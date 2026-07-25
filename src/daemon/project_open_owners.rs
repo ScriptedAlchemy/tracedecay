@@ -1232,6 +1232,7 @@ async fn register_production_feedback_cycle(
         runtime_state: Arc::clone(&runtime_state) as _,
         document_identity: Arc::new(invocation.code_index_schedulers.clone()),
         code_index_identity: Arc::new(invocation.code_index_schedulers.clone()),
+        test_attribution: Arc::new(invocation.code_index_schedulers.clone()),
         mounted_providers,
     })
     .await

@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use tracedecay_domain::{CodeGenerationId, ManifestDigest, RepositoryId, WorktreeId};
 
@@ -47,6 +47,17 @@ pub(in crate::daemon) struct CodeIndexSchedulerRegistryV1 {
     pub(super) byte_pool: Arc<SharedCodeIndexBytePoolV1>,
     pub(super) mounted: Arc<tokio::sync::Mutex<BTreeMap<PathBuf, MountedCodeIndexWorktreeV1>>>,
     background_reconcile_admission: Arc<tokio::sync::Semaphore>,
+    test_attribution_authorities: Arc<
+        RwLock<
+            BTreeMap<
+                PathBuf,
+                (
+                    CodeGenerationId,
+                    crate::code_index::production::PublishedGenerationTestAttributionAuthorityV1,
+                ),
+            >,
+        >,
+    >,
 }
 
 impl CodeIndexSchedulerRegistryV1 {
@@ -58,6 +69,7 @@ impl CodeIndexSchedulerRegistryV1 {
             background_reconcile_admission: Arc::new(tokio::sync::Semaphore::new(
                 MAX_CONCURRENT_BACKGROUND_RECONCILES,
             )),
+            test_attribution_authorities: Arc::new(RwLock::new(BTreeMap::new())),
         }
     }
 
@@ -469,7 +481,7 @@ impl CodeIndexSchedulerRegistryV1 {
         // Run the synchronous reconcile off the async executor. Freshness is an
         // admission requirement: if it cannot be established, fail closed
         // rather than serving a last-known generation that may now be stale.
-        tokio::task::spawn_blocking(move || {
+        let latest = tokio::task::spawn_blocking(move || {
             let mut scheduler = scheduler
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -478,7 +490,23 @@ impl CodeIndexSchedulerRegistryV1 {
         })
         .await
         .ok()
-        .flatten()
+        .flatten();
+        if let Some(latest) = &latest
+            && let Ok(authority) = latest.test_attribution_authority()
+        {
+            let mut authorities = self
+                .test_attribution_authorities
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            authorities.insert(
+                project_root,
+                (
+                    latest.generation.manifest().generation_id.clone(),
+                    authority,
+                ),
+            );
+        }
+        latest
     }
 
     /// Resolve one mounted root by the exact admitted repository/worktree/ref
@@ -580,6 +608,10 @@ impl CodeIndexSchedulerRegistryV1 {
 
     pub async fn shutdown(&self) {
         let mounted = std::mem::take(&mut *self.mounted.lock().await);
+        self.test_attribution_authorities
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
         for worktree in mounted.values() {
             let scheduler = worktree
                 .scheduler
@@ -702,6 +734,44 @@ impl crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1
                 ),
             )
         })
+    }
+}
+
+impl crate::code_index::provider::GenerationTestAttributionJoinReadPort
+    for CodeIndexSchedulerRegistryV1
+{
+    fn read_test_attribution(
+        &self,
+        generation: &CodeGenerationId,
+    ) -> crate::code_index::provider::GenerationProviderReadV1<
+        crate::code_index::test_attribution::GenerationTestJoinV1,
+    > {
+        let authorities = self
+            .test_attribution_authorities
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut matching = authorities
+            .values()
+            .filter(|(candidate, _)| candidate == generation);
+        let Some((_, authority)) = matching.next() else {
+            return crate::code_index::provider::GenerationProviderReadV1::new(
+                tracedecay_domain::ProviderEvaluationStateV1::Unavailable,
+                crate::code_index::provider::GenerationProviderCoverageV1::Unavailable,
+                None,
+            )
+            .unwrap_or_else(|_| panic!("static unavailable attribution read"));
+        };
+        if matching.next().is_some() {
+            return crate::code_index::provider::GenerationProviderReadV1::new(
+                tracedecay_domain::ProviderEvaluationStateV1::Unavailable,
+                crate::code_index::provider::GenerationProviderCoverageV1::Unavailable,
+                None,
+            )
+            .unwrap_or_else(|_| panic!("static ambiguous attribution read"));
+        }
+        crate::code_index::provider::GenerationTestAttributionJoinReadPort::read_test_attribution(
+            authority, generation,
+        )
     }
 }
 

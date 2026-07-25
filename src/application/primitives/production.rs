@@ -11,18 +11,20 @@ use tracedecay_application::retrieval::grep_analysis::{
     PrimitivePortContextV1, RedundancyAuthorityV1, RedundancyRequestV1, RedundancyResultV1,
 };
 use tracedecay_application::retrieval::{
-    AffectedFileTestsPrimitiveRequest, AffectedFileTestsPrimitiveResultV1, AffectedTestsRequest,
-    AffectedTestsResult, HealthReadRequest, HealthReadResult, OperationalRetrievalPort,
-    RankedAffectedTestV1, RetrievalPortContext, RetrievalPortOutcome, SessionLookupRequest,
-    SessionLookupResult, SourceLinesRequest, SourceLinesResult, SourceReference,
-    SourceRetrievalPort, SymbolPrimitiveRecord, TemporalRetrievalPort, TestMapCoverageV1,
-    TestMapPrimitiveRequest, TestMapPrimitiveResultV1, TestPrimitivePort, TestPrimitivePortContext,
-    TestPrimitivePortFuture, TestPrimitivePortOutcome, TestReferenceV1, UncoveredSourceV1,
+    AffectedFileTestsPrimitiveRequest, AffectedFileTestsPrimitiveResultV1,
+    AffectedTestAttributionV1, AffectedTestsRequest, AffectedTestsResult, HealthReadRequest,
+    HealthReadResult, OperationalRetrievalPort, RankedAffectedTestV1, RetrievalPortContext,
+    RetrievalPortOutcome, SessionLookupRequest, SessionLookupResult, SourceLinesRequest,
+    SourceLinesResult, SourceReference, SourceRetrievalPort, SymbolPrimitiveRecord,
+    TemporalRetrievalPort, TestMapCoverageV1, TestMapPrimitiveRequest, TestMapPrimitiveResultV1,
+    TestPrimitivePort, TestPrimitivePortContext, TestPrimitivePortFuture, TestPrimitivePortOutcome,
+    TestReferenceV1, UncoveredSourceV1,
 };
 use tracedecay_application::{
-    ApplicationContractError, CoverageCompleteness, CoverageDomainState, EvidenceCoverage,
-    EvidenceDomain, FreshnessState, Omission, OmissionReason, OpaqueCursor, OperationBudgetUsage,
-    PageState, RequestAdmission, RequestContext, ResolvedScope, RetrievalEvidence, TemporalState,
+    ApplicationContractError, CoverageCompleteness, CoverageDomainState, EvidenceAuthority,
+    EvidenceCoverage, EvidenceDomain, EvidenceIdentity, FreshnessState, Omission, OmissionReason,
+    OpaqueCursor, OperationBudgetUsage, PageState, RequestAdmission, RequestContext, ResolvedScope,
+    RetrievalEvidence, TemporalState,
 };
 use tracedecay_domain::{
     CodeGenerationId, CommitId, ManifestDigest, ProjectId, ProviderEvaluationStateV1,
@@ -1621,7 +1623,6 @@ impl SymbolGraphCursorSnapshotAuthority for ProjectSymbolGraphCursorSnapshotAuth
 
 pub struct TraceDecayAffectedTestsPortV1 {
     project_id: Option<ProjectId>,
-    generation: CodeGenerationId,
     attribution: Option<Arc<dyn GenerationTestAttributionJoinReadPort + Send + Sync>>,
 }
 
@@ -1640,12 +1641,11 @@ impl TraceDecayAffectedTestsPortV1 {
 
     fn from_binding(
         project_id: Option<ProjectId>,
-        generation: CodeGenerationId,
+        _generation: CodeGenerationId,
         attribution: Option<Arc<dyn GenerationTestAttributionJoinReadPort + Send + Sync>>,
     ) -> Self {
         Self {
             project_id,
-            generation,
             attribution,
         }
     }
@@ -1658,9 +1658,7 @@ impl tracedecay_application::AffectedTestsRetrievalPort for TraceDecayAffectedTe
         request: &AffectedTestsRequest,
     ) -> RetrievalPortOutcome<AffectedTestsResult> {
         let finished_at = now_observed();
-        if self.project_id.as_ref() != Some(&context.request.scope().project_id)
-            || request.generation != self.generation
-        {
+        if self.project_id.as_ref() != Some(&context.request.scope().project_id) {
             return affected_tests_unavailable(
                 request,
                 finished_at,
@@ -1678,6 +1676,7 @@ impl tracedecay_application::AffectedTestsRetrievalPort for TraceDecayAffectedTe
         };
         attributed_tests_outcome(
             request,
+            context.request.scope().clone(),
             attribution.read_test_attribution(&request.generation),
             finished_at,
         )
@@ -1695,6 +1694,7 @@ fn project_id_for_graph(graph: &TraceDecay) -> Option<ProjectId> {
 
 fn attributed_tests_outcome(
     request: &AffectedTestsRequest,
+    scope: ResolvedScope,
     read: GenerationProviderReadV1<GenerationTestJoinV1>,
     finished_at: UtcMicros,
 ) -> RetrievalPortOutcome<AffectedTestsResult> {
@@ -1716,6 +1716,8 @@ fn attributed_tests_outcome(
                 FreshnessState::Unknown,
                 None,
                 None,
+                None,
+                None,
                 Some(OmissionReason::Cancelled),
             ));
         }
@@ -1726,6 +1728,8 @@ fn attributed_tests_outcome(
                 finished_at,
                 CoverageCompleteness::Unknown,
                 FreshnessState::Unknown,
+                None,
+                None,
                 None,
                 None,
                 Some(OmissionReason::TimedOut),
@@ -1775,6 +1779,7 @@ fn attributed_tests_outcome(
     }
 
     let mut tests = Vec::new();
+    let mut attributions = Vec::new();
     let mut matching_incomplete = false;
     for record in &join.records {
         if record.attribution.generation_id != request.generation {
@@ -1792,10 +1797,7 @@ fn attributed_tests_outcome(
         if !covers_requested_symbol {
             continue;
         }
-        if matches!(
-            &record.disposition,
-            GenerationTestJoinDispositionV1::Current { .. }
-        ) {
+        if let GenerationTestJoinDispositionV1::Current { evidence_class } = &record.disposition {
             let Some(test_occurrence) = &record.test_occurrence else {
                 return affected_tests_unavailable(
                     request,
@@ -1813,12 +1815,32 @@ fn attributed_tests_outcome(
                 );
             }
             tests.push(test_occurrence.occurrence_id.clone());
+            attributions.push(AffectedTestAttributionV1 {
+                test: test_occurrence.occurrence_id.clone(),
+                evidence_class: *evidence_class,
+            });
         } else {
             matching_incomplete = true;
+            if matches!(
+                record.disposition,
+                GenerationTestJoinDispositionV1::StaleEvidence
+                    | GenerationTestJoinDispositionV1::UnknownUnsupported
+            ) && record.test_occurrence.as_ref().is_some_and(|occurrence| {
+                occurrence.occurrence_id == record.attribution.test_occurrence
+            }) {
+                attributions.push(AffectedTestAttributionV1 {
+                    test: record.attribution.test_occurrence.clone(),
+                    evidence_class: record.attribution.evidence_class,
+                });
+            }
         }
     }
     tests.sort();
     tests.dedup();
+    attributions.sort_by(|left, right| {
+        (&left.test, left.evidence_class).cmp(&(&right.test, right.evidence_class))
+    });
+    attributions.dedup();
 
     let complete = read.provider_state == ProviderEvaluationStateV1::SupportedCompletedComplete
         && read.coverage.is_complete()
@@ -1835,7 +1857,10 @@ fn attributed_tests_outcome(
     }
     let evidence = affected_tests_evidence(
         request,
-        Some(AffectedTestsResult { tests }),
+        Some(AffectedTestsResult {
+            tests,
+            attributions,
+        }),
         finished_at,
         if complete {
             CoverageCompleteness::Complete
@@ -1849,6 +1874,22 @@ fn attributed_tests_outcome(
         },
         visited,
         eligible,
+        Some(EvidenceAuthority {
+            evidence_id: EvidenceIdentity::new(format!(
+                "evidence.test-attribution.{}",
+                join.test_watermark
+                    .evidence_digest
+                    .as_str()
+                    .trim_start_matches("sha256:")
+            ))
+            .unwrap_or_else(|_| panic!("validated attribution digest yields evidence identity")),
+            source_kind: "test_attribution".to_owned(),
+            producer: "code_index".to_owned(),
+            scope,
+            revision: join.test_watermark.attribution_revision.clone(),
+            horizon: None,
+        }),
+        Some(join.test_watermark.evidence_digest.clone()),
         (!complete).then_some(OmissionReason::Unavailable),
     );
     if complete {
@@ -1886,6 +1927,8 @@ fn affected_tests_unavailable(
         freshness,
         None,
         None,
+        None,
+        None,
         Some(reason),
     ))
 }
@@ -1899,6 +1942,8 @@ fn affected_tests_evidence(
     freshness: FreshnessState,
     visited: Option<u64>,
     eligible: Option<u64>,
+    evidence_authority: Option<EvidenceAuthority>,
+    watermark_digest: Option<ManifestDigest>,
     omission: Option<OmissionReason>,
 ) -> RetrievalEvidence<AffectedTestsResult> {
     let returned = payload
@@ -1911,10 +1956,10 @@ fn affected_tests_evidence(
             requested_at: finished_at,
             resolved_at: finished_at,
             source_generation: Some(request.generation.clone()),
-            watermark_digest: None,
+            watermark_digest,
             freshness,
         },
-        evidence_authorities: Vec::new(),
+        evidence_authorities: evidence_authority.into_iter().collect(),
         coverage: EvidenceCoverage {
             requested_domains: vec![EvidenceDomain::Test],
             visited,
@@ -2173,6 +2218,29 @@ mod affected_tests_tests {
         ) -> GenerationProviderReadV1<GenerationTestJoinV1> {
             self.calls.fetch_add(1, Ordering::Relaxed);
             self.read.clone()
+        }
+    }
+
+    struct GenerationSwitchingFixture {
+        current: CodeGenerationId,
+        read: GenerationProviderReadV1<GenerationTestJoinV1>,
+    }
+
+    impl GenerationTestAttributionJoinReadPort for GenerationSwitchingFixture {
+        fn read_test_attribution(
+            &self,
+            generation: &CodeGenerationId,
+        ) -> GenerationProviderReadV1<GenerationTestJoinV1> {
+            if generation == &self.current {
+                self.read.clone()
+            } else {
+                GenerationProviderReadV1::new(
+                    ProviderEvaluationStateV1::Unavailable,
+                    GenerationProviderCoverageV1::Unavailable,
+                    None,
+                )
+                .expect("unavailable provider read")
+            }
         }
     }
 
@@ -2460,9 +2528,110 @@ mod affected_tests_tests {
             panic!("exact current attribution must complete");
         };
         assert_eq!(evidence.temporal.source_generation, Some(generation));
+        assert_eq!(evidence.temporal.watermark_digest, Some(digest('f')));
+        assert_eq!(evidence.evidence_authorities.len(), 1);
         assert_eq!(
-            evidence.payload.expect("payload").tests,
+            evidence.evidence_authorities[0].source_kind,
+            "test_attribution"
+        );
+        let payload = evidence.payload.expect("payload");
+        assert_eq!(
+            payload.tests,
             vec![SymbolOccurrenceId::new("symbol.test").expect("test")]
+        );
+        assert_eq!(
+            payload.attributions,
+            vec![AffectedTestAttributionV1 {
+                test: SymbolOccurrenceId::new("symbol.test").expect("test"),
+                evidence_class: TestAttributionEvidenceClassV1::ConservativeDependencyCandidates,
+            }]
+        );
+    }
+
+    #[test]
+    fn attribution_class_is_preserved_without_inference() {
+        for evidence_class in [
+            TestAttributionEvidenceClassV1::ObservedCoverageCandidates,
+            TestAttributionEvidenceClassV1::PredictiveRankedCandidates,
+        ] {
+            let project_id = ProjectId::new("project.affected-tests").expect("project");
+            let generation = generation("generation.affected-tests.1");
+            let mut read = complete_read(generation.clone());
+            let record = &mut read.evidence.as_mut().expect("join").records[0];
+            record.attribution.evidence_class = evidence_class;
+            record.disposition = GenerationTestJoinDispositionV1::Current { evidence_class };
+            let port = TraceDecayAffectedTestsPortV1::from_binding(
+                Some(project_id.clone()),
+                generation.clone(),
+                Some(Arc::new(AttributionFixture {
+                    calls: AtomicUsize::new(0),
+                    read,
+                })),
+            );
+            let (context, operation, _) = context(project_id);
+
+            let RetrievalPortOutcome::Completed(evidence) = port.affected_tests(
+                &RetrievalPortContext {
+                    request: &context,
+                    operation: &operation,
+                },
+                &request(generation),
+            ) else {
+                panic!("current attribution must complete");
+            };
+            assert_eq!(
+                evidence.payload.expect("payload").attributions[0].evidence_class,
+                evidence_class
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_attribution_remains_typed_partial() {
+        let project_id = ProjectId::new("project.affected-tests").expect("project");
+        let generation = generation("generation.affected-tests.1");
+        let mut read = complete_read(generation.clone());
+        read.provider_state = ProviderEvaluationStateV1::Partial;
+        read.coverage = GenerationProviderCoverageV1::Partial {
+            examined: 1,
+            eligible: 0,
+            excluded: 0,
+            unknown: 1,
+            capped: false,
+        };
+        let join = read.evidence.as_mut().expect("join");
+        join.coverage = GenerationTestJoinCoverageV1::Partial {
+            reasons: vec![GenerationTestJoinPartialReasonV1::UnknownUnsupported {
+                test_occurrence: SymbolOccurrenceId::new("symbol.test").expect("test"),
+            }],
+        };
+        join.records[0].attribution.evidence_class =
+            TestAttributionEvidenceClassV1::UnknownUnsupported;
+        join.records[0].disposition = GenerationTestJoinDispositionV1::UnknownUnsupported;
+        let port = TraceDecayAffectedTestsPortV1::from_binding(
+            Some(project_id.clone()),
+            generation.clone(),
+            Some(Arc::new(AttributionFixture {
+                calls: AtomicUsize::new(0),
+                read,
+            })),
+        );
+        let (context, operation, _) = context(project_id);
+
+        let RetrievalPortOutcome::Partial(evidence) = port.affected_tests(
+            &RetrievalPortContext {
+                request: &context,
+                operation: &operation,
+            },
+            &request(generation),
+        ) else {
+            panic!("unknown attribution must stay partial");
+        };
+        let payload = evidence.payload.expect("payload");
+        assert!(payload.tests.is_empty());
+        assert_eq!(
+            payload.attributions[0].evidence_class,
+            TestAttributionEvidenceClassV1::UnknownUnsupported
         );
     }
 
@@ -2507,6 +2676,32 @@ mod affected_tests_tests {
 
         assert!(matches!(outcome, RetrievalPortOutcome::Unavailable(_)));
         assert_eq!(authority.calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn port_routes_each_current_generation_instead_of_pinning_open_generation() {
+        let project_id = ProjectId::new("project.affected-tests").expect("project");
+        let opened_generation = generation("generation.affected-tests.1");
+        let current_generation = generation("generation.affected-tests.2");
+        let port = TraceDecayAffectedTestsPortV1::from_binding(
+            Some(project_id.clone()),
+            opened_generation,
+            Some(Arc::new(GenerationSwitchingFixture {
+                current: current_generation.clone(),
+                read: complete_read(current_generation.clone()),
+            })),
+        );
+        let (context, operation, _) = context(project_id);
+
+        let outcome = port.affected_tests(
+            &RetrievalPortContext {
+                request: &context,
+                operation: &operation,
+            },
+            &request(current_generation),
+        );
+
+        assert!(matches!(outcome, RetrievalPortOutcome::Completed(_)));
     }
 
     #[test]
