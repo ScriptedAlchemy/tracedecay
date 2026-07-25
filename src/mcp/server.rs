@@ -1054,6 +1054,12 @@ impl McpServer {
         self.cg_snapshot().await
     }
 
+    pub(crate) fn profile_identity(
+        &self,
+    ) -> Option<&crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1> {
+        self.profile_identity.as_ref()
+    }
+
     pub fn diagnostics_lsp(
         &self,
     ) -> Arc<tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>> {

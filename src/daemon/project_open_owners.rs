@@ -785,6 +785,14 @@ pub(crate) async fn register_project_open_production_owners(
             project_root.to_path_buf(),
             Arc::clone(graph.configuration_runtime()),
             scope.clone(),
+            server
+                .profile_identity()
+                .ok_or_else(|| TraceDecayError::Config {
+                    message: "project-open configuration requires exact profile authority"
+                        .to_owned(),
+                })?
+                .profile_id()
+                .clone(),
             requester.clone(),
             grant_expires_at,
             None,
