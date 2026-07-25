@@ -375,13 +375,13 @@ impl McpServer {
         let root = cg.project_root().to_path_buf();
         // Live-activity tap: a host hook arriving here IS an agent working in
         // this project, so publish it at the observation point carrying this
-        // project's own registered id. Free when no dashboard is connected; the
-        // dashboard coalesces the burst.
-        let activity_project_id = crate::dashboard::activity_bus::enabled()
+        // project's own registered id. The application lane retains it even
+        // without a connected dashboard; the SSE adapter coalesces the burst.
+        let activity_project_id = crate::application::event_lane::enabled()
             .then(|| cg.store_layout().identity.project_id.clone())
             .flatten();
-        crate::dashboard::activity_bus::publish(
-            crate::dashboard::activity_bus::ActivityFamilyV1::Hook,
+        crate::application::event_lane::publish(
+            crate::application::event_lane::ActivityFamilyV1::Hook,
             &root,
             activity_project_id.as_deref(),
             1,
@@ -399,8 +399,8 @@ impl McpServer {
             // worktree's incremental queue — the exact moment indexing work is
             // created for this project, and the only condition worth lighting.
             if sink(root.clone(), event.rel_paths.clone()).await {
-                crate::dashboard::activity_bus::publish(
-                    crate::dashboard::activity_bus::ActivityFamilyV1::CodeIndex,
+                crate::application::event_lane::publish(
+                    crate::application::event_lane::ActivityFamilyV1::CodeIndex,
                     &root,
                     activity_project_id.as_deref(),
                     event.rel_paths.len() as u64,
@@ -1538,13 +1538,13 @@ impl McpServer {
             Err(response) => return response,
         };
 
-        // Live-activity tap: one pulse per dispatched tool call, scoped to the
-        // project this server serves. Gated so an unwatched daemon never pays
-        // the snapshot read.
-        if crate::dashboard::activity_bus::enabled() {
+        // Durable activity record: one per dispatched tool call, scoped to the
+        // project this server serves. Gate the snapshot read when no profile
+        // event authority can be mounted.
+        if crate::application::event_lane::enabled() {
             let cg = self.cg_snapshot().await;
-            crate::dashboard::activity_bus::publish(
-                crate::dashboard::activity_bus::ActivityFamilyV1::ToolCall,
+            crate::application::event_lane::publish(
+                crate::application::event_lane::ActivityFamilyV1::ToolCall,
                 cg.project_root(),
                 cg.store_layout().identity.project_id.as_deref(),
                 1,
