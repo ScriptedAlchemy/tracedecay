@@ -337,7 +337,7 @@ mod tests {
         TemporalSnapshotRequest, TemporalWatermarks,
     };
     use crate::query::temporal::resolution::ValidatedAuthorization;
-    use crate::tracedecay::TraceDecay;
+    use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
     const NOW: UtcMicros = UtcMicros(1_000);
 
@@ -366,8 +366,24 @@ mod tests {
             "pub fn first() {}\npub fn second() {}\n",
         )
         .expect("fixture source");
+        let profile_root = root.path().join(".tracedecay-test-profile");
+        let open_options = TraceDecayOpenOptions {
+            profile_root: Some(profile_root.clone()),
+            global_db_path: Some(profile_root.join("global.db")),
+        };
+        let lifecycle = crate::lifecycle_lease::acquire_exclusive_for_profile(
+            &profile_root,
+            "source-read cache test",
+        )
+        .expect("exclusive lifecycle authority");
+        let _database_scope = crate::db::enter_maintenance_database_scope(
+            &lifecycle,
+            &profile_root,
+            "source-read cache test",
+        )
+        .expect("maintenance database authority");
         let graph = Arc::new(
-            TraceDecay::init(root.path())
+            TraceDecay::init_with_exclusive_maintenance(root.path(), open_options, &lifecycle)
                 .await
                 .expect("initialize graph"),
         );
