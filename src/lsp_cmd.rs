@@ -189,18 +189,24 @@ fn initialize_binding(frame: &str) -> tracedecay::errors::Result<InitializeBindi
             ));
         }
     };
-    if let (Some(root), Some(folder)) = (&root_uri, &folder_uri)
+    let root_path = root_uri
+        .as_deref()
+        .map(canonical_file_uri_path)
+        .transpose()?;
+    let folder_path = folder_uri
+        .as_deref()
+        .map(canonical_file_uri_path)
+        .transpose()?;
+    if let (Some(root), Some(folder)) = (&root_path, &folder_path)
         && root != folder
     {
         return Err(bridge_config_error(
             "LSP initialize rootUri and workspace folder differ",
         ));
     }
-    let selected_uri = root_uri
-        .as_deref()
-        .or(folder_uri.as_deref())
+    let project_root = root_path
+        .or(folder_path)
         .ok_or_else(|| bridge_config_error("LSP initialize requires one workspace root"))?;
-    let project_root = canonical_file_uri_path(selected_uri)?;
     let canonical_root_uri = url::Url::from_file_path(&project_root)
         .map_err(|()| bridge_config_error("canonical LSP workspace root is not a file path"))?
         .to_string();
@@ -450,6 +456,42 @@ mod tests {
                 .to_string()
                 .contains("rootUri and workspace folder differ"),
             "{error}"
+        );
+    }
+
+    #[test]
+    fn initialize_root_binding_accepts_equivalent_uri_aliases() {
+        let root = tempfile::tempdir().expect("workspace root");
+        let root_uri = url::Url::from_file_path(root.path())
+            .expect("file URI")
+            .to_string();
+        let folder_uri = format!("{root_uri}/");
+        let frame = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "rootUri": root_uri,
+                "workspaceFolders": [{
+                    "uri": folder_uri,
+                    "name": "workspace"
+                }],
+                "capabilities": {}
+            }
+        })
+        .to_string();
+
+        let binding = initialize_binding(&frame).expect("equivalent roots bind");
+        assert_eq!(
+            binding.project_root,
+            root.path().canonicalize().expect("canonical workspace")
+        );
+        let forwarded: Value =
+            serde_json::from_str(&binding.frame).expect("forwarded initialize frame");
+        assert_eq!(forwarded["params"]["rootUri"], binding.canonical_root_uri);
+        assert_eq!(
+            forwarded["params"]["workspaceFolders"][0]["uri"],
+            binding.canonical_root_uri
         );
     }
 
