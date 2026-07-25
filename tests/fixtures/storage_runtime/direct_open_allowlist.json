@@ -26,23 +26,8 @@
     },
     {
       "path": "crates/tracedecay-rusqlite-runtime/src/backup/driver.rs",
-      "callee": "Connection::open_in_memory",
-      "disposition": "test-only backup authority fixture"
-    },
-    {
-      "path": "crates/tracedecay-rusqlite-runtime/src/backup/driver.rs",
       "callee": "Connection::open_with_flags",
       "disposition": "read-only staged restore verification"
-    },
-    {
-      "path": "crates/tracedecay-rusqlite-runtime/src/backup/sqlite.rs",
-      "callee": "Connection::open",
-      "disposition": "test-only online-backup fixture"
-    },
-    {
-      "path": "crates/tracedecay-rusqlite-runtime/src/backup/sqlite.rs",
-      "callee": "Connection::open_in_memory",
-      "disposition": "test-only online-backup fixture"
     },
     {
       "path": "crates/tracedecay-rusqlite-runtime/src/connection/mod.rs",
@@ -70,34 +55,16 @@
       "disposition": "test-only graph parity fixture"
     },
     {
-      "path": "crates/tracedecay-rusqlite-runtime/src/maintenance/sqlite.rs",
-      "callee": "Connection::open_in_memory",
-      "disposition": "test-only maintenance fixture"
+      "path": "crates/tracedecay-rusqlite-runtime/src/writer/backup.rs",
+      "scope": "StagedBackupDestination::create_new_private_destination",
+      "callee": "Connection::open_with_flags",
+      "disposition": "writer-owned private backup staging destination pinned until atomic publication or cleanup"
     },
     {
-      "path": "crates/tracedecay-rusqlite-runtime/src/persistence.rs",
-      "callee": "Connection::open_in_memory",
-      "disposition": "test-only persistence fixture"
-    },
-    {
-      "path": "crates/tracedecay-rusqlite-runtime/src/repair/sqlite.rs",
-      "callee": "Connection::open_in_memory",
-      "disposition": "test-only repair fixture"
-    },
-    {
-      "path": "crates/tracedecay-rusqlite-runtime/src/repository/observation.rs",
-      "callee": "Connection::open_in_memory",
-      "disposition": "test-only observation repository fixture"
-    },
-    {
-      "path": "crates/tracedecay-rusqlite-runtime/src/runtime/doctor.rs",
-      "callee": "Connection::open",
-      "disposition": "test-only Doctor fixture"
-    },
-    {
-      "path": "crates/tracedecay-rusqlite-runtime/src/s11_evidence_tests.rs",
-      "callee": "Connection::open",
-      "disposition": "test-only S11 evidence fixture"
+      "path": "crates/tracedecay-rusqlite-runtime/src/writer/backup.rs",
+      "scope": "verify_sqlite",
+      "callee": "Connection::open_with_flags",
+      "disposition": "bounded read-only quick-check over the pinned private backup staging destination before publication"
     },
     {
       "path": "src/sqlite_read_snapshot.rs",
@@ -110,6 +77,12 @@
       "scope": "SnapshotDatabase::backup_to",
       "callee": "Connection::open_with_flags",
       "disposition": "new private standalone backup destination populated from an already-frozen snapshot"
+    },
+    {
+      "path": "src/sqlite_read_snapshot.rs",
+      "scope": "materialize_standalone_snapshot",
+      "callee": "Connection::open_with_flags",
+      "disposition": "bounded source and private destination opens used only to collapse a frozen copied WAL family into a standalone snapshot"
     },
     {
       "path": "src/retention/branch_compaction.rs",
