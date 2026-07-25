@@ -1310,9 +1310,11 @@ mod authority_tests {
         );
         let doctor_reader: DoctorReportReader = Arc::new(|| {
             Box::pin(async {
-                Err(tracedecay_application::ApplicationContractError::Inconsistent {
-                    field: "dashboard authority test reader",
-                })
+                Err(
+                    tracedecay_application::ApplicationContractError::Inconsistent {
+                        field: "dashboard authority test reader",
+                    },
+                )
             })
         });
 
