@@ -1126,6 +1126,7 @@ where
         let physical_reuse_key = canonical_sha256(&(
             PHYSICAL_CODE_ARTIFACT_REUSE_DIGEST_DOMAIN,
             &self.config.repository,
+            &file.logical_path,
             &file.content_digest,
             descriptor,
             &self.config.sanitizer_revision,
