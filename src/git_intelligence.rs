@@ -1043,9 +1043,10 @@ impl NativeGitIntelligence {
     ///
     /// These references are read-only identity evidence: applying them is a
     /// PR11 daemon mutation path. Commit-range diffs are never mintable.
-    /// Per-file binary, submodule, symlink, mode-only, and unmerged entries
-    /// remain explicit read-only capability evidence in [`GitDiffV1`] and are
-    /// omitted here without suppressing safe text refs from the same diff.
+    /// Per-file binary, submodule, symlink, mode-only, rename/copy,
+    /// attribute-driven, and unmerged entries remain explicit read-only
+    /// capability evidence in [`GitDiffV1`] and are omitted here without
+    /// suppressing safe text refs from the same diff.
     pub fn hunk_refs(
         &self,
         scope: &GitDiffScopeV1,
@@ -1083,6 +1084,12 @@ impl NativeGitIntelligence {
             if patch_file.hunks.is_empty() {
                 continue;
             }
+            if matches!(
+                entry.change,
+                GitChangeKindV1::Renamed | GitChangeKindV1::Copied
+            ) {
+                continue;
+            }
             if entry
                 .old_mode
                 .iter()
@@ -1101,6 +1108,11 @@ impl NativeGitIntelligence {
                 .as_ref()
                 .is_some_and(GitFileModeV1::is_symlink)
             {
+                continue;
+            }
+            let (attributes_digest, special_attributes) =
+                self.attributes_digest_and_special_state(&entry.path)?;
+            if special_attributes {
                 continue;
             }
 
@@ -1123,8 +1135,6 @@ impl NativeGitIntelligence {
                 HunkDirectionV1::IndexToHead => (None, None),
             };
 
-            let attributes_digest = self.attributes_digest(&entry.path);
-
             for hunk in &patch_file.hunks {
                 let reference = HunkRefV1 {
                     repository: self.repository.clone(),
@@ -1142,7 +1152,7 @@ impl NativeGitIntelligence {
                     selected_line_bitmap: full_hunk_selection_bitmap(
                         hunk.old_lines.max(hunk.new_lines),
                     ),
-                    attributes_digest: attributes_digest.clone(),
+                    attributes_digest: Some(attributes_digest.clone()),
                     preview_id: preview_id.to_owned(),
                     schema_version: HUNK_REF_SCHEMA_VERSION_V1.to_owned(),
                     snapshot_digest: snapshot_digest.clone(),
@@ -1231,12 +1241,40 @@ impl NativeGitIntelligence {
         Ok(GitBlobExpectationV1::Present(GitOidV1::new(output.trim())?))
     }
 
-    /// Attributes/filter identity relevant to clean/smudge and EOL handling.
-    fn attributes_digest(&self, path: &str) -> Option<ManifestDigest> {
-        let output = self
-            .run_git("check-attr", &["check-attr", "-z", "-a", "--", path])
-            .ok()?;
-        canonical_sha256(&String::from_utf8_lossy(&output.stdout).into_owned()).ok()
+    /// Capture the exact attribute identity and classify paths whose
+    /// clean/smudge or end-of-line behavior lacks a proven native round trip.
+    fn attributes_digest_and_special_state(
+        &self,
+        path: &str,
+    ) -> Result<(ManifestDigest, bool), GitIntelligenceError> {
+        let output = self.run_git("check-attr", &["check-attr", "-z", "-a", "--", path])?;
+        let digest = canonical_sha256(&String::from_utf8_lossy(&output.stdout).into_owned())?;
+        if output.stdout.is_empty() {
+            return Ok((digest, false));
+        }
+        let fields = output.stdout.split(|byte| *byte == 0).collect::<Vec<_>>();
+        let Some((terminator, records)) = fields.split_last() else {
+            return Err(GitIntelligenceError::MalformedOutput {
+                operation: "check-attr",
+                detail: "attribute output was empty".to_owned(),
+            });
+        };
+        if !terminator.is_empty() || !records.len().is_multiple_of(3) {
+            return Err(GitIntelligenceError::MalformedOutput {
+                operation: "check-attr",
+                detail: "attribute output was not complete NUL-delimited triples".to_owned(),
+            });
+        }
+        let special = records.chunks_exact(3).any(|record| {
+            let attribute = record[1];
+            let value = record[2];
+            if attribute == b"filter" {
+                value != b"unset"
+            } else {
+                attribute == b"text" || attribute == b"eol" || attribute == b"working-tree-encoding"
+            }
+        });
+        Ok((digest, special))
     }
 }
 
@@ -2708,6 +2746,71 @@ mod tests {
         );
         assert_eq!(references[0].direction, HunkDirectionV1::IndexToHead);
         assert_eq!(references[0].preview_id, "preview.mixed-staged");
+    }
+
+    #[test]
+    fn hunk_refs_omit_rename_and_attribute_driven_paths() {
+        let Some(fixture) = Fixture::standard() else {
+            return;
+        };
+        fixture.write("safe.txt", "before\n");
+        fixture.write(
+            "rename-source.txt",
+            concat!(
+                "line-01\nline-02\nline-03\nline-04\nline-05\n",
+                "line-06\nline-07\nline-08\nline-09\nline-10\n",
+                "line-11\nline-12\nline-13\nline-14\nline-15\n",
+                "line-16\nline-17\nline-18\nline-19\nline-20\n",
+            ),
+        );
+        fixture.write("filtered.txt", "before\n");
+        fixture.write(".gitattributes", "filtered.txt filter=fixture\n");
+        fixture.commit_all("add special hunk fixtures");
+
+        fixture.write("safe.txt", "after\n");
+        fixture.write("filtered.txt", "after\n");
+        std::fs::rename(
+            fixture.path().join("rename-source.txt"),
+            fixture.path().join("rename-target.txt"),
+        )
+        .unwrap();
+        fixture.write(
+            "rename-target.txt",
+            concat!(
+                "line-01\nline-02\nchanged\nline-04\nline-05\n",
+                "line-06\nline-07\nline-08\nline-09\nline-10\n",
+                "line-11\nline-12\nline-13\nline-14\nline-15\n",
+                "line-16\nline-17\nline-18\nline-19\nline-20\n",
+            ),
+        );
+        fixture.git_ok(&["add", "-A"]);
+
+        let adapter = fixture.adapter();
+        let diff = adapter.diff(&GitDiffScopeV1::Staged).unwrap();
+        assert!(diff.files.iter().any(|file| {
+            file.path == "rename-target.txt" && file.change == GitChangeKindV1::Renamed
+        }));
+        assert!(
+            diff.files
+                .iter()
+                .any(|file| file.path == "filtered.txt" && !file.hunks.is_empty())
+        );
+
+        let snapshot_digest = ManifestDigest::new(format!("sha256:{}", "e".repeat(64))).unwrap();
+        let references = adapter
+            .hunk_refs(
+                &GitDiffScopeV1::Staged,
+                "preview.special-kinds",
+                &snapshot_digest,
+            )
+            .unwrap();
+        assert_eq!(
+            references
+                .iter()
+                .map(|reference| reference.path.as_str())
+                .collect::<Vec<_>>(),
+            ["safe.txt"]
+        );
     }
 
     #[test]
