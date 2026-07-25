@@ -1837,29 +1837,3 @@ async fn correlation_index_health_without_tables_is_empty() {
     assert_eq!(health.commit_count, 0);
     assert_eq!(health.backfill_watermark, None);
 }
-
-#[tokio::test]
-#[ignore = "scratch: runs the migration against a copy of a live store"]
-async fn scratch_compact_live_copy() {
-    let path = std::env::var("TRACEDECAY_SCRATCH_DB").expect("TRACEDECAY_SCRATCH_DB");
-    let conn = GitCorrelationTestDb {
-        _directory: tempfile::tempdir().unwrap(),
-        connection: TestConnection::open(std::path::Path::new(&path)),
-    };
-    let before = count_rows(&conn, "SELECT COUNT(*) FROM session_git_spans").await;
-    let started = std::time::Instant::now();
-    ensure_git_correlation_schema(&conn).await.unwrap();
-    let elapsed = started.elapsed();
-    let after = count_rows(&conn, "SELECT COUNT(*) FROM session_git_spans").await;
-    println!("SCRATCH spans before={before} after={after} elapsed={elapsed:?}");
-    println!(
-        "SCRATCH version={:?} dangling={}",
-        schema_version(&conn).await.unwrap(),
-        count_rows(
-            &conn,
-            "SELECT COUNT(*) FROM commit_sessions c WHERE c.span_id IS NOT NULL
-             AND NOT EXISTS (SELECT 1 FROM session_git_spans s WHERE s.span_id = c.span_id)"
-        )
-        .await
-    );
-}
