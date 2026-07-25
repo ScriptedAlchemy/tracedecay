@@ -186,6 +186,10 @@ pub struct AnalyticsEventQuery {
     pub event_kind: Option<String>,
     /// Inclusive lower bound on `timestamp` (unix seconds). `None` = unbounded.
     pub since: Option<i64>,
+    /// Exclusive upper bound on `timestamp` (unix seconds). `None` = unbounded.
+    pub until: Option<i64>,
+    /// Exclusive row-id cursor used by bounded reverse-chronological scans.
+    pub before_id: Option<i64>,
     pub limit: usize,
 }
 

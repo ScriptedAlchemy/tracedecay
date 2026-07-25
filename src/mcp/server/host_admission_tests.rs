@@ -1201,6 +1201,8 @@ async fn failed_admission_does_not_emit_hook_route_analytics() {
             session_id: None,
             event_kind: Some("hook_route".to_string()),
             since: None,
+            until: None,
+            before_id: None,
             limit: 16,
         })
         .await
@@ -1312,6 +1314,8 @@ async fn durable_route_survives_unavailable_effect_for_same_connection_retry() {
             session_id: None,
             event_kind: Some("hook_route".to_string()),
             since: None,
+            until: None,
+            before_id: None,
             limit: 16,
         })
         .await
@@ -1398,6 +1402,8 @@ async fn committed_admissions_emit_post_commit_private_route_analytics() {
             session_id: None,
             event_kind: Some("hook_route".to_string()),
             since: None,
+            until: None,
+            before_id: None,
             limit: 16,
         })
         .await
@@ -1577,6 +1583,8 @@ async fn credential_canary_receipt_analytics_and_git_span_survive_database_reope
             session_id: Some(protected.clone()),
             event_kind: Some("hook_route".to_string()),
             since: None,
+            until: None,
+            before_id: None,
             limit: 16,
         })
         .await
