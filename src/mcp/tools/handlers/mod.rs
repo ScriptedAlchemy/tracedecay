@@ -51,6 +51,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use serde_json::{Value, json};
+use tracedecay_application::RetainedSurfaceOperation;
 
 #[cfg(test)]
 use crate::application_surface::APPLICATION_SURFACE_OPERATIONS;
@@ -537,6 +538,16 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
                         options.allow_default_registry_fallback,
                     )?,
                 };
+                if let Some(operation) = RetainedSurfaceOperation::from_name(tool_name) {
+                    return dispatch_profile_retained_application_tool(
+                        operation,
+                        tool_name,
+                        args,
+                        &profile_root,
+                        &options,
+                    )
+                    .await;
+                }
                 return handle_user_lcm_tool_with_db(
                     tool_name,
                     args,
@@ -663,13 +674,21 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
     {
         return result;
     }
+    if let Some(result) = dispatch_retained_application_tools(
+        tool_name,
+        cg,
+        &args,
+        active_project_session_db,
+        &options,
+    )
+    .await
+    {
+        return result;
+    }
     if let Some(result) = dispatch_memory_tools(tool_name, cg, &args, &options).await {
         return result;
     }
-    if let Some(result) =
-        dispatch_session_workflow_tools(tool_name, cg, &args, active_project_session_db, &options)
-            .await
-    {
+    if let Some(result) = dispatch_session_workflow_tools(tool_name, cg, &args, &options).await {
         return result;
     }
     match tool_name {
@@ -678,6 +697,32 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
         }
         _ => Err(TraceDecayError::Config {
             message: format!("unknown tool: {tool_name}"),
+        }),
+    }
+}
+
+async fn dispatch_profile_retained_application_tool(
+    operation: RetainedSurfaceOperation,
+    tool_name: &str,
+    args: Value,
+    profile_root: &Path,
+    options: &ToolCallRegistryOptions<'_>,
+) -> Result<ToolResult> {
+    match operation {
+        RetainedSurfaceOperation::MessageSearch => {
+            handle_user_lcm_tool_with_db(
+                tool_name,
+                args,
+                profile_root,
+                options.session_authorities.user,
+                options.global_db,
+                options.allow_default_registry_fallback,
+                options.session_authorities.profile_retrieval,
+            )
+            .await
+        }
+        _ => Err(TraceDecayError::Config {
+            message: format!("storage_scope=user is not supported for `{tool_name}`"),
         }),
     }
 }
@@ -1110,6 +1155,80 @@ async fn dispatch_health_tools(
     Some(result)
 }
 
+/// Dispatch retained memory, session, and workflow operations only after the
+/// application-owned catalog has resolved their stable operation identity.
+async fn dispatch_retained_application_tools(
+    tool_name: &str,
+    cg: &TraceDecay,
+    args: &Value,
+    active_project_session_db: Option<&Arc<RegisteredGlobalDb>>,
+    options: &ToolCallRegistryOptions<'_>,
+) -> Option<Result<ToolResult>> {
+    let operation = RetainedSurfaceOperation::from_name(tool_name)?;
+    let result = match operation {
+        RetainedSurfaceOperation::FactStore => {
+            memory::handle_fact_store(
+                cg,
+                args.clone(),
+                options.global_db,
+                options.allow_default_registry_fallback,
+            )
+            .await
+        }
+        RetainedSurfaceOperation::FactFeedback => {
+            memory::handle_fact_feedback(
+                cg,
+                args.clone(),
+                options.global_db,
+                options.allow_default_registry_fallback,
+            )
+            .await
+        }
+        RetainedSurfaceOperation::MemoryStatus => {
+            memory::handle_memory_status(
+                cg,
+                args.clone(),
+                options.global_db,
+                options.allow_default_registry_fallback,
+            )
+            .await
+        }
+        RetainedSurfaceOperation::SessionRefresh => {
+            session::handle_session_refresh(
+                args.clone(),
+                options.session_authorities.refresh_services(),
+            )
+            .await
+        }
+        RetainedSurfaceOperation::MessageSearch => {
+            Box::pin(session::message_search::handle_message_search_with_service(
+                Some(cg.project_root()),
+                session::message_search::SessionRetrievalStoreScope::Project,
+                args.clone(),
+                options.session_authorities.project_retrieval,
+            ))
+            .await
+        }
+        RetainedSurfaceOperation::SessionsFor => {
+            session::handle_sessions_for(
+                cg,
+                active_project_session_db.map(Arc::as_ref),
+                args.clone(),
+            )
+            .await
+        }
+        RetainedSurfaceOperation::Workflows => {
+            workflow_query::handle_workflows(
+                cg,
+                args.clone(),
+                options.session_authorities.project_registered,
+            )
+            .await
+        }
+    };
+    Some(result)
+}
+
 /// Dispatch memory, skill, and analytics tools (`tracedecay_fact_store`,
 /// `tracedecay_skill_list`, `tracedecay_analytics`, ...).
 async fn dispatch_memory_tools(
@@ -1119,33 +1238,6 @@ async fn dispatch_memory_tools(
     options: &ToolCallRegistryOptions<'_>,
 ) -> Option<Result<ToolResult>> {
     let result = match tool_name {
-        "tracedecay_fact_store" => {
-            memory::handle_fact_store(
-                cg,
-                args.clone(),
-                options.global_db,
-                options.allow_default_registry_fallback,
-            )
-            .await
-        }
-        "tracedecay_fact_feedback" => {
-            memory::handle_fact_feedback(
-                cg,
-                args.clone(),
-                options.global_db,
-                options.allow_default_registry_fallback,
-            )
-            .await
-        }
-        "tracedecay_memory_status" => {
-            memory::handle_memory_status(
-                cg,
-                args.clone(),
-                options.global_db,
-                options.allow_default_registry_fallback,
-            )
-            .await
-        }
         "tracedecay_automation_run_artifact_view" => {
             skills::handle_automation_run_artifact_view(cg, args.clone()).await
         }
@@ -1177,7 +1269,6 @@ async fn dispatch_session_workflow_tools(
     tool_name: &str,
     cg: &TraceDecay,
     args: &Value,
-    active_project_session_db: Option<&Arc<RegisteredGlobalDb>>,
     options: &ToolCallRegistryOptions<'_>,
 ) -> Option<Result<ToolResult>> {
     let result = match tool_name {
@@ -1208,38 +1299,6 @@ async fn dispatch_session_workflow_tools(
                 options.automation_writer.clone(),
                 options.doctor_report_reader.clone(),
                 options.doctor_remediation_dispatcher.clone(),
-            )
-            .await
-        }
-        "tracedecay_session_refresh" => {
-            session::handle_session_refresh(
-                args.clone(),
-                options.session_authorities.refresh_services(),
-            )
-            .await
-        }
-        "tracedecay_message_search" => {
-            Box::pin(session::message_search::handle_message_search_with_service(
-                Some(cg.project_root()),
-                session::message_search::SessionRetrievalStoreScope::Project,
-                args.clone(),
-                options.session_authorities.project_retrieval,
-            ))
-            .await
-        }
-        "tracedecay_sessions_for" => {
-            session::handle_sessions_for(
-                cg,
-                active_project_session_db.map(Arc::as_ref),
-                args.clone(),
-            )
-            .await
-        }
-        "tracedecay_workflows" => {
-            workflow_query::handle_workflows(
-                cg,
-                args.clone(),
-                options.session_authorities.project_registered,
             )
             .await
         }
@@ -1432,6 +1491,21 @@ mod tests {
                 .into_iter()
                 .map(|operation| format!("tracedecay_{}", operation.as_str())),
         );
+        for tool_name in [
+            "tracedecay_fact_store",
+            "tracedecay_fact_feedback",
+            "tracedecay_memory_status",
+            "tracedecay_session_refresh",
+            "tracedecay_message_search",
+            "tracedecay_sessions_for",
+            "tracedecay_workflows",
+        ] {
+            assert!(
+                RetainedSurfaceOperation::from_name(tool_name).is_some(),
+                "{tool_name} must resolve through the retained application catalog"
+            );
+            handler_names.insert(tool_name.to_owned());
+        }
         for internal in INTERNAL_DAEMON_TOOL_NAMES {
             handler_names.remove(*internal);
         }

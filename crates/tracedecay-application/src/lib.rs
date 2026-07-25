@@ -19,6 +19,7 @@ pub mod git;
 pub mod handlers;
 pub mod policy;
 pub mod result;
+pub mod retained_surfaces;
 pub mod retrieval;
 pub mod source_edit;
 pub mod storage;
@@ -114,6 +115,10 @@ pub use result::{
     RetrievalEvidence, RetrieverContribution, RetrieverContributionState, RetryDirective,
     RetryScope, SafeDiagnostic, ScoreId, StreamEvent, StreamEventKind, StreamFrontier, StreamGap,
     StreamTermination, StreamValidationError, TemporalState, validate_stream,
+};
+pub use retained_surfaces::{
+    RetainedSurfaceOperation, retained_surface_application_operation,
+    retained_surface_catalog_contribution, retained_surface_handler_descriptors,
 };
 pub use retrieval::catalog::{APPLICATION_DEFAULT_PROFILE_ID, application_catalog_contributions};
 pub use retrieval::{
