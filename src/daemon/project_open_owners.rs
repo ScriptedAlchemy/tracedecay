@@ -858,19 +858,6 @@ pub(crate) async fn register_project_open_production_owners(
         .filter_map(AdmittedLspProvider::mounted)
         .collect::<Vec<_>>();
 
-    let (feedback_cycle, feedback_scope, feedback_lsp_input) = register_production_feedback_cycle(
-        invocation,
-        project_root,
-        database.clone(),
-        Arc::clone(&session_db),
-        Arc::clone(&graph),
-        scope.clone(),
-        configuration,
-        requester,
-        mounted_providers.clone(),
-    )
-    .await?;
-
     let lsp_session_factory = register_production_lsp_owner(
         invocation,
         project_root,
@@ -880,6 +867,26 @@ pub(crate) async fn register_project_open_production_owners(
         admitted_root_uri.clone(),
     )
     .await?;
+
+    let Some((feedback_cycle, feedback_scope, feedback_lsp_input)) =
+        register_production_feedback_cycle(
+            invocation,
+            project_root,
+            database.clone(),
+            Arc::clone(&session_db),
+            Arc::clone(&graph),
+            scope.clone(),
+            configuration,
+            requester,
+            mounted_providers.clone(),
+        )
+        .await?
+    else {
+        // Feedback and advisory evidence requires an exact Git branch and HEAD.
+        // Non-Git and unborn projects retain LSP and every already-registered
+        // owner; no repository identity is fabricated to mount these producers.
+        return Ok(());
+    };
 
     register_production_advisory_owner(
         invocation,
@@ -980,11 +987,11 @@ async fn register_production_feedback_cycle(
     configuration: crate::config::PinnedRuntimeConfiguration,
     requester: ActorId,
     mounted_providers: Vec<MountedLspProvider>,
-) -> Result<(
+) -> Result<Option<(
     Arc<crate::application::feedback::Pr12FeedbackCycleRuntime>,
     FeedbackScopeV1,
     crate::application::feedback::Pr12FeedbackCycleLspInput,
-)> {
+)>> {
     let configuration_digest = &configuration.snapshot.effective_behavior_digest;
     let policy_digest = canonical_sha256(&(
         "tracedecay.project-open.policy.v1",
@@ -1005,7 +1012,7 @@ async fn register_production_feedback_cycle(
             scope: scope.clone(),
             configuration: Arc::clone(graph.configuration_runtime()),
         });
-    let parts = resolve_production_feedback_cycle_parts(ProductionFeedbackCycleOpenV1 {
+    let parts = match resolve_production_feedback_cycle_parts(ProductionFeedbackCycleOpenV1 {
         project_root: project_root.to_path_buf(),
         project_runtime_db,
         scope,
@@ -1021,9 +1028,17 @@ async fn register_production_feedback_cycle(
         mounted_providers,
     })
     .await
-    .map_err(|error| TraceDecayError::Config {
-        message: format!("project-open feedback cycle parts failed: {error}"),
-    })?;
+    {
+        Ok(parts) => parts,
+        Err(ApplicationContractError::Inconsistent {
+            field: "project-open feedback branch" | "project-open feedback head commit",
+        }) => return Ok(None),
+        Err(error) => {
+            return Err(TraceDecayError::Config {
+                message: format!("project-open feedback cycle parts failed: {error}"),
+            });
+        }
+    };
     let feedback_scope = parts.feedback_scope.clone();
     let feedback_lsp_input = Arc::clone(&parts.lsp_input);
     invocation
@@ -1045,7 +1060,7 @@ async fn register_production_feedback_cycle(
             parts.proximity,
         )
         .await
-        .map(|runtime| (runtime, feedback_scope, feedback_lsp_input))
+        .map(|runtime| Some((runtime, feedback_scope, feedback_lsp_input)))
         .map_err(|error| TraceDecayError::Config {
             message: format!("project-open feedback cycle registration failed: {error}"),
         })
