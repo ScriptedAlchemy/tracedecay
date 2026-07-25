@@ -41,6 +41,7 @@ pub(crate) use connection::{
     DatabaseAccessMode, DatabaseEngineConnection, DatabaseMemoryTransaction,
     DatabaseWriteTransaction,
 };
+pub(crate) use external_source::install_external_source_schema;
 pub use fingerprints::StoredFingerprint;
 pub(crate) use memory_connection::MemoryConnection;
 pub use memory_connection::SqliteDriverError;
