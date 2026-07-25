@@ -3,6 +3,8 @@
 //! Composition validates metadata against the closed application handler
 //! descriptors and binds them to one caller-supplied canonical dispatcher.
 
+use std::collections::BTreeSet;
+
 use thiserror::Error;
 use tracedecay_application::handlers::BoundApplicationHandler;
 use tracedecay_application::{
@@ -50,6 +52,21 @@ impl<Dispatcher> ApplicationCatalogComposition<Dispatcher> {
         self.handlers
             .get(use_case_id)
             .map(|descriptor| descriptor.bind(&self.dispatcher))
+    }
+
+    /// Bind one validated descriptor to a request-scoped dispatcher.
+    ///
+    /// Long-lived catalog metadata stays immutable while adapters supply the
+    /// exact mounted authorities for one invocation. The descriptor remains
+    /// the same application-owned handler validated during composition.
+    pub fn bind_handler<'a, RequestDispatcher>(
+        &'a self,
+        use_case_id: &UseCaseId,
+        dispatcher: &'a RequestDispatcher,
+    ) -> Option<BoundApplicationHandler<'a, RequestDispatcher>> {
+        self.handlers
+            .get(use_case_id)
+            .map(|descriptor| descriptor.bind(dispatcher))
     }
 }
 
@@ -125,7 +142,7 @@ fn application_profiles(
         (
             APPLICATION_DEFAULT_PROFILE_ID,
             ProfileKind::Default,
-            ProfileBudget::new(192, 64_000_000, 18_000)?,
+            ProfileBudget::new(256, 80_000_000, 18_000)?,
             true,
         ),
         (
@@ -180,21 +197,21 @@ fn application_profile(
         .iter()
         .map(|capability| capability.capability_id().clone())
         .collect::<Vec<_>>();
+    let mut used_fixture_utterances = BTreeSet::from([
+        "Preview and apply these index changes".to_owned(),
+        "Explain the weather".to_owned(),
+        "Stage these selected hunks".to_owned(),
+    ]);
     let mut routing_fixtures = capabilities
         .iter()
-        .map(|capability| {
-            let query = capability
-                .routing()
-                .examples()
-                .first()
-                .cloned()
-                .unwrap_or_else(|| capability.routing().name().to_owned());
-            RoutingFixtureV1::new(
+        .map(|capability| -> Result<_, CatalogCompositionError> {
+            let query = unique_routing_fixture_utterance(capability, &mut used_fixture_utterances)?;
+            Ok(RoutingFixtureV1::new(
                 query,
                 RoutingFixtureExpectation::Select {
                     capability_id: capability.capability_id().clone(),
                 },
-            )
+            )?)
         })
         .collect::<Result<Vec<_>, _>>()?;
     if !capability_ids.is_empty() {
@@ -211,25 +228,30 @@ fn application_profile(
             RoutingFixtureExpectation::Reject,
         )?);
         let stage_hunks = CapabilityId::new("capability.git.stage-hunks")?;
-        let insufficient_capability_id = contributions
+        let insufficient_capability = contributions
             .iter()
             .flat_map(tracedecay_tool_catalog::CatalogContributionV1::capabilities)
-            .map(|capability| capability.capability_id())
-            .find(|capability_id| {
-                *capability_id == &stage_hunks && !capability_ids.contains(*capability_id)
+            .find(|capability| {
+                capability.capability_id() == &stage_hunks
+                    && !capability_ids.contains(capability.capability_id())
             })
             .or_else(|| {
                 contributions
                     .iter()
                     .flat_map(tracedecay_tool_catalog::CatalogContributionV1::capabilities)
-                    .map(|capability| capability.capability_id())
-                    .find(|capability_id| !capability_ids.contains(*capability_id))
+                    .find(|capability| !capability_ids.contains(capability.capability_id()))
             });
-        if let Some(capability_id) = insufficient_capability_id {
+        if let Some(capability) = insufficient_capability {
+            let query = capability
+                .routing()
+                .examples()
+                .first()
+                .cloned()
+                .unwrap_or_else(|| capability.routing().name().to_owned());
             routing_fixtures.push(RoutingFixtureV1::new(
-                "Stage these selected hunks",
+                query,
                 RoutingFixtureExpectation::InsufficientCapability {
-                    capability_id: capability_id.clone(),
+                    capability_id: capability.capability_id().clone(),
                 },
             )?);
         }
@@ -260,4 +282,99 @@ fn application_profile(
         budget,
         routing_fixtures,
     })?)
+}
+
+fn unique_routing_fixture_utterance(
+    capability: &tracedecay_tool_catalog::CapabilityManifestV1,
+    used: &mut BTreeSet<String>,
+) -> Result<String, CatalogCompositionError> {
+    for candidate in capability
+        .routing()
+        .examples()
+        .iter()
+        .cloned()
+        .chain(std::iter::once(capability.routing().name().to_owned()))
+    {
+        if used.insert(candidate.clone()) {
+            return Ok(candidate);
+        }
+    }
+
+    let fallback = format!(
+        "{} [{}]",
+        capability.routing().name(),
+        capability.capability_id().as_str()
+    );
+    if !used.insert(fallback.clone()) {
+        return Err(CatalogValidationError::DuplicateValue {
+            field: "profile routing fixture utterances",
+        }
+        .into());
+    }
+    Ok(fallback)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_profile_capacity_tracks_composed_runtime() {
+        let snapshot = build_application_catalog_snapshot().expect("application catalog");
+        let contributions = application_catalog_contributions().expect("application contributions");
+        let default_profile_id =
+            ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID).expect("default profile id");
+        let default_profile = snapshot
+            .profile(&default_profile_id)
+            .expect("default application profile");
+        let default_binding_count = contributions
+            .iter()
+            .flat_map(CatalogContributionV1::bindings)
+            .filter(|binding| {
+                default_profile.includes_capability(binding.capability_id())
+                    && default_profile.enables_surface(binding.surface())
+            })
+            .count();
+        assert_eq!(default_binding_count, 235);
+        assert_eq!(default_profile.budget().maximum_bindings(), 256);
+        assert!(default_binding_count <= default_profile.budget().maximum_bindings() as usize);
+        let mut default_schemas = std::collections::BTreeMap::new();
+        for capability in contributions
+            .iter()
+            .flat_map(CatalogContributionV1::capabilities)
+            .filter(|capability| default_profile.includes_capability(capability.capability_id()))
+        {
+            for schema in capability.schema_refs() {
+                default_schemas
+                    .entry((schema.schema_id().clone(), schema.revision()))
+                    .or_insert(schema.canonical_size_bytes());
+            }
+        }
+        let default_schema_bytes = default_schemas
+            .values()
+            .copied()
+            .map(u64::from)
+            .sum::<u64>();
+        assert_eq!(default_schema_bytes, 76_033_408);
+        assert_eq!(default_profile.budget().maximum_schema_bytes(), 80_000_000);
+        assert!(default_schema_bytes <= u64::from(default_profile.budget().maximum_schema_bytes()));
+    }
+
+    #[test]
+    fn application_profiles_disambiguate_duplicate_routing_examples() {
+        let snapshot = build_application_catalog_snapshot().expect("application catalog");
+        for profile in snapshot.profiles() {
+            let utterances = profile
+                .routing_fixtures()
+                .iter()
+                .map(RoutingFixtureV1::utterance)
+                .collect::<BTreeSet<_>>();
+            assert_eq!(
+                utterances.len(),
+                profile.routing_fixtures().len(),
+                "{} contains duplicate routing fixtures",
+                profile.profile_id().as_str()
+            );
+        }
+    }
 }

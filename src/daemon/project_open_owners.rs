@@ -785,6 +785,14 @@ pub(crate) async fn register_project_open_production_owners(
             project_root.to_path_buf(),
             Arc::clone(graph.configuration_runtime()),
             scope.clone(),
+            server
+                .profile_identity()
+                .ok_or_else(|| TraceDecayError::Config {
+                    message: "project-open configuration requires exact profile authority"
+                        .to_owned(),
+                })?
+                .profile_id()
+                .clone(),
             requester.clone(),
             grant_expires_at,
             None,
@@ -868,6 +876,22 @@ pub(crate) async fn register_project_open_production_owners(
         .filter_map(AdmittedLspProvider::mounted)
         .collect::<Vec<_>>();
 
+    let feedback_cycle = register_production_feedback_cycle(
+        invocation,
+        project_root,
+        database.clone(),
+        Arc::clone(&session_db),
+        Arc::clone(&graph),
+        scope.clone(),
+        configuration,
+        requester,
+        mounted_providers.clone(),
+    )
+    .await?;
+
+    // The LSP gateway can immediately emit post-edit feedback. Publish the
+    // corresponding feedback cycle first so no admitted request observes a
+    // gateway whose downstream owner is still absent.
     let lsp_session_factory = register_production_lsp_owner(
         invocation,
         project_root,
@@ -878,20 +902,12 @@ pub(crate) async fn register_project_open_production_owners(
     )
     .await?;
 
-    let Some((feedback_cycle, feedback_scope, feedback_lsp_input)) =
-        register_production_feedback_cycle(
-            invocation,
-            project_root,
-            database.clone(),
-            Arc::clone(&session_db),
-            Arc::clone(&graph),
-            scope.clone(),
-            configuration,
-            requester,
-            mounted_providers.clone(),
-        )
-        .await?
-    else {
+    // Hook V2 envelopes that missed their synchronous budget are durable in
+    // the per-host transport spool. Replay is project-scoped, not Git-scoped:
+    // non-Git and unborn projects must drain their admitted envelopes too.
+    crate::daemon::hook_v2_replay::register_hook_v2_replay_consumer(Arc::clone(&graph));
+
+    let Some((feedback_cycle, feedback_scope, feedback_lsp_input)) = feedback_cycle else {
         // Feedback and advisory evidence requires an exact Git branch, HEAD,
         // and current saved document identity. Non-Git, unborn, and empty
         // projects retain the observing unavailable cycle installed above; no
@@ -916,11 +932,6 @@ pub(crate) async fn register_project_open_production_owners(
         indexed_files,
     )
     .await?;
-
-    // Hook V2 envelopes that missed their synchronous budget are durable in the
-    // per-host transport spool. Nothing drains them until this consumer runs,
-    // so start it once the bindings and admission owners above are mounted.
-    crate::daemon::hook_v2_replay::register_hook_v2_replay_consumer(graph);
 
     Ok(())
 }
@@ -2301,6 +2312,11 @@ fn production_owner_capabilities()
         "capability.application.primitive.health-read",
         "capability.application.primitive.storage-status",
         "capability.application.primitive.diagnostics-read",
+        "capability.application.git.status",
+        "capability.application.git.diff",
+        "capability.application.git.history",
+        "capability.application.git.blame",
+        "capability.application.git.hunks",
         "capability.application.source-edit.ast-grep-rewrite",
         "capability.application.source-edit.insert-at",
         "capability.application.source-edit.insert-at-symbol",
@@ -2359,6 +2375,26 @@ fn now_micros() -> UtcMicros {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn production_project_owner_grants_every_cataloged_git_read() {
+        let capabilities = production_owner_capabilities().expect("production capabilities");
+
+        for capability in [
+            "capability.application.git.status",
+            "capability.application.git.diff",
+            "capability.application.git.history",
+            "capability.application.git.blame",
+            "capability.application.git.hunks",
+        ] {
+            let capability = CapabilityId::new(capability).expect("Git read capability");
+            assert!(
+                capabilities.contains(&capability),
+                "{} must be granted to the daemon-owned project route",
+                capability.as_str()
+            );
+        }
+    }
 
     #[derive(Default)]
     struct RecordingHookCycleObservations(

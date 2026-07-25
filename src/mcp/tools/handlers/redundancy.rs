@@ -115,6 +115,7 @@ struct SemanticPair<'a> {
     node_a: &'a Node,
     node_b: &'a Node,
     cosine: f64,
+    distance_micros: i64,
 }
 
 fn augment_redundancy_output(
@@ -129,7 +130,7 @@ fn augment_redundancy_output(
     let Some(semantic) = semantic else {
         return redundancy_output(options, total_candidates, scanned, pairs, groups);
     };
-    let semantic_pairs = semantic_pairs(nodes, pairs, semantic, options);
+    let semantic_pairs = semantic_pairs(nodes, pairs, semantic);
     let mut ranked = Vec::with_capacity(pairs.len() + semantic_pairs.len());
     ranked.extend(pairs.iter().map(|pair| {
         let mut value = redundant_pair_json(pair);
@@ -142,6 +143,7 @@ fn augment_redundancy_output(
             .to_owned(),
         );
         (
+            0_u8,
             pair.score.ranking_score,
             pair.node_a.id.as_str(),
             pair.node_b.id.as_str(),
@@ -150,6 +152,7 @@ fn augment_redundancy_output(
     }));
     ranked.extend(semantic_pairs.iter().map(|pair| {
         (
+            1_u8,
             pair.cosine,
             pair.node_a.id.as_str(),
             pair.node_b.id.as_str(),
@@ -157,16 +160,16 @@ fn augment_redundancy_output(
         )
     }));
     ranked.sort_by(|left, right| {
-        right
-            .0
-            .total_cmp(&left.0)
-            .then_with(|| left.1.cmp(right.1))
+        left.0
+            .cmp(&right.0)
+            .then_with(|| right.1.total_cmp(&left.1))
             .then_with(|| left.2.cmp(right.2))
+            .then_with(|| left.3.cmp(right.3))
     });
     ranked.truncate(options.max_pairs);
     let rendered_pairs = ranked
         .into_iter()
-        .map(|(_, _, _, value)| value)
+        .map(|(_, _, _, _, value)| value)
         .collect::<Vec<_>>();
     let augmented_groups = connected_rendered_groups(&rendered_pairs, nodes);
     json!({
@@ -177,7 +180,7 @@ fn augment_redundancy_output(
         "pairs": rendered_pairs,
         "groups": duplicate_groups(&augmented_groups),
         "groups_scope": "connected components over the returned pairs only; raise max_pairs to see full clusters",
-        "ranked_by": "ranking_score desc (structural composite or active generation-bound semantic cosine, stable node-id ties)",
+        "ranked_by": "structural composite pairs first; accepted semantic analogues by calibrated distance, stable node-id ties",
         "scope": options.path_prefix.unwrap_or("(whole project)"),
         "thresholds": {
             "min_lines": options.min_lines,
@@ -189,6 +192,12 @@ fn augment_redundancy_output(
             "vector_generation": semantic.vector_generation,
             "source_generation": semantic.source_generation,
             "projection_key": semantic.projection_key,
+            "scope_digest": semantic.profile.scope_digest,
+            "accepted_profile_digest": semantic.profile.accepted_profile_digest,
+            "calibration_profile_id": semantic.profile.calibration_profile_id,
+            "calibration_digest": semantic.profile.calibration_digest,
+            "redundancy_profile_digest": semantic.profile.redundancy_profile_digest,
+            "maximum_distance_micros": semantic.profile.maximum_distance_micros,
         },
     })
 }
@@ -197,7 +206,6 @@ fn semantic_pairs<'a>(
     nodes: &'a [Node],
     structural: &[RedundantPair<'_>],
     semantic: &SemanticRedundancyGenerationV1,
-    options: &RedundancyOptions<'_>,
 ) -> Vec<SemanticPair<'a>> {
     let mut vectors_by_node: HashMap<&str, Vec<&[f32]>> = HashMap::new();
     for vector in &semantic.vectors {
@@ -243,9 +251,12 @@ fn semantic_pairs<'a>(
                         .filter_map(move |right| semantic_cosine(left, right))
                 })
                 .max_by(f64::total_cmp);
-            if let Some(cosine) = cosine
-                && cosine >= options.threshold
-            {
+            if let Some((cosine, distance_micros)) = cosine.and_then(|cosine| {
+                semantic
+                    .profile
+                    .accepts(cosine)
+                    .map(|distance| (cosine, distance))
+            }) {
                 let (node_a, node_b) = if node_a.id <= node_b.id {
                     (node_a, node_b)
                 } else {
@@ -255,6 +266,7 @@ fn semantic_pairs<'a>(
                     node_a,
                     node_b,
                     cosine,
+                    distance_micros,
                 });
             }
         }
@@ -307,7 +319,7 @@ fn nodes_overlap(left: &Node, right: &Node) -> bool {
 fn semantic_pair_json(pair: &SemanticPair<'_>) -> Value {
     json!({
         "similarity": round4(pair.cosine),
-        "ranking_score": round4(pair.cosine),
+        "ranking_score": 0.0,
         "severity": "review",
         "overlap_kind": "semantic",
         "classification": "semantic_analogue",
@@ -320,6 +332,7 @@ fn semantic_pair_json(pair: &SemanticPair<'_>) -> Value {
             "shingle_jaccard": 0.0,
             "body_vector_cosine": 0.0,
             "semantic_vector_cosine": round4(pair.cosine),
+            "semantic_distance_micros": pair.distance_micros,
             "generic_helper_downranked": false,
             "body_tokens": [0, 0],
         },
@@ -909,7 +922,7 @@ mod tests {
         redundancy_md, redundancy_output, scoped_fingerprints,
     };
     use crate::application::semantic_runtime::{
-        SemanticRedundancyGenerationV1, SemanticRedundancyVectorV1,
+        SemanticRedundancyGenerationV1, SemanticRedundancyProfileV1, SemanticRedundancyVectorV1,
     };
     use crate::db::StoredFingerprint;
     use crate::redundancy::{Fingerprint, RedundancyMatchScore, RedundantPair};
@@ -1147,6 +1160,14 @@ mod tests {
             vector_generation: "sha256:vector-generation".to_owned(),
             source_generation: "sha256:source-generation".to_owned(),
             projection_key: "sha256:projection-key".to_owned(),
+            profile: SemanticRedundancyProfileV1 {
+                scope_digest: "sha256:scope".to_owned(),
+                accepted_profile_digest: "sha256:accepted-profile".to_owned(),
+                calibration_profile_id: "calibration.semantic.v1".to_owned(),
+                calibration_digest: "sha256:calibration".to_owned(),
+                redundancy_profile_digest: "sha256:redundancy-profile".to_owned(),
+                maximum_distance_micros: 100_000_000,
+            },
             vectors: vec![
                 SemanticRedundancyVectorV1 {
                     file_path: "src/spans.rs".to_owned(),
@@ -1184,6 +1205,55 @@ mod tests {
             output["semantic_generation"]["vector_generation"],
             "sha256:vector-generation"
         );
+        assert_eq!(
+            output["semantic_generation"]["redundancy_profile_digest"],
+            "sha256:redundancy-profile"
+        );
+    }
+
+    #[test]
+    fn structural_threshold_cannot_admit_uncalibrated_semantic_pair() {
+        let nodes = vec![
+            candidate_node("left-id", "left", "src/left.rs", 8),
+            candidate_node("right-id", "right", "src/right.rs", 8),
+        ];
+        let generation = SemanticRedundancyGenerationV1 {
+            vector_generation: "sha256:vector-generation".to_owned(),
+            source_generation: "sha256:source-generation".to_owned(),
+            projection_key: "sha256:projection-key".to_owned(),
+            profile: SemanticRedundancyProfileV1 {
+                scope_digest: "sha256:scope".to_owned(),
+                accepted_profile_digest: "sha256:accepted-profile".to_owned(),
+                calibration_profile_id: "calibration.semantic.v1".to_owned(),
+                calibration_digest: "sha256:calibration".to_owned(),
+                redundancy_profile_digest: "sha256:redundancy-profile".to_owned(),
+                maximum_distance_micros: 100_000_000,
+            },
+            vectors: vec![
+                SemanticRedundancyVectorV1 {
+                    file_path: "src/left.rs".to_owned(),
+                    qualified_name: "left".to_owned(),
+                    values: vec![1.0, 0.0],
+                },
+                SemanticRedundancyVectorV1 {
+                    file_path: "src/right.rs".to_owned(),
+                    qualified_name: "right".to_owned(),
+                    values: vec![0.8, 0.6],
+                },
+            ],
+        };
+        let options = RedundancyOptions {
+            path_prefix: None,
+            min_lines: 8,
+            max_pairs: 20,
+            threshold: 0.5,
+            include_naming: false,
+            include_generated: false,
+        };
+
+        let output = augment_redundancy_output(&options, 2, 0, &nodes, &[], &[], Some(&generation));
+
+        assert_eq!(output["pair_count"], 0);
     }
 
     #[test]
