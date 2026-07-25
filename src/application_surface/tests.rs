@@ -10,6 +10,7 @@ use tracedecay_application::{
     CapabilityGrantSnapshot, Deadline, DisclosureClass, OperationBudgetUsage, OperationReceipt,
     PageRequest, RequestContext, RequestId, ResolvedScope, StreamEvent,
 };
+use tracedecay_domain::configuration::ConfigurationRevisionId;
 use tracedecay_domain::{
     ActorId, ManifestDigest, ProjectId, QueryNormalizationRevision, RefId, RepositoryId,
     SanitizerRevision, UtcMicros, WorktreeId,
@@ -19,8 +20,10 @@ use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 use super::{
     APPLICATION_PROTOCOL_REVISION, APPLICATION_SURFACE_OPERATIONS, ApplicationSurfaceAdapterError,
     ApplicationSurfaceOperation, ApplicationSurfaceRequest, CallableCodeSurfaceRequest,
-    FeedbackSurfaceRequest, HttpCancellationRegistry, HttpDisconnectCancellation,
-    HttpOperationEventState, PrimitiveCodeSurfaceRequest, application_negotiated_features,
+    ContextScoutClaimSurfaceRequest, ContextScoutClaimWindowSurfaceV1,
+    ContextScoutControlSurfaceRequest, ContextScoutSurfaceRequest, FeedbackSurfaceRequest,
+    HttpCancellationRegistry, HttpDisconnectCancellation, HttpOperationEventState,
+    PrimitiveCodeSurfaceRequest, application_negotiated_features,
     application_surface_dispatch_input_with_controls, current_micros, execute_application_surface,
     http_operation_event_router, parse_application_surface_request, plan26_sse_stream_event,
     resolve_application_surface_dispatch, resolve_authenticated_http_request_context,
@@ -195,6 +198,59 @@ fn cli_and_mcp_resolve_every_operation_through_the_current_catalog_gate() {
             assert_eq!(binding.result_schema.revision(), 1);
         }
     }
+}
+
+#[test]
+fn context_scout_controls_and_claims_preserve_the_exact_address() {
+    let address = crate::agents::context_scout_v2::ContextScoutAddressV1 {
+        profile_id: [1; 16],
+        provider_id: [2; 16],
+        protected_session_id: [3; 32],
+        thread_id: [4; 16],
+        turn_id: [5; 16],
+        agent_id: [6; 16],
+        logical_message_id: [7; 16],
+        project_id: [8; 16],
+    };
+    let pause = parse_application_surface_request(
+        ApplicationSurfaceOperation::ContextScoutPause,
+        serde_json::to_value(ContextScoutControlSurfaceRequest {
+            address,
+            expected_revision: ConfigurationRevisionId::new("revision.scout.surface")
+                .expect("revision"),
+        })
+        .expect("pause request"),
+    )
+    .expect("exact-address pause");
+    assert!(matches!(
+        pause,
+        ApplicationSurfaceRequest::ContextScout(ContextScoutSurfaceRequest::Pause(request))
+            if request.address == address
+    ));
+
+    let claim_body = serde_json::to_value(ContextScoutClaimSurfaceRequest {
+        address,
+        window: ContextScoutClaimWindowSurfaceV1::IdleWindow,
+    })
+    .expect("claim request");
+    let claim = parse_application_surface_request(
+        ApplicationSurfaceOperation::ContextScoutClaim,
+        claim_body.clone(),
+    )
+    .expect("exact-address claim");
+    assert!(matches!(
+        claim,
+        ApplicationSurfaceRequest::ContextScout(ContextScoutSurfaceRequest::Claim(request))
+            if request.address == address
+                && request.window == ContextScoutClaimWindowSurfaceV1::IdleWindow
+    ));
+    assert!(matches!(
+        parse_application_surface_request(
+            ApplicationSurfaceOperation::ContextScoutPause,
+            claim_body,
+        ),
+        Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+    ));
 }
 
 #[tokio::test]

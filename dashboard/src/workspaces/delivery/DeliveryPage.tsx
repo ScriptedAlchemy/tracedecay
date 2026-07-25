@@ -1,3 +1,4 @@
+import { useQuery } from '@tanstack/react-query';
 import { useMemo, useState } from 'react';
 import type { LucideIcon } from 'lucide-react';
 import {
@@ -10,6 +11,13 @@ import {
   ScrollText,
   Server,
 } from 'lucide-react';
+import { z } from 'zod';
+import {
+  assertNever,
+  type WireCoverage,
+  type WireFreshness,
+} from '../../contracts/generated.ts';
+import { fetchEnvelope } from '../../data/query/envelope.ts';
 import { LegacyBoundary } from '../../ui/LegacyStates.tsx';
 import { FreshnessMeter } from '../../ui/OpsLayout.tsx';
 import { StateChip } from '../../ui/StateChip';
@@ -37,13 +45,14 @@ import {
  * a list.
  *
  * The plan asks for "changes, commits, branches, worktrees, pull requests, CI,
- * releases". `/api/projects` is the only delivery-relevant route the daemon
- * exposes, and it serves repositories, their branch NAMES, and the checkouts
- * mapped to each. It serves no commit, no PR, no check and no release, and it
- * serves no timestamp for any branch. So this surface reads what is there —
+ * releases". `/api/projects` is the repository route the daemon exposes: it
+ * serves repositories, their branch NAMES, and the checkouts mapped to each.
+ * It serves no commit, no PR, no check and no release, and no timestamp for any
+ * branch. So this surface reads what is there —
  * where work is indexed and how branch-heavy each repository is — and prints
- * the rest as typed unsupported stages rather than as empty tables that look
- * like they are still loading.
+ * absent delivery authorities as unsupported rather than as empty tables. The
+ * separate code-index freshness route is decoded through the canonical
+ * envelope and keeps its server-owned ready/partial/stale/unsupported state.
  *
  * The one word that has to stay exact everywhere on this page: `last_seen_at`
  * is when TraceDecay last INDEXED the checkout, not when anyone last committed
@@ -194,9 +203,9 @@ function DeliveryBody_({
           <Panel legend="Pipeline">
             <div className="flex flex-col gap-2.5">
               <p className="text-2xs leading-relaxed text-text-muted">
-                Everything downstream of a branch name is absent from the
+                Commit, pull-request, CI and release reads are absent from the
                 dashboard API. These are not empty results — no route serves
-                them at all.
+                those authorities.
               </p>
               <PipelineStage icon={GitCommitHorizontal} label="Changes & commits">
                 <StateChip kind="unsupported" detail="no commit route; branch names only" />
@@ -211,7 +220,7 @@ function DeliveryBody_({
                 <StateChip kind="unsupported" detail="no release route in the dashboard API" />
               </PipelineStage>
               <PipelineStage icon={ScrollText} label="Index freshness">
-                <StateChip kind="unsupported" detail="generation read port unwired" />
+                <IndexFreshnessState />
               </PipelineStage>
             </div>
           </Panel>
@@ -221,6 +230,80 @@ function DeliveryBody_({
       </div>
     </div>
   );
+}
+
+function IndexFreshnessState() {
+  const query = useQuery({
+    queryKey: ['delivery', 'code-index-freshness'],
+    queryFn: () => fetchEnvelope('/api/code-index/freshness', z.unknown()),
+  });
+  if (query.isPending) {
+    return <StateChip kind="loading" detail="reading generation freshness" />;
+  }
+  const result = query.data;
+  if (!result) {
+    return <StateChip kind="error" detail="generation freshness read failed" />;
+  }
+  if (result.outcome === 'transport') {
+    return (
+      <StateChip
+        kind={result.state}
+        detail={
+          result.detail ??
+          `generation freshness ${result.state.replaceAll('_', ' ')}`
+        }
+      />
+    );
+  }
+  return (
+    <StateChip
+      kind={result.envelope.domain_state}
+      detail={generationFreshnessDetail(
+        result.envelope.freshness,
+        result.envelope.coverage,
+      )}
+    />
+  );
+}
+
+function generationFreshnessDetail(
+  freshness: WireFreshness,
+  coverage: WireCoverage,
+): string {
+  return `${freshnessDetail(freshness)} · ${coverageDetail(coverage)}`;
+}
+
+function freshnessDetail(freshness: WireFreshness): string {
+  switch (freshness.state) {
+    case 'fresh':
+    case 'stale':
+    case 'unknown':
+    case 'absent':
+      return `generation state ${freshness.state}`;
+    case 'unsupported':
+      return 'generation source unsupported';
+    default:
+      return assertNever(freshness.state);
+  }
+}
+
+function coverageDetail(coverage: WireCoverage): string {
+  switch (coverage.completeness) {
+    case 'complete':
+      return coverage.denominator == null
+        ? 'coverage complete; denominator unavailable'
+        : `${coverage.examined ?? coverage.denominator} of ${coverage.denominator} ${coverage.unit ?? 'items'} examined`;
+    case 'partial':
+      return coverage.eligible == null || coverage.examined == null
+        ? 'coverage partial'
+        : `${coverage.examined} of ${coverage.eligible} ${coverage.unit ?? 'items'} examined`;
+    case 'unknown':
+      return 'coverage unknown';
+    case 'unsupported':
+      return 'coverage unsupported';
+    default:
+      return assertNever(coverage.completeness);
+  }
 }
 
 /** The axes, printed. Both of them are easy to misread — one looks like commit

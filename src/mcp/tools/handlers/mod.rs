@@ -8,7 +8,7 @@ mod admin_cli;
 pub(crate) use admin_cli::handle_projectless_admin_cli;
 pub(crate) use hook_runtime::{
     HookV2AdmissionOutcomeV1, admit_hook_v2_envelope, handle_projectless_hook_runtime,
-    replay_projectless_hermes_host_admission,
+    hook_v2_pending_work_envelopes, replay_projectless_hermes_host_admission,
 };
 mod admin_project;
 pub mod analysis;
@@ -453,6 +453,8 @@ pub struct ToolCallRegistryOptions<'a> {
     pub automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,
     pub automation_writer: crate::dashboard::DashboardAutomationWriter,
     pub doctor_report_reader: Option<crate::dashboard::DoctorReportReader>,
+    pub doctor_remediation_dispatcher:
+        Option<crate::dashboard::DoctorRemediationDispatcherV1>,
     pub diagnostics_cache: Option<&'a crate::diagnostics::DiagnosticsCache>,
     pub diagnostics_lsp:
         Option<&'a tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>>,
@@ -486,6 +488,7 @@ impl Default for ToolCallRegistryOptions<'_> {
             automation_scheduler_reconciler: None,
             automation_writer: crate::dashboard::direct_dashboard_automation_writer(),
             doctor_report_reader: None,
+            doctor_remediation_dispatcher: None,
             diagnostics_cache: None,
             diagnostics_lsp: None,
             application_invocation_client: None,
@@ -1204,6 +1207,7 @@ async fn dispatch_session_workflow_tools(
                 options.automation_scheduler_reconciler.clone(),
                 options.automation_writer.clone(),
                 options.doctor_report_reader.clone(),
+                options.doctor_remediation_dispatcher.clone(),
             )
             .await
         }

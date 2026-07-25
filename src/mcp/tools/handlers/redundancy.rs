@@ -27,6 +27,9 @@ use std::path::Path;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+use crate::application::semantic_runtime::{
+    SemanticRedundancyGenerationV1, project_semantic_redundancy_generation,
+};
 use crate::errors::Result;
 use crate::redundancy::{
     Fingerprint, RedundantPair, compute_fingerprint, connected_node_groups, find_node_at_lines,
@@ -82,9 +85,22 @@ pub(crate) async fn handle_redundancy(
     // result into both so the two views can never diverge and the O(pairs²)
     // grouping runs a single time per call.
     let groups = connected_node_groups(&pairs);
-    let output = redundancy_output(&options, total_candidates, scanned, &pairs, &groups);
+    let semantic = project_semantic_redundancy_generation(cg.project_root(), cg.db()).await;
+    let output = augment_redundancy_output(
+        &options,
+        total_candidates,
+        scanned,
+        &nodes,
+        &pairs,
+        &groups,
+        semantic.as_ref(),
+    );
     let text = render::finalize(Some(cg.project_root()), &args, &output, || {
-        redundancy_md(&options, total_candidates, scanned, &pairs, &groups)
+        if semantic.is_some() {
+            render::generic_md(&output)
+        } else {
+            redundancy_md(&options, total_candidates, scanned, &pairs, &groups)
+        }
     });
     Ok(ToolResult::new(
         json!({
@@ -92,6 +108,265 @@ pub(crate) async fn handle_redundancy(
         }),
         vec![],
     ))
+}
+
+#[derive(Clone, Copy)]
+struct SemanticPair<'a> {
+    node_a: &'a Node,
+    node_b: &'a Node,
+    cosine: f64,
+}
+
+fn augment_redundancy_output(
+    options: &RedundancyOptions<'_>,
+    total_candidates: usize,
+    scanned: usize,
+    nodes: &[Node],
+    pairs: &[RedundantPair<'_>],
+    groups: &[Vec<&Node>],
+    semantic: Option<&SemanticRedundancyGenerationV1>,
+) -> Value {
+    let Some(semantic) = semantic else {
+        return redundancy_output(options, total_candidates, scanned, pairs, groups);
+    };
+    let semantic_pairs = semantic_pairs(nodes, pairs, semantic, options);
+    let mut ranked = Vec::with_capacity(pairs.len() + semantic_pairs.len());
+    ranked.extend(pairs.iter().map(|pair| {
+        let mut value = redundant_pair_json(pair);
+        value["classification"] = Value::String(
+            if pair.fp_a.source_hash == pair.fp_b.source_hash {
+                "exact_clone"
+            } else {
+                "structural_near_duplicate"
+            }
+            .to_owned(),
+        );
+        (
+            pair.score.ranking_score,
+            pair.node_a.id.as_str(),
+            pair.node_b.id.as_str(),
+            value,
+        )
+    }));
+    ranked.extend(semantic_pairs.iter().map(|pair| {
+        (
+            pair.cosine,
+            pair.node_a.id.as_str(),
+            pair.node_b.id.as_str(),
+            semantic_pair_json(pair),
+        )
+    }));
+    ranked.sort_by(|left, right| {
+        right
+            .0
+            .total_cmp(&left.0)
+            .then_with(|| left.1.cmp(right.1))
+            .then_with(|| left.2.cmp(right.2))
+    });
+    ranked.truncate(options.max_pairs);
+    let rendered_pairs = ranked
+        .into_iter()
+        .map(|(_, _, _, value)| value)
+        .collect::<Vec<_>>();
+    let augmented_groups = connected_rendered_groups(&rendered_pairs, nodes);
+    json!({
+        "candidates": total_candidates,
+        "scanned": scanned,
+        "skipped_for_size": total_candidates.saturating_sub(scanned),
+        "pair_count": rendered_pairs.len(),
+        "pairs": rendered_pairs,
+        "groups": duplicate_groups(&augmented_groups),
+        "groups_scope": "connected components over the returned pairs only; raise max_pairs to see full clusters",
+        "ranked_by": "ranking_score desc (structural composite or active generation-bound semantic cosine, stable node-id ties)",
+        "scope": options.path_prefix.unwrap_or("(whole project)"),
+        "thresholds": {
+            "min_lines": options.min_lines,
+            "similarity_threshold": options.threshold,
+            "include_naming_only": options.include_naming,
+            "include_generated_paths": options.include_generated,
+        },
+        "semantic_generation": {
+            "vector_generation": semantic.vector_generation,
+            "source_generation": semantic.source_generation,
+            "projection_key": semantic.projection_key,
+        },
+    })
+}
+
+fn semantic_pairs<'a>(
+    nodes: &'a [Node],
+    structural: &[RedundantPair<'_>],
+    semantic: &SemanticRedundancyGenerationV1,
+    options: &RedundancyOptions<'_>,
+) -> Vec<SemanticPair<'a>> {
+    let mut vectors_by_node: HashMap<&str, Vec<&[f32]>> = HashMap::new();
+    for vector in &semantic.vectors {
+        let mut matches = nodes.iter().filter(|node| {
+            node.file_path == vector.file_path
+                && (node.qualified_name == vector.qualified_name
+                    || node.name == vector.qualified_name)
+        });
+        let Some(node) = matches.next() else {
+            continue;
+        };
+        if matches.next().is_some() {
+            continue;
+        }
+        vectors_by_node
+            .entry(node.id.as_str())
+            .or_default()
+            .push(&vector.values);
+    }
+    let structural_pairs = structural
+        .iter()
+        .map(|pair| canonical_pair_ids(&pair.node_a.id, &pair.node_b.id))
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut semantic_pairs = Vec::new();
+    for (index, node_a) in nodes.iter().enumerate() {
+        let Some(vectors_a) = vectors_by_node.get(node_a.id.as_str()) else {
+            continue;
+        };
+        for node_b in nodes.iter().skip(index + 1) {
+            if nodes_overlap(node_a, node_b)
+                || structural_pairs.contains(&canonical_pair_ids(&node_a.id, &node_b.id))
+            {
+                continue;
+            }
+            let Some(vectors_b) = vectors_by_node.get(node_b.id.as_str()) else {
+                continue;
+            };
+            let cosine = vectors_a
+                .iter()
+                .flat_map(|left| {
+                    vectors_b
+                        .iter()
+                        .filter_map(move |right| semantic_cosine(left, right))
+                })
+                .max_by(f64::total_cmp);
+            if let Some(cosine) = cosine
+                && cosine >= options.threshold
+            {
+                let (node_a, node_b) = if node_a.id <= node_b.id {
+                    (node_a, node_b)
+                } else {
+                    (node_b, node_a)
+                };
+                semantic_pairs.push(SemanticPair {
+                    node_a,
+                    node_b,
+                    cosine,
+                });
+            }
+        }
+    }
+    semantic_pairs.sort_by(|left, right| {
+        right
+            .cosine
+            .total_cmp(&left.cosine)
+            .then_with(|| left.node_a.id.cmp(&right.node_a.id))
+            .then_with(|| left.node_b.id.cmp(&right.node_b.id))
+    });
+    semantic_pairs
+}
+
+fn semantic_cosine(left: &[f32], right: &[f32]) -> Option<f64> {
+    if left.is_empty() || left.len() != right.len() {
+        return None;
+    }
+    let mut dot = 0.0_f64;
+    let mut left_norm = 0.0_f64;
+    let mut right_norm = 0.0_f64;
+    for (&left, &right) in left.iter().zip(right) {
+        if !left.is_finite() || !right.is_finite() {
+            return None;
+        }
+        let left = f64::from(left);
+        let right = f64::from(right);
+        dot += left * right;
+        left_norm += left * left;
+        right_norm += right * right;
+    }
+    (left_norm > 0.0 && right_norm > 0.0)
+        .then(|| (dot / (left_norm.sqrt() * right_norm.sqrt())).clamp(-1.0, 1.0))
+}
+
+fn canonical_pair_ids<'a>(left: &'a str, right: &'a str) -> (&'a str, &'a str) {
+    if left <= right {
+        (left, right)
+    } else {
+        (right, left)
+    }
+}
+
+fn nodes_overlap(left: &Node, right: &Node) -> bool {
+    left.file_path == right.file_path
+        && left.start_line <= right.end_line
+        && right.start_line <= left.end_line
+}
+
+fn semantic_pair_json(pair: &SemanticPair<'_>) -> Value {
+    json!({
+        "similarity": round4(pair.cosine),
+        "ranking_score": round4(pair.cosine),
+        "severity": "review",
+        "overlap_kind": "semantic",
+        "classification": "semantic_analogue",
+        "a": node_json(pair.node_a),
+        "b": node_json(pair.node_b),
+        "signals": {
+            "ast_match": false,
+            "cfg_match": false,
+            "call_seq_match": false,
+            "shingle_jaccard": 0.0,
+            "body_vector_cosine": 0.0,
+            "semantic_vector_cosine": round4(pair.cosine),
+            "generic_helper_downranked": false,
+            "body_tokens": [0, 0],
+        },
+    })
+}
+
+fn connected_rendered_groups<'a>(pairs: &[Value], nodes: &'a [Node]) -> Vec<Vec<&'a Node>> {
+    let by_id = nodes
+        .iter()
+        .map(|node| (node.id.as_str(), node))
+        .collect::<HashMap<_, _>>();
+    let mut adjacency: HashMap<&str, Vec<&str>> = HashMap::new();
+    for pair in pairs {
+        let (Some(left), Some(right)) = (pair["a"]["id"].as_str(), pair["b"]["id"].as_str()) else {
+            continue;
+        };
+        adjacency.entry(left).or_default().push(right);
+        adjacency.entry(right).or_default().push(left);
+    }
+    let mut ids = adjacency.keys().copied().collect::<Vec<_>>();
+    ids.sort_unstable();
+    let mut visited = std::collections::BTreeSet::new();
+    let mut groups = Vec::new();
+    for root in ids {
+        if !visited.insert(root) {
+            continue;
+        }
+        let mut stack = vec![root];
+        let mut group = Vec::new();
+        while let Some(id) = stack.pop() {
+            if let Some(node) = by_id.get(id) {
+                group.push(*node);
+            }
+            if let Some(neighbors) = adjacency.get(id) {
+                for neighbor in neighbors {
+                    if visited.insert(*neighbor) {
+                        stack.push(neighbor);
+                    }
+                }
+            }
+        }
+        group.sort_by(|left, right| left.id.cmp(&right.id));
+        if group.len() > 1 {
+            groups.push(group);
+        }
+    }
+    groups
 }
 
 struct RedundancyOptions<'a> {
@@ -626,10 +901,15 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    use serde_json::Value;
+
     use super::{
-        RedundancyOptions, body_slice, connected_node_groups, ensure_fingerprints_with_loader,
-        find_redundant_pairs, is_generated_path, node_body_slice, redundancy_md, redundancy_output,
-        scoped_fingerprints,
+        RedundancyOptions, augment_redundancy_output, body_slice, connected_node_groups,
+        ensure_fingerprints_with_loader, find_redundant_pairs, is_generated_path, node_body_slice,
+        redundancy_md, redundancy_output, scoped_fingerprints,
+    };
+    use crate::application::semantic_runtime::{
+        SemanticRedundancyGenerationV1, SemanticRedundancyVectorV1,
     };
     use crate::db::StoredFingerprint;
     use crate::redundancy::{Fingerprint, RedundancyMatchScore, RedundantPair};
@@ -796,6 +1076,113 @@ mod tests {
                 "groups_scope: connected components over the returned pairs only; raise max_pairs to see full clusters"
             ),
             "{md}"
+        );
+    }
+
+    #[test]
+    fn disabled_semantics_preserves_structural_output_bytes_and_order() {
+        let nodes = vec![
+            test_node("id_a", "alpha", 10),
+            test_node("id_b", "beta", 20),
+            test_node("id_c", "gamma", 30),
+        ];
+        let fa = test_fingerprint(50);
+        let fb = test_fingerprint(52);
+        let fc = test_fingerprint(54);
+        let pairs = vec![
+            RedundantPair {
+                score: test_score(0.95),
+                node_a: &nodes[0],
+                node_b: &nodes[1],
+                fp_a: &fa,
+                fp_b: &fb,
+            },
+            RedundantPair {
+                score: test_score(0.85),
+                node_a: &nodes[1],
+                node_b: &nodes[2],
+                fp_a: &fb,
+                fp_b: &fc,
+            },
+        ];
+        let options = RedundancyOptions {
+            path_prefix: None,
+            min_lines: 8,
+            max_pairs: 20,
+            threshold: 0.6,
+            include_naming: false,
+            include_generated: false,
+        };
+        let groups = connected_node_groups(&pairs);
+        let baseline = redundancy_output(&options, 3, 3, &pairs, &groups);
+
+        let augmented = augment_redundancy_output(&options, 3, 3, &nodes, &pairs, &groups, None);
+
+        assert_eq!(
+            serde_json::to_vec(&augmented).unwrap(),
+            serde_json::to_vec(&baseline).unwrap()
+        );
+    }
+
+    #[test]
+    fn active_generation_classifies_semantic_only_pair_as_analogue() {
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../../../../tests/fixtures/redundancy_eval_labeled.json"
+        ))
+        .unwrap();
+        let labelled = fixture["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|case| case["label"] == "vector_rescue_renamed")
+            .unwrap();
+        let left_name = labelled["a_name"].as_str().unwrap();
+        let right_name = labelled["b_name"].as_str().unwrap();
+        let nodes = vec![
+            candidate_node("left-id", left_name, "src/spans.rs", 8),
+            candidate_node("right-id", right_name, "src/ranges.rs", 8),
+            candidate_node("render-id", "render_page", "src/view.rs", 8),
+        ];
+        let generation = SemanticRedundancyGenerationV1 {
+            vector_generation: "sha256:vector-generation".to_owned(),
+            source_generation: "sha256:source-generation".to_owned(),
+            projection_key: "sha256:projection-key".to_owned(),
+            vectors: vec![
+                SemanticRedundancyVectorV1 {
+                    file_path: "src/spans.rs".to_owned(),
+                    qualified_name: left_name.to_owned(),
+                    values: vec![1.0, 0.0],
+                },
+                SemanticRedundancyVectorV1 {
+                    file_path: "src/ranges.rs".to_owned(),
+                    qualified_name: right_name.to_owned(),
+                    values: vec![0.99, 0.01],
+                },
+                SemanticRedundancyVectorV1 {
+                    file_path: "src/view.rs".to_owned(),
+                    qualified_name: "render_page".to_owned(),
+                    values: vec![0.0, 1.0],
+                },
+            ],
+        };
+        let options = RedundancyOptions {
+            path_prefix: None,
+            min_lines: 8,
+            max_pairs: 20,
+            threshold: 0.9,
+            include_naming: false,
+            include_generated: false,
+        };
+
+        let output = augment_redundancy_output(&options, 3, 0, &nodes, &[], &[], Some(&generation));
+
+        assert_eq!(output["pair_count"], 1);
+        assert_eq!(output["pairs"][0]["classification"], "semantic_analogue");
+        assert_eq!(output["pairs"][0]["a"]["id"], "left-id");
+        assert_eq!(output["pairs"][0]["b"]["id"], "right-id");
+        assert_eq!(
+            output["semantic_generation"]["vector_generation"],
+            "sha256:vector-generation"
         );
     }
 

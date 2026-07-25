@@ -42,7 +42,7 @@ pub(crate) enum DoctorRemediationDispatchCommandV1 {
     },
 }
 
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum DoctorRemediationOperationPhaseV1 {
     Previewed,
@@ -55,7 +55,7 @@ pub(crate) enum DoctorRemediationOperationPhaseV1 {
     EffectUnknown,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct DoctorRemediationOperationV1 {
     pub operation_id: OperationId,
     pub owning_operation: DoctorOwningOperationRefV1,
@@ -101,6 +101,7 @@ pub(crate) struct DoctorRemediationDispatcherV1 {
     // construction-time admission alone never authorizes a later request.
     legal_actions: LegalActions,
     dispatch: Dispatch,
+    durable_receipt_root: Option<std::path::PathBuf>,
 }
 
 impl DoctorRemediationDispatcherV1 {
@@ -108,6 +109,19 @@ impl DoctorRemediationDispatcherV1 {
         Self {
             legal_actions,
             dispatch,
+            durable_receipt_root: None,
+        }
+    }
+
+    pub(crate) fn new_durable(
+        durable_receipt_root: std::path::PathBuf,
+        legal_actions: LegalActions,
+        dispatch: Dispatch,
+    ) -> Self {
+        Self {
+            legal_actions,
+            dispatch,
+            durable_receipt_root: Some(durable_receipt_root),
         }
     }
 
@@ -146,8 +160,85 @@ impl DoctorRemediationDispatcherV1 {
         &self,
         command: DoctorRemediationDispatchCommandV1,
     ) -> Result<DoctorRemediationOperationV1, DoctorRemediationDispatchErrorV1> {
-        (self.dispatch)(command).await
+        if let (Some(root), DoctorRemediationDispatchCommandV1::Status { operation_id }) =
+            (&self.durable_receipt_root, &command)
+            && let Some(operation) = read_durable_operation(root, operation_id)?
+        {
+            let kind = if operation.phase == DoctorRemediationOperationPhaseV1::Previewed {
+                DoctorRemediationKindV1::Preview
+            } else {
+                DoctorRemediationKindV1::Action
+            };
+            let reference = DoctorRemediationRefV1::new(operation.owning_operation.clone(), kind);
+            if self.legal_actions(&reference).await.is_empty() {
+                return Err(DoctorRemediationDispatchErrorV1::Denied);
+            }
+            return Ok(operation);
+        }
+        let operation = (self.dispatch)(command).await?;
+        if let Some(root) = &self.durable_receipt_root {
+            validate_outcome(operation.clone())?;
+            write_durable_operation(root, &operation)?;
+        }
+        Ok(operation)
     }
+}
+
+fn durable_operation_path(
+    root: &std::path::Path,
+    operation_id: &OperationId,
+) -> Result<std::path::PathBuf, DoctorRemediationDispatchErrorV1> {
+    let digest = tracedecay_domain::canonical_sha256(&(
+        "tracedecay.doctor-remediation-operation.v1",
+        operation_id,
+    ))
+    .map_err(|_| DoctorRemediationDispatchErrorV1::InvalidReference)?;
+    Ok(root.join(format!("{}.json", digest.as_str())))
+}
+
+fn read_durable_operation(
+    root: &std::path::Path,
+    operation_id: &OperationId,
+) -> Result<Option<DoctorRemediationOperationV1>, DoctorRemediationDispatchErrorV1> {
+    crate::storage::PrivateStoreIo::create_dir_all(root)
+        .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)?;
+    let path = durable_operation_path(root, operation_id)?;
+    let lock_path = crate::storage::append_lock_path(&path);
+    let _lock = crate::storage::acquire_sidecar_lock_blocking(&lock_path)
+        .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)?;
+    match std::fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            Err(DoctorRemediationDispatchErrorV1::InvalidReference)
+        }
+        Ok(_) => {
+            let bytes = std::fs::read(&path)
+                .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)?;
+            let operation: DoctorRemediationOperationV1 = serde_json::from_slice(&bytes)
+                .map_err(|_| DoctorRemediationDispatchErrorV1::InvalidReference)?;
+            (operation.operation_id == *operation_id)
+                .then_some(Some(operation))
+                .ok_or(DoctorRemediationDispatchErrorV1::InvalidReference)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(DoctorRemediationDispatchErrorV1::OwnerUnavailable),
+    }
+}
+
+fn write_durable_operation(
+    root: &std::path::Path,
+    operation: &DoctorRemediationOperationV1,
+) -> Result<(), DoctorRemediationDispatchErrorV1> {
+    crate::storage::PrivateStoreIo::create_dir_all(root)
+        .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)?;
+    let path = durable_operation_path(root, &operation.operation_id)?;
+    let lock_path = crate::storage::append_lock_path(&path);
+    let _lock = crate::storage::acquire_sidecar_lock_blocking(&lock_path)
+        .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)?;
+    let bytes = serde_json::to_vec(operation)
+        .map_err(|_| DoctorRemediationDispatchErrorV1::InvalidReference)?;
+    let temp_path = path.with_extension(format!("json.tmp-{}", std::process::id()));
+    crate::storage::PrivateStoreIo::write_file_atomically(&path, &temp_path, &bytes)
+        .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)
 }
 
 #[derive(Debug, Deserialize)]
@@ -687,5 +778,44 @@ mod tests {
             DoctorRemediationPayloadV1::Operation { operation: failed }
         );
         assert_eq!(resumed.domain_state, DashboardDomainStateV1::Error);
+    }
+
+    #[tokio::test]
+    async fn durable_dispatcher_resumes_terminal_receipt_after_rebuild() {
+        let root = tempfile::tempdir().expect("receipt root");
+        let failed = failed_operation();
+        let first = DoctorRemediationDispatcherV1::new_durable(
+            root.path().to_path_buf(),
+            Arc::new(|_| Box::pin(async { vec![DashboardLegalActionKindV1::RequestDryRun] })),
+            Arc::new({
+                let failed = failed.clone();
+                move |_| {
+                    let failed = failed.clone();
+                    Box::pin(async move { Ok(failed) })
+                }
+            }),
+        );
+        first
+            .dispatch(DoctorRemediationDispatchCommandV1::Preview {
+                operation: configuration_operation(),
+            })
+            .await
+            .expect("persist terminal operation");
+
+        let rebuilt = DoctorRemediationDispatcherV1::new_durable(
+            root.path().to_path_buf(),
+            Arc::new(|_| Box::pin(async { vec![DashboardLegalActionKindV1::RequestDryRun] })),
+            Arc::new(|_| {
+                Box::pin(async { Err(DoctorRemediationDispatchErrorV1::OwnerUnavailable) })
+            }),
+        );
+        let resumed = rebuilt
+            .dispatch(DoctorRemediationDispatchCommandV1::Status {
+                operation_id: failed.operation_id.clone(),
+            })
+            .await
+            .expect("resume durable terminal operation");
+
+        assert_eq!(resumed, failed);
     }
 }

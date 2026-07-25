@@ -5248,8 +5248,9 @@ fn host_scope(scope: &ObservationScopeV1) -> HostAdmissionScope {
 }
 
 fn supported_provider(provider: &str) -> bool {
-    crate::sessions::SessionProvider::parse(provider)
-        .is_some_and(crate::sessions::SessionProvider::supports_host_admission)
+    matches!(provider, "kimi" | "opencode")
+        || crate::sessions::SessionProvider::parse(provider)
+            .is_some_and(crate::sessions::SessionProvider::supports_host_admission)
 }
 
 fn classify_capture(outcome: CaptureObservationOutcome) -> HostAdmissionOutcome {

@@ -56,7 +56,8 @@ use crate::agents::host_bundle_v2::HostKindV1;
 use crate::application::advisory::github_runtime::{
     ConfiguredGitHubSourceAccessAuthorityV1, GitHubExactCommitDiscoveryOutcomeV1,
     GitHubProviderLifecycleV1, GitHubSourceAccessAuthorityV1,
-    discover_exact_commit_pull_request_v1, resolve_registered_github_read_only_credential_v1,
+    ProfileGitHubReadOnlyCredentialMountOutcomeV1, discover_exact_commit_pull_request_v1,
+    resolve_registered_github_read_only_credential_v1,
 };
 use crate::application::advisory::{
     GitHubHttpReadConfigV1, GitHubReadOnlyCredentialV1, GitHubReadPermissionV1,
@@ -75,6 +76,10 @@ use crate::application::feedback::{
     ProductionFeedbackCycleOpenV1, ProductionFeedbackRuntimeStateV1,
     resolve_production_feedback_cycle_parts,
 };
+use crate::application::feedback::observations::{
+    Plan26DeliveryRouteV1, Plan26FeedbackObservationEmitterV1, Plan26FeedbackOperationV1,
+    Plan26FeedbackOutcomeV1, Plan26FeedbackSourceEventV1,
+};
 use crate::application::operation_stream::OperationKind;
 use crate::application::primitives::{
     admitted_root_uri_for_project, locator_digest_for_project,
@@ -86,7 +91,9 @@ use crate::daemon::lsp_gateway::{
     ContextProjectionKind, DiagnosticTrigger, FeedbackCycleRequest, FeedbackCycleRuntimePort,
     GatewayCapabilities, LspRuntimeFailure, LspRuntimeFuture,
 };
-use crate::daemon::service::invocation::daemon_operation_event_authority;
+use crate::daemon::service::invocation::{
+    daemon_operation_event_authority, observe_accepted_feedback_cycle_terminal,
+};
 use crate::diagnostics::lsp::broker::{AdmittedLspProvider, MountedLspProvider};
 use crate::diagnostics::lsp::client::LspRefreshTimeouts;
 use crate::diagnostics::lsp::semantic::graph_semantic_capabilities;
@@ -119,7 +126,19 @@ impl FeedbackCycleRuntimePort for ProjectOpenAdvisoryFeedbackCycleV1 {
         let github_pull_request_id = self.github_pull_request_id.clone();
         let ci_discovery_config = self.ci_discovery_config.clone();
         Box::pin(async move {
-            let invocation = lsp_input(request).await?;
+            let terminal_request = request.clone();
+            let invocation = match lsp_input(request).await {
+                Ok(invocation) => invocation,
+                Err(error) => {
+                    observe_accepted_feedback_cycle_terminal(
+                        &registration.host_delivery.source_observations,
+                        &feedback_scope.project_id,
+                        &terminal_request,
+                        Plan26FeedbackOutcomeV1::Unavailable,
+                    );
+                    return Err(error);
+                }
+            };
             let observed_at = invocation.request.input.observed_at;
             let ci = match ci_discovery_config.as_ref() {
                 Some(config) => {
@@ -632,6 +651,42 @@ fn unavailable_advisory_hook_sink() -> Arc<Pr13AdvisoryHookNoticeSinkV1> {
     Arc::new(unavailable_advisory_hook_notice)
 }
 
+async fn load_project_open_context_scout_model_config(
+    profile_root: &Path,
+    dashboard_root: &Path,
+) -> Result<crate::automation::config::AutomationConfig> {
+    use crate::automation::config::{effective_config, load_project_config};
+
+    let path = profile_root.join("config.toml");
+    let global: crate::user_config::UserConfig = std::fs::read_to_string(&path)
+        .map(|contents| crate::user_config::parse_or_warn_default(&path, &contents))
+        .unwrap_or_default();
+    let project = load_project_config(dashboard_root).await?;
+    effective_config(&global.automation, project.as_ref())
+}
+
+async fn install_project_open_context_scout_configuration(
+    owner: &crate::agents::context_scout_owner::ProjectContextScoutOwnerV1,
+    pin: ContextScoutConfigurationPinV1,
+    profile_root: &Path,
+    dashboard_root: &Path,
+) -> Result<()> {
+    let model_config =
+        load_project_open_context_scout_model_config(profile_root, dashboard_root).await?;
+    let admitted_model_config = pin.control().model_path.and_then(|expected| {
+        (crate::agents::context_scout_model::context_scout_backend_from_automation_config(
+            &model_config,
+        ) == expected)
+            .then_some(&model_config)
+    });
+    owner
+        .install_configuration(pin, admitted_model_config)
+        .await
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("project-open Context Scout configuration failed: {error}"),
+        })
+}
+
 /// Registers concrete production owners for one newly inserted project server.
 pub(crate) async fn register_project_open_production_owners(
     invocation: &DaemonInvocationState,
@@ -702,19 +757,19 @@ pub(crate) async fn register_project_open_production_owners(
     let configuration_digest = access.configuration_digest.clone();
     let grant_expires_at = access.grant_expires_at;
     let requester = access.requester.clone();
-    let repository_root = crate::worktree::git_worktree_root(project_root)
-        .unwrap_or_else(|| project_root.to_path_buf());
-    git_transactions
-        .install_authority(
-            &repository_root,
-            access.clone(),
-            Arc::clone(&session_db),
-            tokio::runtime::Handle::current(),
-        )
-        .await
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("project-open Git authority registration failed: {error}"),
-        })?;
+    if let Some(repository_root) = crate::worktree::git_worktree_root(project_root) {
+        git_transactions
+            .install_authority(
+                &repository_root,
+                access.clone(),
+                Arc::clone(&session_db),
+                tokio::runtime::Handle::current(),
+            )
+            .await
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("project-open Git authority registration failed: {error}"),
+            })?;
+    }
     let configuration_policy_digest = canonical_sha256(&(
         "tracedecay.daemon.configuration-policy.v1",
         &scope.scope_digest,
@@ -775,6 +830,8 @@ pub(crate) async fn register_project_open_production_owners(
         database.clone(),
         Arc::clone(&graph),
         Arc::clone(&session_db),
+        project_root.to_path_buf(),
+        Arc::new(invocation.code_index_schedulers.clone()),
         scope.clone(),
         access.clone(),
         admitted_root_uri.clone(),
@@ -835,12 +892,12 @@ pub(crate) async fn register_project_open_production_owners(
         )
         .await?
     else {
-        // Feedback and advisory evidence requires an exact Git branch and HEAD.
-        // Non-Git and unborn projects retain LSP and every already-registered
-        // owner; no repository identity is fabricated to mount these producers.
+        // Feedback and advisory evidence requires an exact Git branch, HEAD,
+        // and current saved document identity. Non-Git, unborn, and empty
+        // projects retain the observing unavailable cycle installed above; no
+        // repository or document identity is fabricated to mount producers.
         return Ok(());
     };
-
     register_production_advisory_owner(
         invocation,
         project_root,
@@ -1087,7 +1144,10 @@ async fn register_production_feedback_cycle(
     {
         Ok(parts) => parts,
         Err(ApplicationContractError::Inconsistent {
-            field: "project-open feedback branch" | "project-open feedback head commit",
+            field:
+                "project-open feedback branch"
+                | "project-open feedback head commit"
+                | "project-open provider code-index identity",
         }) => return Ok(None),
         Err(error) => {
             return Err(TraceDecayError::Config {
@@ -1200,13 +1260,23 @@ async fn register_production_advisory_owner(
             .ok_or_else(|| TraceDecayError::Config {
                 message: "project-open Context Scout owner is unavailable".to_owned(),
             })?;
-    scout_owner
-        .install_configuration(scout_configuration.clone(), None)
-        .await
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("project-open Context Scout configuration failed: {error}"),
-        })?;
+    let profile_root =
+        graph
+            .open_options()
+            .profile_root
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "project-open Context Scout model requires exact profile authority"
+                    .to_owned(),
+            })?;
+    install_project_open_context_scout_configuration(
+        scout_owner.as_ref(),
+        scout_configuration.clone(),
+        &profile_root,
+        &graph.store_layout().dashboard_root,
+    )
+    .await?;
     let (github, github_source_access) = match resolve_production_github_review_config(
+        invocation,
         project_root,
         database.clone(),
         Arc::clone(&project_runtime_db),
@@ -1388,8 +1458,12 @@ async fn run_production_pr13_hook_cycle(
     root_uri: String,
     indexed_files: Vec<String>,
 ) {
-    let Some(document_uri) = hook_feedback_document_uri(&project_root, &indexed_files, &request)
-    else {
+    let Some(document_uri) = hook_feedback_document_uri_or_observe(
+        &project_root,
+        &indexed_files,
+        &request,
+        &registration.host_delivery.source_observations,
+    ) else {
         return;
     };
     let diagnostic_trigger = match request.trigger {
@@ -1398,20 +1472,33 @@ async fn run_production_pr13_hook_cycle(
             DiagnosticTrigger::ExplicitDocumentDiagnostics
         }
     };
-    let Ok(mut invocation) = feedback_lsp_input(FeedbackCycleRequest {
+    let feedback_request = FeedbackCycleRequest {
         root_uri,
         document_uri,
         trigger: diagnostic_trigger,
-    })
-    .await
-    else {
-        return;
+    };
+    let mut invocation = match feedback_lsp_input(feedback_request.clone()).await {
+        Ok(invocation) => invocation,
+        Err(_) => {
+            observe_accepted_feedback_cycle_terminal(
+                &registration.host_delivery.source_observations,
+                &feedback_scope.project_id,
+                &feedback_request,
+                Plan26FeedbackOutcomeV1::Unavailable,
+            );
+            return;
+        }
     };
     if request.trigger == Pr13HookOrchestrationTriggerV1::Stop {
         invocation.request.input.request.trigger = FeedbackTriggerV1::AgentStopGate;
         let Ok(validated) =
             Pr12FeedbackCycleInvocation::new(invocation.context, invocation.request)
         else {
+            observe_hook_feedback_cycle_terminal(
+                &registration.host_delivery.source_observations,
+                &request,
+                Plan26FeedbackOutcomeV1::Partial,
+            );
             return;
         };
         invocation = validated;
@@ -1425,8 +1512,13 @@ async fn run_production_pr13_hook_cycle(
             OperationKind::FeedbackDiagnostics,
             observed_at,
         )
-        .await
+    .await
     else {
+        observe_hook_feedback_cycle_terminal(
+            &registration.host_delivery.source_observations,
+            &request,
+            Plan26FeedbackOutcomeV1::Unavailable,
+        );
         return;
     };
     let ci = match ci_discovery_config.as_ref() {
@@ -1474,6 +1566,11 @@ async fn run_production_pr13_hook_cycle(
         .await
         .is_err()
     {
+        observe_hook_feedback_cycle_terminal(
+            &registration.host_delivery.source_observations,
+            &request,
+            Plan26FeedbackOutcomeV1::Unavailable,
+        );
         return;
     }
     let Ok(pinned_configuration) = graph.configuration_runtime().client().current().await else {
@@ -1488,11 +1585,20 @@ async fn run_production_pr13_hook_cycle(
     else {
         return;
     };
-    if scout_configuration.configuration_digest() != &feedback_configuration_digest
-        || scout_owner
-            .install_configuration(scout_configuration.clone(), None)
-            .await
-            .is_err()
+    let Some(profile_root) = graph.open_options().profile_root else {
+        return;
+    };
+    if scout_configuration.configuration_digest() != &feedback_configuration_digest {
+        return;
+    }
+    if install_project_open_context_scout_configuration(
+        scout_owner.as_ref(),
+        scout_configuration.clone(),
+        &profile_root,
+        &graph.store_layout().dashboard_root,
+    )
+    .await
+    .is_err()
     {
         return;
     }
@@ -1591,6 +1697,62 @@ async fn run_production_pr13_hook_cycle(
     }
 }
 
+fn observe_hook_feedback_cycle_terminal(
+    observations: &Arc<dyn Plan26FeedbackObservationEmitterV1 + Send + Sync>,
+    request: &Pr13HookOrchestrationRequestV1,
+    outcome: Plan26FeedbackOutcomeV1,
+) {
+    let envelope = request.hook.envelope();
+    let trigger = match request.trigger {
+        Pr13HookOrchestrationTriggerV1::SavedEdit => "saved_edit",
+        Pr13HookOrchestrationTriggerV1::Stop => "stop",
+        Pr13HookOrchestrationTriggerV1::Explicit => "explicit",
+    };
+    let Ok(subject) = canonical_sha256(&(
+        "tracedecay.feedback.accepted-hook-cycle.v1",
+        envelope.event_id,
+        envelope.project_id,
+        envelope.repository_id,
+        envelope.worktree_id,
+        &request.hook_configuration_revision,
+        trigger,
+    )) else {
+        return;
+    };
+    observations.observe_source_event_for_subject(
+        subject,
+        envelope.observed_at,
+        Plan26FeedbackSourceEventV1::Delivery {
+            operation: Plan26FeedbackOperationV1::FeedbackCycle,
+            route: Plan26DeliveryRouteV1::HookV2,
+            outcome,
+            item_count: 0,
+            duration_micros: None,
+        },
+    );
+}
+
+fn hook_feedback_document_uri_or_observe(
+    project_root: &Path,
+    indexed_files: &[String],
+    request: &Pr13HookOrchestrationRequestV1,
+    observations: &Arc<dyn Plan26FeedbackObservationEmitterV1 + Send + Sync>,
+) -> Option<String> {
+    let document_uri = hook_feedback_document_uri(project_root, indexed_files, request);
+    if document_uri.is_none() {
+        observe_hook_feedback_cycle_terminal(
+            observations,
+            request,
+            if indexed_files.is_empty() {
+                Plan26FeedbackOutcomeV1::Unavailable
+            } else {
+                Plan26FeedbackOutcomeV1::Partial
+            },
+        );
+    }
+    document_uri
+}
+
 fn hook_feedback_document_uri(
     project_root: &Path,
     indexed_files: &[String],
@@ -1684,6 +1846,7 @@ const fn host_kind_for_hook(host: HookHostV1) -> HostKindV1 {
 }
 
 async fn resolve_production_github_review_config(
+    invocation: &DaemonInvocationState,
     project_root: &Path,
     database: crate::db::Database,
     project_runtime_db: Arc<crate::global_db::RegisteredGlobalDb>,
@@ -1696,15 +1859,27 @@ async fn resolve_production_github_review_config(
 )> {
     let (owner, repository) =
         github_repository_from_remote(&crate::tracedecay::git_remote_url(project_root)?)?;
-    let credential = match resolve_registered_github_read_only_credential_v1(&owner, &repository) {
-        crate::application::advisory::github_runtime::RegisteredGitHubReadOnlyCredentialV1::Verified(
-            credential,
-        ) => credential,
-        crate::application::advisory::github_runtime::RegisteredGitHubReadOnlyCredentialV1::Missing => {
+    let profile_id = &project_runtime_db.binding().shard_id.profile_id;
+    let credential = match invocation.mount_github_read_only_credential_authority_for_project(
+        profile_id,
+        &owner,
+        &repository,
+    ) {
+        ProfileGitHubReadOnlyCredentialMountOutcomeV1::Public => {
             GitHubReadOnlyCredentialV1::anonymous()
         }
-        crate::application::advisory::github_runtime::RegisteredGitHubReadOnlyCredentialV1::Rejected => {
-            return None;
+        ProfileGitHubReadOnlyCredentialMountOutcomeV1::NotConfigured
+        | ProfileGitHubReadOnlyCredentialMountOutcomeV1::Rejected => return None,
+        ProfileGitHubReadOnlyCredentialMountOutcomeV1::Mounted => {
+            match resolve_registered_github_read_only_credential_v1(&owner, &repository) {
+                crate::application::advisory::github_runtime::RegisteredGitHubReadOnlyCredentialV1::Verified(
+                    credential,
+                ) => credential,
+                crate::application::advisory::github_runtime::RegisteredGitHubReadOnlyCredentialV1::Missing
+                | crate::application::advisory::github_runtime::RegisteredGitHubReadOnlyCredentialV1::Rejected => {
+                    return None;
+                }
+            }
         }
     };
     let configuration = OwnedGlobalDbConfigurationControlStore::from_registered_project_runtime_db(
@@ -2185,11 +2360,191 @@ fn now_micros() -> UtcMicros {
 mod tests {
     use super::*;
 
+    #[derive(Default)]
+    struct RecordingHookCycleObservations(
+        std::sync::Mutex<Vec<Plan26FeedbackSourceEventV1>>,
+    );
+
+    impl Plan26FeedbackObservationEmitterV1 for RecordingHookCycleObservations {
+        fn observe_source_event(
+            &self,
+            _input: &tracedecay_domain::feedback::FeedbackEvaluationInputV1,
+            source_event: Plan26FeedbackSourceEventV1,
+        ) {
+            self.0.lock().expect("observations").push(source_event);
+        }
+
+        fn observe_source_event_for_subject(
+            &self,
+            _subject_digest: tracedecay_domain::ManifestDigest,
+            _observed_at: UtcMicros,
+            source_event: Plan26FeedbackSourceEventV1,
+        ) {
+            self.0.lock().expect("observations").push(source_event);
+        }
+    }
+
+    fn saved_edit_hook_request(file_id: [u8; 16]) -> Pr13HookOrchestrationRequestV1 {
+        let capabilities = vec![tracedecay_hooks::HookCapabilityV1 {
+            family: tracedecay_hooks::HookEventFamily::SavedEdit,
+            support: tracedecay_hooks::stock_event_support(
+                tracedecay_hooks::HookHostV1::Codex,
+                tracedecay_hooks::HookEventFamily::SavedEdit,
+            ),
+        }];
+        let binding = tracedecay_hooks::HookScopeBindingV1 {
+            host: tracedecay_hooks::HookHostV1::Codex,
+            project_id: [3; 16],
+            repository_id: [4; 16],
+            worktree_id: [5; 16],
+            worktree_epoch: 1,
+            binding_token: [6; 32],
+            capabilities,
+        };
+        Pr13HookOrchestrationRequestV1::from_envelope(
+            tracedecay_hooks::HookEventEnvelopeV2 {
+                schema_version: tracedecay_hooks::HOOK_EVENT_SCHEMA_VERSION,
+                event_id: [1; 16],
+                producer: tracedecay_hooks::HookHostV1::Codex,
+                protected_session_id: [2; 32],
+                project_id: binding.project_id,
+                repository_id: binding.repository_id,
+                worktree_id: binding.worktree_id,
+                worktree_epoch: binding.worktree_epoch,
+                binding_token: binding.binding_token,
+                ordering: tracedecay_hooks::HookOrderingV1::Unknown,
+                observed_at: UtcMicros(10),
+                event: tracedecay_hooks::HookEventV2::SavedEdit {
+                    file_id,
+                    changed_range_count: 1,
+                },
+            },
+            &binding,
+            None,
+            7,
+            false,
+        )
+        .expect("admitted saved edit")
+    }
+
     fn admitted(language: &str, analyzer_available: bool) -> AdmittedLspProvider {
         AdmittedLspProvider {
             language: language.to_owned(),
             command: format!("{language}-language-server"),
             analyzer_available,
+        }
+    }
+
+    fn configured_model_pin() -> ContextScoutConfigurationPinV1 {
+        let setting_key = tracedecay_domain::configuration::SettingKey::new(
+            tracedecay_domain::configuration::CONTEXT_SCOUT_SETTINGS_SETTING_KEY,
+        )
+        .expect("Scout setting key");
+        let revision =
+            tracedecay_domain::configuration::ConfigurationRevisionId::new("revision.scout.model")
+                .expect("configuration revision");
+        let settings = tracedecay_domain::configuration::ContextScoutSettingsV1 {
+            schema_version:
+                tracedecay_domain::configuration::ContextScoutSettingsV1::SCHEMA_VERSION,
+            state: tracedecay_domain::configuration::ContextScoutConfigurationStateV1::Active,
+            mode: tracedecay_domain::configuration::ContextScoutConfigurationModeV1::ConfiguredModel,
+            limits:
+                tracedecay_domain::configuration::ContextScoutConfigurationLimitsV1::bounded_defaults(),
+            model_path: Some(
+                tracedecay_domain::configuration::ContextScoutConfiguredModelPathV1::CodexAppServer,
+            ),
+        };
+        let snapshot = tracedecay_domain::configuration::ConfigurationSnapshotV1::new(
+            BTreeMap::from([(
+                setting_key.clone(),
+                ConfigurationValueV1::ContextScoutSettings(settings),
+            )]),
+            BTreeMap::from([(
+                setting_key,
+                vec![tracedecay_domain::configuration::ConfigurationCandidateV1 {
+                    layer: tracedecay_domain::configuration::ConfigurationLayerIdV1::Project {
+                        project_id: ProjectId::new("project.scout.model").expect("project id"),
+                    },
+                    revision_id: revision.clone(),
+                    disposition: tracedecay_domain::configuration::CandidateDispositionV1::Winning,
+                    safe_reason: None,
+                }],
+            )]),
+        )
+        .expect("configuration snapshot");
+        ContextScoutConfigurationPinV1::from_current(
+            &crate::application::configuration::ConfigurationCurrentStateV1 {
+                revision_id: revision,
+                snapshot,
+            },
+        )
+        .expect("configured-model pin")
+    }
+
+    async fn test_scout_owner(
+        temporary: &tempfile::TempDir,
+        name: &str,
+    ) -> Arc<crate::agents::context_scout_owner::ProjectContextScoutOwnerV1> {
+        let database_path = temporary.path().join(format!("{name}.db"));
+        let database_authority = crate::db::DatabaseAuthority::acquire_test(&database_path, name)
+            .expect("database authority");
+        let database = crate::db::Database::publish_test_runtime(
+            &database_path,
+            &database_authority,
+            crate::db::TestDatabaseRuntimeMode::Initialize,
+        )
+        .await
+        .expect("project database")
+        .0;
+        crate::agents::context_scout_owner::ProjectContextScoutOwnerV1::startup(
+            database,
+            [8; 16],
+            UtcMicros(1),
+            None,
+        )
+        .await
+        .expect("Scout owner")
+    }
+
+    fn configured_model_input(
+        configuration_revision: [u8; 32],
+    ) -> crate::agents::context_scout_v2::ContextScoutSelectionInputV1 {
+        crate::agents::context_scout_v2::ContextScoutSelectionInputV1 {
+            address: crate::agents::context_scout_v2::ContextScoutAddressV1 {
+                profile_id: [1; 16],
+                provider_id: [2; 16],
+                protected_session_id: [3; 32],
+                thread_id: [4; 16],
+                turn_id: [5; 16],
+                agent_id: [6; 16],
+                logical_message_id: [7; 16],
+                project_id: [8; 16],
+            },
+            input_watermark: [9; 32],
+            configuration_revision,
+            envelope_id: [10; 16],
+            now: UtcMicros(10),
+            delivery_window:
+                crate::agents::context_scout_v2::ContextScoutDeliveryWindowV1::Immediate,
+            delivered_dedupe_keys: BTreeSet::new(),
+            candidates: vec![
+                crate::agents::context_scout_v2::ContextScoutCandidateV1 {
+                    dedupe_key: [11; 32],
+                    category:
+                        crate::agents::context_scout_v2::ContextScoutCategoryV1::Retrieval,
+                    relevance_score: 10,
+                    suggestion_text: "Use the admitted evidence.".to_owned(),
+                    evidence: vec![
+                        crate::agents::context_scout_v2::ContextScoutEvidenceBindingV1 {
+                            anchor_id: [12; 16],
+                            content_identity: [13; 32],
+                            generation:
+                                crate::agents::context_scout_v2::ContextScoutEvidenceGenerationV1::SavedContent,
+                        },
+                    ],
+                    expires_at: UtcMicros(100),
+                },
+            ],
         }
     }
 
@@ -2201,6 +2556,50 @@ mod tests {
         assert_eq!(language, Some("rust"));
         assert!(gateway.supports_managed_diagnostics);
         assert_eq!(gateway.semantic, graph_semantic_capabilities());
+    }
+
+    #[test]
+    fn empty_project_and_unmappable_edit_persist_typed_feedback_terminals() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let request = saved_edit_hook_request([99; 16]);
+        let observations = Arc::new(RecordingHookCycleObservations::default());
+        let observation_port =
+            Arc::clone(&observations) as Arc<dyn Plan26FeedbackObservationEmitterV1 + Send + Sync>;
+
+        assert!(
+            hook_feedback_document_uri_or_observe(
+                temporary.path(),
+                &[],
+                &request,
+                &observation_port,
+            )
+            .is_none()
+        );
+        assert!(matches!(
+            observations.0.lock().expect("observations").as_slice(),
+            [Plan26FeedbackSourceEventV1::Delivery {
+                outcome: Plan26FeedbackOutcomeV1::Unavailable,
+                ..
+            }]
+        ));
+
+        observations.0.lock().expect("observations").clear();
+        assert!(
+            hook_feedback_document_uri_or_observe(
+                temporary.path(),
+                &["src/lib.rs".to_owned()],
+                &request,
+                &observation_port,
+            )
+            .is_none()
+        );
+        assert!(matches!(
+            observations.0.lock().expect("observations").as_slice(),
+            [Plan26FeedbackSourceEventV1::Delivery {
+                outcome: Plan26FeedbackOutcomeV1::Partial,
+                ..
+            }]
+        ));
     }
 
     #[test]
@@ -2296,6 +2695,197 @@ mod tests {
             assert!(discovery.is_none());
             assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
         }
+    }
+
+    #[tokio::test]
+    async fn project_open_unavailable_configured_backend_keeps_deterministic_scout() {
+        for (name, profile_config) in [
+            ("default-model", ""),
+            (
+                "disabled-model",
+                "[automation]\nenabled = false\nbackend = \"disabled\"\n",
+            ),
+            (
+                "mismatched-model",
+                "[automation]\nenabled = true\nbackend = \"external_command\"\n",
+            ),
+        ] {
+            let temporary = tempfile::tempdir().expect("temporary directory");
+            let profile_root = temporary.path().join("profile");
+            let dashboard_root = temporary.path().join("dashboard");
+            std::fs::create_dir_all(&profile_root).expect("create profile");
+            std::fs::write(profile_root.join("config.toml"), profile_config)
+                .expect("write profile config");
+            let pin = configured_model_pin();
+            let control = pin.control();
+            let owner = test_scout_owner(&temporary, name).await;
+
+            install_project_open_context_scout_configuration(
+                owner.as_ref(),
+                pin,
+                &profile_root,
+                &dashboard_root,
+            )
+            .await
+            .expect("install unavailable configured backend");
+            let outcome = owner
+                .prepare_configured(
+                    &configured_model_input(control.configuration_revision),
+                    MonotonicDeadline::at(Instant::now() + Duration::from_secs(1)),
+                    CancellationToken::new(),
+                )
+                .await
+                .expect("deterministic fallback");
+            let crate::agents::context_scout_v2::ContextScoutRuntimeOutcomeV1::Enqueued {
+                entry,
+                ..
+            } = outcome
+            else {
+                panic!("deterministic fallback should enqueue: {outcome:?}");
+            };
+
+            assert_eq!(
+                entry.route,
+                crate::agents::context_scout_v2::ContextScoutRouteV1::DeterministicFallback
+            );
+            assert_eq!(
+                entry.model_outcome,
+                crate::agents::context_scout_v2::ContextScoutModelRunOutcomeV1::Unavailable
+            );
+            assert!(entry.model_receipt.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn project_open_configured_backend_receipt_uses_exact_profile_and_project_scope() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let exact_profile = temporary.path().join("exact-profile");
+        let other_profile = temporary.path().join("other-profile");
+        let dashboard_root = temporary.path().join("project-dashboard");
+        std::fs::create_dir_all(&exact_profile).expect("create exact profile");
+        std::fs::create_dir_all(&other_profile).expect("create other profile");
+        std::fs::write(
+            exact_profile.join("config.toml"),
+            "[automation]\nenabled = false\nbackend = \"codex_app_server\"\n",
+        )
+        .expect("write exact profile config");
+        std::fs::write(
+            other_profile.join("config.toml"),
+            "[automation]\nenabled = true\nbackend = \"external_command\"\n",
+        )
+        .expect("write other profile config");
+        crate::automation::config::save_project_config(
+            &dashboard_root,
+            &crate::automation::config::AutomationConfigPatch {
+                enabled: Some(true),
+                timeout_secs: Some(73),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("write project config");
+
+        let setting_key = tracedecay_domain::configuration::SettingKey::new(
+            tracedecay_domain::configuration::CONTEXT_SCOUT_SETTINGS_SETTING_KEY,
+        )
+        .expect("Scout setting key");
+        let revision =
+            tracedecay_domain::configuration::ConfigurationRevisionId::new("revision.scout.model")
+                .expect("configuration revision");
+        let settings = tracedecay_domain::configuration::ContextScoutSettingsV1 {
+            schema_version:
+                tracedecay_domain::configuration::ContextScoutSettingsV1::SCHEMA_VERSION,
+            state: tracedecay_domain::configuration::ContextScoutConfigurationStateV1::Active,
+            mode: tracedecay_domain::configuration::ContextScoutConfigurationModeV1::ConfiguredModel,
+            limits:
+                tracedecay_domain::configuration::ContextScoutConfigurationLimitsV1::bounded_defaults(),
+            model_path: Some(
+                tracedecay_domain::configuration::ContextScoutConfiguredModelPathV1::CodexAppServer,
+            ),
+        };
+        let snapshot = tracedecay_domain::configuration::ConfigurationSnapshotV1::new(
+            BTreeMap::from([(
+                setting_key.clone(),
+                ConfigurationValueV1::ContextScoutSettings(settings),
+            )]),
+            BTreeMap::from([(
+                setting_key,
+                vec![tracedecay_domain::configuration::ConfigurationCandidateV1 {
+                    layer: tracedecay_domain::configuration::ConfigurationLayerIdV1::Project {
+                        project_id: ProjectId::new("project.scout.model").expect("project id"),
+                    },
+                    revision_id: revision.clone(),
+                    disposition: tracedecay_domain::configuration::CandidateDispositionV1::Winning,
+                    safe_reason: None,
+                }],
+            )]),
+        )
+        .expect("configuration snapshot");
+        let pin = ContextScoutConfigurationPinV1::from_current(
+            &crate::application::configuration::ConfigurationCurrentStateV1 {
+                revision_id: revision,
+                snapshot,
+            },
+        )
+        .expect("configured-model pin");
+        let database_path = temporary.path().join("scout.db");
+        let database_authority =
+            crate::db::DatabaseAuthority::acquire_test(&database_path, "project-open Scout model")
+                .expect("database authority");
+        let database = crate::db::Database::publish_test_runtime(
+            &database_path,
+            &database_authority,
+            crate::db::TestDatabaseRuntimeMode::Initialize,
+        )
+        .await
+        .expect("project database")
+        .0;
+        let owner = crate::agents::context_scout_owner::ProjectContextScoutOwnerV1::startup(
+            database,
+            [7; 16],
+            UtcMicros(1),
+            None,
+        )
+        .await
+        .expect("Scout owner");
+
+        install_project_open_context_scout_configuration(
+            owner.as_ref(),
+            pin,
+            &exact_profile,
+            &dashboard_root,
+        )
+        .await
+        .expect("install configured backend");
+        let configured =
+            load_project_open_context_scout_model_config(&exact_profile, &dashboard_root)
+                .await
+                .expect("load exact effective config");
+        let other_configured =
+            load_project_open_context_scout_model_config(&other_profile, &dashboard_root)
+                .await
+                .expect("load other effective config");
+        let receipt = crate::automation::backend::backend_availability(&configured);
+        let status = owner.configured_status().await.expect("configured status");
+
+        assert!(configured.enabled);
+        assert_eq!(
+            configured.backend,
+            crate::automation::config::AutomationBackend::CodexAppServer
+        );
+        assert_eq!(configured.timeout_secs, 73);
+        assert_eq!(
+            receipt.backend,
+            crate::automation::config::AutomationBackend::CodexAppServer
+        );
+        assert_eq!(
+            other_configured.backend,
+            crate::automation::config::AutomationBackend::ExternalCommand
+        );
+        assert_eq!(
+            status.model_path,
+            Some(crate::agents::context_scout_v2::ContextScoutModelBackendV1::CodexAppServer)
+        );
     }
 
     #[test]

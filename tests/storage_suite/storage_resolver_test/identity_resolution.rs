@@ -186,27 +186,29 @@ async fn legacy_profile_store_upgrade_preserves_data_across_repo_identity_change
     )
     .await
     .unwrap();
-    assert!(sessions
-        .upsert_session_for_test(
-            tracedecay::application::host_admission::HostAdmissionScope::Project,
-            &SessionRecord {
-                provider: "codex".to_string(),
-                session_id: "legacy-session-sentinel".to_string(),
-                project_key: current_project_id,
-                project_path: project.to_string_lossy().to_string(),
-                title: Some("legacy session sentinel".to_string()),
-                started_at: Some(1_800_000_001),
-                ended_at: Some(1_800_000_002),
-                transcript_path: None,
-                metadata_json: None,
-                parent_session_id: None,
-                is_subagent: false,
-                agent_id: None,
-                parent_tool_use_id: None,
-            },
-        )
-        .await
-        .unwrap());
+    assert!(
+        sessions
+            .upsert_session_for_test(
+                tracedecay::application::host_admission::HostAdmissionScope::Project,
+                &SessionRecord {
+                    provider: "codex".to_string(),
+                    session_id: "legacy-session-sentinel".to_string(),
+                    project_key: current_project_id,
+                    project_path: project.to_string_lossy().to_string(),
+                    title: Some("legacy session sentinel".to_string()),
+                    started_at: Some(1_800_000_001),
+                    ended_at: Some(1_800_000_002),
+                    transcript_path: None,
+                    metadata_json: None,
+                    parent_session_id: None,
+                    is_subagent: false,
+                    agent_id: None,
+                    parent_tool_use_id: None,
+                },
+            )
+            .await
+            .unwrap()
+    );
     drop(sessions);
 
     let automation_sentinel = current_root.join("automation/migration-sentinel.json");
@@ -518,27 +520,29 @@ async fn corrupt_nonempty_cutover_store_reports_both_shards_without_switching() 
     )
     .await
     .unwrap();
-    assert!(sessions
-        .upsert_session_for_test(
-            tracedecay::application::host_admission::HostAdmissionScope::Project,
-            &SessionRecord {
-                provider: "codex".to_string(),
-                session_id: "new-cutover-session".to_string(),
-                project_key: cutover_project_id.clone(),
-                project_path: project.to_string_lossy().to_string(),
-                title: Some("new cutover session".to_string()),
-                started_at: Some(1_800_000_010),
-                ended_at: None,
-                transcript_path: None,
-                metadata_json: None,
-                parent_session_id: None,
-                is_subagent: false,
-                agent_id: None,
-                parent_tool_use_id: None,
-            },
-        )
-        .await
-        .unwrap());
+    assert!(
+        sessions
+            .upsert_session_for_test(
+                tracedecay::application::host_admission::HostAdmissionScope::Project,
+                &SessionRecord {
+                    provider: "codex".to_string(),
+                    session_id: "new-cutover-session".to_string(),
+                    project_key: cutover_project_id.clone(),
+                    project_path: project.to_string_lossy().to_string(),
+                    title: Some("new cutover session".to_string()),
+                    started_at: Some(1_800_000_010),
+                    ended_at: None,
+                    transcript_path: None,
+                    metadata_json: None,
+                    parent_session_id: None,
+                    is_subagent: false,
+                    agent_id: None,
+                    parent_tool_use_id: None,
+                },
+            )
+            .await
+            .unwrap()
+    );
     drop(sessions);
     fs::remove_file(enrollment_marker_path(&project)).unwrap();
     write_repository_identity_marker(&project, &cutover_project_id).unwrap();
@@ -617,9 +621,11 @@ async fn ambiguous_legacy_store_adoption_preserves_every_candidate() {
     .await
     .expect_err("ambiguous legacy manifests must not be selected implicitly");
 
-    assert!(error
-        .to_string()
-        .contains("ambiguous legacy profile stores"));
+    assert!(
+        error
+            .to_string()
+            .contains("ambiguous legacy profile stores")
+    );
     for project_id in ["proj_legacy_one", "proj_legacy_two"] {
         assert_eq!(
             fs::read_to_string(profile_root.join(format!("projects/{project_id}/tracedecay.db")))

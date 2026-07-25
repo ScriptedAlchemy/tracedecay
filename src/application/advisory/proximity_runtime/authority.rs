@@ -189,6 +189,7 @@ impl ProductionProximityEvidenceAuthorityV1 {
 
         let mut edits: BTreeMap<String, BTreeSet<SessionKey>> = BTreeMap::new();
         let mut session_edits: BTreeMap<SessionKey, BTreeSet<String>> = BTreeMap::new();
+        let mut session_edit_spans = BTreeMap::<(SessionKey, String), Vec<SourceSpan>>::new();
         for key in active.keys() {
             let rows = self
                 .sessions
@@ -202,9 +203,21 @@ impl ProductionProximityEvidenceAuthorityV1 {
                 .ok()?;
             partial |= rows.len() == MAX_ACTIVITY_ROWS_PER_SESSION_V1;
             for row in rows {
-                for path in edited_paths(row.metadata_json.as_deref(), &self.worktree_root) {
-                    edits.entry(path.clone()).or_default().insert(key.clone());
-                    session_edits.entry(key.clone()).or_default().insert(path);
+                for edit in edited_paths(row.metadata_json.as_deref(), &self.worktree_root) {
+                    edits
+                        .entry(edit.path.clone())
+                        .or_default()
+                        .insert(key.clone());
+                    session_edits
+                        .entry(key.clone())
+                        .or_default()
+                        .insert(edit.path.clone());
+                    if let Some(span) = edit.span {
+                        session_edit_spans
+                            .entry((key.clone(), edit.path))
+                            .or_default()
+                            .push(span);
+                    }
                 }
             }
         }
@@ -446,7 +459,18 @@ impl ProductionProximityEvidenceAuthorityV1 {
             );
             let exact_address = verified_graph_paths
                 .contains_key(&candidate.path)
-                .then(|| exact_graph_address(&self.worktree_root, &candidate.path, path_nodes))
+                .then(|| {
+                    let ranges = candidate
+                        .session_keys
+                        .iter()
+                        .map(|key| {
+                            session_edit_spans
+                                .get(&(key.clone(), candidate.path.clone()))
+                                .map(Vec::as_slice)
+                        })
+                        .collect::<Option<Vec<_>>>()?;
+                    exact_graph_address(&self.worktree_root, &candidate.path, path_nodes, &ranges)
+                })
                 .flatten();
             if candidate.warning_class == ProximityWarningClassV1::SameFile
                 && !path_nodes.is_empty()
@@ -722,28 +746,70 @@ fn exact_graph_address(
     worktree_root: &Path,
     path: &str,
     nodes: &[crate::types::Node],
+    session_ranges: &[&[SourceSpan]],
 ) -> Option<(SourceSpan, SymbolOccurrenceId)> {
-    let minimum_span = nodes
-        .iter()
-        .filter(|node| node.kind.is_callable_kind())
-        .map(|node| node.end_line.saturating_sub(node.start_line))
-        .min()?;
-    let mut candidates = nodes.iter().filter(|node| {
-        node.kind.is_callable_kind()
-            && node.end_line.saturating_sub(node.start_line) == minimum_span
-    });
-    let candidate = candidates.next()?;
-    if candidates.next().is_some() {
+    if session_ranges.len() < 2 {
         return None;
     }
-    Some((
-        source_span_for_lines(
-            &worktree_root.join(path),
-            candidate.start_line,
-            candidate.end_line,
-        )?,
-        SymbolOccurrenceId::new(candidate.id.clone()).ok()?,
-    ))
+    let source_path = worktree_root.join(path);
+    let mut resolved_symbol = None::<(&crate::types::Node, SourceSpan)>;
+    for ranges in session_ranges {
+        if ranges.is_empty() {
+            return None;
+        }
+        let mut session_symbol = None::<(&crate::types::Node, SourceSpan)>;
+        for range in *ranges {
+            if range.validate().is_err() || range.start_byte == range.end_byte {
+                return None;
+            }
+            let candidate = resolve_edit_range_symbol(&source_path, range, nodes)?;
+            match &session_symbol {
+                Some((current, _)) if current.id != candidate.0.id => return None,
+                None => session_symbol = Some(candidate),
+                _ => {}
+            }
+        }
+        let session_symbol = session_symbol?;
+        match &resolved_symbol {
+            Some((current, _)) if current.id != session_symbol.0.id => return None,
+            None => resolved_symbol = Some(session_symbol),
+            _ => {}
+        }
+    }
+    let (candidate, span) = resolved_symbol?;
+    Some((span, SymbolOccurrenceId::new(candidate.id.clone()).ok()?))
+}
+
+fn resolve_edit_range_symbol<'a>(
+    source_path: &Path,
+    edit_range: &SourceSpan,
+    nodes: &'a [crate::types::Node],
+) -> Option<(&'a crate::types::Node, SourceSpan)> {
+    let mut candidates = nodes
+        .iter()
+        .filter(|node| node.kind.is_callable_kind())
+        .filter_map(|node| {
+            let span = source_span_for_lines(source_path, node.start_line, node.end_line)?;
+            (span.start_byte <= edit_range.start_byte && span.end_byte >= edit_range.end_byte)
+                .then_some((node, span))
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        left.1
+            .end_byte
+            .saturating_sub(left.1.start_byte)
+            .cmp(&right.1.end_byte.saturating_sub(right.1.start_byte))
+            .then_with(|| left.0.id.cmp(&right.0.id))
+    });
+    let candidate = candidates.first()?.clone();
+    let candidate_size = candidate.1.end_byte.saturating_sub(candidate.1.start_byte);
+    if candidates
+        .get(1)
+        .is_some_and(|next| next.1.end_byte.saturating_sub(next.1.start_byte) == candidate_size)
+    {
+        return None;
+    }
+    Some(candidate)
 }
 
 fn source_span_for_lines(path: &Path, start_line: u32, end_line: u32) -> Option<SourceSpan> {
@@ -788,7 +854,13 @@ const fn proximity_warning_rank(warning: ProximityWarningClassV1) -> u8 {
     }
 }
 
-fn edited_paths(metadata: Option<&str>, worktree_root: &Path) -> Vec<String> {
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct EditedPathEvidence {
+    path: String,
+    span: Option<SourceSpan>,
+}
+
+fn edited_paths(metadata: Option<&str>, worktree_root: &Path) -> Vec<EditedPathEvidence> {
     let Some(Value::Object(metadata)) = metadata.and_then(|value| serde_json::from_str(value).ok())
     else {
         return Vec::new();
@@ -798,18 +870,26 @@ fn edited_paths(metadata: Option<&str>, worktree_root: &Path) -> Vec<String> {
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter_map(|entry| entry.get("path").and_then(Value::as_str))
+        .filter_map(|entry| edited_path_evidence(entry, worktree_root))
         .chain(
             metadata
                 .get("edited_file")
-                .and_then(|value| value.get("path"))
-                .and_then(Value::as_str),
+                .and_then(|value| edited_path_evidence(value, worktree_root)),
         )
-        .filter_map(|path| project_relative_path(worktree_root, path))
         .collect::<Vec<_>>();
     paths.sort();
     paths.dedup();
     paths
+}
+
+fn edited_path_evidence(value: &Value, worktree_root: &Path) -> Option<EditedPathEvidence> {
+    let path = project_relative_path(worktree_root, value.get("path")?.as_str()?)?;
+    let span = value
+        .get("span")
+        .or_else(|| value.get("range"))
+        .and_then(|span| serde_json::from_value::<SourceSpan>(span.clone()).ok())
+        .filter(|span| span.validate().is_ok() && span.start_byte < span.end_byte);
+    Some(EditedPathEvidence { path, span })
 }
 
 fn project_relative_path(worktree_root: &Path, value: &str) -> Option<String> {
@@ -836,6 +916,7 @@ fn project_relative_path(worktree_root: &Path, value: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::{NodeKind, Visibility};
     use tracedecay_domain::{CommitId, ProjectId, RepositoryId, WorktreeId};
 
     fn scope() -> FeedbackScopeV1 {
@@ -870,5 +951,106 @@ mod tests {
             assert!(batch.evidence.is_empty());
             assert_eq!(batch.coverage, ProximityCoverageV1::Partial);
         }
+    }
+
+    fn callable(id: &str, name: &str, line: u32) -> crate::types::Node {
+        crate::types::Node {
+            id: id.to_owned(),
+            kind: NodeKind::Function,
+            name: name.to_owned(),
+            qualified_name: format!("crate::{name}"),
+            file_path: "src/lib.rs".to_owned(),
+            start_line: line,
+            attrs_start_line: line,
+            end_line: line,
+            start_column: 0,
+            end_column: 1,
+            signature: Some(format!("fn {name}()")),
+            docstring: None,
+            visibility: Visibility::Private,
+            is_async: false,
+            branches: 0,
+            loops: 0,
+            returns: 0,
+            max_nesting: 0,
+            unsafe_blocks: 0,
+            unchecked_calls: 0,
+            assertions: 0,
+            updated_at: 1,
+            parent_id: None,
+        }
+    }
+
+    #[test]
+    fn same_symbol_requires_each_typed_edit_range_to_resolve_to_that_symbol() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("src")).unwrap();
+        std::fs::write(
+            root.path().join("src/lib.rs"),
+            "fn alpha() {}\nfn beta() {}\n",
+        )
+        .unwrap();
+        let nodes = vec![
+            callable("symbol.alpha", "alpha", 1),
+            callable("symbol.beta", "beta", 2),
+        ];
+        let alpha = SourceSpan {
+            start_byte: 3,
+            end_byte: 8,
+        };
+        let beta = SourceSpan {
+            start_byte: 17,
+            end_byte: 21,
+        };
+
+        let same = exact_graph_address(
+            root.path(),
+            "src/lib.rs",
+            &nodes,
+            &[std::slice::from_ref(&alpha), std::slice::from_ref(&alpha)],
+        )
+        .unwrap();
+        assert_eq!(same.1.as_str(), "symbol.alpha");
+        assert!(
+            exact_graph_address(
+                root.path(),
+                "src/lib.rs",
+                &nodes,
+                &[std::slice::from_ref(&alpha), std::slice::from_ref(&beta)],
+            )
+            .is_none()
+        );
+        assert!(exact_graph_address(root.path(), "src/lib.rs", &nodes, &[&[], &[]]).is_none());
+    }
+
+    #[test]
+    fn edited_path_evidence_accepts_only_valid_typed_ranges() {
+        let root = Path::new("/repo");
+        let edits = edited_paths(
+            Some(
+                r#"{"files":[
+                    {"path":"/repo/src/lib.rs","span":{"start_byte":4,"end_byte":9}},
+                    {"path":"/repo/src/other.rs","span":{"start_byte":9,"end_byte":4}}
+                ]}"#,
+            ),
+            root,
+        );
+        assert_eq!(edits.len(), 2);
+        assert_eq!(
+            edits
+                .iter()
+                .find(|edit| edit.path == "src/lib.rs")
+                .and_then(|edit| edit.span),
+            Some(SourceSpan {
+                start_byte: 4,
+                end_byte: 9
+            })
+        );
+        assert!(
+            edits
+                .iter()
+                .find(|edit| edit.path == "src/other.rs")
+                .is_some_and(|edit| edit.span.is_none())
+        );
     }
 }

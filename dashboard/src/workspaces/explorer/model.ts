@@ -4,10 +4,11 @@
  * into one comparable result shape.
  *
  * Rules this module exists to enforce:
- *  - No invented ranking. `rank` is nothing but the row's position in the
- *    daemon's own response; `signal` is only ever a field the payload really
- *    carried (graph degree, fact trust), and it always names that field.
- *  - No invented text. Every string is read from the row, never synthesised.
+ *  - No invented ranking. `rank` is only the row's position in its named
+ *    response collection; the browser never presents the three endpoints as
+ *    one canonical merge.
+ *  - No invented text. Display values come from returned fields. Rows without
+ *    any usable returned identifier are omitted.
  *  - Missing is missing: absent fields become `undefined`, not placeholders.
  */
 import { matchedFieldNames, matchWindow } from '../../ui/search/terms.ts';
@@ -32,7 +33,7 @@ export const LANES: readonly LaneSpec[] = [
   {
     id: 'code',
     label: 'Code graph',
-    searches: 'symbol names, qualified paths, and files',
+    searches: 'name, qualified_name, signature, and file_path',
     browseLabel: 'most-connected symbols',
     railClass: 'bg-accent',
     textClass: 'text-accent',
@@ -41,7 +42,7 @@ export const LANES: readonly LaneSpec[] = [
   {
     id: 'sessions',
     label: 'Sessions',
-    searches: 'transcript messages across every provider',
+    searches: 'message content and summary text in the active LCM store',
     browseLabel: 'latest session summaries',
     railClass: 'bg-state-partial',
     textClass: 'text-state-partial',
@@ -50,8 +51,8 @@ export const LANES: readonly LaneSpec[] = [
   {
     id: 'knowledge',
     label: 'Knowledge',
-    searches: 'durable facts and their evidence',
-    browseLabel: 'facts in the memory store',
+    searches: 'content and tags in a bounded fact overview',
+    browseLabel: 'a bounded fact overview',
     railClass: 'bg-state-ready',
     textClass: 'text-state-ready',
     facetLabel: 'Category',
@@ -65,21 +66,26 @@ export interface Signal {
   /** Largest value seen across the lane's loaded rows, for the proportion. */
   readonly max: number;
   readonly display: string;
+  readonly basis: string;
 }
 
 export interface Hit {
   readonly key: string;
   readonly lane: LaneId;
-  /** 1-based position in the daemon's response for this lane. */
+  /** 1-based position in the named response collection. */
   readonly rank: number;
+  readonly orderLabel: string;
   readonly title: string;
   /** Payload field the title was read from. */
   readonly titleField: string;
   readonly context?: string;
+  readonly contextFields: readonly string[];
   readonly body?: string;
+  readonly bodyField?: string;
   /** Value of this lane's pivot dimension for this row. */
   readonly facet?: string;
   readonly stamp?: number;
+  readonly stampField?: string;
   readonly signal?: Signal;
   /** Fields whose text observably contains a query term. */
   readonly matchedIn: readonly string[];
@@ -109,21 +115,31 @@ export function codeHits(
   terms: readonly string[],
 ): Hit[] {
   const max = rows.reduce((m, row) => Math.max(m, num(row, 'degree') ?? 0), 0);
-  return rows.map((row, index) => {
-    const name = str(row, 'name') ?? str(row, 'qualified_name');
+  return rows.flatMap((row, index) => {
+    const id = str(row, 'id');
+    const name = str(row, 'name') ?? str(row, 'qualified_name') ?? id;
+    if (!name) return [];
+    const titleField = str(row, 'name')
+      ? 'name'
+      : str(row, 'qualified_name')
+        ? 'qualified_name'
+        : 'id';
     const file = str(row, 'file_path');
     const line = num(row, 'start_line');
     const degree = num(row, 'degree');
     const body = str(row, 'signature') ?? str(row, 'doc');
+    const bodyField = str(row, 'signature') ? 'signature' : str(row, 'doc') ? 'doc' : undefined;
     const kind = str(row, 'kind');
     const hit: Hit = {
-      key: `code:${str(row, 'id') ?? index}`,
+      key: `code:${id ?? index}`,
       lane: 'code',
       rank: index + 1,
-      title: name ?? `row ${index + 1}`,
-      titleField: str(row, 'name') ? 'name' : 'qualified_name',
+      orderLabel: 'graph endpoint rows',
+      title: name,
+      titleField,
       ...(file ? { context: line == null ? file : `${file}:${line}` } : {}),
-      ...(body ? { body } : {}),
+      contextFields: file ? (line == null ? ['file_path'] : ['file_path', 'start_line']) : [],
+      ...(body && bodyField ? { body, bodyField } : {}),
       ...(kind ? { facet: kind } : {}),
       ...(degree != null
         ? {
@@ -132,6 +148,7 @@ export function codeHits(
               value: degree,
               max,
               display: `${degree.toLocaleString()} edges`,
+              basis: 'maximum among loaded graph rows',
             },
           }
         : {}),
@@ -148,23 +165,57 @@ export function sessionHits(
   rows: readonly Record<string, unknown>[],
   terms: readonly string[],
 ): Hit[] {
-  return rows.map((row, index) => {
-    const text = str(row, 'snippet') ?? str(row, 'content') ?? str(row, 'summary');
+  let messageRank = 0;
+  let summaryRank = 0;
+  return rows.flatMap((row, index) => {
+    const messageId = str(row, 'message_id');
+    const nodeId = str(row, 'node_id');
+    const storeId = str(row, 'store_id');
+    const isSummary = nodeId != null && messageId == null;
+    const rank = isSummary ? ++summaryRank : ++messageRank;
+    const snippet = str(row, 'snippet');
+    const content = str(row, 'content');
+    const summary = str(row, 'summary');
     const session = str(row, 'session_id');
-    const role = str(row, 'role') ?? (str(row, 'summary') ? 'summary' : undefined);
-    const provider = str(row, 'source') ?? str(row, 'provider');
-    const stamp = num(row, 'timestamp') ?? num(row, 'latest_at');
+    const text = snippet ?? content ?? summary ?? session ?? messageId ?? nodeId ?? storeId;
+    if (!text) return [];
+    const titleField = snippet
+      ? 'snippet'
+      : content
+        ? 'content'
+        : summary
+          ? 'summary'
+          : session
+            ? 'session_id'
+            : messageId
+              ? 'message_id'
+              : nodeId
+                ? 'node_id'
+                : 'store_id';
+    const role = str(row, 'role') ?? (summary ? 'summary' : undefined);
+    const source = str(row, 'source');
+    const provider = source ?? str(row, 'provider');
+    const providerField = source ? 'source' : provider ? 'provider' : undefined;
+    const timestamp = num(row, 'timestamp');
+    const latestAt = num(row, 'latest_at');
+    const stamp = timestamp ?? latestAt;
+    const stampField = timestamp != null ? 'timestamp' : latestAt != null ? 'latest_at' : undefined;
     const hit: Hit = {
-      key: `sessions:${str(row, 'message_id') ?? str(row, 'node_id') ?? str(row, 'store_id') ?? index}`,
+      key: `sessions:${messageId ?? nodeId ?? storeId ?? index}`,
       lane: 'sessions',
-      rank: index + 1,
-      title: text ? matchWindow(text, terms) : (session ?? `row ${index + 1}`),
-      titleField: str(row, 'snippet') ? 'snippet' : str(row, 'content') ? 'content' : 'summary',
+      rank,
+      orderLabel: isSummary ? 'summary-node matches' : 'message matches',
+      title: matchWindow(text, terms),
+      titleField,
       ...(session
         ? { context: provider ? `${provider} · ${session}` : session }
         : {}),
+      contextFields: [
+        ...(providerField ? [providerField] : []),
+        ...(session ? ['session_id'] : []),
+      ],
       ...(role ? { facet: role } : {}),
-      ...(stamp != null ? { stamp } : {}),
+      ...(stamp != null && stampField ? { stamp, stampField } : {}),
       matchedIn: matchedFieldNames(row, SESSION_MATCH_FIELDS, terms),
       raw: row,
     };
@@ -177,8 +228,11 @@ export function knowledgeHits(
   rows: readonly Record<string, unknown>[],
   terms: readonly string[],
 ): Hit[] {
-  return rows.map((row, index) => {
+  return rows.flatMap((row, index) => {
     const content = str(row, 'content');
+    const factId = str(row, 'fact_id');
+    const title = content ?? factId;
+    if (!title) return [];
     const trust = num(row, 'trust_score');
     const tags = Array.isArray(row['tags'])
       ? (row['tags'] as unknown[]).map(String).filter((t) => t !== '')
@@ -186,14 +240,16 @@ export function knowledgeHits(
     const category = str(row, 'category');
     const recalled = num(row, 'last_recalled_at');
     const hit: Hit = {
-      key: `knowledge:${str(row, 'fact_id') ?? index}`,
+      key: `knowledge:${factId ?? index}`,
       lane: 'knowledge',
       rank: index + 1,
-      title: content ? matchWindow(content, terms) : `fact ${str(row, 'fact_id') ?? index}`,
-      titleField: 'content',
+      orderLabel: 'bounded fact endpoint rows',
+      title: content ? matchWindow(content, terms) : title,
+      titleField: content ? 'content' : 'fact_id',
       ...(tags.length > 0 ? { context: tags.join(' · ') } : {}),
+      contextFields: tags.length > 0 ? ['tags'] : [],
       ...(category ? { facet: category } : {}),
-      ...(recalled != null ? { stamp: recalled } : {}),
+      ...(recalled != null ? { stamp: recalled, stampField: 'last_recalled_at' } : {}),
       ...(trust != null
         ? {
             signal: {
@@ -201,6 +257,7 @@ export function knowledgeHits(
               value: trust,
               max: 1,
               display: `trust ${trust.toFixed(2)}`,
+              basis: 'fixed trust scale from 0 to 1',
             },
           }
         : {}),

@@ -78,6 +78,17 @@ pub enum HttpApplicationOperation {
     ConfigurationRollbackPreview,
     ConfigurationRollbackApply,
     ConfigurationAudit,
+    ContextScoutStatus,
+    ContextScoutRecent,
+    ContextScoutExplain,
+    ContextScoutCapability,
+    ContextScoutBudget,
+    ContextScoutPause,
+    ContextScoutResume,
+    ContextScoutCancel,
+    ContextScoutClaim,
+    ContextScoutDelivery,
+    ContextScoutFeedback,
 }
 
 /// The canonical application owner family responsible for one HTTP binding.
@@ -88,6 +99,7 @@ pub enum HttpApplicationOwnerKind {
     CallableCode,
     Primitive,
     Configuration,
+    ContextScout,
 }
 
 impl HttpApplicationOperation {
@@ -135,6 +147,17 @@ impl HttpApplicationOperation {
             Self::ConfigurationRollbackPreview => "configuration_rollback_preview",
             Self::ConfigurationRollbackApply => "configuration_rollback_apply",
             Self::ConfigurationAudit => "configuration_audit",
+            Self::ContextScoutStatus => "context_scout_status",
+            Self::ContextScoutRecent => "context_scout_recent",
+            Self::ContextScoutExplain => "context_scout_explain",
+            Self::ContextScoutCapability => "context_scout_capability",
+            Self::ContextScoutBudget => "context_scout_budget",
+            Self::ContextScoutPause => "context_scout_pause",
+            Self::ContextScoutResume => "context_scout_resume",
+            Self::ContextScoutCancel => "context_scout_cancel",
+            Self::ContextScoutClaim => "context_scout_claim",
+            Self::ContextScoutDelivery => "context_scout_delivery",
+            Self::ContextScoutFeedback => "context_scout_feedback",
         }
     }
 
@@ -181,6 +204,17 @@ impl HttpApplicationOperation {
             | Self::ConfigurationRollbackPreview
             | Self::ConfigurationRollbackApply
             | Self::ConfigurationAudit => HttpApplicationOwnerKind::Configuration,
+            Self::ContextScoutStatus
+            | Self::ContextScoutRecent
+            | Self::ContextScoutExplain
+            | Self::ContextScoutCapability
+            | Self::ContextScoutBudget
+            | Self::ContextScoutPause
+            | Self::ContextScoutResume
+            | Self::ContextScoutCancel
+            | Self::ContextScoutClaim
+            | Self::ContextScoutDelivery
+            | Self::ContextScoutFeedback => HttpApplicationOwnerKind::ContextScout,
         }
     }
 }
@@ -224,6 +258,11 @@ pub trait HttpApplicationOwners: Clone + Send + Sync + 'static {
         &self,
         request: HttpApplicationRequest,
     ) -> HttpApplicationInvocationFuture;
+
+    fn invoke_context_scout(
+        &self,
+        request: HttpApplicationRequest,
+    ) -> HttpApplicationInvocationFuture;
 }
 
 impl<F, Fut> HttpApplicationOwners for F
@@ -251,6 +290,13 @@ where
     }
 
     fn invoke_configuration(
+        &self,
+        request: HttpApplicationRequest,
+    ) -> HttpApplicationInvocationFuture {
+        Box::pin((self)(request))
+    }
+
+    fn invoke_context_scout(
         &self,
         request: HttpApplicationRequest,
     ) -> HttpApplicationInvocationFuture {
@@ -371,6 +417,10 @@ where
         .route(
             "/configuration/{operation}",
             post(configuration_operation::<O>),
+        )
+        .route(
+            "/context-scout/{operation}",
+            post(context_scout_operation::<O>),
         )
         .layer(DefaultBodyLimit::max(MAX_HTTP_APPLICATION_BODY_BYTES))
         .with_state(owners)
@@ -684,6 +734,43 @@ where
     invoke_route(operation, state, request_id, cancellation, page, body).await
 }
 
+fn parse_context_scout_operation(operation: &str) -> Option<HttpApplicationOperation> {
+    match operation {
+        "context_scout_status" => Some(HttpApplicationOperation::ContextScoutStatus),
+        "context_scout_recent" => Some(HttpApplicationOperation::ContextScoutRecent),
+        "context_scout_explain" => Some(HttpApplicationOperation::ContextScoutExplain),
+        "context_scout_capability" => Some(HttpApplicationOperation::ContextScoutCapability),
+        "context_scout_budget" => Some(HttpApplicationOperation::ContextScoutBudget),
+        "context_scout_pause" => Some(HttpApplicationOperation::ContextScoutPause),
+        "context_scout_resume" => Some(HttpApplicationOperation::ContextScoutResume),
+        "context_scout_cancel" => Some(HttpApplicationOperation::ContextScoutCancel),
+        "context_scout_claim" => Some(HttpApplicationOperation::ContextScoutClaim),
+        "context_scout_delivery" => Some(HttpApplicationOperation::ContextScoutDelivery),
+        "context_scout_feedback" => Some(HttpApplicationOperation::ContextScoutFeedback),
+        _ => None,
+    }
+}
+
+async fn context_scout_operation<O>(
+    Path(operation): Path<String>,
+    state: State<O>,
+    request_id: Extension<RequestId>,
+    cancellation: Extension<HttpApplicationControls>,
+    page: Result<Query<HttpPageQuery>, QueryRejection>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response
+where
+    O: HttpApplicationOwners,
+{
+    let Some(operation) = parse_context_scout_operation(&operation) else {
+        return application_problem_response(adapter_problem(
+            request_id.0,
+            ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
+        ));
+    };
+    invoke_route(operation, state, request_id, cancellation, page, body).await
+}
+
 async fn invoke_route<O>(
     operation: HttpApplicationOperation,
     State(owners): State<O>,
@@ -741,6 +828,7 @@ where
         HttpApplicationOwnerKind::CallableCode => owners.invoke_callable_code(request),
         HttpApplicationOwnerKind::Primitive => owners.invoke_primitive(request),
         HttpApplicationOwnerKind::Configuration => owners.invoke_configuration(request),
+        HttpApplicationOwnerKind::ContextScout => owners.invoke_context_scout(request),
     };
     invocation.await.into_http_response()
 }
@@ -750,6 +838,7 @@ mod tests {
     use super::{
         DEFAULT_HTTP_PAGE_SIZE, HttpApplicationOperation, HttpApplicationOwnerKind, HttpPageQuery,
         parse_callable_code_operation, parse_configuration_operation,
+        parse_context_scout_operation,
     };
 
     #[test]
@@ -895,5 +984,33 @@ mod tests {
         ] {
             assert_eq!(parse_configuration_operation(rejected), None);
         }
+    }
+
+    #[test]
+    fn context_scout_operation_parser_is_exact_and_backend_only() {
+        for operation in [
+            HttpApplicationOperation::ContextScoutStatus,
+            HttpApplicationOperation::ContextScoutRecent,
+            HttpApplicationOperation::ContextScoutExplain,
+            HttpApplicationOperation::ContextScoutCapability,
+            HttpApplicationOperation::ContextScoutBudget,
+            HttpApplicationOperation::ContextScoutPause,
+            HttpApplicationOperation::ContextScoutResume,
+            HttpApplicationOperation::ContextScoutCancel,
+            HttpApplicationOperation::ContextScoutClaim,
+            HttpApplicationOperation::ContextScoutDelivery,
+            HttpApplicationOperation::ContextScoutFeedback,
+        ] {
+            assert_eq!(
+                parse_context_scout_operation(operation.as_str()),
+                Some(operation)
+            );
+            assert_eq!(
+                operation.owner_kind(),
+                HttpApplicationOwnerKind::ContextScout
+            );
+        }
+        assert_eq!(parse_context_scout_operation("context_scout"), None);
+        assert_eq!(parse_context_scout_operation("context_scout_status/"), None);
     }
 }

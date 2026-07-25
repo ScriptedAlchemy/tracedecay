@@ -154,12 +154,16 @@ describe('summarizeCoverage', () => {
     const coverage = summarizeCoverage({
       messages: 1_751_214,
       usage_messages: 138_317,
-      estimated_messages: 1_612_897,
+      tokenized_messages: 400_000,
+      estimated_messages: 1_212_897,
       unknown_model_messages: 187_066,
     })!;
     // "cost_basis: mixed" in one word; this is what the mix actually is.
     expect(Math.round(coverage.measuredShare * 100)).toBe(8);
-    expect(coverage.estimated + coverage.usage).toBe(coverage.messages);
+    expect(coverage.tokenized).toBe(400_000);
+    expect(coverage.estimated + coverage.tokenized + coverage.usage).toBe(
+      coverage.messages,
+    );
   });
 
   it('has nothing to measure with no messages', () => {

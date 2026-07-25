@@ -321,6 +321,10 @@ impl AcceptedRetrievalProfileV1 {
         &self.diversity
     }
 
+    pub(crate) fn rerank(&self) -> Option<&RerankPolicy> {
+        self.rerank.as_ref()
+    }
+
     pub fn compatibility(&self) -> &RetrievalCompatibilityPinsV1 {
         &self.compatibility
     }

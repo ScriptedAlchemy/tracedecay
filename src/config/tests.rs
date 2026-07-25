@@ -2029,32 +2029,56 @@ mod retention_config_tests {
     use crate::config::{RetentionConfig, SyncConfig};
 
     #[test]
-    fn default_retention_is_fully_inert() {
+    fn default_retention_runs_only_safe_bounded_maintenance() {
         let retention = RetentionConfig::default();
-        assert!(!retention.session_lcm.enabled, "LCM disabled by default");
+        assert!(
+            retention.session_lcm.enabled,
+            "projection-durable session dedupe enabled by default"
+        );
+        assert_eq!(retention.session_lcm.offload_after_days, None);
+        assert_eq!(retention.session_lcm.drop_after_days, None);
+        assert_eq!(retention.session_lcm.dedupe_projected_after_days, Some(30));
+        assert_eq!(retention.session_lcm.max_batch_size, 500);
         assert!(
             !retention.observation.enabled,
-            "observation disabled by default"
+            "live observation evidence stays disabled by default"
         );
-        assert!(
-            retention.orphan_store_gc_days.is_none(),
-            "orphan sweep disabled by default"
-        );
-        assert!(
-            retention.compaction.is_none(),
-            "compaction disabled by default"
-        );
+        assert_eq!(retention.orphan_store_gc_days, Some(30));
+        assert_eq!(retention.incident_debris_retention_days, Some(30));
+        let compaction = retention.compaction.expect("compaction enabled");
+        assert!((compaction.free_page_ratio_threshold - 0.25).abs() < f64::EPSILON);
+        assert_eq!(compaction.minimum_reclaimable_bytes, 64 * 1024 * 1024);
+        assert_eq!(compaction.max_pages_per_tick, 1024);
         assert!(retention.store_soft_budgets_bytes.is_empty());
-        // A default SyncConfig carries the inert retention tree.
+        // A default SyncConfig carries the same bounded retention tree.
         assert_eq!(SyncConfig::default().retention, retention);
     }
 
     #[test]
-    fn empty_json_object_deserializes_to_inert_defaults() {
+    fn empty_json_object_deserializes_to_safe_defaults() {
         // A serde-compat empty object (older config with no retention block)
-        // must resolve every engine to disabled.
+        // must resolve the same safe maintenance policy.
         let retention: RetentionConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(retention, RetentionConfig::default());
+    }
+
+    #[test]
+    fn retention_rejects_immediate_collection_and_invalid_compaction_ratio() {
+        let mut retention = RetentionConfig::default();
+        retention.orphan_store_gc_days = Some(0);
+        assert!(retention.validate().is_err());
+
+        retention = RetentionConfig::default();
+        retention.incident_debris_retention_days = Some(0);
+        assert!(retention.validate().is_err());
+
+        retention = RetentionConfig::default();
+        retention
+            .compaction
+            .as_mut()
+            .expect("default compaction")
+            .free_page_ratio_threshold = 1.01;
+        assert!(retention.validate().is_err());
     }
 
     #[test]
@@ -2063,6 +2087,7 @@ mod retention_config_tests {
             "session_lcm": { "enabled": true, "drop_after_days": 30 },
             "observation": { "enabled": true, "anchor_release_after_days": 45 },
             "orphan_store_gc_days": 14,
+            "incident_debris_retention_days": 21,
             "compaction": { "free_page_ratio_threshold": 0.25, "minimum_reclaimable_bytes": 1000000 },
             "store_soft_budgets_bytes": { "sessions.db": 2000000000 },
             "interval_hours": 12
@@ -2073,6 +2098,7 @@ mod retention_config_tests {
         assert!(retention.observation.enabled);
         assert_eq!(retention.observation.anchor_release_after_days, Some(45));
         assert_eq!(retention.orphan_store_gc_days, Some(14));
+        assert_eq!(retention.incident_debris_retention_days, Some(21));
         assert_eq!(retention.interval_hours, 12);
         let compaction = retention.compaction.expect("compaction configured");
         assert!((compaction.free_page_ratio_threshold - 0.25).abs() < f64::EPSILON);

@@ -38,7 +38,7 @@ use tracedecay_application::{
     RequestAdmission, RequestContext, RequestId, ResolvedScope, RetrievalEvidence, RetryDirective,
     SafeDiagnostic, TemporalState,
 };
-use tracedecay_domain::{ComponentVersion, UtcMicros};
+use tracedecay_domain::{CodeGenerationId, CommitId, ComponentVersion, UtcMicros};
 use tracedecay_tool_catalog::SortContractId;
 use url::Url;
 
@@ -49,7 +49,10 @@ use super::grep_analysis::{
 };
 use super::symbol_graph::{CanonicalSymbolGraphAdapter, SymbolGraphCursorPort};
 use crate::application::ProjectSourceAccessSnapshot;
-use crate::application::operation_stream::{OperationEventAuthority, OperationEventError};
+use crate::application::operation_stream::{
+    CanonicalManagedTestRunReader, ManagedTestRunCurrentScope, ManagedTestRunReadOutcome,
+    ManagedTestRunStaleReason, OperationEventAuthority,
+};
 use crate::db::Database;
 use crate::tracedecay::TraceDecay;
 
@@ -72,6 +75,24 @@ pub type Pr12OperationalPrimitiveFuture<'a> =
 
 pub type Pr12ExtendedPrimitiveFuture<'a, T> =
     Pin<Box<dyn Future<Output = RetrievalPortOutcome<T>> + Send + 'a>>;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ManagedTestRunCurrentIdentity {
+    pub head_commit_id: CommitId,
+    pub code_generation_id: CodeGenerationId,
+}
+
+pub type ManagedTestRunCurrentIdentityFuture<'a> = Pin<
+    Box<
+        dyn Future<Output = Result<ManagedTestRunCurrentIdentity, ApplicationContractError>>
+            + Send
+            + 'a,
+    >,
+>;
+
+pub trait ManagedTestRunCurrentScopePort: Send + Sync {
+    fn current_identity(&self) -> ManagedTestRunCurrentIdentityFuture<'_>;
+}
 
 /// Closed operational reads whose concrete owner remains Doctor,
 /// configuration, diagnostics, project, or status.
@@ -465,7 +486,8 @@ pub struct OwnedPr12PrimitiveRuntime {
     scope: ResolvedScope,
     access: ProjectSourceAccessSnapshot,
     admitted_root_uri: String,
-    operation_events: OperationEventAuthority,
+    test_runs: CanonicalManagedTestRunReader,
+    test_run_scope: Arc<dyn ManagedTestRunCurrentScopePort>,
     capacity: Pr12PrimitiveCapacity,
 }
 
@@ -684,7 +706,8 @@ fn transport_context(
 /// `open_pr12_primitive_project_runtime(database, graph, symbol_graph_cursors,
 /// tests, lexical_grep, redundancy, temporal, source_lines, health, extended,
 /// operational, scope, access,
-/// admitted_root_uri, operation_events) -> Result<Pr12PrimitiveProjectRuntime,
+/// admitted_root_uri, operation_events, test_run_scope) ->
+/// Result<Pr12PrimitiveProjectRuntime,
 /// ApplicationContractError>`
 #[allow(clippy::too_many_arguments)]
 pub fn open_pr12_primitive_project_runtime(
@@ -703,6 +726,7 @@ pub fn open_pr12_primitive_project_runtime(
     access: ProjectSourceAccessSnapshot,
     admitted_root_uri: String,
     operation_events: OperationEventAuthority,
+    test_run_scope: Arc<dyn ManagedTestRunCurrentScopePort>,
 ) -> Result<Pr12PrimitiveProjectRuntime, ApplicationContractError> {
     scope.validate()?;
     validate_admitted_root_uri(&admitted_root_uri)?;
@@ -739,7 +763,8 @@ pub fn open_pr12_primitive_project_runtime(
         scope,
         access,
         admitted_root_uri,
-        operation_events,
+        test_runs: CanonicalManagedTestRunReader::new(operation_events),
+        test_run_scope,
         capacity: Pr12PrimitiveCapacity::new(MAX_CONCURRENT_PR12_PRIMITIVES),
     });
     Ok(Pr12PrimitiveProjectRuntime {
@@ -1705,31 +1730,47 @@ async fn recent_test_results(
     operation: &ApplicationOperation,
     observed_at: UtcMicros,
 ) -> ApplicationResult<Value> {
-    let snapshot = match runtime
-        .operation_events
-        .latest_managed_test_run(&runtime.admitted_root_uri)
-        .await
-    {
-        Ok(snapshot) => snapshot,
-        Err(OperationEventError::FrontierExpired) => {
+    let current = match runtime.test_run_scope.current_identity().await {
+        Ok(identity) => ManagedTestRunCurrentScope {
+            root_uri: runtime.admitted_root_uri.clone(),
+            head_commit_id: Some(identity.head_commit_id),
+            code_generation_id: Some(identity.code_generation_id),
+            document_uri: None,
+            document_content_digest: None,
+        },
+        Err(_) => return unavailable(context, operation),
+    };
+    let snapshot = match runtime.test_runs.latest_current(&current).await {
+        ManagedTestRunReadOutcome::Current(snapshot) => snapshot,
+        ManagedTestRunReadOutcome::Stale(
+            ManagedTestRunStaleReason::SourceIdentity | ManagedTestRunStaleReason::DocumentContent,
+        ) => {
             return problem(
                 context,
                 operation,
                 ApplicationProblem::stale(
                     SafeDiagnostic::new(
-                        "application.pr12-primitive.test-results-expired",
-                        "No retained managed test result is available.",
+                        "application.pr12-primitive.test-results-stale",
+                        "The retained managed test result does not match the current source identity.",
                     )
                     .unwrap_or_else(|_| panic!("static diagnostic is valid")),
                 ),
             );
         }
-        Err(_) => return unavailable(context, operation),
+        ManagedTestRunReadOutcome::Unavailable(_) => return unavailable(context, operation),
     };
     let returned = snapshot.results.len() as u64;
     let payload = json!({
         "operation_id": snapshot.operation_id.to_string(),
         "generation": snapshot.generation,
+        "head_commit_id": snapshot
+            .head_commit_id
+            .as_ref()
+            .map(CommitId::as_str),
+        "code_generation_id": snapshot
+            .code_generation_id
+            .as_ref()
+            .map(CodeGenerationId::as_str),
         "results": snapshot.results.into_iter().map(|result| json!({
             "test": result.test,
             "passed": result.passed,

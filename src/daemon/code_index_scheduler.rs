@@ -42,6 +42,7 @@ use crate::{
             CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
             CodeIndexProductionConfigV1, CodeIndexProductionErrorV1,
             CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
+            SharedPhysicalCodeArtifactPoolV1,
         },
         projection::{
             ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionSinkErrorV1,
@@ -101,11 +102,14 @@ type ProductionOwner =
 pub(super) struct CodeIndexBytePoolStatsV1 {
     pub inserted: u64,
     pub reused: u64,
+    pub parse_chunk_inserted: u64,
+    pub parse_chunk_reused: u64,
 }
 
 #[derive(Default)]
 pub(super) struct SharedCodeIndexBytePoolV1 {
     bytes: Mutex<BTreeMap<ContentDigest, Weak<[u8]>>>,
+    physical_artifacts: SharedPhysicalCodeArtifactPoolV1,
     inserted: AtomicU64,
     reused: AtomicU64,
 }
@@ -128,9 +132,12 @@ impl SharedCodeIndexBytePoolV1 {
     }
 
     fn stats(&self) -> CodeIndexBytePoolStatsV1 {
+        let physical_artifacts = self.physical_artifacts.stats();
         CodeIndexBytePoolStatsV1 {
             inserted: self.inserted.load(Ordering::Relaxed),
             reused: self.reused.load(Ordering::Relaxed),
+            parse_chunk_inserted: physical_artifacts.inserted,
+            parse_chunk_reused: physical_artifacts.reused,
         }
     }
 }
@@ -687,7 +694,8 @@ impl CodeIndexWorktreeSchedulerV1 {
             publication,
             DaemonProjectionSinkV1,
         )
-        .map_err(|error| CodeIndexSchedulerErrorV1::ProductionOpen(error.to_string()))?;
+        .map_err(|error| CodeIndexSchedulerErrorV1::ProductionOpen(error.to_string()))?
+        .with_physical_artifact_pool(byte_pool.physical_artifacts.clone());
         let restored = owner.active_generation()?;
         // Identity backstop: a restored generation may only be adopted when it
         // was produced under this exact repository AND worktree. A matching path
@@ -1206,6 +1214,8 @@ fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
+#[cfg(test)]
+mod overlay_ephemerality_tests;
 #[cfg(test)]
 mod tests;
 

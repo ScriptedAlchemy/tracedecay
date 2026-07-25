@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
+  DoctorFindingsPayloadSchema,
   EnvelopeSchema,
   LegalActionRefSchema,
-  StorageFindingsPayloadSchema,
   StorageTelemetryPayloadSchema,
 } from '../../contracts/wire.ts';
 import {
@@ -75,35 +75,68 @@ describe('Observatory storage read models', () => {
     expect(EnvelopeSchema(StorageTelemetryPayloadSchema).safeParse(envelope).success).toBe(false);
   });
 
-  it('decodes storage finding kind statuses and maps storage kinds to labels', () => {
-    // Mirrors StorageFindingsPayloadV1 in src/dashboard/storage_findings_api.rs:
-    // a per-kind producer support report, not a Doctor report projection.
-    const kind = (storageKind: string, state: string, reason: string) => ({
-      kind: storageKind,
-      state,
-      required_source: `${storageKind}_source`,
-      reason,
-    });
-    const payload = StorageFindingsPayloadSchema.parse({
-      kinds: [
-        kind('over_budget_store', 'unsupported', 'budget source unavailable'),
-        kind('orphan_store', 'absent', 'no orphan stores observed'),
-        kind('stale_branch_dbs', 'stale', 'inventory watermark is stale'),
-        kind('incident_debris_present', 'degraded', 'quarantined debris is present'),
-        kind('retention_backlog', 'partial', 'backlog scan was partial'),
+  it('decodes the canonical Doctor storage-family projection and maps typed kinds', () => {
+    const payload = DoctorFindingsPayloadSchema.parse({
+      family_filter: 'storage',
+      entries: [
+        {
+          finding: {
+            family: 'storage',
+            state: 'degraded',
+            evidence: [
+              {
+                family: 'storage',
+                reference:
+                  'storage.over_budget_store.sessions.db.observed-8388608b.overage-4194304b',
+              },
+            ],
+            coverage: {
+              completeness: 'complete',
+              statement: 'store size observed against soft budget',
+            },
+            remediation: {
+              owning_operation: 'use-case.application.storage.retention-collect',
+              kind: 'action',
+            },
+          },
+          storage_kind: 'over_budget_store',
+        },
       ],
-      note: 'storage evidence',
+      report_coverage: {
+        families: [{ family: 'storage', consultation: { status: 'consulted' } }],
+        completeness: 'complete',
+        statement: {
+          completeness: 'complete',
+          statement: 'storage retention and size authorities were consulted',
+        },
+      },
+      remediations: [],
+      known_families: ['storage'],
+      note: 'storage retention and size authorities were consulted',
     });
 
-    expect(payload.kinds.map((row) => storageFindingLabel(row.kind))).toEqual([
+    expect(
+      (
+        [
+          'over_budget_store',
+          'orphan_store',
+          'stale_branch_dbs',
+          'incident_debris_present',
+          'retention_backlog',
+        ] as const
+      ).map(storageFindingLabel),
+    ).toEqual([
       'Over-budget stores',
       'Orphan stores',
       'Stale branch databases',
       'Incident debris',
       'Retention backlog',
     ]);
-    expect(payload.kinds[0]?.reason).toBe('budget source unavailable');
-    expect(doctorEvidencePresentation(payload.kinds[3]!.state)).toEqual({
+    expect(payload.entries[0]?.storage_kind).toBe('over_budget_store');
+    expect(payload.entries[0]?.finding.coverage.statement).toBe(
+      'store size observed against soft budget',
+    );
+    expect(doctorEvidencePresentation(payload.entries[0]!.finding.state)).toEqual({
       label: 'Degraded',
       tokenClass: 'text-state-error',
       dotClass: 'bg-state-error',

@@ -186,6 +186,8 @@ pub enum SemanticQueryServiceError {
     StrictUnavailable(SemanticAbstentionV1),
     #[error("the authorized PR9 fallback binding is invalid")]
     InvalidFallback,
+    #[error("the authenticated semantic continuation is invalid or stale")]
+    InvalidCursor,
 }
 
 pub struct CalibratedSemanticQueryService<'a, L> {

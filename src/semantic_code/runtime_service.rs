@@ -769,4 +769,68 @@ mod tests {
             "worker termination must not leave publication permanently locked"
         );
     }
+
+    #[tokio::test]
+    async fn cancelled_superseding_work_retains_prior_generation_without_publication() {
+        let handle = SemanticRuntimeSchedulingHandleV1::new();
+        let prior = pointer('a');
+        let prior_generation = prior.generation.clone();
+        assert!(handle.schedule(SemanticRuntimeWorkV1::new(
+            prior.source_generation.clone(),
+            1,
+            move |_cancellation| async move {
+                Ok(PreparedSemanticRuntimeCommitV1::new(move || async move {
+                    Ok(prior)
+                }))
+            },
+        )));
+        wait_until(&handle, |status| {
+            matches!(
+                status,
+                SemanticRuntimeScheduleStatusV1::Current { generation }
+                    if generation == &prior_generation
+            )
+        })
+        .await;
+
+        let next = pointer('b');
+        let publication_ran = Arc::new(AtomicBool::new(false));
+        let publication_ran_for_commit = Arc::clone(&publication_ran);
+        let (prepared_tx, prepared_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        assert!(handle.schedule(SemanticRuntimeWorkV1::new(
+            next.source_generation.clone(),
+            1,
+            move |_cancellation| async move {
+                let _ = prepared_tx.send(());
+                let _ = release_rx.await;
+                Ok(PreparedSemanticRuntimeCommitV1::new(move || async move {
+                    publication_ran_for_commit.store(true, Ordering::SeqCst);
+                    Ok(next)
+                }))
+            },
+        )));
+        prepared_rx.await.expect("superseding work prepared");
+        assert!(handle.cancel(), "superseding work remains cancellable");
+        let _ = release_tx.send(());
+        wait_until(&handle, |status| {
+            matches!(
+                status,
+                SemanticRuntimeScheduleStatusV1::Failed {
+                    reason: SemanticRuntimeScheduleFailureV1::Cancelled,
+                    prior_generation: Some(generation),
+                } if generation == &prior_generation
+            )
+        })
+        .await;
+
+        assert_eq!(
+            handle.current().map(|pointer| pointer.generation),
+            Some(prior_generation)
+        );
+        assert!(
+            !publication_ran.load(Ordering::SeqCst),
+            "cancelled preparation must not enter atomic publication"
+        );
+    }
 }

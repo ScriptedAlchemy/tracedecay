@@ -131,9 +131,20 @@ pub enum ApplicationSurfaceOperation {
     ConfigurationRollbackPreview,
     ConfigurationRollbackApply,
     ConfigurationAudit,
+    ContextScoutStatus,
+    ContextScoutRecent,
+    ContextScoutExplain,
+    ContextScoutCapability,
+    ContextScoutBudget,
+    ContextScoutPause,
+    ContextScoutResume,
+    ContextScoutCancel,
+    ContextScoutClaim,
+    ContextScoutDelivery,
+    ContextScoutFeedback,
 }
 
-pub const APPLICATION_SURFACE_OPERATIONS: [ApplicationSurfaceOperation; 42] = [
+pub const APPLICATION_SURFACE_OPERATIONS: [ApplicationSurfaceOperation; 53] = [
     ApplicationSurfaceOperation::GitPreview,
     ApplicationSurfaceOperation::GitApply,
     ApplicationSurfaceOperation::FeedbackDiagnostics,
@@ -176,6 +187,17 @@ pub const APPLICATION_SURFACE_OPERATIONS: [ApplicationSurfaceOperation; 42] = [
     ApplicationSurfaceOperation::ConfigurationRollbackPreview,
     ApplicationSurfaceOperation::ConfigurationRollbackApply,
     ApplicationSurfaceOperation::ConfigurationAudit,
+    ApplicationSurfaceOperation::ContextScoutStatus,
+    ApplicationSurfaceOperation::ContextScoutRecent,
+    ApplicationSurfaceOperation::ContextScoutExplain,
+    ApplicationSurfaceOperation::ContextScoutCapability,
+    ApplicationSurfaceOperation::ContextScoutBudget,
+    ApplicationSurfaceOperation::ContextScoutPause,
+    ApplicationSurfaceOperation::ContextScoutResume,
+    ApplicationSurfaceOperation::ContextScoutCancel,
+    ApplicationSurfaceOperation::ContextScoutClaim,
+    ApplicationSurfaceOperation::ContextScoutDelivery,
+    ApplicationSurfaceOperation::ContextScoutFeedback,
 ];
 
 impl ApplicationSurfaceOperation {
@@ -223,6 +245,17 @@ impl ApplicationSurfaceOperation {
             Self::ConfigurationRollbackPreview => "configuration_rollback_preview",
             Self::ConfigurationRollbackApply => "configuration_rollback_apply",
             Self::ConfigurationAudit => "configuration_audit",
+            Self::ContextScoutStatus => "context_scout_status",
+            Self::ContextScoutRecent => "context_scout_recent",
+            Self::ContextScoutExplain => "context_scout_explain",
+            Self::ContextScoutCapability => "context_scout_capability",
+            Self::ContextScoutBudget => "context_scout_budget",
+            Self::ContextScoutPause => "context_scout_pause",
+            Self::ContextScoutResume => "context_scout_resume",
+            Self::ContextScoutCancel => "context_scout_cancel",
+            Self::ContextScoutClaim => "context_scout_claim",
+            Self::ContextScoutDelivery => "context_scout_delivery",
+            Self::ContextScoutFeedback => "context_scout_feedback",
         }
     }
 
@@ -605,6 +638,140 @@ pub enum ConfigurationSurfaceRequest {
     Audit(ConfigurationAuditSurfaceRequest),
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextScoutClaimWindowSurfaceV1 {
+    IdleWindow,
+    OnRequest,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ContextScoutExactAddressSurfaceRequest {
+    pub address: crate::agents::context_scout_v2::ContextScoutAddressV1,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ContextScoutRecentSurfaceRequest {
+    pub address: crate::agents::context_scout_v2::ContextScoutAddressV1,
+    #[serde(default = "default_context_scout_recent_limit")]
+    pub limit: usize,
+}
+
+const fn default_context_scout_recent_limit() -> usize {
+    8
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ContextScoutControlSurfaceRequest {
+    pub address: crate::agents::context_scout_v2::ContextScoutAddressV1,
+    pub expected_revision: ConfigurationRevisionId,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ContextScoutCancelSurfaceRequest {
+    pub address: crate::agents::context_scout_v2::ContextScoutAddressV1,
+    pub work: crate::agents::context_scout_v2::ContextScoutWorkV1,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ContextScoutClaimSurfaceRequest {
+    pub address: crate::agents::context_scout_v2::ContextScoutAddressV1,
+    pub window: ContextScoutClaimWindowSurfaceV1,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ContextScoutDeliverySurfaceRequest {
+    pub address: crate::agents::context_scout_v2::ContextScoutAddressV1,
+    pub claim: crate::agents::context_scout_v2::ContextScoutDurableClaimV1,
+    pub receipt: crate::agents::context_scout_v2::ContextScoutDeliveryReceiptV1,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ContextScoutFeedbackSurfaceRequest {
+    pub address: crate::agents::context_scout_v2::ContextScoutAddressV1,
+    pub receipt: crate::agents::context_scout_v2::ContextScoutDeliveryReceiptV1,
+    pub feedback: crate::agents::context_scout_v2::ContextScoutFeedbackV1,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "operation", content = "request")]
+pub enum ContextScoutSurfaceRequest {
+    Status(ContextScoutExactAddressSurfaceRequest),
+    Recent(ContextScoutRecentSurfaceRequest),
+    Explain(ContextScoutRecentSurfaceRequest),
+    Capability(ContextScoutExactAddressSurfaceRequest),
+    Budget(ContextScoutExactAddressSurfaceRequest),
+    Pause(ContextScoutControlSurfaceRequest),
+    Resume(ContextScoutControlSurfaceRequest),
+    Cancel(ContextScoutCancelSurfaceRequest),
+    Claim(ContextScoutClaimSurfaceRequest),
+    Delivery(ContextScoutDeliverySurfaceRequest),
+    Feedback(ContextScoutFeedbackSurfaceRequest),
+}
+
+impl ContextScoutSurfaceRequest {
+    pub(crate) const fn address(&self) -> crate::agents::context_scout_v2::ContextScoutAddressV1 {
+        match self {
+            Self::Status(request) | Self::Capability(request) | Self::Budget(request) => {
+                request.address
+            }
+            Self::Recent(request) | Self::Explain(request) => request.address,
+            Self::Pause(request) | Self::Resume(request) => request.address,
+            Self::Cancel(request) => request.address,
+            Self::Claim(request) => request.address,
+            Self::Delivery(request) => request.address,
+            Self::Feedback(request) => request.address,
+        }
+    }
+
+    pub(crate) const fn matches(&self, operation: ApplicationSurfaceOperation) -> bool {
+        matches!(
+            (self, operation),
+            (
+                Self::Status(_),
+                ApplicationSurfaceOperation::ContextScoutStatus
+            ) | (
+                Self::Recent(_),
+                ApplicationSurfaceOperation::ContextScoutRecent
+            ) | (
+                Self::Explain(_),
+                ApplicationSurfaceOperation::ContextScoutExplain
+            ) | (
+                Self::Capability(_),
+                ApplicationSurfaceOperation::ContextScoutCapability
+            ) | (
+                Self::Budget(_),
+                ApplicationSurfaceOperation::ContextScoutBudget
+            ) | (
+                Self::Pause(_),
+                ApplicationSurfaceOperation::ContextScoutPause
+            ) | (
+                Self::Resume(_),
+                ApplicationSurfaceOperation::ContextScoutResume
+            ) | (
+                Self::Cancel(_),
+                ApplicationSurfaceOperation::ContextScoutCancel
+            ) | (
+                Self::Claim(_),
+                ApplicationSurfaceOperation::ContextScoutClaim
+            ) | (
+                Self::Delivery(_),
+                ApplicationSurfaceOperation::ContextScoutDelivery
+            ) | (
+                Self::Feedback(_),
+                ApplicationSurfaceOperation::ContextScoutFeedback
+            )
+        )
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct GitPreviewSurfaceRequest {
@@ -644,6 +811,7 @@ pub enum ApplicationSurfaceRequest {
     PrimitiveCode(PrimitiveCodeSurfaceRequest),
     Primitive(Pr12PrimitiveRequest),
     Configuration(ConfigurationSurfaceRequest),
+    ContextScout(ContextScoutSurfaceRequest),
 }
 
 pub struct ApplicationSurfaceInvocationResult {
@@ -1593,6 +1761,50 @@ impl ApplicationSurfaceRequest {
                     Self::Configuration(ConfigurationSurfaceRequest::Audit(_)),
                     ApplicationSurfaceOperation::ConfigurationAudit
                 )
+                | (
+                    Self::ContextScout(ContextScoutSurfaceRequest::Status(_)),
+                    ApplicationSurfaceOperation::ContextScoutStatus
+                )
+                | (
+                    Self::ContextScout(ContextScoutSurfaceRequest::Recent(_)),
+                    ApplicationSurfaceOperation::ContextScoutRecent
+                )
+                | (
+                    Self::ContextScout(ContextScoutSurfaceRequest::Explain(_)),
+                    ApplicationSurfaceOperation::ContextScoutExplain
+                )
+                | (
+                    Self::ContextScout(ContextScoutSurfaceRequest::Capability(_)),
+                    ApplicationSurfaceOperation::ContextScoutCapability
+                )
+                | (
+                    Self::ContextScout(ContextScoutSurfaceRequest::Budget(_)),
+                    ApplicationSurfaceOperation::ContextScoutBudget
+                )
+                | (
+                    Self::ContextScout(ContextScoutSurfaceRequest::Pause(_)),
+                    ApplicationSurfaceOperation::ContextScoutPause
+                )
+                | (
+                    Self::ContextScout(ContextScoutSurfaceRequest::Resume(_)),
+                    ApplicationSurfaceOperation::ContextScoutResume
+                )
+                | (
+                    Self::ContextScout(ContextScoutSurfaceRequest::Cancel(_)),
+                    ApplicationSurfaceOperation::ContextScoutCancel
+                )
+                | (
+                    Self::ContextScout(ContextScoutSurfaceRequest::Claim(_)),
+                    ApplicationSurfaceOperation::ContextScoutClaim
+                )
+                | (
+                    Self::ContextScout(ContextScoutSurfaceRequest::Delivery(_)),
+                    ApplicationSurfaceOperation::ContextScoutDelivery
+                )
+                | (
+                    Self::ContextScout(ContextScoutSurfaceRequest::Feedback(_)),
+                    ApplicationSurfaceOperation::ContextScoutFeedback
+                )
         )
     }
 }
@@ -1795,6 +2007,50 @@ pub fn parse_application_surface_request(
             .map(ConfigurationSurfaceRequest::Audit)
             .map(ApplicationSurfaceRequest::Configuration)
             .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+        ApplicationSurfaceOperation::ContextScoutStatus => serde_json::from_value(value)
+            .map(ContextScoutSurfaceRequest::Status)
+            .map(ApplicationSurfaceRequest::ContextScout)
+            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+        ApplicationSurfaceOperation::ContextScoutRecent => serde_json::from_value(value)
+            .map(ContextScoutSurfaceRequest::Recent)
+            .map(ApplicationSurfaceRequest::ContextScout)
+            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+        ApplicationSurfaceOperation::ContextScoutExplain => serde_json::from_value(value)
+            .map(ContextScoutSurfaceRequest::Explain)
+            .map(ApplicationSurfaceRequest::ContextScout)
+            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+        ApplicationSurfaceOperation::ContextScoutCapability => serde_json::from_value(value)
+            .map(ContextScoutSurfaceRequest::Capability)
+            .map(ApplicationSurfaceRequest::ContextScout)
+            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+        ApplicationSurfaceOperation::ContextScoutBudget => serde_json::from_value(value)
+            .map(ContextScoutSurfaceRequest::Budget)
+            .map(ApplicationSurfaceRequest::ContextScout)
+            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+        ApplicationSurfaceOperation::ContextScoutPause => serde_json::from_value(value)
+            .map(ContextScoutSurfaceRequest::Pause)
+            .map(ApplicationSurfaceRequest::ContextScout)
+            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+        ApplicationSurfaceOperation::ContextScoutResume => serde_json::from_value(value)
+            .map(ContextScoutSurfaceRequest::Resume)
+            .map(ApplicationSurfaceRequest::ContextScout)
+            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+        ApplicationSurfaceOperation::ContextScoutCancel => serde_json::from_value(value)
+            .map(ContextScoutSurfaceRequest::Cancel)
+            .map(ApplicationSurfaceRequest::ContextScout)
+            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+        ApplicationSurfaceOperation::ContextScoutClaim => serde_json::from_value(value)
+            .map(ContextScoutSurfaceRequest::Claim)
+            .map(ApplicationSurfaceRequest::ContextScout)
+            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+        ApplicationSurfaceOperation::ContextScoutDelivery => serde_json::from_value(value)
+            .map(ContextScoutSurfaceRequest::Delivery)
+            .map(ApplicationSurfaceRequest::ContextScout)
+            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+        ApplicationSurfaceOperation::ContextScoutFeedback => serde_json::from_value(value)
+            .map(ContextScoutSurfaceRequest::Feedback)
+            .map(ApplicationSurfaceRequest::ContextScout)
+            .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
         ApplicationSurfaceOperation::FeedbackDiagnostics
         | ApplicationSurfaceOperation::FeedbackGet
         | ApplicationSurfaceOperation::FeedbackExpand
@@ -1927,6 +2183,16 @@ pub async fn execute_application_surface(
                 cancellation_context,
             )
         }
+        ApplicationSurfaceRequest::ContextScout(request) => {
+            crate::daemon::DaemonInvocationRequest::context_scout(
+                request_id.as_str(),
+                operation,
+                request,
+                observed_at,
+                deadline,
+                cancellation_context,
+            )
+        }
     }
     .with_delivery_route(delivery_route);
     let Some(client) = client else {
@@ -1953,6 +2219,12 @@ pub async fn execute_application_surface(
             | ApplicationSurfaceOperation::ConfigurationWriteCredential
             | ApplicationSurfaceOperation::ConfigurationProtectedApply
             | ApplicationSurfaceOperation::ConfigurationRollbackApply
+            | ApplicationSurfaceOperation::ContextScoutPause
+            | ApplicationSurfaceOperation::ContextScoutResume
+            | ApplicationSurfaceOperation::ContextScoutCancel
+            | ApplicationSurfaceOperation::ContextScoutClaim
+            | ApplicationSurfaceOperation::ContextScoutDelivery
+            | ApplicationSurfaceOperation::ContextScoutFeedback
     ) {
         InvocationCancellationPolicy::AuthoritativeEffect
     } else {
@@ -2061,6 +2333,14 @@ pub async fn execute_application_surface(
                 outcome,
             })
         }
+        crate::daemon::DaemonInvocationOutcome::ContextScout { scope, outcome } => {
+            Ok(ApplicationEnvelope {
+                contract: result_contract.clone(),
+                request_id: request_id.clone(),
+                scope,
+                outcome,
+            })
+        }
         crate::daemon::DaemonInvocationOutcome::ApplicationProblem { problem } => Err(
             ApplicationProblemEnvelope::new(result_contract.clone(), request_id.clone(), problem),
         ),
@@ -2145,7 +2425,18 @@ fn plan26_surface_operation(operation: ApplicationSurfaceOperation) -> Plan26Fee
         | ApplicationSurfaceOperation::ConfigurationProtectedApply
         | ApplicationSurfaceOperation::ConfigurationRollbackPreview
         | ApplicationSurfaceOperation::ConfigurationRollbackApply
-        | ApplicationSurfaceOperation::ConfigurationAudit => {
+        | ApplicationSurfaceOperation::ConfigurationAudit
+        | ApplicationSurfaceOperation::ContextScoutStatus
+        | ApplicationSurfaceOperation::ContextScoutRecent
+        | ApplicationSurfaceOperation::ContextScoutExplain
+        | ApplicationSurfaceOperation::ContextScoutCapability
+        | ApplicationSurfaceOperation::ContextScoutBudget
+        | ApplicationSurfaceOperation::ContextScoutPause
+        | ApplicationSurfaceOperation::ContextScoutResume
+        | ApplicationSurfaceOperation::ContextScoutCancel
+        | ApplicationSurfaceOperation::ContextScoutClaim
+        | ApplicationSurfaceOperation::ContextScoutDelivery
+        | ApplicationSurfaceOperation::ContextScoutFeedback => {
             Plan26FeedbackOperationV1::FeedbackCycle
         }
     }
@@ -2529,6 +2820,39 @@ fn application_operation_for_http(
         }
         HttpApplicationOperation::ConfigurationAudit => {
             ApplicationSurfaceOperation::ConfigurationAudit
+        }
+        HttpApplicationOperation::ContextScoutStatus => {
+            ApplicationSurfaceOperation::ContextScoutStatus
+        }
+        HttpApplicationOperation::ContextScoutRecent => {
+            ApplicationSurfaceOperation::ContextScoutRecent
+        }
+        HttpApplicationOperation::ContextScoutExplain => {
+            ApplicationSurfaceOperation::ContextScoutExplain
+        }
+        HttpApplicationOperation::ContextScoutCapability => {
+            ApplicationSurfaceOperation::ContextScoutCapability
+        }
+        HttpApplicationOperation::ContextScoutBudget => {
+            ApplicationSurfaceOperation::ContextScoutBudget
+        }
+        HttpApplicationOperation::ContextScoutPause => {
+            ApplicationSurfaceOperation::ContextScoutPause
+        }
+        HttpApplicationOperation::ContextScoutResume => {
+            ApplicationSurfaceOperation::ContextScoutResume
+        }
+        HttpApplicationOperation::ContextScoutCancel => {
+            ApplicationSurfaceOperation::ContextScoutCancel
+        }
+        HttpApplicationOperation::ContextScoutClaim => {
+            ApplicationSurfaceOperation::ContextScoutClaim
+        }
+        HttpApplicationOperation::ContextScoutDelivery => {
+            ApplicationSurfaceOperation::ContextScoutDelivery
+        }
+        HttpApplicationOperation::ContextScoutFeedback => {
+            ApplicationSurfaceOperation::ContextScoutFeedback
         }
     }
 }

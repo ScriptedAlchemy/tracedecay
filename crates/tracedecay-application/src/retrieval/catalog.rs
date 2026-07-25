@@ -32,6 +32,7 @@ pub fn application_catalog_contributions()
         crate::git::git_index_catalog_contribution()?,
         crate::git::git_surface_catalog_contribution()?,
         crate::configuration::configuration_surface_catalog_contribution()?,
+        crate::context_scout::context_scout_surface_catalog_contribution()?,
         crate::feedback::feedback_surface_catalog_contribution()?,
         crate::source_edit::source_edit_catalog_contribution()?,
     ])

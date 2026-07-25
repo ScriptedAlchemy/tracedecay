@@ -309,6 +309,8 @@ pub struct RedundancySignalsV1 {
     pub call_seq_match: bool,
     pub shingle_jaccard: f64,
     pub body_vector_cosine: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_vector_cosine: Option<f64>,
     pub generic_helper_downranked: bool,
     pub body_tokens: [u64; 2],
 }
@@ -320,9 +322,19 @@ pub struct RedundancyPairV1 {
     pub ranking_score: f64,
     pub severity: String,
     pub overlap_kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub classification: Option<String>,
     pub a: RedundancyNodeV1,
     pub b: RedundancyNodeV1,
     pub signals: RedundancySignalsV1,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SemanticRedundancyGenerationV1 {
+    pub vector_generation: String,
+    pub source_generation: String,
+    pub projection_key: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -354,6 +366,8 @@ pub struct RedundancyResultV1 {
     pub ranked_by: String,
     pub scope: String,
     pub thresholds: RedundancyThresholdsV1,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_generation: Option<SemanticRedundancyGenerationV1>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

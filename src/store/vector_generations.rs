@@ -1046,11 +1046,18 @@ impl<'database> DatabaseVectorGenerationStoreV1<'database> {
         .map(ActiveVectorGenerationSnapshotV1::into_generation))
     }
 
-    pub(crate) async fn read_active_generation_snapshot_for(
+    /// Read the atomically active immutable generation without entering the
+    /// writer lane. Callers must apply their own source/projection admission.
+    pub(crate) async fn read_active_generation(
         database: &Database,
-        embedding_key: &AdmittedEmbeddingProjectionKeyV1,
-        source_generation: &CodeGenerationId,
-        source_manifest_digest: &ManifestDigest,
+    ) -> Result<Option<PublishedVectorGenerationV1>, VectorGenerationStoreErrorV1> {
+        Ok(Self::read_active_generation_snapshot(database)
+            .await?
+            .map(ActiveVectorGenerationSnapshotV1::into_generation))
+    }
+
+    async fn read_active_generation_snapshot(
+        database: &Database,
     ) -> Result<Option<ActiveVectorGenerationSnapshotV1>, VectorGenerationStoreErrorV1> {
         let mut rows = database
             .engine_conn()
@@ -1080,16 +1087,28 @@ impl<'database> DatabaseVectorGenerationStoreV1<'database> {
         let generation: PublishedVectorGenerationV1 =
             serde_json::from_str(&generation_json).map_err(storage_error)?;
         generation.validate_persisted()?;
-        if generation.embedding_key() != embedding_key
-            || generation.source_generation() != source_generation
-            || generation.source_manifest_digest() != source_manifest_digest
-        {
-            return Ok(None);
-        }
         Ok(Some(ActiveVectorGenerationSnapshotV1 {
             revision,
             generation,
         }))
+    }
+
+    pub(crate) async fn read_active_generation_snapshot_for(
+        database: &Database,
+        embedding_key: &AdmittedEmbeddingProjectionKeyV1,
+        source_generation: &CodeGenerationId,
+        source_manifest_digest: &ManifestDigest,
+    ) -> Result<Option<ActiveVectorGenerationSnapshotV1>, VectorGenerationStoreErrorV1> {
+        let Some(snapshot) = Self::read_active_generation_snapshot(database).await? else {
+            return Ok(None);
+        };
+        if snapshot.generation.embedding_key() != embedding_key
+            || snapshot.generation.source_generation() != source_generation
+            || snapshot.generation.source_manifest_digest() != source_manifest_digest
+        {
+            return Ok(None);
+        }
+        Ok(Some(snapshot))
     }
 
     pub(crate) async fn active_snapshot_is_current(

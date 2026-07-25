@@ -71,6 +71,10 @@ pub struct ArtifactInventoryRecordV1 {
     pub artifact_digest: Sha256DigestHex,
     /// Digest of canonical payload bytes, retained for audit correlation.
     pub manifest_digest: Sha256DigestHex,
+    /// Canonical manifest retained so an offline restart can re-admit an
+    /// independently selected embedding or reranker artifact by digest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest: Option<ModelArtifactManifestV1>,
     pub members: Vec<ArtifactPackageMemberV1>,
     pub state: ArtifactInventoryStateV1,
     pub recorded_at_unix: u64,
@@ -112,6 +116,46 @@ pub struct RuntimeEnvironmentV1 {
     pub available_threads: u32,
 }
 
+pub(super) const FASTEMBED_RUNTIME_FAMILY_V1: &str = "fastembed-ort";
+pub(super) const FASTEMBED_RUNTIME_BUILD_REVISION_V1: &str = "fastembed-5.17.3+ort-2.0.0-rc.12";
+
+impl RuntimeEnvironmentV1 {
+    /// Capture the runtime and host resources of this process. These values
+    /// are independent of any candidate artifact manifest.
+    #[cfg(feature = "semantic-fastembed")]
+    pub(super) fn detect_fastembed_process() -> Result<Self, SemanticCapabilityDisabledV1> {
+        let available_threads = std::thread::available_parallelism()
+            .ok()
+            .and_then(|threads| u32::try_from(threads.get()).ok())
+            .filter(|threads| *threads > 0)
+            .ok_or(SemanticCapabilityDisabledV1::ResourceCeilingExceeded)?;
+        let mut system = sysinfo::System::new_with_specifics(
+            sysinfo::RefreshKind::new().with_memory(sysinfo::MemoryRefreshKind::new().with_ram()),
+        );
+        system.refresh_memory();
+        let host_available = system.available_memory();
+        let available_resident_bytes = system.cgroup_limits().map_or(host_available, |limits| {
+            host_available.min(limits.free_memory)
+        });
+        if available_resident_bytes == 0 {
+            return Err(SemanticCapabilityDisabledV1::ResourceCeilingExceeded);
+        }
+        Ok(Self {
+            os: std::env::consts::OS.to_owned(),
+            arch: std::env::consts::ARCH.to_owned(),
+            runtime: FASTEMBED_RUNTIME_FAMILY_V1.to_owned(),
+            build_revision: FASTEMBED_RUNTIME_BUILD_REVISION_V1.to_owned(),
+            available_resident_bytes,
+            available_threads,
+        })
+    }
+
+    #[cfg(not(feature = "semantic-fastembed"))]
+    pub(super) fn detect_fastembed_process() -> Result<Self, SemanticCapabilityDisabledV1> {
+        Err(SemanticCapabilityDisabledV1::IncompatibleRuntime)
+    }
+}
+
 /// Import failures. Every variant is typed; staging is discarded or
 /// quarantined on failure and never exposed to runtime discovery.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -148,6 +192,8 @@ pub enum ArtifactImportErrorV1 {
     UnsafeStorePath,
     #[error("artifact store is busy")]
     StoreBusy,
+    #[error("artifact lease authority is ambiguous")]
+    LeaseConflict,
     #[error("artifact store operation failed")]
     StorageFailure,
 }
@@ -245,6 +291,8 @@ pub enum SemanticCapabilityDisabledV1 {
     IncompatiblePlatform,
     #[error("resource ceiling cannot be honored")]
     ResourceCeilingExceeded,
+    #[error("artifact lacks the required active runtime lease")]
+    LeaseUnavailable,
     #[error("artifact identity does not match verified inventory")]
     IdentityMismatch,
     #[error("artifact store operation failed")]
@@ -1209,6 +1257,156 @@ impl ModelArtifactStore {
         self.save_inventory_locked(&inventory)
     }
 
+    pub fn artifact_digest_for_lease(
+        &self,
+        lease_id: &str,
+        kind: ArtifactLeaseKindV1,
+        now_unix: u64,
+    ) -> Result<Option<Sha256DigestHex>, ArtifactImportErrorV1> {
+        if lease_id.trim().is_empty() {
+            return Err(ArtifactImportErrorV1::LeaseConflict);
+        }
+        let _lock = self.acquire_lock()?;
+        self.recover_locked()?;
+        let inventory = self.load_inventory_locked()?;
+        let mut matched = inventory.leases.iter().filter_map(|(digest, leases)| {
+            leases
+                .iter()
+                .any(|lease| {
+                    lease.lease_id == lease_id
+                        && lease.kind == kind
+                        && lease.expires_at_unix > now_unix
+                })
+                .then_some(digest)
+        });
+        let first = matched.next();
+        if matched.next().is_some() {
+            return Err(ArtifactImportErrorV1::LeaseConflict);
+        }
+        first
+            .map(|digest| {
+                Sha256DigestHex::new(digest.clone())
+                    .map_err(|_| ArtifactImportErrorV1::LeaseConflict)
+            })
+            .transpose()
+    }
+
+    /// Atomically activate one installed artifact and retain the prior active
+    /// artifact as the single rollback target for this lease namespace.
+    pub fn activate_artifact_with_rollback(
+        &self,
+        digest: &Sha256DigestHex,
+        active_lease_id: &str,
+        rollback_lease_id: &str,
+        now_unix: u64,
+    ) -> Result<(), ArtifactImportErrorV1> {
+        if active_lease_id.trim().is_empty()
+            || rollback_lease_id.trim().is_empty()
+            || active_lease_id == rollback_lease_id
+        {
+            return Err(ArtifactImportErrorV1::LeaseConflict);
+        }
+        let _lock = self.acquire_lock()?;
+        self.recover_locked()?;
+        let mut inventory = self.load_inventory_locked()?;
+        let record = inventory
+            .records
+            .get(&digest.to_string())
+            .ok_or(ArtifactImportErrorV1::StagingUnavailable)?;
+        if !matches!(
+            record.state,
+            ArtifactInventoryStateV1::Installed | ArtifactInventoryStateV1::RetainedForRollback
+        ) {
+            return Err(ArtifactImportErrorV1::StagingUnavailable);
+        }
+
+        let mut prior_active = None;
+        let mut prior_rollback = None;
+        for (leased_digest, leases) in &inventory.leases {
+            for lease in leases
+                .iter()
+                .filter(|lease| lease.expires_at_unix > now_unix)
+            {
+                let slot = if lease.kind == ArtifactLeaseKindV1::Active
+                    && lease.lease_id == active_lease_id
+                {
+                    Some(&mut prior_active)
+                } else if lease.kind == ArtifactLeaseKindV1::Rollback
+                    && lease.lease_id == rollback_lease_id
+                {
+                    Some(&mut prior_rollback)
+                } else {
+                    None
+                };
+                if let Some(slot) = slot {
+                    if slot
+                        .as_ref()
+                        .is_some_and(|existing: &String| existing != leased_digest)
+                    {
+                        return Err(ArtifactImportErrorV1::LeaseConflict);
+                    }
+                    *slot = Some(leased_digest.clone());
+                }
+            }
+        }
+
+        let digest_text = digest.to_string();
+        let rollback_digest = if prior_active
+            .as_ref()
+            .is_some_and(|prior| prior != &digest_text)
+        {
+            prior_active
+        } else {
+            prior_rollback.filter(|prior| prior != &digest_text)
+        }
+        .filter(|rollback_digest| {
+            inventory
+                .records
+                .get(rollback_digest)
+                .is_some_and(|record| {
+                    matches!(
+                        record.state,
+                        ArtifactInventoryStateV1::Installed
+                            | ArtifactInventoryStateV1::RetainedForRollback
+                    )
+                })
+        });
+        for leases in inventory.leases.values_mut() {
+            leases.retain(|lease| {
+                !((lease.kind == ArtifactLeaseKindV1::Active && lease.lease_id == active_lease_id)
+                    || (lease.kind == ArtifactLeaseKindV1::Rollback
+                        && lease.lease_id == rollback_lease_id))
+            });
+        }
+        inventory.leases.retain(|_, leases| !leases.is_empty());
+        inventory
+            .leases
+            .entry(digest_text)
+            .or_default()
+            .push(ArtifactLeaseV1 {
+                lease_id: active_lease_id.to_owned(),
+                kind: ArtifactLeaseKindV1::Active,
+                expires_at_unix: u64::MAX,
+            });
+        if let Some(rollback_digest) = rollback_digest {
+            let rollback_record = inventory
+                .records
+                .get_mut(&rollback_digest)
+                .ok_or(ArtifactImportErrorV1::LeaseConflict)?;
+            rollback_record.state = ArtifactInventoryStateV1::RetainedForRollback;
+            inventory
+                .leases
+                .entry(rollback_digest)
+                .or_default()
+                .push(ArtifactLeaseV1 {
+                    lease_id: rollback_lease_id.to_owned(),
+                    kind: ArtifactLeaseKindV1::Rollback,
+                    expires_at_unix: u64::MAX,
+                });
+        }
+        self.save_inventory_locked(&inventory)
+    }
+
     pub fn acquire_daemon_gc_lease(
         &self,
         lease_id: impl Into<String>,
@@ -1233,7 +1431,18 @@ impl ModelArtifactStore {
         digest: &Sha256DigestHex,
         manifest: &ModelArtifactManifestV1,
         env: &RuntimeEnvironmentV1,
-        _now_unix: u64,
+        now_unix: u64,
+    ) -> Result<AdmittedArtifactV1, SemanticCapabilityDisabledV1> {
+        self.admit_for_runtime_with_required_lease(digest, manifest, env, None, now_unix)
+    }
+
+    fn admit_for_runtime_with_required_lease(
+        &self,
+        digest: &Sha256DigestHex,
+        manifest: &ModelArtifactManifestV1,
+        env: &RuntimeEnvironmentV1,
+        required_lease: Option<(&str, ArtifactLeaseKindV1)>,
+        now_unix: u64,
     ) -> Result<AdmittedArtifactV1, SemanticCapabilityDisabledV1> {
         self.verify_manifest(manifest)
             .map_err(|_| SemanticCapabilityDisabledV1::IdentityMismatch)?;
@@ -1249,6 +1458,20 @@ impl ModelArtifactStore {
             .records
             .get(&digest.to_string())
             .ok_or(SemanticCapabilityDisabledV1::MissingArtifact)?;
+        if let Some((lease_id, kind)) = required_lease
+            && !inventory
+                .leases
+                .get(&digest.to_string())
+                .is_some_and(|leases| {
+                    leases.iter().any(|lease| {
+                        lease.lease_id == lease_id
+                            && lease.kind == kind
+                            && lease.expires_at_unix > now_unix
+                    })
+                })
+        {
+            return Err(SemanticCapabilityDisabledV1::LeaseUnavailable);
+        }
         match record.state {
             ArtifactInventoryStateV1::Installed | ArtifactInventoryStateV1::RetainedForRollback => {
             }
@@ -1283,6 +1506,55 @@ impl ModelArtifactStore {
             manifest: manifest.clone(),
             source: Some(Arc::new(AdmittedArtifactSourceV1 { directory })),
         })
+    }
+
+    /// Re-admit an installed artifact from its durable canonical manifest and
+    /// caller-supplied process evidence. Legacy records without that manifest
+    /// remain unavailable rather than reconstructing authority from filenames
+    /// or member rows.
+    pub(super) fn admit_for_runtime_by_digest(
+        &self,
+        digest: &Sha256DigestHex,
+        env: &RuntimeEnvironmentV1,
+    ) -> Result<AdmittedArtifactV1, SemanticCapabilityDisabledV1> {
+        let manifest = {
+            let inventory = self
+                .inventory()
+                .map_err(|_| SemanticCapabilityDisabledV1::StorageFailure)?;
+            inventory
+                .records
+                .get(&digest.to_string())
+                .and_then(|record| record.manifest.clone())
+                .ok_or(SemanticCapabilityDisabledV1::MissingArtifact)?
+        };
+        self.admit_for_runtime(digest, &manifest, env, 0)
+    }
+
+    pub(super) fn admit_leased_for_runtime_by_digest(
+        &self,
+        digest: &Sha256DigestHex,
+        env: &RuntimeEnvironmentV1,
+        lease_id: &str,
+        kind: ArtifactLeaseKindV1,
+        now_unix: u64,
+    ) -> Result<AdmittedArtifactV1, SemanticCapabilityDisabledV1> {
+        let manifest = {
+            let inventory = self
+                .inventory()
+                .map_err(|_| SemanticCapabilityDisabledV1::StorageFailure)?;
+            inventory
+                .records
+                .get(&digest.to_string())
+                .and_then(|record| record.manifest.clone())
+                .ok_or(SemanticCapabilityDisabledV1::MissingArtifact)?
+        };
+        self.admit_for_runtime_with_required_lease(
+            digest,
+            &manifest,
+            env,
+            Some((lease_id, kind)),
+            now_unix,
+        )
     }
 
     /// Garbage-collect unreferenced artifacts past the grace window.
@@ -1376,6 +1648,7 @@ impl ModelArtifactStore {
         ArtifactInventoryRecordV1 {
             artifact_digest: manifest.artifact_identity_digest(),
             manifest_digest: manifest.canonical_digest(),
+            manifest: Some(manifest.clone()),
             members: manifest.payload.members.clone(),
             state,
             recorded_at_unix,
@@ -3171,6 +3444,91 @@ mod tests {
                 .unwrap_err(),
             SemanticCapabilityDisabledV1::ResourceCeilingExceeded
         ));
+    }
+
+    #[test]
+    fn digest_readmission_rejects_runtime_evidence_mismatch() {
+        let (_dir, store) = store();
+        let (_manifest, digest) = import_ok(&store, &model_bytes());
+        let mut runtime = env();
+        runtime.build_revision = "different-runtime-build".to_owned();
+
+        assert_eq!(
+            store
+                .admit_for_runtime_by_digest(&digest, &runtime)
+                .unwrap_err(),
+            SemanticCapabilityDisabledV1::IncompatibleRuntime
+        );
+    }
+
+    #[cfg(feature = "semantic-fastembed")]
+    #[test]
+    fn detected_fastembed_environment_uses_process_evidence() {
+        let runtime = RuntimeEnvironmentV1::detect_fastembed_process().unwrap();
+
+        assert_eq!(runtime.os, std::env::consts::OS);
+        assert_eq!(runtime.arch, std::env::consts::ARCH);
+        assert_eq!(runtime.runtime, FASTEMBED_RUNTIME_FAMILY_V1);
+        assert_eq!(runtime.build_revision, FASTEMBED_RUNTIME_BUILD_REVISION_V1);
+        assert!(runtime.available_resident_bytes > 0);
+        assert!(runtime.available_threads > 0);
+    }
+
+    #[test]
+    fn digest_readmission_rejects_insufficient_process_memory() {
+        let (_dir, store) = store();
+        let (_manifest, digest) = import_ok(&store, &model_bytes());
+        let mut runtime = env();
+        runtime.available_resident_bytes = 1;
+
+        assert_eq!(
+            store
+                .admit_for_runtime_by_digest(&digest, &runtime)
+                .unwrap_err(),
+            SemanticCapabilityDisabledV1::ResourceCeilingExceeded
+        );
+    }
+
+    #[test]
+    fn digest_readmission_rejects_insufficient_process_threads() {
+        let (_dir, store) = store();
+        let (_manifest, digest) = import_ok(&store, &model_bytes());
+        let mut runtime = env();
+        runtime.available_threads = 1;
+
+        assert_eq!(
+            store
+                .admit_for_runtime_by_digest(&digest, &runtime)
+                .unwrap_err(),
+            SemanticCapabilityDisabledV1::ResourceCeilingExceeded
+        );
+    }
+
+    #[test]
+    fn lease_rotation_never_resurrects_a_revoked_prior_active_artifact() {
+        let (_dir, store) = store();
+        let (_first_manifest, first) = import_ok(&store, &model_bytes());
+        store
+            .activate_artifact_with_rollback(&first, "active", "rollback", NOW)
+            .unwrap();
+        store.revoke_artifact(&first, NOW + 1).unwrap();
+        let (_second_manifest, second) = import_ok(&store, b"second verified model");
+
+        store
+            .activate_artifact_with_rollback(&second, "active", "rollback", NOW + 2)
+            .unwrap();
+
+        let inventory = store.inventory().unwrap();
+        assert_eq!(
+            inventory.records.get(&first.to_string()).unwrap().state,
+            ArtifactInventoryStateV1::Revoked
+        );
+        assert_eq!(
+            store
+                .artifact_digest_for_lease("rollback", ArtifactLeaseKindV1::Rollback, NOW + 2)
+                .unwrap(),
+            None
+        );
     }
 
     #[test]

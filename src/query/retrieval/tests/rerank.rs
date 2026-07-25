@@ -184,6 +184,39 @@ fn reranks_only_the_bounded_approximate_prefix_and_bypasses_exact() {
 }
 
 #[test]
+fn mounted_trait_object_authorities_execute_the_bounded_runtime() {
+    let request = request();
+    let policy = rerank_policy();
+    let before = ranked_candidates();
+    let mut views = Views::default();
+    let executor = ReverseExecutor::default();
+    let views: &mut dyn EphemeralRerankViewSourceV1 = &mut views;
+    let executor: &dyn DeterministicLocalRerankExecutorV1 = &executor;
+    let control = Control {
+        elapsed: Cell::new(1),
+        cancelled: false,
+    };
+
+    let outcome =
+        BoundedRerankRuntimeV1::new(views, executor).rerank(&request, &policy, &before, &control);
+
+    assert_eq!(outcome.public_status, OptionalStagePublicStatus::Complete);
+    assert_eq!(
+        outcome
+            .ordered_candidates
+            .iter()
+            .map(|candidate| candidate.candidate.anchor_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "anchor.exact",
+            "anchor.approx-b",
+            "anchor.approx-a",
+            "anchor.approx-c"
+        ]
+    );
+}
+
+#[test]
 fn missing_view_preserves_the_exact_pre_rerank_bytes() {
     let request = request();
     let policy = rerank_policy();

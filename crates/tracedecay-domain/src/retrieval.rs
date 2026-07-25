@@ -18,6 +18,7 @@ use std::fmt;
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
+use crate::code_intelligence::{CodeGenerationId, ProjectionKeyV1, VectorGenerationIdV1};
 use crate::research::id::{PrivacyDomainId, RetrievalAnchorId};
 use crate::research::time::UtcMicros;
 use crate::research::watermark::VectorWatermark;
@@ -1151,6 +1152,43 @@ pub struct HydrationReceipt {
 /// bound set or rejects, it never recomputes).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+pub struct SemanticRetrievalContinuationV1 {
+    pub profile_id: FusionProfileId,
+    pub code_generation: CodeGenerationId,
+    pub vector_generation: VectorGenerationIdV1,
+    pub projection_key: ProjectionKeyV1,
+    pub candidate_set_digest: CandidateSetDigest,
+    pub public_lane_statuses: BTreeMap<RetrieverKind, PublicRetrieverStatus>,
+    pub lane_checkpoints: Vec<RetrieverContinuation>,
+    pub ranking_revision: RankingRevision,
+    pub next_ordinal: u32,
+}
+
+impl SemanticRetrievalContinuationV1 {
+    pub fn validate(&self) -> Result<(), RetrievalContractError> {
+        if !self
+            .public_lane_statuses
+            .contains_key(&RetrieverKind::Semantic)
+        {
+            return Err(RetrievalContractError::InvalidCursorBinding {
+                field: "semantic lane status",
+            });
+        }
+        if self
+            .lane_checkpoints
+            .iter()
+            .any(|checkpoint| !self.public_lane_statuses.contains_key(&checkpoint.lane))
+        {
+            return Err(RetrievalContractError::InvalidCursorBinding {
+                field: "semantic lane checkpoint without admitted lane status",
+            });
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct RetrievalCursor {
     pub key_id: RetrievalCursorKeyId,
     pub key_epoch: u64,
@@ -1166,6 +1204,10 @@ pub struct RetrievalCursor {
     pub ranking_revision: RankingRevision,
     /// First final ordinal in the next page of the frozen candidate set.
     pub next_ordinal: u32,
+    /// Optional PR10 continuation authenticated by the same PR9 cursor key.
+    /// Its absence preserves the canonical PR9 cursor bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic: Option<SemanticRetrievalContinuationV1>,
     pub expiry: UtcMicros,
     pub signature: QueryMac,
 }
@@ -1190,6 +1232,9 @@ impl RetrievalCursor {
             return Err(RetrievalContractError::InvalidCursorBinding {
                 field: "lane checkpoint without admitted lane status",
             });
+        }
+        if let Some(semantic) = &self.semantic {
+            semantic.validate()?;
         }
         Ok(())
     }

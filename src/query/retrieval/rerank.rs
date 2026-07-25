@@ -120,15 +120,15 @@ pub struct BoundedRerankOutcomeV1 {
 }
 
 /// Executes the optional rerank stage without retaining authorized views.
-pub struct BoundedRerankRuntimeV1<'a, S, E> {
+pub struct BoundedRerankRuntimeV1<'a, S: ?Sized, E: ?Sized> {
     views: &'a mut S,
     executor: &'a E,
 }
 
 impl<'a, S, E> BoundedRerankRuntimeV1<'a, S, E>
 where
-    S: EphemeralRerankViewSourceV1,
-    E: DeterministicLocalRerankExecutorV1,
+    S: EphemeralRerankViewSourceV1 + ?Sized,
+    E: DeterministicLocalRerankExecutorV1 + ?Sized,
 {
     pub fn new(views: &'a mut S, executor: &'a E) -> Self {
         Self { views, executor }

@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
-use tracedecay_domain::UtcMicros;
+use tracedecay_domain::{SessionId, UtcMicros};
 use tracedecay_hooks::{
     HookConfigurationFileReaderV1, HookConfigurationReadOutcomeV1, HookConfigurationSubscriberV1,
     HookEventEnvelopeV2, HookHostV1, HookScopeBindingV1, HookSpoolAckDispositionV1, HookSpoolAckV1,
@@ -28,7 +28,9 @@ use tracedecay_hooks::{
     validate_replay_batch,
 };
 
-use crate::mcp::tools::handlers::{HookV2AdmissionOutcomeV1, admit_hook_v2_envelope};
+use crate::mcp::tools::handlers::{
+    HookV2AdmissionOutcomeV1, admit_hook_v2_envelope, hook_v2_pending_work_envelopes,
+};
 
 /// How often a project's spools are drained after the project-open pass.
 const REPLAY_INTERVAL: Duration = Duration::from_secs(30);
@@ -255,11 +257,74 @@ fn log_tombstone(
     );
 }
 
+async fn admit_replayed_envelope_with_authoritative_session<R, RF, A, AF>(
+    envelope: HookEventEnvelopeV2,
+    resolve_session: R,
+    admit: A,
+) -> HookV2AdmissionOutcomeV1
+where
+    R: FnOnce([u8; 16], [u8; 16], [u8; 32]) -> RF,
+    RF: Future<Output = Option<SessionId>>,
+    A: FnOnce(HookEventEnvelopeV2, Option<SessionId>) -> AF,
+    AF: Future<Output = HookV2AdmissionOutcomeV1>,
+{
+    let native_session_id = resolve_session(
+        envelope.project_id,
+        envelope.worktree_id,
+        envelope.protected_session_id,
+    )
+    .await;
+    admit(envelope, native_session_id).await
+}
+
 async fn drain_all_hosts(graph: &crate::tracedecay::TraceDecay, data_root: &Path) {
     for host in crate::hooks::HOOK_V2_BOUND_HOSTS {
         let now = hook_replay_now();
+        for envelope in hook_v2_pending_work_envelopes(data_root, *host, now) {
+            let _ = admit_replayed_envelope_with_authoritative_session(
+                envelope,
+                |project_id, worktree_id, protected_session_id| async move {
+                    crate::daemon::context_scout_lifecycle::lookup_registered_context_scout_native_session(
+                        project_id,
+                        worktree_id,
+                        protected_session_id,
+                    )
+                    .await
+                },
+                |envelope, native_session_id| async move {
+                    admit_hook_v2_envelope(
+                        graph,
+                        &envelope,
+                        native_session_id,
+                        hook_replay_now(),
+                    )
+                    .await
+                },
+            )
+            .await;
+        }
         let report = drain_host_spool_once(data_root, *host, now, |envelope| async move {
-            admit_hook_v2_envelope(graph, &envelope, None, hook_replay_now()).await
+            admit_replayed_envelope_with_authoritative_session(
+                envelope,
+                |project_id, worktree_id, protected_session_id| async move {
+                    crate::daemon::context_scout_lifecycle::lookup_registered_context_scout_native_session(
+                        project_id,
+                        worktree_id,
+                        protected_session_id,
+                    )
+                    .await
+                },
+                |envelope, native_session_id| async move {
+                    admit_hook_v2_envelope(
+                        graph,
+                        &envelope,
+                        native_session_id,
+                        hook_replay_now(),
+                    )
+                    .await
+                },
+            )
+            .await
         })
         .await;
         if let Some(report) = report
@@ -292,6 +357,13 @@ fn hook_replay_now() -> UtcMicros {
 fn registered_replay_roots() -> &'static StdMutex<BTreeSet<PathBuf>> {
     static ROOTS: OnceLock<StdMutex<BTreeSet<PathBuf>>> = OnceLock::new();
     ROOTS.get_or_init(|| StdMutex::new(BTreeSet::new()))
+}
+
+#[cfg(test)]
+pub(crate) fn hook_v2_replay_consumer_registered(data_root: &Path) -> bool {
+    registered_replay_roots()
+        .lock()
+        .is_ok_and(|roots| roots.contains(data_root))
 }
 
 /// Start the per-project replay consumer exactly once per hook data root.
@@ -573,6 +645,74 @@ mod tests {
 
         assert!(report.binding_unavailable);
         assert_eq!(pending_records(root.path(), now), 1);
+    }
+
+    #[tokio::test]
+    async fn live_failure_spools_then_replay_preserves_lifecycle_for_suggestion() {
+        let root = TestRoot::new("lifecycle-suggestion");
+        let now = UtcMicros(1_000);
+        let binding = binding(7);
+        publish_binding(root.path(), &binding, now);
+        let mut edit = envelope(9, &binding);
+        edit.protected_session_id =
+            crate::hooks::hook_v2_protected_session_id_for_native("session.native.replay");
+        edit.event = HookEventV2::SavedEdit {
+            file_id: [8; 16],
+            changed_range_count: 1,
+        };
+        // The synchronous admission failed, so the host retained only the
+        // validated, payload-free envelope for daemon replay.
+        spool_envelopes(root.path(), &binding, &[edit], now);
+        let suggestions = Arc::new(StdMutex::new(Vec::new()));
+        let captured = Arc::clone(&suggestions);
+
+        let report = drain_host_spool_once(root.path(), HOST, now, move |envelope| {
+            let captured = Arc::clone(&captured);
+            async move {
+                admit_replayed_envelope_with_authoritative_session(
+                    envelope,
+                    |project_id, worktree_id, protected_session_id| async move {
+                        assert_eq!(project_id, [1; 16]);
+                        assert_eq!(worktree_id, [3; 16]);
+                        assert_eq!(
+                            protected_session_id,
+                            crate::hooks::hook_v2_protected_session_id_for_native(
+                                "session.native.replay"
+                            )
+                        );
+                        Some(SessionId::new("session.native.replay".to_owned()).unwrap())
+                    },
+                    |_, native_session_id| async move {
+                        if native_session_id.as_ref().map(SessionId::as_str)
+                            == Some("session.native.replay")
+                        {
+                            captured
+                                .lock()
+                                .unwrap()
+                                .push("replayed lifecycle suggestion");
+                        }
+                        HookV2AdmissionOutcomeV1::Admitted {
+                            orchestration:
+                                crate::daemon::Pr13HookOrchestrationAdmissionV1::Enqueued,
+                            ready_guidance: serde_json::json!({
+                                "suggestion": "replayed lifecycle suggestion"
+                            }),
+                            feedback_notice: serde_json::Value::Null,
+                        }
+                    },
+                )
+                .await
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(report.committed, 1);
+        assert_eq!(
+            suggestions.lock().unwrap().as_slice(),
+            ["replayed lifecycle suggestion"]
+        );
+        assert_eq!(pending_records(root.path(), now), 0);
     }
 
     #[tokio::test]

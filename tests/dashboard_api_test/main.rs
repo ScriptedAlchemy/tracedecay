@@ -12,6 +12,7 @@ mod dashboard_api_support;
 
 mod analytics;
 mod api;
+mod assets;
 mod automation;
 mod automation_config;
 mod automation_jobs;
@@ -23,3 +24,4 @@ mod memory_curation;
 mod projects;
 mod savings;
 mod settings;
+mod storage;

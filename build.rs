@@ -2,12 +2,11 @@ use std::hash::{Hash, Hasher};
 use std::process::Command;
 use std::{collections::hash_map::DefaultHasher, fmt::Write as _, fs, path::Path};
 
-// Prebuilt dashboard bundles embedded by `src/dashboard/assets.rs`. The
-// dashboard frontend is being rewritten from scratch; until the new UI lands,
-// `dashboard/*/dist/` ships committed placeholder bundles (a minimal
-// "rebuild in progress" shell). The build no longer shells out to npm/node —
-// it only verifies the placeholder bundles exist and hashes them into the
-// asset stamp used for HTTP caching/ETags.
+// Legacy plugin bundles embedded by `src/dashboard/assets.rs` for `/legacy`
+// and Hermes wrapper compatibility. The production `/` route uses the
+// single-app `dashboard/app-dist` manifest generated below. These committed
+// legacy bundles are only verified and hashed here; the source-backed
+// single-app build is handled by `build_and_embed_dashboard_app`.
 const DASHBOARD_ASSET_FILES: &[&str] = &[
     "dashboard/shell/dist/shell.js",
     "dashboard/shell/dist/shell.css",

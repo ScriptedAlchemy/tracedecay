@@ -390,6 +390,7 @@ async fn build_state_inner(
     automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
     automation_writer: DashboardAutomationWriter,
     doctor_report_reader: Option<DoctorReportReader>,
+    doctor_remediation_dispatcher: Option<doctor_remediation_api::DoctorRemediationDispatcherV1>,
 ) -> Result<DashboardState> {
     let (mem_db_path, mem_db) = resolve_project_memory_store(cg);
     let memory_owner = project_memory_owner(cg)?;
@@ -436,7 +437,7 @@ async fn build_state_inner(
         automation_scheduler_reconciler,
         automation_writer,
         doctor_report_reader,
-        doctor_remediation_dispatcher: None,
+        doctor_remediation_dispatcher,
     };
     // Pre-count non-usage messages in the background so the first Savings
     // tab paint doesn't pay the initial BPE pass over the session store.
@@ -460,6 +461,7 @@ pub(crate) async fn build_state(cg: &TraceDecay) -> Result<DashboardState> {
         None,
         direct_dashboard_automation_writer(),
         None,
+        None,
     )
     .await
 }
@@ -472,6 +474,7 @@ pub(crate) async fn build_state_with_automation_reconciler(
     automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
     automation_writer: DashboardAutomationWriter,
     doctor_report_reader: Option<DoctorReportReader>,
+    doctor_remediation_dispatcher: Option<doctor_remediation_api::DoctorRemediationDispatcherV1>,
 ) -> Result<DashboardState> {
     build_state_inner(
         cg.as_ref(),
@@ -483,6 +486,7 @@ pub(crate) async fn build_state_with_automation_reconciler(
         automation_scheduler_reconciler,
         automation_writer,
         doctor_report_reader,
+        doctor_remediation_dispatcher,
     )
     .await
 }
@@ -506,6 +510,7 @@ pub(crate) async fn build_selected_project_state(
         // The active reader is bound to the active project's exact scope.
         // Never reuse it for a selected project without a separately admitted
         // daemon owner for that project's identity.
+        None,
         None,
     )
     .await
@@ -639,6 +644,7 @@ where
         options.warm_token_counts,
         None,
         direct_dashboard_automation_writer(),
+        None,
         None,
     )
     .await?;
@@ -1322,6 +1328,12 @@ mod authority_tests {
                 )
             })
         });
+        let doctor_dispatcher = DoctorRemediationDispatcherV1::new(
+            Arc::new(|_| Box::pin(async { Vec::new() })),
+            Arc::new(|_| {
+                Box::pin(async { Err(DoctorRemediationDispatchErrorV1::OwnerUnavailable) })
+            }),
+        );
 
         let state = build_state_with_automation_reconciler(
             Arc::clone(&cg),
@@ -1331,6 +1343,7 @@ mod authority_tests {
             None,
             direct_dashboard_automation_writer(),
             Some(Arc::clone(&doctor_reader)),
+            Some(doctor_dispatcher),
         )
         .await
         .expect("dashboard state");
@@ -1346,6 +1359,7 @@ mod authority_tests {
                 .expect("admitted Doctor reader"),
             &doctor_reader,
         ));
+        assert!(state.doctor_remediation_dispatcher.is_some());
     }
 
     #[tokio::test]

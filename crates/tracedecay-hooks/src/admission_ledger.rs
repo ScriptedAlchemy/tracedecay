@@ -22,7 +22,7 @@
 //! that window and no further — a replay older than the window is admitted
 //! again rather than silently believed to be new forever.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -47,6 +47,7 @@ const CHECKSUM_PREFIX_BYTES: usize = 8;
 const RECORD_BODY_BYTES: usize = IDENTITY_BYTES + DIGEST_BYTES + 8;
 const RECORD_BYTES: usize = RECORD_BODY_BYTES + CHECKSUM_PREFIX_BYTES;
 const RECORDS_FILE: &str = "admissions.v1.bin";
+const COMPLETIONS_FILE: &str = "admission-work-completions.v1.json";
 const DIRECTORY_POLICY: DirectorySyncPolicy = DirectorySyncPolicy::Strict;
 
 /// Checked-in ledger bounds. Callers may narrow these but never widen them.
@@ -91,6 +92,14 @@ pub enum HookAdmissionDecisionV1 {
     ExactDuplicate,
     /// The same identity already carries *different* bytes.
     Conflict,
+}
+
+/// Durable ledger decision plus the stable order assigned to its entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HookAdmissionLedgerReceiptV1 {
+    pub decision: HookAdmissionDecisionV1,
+    pub order: u64,
+    pub work_completed: bool,
 }
 
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
@@ -141,6 +150,7 @@ pub struct HookAdmissionLedgerV1 {
     host: HookHostV1,
     limits: HookAdmissionLedgerLimitsV1,
     entries: BTreeMap<[u8; IDENTITY_BYTES], LedgerEntry>,
+    completed_work: BTreeSet<[u8; IDENTITY_BYTES]>,
     next_order: u64,
 }
 
@@ -159,11 +169,13 @@ impl HookAdmissionLedgerV1 {
         ensure_header(&path)?;
         let bytes = read_bounded(&path, limits.max_file_bytes())?.unwrap_or_default();
         let (scanned, truncated_tail_bytes) = scan_records(&bytes);
+        let completions_existed = completions_path(&root).is_file();
         let mut ledger = Self {
             root,
             host,
             limits,
             entries: BTreeMap::new(),
+            completed_work: BTreeSet::new(),
             next_order: 0,
         };
         let mut dropped_expired_records = 0u32;
@@ -186,6 +198,17 @@ impl HookAdmissionLedgerV1 {
                 },
             );
         }
+        ledger.completed_work = if completions_existed {
+            read_work_completions(&ledger.root, limits.max_records)?
+                .into_iter()
+                .filter(|identity| ledger.entries.contains_key(identity))
+                .collect()
+        } else {
+            // Records written before the durable producer-work outbox existed
+            // were already treated as complete. Preserve that upgrade
+            // invariant instead of redriving historical admissions.
+            ledger.entries.keys().copied().collect()
+        };
         let dropped_overflow_records = ledger.trim_to(limits.max_records as usize);
         if truncated_tail_bytes > 0 {
             shared_truncate_file(
@@ -200,6 +223,8 @@ impl HookAdmissionLedgerV1 {
             || ledger.entries.len() < ledger.next_order as usize
         {
             ledger.rewrite()?;
+        } else if !completions_existed {
+            ledger.write_work_completions()?;
         }
         let report = HookAdmissionLedgerOpenReportV1 {
             live_records: ledger.entries.len() as u32,
@@ -226,6 +251,17 @@ impl HookAdmissionLedgerV1 {
         envelope: &HookEventEnvelopeV2,
         now: UtcMicros,
     ) -> Result<HookAdmissionDecisionV1, HookAdmissionLedgerError> {
+        self.admit_with_receipt(envelope, now)
+            .map(|receipt| receipt.decision)
+    }
+
+    /// Records one attempt and exposes the durable entry order. Exact
+    /// duplicates reuse the original order, including after ledger reopen.
+    pub fn admit_with_receipt(
+        &mut self,
+        envelope: &HookEventEnvelopeV2,
+        now: UtcMicros,
+    ) -> Result<HookAdmissionLedgerReceiptV1, HookAdmissionLedgerError> {
         let identity = envelope.event_id;
         if identity == [0; IDENTITY_BYTES] {
             return Err(HookAdmissionLedgerError::InvalidIdentity);
@@ -235,9 +271,17 @@ impl HookAdmissionLedgerV1 {
             if is_expired(existing.admitted_at, now, self.limits.max_age_micros) {
                 self.entries.remove(&identity);
             } else if existing.digest == digest {
-                return Ok(HookAdmissionDecisionV1::ExactDuplicate);
+                return Ok(HookAdmissionLedgerReceiptV1 {
+                    decision: HookAdmissionDecisionV1::ExactDuplicate,
+                    order: existing.order,
+                    work_completed: self.completed_work.contains(&identity),
+                });
             } else {
-                return Ok(HookAdmissionDecisionV1::Conflict);
+                return Ok(HookAdmissionLedgerReceiptV1 {
+                    decision: HookAdmissionDecisionV1::Conflict,
+                    order: existing.order,
+                    work_completed: self.completed_work.contains(&identity),
+                });
             }
         }
         if self.entries.len() as u32 >= self.limits.max_records {
@@ -260,7 +304,31 @@ impl HookAdmissionLedgerV1 {
                 order,
             },
         );
-        Ok(HookAdmissionDecisionV1::Admitted)
+        Ok(HookAdmissionLedgerReceiptV1 {
+            decision: HookAdmissionDecisionV1::Admitted,
+            order,
+            work_completed: false,
+        })
+    }
+
+    /// Mark producer work complete only after the admitted worker returns.
+    /// Exact duplicate redrives remain pending until this fsync succeeds.
+    pub fn mark_work_completed(
+        &mut self,
+        envelope: &HookEventEnvelopeV2,
+    ) -> Result<bool, HookAdmissionLedgerError> {
+        let identity = envelope.event_id;
+        let Some(entry) = self.entries.get(&identity) else {
+            return Err(HookAdmissionLedgerError::InvalidIdentity);
+        };
+        if entry.digest != hook_admission_digest(envelope)? {
+            return Err(HookAdmissionLedgerError::InvalidIdentity);
+        }
+        if !self.completed_work.insert(identity) {
+            return Ok(false);
+        }
+        self.write_work_completions()?;
+        Ok(true)
     }
 
     /// Drop entries older than the age bound. Returns how many were removed.
@@ -269,6 +337,8 @@ impl HookAdmissionLedgerV1 {
         let max_age = self.limits.max_age_micros;
         self.entries
             .retain(|_, entry| !is_expired(entry.admitted_at, now, max_age));
+        self.completed_work
+            .retain(|identity| self.entries.contains_key(identity));
         let removed = before.saturating_sub(self.entries.len()) as u32;
         if removed > 0 {
             self.rewrite()?;
@@ -293,6 +363,7 @@ impl HookAdmissionLedgerV1 {
         let dropped = ordered.len().saturating_sub(retained);
         for (_, identity) in ordered.into_iter().take(dropped) {
             self.entries.remove(&identity);
+            self.completed_work.remove(&identity);
         }
         dropped as u32
     }
@@ -323,8 +394,38 @@ impl HookAdmissionLedgerV1 {
             &bytes,
             DIRECTORY_POLICY,
         )
+        .map_err(|_| HookAdmissionLedgerError::Io)?;
+        self.write_work_completions()
+    }
+
+    fn write_work_completions(&self) -> Result<(), HookAdmissionLedgerError> {
+        let bytes = canonical_json_bytes(&self.completed_work.iter().copied().collect::<Vec<_>>())
+            .map_err(|_| HookAdmissionLedgerError::RecordUnencodable)?;
+        shared_atomic_write(
+            &completions_path(&self.root),
+            "hook-admission-work-completions",
+            &bytes,
+            DIRECTORY_POLICY,
+        )
         .map_err(|_| HookAdmissionLedgerError::Io)
     }
+}
+
+fn completions_path(root: &Path) -> PathBuf {
+    root.join(COMPLETIONS_FILE)
+}
+
+fn read_work_completions(
+    root: &Path,
+    max_records: u32,
+) -> Result<Vec<[u8; IDENTITY_BYTES]>, HookAdmissionLedgerError> {
+    let maximum = (max_records as usize)
+        .saturating_mul(IDENTITY_BYTES.saturating_mul(4).saturating_add(8))
+        .saturating_add(2);
+    let Some(bytes) = read_bounded(&completions_path(root), maximum)? else {
+        return Ok(Vec::new());
+    };
+    serde_json::from_slice(&bytes).map_err(|_| HookAdmissionLedgerError::Io)
 }
 
 fn is_expired(admitted_at: UtcMicros, now: UtcMicros, max_age_micros: i64) -> bool {
@@ -548,6 +649,62 @@ mod tests {
             reopened.admit(&envelope(9, 6), UtcMicros(6)).unwrap(),
             HookAdmissionDecisionV1::Conflict
         );
+    }
+
+    #[test]
+    fn durable_receipt_order_is_successive_and_survives_duplicate_reopen() {
+        let root = TestDir::new("ledger-receipt-order");
+        let first_order;
+        {
+            let mut ledger = open(root.path(), UtcMicros(1));
+            let first = ledger
+                .admit_with_receipt(&envelope(9, 5), UtcMicros(2))
+                .unwrap();
+            let second = ledger
+                .admit_with_receipt(&envelope(10, 5), UtcMicros(3))
+                .unwrap();
+            assert_eq!(first.decision, HookAdmissionDecisionV1::Admitted);
+            assert_eq!(second.decision, HookAdmissionDecisionV1::Admitted);
+            assert_eq!(second.order, first.order + 1);
+            first_order = first.order;
+        }
+
+        let mut reopened = open(root.path(), UtcMicros(4));
+        let duplicate = reopened
+            .admit_with_receipt(&envelope(9, 5), UtcMicros(5))
+            .unwrap();
+        assert_eq!(duplicate.decision, HookAdmissionDecisionV1::ExactDuplicate);
+        assert_eq!(duplicate.order, first_order);
+    }
+
+    #[test]
+    fn pending_producer_work_redrives_until_completion_survives_reopen() {
+        let root = TestDir::new("ledger-work-completion");
+        let admitted = envelope(9, 5);
+        {
+            let mut ledger = open(root.path(), UtcMicros(1));
+            let first = ledger
+                .admit_with_receipt(&admitted, UtcMicros(2))
+                .unwrap();
+            assert!(!first.work_completed);
+        }
+
+        {
+            let mut restarted = open(root.path(), UtcMicros(3));
+            let duplicate = restarted
+                .admit_with_receipt(&admitted, UtcMicros(4))
+                .unwrap();
+            assert_eq!(duplicate.decision, HookAdmissionDecisionV1::ExactDuplicate);
+            assert!(!duplicate.work_completed);
+            assert!(restarted.mark_work_completed(&admitted).unwrap());
+        }
+
+        let mut completed = open(root.path(), UtcMicros(5));
+        let duplicate = completed
+            .admit_with_receipt(&admitted, UtcMicros(6))
+            .unwrap();
+        assert!(duplicate.work_completed);
+        assert!(!completed.mark_work_completed(&admitted).unwrap());
     }
 
     #[test]

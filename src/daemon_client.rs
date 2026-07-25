@@ -616,6 +616,18 @@ impl DaemonInvocationClient {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn for_connection_for_test(
+        connection: crate::daemon::DaemonConnection,
+        handshake: crate::daemon::DaemonHandshake,
+    ) -> Self {
+        Self {
+            connection,
+            handshake,
+            state: Arc::new(AsyncMutex::new(None)),
+        }
+    }
+
     pub(crate) async fn invoke(
         &self,
         request: crate::daemon::DaemonInvocationRequest,

@@ -9,7 +9,8 @@ use tracedecay_application::doctor::{
     DoctorFamilyConsultationV1, DoctorFamilyUnavailableReasonV1, DoctorFindingFamilyV1,
     DoctorFindingV1, DoctorOwningOperationRefV1, DoctorRemediationKindV1, DoctorRemediationRefV1,
     DoctorStorageFamilyReadV1, DoctorStorageFindingKindV1, DoctorStorageFindingV1,
-    HostConformanceV1, HostIntegrationReadV1, RuntimeHealthReadV1, RuntimeLivenessV1,
+    HostConformanceV1, HostIntegrationReadV1, LanguageServerReadV1, LanguageServerStateV1,
+    ObservabilityReadV1, ObservabilityStateV1, RuntimeHealthReadV1, RuntimeLivenessV1,
 };
 use tracedecay_application::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
@@ -345,6 +346,43 @@ async fn code_index_adapter_returns_seeded_read() {
     assert_eq!(adapter.code_index_mount(&ctx).await, read);
 }
 
+// --- Language-server and observability mappers ------------------------------
+
+#[test]
+fn language_server_engine_states_preserve_live_degradation() {
+    use crate::diagnostics::lsp::broker::EngineState;
+
+    assert_eq!(
+        language_server_read_from_engine_states([]),
+        LanguageServerReadV1::Absent
+    );
+    assert_eq!(
+        language_server_read_from_engine_states([EngineState::Ready]),
+        LanguageServerReadV1::Observed {
+            state: LanguageServerStateV1::Ready,
+            coverage: DoctorCoverageCompletenessV1::Complete,
+        }
+    );
+    assert_eq!(
+        language_server_read_from_engine_states([EngineState::Ready, EngineState::Crashed]),
+        LanguageServerReadV1::Observed {
+            state: LanguageServerStateV1::Crashed,
+            coverage: DoctorCoverageCompletenessV1::Complete,
+        }
+    );
+}
+
+#[test]
+fn empty_observation_projection_is_absent() {
+    let model =
+        crate::application::feedback::observations::FeedbackObservationReadModelV1::project(&[])
+            .expect("empty projection");
+    assert_eq!(
+        observability_read_from_model(Ok(model)),
+        ObservabilityReadV1::Absent
+    );
+}
+
 // --- Storage mapper ---------------------------------------------------------
 
 #[test]
@@ -392,7 +430,18 @@ async fn composed_report_carries_real_states_and_enumerates_coverage() {
             ..DaemonRuntimeHealthSignalV1::default()
         }),
         host: HostIntegrationReadV1::Denied,
+        advisory_feedback: AdvisoryFeedbackReadV1::Absent,
+        language_server: LanguageServerReadV1::Observed {
+            state: LanguageServerStateV1::Ready,
+            coverage: DoctorCoverageCompletenessV1::Complete,
+        },
         code_index: code_index_read(CodeIndexMountSignalV1::MountedFresh),
+        observability: ObservabilityReadV1::Observed {
+            state: ObservabilityStateV1::Current,
+            total_count: 7,
+            last_observed_at_micros: Some(42),
+            coverage: DoctorCoverageCompletenessV1::Partial,
+        },
         storage: storage_family_read(vec![orphan_storage_finding()]),
     };
 
@@ -427,19 +476,26 @@ async fn composed_report_carries_real_states_and_enumerates_coverage() {
         family_state(DoctorFindingFamilyV1::Storage),
         Some(DoctorEvidenceStateV1::Degraded)
     );
+    assert_eq!(
+        family_state(DoctorFindingFamilyV1::LanguageServer),
+        Some(DoctorEvidenceStateV1::HealthyCompleteCoverage)
+    );
+    assert_eq!(
+        family_state(DoctorFindingFamilyV1::Observability),
+        Some(DoctorEvidenceStateV1::Partial)
+    );
 
     // The storage entry carries its typed subclass; the report is not healthy
-    // (denied host + degraded runtime + unwired families), and coverage is not
-    // complete because some families were unavailable.
+    // (denied host + degraded runtime), and bounded observability coverage
+    // prevents a complete-coverage claim.
     assert!(!report.is_healthy_complete());
     assert_ne!(
         report.coverage().completeness(),
         DoctorCoverageCompletenessV1::Complete
     );
 
-    // Unwired families (LanguageServer, Observability) are carried as
-    // unavailable(unwired), never silently omitted; the host family that was
-    // denied is carried as unavailable(denied).
+    // Both newly wired families were consulted; the denied host remains
+    // explicitly unavailable.
     let consultation = |family: DoctorFindingFamilyV1| {
         report
             .coverage()
@@ -450,9 +506,11 @@ async fn composed_report_carries_real_states_and_enumerates_coverage() {
     };
     assert_eq!(
         consultation(DoctorFindingFamilyV1::LanguageServer),
-        Some(DoctorFamilyConsultationV1::Unavailable {
-            reason: DoctorFamilyUnavailableReasonV1::Unwired,
-        })
+        Some(DoctorFamilyConsultationV1::Consulted)
+    );
+    assert_eq!(
+        consultation(DoctorFindingFamilyV1::Observability),
+        Some(DoctorFamilyConsultationV1::Consulted)
     );
     assert_eq!(
         consultation(DoctorFindingFamilyV1::Advisory),

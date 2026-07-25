@@ -65,10 +65,10 @@ pub const SEMANTIC_RUNTIME_SETTING_KEY: &str = "semantic.runtime.v1";
 /// Atomic daemon retention/compaction policy tree (Plan 38).
 ///
 /// The value is canonical JSON for [`RetentionConfig`]. Keeping the session
-/// (LCM), observation-evidence, orphan-store, and compaction windows under one
-/// setting keeps the inert-by-default retention engines threaded as a single
+/// (LCM), observation-evidence, orphan-store, debris, and compaction windows
+/// under one setting keeps the retention engines threaded as a single
 /// versioned unit the daemon backstop reads, mirroring the semantic key. Absent
-/// or unset resolves to [`RetentionConfig::default`] — every engine disabled.
+/// or unset resolves to [`RetentionConfig::default`]'s bounded safe policy.
 pub const SYNC_RETENTION_SETTING_KEY: &str = "sync.retention.v1";
 
 /// Default `FastEmbed` catalog model selected on install (offline-safe).
@@ -465,11 +465,27 @@ fn default_retention_interval_hours() -> u64 {
     24
 }
 
+fn default_orphan_store_gc_days() -> Option<u64> {
+    Some(30)
+}
+
+fn default_incident_debris_retention_days() -> Option<u64> {
+    Some(30)
+}
+
+fn default_compaction_threshold() -> Option<CompactionThresholdConfig> {
+    Some(CompactionThresholdConfig {
+        free_page_ratio_threshold: 0.25,
+        minimum_reclaimable_bytes: 64 * 1024 * 1024,
+        max_pages_per_tick: default_compaction_max_pages_per_tick(),
+    })
+}
+
 /// Incremental-vacuum compaction trigger for the daemon background lane
 /// (Plan 38 §6). Threads [`crate::storage::compaction::CompactionTriggerPolicyV1`]
 /// through owner config: the daemon samples a store's free-page ratio and, when
 /// this threshold is met, schedules a bounded incremental vacuum off the hot
-/// path. Present-but-disabled unless the owner opts in with a positive ratio.
+/// path.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct CompactionThresholdConfig {
     /// Free-page ratio at or above which an incremental vacuum is scheduled.
@@ -497,10 +513,11 @@ impl Default for CompactionThresholdConfig {
     }
 }
 
-/// The daemon retention/compaction policy tree (Plan 38). Every engine is
-/// inert by default: the session (LCM) and observation-evidence sub-configs
-/// default to their own disabled state, and the orphan-store and compaction
-/// windows default to `None`. Only an owner who sets a window opts a store in.
+/// The daemon retention/compaction policy tree (Plan 38). Safe, bounded
+/// maintenance is active by default for proven orphan stores, quarantined
+/// debris, redundant projection-durable session copies, and free-page bloat.
+/// Lossy session/evidence deletion remains disabled and soft budgets remain
+/// owner-configured findings only.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RetentionConfig {
     /// Session-store (LCM raw/projected) retention windows.
@@ -511,10 +528,14 @@ pub struct RetentionConfig {
     pub observation: crate::global_db::observation::retention::ObservationRetentionConfig,
     /// Orphan profile-sharded store collection window (days). `None` disables
     /// the sweep; the Doctor surface still reports findings read-only.
-    #[serde(default)]
+    #[serde(default = "default_orphan_store_gc_days")]
     pub orphan_store_gc_days: Option<u64>,
+    /// Retention window for quarantined recovery/corruption artifacts (days).
+    /// `None` disables collection while Doctor continues surfacing debris.
+    #[serde(default = "default_incident_debris_retention_days")]
+    pub incident_debris_retention_days: Option<u64>,
     /// Incremental-vacuum compaction trigger. `None` disables compaction.
-    #[serde(default)]
+    #[serde(default = "default_compaction_threshold")]
     pub compaction: Option<CompactionThresholdConfig>,
     /// Owner-configured soft byte budgets keyed by exact logical store key.
     /// Missing entries mean no budget was configured for that store.
@@ -531,8 +552,9 @@ impl Default for RetentionConfig {
             session_lcm: crate::sessions::lcm::LcmRetentionConfig::default(),
             observation:
                 crate::global_db::observation::retention::ObservationRetentionConfig::default(),
-            orphan_store_gc_days: None,
-            compaction: None,
+            orphan_store_gc_days: default_orphan_store_gc_days(),
+            incident_debris_retention_days: default_incident_debris_retention_days(),
+            compaction: default_compaction_threshold(),
             store_soft_budgets_bytes: BTreeMap::new(),
             interval_hours: default_retention_interval_hours(),
         }
@@ -558,16 +580,26 @@ impl RetentionConfig {
         Ok(Some(budget))
     }
 
-    /// Validate the compaction trigger, when configured. A non-positive or
-    /// non-finite ratio would schedule compaction unconditionally, so it is
-    /// rejected in favor of leaving compaction disabled (`None`).
+    /// Validate collection windows and the compaction trigger. Immediate
+    /// collection and ratios outside the unit interval are rejected.
     fn validate(&self) -> Result<()> {
+        if self.orphan_store_gc_days == Some(0) {
+            return Err(config_error(
+                "retention orphan_store_gc_days must be greater than zero",
+            ));
+        }
+        if self.incident_debris_retention_days == Some(0) {
+            return Err(config_error(
+                "retention incident_debris_retention_days must be greater than zero",
+            ));
+        }
         if let Some(compaction) = &self.compaction
             && (!compaction.free_page_ratio_threshold.is_finite()
-                || compaction.free_page_ratio_threshold <= 0.0)
+                || compaction.free_page_ratio_threshold <= 0.0
+                || compaction.free_page_ratio_threshold > 1.0)
         {
             return Err(config_error(
-                "retention compaction free_page_ratio_threshold must be a positive, finite ratio",
+                "retention compaction free_page_ratio_threshold must be within (0.0, 1.0]",
             ));
         }
         for (store, bytes) in &self.store_soft_budgets_bytes {
@@ -673,7 +705,7 @@ pub struct SyncConfig {
     /// to [`MIN_AUTO_TRACK_PR_POLL_SECS`] at read time.
     #[serde(default = "default_sync_auto_track_pr_poll_secs")]
     pub auto_track_pr_poll_secs: u64,
-    /// Daemon retention/compaction policy tree (Plan 38). Inert by default.
+    /// Daemon retention/compaction policy tree (Plan 38).
     #[serde(default)]
     pub retention: RetentionConfig,
 }

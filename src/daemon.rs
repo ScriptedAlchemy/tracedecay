@@ -128,38 +128,232 @@ fn code_index_scope_unavailable() -> crate::mcp::server::CodeIndexSearchOutcomeV
     )
 }
 
-fn code_index_search_displays(
+fn code_index_search_hydration_budget(
+    accepted_semantic_budget: Option<&tracedecay_domain::RetrievalBudget>,
+    pr9_budget: &tracedecay_domain::RetrievalBudget,
+) -> tracedecay_domain::RetrievalBudget {
+    accepted_semantic_budget
+        .cloned()
+        .unwrap_or_else(|| pr9_budget.clone())
+}
+
+struct CodeIndexSearchHydrationSourceV1<A, P, H> {
+    authorize: A,
+    preflight: P,
+    hydrate: H,
+}
+
+impl<A, P, H> CodeIndexSearchHydrationSourceV1<A, P, H> {
+    fn new(authorize: A, preflight: P, hydrate: H) -> Self {
+        Self {
+            authorize,
+            preflight,
+            hydrate,
+        }
+    }
+}
+
+impl<A, P, H>
+    crate::query::retrieval::hydrate::LateHydrationSource<
+        crate::mcp::server::CodeIndexSearchDisplayV1,
+    > for CodeIndexSearchHydrationSourceV1<A, P, H>
+where
+    A: FnMut(
+        &tracedecay_domain::RetrievalRequest,
+        &tracedecay_domain::RankedCandidate,
+    ) -> crate::query::retrieval::hydrate::HydrationAuthorizationV1,
+    P: FnMut(
+        &tracedecay_domain::RetrievalRequest,
+        &tracedecay_domain::RankedCandidate,
+        &crate::query::retrieval::hydrate::HydrationWorkPermitV1,
+    ) -> crate::query::retrieval::hydrate::HydrationPreflightOutcomeV1,
+    H: FnMut(
+        &tracedecay_domain::RetrievalRequest,
+        &tracedecay_domain::RankedCandidate,
+        &crate::query::retrieval::hydrate::HydrationWorkPermitV1,
+    ) -> crate::query::retrieval::hydrate::HydrationReadOutcomeV1<
+        crate::mcp::server::CodeIndexSearchDisplayV1,
+    >,
+{
+    fn authorize(
+        &mut self,
+        request: &tracedecay_domain::RetrievalRequest,
+        candidate: &tracedecay_domain::RankedCandidate,
+    ) -> crate::query::retrieval::hydrate::HydrationAuthorizationV1 {
+        (self.authorize)(request, candidate)
+    }
+
+    fn preflight_authorized(
+        &mut self,
+        request: &tracedecay_domain::RetrievalRequest,
+        candidate: &tracedecay_domain::RankedCandidate,
+        permit: &crate::query::retrieval::hydrate::HydrationWorkPermitV1,
+    ) -> crate::query::retrieval::hydrate::HydrationPreflightOutcomeV1 {
+        use crate::query::retrieval::hydrate::{
+            HydrationAuthorizationV1, HydrationPreflightOutcomeV1, HydrationUnavailableV1,
+        };
+
+        match (self.authorize)(request, candidate) {
+            HydrationAuthorizationV1::Authorized => (self.preflight)(request, candidate, permit),
+            HydrationAuthorizationV1::Denied => HydrationPreflightOutcomeV1::Unavailable(
+                HydrationUnavailableV1::AuthorityUnavailable,
+            ),
+            HydrationAuthorizationV1::Unavailable(reason) => {
+                HydrationPreflightOutcomeV1::Unavailable(reason)
+            }
+        }
+    }
+
+    fn hydrate_authorized(
+        &mut self,
+        request: &tracedecay_domain::RetrievalRequest,
+        candidate: &tracedecay_domain::RankedCandidate,
+        permit: &crate::query::retrieval::hydrate::HydrationWorkPermitV1,
+    ) -> crate::query::retrieval::hydrate::HydrationReadOutcomeV1<
+        crate::mcp::server::CodeIndexSearchDisplayV1,
+    > {
+        use crate::query::retrieval::hydrate::{
+            HydrationAuthorizationV1, HydrationReadOutcomeV1, HydrationUnavailableV1,
+        };
+
+        match (self.authorize)(request, candidate) {
+            HydrationAuthorizationV1::Authorized => (self.hydrate)(request, candidate, permit),
+            HydrationAuthorizationV1::Denied => {
+                HydrationReadOutcomeV1::Unavailable(HydrationUnavailableV1::AuthorityUnavailable)
+            }
+            HydrationAuthorizationV1::Unavailable(reason) => {
+                HydrationReadOutcomeV1::Unavailable(reason)
+            }
+        }
+    }
+}
+
+fn code_index_search_display_binding(
     generation: &crate::code_index::production::CodeIndexPublishedGenerationV1,
-    candidates: &[tracedecay_domain::RankedCandidate],
-) -> HashMap<tracedecay_domain::RetrievalAnchorId, crate::mcp::server::CodeIndexSearchDisplayV1> {
-    let symbols = generation
-        .symbols()
-        .symbols
+    request: &tracedecay_domain::RetrievalRequest,
+    candidate: &tracedecay_domain::RankedCandidate,
+) -> std::result::Result<
+    (
+        crate::mcp::server::CodeIndexSearchDisplayV1,
+        tracedecay_domain::OccurrenceProvenance,
+    ),
+    crate::query::retrieval::hydrate::HydrationUnavailableV1,
+> {
+    use crate::query::retrieval::hydrate::HydrationUnavailableV1;
+
+    if generation.symbols().generation_id != generation.manifest().generation_id
+        || request.scope.privacy_domain != generation.manifest().privacy_domain
+        || request.scope.root.repository != generation.snapshot().repository
+        || request.scope.root.worktree != generation.snapshot().worktree
+        || request.scope.root.reference != generation.snapshot().reference
+        || request.snapshot.freshness_digest.as_str()
+            != generation.manifest().snapshot_digest.as_str()
+        || request.snapshot.captured_at != generation.manifest().seal.sealed_at
+    {
+        return Err(HydrationUnavailableV1::Stale);
+    }
+    let anchor = candidate.candidate.anchor_id.as_str();
+    let (display, expected_source_occurrence) =
+        if let Some(occurrence) = anchor.strip_prefix("code-symbol:") {
+            let symbol = generation
+                .symbols()
+                .symbols
+                .iter()
+                .find(|symbol| symbol.occurrence.as_str() == occurrence)
+                .ok_or(HydrationUnavailableV1::Invalid)?;
+            (code_index_symbol_display(symbol), None)
+        } else if let Some(chunk_id) = anchor.strip_prefix("code-chunk:") {
+            let chunk_id = tracedecay_domain::CodeSearchChunkId::new(chunk_id.to_owned())
+                .map_err(|_| HydrationUnavailableV1::Invalid)?;
+            let chunk = generation
+                .chunks()
+                .chunk(&chunk_id)
+                .ok_or(HydrationUnavailableV1::Invalid)?;
+            if chunk.anchor.generation_id != generation.manifest().generation_id {
+                return Err(HydrationUnavailableV1::Stale);
+            }
+            let display = match chunk.anchor.symbol_occurrence_id.as_ref() {
+                Some(occurrence) => {
+                    let symbol = generation
+                        .symbols()
+                        .symbols
+                        .iter()
+                        .find(|symbol| symbol.occurrence == *occurrence)
+                        .ok_or(HydrationUnavailableV1::Invalid)?;
+                    code_index_symbol_display(symbol)
+                }
+                None => {
+                    let file = generation
+                        .snapshot()
+                        .files
+                        .iter()
+                        .find(|file| {
+                            file.file_occurrence_id == chunk.anchor.file_occurrence_id
+                                && file.disposition
+                                    == tracedecay_domain::SnapshotFileDispositionV1::Present
+                        })
+                        .ok_or(HydrationUnavailableV1::Invalid)?;
+                    crate::mcp::server::CodeIndexSearchDisplayV1 {
+                        name: file
+                            .logical_path
+                            .rsplit('/')
+                            .next()
+                            .unwrap_or(file.logical_path.as_str())
+                            .to_owned(),
+                        qualified_name: file.logical_path.clone(),
+                        kind: "file".to_owned(),
+                    }
+                }
+            };
+            (display, Some(format!("code-chunk:{}", chunk_id.as_str())))
+        } else {
+            return Err(HydrationUnavailableV1::Invalid);
+        };
+    let provenance = candidate
+        .candidate
+        .occurrences
         .iter()
-        .map(|symbol| (symbol.occurrence.as_str(), symbol))
-        .collect::<HashMap<_, _>>();
-    candidates
-        .iter()
-        .filter_map(|ranked| {
-            let anchor = &ranked.candidate.anchor_id;
-            let occurrence = anchor.as_str().strip_prefix("code-symbol:")?;
-            let symbol = symbols.get(occurrence)?;
-            let name = symbol
-                .qualified_name
-                .rsplit("::")
-                .next()
-                .unwrap_or(symbol.qualified_name.as_str())
-                .to_owned();
-            Some((
-                anchor.clone(),
-                crate::mcp::server::CodeIndexSearchDisplayV1 {
-                    name,
-                    qualified_name: symbol.qualified_name.clone(),
-                    kind: symbol.kind.clone(),
-                },
-            ))
+        .find(|provenance| {
+            provenance.repository_id.as_ref() == Some(&request.scope.root.repository)
+                && provenance.source_namespace == provenance.freshness.source_namespace
+                && provenance.freshness.compatibility
+                    == tracedecay_domain::FreshnessCompatibilityV1::Current
+                && provenance.source_namespace.as_str() == "ns.code.daemon"
+                && expected_source_occurrence
+                    .as_ref()
+                    .is_none_or(|expected| provenance.source_occurrence_id.as_str() == expected)
         })
-        .collect()
+        .cloned()
+        .ok_or(HydrationUnavailableV1::Invalid)?;
+    Ok((display, provenance))
+}
+
+fn code_index_symbol_display(
+    symbol: &crate::code_index::lineage::LineageSymbolRecordV1,
+) -> crate::mcp::server::CodeIndexSearchDisplayV1 {
+    crate::mcp::server::CodeIndexSearchDisplayV1 {
+        name: symbol
+            .qualified_name
+            .rsplit("::")
+            .next()
+            .unwrap_or(symbol.qualified_name.as_str())
+            .to_owned(),
+        qualified_name: symbol.qualified_name.clone(),
+        kind: symbol.kind.clone(),
+    }
+}
+
+fn code_index_search_display_bytes(
+    display: &crate::mcp::server::CodeIndexSearchDisplayV1,
+) -> std::result::Result<u64, crate::query::retrieval::hydrate::HydrationUnavailableV1> {
+    serde_json::to_vec(&(
+        display.name.as_str(),
+        display.qualified_name.as_str(),
+        display.kind.as_str(),
+    ))
+    .ok()
+    .and_then(|bytes| u64::try_from(bytes.len()).ok())
+    .ok_or(crate::query::retrieval::hydrate::HydrationUnavailableV1::Internal)
 }
 
 impl crate::query::retrieval::semantic::SemanticExecutionControl for McpSemanticExecutionControlV1 {
@@ -169,6 +363,18 @@ impl crate::query::retrieval::semantic::SemanticExecutionControl for McpSemantic
 
     fn elapsed_micros(&self) -> u64 {
         u64::try_from(self.started.elapsed().as_micros()).unwrap_or(u64::MAX)
+    }
+}
+
+impl crate::query::retrieval::hydrate::HydrationExecutionControlV1
+    for McpSemanticExecutionControlV1
+{
+    fn elapsed_micros(&self) -> u64 {
+        crate::query::retrieval::semantic::SemanticExecutionControl::elapsed_micros(self)
+    }
+
+    fn is_cancelled(&self) -> bool {
+        !self.admission_provider.route_is_registered() || self.request_termination().is_some()
     }
 }
 
@@ -256,7 +462,7 @@ fn code_index_search_executor(
                     graph_edge_kinds: vec![tracedecay_domain::RelationEdgeKindV1::Calls],
                     graph_max_depth: 1,
                     page_size: request.limit,
-                    cursor: None,
+                    cursor: request.cursor,
                 },
                 _ => {
                     return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
@@ -536,17 +742,22 @@ fn code_index_search_executor(
                     },
                 );
             }
-            let (semantic, ordered_candidates) = match &executed.semantic {
+            let (semantic, ordered_candidates, next_cursor, accepted_semantic_budget) =
+                match &executed.semantic {
                 code_index_scheduler::semantic_query_runtime::SemanticAugmentationOutcomeV1::Augmented {
                     composition,
+                    cursor,
+                    hydration_budget,
                     ..
                 } => (
                     crate::mcp::server::CodeIndexSemanticStatusV1::Complete,
                     composition.ranked_candidates.clone(),
+                    cursor.clone(),
+                    Some(hydration_budget),
                 ),
                 code_index_scheduler::semantic_query_runtime::SemanticAugmentationOutcomeV1::Fallback {
                     abstention,
-                    ..
+                    fallback,
                 } => (
                     crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
                         reason: code_index_scheduler::semantic_query_runtime::semantic_abstention_reason(
@@ -554,15 +765,178 @@ fn code_index_search_executor(
                         ),
                     },
                     executed.pr9.authorized.fallback.ordered_candidates.clone(),
+                    fallback.cursor.clone(),
+                    None,
                 ),
             };
-            let display_by_anchor = schedulers
+            let Some(latest) = schedulers
                 .generation_for(&terminal_scope, &executed.pr9.generation)
                 .await
-                .map(|latest| {
-                    code_index_search_displays(latest.generation(), ordered_candidates.as_slice())
-                })
-                .unwrap_or_default();
+            else {
+                return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
+                    crate::mcp::server::CodeIndexSearchUnavailableV1 {
+                        code_generation: Some(executed.pr9.generation.as_str().to_owned()),
+                        reason:
+                            crate::mcp::server::CodeIndexSearchUnavailableReasonV1::GenerationUnavailable,
+                        semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
+                            reason: "generation_changed_before_hydration",
+                        },
+                    },
+                );
+            };
+            let mut hydration_request = executed.pr9.sanitized.request().clone();
+            let hydration_budget = code_index_search_hydration_budget(
+                accepted_semantic_budget,
+                &hydration_request.budget,
+            );
+            hydration_request.budget = hydration_budget.clone();
+            let authorize =
+                |request: &tracedecay_domain::RetrievalRequest,
+                 _candidate: &tracedecay_domain::RankedCandidate| {
+                    use crate::query::retrieval::hydrate::HydrationAuthorizationV1;
+
+                    let Ok(current_scope) =
+                        project_open_owners::resolved_scope_for_project(&project_root, &project_id)
+                    else {
+                        return HydrationAuthorizationV1::Denied;
+                    };
+                    if current_scope != terminal_scope
+                        || request.principal != terminal_expected_authority.principal
+                        || request.snapshot.authorization_revision
+                            != terminal_expected_authority.authorization_revision
+                    {
+                        return HydrationAuthorizationV1::Denied;
+                    }
+                    let Ok(current_admission) = admission_provider.admit_current(&current_scope)
+                    else {
+                        return HydrationAuthorizationV1::Denied;
+                    };
+                    let current_authority = current_admission.search_authority();
+                    if current_authority != terminal_expected_authority
+                        || current_admission
+                            .authorize(&current_scope, Some(&current_authority))
+                            .is_err()
+                    {
+                        HydrationAuthorizationV1::Denied
+                    } else {
+                        HydrationAuthorizationV1::Authorized
+                    }
+                };
+            let preflight =
+                |request: &tracedecay_domain::RetrievalRequest,
+                 candidate: &tracedecay_domain::RankedCandidate,
+                 _permit: &crate::query::retrieval::hydrate::HydrationWorkPermitV1| {
+                    use crate::query::retrieval::hydrate::HydrationPreflightOutcomeV1;
+
+                    match code_index_search_display_binding(
+                        latest.generation(),
+                        request,
+                        candidate,
+                    )
+                    .and_then(|(display, _)| code_index_search_display_bytes(&display))
+                    {
+                        Ok(estimated_bytes) => {
+                            HydrationPreflightOutcomeV1::Ready { estimated_bytes }
+                        }
+                        Err(reason) => HydrationPreflightOutcomeV1::Unavailable(reason),
+                    }
+                };
+            let hydrate =
+                |request: &tracedecay_domain::RetrievalRequest,
+                 candidate: &tracedecay_domain::RankedCandidate,
+                 _permit: &crate::query::retrieval::hydrate::HydrationWorkPermitV1| {
+                    use crate::query::retrieval::hydrate::HydrationReadOutcomeV1;
+
+                    let (display, provenance) = match code_index_search_display_binding(
+                        latest.generation(),
+                        request,
+                        candidate,
+                    ) {
+                        Ok(binding) => binding,
+                        Err(reason) => return HydrationReadOutcomeV1::Unavailable(reason),
+                    };
+                    let bytes_hydrated = match code_index_search_display_bytes(&display) {
+                        Ok(bytes) => bytes,
+                        Err(reason) => return HydrationReadOutcomeV1::Unavailable(reason),
+                    };
+                    let hydration_revision = match tracedecay_domain::HydrationRevision::new(
+                        "hydration.code-index.display.v1",
+                    ) {
+                        Ok(revision) => revision,
+                        Err(_) => {
+                            return HydrationReadOutcomeV1::Unavailable(
+                                crate::query::retrieval::hydrate::HydrationUnavailableV1::Internal,
+                            );
+                        }
+                    };
+                    HydrationReadOutcomeV1::Complete {
+                        payload: display,
+                        receipt: tracedecay_domain::HydrationReceipt {
+                            anchor_id: candidate.candidate.anchor_id.clone(),
+                            source_occurrence_id: provenance.source_occurrence_id,
+                            hydration_revision,
+                            bytes_hydrated,
+                            authorized: true,
+                            freshness: provenance.freshness,
+                        },
+                    }
+                };
+            let mut source = CodeIndexSearchHydrationSourceV1::new(authorize, preflight, hydrate);
+            let hydrated = match crate::query::retrieval::hydrate::DeterministicLateHydration::new(
+                &mut source,
+            )
+            .hydrate_with_control(
+                &hydration_request,
+                ordered_candidates.as_slice(),
+                &hydration_budget,
+                control.as_ref(),
+            ) {
+                Ok(hydrated) => hydrated,
+                Err(error) => {
+                    tracing::warn!(
+                        project_id = %project_id.as_str(),
+                        error = %error,
+                        "code_index_search_hydration_failed"
+                    );
+                    return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
+                        crate::mcp::server::CodeIndexSearchUnavailableV1 {
+                            code_generation: Some(executed.pr9.generation.as_str().to_owned()),
+                            reason:
+                                crate::mcp::server::CodeIndexSearchUnavailableReasonV1::Internal,
+                            semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
+                                reason: "late_hydration_failed",
+                            },
+                        },
+                    );
+                }
+            };
+            let hydrated_prefix_len = hydrated.results.len();
+            let mut display_by_anchor = HashMap::new();
+            let mut hydrated_candidates = Vec::with_capacity(ordered_candidates.len());
+            for result in hydrated.results {
+                use crate::query::retrieval::hydrate::{
+                    HydrationOutcomeV1, HydrationUnavailableV1,
+                };
+
+                match result.outcome {
+                    HydrationOutcomeV1::Complete(display)
+                    | HydrationOutcomeV1::Partial {
+                        payload: display, ..
+                    } => {
+                        display_by_anchor
+                            .insert(result.ranked.candidate.anchor_id.clone(), display);
+                        hydrated_candidates.push(result.ranked);
+                    }
+                    HydrationOutcomeV1::Unavailable(
+                        HydrationUnavailableV1::AuthorityUnavailable,
+                    ) => {}
+                    HydrationOutcomeV1::Unavailable(_) => {
+                        hydrated_candidates.push(result.ranked);
+                    }
+                }
+            }
+            hydrated_candidates.extend(ordered_candidates.into_iter().skip(hydrated_prefix_len));
+            let ordered_candidates = hydrated_candidates;
             if let Some(reason) = control.request_termination() {
                 return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
                     crate::mcp::server::CodeIndexSearchUnavailableV1 {
@@ -646,6 +1020,7 @@ fn code_index_search_executor(
                     pr9_fallback: executed.pr9.authorized.fallback,
                     display_by_anchor,
                     semantic,
+                    next_cursor,
                 },
             )
         })
@@ -851,6 +1226,7 @@ pub use core_proxy::*;
 mod git_transactions;
 #[cfg(unix)]
 mod git_watch;
+mod github_credential_lifecycle;
 mod http_application;
 pub mod lsp_gateway;
 #[cfg(unix)]
@@ -947,6 +1323,7 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
     let lifecycle = DaemonLifecycle::default();
     let project_open_gates = Arc::new(tokio::sync::Mutex::new(ProjectOpenGates::default()));
     let invocation = DaemonInvocationState::default();
+    invocation.configure_github_read_only_credentials(authority.profile_identity());
     let admission = DaemonClientAdmission::new(MAX_CONCURRENT_DAEMON_CLIENTS);
     let per_client_admission = DaemonPerClientAdmission::default();
     let mut clients: JoinSet<Result<()>> = JoinSet::new();
@@ -1325,6 +1702,8 @@ async fn prepare_socket_path(authority: &authority::DaemonAuthority) -> Result<(
 struct DaemonInvocationState {
     lsp_session_registry: Arc<tokio::sync::Mutex<lsp_gateway::LspSessionRegistry>>,
     service: DaemonInvocationService,
+    github_credential_lifecycle:
+        github_credential_lifecycle::DaemonGitHubReadOnlyCredentialLifecycleV1,
     code_index_schedulers: code_index_scheduler::CodeIndexSchedulerRegistryV1,
     pr9_authority_provider: pr9_authority_provider::DaemonPr9AuthorityProviderV1,
     semantic_projection_scheduler:
@@ -1342,6 +1721,8 @@ impl Default for DaemonInvocationState {
                 lsp_gateway::LspSessionRegistry::default(),
             )),
             service,
+            github_credential_lifecycle:
+                github_credential_lifecycle::DaemonGitHubReadOnlyCredentialLifecycleV1::default(),
             code_index_schedulers,
             pr9_authority_provider:
                 pr9_authority_provider::DaemonPr9AuthorityProviderV1::default(),
@@ -1352,6 +1733,24 @@ impl Default for DaemonInvocationState {
 }
 
 impl DaemonInvocationState {
+    fn configure_github_read_only_credentials(
+        &self,
+        identity: &profile_identity::LocalProfileIdentityAuthorityV1,
+    ) {
+        self.github_credential_lifecycle.configure_profile(identity);
+    }
+
+    fn mount_github_read_only_credential_authority_for_project(
+        &self,
+        profile_id: &tracedecay_domain::UserProfileId,
+        repository_owner: &str,
+        repository_name: &str,
+    ) -> crate::application::advisory::github_runtime::ProfileGitHubReadOnlyCredentialMountOutcomeV1
+    {
+        self.github_credential_lifecycle
+            .mount(profile_id, repository_owner, repository_name)
+    }
+
     fn advisory_runtime_registrar(&self) -> DaemonAdvisoryRuntimeRegistrar {
         DaemonAdvisoryRuntimeRegistrar::new(&self.service)
     }
@@ -1470,6 +1869,7 @@ impl DaemonInvocationState {
     }
 
     async fn shutdown(&self) {
+        self.github_credential_lifecycle.shutdown();
         self.code_index_schedulers.shutdown().await;
         self.lsp_session_registry.lock().await.expire_at(u64::MAX);
         self.service.expire_all().await;
@@ -1551,8 +1951,11 @@ async fn ensure_git_index_transactions_before_advertising(
             message: format!("git index transaction project identity is invalid: {error}"),
         }
     })?;
-    let repository_root = crate::worktree::git_worktree_root(project_root)
-        .unwrap_or_else(|| project_root.to_path_buf());
+    let Some(repository_root) = crate::worktree::git_worktree_root(project_root) else {
+        // Non-Git projects remain valid TraceDecay projects. They advertise no
+        // Git mutation authority and must not fail project-open admission.
+        return Ok(());
+    };
     let observed_at = tracedecay_domain::UtcMicros(
         i64::try_from(
             std::time::SystemTime::now()
@@ -2349,6 +2752,8 @@ impl DaemonEngine {
         mut self,
         profile_identity: profile_identity::LocalProfileIdentityAuthorityV1,
     ) -> Self {
+        self.invocation
+            .configure_github_read_only_credentials(&profile_identity);
         self.store_administration = self
             .store_administration
             .with_profile_identity(profile_identity);
@@ -2701,10 +3106,7 @@ impl DaemonEngine {
             .store_administration
             .registered_project_session_database(
                 authoritative_project_id,
-                [
-                    canonical_project_path.clone(),
-                    cg.project_root().to_path_buf(),
-                ],
+                [cg.project_root().to_path_buf()],
             )
             .await?;
         ensure_git_index_transactions_before_advertising(
@@ -2810,6 +3212,16 @@ impl DaemonEngine {
             code_search_project_id.clone(),
             read_admission_provider.clone(),
         );
+        let diagnostic_settings =
+            crate::diagnostics::lsp::settings::load_settings(&cg.store_layout().dashboard_root)
+                .await
+                .unwrap_or_default();
+        let diagnostic_broker = Arc::new(tokio::sync::Mutex::new(
+            crate::dashboard::code_diagnostics_broker(
+                canonical_project_path.clone(),
+                diagnostic_settings,
+            ),
+        ));
         let doctor_report_reader = doctor_kernel::production_doctor_report_reader(
             canonical_project_path.clone(),
             code_search_project_id.clone(),
@@ -2821,6 +3233,8 @@ impl DaemonEngine {
             profile_identity.profile_root().to_path_buf(),
             cg.get_config().sync.retention.clone(),
             self.invocation.code_index_schedulers.clone(),
+            Arc::clone(&diagnostic_broker),
+            self.invocation.feedback_runtime_registrar(),
         );
         let code_index_search_executor = code_index_search_executor(
             self.invocation.code_index_schedulers.clone(),
@@ -2853,6 +3267,7 @@ impl DaemonEngine {
         )
         .with_automation_scheduler_reconciler(reconciler)
         .with_dashboard_doctor_report_reader(doctor_report_reader)
+        .with_diagnostics_lsp(diagnostic_broker)
         .with_code_index_hook_sink(code_index_hook_sink)
         .with_code_index_publication_identity(code_index_publication_identity)
         .with_code_index_search_executor(code_index_search_executor)
@@ -3202,13 +3617,19 @@ impl DaemonEngine {
 async fn shutdown_project_servers(store_administration: &StoreAdministration) {
     let servers: Vec<Arc<crate::mcp::McpServer>> = store_administration
         .with_writer(|| async {
-            let servers = store_administration.project_servers().lock().await;
+            let mut registry = store_administration.project_servers().lock().await;
             let mut seen = HashSet::new();
-            servers
+            let servers = registry
                 .values()
                 .filter(|server| seen.insert(Arc::as_ptr(server) as usize))
                 .cloned()
-                .collect()
+                .collect();
+            // Servers retain daemon callbacks that clone StoreAdministration.
+            // Remove the registry's side of that cycle before awaiting server
+            // shutdown so every physical store runtime can be dropped.
+            registry.servers.clear();
+            registry.aliases.clear();
+            servers
         })
         .await;
     for server in servers {
@@ -3834,6 +4255,16 @@ async fn portable_project_server(
         code_search_project_id.clone(),
         read_admission_provider.clone(),
     );
+    let diagnostic_settings =
+        crate::diagnostics::lsp::settings::load_settings(&cg.store_layout().dashboard_root)
+            .await
+            .unwrap_or_default();
+    let diagnostic_broker = Arc::new(tokio::sync::Mutex::new(
+        crate::dashboard::code_diagnostics_broker(
+            canonical_project_path.to_path_buf(),
+            diagnostic_settings,
+        ),
+    ));
     let doctor_report_reader = doctor_kernel::production_doctor_report_reader(
         canonical_project_path.to_path_buf(),
         code_search_project_id.clone(),
@@ -3845,6 +4276,8 @@ async fn portable_project_server(
         profile_identity.profile_root().to_path_buf(),
         cg.get_config().sync.retention.clone(),
         invocation.code_index_schedulers.clone(),
+        Arc::clone(&diagnostic_broker),
+        invocation.feedback_runtime_registrar(),
     );
     let code_index_search_executor = code_index_search_executor(
         invocation.code_index_schedulers.clone(),
@@ -3876,6 +4309,7 @@ async fn portable_project_server(
         },
     )
     .with_dashboard_doctor_report_reader(doctor_report_reader)
+    .with_diagnostics_lsp(diagnostic_broker)
     .with_code_index_hook_sink(code_index_hook_sink)
     .with_code_index_publication_identity(code_index_publication_identity)
     .with_code_index_search_executor(code_index_search_executor)
@@ -4688,13 +5122,7 @@ async fn open_project_for_handshake(
         )?;
     }
     let configuration_database = store_administration
-        .registered_project_session_database(
-            project_id,
-            [
-                project_path.to_path_buf(),
-                store_layout.project_root.clone(),
-            ],
-        )
+        .registered_project_session_database(project_id, [store_layout.project_root.clone()])
         .await?;
     let runtime_registry = store_administration.registered_runtime_registry().await?;
     match crate::tracedecay::TraceDecay::open_with_registered_configuration(

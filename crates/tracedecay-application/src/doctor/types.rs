@@ -188,7 +188,7 @@ doctor_identifier!(
     /// record (for example a `FeedbackFindingId`, configuration revision, or
     /// runtime read coverage anchor). Doctor stores the reference only; the
     /// owning authority remains the single source of the record.
-    DoctorEvidenceReferenceV1 => ("doctor evidence reference", 512),
+    DoctorEvidenceReferenceV1 => ("doctor evidence reference", 1024),
     /// Reference to the owning application operation that would perform a
     /// remediation (its capability or use-case identity). Doctor names the
     /// operation; it never embeds argv, a path, or an inline effect.

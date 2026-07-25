@@ -2,9 +2,9 @@ import { useQuery } from '@tanstack/react-query';
 import { RefreshCw } from 'lucide-react';
 import type { ReactNode } from 'react';
 import {
-  StorageFindingsPayloadSchema,
+  DoctorFindingsPayloadSchema,
   StorageTelemetryPayloadSchema,
-  type StorageFindingKindStatus,
+  type DoctorReportEntry,
   type StorageTelemetryRead,
   type StoreTelemetryEntry,
   type WireCoverage,
@@ -43,7 +43,7 @@ export function ObservatoryPage() {
   const findings = useQuery({
     queryKey: ['storage', 'findings', scopeKey(scope)],
     queryFn: () =>
-      fetchEnvelope(scopedUrl(scope, '/api/storage/findings'), StorageFindingsPayloadSchema),
+      fetchEnvelope(scopedUrl(scope, '/api/storage/findings'), DoctorFindingsPayloadSchema),
     refetchInterval: 30_000,
   });
 
@@ -153,7 +153,7 @@ function FindingsReadModel({
   refreshing,
   onRefresh,
 }: {
-  result: EnvelopeResult<ReturnType<typeof StorageFindingsPayloadSchema.parse>>;
+  result: EnvelopeResult<ReturnType<typeof DoctorFindingsPayloadSchema.parse>>;
   refreshing: boolean;
   onRefresh: () => void;
 }) {
@@ -171,12 +171,15 @@ function FindingsReadModel({
         refreshing={refreshing}
         onRefresh={onRefresh}
       />
-      {envelope.payload.kinds.length === 0 ? (
-        <ReadModelState kind="unknown" detail="storage report contained no finding kinds" />
+      {envelope.payload.entries.length === 0 ? (
+        <ReadModelState kind={envelope.domain_state} detail={envelope.payload.note} />
       ) : (
         <OverviewGrid>
-          {envelope.payload.kinds.map((kind) => (
-            <StorageKindCard key={kind.kind} status={kind} />
+          {envelope.payload.entries.map((entry, index) => (
+            <StorageFindingCard
+              key={`${entry.storage_kind ?? 'unclassified'}:${entry.finding.evidence[0]?.reference ?? index}`}
+              entry={entry}
+            />
           ))}
         </OverviewGrid>
       )}
@@ -271,26 +274,47 @@ function StoreCard({ entry }: { entry: StoreTelemetryEntry }) {
   );
 }
 
-/** `/api/storage/findings` reports per-kind producer support, not Doctor report
- * entries: each kind carries its own evidence state plus the input source it
- * still needs. */
-function StorageKindCard({ status }: { status: StorageFindingKindStatus }) {
-  const presentation = doctorEvidencePresentation(status.state);
+/** `/api/storage/findings` is the storage-family projection of the admitted
+ * canonical Doctor report. The browser preserves its typed subclass, evidence,
+ * coverage, and owner-operation reference without recomputing health. */
+function StorageFindingCard({ entry }: { entry: DoctorReportEntry }) {
+  const { finding, storage_kind: storageKind } = entry;
+  const presentation = doctorEvidencePresentation(finding.state);
   return (
-    <OverviewCard title={storageFindingLabel(status.kind)}>
-      <div className="flex flex-col gap-2">
+    <OverviewCard
+      title={storageKind ? storageFindingLabel(storageKind) : 'Unclassified storage finding'}
+    >
+      <div
+        className="flex flex-col gap-2"
+        data-storage-finding-kind={storageKind ?? 'unclassified'}
+      >
         <span
-          className="inline-flex w-fit items-center gap-1.5 rounded-[var(--radius-chip)] border border-edge-subtle bg-surface-2 px-2 py-0.5 text-2xs font-medium text-text-secondary"
-          data-evidence-state={status.state}
+          className={`inline-flex w-fit items-center gap-1.5 rounded-[var(--radius-chip)] border border-edge-subtle bg-surface-2 px-2 py-0.5 text-2xs font-medium ${presentation.tokenClass}`}
+          data-evidence-state={finding.state}
         >
           <span aria-hidden className={`size-1.5 rounded-full ${presentation.dotClass}`} />
           {presentation.label}
         </span>
-        <p className="text-xs text-text-secondary">{status.reason}</p>
-        <p className="tabular text-2xs text-text-muted">
-          {'requires: '}
-          <span className="font-mono text-text-secondary">{status.required_source}</span>
-        </p>
+        <EvidenceTruthStrip
+          coverage={{ completeness: finding.coverage.completeness }}
+          citations={finding.evidence.length}
+        />
+        <p className="text-xs text-text-secondary">{finding.coverage.statement}</p>
+        <ul className="space-y-1" aria-label="Storage finding evidence">
+          {finding.evidence.map((evidence) => (
+            <li
+              key={`${evidence.family}:${evidence.reference}`}
+              className="break-all font-mono text-2xs text-text-muted"
+            >
+              {evidence.reference}
+            </li>
+          ))}
+        </ul>
+        {finding.remediation ? (
+          <p className="break-all font-mono text-2xs text-text-muted">
+            {finding.remediation.owning_operation}
+          </p>
+        ) : null}
       </div>
     </OverviewCard>
   );

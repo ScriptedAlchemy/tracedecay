@@ -17,7 +17,7 @@ use super::dispatch_policy::REGISTERED_PROJECT_READER_TOOL_NAMES;
 /// Tools registered on every host before optional external capabilities.
 /// Count-contract tests share this source of truth so branch rebases cannot
 /// leave independent stale literals on the unit and integration surfaces.
-pub const ALWAYS_REGISTERED_TOOL_COUNT: usize = 152;
+pub const ALWAYS_REGISTERED_TOOL_COUNT: usize = 159;
 
 mod admin;
 mod analysis;
@@ -376,6 +376,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         def_feedback_get(),
         def_feedback_expand(),
         def_feedback_list(),
+        def_context_scout_status(),
         def_context_scout_recent(),
         def_context_scout_explain(),
         def_context_scout_capability(),
@@ -492,6 +493,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         def_find_exact_symbol(),
     ];
     definitions.extend(configuration_definitions());
+    definitions.extend(context_scout_control_definitions());
     add_registered_project_selector_properties(&mut definitions);
     add_lcm_storage_scope_property(&mut definitions);
     add_format_property(&mut definitions);
@@ -782,6 +784,7 @@ mod tests {
     fn context_scout_read_surfaces_are_registered_read_only() {
         let definitions = get_tool_definitions();
         for name in [
+            "tracedecay_context_scout_status",
             "tracedecay_context_scout_recent",
             "tracedecay_context_scout_explain",
             "tracedecay_context_scout_capability",

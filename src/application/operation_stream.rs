@@ -295,6 +295,122 @@ pub(crate) struct ManagedTestRunSnapshot {
     pub(crate) termination: Option<OperationTermination>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ManagedTestRunCurrentScope {
+    pub(crate) root_uri: String,
+    pub(crate) head_commit_id: Option<CommitId>,
+    pub(crate) code_generation_id: Option<CodeGenerationId>,
+    pub(crate) document_uri: Option<String>,
+    pub(crate) document_content_digest: Option<ContentDigest>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ManagedTestRunUnavailableReason {
+    FrontierExpired,
+    CurrentHeadUnbound,
+    CurrentCodeGenerationUnbound,
+    RetainedHeadUnbound,
+    RetainedCodeGenerationUnbound,
+    CurrentDocumentUnbound,
+    RetainedDocumentUnbound,
+    AuthorityFailure,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ManagedTestRunStaleReason {
+    SourceIdentity,
+    DocumentContent,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ManagedTestRunReadOutcome {
+    Current(ManagedTestRunSnapshot),
+    Stale(ManagedTestRunStaleReason),
+    Unavailable(ManagedTestRunUnavailableReason),
+}
+
+/// Canonical generation- and content-bound reader for retained managed test
+/// runs. Adapters project this result; they do not read the event authority or
+/// decide current identity independently.
+#[derive(Clone)]
+pub(crate) struct CanonicalManagedTestRunReader {
+    events: OperationEventAuthority,
+}
+
+impl CanonicalManagedTestRunReader {
+    pub(crate) fn new(events: OperationEventAuthority) -> Self {
+        Self { events }
+    }
+
+    pub(crate) async fn latest_current(
+        &self,
+        current: &ManagedTestRunCurrentScope,
+    ) -> ManagedTestRunReadOutcome {
+        let snapshot = match self.events.latest_managed_test_run(&current.root_uri).await {
+            Ok(snapshot) => snapshot,
+            Err(OperationEventError::FrontierExpired) => {
+                return ManagedTestRunReadOutcome::Unavailable(
+                    ManagedTestRunUnavailableReason::FrontierExpired,
+                );
+            }
+            Err(_) => {
+                return ManagedTestRunReadOutcome::Unavailable(
+                    ManagedTestRunUnavailableReason::AuthorityFailure,
+                );
+            }
+        };
+        let Some(current_head) = current.head_commit_id.as_ref() else {
+            return ManagedTestRunReadOutcome::Unavailable(
+                ManagedTestRunUnavailableReason::CurrentHeadUnbound,
+            );
+        };
+        let Some(current_generation) = current.code_generation_id.as_ref() else {
+            return ManagedTestRunReadOutcome::Unavailable(
+                ManagedTestRunUnavailableReason::CurrentCodeGenerationUnbound,
+            );
+        };
+        let Some(retained_head) = snapshot.head_commit_id.as_ref() else {
+            return ManagedTestRunReadOutcome::Unavailable(
+                ManagedTestRunUnavailableReason::RetainedHeadUnbound,
+            );
+        };
+        let Some(retained_generation) = snapshot.code_generation_id.as_ref() else {
+            return ManagedTestRunReadOutcome::Unavailable(
+                ManagedTestRunUnavailableReason::RetainedCodeGenerationUnbound,
+            );
+        };
+        if retained_head != current_head || retained_generation != current_generation {
+            return ManagedTestRunReadOutcome::Stale(ManagedTestRunStaleReason::SourceIdentity);
+        }
+        match (
+            current.document_uri.as_ref(),
+            current.document_content_digest.as_ref(),
+        ) {
+            (None, None) => {}
+            (Some(document_uri), Some(current_digest)) => {
+                let Some(retained_digest) =
+                    snapshot.document_content_digests.get(document_uri.as_str())
+                else {
+                    return ManagedTestRunReadOutcome::Unavailable(
+                        ManagedTestRunUnavailableReason::RetainedDocumentUnbound,
+                    );
+                };
+                if retained_digest != current_digest {
+                    return ManagedTestRunReadOutcome::Stale(
+                        ManagedTestRunStaleReason::DocumentContent,
+                    );
+                }
+            }
+            _ => {
+                return ManagedTestRunReadOutcome::Unavailable(
+                    ManagedTestRunUnavailableReason::CurrentDocumentUnbound,
+                );
+            }
+        }
+        ManagedTestRunReadOutcome::Current(snapshot)
+    }
+}
+
 #[derive(Clone)]
 pub struct OperationEventAuthority {
     inner: Arc<AuthorityInner>,
@@ -1380,10 +1496,12 @@ mod tests {
     use std::collections::BTreeMap;
 
     use tracedecay_application::{ApplicationProblemKind, Deadline, RequestId};
-    use tracedecay_domain::{CodeGenerationId, CommitId, UtcMicros};
+    use tracedecay_domain::{CodeGenerationId, CommitId, ContentDigest, UtcMicros};
 
     use super::{
-        OperationCancelOutcome, OperationEventAuthority, OperationEventError, OperationId,
+        CanonicalManagedTestRunReader, ManagedTestRunCurrentScope, ManagedTestRunReadOutcome,
+        ManagedTestRunStaleReason, OperationCancelOutcome, OperationEventAuthority,
+        OperationEventError, OperationId,
     };
 
     #[test]
@@ -1472,5 +1590,45 @@ mod tests {
             OperationCancelOutcome::Requested
         );
         assert!(emitter.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn canonical_test_run_reader_rejects_document_content_drift() {
+        let authority = OperationEventAuthority::default();
+        let head = CommitId::new("0123456789abcdef0123456789abcdef01234567").expect("head commit");
+        let generation = CodeGenerationId::new("generation.test.current").expect("code generation");
+        let document_uri = "file:///workspace/src/lib.rs";
+        let retained_digest =
+            ContentDigest::new(format!("sha256:{}", "a".repeat(64))).expect("retained digest");
+        authority
+            .begin_managed_test_run(
+                "file:///workspace".to_owned(),
+                RequestId::new("request.test-run.document-drift").expect("request id"),
+                Some(head.clone()),
+                Some(generation.clone()),
+                BTreeMap::from([(document_uri.to_owned(), retained_digest.clone())]),
+                Deadline::new(UtcMicros(10_000)).expect("deadline"),
+            )
+            .await
+            .expect("managed test run");
+        let reader = CanonicalManagedTestRunReader::new(authority);
+        let mut current = ManagedTestRunCurrentScope {
+            root_uri: "file:///workspace".to_owned(),
+            head_commit_id: Some(head),
+            code_generation_id: Some(generation),
+            document_uri: Some(document_uri.to_owned()),
+            document_content_digest: Some(retained_digest),
+        };
+
+        assert!(matches!(
+            reader.latest_current(&current).await,
+            ManagedTestRunReadOutcome::Current(_)
+        ));
+        current.document_content_digest =
+            Some(ContentDigest::new(format!("sha256:{}", "b".repeat(64))).expect("changed digest"));
+        assert_eq!(
+            reader.latest_current(&current).await,
+            ManagedTestRunReadOutcome::Stale(ManagedTestRunStaleReason::DocumentContent)
+        );
     }
 }

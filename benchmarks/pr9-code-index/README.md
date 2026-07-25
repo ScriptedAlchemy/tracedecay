@@ -30,12 +30,26 @@ store adapter participates.
 
 Metrics:
 
-- wall time: `std::time::Instant`;
+- event-to-ready and wall time: the same `std::time::Instant` interval from
+  immediate closed-loop event admission through projection receipt readiness;
+- queue delay: zero because this bounded harness has no scheduler queue and
+  executes one event synchronously;
 - CPU: `/proc/self/stat` user+system ticks converted with `getconf CLK_TCK`;
 - peak RSS: `/proc/self/status` `VmHWM` after `/proc/self/clear_refs`;
 - process read/write bytes: `/proc/self/io`;
 - input/output bytes and parsed/reused/changed/deleted chunks: deterministic
-  harness counters checked against `expected-v1.json`.
+  harness counters checked against `expected-v1.json`;
+- changed ranges: one for the append-only warm edit and zero when no
+  Tree-sitter source edit exists;
+- invalidated chunks: deleted prior chunks plus changed chunks that name a
+  prior digest;
+- embedding batches: zero because PR9 projects lexical chunks and deliberately
+  does not invoke semantic inference;
+- invalidation and projection amplification: invalidated chunks or projection
+  operations per changed range, reported as `null` when there is no source
+  changed range;
+- full-rebuild reason: `chunker_incompatible` only for the incompatible case;
+  clean startup remains `no_prior_generation`, not a disguised rebuild.
 
 `workload-v1.json` pins source files, exact current/10x files/bytes/chunks,
 content and language-descriptor digests, cache state, seed, command, platform,

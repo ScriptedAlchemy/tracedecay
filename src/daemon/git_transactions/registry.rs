@@ -31,10 +31,10 @@ impl GitIndexTransactionStoreRegistry {
         &self,
         database: Arc<RegisteredGlobalDb>,
     ) -> GitIndexTransactionStoreResult<SharedDaemonGitIndexTransactionStore> {
-        let path = database
-            .db_path()
-            .canonicalize()
-            .map_err(|_| GitIndexTransactionStoreError::Unavailable)?;
+        // The registered runtime authority already supplies the canonical
+        // database identity. Avoid a second filesystem lookup because a fresh
+        // SQLite shard may not have materialized its path yet.
+        let path = database.db_path().to_path_buf();
         let mut stores = self
             .stores
             .lock()

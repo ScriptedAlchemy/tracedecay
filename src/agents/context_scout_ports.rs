@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use tracedecay_application::feedback::{
     FeedbackCompletedPublicationReadPort, FeedbackCompletedPublicationV1,
 };
-use tracedecay_application::{RequestAdmission, RequestContext};
+use tracedecay_application::{RequestAdmission, RequestContext, ResolvedScope};
 use tracedecay_domain::configuration::{
     CONTEXT_SCOUT_SETTINGS_SETTING_KEY, ConfigurationRevisionId, ConfigurationValueV1,
     ContextScoutConfigurationModeV1, ContextScoutConfigurationStateV1,
@@ -578,6 +578,32 @@ impl ProjectContextScoutAddressRegistryV1 {
             (None, _) => ContextScoutAddressResolveOutcomeV1::Missing,
             (Some(_), Some(_)) => ContextScoutAddressResolveOutcomeV1::Ambiguous,
         }
+    }
+
+    /// Reauthorizes one opaque address against the current daemon-routed
+    /// project/worktree scope and configuration. Possession of the address is
+    /// never sufficient, and ambiguity fails closed.
+    pub async fn authorize_current_exact_address(
+        &self,
+        address: ContextScoutAddressV1,
+        configuration: &ContextScoutConfigurationPinV1,
+        scope: &ResolvedScope,
+    ) -> bool {
+        if scope.project_id != self.project_id {
+            return false;
+        }
+        let Ok(Some(ledger)) = self.read_ledger().await else {
+            return false;
+        };
+        let mut matches = ledger.bindings.iter().filter(|binding| {
+            binding.address == address
+                && binding.lifecycle.project_id == scope.project_id
+                && binding.lifecycle.worktree_id == scope.worktree_id
+                && binding.scope_digest == scope.scope_digest
+                && binding.configuration_revision == configuration.revision_id
+                && binding.configuration_digest == configuration.configuration_digest
+        });
+        matches.next().is_some() && matches.next().is_none()
     }
 
     async fn read_ledger(&self) -> Result<Option<StoredContextScoutAddressLedgerV1>, ()> {

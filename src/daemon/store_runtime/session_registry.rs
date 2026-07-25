@@ -171,6 +171,13 @@ impl DaemonSessionRuntimeRegistryV1 {
         databases
     }
 
+    pub(crate) async fn mounted_project_sessions(
+        &self,
+        project_id: &ProjectId,
+    ) -> Option<Arc<RegisteredGlobalDb>> {
+        self.project_sessions.lock().await.get(project_id).cloned()
+    }
+
     pub(crate) async fn project_sessions(
         &self,
         project_id: ProjectId,

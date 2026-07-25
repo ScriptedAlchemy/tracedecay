@@ -2,22 +2,33 @@ use crate::application::host_admission::{
     HostAdmissionAuthorities, HostAdmissionFacade, HostAdmissionOutcome, HostAdmissionScope,
     HostAdmissionStatus, SharedHostAdmissionBroker, TerminalReason,
 };
-use crate::application::observation::ObservationCancellation;
+use crate::application::observation::{
+    CaptureObservationOutcome, CaptureObservationRequest, ObservationCancellation,
+};
 use crate::automation::config_error;
 use crate::automation::run_ledger::AutomationRunStatus;
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::RegisteredGlobalDb;
 use crate::mcp::tools::ToolResult;
+use crate::privacy::{ObservationRecordParseErrorV1, parse_normalized_observation_record_v1};
 use crate::sessions::claude_observation::ClaudeObservationIngestError;
 use crate::sessions::source::TranscriptSource;
 use crate::tracedecay::TraceDecay;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tracedecay_domain::{ObservationScopeV1, ProjectId, SessionId, UtcMicros};
+use tracedecay_domain::{
+    CanonicalBoundaryKindV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
+    CanonicalObservationFactV1, CanonicalObservationRelationsV1, ObservationId,
+    ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
+    ObservationSourceGenerationV1, ObservationSourceIdentityV1, ObservationSourceRangeV1,
+    ProjectId, ProviderId, RetentionClass, SessionId, UtcMicros,
+};
+use tracedecay_store::StoreShardScopeV1;
 
 use super::{SessionAuthorities, rendered_tool_json};
 
@@ -42,7 +53,9 @@ pub async fn handle_hook_runtime(
             json!({ "action": action, "reset": true })
         }
         "accounting_receipt" => accounting_receipt(cg, accounting_db).await?,
-        "hook_v2_admit" | "hook_v2_guidance_lookup" => hook_v2_admit(cg, &args, action).await?,
+        "hook_v2_admit" | "hook_v2_guidance_lookup" => {
+            hook_v2_admit(cg, &args, action, required_project_db(session_authorities)?).await?
+        }
         "hook_v2_scout_prepare" => hook_v2_scout_prepare(cg, &args).await?,
         "hook_v2_delivery_receipt" => hook_v2_delivery_receipt(cg, &args).await?,
         "hook_v2_feedback_notice_delivery" => hook_v2_feedback_notice_delivery(cg, &args).await?,
@@ -194,6 +207,133 @@ async fn hook_v2_context_scout_lifecycle_for_session(
     .await
 }
 
+fn hook_v2_native_context_scout_lifecycle(
+    args: &Value,
+    envelope: &tracedecay_hooks::HookEventEnvelopeV2,
+) -> Option<crate::hooks::NativeContextScoutLifecycleV1> {
+    let lifecycle: crate::hooks::NativeContextScoutLifecycleV1 =
+        serde_json::from_value(args.get("native_lifecycle")?.clone()).ok()?;
+    lifecycle.matches_envelope(envelope).then_some(lifecycle)
+}
+
+async fn admit_native_context_scout_lifecycle(
+    sessions: &RegisteredGlobalDb,
+    provider: ProviderId,
+    lifecycle: &crate::hooks::NativeContextScoutLifecycleV1,
+    range: ObservationSourceRangeV1,
+) -> bool {
+    let StoreShardScopeV1::ProjectSessions { project_id } = &sessions.binding().shard_id.scope
+    else {
+        return false;
+    };
+    let project_id = project_id.clone();
+    let scope = ObservationScopeV1::Project {
+        project_id: project_id.clone(),
+    };
+    let raw = match serde_json::to_vec(lifecycle) {
+        Ok(raw) => raw,
+        Err(_) => return false,
+    };
+    let session_id = lifecycle.session_id.clone();
+    let call_id = lifecycle.call_id.clone();
+    let canonical_provider = provider.clone();
+    let parsed = match parse_normalized_observation_record_v1(
+        &raw,
+        range,
+        ObservationOrderingDomainV1::DaemonSequence,
+        move |_| {
+            CanonicalObservationEnvelopeV1::new(
+                canonical_provider,
+                "hook_tool_after",
+                call_id.clone(),
+                CanonicalObservationRelationsV1::new(session_id.clone())
+                    .with_thread_id(
+                        ObservationId::new(session_id.as_str().to_owned())
+                            .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)?,
+                    )
+                    .with_turn_id(call_id.clone())
+                    .with_agent_id(
+                        ObservationId::new(session_id.as_str().to_owned())
+                            .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)?,
+                    )
+                    .with_message_id(call_id.clone()),
+                vec![CanonicalObservationFactV1::Boundary {
+                    boundary_kind: CanonicalBoundaryKindV1::TurnEnd,
+                }],
+                CanonicalObservationEvidenceV1::new(
+                    ObservationOrderingDomainV1::DaemonSequence,
+                    range,
+                ),
+            )
+            .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)
+        },
+    ) {
+        Ok(parsed) => parsed,
+        Err(_) => return false,
+    };
+    let source =
+        match ObservationSourceIdentityV1::for_provider(provider, lifecycle.session_id.clone()) {
+            Ok(source) => source,
+            Err(_) => return false,
+        };
+    let binding = sessions.binding();
+    let facade = HostAdmissionFacade::new(HostAdmissionAuthorities::registered_for_project(
+        binding.shard_id.brain_id.clone(),
+        binding.shard_id.profile_id.clone(),
+        project_id,
+        sessions,
+    ));
+    let expected_cursor = match facade.get_source_cursor(&source, &scope).await {
+        Ok(None) => None,
+        Ok(Some(cursor))
+            if cursor.generation().file_id() == 1
+                && cursor.ordering_domain() == ObservationOrderingDomainV1::DaemonSequence
+                && cursor.position() == range.start() =>
+        {
+            Some(cursor)
+        }
+        Ok(Some(cursor))
+            if cursor.generation().file_id() == 1
+                && cursor.ordering_domain() == ObservationOrderingDomainV1::DaemonSequence
+                && cursor.position() == range.end() =>
+        {
+            None
+        }
+        Ok(Some(_)) | Err(_) => return false,
+    };
+    let identity = match ObservationIdentityMaterialV1::for_native_record(
+        source,
+        scope,
+        match ObservationSourceGenerationV1::new(1) {
+            Ok(generation) => generation,
+            Err(_) => return false,
+        },
+        range,
+        ObservationOrderingDomainV1::DaemonSequence,
+        lifecycle.call_id.clone(),
+    ) {
+        Ok(identity) => identity,
+        Err(_) => return false,
+    };
+    let request = match CaptureObservationRequest::new(
+        parsed,
+        identity,
+        expected_cursor,
+        match RetentionClass::new("transcript.hook-lifecycle.v1") {
+            Ok(retention) => retention,
+            Err(_) => return false,
+        },
+        ObservationCancellation::default(),
+    ) {
+        Ok(request) => request,
+        Err(_) => return false,
+    };
+    matches!(
+        facade.capture_observation(request).await,
+        Ok(CaptureObservationOutcome::Persisted { .. })
+    )
+}
+
 enum HookV2BindingAdmission {
     Bound(tracedecay_hooks::HookConfigurationSnapshotV1),
     Unavailable,
@@ -319,13 +459,115 @@ fn hook_v2_admission_ledgers() -> &'static StdMutex<HookV2AdmissionLedgers> {
     LEDGERS.get_or_init(|| StdMutex::new(BTreeMap::new()))
 }
 
+fn hook_v2_pending_work_root(
+    data_root: &Path,
+    host: tracedecay_hooks::HookHostV1,
+) -> std::path::PathBuf {
+    data_root.join("hook-v2-pending-work").join(host.as_key())
+}
+
+fn hook_v2_pending_work_gate() -> &'static StdMutex<()> {
+    static GATE: OnceLock<StdMutex<()>> = OnceLock::new();
+    GATE.get_or_init(|| StdMutex::new(()))
+}
+
+fn complete_hook_v2_pending_work(
+    data_root: &Path,
+    envelope: &tracedecay_hooks::HookEventEnvelopeV2,
+    sequence: u64,
+    now: UtcMicros,
+) -> bool {
+    let key = (data_root.to_path_buf(), envelope.producer.as_key());
+    let Some(mut ledgers) = hook_v2_admission_ledgers().lock().ok() else {
+        return false;
+    };
+    let Some(ledger) = ledgers.get_mut(&key) else {
+        return false;
+    };
+    if ledger.mark_work_completed(envelope).is_err() {
+        return false;
+    }
+    drop(ledgers);
+    let Some(_gate) = hook_v2_pending_work_gate().lock().ok() else {
+        return false;
+    };
+    let Ok((mut spool, _)) = tracedecay_hooks::HookSpoolV1::open(
+        hook_v2_pending_work_root(data_root, envelope.producer),
+        tracedecay_hooks::HookSpoolConfigV1::stock(envelope.producer),
+        now,
+    ) else {
+        return false;
+    };
+    spool
+        .acknowledge(
+            tracedecay_hooks::HookSpoolAckV1 {
+                sequence,
+                receipt_id: envelope.event_id,
+                disposition: tracedecay_hooks::HookSpoolAckDispositionV1::Committed,
+            },
+            now,
+        )
+        .is_ok()
+}
+
+fn retain_hook_v2_pending_work(
+    data_root: &Path,
+    pending_envelope: &tracedecay_hooks::HookEventEnvelopeV2,
+    ledger_envelope: &tracedecay_hooks::HookEventEnvelopeV2,
+    binding: &tracedecay_hooks::HookScopeBindingV1,
+    now: UtcMicros,
+) -> Option<Arc<dyn Fn() + Send + Sync + 'static>> {
+    let _gate = hook_v2_pending_work_gate().lock().ok()?;
+    let (mut spool, _) = tracedecay_hooks::HookSpoolV1::open(
+        hook_v2_pending_work_root(data_root, pending_envelope.producer),
+        tracedecay_hooks::HookSpoolConfigV1::stock(pending_envelope.producer),
+        now,
+    )
+    .ok()?;
+    let record = spool.append(pending_envelope.clone(), binding, now).ok()?;
+    drop(spool);
+    drop(_gate);
+    let data_root = data_root.to_path_buf();
+    let envelope = ledger_envelope.clone();
+    Some(Arc::new(move || {
+        let _ = complete_hook_v2_pending_work(&data_root, &envelope, record.sequence, hook_now());
+    }))
+}
+
+pub(crate) fn hook_v2_pending_work_envelopes(
+    data_root: &Path,
+    host: tracedecay_hooks::HookHostV1,
+    now: UtcMicros,
+) -> Vec<tracedecay_hooks::HookEventEnvelopeV2> {
+    let Some(_gate) = hook_v2_pending_work_gate().lock().ok() else {
+        return Vec::new();
+    };
+    let Ok((mut spool, _)) = tracedecay_hooks::HookSpoolV1::open(
+        hook_v2_pending_work_root(data_root, host),
+        tracedecay_hooks::HookSpoolConfigV1::stock(host),
+        now,
+    ) else {
+        return Vec::new();
+    };
+    let mut records = spool.expired_records(now);
+    if let Ok(batches) = spool.claim_replay_batches(now, 4) {
+        for batch in batches {
+            records.extend(batch.records);
+            let _ = spool.release_replay_claim(batch.claim_id);
+        }
+    }
+    records.sort_unstable_by_key(|record| record.sequence);
+    records.dedup_by_key(|record| record.sequence);
+    records.into_iter().map(|record| record.envelope).collect()
+}
+
 /// Durably record one admission identity. `None` means the ledger itself is
 /// unavailable — the caller must not claim an admission it cannot deduplicate.
 pub(crate) fn record_hook_v2_admission(
     data_root: &Path,
     envelope: &tracedecay_hooks::HookEventEnvelopeV2,
     now: UtcMicros,
-) -> Option<tracedecay_hooks::HookAdmissionDecisionV1> {
+) -> Option<tracedecay_hooks::HookAdmissionLedgerReceiptV1> {
     let key = (data_root.to_path_buf(), envelope.producer.as_key());
     let mut ledgers = hook_v2_admission_ledgers().lock().ok()?;
     if !ledgers.contains_key(&key) {
@@ -341,7 +583,161 @@ pub(crate) fn record_hook_v2_admission(
         .ok()?;
         ledgers.insert(key.clone(), ledger);
     }
-    ledgers.get_mut(&key)?.admit(envelope, now).ok()
+    ledgers
+        .get_mut(&key)?
+        .admit_with_receipt(envelope, now)
+        .ok()
+}
+
+fn hook_v2_requires_producer_work(envelope: &tracedecay_hooks::HookEventEnvelopeV2) -> bool {
+    matches!(
+        &envelope.event,
+        tracedecay_hooks::HookEventV2::SavedEdit { .. }
+            | tracedecay_hooks::HookEventV2::SessionBoundary {
+                boundary: tracedecay_hooks::HookBoundaryV1::End
+                    | tracedecay_hooks::HookBoundaryV1::TurnComplete
+            }
+    )
+}
+
+fn hook_v2_lifecycle_range(
+    envelope: &tracedecay_hooks::HookEventEnvelopeV2,
+    receipt: tracedecay_hooks::HookAdmissionLedgerReceiptV1,
+) -> Option<ObservationSourceRangeV1> {
+    let start = match envelope.ordering {
+        tracedecay_hooks::HookOrderingV1::ProviderSequence(sequence) if sequence > 0 => sequence,
+        tracedecay_hooks::HookOrderingV1::ProviderSequence(_) => return None,
+        tracedecay_hooks::HookOrderingV1::Unknown => receipt.order.checked_add(1)?,
+    };
+    ObservationSourceRangeV1::new(start, start.checked_add(1)?).ok()
+}
+
+fn daemon_mint_hook_v2_id(
+    envelope: &tracedecay_hooks::HookEventEnvelopeV2,
+    domain: &[u8],
+    native_id: [u8; 16],
+) -> [u8; 16] {
+    let producer = envelope.producer.as_key().as_bytes();
+    let mut hasher = Sha256::new();
+    hasher.update(b"tracedecay.hook-v2.daemon-id.v1");
+    hasher.update(envelope.binding_token);
+    hasher.update(envelope.project_id);
+    hasher.update(envelope.repository_id);
+    hasher.update(envelope.worktree_id);
+    hasher.update(envelope.worktree_epoch.to_le_bytes());
+    hasher.update(envelope.protected_session_id);
+    hasher.update((producer.len() as u64).to_le_bytes());
+    hasher.update(producer);
+    hasher.update((domain.len() as u64).to_le_bytes());
+    hasher.update(domain);
+    hasher.update(native_id);
+    let digest = hasher.finalize();
+    let mut canonical_id = [0; 16];
+    canonical_id.copy_from_slice(&digest[..16]);
+    canonical_id
+}
+
+fn hook_v2_event_identity_domain(event: &tracedecay_hooks::HookEventV2) -> &'static [u8] {
+    use tracedecay_hooks::{HookBoundaryV1, HookEventV2, HookLifecyclePhaseV1};
+
+    match event {
+        HookEventV2::SessionBoundary {
+            boundary: HookBoundaryV1::Start,
+        } => b"event.session.start",
+        HookEventV2::SessionBoundary {
+            boundary: HookBoundaryV1::End,
+        } => b"event.session.end",
+        HookEventV2::SessionBoundary {
+            boundary: HookBoundaryV1::TurnComplete,
+        } => b"event.session.turn-complete",
+        HookEventV2::PromptBoundary => b"event.prompt",
+        HookEventV2::ToolLifecycle {
+            phase: HookLifecyclePhaseV1::Started,
+            ..
+        } => b"event.tool.started",
+        HookEventV2::ToolLifecycle {
+            phase: HookLifecyclePhaseV1::Completed,
+            ..
+        } => b"event.tool.completed",
+        HookEventV2::ToolLifecycle {
+            phase: HookLifecyclePhaseV1::Failed,
+            ..
+        } => b"event.tool.failed",
+        HookEventV2::ToolLifecycle {
+            phase: HookLifecyclePhaseV1::Cancelled,
+            ..
+        } => b"event.tool.cancelled",
+        HookEventV2::SavedEdit { .. } => b"event.saved-edit",
+        HookEventV2::TestLifecycle {
+            phase: HookLifecyclePhaseV1::Started,
+            ..
+        } => b"event.test.started",
+        HookEventV2::TestLifecycle {
+            phase: HookLifecyclePhaseV1::Completed,
+            ..
+        } => b"event.test.completed",
+        HookEventV2::TestLifecycle {
+            phase: HookLifecyclePhaseV1::Failed,
+            ..
+        } => b"event.test.failed",
+        HookEventV2::TestLifecycle {
+            phase: HookLifecyclePhaseV1::Cancelled,
+            ..
+        } => b"event.test.cancelled",
+    }
+}
+
+/// Mint canonical daemon-owned identities only after binding validation.
+/// Hook-provided fixed-size values are typed native identity material, never
+/// canonical ledger or orchestration identities.
+fn daemon_mint_hook_v2_envelope(
+    envelope: &tracedecay_hooks::HookEventEnvelopeV2,
+) -> tracedecay_hooks::HookEventEnvelopeV2 {
+    let mut canonical = envelope.clone();
+    canonical.event_id = daemon_mint_hook_v2_id(
+        envelope,
+        hook_v2_event_identity_domain(&envelope.event),
+        envelope.event_id,
+    );
+    canonical.event = match &envelope.event {
+        tracedecay_hooks::HookEventV2::SessionBoundary { boundary } => {
+            tracedecay_hooks::HookEventV2::SessionBoundary {
+                boundary: *boundary,
+            }
+        }
+        tracedecay_hooks::HookEventV2::PromptBoundary => {
+            tracedecay_hooks::HookEventV2::PromptBoundary
+        }
+        tracedecay_hooks::HookEventV2::ToolLifecycle {
+            tool_id,
+            phase,
+            effect_receipt_id,
+        } => tracedecay_hooks::HookEventV2::ToolLifecycle {
+            tool_id: daemon_mint_hook_v2_id(envelope, b"tool", *tool_id),
+            phase: *phase,
+            effect_receipt_id: effect_receipt_id
+                .map(|id| daemon_mint_hook_v2_id(envelope, b"effect-receipt", id)),
+        },
+        tracedecay_hooks::HookEventV2::SavedEdit {
+            file_id,
+            changed_range_count,
+        } => tracedecay_hooks::HookEventV2::SavedEdit {
+            file_id: daemon_mint_hook_v2_id(envelope, b"file", *file_id),
+            changed_range_count: *changed_range_count,
+        },
+        tracedecay_hooks::HookEventV2::TestLifecycle {
+            test_run_id,
+            test_count,
+            phase,
+            receipt_id,
+        } => tracedecay_hooks::HookEventV2::TestLifecycle {
+            test_run_id: daemon_mint_hook_v2_id(envelope, b"test-run", *test_run_id),
+            test_count: *test_count,
+            phase: *phase,
+            receipt_id: receipt_id.map(|id| daemon_mint_hook_v2_id(envelope, b"test-receipt", id)),
+        },
+    };
+    canonical
 }
 
 /// The daemon-side result of admitting one Hook V2 envelope, shared by the
@@ -370,6 +766,18 @@ pub(crate) async fn admit_hook_v2_envelope(
     native_session_id: Option<SessionId>,
     now: UtcMicros,
 ) -> HookV2AdmissionOutcomeV1 {
+    admit_hook_v2_envelope_with_lifecycle(cg, envelope, native_session_id, None, None, now).await
+}
+
+async fn admit_hook_v2_envelope_with_lifecycle(
+    cg: &TraceDecay,
+    envelope: &tracedecay_hooks::HookEventEnvelopeV2,
+    native_session_id: Option<SessionId>,
+    native_lifecycle: Option<crate::hooks::NativeContextScoutLifecycleV1>,
+    project_sessions: Option<&RegisteredGlobalDb>,
+    now: UtcMicros,
+) -> HookV2AdmissionOutcomeV1 {
+    let provider_envelope = envelope;
     let snapshot = match hook_v2_binding_admission(cg, envelope, now) {
         HookV2BindingAdmission::Bound(snapshot) => snapshot,
         HookV2BindingAdmission::Unavailable => return HookV2AdmissionOutcomeV1::Unavailable,
@@ -377,29 +785,73 @@ pub(crate) async fn admit_hook_v2_envelope(
             return HookV2AdmissionOutcomeV1::CatchupRequired;
         }
     };
-    // Durable idempotency is taken *after* reauthorization and *before* any
-    // effect, so at-least-once delivery converges on exactly one admission.
-    match record_hook_v2_admission(&cg.hook_store_layout().data_root, envelope, now) {
-        Some(tracedecay_hooks::HookAdmissionDecisionV1::Admitted) => {}
-        Some(tracedecay_hooks::HookAdmissionDecisionV1::ExactDuplicate) => {
-            return HookV2AdmissionOutcomeV1::ExactDuplicate;
-        }
-        Some(tracedecay_hooks::HookAdmissionDecisionV1::Conflict) => {
+    let canonical_envelope = daemon_mint_hook_v2_envelope(envelope);
+    let envelope = &canonical_envelope;
+    // The durable ledger supplies stable daemon order when the provider has no
+    // native sequence. Exact-duplicate retries reuse that order and retry only
+    // the lifecycle prerequisite before suppressing downstream effects.
+    let Some(receipt) = record_hook_v2_admission(&cg.hook_store_layout().data_root, envelope, now)
+    else {
+        return HookV2AdmissionOutcomeV1::Backpressured;
+    };
+    match receipt.decision {
+        tracedecay_hooks::HookAdmissionDecisionV1::Admitted
+        | tracedecay_hooks::HookAdmissionDecisionV1::ExactDuplicate => {}
+        tracedecay_hooks::HookAdmissionDecisionV1::Conflict => {
             return HookV2AdmissionOutcomeV1::Conflict;
         }
-        None => return HookV2AdmissionOutcomeV1::Backpressured,
     }
+    if let (Some(native_lifecycle), Some(project_sessions)) =
+        (native_lifecycle.as_ref(), project_sessions)
+    {
+        let Some(range) = hook_v2_lifecycle_range(envelope, receipt) else {
+            return HookV2AdmissionOutcomeV1::Backpressured;
+        };
+        if !admit_native_context_scout_lifecycle(
+            project_sessions,
+            ProviderId::new(envelope.producer.as_key()).expect("static Hook V2 provider id"),
+            native_lifecycle,
+            range,
+        )
+        .await
+        {
+            return HookV2AdmissionOutcomeV1::Backpressured;
+        }
+    }
+    let requires_producer_work = hook_v2_requires_producer_work(envelope);
+    if receipt.decision == tracedecay_hooks::HookAdmissionDecisionV1::ExactDuplicate
+        && (!requires_producer_work || receipt.work_completed)
+    {
+        return HookV2AdmissionOutcomeV1::ExactDuplicate;
+    }
+    let completion = if requires_producer_work {
+        let Some(completion) = retain_hook_v2_pending_work(
+            &cg.hook_store_layout().data_root,
+            provider_envelope,
+            envelope,
+            &snapshot.binding,
+            now,
+        ) else {
+            return HookV2AdmissionOutcomeV1::Backpressured;
+        };
+        Some(completion)
+    } else {
+        None
+    };
+    let first_admission = receipt.decision == tracedecay_hooks::HookAdmissionDecisionV1::Admitted;
     // Live-activity tap: a bound hook-v2 envelope reaching admission IS an agent
     // working in this project — the primary live hook path for every v2-bound
     // host. Publish it here, where the project scope is already resolved. Free
     // when no dashboard is connected.
-    crate::dashboard::activity_bus::publish(
-        crate::dashboard::activity_bus::ActivityFamilyV1::Hook,
-        cg.project_root(),
-        cg.store_layout().identity.project_id.as_deref(),
-        1,
-        Some(hook_v2_family_label(envelope.event.family())),
-    );
+    if first_admission {
+        crate::dashboard::activity_bus::publish(
+            crate::dashboard::activity_bus::ActivityFamilyV1::Hook,
+            cg.project_root(),
+            cg.store_layout().identity.project_id.as_deref(),
+            1,
+            Some(hook_v2_family_label(envelope.event.family())),
+        );
+    }
     let lifecycle = hook_v2_context_scout_lifecycle_for_session(envelope, native_session_id).await;
     let claim_authority = match (
         crate::agents::context_scout_ports::AdmittedContextScoutHookV1::new(
@@ -414,8 +866,8 @@ pub(crate) async fn admit_hook_v2_envelope(
         }
         _ => None,
     };
-    let ready_guidance = match (cg.context_scout_owner(), claim_authority) {
-        (Some(owner), Some((address, input_watermark))) => match owner
+    let ready_guidance = match (first_admission, cg.context_scout_owner(), claim_authority) {
+        (true, Some(owner), Some((address, input_watermark))) => match owner
             .claim_ready_guidance_exact(envelope, address, input_watermark, snapshot.revision, now)
             .await
         {
@@ -450,13 +902,18 @@ pub(crate) async fn admit_hook_v2_envelope(
         lifecycle,
         snapshot.revision,
         false,
+        completion,
     );
-    let feedback_notice = crate::application::advisory::peek_pr13_advisory_hook_notice(
-        envelope.project_id,
-        envelope.worktree_id,
-    )
-    .and_then(|notice| serde_json::to_value(notice).ok())
-    .unwrap_or(Value::Null);
+    let feedback_notice = if first_admission {
+        crate::application::advisory::peek_pr13_advisory_hook_notice(
+            envelope.project_id,
+            envelope.worktree_id,
+        )
+        .and_then(|notice| serde_json::to_value(notice).ok())
+        .unwrap_or(Value::Null)
+    } else {
+        Value::Null
+    };
     HookV2AdmissionOutcomeV1::Admitted {
         orchestration,
         ready_guidance,
@@ -464,12 +921,27 @@ pub(crate) async fn admit_hook_v2_envelope(
     }
 }
 
-async fn hook_v2_admit(cg: &TraceDecay, args: &Value, action: &str) -> Result<Value> {
+async fn hook_v2_admit(
+    cg: &TraceDecay,
+    args: &Value,
+    action: &str,
+    project_sessions: &RegisteredGlobalDb,
+) -> Result<Value> {
     let envelope = hook_v2_envelope(args, action)?;
     let now = hook_now();
     let native_session_id = hook_v2_native_session_id(args, &envelope);
+    let native_lifecycle = hook_v2_native_context_scout_lifecycle(args, &envelope);
     Ok(
-        match admit_hook_v2_envelope(cg, &envelope, native_session_id, now).await {
+        match admit_hook_v2_envelope_with_lifecycle(
+            cg,
+            &envelope,
+            native_session_id,
+            native_lifecycle,
+            Some(project_sessions),
+            now,
+        )
+        .await
+        {
             HookV2AdmissionOutcomeV1::Admitted {
                 orchestration,
                 ready_guidance,
@@ -543,6 +1015,7 @@ async fn hook_v2_scout_prepare(cg: &TraceDecay, args: &Value) -> Result<Value> {
             lifecycle,
             snapshot.revision,
             true,
+            None,
         ),
     ))
 }
@@ -1800,27 +2273,102 @@ mod tests {
         }
     }
 
+    fn admission_test_binding(epoch: u64) -> tracedecay_hooks::HookScopeBindingV1 {
+        let host = tracedecay_hooks::HookHostV1::ClaudeCode;
+        tracedecay_hooks::HookScopeBindingV1 {
+            host,
+            project_id: [1; 16],
+            repository_id: [2; 16],
+            worktree_id: [3; 16],
+            worktree_epoch: epoch,
+            binding_token: [4; 32],
+            capabilities: [
+                tracedecay_hooks::HookEventFamily::SessionBoundary,
+                tracedecay_hooks::HookEventFamily::PromptBoundary,
+                tracedecay_hooks::HookEventFamily::ToolLifecycle,
+                tracedecay_hooks::HookEventFamily::SavedEdit,
+                tracedecay_hooks::HookEventFamily::TestLifecycle,
+            ]
+            .into_iter()
+            .map(|family| tracedecay_hooks::HookCapabilityV1 {
+                family,
+                support: tracedecay_hooks::stock_event_support(host, family),
+            })
+            .collect(),
+        }
+    }
+
+    #[test]
+    fn daemon_minted_hook_ids_are_replay_stable_typed_and_binding_scoped() {
+        let mut native = admission_test_envelope(9, 7);
+        native.event = tracedecay_hooks::HookEventV2::SavedEdit {
+            file_id: [9; 16],
+            changed_range_count: 1,
+        };
+
+        let first = daemon_mint_hook_v2_envelope(&native);
+        let replay = daemon_mint_hook_v2_envelope(&native);
+        assert_eq!(replay, first);
+
+        let tracedecay_hooks::HookEventV2::SavedEdit { file_id, .. } = first.event else {
+            panic!("expected saved-edit envelope");
+        };
+        assert_ne!(first.event_id, file_id);
+
+        let mut different_binding = native.clone();
+        different_binding.binding_token = [8; 32];
+        let different_binding = daemon_mint_hook_v2_envelope(&different_binding);
+        assert_ne!(different_binding.event_id, first.event_id);
+        let tracedecay_hooks::HookEventV2::SavedEdit {
+            file_id: different_file_id,
+            ..
+        } = different_binding.event
+        else {
+            panic!("expected saved-edit envelope");
+        };
+        assert_ne!(different_file_id, file_id);
+
+        let mut different_session = native.clone();
+        different_session.protected_session_id = [6; 32];
+        let different_session = daemon_mint_hook_v2_envelope(&different_session);
+        assert_ne!(different_session.event_id, first.event_id);
+    }
+
     #[test]
     fn daemon_admission_is_idempotent_per_identity_and_conflicts_on_different_bytes() {
         let data_root = tempfile::tempdir().unwrap();
         let now = UtcMicros(1_000);
 
+        let first = record_hook_v2_admission(data_root.path(), &admission_test_envelope(9, 7), now)
+            .unwrap();
+        let duplicate =
+            record_hook_v2_admission(data_root.path(), &admission_test_envelope(9, 7), now)
+                .unwrap();
+        let conflict =
+            record_hook_v2_admission(data_root.path(), &admission_test_envelope(9, 8), now)
+                .unwrap();
+        let second =
+            record_hook_v2_admission(data_root.path(), &admission_test_envelope(10, 7), now)
+                .unwrap();
         assert_eq!(
-            record_hook_v2_admission(data_root.path(), &admission_test_envelope(9, 7), now),
-            Some(tracedecay_hooks::HookAdmissionDecisionV1::Admitted)
+            first.decision,
+            tracedecay_hooks::HookAdmissionDecisionV1::Admitted
         );
         assert_eq!(
-            record_hook_v2_admission(data_root.path(), &admission_test_envelope(9, 7), now),
-            Some(tracedecay_hooks::HookAdmissionDecisionV1::ExactDuplicate)
+            duplicate.decision,
+            tracedecay_hooks::HookAdmissionDecisionV1::ExactDuplicate
         );
+        assert_eq!(duplicate.order, first.order);
         assert_eq!(
-            record_hook_v2_admission(data_root.path(), &admission_test_envelope(9, 8), now),
-            Some(tracedecay_hooks::HookAdmissionDecisionV1::Conflict)
+            conflict.decision,
+            tracedecay_hooks::HookAdmissionDecisionV1::Conflict
         );
+        assert_eq!(conflict.order, first.order);
         assert_eq!(
-            record_hook_v2_admission(data_root.path(), &admission_test_envelope(10, 7), now),
-            Some(tracedecay_hooks::HookAdmissionDecisionV1::Admitted)
+            second.decision,
+            tracedecay_hooks::HookAdmissionDecisionV1::Admitted
         );
+        assert_eq!(second.order, first.order + 1);
         assert!(
             hook_v2_admission_ledger_root(
                 data_root.path(),
@@ -1828,6 +2376,82 @@ mod tests {
             )
             .join("admissions.v1.bin")
             .is_file()
+        );
+    }
+
+    #[test]
+    fn pending_work_survives_unavailable_redrive_and_clears_only_after_completion() {
+        let data_root = tempfile::tempdir().unwrap();
+        let now = UtcMicros(1_000);
+        let envelope = admission_test_envelope(31, 7);
+        let binding = admission_test_binding(7);
+        let first = record_hook_v2_admission(data_root.path(), &envelope, now).unwrap();
+        assert!(!first.work_completed);
+        let unavailable = retain_hook_v2_pending_work(
+            data_root.path(),
+            &envelope,
+            &envelope,
+            &binding,
+            now,
+        )
+        .expect("durable pending work");
+        drop(unavailable);
+        assert_eq!(
+            hook_v2_pending_work_envelopes(
+                data_root.path(),
+                tracedecay_hooks::HookHostV1::ClaudeCode,
+                now,
+            ),
+            [envelope.clone()]
+        );
+
+        let duplicate = record_hook_v2_admission(data_root.path(), &envelope, now).unwrap();
+        assert_eq!(
+            duplicate.decision,
+            tracedecay_hooks::HookAdmissionDecisionV1::ExactDuplicate
+        );
+        assert!(!duplicate.work_completed);
+        let redrive = retain_hook_v2_pending_work(
+            data_root.path(),
+            &envelope,
+            &envelope,
+            &binding,
+            now,
+        )
+        .expect("duplicate pending work redrive");
+        redrive();
+
+        assert!(hook_v2_pending_work_envelopes(
+            data_root.path(),
+            tracedecay_hooks::HookHostV1::ClaudeCode,
+            now,
+        )
+        .is_empty());
+        assert!(
+            record_hook_v2_admission(data_root.path(), &envelope, now)
+                .unwrap()
+                .work_completed
+        );
+    }
+
+    #[test]
+    fn lifecycle_range_prefers_native_sequence_and_reuses_unknown_ledger_order() {
+        let receipt = tracedecay_hooks::HookAdmissionLedgerReceiptV1 {
+            decision: tracedecay_hooks::HookAdmissionDecisionV1::Admitted,
+            order: 7,
+            work_completed: false,
+        };
+        let unknown = admission_test_envelope(21, 7);
+        assert_eq!(
+            hook_v2_lifecycle_range(&unknown, receipt),
+            ObservationSourceRangeV1::new(8, 9).ok()
+        );
+
+        let mut native = admission_test_envelope(22, 7);
+        native.ordering = tracedecay_hooks::HookOrderingV1::ProviderSequence(41);
+        assert_eq!(
+            hook_v2_lifecycle_range(&native, receipt),
+            ObservationSourceRangeV1::new(41, 42).ok()
         );
     }
 
@@ -2067,6 +2691,90 @@ mod tests {
             hook_v2_native_session_id(&json!({ "native_session_id": session_id }), &envelope)
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn kimi_and_opencode_queued_lifecycle_delivery_prepares_scout_lookup() {
+        let temporary = tempfile::tempdir().unwrap();
+        let project_id = ProjectId::new("project.native-hook-scout").unwrap();
+        let runtime = crate::application::host_admission::HostAdmissionTestRuntimeV1::project(
+            temporary.path().join("profile"),
+            temporary.path().join("project"),
+            project_id.clone(),
+        )
+        .await
+        .unwrap();
+        let sessions = runtime
+            .registered_database_arc(HostAdmissionScope::Project)
+            .unwrap();
+        let worktree_id = tracedecay_domain::WorktreeId::new("worktree.native-hook-scout").unwrap();
+        let hook_project_id = [71; 16];
+        let hook_worktree_id = [72; 16];
+        assert!(
+            crate::daemon::context_scout_lifecycle::register_context_scout_lifecycle_authority(
+                hook_project_id,
+                hook_worktree_id,
+                project_id,
+                worktree_id,
+                &sessions,
+            )
+        );
+
+        for (provider, session, first_call, latest_call) in [
+            (
+                "kimi",
+                "session.kimi.native",
+                "call.kimi.first",
+                "call.kimi.latest",
+            ),
+            (
+                "opencode",
+                "session.opencode.native",
+                "call.opencode.first",
+                "call.opencode.latest",
+            ),
+        ] {
+            for (order, call) in [first_call, latest_call].into_iter().enumerate() {
+                let identity =
+                    crate::hooks::NativeContextScoutLifecycleV1::new(session, call).unwrap();
+                let range = ObservationSourceRangeV1::new(
+                    u64::try_from(order).unwrap() + 1,
+                    u64::try_from(order).unwrap() + 2,
+                )
+                .unwrap();
+                assert!(
+                    admit_native_context_scout_lifecycle(
+                        &sessions,
+                        ProviderId::new(provider).unwrap(),
+                        &identity,
+                        range,
+                    )
+                    .await
+                );
+                assert!(
+                    admit_native_context_scout_lifecycle(
+                        &sessions,
+                        ProviderId::new(provider).unwrap(),
+                        &identity,
+                        range,
+                    )
+                    .await
+                );
+            }
+            let lifecycle =
+                crate::daemon::context_scout_lifecycle::lookup_registered_context_scout_lifecycle(
+                    hook_project_id,
+                    hook_worktree_id,
+                    &SessionId::new(session.to_owned()).unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(lifecycle.provider_id.as_str(), provider);
+            assert_eq!(lifecycle.thread_id.as_str(), session);
+            assert_eq!(lifecycle.agent_id.as_str(), session);
+            assert_eq!(lifecycle.turn_id.as_str(), latest_call);
+            assert_eq!(lifecycle.logical_message_id.as_str(), latest_call);
+        }
     }
 
     #[test]

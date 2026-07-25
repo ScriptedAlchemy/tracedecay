@@ -17,6 +17,12 @@ use super::GitWatcherInner;
 
 const SECONDS_PER_DAY: i64 = 24 * 60 * 60;
 
+pub(super) fn retention_window_secs(days: u64) -> i64 {
+    i64::try_from(days)
+        .unwrap_or(i64::MAX)
+        .saturating_mul(SECONDS_PER_DAY)
+}
+
 /// Opens the project store and runs a diff-scoped incremental sync (or a full
 /// sync when the diff base is missing / oversized). Returns true on success.
 /// `SyncLock` is treated as success (a peer synced).
@@ -481,7 +487,7 @@ pub(super) async fn run_orphan_store_sweep(
     profile_root: &Path,
     orphan_store_gc_days: u64,
 ) -> bool {
-    let retention_secs = (orphan_store_gc_days as i64).saturating_mul(SECONDS_PER_DAY);
+    let retention_secs = retention_window_secs(orphan_store_gc_days);
     let now = now_secs_i64();
     let report = crate::retention::orphan_stores::sweep_orphan_stores(
         database,
@@ -658,6 +664,21 @@ pub(super) async fn run_orphan_store_sweep(
         );
     }
 
+    report.outcome.errors.is_empty()
+        && !registry_retirement_failed
+        && unregistered_report.outcome.errors.is_empty()
+}
+
+/// Quarantines and collects incident debris on its own retention policy. This
+/// pass is independent from orphan-store GC: disabling or failing one must not
+/// suppress recovery/corruption artifact ownership for otherwise-live stores.
+pub(super) async fn run_incident_debris_sweep(
+    database: &crate::global_db::RegisteredGlobalDb,
+    profile_root: &Path,
+    retention_days: u64,
+) -> bool {
+    let retention_secs = retention_window_secs(retention_days);
+    let now = now_secs_i64();
     let debris_report =
         match crate::retention::orphan_stores::build_store_census(database, profile_root).await {
             Ok(census) => crate::retention::incident_debris::sweep_incident_debris(
@@ -692,8 +713,5 @@ pub(super) async fn run_orphan_store_sweep(
             ],
         );
     }
-    report.outcome.errors.is_empty()
-        && !registry_retirement_failed
-        && unregistered_report.outcome.errors.is_empty()
-        && debris_report.errors.is_empty()
+    debris_report.errors.is_empty()
 }

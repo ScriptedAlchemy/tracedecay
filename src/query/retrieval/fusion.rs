@@ -274,6 +274,11 @@ impl RetrievalCursorKeyringV1 {
             .map_err(|_| RetrievalError::CursorAuthenticationFailed)
     }
 
+    pub(crate) fn resign_cursor(&self, cursor: &mut RetrievalCursor) -> Result<(), RetrievalError> {
+        cursor.signature = self.sign_cursor(cursor)?;
+        Ok(())
+    }
+
     fn key_material(
         &self,
         key_id: &RetrievalCursorKeyId,
@@ -587,6 +592,34 @@ impl CompositionKernel {
             ranked_candidates,
             cursor,
         })
+    }
+
+    pub(crate) fn cursor_at(
+        &self,
+        request: &RetrievalRequest,
+        query_view: &EphemeralSanitizedQueryViewV1,
+        keyring: &RetrievalCursorKeyringV1,
+        output: &CompositionOutputV1,
+        next_ordinal: usize,
+        now: UtcMicros,
+    ) -> Result<RetrievalCursor, RetrievalError> {
+        if next_ordinal > output.ranked_candidates.len() {
+            return Err(RetrievalError::CursorSetMismatch);
+        }
+        let query_digest = keyring
+            .digest_active_query(request, query_view)
+            .map_err(|error| RetrievalError::InvalidRequest(error.to_string()))?;
+        build_cursor(
+            request,
+            output,
+            query_digest,
+            request.snapshot.compute_digest()?,
+            digest_candidate_set(&output.ranked_candidates)?,
+            self.ranking_revision.clone(),
+            u32::try_from(next_ordinal).map_err(|_| RetrievalError::CursorSetMismatch)?,
+            now,
+            keyring,
+        )
     }
 }
 
@@ -1029,7 +1062,7 @@ fn attach_same_source_decisions(
     Ok(())
 }
 
-fn digest_candidate_set(
+pub(crate) fn digest_candidate_set(
     candidates: &[RankedCandidate],
 ) -> Result<CandidateSetDigest, RetrievalError> {
     digest_value("tracedecay.retrieval-candidate-set.v1", candidates)
@@ -1074,6 +1107,7 @@ fn build_cursor(
             ranking_revision.as_str().to_owned(),
         )?,
         next_ordinal,
+        semantic: None,
         expiry: keyring.expiry_from(now)?,
         signature: QueryMac::new(format!("hmac-sha256:{}", "0".repeat(64)))?,
     };
@@ -1097,6 +1131,8 @@ struct CursorAuthenticatedPayload<'a> {
     lane_checkpoints: &'a [RetrieverContinuation],
     ranking_revision: &'a tracedecay_domain::RankingRevision,
     next_ordinal: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    semantic: &'a Option<tracedecay_domain::SemanticRetrievalContinuationV1>,
     expiry: UtcMicros,
 }
 
@@ -1116,6 +1152,7 @@ fn cursor_authenticated_bytes(cursor: &RetrievalCursor) -> Result<Vec<u8>, Retri
         lane_checkpoints: &cursor.lane_checkpoints,
         ranking_revision: &cursor.ranking_revision,
         next_ordinal: cursor.next_ordinal,
+        semantic: &cursor.semantic,
         expiry: cursor.expiry,
     })
     .map_err(|error| RetrievalError::InvalidRequest(error.to_string()))
