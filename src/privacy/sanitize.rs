@@ -13,7 +13,8 @@ use tracedecay_domain::{
 
 use super::detect::{
     DetectionConfidenceV1, DetectionError, PrivacyDetectorV1, SanitizationActionV1,
-    SanitizationFindingV1, normalize_key, redact_sensitive_values,
+    SanitizationDetectorOriginV1, SanitizationFindingV1, SanitizationScanBoundaryV1, normalize_key,
+    redact_sensitive_values,
 };
 use super::parse::{ParseLimits, ParsedClaudeRecordV1, ParsedPolicyLimitViolation};
 use super::structural_id::{StructuralIdProtectionError, protect_sensitive_structural_id};
@@ -292,12 +293,15 @@ impl ClaudeRecordSanitizerV1 {
         };
         let mut detected = redact_sensitive_values(payload, &self.policy.sensitive_keys)?;
         if structural_identity_protected {
-            detected.findings.push(SanitizationFindingV1::new(
-                PrivacyDetectorV1::ExactCredential,
-                "$/structural-identity",
-                DetectionConfidenceV1::Exact,
-                SanitizationActionV1::Redacted,
-            ));
+            detected
+                .findings
+                .push(SanitizationFindingV1::new_with_origin(
+                    PrivacyDetectorV1::ExactCredential,
+                    SanitizationDetectorOriginV1::SanitizerPolicy,
+                    "$/structural-identity",
+                    DetectionConfidenceV1::Exact,
+                    SanitizationActionV1::Redacted,
+                ));
         }
         if !detected.quarantine_findings.is_empty() {
             return self.quarantined_outcome_from_digest(
@@ -349,16 +353,24 @@ impl ClaudeRecordSanitizerV1 {
         raw_digest: &[u8; 32],
         identity: &ClaudeObservationIdentityMaterialV1,
     ) -> Result<ClaudeSanitizationOutcomeV1, PrivacySanitizerError> {
-        let (disposition, detector, action) = match kind {
-            ParsedPolicyLimitViolation::NestingDepth | ParsedPolicyLimitViolation::ValueCount => (
+        let (disposition, detector, action, boundary) = match kind {
+            ParsedPolicyLimitViolation::NestingDepth => (
                 SanitizerDispositionV1::Quarantined,
                 PrivacyDetectorV1::StructureLimit,
                 SanitizationActionV1::Quarantined,
+                SanitizationScanBoundaryV1::NestingDepth,
+            ),
+            ParsedPolicyLimitViolation::ValueCount => (
+                SanitizerDispositionV1::Quarantined,
+                PrivacyDetectorV1::StructureLimit,
+                SanitizationActionV1::Quarantined,
+                SanitizationScanBoundaryV1::ValueCount,
             ),
             ParsedPolicyLimitViolation::RecordSize => (
                 SanitizerDispositionV1::Rejected,
                 PrivacyDetectorV1::RecordSizeLimit,
                 SanitizationActionV1::Rejected,
+                SanitizationScanBoundaryV1::RecordBytes,
             ),
         };
         let sensitivity = SensitivityV1::Sensitive;
@@ -372,8 +384,13 @@ impl ClaudeRecordSanitizerV1 {
             )?
             .derive_receipt_ref()?;
         let receipt = SanitizationReceiptV1::new(receipt_ref, disposition, sensitivity, None)?;
-        let finding =
-            SanitizationFindingV1::new(detector, "$", DetectionConfidenceV1::Exact, action);
+        let finding = SanitizationFindingV1::new_with_incomplete_coverage(
+            detector,
+            "$",
+            DetectionConfidenceV1::Exact,
+            action,
+            boundary,
+        );
         Ok(match disposition {
             SanitizerDispositionV1::Rejected => ClaudeSanitizationOutcomeV1::Rejected {
                 receipt,
