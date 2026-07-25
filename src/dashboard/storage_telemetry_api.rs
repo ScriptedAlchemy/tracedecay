@@ -150,7 +150,7 @@ pub(crate) struct StorageTelemetryPayloadV1 {
 }
 
 /// The owner setting path that configures a store's soft byte budget.
-const BUDGET_SETTING_KEY: &str = "sync.retention.v1 store_soft_budgets_bytes";
+pub(crate) const BUDGET_SETTING_KEY: &str = "sync.retention.v1 store_soft_budgets_bytes";
 const BUDGET_UNSET_REASON: &str = "no soft size budget is configured by the owner for this store (set \
      sync.retention.v1 store_soft_budgets_bytes for the store key to configure one)";
 const BUDGET_NOTE: &str = "budgets are owner configuration: sync.retention.v1 store_soft_budgets_bytes, keyed by store \
@@ -179,6 +179,10 @@ struct SampledStoreV1 {
     pub roles: Vec<String>,
     /// The typed size read: `observed` with a sample, or `unknown`.
     pub read: StorageTelemetryReadV1,
+    /// Why this expected store could not be examined. Kept alongside the
+    /// sample so envelope coverage can name the actual omission rather than
+    /// silently shrinking its denominator.
+    pub omission_reason: Option<String>,
 }
 
 impl SampledStoreV1 {
@@ -209,6 +213,18 @@ enum ResolvedStoreBudgetV1 {
     Configured(StoreSizeBudgetV1),
     Unset,
     Unknown(String),
+}
+
+/// Aggregate source coverage for the `OverBudgetStore` producer. This is not a
+/// health verdict: it records how many real store samples could be evaluated,
+/// how many owner budgets are unset, and how many reads remain undetermined.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct StoreBudgetSourceSummaryV1 {
+    pub stores: usize,
+    pub evaluated: usize,
+    pub over_budget: usize,
+    pub unset: usize,
+    pub unknown: usize,
 }
 
 /// Resolve one store's owner-configured soft budget from the retention config.
@@ -259,33 +275,80 @@ async fn collect_store_samples(state: &DashboardState) -> Vec<SampledStoreV1> {
     )
     .await;
     // LCM session store, when a read connection is held.
-    if let Some(db) = &state.lcm_db
-        && let Ok(snapshot) = db.read_snapshot().await
-    {
-        push_or_merge_role(
-            &mut entries,
-            &mut seen,
-            "lcm",
-            &state.lcm_db_path,
-            &snapshot,
-        )
-        .await;
+    if let Some(db) = &state.lcm_db {
+        match db.read_snapshot().await {
+            Ok(snapshot) => {
+                push_or_merge_role(
+                    &mut entries,
+                    &mut seen,
+                    "lcm",
+                    &state.lcm_db_path,
+                    &snapshot,
+                )
+                .await;
+            }
+            Err(error) => push_or_merge_unknown_role(
+                &mut entries,
+                &mut seen,
+                "lcm",
+                &state.lcm_db_path,
+                format!("store snapshot open failed for lcm role: {error}"),
+            ),
+        }
     }
     // Global accounting store, when available.
-    if let Some(db) = &state.savings_db
-        && let Ok(snapshot) = db.read_snapshot().await
-    {
-        push_or_merge_role(
-            &mut entries,
-            &mut seen,
-            "savings",
-            &state.savings_db_path,
-            &snapshot,
-        )
-        .await;
+    if let Some(db) = &state.savings_db {
+        match db.read_snapshot().await {
+            Ok(snapshot) => {
+                push_or_merge_role(
+                    &mut entries,
+                    &mut seen,
+                    "savings",
+                    &state.savings_db_path,
+                    &snapshot,
+                )
+                .await;
+            }
+            Err(error) => push_or_merge_unknown_role(
+                &mut entries,
+                &mut seen,
+                "savings",
+                &state.savings_db_path,
+                format!("store snapshot open failed for savings role: {error}"),
+            ),
+        }
     }
 
     entries
+}
+
+/// Read the same real store samples and pinned owner configuration as the
+/// telemetry route, but without recording a growth watermark. The storage
+/// finding route uses this to state whether `OverBudgetStore` was evaluated,
+/// unset, or only partially observable.
+pub(crate) async fn budget_source_summary(state: &DashboardState) -> StoreBudgetSourceSummaryV1 {
+    let samples = collect_store_samples(state).await;
+    let mut summary = StoreBudgetSourceSummaryV1 {
+        stores: samples.len(),
+        ..StoreBudgetSourceSummaryV1::default()
+    };
+    for sampled in samples {
+        match budget_dimension(
+            &sampled.store,
+            sampled.sample(),
+            Some(&state.retention_config),
+        ) {
+            StoreBudgetDimensionV1::Evaluated { evaluation, .. } => {
+                summary.evaluated += 1;
+                if evaluation.is_over_budget() {
+                    summary.over_budget += 1;
+                }
+            }
+            StoreBudgetDimensionV1::Unset { .. } => summary.unset += 1,
+            StoreBudgetDimensionV1::Unknown { .. } => summary.unknown += 1,
+        }
+    }
+    summary
 }
 
 /// Upper bound on watermarks retained per store, and on distinct stores tracked
@@ -337,30 +400,12 @@ pub(crate) async fn telemetry(
     // runtime configuration.
     let retention = &state.retention_config;
 
-    let entries: Vec<StoreTelemetryEntryV1> = collect_store_samples(&state)
-        .await
+    let samples = collect_store_samples(&state).await;
+    let coverage = telemetry_coverage(&samples);
+    let entries: Vec<StoreTelemetryEntryV1> = samples
         .into_iter()
         .map(|sampled| telemetry_entry(sampled, Some(retention)))
         .collect();
-
-    let total = entries.len() as u64;
-    let observed = entries
-        .iter()
-        .filter(|entry| matches!(entry.read, StorageTelemetryReadV1::Observed { .. }))
-        .count() as u64;
-
-    // Coverage is over the known, enumerated set of dashboard-held stores. A
-    // complete claim therefore always carries a real denominator.
-    let coverage = if observed == total {
-        DashboardCoverageV1::complete(total, "dashboard_held_stores")
-    } else {
-        DashboardCoverageV1::partial(
-            total,
-            observed,
-            "dashboard_held_stores",
-            vec!["store telemetry read failed (pragma unavailable)".to_string()],
-        )
-    };
 
     let payload = StorageTelemetryPayloadV1 {
         stores: entries,
@@ -398,6 +443,62 @@ async fn push_or_merge_role(
     entries.push(entry);
 }
 
+/// Preserve an expected dashboard-held store when its snapshot could not be
+/// opened. The store stays in the denominator and projects as typed `unknown`.
+#[allow(clippy::expect_used)] // the "store" fallback key is statically valid
+fn push_or_merge_unknown_role(
+    entries: &mut Vec<SampledStoreV1>,
+    seen: &mut HashMap<String, usize>,
+    role: &str,
+    path: &str,
+    omission_reason: String,
+) {
+    let identity = store_identity(path);
+    if let Some(index) = seen.get(&identity).copied() {
+        let entry = &mut entries[index];
+        if !entry.roles.iter().any(|existing| existing == role) {
+            entry.roles.push(role.to_string());
+        }
+        if entry.sample().is_none() && entry.omission_reason.is_none() {
+            entry.omission_reason = Some(omission_reason);
+        }
+        return;
+    }
+
+    let store_name = store_file_name(path);
+    let store = StoreKeyV1::new(store_name.clone()).unwrap_or_else(|_| {
+        StoreKeyV1::new(sanitize_store_key(&store_name))
+            .unwrap_or_else(|_| StoreKeyV1::new("store").expect("static key"))
+    });
+    seen.insert(identity, entries.len());
+    entries.push(SampledStoreV1 {
+        store: store_name,
+        path: path.to_string(),
+        roles: vec![role.to_string()],
+        read: StorageTelemetryReadV1::Unknown { store },
+        omission_reason: Some(omission_reason),
+    });
+}
+
+/// Coverage over the expected, deduplicated set of dashboard-held stores.
+/// Unknown stores remain eligible and contribute their concrete failure reason.
+fn telemetry_coverage(samples: &[SampledStoreV1]) -> DashboardCoverageV1 {
+    let total = samples.len() as u64;
+    let observed = samples
+        .iter()
+        .filter(|sampled| sampled.sample().is_some())
+        .count() as u64;
+    if observed == total {
+        return DashboardCoverageV1::complete(total, "dashboard_held_stores");
+    }
+
+    let omission_reasons = samples
+        .iter()
+        .filter_map(|sampled| sampled.omission_reason.clone())
+        .collect();
+    DashboardCoverageV1::partial(total, observed, "dashboard_held_stores", omission_reasons)
+}
+
 /// Identity of a store *file*, used to deduplicate roles that share a database.
 /// Canonicalization resolves symlinks and relative spellings; an
 /// uncanonicalizable path falls back to its own spelling so two genuinely
@@ -420,19 +521,27 @@ async fn sample_store(
     let store_name = store_file_name(path);
     let store_key = StoreKeyV1::new(store_name.clone());
 
-    let read = match &store_key {
+    let (read, omission_reason) = match &store_key {
         Ok(store) => match read_size_sample(conn, store).await {
-            Some(sample) => StorageTelemetryReadV1::Observed { sample },
-            None => StorageTelemetryReadV1::Unknown {
-                store: store.clone(),
-            },
+            Some(sample) => (StorageTelemetryReadV1::Observed { sample }, None),
+            None => (
+                StorageTelemetryReadV1::Unknown {
+                    store: store.clone(),
+                },
+                Some(format!(
+                    "store telemetry pragma read failed for {role} role"
+                )),
+            ),
         },
         // The store file name is not a valid store key; report the read as
         // unknown against a sanitized fallback key rather than inventing a size.
-        Err(_) => StorageTelemetryReadV1::Unknown {
-            store: StoreKeyV1::new(sanitize_store_key(&store_name))
-                .unwrap_or_else(|_| StoreKeyV1::new("store").expect("static key")),
-        },
+        Err(_) => (
+            StorageTelemetryReadV1::Unknown {
+                store: StoreKeyV1::new(sanitize_store_key(&store_name))
+                    .unwrap_or_else(|_| StoreKeyV1::new("store").expect("static key")),
+            },
+            Some(format!("store key is invalid for {role} role")),
+        ),
     };
 
     SampledStoreV1 {
@@ -440,6 +549,7 @@ async fn sample_store(
         path: path.to_string(),
         roles: vec![role.to_string()],
         read,
+        omission_reason,
     }
 }
 
@@ -891,5 +1001,46 @@ mod tests {
         assert!(pragma_u64(&conn, "definitely_not_a_pragma").await.is_none());
         // A valid pragma still reads.
         assert!(read_size_sample(&conn, &store).await.is_some());
+    }
+
+    #[test]
+    fn failed_expected_store_stays_visible_unknown_with_partial_coverage() {
+        let path = "/profile/accounting.db";
+        let mut sampled = Vec::new();
+        let mut seen = HashMap::new();
+
+        push_or_merge_unknown_role(
+            &mut sampled,
+            &mut seen,
+            "savings",
+            path,
+            "store snapshot open failed for savings role".to_string(),
+        );
+        let coverage = telemetry_coverage(&sampled);
+        let entries = sampled
+            .into_iter()
+            .map(|store| telemetry_entry(store, Some(&RetentionConfig::default())))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            entries.len(),
+            1,
+            "the failed expected store must not disappear"
+        );
+        assert_eq!(entries[0].path, path);
+        assert_eq!(entries[0].roles, vec!["savings"]);
+        assert!(matches!(
+            entries[0].read,
+            StorageTelemetryReadV1::Unknown { .. }
+        ));
+        assert_eq!(coverage.denominator, Some(1));
+        assert_eq!(coverage.examined, Some(0));
+        assert!(!coverage.is_complete());
+        assert!(
+            coverage
+                .omission_reasons
+                .iter()
+                .any(|reason| reason.contains("store snapshot open failed"))
+        );
     }
 }

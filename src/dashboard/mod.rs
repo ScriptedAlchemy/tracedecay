@@ -37,6 +37,7 @@ mod automation_scheduler_api;
 mod automation_skills_api;
 mod code_diagnostics_api;
 mod code_index_freshness_api;
+mod delivery_api;
 mod doctor_findings_api;
 mod doctor_remediation_api;
 pub(crate) use doctor_remediation_api::{
@@ -804,6 +805,7 @@ fn router_with_active_application(
         .route("/api/automation/{*tail}", any(active_api_gateway))
         .route("/api/settings", any(active_api_gateway))
         .route("/api/settings/{*tail}", any(active_api_gateway))
+        .route("/api/delivery/{*tail}", any(active_api_gateway))
         .route("/api/explorer/{*tail}", any(active_api_gateway))
         // PR14 V2 read-model surfaces bound through the active-project gateway,
         // mirroring the project-scoped `/api/projects/{id}/…` gateway path.
@@ -1090,6 +1092,7 @@ fn project_api_router() -> Router<DashboardState> {
             "/api/code-index/freshness",
             get(code_index_freshness_api::freshness),
         )
+        .route("/api/delivery/overview", get(delivery_api::overview))
         .route("/api/events", get(events_api::events))
 }
 

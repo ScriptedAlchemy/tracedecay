@@ -36,8 +36,8 @@
  * measurement for a fifth of the field.
  *
  * `last_seen_at` is when TraceDecay last INDEXED the checkout. It is not the
- * last commit time — the daemon serves no commit timestamps at all — and every
- * caption that prints this axis has to say so.
+ * last commit time; the active checkout's bounded commit history is a separate
+ * Delivery projection, and every caption that prints this axis has to say so.
  */
 import {
   RECENCY_COLUMNS,

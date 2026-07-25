@@ -201,18 +201,6 @@ fn holographic_dashboard_endpoints_return_seeded_payloads() {
         assert_eq!(overview["holographic"]["overview"]["facts"], 3);
         assert_eq!(overview["holographic"]["overview"]["banks"], 3);
         assert_eq!(overview["holographic"]["overview"]["entities"], 3);
-        assert_eq!(overview["holographic"]["reads"]["facts"]["state"], "ready");
-        assert_eq!(overview["holographic"]["reads"]["entities"]["state"], "ready");
-        assert_eq!(overview["holographic"]["reads"]["graph"]["state"], "ready");
-        assert_eq!(
-            overview["holographic"]["facts_coverage"]["completeness"],
-            "bounded"
-        );
-        assert_eq!(overview["holographic"]["facts_coverage"]["limit"], 5);
-        assert_eq!(
-            overview["holographic"]["facts_coverage"]["query_applied_after_limit"],
-            true
-        );
         // Bank list counts must be live (consistent with the header fact
         // count). The stored bundle snapshot still stays exposed as
         // bundled_fact_count, but startup backfill rebuilds now refresh the

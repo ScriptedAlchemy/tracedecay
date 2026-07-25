@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { DeliveryPage } from './DeliveryPage.tsx';
@@ -125,6 +125,97 @@ const INDEX_FRESHNESS = {
   },
 };
 
+const DELIVERY_OVERVIEW = {
+  ...INDEX_FRESHNESS,
+  coverage: {
+    ...INDEX_FRESHNESS.coverage,
+    completeness: 'partial',
+    eligible: 8,
+    examined: 3,
+    omitted: 5,
+    denominator: 8,
+    unit: 'delivery sources',
+    omission_reasons: ['external authorities are not mounted'],
+  },
+  freshness: {
+    state: 'unknown',
+    observed_at_micros: null,
+    watermark: null,
+  },
+  domain_state: 'partial',
+  payload: {
+    changes: {
+      state: 'ready',
+      value: {
+        head: { state: 'attached', branch: 'main', commit: 'a'.repeat(40) },
+        staged: 0,
+        unstaged: 1,
+        conflicted: 0,
+        untracked: 0,
+        ignored: 0,
+        changed_paths: ['src/lib.rs'],
+      },
+    },
+    commits: {
+      state: 'ready',
+      value: {
+        items: [
+          {
+            commit: 'a'.repeat(40),
+            subject: 'bind delivery timeline',
+            author_name: 'TraceDecay',
+            author_email: 'dev@example.com',
+            author_at_micros: 100,
+            committer_at_micros: 100,
+          },
+          {
+            commit: 'b'.repeat(40),
+            subject: 'initial',
+            author_name: 'TraceDecay',
+            author_email: 'dev@example.com',
+            author_at_micros: 90,
+            committer_at_micros: 90,
+          },
+        ],
+        truncated: false,
+      },
+    },
+    pull_requests: {
+      state: 'unavailable',
+      required_authority: 'ProjectGitHubReviewStoreV1 in DashboardState',
+      reason: 'GitHub review authority is not mounted',
+    },
+    review_comments: {
+      state: 'unavailable',
+      required_authority: 'ProjectGitHubReviewStoreV1 in DashboardState',
+      reason: 'GitHub review authority is not mounted',
+    },
+    ci_checks: {
+      state: 'unavailable',
+      required_authority: 'CiReadOnlyProviderArchiveV1 in DashboardState',
+      reason: 'CI archive is not mounted',
+    },
+    failure_localization: {
+      state: 'unavailable',
+      required_authority: 'CiExactEvidenceAuthorityV1 in DashboardState',
+      reason: 'CI exact evidence authority is not mounted',
+    },
+    releases: {
+      state: 'unsupported',
+      required_authority: 'read-only release authority in DashboardState',
+      reason: 'no reusable read-only release authority is implemented',
+    },
+    generation_freshness: {
+      state: 'ready',
+      value: {
+        comparison: 'current',
+        head_commit: 'a'.repeat(40),
+        indexed_commit: 'a'.repeat(40),
+      },
+    },
+  },
+};
+
 function serve(routes: Record<string, { status: number; body: unknown }>) {
   return vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
@@ -141,13 +232,13 @@ function serve(routes: Record<string, { status: number; body: unknown }>) {
 function renderDelivery(
   body: unknown = PROJECTS,
   status = 200,
-  freshness: unknown = INDEX_FRESHNESS,
+  overview: unknown = DELIVERY_OVERVIEW,
 ) {
   vi.stubGlobal(
     'fetch',
     serve({
       '/api/projects': { status, body },
-      '/api/code-index/freshness': { status: 200, body: freshness },
+      '/api/delivery/overview': { status: 200, body: overview },
     }),
   );
   const client = new QueryClient({
@@ -169,7 +260,9 @@ describe('DeliveryPage', () => {
     renderDelivery();
     await screen.findByText('last indexed across · branches up');
     expect(
-      screen.getByText(/not when it was last committed to; the daemon serves no commit\s+times/),
+      screen.getByText(
+        /not when it was last committed to; commit history is shown separately\s+for the active checkout/,
+      ),
     ).toBeTruthy();
   });
 
@@ -185,40 +278,60 @@ describe('DeliveryPage', () => {
     expect(screen.getByText('unknown')).toBeTruthy();
   });
 
-  it('names the whole unserved pipeline instead of showing empty tables', async () => {
+  it('renders real Git projections and typed external authority gaps', async () => {
     renderDelivery();
     await screen.findByText('Changes & commits');
     expect(screen.getByText('Pull requests & review')).toBeTruthy();
     expect(screen.getByText('Continuous integration')).toBeTruthy();
     expect(screen.getByText('Releases')).toBeTruthy();
     expect(screen.getByText('Index freshness')).toBeTruthy();
-    expect(screen.getByText(/no commit route; branch names only/)).toBeTruthy();
+    expect(screen.getByText(/2 commits · 1 changed path/)).toBeTruthy();
+    expect(screen.getByText(/unavailable · GitHub review authority is not mounted/)).toBeTruthy();
+    expect(screen.getByText(/no reusable read-only release authority is implemented/)).toBeTruthy();
+    expect(screen.getByText('measured')).toBeTruthy();
   });
 
-  it('renders generation freshness from the typed daemon envelope', async () => {
+  it('discloses when the commit timeline is truncated', async () => {
     renderDelivery(PROJECTS, 200, {
-      ...INDEX_FRESHNESS,
-      coverage: {
-        ...INDEX_FRESHNESS.coverage,
-        completeness: 'partial',
-        eligible: 2,
-        examined: 1,
-        omitted: 1,
-        denominator: 2,
-        unit: 'worktrees',
-        omission_reasons: ['one scheduler generation is unavailable'],
+      ...DELIVERY_OVERVIEW,
+      payload: {
+        ...DELIVERY_OVERVIEW.payload,
+        commits: {
+          ...DELIVERY_OVERVIEW.payload.commits,
+          value: {
+            ...DELIVERY_OVERVIEW.payload.commits.value,
+            truncated: true,
+          },
+        },
       },
-      freshness: {
-        state: 'stale',
-        observed_at_micros: 90,
-        watermark: 'generation:4',
-      },
-      domain_state: 'partial',
     });
 
-    await screen.findByText('Partial');
     expect(
-      screen.getByText(/generation state stale · 1 of 2 worktrees examined/),
+      await screen.findByText(/2 commits shown · more commits not shown/),
+    ).toBeTruthy();
+  });
+
+  it('renders generation freshness from the reusable delivery projection', async () => {
+    renderDelivery(PROJECTS, 200, {
+      ...DELIVERY_OVERVIEW,
+      payload: {
+        ...DELIVERY_OVERVIEW.payload,
+        generation_freshness: {
+          state: 'ready',
+          value: {
+            comparison: 'behind',
+            head_commit: 'c'.repeat(40),
+            indexed_commit: 'a'.repeat(40),
+          },
+        },
+      },
+    });
+
+    await screen.findByText('Stale');
+    const staleRead = screen.getByText(/behind · HEAD cccccccc · indexed aaaaaaaa/);
+    expect(staleRead).toBeTruthy();
+    expect(
+      within(staleRead.parentElement?.parentElement ?? document.body).getByText('unknown'),
     ).toBeTruthy();
   });
 

@@ -893,8 +893,7 @@ decision with collision, ambiguity, and maintenance review.
   horizon censor. Observed merge success remains separate from required test/
   CI completion, Plan 24 acceptance, escaped defects, and TraceDecay operation
   support; Plan 36 preview-only results never emit fictional apply events, and
-  apply events require the exact Plan 36 product-runtime owner receipt, never a
-  PR acceptance receipt.
+  apply events require the exact owner receipt.
 - Stale-stack and blocked-time fixtures coalesce duplicate/overlapping
   intervals deterministically, keep open intervals visible at the watermark,
   preserve per-cause overlap separately from unioned wall time, and handle

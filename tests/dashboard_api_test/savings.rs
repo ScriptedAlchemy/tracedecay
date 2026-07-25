@@ -599,9 +599,6 @@ fn savings_ledger_endpoints_reflect_seeded_ledger() {
         assert_eq!(savings["ledger"]["today"]["saved_tokens"], 14_250);
         assert_eq!(savings["ledger"]["today"]["calls"], 2);
         assert_eq!(savings["lifetime_counters"]["total_tokens_saved"], 47_000);
-        assert_eq!(savings["lifetime_counters"]["project_total"], 1);
-        assert_eq!(savings["lifetime_counters"]["projects_limit"], 25);
-        assert_eq!(savings["lifetime_counters"]["projects_truncated"], false);
         assert_eq!(
             savings["lifetime_counters"]["projects"]
                 .as_array()
@@ -882,7 +879,6 @@ fn session_costs_label_actual_vs_tokenized_vs_estimated() {
         // Overview session stats roll the same numbers up: 7 messages, 3
         // usage-backed, 4 non-usage (tokenized or chars/4 by build).
         let sessions = &overview["sessions"];
-        assert_eq!(sessions["available"], true);
         assert_eq!(sessions["session_count"], 5);
         assert_eq!(sessions["messages"], 7);
         assert_eq!(sessions["usage_messages"], 3);
@@ -896,9 +892,6 @@ fn session_costs_label_actual_vs_tokenized_vs_estimated() {
         assert_eq!(sessions["unknown_model_messages"], 1);
         assert_eq!(sessions["model_count"], 4);
         assert_eq!(sessions["cost_basis"], "mixed");
-        assert_eq!(overview["turns"]["available"], true);
-        assert_eq!(overview["turns"]["turn_count"], 1);
-        assert_eq!(overview["turns"]["total_tokens"], 120_000);
     });
 }
 

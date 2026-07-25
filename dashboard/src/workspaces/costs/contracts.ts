@@ -18,7 +18,6 @@ export const SavingsOverviewPayloadSchema = z
     savings: z
       .object({
         available: z.boolean(),
-        error: z.string().optional(),
         ledger: z
           .object({
             today: SavingsSumSchema,
@@ -31,9 +30,6 @@ export const SavingsOverviewPayloadSchema = z
         lifetime_counters: z
           .object({
             total_tokens_saved: z.number().optional(),
-            project_total: z.number().optional(),
-            projects_limit: z.number().optional(),
-            projects_truncated: z.boolean().optional(),
             projects: z
               .array(
                 z
@@ -52,7 +48,6 @@ export const SavingsOverviewPayloadSchema = z
     turns: z
       .object({
         available: z.boolean(),
-        error: z.string().optional(),
         turn_count: z.number().optional(),
         total_cost_usd: z.number().optional(),
         total_tokens: z.number().optional(),
@@ -70,7 +65,6 @@ export const SavingsOverviewPayloadSchema = z
     sessions: z
       .object({
         available: z.boolean(),
-        error: z.string().optional(),
         cost_basis: z.string().optional(),
         scope: z.string().optional(),
         session_count: z.number().optional(),
