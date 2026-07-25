@@ -277,10 +277,49 @@ impl ApplicationSurfaceOperation {
 
     pub fn from_tool_name(tool_name: &str) -> Option<Self> {
         let operation = tool_name.strip_prefix("tracedecay_").unwrap_or(tool_name);
+        if operation == "diagnostics" {
+            return Some(Self::DiagnosticsRead);
+        }
         APPLICATION_SURFACE_OPERATIONS
             .into_iter()
             .find(|candidate| candidate.as_str() == operation)
     }
+}
+
+/// Normalizes compatibility tool arguments before every CLI/MCP transport
+/// parses the canonical application request.
+pub fn normalize_application_tool_args(
+    tool_name: &str,
+    args: Value,
+) -> Result<Value, ApplicationSurfaceAdapterError> {
+    if tool_name != "tracedecay_diagnostics" {
+        return Ok(args);
+    }
+    let scope = match args
+        .get("scope")
+        .and_then(Value::as_str)
+        .unwrap_or("workspace")
+    {
+        "workspace" => serde_json::json!("workspace"),
+        "package" => serde_json::json!({
+            "package": args
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or(ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?
+        }),
+        "file" => serde_json::json!({
+            "file": args
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or(ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?
+        }),
+        _ => return Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+    };
+    Ok(serde_json::json!({
+        "scope": scope,
+        "maximum_diagnostics": 1000,
+        "cursor": null,
+    }))
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

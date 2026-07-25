@@ -43,7 +43,8 @@ use tokio::time::{Instant, timeout_at};
 
 use tracedecay::application_surface::{
     ApplicationSurfaceInvocationResult, ApplicationSurfaceOperation,
-    observe_surface_argument_rejection, parse_application_surface_request,
+    normalize_application_tool_args, observe_surface_argument_rejection,
+    parse_application_surface_request,
 };
 use tracedecay::daemon::{DaemonHandshake, call_default_tool_within};
 use tracedecay::daemon_client::{DaemonInvocationClient, RequestedOutputFormat};
@@ -207,6 +208,11 @@ pub(crate) async fn run(
         .checked_add(tool_command_deadline()?)
         .ok_or_else(tool_deadline_range_error)?;
     if let Some(operation) = ApplicationSurfaceOperation::from_tool_name(&def.name) {
+        let tool_args = normalize_application_tool_args(&def.name, tool_args).map_err(|error| {
+            TraceDecayError::Config {
+                message: error.to_string(),
+            }
+        })?;
         return dispatch_cli_application_surface(
             operation,
             tool_args,
