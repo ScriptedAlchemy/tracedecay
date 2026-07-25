@@ -181,6 +181,11 @@ main() {
   mkdir -p "$fixture/src" "$WORK_DIR/home"
   printf 'fn main() { println!("hello"); }\n' > "$fixture/src/main.rs"
   git -C "$fixture" init --quiet
+  git -C "$fixture" add src/main.rs
+  git -C "$fixture" \
+    -c user.name="TraceDecay MCP Smoke" \
+    -c user.email="tracedecay-mcp-smoke@example.invalid" \
+    commit --quiet -m "test: seed MCP smoke fixture"
   trap cleanup EXIT
 
   set +e
