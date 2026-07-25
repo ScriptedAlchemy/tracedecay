@@ -1,14 +1,17 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tracedecay_application::feedback::{
-    FeedbackPortFuture, GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1, GitHubReviewReadRequestV1,
-    feedback_surface_operation,
+    CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1, FeedbackPortFuture,
+    GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1, GitHubReviewReadRequestV1, feedback_surface_operation,
 };
 use tracedecay_application::{AuthorizationPhase, AuthorizationRequest, ResolvedScope};
 use tracedecay_domain::configuration::SourceKindV1;
 use tracedecay_domain::{LocatorDigest, UtcMicros, canonical_sha256};
 
 use super::{GitHubProviderLifecycleV1, GitHubSourceAccessAuthorityV1};
+use crate::application::advisory::ci_runtime::{
+    CiSourceAccessAuthorityV1, CiSourceAccessOutcomeV1,
+};
 use crate::application::configuration::ConfigurationControlStore;
 use crate::application::source_authorization::{
     ProjectSourceAccessOutcome, project_source_access_snapshot_for_request,
@@ -85,6 +88,61 @@ where
                 }
                 ProjectSourceAccessOutcome::Allowed(_) | ProjectSourceAccessOutcome::Denied(_) => {
                     GitHubProviderLifecycleV1::Denied
+                }
+            }
+        })
+    }
+}
+
+impl<C> CiSourceAccessAuthorityV1 for ConfiguredGitHubSourceAccessAuthorityV1<C>
+where
+    C: ConfigurationControlStore + Send + Sync,
+{
+    fn authorize_ci<'a>(
+        &'a self,
+        context: &'a tracedecay_application::RequestContext,
+        scope: &'a tracedecay_domain::feedback::FeedbackScopeV1,
+    ) -> FeedbackPortFuture<'a, CiSourceAccessOutcomeV1> {
+        Box::pin(async move {
+            if scope.validate().is_err()
+                || context.scope() != &self.scope
+                || scope.project_id != self.scope.project_id
+                || scope.repository_id != self.scope.repository_id
+                || scope.worktree_id != self.scope.worktree_id
+                || self.scope.reference.as_ref().map(|value| value.as_str())
+                    != Some(scope.branch_ref.as_str())
+            {
+                return CiSourceAccessOutcomeV1::Denied;
+            }
+            let Ok(Some(operation)) = feedback_surface_operation("ci_failure_localize") else {
+                return CiSourceAccessOutcomeV1::Unavailable;
+            };
+            if operation.capability_id().as_str() != CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1 {
+                return CiSourceAccessOutcomeV1::Unavailable;
+            }
+            let observed_at = now_micros();
+            let authorization = AuthorizationRequest {
+                context,
+                operation: &operation,
+                phase: AuthorizationPhase::Admission,
+                observed_at,
+            };
+            match project_source_access_snapshot_for_request(
+                &self.configuration,
+                &authorization,
+                SourceKindV1::GitHub,
+            )
+            .await
+            {
+                ProjectSourceAccessOutcome::Allowed(snapshot)
+                    if snapshot.scope == self.scope
+                        && snapshot.binding.source_locator_digest == self.expected_locator
+                        && snapshot.allows(context, &operation, observed_at) =>
+                {
+                    CiSourceAccessOutcomeV1::Ready
+                }
+                ProjectSourceAccessOutcome::Allowed(_) | ProjectSourceAccessOutcome::Denied(_) => {
+                    CiSourceAccessOutcomeV1::Denied
                 }
             }
         })

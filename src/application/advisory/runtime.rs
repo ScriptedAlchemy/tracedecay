@@ -526,10 +526,41 @@ where
                             &request.feedback.input,
                             Plan26FeedbackOutcomeV1::Denied,
                             Plan26CoverageV1::Known,
+                            None,
                         );
                         contributions.set_state(
                             Pr13AdvisoryProviderV1::Ci,
                             ProviderEvaluationStateV1::Unavailable,
+                        );
+                    }
+                    CiFailureLocalizationPortOutcomeV1::RateLimited(checkpoint) => {
+                        self.observe_ci_terminal(
+                            &request.feedback.input,
+                            Plan26FeedbackOutcomeV1::RateLimited,
+                            Plan26CoverageV1::Unknown,
+                            Some(tracedecay_domain::feedback::CiFailureSourceDegradationV1::RateLimited(
+                                checkpoint,
+                            )),
+                        );
+                        contributions.set_state(
+                            Pr13AdvisoryProviderV1::Ci,
+                            ProviderEvaluationStateV1::Partial,
+                        );
+                    }
+                    CiFailureLocalizationPortOutcomeV1::Failed(cause) => {
+                        self.observe_ci_terminal(
+                            &request.feedback.input,
+                            Plan26FeedbackOutcomeV1::Failed,
+                            Plan26CoverageV1::Unknown,
+                            Some(
+                                tracedecay_domain::feedback::CiFailureSourceDegradationV1::Failed(
+                                    cause,
+                                ),
+                            ),
+                        );
+                        contributions.set_state(
+                            Pr13AdvisoryProviderV1::Ci,
+                            ProviderEvaluationStateV1::Failed,
                         );
                     }
                     CiFailureLocalizationPortOutcomeV1::Unavailable => {
@@ -537,6 +568,7 @@ where
                             &request.feedback.input,
                             Plan26FeedbackOutcomeV1::Unavailable,
                             Plan26CoverageV1::Unknown,
+                            None,
                         );
                         contributions.set_state(
                             Pr13AdvisoryProviderV1::Ci,
@@ -548,7 +580,18 @@ where
             discovery => {
                 let (state, outcome, coverage) = ci_discovery_terminal_state(discovery)
                     .expect("non-found discovery is terminal");
-                self.observe_ci_terminal(&request.feedback.input, outcome, coverage);
+                let degradation = match discovery {
+                    ProductionCiFailureDiscoveryOutcomeV1::RateLimited(checkpoint) => Some(
+                        tracedecay_domain::feedback::CiFailureSourceDegradationV1::RateLimited(
+                            checkpoint.clone(),
+                        ),
+                    ),
+                    ProductionCiFailureDiscoveryOutcomeV1::Failed(cause) => Some(
+                        tracedecay_domain::feedback::CiFailureSourceDegradationV1::Failed(*cause),
+                    ),
+                    _ => None,
+                };
+                self.observe_ci_terminal(&request.feedback.input, outcome, coverage, degradation);
                 contributions.set_state(Pr13AdvisoryProviderV1::Ci, state);
             }
         }
@@ -771,6 +814,7 @@ where
                 provider: Plan26CiProviderV1::GitHubActions,
                 exact_evidence: localization.generation.is_some(),
                 coverage,
+                source_degradation: localization.source_degradation.clone(),
                 localized_count,
                 candidate_count: localized_count,
                 duration_micros: None,
@@ -783,6 +827,7 @@ where
         input: &tracedecay_domain::feedback::FeedbackEvaluationInputV1,
         outcome: Plan26FeedbackOutcomeV1,
         coverage: Plan26CoverageV1,
+        source_degradation: Option<tracedecay_domain::feedback::CiFailureSourceDegradationV1>,
     ) {
         self.observations.observe_source_event(
             input,
@@ -791,6 +836,7 @@ where
                 provider: Plan26CiProviderV1::GitHubActions,
                 exact_evidence: false,
                 coverage,
+                source_degradation,
                 localized_count: 0,
                 candidate_count: 0,
                 duration_micros: None,
@@ -1054,6 +1100,16 @@ fn ci_discovery_terminal_state(
         ProductionCiFailureDiscoveryOutcomeV1::Denied => Some((
             ProviderEvaluationStateV1::Unavailable,
             Plan26FeedbackOutcomeV1::Denied,
+            Plan26CoverageV1::Unknown,
+        )),
+        ProductionCiFailureDiscoveryOutcomeV1::RateLimited(_) => Some((
+            ProviderEvaluationStateV1::Partial,
+            Plan26FeedbackOutcomeV1::RateLimited,
+            Plan26CoverageV1::Unknown,
+        )),
+        ProductionCiFailureDiscoveryOutcomeV1::Failed(_) => Some((
+            ProviderEvaluationStateV1::Failed,
+            Plan26FeedbackOutcomeV1::Failed,
             Plan26CoverageV1::Unknown,
         )),
         ProductionCiFailureDiscoveryOutcomeV1::NotConfigured

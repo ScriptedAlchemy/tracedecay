@@ -65,15 +65,15 @@ use crate::application::advisory::github_runtime::{
     resolve_registered_github_read_only_credential_v1,
 };
 use crate::application::advisory::{
-    GitHubHttpReadConfigV1, GitHubReadOnlyCredentialV1, GitHubReadPermissionV1,
-    GitHubRepositoryTargetV1, GitHubReviewProviderIdentityV1, GitHubReviewRuntimeOwnerConfigV1,
-    Pr13AdvisoryCycleControlV1, Pr13AdvisoryCycleRequestV1, Pr13AdvisoryHookLookupNoticeV1,
-    Pr13AdvisoryHookNoticeQueueV1, Pr13AdvisoryHookNoticeSinkV1, Pr13AdvisoryProductionOpenV1,
+    CiSourceAccessAuthorityV1, GitHubCiRepositoryTargetV1, GitHubHttpReadConfigV1,
+    GitHubReadOnlyCredentialV1, GitHubReadPermissionV1, GitHubRepositoryTargetV1,
+    GitHubReviewProviderIdentityV1, GitHubReviewRuntimeOwnerConfigV1, Pr13AdvisoryCycleControlV1,
+    Pr13AdvisoryCycleRequestV1, Pr13AdvisoryHookLookupNoticeV1, Pr13AdvisoryHookNoticeQueueV1,
+    Pr13AdvisoryHookNoticeSinkV1, Pr13AdvisoryProductionOpenV1,
     Pr13AdvisoryProductionStartupRegistrationV1, Pr13AdvisoryRuntimeOpenV1,
     ProductionCiProviderConfigV1, ProjectCiCodeAnchorStoreV1, ProjectCiRetainedObservationStoreV1,
     discover_production_ci_failure_request_v1, register_pr13_advisory_hook_notice_queue,
 };
-use crate::application::configuration::ConfigurationControlStore;
 use crate::application::context::{CancellationToken, MonotonicDeadline};
 use crate::application::feedback::observations::{
     Plan26DeliveryRouteV1, Plan26FeedbackObservationEmitterV1, Plan26FeedbackOperationV1,
@@ -1370,7 +1370,7 @@ async fn register_production_advisory_owner(
         &graph.store_layout().dashboard_root,
     )
     .await?;
-    let (github, github_source_access) = match resolve_production_github_review_config(
+    let remote = resolve_production_github_provider_config(
         invocation,
         project_root,
         database.clone(),
@@ -1379,13 +1379,13 @@ async fn register_production_advisory_owner(
         &source_access,
         feedback_scope.clone(),
     )
-    .await
-    {
-        Some((github, source_access)) => (Some(github), Some(source_access)),
-        None => (None, None),
-    };
-    let (github, ci_config, github_pull_request_id) =
-        optional_remote_provider_configuration(github, github_source_access.as_ref());
+    .await;
+    let (github, github_source_access, ci_config) = remote.map_or((None, None, None), |remote| {
+        (remote.github, Some(remote.github_source_access), remote.ci)
+    });
+    let github_pull_request_id = github
+        .as_ref()
+        .map(|github| github.target.pull_request_id.clone());
     let ci_discovery_config = ci_config.clone();
     let ci_retained = Arc::new(
         ProjectCiRetainedObservationStoreV1::new(database.clone(), feedback_scope.clone())
@@ -1882,40 +1882,11 @@ fn hash16(value: &[u8]) -> [u8; 16] {
     value
 }
 
-fn optional_remote_provider_configuration(
-    github: Option<GitHubReviewRuntimeOwnerConfigV1>,
-    github_source_access: Option<&Arc<dyn GitHubSourceAccessAuthorityV1>>,
-) -> (
-    Option<GitHubReviewRuntimeOwnerConfigV1>,
-    Option<ProductionCiProviderConfigV1>,
-    Option<GitHubPullRequestIdV1>,
-) {
-    let ci_config = github
-        .as_ref()
-        .filter(|github| {
-            github.credential.permits(GitHubReadPermissionV1::Actions)
-                && github.credential.permits(GitHubReadPermissionV1::Checks)
-        })
-        .and_then(|github| {
-            let source_access = github_source_access.map(Arc::clone)?;
-            Some(production_ci_provider_configuration(
-                github.target.clone(),
-                github.credential.clone(),
-                github.http.clone(),
-                source_access,
-            ))
-        });
-    let github_pull_request_id = github
-        .as_ref()
-        .map(|github| github.target.pull_request_id.clone());
-    (github, ci_config, github_pull_request_id)
-}
-
 fn production_ci_provider_configuration(
-    target: GitHubRepositoryTargetV1,
+    target: GitHubCiRepositoryTargetV1,
     credential: GitHubReadOnlyCredentialV1,
     http: GitHubHttpReadConfigV1,
-    source_access: Arc<dyn GitHubSourceAccessAuthorityV1>,
+    source_access: Arc<dyn CiSourceAccessAuthorityV1>,
 ) -> ProductionCiProviderConfigV1 {
     ProductionCiProviderConfigV1 {
         provider: ProviderId::new("provider.github-actions")
@@ -1947,7 +1918,13 @@ const fn host_kind_for_hook(host: HookHostV1) -> HostKindV1 {
     }
 }
 
-async fn resolve_production_github_review_config(
+struct ProductionGitHubProviderConfigV1 {
+    github: Option<GitHubReviewRuntimeOwnerConfigV1>,
+    github_source_access: Arc<dyn GitHubSourceAccessAuthorityV1>,
+    ci: Option<ProductionCiProviderConfigV1>,
+}
+
+async fn resolve_production_github_provider_config(
     invocation: &DaemonInvocationState,
     project_root: &Path,
     database: crate::db::Database,
@@ -1955,10 +1932,7 @@ async fn resolve_production_github_review_config(
     resolved_scope: ResolvedScope,
     project_source_access: &ProjectSourceAccessSnapshot,
     feedback_scope: FeedbackScopeV1,
-) -> Option<(
-    GitHubReviewRuntimeOwnerConfigV1,
-    Arc<dyn GitHubSourceAccessAuthorityV1>,
-)> {
+) -> Option<ProductionGitHubProviderConfigV1> {
     let (owner, repository) =
         github_repository_from_remote(&crate::tracedecay::git_remote_url(project_root)?)?;
     let profile_id = &project_runtime_db.binding().shard_id.profile_id;
@@ -1987,63 +1961,89 @@ async fn resolve_production_github_review_config(
     let configuration = OwnedGlobalDbConfigurationControlStore::from_registered_project_runtime_db(
         project_runtime_db,
     );
-    let source_access: Arc<dyn GitHubSourceAccessAuthorityV1> =
-        Arc::new(ConfiguredGitHubSourceAccessAuthorityV1::new(
-            configuration,
-            resolved_scope.clone(),
-            &owner,
-            &repository,
-        )?);
-    let authorization_context =
-        github_discovery_authorization_context(project_source_access, &feedback_scope)?;
-    let discovery_request = github_discovery_source_access_request(&feedback_scope)?;
+    let configured_source_access = Arc::new(ConfiguredGitHubSourceAccessAuthorityV1::new(
+        configuration,
+        resolved_scope.clone(),
+        &owner,
+        &repository,
+    )?);
+    let source_access: Arc<dyn GitHubSourceAccessAuthorityV1> = configured_source_access.clone();
+    let ci_source_access: Arc<dyn CiSourceAccessAuthorityV1> = configured_source_access;
+    let ci = (credential.permits(GitHubReadPermissionV1::Actions)
+        && credential.permits(GitHubReadPermissionV1::Checks))
+    .then(|| {
+        production_ci_provider_configuration(
+            GitHubCiRepositoryTargetV1 {
+                owner: owner.clone(),
+                repository: repository.clone(),
+            },
+            credential.clone(),
+            GitHubHttpReadConfigV1::default(),
+            ci_source_access,
+        )
+    });
+    let review_discovery_authority =
+        github_discovery_authorization_context(project_source_access, &feedback_scope)
+            .zip(github_discovery_source_access_request(&feedback_scope));
     let head_commit_id = feedback_scope.head_commit_id.clone();
     let http = GitHubHttpReadConfigV1::default();
     let discovery_http = http.clone();
     let discovery_credential = credential.clone();
-    let discovery = discover_github_pull_request_after_authorization(
-        || source_access.authorize(&authorization_context, &discovery_request),
-        move || {
-            discover_exact_commit_pull_request_v1(
-                &owner,
-                &repository,
-                &head_commit_id,
-                &discovery_http,
-                &discovery_credential,
+    let discovery = match review_discovery_authority.as_ref() {
+        Some((authorization_context, discovery_request)) => {
+            discover_github_pull_request_after_authorization(
+                || source_access.authorize(authorization_context, discovery_request),
+                move || {
+                    discover_exact_commit_pull_request_v1(
+                        &owner,
+                        &repository,
+                        &head_commit_id,
+                        &discovery_http,
+                        &discovery_credential,
+                    )
+                },
             )
-        },
-    )
-    .await?;
-    let GitHubExactCommitDiscoveryOutcomeV1::Found(pull) = discovery else {
-        return None;
+            .await
+        }
+        None => None,
     };
-    let target = pull.target.clone();
-    let exact_request = GitHubReviewReadRequestV1 {
-        operation: GitHubReviewReadOperationV1::GraphQlQueryPullRequestReviewThreads,
-        scope: feedback_scope.clone(),
-        pull_request_id: target.pull_request_id.clone(),
+    let github = match (discovery, review_discovery_authority.as_ref()) {
+        (
+            Some(GitHubExactCommitDiscoveryOutcomeV1::Found(pull)),
+            Some((authorization_context, _)),
+        ) => {
+            let target = pull.target.clone();
+            let exact_request = GitHubReviewReadRequestV1 {
+                operation: GitHubReviewReadOperationV1::GraphQlQueryPullRequestReviewThreads,
+                scope: feedback_scope.clone(),
+                pull_request_id: target.pull_request_id.clone(),
+            };
+            if source_access
+                .authorize(&authorization_context, &exact_request)
+                .await
+                != GitHubProviderLifecycleV1::Ready
+            {
+                None
+            } else {
+                resolve_production_github_identity(project_root, &feedback_scope, &target, pull)
+                    .map(|identity| GitHubReviewRuntimeOwnerConfigV1 {
+                        database,
+                        resolved_scope,
+                        feedback_scope,
+                        target,
+                        credential,
+                        http,
+                        identity,
+                    })
+            }
+        }
+        _ => None,
     };
-    if source_access
-        .authorize(&authorization_context, &exact_request)
-        .await
-        != GitHubProviderLifecycleV1::Ready
-    {
-        return None;
-    }
-    let identity =
-        resolve_production_github_identity(project_root, &feedback_scope, &target, pull)?;
-    Some((
-        GitHubReviewRuntimeOwnerConfigV1 {
-            database,
-            resolved_scope,
-            feedback_scope,
-            target,
-            credential,
-            http,
-            identity,
-        },
-        source_access,
-    ))
+    Some(ProductionGitHubProviderConfigV1 {
+        github,
+        github_source_access: source_access,
+        ci,
+    })
 }
 
 async fn discover_github_pull_request_after_authorization<A, AF, F>(
@@ -2790,15 +2790,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn non_github_project_keeps_remote_provider_configuration_optional() {
-        let (github, ci, pull_request) = optional_remote_provider_configuration(None, None);
-
-        assert!(github.is_none());
-        assert!(ci.is_none());
-        assert!(pull_request.is_none());
-    }
-
     #[tokio::test]
     async fn denied_or_stale_github_source_access_makes_zero_discovery_network_calls() {
         for lifecycle in [
@@ -3017,25 +3008,24 @@ mod tests {
     fn configured_github_mounts_real_ci_provider_configuration() {
         struct ReadyGitHubSourceAccess;
 
-        impl GitHubSourceAccessAuthorityV1 for ReadyGitHubSourceAccess {
-            fn authorize<'a>(
+        impl CiSourceAccessAuthorityV1 for ReadyGitHubSourceAccess {
+            fn authorize_ci<'a>(
                 &'a self,
                 _context: &'a tracedecay_application::RequestContext,
-                _request: &'a GitHubReviewReadRequestV1,
-            ) -> tracedecay_application::feedback::FeedbackPortFuture<'a, GitHubProviderLifecycleV1>
-            {
-                Box::pin(async { GitHubProviderLifecycleV1::Ready })
+                _scope: &'a FeedbackScopeV1,
+            ) -> tracedecay_application::feedback::FeedbackPortFuture<
+                'a,
+                crate::application::advisory::CiSourceAccessOutcomeV1,
+            > {
+                Box::pin(async { crate::application::advisory::CiSourceAccessOutcomeV1::Ready })
             }
         }
 
-        let target = GitHubRepositoryTargetV1 {
+        let target = GitHubCiRepositoryTargetV1 {
             owner: "ScriptedAlchemy".to_owned(),
             repository: "tracedecay".to_owned(),
-            pull_request_number: 421,
-            pull_request_id: GitHubPullRequestIdV1::new("pull-request.421").expect("pull request"),
         };
-        let source_access: Arc<dyn GitHubSourceAccessAuthorityV1> =
-            Arc::new(ReadyGitHubSourceAccess);
+        let source_access: Arc<dyn CiSourceAccessAuthorityV1> = Arc::new(ReadyGitHubSourceAccess);
         let ci = production_ci_provider_configuration(
             target.clone(),
             GitHubReadOnlyCredentialV1::anonymous(),
