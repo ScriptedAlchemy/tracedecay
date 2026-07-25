@@ -1,5 +1,9 @@
 # MCP Response Truncation & Local Response Handles — Failure-Mode Audit
 
+> Historical failure-mode audit. The `TraceDecayError::Libsql` reference and
+> line anchors below record the audited pre-rusqlite revision; the current
+> storage runtime is `rusqlite`.
+
 Scope: the path that keeps MCP tool responses under the transport size budget and
 the "reversible truncation" handle cache that lets a client recover the original.
 This is `src/mcp/response_handles.rs` plus the truncation helpers in
@@ -7,7 +11,8 @@ This is `src/mcp/response_handles.rs` plus the truncation helpers in
 The irreversible plain-text truncation used by most tools is included where it
 shares the budget constant.
 
-All line references are against the current `master` checkout.
+All line references are against the `master` checkout audited at the time, not
+the current tree.
 
 ---
 

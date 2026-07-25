@@ -18,6 +18,8 @@ import { SearchField } from '../../ui/search/SearchField.tsx';
 import { queryTerms } from '../../ui/search/terms.ts';
 import { cn } from '../../ui/cn';
 import { Meter } from '../../ui/instrument.tsx';
+import { EvidencePattern, type EvidenceQuality } from '../../ui/EvidencePattern.tsx';
+import { Reveal } from './Reveal.tsx';
 import { AnyObject, type LegacyResult } from '../../data/query/legacy.ts';
 import { fetchEnvelope, type EnvelopeResult } from '../../data/query/envelope.ts';
 import { useLegacy } from '../../data/query/useLegacy.ts';
@@ -41,6 +43,7 @@ import {
   sessionHits,
   type Hit,
   type LaneId,
+  type LaneSpec,
   type PlannerLaneState,
 } from './model.ts';
 
@@ -155,6 +158,21 @@ function plannerStateKind(state: ExplorerQueryRun['state']): DomainStateKind {
       return exhaustive;
     }
   }
+}
+
+/**
+ * Where a lane's quantity sits on the shared evidence axis.
+ *
+ * `measured` is reserved for a source that answered AND reported the size of
+ * the matching set — the only case in which the number on screen has a real
+ * denominator behind it. Rows without a reported total are `associated`: they
+ * are genuine rows, but the surface cannot say what fraction of the truth they
+ * are. A lane that did not answer, or has not answered yet, is `unknown`.
+ * `predicted` is deliberately unreachable: Explorer never estimates.
+ */
+function laneEvidence(lane: Lane | undefined): EvidenceQuality {
+  if (lane === undefined || lane.pending || lane.outcome !== 'ok') return 'unknown';
+  return lane.reportedTotal != null ? 'measured' : 'associated';
 }
 
 function sourceStateKind(outcome: ExplorerSourceProgress['outcome']): DomainStateKind {
@@ -349,6 +367,24 @@ export function ExplorerPage() {
   const failedLanes = lanes.filter(
     (lane) => lane.outcome !== 'ok' && lane.outcome !== 'pending',
   );
+  const answeredLanes = lanes.filter((lane) => lane.outcome === 'ok');
+  // A confirmed global absence is a claim about the whole index, so the client
+  // verifies the same predicate the coordinator uses to earn it
+  // (`DashboardCoverageV1::is_complete` — complete coverage AND a real
+  // denominator) on every source, rather than reprinting the `finality` scalar
+  // as fact. A payload that declares canonical finality while one of its own
+  // sources reports unknown coverage contradicts itself, and the surface must
+  // side with the evidence it can see.
+  const everySourceFullyCovered =
+    plannerRun !== undefined &&
+    plannerRun.sources.length > 0 &&
+    plannerRun.sources.every(
+      (source) =>
+        source.outcome === 'ready' &&
+        source.coverage.completeness === 'complete' &&
+        source.coverage.denominator !== null,
+    );
+  const absenceIsConfirmed = plannerRun?.finality === 'complete' && everySourceFullyCovered;
 
   const reset = () => {
     setQuery('');
@@ -413,69 +449,29 @@ export function ExplorerPage() {
               aria-label="Memory lanes"
               role="group"
             >
-              {LANES.map((spec) => {
-                const lane = laneById.get(spec.id);
-                const Icon = LANE_ICON[spec.id];
-                const active = laneFilter === spec.id;
-                const accessibleState = lane?.pending
-                  ? 'query pending'
-                  : lane?.outcome === 'ok'
-                    ? `${lane.hits.length.toLocaleString()} loaded${
-                        lane.reportedTotal != null
-                          ? ` of ${lane.reportedTotal.toLocaleString()} matching rows reported`
-                          : ' with no source total reported'
-                      }`
-                    : lane?.outcome === 'offline'
-                      ? 'source unavailable'
-                      : 'source error';
-                return (
-                  <button
-                    key={spec.id}
-                    type="button"
-                    aria-pressed={active}
-                    aria-label={`${spec.label} ${accessibleState}`}
-                    onClick={() => {
-                      setLaneFilter(active ? null : spec.id);
+              {LANES.map((spec, laneIndex) => (
+                <Reveal
+                  key={spec.id}
+                  index={laneIndex}
+                  // Three readouts abreast inside a 320px column leaves ~35px
+                  // for the label, which clipped every lane name to "CODE …".
+                  // Two per row below `lg` gives the name its full measure; the
+                  // third stretches across the next row rather than sitting in
+                  // a ragged third of one.
+                  className="min-w-0 flex-1 basis-[calc(50%-0.25rem)] lg:basis-auto lg:flex-none"
+                >
+                  <LaneReadout
+                    spec={spec}
+                    lane={laneById.get(spec.id)}
+                    searching={searching}
+                    active={laneFilter === spec.id}
+                    onToggle={() => {
+                      setLaneFilter(laneFilter === spec.id ? null : spec.id);
                       setFacet(null);
                     }}
-                    className={cn(
-                      'flex min-w-[7.5rem] flex-col gap-1 rounded-[var(--radius-standard)] border px-2.5 py-1.5 text-left',
-                      active
-                        ? 'border-accent bg-surface-2'
-                        : 'border-edge-subtle bg-surface-0 hover:border-edge-strong',
-                    )}
-                  >
-                    <span className="flex items-center gap-1.5">
-                      <Icon aria-hidden size={12} className={spec.textClass} />
-                      <span className="text-2xs font-medium text-text-secondary">
-                        {spec.label}
-                      </span>
-                    </span>
-                    <span className="flex items-baseline gap-1.5">
-                      {lane?.pending ? (
-                        <StateChip kind="loading" />
-                      ) : lane?.outcome === 'ok' ? (
-                        <>
-                          <span className="tabular text-sm font-semibold leading-none text-text-primary">
-                            {lane.hits.length.toLocaleString()}
-                          </span>
-                          <span className="text-2xs text-text-muted">
-                            {lane.reportedTotal != null
-                              ? `of ${lane.reportedTotal.toLocaleString()}`
-                              : searching
-                                ? 'hits'
-                                : 'shown'}
-                          </span>
-                        </>
-                      ) : (
-                        <StateChip
-                          kind={lane?.outcome === 'offline' ? 'offline' : 'error'}
-                        />
-                      )}
-                    </span>
-                  </button>
-                );
-              })}
+                  />
+                </Reveal>
+              ))}
             </div>
           </div>
         </div>
@@ -483,16 +479,18 @@ export function ExplorerPage() {
       filters={
         <div className="flex flex-col gap-4">
           {searching ? (
-            <PlannerRunPanel
-              result={plannerResult}
-              run={plannerRun}
-              cancelling={cancelRun.isPending}
-              onCancel={
-                activeRunId && plannerRun?.state === 'pending'
-                  ? () => cancelRun.mutate(activeRunId)
-                  : undefined
-              }
-            />
+            <Reveal index={3}>
+              <PlannerRunPanel
+                result={plannerResult}
+                run={plannerRun}
+                cancelling={cancelRun.isPending}
+                onCancel={
+                  activeRunId && plannerRun?.state === 'pending'
+                    ? () => cancelRun.mutate(activeRunId)
+                    : undefined
+                }
+              />
+            </Reveal>
           ) : null}
           {visibleLanes.map((lane) => {
             const spec = LANES.find((l) => l.id === lane.id)!;
@@ -511,49 +509,56 @@ export function ExplorerPage() {
               />
             );
           })}
-          <section className="flex flex-col gap-2">
-            <MetaLabel>What each lane searches</MetaLabel>
-            <dl className="flex flex-col gap-2">
-              {LANES.map((spec) => {
-                const lane = laneById.get(spec.id);
-                return (
-                  <div key={spec.id} className="flex flex-col gap-0.5">
-                    <dt className="flex items-center gap-2 text-2xs font-medium text-text-secondary">
-                      <span
-                        aria-hidden
-                        className={cn('h-3 w-[3px] shrink-0 rounded-full', spec.railClass)}
-                      />
-                      <span>
-                        {spec.label}
-                      </span>
-                    </dt>
-                    <dd className="pl-[11px] text-2xs leading-relaxed text-text-muted">
-                      {searching ? spec.searches : spec.browseLabel}
-                      {lane?.reportedTotal != null
-                        ? ` · daemon reports ${lane.reportedTotal.toLocaleString()} matching`
-                        : ''}
-                    </dd>
-                  </div>
-                );
-              })}
-            </dl>
-          </section>
-          {failedLanes.length > 0 ? (
-            <section className="flex flex-col gap-1.5">
-              <MetaLabel>Unanswered</MetaLabel>
-              {failedLanes.map((lane) => (
-                <p key={lane.id} className="flex items-center gap-1.5 text-2xs text-text-muted">
-                  <StateChip
-                    kind={lane.outcome === 'offline' ? 'offline' : 'error'}
-                  />
-                  <span>{LANES.find((l) => l.id === lane.id)?.label}</span>
-                </p>
-              ))}
-              <p className="text-2xs leading-relaxed text-text-muted">
-                Results below are only from the lanes that answered. Nothing is being
-                substituted for the rest.
-              </p>
+          <Reveal index={4}>
+            <section className="flex flex-col gap-2">
+              <MetaLabel>What each lane searches</MetaLabel>
+              <dl className="flex flex-col gap-2.5">
+                {LANES.map((spec) => {
+                  const lane = laneById.get(spec.id);
+                  return (
+                    <div key={spec.id} className="flex flex-col gap-0.5">
+                      <dt className="flex items-center gap-2 text-2xs font-medium text-text-secondary">
+                        <span
+                          aria-hidden
+                          className={cn('h-3 w-[3px] shrink-0 rounded-full', spec.railClass)}
+                        />
+                        <span>{spec.label}</span>
+                      </dt>
+                      <dd className="flex flex-col gap-1 pl-[11px] text-2xs leading-relaxed text-text-muted">
+                        <span>
+                          {searching ? spec.searches : spec.browseLabel}
+                          {lane?.reportedTotal != null
+                            ? ` · daemon reports ${lane.reportedTotal.toLocaleString()} matching`
+                            : ''}
+                        </span>
+                        {/* How well the quantity above is known, on the shared
+                          * evidence axis: solid when the source reported a real
+                          * denominator, hatched when rows arrived without one,
+                          * dashed when the source never answered. */}
+                        <EvidencePattern quality={laneEvidence(lane)} />
+                      </dd>
+                    </div>
+                  );
+                })}
+              </dl>
             </section>
+          </Reveal>
+          {failedLanes.length > 0 ? (
+            <Reveal index={5}>
+              <section className="flex flex-col gap-1.5 border-l-2 border-state-partial pl-2">
+                <MetaLabel>Unanswered</MetaLabel>
+                {failedLanes.map((lane) => (
+                  <p key={lane.id} className="flex items-center gap-1.5 text-2xs text-text-muted">
+                    <StateChip kind={lane.outcome === 'offline' ? 'offline' : 'error'} />
+                    <span>{LANES.find((l) => l.id === lane.id)?.label}</span>
+                  </p>
+                ))}
+                <p className="text-2xs leading-relaxed text-text-muted">
+                  Results are only from the lanes that answered. Nothing is being substituted
+                  for the rest, and no count is shown for a lane that reported none.
+                </p>
+              </section>
+            </Reveal>
           ) : null}
         </div>
       }
@@ -565,7 +570,7 @@ export function ExplorerPage() {
             query={submitted}
             facet={facet?.value ?? null}
             failed={failedLanes.length > 0}
-            finality={plannerRun?.finality}
+            absenceIsConfirmed={absenceIsConfirmed}
             onClearFacet={() => setFacet(null)}
             onClearQuery={reset}
           />
@@ -576,14 +581,18 @@ export function ExplorerPage() {
             getKey={(hit) => hit.key}
             header={
               <ListCaption>
-                <span className="tabular font-medium text-text-secondary">
-                  {hits.length.toLocaleString()}
-                </span>
+                <span className="td-display text-xs">{hits.length.toLocaleString()}</span>
                 <span>
                   {searching ? 'results' : 'rows'}
                   {laneFilter
                     ? ` in ${LANES.find((l) => l.id === laneFilter)?.label.toLowerCase()}`
-                    : ' across three memories'}
+                    : // Never claim breadth the run did not deliver: a source
+                      // that failed, went unavailable, or is still reading did
+                      // not contribute to this set, and saying otherwise would
+                      // credit it for rows it never returned.
+                      answeredLanes.length === lanes.length
+                      ? ` across ${lanes.length} memories`
+                      : ` across ${answeredLanes.length} of ${lanes.length} memories`}
                   {facet ? ` · ${facet.value}` : ''}
                 </span>
                 <span aria-hidden className="ml-auto hidden sm:inline">
@@ -591,11 +600,15 @@ export function ExplorerPage() {
                 </span>
               </ListCaption>
             }
-            renderItem={(hit) => (
+            renderItem={(hit, index) => (
               <HitRow
                 hit={hit}
                 terms={terms}
                 selected={selected?.key === hit.key}
+                // A source-local order is only readable if the seam between two
+                // sources is visible; without it seven rows from three
+                // independent answers read as one ranked list.
+                startsLane={index === 0 || hits[index - 1]?.lane !== hit.lane}
                 onSelect={() => setSelected(hit)}
               />
             )}
@@ -612,6 +625,86 @@ export function ExplorerPage() {
         ) : undefined
       }
     />
+  );
+}
+
+/**
+ * One memory's readout: what it is, how much of it we are holding, and how
+ * well that quantity is known.
+ *
+ * The accessible name is composed entirely from visible text — there is no
+ * `aria-label` override — so a screen reader and a sighted reader are told the
+ * same sentence, and the visible label can never drift out of the name
+ * (WCAG 2.5.3). The quantity is only ever a number the source actually
+ * reported: a lane that did not answer shows its state and says so, never a
+ * zero, and the proportional rail is drawn only when a real denominator exists.
+ */
+function LaneReadout({
+  spec,
+  lane,
+  searching,
+  active,
+  onToggle,
+}: {
+  spec: LaneSpec;
+  lane: Lane | undefined;
+  searching: boolean;
+  active: boolean;
+  onToggle: () => void;
+}) {
+  const Icon = LANE_ICON[spec.id];
+  const answered = lane?.outcome === 'ok';
+  const total = lane?.reportedTotal;
+  const loaded = lane?.hits.length ?? 0;
+  const share = answered && total != null && total > 0 ? loaded / total : null;
+  return (
+    <button
+      type="button"
+      aria-pressed={active}
+      onClick={onToggle}
+      className={cn(
+        'flex h-full w-full min-w-[7.5rem] flex-col gap-1.5 border px-2.5 py-2 text-left',
+        'rounded-[var(--radius-standard)] transition-colors duration-[var(--dur-state)]',
+        'ease-[var(--ease-standard)] motion-reduce:transition-none',
+        active
+          ? 'border-accent bg-surface-2'
+          : 'border-edge-subtle bg-surface-0 hover:border-edge-strong',
+      )}
+    >
+      <span className="flex items-center gap-1.5">
+        <span
+          aria-hidden
+          className={cn('h-2.5 w-[3px] shrink-0 rounded-full', spec.railClass)}
+        />
+        {/* The coloured rail already carries lane identity, and at 320px the
+          * icon plus its gap was the ~18px that pushed "Code graph" into an
+          * ellipsis. The name outranks the glyph, so the glyph yields. */}
+        <Icon aria-hidden size={12} className={cn('hidden shrink-0 sm:block', spec.textClass)} />
+        <span className="td-legend truncate text-text-secondary">{spec.label}</span>
+      </span>
+      {lane?.pending ? (
+        <StateChip kind="loading" detail="reading" />
+      ) : answered ? (
+        <span className="flex flex-wrap items-baseline gap-x-1.5 gap-y-0.5">
+          <span className="td-display text-base">{loaded.toLocaleString()}</span>
+          <span className="min-w-0 text-2xs leading-tight text-text-muted">
+            {searching
+              ? total != null
+                ? `loaded of ${total.toLocaleString()} matching rows reported`
+                : 'loaded with no source total reported'
+              : 'shown from the overview endpoint'}
+          </span>
+        </span>
+      ) : (
+        <span className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
+          <StateChip kind={lane?.outcome === 'offline' ? 'offline' : 'error'} />
+          <span className="text-2xs leading-tight text-text-muted">no count reported</span>
+        </span>
+      )}
+      {share !== null ? (
+        <Meter fraction={share} className="w-full rounded-full" tone="bg-accent/80" />
+      ) : null}
+    </button>
   );
 }
 
@@ -655,13 +748,19 @@ function PlannerRunPanel({
       </div>
       <p className="break-all font-mono text-2xs text-text-muted">{run.run_id}</p>
       <p className="text-2xs leading-relaxed text-text-secondary">{run.explanation}</p>
+      {/* Revision and policy identifiers are single unbreakable tokens, and a
+        * `1fr` track cannot shrink below an unbreakable word: in a 224px rail
+        * both ran straight off the panel and read as `explorer-query-plan-`.
+        * `min-w-0` lets the track shrink; `break-words` then wraps at the
+        * hyphens and underscores the identifiers already contain, rather than
+        * slicing mid-word the way `break-all` does. */}
       <dl className="grid grid-cols-[auto_1fr] gap-x-2 gap-y-1 text-2xs">
         <dt className="text-text-muted">Plan</dt>
-        <dd className="font-mono text-text-secondary">{run.plan_revision}</dd>
+        <dd className="min-w-0 break-words font-mono text-text-secondary">{run.plan_revision}</dd>
         <dt className="text-text-muted">Ordering</dt>
-        <dd className="text-text-secondary">{run.ordering_policy}</dd>
+        <dd className="min-w-0 break-words text-text-secondary">{run.ordering_policy}</dd>
         <dt className="text-text-muted">Elapsed</dt>
-        <dd className="tabular text-text-secondary">
+        <dd className="td-value text-2xs">
           {Math.round(run.elapsed_micros / 1_000).toLocaleString()} ms
         </dd>
       </dl>
@@ -713,11 +812,14 @@ function HitRow({
   hit,
   terms,
   selected,
+  startsLane,
   onSelect,
 }: {
   hit: Hit;
   terms: readonly string[];
   selected: boolean;
+  /** First row of a run of rows from the same source. */
+  startsLane: boolean;
   onSelect: () => void;
 }) {
   const spec = LANES.find((lane) => lane.id === hit.lane)!;
@@ -729,11 +831,11 @@ function HitRow({
       onSelect={onSelect}
       height={RESULT_ROW_HEIGHT}
       railClassName={spec.railClass}
-      className="pl-4"
+      className={cn('pl-4', startsLane && 'border-t border-edge-strong')}
     >
       <span className="flex w-10 shrink-0 flex-col items-center gap-0.5">
         <Icon aria-hidden size={13} className={cn(spec.textClass, 'opacity-80')} />
-        <span className="tabular text-2xs leading-none text-text-muted">#{hit.rank}</span>
+        <span className="td-value text-2xs leading-none text-text-muted">#{hit.rank}</span>
       </span>
       <span className="flex min-w-0 flex-1 flex-col gap-0.5">
         <span className="flex min-w-0 items-baseline gap-2">
@@ -1003,7 +1105,7 @@ function EmptyResults({
   query,
   facet,
   failed,
-  finality,
+  absenceIsConfirmed,
   onClearFacet,
   onClearQuery,
 }: {
@@ -1012,7 +1114,9 @@ function EmptyResults({
   query: string;
   facet: string | null;
   failed: boolean;
-  finality?: ExplorerQueryRun['finality'];
+  /** True only when every required source answered with complete coverage over
+   * a real denominator AND the coordinator declared canonical finality. */
+  absenceIsConfirmed: boolean;
   onClearFacet: () => void;
   onClearQuery: () => void;
 }) {
@@ -1059,14 +1163,13 @@ function EmptyResults({
     );
   }
   if (searching) {
-    const complete = finality === 'complete';
     return (
       <div className="flex h-full flex-col items-center justify-center gap-3 p-8 text-center">
         <h2 className="text-sm font-semibold tracking-tight">
-          {complete ? `No source matched “${query}”` : `No rows loaded for “${query}”`}
+          {absenceIsConfirmed ? `No source matched “${query}”` : `No rows loaded for “${query}”`}
         </h2>
         <p className="max-w-md text-2xs leading-relaxed text-text-muted">
-          {complete
+          {absenceIsConfirmed
             ? 'Every required source completed with known coverage, and the coordinator declared canonical finality.'
             : 'These bounded pages do not report complete coverage or planner finality, so they cannot establish global absence.'}
         </p>

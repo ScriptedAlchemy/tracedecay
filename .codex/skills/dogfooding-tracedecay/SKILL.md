@@ -53,12 +53,10 @@ when its integration is in-process or its plugin module cannot hot-reload.
 
 ## Guardrails
 
-- Machine-local Cargo wrappers that redirect `CARGO_TARGET_DIR` or set
-  `TRACEDECAY_DATA_DIR` (for example concurrent-build slot shims) must not
-  apply to `cargo dogfood`: a redirected target dir breaks the staged-binary
-  path, and an injected data dir deploys against an isolated test profile
-  instead of the real one. Configure such wrappers to pass `dogfood` through
-  untouched, or invoke the real `cargo` directly with those variables unset.
+- Invoke ordinary `cargo dogfood` without setting `CARGO_TARGET_DIR` or
+  `TRACEDECAY_DATA_DIR`: a redirected target dir breaks the staged-binary path,
+  and an injected data dir deploys against an isolated test profile instead of
+  the real one.
 - Do not run `tracedecay upgrade` for checkout dogfood; it installs a published
   release.
 - Do not kill host-owned MCP shim processes indiscriminately.

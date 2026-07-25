@@ -2,7 +2,11 @@ use std::collections::HashSet;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 
-use super::model::{InventoryIntegrityMode, SkippedPath, StoreArtifact, StoreStatus};
+use super::model::{
+    InventoryIntegrityMode, InventoryStoreAuthority, SkippedPath, SqliteIntegrityOutcome,
+    StoreArtifact, StoreStatus,
+};
+use super::project::push_integrity_issue;
 use super::sqlite::sqlite_quick_check;
 
 const MAX_CONCURRENT_BRANCH_CHECKS: usize = 8;
@@ -33,6 +37,7 @@ pub(super) fn record_optional_artifact(
 
 pub(super) async fn record_branch_db_artifacts(
     data_dir: &Path,
+    current_branch_db: Option<&Path>,
     follow_symlinks: bool,
     skipped: &mut Vec<SkippedPath>,
     statuses: &mut Vec<StoreStatus>,
@@ -97,23 +102,32 @@ pub(super) async fn record_branch_db_artifacts(
         }
         InventoryIntegrityMode::MetadataOnly => {}
         InventoryIntegrityMode::Full => {
-            let healthy =
+            let outcomes =
                 check_branch_databases(
                     db_paths,
                     |path| async move { sqlite_quick_check(&path).await },
                 )
                 .await;
-            if !healthy && !statuses.contains(&StoreStatus::Corrupt) {
-                statuses.push(StoreStatus::Corrupt);
+            for (path, outcome) in outcomes {
+                let authority =
+                    if current_branch_db.is_some_and(|current| same_path(current, &path)) {
+                        InventoryStoreAuthority::Authoritative
+                    } else {
+                        InventoryStoreAuthority::StaleBranch
+                    };
+                push_integrity_issue(statuses, &path, authority, outcome);
             }
         }
     }
 }
 
-async fn check_branch_databases<F, Fut>(db_paths: Vec<PathBuf>, mut check: F) -> bool
+async fn check_branch_databases<F, Fut>(
+    db_paths: Vec<PathBuf>,
+    mut check: F,
+) -> Vec<(PathBuf, SqliteIntegrityOutcome)>
 where
     F: FnMut(PathBuf) -> Fut,
-    Fut: Future<Output = bool> + Send + 'static,
+    Fut: Future<Output = SqliteIntegrityOutcome> + Send + 'static,
 {
     let mut pending = db_paths.into_iter();
     let mut checks = tokio::task::JoinSet::new();
@@ -121,17 +135,28 @@ where
         let Some(path) = pending.next() else {
             break;
         };
-        checks.spawn(check(path));
+        let outcome = check(path.clone());
+        checks.spawn(async move { (path, outcome.await) });
     }
 
-    let mut healthy = true;
+    let mut outcomes = Vec::new();
     while let Some(result) = checks.join_next().await {
-        healthy &= matches!(result, Ok(true));
+        if let Ok(result) = result {
+            outcomes.push(result);
+        }
         if let Some(path) = pending.next() {
-            checks.spawn(check(path));
+            let outcome = check(path.clone());
+            checks.spawn(async move { (path, outcome.await) });
         }
     }
-    healthy
+    outcomes.sort_by(|left, right| left.0.cmp(&right.0));
+    outcomes
+}
+
+fn same_path(left: &Path, right: &Path) -> bool {
+    let left = left.canonicalize().unwrap_or_else(|_| left.to_path_buf());
+    let right = right.canonicalize().unwrap_or_else(|_| right.to_path_buf());
+    left == right
 }
 
 pub(super) fn record_sqlite_family_sidecars(
@@ -207,7 +232,7 @@ mod tests {
 
     use tokio::sync::Barrier;
 
-    use super::{MAX_CONCURRENT_BRANCH_CHECKS, check_branch_databases};
+    use super::{MAX_CONCURRENT_BRANCH_CHECKS, SqliteIntegrityOutcome, check_branch_databases};
 
     #[tokio::test]
     async fn branch_database_checks_are_bounded_and_complete() {
@@ -220,7 +245,7 @@ mod tests {
         let started = Arc::new(AtomicUsize::new(0));
         let first_batch = Arc::new(Barrier::new(MAX_CONCURRENT_BRANCH_CHECKS));
 
-        let healthy = check_branch_databases(paths, |_| {
+        let outcomes = check_branch_databases(paths, |_| {
             let active = Arc::clone(&active);
             let checked = Arc::clone(&checked);
             let peak = Arc::clone(&peak);
@@ -234,12 +259,17 @@ mod tests {
                 }
                 checked.fetch_add(1, Ordering::SeqCst);
                 active.fetch_sub(1, Ordering::SeqCst);
-                true
+                SqliteIntegrityOutcome::Verified
             }
         })
         .await;
 
-        assert!(healthy);
+        assert_eq!(outcomes.len(), 512);
+        assert!(
+            outcomes
+                .iter()
+                .all(|(_, outcome)| outcome == &SqliteIntegrityOutcome::Verified)
+        );
         assert_eq!(checked.load(Ordering::SeqCst), 512);
         assert_eq!(peak.load(Ordering::SeqCst), MAX_CONCURRENT_BRANCH_CHECKS);
     }

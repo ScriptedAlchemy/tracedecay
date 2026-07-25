@@ -207,8 +207,9 @@ not leave both half-implemented.
    the ranking as expected (the Option 1(a) branch). The Option 2 branch is
    moot since Option 2 was not taken. A test that the explainability API
    (item 3) returns the expected history is covered by the Q6 read-API tests
-   (`tests/dashboard_api_test.rs` exercises `/trust-history`; MCP `get`
-   `trust_history` is exercised in the memory-handler tests).
+   (`tests/dashboard_api_test/api.rs` exercises `/trust-history`; MCP `get`
+   `trust_history` is exercised in the memory-handler tests). This names
+   implemented coverage, not a successful aggregate dashboard-suite run.
 
 ### Acceptance-criteria check
 

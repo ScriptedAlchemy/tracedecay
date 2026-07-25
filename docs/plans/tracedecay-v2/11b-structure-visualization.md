@@ -1,7 +1,11 @@
 # 11b — Structure visualization: anatomy, transit, disagreement
 
-Status: concept approved, mockups + wire recon complete (2026-07-25). Sequenced
-after PR14 dashboard delivery. Mockups live on branch
+Status: user direction captured and agent concept/mockup exploration complete
+(2026-07-25); the concepts are not themselves user-approved specifications.
+Delivery timing is an **open owner question**. The user raised topography and
+"kinestetic synastisya" while PR14 was active and never agreed to defer them
+until after PR14. The current roadmap sequencing is therefore a plan proposal,
+not a user decision. Historical mockups live on branch
 `worktree-agent-ac56015e63cbf0f86` under `mockups/structure-viz/` (three
 self-contained HTML pages, dark+light shots, per-concept notes).
 
@@ -13,6 +17,11 @@ temporal graph (which sessions touched which files), and the semantic graph
 only the first, which is why they are inert — they restate what the compiler
 already knows. Every surface below either composes the layers on one field or
 draws the *disagreement* between them.
+
+The user explicitly rejected "bland UML" as the structural idiom. The visual
+quality benchmark is cosmograph.app — visuals like it, not adoption of its
+library — and every structure surface must be beautiful, functional, and
+truthful rather than merely diagrammatically correct.
 
 ## Wire truth (recon summary — design against this, not against hope)
 
@@ -54,7 +63,7 @@ Endpoints: `/api/plugins/graph/node/{id}/sessions` (edited_files json_each +
 FTS arm), `/api/plugins/graph/node/{id}/facts`, `/api/plugins/graph/node/{id}/tests`
 (in-process `project_graph` test-map). Neighbors endpoint exists.
 
-## Surface 2 — Call-chain transit map (cheapest, build second)
+## Surface 2 — Call-chain transit map (historical standalone proposal)
 
 Two symbols → the shortest directed calls-only route drawn as a transit line
 across horizontal strata bands ordered by measured file dependency depth.
@@ -102,14 +111,14 @@ Open wire-contract question tracked separately: adding `path` to
 surfaces (stability tests at `events_api.rs:718`, `activity_bus.rs:152` must
 move with it).
 
-## Owner redirect (2026-07-25)
+## User rejection and redirect (2026-07-25)
 
-The transit map read as service routing, not what was asked. The intent is the
-graph tools made visible — callers/callees traced over surrounding types, the
-structure of many files and many functions in a file, "the topography of the
-codebase" — broader and more futuristic than any two-point route. Direction
-under exploration (mockups in flight): one continuous, semantically-zoomed
-space rather than pages —
+The transit map read as service routing, which the user rejected: call chains
+must not look like service boxes. His stated intent is graph tools made visible
+— callers/callees traced over surrounding types, the structure of many files
+and many functions in a file, "the topography of the code base" — broader and
+more futuristic than any two-point route. The agent-developed direction under
+exploration is one continuous, semantically zoomed space rather than pages:
 
 - CORTEX (macro): modules as relief terrain — depth-strata placement, area =
   symbol mass, contour lines = measured connectivity density, churn heat,
@@ -125,12 +134,16 @@ The transit map demotes to "maybe, inside Trace" — its endpoint work
 (registering directed get_call_chain, strata service) is still the right
 backend for Trace and proceeds unchanged.
 
-## Sensory contract (owner: "kinesthetic synesthesia", 2026-07-25)
+## Impressionistic sensory direction (2026-07-25)
 
-The direction in one phrase: structure you can FEEL through motion. Sensation
-channels are measurements — the honesty rule extends from "position encodes a
-stated measurement" to "sensation encodes a stated measurement". One mapping,
-app-wide, so the body learns it once:
+The user's words were "like kinestetic synastisya," immediately hedged with "i
+dont wuite know but you get the idea i mean or i want." Treat that as
+impressionistic direction, not a motion, physics, colour, or interaction
+specification. The measurement mappings below are agent/design-owner
+proposals: structure you can feel through motion while extending the honesty
+rule from "position encodes a stated measurement" to "sensation encodes a
+stated measurement." One mapping is proposed app-wide so the body learns it
+once:
 
 | Feel | Measurement | Mechanics |
 | --- | --- | --- |
@@ -151,7 +164,7 @@ Consequences:
   cheap; the cortex (aggregated regions) simulates dozens of bodies, not
   thousands.
 
-## Rendering strategy (owner cleared full-custom, 2026-07-25)
+## Rendering strategy (user permitted full custom, 2026-07-25)
 
 Library constraints must not cap the vision — custom rendering (D3-style
 hand-rolled canvas/WebGL, game-engine techniques, physics engine) is approved
@@ -208,8 +221,14 @@ sensory contract rides on top: channel = spring, mass = weight, churn = warmth.
 
 ## Visual artifact index (reference images)
 
-All design-round artifacts are committed on mockup branches (kept off trunk —
-heavy PNGs). View any file without switching branches:
+This branch-tied index is historical design evidence, not a delivery authority,
+acceptance record, or artifact set that future lanes must recreate. Do not add
+per-commit mockup/evaluation documents or git-hash-tied screenshot manifests.
+Current implementation must instead be reviewed in real Google Chrome at full
+viewport, with every relevant interaction state exercised and screenshotted;
+the embedded/in-IDE browser is rejected as too small for this review.
+Existing design-round artifacts are on mockup branches (kept off trunk — heavy
+PNGs). View an existing file without switching branches:
 `git show <branch>:<path>` (binary shots: `git show <branch>:<path> > /tmp/x.png`).
 
 | Artifact | Branch | Path |
