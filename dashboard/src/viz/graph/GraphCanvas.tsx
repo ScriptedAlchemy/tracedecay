@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import Graph from 'graphology';
 import forceAtlas2 from 'graphology-layout-forceatlas2';
 import Sigma from 'sigma';
@@ -28,6 +28,18 @@ export interface GraphCanvasNode {
    * (deliberately unremarkable) brightness.
    */
   vitality?: number;
+  /**
+   * Caller-supplied layout position, in the caller's own coordinate space.
+   * Supply it only when the position MEASURES something — an axis the caption
+   * names — because a fixed coordinate is read as meaning far more strongly
+   * than a force-layout one. When every node carries `x`/`y` the canvas skips
+   * ForceAtlas2 and the constellation re-centering entirely and draws the
+   * composition it was handed; when any node lacks them the whole graph falls
+   * back to the force layout, because a half-placed field would silently mix
+   * measured positions with emergent ones.
+   */
+  x?: number;
+  y?: number;
 }
 
 export interface GraphCanvasEdge {
@@ -122,6 +134,9 @@ export function GraphCanvas({
   fill = false,
   activation,
   canvasClassName,
+  caption,
+  ariaLabel,
+  extent,
 }: {
   nodes: GraphCanvasNode[];
   edges: GraphCanvasEdge[];
@@ -139,6 +154,21 @@ export function GraphCanvas({
    * breakpoint where its own flex ancestors would otherwise squeeze a `fill`
    * canvas toward zero. */
   canvasClassName?: string;
+  /** What this particular field means. The default sentence describes a
+   * force-laid symbol graph; any caller composing a different field MUST
+   * replace it, because the caption is the only place the reader is told what
+   * position, size and brightness encode — leaving the default on a measured
+   * layout would state something untrue about the picture. */
+  caption?: ReactNode;
+  /** Accessible description of the canvas, for the same reason. */
+  ariaLabel?: string;
+  /** The frame a measured field is drawn in, in the caller's own coordinates.
+   * Only meaningful alongside placed nodes. Without it the camera frames the
+   * bodies that happen to exist, so a field with an empty region — no dormant
+   * projects, say — silently loses that region and the reader is never shown
+   * the absence. With it, an empty part of the axis stays empty on screen,
+   * which is the finding. */
+  extent?: { x: [number, number]; y: [number, number] };
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const sigmaRef = useRef<Sigma | null>(null);
@@ -178,6 +208,13 @@ export function GraphCanvas({
 
     const graph = new Graph({ multi: true, type: 'directed' });
     const maxDegree = Math.max(...nodes.map((n) => n.degree), 1);
+    // A field is "placed" only if EVERY node was measured into it. One node
+    // without coordinates would otherwise be dropped at the seed circle beside
+    // nodes whose position is a claim about their data, and the reader has no
+    // way to tell the two apart.
+    const placed = nodes.every(
+      (node) => Number.isFinite(node.x) && Number.isFinite(node.y),
+    );
     // Deterministic circular seed (sorted order) so layouts are stable
     // across reloads of the same subgraph.
     const sorted = [...nodes].sort((a, b) => a.id.localeCompare(b.id));
@@ -216,8 +253,8 @@ export function GraphCanvas({
         label: node.label,
         kind: node.kind,
         degree: node.degree,
-        x: Math.cos(angle),
-        y: Math.sin(angle),
+        x: placed ? node.x! : Math.cos(angle),
+        y: placed ? node.y! : Math.sin(angle),
         size: (5 + 9 * Math.sqrt(node.degree / maxDegree)) * bodyScale,
         isHub: node.degree >= maxDegree * 0.75,
         // A graph with no vitality measurement rests mid-scale, so an absent
@@ -232,6 +269,11 @@ export function GraphCanvas({
         graph.addEdge(edge.source, edge.target, { kind: edge.kind });
       }
     }
+    // Emergent layout, for graphs whose shape is the finding. A measured field
+    // skips all of it: running a force pass over placed coordinates, or
+    // re-centering their components onto a ring, would destroy the very
+    // measurement the positions were carrying.
+    if (!placed) {
     const fa2 = forceAtlas2.inferSettings(graph);
     forceAtlas2.assign(graph, {
       // A dense component needs more settling time to actually reach the
@@ -384,6 +426,7 @@ export function GraphCanvas({
           });
         }
       }
+    }
     }
 
     // Real topology, captured before the dendrite pass rewrites the edge set.
@@ -553,7 +596,13 @@ export function GraphCanvas({
       },
     });
     sigmaRef.current = renderer;
-    {
+    if (placed && extent) {
+      // A measured field is framed by its AXIS, not by its occupants. Framing
+      // the occupants would rescale the picture every time a body enters or
+      // leaves a region, and would quietly delete an empty region — which on
+      // this kind of field is itself a reading.
+      renderer.setCustomBBox({ x: extent.x, y: extent.y });
+    } else {
       // Frame the real network only: dendrite waypoints bow outside the node
       // hull and glow companions scale with heat, and neither may be allowed
       // to move the camera.
@@ -802,7 +851,7 @@ export function GraphCanvas({
       renderer.kill();
       sigmaRef.current = null;
     };
-  }, [nodes, edges]);
+  }, [nodes, edges, extent]);
 
   if (nodes.length === 0) {
     return (
@@ -852,12 +901,20 @@ export function GraphCanvas({
           canvasClassName,
         )}
         role="img"
-        aria-label={`Code graph: ${nodes.length} symbols, ${edges.length} relations. The symbol list alongside is the accessible equivalent.`}
+        aria-label={
+          ariaLabel ??
+          `Code graph: ${nodes.length} symbols, ${edges.length} relations. The symbol list alongside is the accessible equivalent.`
+        }
       />
       <figcaption className="text-2xs text-text-muted">
-        {nodes.length} symbols · {edges.length} relations · size = connectedness ·
-        brightness = how live the signal is · hover isolates a neighbourhood,
-        click fires it and the bloom decays as the activation fades
+        {caption ?? (
+          <>
+            {nodes.length} symbols · {edges.length} relations · size =
+            connectedness · brightness = how live the signal is · hover isolates
+            a neighbourhood, click fires it and the bloom decays as the
+            activation fades
+          </>
+        )}
       </figcaption>
     </figure>
   );

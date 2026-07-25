@@ -5,21 +5,36 @@ import { ActivationField } from '../../viz/graph/activation.ts';
 import { buildAdjacency, neighborsOf } from '../../viz/graph/adjacency.ts';
 import { useEventStreamState, useLiveActivity } from '../../data/sse/useEvents.tsx';
 import { LegacyBoundary } from '../../ui/LegacyStates.tsx';
+import { Legend, Readout } from '../../ui/instrument.tsx';
 import { cn } from '../../ui/cn';
 import { useLegacy } from '../../data/query/useLegacy.ts';
 import { useScope } from '../../data/scope/store.ts';
 import { SignalPanel } from './SignalPanel.tsx';
+import { composeRegistryField, indexedMass, type RegistryField } from './field.ts';
+import { ScopedBrain } from './ScopedBrain.tsx';
 import {
   ProjectsPayloadSchema,
   type ProjectRegistryEntry,
   type ProjectRepoGroup,
 } from './contracts.ts';
 
-/** Brain: the all-projects aggregate first (plan 11a scope model). Repo-grouped
- * registry with recency signal; selecting a project sets the dashboard scope.
- * The connected Sigma brain map is the phase-2 canvas over this same data. */
+/** Brain. Two surfaces, because the question genuinely changes when a project
+ * is selected.
+ *
+ * Unscoped, the question is "what does this daemon look after?" and the answer
+ * is the registry, composed as a measured field (see `field.ts`) rather than a
+ * force layout — several dozen unrelated repositories have no shape to
+ * discover, so position is spent on measurement instead.
+ *
+ * Scoped, the question becomes "what does TraceDecay know about THIS project?",
+ * which is a different surface entirely (see `ScopedBrain.tsx`). */
 export function BrainPage() {
+  const scope = useScope((s) => s.scope);
   const projects = useLegacy(['projects'], '/api/projects', ProjectsPayloadSchema);
+
+  if (scope.kind === 'project') {
+    return <ScopedBrain projectId={scope.projectId} label={scope.label} />;
+  }
 
   return (
     <LegacyBoundary title="Brain" pending={projects.isPending} result={projects.data}>
@@ -27,16 +42,6 @@ export function BrainPage() {
         const groups = [...data.project_tree].sort(
           (a, b) => latestSeen(b) - latestSeen(a),
         );
-        const totals = groups
-          .flatMap((g) => g.projects)
-          .reduce(
-            (acc, p) => ({
-              stores: acc.stores + p.store_count,
-              artifacts: acc.artifacts + p.artifact_count,
-              scopes: acc.scopes + p.graph_scope_count,
-            }),
-            { stores: 0, artifacts: 0, scopes: 0 },
-          );
         return (
           <div className="flex h-full min-h-0 flex-col">
             <div className="flex items-center gap-3 border-b border-edge-subtle px-4 py-2">
@@ -51,23 +56,21 @@ export function BrainPage() {
              * instrument HUD, and the registry becomes a dense side rail that
              * remains the canvas's accessible equivalent. */}
             <div className="flex min-h-0 flex-1 flex-col lg:flex-row">
-              <div className="relative flex min-h-0 flex-1 flex-col p-3">
-                <SynapseMap
-                  groups={groups}
-                  activeProjectId={data.active_project_id ?? null}
-                  counts={[
-                    { label: 'repos', value: data.summary.repo_count },
-                    { label: 'projects', value: data.summary.project_count },
-                    { label: 'stores', value: totals.stores },
-                    { label: 'scopes', value: totals.scopes },
-                    { label: 'artifacts', value: totals.artifacts },
-                  ]}
-                />
+              {/* Below `lg` this is a vertical stack, and the column has to be
+                * allowed its natural height. Pinned to a share of the viewport
+                * it both squeezed the field and overflowed, and what would not
+                * fit painted straight through the registry rail beneath it.
+                * The shell's `main` is the scroll container, so giving the
+                * stack its real height simply makes the page scroll. From `lg`
+                * the two panes split the viewport and each owns its overflow
+                * again. */}
+              <div className="relative flex shrink-0 flex-col p-3 lg:min-h-0 lg:flex-1">
+                <RegistryFieldView groups={groups} activeProjectId={data.active_project_id ?? null} />
               </div>
               <aside
                 aria-label="Project registry"
                 tabIndex={0}
-                className="flex w-full shrink-0 flex-col gap-2 overflow-auto border-t border-edge-subtle p-3 lg:w-80 lg:border-l lg:border-t-0"
+                className="flex w-full shrink-0 flex-col gap-2 border-t border-edge-subtle p-3 lg:w-80 lg:min-h-0 lg:overflow-auto lg:border-l lg:border-t-0"
               >
                 {groups.map((group, index) => (
                   <RepoGroupCard
@@ -84,20 +87,19 @@ export function BrainPage() {
   );
 }
 
-/** The all-projects synapse map: repositories as ganglia hubs, each checkout
- * a neuron wired to its hub. The active project pulses with live SSE beats;
- * selecting fires real neighborhoods (see GraphCanvas activation). */
-function SynapseMap({
+/** The all-projects field. Position, size and brightness are all measurements
+ * of the registry — recency across, indexed mass up — so the composition can be
+ * read rather than merely looked at. The activation field still fires on real
+ * SSE beats, and a repository hub still fires its checkouts, in the one case
+ * where such a hub exists at all. */
+function RegistryFieldView({
   groups,
   activeProjectId,
-  counts,
 }: {
   groups: ProjectRepoGroup[];
   activeProjectId: string | null;
-  counts: ReadonlyArray<{ label: string; value: number }>;
 }) {
   const selectProject = useScope((s) => s.selectProject);
-  const scope = useScope((s) => s.scope);
   const activationRef = useRef(new ActivationField({ halfLifeMs: 4200 }));
   const { state: sseState, lastEventAt } = useEventStreamState();
   const { pulses, revision } = useLiveActivity();
@@ -109,48 +111,34 @@ function SynapseMap({
   // page, and the page re-renders on every live pulse. Memoising on its
   // identity would therefore hand GraphCanvas a new node/edge array per event
   // and force a full renderer teardown plus layout each time. Key the memo on
-  // what the topology actually IS instead, so the canvas is rebuilt only when
-  // the registry really changed.
+  // what the topology and the measurements actually ARE instead, so the canvas
+  // is rebuilt only when the registry really changed.
   const groupsRef = useRef(groups);
   groupsRef.current = groups;
-  const topologySignature = groups
+  const fieldSignature = groups
     .map(
       (group) =>
         `${group.git_common_dir ?? group.label}|${group.projects
           .map(
             (project) =>
-              `${project.project_id}:${project.kind}:${project.store_count}:${project.graph_scope_count}`,
+              `${project.project_id}:${project.kind}:${indexedMass(project)}:${bucketStamp(project.last_seen_at)}`,
           )
           .join(',')}`,
     )
     .join(';');
 
-  const { nodes, edges } = useMemo(() => {
-    const nodes = [] as Array<{ id: string; label: string; kind: string; degree: number }>;
-    const edges = [] as Array<{ source: string; target: string; kind?: string }>;
-    for (const group of groupsRef.current) {
-      const hubId = `repo:${group.git_common_dir ?? group.label}`;
-      nodes.push({
-        id: hubId,
-        label: group.label,
-        kind: 'repository',
-        degree: Math.max(group.projects.length, 1) * 2,
-      });
-      for (const project of group.projects) {
-        nodes.push({
-          id: project.project_id,
-          label: project.label,
-          kind: project.kind,
-          degree: Math.max(project.store_count + project.graph_scope_count, 1),
-        });
-        edges.push({ source: hubId, target: project.project_id, kind: 'checkout' });
-      }
-    }
-    return { nodes, edges };
-  }, [topologySignature]);
+  const field: RegistryField = useMemo(
+    () => composeRegistryField(groupsRef.current),
+    [fieldSignature],
+  );
+  const nodes = field.nodes;
+  const edges = field.edges;
+  const extent = field.extent;
 
   // Propagation reads the drawn edge list, so activation can only ever travel
-  // where the viewer can see a relation to travel along.
+  // where the viewer can see a relation to travel along. On this field most
+  // projects have no drawn relation at all, which is correct: a beat in one
+  // repository has nothing to conduct into.
   const adjacency = useMemo(() => buildAdjacency(edges), [edges]);
   const drawnIds = useMemo(() => new Set(nodes.map((node) => node.id)), [nodes]);
 
@@ -167,23 +155,21 @@ function SynapseMap({
     }
     const unseen = Math.min(revision - drawnRevision.current, pulses.length);
     drawnRevision.current = revision;
-    const field = activationRef.current;
+    const activation = activationRef.current;
     for (const pulse of pulses.slice(pulses.length - unseen)) {
       const projectId = pulse.projectId ?? activeProjectId;
-      // A scope naming something this graph does not draw fires nothing: heat
-      // on an id with no neuron is heat nobody can see, and it would keep the
+      // A scope naming something this field does not draw fires nothing: heat
+      // on an id with no body is heat nobody can see, and it would keep the
       // render loop awake resolving an invisible decay.
       if (!projectId || !drawnIds.has(projectId)) continue;
       const energy = strikeIntensity(pulse.family);
-      field.strike([projectId], energy);
-      // One synaptic hop along the graph's own edges. On this graph that hop
-      // reaches the checkout's repository hub and stops there — true, because
-      // work in a checkout IS work in that repository. It deliberately does
-      // not reach the hub's other checkouts, which did nothing. The hop lands
-      // at a third the energy, so the conducting edge lights from the end
-      // where the event actually happened.
+      activation.strike([projectId], energy);
+      // One synaptic hop along the field's own edges — which exist only where
+      // several checkouts share a git directory. It lands at a third the
+      // energy, so the conducting edge lights from the end where the event
+      // actually happened.
       const hop = neighborsOf(adjacency, projectId);
-      if (hop.length > 0) field.strike(hop, energy / 3);
+      if (hop.length > 0) activation.strike(hop, energy / 3);
     }
   }, [pulses, revision, sseState, activeProjectId, adjacency, drawnIds]);
 
@@ -199,6 +185,17 @@ function SynapseMap({
     },
     [selectProject],
   );
+
+  const totals = groups
+    .flatMap((g) => g.projects)
+    .reduce(
+      (acc, p) => ({
+        stores: acc.stores + p.store_count,
+        artifacts: acc.artifacts + p.artifact_count,
+        scopes: acc.scopes + p.graph_scope_count,
+      }),
+      { stores: 0, artifacts: 0, scopes: 0 },
+    );
 
   return (
     <>
@@ -219,30 +216,100 @@ function SynapseMap({
         * which makes it a positioned, z-index:auto box just like this HUD --
         * two such boxes stack in DOM order, and with the HUD now rendered
         * FIRST (for the mobile flow case above) the canvas would otherwise
-        * paint over it at every width. The canvas gets a guaranteed minimum
-        * height so it always has a real field to draw the network on
-        * regardless of how tall the HUD's own content is. */}
+        * paint over it at every width. */}
       <div className="pointer-events-none static z-10 mb-2 flex flex-col items-start gap-2 md:absolute md:inset-x-6 md:top-6 md:mb-0">
-        <InstrumentReadout items={counts} />
+        <InstrumentReadout
+          items={[
+            { label: 'repos', value: groups.length },
+            { label: 'projects', value: nodes.length - field.sharedRepoCount },
+            { label: 'stores', value: totals.stores },
+            { label: 'scopes', value: totals.scopes },
+            { label: 'artifacts', value: totals.artifacts },
+          ]}
+        />
         <SignalPanel pulses={pulses} sseState={sseState} lastEventAt={lastEventAt} />
       </div>
       <GraphCanvas
         nodes={nodes}
         edges={edges}
         fill
-        canvasClassName="min-h-[55vh] md:min-h-0"
+        // The field has a fixed aspect (five columns across a mass axis) and
+        // the camera fits it whole, so a canvas far taller than it is wide
+        // shrinks the whole composition into a band with dead space above and
+        // below. On a phone the canvas is therefore sized in viewport WIDTHS,
+        // which keeps its shape near the field's own; from `md` up there is
+        // enough width that a generous height is the right trade again.
+        canvasClassName="min-h-[64vw] max-h-[84vw] md:max-h-none md:min-h-[55vh] lg:min-h-0"
+        extent={extent}
         activation={activationRef.current}
-        selectedId={scope.kind === 'project' ? scope.projectId : null}
+        selectedId={null}
         onSelect={handleSelect}
+        ariaLabel={fieldDescription(field)}
+        caption={<FieldAxis field={field} />}
       />
     </>
   );
 }
 
+/** The horizontal axis, printed. The field's columns are a real measurement and
+ * a reader cannot infer their order or their bounds from the picture alone, so
+ * they are stated: name, the age each column actually bounds, how many projects
+ * fell into it, and a rail giving that count a length. */
+function FieldAxis({ field }: { field: RegistryField }) {
+  const busiest = field.columns.reduce((max, column) => Math.max(max, column.count), 0);
+  return (
+    <div className="flex flex-col gap-1.5">
+      {/* Short enough to survive a 320px rail: the full sentence is the
+        * paragraph below, and a legend that truncates to "INDEXED M…" states
+        * nothing. */}
+      <Legend>recency across · mass up</Legend>
+      <div className="flex flex-wrap border-y border-edge-subtle bg-surface-1">
+        {field.columns.map((column) => (
+          <div
+            key={column.id}
+            className="min-w-0 flex-1 basis-24 border-l border-edge-subtle px-2.5 py-1.5 first:border-l-0"
+          >
+            <Readout
+              label={column.label}
+              value={column.count}
+              unit={column.bound}
+              fraction={busiest > 0 ? column.count / busiest : null}
+              size="sm"
+            />
+          </div>
+        ))}
+      </div>
+      <p className="text-2xs text-text-muted">
+        Each body is one project: column = when TraceDecay last saw it, height =
+        indexed mass (stores + scopes + artifacts, log scale), size = the same
+        mass, brightness = the same recency.{' '}
+        {field.sharedRepoCount > 0
+          ? `${field.sharedRepoCount} ${field.sharedRepoCount === 1 ? 'repository has' : 'repositories have'} more than one checkout and ${field.sharedRepoCount === 1 ? 'is' : 'are'} drawn wired to theirs — every other project stands alone because it genuinely is.`
+          : 'No repository here has a second checkout, so nothing is wired to anything: these projects share no relation for a line to state.'}
+      </p>
+    </div>
+  );
+}
+
+function fieldDescription(field: RegistryField): string {
+  const occupied = field.columns
+    .filter((column) => column.count > 0)
+    .map((column) => `${column.count} ${column.label}`)
+    .join(', ');
+  return `Registry field: projects placed by when they were last seen (${occupied || 'none'}) and by indexed mass. The project registry list alongside is the accessible equivalent.`;
+}
+
+/** Which recency column a timestamp lands in, as a memo key. Keying the field
+ * memo on the raw timestamp would recompose the layout on any clock tick; the
+ * layout only actually changes when a project crosses a column boundary. */
+function bucketStamp(lastSeenAt: number): number {
+  return Math.floor((Date.now() / 1000 - lastSeenAt) / 3600);
+}
+
 /** Corner-bracketed instrument readout floating on the canvas: the counts that
  * used to occupy four tall tiles, rendered as one hairline strip so the brain
  * keeps the space. Pointer-transparent so it never steals a graph drag. */
-function InstrumentReadout({
+export function InstrumentReadout({
   items,
 }: {
   items: ReadonlyArray<{ label: string; value: number }>;
@@ -377,7 +444,7 @@ function ProjectRow({ project }: { project: ProjectRegistryEntry }) {
 
 /** Recency as a quiet luminance signal, not an alarm color: bright accent for
  * activity within a day, dimming with age, hollow when dormant for a month. */
-function RecencyDot({
+export function RecencyDot({
   lastSeenAt,
   className,
 }: {
@@ -405,7 +472,7 @@ function latestSeen(group: ProjectRepoGroup): number {
   return group.projects.reduce((max, p) => Math.max(max, p.last_seen_at), 0);
 }
 
-function relativeTime(epochSeconds: number): string {
+export function relativeTime(epochSeconds: number): string {
   const delta = Date.now() / 1000 - epochSeconds;
   if (delta < 90) return 'now';
   if (delta < 3600) return `${Math.round(delta / 60)}m ago`;
