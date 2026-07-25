@@ -20,10 +20,10 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tracedecay_application::{
     ApplicationProblem, ApplicationProblemEnvelope, CancellationContext, CapabilityGrantId,
-    CapabilityGrantSnapshot, Deadline, DisclosureClass, LegalAction, OperationReceipt,
-    OperationTermination, ProblemOwningLayer, RequestContext, RequestId, ResolvedScope,
-    ResultContractRef, ResumeToken, RetryDirective, SafeDiagnostic, StreamEvent, StreamEventKind,
-    StreamFrontier, StreamGap, StreamTermination,
+    CapabilityGrantSnapshot, Deadline, DisclosureClass, LegalAction, OpaqueCursor,
+    OperationReceipt, OperationTermination, PageRequest, ProblemOwningLayer, RequestContext,
+    RequestId, ResolvedScope, ResultContractRef, ResumeToken, RetryDirective, SafeDiagnostic,
+    StreamEvent, StreamEventKind, StreamFrontier, StreamGap, StreamTermination,
 };
 use tracedecay_domain::{
     ActorId, CodeGenerationId, CommitId, ContentDigest, ProjectId, RetrievalGrainV1,
@@ -303,6 +303,9 @@ pub(crate) struct ManagedTestRunSnapshot {
     pub(crate) document_content_digests: BTreeMap<String, ContentDigest>,
     pub(crate) deadline: Deadline,
     pub(crate) results: Vec<ManagedTestRunResult>,
+    pub(crate) result_offset: usize,
+    pub(crate) available_results: usize,
+    pub(crate) next_cursor: Option<OpaqueCursor>,
     pub(crate) completed: u64,
     pub(crate) total: Option<u64>,
     pub(crate) termination: Option<OperationTermination>,
@@ -393,6 +396,23 @@ impl CanonicalManagedTestRunReader {
             }
         };
         Some(current_managed_test_run(snapshot, current))
+    }
+
+    pub(crate) async fn latest_current_page(
+        &self,
+        current: &ManagedTestRunCurrentScope,
+        page: &PageRequest,
+    ) -> ManagedTestRunReadOutcome {
+        let snapshot = match self.latest_current(current).await {
+            ManagedTestRunReadOutcome::Current(snapshot) => snapshot,
+            outcome => return outcome,
+        };
+        match self.events.page_managed_test_run(snapshot, page).await {
+            Ok(snapshot) => ManagedTestRunReadOutcome::Current(snapshot),
+            Err(_) => ManagedTestRunReadOutcome::Unavailable(
+                ManagedTestRunUnavailableReason::AuthorityFailure,
+            ),
+        }
     }
 }
 
@@ -556,6 +576,49 @@ impl OperationResumeAuthority {
             return Err(OperationEventError::NotFoundOrNotAuthorized);
         }
         Ok(())
+    }
+
+    fn issue_test_result_cursor(
+        &self,
+        binding: &OperationBinding,
+        generation: u64,
+        completed: u64,
+        next_offset: usize,
+    ) -> Result<OpaqueCursor, OperationEventError> {
+        let snapshot = operation_resume_snapshot(binding, generation, self.key.clone())?;
+        let encoded = encode_cursor(
+            &snapshot,
+            &StableSortKey {
+                normalized_score_micros: u64::try_from(next_offset)
+                    .map_err(|_| OperationEventError::ResumeUnavailable)?,
+                knowledge_at_micros: i64::try_from(completed)
+                    .map_err(|_| OperationEventError::ResumeUnavailable)?,
+                stable_id: binding.operation_id.to_string(),
+            },
+            &self.authenticator,
+        )
+        .map_err(|_| OperationEventError::ResumeUnavailable)?;
+        OpaqueCursor::new(encoded).map_err(|_| OperationEventError::ResumeUnavailable)
+    }
+
+    fn verify_test_result_cursor(
+        &self,
+        cursor: &OpaqueCursor,
+        record: &OperationRecord,
+        completed: u64,
+    ) -> Result<usize, OperationEventError> {
+        let snapshot =
+            operation_resume_snapshot(&record.binding, record.generation, self.key.clone())?;
+        let sort_key = verify_cursor(cursor.as_str(), &snapshot, &self.authenticator)
+            .map_err(operation_resume_verification_error)?;
+        if sort_key.stable_id != record.binding.operation_id.to_string()
+            || sort_key.knowledge_at_micros
+                != i64::try_from(completed).map_err(|_| OperationEventError::ResumeUnavailable)?
+        {
+            return Err(OperationEventError::NotFoundOrNotAuthorized);
+        }
+        usize::try_from(sort_key.normalized_score_micros)
+            .map_err(|_| OperationEventError::NotFoundOrNotAuthorized)
     }
 }
 
@@ -833,6 +896,50 @@ impl OperationEventAuthority {
     ) -> Option<Result<ManagedTestRunSnapshot, OperationEventError>> {
         let state = self.inner.state.try_lock().ok()?;
         Some(managed_test_run_snapshot(&state, root_uri))
+    }
+
+    async fn page_managed_test_run(
+        &self,
+        mut snapshot: ManagedTestRunSnapshot,
+        page: &PageRequest,
+    ) -> Result<ManagedTestRunSnapshot, OperationEventError> {
+        let state = self.inner.state.lock().await;
+        let record = state
+            .operations
+            .get(&snapshot.operation_id)
+            .ok_or(OperationEventError::NotFoundOrNotAuthorized)?;
+        if record.generation != snapshot.generation {
+            return Err(OperationEventError::NotFoundOrNotAuthorized);
+        }
+        let available_results = snapshot.results.len();
+        let offset = match page.cursor.as_ref() {
+            Some(cursor) => {
+                self.inner
+                    .resume
+                    .verify_test_result_cursor(cursor, record, snapshot.completed)?
+            }
+            None => 0,
+        };
+        if offset > available_results {
+            return Err(OperationEventError::NotFoundOrNotAuthorized);
+        }
+        let page_size = usize::try_from(page.page_size)
+            .map_err(|_| OperationEventError::NotFoundOrNotAuthorized)?;
+        let end = offset.saturating_add(page_size).min(available_results);
+        snapshot.results = snapshot.results[offset..end].to_vec();
+        snapshot.result_offset = offset;
+        snapshot.available_results = available_results;
+        snapshot.next_cursor = (end < available_results)
+            .then(|| {
+                self.inner.resume.issue_test_result_cursor(
+                    &record.binding,
+                    record.generation,
+                    snapshot.completed,
+                    end,
+                )
+            })
+            .transpose()?;
+        Ok(snapshot)
     }
 
     /// Requests cancellation for one exact trusted project-local test run.
@@ -1141,7 +1248,8 @@ fn managed_test_run_snapshot(
             }
             _ => None,
         })
-        .collect();
+        .collect::<Vec<_>>();
+    let available_results = results.len();
     let (completed, total) = record
         .history
         .iter()
@@ -1186,6 +1294,9 @@ fn managed_test_run_snapshot(
             }
         },
         results,
+        result_offset: 0,
+        available_results,
+        next_cursor: None,
         completed,
         total,
         termination,
@@ -1560,13 +1671,15 @@ fn operation_resume_verification_error(error: CursorError) -> OperationEventErro
 mod tests {
     use std::collections::BTreeMap;
 
-    use tracedecay_application::{ApplicationProblemKind, Deadline, RequestId};
+    use tracedecay_application::{
+        ApplicationProblemKind, Deadline, OpaqueCursor, PageRequest, RequestId,
+    };
     use tracedecay_domain::{CodeGenerationId, CommitId, ContentDigest, UtcMicros};
 
     use super::{
         CanonicalManagedTestRunReader, ManagedTestRunCurrentScope, ManagedTestRunReadOutcome,
-        ManagedTestRunStaleReason, OperationCancelOutcome, OperationEventAuthority,
-        OperationEventError, OperationId,
+        ManagedTestRunStaleReason, ManagedTestRunUnavailableReason, OperationCancelOutcome,
+        OperationEventAuthority, OperationEventError, OperationId,
     };
 
     #[test]
@@ -1742,5 +1855,75 @@ mod tests {
                 ManagedTestRunReadOutcome::Stale(ManagedTestRunStaleReason::SourceIdentity)
             );
         }
+    }
+
+    #[tokio::test]
+    async fn canonical_test_run_reader_pages_with_an_authenticated_stable_cursor() {
+        let authority = OperationEventAuthority::default();
+        let head = CommitId::new("0123456789abcdef0123456789abcdef01234567").expect("head commit");
+        let generation = CodeGenerationId::new("generation.test.page").expect("code generation");
+        let emitter = authority
+            .begin_managed_test_run(
+                "file:///workspace".to_owned(),
+                RequestId::new("request.test-run.page").expect("request id"),
+                Some(head.clone()),
+                Some(generation.clone()),
+                BTreeMap::new(),
+                Deadline::new(UtcMicros(i64::MAX)).expect("deadline"),
+            )
+            .await
+            .expect("managed test run");
+        for index in 0..3 {
+            emitter
+                .test_result(format!("suite::test_{index}"), index != 1)
+                .await
+                .expect("test result");
+        }
+        emitter.progress(3, Some(3)).await.expect("test progress");
+        let reader = CanonicalManagedTestRunReader::new(authority);
+        let current = ManagedTestRunCurrentScope {
+            root_uri: "file:///workspace".to_owned(),
+            head_commit_id: Some(head),
+            code_generation_id: Some(generation),
+            document_uri: None,
+            document_content_digest: None,
+        };
+
+        let ManagedTestRunReadOutcome::Current(first) = reader
+            .latest_current_page(&current, &PageRequest::first(2).expect("page"))
+            .await
+        else {
+            panic!("first page must be current");
+        };
+        assert_eq!(first.results.len(), 2);
+        assert_eq!(first.result_offset, 0);
+        assert_eq!(first.available_results, 3);
+        let cursor = first.next_cursor.expect("continuation");
+        let tampered = OpaqueCursor::new(format!("{}x", cursor.as_str())).expect("opaque cursor");
+        assert_eq!(
+            reader
+                .latest_current_page(
+                    &current,
+                    &PageRequest::new(2, Some(tampered)).expect("tampered page"),
+                )
+                .await,
+            ManagedTestRunReadOutcome::Unavailable(
+                ManagedTestRunUnavailableReason::AuthorityFailure,
+            )
+        );
+
+        let ManagedTestRunReadOutcome::Current(second) = reader
+            .latest_current_page(
+                &current,
+                &PageRequest::new(2, Some(cursor)).expect("continuation page"),
+            )
+            .await
+        else {
+            panic!("second page must be current");
+        };
+        assert_eq!(second.results.len(), 1);
+        assert_eq!(second.results[0].test, "suite::test_2");
+        assert_eq!(second.result_offset, 2);
+        assert!(second.next_cursor.is_none());
     }
 }
