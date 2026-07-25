@@ -124,3 +124,29 @@ Surfaces 1 and 3 of the original plan (Anatomy, Disagreement) are unaffected.
 The transit map demotes to "maybe, inside Trace" — its endpoint work
 (registering directed get_call_chain, strata service) is still the right
 backend for Trace and proceeds unchanged.
+
+## Sensory contract (owner: "kinesthetic synesthesia", 2026-07-25)
+
+The direction in one phrase: structure you can FEEL through motion. Sensation
+channels are measurements — the honesty rule extends from "position encodes a
+stated measurement" to "sensation encodes a stated measurement". One mapping,
+app-wide, so the body learns it once:
+
+| Feel | Measurement | Mechanics |
+| --- | --- | --- |
+| weight / inertia | connectedness (degree / mass) | hover-response latency, bloom depth, settle time scale with degree; leaves flick, hubs are slow and deep |
+| tension / deformation | coupling strength (call-site count) | edges as springs, stiffness = call sites; drag deforms the neighborhood proportionally — coupled code moves as flesh, loose code trails |
+| texture / grain | cyclomatic complexity | contour tightness, surface roughness |
+| warmth | churn recency | heat tint that decays over real time |
+| pulse | live activity (SSE strikes) | shipped — the existing strike/bloom machinery |
+
+Consequences:
+- Reduced-motion: every felt channel needs a static equivalent (weight → size
+  already; tension → edge thickness; pulse → pinned-lit) — the a11y story is a
+  first-class rendering mode, not a degradation.
+- Static mockups settle the SPATIAL language only. Feel requires a live
+  prototype: round two is an interactive page with real spring physics over a
+  real subgraph, reviewed in Chrome at full viewport.
+- Performance boundary: spring simulation over the ~80-250-node subgraph cap is
+  cheap; the cortex (aggregated regions) simulates dozens of bodies, not
+  thousands.
