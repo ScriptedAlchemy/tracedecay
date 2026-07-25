@@ -38,5 +38,16 @@ pub use self::pr9_authority::{
 pub use self::request::{RawRetrievalRequestV1, SanitizedRetrievalRequestV1};
 pub use self::unavailable::{CapabilityReportedLane, UnavailableLaneReportV1};
 
+pub(crate) const PR9_EXACT_RETRIEVER_REVISION_V1: &str = "retriever.exact.daemon.v1";
+pub(crate) const PR9_LEXICAL_RETRIEVER_REVISION_V1: &str = "retriever.lexical.daemon.v1";
+pub(crate) const PR9_GRAPH_RETRIEVER_REVISION_V1: &str = "retriever.graph.daemon.v1";
+pub(crate) const PR9_QUERY_SANITIZER_REVISION_V1: &str = "query-sanitizer.daemon.v1";
+pub(crate) const PR9_QUERY_NORMALIZATION_REVISION_V1: &str = "query-normalization.daemon.v1";
+pub(crate) const PR9_EXACT_RULE_REVISION_V1: &str = "exact-rules.daemon.v1";
+pub(crate) const PR9_LEXICAL_PROFILE_REVISION_V1: &str = "lexical-profile.daemon.v1";
+pub(crate) const PR9_EXACT_SCORE_DOMAIN_V1: &str = "score.exact.daemon.v1";
+pub(crate) const PR9_LEXICAL_SCORE_DOMAIN_V1: &str = "score.lexical.daemon.v1";
+pub(crate) const PR9_GRAPH_SCORE_DOMAIN_V1: &str = "score.graph.daemon.v1";
+
 #[cfg(test)]
 mod tests;

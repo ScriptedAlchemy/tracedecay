@@ -5,6 +5,7 @@
 //! port that those owners can mount later.
 
 mod accepted_profile_authority;
+mod bundled_pr9;
 mod config_backend;
 mod config_store;
 mod configuration_operation;
@@ -18,6 +19,7 @@ pub(crate) use accepted_profile_authority::{
     RegisteredSemanticAcceptedProfileAuthorityV1, SemanticAcceptedProfileAuthorityErrorV1,
     SemanticAcceptedProfileAuthorityPortV1, SemanticAcceptedProfileAuthorityRecordV1,
 };
+pub(crate) use bundled_pr9::bundled_pr9_authority;
 pub use config_backend::ConfigurationLinkedSemanticRuntimeBackendV1;
 pub use config_store::ProductionSemanticRetrievalConfigurationStoreV1;
 pub(crate) use configuration_operation::{

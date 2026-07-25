@@ -128,6 +128,40 @@ fn code_index_scope_unavailable() -> crate::mcp::server::CodeIndexSearchOutcomeV
     )
 }
 
+fn code_index_search_displays(
+    generation: &crate::code_index::production::CodeIndexPublishedGenerationV1,
+    candidates: &[tracedecay_domain::RankedCandidate],
+) -> HashMap<tracedecay_domain::RetrievalAnchorId, crate::mcp::server::CodeIndexSearchDisplayV1> {
+    let symbols = generation
+        .symbols()
+        .symbols
+        .iter()
+        .map(|symbol| (symbol.occurrence.as_str(), symbol))
+        .collect::<HashMap<_, _>>();
+    candidates
+        .iter()
+        .filter_map(|ranked| {
+            let anchor = &ranked.candidate.anchor_id;
+            let occurrence = anchor.as_str().strip_prefix("code-symbol:")?;
+            let symbol = symbols.get(occurrence)?;
+            let name = symbol
+                .qualified_name
+                .rsplit("::")
+                .next()
+                .unwrap_or(symbol.qualified_name.as_str())
+                .to_owned();
+            Some((
+                anchor.clone(),
+                crate::mcp::server::CodeIndexSearchDisplayV1 {
+                    name,
+                    qualified_name: symbol.qualified_name.clone(),
+                    kind: symbol.kind.clone(),
+                },
+            ))
+        })
+        .collect()
+}
+
 impl crate::query::retrieval::semantic::SemanticExecutionControl for McpSemanticExecutionControlV1 {
     fn is_cancelled(&self) -> bool {
         !self.admission_provider.route_is_registered() || self.request_termination().is_some()
@@ -188,11 +222,21 @@ fn code_index_search_executor(
             };
             let terminal_expected_authority = authority.clone();
             let policy = match (
-                tracedecay_domain::SanitizerRevision::new("query-sanitizer.daemon.v1"),
-                tracedecay_domain::QueryNormalizationRevision::new("query-normalization.daemon.v1"),
-                tracedecay_domain::ExactAdmissionRuleRevision::new("exact-rules.daemon.v1"),
-                tracedecay_domain::ComponentRevision::new("lexical-profile.daemon.v1"),
-                tracedecay_domain::ScoreDomainId::new("score.lexical.daemon.v1"),
+                tracedecay_domain::SanitizerRevision::new(
+                    crate::query::retrieval::PR9_QUERY_SANITIZER_REVISION_V1,
+                ),
+                tracedecay_domain::QueryNormalizationRevision::new(
+                    crate::query::retrieval::PR9_QUERY_NORMALIZATION_REVISION_V1,
+                ),
+                tracedecay_domain::ExactAdmissionRuleRevision::new(
+                    crate::query::retrieval::PR9_EXACT_RULE_REVISION_V1,
+                ),
+                tracedecay_domain::ComponentRevision::new(
+                    crate::query::retrieval::PR9_LEXICAL_PROFILE_REVISION_V1,
+                ),
+                tracedecay_domain::ScoreDomainId::new(
+                    crate::query::retrieval::PR9_LEXICAL_SCORE_DOMAIN_V1,
+                ),
             ) {
                 (
                     Ok(sanitizer_revision),
@@ -364,6 +408,11 @@ fn code_index_search_executor(
                 Err(error) => {
                     use code_index_scheduler::pr9_runtime::Pr9SearchExecutionErrorV1;
                     use code_index_scheduler::semantic_query_runtime::Pr9SemanticSearchExecutionErrorV1;
+                    tracing::warn!(
+                        project_id = %project_id.as_str(),
+                        error = %error,
+                        "code_index_search_failed"
+                    );
                     if let Pr9SemanticSearchExecutionErrorV1::Semantic(
                         crate::query::retrieval::semantic::SemanticQueryServiceError::StrictUnavailable(
                             abstention,
@@ -507,6 +556,13 @@ fn code_index_search_executor(
                     executed.pr9.authorized.fallback.ordered_candidates.clone(),
                 ),
             };
+            let display_by_anchor = schedulers
+                .generation_for(&terminal_scope, &executed.pr9.generation)
+                .await
+                .map(|latest| {
+                    code_index_search_displays(latest.generation(), ordered_candidates.as_slice())
+                })
+                .unwrap_or_default();
             if let Some(reason) = control.request_termination() {
                 return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
                     crate::mcp::server::CodeIndexSearchUnavailableV1 {
@@ -588,6 +644,7 @@ fn code_index_search_executor(
                     code_generation: executed.pr9.generation.as_str().to_owned(),
                     ordered_candidates,
                     pr9_fallback: executed.pr9.authorized.fallback,
+                    display_by_anchor,
                     semantic,
                 },
             )
@@ -1335,6 +1392,18 @@ impl DaemonInvocationState {
             &self.pr9_authority_provider,
         )
         .await
+    }
+
+    fn restore_initial_pr9_authority_for_project(
+        &self,
+        scope: tracedecay_application::ResolvedScope,
+        state: crate::config::retrieval::RetrievalProfileStateV1,
+    ) -> std::result::Result<
+        pr9_authority_provider::Pr9AuthorityProviderStatusV1,
+        pr9_authority_provider::Pr9AuthorityUpdateErrorV1,
+    > {
+        self.pr9_authority_provider
+            .install_evaluated_initial_state(scope, state)
     }
 
     fn pr9_activation_registrar(

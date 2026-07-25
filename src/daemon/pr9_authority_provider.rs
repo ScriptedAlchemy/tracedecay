@@ -74,6 +74,8 @@ pub(crate) enum Pr9AuthorityProviderStatusV1 {
 pub(crate) enum Pr9AuthorityUpdateErrorV1 {
     #[error("PR9 activated scope is invalid")]
     InvalidScope,
+    #[error("PR9 initial profile state is not the exact evaluated fallback")]
+    InvalidInitialState,
     #[error("PR9 profile state does not contain a successful current activation")]
     ActivationNotCurrent,
     #[error("PR9 activation does not match the provider's exact current scope")]
@@ -227,6 +229,48 @@ impl fmt::Debug for DaemonPr9AuthorityProviderV1 {
 }
 
 impl DaemonPr9AuthorityProviderV1 {
+    /// Restore the evaluated fallback installed as the configuration store's
+    /// initial state. Initial installation has no mutation audit event, so it
+    /// is admitted only while the exact PR9 profile is active with no rollback
+    /// slot or audit history.
+    pub(crate) fn install_evaluated_initial_state(
+        &self,
+        scope: ResolvedScope,
+        initial: RetrievalProfileStateV1,
+    ) -> Result<Pr9AuthorityProviderStatusV1, Pr9AuthorityUpdateErrorV1> {
+        scope
+            .validate()
+            .map_err(|_| Pr9AuthorityUpdateErrorV1::InvalidScope)?;
+        if !initial.audit().is_empty()
+            || initial.rollback_profile().is_some()
+            || exact_pr9_profile(&initial).is_err()
+        {
+            return Err(Pr9AuthorityUpdateErrorV1::InvalidInitialState);
+        }
+        let mut current = self
+            .activated
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(prior) = current.get(&scope.scope_digest) {
+            if prior.scope != scope {
+                return Err(Pr9AuthorityUpdateErrorV1::ScopeMismatch);
+            }
+            if prior.state != initial {
+                return Err(Pr9AuthorityUpdateErrorV1::CasConflict);
+            }
+        } else {
+            current.insert(
+                scope.scope_digest.clone(),
+                ActivatedPr9StateV1 {
+                    scope: scope.clone(),
+                    state: initial,
+                },
+            );
+        }
+        drop(current);
+        Ok(self.status(Some(&scope)))
+    }
+
     /// Publish a state only after its configuration activation succeeded.
     ///
     /// Subsequent publications are compare-and-swapped against the previous
@@ -285,7 +329,7 @@ impl DaemonPr9AuthorityProviderV1 {
         if self.key.is_none() {
             return unavailable(Pr9AuthorityUnavailableReasonV1::KeyUnavailable);
         }
-        if current_transition(&activated.state).is_none() {
+        if !has_current_pr9_authority(&activated.state) {
             return unavailable(Pr9AuthorityUnavailableReasonV1::ActivationNotCurrent);
         }
         let profile = match exact_pr9_profile(&activated.state) {
@@ -318,8 +362,9 @@ impl DaemonPr9AuthorityProviderV1 {
         if &activated.scope != scope {
             return Err(Pr9AuthorityUnavailableReasonV1::ScopeMismatch);
         }
-        current_transition(&activated.state)
-            .ok_or(Pr9AuthorityUnavailableReasonV1::ActivationNotCurrent)?;
+        if !has_current_pr9_authority(&activated.state) {
+            return Err(Pr9AuthorityUnavailableReasonV1::ActivationNotCurrent);
+        }
         let pr9 = exact_pr9_profile(&activated.state)?;
         let ranking_revision =
             ComponentRevision::new(crate::query::retrieval::PR9_RANKING_REVISION_V1)
@@ -376,6 +421,13 @@ fn current_transition(
     Some(event)
 }
 
+fn has_current_pr9_authority(state: &RetrievalProfileStateV1) -> bool {
+    current_transition(state).is_some()
+        || (state.audit().is_empty()
+            && state.rollback_profile().is_none()
+            && exact_pr9_profile(state).is_ok())
+}
+
 fn exact_pr9_profile(
     state: &RetrievalProfileStateV1,
 ) -> Result<&AcceptedRetrievalProfileV1, Pr9AuthorityUnavailableReasonV1> {
@@ -428,6 +480,7 @@ fn map_update_observer_error(
 ) -> RetrievalProfileActivationObserverErrorV1 {
     match error {
         Pr9AuthorityUpdateErrorV1::InvalidScope
+        | Pr9AuthorityUpdateErrorV1::InvalidInitialState
         | Pr9AuthorityUpdateErrorV1::ActivationNotCurrent => {
             RetrievalProfileActivationObserverErrorV1::Rejected
         }
@@ -446,8 +499,8 @@ pub(crate) mod tests {
     };
     use crate::config::retrieval::{
         PassingRetrievalEvaluationV1, RetrievalCompatibilityPinsV1, RetrievalProfileAuditEventV1,
-        RetrievalProfileStateSnapshotV1, SemanticCompatibilityPinsV1,
-        SemanticResourceRequirementV1,
+        RetrievalProfileStateSnapshotV1, RetrievalRuntimeCompatibilityV1,
+        SemanticCompatibilityPinsV1, SemanticResourceRequirementV1,
     };
     use crate::query::retrieval::semantic::SemanticCalibrationProfileV1;
     use crate::search_eval::{
@@ -779,6 +832,47 @@ pub(crate) mod tests {
             .expect("rollback PR9 profile");
 
         assert_eq!(selected.profile().profile_id, pr9.profile().profile_id);
+    }
+
+    #[test]
+    fn evaluated_initial_pr9_state_is_available_without_a_fake_activation_event() {
+        let provider = DaemonPr9AuthorityProviderV1::default();
+        let scope = ResolvedScope::new(
+            id("project.initial"),
+            id("repository.initial"),
+            id("worktree.initial"),
+            Some(id("refs/heads/main")),
+        )
+        .expect("scope");
+        let pr9 = accepted_profile("pr9-baseline", &RetrieverKind::PR9_FALLBACK_LANES);
+        let state = RetrievalProfileStateV1::new(
+            id::<ConfigurationRevisionId>("configuration.pr9-initial.1"),
+            pr9.clone(),
+            &RetrievalRuntimeCompatibilityV1 {
+                retrieval_ceiling: RetrievalBudget {
+                    max_candidates_per_lane: 32,
+                    max_fused_candidates: 32,
+                    max_hydrated_results: 16,
+                    max_hydration_bytes: 65_536,
+                    deadline_micros: None,
+                },
+                semantic: None,
+                semantic_ceiling: None,
+                rerank: None,
+                rerank_ceiling: None,
+            },
+        )
+        .expect("initial state");
+
+        let status = provider
+            .install_evaluated_initial_state(scope.clone(), state)
+            .expect("evaluated initial state");
+
+        assert!(matches!(
+            status,
+            Pr9AuthorityProviderStatusV1::Available { profile_id, .. }
+                if profile_id == pr9.profile().profile_id
+        ));
     }
 
     #[test]

@@ -1797,8 +1797,10 @@ fn prepare_production_query(
     let request = retrieval_request(&profile.profile_id, published)?;
     let query_view = EphemeralSanitizedQueryViewV1::sanitize(
         &query.query,
-        id::<SanitizerRevision>("query-sanitizer.candidate.v1")?,
-        id::<QueryNormalizationRevision>("query-normalization.candidate.v1")?,
+        id::<SanitizerRevision>(crate::query::retrieval::PR9_QUERY_SANITIZER_REVISION_V1)?,
+        id::<QueryNormalizationRevision>(
+            crate::query::retrieval::PR9_QUERY_NORMALIZATION_REVISION_V1,
+        )?,
     )
     .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
 
@@ -1818,9 +1820,9 @@ fn prepare_production_query(
             .map(|file| (file.file_occurrence_id.clone(), file.logical_path.clone()))
             .collect(),
         freshness: freshness.clone(),
-        exact_retriever_revision: id("retriever.exact.candidate.v1")?,
-        lexical_retriever_revision: id("retriever.lexical.candidate.v1")?,
-        exact_score_domain: id("score.exact.candidate.v1")?,
+        exact_retriever_revision: id(crate::query::retrieval::PR9_EXACT_RETRIEVER_REVISION_V1)?,
+        lexical_retriever_revision: id(crate::query::retrieval::PR9_LEXICAL_RETRIEVER_REVISION_V1)?,
+        exact_score_domain: id(crate::query::retrieval::PR9_EXACT_SCORE_DOMAIN_V1)?,
     };
     let admitted = published
         .generation
@@ -1836,8 +1838,9 @@ fn prepare_production_query(
         .collect();
     let lexical_projection = CodeLexicalProjectionAdapterV1::new_admitted(metadata, admitted)
         .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
-    let authority =
-        CentralExactAdmissionAuthorityV1::new(id::<ExactAdmissionRuleRevision>("exact-rules.v1")?);
+    let authority = CentralExactAdmissionAuthorityV1::new(id::<ExactAdmissionRuleRevision>(
+        crate::query::retrieval::PR9_EXACT_RULE_REVISION_V1,
+    )?);
     let exact_lane = ExactLane::new(
         authority.clone(),
         lexical_projection.exact_adapter(authority.clone()),
@@ -1896,8 +1899,8 @@ fn prepare_production_query(
         phrases: lexical_parts.phrases,
         field_filters: Vec::new(),
         fuzzy_budget: 8,
-        lexical_profile_revision: id("lexical-profile.candidate.v1")?,
-        score_domain: id("score.lexical.candidate.v1")?,
+        lexical_profile_revision: id(crate::query::retrieval::PR9_LEXICAL_PROFILE_REVISION_V1)?,
+        score_domain: id(crate::query::retrieval::PR9_LEXICAL_SCORE_DOMAIN_V1)?,
         budget,
     };
     let lexical_input_candidates = lexical_request
@@ -3057,9 +3060,18 @@ fn fusion_profile(
         })
         .collect::<Result<BTreeMap<_, _>, CandidateOutputError>>()?;
     let score_domain_calibrations = [
-        (RetrieverKind::ExactLiteral, "score.exact.candidate.v1"),
-        (RetrieverKind::Lexical, "score.lexical.candidate.v1"),
-        (RetrieverKind::Graph, "score.graph.daemon.v1"),
+        (
+            RetrieverKind::ExactLiteral,
+            crate::query::retrieval::PR9_EXACT_SCORE_DOMAIN_V1,
+        ),
+        (
+            RetrieverKind::Lexical,
+            crate::query::retrieval::PR9_LEXICAL_SCORE_DOMAIN_V1,
+        ),
+        (
+            RetrieverKind::Graph,
+            crate::query::retrieval::PR9_GRAPH_SCORE_DOMAIN_V1,
+        ),
         (RetrieverKind::Semantic, "score.semantic.candidate.v1"),
     ]
     .into_iter()

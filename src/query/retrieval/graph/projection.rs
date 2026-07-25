@@ -148,9 +148,11 @@ impl CodeGraphEvidenceAdapterV1 {
             generation,
             repository_id,
             freshness,
-            retriever_revision: ComponentRevision::new("retriever.graph.daemon.v1")
-                .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
-            score_domain: ScoreDomainId::new("score.graph.daemon.v1")
+            retriever_revision: ComponentRevision::new(
+                crate::query::retrieval::PR9_GRAPH_RETRIEVER_REVISION_V1,
+            )
+            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
+            score_domain: ScoreDomainId::new(crate::query::retrieval::PR9_GRAPH_SCORE_DOMAIN_V1)
                 .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
             adjacency,
             symbols,

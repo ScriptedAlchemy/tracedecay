@@ -203,8 +203,25 @@ pub(super) async fn handle_search(
     .await;
     match outcome {
         crate::mcp::server::CodeIndexSearchOutcomeV1::Complete(complete) => {
+            let results = complete
+                .ordered_candidates
+                .iter()
+                .map(|ranked| {
+                    let mut result = json!(ranked);
+                    if let Some(display) =
+                        complete.display_by_anchor.get(&ranked.candidate.anchor_id)
+                    {
+                        result["display"] = json!({
+                            "name": display.name,
+                            "qualified_name": display.qualified_name,
+                            "kind": display.kind,
+                        });
+                    }
+                    result
+                })
+                .collect::<Vec<_>>();
             let mut output = json!({
-                "results": &complete.ordered_candidates,
+                "results": results,
                 "code_generation": complete.code_generation,
                 "pr9_fallback_digest": &complete.pr9_fallback.digest,
                 "semantic": semantic_status_value(semantic_mode, &complete.semantic),
@@ -262,10 +279,20 @@ fn render_search_md(value: &Value) -> String {
                         .get("final_ordinal")
                         .and_then(Value::as_u64)
                         .unwrap_or_default();
-                    md.bullet(&format!(
-                        "**{anchor}** ({exact_class}) — rank {} · utility {utility}",
-                        ordinal.saturating_add(1)
-                    ));
+                    if let Some(display) = it.get("display") {
+                        let name = render::field_str(display, "name");
+                        let kind = render::field_str(display, "kind");
+                        md.bullet(&format!(
+                            "**{name}** ({kind}, {exact_class}) — rank {} · utility {utility}",
+                            ordinal.saturating_add(1)
+                        ));
+                        md.line(&format!("  `{anchor}`"));
+                    } else {
+                        md.bullet(&format!(
+                            "**{anchor}** ({exact_class}) — rank {} · utility {utility}",
+                            ordinal.saturating_add(1)
+                        ));
+                    }
                     continue;
                 }
                 let name = render::field_str(it, "name");
@@ -1934,6 +1961,28 @@ mod tests {
                 }
             )
         ));
+    }
+
+    #[test]
+    fn search_markdown_prefers_hydrated_symbol_identity_over_opaque_anchor() {
+        let rendered = render_search_md(&json!({
+            "results": [{
+                "candidate": {
+                    "anchor_id": "code-symbol:symbol.v1.sha256:opaque",
+                    "exact_class": "exact_message",
+                    "utility_micros": 4_000_000
+                },
+                "final_ordinal": 0,
+                "display": {
+                    "name": "main",
+                    "qualified_name": "main",
+                    "kind": "function"
+                }
+            }]
+        }));
+
+        assert!(rendered.contains("**main** (function, exact_message)"));
+        assert!(rendered.contains("`code-symbol:symbol.v1.sha256:opaque`"));
     }
 
     #[test]
