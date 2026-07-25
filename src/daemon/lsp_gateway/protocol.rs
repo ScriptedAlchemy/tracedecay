@@ -146,7 +146,7 @@ struct PendingSemanticRequest {
     request: SemanticRequest,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Eq, PartialEq)]
 struct NativeDiagnosticSnapshot {
     version: i64,
     diagnostics: Vec<GatewayDiagnostic>,
@@ -1037,6 +1037,9 @@ where
             return;
         };
         if document_version != snapshot.version {
+            return;
+        }
+        if self.native_upstream.get(&uri) == Some(&snapshot) {
             return;
         }
         let version = snapshot.version;
@@ -3692,9 +3695,25 @@ mod tests {
                 .is_empty(),
             "Cursor-native clients must not receive their own diagnostics back"
         );
+        let projected_only = br#"{"jsonrpc":"2.0","method":"tracedecay/nativeDiagnostics","params":{"uri":"file:///root/a.rs","version":7,"diagnostics":[{"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":1}},"source":"tracedecay-github","message":"projected diagnostic"}]}}"#;
+        session.handle_payload(projected_only, 62);
+        session.flush_due(62);
+        session.drain_outbound();
+        assert!(
+            session.native_upstream["file:///root/a.rs"]
+                .diagnostics
+                .is_empty(),
+            "a projected-only native publication clears prior upstream evidence once"
+        );
+        session.handle_payload(projected_only, 63);
+        assert_eq!(
+            session.flush_due(10_000).queued_messages,
+            0,
+            "an unchanged projected-only publication must not start a refresh loop"
+        );
         session.handle_payload(
             br#"{"jsonrpc":"2.0","method":"textDocument/didClose","params":{"textDocument":{"uri":"file:///root/a.rs"}}}"#,
-            62,
+            64,
         );
         assert!(
             !session.native_upstream.contains_key("file:///root/a.rs"),
