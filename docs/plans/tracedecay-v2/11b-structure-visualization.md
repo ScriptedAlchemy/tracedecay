@@ -101,3 +101,26 @@ Open wire-contract question tracked separately: adding `path` to
 `ActivityPulseV1` + coalescing key so live strikes can reach file/symbol
 surfaces (stability tests at `events_api.rs:718`, `activity_bus.rs:152` must
 move with it).
+
+## Owner redirect (2026-07-25)
+
+The transit map read as service routing, not what was asked. The intent is the
+graph tools made visible — callers/callees traced over surrounding types, the
+structure of many files and many functions in a file, "the topography of the
+codebase" — broader and more futuristic than any two-point route. Direction
+under exploration (mockups in flight): one continuous, semantically-zoomed
+space rather than pages —
+
+- CORTEX (macro): modules as relief terrain — depth-strata placement, area =
+  symbol mass, contour lines = measured connectivity density, churn heat,
+  bundled cross-module call rivers.
+- TRACE (hero): a selected function floods the terrain — caller tributaries
+  converging, callee delta fanning, flow width = call sites, impl/trait
+  membranes as translucent enclosures the flow enters and exits.
+- CORE SAMPLE (micro): files as vertical strat columns in true line order
+  (start_line/end_line), internal call arcs, external edges to sibling columns.
+
+Surfaces 1 and 3 of the original plan (Anatomy, Disagreement) are unaffected.
+The transit map demotes to "maybe, inside Trace" — its endpoint work
+(registering directed get_call_chain, strata service) is still the right
+backend for Trace and proceeds unchanged.
