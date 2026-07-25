@@ -81,8 +81,14 @@ export interface RegistryField {
 }
 
 /** Ordered recency columns. `maxDays` is exclusive; the last column is the
- * catch-all and is bounded by Infinity. */
-const COLUMNS: ReadonlyArray<{
+ * catch-all and is bounded by Infinity.
+ *
+ * Exported because the Delivery field asks a different question of the same
+ * registry (branch composition rather than indexed mass) but has to place its
+ * bodies on the SAME time ladder — two surfaces that both say "this week" have
+ * to mean the same seven days. A second copy of these bounds would drift the
+ * first time one of them was tuned. */
+export const RECENCY_COLUMNS: ReadonlyArray<{
   id: string;
   label: string;
   bound: string;
@@ -117,8 +123,8 @@ export function recencyVitality(lastSeenAt: number, nowSeconds: number): number 
 
 export function columnIndexFor(lastSeenAt: number, nowSeconds: number): number {
   const days = ageDays(lastSeenAt, nowSeconds);
-  const index = COLUMNS.findIndex((column) => days < column.maxDays);
-  return index === -1 ? COLUMNS.length - 1 : index;
+  const index = RECENCY_COLUMNS.findIndex((column) => days < column.maxDays);
+  return index === -1 ? RECENCY_COLUMNS.length - 1 : index;
 }
 
 /** Layout geometry, in the abstract units the canvas frames. Columns are one
@@ -163,7 +169,7 @@ export function composeRegistryField(
   const axisLow = Math.log1p(Math.max(1, Number.isFinite(massFloor) ? massFloor : 1));
   const axisSpan = Math.max(Math.log1p(Math.max(massCeiling, 1)) - axisLow, 0.001);
 
-  const columns: FieldColumn[] = COLUMNS.map((column) => ({
+  const columns: FieldColumn[] = RECENCY_COLUMNS.map((column) => ({
     id: column.id,
     label: column.label,
     bound: column.bound,
@@ -265,7 +271,7 @@ export function composeRegistryField(
     massCeiling,
     sharedRepoCount,
     extent: {
-      x: [-margin, COLUMNS.length - 1 + margin],
+      x: [-margin, RECENCY_COLUMNS.length - 1 + margin],
       y: [-margin, MASS_AXIS_HEIGHT + margin],
     },
   };

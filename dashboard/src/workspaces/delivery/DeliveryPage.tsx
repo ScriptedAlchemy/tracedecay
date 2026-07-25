@@ -1,214 +1,494 @@
-import { useState } from 'react';
-import type { ReactNode } from 'react';
+import { useMemo, useState } from 'react';
 import type { LucideIcon } from 'lucide-react';
-import { Boxes, FolderGit2, GitBranch, GitFork, GitPullRequest, ScrollText } from 'lucide-react';
 import {
-  DataRow,
-  ExplorerSplit,
-  InspectorPanel,
-  KeyValueTree,
-} from '../../ui/archetypes/ExplorerSplit.tsx';
-import { LegacyBoundary, StatTile } from '../../ui/LegacyStates.tsx';
+  FolderGit2,
+  GitBranch,
+  GitFork,
+  GitPullRequest,
+  ScrollText,
+  Server,
+} from 'lucide-react';
+import { LegacyBoundary } from '../../ui/LegacyStates.tsx';
 import { StateChip } from '../../ui/StateChip';
+import {
+  Legend,
+  Meter,
+  Panel,
+  Readout,
+  ReadoutBar,
+  WorkspaceHeader,
+} from '../../ui/instrument.tsx';
+import { cn } from '../../ui/cn';
+import { formatCount } from '../../ui/format.ts';
+import { relativeTime } from '../brain/BrainPage.tsx';
 import { useLegacy } from '../../data/query/useLegacy.ts';
+import { DeliveryFieldPlot } from './DeliveryField.tsx';
+import { composeDeliveryField, type DeliveryBody, type DeliveryField } from './field.ts';
 import {
   DeliveryProjectsPayloadSchema,
-  type ProjectRegistryEntry,
   type ProjectRepoGroup,
 } from './contracts.ts';
 
-/** Delivery: the daemon's git-delivery surface as served by `/api/projects` —
- * registered repositories, their branches, and the primary/worktree checkouts
- * mapped to each. Commit history, pull-request, and review state are not served
- * over the dashboard API (no advisory route in src/dashboard/mod.rs), and
- * per-worktree index freshness is typed unsupported; both render as truthful
- * typed-unavailable pipeline stages rather than invented data. */
+/**
+ * Delivery — the daemon's git surface, read as a field rather than scrolled as
+ * a list.
+ *
+ * The plan asks for "changes, commits, branches, worktrees, pull requests, CI,
+ * releases". `/api/projects` is the only delivery-relevant route the daemon
+ * exposes, and it serves repositories, their branch NAMES, and the checkouts
+ * mapped to each. It serves no commit, no PR, no check and no release, and it
+ * serves no timestamp for any branch. So this surface reads what is there —
+ * where work is indexed and how branch-heavy each repository is — and prints
+ * the rest as typed unsupported stages rather than as empty tables that look
+ * like they are still loading.
+ *
+ * The one word that has to stay exact everywhere on this page: `last_seen_at`
+ * is when TraceDecay last INDEXED the checkout, not when anyone last committed
+ * to it. Every caption says so, because "recency" on a delivery surface will
+ * otherwise be read as commit recency, which would be a fabrication.
+ */
 export function DeliveryPage() {
   const projects = useLegacy(
     ['delivery', 'projects'],
     '/api/projects',
     DeliveryProjectsPayloadSchema,
   );
-  const [selected, setSelected] = useState<ProjectRegistryEntry | null>(null);
-
-  const payload = projects.data?.outcome === 'ok' ? projects.data.data : undefined;
-  const activeBranch =
-    payload?.project_tree
-      ?.flatMap((group) => group.projects)
-      .find((entry) => entry.is_active)?.default_branch ?? undefined;
+  const [selectedId, setSelectedId] = useState<string | null>(null);
 
   return (
-    <div className="flex h-full flex-col overflow-hidden">
-      <header className="flex items-center gap-3 border-b border-edge-subtle px-4 py-2">
-        <h1 className="text-sm font-semibold tracking-tight">Delivery</h1>
-        <span className="text-2xs text-text-muted">
-          repositories, branches, and worktrees indexed for this workspace
-        </span>
-        {activeBranch ? (
-          <span className="ml-auto inline-flex h-5 items-center gap-1 rounded-[var(--radius-chip)] border border-accent/40 bg-accent/10 px-1.5 text-2xs text-text-primary">
-            <GitBranch aria-hidden size={11} />
-            {activeBranch}
-          </span>
-        ) : null}
-      </header>
-
-      <div className="min-h-0 flex-1">
-        <ExplorerSplit
-          filters={
-            <div className="flex flex-col gap-3">
-              <LegacyBoundary
-                title="Delivery"
-                pending={projects.isPending}
-                result={projects.data}
-              >
-                {(data) => {
-                  const tree = data.project_tree ?? [];
-                  const entries = tree.flatMap((group) => group.projects);
-                  const worktrees = entries.filter((entry) => entry.kind === 'worktree').length;
-                  const branches = new Set<string>();
-                  for (const group of tree) for (const branch of group.branches) branches.add(branch);
-                  return (
-                    // A 2x2 of tiles inside a ~200px rail leaves each label
-                    // under 60px, which is narrower than the words this
-                    // workspace is made of: every tile printed a clipped legend
-                    // ("REPOSIT…", "BRANCH…", "CHECKO…"). One column per row
-                    // gives each label the full rail and costs vertical space
-                    // the rail had going spare.
-                    <div className="grid grid-cols-1 gap-2">
-                      <StatTile
-                        label="repositories"
-                        value={data.summary?.repo_count ?? tree.length}
-                      />
-                      <StatTile label="branches" value={branches.size} />
-                      <StatTile label="worktrees" value={worktrees} />
-                      <StatTile
-                        label="checkouts"
-                        value={data.summary?.project_count ?? entries.length}
-                      />
-                    </div>
-                  );
-                }}
-              </LegacyBoundary>
-
-              <div className="flex flex-col gap-2">
-                <span className="text-2xs font-medium uppercase tracking-wide text-text-muted">
-                  Pipeline
-                </span>
-                <PipelineStage icon={GitPullRequest} label="Pull requests & review">
-                  <StateChip kind="unsupported" detail="not served by the daemon API" />
-                </PipelineStage>
-                <PipelineStage icon={ScrollText} label="Index freshness">
-                  <StateChip kind="unsupported" detail="generation read port unwired" />
-                </PipelineStage>
+    <div className="flex h-full min-h-0 flex-col">
+      <WorkspaceHeader
+        path="/delivery"
+        title="Delivery"
+        note="repositories, branches and checkouts · commits, PRs and CI unserved"
+      />
+      <LegacyBoundary
+        title="Delivery"
+        pending={projects.isPending}
+        result={projects.data}
+      >
+        {(data) => {
+          if (data.status === 'missing_registry') {
+            return (
+              <div className="flex min-h-0 flex-1 items-center justify-center p-8">
+                <div className="flex max-w-sm flex-col items-center gap-3 text-center">
+                  <StateChip kind="unknown" detail="no project registry available" />
+                  <p className="text-xs leading-relaxed text-text-muted">
+                    The daemon answered without a project registry, so there is
+                    no repository to place on the field.{' '}
+                    <span className="text-text-secondary">
+                      This is the registry reporting itself absent, not an empty
+                      workspace.
+                    </span>
+                  </p>
+                </div>
               </div>
+            );
+          }
+
+          const tree = data.project_tree ?? [];
+          return (
+            <DeliveryBody_
+              tree={tree}
+              truncated={data.truncated === true}
+              selectedId={selectedId}
+              onSelect={setSelectedId}
+            />
+          );
+        }}
+      </LegacyBoundary>
+    </div>
+  );
+}
+
+function DeliveryBody_({
+  tree,
+  truncated,
+  selectedId,
+  onSelect,
+}: {
+  tree: readonly ProjectRepoGroup[];
+  truncated: boolean;
+  selectedId: string | null;
+  onSelect: (id: string | null) => void;
+}) {
+  // Keyed on identity: the payload is fetched once and does not churn, and the
+  // field's clock only matters at recency-column boundaries.
+  const field = useMemo(() => composeDeliveryField(tree), [tree]);
+  const selected =
+    field.bodies.find((body) => body.id === selectedId) ?? null;
+  const selectedGroup = tree.find(
+    (group) => (group.git_common_dir ?? group.label) === selectedId,
+  );
+  const indexedToday = field.columns[0]?.count ?? 0;
+
+  if (tree.length === 0) {
+    return (
+      <div className="flex min-h-0 flex-1 items-center justify-center p-8">
+        <p className="max-w-sm text-center text-xs leading-relaxed text-text-muted">
+          The registry answered and holds no repositories in this workspace.{' '}
+          <span className="text-text-secondary">
+            Repositories appear here once TraceDecay has indexed one.
+          </span>
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <ReadoutBar
+        label="Registry readings"
+        elevation="raised"
+        items={[
+          { label: 'repositories', value: field.bodies.length },
+          {
+            label: 'branches',
+            value: formatCount(field.totalBranches),
+            note: `across ${field.bodies.length - field.unknownBranchCount} git repos`,
+          },
+          { label: 'checkouts', value: field.totalCheckouts },
+          {
+            label: 'worktrees',
+            value: field.totalWorktrees,
+            note: field.totalWorktrees === 0 ? 'none registered' : undefined,
+          },
+          {
+            label: 'indexed today',
+            value: indexedToday,
+            fraction:
+              field.bodies.length > 0 ? indexedToday / field.bodies.length : null,
+            note: 'of all repositories',
+          },
+          {
+            label: 'busiest repo',
+            value: formatCount(field.branchCeiling),
+            note: 'branches',
+          },
+        ]}
+      />
+
+      <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-auto p-3 [scrollbar-gutter:stable] xl:flex-row">
+        <div className="flex min-w-0 flex-1 flex-col gap-2">
+          <DeliveryFieldPlot
+            field={field}
+            selectedId={selectedId}
+            onSelect={onSelect}
+            ariaLabel={fieldDescription(field)}
+          />
+          <FieldAxis field={field} />
+          <RepoTable
+            field={field}
+            selectedId={selectedId}
+            onSelect={onSelect}
+            truncated={truncated}
+          />
+        </div>
+
+        <aside className="flex w-full shrink-0 flex-col gap-3 xl:w-[22rem]">
+          <Panel legend="Pipeline">
+            <div className="flex flex-col gap-2.5">
+              <p className="text-2xs leading-relaxed text-text-muted">
+                Everything downstream of a branch name is absent from the
+                dashboard API. These are not empty results — no route serves
+                them at all.
+              </p>
+              <PipelineStage icon={GitBranch} label="Commits & history">
+                <StateChip kind="unsupported" detail="no commit route; branch names only" />
+              </PipelineStage>
+              <PipelineStage icon={GitPullRequest} label="Pull requests & review">
+                <StateChip kind="unsupported" detail="not served by the daemon API" />
+              </PipelineStage>
+              <PipelineStage icon={Server} label="CI & releases">
+                <StateChip kind="unsupported" detail="not recorded by the daemon" />
+              </PipelineStage>
+              <PipelineStage icon={ScrollText} label="Index freshness">
+                <StateChip kind="unsupported" detail="generation read port unwired" />
+              </PipelineStage>
             </div>
-          }
-          list={
-            <LegacyBoundary
-              title="Repositories"
-              pending={projects.isPending}
-              result={projects.data}
-            >
-              {(data) => {
-                if (data.status === 'missing_registry') {
-                  return (
-                    <div className="flex h-full items-center justify-center p-6">
-                      <StateChip kind="unknown" detail="no project registry available" />
-                    </div>
-                  );
-                }
-                const tree = data.project_tree ?? [];
-                if (tree.length === 0) {
-                  return (
-                    <p className="p-6 text-center text-sm text-text-muted">
-                      no repositories registered in this workspace
-                    </p>
-                  );
-                }
-                return (
-                  <div className="flex flex-col">
-                    {tree.map((group, index) => (
-                      <RepoGroupSection
-                        key={group.git_common_dir ?? group.label ?? String(index)}
-                        group={group}
-                        selectedId={selected?.project_id ?? null}
-                        onSelect={setSelected}
-                      />
-                    ))}
-                    {data.truncated ? (
-                      <p className="px-3 py-2 text-2xs text-text-muted">
-                        result truncated — raise the registry limit for more repositories
-                      </p>
-                    ) : null}
-                  </div>
-                );
-              }}
-            </LegacyBoundary>
-          }
-          inspector={
-            selected ? (
-              <InspectorPanel title="Checkout" onClose={() => setSelected(null)}>
-                <KeyValueTree value={selected} />
-              </InspectorPanel>
-            ) : undefined
-          }
-        />
+          </Panel>
+
+          <RepoDetail body={selected} group={selectedGroup} />
+        </aside>
       </div>
     </div>
   );
 }
 
-function RepoGroupSection({
-  group,
-  selectedId,
-  onSelect,
-}: {
-  group: ProjectRepoGroup;
-  selectedId: string | null;
-  onSelect: (entry: ProjectRegistryEntry) => void;
-}) {
+/** The axes, printed. Both of them are easy to misread — one looks like commit
+ * recency and is not, the other is logarithmic — so both are stated. */
+function FieldAxis({ field }: { field: DeliveryField }) {
+  const busiest = field.columns.reduce((max, column) => Math.max(max, column.count), 0);
   return (
-    <div className="flex flex-col">
-      <div className="sticky top-0 z-[1] flex items-center gap-2 border-b border-edge-subtle bg-surface-1 px-3 py-1.5">
-        <FolderGit2 aria-hidden size={12} className="shrink-0 text-text-muted" />
-        <span className="min-w-0 flex-1 truncate text-2xs font-semibold uppercase tracking-wide text-text-secondary">
-          {group.label}
-        </span>
-        <span className="tabular shrink-0 text-2xs text-text-muted">
-          {group.branches.length} {group.branches.length === 1 ? 'branch' : 'branches'}
-        </span>
-      </div>
-      {group.projects.map((entry) => {
-        const { icon: Icon, label: kindLabel } = kindPresentation(entry.kind);
-        return (
-          <DataRow
-            key={entry.project_id}
-            selected={selectedId === entry.project_id}
-            onSelect={() => onSelect(entry)}
+    <div className="flex flex-col gap-1.5">
+      <Legend>last indexed across · branches up</Legend>
+      <div className="flex flex-wrap border-y border-edge-subtle bg-surface-1">
+        {field.columns.map((column) => (
+          <div
+            key={column.id}
+            className="min-w-0 flex-1 basis-24 border-l border-edge-subtle px-2.5 py-1.5 first:border-l-0"
           >
-            <Icon aria-hidden size={13} className="shrink-0 text-text-muted" />
-            <span className="min-w-0 flex-1 truncate font-mono">{entry.label}</span>
-            {entry.default_branch ? (
-              <span className="inline-flex shrink-0 items-center gap-1 text-2xs text-text-muted">
-                <GitBranch aria-hidden size={11} />
-                {entry.default_branch}
-              </span>
-            ) : null}
-            <span className="shrink-0 rounded-[var(--radius-chip)] border border-edge-subtle px-1.5 text-2xs text-text-muted">
-              {kindLabel}
-            </span>
-            {entry.is_active ? (
-              <span
-                className="size-1.5 shrink-0 rounded-full bg-accent"
-                title="active project"
-                aria-label="active project"
-              />
-            ) : null}
-          </DataRow>
-        );
-      })}
+            <Readout
+              label={column.label}
+              value={column.count}
+              unit={column.bound}
+              fraction={busiest > 0 ? column.count / busiest : null}
+              size="sm"
+            />
+          </div>
+        ))}
+      </div>
+      <p className="text-2xs leading-relaxed text-text-muted">
+        Each body is one repository: column = when TraceDecay last indexed it —{' '}
+        <span className="text-text-secondary">
+          not when it was last committed to; the daemon serves no commit times
+        </span>{' '}
+        — height = how many branches it has ({field.branchFloor} to{' '}
+        {field.branchCeiling}, log scale), size = how many checkouts map to it,
+        brightness = the same index recency. A ring marks the active project.{' '}
+        {field.unknownBranchCount > 0
+          ? `${field.unknownBranchCount} ${field.unknownBranchCount === 1 ? 'entry sits' : 'entries sit'} in the fenced band below the plot: they have no git directory, so their branch count is unknown rather than zero. `
+          : ''}
+        {field.multiCheckoutCount === 0
+          ? 'Every repository here has exactly one checkout, so every body is the same size — the size channel is live but this registry has nothing to spend it on.'
+          : `${field.multiCheckoutCount} ${field.multiCheckoutCount === 1 ? 'repository has' : 'repositories have'} more than one checkout and ${field.multiCheckoutCount === 1 ? 'is' : 'are'} drawn larger.`}
+      </p>
     </div>
   );
+}
+
+/** The field's accessible equivalent, and the scanning surface: one line per
+ * repository instead of the header-plus-row pair the flat list used to spend
+ * on each one. */
+function RepoTable({
+  field,
+  selectedId,
+  onSelect,
+  truncated,
+}: {
+  field: DeliveryField;
+  selectedId: string | null;
+  onSelect: (id: string | null) => void;
+  truncated: boolean;
+}) {
+  return (
+    <section aria-label="Repositories" className="flex min-w-0 flex-col">
+      <Legend>repositories · most recently indexed first</Legend>
+      <div className="mt-1.5 max-h-80 overflow-auto border border-edge-subtle">
+        <table className="w-full border-collapse text-2xs">
+          <caption className="sr-only">
+            Every repository on the field, most recently indexed first, with its
+            branch count, checkouts and default branch.
+          </caption>
+          <thead className="sticky top-0 bg-surface-2">
+            <tr className="text-left text-text-secondary">
+              <th scope="col" className="px-2 py-1 font-medium">Repository</th>
+              <th scope="col" className="px-2 py-1 font-medium">Default branch</th>
+              <th scope="col" className="px-2 py-1 text-right font-medium">Branches</th>
+              <th scope="col" className="px-2 py-1 text-right font-medium">Checkouts</th>
+              <th scope="col" className="px-2 py-1 text-right font-medium">Indexed</th>
+            </tr>
+          </thead>
+          <tbody>
+            {field.bodies.map((body) => (
+              <tr
+                key={body.id}
+                className={cn(
+                  'border-t border-edge-subtle',
+                  selectedId === body.id && 'bg-accent/10',
+                )}
+              >
+                <td className="max-w-0 px-2 py-1">
+                  <button
+                    type="button"
+                    onClick={() => onSelect(selectedId === body.id ? null : body.id)}
+                    aria-pressed={selectedId === body.id}
+                    className="flex w-full min-w-0 items-center gap-1.5 text-left"
+                  >
+                    {body.branches == null ? (
+                      <FolderGit2 aria-hidden size={11} className="shrink-0 text-text-muted" />
+                    ) : (
+                      <GitBranch aria-hidden size={11} className="shrink-0 text-text-muted" />
+                    )}
+                    <span className="truncate text-text-primary">{body.label}</span>
+                    {body.active ? (
+                      <span className="td-legend shrink-0 bg-accent/15 px-1 text-text-primary">
+                        active
+                      </span>
+                    ) : null}
+                  </button>
+                </td>
+                <td className="max-w-0 truncate px-2 py-1 text-text-secondary">
+                  {body.defaultBranch ?? '—'}
+                </td>
+                <td className="px-2 py-1 text-right" data-cell="numeric">
+                  {body.branches == null ? (
+                    <span className="text-text-muted">unknown</span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1.5">
+                      <Meter
+                        fraction={
+                          field.branchCeiling > 0
+                            ? body.branches / field.branchCeiling
+                            : null
+                        }
+                        className="w-10 shrink-0"
+                      />
+                      <span className="tabular-nums text-text-primary">
+                        {body.branches}
+                      </span>
+                    </span>
+                  )}
+                </td>
+                <td
+                  className="px-2 py-1 text-right text-text-secondary tabular-nums"
+                  data-cell="numeric"
+                >
+                  {body.checkouts}
+                  {body.worktrees > 0 ? (
+                    <span className="text-text-muted"> ({body.worktrees} wt)</span>
+                  ) : null}
+                </td>
+                <td
+                  className="px-2 py-1 text-right text-text-muted tabular-nums"
+                  data-cell="numeric"
+                >
+                  {relativeTime(body.lastSeenAt)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {truncated ? (
+        <p className="pt-1 text-2xs text-text-muted">
+          Result truncated by the registry limit — more repositories exist than
+          are drawn.
+        </p>
+      ) : null}
+    </section>
+  );
+}
+
+/** The selected repository, expanded: its checkouts and the branch names the
+ * registry actually holds. Branch names are all there is — no branch here
+ * carries a time, an author or a tip commit. */
+function RepoDetail({
+  body,
+  group,
+}: {
+  body: DeliveryBody | null;
+  group: ProjectRepoGroup | undefined;
+}) {
+  if (!body || !group) {
+    return (
+      <Panel legend="Repository">
+        <p className="text-2xs leading-relaxed text-text-muted">
+          Select a repository — on the field or in the table — to see its
+          checkouts and the branch names the registry holds for it.
+        </p>
+      </Panel>
+    );
+  }
+  return (
+    <Panel legend="Repository">
+      <div className="flex flex-col gap-3">
+        <div className="flex flex-col gap-1">
+          <span className="text-xs font-medium leading-snug text-text-primary">
+            {body.label}
+          </span>
+          <span className="td-value truncate text-3xs text-text-muted">
+            {group.git_common_dir ?? 'no git directory'}
+          </span>
+        </div>
+
+        <dl className="grid grid-cols-2 gap-x-3 gap-y-1.5 text-2xs">
+          <Fact
+            label="branches"
+            value={body.branches == null ? 'unknown' : String(body.branches)}
+            muted={body.branches == null}
+          />
+          <Fact label="checkouts" value={String(body.checkouts)} />
+          <Fact label="worktrees" value={String(body.worktrees)} />
+          <Fact label="last indexed" value={relativeTime(body.lastSeenAt)} />
+        </dl>
+
+        <div className="flex flex-col gap-1.5">
+          <Legend>checkouts</Legend>
+          <ul className="flex flex-col border border-edge-subtle">
+            {group.projects.map((project) => (
+              <li
+                key={project.project_id}
+                className="flex items-center gap-1.5 border-b border-edge-subtle px-2 py-1 last:border-b-0"
+              >
+                {project.kind === 'worktree' ? (
+                  <GitFork aria-hidden size={11} className="shrink-0 text-text-muted" />
+                ) : (
+                  <FolderGit2 aria-hidden size={11} className="shrink-0 text-text-muted" />
+                )}
+                <span className="td-value min-w-0 flex-1 truncate text-3xs text-text-secondary">
+                  {project.project_root}
+                </span>
+                <span className="td-legend shrink-0 text-text-muted">
+                  {project.kind}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+
+        <div className="flex flex-col gap-1.5">
+          <Legend
+            trailing={
+              <span
+                className="td-value shrink-0 text-3xs text-text-muted"
+                data-cell="numeric"
+              >
+                {group.branches.length}
+              </span>
+            }
+          >
+            branch names
+          </Legend>
+          {group.branches.length === 0 ? (
+            <StateChip
+              kind={body.branches == null ? 'unsupported' : 'complete_zero_findings'}
+              detail={
+                body.branches == null
+                  ? 'not a git checkout'
+                  : 'registry holds no branch names'
+              }
+            />
+          ) : (
+            <>
+              <ul className="max-h-40 overflow-auto border border-edge-subtle">
+                {group.branches.map((branch) => (
+                  <li
+                    key={branch}
+                    className="td-value truncate border-b border-edge-subtle px-2 py-0.5 text-3xs text-text-secondary last:border-b-0"
+                  >
+                    {branch}
+                  </li>
+                ))}
+              </ul>
+              <span className="text-3xs leading-relaxed text-text-muted">
+                Names only. The registry records no tip commit, author or time
+                for any of these.
+              </span>
+            </>
+          )}
+        </div>
+      </div>
+    </Panel>
+  );
+}
+
+function fieldDescription(field: DeliveryField): string {
+  const occupied = field.columns
+    .filter((column) => column.count > 0)
+    .map((column) => `${column.count} ${column.label}`)
+    .join(', ');
+  return `Delivery field: ${field.bodies.length} repositories placed by when TraceDecay last indexed them (${occupied || 'none'}) and by branch count, ${field.branchFloor} to ${field.branchCeiling}. ${field.unknownBranchCount} entries have no git directory and no branch measurement. The repository table below is the accessible equivalent.`;
 }
 
 function PipelineStage({
@@ -218,10 +498,10 @@ function PipelineStage({
 }: {
   icon: LucideIcon;
   label: string;
-  children: ReactNode;
+  children: React.ReactNode;
 }) {
   return (
-    <div className="flex flex-col gap-1.5 rounded-[var(--radius-chip)] bg-surface-2 px-2.5 py-2">
+    <div className="flex flex-col gap-1.5">
       <span className="flex items-center gap-1.5 text-2xs font-medium text-text-secondary">
         <Icon aria-hidden size={12} className="text-text-muted" />
         {label}
@@ -231,13 +511,27 @@ function PipelineStage({
   );
 }
 
-function kindPresentation(kind: string): { icon: LucideIcon; label: string } {
-  switch (kind) {
-    case 'primary':
-      return { icon: FolderGit2, label: 'primary' };
-    case 'worktree':
-      return { icon: GitFork, label: 'worktree' };
-    default:
-      return { icon: Boxes, label: kind || 'project' };
-  }
+function Fact({
+  label,
+  value,
+  muted,
+}: {
+  label: string;
+  value: string;
+  muted?: boolean;
+}) {
+  return (
+    <div className="flex min-w-0 flex-col gap-0.5">
+      <dt className="td-legend">{label}</dt>
+      <dd
+        className={
+          muted
+            ? 'truncate text-3xs text-text-muted'
+            : 'truncate text-3xs text-text-secondary'
+        }
+      >
+        {value}
+      </dd>
+    </div>
+  );
 }
