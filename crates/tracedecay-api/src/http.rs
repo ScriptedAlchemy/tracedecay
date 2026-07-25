@@ -42,6 +42,7 @@ pub enum HttpApplicationOperation {
     FeedbackGet,
     FeedbackExpand,
     FeedbackList,
+    FeedbackAdvisoryCycle,
     FeedbackImpact,
     AffectedTests,
     TestResults,
@@ -117,6 +118,7 @@ impl HttpApplicationOperation {
             Self::FeedbackGet => "feedback_get",
             Self::FeedbackExpand => "feedback_expand",
             Self::FeedbackList => "feedback_list",
+            Self::FeedbackAdvisoryCycle => "feedback_advisory_cycle",
             Self::FeedbackImpact => "feedback_impact",
             Self::AffectedTests => "affected_tests",
             Self::TestResults => "test_results",
@@ -180,6 +182,7 @@ impl HttpApplicationOperation {
             | Self::FeedbackGet
             | Self::FeedbackExpand
             | Self::FeedbackList
+            | Self::FeedbackAdvisoryCycle
             | Self::FeedbackImpact => HttpApplicationOwnerKind::Feedback,
             Self::CodeExactOccurrence
             | Self::CodePhraseSearch
@@ -427,6 +430,10 @@ where
         .route("/feedback/get", post(feedback_get::<O>))
         .route("/feedback/expand", post(feedback_expand::<O>))
         .route("/feedback/list", post(feedback_list::<O>))
+        .route(
+            "/feedback/advisory-cycle",
+            post(feedback_advisory_cycle::<O>),
+        )
         .route("/feedback/impact", post(feedback_impact::<O>))
         .route("/tests/affected", post(affected_tests::<O>))
         .route("/tests/results", post(test_results::<O>))
@@ -561,6 +568,27 @@ where
 {
     invoke_route(
         HttpApplicationOperation::FeedbackList,
+        state,
+        request_id,
+        cancellation,
+        page,
+        body,
+    )
+    .await
+}
+
+async fn feedback_advisory_cycle<O>(
+    state: State<O>,
+    request_id: Extension<RequestId>,
+    cancellation: Extension<HttpApplicationControls>,
+    page: Result<Query<HttpPageQuery>, QueryRejection>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response
+where
+    O: HttpApplicationOwners,
+{
+    invoke_route(
+        HttpApplicationOperation::FeedbackAdvisoryCycle,
         state,
         request_id,
         cancellation,

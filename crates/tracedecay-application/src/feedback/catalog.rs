@@ -21,6 +21,7 @@ use crate::result::ResultContractRef;
 use crate::retrieval::catalog::APPLICATION_DEFAULT_PROFILE_ID;
 
 use super::{
+    ADVISORY_CYCLE_CAPABILITY_ID_V1, ADVISORY_CYCLE_USE_CASE_ID_V1,
     CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1, CI_FAILURE_LOCALIZE_USE_CASE_ID_V1,
     FEEDBACK_DIAGNOSTICS_CAPABILITY_ID_V1, FEEDBACK_DIAGNOSTICS_USE_CASE_ID_V1,
     FEEDBACK_EXPAND_CAPABILITY_ID_V1, FEEDBACK_EXPAND_USE_CASE_ID_V1,
@@ -61,7 +62,12 @@ const PR13_ADVISORY_SURFACES: [BindingSurface; 4] = [
     BindingSurface::Lsp,
 ];
 
-const FEEDBACK_SPECS: [FeedbackSurfaceSpec; 10] = [
+/// Producer contributions are application-callable only through the combined
+/// cycle. They remain visible capability metadata for LSP/native projection,
+/// but do not create three independent network orchestration paths.
+const PR13_PROVIDER_CONTRIBUTION_SURFACES: [BindingSurface; 0] = [];
+
+const FEEDBACK_SPECS: [FeedbackSurfaceSpec; 11] = [
     FeedbackSurfaceSpec {
         capability: FEEDBACK_DIAGNOSTICS_CAPABILITY_ID_V1,
         use_case: FEEDBACK_DIAGNOSTICS_USE_CASE_ID_V1,
@@ -147,16 +153,28 @@ const FEEDBACK_SPECS: [FeedbackSurfaceSpec; 10] = [
         surfaces: &PR12_TRANSPORT_SURFACES,
     },
     FeedbackSurfaceSpec {
+        capability: ADVISORY_CYCLE_CAPABILITY_ID_V1,
+        use_case: ADVISORY_CYCLE_USE_CASE_ID_V1,
+        request_schema: "schema.application.feedback.advisory-cycle.request",
+        result_schema: "schema.application.feedback.advisory-cycle.result",
+        operation: "feedback_advisory_cycle",
+        summary: "Run the advisory feedback cycle",
+        description: "Run one authorized four-pillar feedback cycle and return a daemon-minted canonical read handle.",
+        example: "Run the complete advisory cycle for this saved document",
+        paginated: false,
+        surfaces: &PR13_ADVISORY_SURFACES,
+    },
+    FeedbackSurfaceSpec {
         capability: GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,
         use_case: GITHUB_REVIEW_INGEST_USE_CASE_ID_V1,
         request_schema: "schema.application.feedback.github-review-ingest.request",
         result_schema: "schema.application.feedback.github-review-ingest.result",
         operation: "github_review_ingest",
         summary: "Ingest existing GitHub review evidence",
-        description: "Read allowlisted existing GitHub review comments and threads without a write path.",
+        description: "Contribute allowlisted existing GitHub review comments and threads to feedback_advisory_cycle without an independent write or orchestration path.",
         example: "Read existing review threads for this pull request",
         paginated: true,
-        surfaces: &PR13_ADVISORY_SURFACES,
+        surfaces: &PR13_PROVIDER_CONTRIBUTION_SURFACES,
     },
     FeedbackSurfaceSpec {
         capability: CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1,
@@ -165,10 +183,10 @@ const FEEDBACK_SPECS: [FeedbackSurfaceSpec; 10] = [
         result_schema: "schema.application.feedback.ci-failure-localize.result",
         operation: "ci_failure_localize",
         summary: "Localize a reported CI failure",
-        description: "Map anchored CI evidence to exact branch, generation, symbol, caller, and test evidence without running CI.",
+        description: "Contribute anchored CI localization to feedback_advisory_cycle without running CI or exposing an independent orchestration path.",
         example: "Localize this reported CI failure",
         paginated: false,
-        surfaces: &PR13_ADVISORY_SURFACES,
+        surfaces: &PR13_PROVIDER_CONTRIBUTION_SURFACES,
     },
     FeedbackSurfaceSpec {
         capability: PROXIMITY_CAPABILITY_ID_V1,
@@ -177,10 +195,10 @@ const FEEDBACK_SPECS: [FeedbackSurfaceSpec; 10] = [
         result_schema: "schema.application.feedback.proximity.result",
         operation: "feedback_proximity",
         summary: "Inspect advisory concurrent-work proximity",
-        description: "Return immediate or configured-threshold proximity evidence without locks, scheduling, or continuation.",
+        description: "Contribute immediate or configured-threshold proximity evidence to feedback_advisory_cycle without locks, scheduling, continuation, or an independent orchestration path.",
         example: "Inspect concurrent-work proximity for this branch",
         paginated: false,
-        surfaces: &PR13_ADVISORY_SURFACES,
+        surfaces: &PR13_PROVIDER_CONTRIBUTION_SURFACES,
     },
 ];
 
@@ -188,7 +206,7 @@ const FEEDBACK_SPECS: [FeedbackSurfaceSpec; 10] = [
 ///
 /// Indices avoid duplicating operation names while keeping registration
 /// explicit: adding catalog metadata alone cannot advertise a callable route.
-const REGISTERED_FEEDBACK_HANDLER_SPECS: [usize; 10] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+const REGISTERED_FEEDBACK_HANDLER_SPECS: [usize; 11] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 
 pub fn feedback_surface_catalog_contribution()
 -> Result<CatalogContributionV1, ApplicationContractError> {
@@ -341,7 +359,7 @@ fn capability(
             }
         },
         binding_ids,
-        profile_eligibility: if callable {
+        profile_eligibility: if callable && !spec.surfaces.is_empty() {
             vec![ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID)?]
         } else {
             Vec::new()
@@ -395,14 +413,12 @@ mod tests {
             names,
             vec![
                 "affected_tests".to_owned(),
-                "ci_failure_localize".to_owned(),
+                "feedback_advisory_cycle".to_owned(),
                 "feedback_diagnostics".to_owned(),
                 "feedback_expand".to_owned(),
                 "feedback_get".to_owned(),
                 "feedback_impact".to_owned(),
                 "feedback_list".to_owned(),
-                "feedback_proximity".to_owned(),
-                "github_review_ingest".to_owned(),
                 "test_results".to_owned(),
             ]
         );

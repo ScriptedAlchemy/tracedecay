@@ -330,6 +330,20 @@ pub(super) fn def_feedback_list() -> ToolDefinition {
     )
 }
 
+pub(super) fn def_feedback_advisory_cycle() -> ToolDefinition {
+    def(
+        "tracedecay_feedback_advisory_cycle",
+        "Run advisory feedback cycle",
+        "Run one authorized four-pillar feedback cycle for a saved document. The daemon resolves project scope and providers, then returns a canonical diagnostics result with a daemon-minted read handle.",
+        closed_object_schema(
+            json!({
+                "document_uri": string_property("Canonical file URI for the saved document in the admitted project.")
+            }),
+            &["document_uri"],
+        ),
+    )
+}
+
 fn context_scout_address_schema() -> serde_json::Value {
     json!({
         "type": "object",
@@ -1094,6 +1108,7 @@ mod tests {
             def_feedback_get(),
             def_feedback_expand(),
             def_feedback_list(),
+            def_feedback_advisory_cycle(),
             def_feedback_impact(),
             def_affected_tests(),
             def_test_results(),
