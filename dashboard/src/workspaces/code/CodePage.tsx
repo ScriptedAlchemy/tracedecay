@@ -381,7 +381,10 @@ function HubField({
       <div className="flex items-center gap-2.5 border-b border-edge-subtle px-3 py-2">
         <span className="td-legend">most connected symbols</span>
         <span aria-hidden className="td-rule" />
-        <span className="td-legend shrink-0 normal-case tracking-normal">
+        {/* The provenance of the twelve. Dropped below `sm`, where the legend
+         * to its left already fills the strip and this would clip mid-number
+         * — a half-printed total is worse than no total. */}
+        <span className="td-legend shrink-0 normal-case tracking-normal max-sm:hidden">
           {indexedNodes != null
             ? `top ${ranked.length} of ${indexedNodes.toLocaleString()} by degree`
             : `top ${ranked.length} by degree`}
@@ -396,18 +399,7 @@ function HubField({
        * hubs whose degrees nearly tie genuinely land on top of one another,
        * and a hairline of substrate around each body keeps that legible as a
        * cluster instead of a blob. */}
-      <figure className="flex flex-col gap-2 border-b border-edge-subtle px-3 pb-2 pt-2.5">
-        <div className="flex items-baseline gap-2">
-          <span
-            className="td-value min-w-0 flex-1 truncate text-2xs text-text-muted max-sm:hidden"
-            title={tailName}
-          >
-            {tailName}
-          </span>
-          <span className="td-value min-w-0 flex-[2] truncate text-right text-2xs text-text-secondary">
-            {leadName}
-          </span>
-        </div>
+      <figure className="flex flex-col gap-1.5 border-b border-edge-subtle px-3 pb-1.5 pt-2">
         <div
           className="flex items-center gap-2"
           role="img"
@@ -463,19 +455,43 @@ function HubField({
             <span className="td-unit ml-1">deg</span>
           </span>
         </div>
-        <figcaption className="text-3xs text-text-muted">
-          position = connections · size = connections · hue = kind, on the same
-          scale as the field above · axis anchored at zero
+        {/* The one direct label the spine carries, and it shares the caption's
+         * line rather than owning a row of its own: flush under the far-right
+         * mark, so it names that body by pure proximity. A label over the low
+         * end was tried and dropped — to clear its neighbours it has to sit at
+         * the axis origin, and a mark only a fifth of the way along an axis
+         * anchored at zero is exactly the one that must not be mislabelled. */}
+        <figcaption className="flex items-baseline gap-3 leading-tight">
+          <span className="min-w-0 flex-1 truncate text-3xs text-text-muted">
+            position = connections · size = connections · hue = kind, on the
+            same scale as the field above · axis anchored at zero
+          </span>
+          <span className="td-value shrink-0 text-2xs text-text-secondary">
+            {leadName}
+          </span>
         </figcaption>
       </figure>
 
       {/* ---- the field ---------------------------------------------------
-       * Hairline-ruled cells sharing one grid, produced by a 1px gap over an
-       * edge-coloured backing rather than borders, so no cell ever doubles a
-       * rule with its neighbour. */}
-      <ol className="grid grid-cols-1 gap-px bg-edge-subtle sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-4">
+       * Hairline-ruled cells sharing one grid. The rules are cell borders, not
+       * a 1px gap over an edge-coloured backing: a backing shows through the
+       * implicit cells of a part-filled last row, which paints a solid block
+       * of rule colour where the grid simply has no data — a fabricated
+       * region, and the one thing this console must never draw. */}
+      <ol className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-4">
         {ranked.map((node, rank) => (
-          <li key={node.id ?? rank} className="min-w-0">
+          <li
+            key={node.id ?? rank}
+            className={cn(
+              'min-w-0 border-b border-l border-edge-subtle',
+              // The leader's name is set at the display tier, and a display
+              // numeral in a 200px cell is a name that truncates — which
+              // defeats the entire point of sizing it. It takes two columns
+              // wherever a column is narrow, and drops back to one at `xl`,
+              // where a quarter of the workspace is already wide enough.
+              rank === 0 && 'sm:col-span-2 xl:col-span-1',
+            )}
+          >
             <HubCard
               node={node}
               rank={rank}
@@ -514,7 +530,7 @@ function HubCard({
       onClick={onSelect}
       aria-pressed={selected}
       className={cn(
-        'relative flex h-full w-full flex-col gap-1 px-3 py-2 text-left',
+        'relative flex h-full w-full flex-col gap-0.5 px-3 py-1.5 text-left',
         selected ? 'bg-surface-2' : 'bg-surface-0 hover:bg-surface-1',
         'focus-visible:bg-surface-1',
       )}
@@ -526,7 +542,10 @@ function HubCard({
           selected ? 'bg-accent' : 'bg-transparent',
         )}
       />
-      <span className="flex min-w-0 items-baseline gap-2">
+      {/* `leading-tight` on both lines, not the inherited body 1.5: twelve
+       * cards multiply half a line of leading into the better part of a row,
+       * and this grid is here to give the workspace its vertical budget back. */}
+      <span className="flex min-w-0 items-baseline gap-2 leading-tight">
         <span className="td-legend shrink-0" data-cell="numeric">
           {String(rank + 1).padStart(2, '0')}
         </span>
@@ -544,15 +563,21 @@ function HubCard({
         >
           {displayName(node)}
         </span>
+        {/* The leader's own count steps up with its name: the one symbol the
+         * eye lands on first should not have to report itself in the same
+         * whisper as the twelfth. */}
         <span
-          className="td-value shrink-0 self-baseline text-2xs text-text-secondary"
+          className={cn(
+            'td-value shrink-0 self-baseline text-text-secondary',
+            rank === 0 ? 'text-sm' : 'text-2xs',
+          )}
           data-cell="numeric"
         >
           {degree.toLocaleString()}
           <span className="td-unit ml-1">deg</span>
         </span>
       </span>
-      <span className="flex min-w-0 items-baseline gap-2 pl-6">
+      <span className="flex min-w-0 items-baseline gap-2 pl-6 leading-tight">
         <span className="td-legend shrink-0 max-w-24 truncate">{node.kind}</span>
         <span
           className="td-value min-w-0 flex-1 truncate text-right text-3xs text-text-muted"
