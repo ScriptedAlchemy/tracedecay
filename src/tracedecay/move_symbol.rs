@@ -1352,6 +1352,13 @@ mod tests {
     #[tokio::test]
     async fn move_symbol_apply_refreshes_caller_graph() {
         let _profile = crate::config::PinnedUserDataDir::new();
+        let profile_root = crate::storage::default_profile_root().expect("test profile root");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&profile_root, std::fs::Permissions::from_mode(0o700))
+                .expect("secure test profile root");
+        }
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path();
         std::fs::create_dir_all(project.join("src")).unwrap();
@@ -1376,7 +1383,27 @@ mod tests {
         )
         .unwrap();
 
-        let cg = TraceDecay::init(project).await.unwrap();
+        let lifecycle = crate::lifecycle_lease::acquire_exclusive_for_profile(
+            &profile_root,
+            "move symbol fixture initialization",
+        )
+        .expect("acquire fixture lifecycle authority");
+        let _database_scope = crate::db::enter_maintenance_database_scope(
+            &lifecycle,
+            &profile_root,
+            "move symbol fixture initialization",
+        )
+        .expect("enter fixture maintenance database scope");
+        let cg = TraceDecay::init_with_exclusive_maintenance(
+            project,
+            crate::tracedecay::TraceDecayOpenOptions {
+                profile_root: Some(profile_root),
+                global_db_path: None,
+            },
+            &lifecycle,
+        )
+        .await
+        .unwrap();
         cg.index_all().await.unwrap();
         let result = cg
             .move_symbol("moved", "src/destination.rs", false, false)
