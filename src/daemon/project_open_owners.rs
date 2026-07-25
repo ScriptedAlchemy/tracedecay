@@ -1395,7 +1395,13 @@ async fn register_production_advisory_owner(
     });
     let credential_generation = github
         .as_ref()
-        .map_or(0, |github| github.credential.generation());
+        .map(|github| github.credential.generation())
+        .or_else(|| {
+            ci_config
+                .as_ref()
+                .map(|configuration| configuration.credential.generation())
+        })
+        .unwrap_or(0);
     let pull_request_generation = github
         .as_ref()
         .map(|github| {
