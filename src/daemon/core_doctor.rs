@@ -512,6 +512,40 @@ mod doctor_runtime_route_tests {
         (scope, registry, database)
     }
 
+    async fn initialize_test_project(
+        project_root: &Path,
+        profile_root: &Path,
+    ) -> crate::storage::StoreLayout {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(profile_root, std::fs::Permissions::from_mode(0o700))
+                .expect("secure fixture profile root");
+        }
+        let options = TraceDecayOpenOptions {
+            profile_root: Some(profile_root.to_path_buf()),
+            global_db_path: Some(profile_root.join("registry.db")),
+        };
+        let lifecycle = crate::lifecycle_lease::acquire_exclusive_for_profile(
+            profile_root,
+            "core Doctor fixture initialization",
+        )
+        .expect("acquire fixture lifecycle authority");
+        let _database_scope = crate::db::enter_maintenance_database_scope(
+            &lifecycle,
+            profile_root,
+            "core Doctor fixture initialization",
+        )
+        .expect("enter fixture maintenance database scope");
+        let initialized =
+            TraceDecay::init_with_exclusive_maintenance(project_root, options, &lifecycle)
+                .await
+                .expect("initialize core Doctor fixture");
+        let layout = initialized.store_layout().clone();
+        initialized.close();
+        layout
+    }
+
     fn handshake(
         project_path: PathBuf,
         profile_root: PathBuf,
@@ -646,15 +680,8 @@ mod doctor_runtime_route_tests {
         let profile = root.path().join("profile");
         std::fs::create_dir_all(&project).unwrap();
         std::fs::create_dir_all(&profile).unwrap();
-        let options = TraceDecayOpenOptions {
-            profile_root: Some(profile.clone()),
-            global_db_path: Some(profile.join("registry.db")),
-        };
-        let initialized = TraceDecay::init_with_options(&project, options)
-            .await
-            .expect("initialize test project");
-        let db_path = initialized.db_path().clone();
-        drop(initialized);
+        let layout = initialize_test_project(&project, &profile).await;
+        let db_path = layout.graph_db_path;
         std::fs::write(&db_path, b"malformed doctor fixture").unwrap();
         for suffix in ["-wal", "-shm"] {
             let mut sidecar = db_path.as_os_str().to_os_string();
@@ -716,15 +743,8 @@ mod doctor_runtime_route_tests {
         let profile = root.path().join("profile");
         std::fs::create_dir_all(&project).unwrap();
         std::fs::create_dir_all(&profile).unwrap();
-        let options = TraceDecayOpenOptions {
-            profile_root: Some(profile.clone()),
-            global_db_path: Some(profile.join("registry.db")),
-        };
-        let initialized = TraceDecay::init_with_options(&project, options)
-            .await
-            .expect("initialize test project");
-        let session_path = initialized.store_layout().sessions_db_path.clone();
-        drop(initialized);
+        let layout = initialize_test_project(&project, &profile).await;
+        let session_path = layout.sessions_db_path;
         std::fs::create_dir_all(session_path.parent().unwrap()).unwrap();
         let connection = Connection::open(&session_path).unwrap();
         connection
@@ -756,15 +776,8 @@ mod doctor_runtime_route_tests {
         let profile = root.path().join("profile");
         std::fs::create_dir_all(&project).unwrap();
         std::fs::create_dir_all(&profile).unwrap();
-        let options = TraceDecayOpenOptions {
-            profile_root: Some(profile.clone()),
-            global_db_path: Some(profile.join("registry.db")),
-        };
-        let initialized = TraceDecay::init_with_options(&project, options)
-            .await
-            .expect("initialize test project");
-        let db_path = initialized.db_path().clone();
-        drop(initialized);
+        let layout = initialize_test_project(&project, &profile).await;
+        let db_path = layout.graph_db_path;
         let connection = Connection::open(&db_path).unwrap();
         connection
             .execute_batch("PRAGMA journal_mode=DELETE; BEGIN EXCLUSIVE;")
@@ -795,22 +808,15 @@ mod doctor_runtime_route_tests {
         std::fs::create_dir_all(&project).unwrap();
         std::fs::create_dir_all(&profile).unwrap();
         let registry_path = profile.join("registry.db");
-        let options = TraceDecayOpenOptions {
-            profile_root: Some(profile.clone()),
-            global_db_path: Some(registry_path.clone()),
-        };
-        let initialized = TraceDecay::init_with_options(&project, options)
-            .await
-            .expect("initialize test project");
-        let graph_path = initialized.db_path().clone();
-        let session_path = initialized.store_layout().sessions_db_path.clone();
+        let layout = initialize_test_project(&project, &profile).await;
+        let graph_path = layout.graph_db_path.clone();
+        let session_path = layout.sessions_db_path.clone();
         assert_eq!(
             doctor_runtime_store_paths(&project, &profile)
                 .expect("resolve initialized cold Doctor store paths"),
             (graph_path.clone(), session_path.clone()),
             "cold Doctor must resolve the initialized profile-sharded store"
         );
-        drop(initialized);
         checkpoint_sqlite_wal(&graph_path).await;
         // Init leaves a zero-byte sessions placeholder; install + checkpoint a
         // real temporal store so immutable=1 can observe a complete snapshot.
@@ -879,16 +885,8 @@ mod doctor_runtime_route_tests {
                 .unwrap()
                 .success()
         );
-        let options = TraceDecayOpenOptions {
-            profile_root: Some(profile.clone()),
-            global_db_path: Some(profile.join("registry.db")),
-        };
-        let initialized = TraceDecay::init_with_options(&project, options)
-            .await
-            .expect("initialize branch-aware Doctor fixture");
-        let layout = initialized.store_layout().clone();
-        let default_graph = initialized.db_path().clone();
-        drop(initialized);
+        let layout = initialize_test_project(&project, &profile).await;
+        let default_graph = layout.graph_db_path.clone();
 
         let branch_relpath = "branches/feature_doctor.db";
         let branch_graph = layout.data_root.join(branch_relpath);
@@ -917,16 +915,9 @@ mod doctor_runtime_route_tests {
         std::fs::create_dir_all(&project).unwrap();
         std::fs::create_dir_all(&profile).unwrap();
         let registry_path = profile.join("registry.db");
-        let options = TraceDecayOpenOptions {
-            profile_root: Some(profile.clone()),
-            global_db_path: Some(registry_path.clone()),
-        };
-        let initialized = TraceDecay::init_with_options(&project, options)
-            .await
-            .expect("initialize test project");
-        let graph_path = initialized.db_path().clone();
-        let session_path = initialized.store_layout().sessions_db_path.clone();
-        drop(initialized);
+        let layout = initialize_test_project(&project, &profile).await;
+        let graph_path = layout.graph_db_path;
+        let session_path = layout.sessions_db_path;
         checkpoint_sqlite_wal(&graph_path).await;
         for path in [&graph_path, &registry_path] {
             remove_sqlite_sidecars(path);
@@ -982,15 +973,8 @@ mod doctor_runtime_route_tests {
         std::fs::create_dir_all(&project).unwrap();
         std::fs::create_dir_all(&profile).unwrap();
         let registry_path = profile.join("registry.db");
-        let options = TraceDecayOpenOptions {
-            profile_root: Some(profile.clone()),
-            global_db_path: Some(registry_path.clone()),
-        };
-        let initialized = TraceDecay::init_with_options(&project, options)
-            .await
-            .expect("initialize test project");
-        let graph_path = initialized.db_path().clone();
-        drop(initialized);
+        let layout = initialize_test_project(&project, &profile).await;
+        let graph_path = layout.graph_db_path;
         let graph_conn = Connection::open(&graph_path).unwrap();
         graph_conn
             .execute(
@@ -1027,16 +1011,9 @@ mod doctor_runtime_route_tests {
         std::fs::create_dir_all(&project).unwrap();
         std::fs::create_dir_all(&profile).unwrap();
         let registry_path = profile.join("registry.db");
-        let options = TraceDecayOpenOptions {
-            profile_root: Some(profile.clone()),
-            global_db_path: Some(registry_path.clone()),
-        };
-        let initialized = TraceDecay::init_with_options(&project, options)
-            .await
-            .expect("initialize test project");
-        let graph_path = initialized.db_path().clone();
-        let session_path = initialized.store_layout().sessions_db_path.clone();
-        drop(initialized);
+        let layout = initialize_test_project(&project, &profile).await;
+        let graph_path = layout.graph_db_path;
+        let session_path = layout.sessions_db_path;
         checkpoint_sqlite_wal(&graph_path).await;
         for path in [&graph_path, &registry_path] {
             remove_sqlite_sidecars(path);
