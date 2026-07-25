@@ -82,6 +82,14 @@ describe('recencyVitality', () => {
 });
 
 describe('composeRegistryField', () => {
+  it('preserves an explicit zero indexed mass instead of making it one', () => {
+    const field = composeRegistryField(
+      [group('empty', [project('empty', 0, { stores: 0, scopes: 0, artifacts: 0 })])],
+      NOW,
+    );
+    expect(field.nodes[0]!.degree).toBe(0);
+  });
+
   it('draws one body per project and no synthetic hub for a lone checkout', () => {
     const field = composeRegistryField(
       [

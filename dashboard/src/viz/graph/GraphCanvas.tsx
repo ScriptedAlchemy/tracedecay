@@ -18,7 +18,9 @@ export interface GraphCanvasNode {
   id: string;
   label: string;
   kind: string;
-  degree: number;
+  /** Connectedness when the endpoint supplied it. Absence stays absent: the
+   * renderer uses its minimum marker and prints that this is unknown, not 0. */
+  degree?: number;
   /**
    * Real, caller-supplied liveness in 0..1 — recency for projects, freshness
    * for stores, whatever this graph's genuine decay signal is. It sets the
@@ -48,6 +50,27 @@ export interface GraphCanvasEdge {
   kind?: string;
 }
 
+export interface GraphCanvasEncoding {
+  /** What one circular body represents on this field. */
+  body: string;
+  /** The measurement mapped to body area. */
+  size: string;
+  /** The categorical measurement mapped to hue. */
+  hue: string;
+  /** The live or decaying measurement mapped to glow. */
+  signal: string;
+  /** What one drawn line represents. */
+  relation: string;
+}
+
+const DEFAULT_ENCODING: GraphCanvasEncoding = {
+  body: 'one symbol',
+  size: 'connectedness',
+  hue: 'symbol kind',
+  signal: 'activation or supplied vitality',
+  relation: 'one real graph edge',
+};
+
 /** Samples the resolved theme tokens Sigma needs; canvas renderers cannot
  * consume CSS variables directly, so we re-sample on every theme flip. */
 function palette(element: HTMLElement) {
@@ -60,23 +83,19 @@ function palette(element: HTMLElement) {
     // so the renderer always receives a form it can read.
     return cssColorToRgb(style.getPropertyValue(name).trim() || fallback);
   };
-  const substrate = token('--raw-surface-1', '#1c2029');
-  // Which medium the field is suspended in, measured rather than assumed, so
-  // a future theme that is neither of the two shipped ones still resolves.
+  // The graph is a dark analytical instrument in both shell themes. Reading
+  // graph-specific tokens instead of shell surfaces keeps its labels, edges
+  // and glow coherent when a light shell surrounds the field.
+  const substrate = token('--raw-graph-substrate', '#070b16');
   const light = (substrate[0] * 299 + substrate[1] * 587 + substrate[2] * 114) / 1000 > 128;
   return {
-    hot: token('--raw-accent', '#7aa2f7'),
-    edge: token('--raw-edge-subtle', '#333a46'),
-    label: token('--raw-text-secondary', '#aab0bd'),
+    hot: token('--raw-graph-accent', '#5de7ff'),
+    edge: token('--raw-graph-edge', '#375372'),
+    label: token('--raw-graph-text', '#c4d4e8'),
     /** What a node fades INTO as its signal decays: the substrate itself. */
     substrate,
-    dim: token('--raw-surface-3', '#3a4150'),
+    dim: token('--raw-graph-dim', '#26374c'),
     light,
-    /** A dark medium has almost unlimited headroom above it before a glow
-     * clips to white; paper has very little, and additive-looking overlap goes
-     * muddy long before it goes bright. Resting glow is damped on the light
-     * field so a dense cluster stays a cluster instead of a smudge. */
-    glowScale: light ? 0.55 : 1,
   };
 }
 
@@ -135,6 +154,7 @@ export function GraphCanvas({
   activation,
   canvasClassName,
   caption,
+  encoding = DEFAULT_ENCODING,
   ariaLabel,
   extent,
 }: {
@@ -160,6 +180,9 @@ export function GraphCanvas({
    * position, size and brightness encode — leaving the default on a measured
    * layout would state something untrue about the picture. */
   caption?: ReactNode;
+  /** Compact visible key for the canvas's four visual channels. Callers with
+   * measured placement or mass must name those meanings explicitly. */
+  encoding?: GraphCanvasEncoding;
   /** Accessible description of the canvas, for the same reason. */
   ariaLabel?: string;
   /** The frame a measured field is drawn in, in the caller's own coordinates.
@@ -170,6 +193,7 @@ export function GraphCanvas({
    * which is the finding. */
   extent?: { x: [number, number]; y: [number, number] };
 }) {
+  const unknownDegreeCount = nodes.filter((node) => node.degree == null).length;
   const containerRef = useRef<HTMLDivElement | null>(null);
   const sigmaRef = useRef<Sigma | null>(null);
   const [, setRetryTick] = useState(0);
@@ -207,7 +231,10 @@ export function GraphCanvas({
     }
 
     const graph = new Graph({ multi: true, type: 'directed' });
-    const maxDegree = Math.max(...nodes.map((n) => n.degree), 1);
+    const knownDegrees = nodes.flatMap((node) =>
+      node.degree == null ? [] : [Math.max(0, node.degree)],
+    );
+    const maxDegree = Math.max(...knownDegrees, 1);
     // A field is "placed" only if EVERY node was measured into it. One node
     // without coordinates would otherwise be dropped at the seed circle beside
     // nodes whose position is a claim about their data, and the reader has no
@@ -246,17 +273,29 @@ export function GraphCanvas({
     const edgeDensity = nodes.length > 0 ? (2 * edges.length) / nodes.length : 0;
     const densityShrink = Math.min(1, 1.8 / (1 + edgeDensity * 0.55));
     const bodyScale = Math.max(0.32, density * roominess * densityShrink);
+    // Dense Code fields need a hard screen-space ceiling in addition to the
+    // relative scaling above. Relative scaling preserves rank but cannot stop
+    // one high-degree hub from becoming the bright disc every neighbour
+    // disappears behind. The ceiling relaxes with actual room, but never
+    // beyond 7.5 px in the dense tier.
+    const denseField = nodes.length >= 32 || edgeDensity >= 2;
+    const bodyCeiling = denseField ? 7.5 * Math.max(0.62, roominess) : Infinity;
     sorted.forEach((node, index) => {
       const angle = (index / sorted.length) * Math.PI * 2;
       const [kr, kg, kb] = cssColorToRgb(kindColor(node.kind, seedLight));
+      const degreeFraction =
+        node.degree == null ? 0 : Math.max(0, node.degree) / maxDegree;
       graph.addNode(node.id, {
         label: node.label,
         kind: node.kind,
         degree: node.degree,
         x: placed ? node.x! : Math.cos(angle),
         y: placed ? node.y! : Math.sin(angle),
-        size: (5 + 9 * Math.sqrt(node.degree / maxDegree)) * bodyScale,
-        isHub: node.degree >= maxDegree * 0.75,
+        size: Math.min(
+          (5 + 9 * Math.sqrt(degreeFraction)) * bodyScale,
+          bodyCeiling,
+        ),
+        isHub: node.degree != null && node.degree >= maxDegree * 0.75,
         // A graph with no vitality measurement rests mid-scale, so an absent
         // signal never masquerades as a dead network.
         vitality:
@@ -512,12 +551,21 @@ export function GraphCanvas({
     let lastFrame = 0;
     const field = fieldRef.current ?? new ActivationField();
     const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const roomyDenseField = denseField && roominess >= 0.8;
 
     const renderer = new Sigma(graph, container, {
       renderLabels: true,
-      labelRenderedSizeThreshold: nodes.length <= 60 ? 5 : 9,
+      labelRenderedSizeThreshold: roomyDenseField
+        ? 0
+        : denseField
+          ? 6.5
+          : nodes.length <= 60
+            ? 4.5
+            : 8,
+      labelDensity: 1,
+      labelGridCellSize: roomyDenseField ? 90 : 100,
       labelFont: 'ui-monospace, monospace',
-      labelSize: 11,
+      labelSize: roomyDenseField ? 12 : 11,
       labelColor: { color: rgb(colors.label) },
       defaultEdgeColor: rgba(colors.edge, 0.9),
       // Every reducer below hands back a `zIndex` (bloom=0, halo=1, body=2,
@@ -670,9 +718,15 @@ export function GraphCanvas({
           const vitality = (attrs['vitality'] as number | undefined) ?? 0.6;
           const [kr, kg, kb] = (attrs['kindRgb'] as [number, number, number] | undefined) ??
             colors.hot;
+          const resting = restingNodeTint(
+            colors.substrate,
+            [kr, kg, kb],
+            vitality,
+            colors.light,
+          );
           const lit = heat > 0
-            ? lerpRgbTuple([kr, kg, kb], colors.hot, Math.min(1, heat))
-            : ([kr, kg, kb] as [number, number, number]);
+            ? lerpRgbTuple(resting, colors.hot, Math.min(1, heat))
+            : resting;
           const shared = { x: attrs['x'], y: attrs['y'], label: '' };
           // Sigma draws each companion as a hard-edged disc, so a corona is
           // really three concentric steps and every step is a visible edge.
@@ -681,26 +735,17 @@ export function GraphCanvas({
           // of lollipops. Pulled in tight, the resting glow is a rim on the
           // body instead of a second object beside it -- and a strike still
           // has all the room it needs to swell.
-          const glow = colors.glowScale;
-          // A hairline for the ember: on paper a fully-dormant body's own
-          // fill is deliberately close to the substrate (see
-          // `restingNodeTint`), so without help its halo -- which scales
-          // with vitality -- would fade to nothing at exactly the moment the
-          // body needs it most. The floor only ever raises the light-theme
-          // halo of a low-vitality node; a live node's own (already larger)
-          // vitality term dominates, and the dark theme's halo already has
-          // plenty of headroom, so this is a no-op there.
-          const dormantRingFloor = colors.light ? 0.16 * (1 - vitality) : 0;
           upsert(graph, haloId, {
             ...shared,
-            size: size * (1.38 + 1.0 * heat),
-            color: rgba(lit, Math.max((0.05 + 0.1 * vitality) * glow, dormantRingFloor) + 0.26 * heat),
+            // Tight enough to read as a luminous rim, not a second donut body.
+            size: size * (1.11 + 0.55 * heat),
+            color: rgba(lit, 0.045 + 0.07 * vitality + 0.22 * heat),
             zIndex: 1,
           });
           upsert(graph, bloomId, {
             ...shared,
-            size: size * (2.2 + 2.0 * heat),
-            color: rgba(lit, (0.018 + 0.034 * vitality) * glow + 0.1 * heat),
+            size: size * (1.68 + 1.3 * heat),
+            color: rgba(lit, 0.012 + 0.022 * vitality + 0.08 * heat),
             zIndex: 0,
           });
           // Impact flare: a wide, faint ring pops on strike and expands as the
@@ -708,8 +753,8 @@ export function GraphCanvas({
           if (heat > 0.5) {
             upsert(graph, ringId, {
               ...shared,
-              size: size * (2.6 + 3.4 * (1 - heat)),
-              color: rgba(colors.hot, 0.1 * heat),
+              size: size * (2.1 + 2.2 * (1 - heat)),
+              color: rgba(colors.hot, 0.075 * heat),
               zIndex: 1,
             });
           } else if (graph.hasNode(ringId)) {
@@ -895,7 +940,7 @@ export function GraphCanvas({
           // The bezel screen ruling belongs to the chassis; the nebula field
           // behind it belongs to the network. Together the canvas reads as a
           // lit instrument screen rather than a picture pasted onto a panel.
-          'td-scanlines [background:var(--raw-graph-field)]',
+          'td-graph-field td-scanlines',
           'shadow-[inset_0_1px_0_0_var(--raw-membrane-lift),0_18px_44px_-28px_var(--raw-depth)]',
           fill && 'min-h-0 flex-1',
           canvasClassName,
@@ -906,17 +951,65 @@ export function GraphCanvas({
           `Code graph: ${nodes.length} symbols, ${edges.length} relations. The symbol list alongside is the accessible equivalent.`
         }
       />
-      <figcaption className="text-2xs text-text-muted">
-        {caption ?? (
-          <>
-            {nodes.length} symbols · {edges.length} relations · size =
-            connectedness · brightness = how live the signal is · hover isolates
-            a neighbourhood, click fires it and the bloom decays as the
-            activation fades
-          </>
-        )}
+      <figcaption className="flex flex-col gap-1.5 text-2xs text-text-muted">
+        <GraphEncodingKey encoding={encoding} />
+        {unknownDegreeCount > 0 ? (
+          <p data-state="partial" className="text-3xs leading-relaxed text-text-muted">
+            Connectedness is absent for {unknownDegreeCount}{' '}
+            {unknownDegreeCount === 1 ? 'symbol' : 'symbols'}; each uses the
+            minimum marker, not zero.
+          </p>
+        ) : null}
+        <div>
+          {caption ?? (
+            <>
+              {nodes.length} symbols · {edges.length} relations · hover isolates
+              a neighbourhood · click fires it and the glow decays with the
+              activation
+            </>
+          )}
+        </div>
       </figcaption>
     </figure>
+  );
+}
+
+function GraphEncodingKey({ encoding }: { encoding: GraphCanvasEncoding }) {
+  const items = [
+    { label: 'disc', value: encoding.body },
+    { label: 'size', value: encoding.size },
+    { label: 'hue', value: encoding.hue },
+    { label: 'glow', value: encoding.signal },
+    { label: 'line', value: encoding.relation },
+  ];
+  return (
+    <div
+      aria-label="Graph visual key"
+      className="grid grid-cols-3 items-start gap-x-3 gap-y-1 border-y border-edge-subtle/70 py-1 sm:flex sm:flex-wrap sm:items-center sm:gap-x-4"
+    >
+      {items.map((item, index) => (
+        <span
+          key={item.label}
+          className="flex min-w-0 flex-col gap-0.5 sm:inline-flex sm:flex-row sm:items-center sm:gap-1.5"
+        >
+          <span className="inline-flex items-center gap-1.5">
+            {index === 0 ? (
+              <span
+                aria-hidden
+                className="size-2 rounded-full border border-accent/70 bg-accent/25 shadow-[0_0_7px_var(--raw-accent)]"
+              />
+            ) : null}
+            <span className="td-legend">{item.label}</span>
+          </span>
+          <span aria-hidden className="hidden text-text-muted sm:inline">
+            ·
+          </span>
+          <span className="td-value min-w-0 text-3xs leading-tight text-text-secondary">
+            {item.value}
+          </span>
+        </span>
+      ))}
+    </div>
   );
 }
 

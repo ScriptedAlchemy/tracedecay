@@ -83,7 +83,7 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
         id: node.id,
         label: node.name ?? node.qualified_name ?? node.id,
         kind: node.kind,
-        degree: node.degree ?? 1,
+        degree: node.degree ?? undefined,
       })),
     [graph],
   );
@@ -151,6 +151,13 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
               canvasClassName="min-h-[70vw] md:min-h-[58vh] lg:min-h-0"
               activation={activationRef.current}
               ariaLabel={`${label} code graph: ${nodes.length} symbols, ${edges.length} relations. The stores and branches listed alongside are the accessible equivalent.`}
+              encoding={{
+                body: 'symbol',
+                size: 'connectedness',
+                hue: 'symbol kind',
+                signal: 'click activation',
+                relation: 'relation; activation thickens',
+              }}
               caption={
                 <>
                   {nodes.length} of this project's most connected symbols ·{' '}
