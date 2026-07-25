@@ -931,22 +931,45 @@ function graphSearchPayload(query = ''): Record<string, unknown> {
  * CostsPage (SavingsOverviewPayloadSchema).
  * ========================================================================== */
 
-const SAVINGS_PROJECTS = [
-  '/fast/projects/tracedecay',
-  '/fast/projects/lynx',
-  '/fast/projects/hermes',
-  '/home/zack/.claude',
-  '/fast/projects/tracedecay-wt',
-  '/fast/projects/experiments/orbit',
-  '/fast/projects/experiments/loom',
-  '/fast/projects/scratch',
-  '/fast/projects/dashboard-audit',
-  '/fast/projects/tracedecay-store',
-  '/fast/projects/hermes-web',
-  '/fast/projects/lynx-native',
-  '/fast/projects/agents',
-  '/fast/projects/pricing',
-] as const;
+/**
+ * Per-project lifetime savings at the SHAPE the real ledger has, not a smooth
+ * ramp.
+ *
+ * On a machine where every worktree of one repository shares a cache, every
+ * worktree records almost exactly the same lifetime saving: twenty of the
+ * owner's twenty-five rows sit within a few percent of 1.80B. The fixture used
+ * to ramp evenly from 8.4M down to 1.1M, which made twenty-five equal-length
+ * rails look like a legitimate ranking in every audit shot. Two rows genuinely
+ * deviate — the primary checkout above and a small unrelated repository well
+ * below — and those are the only rows worth drawing.
+ */
+const SAVINGS_PROJECTS: ReadonlyArray<readonly [string, number]> = [
+  ['/fast/projects/tracedecay', 2_939_894_592],
+  ['/fast/projects/tracedecay/.worktrees/sqlite-storage-runtime', 2_140_723_247],
+  ['/fast/projects/tracedecay/.worktrees/dogfood-live-repair', 2_078_590_272],
+  ['/fast/projects/tracedecay/.worktrees/dogfood-hardening', 1_946_100_344],
+  ['/fast/projects/tracedecay/.worktrees/pr8-migration', 1_831_192_520],
+  ['/fast/projects/tracedecay/.worktrees/pr8-acceptance-runner', 1_824_171_535],
+  ['/fast/projects/tracedecay/.worktrees/pr8-live-tools', 1_824_065_209],
+  ['/fast/projects/tracedecay/.worktrees/pr8-move-symbol', 1_802_722_260],
+  ['/fast/projects/tracedecay/.worktrees/pr8-kernel', 1_801_796_023],
+  ['/fast/projects/tracedecay/.worktrees/plan-topology-integration', 1_799_923_909],
+  ['/fast/projects/tracedecay/.worktrees/pr8-refresh', 1_799_813_188],
+  ['/fast/projects/tracedecay/.worktrees/pr8-runtime', 1_799_356_160],
+  ['/fast/projects/tracedecay/.worktrees/pr8-compat', 1_796_821_496],
+  ['/fast/projects/tracedecay/.worktrees/plan-dashboard', 1_799_400_112],
+  ['/fast/projects/tracedecay/.worktrees/plan-task-runtime', 1_799_402_004],
+  ['/fast/projects/tracedecay/.worktrees/plan-lsp-hooks', 1_799_398_771],
+  ['/fast/projects/tracedecay/.worktrees/plan-git-stack', 1_799_401_330],
+  ['/fast/projects/tracedecay/.worktrees/plan-policy-anchors', 1_799_399_006],
+  ['/fast/projects/tracedecay/.worktrees/pr8-automation', 1_799_400_845],
+  ['/fast/projects/tracedecay/.worktrees/pr8-benchmark', 1_799_397_612],
+  ['/fast/projects/tracedecay/.worktrees/pr8-transport', 1_799_400_501],
+  ['/fast/projects/tracedecay/.worktrees/pr8-context', 1_799_400_009],
+  ['/fast/projects/lynx', 1_802_004_118],
+  ['/fast/projects/hermes', 1_796_100_530],
+  ['/fast/projects/tracedecay-astgrep', 380_112_004],
+];
 
 function savingsPayload(): Record<string, unknown> {
   const sum = (saved: number, calls: number) => ({ saved_tokens: saved, calls });
@@ -956,38 +979,55 @@ function savingsPayload(): Record<string, unknown> {
       db: '/home/zack/.tracedecay/global.db',
       recording: { enabled: true, mode: 'auto' },
       ledger: {
-        today: sum(184_500, 132),
-        last_7d: sum(1_642_000, 918),
-        last_30d: sum(6_930_400, 3_412),
-        all_time: sum(41_820_900, 18_744),
+        today: sum(27_897_298, 222),
+        last_7d: sum(1_850_569_717, 52_371),
+        last_30d: sum(4_410_909_252, 134_767),
+        all_time: sum(4_902_796_408, 147_230),
       },
       lifetime_counters: {
-        total_tokens_saved: 41_820_900,
-        projects: SAVINGS_PROJECTS.map((path, i) => ({
-          path,
-          tokens_saved: 8_400_000 - i * 560_000 - (i % 3) * 40_000,
-        })),
+        total_tokens_saved: SAVINGS_PROJECTS.reduce((sum, [, saved]) => sum + saved, 0),
+        projects: SAVINGS_PROJECTS.map(([path, tokens_saved]) => ({ path, tokens_saved })),
       },
     },
+    // The session ledger's own accounting, which CostsPage now reads for the
+    // token mix and the measured/estimated split. Both were absent from this
+    // fixture, so both plates were unrenderable under audit.
+    //
+    // The `actual` split carries the real profile's proportions: cache reads
+    // are 98% of every token, which is the whole reason the plate states its
+    // leader instead of drawing it. And `usage_messages` is a SMALL fraction of
+    // `messages` — the previous fixture had it at 71%, which made a "mixed"
+    // cost basis look almost fully measured when in practice it is the reverse.
     sessions: {
       available: true,
       db: '/fast/projects/tracedecay/.tracedecay/sessions.db',
-      scope: 'project',
-      session_count: 486,
-      model_count: 7,
-      unknown_model_messages: 42,
+      scope: 'profile_sharded',
+      session_count: 6_054,
+      model_count: 41,
+      unknown_model_messages: 187_066,
       token_counting: true,
-      messages: 12_840,
-      usage_messages: 9_120,
-      tokenized_messages: 2_680,
-      estimated_messages: 1_040,
+      messages: 1_751_214,
+      usage_messages: 138_317,
+      tokenized_messages: 0,
+      estimated_messages: 1_612_897,
       cost_basis: 'mixed',
+      actual: {
+        cache_read_tokens: 365_936_726_111,
+        cache_write_tokens: 243_694_418,
+        input_tokens: 7_256_407_982,
+        output_tokens: 858_386_349,
+      },
+      estimated: {
+        input_tokens: 118_484_292,
+        output_tokens: 51_104_049,
+      },
+      tokenized: { input_tokens: 0, output_tokens: 0 },
     },
     turns: {
       available: true,
-      turn_count: 3_284,
-      total_cost_usd: 412.87,
-      total_tokens: 58_940_000,
+      turn_count: 57_704,
+      total_cost_usd: 8148.9744974,
+      total_tokens: 683_965_063,
       cost_basis: 'actual',
     },
     pricing: {
