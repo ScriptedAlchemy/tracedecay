@@ -288,6 +288,55 @@ async fn project_context_surfaces_registry_read_failure_as_tool_error() {
 }
 
 #[tokio::test]
+async fn project_search_surfaces_registry_read_failure_as_tool_error() {
+    let (cg, _env, _dir) = setup_empty_project().await;
+    let registry_dir = test_temp_dir();
+    let registry_path = registry_dir.path().join("global.db");
+    let runtime = HostAdmissionTestRuntimeV1::profile(registry_dir.path())
+        .await
+        .unwrap();
+    runtime
+        .upsert_code_project(
+            "proj_broken_search",
+            cg.project_root(),
+            None,
+            None,
+            Some("main"),
+        )
+        .await
+        .unwrap();
+    rusqlite::Connection::open(&registry_path)
+        .unwrap()
+        .execute_batch("DROP TABLE project_aliases")
+        .unwrap();
+    let server = tracedecay::mcp::McpServer::new_with_host_admission_test_runtime_for_test(
+        tracedecay::tracedecay::TraceDecay::open(cg.project_root())
+            .await
+            .unwrap(),
+        None,
+        runtime,
+    )
+    .await;
+
+    let result = handle_real_server_tool_call(
+        &server,
+        "tracedecay_project_search",
+        json!({"query": "broken", "format": "json"}),
+    )
+    .await;
+
+    assert_eq!(
+        result["isError"], true,
+        "registry read failure must not become a successful empty search: {result}"
+    );
+    let message = extract_real_server_text(&result);
+    assert!(
+        message.contains("search code projects") || message.contains("project_aliases"),
+        "{message}"
+    );
+}
+
+#[tokio::test]
 async fn project_registry_tools_prefer_injected_registry_over_process_default() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let process_registry_dir = test_temp_dir();

@@ -11,7 +11,7 @@ mod finalize;
 mod preflight;
 mod prepare;
 mod runtime;
-mod sqlite;
+pub(in crate::migrate) mod sqlite;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;

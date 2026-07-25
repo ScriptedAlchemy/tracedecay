@@ -683,9 +683,7 @@ mod tests {
         let admitted = envelope(9, 5);
         {
             let mut ledger = open(root.path(), UtcMicros(1));
-            let first = ledger
-                .admit_with_receipt(&admitted, UtcMicros(2))
-                .unwrap();
+            let first = ledger.admit_with_receipt(&admitted, UtcMicros(2)).unwrap();
             assert!(!first.work_completed);
         }
 

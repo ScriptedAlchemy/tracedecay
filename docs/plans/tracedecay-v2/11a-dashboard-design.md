@@ -7,6 +7,35 @@ not make structural, styling, or dependency decisions. Binding contracts
 gates) live in [Plan 11](11-dashboard-frontend.md); this file decides how
 they look, sit, and move. Decided 2026-07-23.
 
+Plan 11's **Rejected and superseded frontend approaches** section is binding
+design history. In particular, never delete or rename existing design tokens
+to simplify a theme, and never fork a workspace-local copy of a shared
+primitive; use additive token evolution and the shared UI primitive owner.
+
+## User authority versus design decisions
+
+The user supplied the quality bar — beautiful and functional, world class,
+novel, interactive, and magnificent on every page — and named "very generic
+and clinical and simple" as the failure mode. He did **not** state a preference
+for typography, colour palette, dark/light mode, spacing scale, motion, or
+easing. Every concrete choice on those axes below is a design-owner/agent plan
+decision, not a user quote, and may be revised by that owner while preserving
+truth, accessibility, performance, and the quality bar.
+
+The only user-named external visual benchmark is cosmograph.app: visuals like
+it, not adoption of its library. Linear, Vercel, Perfetto, and every other
+reference below are design research selected by agents, not user endorsements.
+
+The following rejected forms must not return: generic/clinical/simple UI;
+bottom-panel chrome that steals the interactive graph; a sparse circular
+single-project Brain whose geometry means nothing; a Brain that shows no live
+neurons during real dogfooding; bland vertical lists as the dominant
+space-consuming treatment; embedded-browser visual QA; and any fake count,
+health state, activity, or backend capability.
+
+The tooling boundary from Plan 11 also applies here: Rsbuild without a bundler
+ADR, no Module Federation or Vite, and no shadcn adoption yet.
+
 ## Design principles
 
 1. **Truth before polish.** The plan's sixteen domain states, coverage
@@ -26,6 +55,9 @@ they look, sit, and move. Decided 2026-07-23.
 5. **Severity is not quality.** Two independent visual axes everywhere:
    severity/consequence (how bad) and evidence quality (how sure). They never
    blend into one color.
+6. **Beauty and function are one acceptance criterion.** A technically
+   truthful page that remains generic, clinical, simple, or visibly
+   non-magnificent is not accepted.
 
 ## Shell layout
 
@@ -54,7 +86,9 @@ One responsive shell, four fixed regions plus content:
   infinite drawers). Evidence expansion happens here, never in tooltips.
 - **Status strip** (bottom, one line): daemon connection state, active
   query/run progress with cancel, background operation receipts. Live
-  regions coalesce announcements to ≤1/s per the plan.
+  regions coalesce announcements to ≤1/s per the plan. It must remain a
+  single unobtrusive line or collapse/relocate; bottom chrome may never steal
+  meaningful height from an interactive graph.
 
 ## Layout archetypes
 
@@ -68,7 +102,9 @@ Every workspace composes from four archetypes; no bespoke layouts:
    virtualized result table/list (36px data rows, 44px touch targets,
    sticky header, left-aligned text / right-aligned tabular numbers /
    state chips leading), right inspector. The planner-progress panel
-   renders per-source progress rows here.
+   renders per-source progress rows here. The synchronized list/table is an
+   accessible evidence surface, not the bland dominant composition or a
+   massive real-estate consumer.
 3. **Canvas + table** (Loom, Code graph, Brain map, PR17 topology): the
    renderer-neutral canvas above, the synchronized accessible table below
    (toggleable to table-only), shared selection, playback controls docked
@@ -113,6 +149,10 @@ Rules that hold everywhere:
   to what.
 
 ## Visual system
+
+Everything in this section is the design owner's selected implementation,
+including theme default, palette roles, typeface, scale, spacing, radius, and
+motion. None is attributed to a user preference.
 
 Token architecture (Tailwind v4, two-stage so runtime theming works):
 
@@ -162,9 +202,12 @@ Motion:
 ## Aesthetic quality bar
 
 Beautiful and functional are one requirement, not a tradeoff. The reference
-class is the best-crafted developer tools of this era (Linear's calm,
-Vercel's restraint, Perfetto's density done legibly) — TraceDecay should sit
-comfortably beside them and feel unmistakably its own.
+benchmark named by the user is cosmograph.app's visual quality; this is not a
+library-selection instruction. The design owner additionally selected the
+best-crafted developer tools of this era as research references (Linear's
+calm, Vercel's restraint, Perfetto's density done legibly). Those latter
+references are agent choices. TraceDecay should sit comfortably beside them
+and feel unmistakably its own.
 
 - **Depth without noise.** Layered dark surfaces (`surface-0..3`) create
   space; hairline 1px edges, no decorative shadows, one accent hue used
@@ -190,29 +233,40 @@ comfortably beside them and feel unmistakably its own.
   workspace where the meaning differs — never a generic illustration, never
   a bare spinner. `complete_zero_findings` celebrates quietly with its
   coverage receipt.
-- **Design review gate.** Every workspace slice ships with a screenshot set
-  (both themes, three breakpoints, key states) reviewed by the design owner
-  before merge; drift from tokens/archetypes is a review blocker, and a
-  visual-regression suite (Playwright screenshots on the pinned runner)
-  guards the approved compositions afterward.
+- **Design review.** Every workspace slice is opened in real Google Chrome;
+  the reviewer captures every page and manually clicks through every
+  interaction state, including movement and live updates. The embedded browser
+  is rejected because its viewport is too small. Automated Playwright
+  screenshots support this review and guard compositions afterward, but no
+  per-commit acceptance record document or git-hash-tied evidence manifest is
+  created.
 
 ## Continuous visual enforcement
 
 Visual quality is checked by machinery throughout development, not only at
 review:
 
+The responsive target remains an explicit owner question. The user's
+2026-07-06 "desktop resolution only please" conflicts with his 2026-07-25
+below-1024px functionality bug and requested 320/768 checks at zero axe
+violations. Until he decides, the provisional test posture is desktop-sized
+review screenshots plus no hidden or broken functionality below `lg`; neither
+side is recorded as the final product requirement.
+
 - **Screenshot harness** (`npm run visual:audit`): Playwright renders every
   registered surface (workspace routes, archetype demos, each component's
   key states from a story registry) across both themes x three breakpoints
   (320, 768, 1440) x reduced-motion and contrast-more, against MSW fixture
-  data covering the domain states. Output is a browsable gallery (one HTML
-  index) plus a machine manifest. The registry is code: adding a workspace
-  or state without registering its story fails the audit.
-- **Baseline diffing**: approved galleries are committed as baselines;
+  data covering the domain states. Output is ordinary ephemeral run evidence,
+  not a committed per-commit gallery or machine record. The registry is
+  product-test code: adding a workspace or state without registering its story
+  fails the audit.
+- **Baseline diffing**: stable route/state pixel baselines are direct
+  product-test fixtures;
   `visual:audit --diff` fails on pixel drift beyond a perceptual threshold
   (odiff/pixelmatch) outside explicitly re-approved regions. Baseline
-  updates are their own commits, reviewed by the design owner — a code PR
-  can never silently change approved pixels.
+  changes are reviewed as direct product-test changes with the implementation;
+  do not require an isolated baseline commit or separate evidence document.
 - **Automated audit rules** run over the same renders: axe (WCAG) per
   surface, token-compliance scan (computed styles must resolve to token
   variables — raw hex/px drift fails), focus-visibility check (every
@@ -220,11 +274,11 @@ review:
   vs settled geometry), and information-density heuristics (min touch
   targets, max competing accents per region) as warnings.
 - **Agent audit loop**: every implementation lane must run the dev server,
-  exercise its surface with the preview/Playwright tooling, capture the
-  gallery for its slice, LOOK at it, and attach the gallery path + a
-  self-audit paragraph (what matches the spec, what deviates and why) to
-  its report. "Compiles and tests pass" is not done; unaudited UI is
-  unreviewable and gets bounced.
+  exercise its surface in real Google Chrome, screenshot every page, manually
+  click through every interaction state, and LOOK at it. Preview/Playwright
+  tooling may support but not replace that pass. Report deviations truthfully
+  in the normal work summary; do not attach a git-hash-tied self-audit record.
+  "Compiles and tests pass" is not done; unaudited UI is unreviewable.
 - **CI**: the visual suite runs on the pinned runner in the frontend gate;
   diffs and axe failures block; the gallery uploads as a run artifact so
   review happens on real renders, not local claims.
@@ -354,3 +408,8 @@ measured, not hypothetical; align future dashboard slices with it.
    rate + climbing age while connected-quiet), the magnitude-rail idiom at
    real degree ranges, and the ranked most-connected list against real paths.
    These carry to future surfaces as-is.
+
+6. **Real dogfood activity must be visible.** The user rejected a Brain with no
+   visible neurons while agents were active after dogfooding. Render real
+   activity strikes from the admitted wire source; when that source cannot
+   provide finer scope, say so. Never synthesize decorative firing.

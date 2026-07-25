@@ -1,5 +1,10 @@
 # Test-Map Behavior Audit — Integration-Test Coverage Attribution
 
+> Historical audit snapshot. File paths, line numbers, graph percentages, and
+> the former `tests/dashboard_api_test.rs` layout below describe the audited
+> revision; current dashboard integration tests live under
+> `tests/dashboard_api_test/`.
+
 **Task:** `t_b1feb03c` (Audit current test-map behavior on integration tests)
 **Scope:** why `tracedecay_test_risk` reports ~12% mapped function coverage for a repo with a large integration test suite.
 **Method:** reproduced the tool output, read the implementation (`src/mcp/tools/handlers/health.rs`, `src/db/coverage.rs`, `is_test_file` in `src/tracedecay.rs`), and verified every claim against the live graph at `.tracedecay/tracedecay.db` with direct SQL + a Python reimplementation of the algorithm.
