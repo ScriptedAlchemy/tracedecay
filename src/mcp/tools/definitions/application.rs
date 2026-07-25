@@ -658,7 +658,12 @@ pub(super) fn def_diagnostics_read() -> ToolDefinition {
         "Read canonical diagnostics",
         json!({
             "scope": diagnostics_scope_schema(),
-            "maximum_diagnostics": {"type": "integer", "minimum": 1, "maximum": 10000}
+            "maximum_diagnostics": {"type": "integer", "minimum": 1, "maximum": 1000},
+            "cursor": {
+                "type": ["string", "null"],
+                "minLength": 1,
+                "description": "Opaque cursor returned by the prior diagnostic page."
+            }
         }),
         &["scope", "maximum_diagnostics"],
     )
