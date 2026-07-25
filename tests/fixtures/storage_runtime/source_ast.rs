@@ -34,10 +34,24 @@ impl RustAst {
         let tree = parser
             .parse(&source, None)
             .unwrap_or_else(|| panic!("parse Rust source {}", path.display()));
+        let mut parse_errors = Vec::new();
+        walk(tree.root_node(), &mut |node| {
+            if node.is_error() || node.is_missing() {
+                let position = node.start_position();
+                parse_errors.push(format!(
+                    "{}:{}:{} {}",
+                    path.display(),
+                    position.row + 1,
+                    position.column + 1,
+                    node.kind()
+                ));
+            }
+        });
         assert!(
             !tree.root_node().has_error(),
-            "Rust source must parse without syntax errors: {}",
-            path.display()
+            "Rust source must parse without syntax errors: {}\n{}",
+            path.display(),
+            parse_errors.join("\n")
         );
         Self { source, tree }
     }
@@ -108,12 +122,9 @@ impl RustAst {
             })
             .collect::<Vec<_>>();
         !modules.is_empty()
-            && modules.iter().all(|module| {
-                direct_children(*module).any(|child| {
-                    child.kind() == "attribute_item"
-                        && normalize(self.text(child)) == "#[cfg(test)]"
-                })
-            })
+            && modules
+                .iter()
+                .all(|module| self.has_test_attribute(*module))
     }
 
     pub fn method_paths(&self, impl_type: &str, method_name: &str) -> BTreeSet<String> {
@@ -306,19 +317,39 @@ impl RustAst {
     fn is_test_scope(&self, mut node: Node<'_>) -> bool {
         while let Some(parent) = node.parent() {
             if matches!(parent.kind(), "function_item" | "mod_item")
-                && direct_children(parent).any(|child| {
-                    child.kind() == "attribute_item"
-                        && matches!(
-                            normalize(self.text(child)).as_str(),
-                            "#[test]" | "#[tokio::test]" | "#[cfg(test)]"
-                        )
-                })
+                && self.has_test_attribute(parent)
             {
                 return true;
             }
             node = parent;
         }
         false
+    }
+
+    fn has_test_attribute(&self, node: Node<'_>) -> bool {
+        direct_children(node).any(|child| self.is_test_attribute(child)) || {
+            let mut sibling = node.prev_sibling();
+            let mut found = false;
+            while let Some(attribute) = sibling {
+                if attribute.kind() != "attribute_item" {
+                    break;
+                }
+                if self.is_test_attribute(attribute) {
+                    found = true;
+                    break;
+                }
+                sibling = attribute.prev_sibling();
+            }
+            found
+        }
+    }
+
+    fn is_test_attribute(&self, node: Node<'_>) -> bool {
+        node.kind() == "attribute_item"
+            && matches!(
+                normalize(self.text(node)).as_str(),
+                "#[test]" | "#[tokio::test]" | "#[cfg(test)]"
+            )
     }
 
     fn text(&self, node: Node<'_>) -> &str {
