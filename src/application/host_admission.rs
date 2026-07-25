@@ -1,6 +1,5 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
@@ -857,8 +856,6 @@ impl<'a> HostAdmissionFacade<'a> {
     }
 }
 
-static HOST_ADMISSION_TEST_RUNTIME_NONCE: AtomicU64 = AtomicU64::new(1);
-
 #[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionTemporalFixtureCountV1 {
@@ -963,7 +960,7 @@ pub struct HostAdmissionTestRuntimeV1 {
     profile_registered: Arc<RegisteredGlobalDb>,
     project_registered: Option<Arc<RegisteredGlobalDb>>,
     _session_registry:
-        crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1,
+        Arc<crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1>,
     _database_scope: crate::db::DaemonDatabaseScope,
 }
 
@@ -1031,17 +1028,17 @@ impl HostAdmissionTestRuntimeV1 {
             prepare_host_admission_test_project_root(project_root, project_id)?;
         }
         let identity = crate::daemon::profile_identity::load_or_create(&profile_root)?;
-        let nonce = HOST_ADMISSION_TEST_RUNTIME_NONCE.fetch_add(1, Ordering::Relaxed);
         let database_scope = crate::db::enter_daemon_database_scope(
             identity.profile_root(),
-            nonce,
-            &format!("host-admission-test-runtime-{nonce}"),
+            1,
+            "host-admission-test-runtime",
         )?;
-        let session_registry =
+        let session_registry = Arc::new(
             crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
                 identity.clone(),
             )
-            .await?;
+            .await?,
+        );
         let profile_database = session_registry.profile_database().await?;
         let profile_registered = session_registry.profile_sessions().await?;
 
@@ -1066,6 +1063,95 @@ impl HostAdmissionTestRuntimeV1 {
         })
     }
 
+    /// Initializes a project graph through this retained registered runtime.
+    ///
+    /// Integration tests use this instead of the intentionally unavailable
+    /// standalone `TraceDecay::init` path, preserving the same project-session
+    /// authority required by daemon-owned production opens.
+    #[doc(hidden)]
+    #[cfg(feature = "test-transport")]
+    pub async fn initialize_project_graph_for_test(
+        &self,
+        project_root: &Path,
+        open_options: crate::tracedecay::TraceDecayOpenOptions,
+    ) -> crate::errors::Result<crate::tracedecay::TraceDecay> {
+        let project_id = self.project_id.as_ref().ok_or_else(|| {
+            crate::errors::TraceDecayError::Config {
+                message: "project graph initialization requires project-scoped test authority"
+                    .to_owned(),
+            }
+        })?;
+        let project_database = self.project_registered.as_ref().cloned().ok_or_else(|| {
+            crate::errors::TraceDecayError::Config {
+                message: "project graph initialization requires a registered project session"
+                    .to_owned(),
+            }
+        })?;
+        let store_layout =
+            crate::tracedecay::TraceDecay::resolve_registered_configuration_layout(
+                project_root,
+                &open_options,
+                self.profile_database.as_ref(),
+                true,
+            )
+            .await?;
+        if store_layout.identity.project_id.as_deref() != Some(project_id.as_str()) {
+            return Err(crate::errors::TraceDecayError::Config {
+                message: "project graph identity differs from registered test authority".to_owned(),
+            });
+        }
+        crate::tracedecay::TraceDecay::init_with_registered_configuration(
+            project_root,
+            open_options,
+            store_layout,
+            project_database,
+            Arc::clone(&self.profile_database),
+            Arc::clone(&self._session_registry),
+        )
+        .await
+    }
+
+    /// Reopens an existing project graph through this retained registered runtime.
+    #[doc(hidden)]
+    #[cfg(feature = "test-transport")]
+    pub async fn open_project_graph_for_test(
+        &self,
+        project_root: &Path,
+        open_options: crate::tracedecay::TraceDecayOpenOptions,
+    ) -> crate::errors::Result<crate::tracedecay::TraceDecay> {
+        let project_id = self.project_id.as_ref().ok_or_else(|| {
+            crate::errors::TraceDecayError::Config {
+                message: "project graph open requires project-scoped test authority".to_owned(),
+            }
+        })?;
+        let project_database = self.project_registered.as_ref().cloned().ok_or_else(|| {
+            crate::errors::TraceDecayError::Config {
+                message: "project graph open requires a registered project session".to_owned(),
+            }
+        })?;
+        let store_layout =
+            crate::tracedecay::TraceDecay::resolve_registered_configuration_layout(
+                project_root,
+                &open_options,
+                self.profile_database.as_ref(),
+                true,
+            )
+            .await?;
+        if store_layout.identity.project_id.as_deref() != Some(project_id.as_str()) {
+            return Err(crate::errors::TraceDecayError::Config {
+                message: "project graph identity differs from registered test authority".to_owned(),
+            });
+        }
+        crate::tracedecay::TraceDecay::open_with_registered_configuration(
+            project_root,
+            open_options,
+            store_layout,
+            project_database,
+            Arc::clone(&self.profile_database),
+            Arc::clone(&self._session_registry),
+        )
+        .await
+    }
     pub fn facade(&self) -> HostAdmissionFacade<'_> {
         match (self.project_id.as_ref(), self.project_registered.as_ref()) {
             (Some(project_id), Some(project_registered)) => HostAdmissionFacade::new(

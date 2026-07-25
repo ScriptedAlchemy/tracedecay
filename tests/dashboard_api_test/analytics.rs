@@ -352,21 +352,23 @@ async fn start_fixture(seed_durable_events: bool) -> Fixture {
     let env_guard = EnvVarGuard::set("TRACEDECAY_GLOBAL_DB", &global_db_path);
     let profile_root = tmp.path().join("profile").join(".tracedecay");
     let data_dir_guard = EnvVarGuard::set(USER_DATA_DIR_ENV, &profile_root);
-    let cg = TraceDecay::init(&project_root)
-        .await
-        .expect("tracedecay init");
-    let project_id = cg
-        .store_layout()
-        .identity
-        .project_id
-        .as_deref()
-        .and_then(|project_id| tracedecay_domain::ProjectId::new(project_id.to_owned()).ok())
-        .expect("analytics fixture project identity");
+    let project_id =
+        tracedecay_domain::ProjectId::new("dashboard_analytics_fixture").expect("project identity");
     let host_runtime = Arc::new(
         HostAdmissionTestRuntimeV1::project(&profile_root, &project_root, project_id)
             .await
             .expect("analytics host-admission runtime"),
     );
+    let cg = host_runtime
+        .initialize_project_graph_for_test(
+            &project_root,
+            tracedecay::tracedecay::TraceDecayOpenOptions {
+                profile_root: Some(profile_root.clone()),
+                global_db_path: Some(global_db_path),
+            },
+        )
+        .await
+        .expect("tracedecay init");
     seed_session_store(&host_runtime, &project_root).await;
     if seed_durable_events {
         seed_durable_analytics(&host_runtime, &project_root).await;

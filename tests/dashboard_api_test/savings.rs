@@ -481,21 +481,23 @@ async fn start_fixture(seed: FixtureSeed) -> Fixture {
     let now = now_unix();
     let day_start = now - (now % 86_400);
 
-    let cg = TraceDecay::init(&project_root)
-        .await
-        .expect("tracedecay init");
-    let project_id = cg
-        .store_layout()
-        .identity
-        .project_id
-        .as_deref()
-        .and_then(|project_id| tracedecay_domain::ProjectId::new(project_id.to_owned()).ok())
-        .expect("savings fixture project identity");
+    let project_id =
+        tracedecay_domain::ProjectId::new("dashboard_savings_fixture").expect("project identity");
     let host_runtime = Arc::new(
         HostAdmissionTestRuntimeV1::project(&profile_root, &project_root, project_id)
             .await
             .expect("savings host-admission runtime"),
     );
+    let cg = host_runtime
+        .initialize_project_graph_for_test(
+            &project_root,
+            tracedecay::tracedecay::TraceDecayOpenOptions {
+                profile_root: Some(profile_root.clone()),
+                global_db_path: None,
+            },
+        )
+        .await
+        .expect("tracedecay init");
     match seed {
         FixtureSeed::Base => seed_global_db(&host_runtime, &project_root, day_start).await,
         FixtureSeed::LedgerOnly => seed_ledger_db(&host_runtime, &project_root, day_start).await,

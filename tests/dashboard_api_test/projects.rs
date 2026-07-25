@@ -9,7 +9,8 @@ async fn setup_target_project(fixture: &DashboardFixture) -> (PathBuf, Arc<Trace
         .canonicalize()
         .expect("fixture root should canonicalize")
         .join("target-project");
-    let target_cg = Arc::new(setup_project(&target_root).await);
+    let (target_cg, _target_runtime) = setup_project(&target_root).await;
+    let target_cg = Arc::new(target_cg);
     let target_project_id = project_id(&target_cg);
     fixture
         .host_runtime

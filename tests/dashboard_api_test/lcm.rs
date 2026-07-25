@@ -214,17 +214,16 @@ async fn start_fixture(payload_seed: Option<PayloadFixtureSeed>) -> Fixture {
         profile_root: Some(profile_root.clone()),
         global_db_path: None,
     };
-    let initialized = TraceDecay::init_with_options(&project_root, open_options.clone())
+    let project_id = ProjectId::new("dashboard_lcm_fixture").expect("valid project identity");
+    let runtime = Arc::new(
+        HostAdmissionTestRuntimeV1::project(&profile_root, &project_root, project_id)
+            .await
+            .expect("registered project session runtime"),
+    );
+    let cg = runtime
+        .initialize_project_graph_for_test(&project_root, open_options)
         .await
         .expect("tracedecay init");
-    drop(initialized);
-    let marker = tracedecay::storage::read_repository_identity_marker(&project_root)
-        .expect("read project identity")
-        .expect("project identity marker");
-    let project_id = ProjectId::new(marker.project_id).expect("valid project identity");
-    let runtime = HostAdmissionTestRuntimeV1::project(&profile_root, &project_root, project_id)
-        .await
-        .expect("registered project session runtime");
     let external_message = payload_seed.as_ref().map(|seed| {
         let mut external = message(
             seed.message_id,
@@ -291,16 +290,20 @@ async fn start_fixture(payload_seed: Option<PayloadFixtureSeed>) -> Fixture {
     } else {
         None
     };
-    drop(runtime);
-    let cg = TraceDecay::open_with_options(&project_root, open_options)
-        .await
-        .expect("reopen tracedecay");
     let port = pick_free_port();
     let base_url = format!("http://127.0.0.1:{port}");
+    let server_runtime = Arc::clone(&runtime);
+    let server_graph = Arc::new(cg);
     let server = tokio::spawn(async move {
-        let _ =
-            dashboard::run_until_shutdown_for_tests(&cg, "127.0.0.1", port, std::future::pending())
-                .await;
+        let _ = dashboard::run_until_shutdown_for_tests_with_host_admission(
+            server_graph,
+            server_runtime,
+            dashboard::DashboardTestProjectGraphsV1::default(),
+            "127.0.0.1",
+            port,
+            std::future::pending(),
+        )
+        .await;
     });
     wait_for_dashboard(&http_agent(), &base_url).await;
 
