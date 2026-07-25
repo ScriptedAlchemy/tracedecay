@@ -211,7 +211,35 @@ impl AgentIntegration for OpenCodeIntegration {
     }
 
     fn host_registration_paths(&self, home: &Path) -> Vec<std::path::PathBuf> {
-        vec![opencode_config_path(home), opencode_prompt_path(home)]
+        let profile_root = crate::automation::skill_targets::profile_root_for_agent_home(home);
+        vec![
+            opencode_config_path(home),
+            opencode_prompt_path(home),
+            crate::automation::memory_digest::digest_targets_path(&profile_root),
+        ]
+    }
+
+    fn host_component_registration_paths(
+        &self,
+        components: &[super::host_bundle_v2::HostBundleComponentV1],
+        home: &Path,
+    ) -> Vec<std::path::PathBuf> {
+        use super::host_bundle_v2::HostBundleComponentV1;
+
+        let mut paths = Vec::new();
+        if components.contains(&HostBundleComponentV1::Core)
+            || components.contains(&HostBundleComponentV1::ContextMcp)
+        {
+            paths.push(opencode_config_path(home));
+        }
+        if components.contains(&HostBundleComponentV1::Core) {
+            let profile_root = crate::automation::skill_targets::profile_root_for_agent_home(home);
+            paths.push(opencode_prompt_path(home));
+            paths.push(crate::automation::memory_digest::digest_targets_path(
+                &profile_root,
+            ));
+        }
+        paths
     }
 
     fn activate_deployed_host_registration(&self, ctx: &InstallContext) -> Result<()> {
