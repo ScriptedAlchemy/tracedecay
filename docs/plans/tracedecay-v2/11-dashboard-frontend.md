@@ -2,7 +2,12 @@
 
 ## Status / Role
 
-Normative product plan. Every product PR ships its usable UI slice with its backend behavior. PR14 completes the shared shell and the full Brain, Explorer, Loom, Sessions, Agents, Code, Knowledge, Delivery, Automations, Observatory, Costs, and Settings experience. PR17 adds the first-class Work workspace and task-graph projections owned semantically by [Plan 24](24-canonical-task-plan-graph-and-multi-agent-executor.md).
+Normative product plan. Every product PR ships its usable UI slice with its
+backend behavior. PR14 completes exactly the shared shell and Brain, Explorer,
+Loom, Sessions, Agents, Code, Knowledge, Delivery, Automations, Observatory,
+Costs, and Settings. PR14 excludes Work. PR17 adds the first-class Work
+workspace and task-graph projections owned semantically by
+[Plan 24](24-canonical-task-plan-graph-and-multi-agent-executor.md).
 PR17 also adds the execution-topology lens specified below: independent
 execution-placement, branch-topology, review-topology, and integration-strategy
 lanes, dependency-commit and merge-order rails,
@@ -16,12 +21,46 @@ and persisted deep links retain compatibility and migration obligations; all
 other retention is judged by the user journeys, behavior, accessibility,
 performance, platform, and regression requirements below.
 
-Fresh start (2026-07-23): the legacy multi-app dashboard (shell, holographic,
-lcm, graph, code-diagnostics, savings, settings as separate bundles) was
-removed from the tree; placeholder dist bundles keep the Rust build, packaging,
-and daemon serving green until the PR14 implementation replaces them. Nothing
-from the deleted apps is a dependency; the API handlers they consumed remain
-the compatibility surface the new implementation binds to.
+Current implementation (2026-07-25): the legacy multi-app dashboard (shell,
+holographic, lcm, graph, code-diagnostics, savings, settings as separate
+bundles) was removed. The real single-app `app-dist` bundle is the product
+served at `/`; the legacy placeholder shell is isolated at `/legacy` and must
+not be described as the product bundle. Nothing from the deleted apps is a
+dependency; retained API handlers remain compatibility surfaces for the
+current implementation.
+
+The current PR14 checkpoint is implemented but not accepted. Real Settings
+capability and authority-failure state (all seven prior "unsupported" claims
+were stale), storage budget findings and unreadable roles, truthful
+partial/unverified graph state, discriminated registry outcomes, scoped
+failures that no longer masquerade as `not mounted`, and unavailable reads
+preserved across Agents, Costs, Knowledge, and Sessions now exist. Explorer
+coordination/source-local query and LCM read context, Loom time boundaries,
+Delivery, Doctor, storage telemetry, asset serving, and feedback observation
+wiring also exist. The Rust `dashboard_api_test` suite has not completed
+successfully, so Settings CAS, Delivery, Explorer routes, Doctor, storage
+telemetry, Loom, and asset serving remain **implemented but unverified**.
+
+## Rejected and superseded frontend approaches
+
+- **Deleting or renaming design tokens is rejected.** A `tokens.css` variant
+  removed tokens and broke 109 existing references. Additive, backward-
+  compatible token evolution supersedes it; existing token names remain until
+  every consumer has an explicit compatible migration.
+- **The Explorer workspace replacement from `86fd70fe6` is superseded.** It
+  was adopted and then reverted by `cb6c71739` to trunk behavior, retaining
+  only the independently accepted Hermes LCM parsing. Later coordinator,
+  accessibility, and source-binding work does not revive the rejected
+  redesign by implication.
+- **Forked shared primitives are rejected.** The duplicated `Meter` was
+  de-duplicated in `1d83b8071`; dashboard workspaces reuse
+  `dashboard/src/ui/instrument.tsx` and other shared primitives rather than
+  carrying local copies.
+
+The expected history-derived frontend-intent brief was unavailable during this
+pass. Owner: the frontend-history lane. It must append an evidence-backed
+exhaustive rejection record to Plans 11/11a/11b/11c; until then, agents must
+not infer additional frontend rejections or silently rewrite those plans.
 
 ## Outcome
 
@@ -725,8 +764,8 @@ NVDA/Firefox and VoiceOver/Safari completion remains required; screenshots or
 automated checks cannot substitute for semantic assertions or assistive-
 technology use.
 
-Focused developer commands and the aggregate frontend/repository gate may be
-reorganized as the test layout evolves. The aggregate must execute build,
+Focused developer commands and the ordinary aggregate frontend/repository test
+run may be reorganized as the test layout evolves. That run must execute build,
 contract/DOM, accessibility, responsive, renderer parity, authority-negative,
 Work topology, performance, SSE, cross-browser end-to-end, smoke, manual
 assistive-technology, and usability checks; fail when required cases or samples

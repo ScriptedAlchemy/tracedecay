@@ -7,6 +7,11 @@ not make structural, styling, or dependency decisions. Binding contracts
 gates) live in [Plan 11](11-dashboard-frontend.md); this file decides how
 they look, sit, and move. Decided 2026-07-23.
 
+Plan 11's **Rejected and superseded frontend approaches** section is binding
+design history. In particular, never delete or rename existing design tokens
+to simplify a theme, and never fork a workspace-local copy of a shared
+primitive; use additive token evolution and the shared UI primitive owner.
+
 ## Design principles
 
 1. **Truth before polish.** The plan's sixteen domain states, coverage
