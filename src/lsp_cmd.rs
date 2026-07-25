@@ -63,7 +63,7 @@ async fn run_stdio_bridge(project_root: PathBuf) -> tracedecay::errors::Result<(
         }
 
         if let Some(frame) = pending_client_frame.as_deref() {
-            match session.try_send_client_frame(frame).await? {
+            match send_client_frame_with_reconnect(&mut session, frame).await? {
                 FrameSend::Sent => {
                     pending_client_frame = None;
                     continue;
@@ -94,17 +94,54 @@ async fn flush_daemon_frame(
     session: &mut DaemonLspSessionClient,
     stdout: &mut tokio::io::Stdout,
 ) -> tracedecay::errors::Result<bool> {
-    match session.poll_daemon_frame().await? {
+    match poll_daemon_frame_with_reconnect(session).await? {
         FramePoll::Frame(frame) => {
             let encoded = ContentLengthCodec::encode(&frame)
                 .map_err(|error| bridge_error("encode", error))?;
             stdout.write_all(&encoded).await?;
             stdout.flush().await?;
-            session.acknowledge_daemon_frame().await?;
+            acknowledge_daemon_frame_with_reconnect(session).await?;
             Ok(false)
         }
         FramePoll::Pending => Ok(false),
         FramePoll::Closed => Ok(true),
+    }
+}
+
+async fn send_client_frame_with_reconnect(
+    session: &mut DaemonLspSessionClient,
+    frame: &str,
+) -> tracedecay::errors::Result<FrameSend> {
+    match session.try_send_client_frame(frame).await {
+        Ok(outcome) => Ok(outcome),
+        Err(_) => {
+            session.reconnect().await?;
+            session.try_send_client_frame(frame).await
+        }
+    }
+}
+
+async fn poll_daemon_frame_with_reconnect(
+    session: &mut DaemonLspSessionClient,
+) -> tracedecay::errors::Result<FramePoll> {
+    match session.poll_daemon_frame().await {
+        Ok(outcome) => Ok(outcome),
+        Err(_) => {
+            session.reconnect().await?;
+            session.poll_daemon_frame().await
+        }
+    }
+}
+
+async fn acknowledge_daemon_frame_with_reconnect(
+    session: &mut DaemonLspSessionClient,
+) -> tracedecay::errors::Result<()> {
+    match session.acknowledge_daemon_frame().await {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            session.reconnect().await?;
+            session.acknowledge_daemon_frame().await
+        }
     }
 }
 
