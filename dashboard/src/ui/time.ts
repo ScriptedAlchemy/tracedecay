@@ -1,9 +1,7 @@
 /**
  * Time language for the operational surfaces.
  *
- * Both Delivery and Automations answer "when did this last happen" and "how
- * often does this happen" from epoch seconds. These helpers keep that language
- * identical on both pages so a reader learns it once, and they never
+ * Operational timestamps arrive as epoch seconds. These helpers never
  * extrapolate: an absent timestamp stays absent (`null`), it never becomes a
  * zero, a "now", or a guess.
  */
@@ -12,7 +10,7 @@
  * survives without colour. */
 export type FreshnessTier = 'live' | 'recent' | 'aging' | 'dormant';
 
-export const FRESHNESS_TIERS: readonly FreshnessTier[] = [
+const FRESHNESS_TIERS: readonly FreshnessTier[] = [
   'dormant',
   'aging',
   'recent',
@@ -58,17 +56,4 @@ export function relativeAge(
   if (delta < DAY) return `${Math.floor(delta / HOUR)}h ago`;
   if (delta < MONTH) return `${Math.floor(delta / DAY)}d ago`;
   return `${Math.floor(delta / MONTH)}mo ago`;
-}
-
-/** "15m" / "6h" / "2d" — a bare span, for intervals and cooldowns. */
-export function formatSpan(secs: number | null | undefined): string | null {
-  if (secs == null || !Number.isFinite(secs) || secs < 0) return null;
-  if (secs < MINUTE) return `${Math.round(secs)}s`;
-  if (secs < HOUR) return `${Math.round(secs / MINUTE)}m`;
-  if (secs < DAY) {
-    const hours = secs / HOUR;
-    return `${Number.isInteger(hours) ? hours : hours.toFixed(1)}h`;
-  }
-  const days = secs / DAY;
-  return `${Number.isInteger(days) ? days : days.toFixed(1)}d`;
 }
