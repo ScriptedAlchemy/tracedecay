@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use tracedecay_domain::{
     CodeGenerationId, CodeSearchChunkGrainV1, CodeSearchChunkV1, CompactCandidate,
@@ -163,7 +164,7 @@ impl ProjectedChunkV1 {
 #[derive(Clone, Debug)]
 pub struct CodeLexicalProjectionAdapterV1 {
     metadata: CodeLexicalProjectionMetadataV1,
-    rows: Vec<ProjectedChunkV1>,
+    rows: Arc<Vec<ProjectedChunkV1>>,
 }
 
 impl CodeLexicalProjectionAdapterV1 {
@@ -231,7 +232,10 @@ impl CodeLexicalProjectionAdapterV1 {
             rows.push(ProjectedChunkV1::new(chunk, logical_path));
         }
         rows.sort_by(|left, right| left.chunk.id.cmp(&right.chunk.id));
-        Ok(Self { metadata, rows })
+        Ok(Self {
+            metadata,
+            rows: Arc::new(rows),
+        })
     }
 
     pub fn exact_adapter<A>(&self, authority: A) -> CodeExactProjectionAdapterV1<A>
@@ -263,7 +267,7 @@ impl CodeLexicalProjectionAdapterV1 {
         let fuzzy = self.fuzzy_expansions(request);
         let mut pairs = Vec::new();
         let mut excluded = 0_u64;
-        for row in &self.rows {
+        for row in self.rows.iter() {
             let score = self.score_row(row, request, &fuzzy);
             if score.field_scores.is_empty() {
                 excluded += 1;
@@ -318,7 +322,7 @@ impl CodeLexicalProjectionAdapterV1 {
             return FuzzyExpansionsV1::default();
         }
         let mut vocabulary = BTreeSet::new();
-        for row in &self.rows {
+        for row in self.rows.iter() {
             for (field, terms) in &row.fields {
                 if *field != LexicalFieldV1::Subtoken {
                     vocabulary.extend(terms.iter().cloned());
@@ -597,7 +601,7 @@ where
         }
         let mut pairs = Vec::new();
         let mut excluded = 0_u64;
-        for row in &self.projection.rows {
+        for row in self.projection.rows.iter() {
             let (matched_literals, matched_kinds) = exact_matches(row, request);
             if matched_literals.is_empty() {
                 excluded += 1;
