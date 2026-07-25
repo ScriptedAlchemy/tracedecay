@@ -16,6 +16,7 @@ use tracedecay_domain::{
 use crate::global_db::{AnalyticsEventInsert, AnalyticsEventQuery, RegisteredGlobalDb};
 
 const EVENT_LIMIT: usize = 10_000;
+const OBSERVABILITY_SCAN_PAGE: usize = 64;
 const OBSERVABILITY_PROVIDER: &str = "tracedecay-observability";
 const ANALYTICS_DESCRIPTOR: &str = "analytics-events.v1";
 const COST_DESCRIPTOR: &str = "provider-costs.v1";
@@ -86,7 +87,7 @@ impl ObservabilityQueryPort for RegisteredObservabilityPortV1<'_> {
             let requested = usize::try_from(query.limit)
                 .unwrap_or(EVENT_LIMIT)
                 .min(EVENT_LIMIT);
-            let before_id = match query.after_watermark.as_deref() {
+            let mut scan_before_id = match query.after_watermark.as_deref() {
                 None => None,
                 Some(value) => Some(
                     value
@@ -98,67 +99,176 @@ impl ObservabilityQueryPort for RegisteredObservabilityPortV1<'_> {
                         })?,
                 ),
             };
-            let mut rows = self
-                .db
-                .query_analytics_events(&AnalyticsEventQuery {
-                    provider: Some(OBSERVABILITY_PROVIDER.to_string()),
-                    project_id: Some(query.authorized_scope_ref),
-                    event_kind: (query.event_kinds.len() == 1)
-                        .then(|| query.event_kinds[0].clone()),
-                    since: Some(query.horizon.since_micros.div_euclid(1_000_000)),
-                    until: Some(
-                        query
-                            .horizon
-                            .until_micros
-                            .saturating_add(999_999)
-                            .div_euclid(1_000_000),
-                    ),
-                    before_id,
-                    limit: requested.saturating_add(1),
-                    ..AnalyticsEventQuery::default()
-                })
-                .await
-                .map_err(ApplicationContractError::Domain)?;
-            let capped = rows.len() > requested;
-            if capped {
-                rows.remove(0);
-            }
-            let mut events = Vec::new();
-            let mut invalid = false;
-            for row in &rows {
-                if !query.event_kinds.is_empty() && !query.event_kinds.contains(&row.event_kind) {
-                    continue;
+            let scope_ref = query.authorized_scope_ref;
+            let coarse_since = query.horizon.since_micros.div_euclid(1_000_000);
+            let coarse_until = query
+                .horizon
+                .until_micros
+                .saturating_add(999_999)
+                .div_euclid(1_000_000);
+            let scan_limit = requested.max(OBSERVABILITY_SCAN_PAGE).min(EVENT_LIMIT);
+            let mut eligible = Vec::with_capacity(requested.saturating_add(1));
+            let mut watermark_id = None;
+            let mut invalid_in_page = false;
+            let mut invalid_after_page = false;
+            'scan: loop {
+                let rows = self
+                    .db
+                    .query_analytics_events(&AnalyticsEventQuery {
+                        provider: Some(OBSERVABILITY_PROVIDER.to_string()),
+                        project_id: Some(scope_ref.clone()),
+                        event_kind: (query.event_kinds.len() == 1)
+                            .then(|| query.event_kinds[0].clone()),
+                        since: Some(coarse_since),
+                        until: Some(coarse_until),
+                        before_id: scan_before_id,
+                        limit: scan_limit,
+                        ..AnalyticsEventQuery::default()
+                    })
+                    .await
+                    .map_err(ApplicationContractError::Domain)?;
+                if rows.is_empty() {
+                    break;
                 }
-                let Some(metadata) = row.metadata_json.as_deref() else {
-                    invalid = true;
-                    continue;
+                let Some(newest_row) = rows.last() else {
+                    break;
                 };
-                match serde_json::from_str::<ObservabilityEnvelopeV1>(metadata) {
-                    Ok(envelope) if envelope.validate().is_ok() => events.push(envelope),
-                    _ => invalid = true,
+                watermark_id.get_or_insert(newest_row.id);
+                let Some(oldest_row) = rows.first() else {
+                    break;
+                };
+                let next_scan_before_id = oldest_row.id;
+                let exhausted = rows.len() < scan_limit;
+                for row in rows.iter().rev() {
+                    let row_requested =
+                        query.event_kinds.is_empty() || query.event_kinds.contains(&row.event_kind);
+                    let envelope = row
+                        .metadata_json
+                        .as_deref()
+                        .and_then(|value| {
+                            serde_json::from_str::<ObservabilityEnvelopeV1>(value).ok()
+                        })
+                        .filter(|envelope| envelope.validate().is_ok());
+                    let Some(envelope) = envelope else {
+                        if row_requested {
+                            if eligible.len() < requested {
+                                invalid_in_page = true;
+                            } else {
+                                invalid_after_page = true;
+                            }
+                        }
+                        continue;
+                    };
+                    let envelope_requested = query.event_kinds.is_empty()
+                        || query.event_kinds.contains(&envelope.event_kind);
+                    if !row_requested && !envelope_requested {
+                        continue;
+                    }
+                    if envelope.scope_ref != scope_ref
+                        || envelope.event_kind != row.event_kind
+                        || envelope.event_time_micros < query.horizon.since_micros
+                        || envelope.event_time_micros >= query.horizon.until_micros
+                    {
+                        if envelope.event_time_micros >= query.horizon.since_micros
+                            && envelope.event_time_micros < query.horizon.until_micros
+                        {
+                            if eligible.len() < requested {
+                                invalid_in_page = true;
+                            } else {
+                                invalid_after_page = true;
+                            }
+                        }
+                        continue;
+                    }
+                    if !envelope_requested {
+                        continue;
+                    }
+                    eligible.push((row.id, envelope));
+                    if eligible.len() > requested {
+                        break 'scan;
+                    }
                 }
+                if exhausted {
+                    break;
+                }
+                scan_before_id = Some(next_scan_before_id);
             }
-            let watermark = rows.last().map_or_else(
-                || "analytics:empty".to_string(),
-                |row| format!("analytics:{}", row.id),
-            );
-            let next_watermark = capped.then(|| {
-                rows.first()
-                    .map_or_else(|| watermark.clone(), |row| format!("analytics:{}", row.id))
+            let capped = eligible.len() > requested;
+            if capped {
+                eligible.pop();
+            } else if invalid_after_page {
+                invalid_in_page = true;
+            }
+            let next_watermark = if capped {
+                Some(format!(
+                    "analytics:{}",
+                    eligible
+                        .last()
+                        .ok_or(ApplicationContractError::Inconsistent {
+                            field: "observability_page.cursor",
+                        })?
+                        .0
+                ))
+            } else {
+                None
+            };
+            let mut coverage = if capped {
+                CoverageStateV1::Capped
+            } else {
+                CoverageStateV1::Known
+            };
+            for (_, event) in &eligible {
+                coverage = merge_coverage_state(coverage, event.coverage);
+            }
+            if invalid_in_page {
+                coverage = merge_coverage_state(coverage, CoverageStateV1::Partial);
+            }
+            let mut events = eligible
+                .into_iter()
+                .map(|(_, envelope)| envelope)
+                .collect::<Vec<_>>();
+            events.sort_by(|left, right| {
+                (
+                    left.event_time_micros,
+                    left.observation_time_micros,
+                    left.producer_sequence,
+                    left.event_id.as_str(),
+                )
+                    .cmp(&(
+                        right.event_time_micros,
+                        right.observation_time_micros,
+                        right.producer_sequence,
+                        right.event_id.as_str(),
+                    ))
             });
             Ok(ObservabilityPageV1 {
                 events,
-                watermark,
-                coverage: if invalid {
-                    CoverageStateV1::Partial
-                } else if capped {
-                    CoverageStateV1::Capped
-                } else {
-                    CoverageStateV1::Known
-                },
+                watermark: watermark_id.map_or_else(
+                    || "analytics:empty".to_string(),
+                    |id| format!("analytics:{id}"),
+                ),
+                coverage,
                 next_watermark,
             })
         })
+    }
+}
+
+fn merge_coverage_state(left: CoverageStateV1, right: CoverageStateV1) -> CoverageStateV1 {
+    const fn rank(state: CoverageStateV1) -> u8 {
+        match state {
+            CoverageStateV1::Known => 0,
+            CoverageStateV1::Capped => 1,
+            CoverageStateV1::Sampled => 2,
+            CoverageStateV1::Partial => 3,
+            CoverageStateV1::Stale => 4,
+            CoverageStateV1::Unknown => 5,
+        }
+    }
+    if rank(left) >= rank(right) {
+        left
+    } else {
+        right
     }
 }
 
@@ -625,6 +735,51 @@ pub(crate) async fn costs_read_model(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tracedecay_domain::{
+        ObservabilityPayloadV1, ObservabilityRetentionClassV1, RetrievalQueryObservedV1,
+    };
+
+    fn envelope(event_id: &str, event_time_micros: i64) -> ObservabilityEnvelopeV1 {
+        ObservabilityEnvelopeV1 {
+            event_id: event_id.to_string(),
+            event_kind: "retrieval.query.observed.v1".to_string(),
+            schema_revision: 1,
+            idempotency_key: format!("idempotency:{event_id}"),
+            trace_id: format!("trace:{event_id}"),
+            scope_ref: "scope:boundary".to_string(),
+            capability: "retrieval".to_string(),
+            operation: "query".to_string(),
+            event_time_micros,
+            observation_time_micros: event_time_micros,
+            valid_from_micros: None,
+            valid_until_micros: None,
+            quantity: None,
+            unit: None,
+            terminal_result: Some(ObservabilityTerminalResultV1::Succeeded),
+            producer_revision: "producer.v1".to_string(),
+            configuration_revision: "configuration.v1".to_string(),
+            policy_revision: "policy.v1".to_string(),
+            watermark: format!("watermark:{event_id}"),
+            coverage: CoverageStateV1::Known,
+            sampling_probability: None,
+            retention_class: ObservabilityRetentionClassV1::LocalRollup395d,
+            emitted_count: 1,
+            delayed_count: 0,
+            dropped_count: 0,
+            process_boot_id: "boot:boundary".to_string(),
+            producer_sequence: 1,
+            payload: ObservabilityPayloadV1::RetrievalQuery(RetrievalQueryObservedV1 {
+                query_family: "exact_technical".to_string(),
+                enabled_lanes: vec!["exact_literal".to_string()],
+                candidate_budget: 1,
+                context_budget: 1,
+                token_budget: 1,
+                answered: true,
+                source_coverage: CoverageStateV1::Known,
+                lane_coverage: CoverageStateV1::Known,
+            }),
+        }
+    }
 
     #[test]
     fn partial_coverage_never_claims_current() {
@@ -632,5 +787,76 @@ mod tests {
         assert_eq!(value.state, CoverageStateV1::Partial);
         assert_eq!(value.unknown, 2);
         assert_eq!(value.eligible, None);
+    }
+
+    #[tokio::test]
+    async fn exact_horizon_scans_past_dense_coarse_boundary_rows() {
+        let harness = crate::global_db::tests::harness::RegisteredGlobalDbHarness::open(
+            "observability-exact-horizon",
+        )
+        .await;
+        let port = RegisteredObservabilityPortV1::new(&harness.registered);
+        for (index, event_time_micros) in [1_510_000, 1_520_000, 1_530_000].into_iter().enumerate()
+        {
+            port.record(envelope(&format!("eligible:{index}"), event_time_micros))
+                .await
+                .expect("record eligible event");
+        }
+        for index in 0..70 {
+            let event_time_micros = if index % 2 == 0 {
+                1_100_000 + index
+            } else {
+                1_900_000 + index
+            };
+            port.record(envelope(&format!("boundary:{index}"), event_time_micros))
+                .await
+                .expect("record coarse boundary event");
+        }
+
+        let first = port
+            .query(ObservabilityQueryV1 {
+                authorized_scope_ref: "scope:boundary".to_string(),
+                event_kinds: vec!["retrieval.query.observed.v1".to_string()],
+                horizon: ObservabilityHorizonV1 {
+                    since_micros: 1_500_000,
+                    until_micros: 1_600_000,
+                },
+                after_watermark: None,
+                limit: 2,
+            })
+            .await
+            .expect("first exact page");
+        assert_eq!(
+            first
+                .events
+                .iter()
+                .map(|event| event.event_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["eligible:1", "eligible:2"]
+        );
+        assert_eq!(first.coverage, CoverageStateV1::Capped);
+        let second = port
+            .query(ObservabilityQueryV1 {
+                authorized_scope_ref: "scope:boundary".to_string(),
+                event_kinds: vec!["retrieval.query.observed.v1".to_string()],
+                horizon: ObservabilityHorizonV1 {
+                    since_micros: 1_500_000,
+                    until_micros: 1_600_000,
+                },
+                after_watermark: first.next_watermark,
+                limit: 2,
+            })
+            .await
+            .expect("second exact page");
+        assert_eq!(
+            second
+                .events
+                .iter()
+                .map(|event| event.event_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["eligible:0"]
+        );
+        assert_eq!(second.coverage, CoverageStateV1::Known);
+        assert_eq!(second.next_watermark, None);
     }
 }
