@@ -100,7 +100,12 @@ function projectEntry(
  * index — deterministic, never random — to land bodies in every recency column
  * and across the mass axis.
  */
-const SYNTHETIC_REPOS: ReadonlyArray<{ name: string; ageSecs: number; mass: number }> =
+const SYNTHETIC_REPOS: ReadonlyArray<{
+  name: string;
+  ageSecs: number;
+  mass: number;
+  branches: number;
+}> =
   [
     'rslint', 'vite-rsbuild', 'mold', 'core', 'ai-train', 'browser-linux',
     'cargo-slot', 'ci-runner-orchestrator', 'claude-code', 'codex-cli',
@@ -115,15 +120,41 @@ const SYNTHETIC_REPOS: ReadonlyArray<{ name: string; ageSecs: number; mass: numb
     // Masses that cycle through four magnitudes rather than tracking age, so
     // the two axes stay independent and the field is not a diagonal line.
     mass: [1, 4, 9, 22, 58, 140, 310][index % 7]!,
+    // Branch counts spanning the real registry's range (1 to 242 on the
+    // owner's profile) rather than the flat `['main']` this fixture used to
+    // give every repository. The Delivery field's y axis is a log of this
+    // number; with every repo on one branch the axis was a single line and the
+    // scale was never exercised (plan 11a real-profile finding 4). Cycled on a
+    // different period from `mass` so branch count and indexed mass stay
+    // independent measurements.
+    branches: [1, 3, 71, 8, 242, 20, 2, 56, 5, 36, 10][index % 11]!,
   }));
 
-function syntheticGroup(repo: { name: string; ageSecs: number; mass: number }) {
+/** Branch names for a repository, shaped like a real one: `main`, then a
+ * spread of the prefixes this registry actually carries. */
+function branchNames(count: number): string[] {
+  const prefixes = ['feat', 'fix', 'refactor', 'test', 'wt', 'integrate'];
+  return [
+    'main',
+    ...Array.from(
+      { length: Math.max(count - 1, 0) },
+      (_, index) => `${prefixes[index % prefixes.length]}/branch-${index}`,
+    ),
+  ];
+}
+
+function syntheticGroup(repo: {
+  name: string;
+  ageSecs: number;
+  mass: number;
+  branches: number;
+}) {
   const root = `/fast/projects/${repo.name}`;
   return {
     label: repo.name,
     git_common_dir: `${root}/.git`,
     project_count: 1,
-    branches: ['main'],
+    branches: branchNames(repo.branches),
     projects: [
       {
         ...projectEntry(`proj_${repo.name}`, repo.name, root, repo.ageSecs, {
@@ -145,8 +176,9 @@ const projects: Record<string, unknown> = {
   active_project_id: 'tracedecay',
   active_project_root: '/fast/projects/tracedecay',
   summary: {
-    project_count: 4 + SYNTHETIC_REPOS.length,
-    repo_count: 3 + SYNTHETIC_REPOS.length,
+    // tracedecay (2 checkouts) + lynx + hermes + the two non-git entries.
+    project_count: 6 + SYNTHETIC_REPOS.length,
+    repo_count: 5 + SYNTHETIC_REPOS.length,
     truncated: false,
   },
   project_tree: [
@@ -187,6 +219,46 @@ const projects: Record<string, unknown> = {
       ],
     },
     ...SYNTHETIC_REPOS.map(syntheticGroup),
+    // Registry entries that are NOT git checkouts. TraceDecay indexes plain
+    // directories too, and eight of the forty-four entries on the owner's real
+    // profile are in this class. Their branch count is UNKNOWN, not zero, and
+    // the Delivery field draws them in a fenced band below the measured plot —
+    // so the fixture has to contain some, or that band never renders under
+    // audit and the distinction goes unverified.
+    {
+      label: '.hermes',
+      git_common_dir: null,
+      project_count: 1,
+      branches: [],
+      projects: [
+        {
+          ...projectEntry('proj_hermes_home', '.hermes', '/home/zack/.hermes', 20 * DAY, {
+            stores: 1,
+            scopes: 0,
+            artifacts: 3,
+          }),
+          kind: 'project',
+          default_branch: null,
+        },
+      ],
+    },
+    {
+      label: 'notes',
+      git_common_dir: null,
+      project_count: 1,
+      branches: [],
+      projects: [
+        {
+          ...projectEntry('proj_notes', 'notes', '/home/zack/notes', 3 * DAY, {
+            stores: 1,
+            scopes: 0,
+            artifacts: 1,
+          }),
+          kind: 'project',
+          default_branch: null,
+        },
+      ],
+    },
   ],
 };
 
@@ -864,19 +936,35 @@ function graphOverviewPayload(): Record<string, unknown> {
   // cannot produce. Restored to the real shape, including the real curve:
   // degree in a symbol graph is power-law, not linear — one run-away hub, a
   // steep fall, then near-ties bunching at the bottom of the twelve.
-  const HUB_DEGREES = [
-    1840, 1461, 1218, 1093, 837, 811, 704, 551, 546, 545, 399, 390,
-  ] as const;
-  const topConnected = HUB_DEGREES.map((degree, i) => {
-    const full = graphNode(i, 'hub', degree);
-    return {
-      id: full['id'],
-      name: full['name'],
-      kind: full['kind'],
-      file_path: full['file_path'],
-      degree,
-    };
-  });
+  //
+  // The NAMES matter as much as the degrees, and `hub_0 … hub_11` hid the
+  // single hardest thing about this row set. On a real Rust graph the most
+  // connected symbols are language primitives and one-word generics — `path`,
+  // `json`, `u64`, `Value`, `trim`, `kind` — and two of the owner's twelve are
+  // literally the same word in different files. `top_connected_rows` does not
+  // serve `qualified_name`, so the file is the ONLY thing that can tell them
+  // apart, and a fixture of unique invented names meant the card never had to.
+  const HUBS: ReadonlyArray<readonly [string, string, string, number]> = [
+    ['path', 'function', 'src/dashboard/graph_api.rs', 1840],
+    ['path', 'method', 'src/automation/skill_materialization.rs', 1461],
+    ['json', 'function', 'crates/tracedecay-rusqlite-runtime/src/repair/sqlite.rs', 1218],
+    ['Value', 'enum_variant', 'src/dashboard/code_diagnostics_api.rs', 1093],
+    ['u64', 'method', 'src/application/session/refresh.rs', 837],
+    ['as_str', 'method', 'src/memory/types.rs', 811],
+    ['trim', 'function', 'scripts/render-codex-hook-inputs.py', 704],
+    ['i64', 'method', 'src/application/session/refresh.rs', 551],
+    ['kind', 'method', 'crates/tracedecay-tool-catalog/src/profile.rs', 546],
+    ['find_direct_child_by_kind', 'function', 'src/extraction/traversal.rs', 545],
+    ['test', 'annotation_usage', 'src/branch/admin/tests.rs', 399],
+    ['u32', 'impl', 'src/db/engine/value.rs', 390],
+  ];
+  const topConnected = HUBS.map(([name, kind, file_path, degree], i) => ({
+    id: `${kind}:hub-${i}`,
+    name,
+    kind,
+    file_path,
+    degree,
+  }));
   return {
     totals: { nodes: 12_873, edges: 41_206, files: 642 },
     nodes_by_kind: [
@@ -1463,6 +1551,177 @@ const capabilities: Record<string, unknown> = {
   dashboards: ['graph', 'holographic', 'hermes-lcm', 'savings', 'analytics'],
 };
 
+/* ==========================================================================
+ * /api/plugins/savings/sessions (savings_api.rs::sessions) and
+ * /api/plugins/hermes-lcm/session/{id} (lcm_api.rs::session).
+ *
+ * The Loom weave's two sources, mirrored from a real daemon response captured
+ * on 2026-07-25 (`tracedecay dashboard --port 7341`, profile-sharded store,
+ * 6,053 sessions). Shapes are exact; the population is shaped to the same
+ * DISTRIBUTION the real store has, per plan 11a real-profile finding 4 —
+ * fixtures that differ only in size systematically under-test the surface:
+ *
+ *   - Message counts are heavily skewed (a handful in the hundreds, a long
+ *     tail in the tens), because the weave's width channel is log-scaled and a
+ *     uniform fixture would never show that it needed to be.
+ *   - `last_message_at` is null on most rows. On the real profile only 14 of
+ *     100 sessions carry an end later than their start, and drawing open
+ *     threads correctly is the single most load-bearing honesty behaviour on
+ *     the surface — a fixture where every session has an end would render a
+ *     weave that cannot exist.
+ *   - Some rows report zero messages, which the weave draws hollow.
+ *   - Two rows are subagents.
+ *
+ * One deliberate deviation from the captured payload, recorded here rather
+ * than hidden: the real store served a single provider ("cursor"), so its host
+ * axis has one column. The fixture carries three providers so the audit
+ * actually exercises column layout, dividers and the per-host readout row.
+ * ========================================================================== */
+
+const LOOM_PROVIDERS = ['claude', 'codex', 'cursor'] as const;
+const LOOM_MODELS = [
+  'gpt-5.6-sol-high',
+  'composer-2.5-fast',
+  'cursor-grok-4.5-high-fast',
+  'gpt-5.6-terra-max',
+] as const;
+const LOOM_TITLES = [
+  'Verify PR9 scheduler',
+  'Deliver Git primitive runtime',
+  'Normalize daemon service logging',
+  'Bound and validate Hermes snapshots',
+  'Preserve curated correction provenance',
+  'Bind managed test runs to content',
+] as const;
+
+/** Deterministic session id, so screenshots and manifests are stable. */
+function loomSessionId(index: number): string {
+  return `0${(35 + index).toString(16).padStart(2, '0')}c8f3c-d4e6-4176-afea-${String(
+    770_501 + index,
+  ).padStart(12, '0')}`;
+}
+
+function loomModelRow(model: string | null, messages: number) {
+  return {
+    model,
+    messages,
+    estimated_messages: messages,
+    usage_messages: 0,
+    tokenized_messages: 0,
+    cost_basis: 'estimated',
+    actual: {
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_read_tokens: 0,
+      cache_write_tokens: 0,
+    },
+    estimated: { input_tokens: messages * 11, output_tokens: messages * 14 },
+    tokenized: { input_tokens: 0, output_tokens: 0 },
+    tokenizer: { encoder: 'o200k_base', exact: false },
+  };
+}
+
+function loomSessionRows(count = 34): Record<string, unknown>[] {
+  return Array.from({ length: count }, (_, i) => {
+    const provider = LOOM_PROVIDERS[i % LOOM_PROVIDERS.length]!;
+    const startedAt = nowSecs - i * 5 * 3600 - (i % 7) * 1300;
+    // Skewed: three heavy sessions, then a long tail.
+    const messages = i === 0 ? 998 : i === 3 ? 405 : i === 7 ? 169 : Math.max(2, 44 - i);
+    // Only every fourth session carries an end later than its start.
+    const hasEnd = i % 4 === 1;
+    return {
+      session_id: loomSessionId(i),
+      provider,
+      title: i % 5 === 4 ? null : LOOM_TITLES[i % LOOM_TITLES.length],
+      started_at: startedAt,
+      last_message_at: hasEnd ? startedAt + 900 + (i % 6) * 1500 : null,
+      messages: i === 11 || i === 23 ? 0 : messages,
+      is_subagent: i === 5 || i === 17,
+      cost_basis: 'estimated',
+      estimated_messages: messages,
+      usage_messages: 0,
+      tokenized_messages: 0,
+      models: [
+        loomModelRow(null, Math.max(messages - 5, 0)),
+        loomModelRow(LOOM_MODELS[i % LOOM_MODELS.length]!, Math.min(messages, 5)),
+      ],
+    };
+  });
+}
+
+function loomSessionsPayload(): Record<string, unknown> {
+  return {
+    available: true,
+    db: '/home/zack/.tracedecay/projects/proj_a5b3d7e3ebe14ca7/sessions.db',
+    scope: 'profile_sharded',
+    range: 'all',
+    since: 0,
+    total: 6053,
+    sessions: loomSessionRows(),
+  };
+}
+
+const LOOM_CHAIN_TOOLS = [
+  'Read',
+  'Bash',
+  'Grep',
+  'Edit',
+  'tracedecay_context',
+  null,
+] as const;
+
+/** One session's transcript. `timestamp` is null on every message, exactly as
+ * the daemon serves it — the chain rail reads that and prints "ordinal order",
+ * so a fixture with timestamps would hide the behaviour under audit. */
+function loomChainPayload(): Record<string, unknown> {
+  const sessionId = loomSessionId(0);
+  const messages = Array.from({ length: 46 }, (_, i) => {
+    const tool = i === 0 ? null : LOOM_CHAIN_TOOLS[i % LOOM_CHAIN_TOOLS.length];
+    return {
+      message_id: `${sessionId}:${String(i).padStart(4, '0')}`,
+      session_id: sessionId,
+      role: i === 0 ? 'user' : i === 1 ? 'system' : 'assistant',
+      content:
+        i === 0
+          ? 'Verify durable code-generation restart and worktree reconciliation. Fix gaps. No git mutations.'
+          : tool
+            ? `Invoking ${tool} against the workspace to confirm the reconciliation path.`
+            : 'Summarising the reconciliation result and the remaining gap.',
+      ordinal: i,
+      timestamp: null,
+      tool_name: tool,
+      token_estimate: 18 + (i % 9) * 7,
+      pinned: false,
+      source: 'cursor',
+      storage_kind: 'message',
+      store_id: 90_000 + i,
+      summary_node_ids: [],
+      metadata_json: '{"provider":"cursor","version":1}',
+    };
+  });
+  return {
+    exists: true,
+    session_id: sessionId,
+    path: '/home/zack/.tracedecay/projects/proj_a5b3d7e3ebe14ca7/sessions.db',
+    storage_scope: 'profile_sharded',
+    order: 'asc',
+    limit: 200,
+    offset: 0,
+    has_more: false,
+    has_more_messages: false,
+    has_more_summary_nodes: false,
+    counts: {
+      message_count: 998,
+      source_token_count: 0,
+      summary_node_count: 0,
+      summary_token_count: 0,
+      token_estimate_total: 21_460,
+    },
+    messages,
+    summary_nodes: [],
+  };
+}
+
 /**
  * Exact-path fixture map. Keys are the pathname (query string stripped by the
  * resolver). Anything not listed resolves to the prefix table, then to {}.
@@ -1487,8 +1746,9 @@ export const FIXTURES: Readonly<Record<string, unknown>> = {
   '/api/plugins/graph/overview': graphOverviewPayload(),
   '/api/plugins/graph/search': graphSearchPayload(),
   '/api/plugins/graph/subgraph': subgraphPayload(null),
-  // Savings.
+  // Savings. `sessions` is the Loom weave's thread source, not a costs route.
   '/api/plugins/savings/overview': savingsPayload(),
+  '/api/plugins/savings/sessions': loomSessionsPayload(),
   // Memory bank status (memory_api.rs::status) — the scoped Brain's fact and
   // entity readouts. Distinct from the overview payload above.
   '/api/plugins/holographic/status': memoryStatusPayload(),
@@ -1510,6 +1770,9 @@ export const FIXTURES: Readonly<Record<string, unknown>> = {
 export const FIXTURE_PREFIXES: ReadonlyArray<readonly [string, unknown]> = [
   ['/api/plugins/graph/search', FIXTURES['/api/plugins/graph/search']],
   ['/api/plugins/hermes-lcm/search', FIXTURES['/api/plugins/hermes-lcm/search']],
+  // Dynamic: `/session/{session_id}` — the Loom thread chain. One transcript
+  // answers for every id, which is what a fixture can honestly be.
+  ['/api/plugins/hermes-lcm/session/', loomChainPayload()],
   ['/api/plugins/holographic', memoryPayload()],
   ['/api/plugins/graph', graphOverviewPayload()],
   ['/api/plugins/savings', savingsPayload()],
