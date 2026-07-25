@@ -454,6 +454,75 @@ mod tests {
     }
 
     #[test]
+    fn raised_default_budget_routes_pr14_dashboard_operations_for_an_eager_client() {
+        let snapshot = build_application_catalog_snapshot().expect("application catalog");
+        let profile_id = ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID).expect("profile");
+        let profile = snapshot.profile(&profile_id).expect("default profile");
+        let eager_visible_capabilities =
+            snapshot.visible_capabilities(&profile_id, &BTreeSet::new());
+        let eager_binding_count = eager_visible_capabilities
+            .iter()
+            .flat_map(|capability| capability.binding_ids())
+            .filter_map(|binding_id| snapshot.binding(binding_id))
+            .filter(|binding| profile.enables_surface(binding.surface()))
+            .count();
+
+        assert_eq!(profile.budget().maximum_bindings(), 288);
+        assert!(
+            eager_binding_count > 256
+                && eager_binding_count <= profile.budget().maximum_bindings() as usize,
+            "acceptance must exercise the raised budget with the full eager profile loaded"
+        );
+
+        for operation in DASHBOARD_OPERATIONS {
+            let operation_name =
+                SurfaceOperationName::new(operation).expect("surface operation name");
+            let capability = snapshot
+                .resolve_binding(
+                    &profile_id,
+                    BindingSurface::Dashboard,
+                    &operation_name,
+                    1,
+                    &BTreeSet::new(),
+                )
+                .unwrap_or_else(|| panic!("{operation} must resolve from the eager profile"));
+            let fixture = profile
+                .routing_fixtures()
+                .iter()
+                .find(|fixture| {
+                    matches!(
+                        fixture.expectation(),
+                        RoutingFixtureExpectation::Select { capability_id }
+                            if capability_id == capability.capability_id()
+                    )
+                })
+                .unwrap_or_else(|| panic!("{operation} must retain a routing fixture"));
+            let routed = eager_visible_capabilities
+                .iter()
+                .filter(|candidate| {
+                    candidate.routing().name() == fixture.utterance()
+                        || candidate
+                            .routing()
+                            .examples()
+                            .iter()
+                            .any(|example| example == fixture.utterance())
+                        || format!(
+                            "{} [{}]",
+                            candidate.routing().name(),
+                            candidate.capability_id().as_str()
+                        ) == fixture.utterance()
+                })
+                .map(|candidate| candidate.capability_id())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                routed,
+                vec![capability.capability_id()],
+                "{operation} must route unambiguously with every eager capability loaded"
+            );
+        }
+    }
+
+    #[test]
     fn default_profile_capacity_tracks_composed_runtime() {
         let snapshot = build_application_catalog_snapshot().expect("application catalog");
         let contributions = application_catalog_contributions().expect("application contributions");
