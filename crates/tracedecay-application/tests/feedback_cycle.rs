@@ -940,6 +940,7 @@ fn adapters_short_circuit_cancellation_and_deadline_before_source_reads() {
                 calls: test_calls.clone(),
                 outcome: RetrievalPortOutcome::Completed(common::evidence(AffectedTestsResult {
                     tests: Vec::new(),
+                    attributions: Vec::new(),
                 })),
             },
             common::operation(),
@@ -973,6 +974,7 @@ fn graph_impact_adapter_preserves_partial_graph_coverage_and_test_evidence() {
         calls: test_calls.clone(),
         outcome: RetrievalPortOutcome::Completed(common::evidence(AffectedTestsResult {
             tests: vec![common::id::<SymbolOccurrenceId>("symbol.test.feedback")],
+            attributions: Vec::new(),
         })),
     };
     let adapter =
@@ -1016,6 +1018,7 @@ fn failed_graph_outcome_cannot_promote_its_payload_to_partial_evidence() {
         calls: test_calls.clone(),
         outcome: RetrievalPortOutcome::Completed(common::evidence(AffectedTestsResult {
             tests: Vec::new(),
+            attributions: Vec::new(),
         })),
     };
     let adapter =
