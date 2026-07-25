@@ -596,6 +596,9 @@ async fn finish_one(
     if family_state(&prepared.source)? != prepared.source_state {
         return Err(changed_during_snapshot(&prepared.source));
     }
+    if !matches!(prepared.mode, SnapshotMode::DirectImmutable) {
+        materialize_standalone_snapshot(&prepared.target).await?;
+    }
     // `identity_path` is the real file on disk; `attach_path` is the URI used
     // to ATTACH it. They are never interchangeable — the URI is percent-encoded
     // and carries query parameters, so passing it to the filesystem fails.
@@ -610,11 +613,12 @@ async fn finish_one(
                 None,
             )
         } else {
+            let uri = PathBuf::from(immutable_uri(&prepared.target)?);
             (
+                uri.clone(),
+                uri,
                 prepared.target.clone(),
-                PathBuf::from(read_only_uri(&prepared.target)?),
-                prepared.target.clone(),
-                OpenFlags::SQLITE_OPEN_READ_ONLY,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
                 Some(scratch),
             )
         };
@@ -636,6 +640,44 @@ async fn finish_one(
     };
     snapshot.validate_source()?;
     Ok(snapshot)
+}
+
+async fn materialize_standalone_snapshot(path: &Path) -> io::Result<()> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let standalone = with_suffix(&path, ".standalone");
+        match fs::remove_file(&standalone) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        let source = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(io::Error::other)?;
+        let mut destination = Connection::open_with_flags(
+            &standalone,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
+        )
+        .map_err(io::Error::other)?;
+        {
+            let backup = rusqlite::backup::Backup::new(&source, &mut destination)
+                .map_err(io::Error::other)?;
+            backup
+                .run_to_completion(128, Duration::from_millis(1), None)
+                .map_err(io::Error::other)?;
+        }
+        drop(destination);
+        drop(source);
+        for member in family_paths(&path) {
+            match fs::remove_file(member) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        fs::rename(standalone, path)
+    })
+    .await
+    .map_err(|error| io::Error::other(format!("snapshot materialization task failed: {error}")))?
 }
 
 fn changed_during_snapshot(source: &Path) -> io::Error {
@@ -906,6 +948,17 @@ mod tests {
                 .get::<String>(0)
                 .unwrap(),
             "wal-resident"
+        );
+        assert_eq!(
+            snapshot.attach_token().unwrap().verified_path().unwrap(),
+            snapshot.path()
+        );
+        assert!(
+            ["-wal", "-shm"].into_iter().all(|suffix| !with_suffix(
+                &snapshot.identity_path,
+                suffix
+            )
+            .exists())
         );
         assert_eq!(family_state(&path).unwrap(), before);
     }
