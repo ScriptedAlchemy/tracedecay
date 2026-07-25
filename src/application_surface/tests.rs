@@ -201,6 +201,68 @@ fn cli_and_mcp_resolve_every_operation_through_the_current_catalog_gate() {
 }
 
 #[test]
+fn git_reads_parse_the_existing_mcp_shapes_into_catalog_owned_requests() {
+    let fixtures = [
+        (
+            ApplicationSurfaceOperation::GitStatus,
+            serde_json::json!({}),
+            "capability.application.git.status",
+        ),
+        (
+            ApplicationSurfaceOperation::GitDiff,
+            serde_json::json!({
+                "scope": "commit_range",
+                "base": "a".repeat(40),
+                "head": "b".repeat(40),
+            }),
+            "capability.application.git.diff",
+        ),
+        (
+            ApplicationSurfaceOperation::GitHistory,
+            serde_json::json!({
+                "count": 1_001,
+                "path": "src/lib.rs",
+                "follow": true,
+                "first_parent": true,
+            }),
+            "capability.application.git.history",
+        ),
+        (
+            ApplicationSurfaceOperation::GitBlame,
+            serde_json::json!({"path": "src/lib.rs", "follow_renames": true}),
+            "capability.application.git.blame",
+        ),
+        (
+            ApplicationSurfaceOperation::GitHunks,
+            serde_json::json!({
+                "scope": "staged",
+                "preview_id": "preview.catalog-owned",
+                "snapshot_digest": format!("sha256:{}", "c".repeat(64)),
+            }),
+            "capability.application.git.hunks",
+        ),
+    ];
+
+    for (operation, args, capability) in fixtures {
+        assert_eq!(
+            ApplicationSurfaceOperation::from_tool_name(&format!(
+                "tracedecay_{}",
+                operation.as_str()
+            )),
+            Some(operation)
+        );
+        let ApplicationSurfaceRequest::GitRead(request) =
+            parse_application_surface_request(operation, args).expect("Git read request")
+        else {
+            panic!("Git reads must use the catalog-owned request")
+        };
+        assert_eq!(request.request.capability_id(), capability);
+        assert_eq!(request.max_entries, 1_000);
+        assert_eq!(request.max_bytes, 4 * 1024 * 1024);
+    }
+}
+
+#[test]
 fn context_scout_controls_and_claims_preserve_the_exact_address() {
     let address = crate::agents::context_scout_v2::ContextScoutAddressV1 {
         profile_id: [1; 16],

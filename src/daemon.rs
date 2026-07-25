@@ -1027,175 +1027,6 @@ fn code_index_search_executor(
     })
 }
 
-fn git_read_executor(
-    project_id: tracedecay_domain::ProjectId,
-    admission_provider: pr9_mcp_admission::Pr9McpReadAdmissionProviderV1,
-) -> crate::mcp::server::GitReadExecutor {
-    Arc::new(move |request| {
-        let project_id = project_id.clone();
-        let admission_provider = admission_provider.clone();
-        Box::pin(async move {
-            let scope = match project_open_owners::resolved_scope_for_project(
-                &request.project_root,
-                &project_id,
-            ) {
-                Ok(scope) => scope,
-                Err(_) => {
-                    return crate::application::git_reads::GitReadOutcomeV1::Unavailable {
-                        reason: crate::application::git_reads::GitReadUnavailableReasonV1::AuthorityAbsent,
-                    };
-                }
-            };
-            let admission = match admission_provider.admit_current(&scope) {
-                Ok(admission) => admission,
-                Err(_) => {
-                    return crate::application::git_reads::GitReadOutcomeV1::Unavailable {
-                        reason: crate::application::git_reads::GitReadUnavailableReasonV1::AuthorityAbsent,
-                    };
-                }
-            };
-            let authority_receipt = admission.search_authority();
-            if admission
-                .authorize_git_read(&scope, Some(&authority_receipt), &request.request)
-                .is_err()
-            {
-                return crate::application::git_reads::GitReadOutcomeV1::Unavailable {
-                    reason:
-                        crate::application::git_reads::GitReadUnavailableReasonV1::AuthorityAbsent,
-                };
-            }
-            let now_micros = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .ok()
-                .and_then(|duration| u64::try_from(duration.as_micros()).ok())
-                .unwrap_or(u64::MAX);
-            let deadline_micros = request
-                .deadline
-                .as_ref()
-                .and_then(|deadline| u64::try_from(deadline.expires_at.0).ok())
-                .unwrap_or_else(|| now_micros.saturating_add(30_000_000));
-            if deadline_micros <= now_micros {
-                return crate::application::git_reads::GitReadOutcomeV1::Unavailable {
-                    reason: crate::application::git_reads::GitReadUnavailableReasonV1::TimedOut,
-                };
-            }
-
-            let cancellation = request.cancellation;
-            let cancel =
-                Arc::new(AtomicBool::new(cancellation.as_ref().is_some_and(
-                    tracedecay_application::CancellationSignal::is_cancelled,
-                )));
-            let mut bounds = request.bounds;
-            let deadline_at =
-                Instant::now() + Duration::from_micros(deadline_micros.saturating_sub(now_micros));
-            bounds.deadline = Some(deadline_at);
-            bounds.cancel = Some(Arc::clone(&cancel));
-            let project_root = request.project_root;
-            let git_request = request.request;
-            let revalidation_request = git_request.clone();
-            let selected_scope = scope.clone();
-            let authority =
-                crate::application::git_reads::GitReadAuthorityV1::new(project_root.clone(), scope);
-            let mut execution = tokio::task::spawn_blocking(move || {
-                crate::application::git_reads::execute_git_read(
-                    Some(&authority),
-                    &selected_scope,
-                    &git_request,
-                    &bounds,
-                )
-            });
-            let outcome = loop {
-                tokio::select! {
-                    result = &mut execution => {
-                        break result.unwrap_or(
-                            crate::application::git_reads::GitReadOutcomeV1::Unavailable {
-                                reason: crate::application::git_reads::GitReadUnavailableReasonV1::ReadFailed,
-                            },
-                        );
-                    }
-                    () = tokio::time::sleep(Duration::from_millis(1)) => {
-                        if !admission_provider.route_is_registered() {
-                            cancel.store(true, Ordering::Release);
-                            return crate::application::git_reads::GitReadOutcomeV1::Unavailable {
-                                reason: crate::application::git_reads::GitReadUnavailableReasonV1::AuthorityAbsent,
-                            };
-                        }
-                        if cancellation
-                            .as_ref()
-                            .is_some_and(tracedecay_application::CancellationSignal::is_cancelled)
-                        {
-                            cancel.store(true, Ordering::Release);
-                            return crate::application::git_reads::GitReadOutcomeV1::Unavailable {
-                                reason: crate::application::git_reads::GitReadUnavailableReasonV1::Cancelled,
-                            };
-                        }
-                        if Instant::now() >= deadline_at {
-                            cancel.store(true, Ordering::Release);
-                            return crate::application::git_reads::GitReadOutcomeV1::Unavailable {
-                                reason: crate::application::git_reads::GitReadUnavailableReasonV1::TimedOut,
-                            };
-                        }
-                    }
-                }
-            };
-            if !admission_provider.route_is_registered() {
-                return crate::application::git_reads::GitReadOutcomeV1::Unavailable {
-                    reason:
-                        crate::application::git_reads::GitReadUnavailableReasonV1::AuthorityAbsent,
-                };
-            }
-            if cancellation
-                .as_ref()
-                .is_some_and(tracedecay_application::CancellationSignal::is_cancelled)
-            {
-                return crate::application::git_reads::GitReadOutcomeV1::Unavailable {
-                    reason: crate::application::git_reads::GitReadUnavailableReasonV1::Cancelled,
-                };
-            }
-            if Instant::now() >= deadline_at {
-                return crate::application::git_reads::GitReadOutcomeV1::Unavailable {
-                    reason: crate::application::git_reads::GitReadUnavailableReasonV1::TimedOut,
-                };
-            }
-            let current_scope = match project_open_owners::resolved_scope_for_project(
-                &project_root,
-                &project_id,
-            ) {
-                Ok(scope) => scope,
-                Err(_) => {
-                    return crate::application::git_reads::GitReadOutcomeV1::Unavailable {
-                        reason: crate::application::git_reads::GitReadUnavailableReasonV1::AuthorityAbsent,
-                    };
-                }
-            };
-            let terminal_admission = match admission_provider.admit_current(&current_scope) {
-                Ok(admission) => admission,
-                Err(_) => {
-                    return crate::application::git_reads::GitReadOutcomeV1::Unavailable {
-                        reason: crate::application::git_reads::GitReadUnavailableReasonV1::AuthorityAbsent,
-                    };
-                }
-            };
-            let terminal_authority = terminal_admission.search_authority();
-            if terminal_authority != authority_receipt
-                || terminal_admission
-                    .authorize_git_read(
-                        &current_scope,
-                        Some(&terminal_authority),
-                        &revalidation_request,
-                    )
-                    .is_err()
-            {
-                return crate::application::git_reads::GitReadOutcomeV1::Unavailable {
-                    reason:
-                        crate::application::git_reads::GitReadUnavailableReasonV1::AuthorityAbsent,
-                };
-            }
-            outcome
-        })
-    })
-}
-
 mod authority;
 mod branch_add;
 mod branch_admin;
@@ -3208,10 +3039,6 @@ impl DaemonEngine {
             code_search_project_id.clone(),
             Arc::clone(&route_registered),
         );
-        let git_read_executor = git_read_executor(
-            code_search_project_id.clone(),
-            read_admission_provider.clone(),
-        );
         let diagnostic_settings =
             crate::diagnostics::lsp::settings::load_settings(&cg.store_layout().dashboard_root)
                 .await
@@ -3271,7 +3098,6 @@ impl DaemonEngine {
         .with_code_index_hook_sink(code_index_hook_sink)
         .with_code_index_publication_identity(code_index_publication_identity)
         .with_code_index_search_executor(code_index_search_executor)
-        .with_git_read_executor(git_read_executor)
         .with_code_index_search_authority(code_search_authority)
         .with_retained_project_graph_resolver(retained_project_graph_resolver(
             self.store_administration.clone(),
@@ -4251,10 +4077,6 @@ async fn portable_project_server(
         code_search_project_id.clone(),
         Arc::clone(&route_registered),
     );
-    let git_read_executor = git_read_executor(
-        code_search_project_id.clone(),
-        read_admission_provider.clone(),
-    );
     let diagnostic_settings =
         crate::diagnostics::lsp::settings::load_settings(&cg.store_layout().dashboard_root)
             .await
@@ -4313,7 +4135,6 @@ async fn portable_project_server(
     .with_code_index_hook_sink(code_index_hook_sink)
     .with_code_index_publication_identity(code_index_publication_identity)
     .with_code_index_search_executor(code_index_search_executor)
-    .with_git_read_executor(git_read_executor)
     .with_code_index_search_authority(code_search_authority)
     .with_retained_project_graph_resolver(retained_project_graph_resolver(
         store_administration.clone(),
@@ -4971,7 +4792,12 @@ async fn execute_portable_daemon_invocation(
     let request_id = request.request_id.clone();
     let git_operation = matches!(
         request.operation(),
-        service::invocation::DaemonInvocationOperation::GitPreview
+        service::invocation::DaemonInvocationOperation::GitStatus
+            | service::invocation::DaemonInvocationOperation::GitDiff
+            | service::invocation::DaemonInvocationOperation::GitHistory
+            | service::invocation::DaemonInvocationOperation::GitBlame
+            | service::invocation::DaemonInvocationOperation::GitHunks
+            | service::invocation::DaemonInvocationOperation::GitPreview
             | service::invocation::DaemonInvocationOperation::GitApply
     );
     let mut project_path = None;
@@ -5317,7 +5143,12 @@ async fn execute_daemon_invocation(
     let request_id = request.request_id.clone();
     let git_operation = matches!(
         request.operation(),
-        service::invocation::DaemonInvocationOperation::GitPreview
+        service::invocation::DaemonInvocationOperation::GitStatus
+            | service::invocation::DaemonInvocationOperation::GitDiff
+            | service::invocation::DaemonInvocationOperation::GitHistory
+            | service::invocation::DaemonInvocationOperation::GitBlame
+            | service::invocation::DaemonInvocationOperation::GitHunks
+            | service::invocation::DaemonInvocationOperation::GitPreview
             | service::invocation::DaemonInvocationOperation::GitApply
     );
     let mut project_path = None;

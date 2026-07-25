@@ -254,23 +254,7 @@ impl Pr9McpReadAdmissionV1 {
 }
 
 fn git_read_capability(request: &crate::application::git_reads::GitReadRequestV1) -> &'static str {
-    match request {
-        crate::application::git_reads::GitReadRequestV1::Status => {
-            "capability.application.git.status"
-        }
-        crate::application::git_reads::GitReadRequestV1::Diff { .. } => {
-            "capability.application.git.diff"
-        }
-        crate::application::git_reads::GitReadRequestV1::History { .. } => {
-            "capability.application.git.history"
-        }
-        crate::application::git_reads::GitReadRequestV1::Blame { .. } => {
-            "capability.application.git.blame"
-        }
-        crate::application::git_reads::GitReadRequestV1::Hunks { .. } => {
-            "capability.application.git.hunks"
-        }
-    }
+    request.capability_id()
 }
 
 fn now_micros() -> UtcMicros {

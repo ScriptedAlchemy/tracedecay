@@ -2301,6 +2301,11 @@ fn production_owner_capabilities()
         "capability.application.primitive.health-read",
         "capability.application.primitive.storage-status",
         "capability.application.primitive.diagnostics-read",
+        "capability.application.git.status",
+        "capability.application.git.diff",
+        "capability.application.git.history",
+        "capability.application.git.blame",
+        "capability.application.git.hunks",
         "capability.application.source-edit.ast-grep-rewrite",
         "capability.application.source-edit.insert-at",
         "capability.application.source-edit.insert-at-symbol",
@@ -2359,6 +2364,26 @@ fn now_micros() -> UtcMicros {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn production_project_owner_grants_every_cataloged_git_read() {
+        let capabilities = production_owner_capabilities().expect("production capabilities");
+
+        for capability in [
+            "capability.application.git.status",
+            "capability.application.git.diff",
+            "capability.application.git.history",
+            "capability.application.git.blame",
+            "capability.application.git.hunks",
+        ] {
+            let capability = CapabilityId::new(capability).expect("Git read capability");
+            assert!(
+                capabilities.contains(&capability),
+                "{} must be granted to the daemon-owned project route",
+                capability.as_str()
+            );
+        }
+    }
 
     #[derive(Default)]
     struct RecordingHookCycleObservations(

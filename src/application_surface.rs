@@ -44,6 +44,7 @@ use tracedecay_domain::configuration::{
     ConfigurationRevisionId, ConfigurationValueV1, CredentialKindV1, CredentialReferenceId,
     ProtectedChange, RollbackModeV1, SettingKey,
 };
+use tracedecay_domain::git::{GitDiffScopeV1, GitOidV1};
 use tracedecay_domain::{
     ExactTechnicalTermKindV1, GitIndexCommitIntentV1, GitIndexPreviewId, GitIndexPreviewV1,
     GitIndexTransactionOperationV1, HunkRefV1, ManifestDigest, ProjectId,
@@ -89,6 +90,11 @@ static NEXT_HTTP_APPLICATION_REQUEST: AtomicU64 = AtomicU64::new(1);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApplicationSurfaceOperation {
+    GitStatus,
+    GitDiff,
+    GitHistory,
+    GitBlame,
+    GitHunks,
     GitPreview,
     GitApply,
     FeedbackDiagnostics,
@@ -144,7 +150,12 @@ pub enum ApplicationSurfaceOperation {
     ContextScoutFeedback,
 }
 
-pub const APPLICATION_SURFACE_OPERATIONS: [ApplicationSurfaceOperation; 53] = [
+pub const APPLICATION_SURFACE_OPERATIONS: [ApplicationSurfaceOperation; 58] = [
+    ApplicationSurfaceOperation::GitStatus,
+    ApplicationSurfaceOperation::GitDiff,
+    ApplicationSurfaceOperation::GitHistory,
+    ApplicationSurfaceOperation::GitBlame,
+    ApplicationSurfaceOperation::GitHunks,
     ApplicationSurfaceOperation::GitPreview,
     ApplicationSurfaceOperation::GitApply,
     ApplicationSurfaceOperation::FeedbackDiagnostics,
@@ -203,6 +214,11 @@ pub const APPLICATION_SURFACE_OPERATIONS: [ApplicationSurfaceOperation; 53] = [
 impl ApplicationSurfaceOperation {
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::GitStatus => "git_status",
+            Self::GitDiff => "git_diff",
+            Self::GitHistory => "git_history",
+            Self::GitBlame => "git_blame",
+            Self::GitHunks => "git_hunks",
             Self::GitPreview => "git_preview",
             Self::GitApply => "git_apply",
             Self::FeedbackDiagnostics => "feedback_diagnostics",
@@ -799,8 +815,17 @@ pub struct GitApplySurfaceRequest {
     pub idempotency_key: IdempotencyKey,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GitReadSurfaceRequest {
+    pub request: crate::application::git_reads::GitReadRequestV1,
+    pub max_entries: u32,
+    pub max_bytes: u64,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub enum ApplicationSurfaceRequest {
+    GitRead(GitReadSurfaceRequest),
     GitPreview(GitPreviewSurfaceRequest),
     GitApply(GitApplySurfaceRequest),
     Feedback(FeedbackSurfaceRequest),
@@ -1608,7 +1633,14 @@ impl ApplicationSurfaceRequest {
     fn matches(&self, operation: ApplicationSurfaceOperation) -> bool {
         matches!(
             (self, operation),
-            (Self::GitPreview(_), ApplicationSurfaceOperation::GitPreview)
+            (
+                Self::GitRead(_),
+                ApplicationSurfaceOperation::GitStatus
+                    | ApplicationSurfaceOperation::GitDiff
+                    | ApplicationSurfaceOperation::GitHistory
+                    | ApplicationSurfaceOperation::GitBlame
+                    | ApplicationSurfaceOperation::GitHunks
+            ) | (Self::GitPreview(_), ApplicationSurfaceOperation::GitPreview)
                 | (Self::GitApply(_), ApplicationSurfaceOperation::GitApply)
                 | (
                     Self::Feedback(_),
@@ -1809,11 +1841,145 @@ impl ApplicationSurfaceRequest {
     }
 }
 
+fn parse_git_read_surface_request(
+    operation: ApplicationSurfaceOperation,
+    value: Value,
+) -> Result<GitReadSurfaceRequest, ApplicationSurfaceAdapterError> {
+    let object = value
+        .as_object()
+        .ok_or(ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?;
+    let max_entries = object
+        .get("max_entries")
+        .and_then(Value::as_u64)
+        .unwrap_or(u64::from(crate::git_query::GIT_QUERY_DEFAULT_MAX_ENTRIES))
+        .clamp(
+            1,
+            u64::from(crate::git_query::GIT_QUERY_DEFAULT_MAX_ENTRIES),
+        ) as u32;
+    let max_bytes = object
+        .get("max_bytes")
+        .and_then(Value::as_u64)
+        .unwrap_or(crate::git_query::GIT_QUERY_DEFAULT_MAX_BYTES)
+        .clamp(1, crate::git_query::GIT_QUERY_DEFAULT_MAX_BYTES);
+    let string = |name: &str| {
+        object
+            .get(name)
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty() && value.trim() == *value)
+            .map(str::to_owned)
+            .ok_or(ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+    };
+    let scope = |allow_commit_range: bool| match object
+        .get("scope")
+        .and_then(Value::as_str)
+        .unwrap_or("working_tree")
+    {
+        "working_tree" => Ok(GitDiffScopeV1::WorkingTree),
+        "staged" => Ok(GitDiffScopeV1::Staged),
+        "commit_range" if allow_commit_range => Ok(GitDiffScopeV1::CommitRange {
+            base: GitOidV1::new(string("base")?)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?,
+            head: GitOidV1::new(string("head")?)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?,
+        }),
+        _ => Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+    };
+    let request = match operation {
+        ApplicationSurfaceOperation::GitStatus => {
+            crate::application::git_reads::GitReadRequestV1::Status
+        }
+        ApplicationSurfaceOperation::GitDiff => {
+            crate::application::git_reads::GitReadRequestV1::Diff {
+                scope: scope(true)?,
+            }
+        }
+        ApplicationSurfaceOperation::GitHistory => {
+            crate::application::git_reads::GitReadRequestV1::History {
+                max_count: object
+                    .get("count")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(100)
+                    .clamp(1, 1_000) as u32,
+                path: object
+                    .get("path")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                follow: object
+                    .get("follow")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                first_parent: object
+                    .get("first_parent")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            }
+        }
+        ApplicationSurfaceOperation::GitBlame => {
+            crate::application::git_reads::GitReadRequestV1::Blame {
+                path: string("path")?,
+                follow_renames: object
+                    .get("follow_renames")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            }
+        }
+        ApplicationSurfaceOperation::GitHunks => {
+            crate::application::git_reads::GitReadRequestV1::Hunks {
+                scope: scope(false)?,
+                preview_id: string("preview_id")?,
+                snapshot_digest: ManifestDigest::new(string("snapshot_digest")?)
+                    .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?,
+            }
+        }
+        _ => return Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
+    };
+    let allowed = match operation {
+        ApplicationSurfaceOperation::GitStatus => &["max_entries", "max_bytes"][..],
+        ApplicationSurfaceOperation::GitDiff => {
+            &["scope", "base", "head", "max_entries", "max_bytes"][..]
+        }
+        ApplicationSurfaceOperation::GitHistory => &[
+            "count",
+            "path",
+            "follow",
+            "first_parent",
+            "max_entries",
+            "max_bytes",
+        ][..],
+        ApplicationSurfaceOperation::GitBlame => {
+            &["path", "follow_renames", "max_entries", "max_bytes"][..]
+        }
+        ApplicationSurfaceOperation::GitHunks => &[
+            "scope",
+            "preview_id",
+            "snapshot_digest",
+            "max_entries",
+            "max_bytes",
+        ][..],
+        _ => &[],
+    };
+    if object.keys().any(|key| !allowed.contains(&key.as_str())) {
+        return Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest);
+    }
+    Ok(GitReadSurfaceRequest {
+        request,
+        max_entries,
+        max_bytes,
+    })
+}
+
 pub fn parse_application_surface_request(
     operation: ApplicationSurfaceOperation,
     value: Value,
 ) -> Result<ApplicationSurfaceRequest, ApplicationSurfaceAdapterError> {
     match operation {
+        ApplicationSurfaceOperation::GitStatus
+        | ApplicationSurfaceOperation::GitDiff
+        | ApplicationSurfaceOperation::GitHistory
+        | ApplicationSurfaceOperation::GitBlame
+        | ApplicationSurfaceOperation::GitHunks => {
+            parse_git_read_surface_request(operation, value).map(ApplicationSurfaceRequest::GitRead)
+        }
         ApplicationSurfaceOperation::GitPreview => serde_json::from_value(value)
             .map(ApplicationSurfaceRequest::GitPreview)
             .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest),
@@ -2083,6 +2249,16 @@ pub async fn execute_application_surface(
     let cancellation_context = cancellation.context();
     let request_deadline = deadline.clone();
     let request = match invocation.request {
+        ApplicationSurfaceRequest::GitRead(request) => {
+            crate::daemon::DaemonInvocationRequest::git_read(
+                request_id.as_str(),
+                operation,
+                request,
+                observed_at,
+                deadline,
+                cancellation_context,
+            )
+        }
         ApplicationSurfaceRequest::GitPreview(request) => {
             crate::daemon::DaemonInvocationRequest::git_preview(
                 request_id.as_str(),
@@ -2292,6 +2468,14 @@ pub async fn execute_application_surface(
         }
     };
     let result = match response.outcome {
+        crate::daemon::DaemonInvocationOutcome::GitRead { scope, result } => {
+            Ok(ApplicationEnvelope::evidence(
+                result_contract.clone(),
+                request_id.clone(),
+                scope,
+                result.into_application(),
+            ))
+        }
         crate::daemon::DaemonInvocationOutcome::GitPreview { scope, preview } => {
             Ok(ApplicationEnvelope::preview(
                 result_contract.clone(),
@@ -2391,7 +2575,12 @@ fn plan26_surface_operation(operation: ApplicationSurfaceOperation) -> Plan26Fee
             Plan26FeedbackOperationV1::PrimitiveAffectedTests
         }
         ApplicationSurfaceOperation::TestResults => Plan26FeedbackOperationV1::PrimitiveTestResults,
-        ApplicationSurfaceOperation::GitPreview
+        ApplicationSurfaceOperation::GitStatus
+        | ApplicationSurfaceOperation::GitDiff
+        | ApplicationSurfaceOperation::GitHistory
+        | ApplicationSurfaceOperation::GitBlame
+        | ApplicationSurfaceOperation::GitHunks
+        | ApplicationSurfaceOperation::GitPreview
         | ApplicationSurfaceOperation::GitApply
         | ApplicationSurfaceOperation::CodeExactOccurrence
         | ApplicationSurfaceOperation::CodePhraseSearch
