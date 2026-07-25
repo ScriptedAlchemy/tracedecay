@@ -987,11 +987,13 @@ async fn register_production_feedback_cycle(
     configuration: crate::config::PinnedRuntimeConfiguration,
     requester: ActorId,
     mounted_providers: Vec<MountedLspProvider>,
-) -> Result<Option<(
-    Arc<crate::application::feedback::Pr12FeedbackCycleRuntime>,
-    FeedbackScopeV1,
-    crate::application::feedback::Pr12FeedbackCycleLspInput,
-)>> {
+) -> Result<
+    Option<(
+        Arc<crate::application::feedback::Pr12FeedbackCycleRuntime>,
+        FeedbackScopeV1,
+        crate::application::feedback::Pr12FeedbackCycleLspInput,
+    )>,
+> {
     let configuration_digest = &configuration.snapshot.effective_behavior_digest;
     let policy_digest = canonical_sha256(&(
         "tracedecay.project-open.policy.v1",
