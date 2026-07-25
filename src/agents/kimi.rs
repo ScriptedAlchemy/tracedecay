@@ -217,11 +217,7 @@ impl AgentIntegration for KimiIntegration {
             component,
             HostBundleComponentV1::ContextMcp | HostBundleComponentV1::OperatorMcp
         ) {
-            return if mcp_current {
-                State::Current
-            } else {
-                State::Repairable
-            };
+            return State::Missing;
         }
         let events = manifest
             .get("hooks")

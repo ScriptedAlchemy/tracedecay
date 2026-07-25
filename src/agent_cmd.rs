@@ -447,7 +447,6 @@ impl CompatibilityAgentRegistrationDelegate {
                         component.manifest.component,
                         tracedecay::agents::host_bundle_v2::HostBundleComponentV1::Core
                             | tracedecay::agents::host_bundle_v2::HostBundleComponentV1::ContextMcp
-                            | tracedecay::agents::host_bundle_v2::HostBundleComponentV1::OperatorMcp
                     )
                 }))
         {
@@ -2613,6 +2612,10 @@ mod tests {
         );
         assert_eq!(std::fs::read(&paths.1).unwrap(), b"core-sentinel\n");
         assert_eq!(std::fs::read(&paths.2).unwrap(), b"agent-sentinel\n");
+        assert!(
+            !PathBuf::from(format!("{}.bak", paths.0.display())).exists(),
+            "component lifecycle must not leave a legacy config backup"
+        );
     }
 
     #[tokio::test]
@@ -2891,6 +2894,7 @@ mod tests {
             }
             assert_eq!(std::fs::read(&context_path).unwrap(), b"context-sentinel\n");
             assert_eq!(std::fs::read(&agent_path).unwrap(), b"agent-sentinel\n");
+            assert!(!PathBuf::from(format!("{}.bak", config_path.display())).exists());
         }
     }
 

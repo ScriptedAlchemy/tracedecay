@@ -445,24 +445,12 @@ fn component_assets(
     // `InstallContext::tracedecay_bin`) so both writers produce identical
     // bytes; the raw template still carries its unstamped version and
     // unresolved command placeholders.
-    if host == HostKindV1::KimiCode
-        && matches!(
-            component,
-            HostBundleComponentV1::Core
-                | HostBundleComponentV1::ContextMcp
-                | HostBundleComponentV1::OperatorMcp
-        )
-    {
+    if (host, component) == (HostKindV1::KimiCode, HostBundleComponentV1::Core) {
         let bin = super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
         let files = super::kimi::rendered_plugin_files(&bin)
             .map_err(|_| HostBundleRegistryError::Incompatible)?;
-        // Kimi's plugin manifest declares its own MCP server, so the MCP
-        // companion components address that manifest alone while Core keeps the
-        // full deploy set.
-        let manifest_only = component != HostBundleComponentV1::Core;
         return Ok(files
             .into_iter()
-            .filter(|(relative, _)| !manifest_only || *relative == ".kimi-plugin/plugin.json")
             .map(|(relative, body)| {
                 (
                     format!(".kimi-code/plugins/managed/tracedecay/{relative}"),
@@ -531,10 +519,7 @@ fn component_assets(
             ".config/opencode",
             super::plugin_bundle::opencode_agent_files(),
         ),
-        (
-            HostKindV1::OpenCode,
-            HostBundleComponentV1::ContextMcp | HostBundleComponentV1::OperatorMcp,
-        ) => (
+        (HostKindV1::OpenCode, HostBundleComponentV1::ContextMcp) => (
             ".config/opencode",
             vec![
                 (
@@ -623,11 +608,6 @@ mod tests {
                 HostKindV1::Hermes,
                 HostBundleComponentV1::Core,
                 ".hermes/plugins/tracedecay/plugin.yaml",
-            ),
-            (
-                HostKindV1::KimiCode,
-                HostBundleComponentV1::ContextMcp,
-                ".kimi-plugin/plugin.json",
             ),
             (
                 HostKindV1::OpenCode,

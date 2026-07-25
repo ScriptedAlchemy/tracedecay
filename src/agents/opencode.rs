@@ -164,15 +164,15 @@ impl AgentIntegration for OpenCodeIntegration {
                     .iter()
                     .all(|expected| args.iter().any(|arg| arg.as_str() == Some(expected)))
             });
-        if matches!(
-            component,
-            HostBundleComponentV1::ContextMcp | HostBundleComponentV1::OperatorMcp
-        ) {
+        if component == HostBundleComponentV1::ContextMcp {
             return if mcp_current {
                 State::Current
             } else {
                 State::Missing
             };
+        }
+        if component == HostBundleComponentV1::OperatorMcp {
+            return State::Missing;
         }
         let config_root = config_path.parent().unwrap_or(&ctx.home);
         if component == HostBundleComponentV1::Agent {
@@ -226,17 +226,13 @@ impl AgentIntegration for OpenCodeIntegration {
         use super::host_bundle_v2::HostBundleComponentV1;
 
         let core = components.contains(&HostBundleComponentV1::Core);
-        let mcp = components.iter().any(|component| {
-            matches!(
-                component,
-                HostBundleComponentV1::ContextMcp | HostBundleComponentV1::OperatorMcp
-            )
-        });
+        let mcp = components.contains(&HostBundleComponentV1::ContextMcp);
         install_registration_entries(
             &opencode_config_path(&ctx.home),
             &ctx.tracedecay_bin,
             mcp,
             core,
+            false,
         )?;
         if core {
             let prompt = opencode_prompt_path(&ctx.home);
@@ -258,13 +254,8 @@ impl AgentIntegration for OpenCodeIntegration {
         use super::host_bundle_v2::HostBundleComponentV1;
 
         let core = components.contains(&HostBundleComponentV1::Core);
-        let mcp = components.iter().any(|component| {
-            matches!(
-                component,
-                HostBundleComponentV1::ContextMcp | HostBundleComponentV1::OperatorMcp
-            )
-        });
-        remove_registration_entries(&opencode_config_path(&ctx.home), mcp, core)?;
+        let mcp = components.contains(&HostBundleComponentV1::ContextMcp);
+        remove_registration_entries(&opencode_config_path(&ctx.home), mcp, core, false)?;
         if core {
             let prompt = opencode_prompt_path(&ctx.home);
             super::remove_managed_skill_prompt_index(
@@ -432,7 +423,7 @@ fn remove_opencode_plugin(path: &Path) -> Result<()> {
 /// error. Uses strict JSON parsing so an existing file with invalid syntax
 /// is never silently replaced with an empty object.
 fn install_mcp_server(config_path: &Path, tracedecay_bin: &str) -> Result<()> {
-    install_registration_entries(config_path, tracedecay_bin, true, true)
+    install_registration_entries(config_path, tracedecay_bin, true, true, true)
 }
 
 fn install_registration_entries(
@@ -440,11 +431,15 @@ fn install_registration_entries(
     tracedecay_bin: &str,
     install_mcp: bool,
     install_lsp: bool,
+    preserve_backup: bool,
 ) -> Result<()> {
     if !install_mcp && !install_lsp {
         return Ok(());
     }
-    let backup = backup_config_file(config_path)?;
+    let backup = preserve_backup
+        .then(|| backup_config_file(config_path))
+        .transpose()?
+        .flatten();
     let mut config = match load_json_file_strict(config_path) {
         Ok(v) => v,
         Err(e) => {
@@ -540,7 +535,7 @@ fn install_prompt_rules(prompt_path: &Path) -> Result<()> {
 
 /// Remove MCP server from opencode.json.
 fn uninstall_mcp_server(config_path: &Path) {
-    if let Err(error) = remove_registration_entries(config_path, true, true) {
+    if let Err(error) = remove_registration_entries(config_path, true, true, true) {
         eprintln!("  Could not remove OpenCode registration: {error}");
     }
 }
@@ -549,6 +544,7 @@ fn remove_registration_entries(
     config_path: &Path,
     remove_mcp: bool,
     remove_lsp: bool,
+    preserve_backup: bool,
 ) -> Result<()> {
     if !config_path.exists() {
         return Ok(());
@@ -587,7 +583,10 @@ fn remove_registration_entries(
         );
         return Ok(());
     }
-    let backup = backup_config_file(config_path)?;
+    let backup = preserve_backup
+        .then(|| backup_config_file(config_path))
+        .transpose()?
+        .flatten();
     let is_empty = config.as_object().is_some_and(serde_json::Map::is_empty);
     if is_empty {
         std::fs::remove_file(config_path).map_err(|error| TraceDecayError::Config {
