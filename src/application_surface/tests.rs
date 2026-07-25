@@ -6,16 +6,17 @@ use axum::http::{Request, StatusCode};
 use serde_json::{Value, json};
 use tower::ServiceExt;
 use tracedecay_application::{
-    CancellationContext, CancellationSignal, CancellationState, CapabilityGrantId,
-    CapabilityGrantSnapshot, Deadline, DisclosureClass, OperationBudgetUsage, OperationReceipt,
-    PageRequest, RequestContext, RequestId, ResolvedScope, StreamEvent,
+    ApplicationProblem, ApplicationProblemEnvelope, CancellationContext, CancellationSignal,
+    CancellationState, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
+    OperationBudgetUsage, OperationReceipt, PageRequest, RequestContext, RequestId, ResolvedScope,
+    ResultContractRef, SafeDiagnostic, StreamEvent,
 };
 use tracedecay_domain::configuration::ConfigurationRevisionId;
 use tracedecay_domain::{
     ActorId, ManifestDigest, ProjectId, QueryNormalizationRevision, RefId, RepositoryId,
     SanitizerRevision, UtcMicros, WorktreeId,
 };
-use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
+use tracedecay_tool_catalog::{BindingId, CapabilityId, SchemaId, UseCaseId};
 
 use super::{
     APPLICATION_PROTOCOL_REVISION, APPLICATION_SURFACE_OPERATIONS, ApplicationSurfaceAdapterError,
@@ -161,7 +162,7 @@ fn every_configuration_operation_enters_the_canonical_dispatch_catalog() {
 }
 
 #[test]
-fn cli_and_mcp_resolve_every_operation_through_the_current_catalog_gate() {
+fn cli_mcp_and_http_resolve_every_operation_through_the_current_catalog_gate() {
     let catalog = super::application_surface_catalog().expect("application catalog");
     let resolver = crate::daemon_client::CatalogBindingResolver::new(&catalog);
     let profile_id = tracedecay_tool_catalog::ProfileId::new(
@@ -175,6 +176,7 @@ fn cli_and_mcp_resolve_every_operation_through_the_current_catalog_gate() {
         for (surface, surface_name) in [
             (tracedecay_tool_catalog::BindingSurface::Cli, "cli"),
             (tracedecay_tool_catalog::BindingSurface::Mcp, "mcp"),
+            (tracedecay_tool_catalog::BindingSurface::Http, "http"),
         ] {
             let binding = crate::daemon_client::BindingResolver::resolve_binding(
                 &resolver,
@@ -339,6 +341,105 @@ fn git_read_parser_rejects_values_outside_the_catalog_schema() {
             parse_application_surface_request(operation, args),
             Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
         ));
+    }
+}
+
+#[tokio::test]
+async fn http_git_read_routes_preserve_the_canonical_typed_request() {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let owner_seen = Arc::clone(&seen);
+    let app = tracedecay_api::application_router(
+        move |request: tracedecay_api::HttpApplicationRequest| {
+            owner_seen.lock().expect("capture Git read").push((
+                request.operation,
+                request.request_id.clone(),
+                request.page.clone(),
+                request.cancellation.clone(),
+                request.body.clone(),
+            ));
+            async move {
+                tracedecay_api::CanonicalInvocationResult::new(
+                    BindingId::new(format!("binding.http.{}.v1", request.operation.as_str()))
+                        .expect("binding"),
+                    Err(ApplicationProblemEnvelope::new(
+                        ResultContractRef::new(
+                            SchemaId::new("schema.application.git.fixture.result").expect("schema"),
+                            1,
+                        )
+                        .expect("contract"),
+                        request.request_id,
+                        ApplicationProblem::unavailable(
+                            SafeDiagnostic::new(
+                                "git.fixture.unavailable",
+                                "Fixture Git owner is unavailable",
+                            )
+                            .expect("diagnostic"),
+                        ),
+                    )),
+                )
+            }
+        },
+    );
+
+    for (index, (route, operation)) in [
+        (
+            "/git/status?page_size=7",
+            tracedecay_api::HttpApplicationOperation::GitStatus,
+        ),
+        (
+            "/git/diff?page_size=7",
+            tracedecay_api::HttpApplicationOperation::GitDiff,
+        ),
+        (
+            "/git/history?page_size=7",
+            tracedecay_api::HttpApplicationOperation::GitHistory,
+        ),
+        (
+            "/git/blame?page_size=7",
+            tracedecay_api::HttpApplicationOperation::GitBlame,
+        ),
+        (
+            "/git/hunks?page_size=7",
+            tracedecay_api::HttpApplicationOperation::GitHunks,
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let request_id = RequestId::new(format!("request.http.git-read.{index}")).expect("request");
+        let cancellation =
+            CancellationSignal::active(format!("cancellation.http.git-read.{index}"))
+                .expect("cancellation");
+        let deadline = Deadline::new(UtcMicros(9_999_999)).expect("deadline");
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post(route)
+                    .header("content-type", "application/json")
+                    .extension(request_id.clone())
+                    .extension(tracedecay_api::HttpApplicationControls {
+                        deadline,
+                        cancellation: cancellation.clone(),
+                    })
+                    .body(Body::from("{}"))
+                    .expect("HTTP request"),
+            )
+            .await
+            .expect("HTTP response");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let captured = seen.lock().expect("captured Git reads");
+        let (actual_operation, actual_request_id, page, actual_cancellation, body) =
+            captured.last().expect("one captured Git read");
+        assert_eq!(*actual_operation, operation);
+        assert_eq!(actual_request_id, &request_id);
+        assert_eq!(page.page_size, 7);
+        assert!(page.cursor.is_none());
+        assert_eq!(
+            actual_cancellation.context().token_id,
+            cancellation.context().token_id
+        );
+        assert_eq!(body, &serde_json::json!({}));
     }
 }
 
