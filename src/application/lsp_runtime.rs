@@ -2607,17 +2607,19 @@ mod context_expansion_tests {
 
 #[cfg(test)]
 mod projection_tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use super::{
-        LspFeedbackProjectionScope, bind_test_run_document_content, feedback_content_is_current,
-        finding_item, test_run_projection,
+        LspFeedbackProjectionScope, ProjectionChangeQueue, bind_test_run_document_content,
+        feedback_content_is_current, finding_item, test_run_projection,
     };
     use crate::application::operation_stream::{
         ManagedTestRunResult, ManagedTestRunSnapshot, OperationId,
     };
     use crate::daemon::lsp_gateway::{
-        AdmittedRoot, ContextCoverage, ContextProducerState, ContextProjectionOutcome,
+        AdmittedRoot, ContextCoverage, ContextFreshness, ContextProducerState,
+        ContextProjectionChange, ContextProjectionKind, ContextProjectionOutcome,
+        ContextProjectionRegistration, TRACEDECAY_CONTEXT_REVISION,
     };
     use tracedecay_application::{Deadline, OperationTermination, RequestId};
     use tracedecay_domain::feedback::{
@@ -2653,6 +2655,88 @@ mod projection_tests {
             document_content_digest: None,
             generation: 42,
         }
+    }
+
+    fn change(kind: ContextProjectionKind, generation: u64) -> ContextProjectionChange {
+        ContextProjectionChange {
+            root_uri: "file:///root".to_owned(),
+            document_uri: Some("file:///root/src/lib.rs".to_owned()),
+            kind,
+            generation,
+            identity: projection_scope().projection_identity(),
+            freshness: ContextFreshness::Current,
+            producer_state: ContextProducerState::Complete,
+            coverage: ContextCoverage::Complete,
+            revision: TRACEDECAY_CONTEXT_REVISION,
+            retrieval_handle: None,
+        }
+    }
+
+    #[test]
+    fn projection_changes_require_negotiation_coalesce_and_preserve_kind_order() {
+        let root = AdmittedRoot::new("file:///root");
+        let queue = ProjectionChangeQueue::default();
+        queue.offer(
+            "before-subscription".to_owned(),
+            change(ContextProjectionKind::diagnostics(), 1),
+        );
+        assert!(queue.drain(&root).is_empty());
+
+        let subscriptions = [
+            ContextProjectionKind::diagnostics(),
+            ContextProjectionKind::post_edit_impact(),
+            ContextProjectionKind::affected_tests(),
+            ContextProjectionKind::test_run_results(),
+        ]
+        .into_iter()
+        .map(|kind| ContextProjectionRegistration {
+            kind,
+            revision: TRACEDECAY_CONTEXT_REVISION,
+        })
+        .collect::<BTreeSet<_>>();
+        queue.activate(&root, &subscriptions);
+        queue.offer(
+            "diagnostics-1".to_owned(),
+            change(ContextProjectionKind::diagnostics(), 1),
+        );
+        queue.offer(
+            "diagnostics-2".to_owned(),
+            change(ContextProjectionKind::diagnostics(), 2),
+        );
+        for (revision, kind) in [
+            ("test-1", ContextProjectionKind::test_run_results()),
+            ("affected-1", ContextProjectionKind::affected_tests()),
+            ("impact-1", ContextProjectionKind::post_edit_impact()),
+        ] {
+            queue.offer(revision.to_owned(), change(kind, 1));
+        }
+
+        let changes = queue.drain(&root);
+        assert_eq!(
+            changes
+                .iter()
+                .map(|change| change.kind.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "diagnostics",
+                "postEditImpact",
+                "affectedTests",
+                "testRunResults"
+            ]
+        );
+        assert_eq!(changes[0].generation, 2);
+        assert!(queue.drain(&root).is_empty());
+
+        queue.offer(
+            "diagnostics-2".to_owned(),
+            change(ContextProjectionKind::diagnostics(), 2),
+        );
+        assert!(queue.drain(&root).is_empty());
+        queue.offer(
+            "diagnostics-3".to_owned(),
+            change(ContextProjectionKind::diagnostics(), 3),
+        );
+        assert_eq!(queue.drain(&root).len(), 1);
     }
 
     #[test]
