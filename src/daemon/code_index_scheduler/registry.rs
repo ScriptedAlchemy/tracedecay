@@ -119,6 +119,12 @@ impl CodeIndexSchedulerRegistryV1 {
             }
             opened.replace_semantic_schedule_hook(Some(hook));
         }
+        // Project-open completion is the readiness boundary for the canonical
+        // PR9 fallback. Reconcile before publishing the mounted scheduler so
+        // the authority mounted immediately afterwards can bind one complete,
+        // current generation instead of losing a race with the background
+        // worker and remaining unavailable until a later edit.
+        opened.reconcile_now()?;
         let repository_id = opened.identity().repository_id().clone();
         let worktree_id = opened.identity().worktree_id().clone();
         let scheduler = Arc::new(Mutex::new(opened));
@@ -184,7 +190,6 @@ impl CodeIndexSchedulerRegistryV1 {
                 task,
             },
         );
-        wake.notify_one();
         Ok(true)
     }
 

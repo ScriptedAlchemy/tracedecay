@@ -507,14 +507,6 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
     scope_prefix: Option<&str>,
     options: ToolCallRegistryOptions<'_>,
 ) -> Result<ToolResult> {
-    debug_assert!(
-        !tool_name.is_empty(),
-        "handle_tool_call called with empty tool_name"
-    );
-    debug_assert!(
-        tool_name.starts_with("tracedecay_"),
-        "tool_name must start with 'tracedecay_' prefix"
-    );
     for removed in ["hermes_home"] {
         if args.get(removed).is_some() {
             return Err(TraceDecayError::Config {

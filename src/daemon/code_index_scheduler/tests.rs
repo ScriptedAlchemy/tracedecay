@@ -613,6 +613,13 @@ async fn daemon_owned_per_worktree_scheduler_reconciles_saved_edits() {
             .await
             .expect("mount daemon-owned scheduler")
     );
+    assert!(
+        registry
+            .latest_generation_id(fixture.path())
+            .await
+            .is_some(),
+        "mount completion must publish the initial PR9 fallback generation"
+    );
 
     let first = tokio::time::timeout(Duration::from_secs(3), async {
         loop {
