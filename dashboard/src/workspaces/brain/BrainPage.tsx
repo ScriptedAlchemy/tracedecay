@@ -202,23 +202,34 @@ function SynapseMap({
 
   return (
     <>
+      {/* One HUD column rather than two free-floating corners. From `md` up it
+        * overlays the field, anchored to the top and grown downward, so both
+        * strips stay ON the lit canvas -- a bottom-anchored panel measured
+        * from this column instead sat over the caption BELOW the field on a
+        * narrow viewport, which read as chrome spilled onto the page. Below
+        * `md` the overlay itself becomes the problem: on a narrow canvas the
+        * HUD's own content is taller than the field it floats on, so an
+        * absolutely-positioned strip covers the whole canvas and the network
+        * underneath is reduced to a blurred glow behind opaque panels. There
+        * the HUD returns to normal document flow, stacked ABOVE the canvas
+        * (hence rendered first here -- position:absolute takes it out of
+        * flow at `md` and up, so the source order only matters below that),
+        * and the canvas gets a guaranteed minimum height so it always has a
+        * real field to draw the network on regardless of how tall the HUD's
+        * own content is. */}
+      <div className="pointer-events-none static mb-2 flex flex-col items-start gap-2 md:absolute md:inset-x-6 md:top-6 md:mb-0">
+        <InstrumentReadout items={counts} />
+        <SignalPanel pulses={pulses} sseState={sseState} lastEventAt={lastEventAt} />
+      </div>
       <GraphCanvas
         nodes={nodes}
         edges={edges}
         fill
+        canvasClassName="min-h-[55vh] md:min-h-0"
         activation={activationRef.current}
         selectedId={scope.kind === 'project' ? scope.projectId : null}
         onSelect={handleSelect}
       />
-      {/* One HUD column rather than two free-floating corners. Anchored to the
-        * top of the field and grown downward, both strips stay ON the lit
-        * canvas at every width — a bottom-anchored panel measured from this
-        * column instead sat over the caption BELOW the field on a narrow
-        * viewport, which read as chrome spilled onto the page. */}
-      <div className="pointer-events-none absolute inset-x-6 top-6 flex flex-col items-start gap-2">
-        <InstrumentReadout items={counts} />
-        <SignalPanel pulses={pulses} sseState={sseState} lastEventAt={lastEventAt} />
-      </div>
     </>
   );
 }
