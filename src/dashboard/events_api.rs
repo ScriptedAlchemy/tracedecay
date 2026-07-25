@@ -265,6 +265,7 @@ struct EventStreamState {
     heartbeat_revision: u64,
     registry_revision: u64,
     storage_revision: u64,
+    activity_dropped_events: u64,
     last_registry_digest: Option<String>,
     last_store_total_bytes: Option<u64>,
     /// Canonical project root → registered project id, refreshed for free from
@@ -280,6 +281,7 @@ impl EventStreamState {
             heartbeat_revision: 0,
             registry_revision: 0,
             storage_revision: 0,
+            activity_dropped_events: 0,
             last_registry_digest: None,
             last_store_total_bytes: None,
             registry_roots: HashMap::new(),
@@ -410,11 +412,13 @@ impl EventStreamState {
         let record = bucket.last_record.as_ref()?;
         let project_id = self.resolve_project_id(&key.project_root, bucket.project_id);
         let dropped_events = record.dropped_events;
-        let coverage = if dropped_events == 0 {
+        let newly_dropped = dropped_events.saturating_sub(self.activity_dropped_events);
+        self.activity_dropped_events = self.activity_dropped_events.max(dropped_events);
+        let coverage = if newly_dropped == 0 {
             DashboardCoverageV1::complete(bucket.count, "activity_events")
         } else {
             DashboardCoverageV1::partial(
-                bucket.count.saturating_add(dropped_events),
+                bucket.count.saturating_add(newly_dropped),
                 bucket.count,
                 "activity_events",
                 vec!["retention_eviction".to_string()],
@@ -454,12 +458,17 @@ impl EventStreamState {
         pending: &mut std::collections::BTreeMap<ActivityBucketKeyV1, ActivityBucketV1>,
         base: &DashboardScopeV1,
     ) -> Vec<DashboardEventV1> {
-        let mut events: Vec<_> = std::mem::take(pending)
+        let mut buckets: Vec<_> = std::mem::take(pending).into_iter().collect();
+        buckets.sort_by_key(|(_, bucket)| {
+            bucket
+                .last_record
+                .as_ref()
+                .map_or(0, |record| record.producer_sequence)
+        });
+        buckets
             .into_iter()
             .filter_map(|(key, bucket)| self.activity_event(&key, bucket, base))
-            .collect();
-        events.sort_by_key(|event| event.producer_sequence.unwrap_or(0));
-        events
+            .collect()
     }
 
     /// Poll all real sources against `state`, appending any change events.
@@ -819,6 +828,51 @@ mod tests {
         assert_eq!(first.stream, STREAM_HEARTBEAT);
         assert_eq!(first.kind, DashboardEventKindV1::Heartbeat);
         assert_eq!(first.run_id, "run-test");
+    }
+
+    #[test]
+    fn activity_coverage_counts_only_new_drops_for_each_bucket() {
+        let mut state = EventStreamState::new("run-test".to_string());
+        let scope = scope();
+        let key = ActivityBucketKeyV1 {
+            family: ActivityFamilyV1::Hook,
+            project_root: PathBuf::from("/repo/alpha"),
+        };
+        let pulse = ActivityPulseV1 {
+            family: ActivityFamilyV1::Hook,
+            project_root: key.project_root.clone(),
+            project_id: Some("proj-alpha".into()),
+            units: 1,
+            detail: None,
+        };
+        let bucket = |sequence, pulse| ActivityBucketV1 {
+            count: 1,
+            units: 1,
+            project_id: Some("proj-alpha".into()),
+            detail: None,
+            last_record: Some(ActivityRecordV1 {
+                schema_version: 1,
+                run_id: "lane-1".into(),
+                producer_sequence: sequence,
+                observation_time_micros: sequence as i64,
+                retained_from_sequence: 3,
+                dropped_events: 2,
+                pulse,
+            }),
+        };
+
+        let first = state
+            .activity_event(&key, bucket(3, pulse.clone()), &scope)
+            .expect("first activity");
+        assert_eq!(first.coverage.eligible, Some(3));
+        assert_eq!(first.coverage.examined, Some(1));
+
+        let second = state
+            .activity_event(&key, bucket(4, pulse), &scope)
+            .expect("second activity");
+        assert!(second.coverage.is_complete());
+        assert_eq!(second.coverage.eligible, Some(1));
+        assert_eq!(second.coverage.examined, Some(1));
     }
 
     #[test]

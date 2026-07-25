@@ -833,6 +833,8 @@ fn router_with_active_application(
         .route("/api/doctor/{*tail}", any(active_api_gateway))
         .route("/api/storage/{*tail}", any(active_api_gateway))
         .route("/api/code-index/{*tail}", any(active_api_gateway))
+        .route("/api/observatory", any(active_api_gateway))
+        .route("/api/costs", any(active_api_gateway))
         .route("/api/events", any(active_api_gateway))
         // SPA fallback: unmatched non-API paths are client routes
         // (/brain?scope=… deep links) and receive the embedded app index.
