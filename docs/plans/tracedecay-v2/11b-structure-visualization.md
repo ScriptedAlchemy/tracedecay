@@ -150,3 +150,25 @@ Consequences:
 - Performance boundary: spring simulation over the ~80-250-node subgraph cap is
   cheap; the cortex (aggregated regions) simulates dozens of bodies, not
   thousands.
+
+## Rendering strategy (owner cleared full-custom, 2026-07-25)
+
+Library constraints must not cap the vision — custom rendering (D3-style
+hand-rolled canvas/WebGL, game-engine techniques, physics engine) is approved
+where a library falls short.
+
+Decision frame:
+- Shipped PR14 surfaces stay on Sigma — they work, they're gated, no churn.
+- The topography/trace surfaces target a CUSTOM renderer from the start:
+  - Physics: hand-rolled Verlet/spring integrator first (≤250-node subgraph cap
+    makes this trivial, zero deps, exact control of the weight/tension feel).
+    Escalate to a wasm physics engine (e.g. Rapier) only if collision/joint
+    needs outgrow it — not for springs.
+  - Drawing: Canvas2D first (terrain contours, membranes, bundled flows are
+    path-heavy 2D work where Canvas2D + offscreen layering is simpler and
+    theme-safe); WebGL (regl/pixi-class or hand-rolled) when node counts or
+    glow/displacement effects demand it. Three.js only if we go literal 3D
+    relief — undecided, prototype will tell.
+- Keep the honesty invariants renderer-independent: a pure layout/simulation
+  module (like brain/field.ts) computes positions/forces from measurements;
+  the renderer only draws. Tests hit the pure module.
