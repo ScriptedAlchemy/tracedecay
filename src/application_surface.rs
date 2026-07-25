@@ -1893,8 +1893,12 @@ fn parse_git_read_surface_request(
             .ok_or(ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?,
     };
     let scope = |allow_commit_range: bool| match scope_name {
-        "working_tree" => Ok(GitDiffScopeV1::WorkingTree),
-        "staged" => Ok(GitDiffScopeV1::Staged),
+        "working_tree" if !object.contains_key("base") && !object.contains_key("head") => {
+            Ok(GitDiffScopeV1::WorkingTree)
+        }
+        "staged" if !object.contains_key("base") && !object.contains_key("head") => {
+            Ok(GitDiffScopeV1::Staged)
+        }
         "commit_range" if allow_commit_range => Ok(GitDiffScopeV1::CommitRange {
             base: GitOidV1::new(string("base")?)
                 .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)?,

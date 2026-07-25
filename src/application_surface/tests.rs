@@ -277,6 +277,10 @@ fn git_read_parser_rejects_values_outside_the_catalog_schema() {
             ApplicationSurfaceOperation::GitHistory,
             serde_json::json!({"count": 1_001}),
         ),
+        (
+            ApplicationSurfaceOperation::GitDiff,
+            serde_json::json!({"scope": "working_tree", "base": "a".repeat(40)}),
+        ),
     ] {
         assert!(matches!(
             parse_application_surface_request(operation, args),

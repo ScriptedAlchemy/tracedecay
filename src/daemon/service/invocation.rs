@@ -4997,13 +4997,21 @@ fn git_read_evidence_packet(
             message: "The Git read result could not be encoded".to_owned(),
         })
     })?;
+    let evidence_digest = stable_digest(&(
+        "tracedecay.native-git-read-evidence.v1",
+        request,
+        &current.scope,
+        &current.configuration_digest,
+        &current.catalog_digest,
+        &payload,
+    ))?;
     Ok(EvidencePacket {
         temporal: TemporalState::current(execution.ended_at),
         authority,
         evidence_authorities: vec![EvidenceAuthority {
             evidence_id: EvidenceIdentity::new(format!(
                 "evidence.git-read.{}",
-                grant_digest.as_str().trim_start_matches("sha256:")
+                evidence_digest.as_str().trim_start_matches("sha256:")
             ))
             .map_err(|_| invalid_git_request())?,
             source_kind: "native_git".to_owned(),
@@ -6923,6 +6931,7 @@ mod tests {
             packet.evidence_authorities.as_slice(),
             [EvidenceAuthority { source_kind, .. }] if source_kind == "native_git"
         ));
+        let complete_evidence_id = packet.evidence_authorities[0].evidence_id.clone();
 
         let partial = git_read_evidence_packet(
             "request.git-read-packet-partial",
@@ -6975,6 +6984,11 @@ mod tests {
                 }
             ]
         ));
+        assert_ne!(
+            partial.evidence_authorities[0].evidence_id,
+            complete_evidence_id,
+            "native Git evidence identity must bind the captured result"
+        );
     }
 
     #[derive(Default)]
