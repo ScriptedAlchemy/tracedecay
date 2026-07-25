@@ -48,6 +48,14 @@ For other git branches without switching checkout — `tracedecay_branch_list` /
 `tracedecay_branch_search` / `tracedecay_branch_diff` — read
 [references/other-branches.md](references/other-branches.md).
 
+For daemon-admitted, generation-bound code intelligence, use the production
+`tracedecay_code_symbol_search`, `tracedecay_code_phrase_search`,
+`tracedecay_code_signature_search`, and `tracedecay_code_exact_occurrence`
+reads. Traverse only evidenced relationships with `tracedecay_code_callers`,
+`tracedecay_code_callees`, `tracedecay_code_implementations`, and
+`tracedecay_code_type_hierarchy`; an unavailable generation stays unavailable
+instead of falling back to a different project or worktree.
+
 ## Rules
 
 - One well-formed `tracedecay_context` call beats many narrow searches. Pass
