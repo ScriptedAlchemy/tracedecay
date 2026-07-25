@@ -7028,7 +7028,11 @@ mod tests {
             async move { release.notified().await }
         };
         let runtime = BoundedPr13HookOrchestratorV1::new(1, work).unwrap();
-        let request = Pr13HookOrchestrationRequestV1::from_envelope(
+        let completions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_completions = Arc::clone(&completions);
+        let completed = Arc::new(tokio::sync::Notify::new());
+        let completion_notification = Arc::clone(&completed);
+        let mut request = Pr13HookOrchestrationRequestV1::from_envelope(
             hook_envelope(HookEventV2::SavedEdit {
                 file_id: [7; 16],
                 changed_range_count: 1,
@@ -7039,6 +7043,10 @@ mod tests {
             false,
         )
         .unwrap();
+        request.completion = Some(Arc::new(move || {
+            observed_completions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            completion_notification.notify_one();
+        }));
 
         assert_eq!(
             runtime.admit(request.clone()),
@@ -7048,7 +7056,16 @@ mod tests {
             runtime.admit(request),
             Pr13HookOrchestrationAdmissionV1::Backpressured
         );
+        assert_eq!(completions.load(std::sync::atomic::Ordering::Relaxed), 0);
         release.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(1), completed.notified())
+            .await
+            .expect("producer work completion");
+        assert_eq!(
+            completions.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "only completed producer work may clear the durable outbox"
+        );
     }
 
     #[tokio::test]
