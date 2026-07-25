@@ -151,7 +151,7 @@ pub enum ApplicationSurfaceOperation {
     ContextScoutFeedback,
 }
 
-pub const APPLICATION_SURFACE_OPERATIONS: [ApplicationSurfaceOperation; 58] = [
+pub const APPLICATION_SURFACE_OPERATIONS: [ApplicationSurfaceOperation; 59] = [
     ApplicationSurfaceOperation::GitStatus,
     ApplicationSurfaceOperation::GitDiff,
     ApplicationSurfaceOperation::GitHistory,
