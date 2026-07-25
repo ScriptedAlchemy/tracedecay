@@ -4421,24 +4421,39 @@ async fn serve_broker_socket_client(
     }
     if let Some(invocation) = parse_daemon_invocation_request(&first_request_line) {
         let mut invocation = invocation;
-        loop {
-            let response = match invocation {
-                Ok(request) => execute_daemon_invocation(&engine, &handshake, request).await,
-                Err(response) => response,
-            };
-            write_daemon_invocation_response(&mut transport, &response).await?;
-            let next_line = tokio::select! {
-                result = read_line_handling_wire_oversized(&mut transport) => result?,
-                () = engine.lifecycle.wait_for_draining() => return Ok(()),
-            };
-            let Some(next_line) = next_line else {
-                return Ok(());
-            };
-            let Some(next_invocation) = parse_daemon_invocation_request(&next_line) else {
-                return Ok(());
-            };
-            invocation = next_invocation;
+        let mut owned_lsp_sessions = HashMap::new();
+        let result = async {
+            loop {
+                let detached_session = invocation
+                    .as_ref()
+                    .ok()
+                    .and_then(invocation_detached_lsp_session);
+                let response = match invocation {
+                    Ok(request) => execute_daemon_invocation(&engine, &handshake, request).await,
+                    Err(response) => response,
+                };
+                update_connection_lsp_sessions(
+                    &mut owned_lsp_sessions,
+                    detached_session.as_ref(),
+                    &response,
+                );
+                write_daemon_invocation_response(&mut transport, &response).await?;
+                let next_line = tokio::select! {
+                    result = read_line_handling_wire_oversized(&mut transport) => result?,
+                    () = engine.lifecycle.wait_for_draining() => return Ok(()),
+                };
+                let Some(next_line) = next_line else {
+                    return Ok(());
+                };
+                let Some(next_invocation) = parse_daemon_invocation_request(&next_line) else {
+                    return Ok(());
+                };
+                invocation = next_invocation;
+            }
         }
+        .await;
+        cleanup_connection_lsp_sessions(&engine.invocation, owned_lsp_sessions).await;
+        return result;
     }
     if let Ok(request) = serde_json::from_str::<JsonRpcRequest>(first_request_line.trim()) {
         let project_node_count =
@@ -4715,37 +4730,52 @@ async fn serve_windows_broker_client_with_class_and_invocation(
     }
     if let Some(invocation_request) = parse_daemon_invocation_request(&first_request_line) {
         let mut invocation_request = invocation_request;
-        loop {
-            let response = match invocation_request {
-                Ok(request) => {
-                    execute_portable_daemon_invocation(
-                        lifecycle.clone(),
-                        store_administration.clone(),
-                        Arc::clone(&project_open_gates),
-                        &handshake,
-                        &invocation,
-                        http_application_registry.clone(),
-                        request,
-                        #[cfg(test)]
-                        project_open_attempts.clone(),
-                    )
-                    .await
-                }
-                Err(response) => response,
-            };
-            write_daemon_invocation_response(&mut transport, &response).await?;
-            let next_line = tokio::select! {
-                result = read_line_handling_wire_oversized(&mut transport) => result?,
-                () = lifecycle.wait_for_draining() => return Ok(()),
-            };
-            let Some(next_line) = next_line else {
-                return Ok(());
-            };
-            let Some(next_invocation) = parse_daemon_invocation_request(&next_line) else {
-                return Ok(());
-            };
-            invocation_request = next_invocation;
+        let mut owned_lsp_sessions = HashMap::new();
+        let result = async {
+            loop {
+                let detached_session = invocation_request
+                    .as_ref()
+                    .ok()
+                    .and_then(invocation_detached_lsp_session);
+                let response = match invocation_request {
+                    Ok(request) => {
+                        execute_portable_daemon_invocation(
+                            lifecycle.clone(),
+                            store_administration.clone(),
+                            Arc::clone(&project_open_gates),
+                            &handshake,
+                            &invocation,
+                            http_application_registry.clone(),
+                            request,
+                            #[cfg(test)]
+                            project_open_attempts.clone(),
+                        )
+                        .await
+                    }
+                    Err(response) => response,
+                };
+                update_connection_lsp_sessions(
+                    &mut owned_lsp_sessions,
+                    detached_session.as_ref(),
+                    &response,
+                );
+                write_daemon_invocation_response(&mut transport, &response).await?;
+                let next_line = tokio::select! {
+                    result = read_line_handling_wire_oversized(&mut transport) => result?,
+                    () = lifecycle.wait_for_draining() => return Ok(()),
+                };
+                let Some(next_line) = next_line else {
+                    return Ok(());
+                };
+                let Some(next_invocation) = parse_daemon_invocation_request(&next_line) else {
+                    return Ok(());
+                };
+                invocation_request = next_invocation;
+            }
         }
+        .await;
+        cleanup_connection_lsp_sessions(&invocation, owned_lsp_sessions).await;
+        return result;
     }
     if let Ok(request) = serde_json::from_str::<JsonRpcRequest>(first_request_line.trim()) {
         let project_node_count =
@@ -5210,6 +5240,47 @@ async fn write_daemon_invocation_response(
     transport.write_line("\n").await?;
     transport.flush().await?;
     Ok(())
+}
+
+fn invocation_detached_lsp_session(
+    request: &DaemonInvocationRequest,
+) -> Option<service::invocation::DaemonLspSessionAccess> {
+    match &request.payload {
+        service::invocation::DaemonInvocationPayload::LspDetach { session } => {
+            Some(session.clone())
+        }
+        _ => None,
+    }
+}
+
+fn update_connection_lsp_sessions(
+    sessions: &mut HashMap<String, service::invocation::DaemonLspSessionAccess>,
+    detached: Option<&service::invocation::DaemonLspSessionAccess>,
+    response: &DaemonInvocationResponse,
+) {
+    match &response.outcome {
+        service::invocation::DaemonInvocationOutcome::LspOpened { session, .. } => {
+            sessions.insert(session.session_id.clone(), session.clone());
+        }
+        service::invocation::DaemonInvocationOutcome::LspDetached => {
+            if let Some(detached) = detached {
+                sessions.remove(&detached.session_id);
+            }
+        }
+        _ => {}
+    }
+}
+
+async fn cleanup_connection_lsp_sessions(
+    invocation: &DaemonInvocationState,
+    sessions: HashMap<String, service::invocation::DaemonLspSessionAccess>,
+) {
+    for session in sessions.into_values() {
+        invocation
+            .service
+            .disconnect_lsp_session(&invocation.lsp_session_registry, session)
+            .await;
+    }
 }
 
 fn admitted_lsp_root_for_project_path(project_path: &Path) -> Option<lsp_gateway::AdmittedRoot> {

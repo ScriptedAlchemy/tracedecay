@@ -242,9 +242,13 @@ impl LspSessionRegistry {
         access: &LspSessionAccess,
         now_ms: u64,
     ) -> Result<(), LspEndpointError> {
-        self.authenticate(access, now_ms)?
-            .detach()
-            .map_err(LspEndpointError::Lifecycle)
+        self.authenticate(access, now_ms)?;
+        let mut session = self
+            .sessions
+            .remove(&access.session_id)
+            .ok_or(LspEndpointError::AuthenticationFailed)?;
+        session.control.expire();
+        Ok(())
     }
 
     pub fn reconnect(
@@ -414,15 +418,9 @@ mod tests {
         control.begin_initialize().unwrap();
         control.initialized().unwrap();
         endpoint.registry_mut().detach(&access, 2).unwrap();
-        endpoint.registry_mut().reconnect(&access, 3).unwrap();
-        assert_eq!(endpoint.registry().active_sessions(), 1);
-        assert_eq!(endpoint.registry_mut().expire_at(LSP_SESSION_TTL_MS), 1);
         assert_eq!(endpoint.registry().active_sessions(), 0);
         assert_eq!(
-            endpoint
-                .registry_mut()
-                .authenticate(&access, LSP_SESSION_TTL_MS)
-                .err(),
+            endpoint.registry_mut().reconnect(&access, 3).err(),
             Some(LspEndpointError::AuthenticationFailed)
         );
     }
