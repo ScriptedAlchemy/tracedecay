@@ -99,7 +99,7 @@ export function SignalPanel({
               {summary.total}
             </dd>
             <dt className="td-legend">
-              in ring{summary.spanMs != null ? ` · ${formatDuration(summary.spanMs)}` : ''}
+              held{summary.spanMs != null ? ` · ${formatDuration(summary.spanMs)} span` : ''}
             </dt>
           </div>
         </dl>
@@ -118,7 +118,9 @@ export function SignalPanel({
               </div>
             ))}
           </dl>
-        ) : (
+        ) : offline ? null : (
+          // Offline already says everything in its sentence; repeating "no
+          // events" under it reads as a second, redundant apology.
           <p className="td-legend">no events observed yet</p>
         )}
       </div>
