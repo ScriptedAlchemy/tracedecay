@@ -50,6 +50,9 @@ errors or times out, the same tool runs as `tracedecay tool <name> --args '<json
 | Wondering what breaks or which tests to run | `tracedecay:assessing-impact` |
 | Trait/interface/class type-hierarchy question (implementors, extenders, inheritance) | `tracedecay_type_hierarchy` — skill: `tracedecay:exploring-code` |
 | About to run `gh pr diff` / read a raw diff to review | `tracedecay_pr_context` / `tracedecay_diff_context` (offline, no gh needed) — `tracedecay:reviewing-changes` |
+| Need Context Scout status or recent bounded suggestions | `tracedecay_context_scout_capability` / `tracedecay_context_scout_explain` / `tracedecay_context_scout_budget` / `tracedecay_context_scout_recent` |
+| Need effective configuration or provenance | `tracedecay_configuration_list` / `tracedecay_configuration_get` / `tracedecay_configuration_explain` / `tracedecay_configuration_audit` / `tracedecay_configuration_observed_state` |
+| Need to mutate configuration | `tracedecay_configuration_batch`, `tracedecay_configuration_set`, or `tracedecay_configuration_unset`; protected and rollback changes require their exact `*_preview` then `*_apply` pair |
 | About to write a new helper, rename, or mass-edit | `tracedecay:editing-safely` |
 | Looking for duplicate code, similar function bodies, repeated helper logic, or consolidation targets | `tracedecay_redundancy` first for body/functionality matches; `tracedecay_similar` only for near-duplicate names — `tracedecay:code-health` / `tracedecay:editing-safely` |
 | Build/type errors present, or about to run cargo check/tsc | `tracedecay:fixing-build-and-type-errors` |
@@ -88,3 +91,11 @@ errors or times out, the same tool runs as `tracedecay tool <name> --args '<json
 4. A result includes a `tracedecay_metrics:` line → report the savings.
 5. A durable decision, preference, correction, or pitfall surfaced → store it
    via `tracedecay:project-memory` without being asked.
+
+Configuration mutation is never inferred from a read request. Use
+`tracedecay_configuration_protected_preview` before
+`tracedecay_configuration_protected_apply`, and
+`tracedecay_configuration_rollback_preview` before
+`tracedecay_configuration_rollback_apply`. Credential material crosses only
+`tracedecay_configuration_write_credential`; never place it in ordinary
+configuration values, logs, or chat output.

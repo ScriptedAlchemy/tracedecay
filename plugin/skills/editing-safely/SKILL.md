@@ -73,6 +73,9 @@ Run this read-only recon in one shot for a symbol or `Struct::field` with
    are auto-inserted at the destination (`applied_imports`); caller references
    are reported, never auto-edited. Preview first, then re-run with
    `dry_run: false` to apply.
+7. **Reconcile a committed source-edit operation →
+   `tracedecay_source_edit_reconcile`**. Use the operation identity returned by
+   the edit path; never reconstruct it from a path, label, or current CWD.
 
 ## Porting code
 

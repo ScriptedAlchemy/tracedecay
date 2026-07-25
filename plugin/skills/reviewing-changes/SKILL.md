@@ -36,7 +36,11 @@ Announce: "Using tracedecay:reviewing-changes for <diff/PR>."
 7. Git index preview/apply stays on the application surfaces
    `tracedecay_git_preview` then `tracedecay_git_apply` — never invent a
    parallel git write path.
-8. Branch feedback cycle (CI localization, GitHub review comments, proximity):
+8. For generation-bound native Git evidence, use `tracedecay_git_status`,
+   `tracedecay_git_diff`, `tracedecay_git_history`, `tracedecay_git_blame`,
+   and `tracedecay_git_hunks`. These reads never authorize a ref or index
+   mutation.
+9. Branch feedback cycle (CI localization, GitHub review comments, proximity):
    `tracedecay_feedback_diagnostics` → `tracedecay_feedback_list` /
    `tracedecay_feedback_get` → `tracedecay_feedback_expand` /
    `tracedecay_feedback_impact`. Read-only; never post, update, resolve, or
