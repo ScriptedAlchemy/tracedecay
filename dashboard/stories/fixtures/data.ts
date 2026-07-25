@@ -1004,32 +1004,34 @@ function savingsPayload(): Record<string, unknown> {
  * hint_summary_from_events). Consumed by AgentsPage (UsagePayload/HintsPayload).
  * ========================================================================== */
 
+/**
+ * The categories `usage_summary_from_events` actually emits, at the
+ * proportions a real store actually holds them in (captured 2026-07-25).
+ *
+ * This replaces a sixteen-row fixture that ramped smoothly from 1,840 to 86 —
+ * a distribution no analytics store produces, and one that let a linear bar
+ * chart look perfectly reasonable in every audit shot while the real payload
+ * (6,774 against 1) rendered eleven invisible slivers. `record_event_usage`
+ * only ever categorizes `tool`, `mcp_tool_call` and `skill` events, and on
+ * this profile that resolves to exactly four buckets, one of which carries
+ * nine tenths of them.
+ */
 const USAGE_ROWS: ReadonlyArray<readonly [string, string, number]> = [
-  ['tool', 'symbol_lookup', 1840],
-  ['tool', 'search', 1620],
-  ['tool', 'file_read', 1410],
-  ['tool', 'call_graph', 980],
-  ['tool', 'impact', 760],
-  ['tool', 'semantic_search', 640],
-  ['skill', 'exploration', 512],
-  ['tool', 'broad_read', 470],
-  ['skill', 'testing', 388],
-  ['tool', 'file_lookup', 366],
-  ['skill', 'refactor', 284],
-  ['tool', 'other_tool', 240],
-  ['skill', 'diagnostics', 198],
-  ['tool', 'explore_subagent', 152],
-  ['skill', 'memory', 120],
-  ['skill', 'automation', 86],
+  ['tool', 'tracedecay_mcp', 6774],
+  ['tool', 'memory', 643],
+  ['tool', 'lcm_session', 52],
+  ['skill', 'workflow_skill', 1],
 ];
 
 function analyticsUsagePayload(): Record<string, unknown> {
-  const events = USAGE_ROWS.reduce((sum, [, , n]) => sum + n, 0);
   return {
     available: true,
     source: 'analytics_events',
-    message_count: 14_820,
-    event_count: events,
+    // `ANALYTICS_EVENT_LIMIT`, not a total, and deliberately larger than the
+    // categorized sum: the remaining events are hook routing, which carries no
+    // tool or skill name to bucket.
+    message_count: 10_000,
+    event_count: 10_000,
     by_category: USAGE_ROWS.map(([kind, category, evts]) => ({ kind, category, events: evts })),
   };
 }
@@ -1454,6 +1456,8 @@ export const FIXTURES: Readonly<Record<string, unknown>> = {
   '/api/plugins/analytics/overview': analyticsOverviewPayload(),
   '/api/plugins/analytics/usage': analyticsUsagePayload(),
   '/api/plugins/analytics/hints': analyticsHintsPayload(),
+  '/api/plugins/analytics/underused': analyticsUnderusedPayload(),
+  '/api/plugins/analytics/diagnostics': analyticsDiagnosticsPayload(),
   // Automation.
   '/api/automation/scheduler/status': schedulerStatusPayload(),
   '/api/automation/jobs': jobsPayload(),
@@ -1642,4 +1646,152 @@ export function resolveFixture(pathname: string, search = ''): unknown {
     if (pathname.startsWith(prefix)) return payload;
   }
   return EMPTY_FIXTURE;
+}
+
+/* ==========================================================================
+ * /api/plugins/analytics/{underused,diagnostics} (analytics_api.rs
+ * `underused` / `diagnostics_summary`). Consumed by AgentsPage.
+ *
+ * Both were previously unmapped and resolved to `{}`, so the audit never once
+ * rendered the plates that depend on them. Shapes and — more importantly —
+ * DISTRIBUTIONS are taken from a real daemon response captured on 2026-07-25
+ * (profile-sharded store, 10,000-event window):
+ *
+ *   - `event_count` is exactly `ANALYTICS_EVENT_LIMIT`, because on any store
+ *     with real traffic it always is. The page has to render the capped case.
+ *   - `by_mcp_tool` spans 1,945 calls down to 1 across a long tail. A fixture
+ *     with an even spread would never show that a linear rail cannot draw it.
+ *   - `by_event_kind` sums to the window while the usage payload's categories
+ *     sum to less, because hook-routing events carry nothing to categorize.
+ *     The plate that reconciles those two totals only exists because of it.
+ *   - `recent_events` is newest-first with real second-resolution stamps.
+ *
+ * The families payload deliberately carries three of the four verdict states
+ * (under-used, covered, and the two families that have no substitute detector
+ * at all and therefore cannot ever be flagged) so one audit shot exercises the
+ * whole row vocabulary.
+ * ========================================================================== */
+
+function analyticsUnderusedPayload(): Record<string, unknown> {
+  return {
+    available: true,
+    db: '/fast/projects/tracedecay/.tracedecay/sessions.db',
+    families: [
+      // Has a detector, and it fired more often than the family was used.
+      {
+        family: 'code_context',
+        usage_events: 138,
+        relevant_events: 191,
+        missed_events: 53,
+        underused: true,
+      },
+      // Has a detector; the family outran it.
+      {
+        family: 'code_search',
+        usage_events: 226,
+        relevant_events: 84,
+        missed_events: -142,
+        underused: false,
+      },
+      // No detector exists for these two, so `relevant_events` is structurally
+      // zero and `underused` can never become true however they are used.
+      {
+        family: 'call_graph',
+        usage_events: 66,
+        relevant_events: 0,
+        missed_events: -66,
+        underused: false,
+      },
+      {
+        family: 'impact_analysis',
+        usage_events: 0,
+        relevant_events: 0,
+        missed_events: 0,
+        underused: false,
+      },
+    ],
+  };
+}
+
+function analyticsDiagnosticsPayload(): Record<string, unknown> {
+  const AGENT_TOOL_CALLS: ReadonlyArray<readonly [string, number]> = [
+    ['tracedecay_grep', 1945],
+    ['tracedecay_read', 1180],
+    ['tracedecay_body', 1152],
+    ['tracedecay_fact_store', 644],
+    ['tracedecay_hook_runtime', 587],
+    ['tracedecay_outline', 460],
+    ['tracedecay_search', 306],
+    ['tracedecay_context', 200],
+    ['tracedecay_status', 183],
+    ['tracedecay_diagnostics', 81],
+    ['tracedecay_files', 80],
+    ['tracedecay_retrieve', 74],
+    ['tracedecay_callers', 60],
+    ['tracedecay_impact', 41],
+    ['tracedecay_active_project', 27],
+    ['tracedecay_affected', 18],
+    ['tracedecay_health', 9],
+    ['tracedecay_call_chain', 6],
+    ['tracedecay_circular', 3],
+    ['tracedecay_recursion', 1],
+  ];
+  const AGENT_TAPE: ReadonlyArray<readonly [number, string, string]> = [
+    [0, 'tracedecay_fact_store', 'success'],
+    [0, 'tracedecay_fact_store', 'success'],
+    [4, 'tracedecay_hook_runtime', 'success'],
+    [11, 'tracedecay_grep', 'success'],
+    [17, 'tracedecay_body', 'success'],
+    [23, 'tracedecay_grep', 'error'],
+    [29, 'tracedecay_read', 'success'],
+    [38, 'tracedecay_outline', 'success'],
+    [44, 'tracedecay_context', 'success'],
+    [51, 'tracedecay_grep', 'success'],
+    [63, 'tracedecay_body', 'success'],
+    [70, 'tracedecay_search', 'success'],
+    [82, 'tracedecay_read', 'success'],
+    [96, 'tracedecay_hook_runtime', 'success'],
+    [109, 'tracedecay_grep', 'success'],
+    [124, 'tracedecay_body', 'success'],
+    [141, 'tracedecay_status', 'success'],
+    [163, 'tracedecay_read', 'error'],
+    [188, 'tracedecay_hook_runtime', 'success'],
+    [222, 'tracedecay_status', 'success'],
+  ];
+  /** Anchored to a fixed offset so the tape's stamps are stable across a
+   * screenshot pair. */
+  const AGENT_TAPE_ANCHOR = nowSecs - 240;
+  const toolCalls = AGENT_TOOL_CALLS.reduce((sum, [, count]) => sum + count, 0);
+  return {
+    available: true,
+    source: 'analytics_events',
+    event_count: 10_000,
+    message_count: 10_000,
+    events_per_hour: 135.36531714965764,
+    hook_call_count: 444_038,
+    mcp_tool_call_count: toolCalls,
+    tool_call_count: toolCalls,
+    tracedecay_call_count: toolCalls,
+    by_event_kind: [
+      { event_kind: 'mcp_tool_call', count: toolCalls },
+      { event_kind: 'hook_route', count: 10_000 - toolCalls },
+    ],
+    // Outcomes partition the window exactly: every tool call succeeded or
+    // errored, and every hook-routing event is 'observed'. Derived from the
+    // tool total rather than hard-coded so the three always sum to 10,000.
+    by_outcome: [
+      { outcome: 'success', count: toolCalls - 268 },
+      { outcome: 'observed', count: 10_000 - toolCalls },
+      { outcome: 'error', count: 268 },
+    ],
+    by_mcp_tool: AGENT_TOOL_CALLS.map(([tool_name, count]) => ({ tool_name, count })),
+    by_tool: AGENT_TOOL_CALLS.map(([tool_name, count]) => ({ tool_name, count })),
+    recent_events: AGENT_TAPE.map(([ago, tool_name, outcome]) => ({
+      event_kind: 'mcp_tool_call',
+      hook_name: '',
+      outcome,
+      timestamp: AGENT_TAPE_ANCHOR - ago,
+      tool_name,
+    })),
+  };
 }
