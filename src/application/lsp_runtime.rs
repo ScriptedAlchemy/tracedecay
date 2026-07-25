@@ -873,8 +873,7 @@ impl LspTestRunProjectionPort for OperationEventTestRunProjection {
                     };
                 }
             };
-            if let Err(reason) =
-                bind_test_run_document_content(&mut scope, document_content_digest)
+            if let Err(reason) = bind_test_run_document_content(&mut scope, document_content_digest)
             {
                 return ContextProjectionOutcome::Deferred {
                     reason: reason.to_owned(),
@@ -2713,6 +2712,7 @@ mod projection_tests {
                 RequestId::new("request.test-run.unbound").expect("request"),
             ),
             generation: 7,
+            source_revision: 1,
             head_commit_id: None,
             code_generation_id: None,
             document_content_digests: BTreeMap::new(),
@@ -2739,6 +2739,7 @@ mod projection_tests {
                 RequestId::new("request.test-run.current").expect("request"),
             ),
             generation: 7,
+            source_revision: 1,
             head_commit_id: Some(scope.head_commit_id.clone()),
             code_generation_id: Some(scope.code_generation_id.clone()),
             document_content_digests: BTreeMap::new(),
@@ -2818,6 +2819,7 @@ mod projection_tests {
                 RequestId::new("request.test-run.saved-drift").expect("request"),
             ),
             generation: 7,
+            source_revision: 1,
             head_commit_id: Some(scope.head_commit_id.clone()),
             code_generation_id: Some(scope.code_generation_id.clone()),
             document_content_digests: BTreeMap::from([(document_uri.to_owned(), stale_digest)]),
@@ -2855,6 +2857,7 @@ mod projection_tests {
                 RequestId::new("request.test-run.overlay-unbound").expect("request"),
             ),
             generation: 7,
+            source_revision: 1,
             head_commit_id: Some(scope.head_commit_id.clone()),
             code_generation_id: Some(scope.code_generation_id.clone()),
             document_content_digests: BTreeMap::new(),
@@ -2886,6 +2889,7 @@ mod projection_tests {
                 RequestId::new("request.test-run.expired").expect("request"),
             ),
             generation: 7,
+            source_revision: 1,
             head_commit_id: Some(scope.head_commit_id.clone()),
             code_generation_id: Some(scope.code_generation_id.clone()),
             document_content_digests: BTreeMap::new(),
@@ -2931,6 +2935,7 @@ mod projection_tests {
                     RequestId::new(format!("request.test-run.{termination:?}")).expect("request"),
                 ),
                 generation: 7,
+                source_revision: 1,
                 head_commit_id: Some(scope.head_commit_id.clone()),
                 code_generation_id: Some(scope.code_generation_id.clone()),
                 document_content_digests: BTreeMap::new(),
