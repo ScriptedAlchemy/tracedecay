@@ -5,6 +5,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::path::Path;
+use std::sync::Arc;
 
 use crate::common::{
     GLOBAL_DB_ENV_LOCK as ENV_LOCK, create_runtime, get_json, http_agent, pick_free_port,
