@@ -848,6 +848,7 @@ pub struct DaemonLspSessionClient {
     invocation: DaemonInvocationClient,
     session: crate::daemon::DaemonLspSessionAccess,
     next_request: u64,
+    detached: bool,
 }
 
 impl DaemonLspSessionClient {
@@ -873,6 +874,7 @@ impl DaemonLspSessionClient {
             invocation,
             session,
             next_request: 2,
+            detached: false,
         })
     }
 
@@ -948,7 +950,10 @@ impl DaemonLspSessionClient {
             ))
             .await?;
         match response.outcome {
-            crate::daemon::DaemonInvocationOutcome::LspDetached => Ok(()),
+            crate::daemon::DaemonInvocationOutcome::LspDetached => {
+                self.detached = true;
+                Ok(())
+            }
             outcome => Err(invocation_outcome_error(outcome)),
         }
     }
@@ -964,6 +969,27 @@ impl DaemonLspSessionClient {
         let request_id = format!("lsp.{}", self.next_request);
         self.next_request = self.next_request.saturating_add(1);
         request_id
+    }
+}
+
+impl Drop for DaemonLspSessionClient {
+    fn drop(&mut self) {
+        if self.detached {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let invocation = self.invocation.clone();
+        let session = self.session.clone();
+        let request_id = self.next_request_id();
+        runtime.spawn(async move {
+            let _ = invocation
+                .invoke(crate::daemon::DaemonInvocationRequest::lsp_detach(
+                    request_id, session,
+                ))
+                .await;
+        });
     }
 }
 
