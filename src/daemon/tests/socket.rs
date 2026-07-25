@@ -95,15 +95,14 @@ async fn dropping_lsp_client_sends_immediate_session_detach() {
         tool_list_changed_capable: false,
         catalog_version: String::new(),
     };
-    let invocation =
-        crate::daemon_client::DaemonInvocationClient::for_connection_for_test(
-            super::super::DaemonConnection {
-                endpoint,
-                auth_token: None,
-                authority_record: None,
-            },
-            handshake,
-        );
+    let invocation = crate::daemon_client::DaemonInvocationClient::for_connection_for_test(
+        super::super::DaemonConnection {
+            endpoint,
+            auth_token: None,
+            authority_record: None,
+        },
+        handshake,
+    );
     let session = crate::daemon_client::DaemonLspSessionClient::open(
         invocation,
         env!("CARGO_PKG_VERSION"),

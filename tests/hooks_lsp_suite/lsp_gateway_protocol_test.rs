@@ -230,10 +230,7 @@ impl ContextProjectionPort for PendingContext {
                 next_retrieval_handle: None,
             });
         }
-        if !matches!(
-            request.retrieval_handle.as_str(),
-            "rh_current" | "rh_paged"
-        ) {
+        if !matches!(request.retrieval_handle.as_str(), "rh_current" | "rh_paged") {
             return ContextExpansionOutcome::Denied;
         }
         let paged = request.retrieval_handle == "rh_paged";
