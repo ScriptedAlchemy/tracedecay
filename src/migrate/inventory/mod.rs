@@ -31,12 +31,21 @@ pub async fn build_inventory(options: MigrationInventoryOptions) -> Result<Migra
     )?;
     let identity = crate::daemon::profile_identity::load_or_create(&profile_root)?;
     let registry =
-        crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+        match crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
             identity,
         )
-        .await?;
-    let global_db = registry.profile_database().await?;
-    build_inventory_in_scope(options, Some(global_db.as_ref())).await
+        .await
+        {
+            Ok(registry) => registry,
+            Err(_) => return build_inventory_in_scope(options, None).await,
+        };
+    match registry.profile_database().await {
+        Ok(global_db) => build_inventory_in_scope(options, Some(global_db.as_ref())).await,
+        // Inventory is also the recovery path for a corrupt or otherwise
+        // unreadable registry. Retain the exclusive maintenance boundary, but
+        // inspect the file as immutable metadata when no runtime can attach it.
+        Err(_) => build_inventory_in_scope(options, None).await,
+    }
 }
 
 /// Builds a read-only inventory through the daemon's existing database
