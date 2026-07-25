@@ -504,6 +504,54 @@ pub fn classify_feedback_diagnostic_admission(
     Ok(())
 }
 
+fn gateway_diagnostic_data(
+    finding: &FeedbackFindingV1,
+    anchor: &tracedecay_domain::RetrievalAnchorId,
+    scope: &LspFeedbackProjectionScope,
+    coverage: GatewayDiagnosticCoverage,
+    expansion_handles: &BTreeMap<String, String>,
+) -> Option<GatewayDiagnosticData> {
+    let document_content_digest = scope.document_content_digest.as_ref()?;
+    let expansion_handle = expansion_handles.get(finding.finding_id.as_str())?;
+    Some(GatewayDiagnosticData {
+        identity: GatewayDiagnosticIdentity {
+            finding_id: finding.finding_id.as_str().to_owned(),
+            anchor_id: anchor.as_str().to_owned(),
+            generation: scope.generation,
+            head_commit_id: scope.head_commit_id.as_str().to_owned(),
+            code_generation_id: scope.code_generation_id.as_str().to_owned(),
+            snapshot_digest: scope.snapshot_digest.as_str().to_owned(),
+            invalidation_digest: scope.invalidation_digest.as_str().to_owned(),
+            snapshot_content_digest: scope.snapshot_content_digest.as_str().to_owned(),
+            document_content_digest: document_content_digest.as_str().to_owned(),
+        },
+        lifecycle: gateway_diagnostic_lifecycle(finding.lifecycle),
+        provider_state: gateway_diagnostic_provider_state(finding.provider_state),
+        coverage,
+        expansion_handle: expansion_handle.clone(),
+    })
+}
+
+const fn gateway_severity(severity: DiagnosticSeverityV1) -> DiagnosticSeverity {
+    match severity {
+        DiagnosticSeverityV1::Error => DiagnosticSeverity::Error,
+        DiagnosticSeverityV1::Warning => DiagnosticSeverity::Warning,
+        DiagnosticSeverityV1::Information => DiagnosticSeverity::Information,
+        DiagnosticSeverityV1::Hint => DiagnosticSeverity::Hint,
+    }
+}
+
+const fn advisory_diagnostic_source(
+    producer: tracedecay_domain::feedback::FeedbackDiagnosticProducerV1,
+) -> DiagnosticSource {
+    use tracedecay_domain::feedback::FeedbackDiagnosticProducerV1;
+    match producer {
+        FeedbackDiagnosticProducerV1::GitHubReview => DiagnosticSource::TraceDecayGitHub,
+        FeedbackDiagnosticProducerV1::CiLocalization => DiagnosticSource::TraceDecayCi,
+        FeedbackDiagnosticProducerV1::Proximity => DiagnosticSource::TraceDecayProximity,
+    }
+}
+
 /// Real finding-anchor hydration over the canonical managed diagnostics store.
 pub struct DiagnosticsStoreLspFeedbackProjection<S> {
     database: Database,
@@ -565,6 +613,46 @@ where
                     );
                     continue;
                 };
+                if let Some(projection) = finding.diagnostic_projection.as_ref() {
+                    let Some(target_file) = impact_target_file else {
+                        skipped(
+                            finding_id,
+                            FeedbackDiagnosticProjectionSkipV1::ImpactTargetAbsent,
+                        );
+                        continue;
+                    };
+                    if projection.file != *target_file {
+                        skipped(
+                            finding_id,
+                            FeedbackDiagnosticProjectionSkipV1::ImpactTargetFileMismatch,
+                        );
+                        continue;
+                    }
+                    let start = usize::try_from(projection.span.start_byte)
+                        .map_err(|_| LspRuntimeFailure::new("diagnostic-span-invalid"))?;
+                    let end = usize::try_from(projection.span.end_byte)
+                        .map_err(|_| LspRuntimeFailure::new("diagnostic-span-invalid"))?;
+                    let start = byte_offset_to_utf16_position(&document.text, start)
+                        .map_err(|_| LspRuntimeFailure::new("diagnostic-span-invalid"))?;
+                    let end = byte_offset_to_utf16_position(&document.text, end)
+                        .map_err(|_| LspRuntimeFailure::new("diagnostic-span-invalid"))?;
+                    diagnostics.push(GatewayDiagnostic {
+                        uri: document_uri.clone(),
+                        range: crate::daemon::lsp_gateway::LspRange { start, end },
+                        severity: Some(gateway_severity(projection.severity)),
+                        code: Some(projection.code.clone()),
+                        message: projection.safe_bounded_message.clone(),
+                        source: advisory_diagnostic_source(projection.producer),
+                        data: gateway_diagnostic_data(
+                            finding,
+                            anchor,
+                            &scope,
+                            coverage,
+                            &expansion_handles,
+                        ),
+                    });
+                    continue;
+                }
                 let Some(record) = store
                     .diagnostic_by_anchor(anchor)
                     .await
@@ -595,52 +683,11 @@ where
                 let end = byte_offset_to_utf16_position(&document.text, end)
                     .map_err(|_| LspRuntimeFailure::new("diagnostic-span-invalid"))?;
                 let data =
-                    scope
-                        .document_content_digest
-                        .as_ref()
-                        .and_then(|document_content_digest| {
-                            expansion_handles.get(finding.finding_id.as_str()).map(
-                                |expansion_handle| GatewayDiagnosticData {
-                                    identity: GatewayDiagnosticIdentity {
-                                        finding_id: finding.finding_id.as_str().to_owned(),
-                                        anchor_id: anchor.as_str().to_owned(),
-                                        generation: scope.generation,
-                                        head_commit_id: scope.head_commit_id.as_str().to_owned(),
-                                        code_generation_id: scope
-                                            .code_generation_id
-                                            .as_str()
-                                            .to_owned(),
-                                        snapshot_digest: scope.snapshot_digest.as_str().to_owned(),
-                                        invalidation_digest: scope
-                                            .invalidation_digest
-                                            .as_str()
-                                            .to_owned(),
-                                        snapshot_content_digest: scope
-                                            .snapshot_content_digest
-                                            .as_str()
-                                            .to_owned(),
-                                        document_content_digest: document_content_digest
-                                            .as_str()
-                                            .to_owned(),
-                                    },
-                                    lifecycle: gateway_diagnostic_lifecycle(finding.lifecycle),
-                                    provider_state: gateway_diagnostic_provider_state(
-                                        finding.provider_state,
-                                    ),
-                                    coverage,
-                                    expansion_handle: expansion_handle.clone(),
-                                },
-                            )
-                        });
+                    gateway_diagnostic_data(finding, anchor, &scope, coverage, &expansion_handles);
                 diagnostics.push(GatewayDiagnostic {
                     uri: document_uri.clone(),
                     range: crate::daemon::lsp_gateway::LspRange { start, end },
-                    severity: Some(match record.severity {
-                        DiagnosticSeverityV1::Error => DiagnosticSeverity::Error,
-                        DiagnosticSeverityV1::Warning => DiagnosticSeverity::Warning,
-                        DiagnosticSeverityV1::Information => DiagnosticSeverity::Information,
-                        DiagnosticSeverityV1::Hint => DiagnosticSeverity::Hint,
-                    }),
+                    severity: Some(gateway_severity(record.severity)),
                     code: Some(record.code),
                     message: record.message,
                     // Name the real producer instead of an anonymous
@@ -2221,6 +2268,7 @@ mod projection_tests {
             retrieval_anchor_id: None,
             provider_state: ProviderEvaluationStateV1::SupportedCompletedComplete,
             safe_bounded_preview: Some("bounded finding".to_owned()),
+            diagnostic_projection: None,
         }
     }
 

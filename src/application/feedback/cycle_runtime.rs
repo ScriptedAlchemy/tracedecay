@@ -1018,6 +1018,7 @@ mod tests {
             retrieval_anchor_id: Some(anchor.clone()),
             provider_state: ProviderEvaluationStateV1::SupportedCompletedComplete,
             safe_bounded_preview: None,
+            diagnostic_projection: None,
         };
         let cycle = FeedbackCycleResultV1::new(
             &request,

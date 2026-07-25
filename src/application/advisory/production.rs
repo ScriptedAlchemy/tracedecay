@@ -69,6 +69,8 @@ pub struct Pr13AdvisoryProductionOpenV1 {
     pub database: Database,
     pub(crate) project_runtime_db: Arc<RegisteredGlobalDb>,
     pub graph: Arc<TraceDecay>,
+    pub code_index_identity:
+        Arc<dyn crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1>,
     pub project_root: PathBuf,
     pub feedback_scope: FeedbackScopeV1,
     pub ci_config: Option<ProductionCiProviderConfigV1>,
@@ -98,6 +100,7 @@ pub fn open_pr13_advisory_production_authorities(
         database,
         project_runtime_db,
         graph,
+        code_index_identity,
         project_root,
         feedback_scope,
         ci_config,
@@ -107,14 +110,19 @@ pub fn open_pr13_advisory_production_authorities(
         hook_v2,
         legacy_hook,
     } = input;
-    let github =
-        github_anchor_authorities_arc_v1(database, project_root.clone(), feedback_scope.clone())
-            .ok_or(Pr13AdvisoryProductionOpenErrorV1::GitHubAuthorityUnavailable)?;
+    let github = github_anchor_authorities_arc_v1(
+        database,
+        project_root.clone(),
+        feedback_scope.clone(),
+        Arc::clone(&code_index_identity),
+    )
+    .ok_or(Pr13AdvisoryProductionOpenErrorV1::GitHubAuthorityUnavailable)?;
     let proximity_evidence = production_proximity_evidence_authority_v1(
         Arc::clone(&project_runtime_db),
         graph,
         feedback_scope.clone(),
         project_root,
+        code_index_identity,
     )
     .ok_or(Pr13AdvisoryProductionOpenErrorV1::ProximityAuthorityUnavailable)?;
     let configuration = OwnedGlobalDbConfigurationControlStore::from_registered_project_runtime_db(

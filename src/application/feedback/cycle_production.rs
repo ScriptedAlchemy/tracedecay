@@ -81,6 +81,8 @@ pub struct ProductionFeedbackCycleOpenV1 {
     pub project_runtime_db: Arc<RegisteredGlobalDb>,
     pub runtime_state: Arc<dyn FeedbackRuntimeStatePort + Send + Sync>,
     pub document_identity: Arc<dyn ProductionFeedbackDocumentIdentityPort + Send + Sync>,
+    pub code_index_identity:
+        Arc<dyn crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1>,
     pub mounted_providers: Vec<MountedLspProvider>,
 }
 
@@ -333,6 +335,7 @@ pub async fn resolve_production_feedback_cycle_parts(
             Arc::clone(&input.graph),
             feedback_scope.clone(),
             input.project_root.clone(),
+            Arc::clone(&input.code_index_identity),
         )
         .ok_or(ApplicationContractError::Inconsistent {
             field: "project-open proximity authority",

@@ -177,6 +177,11 @@ impl CodeIndexPublicationIdentityV1 {
         &self.generation_id
     }
 
+    #[must_use]
+    pub const fn source_revision(&self) -> Option<&CommitId> {
+        self.source_revision.as_ref()
+    }
+
     /// The authority's identity for one logical path, or `None` when the
     /// code-index generation does not contain that file.
     #[must_use]

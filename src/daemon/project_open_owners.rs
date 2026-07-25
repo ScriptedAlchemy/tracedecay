@@ -1032,6 +1032,7 @@ async fn register_production_feedback_cycle(
         graph: Arc::clone(&graph),
         runtime_state: Arc::clone(&runtime_state) as _,
         document_identity: Arc::new(invocation.code_index_schedulers.clone()),
+        code_index_identity: Arc::new(invocation.code_index_schedulers.clone()),
         mounted_providers,
     })
     .await
@@ -1181,11 +1182,14 @@ async fn register_production_advisory_owner(
             })?,
     ) as _;
     let ci_code_anchors = Arc::new(
-        ProjectCiCodeAnchorStoreV1::new(Arc::clone(&graph), feedback_scope.clone()).ok_or_else(
-            || TraceDecayError::Config {
-                message: "project-open CI anchor store failed: invalid feedback scope".to_string(),
-            },
-        )?,
+        ProjectCiCodeAnchorStoreV1::new_with_code_index_identity(
+            Arc::clone(&graph),
+            feedback_scope.clone(),
+            Arc::new(invocation.code_index_schedulers.clone()),
+        )
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "project-open CI anchor store failed: invalid feedback scope".to_string(),
+        })?,
     ) as _;
     let hook_notices = Pr13AdvisoryHookNoticeQueueV1::new(feedback_scope.clone());
     let hook_v2 = hook_notices.sink();
@@ -1223,6 +1227,7 @@ async fn register_production_advisory_owner(
         database,
         project_runtime_db,
         graph,
+        code_index_identity: Arc::new(invocation.code_index_schedulers.clone()),
         project_root: project_root.to_path_buf(),
         feedback_scope,
         ci_config,

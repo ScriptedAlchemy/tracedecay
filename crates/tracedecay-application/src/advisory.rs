@@ -4,11 +4,12 @@
 //! owning records. This facade projects only canonical findings with durable
 //! retrieval anchors; it creates no parallel reference packet or identity.
 
-use tracedecay_domain::UtcMicros;
 use tracedecay_domain::feedback::{
-    FeedbackDiagnosticClassificationV1, FeedbackFindingLifecycleV1, FeedbackFindingV1,
+    FeedbackDiagnosticClassificationV1, FeedbackDiagnosticProducerV1,
+    FeedbackDiagnosticProjectionV1, FeedbackFindingLifecycleV1, FeedbackFindingV1,
     ProviderEvaluationStateV1,
 };
+use tracedecay_domain::{DiagnosticSeverityV1, UtcMicros};
 
 use crate::ApplicationContractError;
 
@@ -112,6 +113,21 @@ impl AdvisoryFindingContributorV1 for GitHubReviewIngressResultV1 {
                 retrieval_anchor_id: Some(item.body_anchor.clone()),
                 provider_state,
                 safe_bounded_preview: None,
+                diagnostic_projection: (lifecycle == FeedbackFindingLifecycleV1::Active
+                    && item.remap.state == GitHubReviewRemapStateV1::ExactCurrent)
+                    .then(|| item.remap.current.as_ref())
+                    .flatten()
+                    .and_then(|current| {
+                        Some(FeedbackDiagnosticProjectionV1 {
+                            file: current.file.clone(),
+                            span: current.span?,
+                            symbol: current.symbol.clone(),
+                            code: "github-review".to_owned(),
+                            severity: DiagnosticSeverityV1::Information,
+                            safe_bounded_message: "Unresolved GitHub review comment".to_owned(),
+                            producer: FeedbackDiagnosticProducerV1::GitHubReview,
+                        })
+                    }),
             });
         }
         validated_batch(provider_state, findings)
@@ -152,6 +168,18 @@ impl AdvisoryFindingContributorV1 for CiFailureLocalizationResultV1 {
                 retrieval_anchor_id: Some(self.failure_anchor.clone()),
                 provider_state,
                 safe_bounded_preview: None,
+                diagnostic_projection: (lifecycle == FeedbackFindingLifecycleV1::Active)
+                    .then(|| self.symbol.as_ref())
+                    .flatten()
+                    .map(|symbol| FeedbackDiagnosticProjectionV1 {
+                        file: symbol.file.clone(),
+                        span: symbol.span,
+                        symbol: Some(symbol.symbol.clone()),
+                        code: "ci-failure".to_owned(),
+                        severity: DiagnosticSeverityV1::Error,
+                        safe_bounded_message: "CI failure localized to this symbol".to_owned(),
+                        producer: FeedbackDiagnosticProducerV1::CiLocalization,
+                    }),
             }],
         )
     }
@@ -191,6 +219,18 @@ impl AdvisoryFindingContributorV1 for ProximityContributionV1 {
                 retrieval_anchor_id: Some(retrieval_anchor_id),
                 provider_state,
                 safe_bounded_preview: None,
+                diagnostic_projection: self.address.as_ref().and_then(|address| {
+                    Some(FeedbackDiagnosticProjectionV1 {
+                        file: address.file.clone(),
+                        span: address.span?,
+                        symbol: address.symbol.clone(),
+                        code: "agent-proximity".to_owned(),
+                        severity: DiagnosticSeverityV1::Warning,
+                        safe_bounded_message: "Concurrent agent activity overlaps this code"
+                            .to_owned(),
+                        producer: FeedbackDiagnosticProducerV1::Proximity,
+                    })
+                }),
             }],
         )
     }

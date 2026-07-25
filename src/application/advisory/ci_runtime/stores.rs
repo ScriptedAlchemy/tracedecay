@@ -183,12 +183,30 @@ impl CiRetainedProviderObservationAuthorityV1 for ProjectCiRetainedObservationSt
 pub struct ProjectCiCodeAnchorStoreV1 {
     graph: Arc<TraceDecay>,
     scope: FeedbackScopeV1,
+    code_index_identity:
+        Option<Arc<dyn crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1>>,
 }
 
 impl ProjectCiCodeAnchorStoreV1 {
     pub fn new(graph: Arc<TraceDecay>, scope: FeedbackScopeV1) -> Option<Self> {
         scope.validate().ok()?;
-        Some(Self { graph, scope })
+        Some(Self {
+            graph,
+            scope,
+            code_index_identity: None,
+        })
+    }
+
+    pub(crate) fn new_with_code_index_identity(
+        graph: Arc<TraceDecay>,
+        scope: FeedbackScopeV1,
+        code_index_identity: Arc<
+            dyn crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1,
+        >,
+    ) -> Option<Self> {
+        let mut store = Self::new(graph, scope)?;
+        store.code_index_identity = Some(code_index_identity);
+        Some(store)
     }
 }
 
@@ -253,6 +271,20 @@ impl CiCodeAnchorStoreV1 for ProjectCiCodeAnchorStoreV1 {
             if crate::sync::content_hash(&source) != file_record.content_hash {
                 return Some(partial_code_evidence());
             }
+            let code_index_identity = if let Some(resolver) = self.code_index_identity.as_ref() {
+                let Some(identity) = resolver
+                    .resolve(self.graph.project_root().to_path_buf())
+                    .await
+                else {
+                    return Some(partial_code_evidence());
+                };
+                if identity.source_revision() != Some(&request.scope.head_commit_id) {
+                    return Some(partial_code_evidence());
+                }
+                Some(identity)
+            } else {
+                None
+            };
             let Some(span) = source_span_for_annotation(
                 &source,
                 annotation.start_line,
@@ -262,8 +294,19 @@ impl CiCodeAnchorStoreV1 for ProjectCiCodeAnchorStoreV1 {
             ) else {
                 return Some(partial_code_evidence());
             };
-            let Ok(file) = FileOccurrenceId::new(path) else {
-                return Some(partial_code_evidence());
+            let file = if let Some(identity) = code_index_identity.as_ref() {
+                let Some((file, digest)) = identity.file(&path) else {
+                    return Some(partial_code_evidence());
+                };
+                if digest.as_str() != file_record.content_hash {
+                    return Some(partial_code_evidence());
+                }
+                file.clone()
+            } else {
+                let Ok(file) = FileOccurrenceId::new(path) else {
+                    return Some(partial_code_evidence());
+                };
+                file
             };
             let Ok(symbol) = SymbolOccurrenceId::new(symbol_node.id.clone()) else {
                 return Some(partial_code_evidence());
@@ -359,10 +402,15 @@ impl CiCodeAnchorStoreV1 for ProjectCiCodeAnchorStoreV1 {
             let Some(generation_suffix) = generation_digest.as_str().strip_prefix("sha256:") else {
                 return Some(partial_code_evidence());
             };
-            let Ok(generation_id) =
-                CodeGenerationId::new(format!("generation.ci.graph.{generation_suffix}"))
-            else {
-                return Some(partial_code_evidence());
+            let generation_id = if let Some(identity) = code_index_identity.as_ref() {
+                identity.generation_id().clone()
+            } else {
+                let Ok(generation_id) =
+                    CodeGenerationId::new(format!("generation.ci.graph.{generation_suffix}"))
+                else {
+                    return Some(partial_code_evidence());
+                };
+                generation_id
             };
             let partial = callers_truncated
                 || tests_truncated

@@ -908,6 +908,51 @@ impl FeedbackDiagnosticV1 {
     }
 }
 
+/// Bounded code location used only to project an anchored advisory finding
+/// into an editor. The finding's `retrieval_anchor_id` remains the evidence
+/// expansion authority; this value carries no source body or provider payload.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FeedbackDiagnosticProjectionV1 {
+    pub file: FileOccurrenceId,
+    pub span: SourceSpan,
+    pub symbol: Option<SymbolOccurrenceId>,
+    pub code: String,
+    pub severity: DiagnosticSeverityV1,
+    pub safe_bounded_message: String,
+    pub producer: FeedbackDiagnosticProducerV1,
+}
+
+impl FeedbackDiagnosticProjectionV1 {
+    pub fn validate(&self) -> Result<(), DomainError> {
+        self.file.validate()?;
+        self.span.validate()?;
+        self.symbol
+            .as_ref()
+            .map_or(Ok(()), SymbolOccurrenceId::validate)?;
+        validate_label(&self.code, "feedback diagnostic projection code")?;
+        validate_label(
+            &self.safe_bounded_message,
+            "feedback diagnostic projection message",
+        )?;
+        if self.safe_bounded_message.len() > 512 {
+            return Err(DomainError::UnsafeText {
+                field: "feedback diagnostic projection message",
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Closed producer vocabulary for standard diagnostic projection.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FeedbackDiagnosticProducerV1 {
+    GitHubReview,
+    CiLocalization,
+    Proximity,
+}
+
 /// Reference-only PR11 finding. The safe preview is bounded display framing,
 /// never a source-text copy or a second diagnostic store.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -919,6 +964,8 @@ pub struct FeedbackFindingV1 {
     pub retrieval_anchor_id: Option<RetrievalAnchorId>,
     pub provider_state: ProviderEvaluationStateV1,
     pub safe_bounded_preview: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic_projection: Option<FeedbackDiagnosticProjectionV1>,
 }
 
 impl FeedbackFindingV1 {
@@ -934,6 +981,17 @@ impl FeedbackFindingV1 {
                     field: "feedback safe preview",
                 });
             }
+        }
+        self.diagnostic_projection
+            .as_ref()
+            .map_or(Ok(()), FeedbackDiagnosticProjectionV1::validate)?;
+        if self.diagnostic_projection.is_some()
+            && (self.lifecycle != FeedbackFindingLifecycleV1::Active
+                || self.retrieval_anchor_id.is_none())
+        {
+            return Err(DomainError::NonCanonical {
+                field: "feedback diagnostic projection authority",
+            });
         }
         Ok(())
     }
