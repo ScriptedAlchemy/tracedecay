@@ -187,6 +187,7 @@ fn drop_config(days: u32) -> LcmRetentionConfig {
     LcmRetentionConfig {
         enabled: true,
         drop_after_days: Some(days),
+        dedupe_projected_after_days: None,
         ..LcmRetentionConfig::default()
     }
 }
