@@ -44,7 +44,8 @@ use super::{
     DaemonContextScoutRuntimeRegistrationError, DaemonFeedbackRuntimeRegistrationError,
     DaemonInvocationState, DaemonPrimitiveRuntimeRegistrationError,
     Pr13AdvisoryCycleInvocationFutureV1, Pr13AdvisoryCycleInvocationPortV1,
-    Pr13AdvisoryCycleInvocationRequestV1, Pr13HookOrchestrationRequestV1,
+    Pr13AdvisoryCycleInvocationRequestV1, Pr13AdvisoryRegistrationIdentityV1,
+    Pr13HookOrchestrationRequestV1,
     Pr13HookOrchestrationTriggerV1,
 };
 use crate::agents::context_scout_ports::{
@@ -587,30 +588,28 @@ fn install_project_open_source_edit_owners(
 ) -> Result<()> {
     let source_edit_graph = Arc::clone(&graph);
     let source_edit_reconciliation_authorization = authorization.clone();
-    server
-        .install_source_edit_executor(Arc::new(move |request| {
-            let graph = Arc::clone(&source_edit_graph);
-            let authorization = authorization.clone();
-            Box::pin(
-                async move { invoke_project_open_source_edit(graph, authorization, request).await },
-            )
-        }))
-        .map_err(|_| TraceDecayError::Config {
-            message: "project-open source edit authority was already installed".to_owned(),
-        })?;
-    server
-        .install_source_edit_reconciliation_executor(Arc::new(move |request| {
+    let edit = server.install_source_edit_executor(Arc::new(move |request| {
+        let graph = Arc::clone(&source_edit_graph);
+        let authorization = authorization.clone();
+        Box::pin(
+            async move { invoke_project_open_source_edit(graph, authorization, request).await },
+        )
+    }));
+    let reconciliation =
+        server.install_source_edit_reconciliation_executor(Arc::new(move |request| {
             let graph = Arc::clone(&graph);
             let authorization = source_edit_reconciliation_authorization.clone();
             Box::pin(async move {
                 invoke_project_open_source_edit_reconciliation(graph, authorization, request).await
             })
-        }))
-        .map_err(|_| TraceDecayError::Config {
-            message: "project-open source edit reconciliation authority was already installed"
+        }));
+    match (edit, reconciliation) {
+        (Ok(()), Ok(())) | (Err(_), Err(_)) => Ok(()),
+        _ => Err(TraceDecayError::Config {
+            message: "project-open source edit authorities were only partially installed"
                 .to_owned(),
-        })?;
-    Ok(())
+        }),
+    }
 }
 
 #[cfg(feature = "test-transport")]
@@ -789,6 +788,13 @@ pub(crate) async fn register_project_open_production_owners(
             message: "project-open owners require the daemon-owned project session database"
                 .to_owned(),
         })?;
+    let profile_id = server
+        .profile_identity()
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "project-open owners require exact profile authority".to_owned(),
+        })?
+        .profile_id()
+        .clone();
     let scope = resolved_scope_for_project(project_root, &project_id).map_err(|error| {
         TraceDecayError::Config {
             message: format!("project-open resolved scope denied: {error}"),
@@ -867,14 +873,7 @@ pub(crate) async fn register_project_open_production_owners(
             project_root.to_path_buf(),
             Arc::clone(graph.configuration_runtime()),
             scope.clone(),
-            server
-                .profile_identity()
-                .ok_or_else(|| TraceDecayError::Config {
-                    message: "project-open configuration requires exact profile authority"
-                        .to_owned(),
-                })?
-                .profile_id()
-                .clone(),
+            profile_id.clone(),
             requester.clone(),
             grant_expires_at,
             None,
@@ -884,20 +883,27 @@ pub(crate) async fn register_project_open_production_owners(
         .map_err(|error| TraceDecayError::Config {
             message: format!("project-open configuration runtime registration failed: {error}"),
         })?;
-    register_semantic_activation_owner(
-        invocation,
-        project_root,
-        &graph,
-        scope.clone(),
-        &scout_configuration,
-    )
-    .await?;
+    if graph
+        .configuration_runtime()
+        .semantic_runtime()
+        .is_none()
+    {
+        register_semantic_activation_owner(
+            invocation,
+            project_root,
+            &graph,
+            scope.clone(),
+            &scout_configuration,
+        )
+        .await?;
+    }
 
     match invocation
         .feedback_runtime_registrar()
         .open_and_register(
             database.clone(),
             project_root.to_path_buf(),
+            profile_id,
             scope.clone(),
             access.clone(),
             Arc::clone(graph.configuration_runtime()),
@@ -995,6 +1001,10 @@ pub(crate) async fn register_project_open_production_owners(
         // and current saved document identity. Non-Git, unborn, and empty
         // projects retain the observing unavailable cycle installed above; no
         // repository or document identity is fabricated to mount producers.
+        invocation
+            .advisory_runtime_registrar()
+            .unregister(project_root)
+            .await;
         return Ok(());
     };
     register_production_advisory_owner(
@@ -1383,6 +1393,36 @@ async fn register_production_advisory_owner(
     let (github, github_source_access, ci_config) = remote.map_or((None, None, None), |remote| {
         (remote.github, Some(remote.github_source_access), remote.ci)
     });
+    let credential_generation = github
+        .as_ref()
+        .map_or(0, |github| github.credential.generation());
+    let pull_request_generation = github
+        .as_ref()
+        .map(|github| {
+            canonical_sha256(&(
+                "tracedecay.pr13.pull-request-generation.v1",
+                &github.target.owner,
+                &github.target.repository,
+                github.target.pull_request_number,
+                &github.target.pull_request_id,
+                &github.identity.base_commit_id,
+                &github.identity.head_commit_id,
+                &github.identity.merge_base_commit_id,
+            ))
+        })
+        .transpose()
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("project-open pull-request generation failed: {error}"),
+        })?;
+    let registration_identity = Pr13AdvisoryRegistrationIdentityV1 {
+        project_id: feedback_scope.project_id.clone(),
+        profile_id: project_runtime_db.binding().shard_id.profile_id.clone(),
+        configuration_digest: source_access.configuration_digest.clone(),
+        branch_ref: feedback_scope.branch_ref.clone(),
+        head_commit_id: feedback_scope.head_commit_id.clone(),
+        credential_generation,
+        pull_request_generation,
+    };
     let github_pull_request_id = github
         .as_ref()
         .map(|github| github.target.pull_request_id.clone());
@@ -1408,23 +1448,6 @@ async fn register_production_advisory_owner(
     let hook_v2 = hook_notices.sink();
     let legacy_hook = unavailable_advisory_hook_sink();
     let (hook_project_id, hook_worktree_id) = crate::hooks::hook_v2_scope_locators(&resolved_scope);
-    if !crate::daemon::context_scout_lifecycle::register_context_scout_lifecycle_authority(
-        hook_project_id,
-        hook_worktree_id,
-        feedback_scope.project_id.clone(),
-        feedback_scope.worktree_id.clone(),
-        &project_runtime_db,
-    ) {
-        return Err(TraceDecayError::Config {
-            message: "project-open Context Scout lifecycle authority registration failed"
-                .to_owned(),
-        });
-    }
-    if !register_pr13_advisory_hook_notice_queue(hook_project_id, hook_worktree_id, &hook_notices) {
-        return Err(TraceDecayError::Config {
-            message: "project-open advisory Hook notice queue registration failed".to_owned(),
-        });
-    }
     let feedback_runtime = feedback_cycle.feedback_runtime();
     let feedback_scope_for_work = feedback_scope.clone();
     let input = Pr13AdvisoryRuntimeOpenV1 {
@@ -1438,7 +1461,7 @@ async fn register_production_advisory_owner(
     let scout_claim_graph = Arc::clone(&graph);
     let production = Pr13AdvisoryProductionOpenV1 {
         database,
-        project_runtime_db,
+        project_runtime_db: Arc::clone(&project_runtime_db),
         graph,
         code_index_identity: Arc::new(invocation.code_index_schedulers.clone()),
         project_root: project_root.to_path_buf(),
@@ -1454,6 +1477,7 @@ async fn register_production_advisory_owner(
         .advisory_runtime_registrar()
         .register_production(
             project_root.to_path_buf(),
+            registration_identity,
             input,
             production,
             lsp_session_factory,
@@ -1491,6 +1515,27 @@ async fn register_production_advisory_owner(
         .map_err(|error| TraceDecayError::Config {
             message: format!("project-open advisory surface registration failed: {error}"),
         })?;
+    // Replace the cycle router before rebinding weak Hook authorities. The old
+    // router is the final owner of the prior advisory registration, so this
+    // ordering guarantees branch/configuration/credential/PR drift cannot
+    // leave its review, CI, or proximity authorities alive.
+    if !crate::daemon::context_scout_lifecycle::register_context_scout_lifecycle_authority(
+        hook_project_id,
+        hook_worktree_id,
+        feedback_scope_for_work.project_id.clone(),
+        feedback_scope_for_work.worktree_id.clone(),
+        &project_runtime_db,
+    ) {
+        return Err(TraceDecayError::Config {
+            message: "project-open Context Scout lifecycle authority registration failed"
+                .to_owned(),
+        });
+    }
+    if !register_pr13_advisory_hook_notice_queue(hook_project_id, hook_worktree_id, &hook_notices) {
+        return Err(TraceDecayError::Config {
+            message: "project-open advisory Hook notice queue registration failed".to_owned(),
+        });
+    }
     let registered_root = project_root.to_path_buf();
     let work_root = registered_root.clone();
     let work = move |request: Pr13HookOrchestrationRequestV1| {

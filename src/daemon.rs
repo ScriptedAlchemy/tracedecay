@@ -1126,9 +1126,10 @@ pub(crate) use service::invocation::{
     DaemonPrimitiveRuntimeRegistrationError, DaemonSemanticRuntimeRegistrar,
     DaemonSemanticRuntimeRegistrationError, Pr13AdvisoryCycleInvocationFutureV1,
     Pr13AdvisoryCycleInvocationPortV1, Pr13AdvisoryCycleInvocationRequestV1,
-    Pr13HookOrchestrationAdmissionV1, Pr13HookOrchestrationRequestV1,
-    Pr13HookOrchestrationTriggerV1, admit_registered_pr13_hook_orchestration,
-    daemon_operation_event_authority, parse_daemon_invocation_request,
+    Pr13AdvisoryRegistrationIdentityV1, Pr13HookOrchestrationAdmissionV1,
+    Pr13HookOrchestrationRequestV1, Pr13HookOrchestrationTriggerV1,
+    admit_registered_pr13_hook_orchestration, daemon_operation_event_authority,
+    parse_daemon_invocation_request,
 };
 pub use service::{
     DaemonServiceSpec, DaemonServiceState, QuiescedDaemonLifecycle, daemon_reachable,
@@ -2248,15 +2249,16 @@ impl<Server> DatabaseOwnerRegistry<Server> {
         candidate: Server,
         capacity: usize,
         mut is_leased: F,
-    ) -> Option<(Server, bool)>
+    ) -> Option<(Server, bool, Vec<PathBuf>)>
     where
         Server: Clone,
         F: FnMut(&Server) -> bool,
     {
         if let Some(existing) = self.get(&key).cloned() {
             self.bind_route(route, key);
-            return Some((existing, false));
+            return Some((existing, false, Vec::new()));
         }
+        let mut evicted_roots = Vec::new();
         while self.servers.len() >= capacity {
             let evict = self
                 .servers
@@ -2265,10 +2267,18 @@ impl<Server> DatabaseOwnerRegistry<Server> {
                 .min_by_key(|(_, entry)| entry.last_used)
                 .map(|(key, _)| key.clone())?;
             self.servers.remove(&evict);
+            evicted_roots.extend(
+                self.aliases
+                    .iter()
+                    .filter(|(_, key)| *key == &evict)
+                    .map(|(route, _)| route.project_path.clone()),
+            );
             self.aliases.retain(|_, key| key != &evict);
         }
         self.insert_route(route, key, candidate.clone());
-        Some((candidate, true))
+        evicted_roots.sort();
+        evicted_roots.dedup();
+        Some((candidate, true, evicted_roots))
     }
 
     fn rekey(&mut self, old: &ProjectServerKey, new: &ProjectServerKey) -> bool {
@@ -2783,10 +2793,30 @@ impl DaemonEngine {
                 .get_route_and_touch(&route)
                 .map(|(_, server)| Arc::clone(server))
         };
-        Ok(match cached {
-            Some(server) => Some(self.activate_project_server(project_path, server).await),
-            None => None,
-        })
+        let Some(server) = cached else {
+            return Ok(None);
+        };
+        let graph = server.cg().await;
+        let project_id = graph
+            .store_layout()
+            .identity
+            .project_id
+            .as_deref()
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "cached project owners require an authoritative project identity"
+                    .to_owned(),
+            })?;
+        project_open_owners::register_project_open_production_owners(
+            &self.invocation,
+            self.store_administration.git_index_transaction_services(),
+            &project_path,
+            project_id,
+            server.as_ref(),
+        )
+        .await?;
+        Ok(Some(
+            self.activate_project_server(project_path, server).await,
+        ))
     }
 
     async fn begin_project_open(
@@ -3182,10 +3212,16 @@ impl DaemonEngine {
                 MAX_CACHED_PROJECT_SERVERS,
                 |server| Arc::strong_count(server) > 1,
             );
-        let Some((server, inserted)) = resolved else {
+        let Some((server, inserted, evicted_roots)) = resolved else {
             route_registered.store(false, Ordering::Release);
             return Err(project_server_capacity_error());
         };
+        for evicted_root in evicted_roots {
+            self.invocation
+                .advisory_runtime_registrar()
+                .unmount_project(&evicted_root)
+                .await;
+        }
         if inserted {
             self.invocation
                 .mount_code_index(
@@ -4259,10 +4295,16 @@ async fn portable_project_server(
             MAX_CACHED_PROJECT_SERVERS,
             |server| Arc::strong_count(server) > 1,
         );
-    let Some((resolved, inserted)) = resolution else {
+    let Some((resolved, inserted, evicted_roots)) = resolution else {
         route_registered.store(false, Ordering::Release);
         return Err(project_server_capacity_error());
     };
+    for evicted_root in evicted_roots {
+        invocation
+            .advisory_runtime_registrar()
+            .unmount_project(&evicted_root)
+            .await;
+    }
     if !inserted {
         route_registered.store(false, Ordering::Release);
     } else {

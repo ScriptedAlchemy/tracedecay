@@ -47,7 +47,7 @@ use tracedecay_domain::configuration::{
     ConfigurationSnapshotV1, ProtectedApplyRequest,
 };
 use tracedecay_domain::{
-    AccessPolicyDigest, ActorId, ComponentVersion, GitHeadStateV1, GitIndexPreviewId,
+    AccessPolicyDigest, ActorId, CommitId, ComponentVersion, GitHeadStateV1, GitIndexPreviewId,
     GitIndexPreviewV1, GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1,
     ManifestDigest, ProjectId, RetrievalAnchorId, UserProfileId, UtcMicros, canonical_sha256,
 };
@@ -4143,7 +4143,8 @@ pub(crate) struct DaemonInvocationService {
     primitive_runtimes: Arc<Mutex<BTreeMap<PathBuf, Pr12PrimitiveProjectRuntime>>>,
     configuration_runtimes: Arc<Mutex<BTreeMap<PathBuf, RegisteredConfigurationRuntime>>>,
     lsp_owners: Arc<Mutex<BTreeMap<PathBuf, DaemonLspInvocationOwner>>>,
-    advisory_runtimes: Arc<Mutex<BTreeMap<PathBuf, Arc<dyn Any + Send + Sync>>>>,
+    advisory_registration_gate: Arc<Mutex<()>>,
+    advisory_runtimes: Arc<Mutex<BTreeMap<PathBuf, RegisteredAdvisoryRuntime>>>,
     advisory_cycle_invokers:
         Arc<Mutex<BTreeMap<PathBuf, Arc<dyn Pr13AdvisoryCycleInvocationPortV1>>>>,
     advisory_hook_orchestrators:
@@ -4176,6 +4177,7 @@ impl DaemonInvocationService {
             primitive_runtimes: Arc::new(Mutex::new(BTreeMap::new())),
             configuration_runtimes: Arc::new(Mutex::new(BTreeMap::new())),
             lsp_owners: Arc::new(Mutex::new(BTreeMap::new())),
+            advisory_registration_gate: Arc::new(Mutex::new(())),
             advisory_runtimes: Arc::new(Mutex::new(BTreeMap::new())),
             advisory_cycle_invokers: Arc::new(Mutex::new(BTreeMap::new())),
             advisory_hook_orchestrators: Arc::new(Mutex::new(BTreeMap::new())),
@@ -4239,6 +4241,8 @@ impl DaemonContextScoutRuntimeRegistrar {
 
 struct RegisteredFeedbackRuntime {
     project_id: ProjectId,
+    profile_id: UserProfileId,
+    configuration_digest: ManifestDigest,
     runtime: Arc<Pr12FeedbackRuntime>,
 }
 
@@ -4541,15 +4545,49 @@ impl DaemonFeedbackRuntimeRegistrar {
         &self,
         database: Database,
         project_root: PathBuf,
+        profile_id: UserProfileId,
         scope: ResolvedScope,
         access: ProjectSourceAccessSnapshot,
         configuration: Arc<ProjectConfigurationRuntime>,
     ) -> Result<ProjectFeedbackStore, DaemonFeedbackRuntimeRegistrationError> {
-        let mut runtimes = self.service.feedback_runtimes.lock().await;
-        if runtimes.contains_key(&project_root) {
-            return Err(DaemonFeedbackRuntimeRegistrationError::AlreadyRegistered);
+        let replaced = {
+            let mut runtimes = self.service.feedback_runtimes.lock().await;
+            if let Some(registered) = runtimes.get(&project_root)
+                && registered.profile_id == profile_id
+                && registered.runtime.scope() == &scope
+                && registered.configuration_digest == access.configuration_digest
+            {
+                return Err(DaemonFeedbackRuntimeRegistrationError::AlreadyRegistered);
+            }
+            runtimes.remove(&project_root)
+        };
+        if let Some(replaced) = replaced {
+            if let Some(router) = self
+                .service
+                .feedback_cycle_inputs
+                .lock()
+                .await
+                .get(&project_root)
+                .cloned()
+            {
+                router
+                    .replace(Arc::new(UnavailableFeedbackCycleRuntimeV1::new(
+                        replaced.project_id,
+                        replaced.runtime.source_observation_port(),
+                    )))
+                    .map_err(|_| DaemonFeedbackRuntimeRegistrationError::MissingRuntime)?;
+            }
+            self.service
+                .feedback_cycles
+                .lock()
+                .await
+                .remove(&project_root);
+            DaemonAdvisoryRuntimeRegistrar::new(&self.service)
+                .unregister(&project_root)
+                .await;
         }
         let project_id = scope.project_id.clone();
+        let configuration_digest = access.configuration_digest.clone();
         let runtime = Arc::new(
             open_pr12_feedback_runtime(
                 database,
@@ -4571,24 +4609,37 @@ impl DaemonFeedbackRuntimeRegistrar {
             },
         );
         let publications = runtime.publication_store();
-        let unavailable_cycle = Arc::new(UnavailableFeedbackCycleRuntimeV1::new(
-            project_id.clone(),
-            runtime.source_observation_port(),
-        ));
-        runtimes.insert(
+        let unavailable_input: Arc<dyn FeedbackCycleRuntimePort> =
+            Arc::new(UnavailableFeedbackCycleRuntimeV1::new(
+                project_id.clone(),
+                runtime.source_observation_port(),
+            ));
+        self.service.feedback_runtimes.lock().await.insert(
             project_root.clone(),
             RegisteredFeedbackRuntime {
                 project_id,
+                profile_id,
+                configuration_digest,
                 runtime,
             },
         );
-        drop(runtimes);
-        self.service
+        let unavailable_cycle = Arc::new(SwitchableFeedbackCycleRuntimeV1::new(Arc::clone(
+            &unavailable_input,
+        )));
+        let existing_router = self
+            .service
             .feedback_cycle_inputs
             .lock()
             .await
-            .entry(project_root)
-            .or_insert_with(|| Arc::new(SwitchableFeedbackCycleRuntimeV1::new(unavailable_cycle)));
+            .insert(project_root, Arc::clone(&unavailable_cycle));
+        if let Some(existing_router) = existing_router {
+            // Existing LSP sessions retain this router. Quiesce it immediately
+            // so profile/configuration drift cannot continue through the old
+            // feedback authority while project-open replaces downstream owners.
+            existing_router
+                .replace(unavailable_input)
+                .map_err(|_| DaemonFeedbackRuntimeRegistrationError::MissingRuntime)?;
+        }
         Ok(publications)
     }
 
@@ -5058,6 +5109,22 @@ pub(crate) enum DaemonAdvisoryRuntimeRegistrationError {
     Startup(#[from] Pr13AdvisoryDaemonStartupErrorV1),
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Pr13AdvisoryRegistrationIdentityV1 {
+    pub(crate) project_id: ProjectId,
+    pub(crate) profile_id: UserProfileId,
+    pub(crate) configuration_digest: ManifestDigest,
+    pub(crate) branch_ref: String,
+    pub(crate) head_commit_id: CommitId,
+    pub(crate) credential_generation: u64,
+    pub(crate) pull_request_generation: Option<ManifestDigest>,
+}
+
+struct RegisteredAdvisoryRuntime {
+    identity: Pr13AdvisoryRegistrationIdentityV1,
+    _runtime: Arc<dyn Any + Send + Sync>,
+}
+
 #[derive(Clone)]
 pub(crate) struct DaemonAdvisoryRuntimeRegistrar {
     service: DaemonInvocationService,
@@ -5070,9 +5137,80 @@ impl DaemonAdvisoryRuntimeRegistrar {
         }
     }
 
+    async fn quiesce_registration(&self, project_root: &Path) {
+        let feedback = self
+            .service
+            .feedback_runtimes
+            .lock()
+            .await
+            .get(project_root)
+            .map(|feedback| {
+                (
+                    feedback.project_id.clone(),
+                    feedback.runtime.source_observation_port(),
+                )
+            });
+        if let Some((project_id, source_observations)) = feedback
+            && let Some(router) = self
+                .service
+                .feedback_cycle_inputs
+                .lock()
+                .await
+                .get(project_root)
+                .cloned()
+        {
+            let _ = router.replace(Arc::new(UnavailableFeedbackCycleRuntimeV1::new(
+                project_id,
+                source_observations,
+            )));
+        }
+        self.service
+            .advisory_hook_orchestrators
+            .lock()
+            .await
+            .remove(project_root);
+    }
+
+    async fn retain_registration(
+        &self,
+        project_root: PathBuf,
+        identity: Pr13AdvisoryRegistrationIdentityV1,
+        runtime: Arc<dyn Any + Send + Sync>,
+    ) -> Result<bool, DaemonAdvisoryRuntimeRegistrationError> {
+        let mut runtimes = self.service.advisory_runtimes.lock().await;
+        if runtimes
+            .get(&project_root)
+            .is_some_and(|registered| registered.identity == identity)
+        {
+            return Err(DaemonAdvisoryRuntimeRegistrationError::AlreadyRegistered);
+        }
+        let replaced = runtimes
+            .insert(
+                project_root.clone(),
+                RegisteredAdvisoryRuntime {
+                    identity,
+                    _runtime: runtime,
+                },
+            )
+            .is_some();
+        drop(runtimes);
+        if replaced {
+            self.service
+                .advisory_hook_orchestrators
+                .lock()
+                .await
+                .remove(&project_root);
+            if let Ok(mut registry) = pr13_hook_orchestration_registry().lock() {
+                registry.retain(|_, runtime| runtime.strong_count() > 0);
+            }
+        }
+        Ok(replaced)
+    }
+
     pub(crate) async fn register<GR, GA, CS, CE, PE, PC>(
         &self,
         project_root: PathBuf,
+        identity: Pr13AdvisoryRegistrationIdentityV1,
         input: Pr13AdvisoryRuntimeOpenV1,
         providers: Pr13AdvisoryProviderAuthoritiesV1<GR, GA, CS, CE, PE, PC>,
         lsp_session_factory: Arc<Pr12LspSessionFactory>,
@@ -5091,19 +5229,36 @@ impl DaemonAdvisoryRuntimeRegistrar {
         PE: CanonicalProximityEvidenceAuthorityV1 + Send + Sync + 'static,
         PC: ConfigurationControlStore + Clone + Send + Sync + 'static,
     {
+        let _registration_guard = self.service.advisory_registration_gate.lock().await;
         let project_id = input.resolved_scope.project_id.clone();
+        if identity.project_id != project_id
+            || identity.branch_ref != input.feedback_scope.branch_ref
+            || identity.head_commit_id != input.feedback_scope.head_commit_id
+        {
+            return Err(DaemonAdvisoryRuntimeRegistrationError::HookOrchestrationUnavailable);
+        }
         let feedback_registered = self
             .service
             .feedback_runtimes
             .lock()
             .await
             .get(&project_root)
-            .is_some_and(|runtime| runtime.project_id == project_id);
+            .is_some_and(|runtime| {
+                runtime.project_id == project_id
+                    && runtime.profile_id == identity.profile_id
+                    && runtime.configuration_digest == identity.configuration_digest
+            });
         if !feedback_registered {
             return Err(DaemonAdvisoryRuntimeRegistrationError::HookOrchestrationUnavailable);
         }
-        let mut runtimes = self.service.advisory_runtimes.lock().await;
-        if runtimes.contains_key(&project_root) {
+        let registration_matches = self
+            .service
+            .advisory_runtimes
+            .lock()
+            .await
+            .get(&project_root)
+            .is_some_and(|registered| registered.identity == identity);
+        if registration_matches {
             return Err(DaemonAdvisoryRuntimeRegistrationError::AlreadyRegistered);
         }
         let registration = Arc::new(register_pr13_advisory_daemon_startup(
@@ -5112,9 +5267,19 @@ impl DaemonAdvisoryRuntimeRegistrar {
             lsp_session_factory.clone(),
             hook_delivery_port,
         )?);
+        let replacing = self
+            .service
+            .advisory_runtimes
+            .lock()
+            .await
+            .get(&project_root)
+            .is_some_and(|registered| registered.identity != identity);
+        if replacing {
+            self.quiesce_registration(&project_root).await;
+        }
         let registered_root = project_root.clone();
-        runtimes.insert(project_root, registration.clone());
-        drop(runtimes);
+        self.retain_registration(project_root, identity, registration.clone())
+            .await?;
         self.service
             .install_lsp_owner(
                 registered_root,
@@ -5127,6 +5292,7 @@ impl DaemonAdvisoryRuntimeRegistrar {
     pub(crate) async fn register_production(
         &self,
         project_root: PathBuf,
+        identity: Pr13AdvisoryRegistrationIdentityV1,
         input: Pr13AdvisoryRuntimeOpenV1,
         production: Pr13AdvisoryProductionOpenV1,
         lsp_session_factory: Arc<Pr12LspSessionFactory>,
@@ -5138,12 +5304,41 @@ impl DaemonAdvisoryRuntimeRegistrar {
         let (providers, hook_delivery_port) = authorities.into_registrar_parts();
         self.register(
             project_root,
+            identity,
             input,
             providers,
             lsp_session_factory,
             hook_delivery_port,
         )
         .await
+    }
+
+    async fn unregister_registration(&self, project_root: &Path, remove_lsp_owner: bool) -> bool {
+        let _registration_guard = self.service.advisory_registration_gate.lock().await;
+        self.quiesce_registration(project_root).await;
+        let removed = self
+            .service
+            .advisory_runtimes
+            .lock()
+            .await
+            .remove(project_root);
+        if remove_lsp_owner {
+            self.service.lsp_owners.lock().await.remove(project_root);
+        }
+        let was_registered = removed.is_some();
+        drop(removed);
+        if let Ok(mut registry) = pr13_hook_orchestration_registry().lock() {
+            registry.retain(|_, runtime| runtime.strong_count() > 0);
+        }
+        was_registered
+    }
+
+    pub(crate) async fn unregister(&self, project_root: &Path) -> bool {
+        self.unregister_registration(project_root, false).await
+    }
+
+    pub(crate) async fn unmount_project(&self, project_root: &Path) -> bool {
+        self.unregister_registration(project_root, true).await
     }
 
     pub(crate) async fn register_hook_orchestrator(
@@ -7535,6 +7730,102 @@ mod tests {
                 .as_slice(),
             ["rh.daemon.minted"]
         );
+    }
+
+    fn advisory_registration_identity(suffix: &str) -> Pr13AdvisoryRegistrationIdentityV1 {
+        Pr13AdvisoryRegistrationIdentityV1 {
+            project_id: ProjectId::new(format!("project.{suffix}")).expect("project"),
+            profile_id: UserProfileId::new(format!("profile.{suffix}")).expect("profile"),
+            configuration_digest: ManifestDigest::new(format!("sha256:{}", "a".repeat(64)))
+                .expect("configuration digest"),
+            branch_ref: format!("refs/heads/{suffix}"),
+            head_commit_id: CommitId::new(format!("commit.{suffix}")).expect("commit"),
+            credential_generation: 1,
+            pull_request_generation: Some(
+                ManifestDigest::new(format!("sha256:{}", "b".repeat(64))).expect("PR generation"),
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn pr13_registration_replaces_every_exact_drift_axis() {
+        let baseline = advisory_registration_identity("baseline");
+        let mut drifts = Vec::new();
+        let mut drift = baseline.clone();
+        drift.project_id = ProjectId::new("project.drift").unwrap();
+        drifts.push(("project_id", drift));
+        let mut drift = baseline.clone();
+        drift.profile_id = UserProfileId::new("profile.drift").unwrap();
+        drifts.push(("profile_id", drift));
+        let mut drift = baseline.clone();
+        drift.configuration_digest =
+            ManifestDigest::new(format!("sha256:{}", "c".repeat(64))).unwrap();
+        drifts.push(("configuration_digest", drift));
+        let mut drift = baseline.clone();
+        drift.branch_ref = "refs/heads/drift".to_owned();
+        drifts.push(("branch_ref", drift));
+        let mut drift = baseline.clone();
+        drift.head_commit_id = CommitId::new("commit.drift").unwrap();
+        drifts.push(("head_commit_id", drift));
+        let mut drift = baseline.clone();
+        drift.credential_generation = 2;
+        drifts.push(("credential_generation", drift));
+        let mut drift = baseline.clone();
+        drift.pull_request_generation =
+            Some(ManifestDigest::new(format!("sha256:{}", "d".repeat(64))).unwrap());
+        drifts.push(("pull_request_generation", drift));
+
+        for (axis, drift) in drifts {
+            let service = DaemonInvocationService::default();
+            let registrar = DaemonAdvisoryRuntimeRegistrar::new(&service);
+            let root = PathBuf::from(format!("/project/pr13-drift-{axis}"));
+            let first = Arc::new(());
+            let first_weak = Arc::downgrade(&first);
+            let first_runtime: Arc<dyn Any + Send + Sync> = first;
+            assert!(
+                !registrar
+                    .retain_registration(root.clone(), baseline.clone(), first_runtime)
+                    .await
+                    .unwrap()
+            );
+            let replacement: Arc<dyn Any + Send + Sync> = Arc::new(());
+            assert!(
+                registrar
+                    .retain_registration(root, drift, replacement)
+                    .await
+                    .unwrap()
+            );
+            assert!(
+                first_weak.upgrade().is_none(),
+                "drift axis {axis} retained the old review/CI/proximity registration"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn pr13_registration_exact_match_is_idempotent_and_unmount_drops_it() {
+        let service = DaemonInvocationService::default();
+        let registrar = DaemonAdvisoryRuntimeRegistrar::new(&service);
+        let root = PathBuf::from("/project/pr13-exact");
+        let identity = advisory_registration_identity("exact");
+        let first = Arc::new(());
+        let first_weak = Arc::downgrade(&first);
+        let first_runtime: Arc<dyn Any + Send + Sync> = first;
+        registrar
+            .retain_registration(root.clone(), identity.clone(), first_runtime)
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            registrar
+                .retain_registration(root.clone(), identity, Arc::new(()))
+                .await,
+            Err(DaemonAdvisoryRuntimeRegistrationError::AlreadyRegistered)
+        ));
+        assert!(first_weak.upgrade().is_some());
+        assert!(registrar.unmount_project(&root).await);
+        assert!(first_weak.upgrade().is_none());
+        assert!(!registrar.unmount_project(&root).await);
     }
 
     #[test]
