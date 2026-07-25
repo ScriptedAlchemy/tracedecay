@@ -58,6 +58,9 @@ pub(super) async fn handle_dashboard(
     automation_writer: DashboardAutomationWriter,
     doctor_report_reader: Option<crate::dashboard::DoctorReportReader>,
     doctor_remediation_dispatcher: Option<crate::dashboard::DoctorRemediationDispatcherV1>,
+    code_index_freshness_reader: Option<
+        crate::dashboard::code_index_freshness_api::CodeIndexFreshnessReader,
+    >,
 ) -> Result<ToolResult> {
     let action = args
         .get("action")
@@ -126,6 +129,7 @@ pub(super) async fn handle_dashboard(
                 automation_writer,
                 doctor_report_reader,
                 doctor_remediation_dispatcher,
+                code_index_freshness_reader,
             )
             .await?;
 

@@ -1,7 +1,7 @@
 //! Production PR12 primitive owners over `TraceDecay` graph/query authorities.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use ignore::overrides::OverrideBuilder;
 use tracedecay_application::retrieval::grep_analysis::{
@@ -42,8 +42,8 @@ use super::runtime::{
     Pr12OperationalPrimitiveFuture, Pr12OperationalPrimitivePort, Pr12OperationalPrimitiveRequest,
     Pr12PrimitiveProjectRuntime, QualifiedNamePrimitiveRequest, QualifiedNamePrimitiveResult,
     SourceBodyPrimitiveRequest, SourceBodyPrimitiveResult, SourceOutlinePrimitiveRequest,
-    SourceOutlinePrimitiveResult, StorageStatusPrimitiveRequest, StorageStatusPrimitiveResult,
-    open_pr12_primitive_project_runtime,
+    SourceOutlinePrimitiveResult, StorageStatusHistoryPointV1, StorageStatusPrimitiveRequest,
+    StorageStatusPrimitiveResult, open_pr12_primitive_project_runtime,
 };
 use super::symbol_graph::{SymbolGraphCursorPort, symbol_record};
 use crate::application::lsp_runtime::LspCodeIndexProjectionIdentityPort;
@@ -902,6 +902,134 @@ impl TraceDecayExtendedPrimitivePortV1 {
     }
 }
 
+const STORAGE_STATUS_HISTORY_REVISION_V1: u32 = 1;
+const MAX_STORAGE_STATUS_HISTORY_POINTS: usize = 128;
+
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct DurableStorageStatusHistoryV1 {
+    revision: u32,
+    project_id: Option<String>,
+    store_path: String,
+    samples: Vec<StorageStatusHistoryPointV1>,
+}
+
+fn storage_status_history_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn update_storage_status_history(
+    history_path: &Path,
+    project_id: Option<String>,
+    store_path: String,
+    database_bytes: u64,
+    observed_at: i64,
+) -> (Vec<StorageStatusHistoryPointV1>, String) {
+    let Ok(_guard) = storage_status_history_lock().lock() else {
+        return (
+            vec![StorageStatusHistoryPointV1 {
+                observed_at,
+                database_bytes,
+            }],
+            "current_sample_only_history_lock_failed".to_owned(),
+        );
+    };
+    let restored = std::fs::read(history_path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<DurableStorageStatusHistoryV1>(&bytes).ok())
+        .filter(|durable| {
+            durable.revision == STORAGE_STATUS_HISTORY_REVISION_V1
+                && durable.project_id == project_id
+                && durable.store_path == store_path
+                && durable
+                    .samples
+                    .windows(2)
+                    .all(|pair| pair[0].observed_at <= pair[1].observed_at)
+        });
+    let mut history = restored.map_or_else(Vec::new, |durable| durable.samples);
+    history.push(StorageStatusHistoryPointV1 {
+        observed_at,
+        database_bytes,
+    });
+    if history.len() > MAX_STORAGE_STATUS_HISTORY_POINTS {
+        history.drain(..history.len() - MAX_STORAGE_STATUS_HISTORY_POINTS);
+    }
+    let durable = DurableStorageStatusHistoryV1 {
+        revision: STORAGE_STATUS_HISTORY_REVISION_V1,
+        project_id,
+        store_path,
+        samples: history.clone(),
+    };
+    let persisted = serde_json::to_vec_pretty(&durable).ok().and_then(|bytes| {
+        std::fs::create_dir_all(history_path.parent().unwrap_or_else(|| Path::new("."))).ok()?;
+        let temp = history_path.with_extension(format!("tmp-{}-{observed_at}", std::process::id()));
+        crate::storage::PrivateStoreIo::write_file_atomically(history_path, &temp, &bytes).ok()
+    });
+    let coverage = if persisted.is_some() {
+        "durable_project_store_history"
+    } else {
+        "current_sample_only_history_persistence_failed"
+    };
+    (history, coverage.to_owned())
+}
+
+/// Canonical storage-status owner used by the application operation and its
+/// dashboard projection. History is durable and scope-bound, so growth does
+/// not reset when the daemon or dashboard restarts.
+pub(crate) fn canonical_storage_status(
+    graph: &TraceDecay,
+    include_details: bool,
+) -> StorageStatusPrimitiveResult {
+    let branch = graph.branch_diagnostics();
+    let read_only = graph.is_read_only();
+    let store_path = graph.db_path().display().to_string();
+    let database_bytes = graph
+        .db_path()
+        .metadata()
+        .ok()
+        .map(|metadata| metadata.len());
+    let project_id = graph.store_layout().identity.project_id.clone();
+    let status = if branch.serving_db_exists {
+        if branch.is_fallback { "degraded" } else { "ok" }
+    } else {
+        "missing_graph_db"
+    };
+    let mut details = Vec::new();
+    if include_details {
+        details.extend(branch.warnings);
+        if let Some(warning) = branch.fallback_warning {
+            details.push(warning);
+        }
+    }
+    let history_path = graph
+        .store_layout()
+        .data_root
+        .join("storage-status-history-v1.json");
+    let (history, history_coverage) = database_bytes.map_or_else(
+        || (Vec::new(), "current_sample_unavailable".to_owned()),
+        |bytes| {
+            update_storage_status_history(
+                &history_path,
+                project_id.clone(),
+                store_path.clone(),
+                bytes,
+                now_observed().0,
+            )
+        },
+    );
+    StorageStatusPrimitiveResult {
+        status: status.to_owned(),
+        read_only,
+        database_bytes,
+        details,
+        project_id,
+        store_path: Some(store_path),
+        history,
+        history_coverage: Some(history_coverage),
+    }
+}
+
 impl Pr12ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
     fn qualified_name<'a>(
         &'a self,
@@ -1098,33 +1226,8 @@ impl Pr12ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
         request: &'a StorageStatusPrimitiveRequest,
     ) -> Pr12ExtendedPrimitiveFuture<'a, StorageStatusPrimitiveResult> {
         Box::pin(async move {
-            let branch = self.graph.branch_diagnostics();
-            let read_only = self.graph.is_read_only();
-            let database_bytes = self
-                .graph
-                .db_path()
-                .metadata()
-                .ok()
-                .map(|metadata| metadata.len());
-            let status = if branch.serving_db_exists {
-                if branch.is_fallback { "degraded" } else { "ok" }
-            } else {
-                "missing_graph_db"
-            };
-            let mut details = Vec::new();
-            if request.include_details {
-                details.extend(branch.warnings);
-                if let Some(warning) = branch.fallback_warning {
-                    details.push(warning);
-                }
-            }
             completed(
-                StorageStatusPrimitiveResult {
-                    status: status.to_owned(),
-                    read_only,
-                    database_bytes,
-                    details,
-                },
+                canonical_storage_status(self.graph.as_ref(), request.include_details),
                 EvidenceDomain::Operational,
                 now_observed(),
             )
@@ -2405,5 +2508,31 @@ mod affected_tests_tests {
         );
 
         assert!(matches!(outcome, RetrievalPortOutcome::Partial(_)));
+    }
+
+    #[test]
+    fn storage_status_history_is_reloaded_from_durable_scope_file() {
+        let directory = tempfile::tempdir().expect("history tempdir");
+        let history_path = directory.path().join("storage-status-history-v1.json");
+        let project_id = Some("project.storage-status".to_owned());
+        let store_path = "/project/.tracedecay/graph.db".to_owned();
+
+        let (first, first_coverage) = update_storage_status_history(
+            &history_path,
+            project_id.clone(),
+            store_path.clone(),
+            4096,
+            1,
+        );
+        assert_eq!(first.len(), 1);
+        assert_eq!(first_coverage, "durable_project_store_history");
+        assert!(history_path.is_file());
+
+        let (second, second_coverage) =
+            update_storage_status_history(&history_path, project_id, store_path, 8192, 2);
+        assert_eq!(second.len(), 2);
+        assert_eq!(second[0].database_bytes, 4096);
+        assert_eq!(second[1].database_bytes, 8192);
+        assert_eq!(second_coverage, "durable_project_store_history");
     }
 }

@@ -91,6 +91,7 @@ impl DashboardFixture {
             savings_db: None,
             savings_db_path: String::new(),
             project_root: project_root.clone(),
+            code_index_freshness_reader: None,
             storage_mode: "project_local".to_string(),
             store_root: project_root.clone(),
             config_path: project_root.join("config.json"),

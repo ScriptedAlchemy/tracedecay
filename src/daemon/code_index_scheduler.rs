@@ -632,6 +632,8 @@ pub(super) struct CodeIndexWorktreeSchedulerV1 {
     git_metadata: identity::GitMetadataFingerprintV1,
     /// Tier-2 bounded-staleness clock: when truth was last reconciled.
     last_reconciled_at: Instant,
+    /// Wall-clock companion to `last_reconciled_at` for read-model projection.
+    last_reconciled_at_micros: i64,
     /// Tier-2 cheap prefilter: stat-level (path, mtime, size) signature of the
     /// present source candidates at last reconcile. A quiet repository whose
     /// signature is unchanged resets the staleness clock without paying the
@@ -724,6 +726,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             policy,
             git_metadata,
             last_reconciled_at: Instant::now(),
+            last_reconciled_at_micros: now_micros().0,
             last_stat_signature: None,
             byte_pool,
             retained_snapshot_bytes: Vec::new(),
@@ -934,6 +937,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         self.git_metadata = metadata;
         self.last_stat_signature = signature;
         self.last_reconciled_at = Instant::now();
+        self.last_reconciled_at_micros = now_micros().0;
     }
 
     /// A cheap stat-level (path, mtime, size) signature of the present source
@@ -1023,6 +1027,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         match self.worktree_stat_signature() {
             Ok(signature) if self.last_stat_signature.as_ref() == Some(&signature) => {
                 self.last_reconciled_at = Instant::now();
+                self.last_reconciled_at_micros = now_micros().0;
                 Ok(false)
             }
             _ => {
@@ -1035,6 +1040,18 @@ impl CodeIndexWorktreeSchedulerV1 {
     /// The exact identity this scheduler is currently bound to.
     pub fn identity(&self) -> &identity::IndexingIdentityV1 {
         &self.identity
+    }
+
+    pub(super) const fn last_reconciled_at_micros(&self) -> i64 {
+        self.last_reconciled_at_micros
+    }
+
+    pub(super) fn pending_hint_count(&self) -> Option<u64> {
+        let hints = self
+            .hints
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (!hints.overflow).then(|| u64::try_from(hints.paths.len()).unwrap_or(u64::MAX))
     }
 
     #[cfg(test)]
