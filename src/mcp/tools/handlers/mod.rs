@@ -47,15 +47,22 @@ pub(crate) use session::{
     SessionRefreshServiceOutcome, SessionRefreshServicePort, utc_micros_value,
 };
 
+use std::collections::BTreeSet;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use serde_json::{Value, json};
-use tracedecay_application::RetainedSurfaceOperation;
+use tracedecay_application::handlers::CanonicalApplicationDispatcher;
+use tracedecay_application::{
+    APPLICATION_DEFAULT_PROFILE_ID, ApplicationOperation, RetainedSurfaceOperation,
+    retained_surface_application_operation,
+};
+use tracedecay_tool_catalog::{BindingSurface, ProfileId, SurfaceOperationName};
 
 #[cfg(test)]
 use crate::application_surface::APPLICATION_SURFACE_OPERATIONS;
 use crate::application_surface::ApplicationSurfaceOperation;
+use crate::catalog_composition::{ApplicationCatalogComposition, compose_application_catalog};
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::RegisteredGlobalDb;
 use crate::mcp::response_handles::{ResponseHandleLookup, retrieve_response_handle};
@@ -454,8 +461,7 @@ pub struct ToolCallRegistryOptions<'a> {
     pub automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,
     pub automation_writer: crate::dashboard::DashboardAutomationWriter,
     pub doctor_report_reader: Option<crate::dashboard::DoctorReportReader>,
-    pub doctor_remediation_dispatcher:
-        Option<crate::dashboard::DoctorRemediationDispatcherV1>,
+    pub doctor_remediation_dispatcher: Option<crate::dashboard::DoctorRemediationDispatcherV1>,
     pub diagnostics_cache: Option<&'a crate::diagnostics::DiagnosticsCache>,
     pub diagnostics_lsp:
         Option<&'a tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>>,
@@ -678,7 +684,9 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
         tool_name,
         cg,
         &args,
+        scope_prefix,
         active_project_session_db,
+        active_lcm_context,
         &options,
     )
     .await
@@ -701,6 +709,156 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
     }
 }
 
+#[derive(Debug)]
+struct CatalogBoundRetainedMcpRequest {
+    operation: RetainedSurfaceOperation,
+    arguments: Value,
+}
+
+#[derive(Clone, Copy)]
+enum RetainedMcpExecutionContext<'call, 'authority> {
+    Profile {
+        tool_name: &'call str,
+        profile_root: &'call Path,
+        options: &'call ToolCallRegistryOptions<'authority>,
+    },
+    Project {
+        tool_name: &'call str,
+        cg: &'call TraceDecay,
+        scope_prefix: Option<&'call str>,
+        active_project_session_db: Option<&'call Arc<RegisteredGlobalDb>>,
+        active_lcm_context: session::LcmHandlerContext<'call>,
+        options: &'call ToolCallRegistryOptions<'authority>,
+    },
+}
+
+static RETAINED_MCP_COMPOSITION: OnceLock<
+    std::result::Result<ApplicationCatalogComposition<()>, String>,
+> = OnceLock::new();
+
+struct RetainedMcpCatalogDispatcher<'call, 'authority> {
+    context: RetainedMcpExecutionContext<'call, 'authority>,
+}
+
+type RetainedMcpInvocationFuture<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + 'a>>;
+
+impl<'call, 'authority> CanonicalApplicationDispatcher<CatalogBoundRetainedMcpRequest>
+    for RetainedMcpCatalogDispatcher<'call, 'authority>
+{
+    type Output = RetainedMcpInvocationFuture<'call>;
+
+    fn invoke(
+        &self,
+        operation: &ApplicationOperation,
+        request: CatalogBoundRetainedMcpRequest,
+    ) -> Self::Output {
+        let expected = match retained_surface_application_operation(request.operation)
+            .map_err(retained_catalog_error)
+        {
+            Ok(expected) => expected,
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
+        if operation != &expected {
+            let error = retained_catalog_error(
+                "resolved retained MCP handler does not own the requested operation",
+            );
+            return Box::pin(async move { Err(error) });
+        }
+        let context = self.context;
+        Box::pin(async move {
+            match context {
+                RetainedMcpExecutionContext::Profile {
+                    tool_name,
+                    profile_root,
+                    options,
+                } => {
+                    execute_profile_retained_application_tool(
+                        request,
+                        tool_name,
+                        profile_root,
+                        options,
+                    )
+                    .await
+                }
+                RetainedMcpExecutionContext::Project {
+                    tool_name,
+                    cg,
+                    scope_prefix,
+                    active_project_session_db,
+                    active_lcm_context,
+                    options,
+                } => {
+                    execute_project_retained_application_tool(
+                        request,
+                        tool_name,
+                        cg,
+                        scope_prefix,
+                        active_project_session_db,
+                        active_lcm_context,
+                        options,
+                    )
+                    .await
+                }
+            }
+        })
+    }
+}
+
+fn retained_catalog_error(error: impl std::fmt::Display) -> TraceDecayError {
+    TraceDecayError::Config {
+        message: format!("retained application catalog is unavailable: {error}"),
+    }
+}
+
+fn retained_mcp_composition() -> Result<&'static ApplicationCatalogComposition<()>> {
+    RETAINED_MCP_COMPOSITION
+        .get_or_init(|| compose_application_catalog(()).map_err(|error| error.to_string()))
+        .as_ref()
+        .map_err(retained_catalog_error)
+}
+
+async fn invoke_retained_mcp_request<'call, 'authority>(
+    context: RetainedMcpExecutionContext<'call, 'authority>,
+    operation: RetainedSurfaceOperation,
+    arguments: Value,
+) -> Result<ToolResult> {
+    let composition = retained_mcp_composition()?;
+    let profile_id =
+        ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID).map_err(retained_catalog_error)?;
+    let operation_name =
+        SurfaceOperationName::new(operation.as_str()).map_err(retained_catalog_error)?;
+    let capability = composition
+        .snapshot()
+        .resolve_binding(
+            &profile_id,
+            BindingSurface::Mcp,
+            &operation_name,
+            1,
+            &BTreeSet::new(),
+        )
+        .ok_or_else(|| retained_catalog_error("retained MCP binding is not callable"))?;
+    let expected =
+        retained_surface_application_operation(operation).map_err(retained_catalog_error)?;
+    if capability.capability_id() != expected.capability_id()
+        || capability.use_case_id() != expected.use_case_id()
+    {
+        return Err(retained_catalog_error(
+            "retained MCP binding resolves a different application operation",
+        ));
+    }
+    let dispatcher = RetainedMcpCatalogDispatcher { context };
+    let handler = composition
+        .bind_handler(capability.use_case_id(), &dispatcher)
+        .ok_or_else(|| retained_catalog_error("retained MCP handler is not registered"))?;
+    handler
+        .invoke(CatalogBoundRetainedMcpRequest {
+            operation,
+            arguments,
+        })
+        .await
+}
+
 async fn dispatch_profile_retained_application_tool(
     operation: RetainedSurfaceOperation,
     tool_name: &str,
@@ -708,11 +866,39 @@ async fn dispatch_profile_retained_application_tool(
     profile_root: &Path,
     options: &ToolCallRegistryOptions<'_>,
 ) -> Result<ToolResult> {
-    match operation {
-        RetainedSurfaceOperation::MessageSearch => {
+    invoke_retained_mcp_request(
+        RetainedMcpExecutionContext::Profile {
+            tool_name,
+            profile_root,
+            options,
+        },
+        operation,
+        args,
+    )
+    .await
+}
+
+async fn execute_profile_retained_application_tool(
+    request: CatalogBoundRetainedMcpRequest,
+    tool_name: &str,
+    profile_root: &Path,
+    options: &ToolCallRegistryOptions<'_>,
+) -> Result<ToolResult> {
+    match request.operation {
+        RetainedSurfaceOperation::MessageSearch
+        | RetainedSurfaceOperation::LcmStatus
+        | RetainedSurfaceOperation::LcmDoctor
+        | RetainedSurfaceOperation::LcmLoadSession
+        | RetainedSurfaceOperation::LcmGrep
+        | RetainedSurfaceOperation::LcmDescribe
+        | RetainedSurfaceOperation::LcmExpand
+        | RetainedSurfaceOperation::LcmExpandQuery
+        | RetainedSurfaceOperation::LcmPreflight
+        | RetainedSurfaceOperation::LcmCompress
+        | RetainedSurfaceOperation::LcmSessionBoundary => {
             handle_user_lcm_tool_with_db(
                 tool_name,
-                args,
+                request.arguments,
                 profile_root,
                 options.session_authorities.user,
                 options.global_db,
@@ -1144,12 +1330,6 @@ async fn dispatch_health_tools(
         }
         "tracedecay_dsm" => health::handle_dsm(cg, args.clone(), scope_prefix).await,
         "tracedecay_test_risk" => health::handle_test_risk(cg, args.clone(), scope_prefix).await,
-        "tracedecay_session_start" => {
-            health::handle_session_start(cg, args.clone(), scope_prefix).await
-        }
-        "tracedecay_session_end" => {
-            health::handle_session_end(cg, args.clone(), scope_prefix).await
-        }
         _ => return None,
     };
     Some(result)
@@ -1161,15 +1341,44 @@ async fn dispatch_retained_application_tools(
     tool_name: &str,
     cg: &TraceDecay,
     args: &Value,
+    scope_prefix: Option<&str>,
     active_project_session_db: Option<&Arc<RegisteredGlobalDb>>,
+    active_lcm_context: session::LcmHandlerContext<'_>,
     options: &ToolCallRegistryOptions<'_>,
 ) -> Option<Result<ToolResult>> {
     let operation = RetainedSurfaceOperation::from_name(tool_name)?;
-    let result = match operation {
+    Some(
+        invoke_retained_mcp_request(
+            RetainedMcpExecutionContext::Project {
+                tool_name,
+                cg,
+                scope_prefix,
+                active_project_session_db,
+                active_lcm_context,
+                options,
+            },
+            operation,
+            args.clone(),
+        )
+        .await,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_project_retained_application_tool(
+    request: CatalogBoundRetainedMcpRequest,
+    tool_name: &str,
+    cg: &TraceDecay,
+    scope_prefix: Option<&str>,
+    active_project_session_db: Option<&Arc<RegisteredGlobalDb>>,
+    active_lcm_context: session::LcmHandlerContext<'_>,
+    options: &ToolCallRegistryOptions<'_>,
+) -> Result<ToolResult> {
+    match request.operation {
         RetainedSurfaceOperation::FactStore => {
             memory::handle_fact_store(
                 cg,
-                args.clone(),
+                request.arguments,
                 options.global_db,
                 options.allow_default_registry_fallback,
             )
@@ -1178,7 +1387,7 @@ async fn dispatch_retained_application_tools(
         RetainedSurfaceOperation::FactFeedback => {
             memory::handle_fact_feedback(
                 cg,
-                args.clone(),
+                request.arguments,
                 options.global_db,
                 options.allow_default_registry_fallback,
             )
@@ -1187,7 +1396,7 @@ async fn dispatch_retained_application_tools(
         RetainedSurfaceOperation::MemoryStatus => {
             memory::handle_memory_status(
                 cg,
-                args.clone(),
+                request.arguments,
                 options.global_db,
                 options.allow_default_registry_fallback,
             )
@@ -1195,7 +1404,7 @@ async fn dispatch_retained_application_tools(
         }
         RetainedSurfaceOperation::SessionRefresh => {
             session::handle_session_refresh(
-                args.clone(),
+                request.arguments,
                 options.session_authorities.refresh_services(),
             )
             .await
@@ -1204,7 +1413,7 @@ async fn dispatch_retained_application_tools(
             Box::pin(session::message_search::handle_message_search_with_service(
                 Some(cg.project_root()),
                 session::message_search::SessionRetrievalStoreScope::Project,
-                args.clone(),
+                request.arguments,
                 options.session_authorities.project_retrieval,
             ))
             .await
@@ -1213,20 +1422,37 @@ async fn dispatch_retained_application_tools(
             session::handle_sessions_for(
                 cg,
                 active_project_session_db.map(Arc::as_ref),
-                args.clone(),
+                request.arguments,
             )
             .await
         }
         RetainedSurfaceOperation::Workflows => {
             workflow_query::handle_workflows(
                 cg,
-                args.clone(),
+                request.arguments,
                 options.session_authorities.project_registered,
             )
             .await
         }
-    };
-    Some(result)
+        RetainedSurfaceOperation::LcmStatus
+        | RetainedSurfaceOperation::LcmDoctor
+        | RetainedSurfaceOperation::LcmLoadSession
+        | RetainedSurfaceOperation::LcmGrep
+        | RetainedSurfaceOperation::LcmDescribe
+        | RetainedSurfaceOperation::LcmExpand
+        | RetainedSurfaceOperation::LcmExpandQuery
+        | RetainedSurfaceOperation::LcmPreflight
+        | RetainedSurfaceOperation::LcmCompress
+        | RetainedSurfaceOperation::LcmSessionBoundary => {
+            dispatch_lcm_tool(tool_name, request.arguments, active_lcm_context).await
+        }
+        RetainedSurfaceOperation::SessionStart => {
+            health::handle_session_start(cg, request.arguments, scope_prefix).await
+        }
+        RetainedSurfaceOperation::SessionEnd => {
+            health::handle_session_end(cg, request.arguments, scope_prefix).await
+        }
+    }
 }
 
 /// Dispatch memory, skill, and analytics tools (`tracedecay_fact_store`,
@@ -1491,20 +1717,32 @@ mod tests {
                 .into_iter()
                 .map(|operation| format!("tracedecay_{}", operation.as_str())),
         );
-        for tool_name in [
-            "tracedecay_fact_store",
-            "tracedecay_fact_feedback",
-            "tracedecay_memory_status",
-            "tracedecay_session_refresh",
-            "tracedecay_message_search",
-            "tracedecay_sessions_for",
-            "tracedecay_workflows",
-        ] {
+        for operation in RetainedSurfaceOperation::ALL {
+            let tool_name = format!("tracedecay_{}", operation.as_str());
+            let composition = retained_mcp_composition()
+                .unwrap_or_else(|error| panic!("{tool_name} catalog composition failed: {error}"));
+            let profile = ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID).unwrap();
+            let operation_name = SurfaceOperationName::new(operation.as_str()).unwrap();
+            let capability = composition
+                .snapshot()
+                .resolve_binding(
+                    &profile,
+                    BindingSurface::Mcp,
+                    &operation_name,
+                    1,
+                    &BTreeSet::new(),
+                )
+                .unwrap_or_else(|| panic!("{tool_name} catalog binding is not callable"));
+            let expected = retained_surface_application_operation(operation).unwrap();
+            assert_eq!(capability.capability_id(), expected.capability_id());
+            assert_eq!(capability.use_case_id(), expected.use_case_id());
             assert!(
-                RetainedSurfaceOperation::from_name(tool_name).is_some(),
-                "{tool_name} must resolve through the retained application catalog"
+                composition
+                    .bind_handler(capability.use_case_id(), &())
+                    .is_some(),
+                "{tool_name} application handler is not registered"
             );
-            handler_names.insert(tool_name.to_owned());
+            handler_names.insert(tool_name);
         }
         for internal in INTERNAL_DAEMON_TOOL_NAMES {
             handler_names.remove(*internal);
