@@ -1550,10 +1550,15 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
             &exact_request,
         )
         .await;
+    assert!(
+        exact.evidence().finished_at > latest.generation.manifest().seal.sealed_at,
+        "query completion time must not reuse the generation seal time"
+    );
     assert_eq!(
-        serde_json::to_vec(exact.evidence()).expect("serialize exact evidence"),
-        serde_json::to_vec(exact_repeat.evidence()).expect("serialize repeated exact evidence"),
-        "same generation and request produce byte-stable production evidence"
+        serde_json::to_vec(&exact.evidence().payload).expect("serialize exact payload"),
+        serde_json::to_vec(&exact_repeat.evidence().payload)
+            .expect("serialize repeated exact payload"),
+        "same generation and request produce byte-stable production query payload"
     );
     match exact {
         RetrievalPortOutcome::Completed(evidence) => {
@@ -2589,6 +2594,114 @@ async fn unpinned_query_resolves_exact_admitted_worktree_scope() {
         other => panic!("expected completed scoped query, got {other:?}"),
     };
     assert_eq!(served, target_generation);
+    registry.shutdown().await;
+}
+
+#[tokio::test]
+async fn unpinned_cursor_continues_on_its_immutable_generation() {
+    let fixture = GitFixture::new(&[(
+        "src/lib.rs",
+        "mod a { pub fn shared() {} }\nmod b { pub fn shared() {} }\nmod c { pub fn shared() {} }\n",
+    )]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(fixture.path(), store.path().to_path_buf(), None)
+        .await
+        .expect("mount worktree");
+    wait_for_initial_generation(&registry, fixture.path()).await;
+    let initial = registry
+        .latest_complete_fresh(fixture.path())
+        .await
+        .expect("initial generation");
+    let operation =
+        callable_code_operation(CallableCodeOperationKind::ExactOccurrence).expect("operation");
+    let context = application_context(
+        &operation,
+        initial.generation.snapshot().repository.clone(),
+        initial
+            .generation
+            .snapshot()
+            .worktree
+            .clone()
+            .expect("worktree identity"),
+    );
+    mount_query_authority(
+        &registry,
+        fixture.path(),
+        &context,
+        initial.generation.manifest().privacy_domain.clone(),
+    )
+    .await;
+    let scope =
+        CodeQueryScope::new(super::queries::unpinned_latest_generation(), None).expect("scope");
+    let first_request = ExactOccurrenceRequest::new(
+        "shared",
+        None,
+        scope.clone(),
+        RetrievalRequestMeta::current(
+            PageRequest::first(1).expect("first page"),
+            ResultProjection::Evidence,
+            RetrievalOrder::Relevance,
+        ),
+    )
+    .expect("first request");
+    let first = registry
+        .exact_occurrence(
+            RetrievalPortContext {
+                request: &context,
+                operation: &operation,
+            },
+            &first_request,
+        )
+        .await;
+    let first_page = match first {
+        RetrievalPortOutcome::Completed(evidence) => evidence.payload.expect("first page"),
+        other => panic!("expected first page, got {other:?}"),
+    };
+    let cursor = first_page.next_cursor.clone().expect("continuation cursor");
+    let original_generation = first_page.generation.clone();
+
+    fixture.edit(
+        "src/lib.rs",
+        "mod a { pub fn shared() {} }\nmod b { pub fn shared() {} }\nmod c { pub fn shared() {} }\npub fn unrelated() {}\n",
+    );
+    git(fixture.path(), &["commit", "-qam", "refresh"]);
+    let refreshed = registry
+        .latest_complete_fresh(fixture.path())
+        .await
+        .expect("refreshed generation");
+    assert_ne!(
+        refreshed.generation.manifest().generation_id,
+        original_generation
+    );
+
+    let continuation_request = ExactOccurrenceRequest::new(
+        "shared",
+        None,
+        scope,
+        RetrievalRequestMeta::current(
+            PageRequest::new(1, Some(cursor)).expect("continuation page"),
+            ResultProjection::Evidence,
+            RetrievalOrder::Relevance,
+        ),
+    )
+    .expect("continuation request");
+    let continuation = registry
+        .exact_occurrence(
+            RetrievalPortContext {
+                request: &context,
+                operation: &operation,
+            },
+            &continuation_request,
+        )
+        .await;
+    let continuation_page = match continuation {
+        RetrievalPortOutcome::Completed(evidence) => evidence.payload.expect("continuation page"),
+        other => panic!("expected continuation page, got {other:?}"),
+    };
+    assert_eq!(continuation_page.generation, original_generation);
+    assert_eq!(continuation_page.items.len(), 1);
     registry.shutdown().await;
 }
 
