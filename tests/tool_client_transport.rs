@@ -3,6 +3,7 @@
 mod common;
 
 use std::io::{BufRead, BufReader, Read, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -180,6 +181,10 @@ fn fixture() -> (TempDir, TempDir, TempDir, PathBuf, PathBuf, PathBuf) {
     let socket_dir = TempDir::new().expect("socket dir");
     let home_path = canonical_existing_path(home.path());
     let project_path = canonical_existing_path(project.path());
+    let profile_root = home_path.join(".tracedecay");
+    std::fs::create_dir(&profile_root).expect("create private profile root");
+    std::fs::set_permissions(&profile_root, std::fs::Permissions::from_mode(0o700))
+        .expect("secure profile root");
     init_project(&home_path, &project_path);
     let socket = socket_dir.path().join("tracedecay.sock");
     (home, project, socket_dir, home_path, project_path, socket)
