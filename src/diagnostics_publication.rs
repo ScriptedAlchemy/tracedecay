@@ -22,6 +22,9 @@
 //! reach evidence through the authorized expansion path instead.
 
 use std::collections::BTreeMap;
+use std::future::Future;
+use std::path::{Component, Path, PathBuf};
+use std::pin::Pin;
 
 use tracedecay_domain::{
     CodeGenerationId, CommitId, ComponentVersion, ContentDigest, DiagnosticEvidenceClassV1,
@@ -115,6 +118,132 @@ pub struct CleanGenerationDiagnosticScopeV1 {
     /// Revision of the configuration the producers ran under.
     pub configuration_revision: ComponentVersion,
     pub collected_at: UtcMicros,
+}
+
+/// The code-index generation authority's identity for one project root.
+///
+/// Every file identity TraceDecay publishes has exactly one mint: the
+/// code-index scheduler, which derives `file.daemon.<digest>` from
+/// `(repository, worktree, logical path, content digest)`. A producer that
+/// invented its own file identity — a repository-relative path, say — would
+/// publish records the LSP feedback projection can only refuse, because that
+/// projection compares a record's `file_occurrence_id` against the saved-edit
+/// cycle's impact target, which is minted by the same authority.
+///
+/// This type carries that authority across the boundary so a producer
+/// *resolves* identity instead of minting it. A file the code index does not
+/// know is not resolvable here, and the honest outcome is a typed skip.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CodeIndexPublicationIdentityV1 {
+    generation_id: CodeGenerationId,
+    sealed_at: UtcMicros,
+    repository: RepositoryId,
+    worktree: Option<WorktreeId>,
+    reference: Option<RefId>,
+    source_revision: Option<CommitId>,
+    files: BTreeMap<String, (FileOccurrenceId, ContentDigest)>,
+}
+
+impl CodeIndexPublicationIdentityV1 {
+    /// Builds the identity from one complete code-index generation. Only the
+    /// generation authority may call this; `files` is keyed by the generation's
+    /// own logical paths.
+    #[must_use]
+    pub fn new(
+        generation_id: CodeGenerationId,
+        sealed_at: UtcMicros,
+        repository: RepositoryId,
+        worktree: Option<WorktreeId>,
+        reference: Option<RefId>,
+        source_revision: Option<CommitId>,
+        files: impl IntoIterator<Item = (String, FileOccurrenceId, ContentDigest)>,
+    ) -> Self {
+        Self {
+            generation_id,
+            sealed_at,
+            repository,
+            worktree,
+            reference,
+            source_revision,
+            files: files
+                .into_iter()
+                .map(|(path, file, digest)| (path, (file, digest)))
+                .collect(),
+        }
+    }
+
+    #[must_use]
+    pub const fn generation_id(&self) -> &CodeGenerationId {
+        &self.generation_id
+    }
+
+    /// The authority's identity for one logical path, or `None` when the
+    /// code-index generation does not contain that file.
+    #[must_use]
+    pub fn file(&self, logical_path: &str) -> Option<(&FileOccurrenceId, &ContentDigest)> {
+        self.files
+            .get(logical_path)
+            .map(|(file, digest)| (file, digest))
+    }
+
+    /// The clean-generation scope a producer publishes under. The generation
+    /// and repository identity are the code index's, never the producer's.
+    #[must_use]
+    pub fn publication_scope(
+        &self,
+        analyzer_revision: ComponentVersion,
+        configuration_revision: ComponentVersion,
+    ) -> CleanGenerationDiagnosticScopeV1 {
+        CleanGenerationDiagnosticScopeV1 {
+            generation_id: self.generation_id.clone(),
+            repository: self.repository.clone(),
+            worktree: self.worktree.clone(),
+            reference: self.reference.clone(),
+            source_revision: self.source_revision.clone(),
+            analyzer_revision,
+            configuration_revision,
+            // The snapshot is immutable per code generation. Binding evidence
+            // time to the generation seal makes identical re-publication
+            // converge instead of conflicting on wall-clock invocation time.
+            collected_at: self.sealed_at,
+        }
+    }
+}
+
+pub type CodeIndexPublicationIdentityFuture<'a> =
+    Pin<Box<dyn Future<Output = Option<CodeIndexPublicationIdentityV1>> + Send + 'a>>;
+
+/// Type-erased access to the code-index generation authority.
+///
+/// The daemon owns the only production implementation
+/// (`CodeIndexSchedulerRegistryV1`). A caller that cannot reach the daemon —
+/// a direct, non-daemon MCP server — has no resolver, and the correct outcome
+/// there is to publish nothing rather than to guess an identity.
+pub trait CodeIndexPublicationIdentityPortV1: Send + Sync {
+    fn resolve(&self, project_root: PathBuf) -> CodeIndexPublicationIdentityFuture<'_>;
+}
+
+/// Normalizes a producer-reported path onto the code index's logical-path
+/// namespace (repository-relative, `/`-separated).
+///
+/// Returns `None` for a path that escapes the project root; such a path has no
+/// logical identity in this generation and must not be resolved to one.
+#[must_use]
+pub fn code_index_logical_path(project_root: &Path, reported: &str) -> Option<String> {
+    let candidate = Path::new(reported);
+    let relative = if candidate.is_absolute() {
+        candidate.strip_prefix(project_root).ok()?
+    } else {
+        candidate
+    };
+    if relative
+        .components()
+        .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return None;
+    }
+    let logical = relative.to_str()?.replace('\\', "/");
+    (!logical.is_empty()).then_some(logical)
 }
 
 /// One producer's finding, addressed exactly.
@@ -437,62 +566,129 @@ pub fn compiler_anchor_v1(
     .map_err(|error| contract(format!("compiler anchor identity is invalid: {error}")))
 }
 
-/// Resolves parsed compiler diagnostics against real file content.
+/// Why one parsed compiler diagnostic could not be resolved into a publishable
+/// record. Every refusal names its file, so a producer never reports a bare
+/// count for findings it silently dropped.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CompilerDiagnosticResolutionSkipV1 {
+    /// The reported path escapes the project root, so it has no logical
+    /// identity in the code-index generation.
+    PathOutsideProject { file: String },
+    /// The code-index generation does not contain this file, so its
+    /// `file.daemon.<digest>` identity does not exist. Guessing one here is
+    /// exactly the raw-path mint this resolver exists to remove.
+    FileNotInCodeIndex { file: String },
+    /// The file on disk no longer matches the content the code-index
+    /// generation recorded; publishing against a stale identity would produce
+    /// records the LSP projection must refuse.
+    ContentDriftFromCodeIndex { file: String },
+    /// The file could not be read to compute a span.
+    FileUnreadable { file: String },
+    /// The reported line does not exist in the resolved content.
+    LineOutOfRange { file: String, line: u32 },
+}
+
+impl std::fmt::Display for CompilerDiagnosticResolutionSkipV1 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PathOutsideProject { file } => {
+                write!(f, "{file} is outside the project root")
+            }
+            Self::FileNotInCodeIndex { file } => {
+                write!(f, "{file} is not in the current code-index generation")
+            }
+            Self::ContentDriftFromCodeIndex { file } => {
+                write!(f, "{file} drifted from the code-index generation content")
+            }
+            Self::FileUnreadable { file } => write!(f, "{file} could not be read"),
+            Self::LineOutOfRange { file, line } => {
+                write!(f, "{file} has no line {line}")
+            }
+        }
+    }
+}
+
+/// Resolves parsed compiler diagnostics against the code-index generation
+/// authority.
 ///
-/// The file identity deliberately matches the identity the feedback impact
-/// adapter mints for graph nodes (the repository-relative path), so the LSP
-/// projection's impact-target comparison can actually succeed. A diagnostic
-/// whose file is unreadable, outside the project root, or whose reported line
-/// does not exist is dropped here rather than published with invented
-/// identity; the count of dropped entries is returned.
+/// File identity is *resolved*, never minted: each reported path is normalized
+/// onto the generation's logical-path namespace and looked up, so a published
+/// record carries the same `file.daemon.<digest>` identity the saved-edit
+/// feedback cycle's impact target carries. That is the whole reason the LSP
+/// projection can admit these records instead of refusing them with
+/// `ImpactTargetFileMismatch`.
+///
+/// A diagnostic whose file is unknown to the generation, has drifted from it,
+/// is unreadable, or whose reported line does not exist is refused with a named
+/// reason rather than published under invented identity.
 ///
 /// The span runs from the reported column to the end of the reported line —
 /// the honest extent of what `cargo` reports without re-parsing the source.
 pub async fn resolve_compiler_diagnostics_v1(
-    project_root: &std::path::Path,
+    project_root: &Path,
+    identity: &CodeIndexPublicationIdentityV1,
     diagnostics: &[crate::diagnose::Diagnostic],
-) -> (Vec<ResolvedCompilerDiagnosticV1>, usize) {
+) -> (
+    Vec<ResolvedCompilerDiagnosticV1>,
+    Vec<CompilerDiagnosticResolutionSkipV1>,
+) {
     let mut contents: BTreeMap<String, Option<(ContentDigest, String)>> = BTreeMap::new();
     let mut resolved = Vec::new();
-    let mut unresolved = 0usize;
+    let mut skipped = Vec::new();
     for diagnostic in diagnostics {
-        if !contents.contains_key(&diagnostic.file) {
-            let loaded = load_project_file(project_root, &diagnostic.file).await;
-            contents.insert(diagnostic.file.clone(), loaded);
+        let Some(logical_path) = code_index_logical_path(project_root, &diagnostic.file) else {
+            skipped.push(CompilerDiagnosticResolutionSkipV1::PathOutsideProject {
+                file: diagnostic.file.clone(),
+            });
+            continue;
+        };
+        let Some((file_occurrence_id, indexed_digest)) = identity.file(&logical_path) else {
+            skipped.push(CompilerDiagnosticResolutionSkipV1::FileNotInCodeIndex {
+                file: logical_path,
+            });
+            continue;
+        };
+        if !contents.contains_key(&logical_path) {
+            let loaded = load_project_file(project_root, &logical_path).await;
+            contents.insert(logical_path.clone(), loaded);
         }
-        let Some(Some((content_digest, text))) = contents.get(&diagnostic.file) else {
-            unresolved += 1;
+        let Some(Some((content_digest, text))) = contents.get(&logical_path) else {
+            skipped.push(CompilerDiagnosticResolutionSkipV1::FileUnreadable { file: logical_path });
             continue;
         };
+        if content_digest != indexed_digest {
+            skipped.push(
+                CompilerDiagnosticResolutionSkipV1::ContentDriftFromCodeIndex {
+                    file: logical_path,
+                },
+            );
+            continue;
+        }
         let Some(span) = line_column_span(text, diagnostic.line, diagnostic.column) else {
-            unresolved += 1;
-            continue;
-        };
-        let Ok(file_occurrence_id) = FileOccurrenceId::new(diagnostic.file.clone()) else {
-            unresolved += 1;
+            skipped.push(CompilerDiagnosticResolutionSkipV1::LineOutOfRange {
+                file: logical_path,
+                line: diagnostic.line,
+            });
             continue;
         };
         resolved.push(ResolvedCompilerDiagnosticV1 {
             diagnostic: diagnostic.clone(),
-            file_occurrence_id,
-            content_digest: content_digest.clone(),
+            file_occurrence_id: file_occurrence_id.clone(),
+            content_digest: indexed_digest.clone(),
             span,
             symbol_occurrence_id: None,
         });
     }
-    (resolved, unresolved)
+    (resolved, skipped)
 }
 
 /// Reads one repository-relative file, refusing paths that escape the root.
-async fn load_project_file(
-    project_root: &std::path::Path,
-    relative: &str,
-) -> Option<(ContentDigest, String)> {
-    let path = std::path::Path::new(relative);
+async fn load_project_file(project_root: &Path, relative: &str) -> Option<(ContentDigest, String)> {
+    let path = Path::new(relative);
     if path.is_absolute()
         || path
             .components()
-            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+            .any(|component| !matches!(component, Component::Normal(_)))
     {
         return None;
     }
@@ -574,6 +770,79 @@ pub async fn publish_compiler_diagnostics_v1(
         cleared,
         rejected,
     })
+}
+
+/// Outcome of the compiler pillar's production publication attempt.
+///
+/// Every non-published outcome is named. A producer that cannot reach the
+/// code-index generation authority publishes nothing and says so, rather than
+/// writing records under an identity the LSP feedback projection must refuse.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CompilerDiagnosticPublicationOutcomeV1 {
+    /// No resolver at this call site — a direct, non-daemon server.
+    CodeIndexIdentityUnavailable,
+    /// The resolver exists but has no complete, fresh generation for this root.
+    CodeIndexGenerationUnavailable,
+    NoResolvableDiagnostics {
+        unresolved: Vec<CompilerDiagnosticResolutionSkipV1>,
+    },
+    Published {
+        generation: CodeGenerationId,
+        report: DiagnosticPublicationReportV1,
+        unresolved: Vec<CompilerDiagnosticResolutionSkipV1>,
+    },
+    Failed {
+        reason: String,
+    },
+}
+
+/// The compiler pillar's production publication path, end to end.
+///
+/// This is the exact sequence `tracedecay_diagnose` runs: resolve the
+/// code-index generation authority, resolve every parsed diagnostic's identity
+/// against it, then publish one clean-generation snapshot under that same
+/// generation. Both identities the LSP feedback projection compares —
+/// `file_occurrence_id` and `generation_id` — therefore come from the same mint
+/// as the saved-edit cycle's impact target.
+pub async fn publish_compiler_diagnostics_through_code_index_v1(
+    project_root: &Path,
+    resolver: Option<&dyn CodeIndexPublicationIdentityPortV1>,
+    store: &DiagnosticsStore<'_>,
+    parsed: &[crate::diagnose::Diagnostic],
+    analyzer_revision: ComponentVersion,
+    configuration_revision: ComponentVersion,
+) -> CompilerDiagnosticPublicationOutcomeV1 {
+    let Some(resolver) = resolver else {
+        return CompilerDiagnosticPublicationOutcomeV1::CodeIndexIdentityUnavailable;
+    };
+    let Some(identity) = resolver.resolve(project_root.to_path_buf()).await else {
+        return CompilerDiagnosticPublicationOutcomeV1::CodeIndexGenerationUnavailable;
+    };
+    let (resolved, unresolved) = if parsed.is_empty() {
+        (Vec::new(), Vec::new())
+    } else {
+        resolve_compiler_diagnostics_v1(project_root, &identity, parsed).await
+    };
+    if !parsed.is_empty() && resolved.is_empty() {
+        return CompilerDiagnosticPublicationOutcomeV1::NoResolvableDiagnostics { unresolved };
+    }
+    let scope = identity.publication_scope(analyzer_revision, configuration_revision);
+    let generation = scope.generation_id.clone();
+    if let Err(error) = store.ensure_schema().await {
+        return CompilerDiagnosticPublicationOutcomeV1::Failed {
+            reason: error.to_string(),
+        };
+    }
+    match publish_compiler_diagnostics_v1(store, scope, &resolved).await {
+        Ok(report) => CompilerDiagnosticPublicationOutcomeV1::Published {
+            generation,
+            report,
+            unresolved,
+        },
+        Err(error) => CompilerDiagnosticPublicationOutcomeV1::Failed {
+            reason: error.to_string(),
+        },
+    }
 }
 
 /// Collapses control characters and bounds the notice to the domain limit so
@@ -827,9 +1096,37 @@ mod tests {
         }
     }
 
+    /// A code-index generation identity standing in for the daemon authority,
+    /// carrying the same `file.daemon.<digest>` shape the scheduler mints.
+    fn code_index_identity(
+        generation: &str,
+        files: &[(&str, &str, &str)],
+    ) -> CodeIndexPublicationIdentityV1 {
+        CodeIndexPublicationIdentityV1::new(
+            id(generation),
+            UtcMicros(1_700_000_000_000_000),
+            id("repository.fixture"),
+            Some(id("worktree.fixture")),
+            Some(id("ref.main")),
+            Some(id("commit.abc123")),
+            files.iter().map(|(path, file, digest)| {
+                ((*path).to_owned(), id(file), id::<ContentDigest>(digest))
+            }),
+        )
+    }
+
+    struct StaticCodeIndexIdentity(CodeIndexPublicationIdentityV1);
+
+    impl CodeIndexPublicationIdentityPortV1 for StaticCodeIndexIdentity {
+        fn resolve(&self, _project_root: PathBuf) -> CodeIndexPublicationIdentityFuture<'_> {
+            let identity = self.0.clone();
+            Box::pin(async move { Some(identity) })
+        }
+    }
+
     /// Reachability: calls the exact function the `tracedecay_diagnose` MCP
     /// handler calls, with real parsed `cargo check` text, and asserts the
-    /// durable store is populated afterwards.
+    /// durable store is populated afterwards with the code-index file identity.
     #[tokio::test]
     async fn production_compiler_path_populates_the_store() {
         let temp = tempfile::tempdir().expect("tempdir");
@@ -837,30 +1134,38 @@ mod tests {
         tokio::fs::create_dir_all(project_root.join("src"))
             .await
             .expect("create src");
-        tokio::fs::write(
-            project_root.join("src/lib.rs"),
-            "fn main() {\n    let x: u32 = \"nope\";\n}\n",
-        )
-        .await
-        .expect("write source");
+        let source = "fn main() {\n    let x: u32 = \"nope\";\n}\n";
+        tokio::fs::write(project_root.join("src/lib.rs"), source)
+            .await
+            .expect("write source");
+        let content_digest = crate::code_index::intake::content_digest(source.as_bytes());
 
         let cargo_output = "error[E0308]: mismatched types\n  --> src/lib.rs:2:18\n";
         let parsed = crate::diagnose::parse_cargo_output(cargo_output);
         assert_eq!(parsed.len(), 1, "fixture cargo output must parse");
 
-        let (resolved, unresolved) = resolve_compiler_diagnostics_v1(&project_root, &parsed).await;
-        assert_eq!(unresolved, 0);
+        let identity = code_index_identity(
+            "generation.reachability.1",
+            &[(
+                "src/lib.rs",
+                "file.daemon.reachability",
+                content_digest.as_str(),
+            )],
+        );
+        let (resolved, skipped) =
+            resolve_compiler_diagnostics_v1(&project_root, &identity, &parsed).await;
+        assert!(skipped.is_empty(), "unexpected skips: {skipped:?}");
         assert_eq!(resolved.len(), 1);
 
         let conn = crate::db::engine::TestConnection::open(&temp.path().join("diagnostics.db"));
         let store = DiagnosticsStore::new_runtime(&conn);
         store.ensure_schema().await.expect("ensure schema");
 
-        let generation: CodeGenerationId = id("generation.reachability.1");
-        let report =
-            publish_compiler_diagnostics_v1(&store, scope("generation.reachability.1"), &resolved)
-                .await
-                .expect("publish compiler diagnostics");
+        let scope = identity.publication_scope(id("analyzer.v1"), id("config.v1"));
+        let generation = identity.generation_id().clone();
+        let report = publish_compiler_diagnostics_v1(&store, scope, &resolved)
+            .await
+            .expect("publish compiler diagnostics");
         assert_eq!(report.inserted, 1);
         assert!(report.rejected.is_empty());
 
@@ -873,9 +1178,10 @@ mod tests {
         assert_eq!(current[0].provenance.producer.as_str(), "tracedecay");
         assert_eq!(
             current[0].file_occurrence_id.as_str(),
-            "src/lib.rs",
-            "file identity must match the impact adapter's node file identity"
+            "file.daemon.reachability",
+            "file identity must be resolved from the code-index generation"
         );
+        assert_eq!(current[0].content_digest, content_digest);
         assert_eq!(
             store
                 .current_generation()
@@ -883,6 +1189,187 @@ mod tests {
                 .expect("current generation"),
             Some(generation)
         );
+    }
+
+    #[tokio::test]
+    async fn repeated_compiler_publication_converges_on_generation_seal_time() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("project");
+        tokio::fs::create_dir_all(project_root.join("src"))
+            .await
+            .expect("create src");
+        let source = "fn main() {\n    let x: u32 = \"nope\";\n}\n";
+        tokio::fs::write(project_root.join("src/lib.rs"), source)
+            .await
+            .expect("write source");
+        let content_digest = crate::code_index::intake::content_digest(source.as_bytes());
+        let resolver = StaticCodeIndexIdentity(code_index_identity(
+            "generation.repeat.1",
+            &[("src/lib.rs", "file.daemon.repeat", content_digest.as_str())],
+        ));
+        let parsed = crate::diagnose::parse_cargo_output(
+            "error[E0308]: mismatched types\n  --> src/lib.rs:2:18\n",
+        );
+        let conn = crate::db::engine::TestConnection::open(&temp.path().join("diagnostics.db"));
+        let store = DiagnosticsStore::new_runtime(&conn);
+
+        for attempt in 0..2 {
+            let outcome = publish_compiler_diagnostics_through_code_index_v1(
+                &project_root,
+                Some(&resolver),
+                &store,
+                &parsed,
+                id("analyzer.v1"),
+                id("config.v1"),
+            )
+            .await;
+            let CompilerDiagnosticPublicationOutcomeV1::Published { report, .. } = outcome else {
+                panic!("publication attempt {attempt} failed: {outcome:?}");
+            };
+            assert_eq!(report.inserted, u64::from(attempt == 0));
+            assert_eq!(report.cleared, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_compiler_result_publishes_clean_successor_generation() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("project");
+        tokio::fs::create_dir_all(project_root.join("src"))
+            .await
+            .expect("create src");
+        let source = "fn main() {\n    let x: u32 = \"nope\";\n}\n";
+        tokio::fs::write(project_root.join("src/lib.rs"), source)
+            .await
+            .expect("write source");
+        let content_digest = crate::code_index::intake::content_digest(source.as_bytes());
+        let parsed = crate::diagnose::parse_cargo_output(
+            "error[E0308]: mismatched types\n  --> src/lib.rs:2:18\n",
+        );
+        let conn = crate::db::engine::TestConnection::open(&temp.path().join("diagnostics.db"));
+        let store = DiagnosticsStore::new_runtime(&conn);
+
+        let first = StaticCodeIndexIdentity(code_index_identity(
+            "generation.clean.1",
+            &[("src/lib.rs", "file.daemon.clean.1", content_digest.as_str())],
+        ));
+        assert!(matches!(
+            publish_compiler_diagnostics_through_code_index_v1(
+                &project_root,
+                Some(&first),
+                &store,
+                &parsed,
+                id("analyzer.v1"),
+                id("config.v1"),
+            )
+            .await,
+            CompilerDiagnosticPublicationOutcomeV1::Published { .. }
+        ));
+
+        let second = StaticCodeIndexIdentity(code_index_identity(
+            "generation.clean.2",
+            &[("src/lib.rs", "file.daemon.clean.2", content_digest.as_str())],
+        ));
+        let outcome = publish_compiler_diagnostics_through_code_index_v1(
+            &project_root,
+            Some(&second),
+            &store,
+            &[],
+            id("analyzer.v1"),
+            id("config.v1"),
+        )
+        .await;
+        let CompilerDiagnosticPublicationOutcomeV1::Published {
+            generation, report, ..
+        } = outcome
+        else {
+            panic!("clean successor was not published: {outcome:?}");
+        };
+        assert_eq!(generation.as_str(), "generation.clean.2");
+        assert_eq!(report.inserted, 0);
+        assert_eq!(report.cleared, 1);
+        assert!(
+            store
+                .current_records(&generation)
+                .await
+                .expect("read clean generation")
+                .is_empty()
+        );
+    }
+
+    /// A file the code-index generation does not contain is refused by name.
+    /// Before this, the resolver minted `FileOccurrenceId::new(<raw path>)` and
+    /// published a record the LSP projection could only refuse.
+    #[tokio::test]
+    async fn file_outside_the_code_index_is_named_not_minted() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("project");
+        tokio::fs::create_dir_all(project_root.join("src"))
+            .await
+            .expect("create src");
+        tokio::fs::write(project_root.join("src/other.rs"), "fn other() {}\n")
+            .await
+            .expect("write source");
+
+        let parsed =
+            crate::diagnose::parse_cargo_output("error[E0308]: nope\n  --> src/other.rs:1:1\n");
+        let identity = code_index_identity("generation.absent.1", &[]);
+        let (resolved, skipped) =
+            resolve_compiler_diagnostics_v1(&project_root, &identity, &parsed).await;
+        assert!(resolved.is_empty());
+        assert_eq!(
+            skipped,
+            vec![CompilerDiagnosticResolutionSkipV1::FileNotInCodeIndex {
+                file: "src/other.rs".to_owned()
+            }]
+        );
+    }
+
+    /// Content that drifted from the indexed generation is refused rather than
+    /// published against a stale identity.
+    #[tokio::test]
+    async fn content_drift_from_the_code_index_is_refused() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project_root = temp.path().join("project");
+        tokio::fs::create_dir_all(project_root.join("src"))
+            .await
+            .expect("create src");
+        tokio::fs::write(project_root.join("src/lib.rs"), "fn main() {}\n")
+            .await
+            .expect("write source");
+
+        let parsed =
+            crate::diagnose::parse_cargo_output("error[E0308]: nope\n  --> src/lib.rs:1:1\n");
+        let identity = code_index_identity(
+            "generation.drift.1",
+            &[("src/lib.rs", "file.daemon.drift", &digest('a'))],
+        );
+        let (resolved, skipped) =
+            resolve_compiler_diagnostics_v1(&project_root, &identity, &parsed).await;
+        assert!(resolved.is_empty());
+        assert_eq!(
+            skipped,
+            vec![
+                CompilerDiagnosticResolutionSkipV1::ContentDriftFromCodeIndex {
+                    file: "src/lib.rs".to_owned()
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn logical_paths_normalize_and_refuse_escapes() {
+        let root = Path::new("/project");
+        assert_eq!(
+            code_index_logical_path(root, "src/lib.rs").as_deref(),
+            Some("src/lib.rs")
+        );
+        assert_eq!(
+            code_index_logical_path(root, "/project/src/lib.rs").as_deref(),
+            Some("src/lib.rs")
+        );
+        assert!(code_index_logical_path(root, "../outside.rs").is_none());
+        assert!(code_index_logical_path(root, "/elsewhere/lib.rs").is_none());
     }
 
     #[test]

@@ -371,6 +371,55 @@ async fn dry_run_counts_without_mutating() -> Result<(), String> {
     Ok(())
 }
 
+#[tokio::test]
+async fn backlog_read_reports_real_eligible_bytes_and_watermark() -> Result<(), String> {
+    let store = test_store().await?;
+    let durable = insert_message(&store.conn, 1, 90, "retention backlog bytes").await?;
+    make_projection_durable(&store.conn, durable).await?;
+
+    let records = read_session_retention_backlog(
+        &store.conn,
+        tracedecay_application::storage::StoreKeyV1::new("sessions.db")
+            .map_err(|error| error.to_string())?,
+        &drop_config(30),
+        NOW,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].table.as_str(), "lcm_raw_messages");
+    assert!(records[0].past_window_bytes.get() > 0);
+    assert_eq!(
+        records[0].oldest_past_window_at,
+        tracedecay_domain::UtcMicros((NOW - 90 * DAY) * 1_000_000)
+    );
+    assert_eq!(
+        records[0].window_watermark_at,
+        tracedecay_domain::UtcMicros((NOW - 30 * DAY) * 1_000_000)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn backlog_read_emits_clean_zero_record_for_configured_window() -> Result<(), String> {
+    let store = test_store().await?;
+    let records = read_session_retention_backlog(
+        &store.conn,
+        tracedecay_application::storage::StoreKeyV1::new("sessions.db")
+            .map_err(|error| error.to_string())?,
+        &drop_config(30),
+        NOW,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].past_window_bytes.get(), 0);
+    records[0].validate().map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 // (c)-analogue for one-content-copy: the projected twin obeys the window while
 // the raw copy is retained — proving raw and projected do not both persist.
 #[tokio::test]

@@ -166,6 +166,128 @@ const GROWTH_UNKNOWN_REASON: &str =
 const BUDGET_NO_SAMPLE_REASON: &str =
     "no observed size sample, so a configured budget could not be evaluated";
 
+/// One store the dashboard holds a connection to, sampled once.
+///
+#[derive(Clone, Debug)]
+struct SampledStoreV1 {
+    /// The store file name, used as the [`StoreKeyV1`] and as the owner budget
+    /// configuration key.
+    pub store: String,
+    /// Display path of the store file.
+    pub path: String,
+    /// Every dashboard role served by this one store file.
+    pub roles: Vec<String>,
+    /// The typed size read: `observed` with a sample, or `unknown`.
+    pub read: StorageTelemetryReadV1,
+}
+
+impl SampledStoreV1 {
+    /// The observed size sample, when the pragma read produced one.
+    const fn sample(&self) -> Option<&StoreSizeSampleV1> {
+        match &self.read {
+            StorageTelemetryReadV1::Observed { sample } => Some(sample),
+            _ => None,
+        }
+    }
+
+    /// The dashboard's primary role label for this store.
+    fn primary_role(&self) -> String {
+        self.roles
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "store".to_string())
+    }
+}
+
+/// The owner-configured soft budget for one store, resolved from configuration.
+///
+/// `Unset` is deliberately distinct from `Unknown`: the owner configured no
+/// budget (a missing *setting*), versus the configuration could not be read.
+/// Neither is ever a fabricated pass.
+#[derive(Clone, Debug)]
+enum ResolvedStoreBudgetV1 {
+    Configured(StoreSizeBudgetV1),
+    Unset,
+    Unknown(String),
+}
+
+/// Resolve one store's owner-configured soft budget from the retention config.
+fn resolve_store_budget(
+    store_name: &str,
+    retention: Option<&crate::config::RetentionConfig>,
+) -> ResolvedStoreBudgetV1 {
+    let Some(retention) = retention else {
+        return ResolvedStoreBudgetV1::Unknown(
+            "the resolved runtime configuration could not be read, so a configured budget could \
+             not be determined"
+                .to_string(),
+        );
+    };
+    match retention.store_soft_budget(store_name) {
+        Ok(Some(budget)) => ResolvedStoreBudgetV1::Configured(budget),
+        Ok(None) => ResolvedStoreBudgetV1::Unset,
+        Err(error) => ResolvedStoreBudgetV1::Unknown(format!(
+            "the configured soft budget for this store is invalid: {error}"
+        )),
+    }
+}
+
+/// Enumerate every store the dashboard holds a connection to, deduplicated by
+/// store file identity, each with one live size sample.
+async fn collect_store_samples(state: &DashboardState) -> Vec<SampledStoreV1> {
+    let mut entries: Vec<SampledStoreV1> = Vec::new();
+    let mut seen: HashMap<String, usize> = HashMap::new();
+
+    // Graph store: the dashboard owns the connection directly.
+    push_or_merge_role(
+        &mut entries,
+        &mut seen,
+        "graph",
+        &state.graph_db_path,
+        &state.graph_conn,
+    )
+    .await;
+    // Project-memory store. In project storage mode this resolves to the same
+    // file as the graph role and is merged into that entry rather than
+    // reported as a second, identically-sized store.
+    push_or_merge_role(
+        &mut entries,
+        &mut seen,
+        "memory",
+        &state.mem_db_path,
+        &state.mem_db.engine_conn(),
+    )
+    .await;
+    // LCM session store, when a read connection is held.
+    if let Some(db) = &state.lcm_db
+        && let Ok(snapshot) = db.read_snapshot().await
+    {
+        push_or_merge_role(
+            &mut entries,
+            &mut seen,
+            "lcm",
+            &state.lcm_db_path,
+            &snapshot,
+        )
+        .await;
+    }
+    // Global accounting store, when available.
+    if let Some(db) = &state.savings_db
+        && let Ok(snapshot) = db.read_snapshot().await
+    {
+        push_or_merge_role(
+            &mut entries,
+            &mut seen,
+            "savings",
+            &state.savings_db_path,
+            &snapshot,
+        )
+        .await;
+    }
+
+    entries
+}
+
 /// Upper bound on watermarks retained per store, and on distinct stores tracked
 /// by one process. Both keep the daemon-lifetime ring strictly bounded.
 const MAX_WATERMARKS_PER_STORE: usize = 128;
@@ -212,65 +334,14 @@ pub(crate) async fn telemetry(
     State(state): State<DashboardState>,
 ) -> Json<DashboardEnvelopeV1<StorageTelemetryPayloadV1>> {
     // The owner-configured soft budgets, resolved once per read from the pinned
-    // runtime configuration. An unreadable configuration yields `None`, which
-    // renders every budget `unknown` rather than a fabricated "no budget".
-    let retention = crate::config::load_sync_config(&state.project_root)
-        .map(|sync| sync.retention)
-        .ok();
+    // runtime configuration.
+    let retention = &state.retention_config;
 
-    let mut entries: Vec<StoreTelemetryEntryV1> = Vec::new();
-    let mut seen: HashMap<String, usize> = HashMap::new();
-
-    // Graph store: the dashboard owns the connection directly.
-    push_or_merge_role(
-        &mut entries,
-        &mut seen,
-        "graph",
-        &state.graph_db_path,
-        &state.graph_conn,
-        retention.as_ref(),
-    )
-    .await;
-    // Project-memory store. In project storage mode this resolves to the same
-    // file as the graph role and is merged into that entry rather than
-    // reported as a second, identically-sized store.
-    push_or_merge_role(
-        &mut entries,
-        &mut seen,
-        "memory",
-        &state.mem_db_path,
-        &state.mem_db.engine_conn(),
-        retention.as_ref(),
-    )
-    .await;
-    // LCM session store, when a read connection is held.
-    if let Some(db) = &state.lcm_db {
-        if let Ok(snapshot) = db.read_snapshot().await {
-            push_or_merge_role(
-                &mut entries,
-                &mut seen,
-                "lcm",
-                &state.lcm_db_path,
-                &snapshot,
-                retention.as_ref(),
-            )
-            .await;
-        }
-    }
-    // Global accounting store, when available.
-    if let Some(db) = &state.savings_db {
-        if let Ok(snapshot) = db.read_snapshot().await {
-            push_or_merge_role(
-                &mut entries,
-                &mut seen,
-                "savings",
-                &state.savings_db_path,
-                &snapshot,
-                retention.as_ref(),
-            )
-            .await;
-        }
-    }
+    let entries: Vec<StoreTelemetryEntryV1> = collect_store_samples(&state)
+        .await
+        .into_iter()
+        .map(|sampled| telemetry_entry(sampled, Some(retention)))
+        .collect();
 
     let total = entries.len() as u64;
     let observed = entries
@@ -281,12 +352,12 @@ pub(crate) async fn telemetry(
     // Coverage is over the known, enumerated set of dashboard-held stores. A
     // complete claim therefore always carries a real denominator.
     let coverage = if observed == total {
-        DashboardCoverageV1::complete(total, "stores")
+        DashboardCoverageV1::complete(total, "dashboard_held_stores")
     } else {
         DashboardCoverageV1::partial(
             total,
             observed,
-            "stores",
+            "dashboard_held_stores",
             vec!["store telemetry read failed (pragma unavailable)".to_string()],
         )
     };
@@ -308,12 +379,11 @@ pub(crate) async fn telemetry(
 /// Sample a role's store, or merge the role into the existing entry when the
 /// role resolves to a store file already sampled in this read.
 async fn push_or_merge_role(
-    entries: &mut Vec<StoreTelemetryEntryV1>,
+    entries: &mut Vec<SampledStoreV1>,
     seen: &mut HashMap<String, usize>,
     role: &str,
     path: &str,
     conn: &(impl QueryExecutor + ?Sized),
-    retention: Option<&crate::config::RetentionConfig>,
 ) {
     let identity = store_identity(path);
     if let Some(index) = seen.get(&identity).copied() {
@@ -323,7 +393,7 @@ async fn push_or_merge_role(
         }
         return;
     }
-    let entry = sample_entry(role, path, conn, retention).await;
+    let entry = sample_store(role, path, conn).await;
     seen.insert(identity, entries.len());
     entries.push(entry);
 }
@@ -342,12 +412,11 @@ fn store_identity(path: &str) -> String {
 /// Sample one store's size from a live connection. A pragma failure produces a
 /// typed [`StorageTelemetryReadV1::Unknown`], never a fabricated size.
 #[allow(clippy::expect_used)] // the "store" fallback key is statically valid
-async fn sample_entry(
+async fn sample_store(
     role: &str,
     path: &str,
     conn: &(impl QueryExecutor + ?Sized),
-    retention: Option<&crate::config::RetentionConfig>,
-) -> StoreTelemetryEntryV1 {
+) -> SampledStoreV1 {
     let store_name = store_file_name(path);
     let store_key = StoreKeyV1::new(store_name.clone());
 
@@ -366,10 +435,21 @@ async fn sample_entry(
         },
     };
 
-    let sample = match &read {
-        StorageTelemetryReadV1::Observed { sample } => Some(sample),
-        _ => None,
-    };
+    SampledStoreV1 {
+        store: store_name,
+        path: path.to_string(),
+        roles: vec![role.to_string()],
+        read,
+    }
+}
+
+/// Project one sampled store onto the telemetry read model, adding the budget
+/// and growth dimensions.
+fn telemetry_entry(
+    sampled: SampledStoreV1,
+    retention: Option<&crate::config::RetentionConfig>,
+) -> StoreTelemetryEntryV1 {
+    let sample = sampled.sample();
     let (total_bytes, free_bytes, free_page_ratio) = sample.map_or((None, None, None), |sample| {
         (
             Some(sample.total_bytes().get()),
@@ -377,16 +457,16 @@ async fn sample_entry(
             Some(sample.free_page_ratio().as_f64()),
         )
     });
-
-    let budget = budget_dimension(&store_name, sample, retention);
-    let growth = growth_dimension(&store_identity(path), total_bytes, free_bytes);
+    let budget = budget_dimension(&sampled.store, sample, retention);
+    let growth = growth_dimension(&store_identity(&sampled.path), total_bytes, free_bytes);
+    let role = sampled.primary_role();
 
     StoreTelemetryEntryV1 {
-        store: store_name,
-        role: role.to_string(),
-        roles: vec![role.to_string()],
-        path: path.to_string(),
-        read,
+        store: sampled.store,
+        role,
+        roles: sampled.roles,
+        path: sampled.path,
+        read: sampled.read,
         total_bytes,
         free_bytes,
         free_page_ratio,
@@ -401,26 +481,17 @@ fn budget_dimension(
     sample: Option<&StoreSizeSampleV1>,
     retention: Option<&crate::config::RetentionConfig>,
 ) -> StoreBudgetDimensionV1 {
-    let Some(retention) = retention else {
-        return StoreBudgetDimensionV1::Unknown {
-            reason: "the resolved runtime configuration could not be read, so a configured budget \
-                     could not be determined"
-                .to_string(),
-        };
-    };
-    let configured: Option<StoreSizeBudgetV1> = match retention.store_soft_budget(store_name) {
-        Ok(budget) => budget,
-        Err(error) => {
-            return StoreBudgetDimensionV1::Unknown {
-                reason: format!("the configured soft budget for this store is invalid: {error}"),
+    let budget = match resolve_store_budget(store_name, retention) {
+        ResolvedStoreBudgetV1::Configured(budget) => budget,
+        ResolvedStoreBudgetV1::Unset => {
+            return StoreBudgetDimensionV1::Unset {
+                reason: BUDGET_UNSET_REASON.to_string(),
+                setting_key: BUDGET_SETTING_KEY.to_string(),
             };
         }
-    };
-    let Some(budget) = configured else {
-        return StoreBudgetDimensionV1::Unset {
-            reason: BUDGET_UNSET_REASON.to_string(),
-            setting_key: BUDGET_SETTING_KEY.to_string(),
-        };
+        ResolvedStoreBudgetV1::Unknown(reason) => {
+            return StoreBudgetDimensionV1::Unknown { reason };
+        }
     };
     let Some(sample) = sample else {
         return StoreBudgetDimensionV1::Unknown {
@@ -671,11 +742,11 @@ mod tests {
 
         let mut entries = Vec::new();
         let mut seen = HashMap::new();
-        push_or_merge_role(&mut entries, &mut seen, "graph", &display, &conn, None).await;
-        push_or_merge_role(&mut entries, &mut seen, "memory", &display, &conn, None).await;
+        push_or_merge_role(&mut entries, &mut seen, "graph", &display, &conn).await;
+        push_or_merge_role(&mut entries, &mut seen, "memory", &display, &conn).await;
 
         assert_eq!(entries.len(), 1, "one file is one store");
-        assert_eq!(entries[0].role, "graph");
+        assert_eq!(entries[0].primary_role(), "graph");
         assert_eq!(entries[0].roles, vec!["graph", "memory"]);
 
         // A genuinely distinct file is still its own entry.
@@ -688,7 +759,6 @@ mod tests {
             "savings",
             &other_display,
             &other_conn,
-            None,
         )
         .await;
         assert_eq!(entries.len(), 2, "distinct files are never merged");

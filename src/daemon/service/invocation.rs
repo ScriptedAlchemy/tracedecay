@@ -3597,6 +3597,7 @@ impl DaemonFeedbackRuntimeRegistrar {
             graph_operation,
             tests_operation,
             lsp_input,
+            Some(Arc::new(self.service.code_index_schedulers.clone())),
         )?;
         let production_input = production_proximity_feedback_cycle_input(
             runtime.clone(),

@@ -24,6 +24,7 @@ use crate::application::operation_stream::{
     OperationEmitter, OperationEventError, operation_event_authority,
 };
 use crate::diagnose::{Severity, parse_cargo_output};
+use crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1;
 use crate::diagnostics_store::DiagnosticsStore;
 use crate::errors::{Result, TraceDecayError};
 use crate::redundancy::{Fingerprint, body_token_window, redundancy_match_score, round4};
@@ -134,7 +135,11 @@ impl RunAffectedArgs {
 }
 
 /// Handles `tracedecay_diagnose`.
-pub(super) async fn handle_diagnose(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
+pub(super) async fn handle_diagnose(
+    cg: &TraceDecay,
+    args: Value,
+    code_index_identity: Option<&dyn CodeIndexPublicationIdentityPortV1>,
+) -> Result<ToolResult> {
     let cargo_output =
         args.get("cargo_output")
             .and_then(|v| v.as_str())
@@ -245,7 +250,8 @@ pub(super) async fn handle_diagnose(cg: &TraceDecay, args: Value) -> Result<Tool
     // Populate the durable managed-diagnostics store so the LSP Problems
     // projection and every diagnostic read surface see these findings. Before
     // this, nothing in production ever wrote a diagnostic record.
-    let publication = publish_parsed_compiler_diagnostics(cg, &diagnostics).await;
+    let publication =
+        publish_parsed_compiler_diagnostics(cg, code_index_identity, &diagnostics).await;
 
     let mapped = items.iter().filter(|i| !i["node"].is_null()).count();
     let body = json!({
@@ -275,130 +281,90 @@ pub(super) async fn handle_diagnose(cg: &TraceDecay, args: Value) -> Result<Tool
 /// publish never fails the diagnose call — the caller still receives its
 /// mapped diagnostics — but the outcome is reported in the response so a
 /// silent no-op is observable.
+///
+/// Identity is resolved from the code-index generation authority, never minted
+/// here. That is what lets the LSP feedback projection admit these records:
+/// the projection compares a record's `file_occurrence_id` against the
+/// saved-edit cycle's impact target and its `generation_id` against the cycle's
+/// code-index generation, and both sides now come from the same mint. Without a
+/// resolver — a direct, non-daemon server — the honest outcome is to publish
+/// nothing under a named reason rather than to guess a repository-relative
+/// path, which the projection could only refuse.
 async fn publish_parsed_compiler_diagnostics(
     cg: &TraceDecay,
+    code_index_identity: Option<&dyn CodeIndexPublicationIdentityPortV1>,
     parsed: &[crate::diagnose::Diagnostic],
 ) -> Value {
-    if parsed.is_empty() {
-        return json!({ "status": "skipped", "reason": "no-parsed-diagnostics" });
-    }
+    use tracedecay_domain::ComponentVersion;
+
     let root = cg.project_root().to_path_buf();
-    let (resolved, unresolved) =
-        crate::diagnostics_publication::resolve_compiler_diagnostics_v1(&root, parsed).await;
-    if resolved.is_empty() {
-        return json!({
-            "status": "skipped",
-            "reason": "no-resolvable-diagnostics",
-            "unresolved": unresolved,
-        });
-    }
-    let Some(scope) = compiler_publication_scope(&root, &resolved) else {
-        return json!({ "status": "skipped", "reason": "project-identity-unavailable" });
+    let Some(analyzer_revision) = ComponentVersion::new(format!(
+        "analyzer.tracedecay-diagnose.{}",
+        env!("CARGO_PKG_VERSION")
+    ))
+    .ok() else {
+        return json!({ "status": "skipped", "reason": "analyzer-identity-unavailable" });
     };
-    let generation = scope.generation_id.as_str().to_owned();
+    let Some(configuration_revision) =
+        ComponentVersion::new("configuration.tracedecay-diagnose.v1".to_owned()).ok()
+    else {
+        return json!({ "status": "skipped", "reason": "configuration-identity-unavailable" });
+    };
     let database = cg.dashboard_database_guard();
     let store = DiagnosticsStore::new(database.conn());
-    if let Err(error) = store.ensure_schema().await {
-        return json!({ "status": "failed", "reason": error.to_string() });
-    }
-    match crate::diagnostics_publication::publish_compiler_diagnostics_v1(&store, scope, &resolved)
-        .await
-    {
-        Ok(report) => json!({
+    let outcome =
+        crate::diagnostics_publication::publish_compiler_diagnostics_through_code_index_v1(
+            &root,
+            code_index_identity,
+            &store,
+            parsed,
+            analyzer_revision,
+            configuration_revision,
+        )
+        .await;
+    compiler_publication_report(&outcome)
+}
+
+/// Renders the typed publication outcome for the diagnose response. Every
+/// refusal keeps its name so an empty Problems list is explainable.
+fn compiler_publication_report(
+    outcome: &crate::diagnostics_publication::CompilerDiagnosticPublicationOutcomeV1,
+) -> Value {
+    use crate::diagnostics_publication::CompilerDiagnosticPublicationOutcomeV1 as Outcome;
+
+    let names = |skips: &[crate::diagnostics_publication::CompilerDiagnosticResolutionSkipV1]| {
+        skips.iter().map(ToString::to_string).collect::<Vec<_>>()
+    };
+    match outcome {
+        Outcome::CodeIndexIdentityUnavailable => {
+            json!({ "status": "skipped", "reason": "code-index-identity-unavailable" })
+        }
+        Outcome::CodeIndexGenerationUnavailable => {
+            json!({ "status": "skipped", "reason": "code-index-generation-unavailable" })
+        }
+        Outcome::NoResolvableDiagnostics { unresolved } => json!({
+            "status": "skipped",
+            "reason": "no-resolvable-diagnostics",
+            "unresolved": names(unresolved),
+        }),
+        Outcome::Published {
+            generation,
+            report,
+            unresolved,
+        } => json!({
             "status": "published",
-            "generation": generation,
+            "generation": generation.as_str(),
             "inserted": report.inserted,
             "cleared": report.cleared,
-            "unresolved": unresolved,
+            "unresolved": names(unresolved),
             "rejected": report
                 .rejected
                 .iter()
                 .map(ToString::to_string)
                 .collect::<Vec<_>>(),
         }),
-        Err(error) => json!({ "status": "failed", "reason": error.to_string() }),
+        Outcome::Failed { reason } => json!({ "status": "failed", "reason": reason }),
     }
-}
-
-/// Derives the clean-generation identity for one compiler publication.
-///
-/// The generation is a deterministic function of the project scope, HEAD, and
-/// the exact resolved finding set, so republishing an unchanged result
-/// converges while a changed result mints a new generation that clears the
-/// prior one.
-///
-/// KNOWN LIMITATION: the LSP feedback projection admits a record only when its
-/// `generation_id` equals the saved-edit cycle's code-index generation and its
-/// `file_occurrence_id` equals the cycle's impact-target file. Those identities
-/// are owned by the code-index generation authority
-/// (`CodeIndexSchedulerRegistryV1::latest_complete_fresh`, which mints
-/// `file.daemon.<digest>` file ids), which an MCP tool call cannot reach. Until
-/// the publication is driven from that authority, records published here are
-/// durable and readable through the diagnostics query surfaces, but the LSP
-/// projection refuses them with the named
-/// `FeedbackDiagnosticProjectionSkipV1::GenerationMismatch` reason rather than
-/// silently. `CleanGenerationDiagnosticScopeV1` already takes both identities
-/// from its caller, so wiring the code-index authority is a substitution here,
-/// not a redesign.
-fn compiler_publication_scope(
-    root: &Path,
-    resolved: &[crate::diagnostics_publication::ResolvedCompilerDiagnosticV1],
-) -> Option<crate::diagnostics_publication::CleanGenerationDiagnosticScopeV1> {
-    use tracedecay_domain::{CodeGenerationId, ComponentVersion, RefId, canonical_sha256};
-
-    let repository = crate::daemon::code_index_scheduler::identity::repository_id_for(root).ok()?;
-    let worktree = crate::daemon::code_index_scheduler::identity::worktree_id_for(root).ok()?;
-    let reference = crate::branch::current_branch(root)
-        .and_then(|branch| RefId::new(format!("refs/heads/{branch}")).ok());
-    let source_revision = current_head_commit_id(root);
-
-    let mut fingerprint: Vec<(String, u64, u64, String, String)> = resolved
-        .iter()
-        .map(|entry| {
-            (
-                entry.file_occurrence_id.as_str().to_owned(),
-                entry.span.start_byte,
-                entry.span.end_byte,
-                entry.diagnostic.code.clone().unwrap_or_default(),
-                entry.diagnostic.message.clone(),
-            )
-        })
-        .collect();
-    fingerprint.sort();
-    fingerprint.dedup();
-    let digest = canonical_sha256(&(
-        "tracedecay.diagnostics.compiler-generation.v1",
-        repository.as_str(),
-        worktree.as_str(),
-        source_revision.as_ref().map(CommitId::as_str),
-        &fingerprint,
-    ))
-    .ok()?;
-    let generation_id = CodeGenerationId::new(format!(
-        "generation.diagnostics.compiler.{}",
-        digest.as_str().trim_start_matches("sha256:")
-    ))
-    .ok()?;
-
-    Some(
-        crate::diagnostics_publication::CleanGenerationDiagnosticScopeV1 {
-            generation_id,
-            repository,
-            worktree: Some(worktree),
-            reference,
-            source_revision,
-            analyzer_revision: ComponentVersion::new(format!(
-                "analyzer.tracedecay-diagnose.{}",
-                env!("CARGO_PKG_VERSION")
-            ))
-            .ok()?,
-            configuration_revision: ComponentVersion::new(
-                "configuration.tracedecay-diagnose.v1".to_owned(),
-            )
-            .ok()?,
-            collected_at: test_run_now(),
-        },
-    )
 }
 
 /// Look up cached near-duplicate matches for a diagnostic's enclosing

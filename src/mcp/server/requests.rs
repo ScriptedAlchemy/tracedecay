@@ -857,6 +857,7 @@ impl McpServer {
                 application_request_id,
                 application_deadline,
                 application_cancellation,
+                code_index_publication_identity: self.code_index_publication_identity.clone(),
                 code_index_search_executor: self.code_index_search_executor.clone(),
                 git_read_executor: self.git_read_executor.clone(),
                 source_edit_executor: self.source_edit_executor.get().cloned(),

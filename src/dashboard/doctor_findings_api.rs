@@ -62,13 +62,12 @@ pub(crate) async fn findings(
     State(state): State<DashboardState>,
     Query(params): Query<FindingsParams>,
 ) -> Json<DashboardEnvelopeV1<DoctorFindingsPayloadV1>> {
-    let scope = scope_from_state(&state);
-
     // Validate the optional per-family filter against the closed vocabulary. An
     // unknown family is a typed `error` envelope, not a silent all-families read.
     let family_filter = match parse_family(params.family.as_deref()) {
         Ok(family) => family,
         Err(invalid) => {
+            let scope = scope_from_state(&state);
             let payload = DoctorFindingsPayloadV1 {
                 family_filter: None,
                 entries: Vec::new(),
@@ -82,13 +81,23 @@ pub(crate) async fn findings(
             return Json(envelope);
         }
     };
+    Json(findings_for_family(state, family_filter).await)
+}
+
+/// Project the admitted canonical Doctor report for one closed finding family.
+///
+/// Compatibility routes such as `/api/storage/findings` call this seam instead
+/// of evaluating health from dashboard-held database handles.
+pub(crate) async fn findings_for_family(
+    state: DashboardState,
+    family_filter: Option<DoctorFindingFamilyV1>,
+) -> DashboardEnvelopeV1<DoctorFindingsPayloadV1> {
+    let scope = scope_from_state(&state);
 
     let Some(reader) = state.doctor_report_reader.as_ref() else {
         let payload = unavailable_payload(family_filter, UNSUPPORTED_NOTE);
-        return Json(
-            DashboardEnvelopeV1::unsupported(scope, payload)
-                .with_legal_actions(vec![refresh_action()]),
-        );
+        return DashboardEnvelopeV1::unsupported(scope, payload)
+            .with_legal_actions(vec![refresh_action()]);
     };
 
     let report = match reader().await {
@@ -98,16 +107,14 @@ pub(crate) async fn findings(
                 family_filter,
                 format!("Doctor report composition failed: {error}"),
             );
-            return Json(
-                DashboardEnvelopeV1::new(
-                    scope,
-                    DashboardDomainStateV1::Error,
-                    DashboardCoverageV1::unknown(),
-                    DashboardFreshnessV1::unknown(),
-                    payload,
-                )
-                .with_legal_actions(vec![refresh_action()]),
-            );
+            return DashboardEnvelopeV1::new(
+                scope,
+                DashboardDomainStateV1::Error,
+                DashboardCoverageV1::unknown(),
+                DashboardFreshnessV1::unknown(),
+                payload,
+            )
+            .with_legal_actions(vec![refresh_action()]);
         }
     };
 
@@ -118,26 +125,22 @@ pub(crate) async fn findings(
     )
     .await
     {
-        Ok(projected) => Json(
-            DashboardEnvelopeV1::new(
-                scope,
-                projected.domain_state,
-                projected.coverage,
-                projected.freshness,
-                projected.payload,
-            )
-            .with_legal_actions(projected.legal_actions),
-        ),
-        Err(note) => Json(
-            DashboardEnvelopeV1::new(
-                scope,
-                DashboardDomainStateV1::Error,
-                DashboardCoverageV1::unknown(),
-                DashboardFreshnessV1::unknown(),
-                unavailable_payload(family_filter, note),
-            )
-            .with_legal_actions(vec![refresh_action()]),
-        ),
+        Ok(projected) => DashboardEnvelopeV1::new(
+            scope,
+            projected.domain_state,
+            projected.coverage,
+            projected.freshness,
+            projected.payload,
+        )
+        .with_legal_actions(projected.legal_actions),
+        Err(note) => DashboardEnvelopeV1::new(
+            scope,
+            DashboardDomainStateV1::Error,
+            DashboardCoverageV1::unknown(),
+            DashboardFreshnessV1::unknown(),
+            unavailable_payload(family_filter, note),
+        )
+        .with_legal_actions(vec![refresh_action()]),
     }
 }
 

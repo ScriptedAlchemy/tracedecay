@@ -2201,3 +2201,315 @@ async fn pinned_query_bypasses_freshness_resolution() {
 
     registry.shutdown().await;
 }
+
+/// End-to-end proof that the diagnostics identity split is closed.
+///
+/// The compiler pillar publishes through its real production entry point
+/// (`publish_compiler_diagnostics_through_code_index_v1`, the exact call the
+/// `tracedecay_diagnose` handler makes) with identity resolved from the real
+/// mounted `CodeIndexSchedulerRegistryV1`. The published records are then driven
+/// through the real `DiagnosticsStoreLspFeedbackProjection` against a feedback
+/// cycle whose impact target carries the same registry-minted identity.
+///
+/// Before the identity was unified, the producer minted
+/// `FileOccurrenceId::new("src/lib.rs")` and its own
+/// `generation.diagnostics.compiler.<digest>`, so the projection refused every
+/// record with `ImpactTargetFileMismatch` / `GenerationMismatch` and LSP
+/// Problems stayed empty. This test asserts admission, not refusal.
+#[tokio::test]
+async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_the_lsp_projection()
+{
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use crate::application::lsp_runtime::{
+        DiagnosticsStoreLspFeedbackProjection, LspCodeIndexProjectionIdentityPort,
+        LspFeedbackDiagnosticProjectionPort, LspFeedbackDocumentSnapshot,
+        LspFeedbackDocumentSnapshotPort, LspFeedbackProjectionScope,
+    };
+    use crate::daemon::lsp_gateway::{AdmittedRoot, DiagnosticSource, LspRuntimeFailure};
+    use crate::diagnostics_publication::{
+        CodeIndexPublicationIdentityPortV1, CompilerDiagnosticPublicationOutcomeV1,
+        publish_compiler_diagnostics_through_code_index_v1,
+    };
+    use crate::diagnostics_store::DiagnosticsStore;
+    use tracedecay_domain::feedback::{
+        FeedbackCycleId, FeedbackCycleResultV1, FeedbackCycleTerminationV1,
+        FeedbackDiagnosticClassificationV1, FeedbackDurabilityV1, FeedbackFindingId,
+        FeedbackFindingLifecycleV1, FeedbackFindingV1, FeedbackImpactStateV1, FeedbackImpactV1,
+        FeedbackResultId, FeedbackScopeV1, FeedbackTargetV1, ProviderEvaluationStateV1,
+    };
+    use tracedecay_domain::{ComponentVersion, ContentDigest};
+
+    struct FixedDocument(String);
+
+    impl LspFeedbackDocumentSnapshotPort for FixedDocument {
+        fn snapshot(
+            &self,
+            _root: AdmittedRoot,
+            _document_uri: String,
+        ) -> crate::daemon::lsp_gateway::LspRuntimeFuture<
+            Result<LspFeedbackDocumentSnapshot, LspRuntimeFailure>,
+        > {
+            let text = self.0.clone();
+            Box::pin(async move { Ok(LspFeedbackDocumentSnapshot { text }) })
+        }
+    }
+
+    fn id<T>(value: &str) -> T
+    where
+        T: TryFrom<String>,
+        <T as TryFrom<String>>::Error: std::fmt::Debug,
+    {
+        T::try_from(value.to_owned()).expect("valid fixture identity")
+    }
+
+    let source = "pub fn alpha() -> u32 {\n    let value: u32 = \"nope\";\n    value\n}\n";
+    let fixture = GitFixture::new(&[("src/lib.rs", source)]);
+    let store_root = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    assert!(
+        registry
+            .mount_worktree(fixture.path(), store_root.path().to_path_buf(), None)
+            .await
+            .expect("mount daemon-owned scheduler")
+    );
+
+    // The one mint: file identity and generation both come from the registry.
+    let identity =
+        CodeIndexPublicationIdentityPortV1::resolve(&registry, fixture.path().to_path_buf())
+            .await
+            .expect("code-index generation identity");
+    let (indexed_file, indexed_digest) = identity
+        .file("src/lib.rs")
+        .expect("code index contains the fixture source");
+    let indexed_file = indexed_file.clone();
+    let indexed_digest = indexed_digest.clone();
+    assert!(
+        indexed_file.as_str().starts_with("file.daemon."),
+        "registry must mint daemon file identity, got {}",
+        indexed_file.as_str()
+    );
+    let generation = identity.generation_id().clone();
+
+    let database_root = TempDir::new().expect("database root");
+    let database_path = database_root.path().join("diagnostics.db");
+    let authority = crate::db::DatabaseAuthority::acquire_test(
+        &database_path,
+        "diagnostics identity admission test",
+    )
+    .expect("database authority");
+    let (database, _guard) = crate::db::Database::publish_test_runtime(
+        &database_path,
+        &authority,
+        crate::db::TestDatabaseRuntimeMode::Initialize,
+    )
+    .await
+    .expect("open diagnostics database");
+
+    let parsed = crate::diagnose::parse_cargo_output(
+        "error[E0308]: mismatched types\n  --> src/lib.rs:2:22\n",
+    );
+    assert_eq!(parsed.len(), 1, "fixture cargo output must parse");
+
+    let outcome = {
+        let store = DiagnosticsStore::new(database.conn());
+        publish_compiler_diagnostics_through_code_index_v1(
+            fixture.path(),
+            Some(&registry as &dyn CodeIndexPublicationIdentityPortV1),
+            &store,
+            &parsed,
+            ComponentVersion::new("analyzer.tracedecay-diagnose.test".to_owned())
+                .expect("analyzer revision"),
+            ComponentVersion::new("configuration.tracedecay-diagnose.v1".to_owned())
+                .expect("configuration revision"),
+        )
+        .await
+    };
+    let CompilerDiagnosticPublicationOutcomeV1::Published {
+        generation: published_generation,
+        report,
+        unresolved,
+    } = outcome
+    else {
+        panic!("compiler publication did not reach the store: {outcome:?}");
+    };
+    assert!(unresolved.is_empty(), "unexpected skips: {unresolved:?}");
+    assert_eq!(report.inserted, 1);
+    assert!(report.rejected.is_empty());
+    assert_eq!(
+        published_generation, generation,
+        "records must publish under the code-index generation"
+    );
+
+    let record = {
+        let store = DiagnosticsStore::new(database.conn());
+        store
+            .current_records(&generation)
+            .await
+            .expect("read published records")
+            .pop()
+            .expect("one published record")
+    };
+    assert_eq!(record.file_occurrence_id, indexed_file);
+    assert_eq!(record.content_digest, indexed_digest);
+
+    // The saved-edit cycle's impact target is minted by the same authority, so
+    // the projection's identity comparison can succeed.
+    let head_commit = git_stdout(fixture.path(), &["rev-parse", "HEAD"]);
+    let projection_identity = LspCodeIndexProjectionIdentityPort::current_identity(
+        &registry,
+        fixture.path().to_path_buf(),
+        Some("src/lib.rs".to_owned()),
+    )
+    .await
+    .expect("lsp code-index projection identity");
+    let document_content_digest: ContentDigest = projection_identity
+        .document_content_digest
+        .clone()
+        .expect("document content digest");
+    assert_eq!(document_content_digest, indexed_digest);
+
+    let finding = FeedbackFindingV1 {
+        finding_id: id::<FeedbackFindingId>("finding.diagnostics.admission"),
+        classification: FeedbackDiagnosticClassificationV1::New,
+        lifecycle: FeedbackFindingLifecycleV1::Active,
+        retrieval_anchor_id: Some(record.diagnostic_anchor.clone()),
+        provider_state: ProviderEvaluationStateV1::SupportedCompletedComplete,
+        safe_bounded_preview: None,
+    };
+    let cycle = FeedbackCycleResultV1 {
+        result_id: id::<FeedbackResultId>("result.diagnostics.admission"),
+        cycle_id: id::<FeedbackCycleId>("cycle.diagnostics.admission"),
+        scope: FeedbackScopeV1 {
+            project_id: id("project.diagnostics.admission"),
+            repository_id: id(record.repository.as_str()),
+            worktree_id: id(record
+                .worktree
+                .as_ref()
+                .expect("worktree identity")
+                .as_str()),
+            branch_ref: "refs/heads/main".to_owned(),
+            head_commit_id: id(&head_commit),
+        },
+        content_identity: None,
+        durability: FeedbackDurabilityV1::Durable,
+        policy_digest: projection_identity.snapshot_digest.clone(),
+        configuration_digest: projection_identity.invalidation_digest.clone(),
+        termination: FeedbackCycleTerminationV1::Clean,
+        provider_states: vec![ProviderEvaluationStateV1::SupportedCompletedComplete],
+        baseline_states: Vec::new(),
+        impact: Some(FeedbackImpactV1 {
+            target: FeedbackTargetV1 {
+                file: indexed_file.clone(),
+                span: None,
+                symbol: None,
+                generation_id: Some(generation.clone()),
+            },
+            affected_files: vec![indexed_file.clone()],
+            affected_callers: Vec::new(),
+            affected_tests: Vec::new(),
+            evidence_anchors: Vec::new(),
+            state: FeedbackImpactStateV1::Partial,
+            affected_tests_state: FeedbackImpactStateV1::Partial,
+        }),
+        impact_state: Some(FeedbackImpactStateV1::Partial),
+        affected_tests_state: Some(FeedbackImpactStateV1::Partial),
+        findings: vec![finding],
+        total_findings: 1,
+        returned_findings: 1,
+        omitted_findings: 0,
+        advisory_only: false,
+    };
+
+    let document_uri = url::Url::from_file_path(fixture.path().join("src/lib.rs"))
+        .expect("document uri")
+        .to_string();
+    let root_uri = url::Url::from_file_path(fixture.path())
+        .expect("root uri")
+        .to_string();
+    let projection = DiagnosticsStoreLspFeedbackProjection::new(
+        database.clone(),
+        Arc::new(FixedDocument(source.to_owned())),
+    );
+    let published = projection
+        .project(
+            AdmittedRoot::new(root_uri),
+            document_uri.clone(),
+            LspFeedbackProjectionScope {
+                head_commit_id: id(&head_commit),
+                code_generation_id: generation.clone(),
+                snapshot_digest: projection_identity.snapshot_digest.clone(),
+                invalidation_digest: projection_identity.invalidation_digest.clone(),
+                snapshot_content_digest: projection_identity.snapshot_content_digest.clone(),
+                document_content_digest: Some(document_content_digest),
+                generation: 1,
+            },
+            cycle,
+            BTreeMap::new(),
+        )
+        .await
+        .expect("projection succeeds");
+
+    assert_eq!(
+        published.len(),
+        1,
+        "the published compiler record must be admitted, not skipped"
+    );
+    assert_eq!(published[0].uri, document_uri);
+    assert_eq!(published[0].code.as_deref(), Some("E0308"));
+    assert_eq!(
+        published[0].source,
+        DiagnosticSource::TraceDecay,
+        "the compiler pillar must name its own producer source"
+    );
+    let sources: BTreeSet<_> = published.iter().map(|entry| entry.source).collect();
+    assert!(sources.iter().all(|source| source.is_tracedecay()));
+
+    registry.shutdown().await;
+}
+
+/// A producer with no reachable code-index authority publishes nothing and says
+/// so. The former behaviour minted a repository-relative file identity, which
+/// the LSP projection could only refuse.
+#[tokio::test]
+async fn compiler_publication_without_a_resolver_is_named_not_guessed() {
+    use crate::diagnostics_publication::{
+        CompilerDiagnosticPublicationOutcomeV1, publish_compiler_diagnostics_through_code_index_v1,
+    };
+    use crate::diagnostics_store::DiagnosticsStore;
+    use tracedecay_domain::ComponentVersion;
+
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let database_root = TempDir::new().expect("database root");
+    let database_path = database_root.path().join("diagnostics.db");
+    let authority =
+        crate::db::DatabaseAuthority::acquire_test(&database_path, "diagnostics absent resolver")
+            .expect("database authority");
+    let (database, _guard) = crate::db::Database::publish_test_runtime(
+        &database_path,
+        &authority,
+        crate::db::TestDatabaseRuntimeMode::Initialize,
+    )
+    .await
+    .expect("open diagnostics database");
+    let store = DiagnosticsStore::new(database.conn());
+
+    let parsed = crate::diagnose::parse_cargo_output(
+        "error[E0308]: mismatched types\n  --> src/lib.rs:1:1\n",
+    );
+    let outcome = publish_compiler_diagnostics_through_code_index_v1(
+        fixture.path(),
+        None,
+        &store,
+        &parsed,
+        ComponentVersion::new("analyzer.tracedecay-diagnose.test".to_owned())
+            .expect("analyzer revision"),
+        ComponentVersion::new("configuration.tracedecay-diagnose.v1".to_owned())
+            .expect("configuration revision"),
+    )
+    .await;
+    assert_eq!(
+        outcome,
+        CompilerDiagnosticPublicationOutcomeV1::CodeIndexIdentityUnavailable
+    );
+}

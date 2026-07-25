@@ -294,6 +294,14 @@ impl CodeIndexSchedulerRegistryV1 {
         matched
     }
 
+    #[cfg(test)]
+    pub(crate) async fn has_pr9_query_authority_for_scope(
+        &self,
+        scope: &tracedecay_application::ResolvedScope,
+    ) -> bool {
+        self.pr9_query_authority_for_scope(scope).await.is_some()
+    }
+
     /// Whether a worktree is currently mounted for `project_root`. Read-only
     /// map membership used by the Doctor code-index mount adapter to distinguish
     /// an unmounted worktree from a mounted-but-still-indexing one. Returns
@@ -569,6 +577,47 @@ impl crate::application::feedback::cycle_production::ProductionFeedbackDocumentI
                     file: file.file_occurrence_id.clone(),
                     content_digest: file.content_digest.clone(),
                 },
+            )
+        })
+    }
+}
+
+/// The registry is the single mint for file and generation identity, so every
+/// diagnostic producer resolves through here instead of inventing its own.
+///
+/// Without this, a producer had no way to reach the authority and fell back to
+/// a repository-relative path; the LSP feedback projection then refused each
+/// published record with `ImpactTargetFileMismatch` / `GenerationMismatch`,
+/// because the saved-edit cycle's impact target is minted here as
+/// `file.daemon.<digest>` under this generation.
+impl crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1
+    for CodeIndexSchedulerRegistryV1
+{
+    fn resolve(
+        &self,
+        project_root: PathBuf,
+    ) -> crate::diagnostics_publication::CodeIndexPublicationIdentityFuture<'_> {
+        let registry = self.clone();
+        Box::pin(async move {
+            let root = project_root.canonicalize().ok()?;
+            let current = registry.latest_complete_fresh(&root).await?;
+            let snapshot = current.generation.snapshot();
+            Some(
+                crate::diagnostics_publication::CodeIndexPublicationIdentityV1::new(
+                    current.generation.manifest().generation_id.clone(),
+                    current.generation.manifest().seal.sealed_at,
+                    snapshot.repository.clone(),
+                    snapshot.worktree.clone(),
+                    snapshot.reference.clone(),
+                    snapshot.source_revision.clone(),
+                    snapshot.files.iter().map(|file| {
+                        (
+                            file.logical_path.clone(),
+                            file.file_occurrence_id.clone(),
+                            file.content_digest.clone(),
+                        )
+                    }),
+                ),
             )
         })
     }

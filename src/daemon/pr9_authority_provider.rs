@@ -858,10 +858,7 @@ pub(crate) mod tests {
                 if profile_id.as_str() == "profile.pr9-baseline"
         ));
         assert!(
-            registry
-                .pr9_query_authority_for_scope(&scope)
-                .await
-                .is_some(),
+            registry.has_pr9_query_authority_for_scope(&scope).await,
             "semantic activation must keep the mounted PR9 fallback query authority"
         );
         registry.shutdown().await;

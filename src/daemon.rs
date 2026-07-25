@@ -2704,6 +2704,11 @@ impl DaemonEngine {
                 let schedulers = code_index_schedulers.clone();
                 Box::pin(async move { schedulers.notify_hook_paths(&root, &rel_paths).await })
             });
+        // The same registry is the single mint for file and generation
+        // identity. Diagnostic producers resolve through it so their published
+        // records carry the identity the LSP feedback projection admits.
+        let code_index_publication_identity: crate::mcp::server::CodeIndexPublicationIdentityResolver =
+            Arc::new(self.invocation.code_index_schedulers.clone());
         let code_search_project_id = tracedecay_domain::ProjectId::new(
             authoritative_project_id.to_owned(),
         )
@@ -2743,6 +2748,7 @@ impl DaemonEngine {
             cg.db().clone(),
             Arc::clone(&registry_db),
             Arc::clone(&user_session_db),
+            Arc::clone(&session_db),
             profile_identity.profile_root().to_path_buf(),
             cg.get_config().sync.retention.clone(),
             self.invocation.code_index_schedulers.clone(),
@@ -2779,6 +2785,7 @@ impl DaemonEngine {
         .with_automation_scheduler_reconciler(reconciler)
         .with_dashboard_doctor_report_reader(doctor_report_reader)
         .with_code_index_hook_sink(code_index_hook_sink)
+        .with_code_index_publication_identity(code_index_publication_identity)
         .with_code_index_search_executor(code_index_search_executor)
         .with_git_read_executor(git_read_executor)
         .with_code_index_search_authority(code_search_authority)
@@ -3726,6 +3733,8 @@ async fn portable_project_server(
             let schedulers = code_index_schedulers.clone();
             Box::pin(async move { schedulers.notify_hook_paths(&root, &rel_paths).await })
         });
+    let code_index_publication_identity: crate::mcp::server::CodeIndexPublicationIdentityResolver =
+        Arc::new(invocation.code_index_schedulers.clone());
     let code_search_project_id = tracedecay_domain::ProjectId::new(
         authoritative_project_id.to_owned(),
     )
@@ -3763,6 +3772,7 @@ async fn portable_project_server(
         cg.db().clone(),
         Arc::clone(&registry_db),
         Arc::clone(&user_session_db),
+        Arc::clone(&session_db),
         profile_identity.profile_root().to_path_buf(),
         cg.get_config().sync.retention.clone(),
         invocation.code_index_schedulers.clone(),
@@ -3798,6 +3808,7 @@ async fn portable_project_server(
     )
     .with_dashboard_doctor_report_reader(doctor_report_reader)
     .with_code_index_hook_sink(code_index_hook_sink)
+    .with_code_index_publication_identity(code_index_publication_identity)
     .with_code_index_search_executor(code_index_search_executor)
     .with_git_read_executor(git_read_executor)
     .with_code_index_search_authority(code_search_authority)

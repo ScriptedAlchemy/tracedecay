@@ -56,6 +56,10 @@
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
+use tracedecay_application::storage::{
+    RetentionBacklogRecordV1, StorageByteSizeV1, StoreKeyV1, TableNameV1,
+};
+use tracedecay_domain::UtcMicros;
 
 use crate::db::engine::{
     Connection, Executor, Params, QueryExecutor, Transaction, TransactionBehavior, params,
@@ -214,6 +218,107 @@ impl LcmRetentionReport {
 
 fn cutoff_secs(window_days: u32, now_secs: i64) -> i64 {
     now_secs.saturating_sub(i64::from(window_days).saturating_mul(SECONDS_PER_DAY))
+}
+
+/// Observe retention-eligible session bytes without mutating the store.
+///
+/// The raw-row query unions the configured drop and offload predicates so a
+/// row eligible for both policies is counted once. The projected-row query
+/// mirrors the dedupe safety predicate. A configured window emits a zero-byte
+/// record when clean, allowing Doctor to distinguish complete clean coverage
+/// from an unwired source.
+pub async fn read_session_retention_backlog(
+    conn: &(impl QueryExecutor + ?Sized),
+    store: StoreKeyV1,
+    config: &LcmRetentionConfig,
+    now: i64,
+) -> Result<Vec<RetentionBacklogRecordV1>, LcmError> {
+    if !config.enabled {
+        return Ok(Vec::new());
+    }
+
+    let mut records = Vec::new();
+    let drop_cutoff = config.drop_after_days.map(|days| cutoff_secs(days, now));
+    let offload_cutoff = config.offload_after_days.map(|days| cutoff_secs(days, now));
+    if drop_cutoff.is_some() || offload_cutoff.is_some() {
+        let raw_watermark = drop_cutoff
+            .into_iter()
+            .chain(offload_cutoff)
+            .max()
+            .unwrap_or(now);
+        let sql = format!(
+            "SELECT MIN(r.timestamp),
+                    COALESCE(SUM(LENGTH(COALESCE(r.content, ''))), 0)
+             FROM lcm_raw_messages r
+             WHERE r.timestamp IS NOT NULL
+               AND (
+                    (?1 = 1 AND r.timestamp < ?2 AND {PROJECTION_DURABLE})
+                 OR (?3 = 1 AND r.timestamp < ?4
+                     AND r.storage_kind = 'inline'
+                     AND r.content IS NOT NULL
+                     AND LENGTH(r.content) > 0
+                     AND {PROJECTION_DURABLE})
+               )"
+        );
+        let mut rows = conn
+            .query(
+                &sql,
+                params![
+                    i64::from(drop_cutoff.is_some()),
+                    drop_cutoff.unwrap_or(0),
+                    i64::from(offload_cutoff.is_some()),
+                    offload_cutoff.unwrap_or(0)
+                ],
+            )
+            .await?;
+        let row = rows.next().await?.ok_or_else(|| {
+            LcmError::Db("retention backlog raw aggregate returned no row".to_string())
+        })?;
+        let oldest = row.get::<Option<i64>>(0)?.unwrap_or(raw_watermark);
+        let bytes = row.get::<i64>(1)?.max(0) as u64;
+        records.push(RetentionBacklogRecordV1 {
+            store: store.clone(),
+            table: TableNameV1::new("lcm_raw_messages")
+                .map_err(|error| LcmError::Db(error.to_string()))?,
+            past_window_bytes: StorageByteSizeV1(bytes),
+            oldest_past_window_at: UtcMicros(oldest.saturating_mul(1_000_000)),
+            window_watermark_at: UtcMicros(raw_watermark.saturating_mul(1_000_000)),
+        });
+    }
+
+    if let Some(days) = config.dedupe_projected_after_days {
+        let watermark = cutoff_secs(days, now);
+        let mut rows = conn
+            .query(
+                "SELECT MIN(sm.timestamp),
+                        COALESCE(SUM(LENGTH(COALESCE(sm.text, ''))), 0)
+                 FROM session_messages sm
+                 WHERE sm.timestamp IS NOT NULL
+                   AND sm.timestamp < ?1
+                   AND EXISTS (
+                       SELECT 1 FROM lcm_raw_messages r
+                       WHERE r.provider = sm.provider
+                         AND r.message_id = sm.message_id
+                   )",
+                params![watermark],
+            )
+            .await?;
+        let row = rows.next().await?.ok_or_else(|| {
+            LcmError::Db("retention backlog projection aggregate returned no row".to_string())
+        })?;
+        let oldest = row.get::<Option<i64>>(0)?.unwrap_or(watermark);
+        let bytes = row.get::<i64>(1)?.max(0) as u64;
+        records.push(RetentionBacklogRecordV1 {
+            store,
+            table: TableNameV1::new("session_messages")
+                .map_err(|error| LcmError::Db(error.to_string()))?,
+            past_window_bytes: StorageByteSizeV1(bytes),
+            oldest_past_window_at: UtcMicros(oldest.saturating_mul(1_000_000)),
+            window_watermark_at: UtcMicros(watermark.saturating_mul(1_000_000)),
+        });
+    }
+
+    Ok(records)
 }
 
 async fn pragma_u64(conn: &(impl QueryExecutor + ?Sized), pragma: &str) -> u64 {

@@ -58,6 +58,7 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) hook_branch_writer: HookBranchWriter,
     pub(crate) background_refresh_writer: BackgroundRefreshWriter,
     pub(crate) code_index_hook_sink: Option<super::CodeIndexHookSink>,
+    pub(crate) code_index_publication_identity: Option<super::CodeIndexPublicationIdentityResolver>,
     pub(crate) code_index_search_executor: Option<super::CodeIndexSearchExecutor>,
     pub(crate) git_read_executor: Option<super::GitReadExecutor>,
     pub(crate) code_index_search_authority: Option<super::CodeIndexSearchAuthorityV1>,
@@ -135,6 +136,7 @@ impl McpServerConstructionContext {
             hook_branch_writer: direct_hook_branch_writer(),
             background_refresh_writer: direct_background_refresh_writer(),
             code_index_hook_sink: None,
+            code_index_publication_identity: None,
             code_index_search_executor: None,
             git_read_executor: None,
             code_index_search_authority: None,
@@ -203,6 +205,7 @@ impl McpServerConstructionContext {
             hook_branch_writer: writers.hook_branch,
             background_refresh_writer: writers.background_refresh,
             code_index_hook_sink: None,
+            code_index_publication_identity: None,
             code_index_search_executor: None,
             git_read_executor: None,
             code_index_search_authority: None,
@@ -214,6 +217,16 @@ impl McpServerConstructionContext {
 
     /// Inject the daemon-owned code-index scheduler bridge so after-edit hooks
     /// deliver touched paths into the incremental indexing queue.
+    /// Installs the code-index generation authority every diagnostic producer
+    /// resolves file and generation identity through.
+    pub(crate) fn with_code_index_publication_identity(
+        mut self,
+        resolver: super::CodeIndexPublicationIdentityResolver,
+    ) -> Self {
+        self.code_index_publication_identity = Some(resolver);
+        self
+    }
+
     pub(crate) fn with_code_index_hook_sink(mut self, sink: super::CodeIndexHookSink) -> Self {
         self.code_index_hook_sink = Some(sink);
         self
