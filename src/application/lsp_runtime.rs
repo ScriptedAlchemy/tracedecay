@@ -410,6 +410,100 @@ pub trait LspFeedbackDocumentSnapshotPort: Send + Sync {
     ) -> LspRuntimeFuture<Result<LspFeedbackDocumentSnapshot, LspRuntimeFailure>>;
 }
 
+/// Why one feedback finding did not become a published LSP diagnostic.
+///
+/// Projection refusals used to be anonymous `continue`s, so an empty Problems
+/// list was indistinguishable from "the store never had the record". Each
+/// refusal is now typed, logged, and directly testable.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum FeedbackDiagnosticProjectionSkipV1 {
+    /// The finding is not in the active lifecycle state.
+    LifecycleNotActive,
+    /// The finding carries no `RetrievalAnchorId`, so no durable record can
+    /// be addressed.
+    NoRetrievalAnchor,
+    /// The anchor resolves to no record: the producing pillar never published
+    /// this finding into the diagnostics store.
+    AnchorNotPublished,
+    /// The record attaches to a different file than the cycle's impact target.
+    ImpactTargetFileMismatch,
+    /// The cycle carries no impact target to compare the record's file with.
+    ImpactTargetAbsent,
+    /// The record belongs to a different clean generation.
+    GenerationMismatch,
+    /// The record was collected against different file content.
+    ContentDigestMismatch,
+    /// The record is superseded or cleared rather than current.
+    RecordNotCurrent,
+    /// The record names a different source revision than the cycle scope.
+    SourceRevisionDrift,
+}
+
+impl FeedbackDiagnosticProjectionSkipV1 {
+    /// Stable classification label for logs and typed status projections.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::LifecycleNotActive => "lifecycle-not-active",
+            Self::NoRetrievalAnchor => "no-retrieval-anchor",
+            Self::AnchorNotPublished => "anchor-not-published",
+            Self::ImpactTargetFileMismatch => "impact-target-file-mismatch",
+            Self::ImpactTargetAbsent => "impact-target-absent",
+            Self::GenerationMismatch => "generation-mismatch",
+            Self::ContentDigestMismatch => "content-digest-mismatch",
+            Self::RecordNotCurrent => "record-not-current",
+            Self::SourceRevisionDrift => "source-revision-drift",
+        }
+    }
+}
+
+/// Records one typed projection refusal. Refusals are observable rather than
+/// silent so an empty Problems list can be attributed to a cause.
+fn skipped(finding_id: &str, skip: FeedbackDiagnosticProjectionSkipV1) {
+    tracing::debug!(
+        target: "tracedecay::lsp::diagnostics",
+        finding_id,
+        reason = skip.label(),
+        "feedback finding was not projected as an LSP diagnostic"
+    );
+}
+
+/// Decides whether a resolved durable record may be projected for this cycle.
+///
+/// Pure and total: every refusal is named, so the previously silent
+/// file-mismatch case is now explicit.
+pub fn classify_feedback_diagnostic_admission(
+    record: &tracedecay_domain::GenerationDiagnosticV1,
+    impact_target_file: Option<&tracedecay_domain::FileOccurrenceId>,
+    code_generation_id: &tracedecay_domain::CodeGenerationId,
+    document_content_digest: &tracedecay_domain::ContentDigest,
+    head_commit_id: &tracedecay_domain::CommitId,
+) -> Result<(), FeedbackDiagnosticProjectionSkipV1> {
+    let Some(target_file) = impact_target_file else {
+        return Err(FeedbackDiagnosticProjectionSkipV1::ImpactTargetAbsent);
+    };
+    if target_file != &record.file_occurrence_id {
+        return Err(FeedbackDiagnosticProjectionSkipV1::ImpactTargetFileMismatch);
+    }
+    if record.generation_id != *code_generation_id {
+        return Err(FeedbackDiagnosticProjectionSkipV1::GenerationMismatch);
+    }
+    if record.content_digest != *document_content_digest {
+        return Err(FeedbackDiagnosticProjectionSkipV1::ContentDigestMismatch);
+    }
+    if !matches!(record.state, DiagnosticRecordStateV1::Current) {
+        return Err(FeedbackDiagnosticProjectionSkipV1::RecordNotCurrent);
+    }
+    if record
+        .source_revision
+        .as_ref()
+        .is_some_and(|revision| revision != head_commit_id)
+    {
+        return Err(FeedbackDiagnosticProjectionSkipV1::SourceRevisionDrift);
+    }
+    Ok(())
+}
+
 /// Real finding-anchor hydration over the canonical managed diagnostics store.
 pub struct DiagnosticsStoreLspFeedbackProjection<S> {
     database: Database,
@@ -454,11 +548,21 @@ where
             let store = DiagnosticsStore::new(database.conn());
             let coverage = gateway_diagnostic_coverage(cycle_coverage(&cycle));
             let mut diagnostics = Vec::new();
-            for finding in cycle.findings {
+            let impact_target_file = cycle.impact.as_ref().map(|impact| &impact.target.file);
+            for finding in &cycle.findings {
+                let finding_id = finding.finding_id.as_str();
                 if finding.lifecycle != FeedbackFindingLifecycleV1::Active {
+                    skipped(
+                        finding_id,
+                        FeedbackDiagnosticProjectionSkipV1::LifecycleNotActive,
+                    );
                     continue;
                 }
                 let Some(anchor) = finding.retrieval_anchor_id.as_ref() else {
+                    skipped(
+                        finding_id,
+                        FeedbackDiagnosticProjectionSkipV1::NoRetrievalAnchor,
+                    );
                     continue;
                 };
                 let Some(record) = store
@@ -466,18 +570,20 @@ where
                     .await
                     .map_err(|_| LspRuntimeFailure::new("diagnostic-anchor-read-failed"))?
                 else {
+                    skipped(
+                        finding_id,
+                        FeedbackDiagnosticProjectionSkipV1::AnchorNotPublished,
+                    );
                     continue;
                 };
-                let target_file = cycle.impact.as_ref().map(|impact| &impact.target.file);
-                if target_file != Some(&record.file_occurrence_id)
-                    || record.generation_id != scope.code_generation_id
-                    || record.content_digest != *document_content_digest
-                    || !matches!(record.state, DiagnosticRecordStateV1::Current)
-                    || record
-                        .source_revision
-                        .as_ref()
-                        .is_some_and(|revision| revision != &cycle.scope.head_commit_id)
-                {
+                if let Err(skip) = classify_feedback_diagnostic_admission(
+                    &record,
+                    impact_target_file,
+                    &scope.code_generation_id,
+                    document_content_digest,
+                    &cycle.scope.head_commit_id,
+                ) {
+                    skipped(finding_id, skip);
                     continue;
                 }
                 let start = usize::try_from(record.span.start_byte)
@@ -537,7 +643,9 @@ where
                     }),
                     code: Some(record.code),
                     message: record.message,
-                    source: DiagnosticSource::TraceDecay,
+                    // Name the real producer instead of an anonymous
+                    // `tracedecay` lane (Plan 35).
+                    source: DiagnosticSource::from_producer(record.provenance.producer.as_str()),
                     data,
                 });
             }
@@ -2310,5 +2418,171 @@ mod projection_tests {
             assert_eq!(envelope.coverage, coverage);
             assert_eq!(envelope.producer_state, producer_state);
         }
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_admission_tests {
+    use super::{FeedbackDiagnosticProjectionSkipV1, classify_feedback_diagnostic_admission};
+    use crate::diagnostics_publication::{
+        CleanGenerationDiagnosticScopeV1, CleanGenerationDiagnosticSnapshotBuilderV1,
+        DiagnosticContributionV1, DiagnosticPillarV1,
+    };
+    use tracedecay_domain::{
+        CodeGenerationId, CommitId, ContentDigest, DiagnosticRecordStateV1, DiagnosticSeverityV1,
+        FileOccurrenceId, GenerationDiagnosticV1, SourceSpan, UtcMicros,
+    };
+
+    fn id<T>(value: &str) -> T
+    where
+        T: TryFrom<String>,
+        <T as TryFrom<String>>::Error: std::fmt::Debug,
+    {
+        T::try_from(value.to_owned()).expect("valid fixture identity")
+    }
+
+    fn digest(byte: char) -> String {
+        format!("sha256:{}", byte.to_string().repeat(64))
+    }
+
+    /// Builds a record through the real production publication builder so the
+    /// admission rules are exercised against records shaped exactly like the
+    /// ones a pillar publishes.
+    fn record(pillar: DiagnosticPillarV1) -> GenerationDiagnosticV1 {
+        let mut builder =
+            CleanGenerationDiagnosticSnapshotBuilderV1::new(CleanGenerationDiagnosticScopeV1 {
+                generation_id: id("generation.admission.1"),
+                repository: id("repository.fixture"),
+                worktree: Some(id("worktree.fixture")),
+                reference: Some(id("ref.main")),
+                source_revision: Some(id("commit.head")),
+                analyzer_revision: id("analyzer.v1"),
+                configuration_revision: id("config.v1"),
+                collected_at: UtcMicros(1_700_000_000_000_000),
+            });
+        builder
+            .contribute(
+                pillar,
+                DiagnosticContributionV1 {
+                    anchor: id("anchor.admission.1"),
+                    file_occurrence_id: id("src/lib.rs"),
+                    content_digest: id(&digest('a')),
+                    span: SourceSpan {
+                        start_byte: 0,
+                        end_byte: 4,
+                    },
+                    symbol_occurrence_id: None,
+                    code: "E0308".to_owned(),
+                    severity: DiagnosticSeverityV1::Error,
+                    message: "mismatched types".to_owned(),
+                },
+            )
+            .expect("contribution accepted");
+        builder.records().pop().expect("one record")
+    }
+
+    fn admit(
+        record: &GenerationDiagnosticV1,
+        target: Option<&FileOccurrenceId>,
+    ) -> Result<(), FeedbackDiagnosticProjectionSkipV1> {
+        classify_feedback_diagnostic_admission(
+            record,
+            target,
+            &id::<CodeGenerationId>("generation.admission.1"),
+            &id::<ContentDigest>(&digest('a')),
+            &id::<CommitId>("commit.head"),
+        )
+    }
+
+    #[test]
+    fn every_pillar_record_is_admitted_when_identity_matches() {
+        for pillar in [
+            DiagnosticPillarV1::Compiler,
+            DiagnosticPillarV1::GitHubReview,
+            DiagnosticPillarV1::CiLocalization,
+            DiagnosticPillarV1::Proximity,
+        ] {
+            let record = record(pillar);
+            let target: FileOccurrenceId = id("src/lib.rs");
+            assert_eq!(
+                admit(&record, Some(&target)),
+                Ok(()),
+                "{pillar:?} record was refused despite exact identity"
+            );
+        }
+    }
+
+    /// The formerly silent case: the record attaches to a different file than
+    /// the cycle's impact target. It must now be a named refusal.
+    #[test]
+    fn impact_target_file_mismatch_is_named_not_silent() {
+        let record = record(DiagnosticPillarV1::Compiler);
+        let other: FileOccurrenceId = id("src/other.rs");
+        assert_eq!(
+            admit(&record, Some(&other)),
+            Err(FeedbackDiagnosticProjectionSkipV1::ImpactTargetFileMismatch)
+        );
+    }
+
+    #[test]
+    fn absent_impact_target_is_named_separately_from_mismatch() {
+        let record = record(DiagnosticPillarV1::Proximity);
+        assert_eq!(
+            admit(&record, None),
+            Err(FeedbackDiagnosticProjectionSkipV1::ImpactTargetAbsent)
+        );
+    }
+
+    #[test]
+    fn generation_content_state_and_revision_drift_each_have_a_reason() {
+        let target: FileOccurrenceId = id("src/lib.rs");
+
+        let mut wrong_generation = record(DiagnosticPillarV1::GitHubReview);
+        wrong_generation.generation_id = id("generation.admission.2");
+        assert_eq!(
+            admit(&wrong_generation, Some(&target)),
+            Err(FeedbackDiagnosticProjectionSkipV1::GenerationMismatch)
+        );
+
+        let mut wrong_content = record(DiagnosticPillarV1::CiLocalization);
+        wrong_content.content_digest = id(&digest('b'));
+        assert_eq!(
+            admit(&wrong_content, Some(&target)),
+            Err(FeedbackDiagnosticProjectionSkipV1::ContentDigestMismatch)
+        );
+
+        let mut cleared = record(DiagnosticPillarV1::Compiler);
+        cleared.state = DiagnosticRecordStateV1::Cleared {
+            cleared_in_generation: id("generation.admission.2"),
+        };
+        assert_eq!(
+            admit(&cleared, Some(&target)),
+            Err(FeedbackDiagnosticProjectionSkipV1::RecordNotCurrent)
+        );
+
+        let mut drifted = record(DiagnosticPillarV1::Compiler);
+        drifted.source_revision = Some(id("commit.other"));
+        assert_eq!(
+            admit(&drifted, Some(&target)),
+            Err(FeedbackDiagnosticProjectionSkipV1::SourceRevisionDrift)
+        );
+    }
+
+    #[test]
+    fn every_skip_reason_has_a_distinct_label() {
+        let labels = [
+            FeedbackDiagnosticProjectionSkipV1::LifecycleNotActive,
+            FeedbackDiagnosticProjectionSkipV1::NoRetrievalAnchor,
+            FeedbackDiagnosticProjectionSkipV1::AnchorNotPublished,
+            FeedbackDiagnosticProjectionSkipV1::ImpactTargetFileMismatch,
+            FeedbackDiagnosticProjectionSkipV1::ImpactTargetAbsent,
+            FeedbackDiagnosticProjectionSkipV1::GenerationMismatch,
+            FeedbackDiagnosticProjectionSkipV1::ContentDigestMismatch,
+            FeedbackDiagnosticProjectionSkipV1::RecordNotCurrent,
+            FeedbackDiagnosticProjectionSkipV1::SourceRevisionDrift,
+        ]
+        .map(FeedbackDiagnosticProjectionSkipV1::label);
+        let unique: std::collections::BTreeSet<&str> = labels.into_iter().collect();
+        assert_eq!(unique.len(), labels.len());
     }
 }

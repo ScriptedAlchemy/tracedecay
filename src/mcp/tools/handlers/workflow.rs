@@ -242,6 +242,11 @@ pub(super) async fn handle_diagnose(cg: &TraceDecay, args: Value) -> Result<Tool
         }));
     }
 
+    // Populate the durable managed-diagnostics store so the LSP Problems
+    // projection and every diagnostic read surface see these findings. Before
+    // this, nothing in production ever wrote a diagnostic record.
+    let publication = publish_parsed_compiler_diagnostics(cg, &diagnostics).await;
+
     let mapped = items.iter().filter(|i| !i["node"].is_null()).count();
     let body = json!({
         "diagnostics_parsed": total,
@@ -249,6 +254,7 @@ pub(super) async fn handle_diagnose(cg: &TraceDecay, args: Value) -> Result<Tool
         "mapped_to_node": mapped,
         "unmapped": items.len() - mapped,
         "truncated": total > items.len(),
+        "published": publication,
         "diagnostics": items,
     });
     let text = render::finalize(Some(cg.project_root()), &args, &body, || {
@@ -260,6 +266,125 @@ pub(super) async fn handle_diagnose(cg: &TraceDecay, args: Value) -> Result<Tool
         }),
         touched.into_iter().collect(),
     ))
+}
+
+/// Publishes parsed compiler diagnostics into the durable managed-diagnostics
+/// store as one clean-generation snapshot.
+///
+/// This is the production write path for the compiler pillar. Failure to
+/// publish never fails the diagnose call — the caller still receives its
+/// mapped diagnostics — but the outcome is reported in the response so a
+/// silent no-op is observable.
+async fn publish_parsed_compiler_diagnostics(
+    cg: &TraceDecay,
+    parsed: &[crate::diagnose::Diagnostic],
+) -> Value {
+    if parsed.is_empty() {
+        return json!({ "status": "skipped", "reason": "no-parsed-diagnostics" });
+    }
+    let root = cg.project_root().to_path_buf();
+    let (resolved, unresolved) =
+        crate::diagnostics_publication::resolve_compiler_diagnostics_v1(&root, parsed).await;
+    if resolved.is_empty() {
+        return json!({
+            "status": "skipped",
+            "reason": "no-resolvable-diagnostics",
+            "unresolved": unresolved,
+        });
+    }
+    let Some(scope) = compiler_publication_scope(&root, &resolved) else {
+        return json!({ "status": "skipped", "reason": "project-identity-unavailable" });
+    };
+    let generation = scope.generation_id.as_str().to_owned();
+    let database = cg.dashboard_database_guard();
+    let store = DiagnosticsStore::new(database.conn());
+    if let Err(error) = store.ensure_schema().await {
+        return json!({ "status": "failed", "reason": error.to_string() });
+    }
+    match crate::diagnostics_publication::publish_compiler_diagnostics_v1(&store, scope, &resolved)
+        .await
+    {
+        Ok(report) => json!({
+            "status": "published",
+            "generation": generation,
+            "inserted": report.inserted,
+            "cleared": report.cleared,
+            "unresolved": unresolved,
+            "rejected": report
+                .rejected
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+        }),
+        Err(error) => json!({ "status": "failed", "reason": error.to_string() }),
+    }
+}
+
+/// Derives the clean-generation identity for one compiler publication.
+///
+/// The generation is a deterministic function of the project scope, HEAD, and
+/// the exact resolved finding set, so republishing an unchanged result
+/// converges while a changed result mints a new generation that clears the
+/// prior one.
+fn compiler_publication_scope(
+    root: &Path,
+    resolved: &[crate::diagnostics_publication::ResolvedCompilerDiagnosticV1],
+) -> Option<crate::diagnostics_publication::CleanGenerationDiagnosticScopeV1> {
+    use tracedecay_domain::{CodeGenerationId, ComponentVersion, RefId, canonical_sha256};
+
+    let repository = crate::daemon::code_index_scheduler::identity::repository_id_for(root).ok()?;
+    let worktree = crate::daemon::code_index_scheduler::identity::worktree_id_for(root).ok()?;
+    let reference = crate::branch::current_branch(root)
+        .and_then(|branch| RefId::new(format!("refs/heads/{branch}")).ok());
+    let source_revision = current_head_commit_id(root);
+
+    let mut fingerprint: Vec<(String, u64, u64, String, String)> = resolved
+        .iter()
+        .map(|entry| {
+            (
+                entry.file_occurrence_id.as_str().to_owned(),
+                entry.span.start_byte,
+                entry.span.end_byte,
+                entry.diagnostic.code.clone().unwrap_or_default(),
+                entry.diagnostic.message.clone(),
+            )
+        })
+        .collect();
+    fingerprint.sort();
+    fingerprint.dedup();
+    let digest = canonical_sha256(&(
+        "tracedecay.diagnostics.compiler-generation.v1",
+        repository.as_str(),
+        worktree.as_str(),
+        source_revision.as_ref().map(CommitId::as_str),
+        &fingerprint,
+    ))
+    .ok()?;
+    let generation_id = CodeGenerationId::new(format!(
+        "generation.diagnostics.compiler.{}",
+        digest.as_str().trim_start_matches("sha256:")
+    ))
+    .ok()?;
+
+    Some(
+        crate::diagnostics_publication::CleanGenerationDiagnosticScopeV1 {
+            generation_id,
+            repository,
+            worktree: Some(worktree),
+            reference,
+            source_revision,
+            analyzer_revision: ComponentVersion::new(format!(
+                "analyzer.tracedecay-diagnose.{}",
+                env!("CARGO_PKG_VERSION")
+            ))
+            .ok()?,
+            configuration_revision: ComponentVersion::new(
+                "configuration.tracedecay-diagnose.v1".to_owned(),
+            )
+            .ok()?,
+            collected_at: test_run_now(),
+        },
+    )
 }
 
 /// Look up cached near-duplicate matches for a diagnostic's enclosing
