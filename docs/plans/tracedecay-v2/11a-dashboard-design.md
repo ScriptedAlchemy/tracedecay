@@ -314,3 +314,43 @@ WebGL dependency must pass an eval/CSP audit before adoption.
 - The four archetypes ship as shell components (`ui/archetypes/`) with the
   regions as slots; workspaces fill slots and own only their read-model
   wiring and workspace-specific panels.
+
+## Real-profile findings (2026-07-25, first live review at scale)
+
+Verified against the owner's real profile (43 repositories, 109.1K symbols,
+257.6K edges, 2,298 files, live SSE): the instrument language holds at real
+magnitude — display-tier counts, degree rails on most-connected symbols, and
+the connection-honest signal panel all read correctly. Guidance below is
+measured, not hypothetical; align future dashboard slices with it.
+
+1. **A layout may never imply structure the data lacks.** The all-projects
+   constellation ring-packs disconnected components; with 43 repos of one
+   checkout each this renders a circle, which the owner correctly read as
+   "what is that supposed to mean?" Rule: every macro-composition must encode
+   a REAL property (recency, activity, filesystem locality) and the caption
+   must name what it encodes. Packing artifacts that read as geometry are
+   design defects even when the data shown is truthful.
+
+2. **Scoped Brain must become the project's brain.** Selecting a project
+   currently narrows the registry view to a sparse hub+checkout pair. The
+   scoped gateway already serves the project's code-graph neighborhood,
+   stores, facts, and sessions; the scoped view should answer "what does
+   TraceDecay know about THIS project" with the graph as the field and
+   instrument readouts around it.
+
+3. **Dense connected components need density-aware rendering.** An 80-symbol
+   real neighborhood fuses into an unreadable mass under settings tuned on
+   sparse fixtures (screen-px node radii vs graph-space spacing; outliers
+   dilating the camera bbox). Fixture graphs under ~40 nodes systematically
+   under-test this; every graph surface must also be judged against a dense
+   real neighborhood before shipping.
+
+4. **Fixtures under-represent scale shape, not just scale size.** Real data
+   differs in DISTRIBUTION (43 single-checkout repos; one 5069-degree hub
+   symbol) rather than only in count. Wire-true fixtures should include at
+   least one skewed-distribution case per graph surface.
+
+5. **What the live review validated:** offline-vs-idle honesty (READY + zero
+   rate + climbing age while connected-quiet), the magnitude-rail idiom at
+   real degree ranges, and the ranked most-connected list against real paths.
+   These carry to future surfaces as-is.

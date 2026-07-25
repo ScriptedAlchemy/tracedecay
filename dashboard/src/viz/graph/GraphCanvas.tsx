@@ -265,7 +265,16 @@ export function GraphCanvas({
     const perNode =
       (container.clientWidth * container.clientHeight) / Math.max(nodes.length, 1);
     const roominess = Math.min(1, Math.sqrt(perNode / 8000));
-    const bodyScale = Math.max(0.4, density * roominess);
+    // A dense connected component (many edges per node) settles into a
+    // tighter FA2 packing than a sparse one of the same node count even
+    // after the repulsion tuning below, so its bodies need to shrink
+    // further or they fuse into an undifferentiated mass regardless of how
+    // roomy the canvas is. Average degree is a cheap, whole-graph proxy for
+    // that packing pressure -- exact per-component density is not worth the
+    // extra pass here.
+    const edgeDensity = nodes.length > 0 ? (2 * edges.length) / nodes.length : 0;
+    const densityShrink = Math.min(1, 1.8 / (1 + edgeDensity * 0.55));
+    const bodyScale = Math.max(0.32, density * roominess * densityShrink);
     sorted.forEach((node, index) => {
       const angle = (index / sorted.length) * Math.PI * 2;
       const [kr, kg, kb] = cssColorToRgb(kindColor(node.kind, seedLight));
@@ -296,15 +305,24 @@ export function GraphCanvas({
     if (!placed) {
     const fa2 = forceAtlas2.inferSettings(graph);
     forceAtlas2.assign(graph, {
-      iterations: 200,
-      // Small graphs over-spread with inferred gravity; pull clusters in so
-      // the tissue reads dense, not lost in the void.
+      // A dense component needs more settling time to actually reach the
+      // wider spread the settings below ask for; capped so a huge sparse
+      // graph doesn't pay for iterations it does not need.
+      iterations: Math.round(Math.min(400, 200 + edgeDensity * 40)),
       settings: {
         ...fa2,
+        // Small graphs over-spread with inferred gravity; pull clusters in so
+        // the tissue reads dense, not lost in the void. A DENSE graph needs
+        // the opposite correction on top of that: less pull-to-centre and
+        // more repulsion, or its own edges collapse it into a fused hairball
+        // no matter how few nodes it has -- node count alone (the previous
+        // basis for both knobs) says nothing about how much mutual pull a
+        // component's edges apply.
         gravity:
-          (fa2.gravity ?? 1) *
-          (nodes.length < 60 ? Math.max(8, 200 / nodes.length) : 2),
-        scalingRatio: 4,
+          ((fa2.gravity ?? 1) *
+            (nodes.length < 60 ? Math.max(8, 200 / nodes.length) : 2)) /
+          (1 + edgeDensity * 0.5),
+        scalingRatio: 4 + edgeDensity * 3,
       },
     });
     // Constellation composure: FA2 lets disconnected components drift apart
@@ -315,64 +333,126 @@ export function GraphCanvas({
     // reliably produces two or three tight clumps separated by a gap several
     // times their own size: exactly the "vast dead field" the camera then
     // faithfully frames, because there is nothing wrong with the frame, only
-    // with how far apart the content drifted before it was fit. Re-center
-    // each component onto a ring sized from the measured component extents
-    // (FA2's own coordinate scale) so separate clusters compose like one
-    // constellation regardless of graph size. A single connected component is
-    // a no-op here. The frozen bbox below is computed after this pass, so the
-    // camera always frames the composed result, not the raw FA2 scatter.
+    // with how far apart the content drifted before it was fit. A single
+    // connected component is a no-op here. The frozen bbox below is computed
+    // after this pass, so the camera always frames the composed result, not
+    // the raw FA2 scatter.
     {
       const componentOf = new Map<string, number>();
-      let componentCount = 0;
+      const membersOf: string[][] = [];
       for (const start of graph.nodes()) {
         if (componentOf.has(start)) continue;
+        const index = membersOf.length;
+        const members: string[] = [];
+        membersOf.push(members);
         const queue = [start];
-        componentOf.set(start, componentCount);
+        componentOf.set(start, index);
         while (queue.length) {
           const current = queue.pop()!;
+          members.push(current);
           for (const neighbor of graph.neighbors(current)) {
             if (!componentOf.has(neighbor)) {
-              componentOf.set(neighbor, componentCount);
+              componentOf.set(neighbor, index);
               queue.push(neighbor);
             }
           }
         }
-        componentCount += 1;
       }
+      const componentCount = membersOf.length;
       if (componentCount > 1) {
-        const centroids = Array.from({ length: componentCount }, () => ({ x: 0, y: 0, n: 0 }));
-        for (const [node, component] of componentOf) {
-          const c = centroids[component]!;
-          c.x += graph.getNodeAttribute(node, 'x') as number;
-          c.y += graph.getNodeAttribute(node, 'y') as number;
-          c.n += 1;
+        const centroids = membersOf.map((members) => {
+          let x = 0, y = 0;
+          for (const node of members) {
+            x += graph.getNodeAttribute(node, 'x') as number;
+            y += graph.getNodeAttribute(node, 'y') as number;
+          }
+          return { x: x / members.length, y: y / members.length };
+        });
+        const extents = membersOf.map((members, index) => {
+          const c = centroids[index]!;
+          let extent = 0.15; // floor: an orphan has zero spread of its own.
+          for (const node of members) {
+            const ex = Math.abs((graph.getNodeAttribute(node, 'x') as number) - c.x);
+            const ey = Math.abs((graph.getNodeAttribute(node, 'y') as number) - c.y);
+            extent = Math.max(extent, ex, ey);
+          }
+          return extent;
+        });
+        let dominant = 0;
+        for (let index = 1; index < componentCount; index += 1) {
+          if (membersOf[index]!.length > membersOf[dominant]!.length) dominant = index;
         }
-        let maxExtent = 1;
-        for (const [node, component] of componentOf) {
-          const c = centroids[component]!;
-          const ex = Math.abs((graph.getNodeAttribute(node, 'x') as number) - c.x / c.n);
-          const ey = Math.abs((graph.getNodeAttribute(node, 'y') as number) - c.y / c.n);
-          maxExtent = Math.max(maxExtent, ex, ey);
-        }
-        // The ring only needs to be as large as geometry actually requires:
-        // adjacent components sit `2π/N` apart in angle, so the chord between
-        // two neighbouring centroids is `2·ring·sin(π/N)`, and that chord must
-        // clear twice each component's own extent for their (roughly
-        // circular) footprints not to overlap. Solving for ring gives exactly
-        // the radius non-overlap needs -- smaller for few components (which a
-        // flat multiplier was over-spacing, leaving a "vast dead field"
-        // around two or three tight clumps) and larger for many (which the
-        // same flat multiplier under-spaced, risking real overlap). A small
-        // safety factor covers the gap between "roughly circular" and the
-        // true, possibly elongated, per-component footprint.
-        const ring = (maxExtent / Math.sin(Math.PI / componentCount)) * 1.15;
-        for (const [node, component] of componentOf) {
-          const c = centroids[component]!;
-          const angle = (component / componentCount) * Math.PI * 2;
-          const dx = Math.cos(angle) * ring - c.x / c.n;
-          const dy = Math.sin(angle) * ring - c.y / c.n;
-          graph.updateNodeAttribute(node, 'x', (x) => (x as number) + dx);
-          graph.updateNodeAttribute(node, 'y', (y) => (y as number) + dy);
+        const totalRealNodes = membersOf.reduce((sum, m) => sum + m.length, 0);
+        const secondLargest = Math.max(
+          0,
+          ...membersOf.filter((_, index) => index !== dominant).map((m) => m.length),
+        );
+        // Two genuinely different shapes share this code path. Brain-style
+        // graphs are a constellation of many roughly EQUAL-sized components
+        // (one hub-and-spokes cluster per repo) -- there is no "main" body,
+        // so the original flat ring (every component equally spaced, sized
+        // from the single largest extent) is exactly right and reads as a
+        // deliberate necklace. Code-style graphs are the opposite: ONE
+        // component holds most of the real nodes and everything else is a
+        // stray orphan or two. Forcing the orphan case through the flat-ring
+        // formula was the actual defect -- a near-zero-extent orphan was
+        // pushed out to the SAME radius the dominant cluster needed, which
+        // inflates the camera's fitted bbox far more than it helps legibility
+        // ("orphans set the extent," shrinking the real structure to a
+        // sliver of the canvas). Detect that shape (one component holding a
+        // clear majority, with no other component anywhere close to its
+        // size) and anchor everything else to it in a tight margin band
+        // instead; otherwise fall back to the flat ring both shapes used to
+        // share.
+        const hasDominantComponent =
+          membersOf[dominant]!.length >= totalRealNodes * 0.5 &&
+          membersOf[dominant]!.length >= secondLargest * 3;
+        if (hasDominantComponent) {
+          const dominantExtent = extents[dominant]!;
+          const domCentroid = centroids[dominant]!;
+          const others = Array.from({ length: componentCount }, (_, index) => index).filter(
+            (index) => index !== dominant,
+          );
+          others.forEach((component, spokeIndex) => {
+            const c = centroids[component]!;
+            const spoke = Math.min(
+              dominantExtent + extents[component]! * 1.2 + 0.3,
+              dominantExtent * 2,
+            );
+            const angle = (spokeIndex / others.length) * Math.PI * 2;
+            const dx = -domCentroid.x + Math.cos(angle) * spoke - c.x;
+            const dy = -domCentroid.y + Math.sin(angle) * spoke - c.y;
+            for (const node of membersOf[component]!) {
+              graph.updateNodeAttribute(node, 'x', (x) => (x as number) + dx);
+              graph.updateNodeAttribute(node, 'y', (y) => (y as number) + dy);
+            }
+          });
+          // Re-centre the dominant component itself onto the origin, so the
+          // spokes above (measured from its pre-move centroid) and the frame
+          // both anchor to where the graph's real mass actually is.
+          for (const node of membersOf[dominant]!) {
+            graph.updateNodeAttribute(node, 'x', (x) => (x as number) - domCentroid.x);
+            graph.updateNodeAttribute(node, 'y', (y) => (y as number) - domCentroid.y);
+          }
+        } else {
+          // The ring only needs to be as large as geometry actually
+          // requires: adjacent components sit `2π/N` apart in angle, so the
+          // chord between two neighbouring centroids is `2·ring·sin(π/N)`,
+          // and that chord must clear twice each component's own extent for
+          // their (roughly circular) footprints not to overlap. Solving for
+          // ring gives exactly the radius non-overlap needs.
+          const maxExtent = Math.max(...extents);
+          const ring = (maxExtent / Math.sin(Math.PI / componentCount)) * 1.15;
+          membersOf.forEach((members, component) => {
+            const c = centroids[component]!;
+            const angle = (component / componentCount) * Math.PI * 2;
+            const dx = Math.cos(angle) * ring - c.x;
+            const dy = Math.sin(angle) * ring - c.y;
+            for (const node of members) {
+              graph.updateNodeAttribute(node, 'x', (x) => (x as number) + dx);
+              graph.updateNodeAttribute(node, 'y', (y) => (y as number) + dy);
+            }
+          });
         }
       }
     }
