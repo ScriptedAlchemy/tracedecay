@@ -150,10 +150,7 @@ pub(super) fn diagnostic_value(diagnostic: GatewayDiagnostic) -> Value {
         "range": range_value(diagnostic.range),
         "severity": diagnostic.severity.map(severity_value),
         "code": diagnostic.code,
-        "source": match diagnostic.source {
-            super::diagnostics::DiagnosticSource::Upstream => "upstream",
-            super::diagnostics::DiagnosticSource::TraceDecay => "tracedecay",
-        },
+        "source": diagnostic.source.wire_name(),
         "message": diagnostic.message,
     });
     if let Some(data) = diagnostic.data {

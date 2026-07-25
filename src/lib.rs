@@ -69,6 +69,7 @@ mod dependency_imports;
 pub mod derive_table;
 pub mod diagnose;
 pub mod diagnostics;
+pub mod diagnostics_publication;
 pub mod diagnostics_query;
 pub mod diagnostics_store;
 pub mod display;

@@ -2371,7 +2371,7 @@ where
         }
         diagnostics
             .into_iter()
-            .filter(|diagnostic| diagnostic.source == DiagnosticSource::TraceDecay)
+            .filter(|diagnostic| diagnostic.source.is_tracedecay())
             .collect()
     }
 

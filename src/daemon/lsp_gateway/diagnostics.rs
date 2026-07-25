@@ -34,10 +34,56 @@ pub enum DiagnosticSeverity {
 }
 
 /// The source lane preserved while composing a document diagnostic report.
+///
+/// The TraceDecay lane names its real producer (Plan 35): a review finding and
+/// a CI-localization finding are distinct producers and must not both render
+/// as an anonymous `tracedecay`. Every non-[`DiagnosticSource::Upstream`]
+/// variant belongs to the TraceDecay lane and keeps its lane privileges.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum DiagnosticSource {
     Upstream,
+    /// TraceDecay-relayed compiler/toolchain findings.
     TraceDecay,
+    /// PR13 GitHub review advisory findings.
+    TraceDecayGitHub,
+    /// PR13 CI failure-localization advisory findings.
+    TraceDecayCi,
+    /// PR13 proximity advisory findings.
+    TraceDecayProximity,
+}
+
+impl DiagnosticSource {
+    /// Whether this source belongs to the TraceDecay lane (as opposed to a
+    /// host's own upstream language server).
+    #[must_use]
+    pub const fn is_tracedecay(self) -> bool {
+        !matches!(self, Self::Upstream)
+    }
+
+    /// The exact wire string published in LSP `Diagnostic.source`.
+    #[must_use]
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::Upstream => "upstream",
+            Self::TraceDecay => "tracedecay",
+            Self::TraceDecayGitHub => "tracedecay-github",
+            Self::TraceDecayCi => "tracedecay-ci",
+            Self::TraceDecayProximity => "tracedecay-proximity",
+        }
+    }
+
+    /// Resolves the producer lane from a durable record's canonical
+    /// `provenance.producer` identity. Unrecognized producers fall back to the
+    /// generic TraceDecay lane rather than being dropped.
+    #[must_use]
+    pub fn from_producer(producer: &str) -> Self {
+        match producer {
+            "tracedecay-github" => Self::TraceDecayGitHub,
+            "tracedecay-ci" => Self::TraceDecayCi,
+            "tracedecay-proximity" => Self::TraceDecayProximity,
+            _ => Self::TraceDecay,
+        }
+    }
 }
 
 /// Immutable identity needed to clear or reauthorize expansion of one
@@ -112,14 +158,23 @@ pub struct GatewayDiagnostic {
 }
 
 impl GatewayDiagnostic {
-    fn normalize(mut self, source: DiagnosticSource) -> Self {
-        self.source = source;
-        match source {
-            DiagnosticSource::TraceDecay if self.severity.is_none() => {
+    /// Normalizes one diagnostic into its merge lane.
+    ///
+    /// The lane is authoritative, but within the TraceDecay lane a producer
+    /// already named by the projection is preserved — merging must not erase
+    /// `tracedecay-github`/`tracedecay-ci`/`tracedecay-proximity` back into an
+    /// anonymous `tracedecay`.
+    fn normalize(mut self, lane: DiagnosticSource) -> Self {
+        if lane.is_tracedecay() {
+            if !self.source.is_tracedecay() {
+                self.source = lane;
+            }
+            if self.severity.is_none() {
                 self.severity = Some(DiagnosticSeverity::Information);
             }
-            DiagnosticSource::Upstream => self.data = None,
-            DiagnosticSource::TraceDecay => {}
+        } else {
+            self.source = lane;
+            self.data = None;
         }
         truncate_utf8(&mut self.message, MAX_DIAGNOSTIC_MESSAGE_BYTES);
         self
@@ -497,5 +552,79 @@ mod tests {
             ),
             Ok(text.find('\r').unwrap() + "\r\n".len() + 'λ'.len_utf8())
         );
+    }
+}
+
+#[cfg(test)]
+mod producer_source_tests {
+    use super::*;
+
+    fn diagnostic(source: DiagnosticSource) -> GatewayDiagnostic {
+        GatewayDiagnostic {
+            uri: "file:///root/a.rs".into(),
+            range: LspRange {
+                start: LspPosition {
+                    line: 0,
+                    character: 0,
+                },
+                end: LspPosition {
+                    line: 0,
+                    character: 1,
+                },
+            },
+            severity: None,
+            code: Some(source.wire_name().to_owned()),
+            message: source.wire_name().to_owned(),
+            source,
+            data: None,
+        }
+    }
+
+    #[test]
+    fn merging_preserves_each_producers_source() {
+        let producers = [
+            DiagnosticSource::TraceDecay,
+            DiagnosticSource::TraceDecayGitHub,
+            DiagnosticSource::TraceDecayCi,
+            DiagnosticSource::TraceDecayProximity,
+        ];
+        let merged = DiagnosticMerge::new(
+            vec![diagnostic(DiagnosticSource::Upstream)],
+            producers.map(diagnostic).to_vec(),
+        );
+        for producer in producers {
+            assert!(
+                merged
+                    .items
+                    .iter()
+                    .any(|item| item.source == producer && item.data.is_none()),
+                "{} was collapsed during merge",
+                producer.wire_name()
+            );
+        }
+    }
+
+    #[test]
+    fn upstream_lane_always_wins_over_a_claimed_tracedecay_source() {
+        let merged = DiagnosticMerge::new(vec![diagnostic(DiagnosticSource::TraceDecayCi)], vec![]);
+        assert_eq!(merged.items[0].source, DiagnosticSource::Upstream);
+    }
+
+    #[test]
+    fn producer_mapping_round_trips_and_defaults_safely() {
+        for source in [
+            DiagnosticSource::TraceDecay,
+            DiagnosticSource::TraceDecayGitHub,
+            DiagnosticSource::TraceDecayCi,
+            DiagnosticSource::TraceDecayProximity,
+        ] {
+            assert_eq!(DiagnosticSource::from_producer(source.wire_name()), source);
+            assert!(source.is_tracedecay());
+        }
+        assert_eq!(
+            DiagnosticSource::from_producer("some-unknown-producer"),
+            DiagnosticSource::TraceDecay
+        );
+        assert!(!DiagnosticSource::Upstream.is_tracedecay());
     }
 }
