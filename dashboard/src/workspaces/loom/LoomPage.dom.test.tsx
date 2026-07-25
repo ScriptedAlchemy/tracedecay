@@ -97,6 +97,175 @@ const TIMELINE = {
   ],
 };
 
+const TEMPORAL = {
+  schema_revision: 1,
+  scope: {
+    project_id: 'project-loom',
+    storage_mode: 'profile_sharded',
+    store_root: '/profile/project-loom',
+  },
+  version: { entity_version: null, graph_version: null },
+  time: { valid_time_micros: null, observation_time_micros: 1_784_700_000_000_000 },
+  source_watermark: null,
+  authorization: { outcome: 'authorized' },
+  coverage: {
+    completeness: 'complete',
+    eligible: 3,
+    examined: 3,
+    matched: 3,
+    excluded: 0,
+    omitted: 0,
+    unknown: 0,
+    denominator: 3,
+    unit: 'sessions',
+    omission_reasons: [],
+  },
+  freshness: {
+    state: 'fresh',
+    observed_at_micros: 1_784_700_000_000_000,
+    watermark: null,
+  },
+  domain_state: 'partial',
+  legal_actions: [],
+  payload: {
+    available: true,
+    total: 3,
+    sessions: SESSIONS.sessions.map((session, index) => ({
+      ...session,
+      ended_at: index === 0 ? session.started_at + 1800 : null,
+      edited_files_recorded: index === 0,
+    })),
+    source_statuses: [
+      {
+        id: 'session_commit',
+        label: 'Session ↔ commit',
+        state: 'ready',
+        authority: 'commit_sessions',
+        granularity: 'commit attribution',
+        providers: ['cursor'],
+        item_count: 1,
+        reason: null,
+        required_authority: null,
+        coverage: {
+          completeness: 'complete',
+          eligible: 1,
+          examined: 1,
+          matched: 1,
+          omitted: 0,
+          unit: 'stored relation rows',
+          reason:
+            'provider-qualified commit_sessions rows for the displayed session page',
+        },
+      },
+      {
+        id: 'session_file',
+        label: 'Session → edited file',
+        state: 'partial',
+        authority: 'sessions.metadata_json $.edited_files[]',
+        granularity: 'recorded file rollup',
+        providers: ['cursor'],
+        item_count: 1,
+        reason: 'provider-native rollups only',
+        required_authority: null,
+        coverage: {
+          completeness: 'partial',
+          eligible: 3,
+          examined: 1,
+          matched: 1,
+          omitted: 2,
+          unit: 'displayed sessions',
+          reason: 'only sessions carrying an edited_files rollup are examined',
+        },
+      },
+      {
+        id: 'branch_worktree',
+        label: 'Branch & worktree spans',
+        state: 'ready',
+        authority: 'session_git_spans',
+        granularity: 'coalesced activity span',
+        providers: ['cursor'],
+        item_count: 1,
+        reason: null,
+        required_authority: null,
+        coverage: {
+          completeness: 'complete',
+          eligible: 1,
+          examined: 1,
+          matched: 1,
+          omitted: 0,
+          unit: 'stored relation rows',
+          reason:
+            'provider-qualified session_git_spans rows for the displayed session page',
+        },
+      },
+      {
+        id: 'delivery_outcomes',
+        label: 'Pull request, review, CI & release outcomes',
+        state: 'unsupported',
+        authority: null,
+        granularity: 'Delivery projection row',
+        providers: [],
+        item_count: null,
+        reason:
+          'the shared Delivery overview is mounted, but its outcome projections are unavailable or unsupported and do not expose session-linked rows; Loom does not duplicate them',
+        required_authority:
+          'GET /api/delivery/overview with session-linked pull_requests, review_comments, ci_checks, failure_localization, and releases rows',
+        coverage: {
+          completeness: 'unsupported',
+          eligible: null,
+          examined: null,
+          matched: null,
+          omitted: null,
+          unit: null,
+          reason:
+            'coverage belongs to the shared Delivery projection once it serves session-linked rows',
+        },
+      },
+    ],
+    commits: [
+      {
+        provider: 'cursor',
+        session_id: 'sess-open',
+        commit_sha: 'abc123def456',
+        committed_at: NOW - 5000,
+        branch: 'main',
+        worktree: '/work/tracedecay',
+        relation: 'produced',
+        evidence: 'transcript',
+        confidence: 100,
+        span_overlap_kind: 'within_span',
+      },
+    ],
+    edited_files: [
+      {
+        provider: 'cursor',
+        session_id: 'sess-open',
+        path: 'src/runtime.rs',
+        change_type: 'edit',
+        hunks: 2,
+      },
+    ],
+    branch_spans: [
+      {
+        provider: 'cursor',
+        session_id: 'sess-open',
+        branch: 'main',
+        worktree: '/work/tracedecay',
+        first_at: NOW - 7200,
+        last_at: NOW - 5400,
+        event_count: 4,
+        source: 'transcript',
+      },
+    ],
+    temporal_refresh: {
+      state: 'ready',
+      active_generations: 1,
+      latest_activated_at_micros: (NOW - 100) * 1_000_000,
+      authority: 'session_temporal_generations maintained by the temporal refresh scheduler',
+    },
+  },
+};
+
 function serve(routes: Record<string, { status: number; body: unknown }>) {
   return vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
@@ -111,7 +280,7 @@ function serve(routes: Record<string, { status: number; body: unknown }>) {
 }
 
 const HAPPY = {
-  '/api/plugins/savings/sessions': { status: 200, body: SESSIONS },
+  '/api/loom/temporal': { status: 200, body: TEMPORAL },
   '/api/plugins/hermes-lcm/session/': { status: 200, body: CHAIN },
   '/api/plugins/hermes-lcm/timeline': { status: 200, body: TIMELINE },
 };
@@ -133,7 +302,7 @@ afterEach(() => {
 });
 
 describe('LoomPage', () => {
-  it('draws the weave from the sessions rollup, not from the 500ing overview route', async () => {
+  it('draws the weave from the typed Loom temporal read', async () => {
     const fetchMock = serve(HAPPY);
     vi.stubGlobal('fetch', fetchMock);
     const client = new QueryClient({
@@ -146,18 +315,57 @@ describe('LoomPage', () => {
     );
     await screen.findByText('Deliver Git primitive runtime');
     const urls = fetchMock.mock.calls.map((call) => String(call[0]));
-    expect(urls.some((url) => url.includes('/api/plugins/savings/sessions'))).toBe(true);
+    expect(urls.some((url) => url.includes('/api/loom/temporal'))).toBe(true);
     expect(urls.some((url) => url.includes('/api/plugins/hermes-lcm/overview'))).toBe(
       false,
     );
   });
 
-  it('states that most threads have no served end, with the real count', async () => {
+  it('uses the Loom temporal read for recorded ends and causal relations', async () => {
+    const fetchMock = serve({
+      ...HAPPY,
+      '/api/loom/temporal': { status: 200, body: TEMPORAL },
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false, gcTime: 0 } },
+    });
+    render(
+      <QueryClientProvider client={client}>
+        <LoomPage />
+      </QueryClientProvider>,
+    );
+
+    const row = await screen.findByText('Deliver Git primitive runtime');
+    expect(
+      fetchMock.mock.calls.some((call) =>
+        String(call[0]).includes('/api/loom/temporal'),
+      ),
+    ).toBe(true);
+    await userEvent.click(row);
+    expect(await screen.findByText('src/runtime.rs')).toBeTruthy();
+    expect(screen.getByText('abc123def456')).toBeTruthy();
+    expect(screen.getAllByText('30m').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText(/1 active temporal generations/)).toBeTruthy();
+    expect(screen.getByText(/complete coverage · 3 examined/)).toBeTruthy();
+    expect(
+      screen.queryByText(/no session→file or session→commit route/),
+    ).toBeNull();
+    expect(
+      screen.getAllByText(
+        /GET \/api\/delivery\/overview with session-linked pull_requests/,
+      ).length,
+    ).toBeGreaterThanOrEqual(1);
+  });
+
+  it('states which threads have no recorded extent, with the real count', async () => {
     renderLoom();
     await screen.findByText('Deliver Git primitive runtime');
-    // Two of the three fixtures are open-ended.
+    // One fixture has a durable end, one a last-message observation, and one is open.
     expect(
-      screen.getByText(/2 of 3 sessions have no\s+served end/),
+      screen.getByText(
+        /1 of 3 sessions have no\s+recorded end or later message observation/,
+      ),
     ).toBeTruthy();
     expect(screen.getByText(/the stub marks unmeasured extent/)).toBeTruthy();
   });
@@ -178,22 +386,20 @@ describe('LoomPage', () => {
     expect(screen.getByText(/it\s+encodes nothing/)).toBeTruthy();
   });
 
-  it('names every unserved causal crossing instead of drawing one', async () => {
+  it('reports each causal source with its real authority or dependency', async () => {
     renderLoom();
     await screen.findByText('Deliver Git primitive runtime');
     expect(screen.getByText('Session ↔ commit')).toBeTruthy();
     expect(screen.getByText('Session → edited file')).toBeTruthy();
-    expect(screen.getByText('Pull requests & review')).toBeTruthy();
-    expect(screen.getByText('CI & release outcomes')).toBeTruthy();
-    // The store that DOES hold the correlation is named, so the gap is
-    // actionable rather than a shrug.
-    expect(screen.getByText('src/sessions/git_correlation.rs')).toBeTruthy();
+    expect(screen.getByText('Branch & worktree spans')).toBeTruthy();
+    expect(screen.getByText('Pull request, review, CI & release outcomes')).toBeTruthy();
+    expect(screen.getByText(/commit_sessions/)).toBeTruthy();
   });
 
-  it('reports a session with no served end as "not served" in the table', async () => {
+  it('reports a session with no recorded extent as unrecorded', async () => {
     renderLoom();
     await screen.findByText('Deliver Git primitive runtime');
-    expect(screen.getAllByText('not served').length).toBeGreaterThanOrEqual(2);
+    expect(screen.getAllByText('unrecorded').length).toBeGreaterThanOrEqual(1);
   });
 
   it('pulls the chain on selection and marks it ordinal-ordered, not timed', async () => {
@@ -210,21 +416,66 @@ describe('LoomPage', () => {
     expect(screen.getAllByText('Bash').length).toBeGreaterThanOrEqual(1);
   });
 
-  it('terminates the chain at the wire rather than trailing off into edits', async () => {
+  it('continues the chain through durable causal rows', async () => {
     renderLoom();
     const row = await screen.findByText('Deliver Git primitive runtime');
     await userEvent.click(row);
-    await screen.findByText('→ edits → commits');
+    await screen.findByText('→ edited files');
+    expect(screen.getByText('src/runtime.rs')).toBeTruthy();
+    expect(screen.getByText('abc123def456')).toBeTruthy();
+    expect(screen.getByText(/4 events/)).toBeTruthy();
+  });
+
+  it('does not render partial commit coverage as a zero result', async () => {
+    const sourceStatuses = TEMPORAL.payload.source_statuses.map((source) =>
+      source.id === 'session_commit'
+        ? {
+            ...source,
+            state: 'partial',
+            reason: 'one providerless legacy attribution was omitted',
+            coverage: {
+              ...source.coverage,
+              completeness: 'partial',
+              eligible: 1,
+              examined: 1,
+              matched: 0,
+              omitted: 1,
+            },
+          }
+        : source,
+    );
+    renderLoom({
+      ...HAPPY,
+      '/api/loom/temporal': {
+        status: 200,
+        body: {
+          ...TEMPORAL,
+          payload: {
+            ...TEMPORAL.payload,
+            commits: [],
+            source_statuses: sourceStatuses,
+          },
+        },
+      },
+    });
+
+    await userEvent.click(await screen.findByText('Deliver Git primitive runtime'));
     expect(
-      screen.getByText(/no session→file or session→commit route/),
-    ).toBeTruthy();
+      screen.getAllByText(/one providerless legacy attribution was omitted/).length,
+    ).toBeGreaterThanOrEqual(1);
+    expect(
+      screen.queryByText(/commit_sessions has no attribution for this session/),
+    ).toBeNull();
   });
 
   it('distinguishes a store that reports itself unavailable from an empty one', async () => {
     renderLoom({
-      '/api/plugins/savings/sessions': {
+      '/api/loom/temporal': {
         status: 200,
-        body: { available: false, sessions: [] },
+        body: {
+          ...TEMPORAL,
+          payload: { ...TEMPORAL.payload, available: false, total: 0, sessions: [] },
+        },
       },
       '/api/plugins/hermes-lcm/timeline': { status: 200, body: TIMELINE },
     });
@@ -234,9 +485,12 @@ describe('LoomPage', () => {
 
   it('renders the empty weave as an answered question when the store is genuinely empty', async () => {
     renderLoom({
-      '/api/plugins/savings/sessions': {
+      '/api/loom/temporal': {
         status: 200,
-        body: { available: true, sessions: [] },
+        body: {
+          ...TEMPORAL,
+          payload: { ...TEMPORAL.payload, total: 0, sessions: [] },
+        },
       },
       '/api/plugins/hermes-lcm/timeline': { status: 200, body: TIMELINE },
     });
@@ -248,18 +502,21 @@ describe('LoomPage', () => {
 
   it('keeps dated sessions visible when the backend also returns an undated row', async () => {
     renderLoom({
-      '/api/plugins/savings/sessions': {
+      '/api/loom/temporal': {
         status: 200,
         body: {
-          available: true,
-          sessions: [
-            SESSIONS.sessions[0],
-            {
-              ...SESSIONS.sessions[2],
-              session_id: 'sess-undated',
-              started_at: null,
-            },
-          ],
+          ...TEMPORAL,
+          payload: {
+            ...TEMPORAL.payload,
+            sessions: [
+              TEMPORAL.payload.sessions[0],
+              {
+                ...TEMPORAL.payload.sessions[2],
+                session_id: 'sess-undated',
+                started_at: null,
+              },
+            ],
+          },
         },
       },
       '/api/plugins/hermes-lcm/timeline': { status: 200, body: TIMELINE },
@@ -267,24 +524,22 @@ describe('LoomPage', () => {
 
     await screen.findByText('Deliver Git primitive runtime');
     expect(screen.getByText(/1 row carried no usable start time/)).toBeTruthy();
-    expect(screen.queryByText(/unsupported schema/i)).toBeNull();
+    expect(screen.queryByText(/Loom temporal response unavailable/)).toBeNull();
   });
 
   it('renders a distinct error state when the read fails, inventing nothing', async () => {
     renderLoom({
-      '/api/plugins/savings/sessions': { status: 500, body: { error: 'boom' } },
+      '/api/loom/temporal': { status: 500, body: { error: 'boom' } },
     });
     await waitFor(() => {
-      expect(
-        screen.getByText(/nothing is being invented in its place/),
-      ).toBeTruthy();
+      expect(screen.getByText(/HTTP 500/)).toBeTruthy();
     });
     expect(screen.queryByText('No thread to weave')).toBeNull();
   });
 
   it('survives a timeline read failing without losing the weave', async () => {
     renderLoom({
-      '/api/plugins/savings/sessions': { status: 200, body: SESSIONS },
+      '/api/loom/temporal': { status: 200, body: TEMPORAL },
       '/api/plugins/hermes-lcm/timeline': { status: 500, body: { error: 'boom' } },
     });
     await screen.findByText('Deliver Git primitive runtime');
@@ -299,8 +554,9 @@ describe('LoomPage', () => {
     const figure = screen.getByRole('img', { name: /Weave:/ });
     expect(figure.getAttribute('aria-label')).toContain('drawn open');
     expect(figure.getAttribute('aria-label')).toContain(
-      'No causal crossings are drawn',
+      'Provider-qualified causal rows are served and listed',
     );
+    expect(figure.getAttribute('aria-label')).toContain('not geometrically drawn');
     expect(screen.getByRole('table')).toBeTruthy();
   });
 });
