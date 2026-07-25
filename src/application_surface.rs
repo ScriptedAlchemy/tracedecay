@@ -26,9 +26,10 @@ use tracedecay_api::{
 };
 use tracedecay_application::handlers::CanonicalApplicationDispatcher;
 use tracedecay_application::retrieval::{
-    CodeQueryScope, CodeRelationRequest, ExactOccurrenceRequest, GraphRelationRequest,
-    ImplementationSelector, ImplementationsRequest, PhraseSearchRequest, SignatureSearchRequest,
-    SymbolGraphScope, SymbolSearchPrimitiveRequest, TypeHierarchyRequest,
+    CodeFacetDimension, CodeFacetRequest, CodeLexicalFieldFilter, CodeNavigationRequest,
+    CodeQueryScope, CodeRelationRequest, CodeTimelineRequest, ExactOccurrenceRequest,
+    GraphRelationRequest, ImplementationSelector, ImplementationsRequest, PhraseSearchRequest,
+    SignatureSearchRequest, SymbolGraphScope, SymbolSearchPrimitiveRequest, TypeHierarchyRequest,
 };
 use tracedecay_application::{
     APPLICATION_DEFAULT_PROFILE_ID, ApplicationContractError, ApplicationEnvelope,
@@ -112,6 +113,12 @@ pub enum ApplicationSurfaceOperation {
     CodeTypeHierarchy,
     CodeCallers,
     CodeCallees,
+    CodeFacets,
+    CodeTimeline,
+    CodeDeclaration,
+    CodeDefinition,
+    CodeTypeDefinition,
+    CodeReferences,
     SessionLookup,
     QualifiedName,
     CallChain,
@@ -150,7 +157,7 @@ pub enum ApplicationSurfaceOperation {
     ContextScoutFeedback,
 }
 
-pub const APPLICATION_SURFACE_OPERATIONS: [ApplicationSurfaceOperation; 58] = [
+pub const APPLICATION_SURFACE_OPERATIONS: [ApplicationSurfaceOperation; 64] = [
     ApplicationSurfaceOperation::GitStatus,
     ApplicationSurfaceOperation::GitDiff,
     ApplicationSurfaceOperation::GitHistory,
@@ -173,6 +180,12 @@ pub const APPLICATION_SURFACE_OPERATIONS: [ApplicationSurfaceOperation; 58] = [
     ApplicationSurfaceOperation::CodeTypeHierarchy,
     ApplicationSurfaceOperation::CodeCallers,
     ApplicationSurfaceOperation::CodeCallees,
+    ApplicationSurfaceOperation::CodeFacets,
+    ApplicationSurfaceOperation::CodeTimeline,
+    ApplicationSurfaceOperation::CodeDeclaration,
+    ApplicationSurfaceOperation::CodeDefinition,
+    ApplicationSurfaceOperation::CodeTypeDefinition,
+    ApplicationSurfaceOperation::CodeReferences,
     ApplicationSurfaceOperation::SessionLookup,
     ApplicationSurfaceOperation::QualifiedName,
     ApplicationSurfaceOperation::CallChain,
@@ -236,6 +249,12 @@ impl ApplicationSurfaceOperation {
             Self::CodeTypeHierarchy => "code_type_hierarchy",
             Self::CodeCallers => "code_callers",
             Self::CodeCallees => "code_callees",
+            Self::CodeFacets => "code_facets",
+            Self::CodeTimeline => "code_timeline",
+            Self::CodeDeclaration => "code_declaration",
+            Self::CodeDefinition => "code_definition",
+            Self::CodeTypeDefinition => "code_type_definition",
+            Self::CodeReferences => "code_references",
             Self::SessionLookup => "session_lookup",
             Self::QualifiedName => "qualified_name",
             Self::CallChain => "call_chain",
@@ -405,6 +424,10 @@ impl CodeExactOccurrenceSurfaceRequest {
 pub struct CodePhraseSearchSurfaceRequest {
     pub query: String,
     pub phrases: Vec<String>,
+    #[serde(default)]
+    pub field_filters: Vec<CodeLexicalFieldFilter>,
+    #[serde(default)]
+    pub fuzzy_budget: u32,
     pub scope: CodeQueryScope,
     pub meta: CallableCodeSurfaceMeta,
 }
@@ -546,6 +569,8 @@ impl CodePhraseSearchSurfaceRequest {
         PhraseSearchRequest::new(
             query,
             self.phrases,
+            self.field_filters,
+            self.fuzzy_budget,
             self.scope,
             self.meta.into_application(page),
         )
@@ -560,6 +585,58 @@ pub struct CodeCalleesSurfaceRequest {
     pub resolve_trait_dispatch: bool,
     pub scope: CodeQueryScope,
     pub meta: CallableCodeSurfaceMeta,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CodeFacetSurfaceRequest {
+    pub dimension: CodeFacetDimension,
+    pub scope: CodeQueryScope,
+    pub meta: CallableCodeSurfaceMeta,
+}
+
+impl CodeFacetSurfaceRequest {
+    pub fn into_application_request(self, page: PageRequest) -> CodeFacetRequest {
+        CodeFacetRequest {
+            dimension: self.dimension,
+            scope: self.scope,
+            meta: self.meta.into_application(page),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CodeTimelineSurfaceRequest {
+    pub scope: CodeQueryScope,
+    pub meta: CallableCodeSurfaceMeta,
+}
+
+impl CodeTimelineSurfaceRequest {
+    pub fn into_application_request(self, page: PageRequest) -> CodeTimelineRequest {
+        CodeTimelineRequest {
+            scope: self.scope,
+            meta: self.meta.into_application(page),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CodeNavigationSurfaceRequest {
+    pub node_id: String,
+    pub scope: CodeQueryScope,
+    pub meta: CallableCodeSurfaceMeta,
+}
+
+impl CodeNavigationSurfaceRequest {
+    pub fn into_application_request(self, page: PageRequest) -> CodeNavigationRequest {
+        CodeNavigationRequest {
+            node_id: self.node_id,
+            scope: self.scope,
+            meta: self.meta.into_application(page),
+        }
+    }
 }
 
 impl CodeCalleesSurfaceRequest {
@@ -579,6 +656,12 @@ pub enum CallableCodeSurfaceRequest {
     ExactOccurrence(CodeExactOccurrenceSurfaceRequest),
     PhraseSearch(CodePhraseSearchSurfaceRequest),
     Callees(CodeCalleesSurfaceRequest),
+    Facets(CodeFacetSurfaceRequest),
+    Timeline(CodeTimelineSurfaceRequest),
+    Declaration(CodeNavigationSurfaceRequest),
+    Definition(CodeNavigationSurfaceRequest),
+    TypeDefinition(CodeNavigationSurfaceRequest),
+    References(CodeNavigationSurfaceRequest),
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -1713,6 +1796,30 @@ impl ApplicationSurfaceRequest {
                     ApplicationSurfaceOperation::CodeCallees
                 )
                 | (
+                    Self::CallableCode(CallableCodeSurfaceRequest::Facets(_)),
+                    ApplicationSurfaceOperation::CodeFacets
+                )
+                | (
+                    Self::CallableCode(CallableCodeSurfaceRequest::Timeline(_)),
+                    ApplicationSurfaceOperation::CodeTimeline
+                )
+                | (
+                    Self::CallableCode(CallableCodeSurfaceRequest::Declaration(_)),
+                    ApplicationSurfaceOperation::CodeDeclaration
+                )
+                | (
+                    Self::CallableCode(CallableCodeSurfaceRequest::Definition(_)),
+                    ApplicationSurfaceOperation::CodeDefinition
+                )
+                | (
+                    Self::CallableCode(CallableCodeSurfaceRequest::TypeDefinition(_)),
+                    ApplicationSurfaceOperation::CodeTypeDefinition
+                )
+                | (
+                    Self::CallableCode(CallableCodeSurfaceRequest::References(_)),
+                    ApplicationSurfaceOperation::CodeReferences
+                )
+                | (
                     Self::PrimitiveCode(PrimitiveCodeSurfaceRequest::SymbolSearch(_)),
                     ApplicationSurfaceOperation::CodeSymbolSearch
                 )
@@ -2092,6 +2199,42 @@ pub fn parse_application_surface_request(
         ApplicationSurfaceOperation::CodeCallees => {
             serde_json::from_value::<CodeCalleesSurfaceRequest>(value)
                 .map(CallableCodeSurfaceRequest::Callees)
+                .map(ApplicationSurfaceRequest::CallableCode)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+        }
+        ApplicationSurfaceOperation::CodeFacets => {
+            serde_json::from_value::<CodeFacetSurfaceRequest>(value)
+                .map(CallableCodeSurfaceRequest::Facets)
+                .map(ApplicationSurfaceRequest::CallableCode)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+        }
+        ApplicationSurfaceOperation::CodeTimeline => {
+            serde_json::from_value::<CodeTimelineSurfaceRequest>(value)
+                .map(CallableCodeSurfaceRequest::Timeline)
+                .map(ApplicationSurfaceRequest::CallableCode)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+        }
+        ApplicationSurfaceOperation::CodeDeclaration => {
+            serde_json::from_value::<CodeNavigationSurfaceRequest>(value)
+                .map(CallableCodeSurfaceRequest::Declaration)
+                .map(ApplicationSurfaceRequest::CallableCode)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+        }
+        ApplicationSurfaceOperation::CodeDefinition => {
+            serde_json::from_value::<CodeNavigationSurfaceRequest>(value)
+                .map(CallableCodeSurfaceRequest::Definition)
+                .map(ApplicationSurfaceRequest::CallableCode)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+        }
+        ApplicationSurfaceOperation::CodeTypeDefinition => {
+            serde_json::from_value::<CodeNavigationSurfaceRequest>(value)
+                .map(CallableCodeSurfaceRequest::TypeDefinition)
+                .map(ApplicationSurfaceRequest::CallableCode)
+                .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+        }
+        ApplicationSurfaceOperation::CodeReferences => {
+            serde_json::from_value::<CodeNavigationSurfaceRequest>(value)
+                .map(CallableCodeSurfaceRequest::References)
                 .map(ApplicationSurfaceRequest::CallableCode)
                 .map_err(|_| ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
         }
@@ -2638,6 +2781,12 @@ fn plan26_surface_operation(operation: ApplicationSurfaceOperation) -> Plan26Fee
         | ApplicationSurfaceOperation::CodeTypeHierarchy
         | ApplicationSurfaceOperation::CodeCallers
         | ApplicationSurfaceOperation::CodeCallees
+        | ApplicationSurfaceOperation::CodeFacets
+        | ApplicationSurfaceOperation::CodeTimeline
+        | ApplicationSurfaceOperation::CodeDeclaration
+        | ApplicationSurfaceOperation::CodeDefinition
+        | ApplicationSurfaceOperation::CodeTypeDefinition
+        | ApplicationSurfaceOperation::CodeReferences
         | ApplicationSurfaceOperation::SessionLookup
         | ApplicationSurfaceOperation::QualifiedName
         | ApplicationSurfaceOperation::CallChain
@@ -3011,6 +3160,14 @@ fn application_operation_for_http(
         }
         HttpApplicationOperation::CodeCallers => ApplicationSurfaceOperation::CodeCallers,
         HttpApplicationOperation::CodeCallees => ApplicationSurfaceOperation::CodeCallees,
+        HttpApplicationOperation::CodeFacets => ApplicationSurfaceOperation::CodeFacets,
+        HttpApplicationOperation::CodeTimeline => ApplicationSurfaceOperation::CodeTimeline,
+        HttpApplicationOperation::CodeDeclaration => ApplicationSurfaceOperation::CodeDeclaration,
+        HttpApplicationOperation::CodeDefinition => ApplicationSurfaceOperation::CodeDefinition,
+        HttpApplicationOperation::CodeTypeDefinition => {
+            ApplicationSurfaceOperation::CodeTypeDefinition
+        }
+        HttpApplicationOperation::CodeReferences => ApplicationSurfaceOperation::CodeReferences,
         HttpApplicationOperation::SessionLookup => ApplicationSurfaceOperation::SessionLookup,
         HttpApplicationOperation::QualifiedName => ApplicationSurfaceOperation::QualifiedName,
         HttpApplicationOperation::CallChain => ApplicationSurfaceOperation::CallChain,
