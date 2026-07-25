@@ -246,6 +246,30 @@ describe('LoomPage', () => {
     ).toBeTruthy();
   });
 
+  it('keeps dated sessions visible when the backend also returns an undated row', async () => {
+    renderLoom({
+      '/api/plugins/savings/sessions': {
+        status: 200,
+        body: {
+          available: true,
+          sessions: [
+            SESSIONS.sessions[0],
+            {
+              ...SESSIONS.sessions[2],
+              session_id: 'sess-undated',
+              started_at: null,
+            },
+          ],
+        },
+      },
+      '/api/plugins/hermes-lcm/timeline': { status: 200, body: TIMELINE },
+    });
+
+    await screen.findByText('Deliver Git primitive runtime');
+    expect(screen.getByText(/1 row carried no usable start time/)).toBeTruthy();
+    expect(screen.queryByText(/unsupported schema/i)).toBeNull();
+  });
+
   it('renders a distinct error state when the read fails, inventing nothing', async () => {
     renderLoom({
       '/api/plugins/savings/sessions': { status: 500, body: { error: 'boom' } },
