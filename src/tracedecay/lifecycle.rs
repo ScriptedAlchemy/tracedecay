@@ -93,6 +93,58 @@ impl TraceDecay {
         Err(configuration_runtime_unavailable())
     }
 
+    /// Initializes a first-touch project while the caller holds the exact
+    /// profile's exclusive lifecycle lease and maintenance database scope.
+    ///
+    /// This is the daemonless bootstrap path used by `tracedecay init`. It
+    /// still mounts configuration and session storage through the canonical
+    /// registered runtime; the lease only replaces daemon ownership during
+    /// this bounded maintenance operation.
+    pub async fn init_with_exclusive_maintenance(
+        project_root: &Path,
+        open_options: TraceDecayOpenOptions,
+        lifecycle_lease: &crate::lifecycle_lease::LifecycleLease,
+    ) -> Result<Self> {
+        let profile_root = open_options.resolved_profile_root()?;
+        if !lifecycle_lease.is_exclusive() || !lifecycle_lease.guards_profile(&profile_root) {
+            return Err(TraceDecayError::Config {
+                message:
+                    "project initialization requires the exact profile's exclusive lifecycle lease"
+                        .to_owned(),
+            });
+        }
+        let identity = crate::daemon::profile_identity::load_or_create(&profile_root)?;
+        let runtime_registry = Arc::new(DaemonSessionRuntimeRegistryV1::open(identity).await?);
+        let profile_database = runtime_registry.profile_database().await?;
+        let store_layout = Self::resolve_first_touch_configuration_layout(
+            project_root,
+            &open_options,
+            profile_database.as_ref(),
+            true,
+        )
+        .await?;
+        let project_id = Self::registered_project_id(&store_layout)?;
+        crate::storage::write_enrollment_marker(
+            project_root,
+            &crate::storage::EnrollmentMarker {
+                project_id: project_id.as_str().to_owned(),
+                storage_mode: crate::storage::StorageMode::ProfileSharded,
+            },
+        )?;
+        let configuration_database = runtime_registry
+            .project_sessions(project_id, [project_root.to_path_buf()])
+            .await?;
+        Self::init_with_registered_configuration(
+            project_root,
+            open_options,
+            store_layout,
+            configuration_database,
+            profile_database,
+            runtime_registry,
+        )
+        .await
+    }
+
     pub(crate) async fn init_with_registered_configuration(
         project_root: &Path,
         open_options: TraceDecayOpenOptions,
@@ -526,6 +578,45 @@ impl TraceDecay {
         _open_options: TraceDecayOpenOptions,
     ) -> Result<Self> {
         Err(configuration_runtime_unavailable())
+    }
+
+    /// Opens an initialized project through the canonical registered runtime
+    /// while the caller holds the exact profile's exclusive maintenance lease.
+    pub async fn open_with_exclusive_maintenance(
+        project_root: &Path,
+        open_options: TraceDecayOpenOptions,
+        lifecycle_lease: &crate::lifecycle_lease::LifecycleLease,
+    ) -> Result<Self> {
+        let profile_root = open_options.resolved_profile_root()?;
+        if !lifecycle_lease.is_exclusive() || !lifecycle_lease.guards_profile(&profile_root) {
+            return Err(TraceDecayError::Config {
+                message: "project open requires the exact profile's exclusive lifecycle lease"
+                    .to_owned(),
+            });
+        }
+        let identity = crate::daemon::profile_identity::load_or_create(&profile_root)?;
+        let runtime_registry = Arc::new(DaemonSessionRuntimeRegistryV1::open(identity).await?);
+        let profile_database = runtime_registry.profile_database().await?;
+        let store_layout = Self::resolve_registered_configuration_layout(
+            project_root,
+            &open_options,
+            profile_database.as_ref(),
+            true,
+        )
+        .await?;
+        let project_id = Self::registered_project_id(&store_layout)?;
+        let configuration_database = runtime_registry
+            .project_sessions(project_id, [project_root.to_path_buf()])
+            .await?;
+        Self::open_with_registered_configuration(
+            project_root,
+            open_options,
+            store_layout,
+            configuration_database,
+            profile_database,
+            runtime_registry,
+        )
+        .await
     }
 
     pub(crate) async fn open_with_registered_configuration(
