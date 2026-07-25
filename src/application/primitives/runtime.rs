@@ -38,7 +38,9 @@ use tracedecay_application::{
     PolicyDecisionRef, RequestAdmission, RequestContext, RequestId, ResolvedScope,
     RetrievalEvidence, RetryDirective, SafeDiagnostic, TemporalState,
 };
-use tracedecay_domain::{CodeGenerationId, CommitId, ComponentVersion, UtcMicros};
+use tracedecay_domain::{
+    CodeGenerationId, CommitId, ComponentVersion, GenerationDiagnosticV1, UtcMicros,
+};
 use tracedecay_tool_catalog::SortContractId;
 use url::Url;
 
@@ -280,22 +282,25 @@ pub enum DiagnosticsPrimitiveScope {
 pub struct DiagnosticsPrimitiveRequest {
     pub scope: DiagnosticsPrimitiveScope,
     pub maximum_diagnostics: u32,
+    #[serde(default)]
+    pub cursor: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct DiagnosticPrimitiveRecord {
-    pub file: String,
-    pub line: u32,
-    pub severity: String,
-    pub code: Option<String>,
-    pub message: String,
+    pub logical_path: String,
+    pub diagnostic: GenerationDiagnosticV1,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct DiagnosticsPrimitiveResult {
+    pub generation_id: CodeGenerationId,
+    pub clean_generation: bool,
+    pub findings_cleared: bool,
     pub diagnostics: Vec<DiagnosticPrimitiveRecord>,
+    pub next_cursor: Option<String>,
 }
 
 /// Typed extension over existing query/source/system services. Every method is
