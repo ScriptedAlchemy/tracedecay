@@ -611,21 +611,29 @@ impl SemanticModelLifecycleOwnerV1 {
         model_id: Option<&str>,
         auto_download: bool,
     ) -> Result<SemanticModelLifecycleStatusV1, ModelLifecycleErrorV1> {
-        let mut guard = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
-        guard.durable.auto_download = auto_download;
-        match model_id {
-            None => {
-                guard.durable.selected_model = None;
-                guard.durable.state = None;
-            }
+        let selected = match model_id {
             Some(model_id) => {
                 let model = self
                     .catalog
                     .get(model_id)
                     .ok_or(CatalogErrorV1::UnknownModel)?;
+                Some((model, self.re_admit_durable_selection(model)?))
+            }
+            None => None,
+        };
+        let mut guard = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        guard.durable.auto_download = auto_download;
+        match selected {
+            None => {
+                guard.durable.selected_model = None;
+                guard.durable.state = None;
+            }
+            Some((model, durable_selection)) => {
                 let digest = catalog_package_digest(model);
                 guard.durable.selected_model = Some(model.model_id.clone());
-                if let Some(path) = existing_install_path(&self.root, model, &digest) {
+                if let Some(state) = durable_selection {
+                    guard.durable.state = Some(state);
+                } else if let Some(path) = existing_install_path(&self.root, model, &digest) {
                     guard.durable.state = Some(SemanticModelLifecycleStateV1::Installed {
                         model_id: model.model_id.clone(),
                         revision: model.source.revision.clone(),
@@ -645,6 +653,67 @@ impl SemanticModelLifecycleOwnerV1 {
         persist_durable(&self.root, &guard.durable)?;
         drop(guard);
         Ok(self.status())
+    }
+
+    fn re_admit_durable_selection(
+        &self,
+        model: &CatalogedFastEmbedModelV1,
+    ) -> Result<Option<SemanticModelLifecycleStateV1>, ModelLifecycleErrorV1> {
+        let state = {
+            let guard = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+            guard.durable.state.clone()
+        };
+        let (was_ready, artifact_digest) = match state {
+            Some(SemanticModelLifecycleStateV1::Installed {
+                model_id,
+                revision,
+                artifact_digest,
+                ..
+            }) if model_id == model.model_id && revision == model.source.revision => {
+                (false, artifact_digest)
+            }
+            Some(SemanticModelLifecycleStateV1::Ready {
+                model_id,
+                revision,
+                artifact_digest,
+                ..
+            }) if model_id == model.model_id && revision == model.source.revision => {
+                (true, artifact_digest)
+            }
+            _ => return Ok(None),
+        };
+        let digest = super::manifest::Sha256DigestHex::new(artifact_digest.clone())
+            .map_err(|_| ModelLifecycleErrorV1::VerificationFailed)?;
+        let environment = RuntimeEnvironmentV1::detect_fastembed_process()
+            .map_err(|_| ModelLifecycleErrorV1::VerificationFailed)?;
+        let lease_id = format!("active:{}:{}", model.model_id, model.source.revision);
+        let admitted = self
+            .artifact_store
+            .admit_leased_for_runtime_by_digest(
+                &digest,
+                &environment,
+                &lease_id,
+                ArtifactLeaseKindV1::Active,
+                current_unix_seconds()?,
+            )
+            .map_err(|_| ModelLifecycleErrorV1::VerificationFailed)?;
+        verify_catalog_manifest(model, admitted.manifest())?;
+        let install_path = self.artifact_store.installed_directory(&digest);
+        Ok(Some(if was_ready {
+            SemanticModelLifecycleStateV1::Ready {
+                model_id: model.model_id.clone(),
+                revision: model.source.revision.clone(),
+                artifact_digest,
+                install_path,
+            }
+        } else {
+            SemanticModelLifecycleStateV1::Installed {
+                model_id: model.model_id.clone(),
+                revision: model.source.revision.clone(),
+                artifact_digest,
+                install_path,
+            }
+        }))
     }
 
     /// Queue background acquisition when a selected model is not yet installed.
@@ -709,6 +778,11 @@ impl SemanticModelLifecycleOwnerV1 {
                 let _ = fs::remove_dir_all(path);
             }
         }
+        {
+            let mut guard = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+            guard.durable.state = None;
+            persist_durable(&self.root, &guard.durable)?;
+        }
         let model_id = status.selected_model.clone();
         self.select_model(model_id.as_deref(), status.auto_download)
     }
@@ -735,7 +809,9 @@ impl SemanticModelLifecycleOwnerV1 {
                 ArtifactLeaseKindV1::Active,
             );
         }
-        if let Ok(digest) =
+        if install_path_of(&previous).is_some_and(|path| {
+            path.starts_with(self.root.join("verified-artifacts").join("artifacts"))
+        }) && let Ok(digest) =
             super::manifest::Sha256DigestHex::new(previous.artifact_digest().to_owned())
         {
             self.artifact_store.acquire_artifact_lease(
@@ -1428,7 +1504,7 @@ pub fn shared_lifecycle_owner() -> Option<Arc<SemanticModelLifecycleOwnerV1>> {
         .clone()
 }
 
-/// Apply config selection and queue first-startup acquisition when appropriate.
+/// Apply config selection and queue explicitly enabled background acquisition.
 pub fn apply_config_and_queue_startup(
     selected_model: Option<&str>,
     auto_download: bool,
@@ -1576,11 +1652,12 @@ mod tests {
                 },
                 precision: EmbeddingPrecisionV1::Fp32,
                 runtime: RuntimeCompatibilityV1 {
-                    runtime: "fastembed-ort".to_owned(),
-                    build_revision: "fixture".to_owned(),
+                    runtime: super::super::artifact_store::FASTEMBED_RUNTIME_FAMILY_V1.to_owned(),
+                    build_revision:
+                        super::super::artifact_store::FASTEMBED_RUNTIME_BUILD_REVISION_V1.to_owned(),
                     platforms: vec![PlatformTargetV1 {
-                        os: "linux".to_owned(),
-                        arch: "x86_64".to_owned(),
+                        os: std::env::consts::OS.to_owned(),
+                        arch: std::env::consts::ARCH.to_owned(),
                     }],
                 },
                 device: DeviceClassV1::Cpu,
@@ -1640,6 +1717,56 @@ mod tests {
             status.state,
             Some(SemanticModelLifecycleStateV1::Installed { .. })
         ));
+    }
+
+    #[test]
+    fn restart_re_admits_explicit_import_without_legacy_acquisition() {
+        let fixture = tempfile::tempdir().unwrap();
+        let (catalog, model_id) = tiny_catalog(fixture.path());
+        let model = catalog.get(&model_id).unwrap().clone();
+        let root = tempfile::tempdir().unwrap();
+        let imported = SemanticModelLifecycleOwnerV1::open(
+            root.path(),
+            catalog.clone(),
+            Arc::new(HfHubModelMemberSourceV1),
+        )
+        .unwrap()
+        .import_local_artifact(&model_id, &tiny_manifest(&model), fixture.path(), 10)
+        .unwrap()
+        .state
+        .unwrap();
+
+        let restarted = SemanticModelLifecycleOwnerV1::open(
+            root.path(),
+            catalog,
+            Arc::new(HfHubModelMemberSourceV1),
+        )
+        .unwrap();
+        let status = restarted.select_model(Some(&model_id), true).unwrap();
+
+        assert!(matches!(
+            status.state,
+            Some(SemanticModelLifecycleStateV1::Installed { .. })
+        ));
+        assert_eq!(
+            status.state.as_ref().unwrap().artifact_digest(),
+            imported.artifact_digest()
+        );
+        assert!(!restarted.enqueue_startup_acquisition_if_needed());
+
+        restarted.mark_ready().unwrap();
+        let ready_restart = SemanticModelLifecycleOwnerV1::open(
+            root.path(),
+            tiny_catalog(fixture.path()).0,
+            Arc::new(HfHubModelMemberSourceV1),
+        )
+        .unwrap();
+        let ready = ready_restart.select_model(Some(&model_id), true).unwrap();
+        assert!(matches!(
+            ready.state,
+            Some(SemanticModelLifecycleStateV1::Ready { .. })
+        ));
+        assert!(!ready_restart.enqueue_startup_acquisition_if_needed());
     }
 
     #[test]

@@ -989,6 +989,7 @@ async fn feedback_handle_bootstrap_reads() {
     let observed_at = wall_clock_micros();
     let access = feedback_access(&scope, observed_at);
     let runtime = open_pr12_feedback_runtime(database, project.path(), scope, access)
+        .await
         .expect("feedback runtime");
     let owner = runtime.owner();
 
