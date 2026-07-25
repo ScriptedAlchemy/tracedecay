@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tracedecay_domain::ContentDigest;
 
 use super::gateway::AdmittedRoot;
 use super::session::LspRequestId;
@@ -142,6 +143,10 @@ pub struct ContextProjectionRequest {
     pub kind: ContextProjectionKind,
     #[serde(default)]
     pub document_uri: Option<String>,
+    /// Exact session-owned overlay identity. The protocol actor binds this
+    /// after decoding; clients cannot claim a trusted content identity.
+    #[serde(skip)]
+    pub(crate) document_content_digest: Option<ContentDigest>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
