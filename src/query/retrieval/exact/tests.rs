@@ -17,8 +17,8 @@ use tracedecay_domain::{
 };
 
 use super::{
-    ExactAdmissionAuthority, ExactLane, ExactLaneEvidence, ExactLaneRequest, ExactLaneRetriever,
-    ExactLiteralV1,
+    CentralExactAdmissionAuthorityV1, ExactAdmissionAuthority, ExactLane, ExactLaneEvidence,
+    ExactLaneRequest, ExactLaneRetriever, ExactLiteralV1,
 };
 use crate::query::retrieval::ports::{
     CodeCandidateBindingV1, CodeOccurrenceRefV1, ExactTermPostingReadPort, RetrievalPortError,
@@ -185,6 +185,24 @@ fn exact_request(
         generation: id("generation.1"),
         budget: budget(max_candidates),
     }
+}
+
+#[test]
+fn central_authority_admits_unprefixed_contextual_error_text() {
+    let authority = CentralExactAdmissionAuthorityV1::new(id("exact-rules.v1"));
+    let query_view = EphemeralSanitizedQueryViewV1::sanitize(
+        "time interval start must not be after its end",
+        id::<SanitizerRevision>("query-sanitizer.v1"),
+        id::<QueryNormalizationRevision>("query-normalization.v1"),
+    )
+    .expect("query sanitizes");
+
+    let literals = authority.parse_literals(&query_view, &base_request(16));
+
+    assert!(literals.iter().any(|literal| {
+        literal.field == ExactFieldV1::CompilerOrRuntimeError
+            && literal.original_bytes == b"time interval start must not be after its end"
+    }));
 }
 
 /// Build one exact candidate/evidence pair whose proof is minted by the
