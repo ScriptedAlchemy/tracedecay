@@ -12,6 +12,10 @@
           "chunks_deleted": 0,
           "chunks_reused": 0,
           "projection_calls": 1,
+          "changed_ranges": 0,
+          "invalidated_chunks": 0,
+          "projection_operations": 1505,
+          "full_rebuild_reason": null,
           "input_bytes": 116543,
           "output_bytes": 3834873
         },
@@ -22,6 +26,10 @@
           "chunks_deleted": 1,
           "chunks_reused": 1504,
           "projection_calls": 1,
+          "changed_ranges": 1,
+          "invalidated_chunks": 2,
+          "projection_operations": 2,
+          "full_rebuild_reason": null,
           "input_bytes": 13616,
           "output_bytes": 3983368
         },
@@ -32,6 +40,10 @@
           "chunks_deleted": 549,
           "chunks_reused": 956,
           "projection_calls": 1,
+          "changed_ranges": 0,
+          "invalidated_chunks": 549,
+          "projection_operations": 549,
+          "full_rebuild_reason": null,
           "input_bytes": 0,
           "output_bytes": 3058532
         },
@@ -42,6 +54,10 @@
           "chunks_deleted": 0,
           "chunks_reused": 1505,
           "projection_calls": 0,
+          "changed_ranges": 0,
+          "invalidated_chunks": 0,
+          "projection_operations": 0,
+          "full_rebuild_reason": null,
           "input_bytes": 0,
           "output_bytes": 3982395
         },
@@ -52,6 +68,10 @@
           "chunks_deleted": 1505,
           "chunks_reused": 0,
           "projection_calls": 1,
+          "changed_ranges": 0,
+          "invalidated_chunks": 1505,
+          "projection_operations": 3010,
+          "full_rebuild_reason": null,
           "input_bytes": 116543,
           "output_bytes": 5344416
         },
@@ -62,6 +82,10 @@
           "chunks_deleted": 1505,
           "chunks_reused": 0,
           "projection_calls": 1,
+          "changed_ranges": 0,
+          "invalidated_chunks": 1505,
+          "projection_operations": 3010,
+          "full_rebuild_reason": "chunker_incompatible",
           "input_bytes": 116543,
           "output_bytes": 5353446
         }
@@ -77,6 +101,10 @@
           "chunks_deleted": 0,
           "chunks_reused": 0,
           "projection_calls": 1,
+          "changed_ranges": 0,
+          "invalidated_chunks": 0,
+          "projection_operations": 15050,
+          "full_rebuild_reason": null,
           "input_bytes": 1165430,
           "output_bytes": 38341836
         },
@@ -87,6 +115,10 @@
           "chunks_deleted": 1,
           "chunks_reused": 15049,
           "projection_calls": 1,
+          "changed_ranges": 1,
+          "invalidated_chunks": 2,
+          "projection_operations": 2,
+          "full_rebuild_reason": null,
           "input_bytes": 13616,
           "output_bytes": 39817742
         },
@@ -97,6 +129,10 @@
           "chunks_deleted": 549,
           "chunks_reused": 14501,
           "projection_calls": 1,
+          "changed_ranges": 0,
+          "invalidated_chunks": 549,
+          "projection_operations": 549,
+          "full_rebuild_reason": null,
           "input_bytes": 0,
           "output_bytes": 38892907
         },
@@ -107,6 +143,10 @@
           "chunks_deleted": 0,
           "chunks_reused": 15050,
           "projection_calls": 0,
+          "changed_ranges": 0,
+          "invalidated_chunks": 0,
+          "projection_operations": 0,
+          "full_rebuild_reason": null,
           "input_bytes": 0,
           "output_bytes": 39816769
         },
@@ -117,6 +157,10 @@
           "chunks_deleted": 15050,
           "chunks_reused": 0,
           "projection_calls": 1,
+          "changed_ranges": 0,
+          "invalidated_chunks": 15050,
+          "projection_operations": 30100,
+          "full_rebuild_reason": null,
           "input_bytes": 1165430,
           "output_bytes": 53437014
         },
@@ -127,6 +171,10 @@
           "chunks_deleted": 15050,
           "chunks_reused": 0,
           "projection_calls": 1,
+          "changed_ranges": 0,
+          "invalidated_chunks": 15050,
+          "projection_operations": 30100,
+          "full_rebuild_reason": "chunker_incompatible",
           "input_bytes": 1165430,
           "output_bytes": 53527314
         }
