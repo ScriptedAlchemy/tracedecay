@@ -14,6 +14,7 @@ import { formatCount, splitCount } from '../../ui/format.ts';
 import { cn } from '../../ui/cn';
 import { useLegacy } from '../../data/query/useLegacy.ts';
 import {
+  FactDetailPayloadSchema,
   MemoryOverviewPayloadSchema,
   MemoryStatusSchema,
   type CategoryCount,
@@ -52,6 +53,14 @@ export function KnowledgePage() {
   const statusBands =
     status.data?.outcome === 'ok' ? status.data.data.memory : undefined;
   const [selected, setSelected] = useState<FactRow | null>(null);
+  const detail = useLegacy(
+    ['memory', 'fact', String(selected?.fact_id ?? '')],
+    `${BASE}/fact/${encodeURIComponent(String(selected?.fact_id ?? ''))}`,
+    FactDetailPayloadSchema,
+    { enabled: selected != null },
+  );
+  const selectedDetail =
+    detail.data?.outcome === 'ok' && detail.data.data.fact ? detail.data.data.fact : selected;
 
   return (
     <ExplorerSplit
@@ -280,22 +289,29 @@ export function KnowledgePage() {
         </LegacyBoundary>
       }
       inspector={
-        selected ? (
+        selectedDetail ? (
           <InspectorPanel title="Fact" onClose={() => setSelected(null)}>
             <div className="flex flex-col gap-3">
-              <TrustGauge score={selected.trust_score} />
-              {selected.content ? (
+              {detail.isPending ? (
+                <p className="text-2xs text-text-muted">Loading canonical fact detail…</p>
+              ) : detail.data?.outcome !== 'ok' ? (
+                <p className="text-2xs text-state-partial">
+                  Canonical detail is unavailable; this is the bounded overview row.
+                </p>
+              ) : null}
+              <TrustGauge score={selectedDetail.trust_score} />
+              {selectedDetail.content ? (
                 <p className="whitespace-pre-wrap text-xs leading-relaxed">
-                  {selected.content}
+                  {selectedDetail.content}
                 </p>
               ) : null}
               <FeedbackSplit
-                helpful={selected.helpful_count ?? 0}
-                unhelpful={selected.unhelpful_count ?? 0}
+                helpful={selectedDetail.helpful_count ?? 0}
+                unhelpful={selectedDetail.unhelpful_count ?? 0}
               />
               <KeyValueTree
                 value={Object.fromEntries(
-                  Object.entries(selected).filter(([k]) => k !== 'content'),
+                  Object.entries(selectedDetail).filter(([k]) => k !== 'content'),
                 )}
               />
             </div>
