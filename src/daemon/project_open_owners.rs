@@ -78,7 +78,7 @@ use crate::application::feedback::{
 use crate::application::operation_stream::OperationKind;
 use crate::application::primitives::{
     admitted_root_uri_for_project, locator_digest_for_project,
-    open_pr12_production_primitive_runtime, worktree_id_for_project,
+    open_pr12_production_primitive_runtime,
 };
 use crate::application::source_authorization::ProjectSourceAccessSnapshot;
 use crate::daemon::git_transactions::DaemonGitIndexTransactionServiceRegistry;
@@ -2093,15 +2093,16 @@ pub(crate) fn resolved_scope_for_project(
     project_root: &Path,
     project_id: &ProjectId,
 ) -> std::result::Result<ResolvedScope, ApplicationContractError> {
-    let repository_digest = locator_digest_for_project(project_root)?;
-    let repository_id = RepositoryId::new(format!(
-        "repository.{}",
-        repository_digest.as_str().trim_start_matches("sha256:")
-    ))
+    let repository_id = crate::daemon::code_index_scheduler::identity::repository_id_for(
+        project_root,
+    )
     .map_err(|_| ApplicationContractError::Inconsistent {
         field: "project-open repository id",
     })?;
-    let worktree_id = worktree_id_for_project(project_root)?;
+    let worktree_id = crate::daemon::code_index_scheduler::identity::worktree_id_for(project_root)
+        .map_err(|_| ApplicationContractError::Inconsistent {
+            field: "project-open worktree id",
+        })?;
     let reference = crate::branch::current_branch(project_root)
         .and_then(|branch| RefId::new(format!("refs/heads/{branch}")).ok());
     ResolvedScope::new(project_id.clone(), repository_id, worktree_id, reference).map_err(|_| {
