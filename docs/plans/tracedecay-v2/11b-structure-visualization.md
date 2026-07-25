@@ -172,3 +172,36 @@ Decision frame:
 - Keep the honesty invariants renderer-independent: a pure layout/simulation
   module (like brain/field.ts) computes positions/forces from measurements;
   the renderer only draws. Tests hit the pure module.
+
+## Topography round one — coordinator verdict (2026-07-25)
+
+Four sheets on branch `worktree-agent-a3433e6e6f36a4201` under
+`mockups/code-topography/` (dark+light, notes, README; kindColor + tokens
+transcribed, honest aggregation statements throughout).
+
+- TRACE is the hero and lands the ask: callers as tributaries, callees as
+  delta, per-edge call-site widths, impl/trait membranes with ports, hop rings
+  not elevation (captioned — the call graph merely happens to run downhill),
+  dashed mouths for edges leaving the graph, all over the dimmed cortex relief
+  so shoreline crossings are cross-module calls. 26 nodes at ≤3 hops = direct
+  render, inside subgraph caps. Round two builds THIS as the live physics
+  prototype (custom canvas + Verlet springs; channels are already rivers —
+  they want to flow).
+- CORTEX is the right macro underlay: real contour interval (0.50 e/sym,
+  indexed 5th), √-area mass, aggregation stated (19 regions ⟵ 1206 symbols),
+  weather strip honestly project-level. Open question adopted: contours should
+  probably encode coupling ratio (internal÷external) rather than e/sym to
+  avoid double-counting with area — decide in round two.
+- CORE SAMPLE answers "shape of the inside of a file, six files at once";
+  the handlers.rs-vs-decision.rs comparison is instant and impossible in a
+  tree view. Its (b) option — cores collapsing toward hairline fabric as count
+  grows — is the growth path.
+- LENS is adopted as the NAVIGATION MODEL, not necessarily a sheet: zoom is a
+  position on an aggregation-ratio continuum, never a screen replacement; the
+  subgraph cap becomes a readable position on the ruler. This is how
+  Cortex→Trace→Core Sample connect in the product. Its self-critique (three
+  grammars on one sheet) is accepted — as a literal surface it is optional.
+
+Synthesis: ONE navigable space. Far = CORTEX. Touch a symbol = TRACE floods.
+Enter a file = CORE SAMPLE. LENS is the theory of motion between them. The
+sensory contract rides on top: channel = spring, mass = weight, churn = warmth.
