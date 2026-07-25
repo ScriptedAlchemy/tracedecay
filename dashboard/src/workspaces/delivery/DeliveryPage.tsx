@@ -3,12 +3,15 @@ import type { LucideIcon } from 'lucide-react';
 import {
   FolderGit2,
   GitBranch,
+  GitCommitHorizontal,
   GitFork,
   GitPullRequest,
+  Package,
   ScrollText,
   Server,
 } from 'lucide-react';
 import { LegacyBoundary } from '../../ui/LegacyStates.tsx';
+import { FreshnessMeter } from '../../ui/OpsLayout.tsx';
 import { StateChip } from '../../ui/StateChip';
 import {
   Legend,
@@ -20,7 +23,7 @@ import {
 } from '../../ui/instrument.tsx';
 import { cn } from '../../ui/cn';
 import { formatCount } from '../../ui/format.ts';
-import { relativeTime } from '../brain/BrainPage.tsx';
+import { freshnessTier, relativeAge } from '../../ui/time.ts';
 import { useLegacy } from '../../data/query/useLegacy.ts';
 import { DeliveryFieldPlot } from './DeliveryField.tsx';
 import { composeDeliveryField, type DeliveryBody, type DeliveryField } from './field.ts';
@@ -114,7 +117,8 @@ function DeliveryBody_({
 }) {
   // Keyed on identity: the payload is fetched once and does not churn, and the
   // field's clock only matters at recency-column boundaries.
-  const field = useMemo(() => composeDeliveryField(tree), [tree]);
+  const nowSecs = useMemo(() => Math.floor(Date.now() / 1000), [tree]);
+  const field = useMemo(() => composeDeliveryField(tree, nowSecs), [tree, nowSecs]);
   const selected =
     field.bodies.find((body) => body.id === selectedId) ?? null;
   const selectedGroup = tree.find(
@@ -182,6 +186,7 @@ function DeliveryBody_({
             selectedId={selectedId}
             onSelect={onSelect}
             truncated={truncated}
+            nowSecs={nowSecs}
           />
         </div>
 
@@ -193,14 +198,17 @@ function DeliveryBody_({
                 dashboard API. These are not empty results — no route serves
                 them at all.
               </p>
-              <PipelineStage icon={GitBranch} label="Commits & history">
+              <PipelineStage icon={GitCommitHorizontal} label="Changes & commits">
                 <StateChip kind="unsupported" detail="no commit route; branch names only" />
               </PipelineStage>
               <PipelineStage icon={GitPullRequest} label="Pull requests & review">
                 <StateChip kind="unsupported" detail="not served by the daemon API" />
               </PipelineStage>
-              <PipelineStage icon={Server} label="CI & releases">
-                <StateChip kind="unsupported" detail="not recorded by the daemon" />
+              <PipelineStage icon={Server} label="Continuous integration">
+                <StateChip kind="unsupported" detail="no CI route in the dashboard API" />
+              </PipelineStage>
+              <PipelineStage icon={Package} label="Releases">
+                <StateChip kind="unsupported" detail="no release route in the dashboard API" />
               </PipelineStage>
               <PipelineStage icon={ScrollText} label="Index freshness">
                 <StateChip kind="unsupported" detail="generation read port unwired" />
@@ -208,7 +216,7 @@ function DeliveryBody_({
             </div>
           </Panel>
 
-          <RepoDetail body={selected} group={selectedGroup} />
+          <RepoDetail body={selected} group={selectedGroup} nowSecs={nowSecs} />
         </aside>
       </div>
     </div>
@@ -265,11 +273,13 @@ function RepoTable({
   selectedId,
   onSelect,
   truncated,
+  nowSecs,
 }: {
   field: DeliveryField;
   selectedId: string | null;
   onSelect: (id: string | null) => void;
   truncated: boolean;
+  nowSecs: number;
 }) {
   return (
     <section aria-label="Repositories" className="flex min-w-0 flex-col">
@@ -353,7 +363,10 @@ function RepoTable({
                   className="px-2 py-1 text-right text-text-muted tabular-nums"
                   data-cell="numeric"
                 >
-                  {relativeTime(body.lastSeenAt)}
+                  <FreshnessMeter
+                    tier={freshnessTier(Math.max(0, nowSecs - body.lastSeenAt))}
+                    label={relativeAge(body.lastSeenAt, nowSecs) ?? 'not recorded'}
+                  />
                 </td>
               </tr>
             ))}
@@ -376,9 +389,11 @@ function RepoTable({
 function RepoDetail({
   body,
   group,
+  nowSecs,
 }: {
   body: DeliveryBody | null;
   group: ProjectRepoGroup | undefined;
+  nowSecs: number;
 }) {
   if (!body || !group) {
     return (
@@ -410,7 +425,10 @@ function RepoDetail({
           />
           <Fact label="checkouts" value={String(body.checkouts)} />
           <Fact label="worktrees" value={String(body.worktrees)} />
-          <Fact label="last indexed" value={relativeTime(body.lastSeenAt)} />
+          <Fact
+            label="last indexed"
+            value={relativeAge(body.lastSeenAt, nowSecs) ?? 'not recorded'}
+          />
         </dl>
 
         <div className="flex flex-col gap-1.5">

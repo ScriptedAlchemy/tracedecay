@@ -135,11 +135,18 @@ describe('DeliveryPage', () => {
 
   it('names the whole unserved pipeline instead of showing empty tables', async () => {
     renderDelivery();
-    await screen.findByText('Commits & history');
+    await screen.findByText('Changes & commits');
     expect(screen.getByText('Pull requests & review')).toBeTruthy();
-    expect(screen.getByText('CI & releases')).toBeTruthy();
+    expect(screen.getByText('Continuous integration')).toBeTruthy();
+    expect(screen.getByText('Releases')).toBeTruthy();
     expect(screen.getByText('Index freshness')).toBeTruthy();
     expect(screen.getByText(/no commit route; branch names only/)).toBeTruthy();
+  });
+
+  it('uses the shared ordered freshness meter beside explicit index age', async () => {
+    renderDelivery();
+    expect((await screen.findAllByTitle('live — under a day')).length).toBeGreaterThan(0);
+    expect(screen.getAllByText('1h ago').length).toBeGreaterThan(0);
   });
 
   it('scans as one row per repository, not a header-plus-row pair', async () => {
