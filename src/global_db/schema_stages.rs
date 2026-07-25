@@ -136,6 +136,9 @@ const TRANSCRIPT_SCHEMA: &str = "
         ON analytics_events(project_id, timestamp);
     CREATE INDEX IF NOT EXISTS idx_analytics_events_timestamp
         ON analytics_events(timestamp);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_observability_event_idempotency
+        ON analytics_events(provider, project_id, hint_id)
+        WHERE provider = 'tracedecay-observability' AND hint_id IS NOT NULL;
     CREATE TABLE IF NOT EXISTS sessions (
         provider TEXT NOT NULL,
         session_id TEXT NOT NULL,
