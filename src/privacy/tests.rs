@@ -1032,6 +1032,20 @@ fn finding_contract_rejects_missing_or_unsafe_evidence_metadata() {
     unsafe_anchor["evidence_anchors"][0]["structural_location"] =
         Value::String("finding-contract-secret".to_owned());
     assert!(serde_json::from_value::<SanitizationFindingV1>(unsafe_anchor).is_err());
+
+    let mut oversized_location = serde_json::to_value(finding).unwrap();
+    let location = format!("$/{}", "1/".repeat(128));
+    oversized_location["location"] = Value::String(location.clone());
+    oversized_location["evidence_anchors"][0]["structural_location"] = Value::String(location);
+    assert!(serde_json::from_value::<SanitizationFindingV1>(oversized_location).is_err());
+
+    let mut duplicate_anchor = serde_json::to_value(finding).unwrap();
+    let anchor = duplicate_anchor["evidence_anchors"][0].clone();
+    duplicate_anchor["evidence_anchors"]
+        .as_array_mut()
+        .unwrap()
+        .push(anchor);
+    assert!(serde_json::from_value::<SanitizationFindingV1>(duplicate_anchor).is_err());
 }
 
 #[test]
