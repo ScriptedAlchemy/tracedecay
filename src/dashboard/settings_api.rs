@@ -10,7 +10,7 @@ use super::DashboardState;
 use super::util::{JsonError, http_detail};
 use crate::automation::config as automation_config;
 use crate::config::{TelemetryConfig, TraceDecayConfig};
-use crate::user_config::{self, UserConfig};
+use crate::user_config::{self, ConfigSaveError, UserConfig};
 
 type ApiResult = std::result::Result<Json<Value>, JsonError>;
 
@@ -187,44 +187,45 @@ pub(crate) async fn patch_user_settings(
         return Err(validation_failed(&errors));
     }
 
-    let current = crate::config::cached_runtime_configuration(&state.project_root)
-        .map_err(|err| configuration_unavailable(&err))?;
-    ensure_expected_revision(&patch.expected_revision_id, current.revision_id.as_str())?;
-
-    let mut config = UserConfig::load();
-    let restart_recommended = patch
-        .watcher_debounce
-        .as_ref()
-        .is_some_and(|value| *value != config.watcher_debounce)
-        || patch
-            .extraction_timeout_secs
-            .is_some_and(|value| value != config.extraction_timeout_secs);
-    if let Some(upload_enabled) = patch.upload_enabled {
-        config.upload_enabled = upload_enabled;
-    }
-    if let Some(debounce) = patch.watcher_debounce {
-        config.watcher_debounce = debounce;
-    }
-    if let Some(timeout) = patch.extraction_timeout_secs {
-        config.extraction_timeout_secs = timeout;
-    }
-    match config.save_with_recovery() {
-        Ok(Some(backup)) => {
-            tracing::warn!(
-                backup = %backup.display(),
-                "corrupt user config backed up before regeneration"
-            );
-        }
-        Ok(None) => {}
-        Err(err) => {
-            return Err(internal_error(&format!(
-                "failed to save user config: {err}"
-            )));
-        }
+    let mutation =
+        match UserConfig::mutate_with_recovery_if_revision(&patch.expected_revision_id, |config| {
+            let restart_recommended = patch
+                .watcher_debounce
+                .as_ref()
+                .is_some_and(|value| *value != config.watcher_debounce)
+                || patch
+                    .extraction_timeout_secs
+                    .is_some_and(|value| value != config.extraction_timeout_secs);
+            if let Some(upload_enabled) = patch.upload_enabled {
+                config.upload_enabled = upload_enabled;
+            }
+            if let Some(debounce) = &patch.watcher_debounce {
+                config.watcher_debounce.clone_from(debounce);
+            }
+            if let Some(timeout) = patch.extraction_timeout_secs {
+                config.extraction_timeout_secs = timeout;
+            }
+            restart_recommended
+        }) {
+            Ok(mutation) => mutation,
+            Err(ConfigSaveError::RevisionConflict { expected, actual }) => {
+                return Err(user_revision_conflict(&expected, &actual));
+            }
+            Err(err) => {
+                return Err(internal_error(&format!(
+                    "failed to save user config: {err}"
+                )));
+            }
+        };
+    if let Some(backup) = mutation.backup {
+        tracing::warn!(
+            backup = %backup.display(),
+            "corrupt user config backed up before regeneration"
+        );
     }
 
     let mut payload = settings_payload(&state).await?;
-    payload["restart_recommended"] = json!(restart_recommended);
+    payload["restart_recommended"] = json!(mutation.output);
     Ok(Json(payload))
 }
 
@@ -233,6 +234,9 @@ async fn settings_payload(state: &DashboardState) -> std::result::Result<Value, 
         .map_err(|err| configuration_unavailable(&err))?;
     let legacy_config_path = state.config_path.clone();
     let user = UserConfig::load();
+    let user_settings_revision_id = user
+        .revision_id()
+        .map_err(|err| internal_error(&format!("failed to revise user config: {err}")))?;
     let user_config_path = user_config::config_path()
         .map(|path| path.display().to_string())
         .unwrap_or_default();
@@ -259,6 +263,7 @@ async fn settings_payload(state: &DashboardState) -> std::result::Result<Value, 
         },
         "user": {
             "config_path": user_config_path,
+            "user_settings_revision_id": user_settings_revision_id,
             "upload_enabled": user.upload_enabled,
             "watcher_debounce": user.watcher_debounce,
             "extraction_timeout_secs": user.extraction_timeout_secs,
@@ -408,6 +413,18 @@ fn ensure_expected_revision(expected: &str, actual: &str) -> std::result::Result
             "actual_revision_id": actual,
         })),
     ))
+}
+
+fn user_revision_conflict(expected: &str, actual: &str) -> JsonError {
+    (
+        StatusCode::CONFLICT,
+        Json(json!({
+            "code": "configuration_revision_conflict",
+            "detail": "user settings changed after this edit began; refresh and retry",
+            "expected_revision_id": expected,
+            "actual_revision_id": actual,
+        })),
+    )
 }
 
 fn patch_shape_error(scope: &str, err: &serde_json::Error) -> JsonError {

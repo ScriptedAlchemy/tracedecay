@@ -1649,6 +1649,7 @@ const settings: Record<string, unknown> = {
   },
   user: {
     config_path: '/home/zack/.tracedecay/config.toml',
+    user_settings_revision_id: 'user-rev-7',
     upload_enabled: false,
     watcher_debounce: '2s',
     extraction_timeout_secs: 30,

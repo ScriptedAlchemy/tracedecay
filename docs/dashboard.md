@@ -1011,6 +1011,8 @@ gitignore status), `user` (editable user-level settings from
 existing editor at `/api/plugins/holographic/curation/config`),
 `environment` (read-only env-var gate verdicts with explanations),
 `storage` (resolved store paths), and `version` (version + update channel).
+The project object carries `configuration_revision_id`; the user object carries
+the independent content-derived `user_settings_revision_id`.
 
 #### `PATCH /api/settings/project`
 
@@ -1018,14 +1020,38 @@ Partial update of the project indexing config. Validates glob patterns and
 `max_file_size >= 1`; rejects unknown fields. Errors follow the automation
 config contract (`validation_errors` array with `field` + `message`). The
 response includes `resync_recommended: true` when any indexing field
-changed — the endpoint never auto-runs a sync.
+changed — the endpoint never auto-runs a sync. Every request must include the
+`expected_revision_id` returned as `project.configuration_revision_id` by GET.
+A stale revision returns HTTP 409:
+
+```json
+{
+  "code": "configuration_revision_conflict",
+  "detail": "settings changed after this edit began; refresh and retry",
+  "expected_revision_id": "configuration.revision.old",
+  "actual_revision_id": "configuration.revision.current"
+}
+```
 
 #### `PATCH /api/settings/user`
 
 Partial update of the editable user-level settings. Validates
 `watcher_debounce` durations (`"2s"`, `"1m"`, …) and
 `extraction_timeout_secs >= 1`. The response includes
-`restart_recommended: true` when a startup-read knob changed.
+`restart_recommended: true` when a startup-read knob changed. Every request
+must include the `expected_revision_id` returned as
+`user.user_settings_revision_id` by GET. The revision is derived from the
+persisted user config and checked under the same lock as the atomic write, so
+concurrent writers cannot both commit. A stale revision returns HTTP 409:
+
+```json
+{
+  "code": "configuration_revision_conflict",
+  "detail": "user settings changed after this edit began; refresh and retry",
+  "expected_revision_id": "sha256:old",
+  "actual_revision_id": "sha256:current"
+}
+```
 
 ---
 

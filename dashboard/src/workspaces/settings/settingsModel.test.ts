@@ -247,7 +247,8 @@ describe('Settings authorized changes', () => {
     );
 
     expect(buildSettingsEditor(payload)).toEqual({
-      expectedRevisionId: 'rev-42',
+      projectExpectedRevisionId: 'rev-42',
+      userExpectedRevisionId: 'user-rev-7',
       project: {
         include: ['src/**', 'dashboard/src/**'],
         exclude: ['target/**', 'node_modules/**'],
@@ -368,7 +369,7 @@ describe('Settings authorized changes', () => {
       }),
     ).toEqual({
       outcome: 'ready',
-      expectedRevisionId: 'rev-42',
+      expectedRevisionId: 'user-rev-7',
       patch: {
         upload_enabled: true,
         watcher_debounce: '15s',
@@ -406,16 +407,21 @@ describe('Settings authorized changes', () => {
     });
   });
 
-  it('reports a stale held revision as a conflict', () => {
+  it('checks stale revisions against the mutated resource', () => {
     const settingsRevisionConflict = modelFunction<
-      (expectedRevisionId: string, payload: unknown) => unknown
+      (scope: 'project' | 'user', expectedRevisionId: string, payload: unknown) => unknown
     >('settingsRevisionConflict');
 
-    expect(settingsRevisionConflict('rev-41', payload)).toEqual({
+    expect(settingsRevisionConflict('project', 'rev-41', payload)).toEqual({
       expectedRevisionId: 'rev-41',
       actualRevisionId: 'rev-42',
     });
-    expect(settingsRevisionConflict('rev-42', payload)).toBeNull();
+    expect(settingsRevisionConflict('project', 'rev-42', payload)).toBeNull();
+    expect(settingsRevisionConflict('user', 'user-rev-6', payload)).toEqual({
+      expectedRevisionId: 'user-rev-6',
+      actualRevisionId: 'user-rev-7',
+    });
+    expect(settingsRevisionConflict('user', 'user-rev-7', payload)).toBeNull();
   });
 });
 

@@ -57,7 +57,11 @@ export async function applySettingsMutation(
       detail: 'The current settings response could not be decoded.',
     };
   }
-  const conflict = settingsRevisionConflict(request.expectedRevisionId, current.body);
+  const conflict = settingsRevisionConflict(
+    request.scope,
+    request.expectedRevisionId,
+    current.body,
+  );
   if (conflict) return { outcome: 'conflict', ...conflict };
 
   const patched = await fetchJson(request.patchUrl, {
@@ -96,7 +100,10 @@ export async function applySettingsMutation(
     outcome: 'success',
     scope: request.scope,
     payload: patched.body,
-    revisionId: editor.expectedRevisionId,
+    revisionId:
+      request.scope === 'project'
+        ? editor.projectExpectedRevisionId
+        : editor.userExpectedRevisionId,
     resyncRecommended: patched.body['resync_recommended'] === true,
     restartRecommended: patched.body['restart_recommended'] === true,
   };
