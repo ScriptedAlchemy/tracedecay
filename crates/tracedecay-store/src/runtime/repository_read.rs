@@ -171,6 +171,32 @@ fn evidence_owner_matches_shard(
         }
 }
 
+fn external_source_read_matches_shard(
+    operation: &ExternalSourceReadOperationV1,
+    shard: &StoreShardIdV1,
+) -> bool {
+    let binding = match operation {
+        ExternalSourceReadOperationV1::State { binding } => binding,
+    };
+    binding.validate().is_ok()
+        && match (&binding.owner, &shard.scope) {
+            (
+                SourceBindingOwnerV1::Project(project_id),
+                StoreShardScopeV1::Project {
+                    project_id: shard_project,
+                }
+                | StoreShardScopeV1::ProjectSessions {
+                    project_id: shard_project,
+                },
+            ) => project_id == shard_project,
+            (
+                SourceBindingOwnerV1::Profile(profile_id),
+                StoreShardScopeV1::Profile | StoreShardScopeV1::ProfileSessions,
+            ) => profile_id == &shard.profile_id,
+            _ => false,
+    }
+}
+
 fn retrieval_read_owner(operation: &RetrievalAnchorReadOperationV1) -> &RetrievalAnchorOwnerV1 {
     match operation {
         RetrievalAnchorReadOperationV1::AnchorById { owner, .. }
