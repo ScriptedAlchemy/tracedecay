@@ -1,6 +1,5 @@
 import type { ReactNode } from 'react';
 import { cn } from '../cn';
-import { Meter } from '../instrument.tsx';
 import { MetaLabel } from './Highlight.tsx';
 
 /** A pivot dimension: one row per value, with the real count beside it and a
@@ -79,15 +78,18 @@ export function FacetGroup({
                       {facet.count.toLocaleString()}
                     </span>
                   </span>
-                  <Meter
-                    // With no facet carrying a count there is no denominator to
-                    // draw against, so the track stays empty rather than
-                    // showing a zero-width fill as though zero were measured.
-                    fraction={max === 0 ? null : facet.count / max}
-                    height="hairline"
-                    className="w-full bg-edge-subtle"
-                    tone={selected ? 'bg-accent' : 'bg-edge-strong group-hover:bg-accent/60'}
-                  />
+                  <span
+                    aria-hidden
+                    className="block h-px w-full overflow-hidden bg-edge-subtle"
+                  >
+                    <span
+                      className={cn(
+                        'block h-px',
+                        selected ? 'bg-accent' : 'bg-edge-strong group-hover:bg-accent/60',
+                      )}
+                      style={{ width: `${max === 0 ? 0 : (facet.count / max) * 100}%` }}
+                    />
+                  </span>
                   {facet.hint ? (
                     <span className="text-2xs text-text-muted">{facet.hint}</span>
                   ) : null}

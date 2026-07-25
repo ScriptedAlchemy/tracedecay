@@ -5,6 +5,10 @@ import type {
   StoreGrowthDimension,
   WireLegalActionRef,
 } from '../../contracts/wire.ts';
+import type {
+  StorageFindingSourceState,
+  StorageFindingSourceStatus,
+} from './contracts.ts';
 
 const FINDING_LABELS: Record<DoctorStorageFindingKind, string> = {
   over_budget_store: 'Over-budget stores',
@@ -42,6 +46,37 @@ export function storageFindingLabel(kind: DoctorStorageFindingKind): string {
 
 export function doctorEvidencePresentation(state: DoctorEvidenceState) {
   return EVIDENCE_PRESENTATION[state];
+}
+
+const SOURCE_STATE_LABELS: Record<StorageFindingSourceState, string> = {
+  real: 'Observed',
+  unset: 'Unset',
+  partial: 'Partial',
+  unsupported: 'Unsupported',
+};
+
+export function storageSourcePresentation(status: StorageFindingSourceStatus): {
+  label: string;
+  tokenClass: string;
+  dotClass: string;
+} {
+  const label = SOURCE_STATE_LABELS[status.state];
+  switch (status.state) {
+    case 'real':
+      return { label, tokenClass: 'text-state-ready', dotClass: 'bg-state-ready' };
+    case 'unset':
+      return { label, tokenClass: 'text-state-locked', dotClass: 'bg-state-locked' };
+    case 'partial':
+      return { label, tokenClass: 'text-state-partial', dotClass: 'bg-state-partial' };
+    case 'unsupported':
+      return {
+        label,
+        tokenClass: 'text-state-unsupported-schema',
+        dotClass: 'bg-state-unsupported-schema',
+      };
+    default:
+      return assertNever(status.state);
+  }
 }
 
 export function refreshOperation(actions: WireLegalActionRef[]): string | undefined {
@@ -189,4 +224,8 @@ export function formatBytes(bytes: number | null): string {
 export function formatSignedBytes(bytes: number): string {
   if (bytes === 0) return 'no size change';
   return `${bytes > 0 ? '+' : '−'}${formatBytes(Math.abs(bytes))}`;
+}
+
+function assertNever(value: never): never {
+  throw new Error(`unsupported storage source state: ${String(value)}`);
 }

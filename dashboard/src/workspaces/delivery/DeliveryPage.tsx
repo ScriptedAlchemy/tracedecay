@@ -11,16 +11,12 @@ import {
   ScrollText,
   Server,
 } from 'lucide-react';
-import { z } from 'zod';
-import {
-  assertNever,
-  type WireCoverage,
-  type WireFreshness,
-} from '../../contracts/generated.ts';
+import type { EnvelopeResult } from '../../data/query/envelope.ts';
 import { fetchEnvelope } from '../../data/query/envelope.ts';
 import { LegacyBoundary } from '../../ui/LegacyStates.tsx';
 import { FreshnessMeter } from '../../ui/OpsLayout.tsx';
 import { StateChip } from '../../ui/StateChip';
+import { EvidencePattern } from '../../ui/EvidencePattern.tsx';
 import {
   Legend,
   Meter,
@@ -36,7 +32,9 @@ import { useLegacy } from '../../data/query/useLegacy.ts';
 import { DeliveryFieldPlot } from './DeliveryField.tsx';
 import { composeDeliveryField, type DeliveryBody, type DeliveryField } from './field.ts';
 import {
+  DeliveryOverviewPayloadSchema,
   DeliveryProjectsPayloadSchema,
+  type DeliveryOverviewPayload,
   type ProjectRepoGroup,
 } from './contracts.ts';
 
@@ -44,15 +42,11 @@ import {
  * Delivery — the daemon's git surface, read as a field rather than scrolled as
  * a list.
  *
- * The plan asks for "changes, commits, branches, worktrees, pull requests, CI,
- * releases". `/api/projects` is the repository route the daemon exposes: it
- * serves repositories, their branch NAMES, and the checkouts mapped to each.
- * It serves no commit, no PR, no check and no release, and no timestamp for any
- * branch. So this surface reads what is there —
- * where work is indexed and how branch-heavy each repository is — and prints
- * absent delivery authorities as unsupported rather than as empty tables. The
- * separate code-index freshness route is decoded through the canonical
- * envelope and keeps its server-owned ready/partial/stale/unsupported state.
+ * `/api/projects` provides the repository field. `/api/delivery/overview`
+ * provides bounded active-checkout changes, commit history, and generation
+ * comparison plus typed unavailable states for authorities that are not
+ * mounted. The page never converts an unavailable projection into an empty
+ * timeline.
  *
  * The one word that has to stay exact everywhere on this page: `last_seen_at`
  * is when TraceDecay last INDEXED the checkout, not when anyone last committed
@@ -65,6 +59,10 @@ export function DeliveryPage() {
     '/api/projects',
     DeliveryProjectsPayloadSchema,
   );
+  const overview = useQuery({
+    queryKey: ['delivery', 'overview'],
+    queryFn: () => fetchEnvelope('/api/delivery/overview', DeliveryOverviewPayloadSchema),
+  });
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
   return (
@@ -72,7 +70,7 @@ export function DeliveryPage() {
       <WorkspaceHeader
         path="/delivery"
         title="Delivery"
-        note="repositories, branches and checkouts · commits, PRs and CI unserved"
+        note="repositories, changes and commit history · external authorities explicit"
       />
       <LegacyBoundary
         title="Delivery"
@@ -105,6 +103,8 @@ export function DeliveryPage() {
               truncated={data.truncated === true}
               selectedId={selectedId}
               onSelect={setSelectedId}
+              overviewPending={overview.isPending}
+              overview={overview.data}
             />
           );
         }}
@@ -118,11 +118,15 @@ function DeliveryBody_({
   truncated,
   selectedId,
   onSelect,
+  overviewPending,
+  overview,
 }: {
   tree: readonly ProjectRepoGroup[];
   truncated: boolean;
   selectedId: string | null;
   onSelect: (id: string | null) => void;
+  overviewPending: boolean;
+  overview: EnvelopeResult<DeliveryOverviewPayload> | undefined;
 }) {
   // Keyed on identity: the payload is fetched once and does not churn, and the
   // field's clock only matters at recency-column boundaries.
@@ -201,28 +205,7 @@ function DeliveryBody_({
 
         <aside className="flex w-full shrink-0 flex-col gap-3 xl:w-[22rem]">
           <Panel legend="Pipeline">
-            <div className="flex flex-col gap-2.5">
-              <p className="text-2xs leading-relaxed text-text-muted">
-                Commit, pull-request, CI and release reads are absent from the
-                dashboard API. These are not empty results — no route serves
-                those authorities.
-              </p>
-              <PipelineStage icon={GitCommitHorizontal} label="Changes & commits">
-                <StateChip kind="unsupported" detail="no commit route; branch names only" />
-              </PipelineStage>
-              <PipelineStage icon={GitPullRequest} label="Pull requests & review">
-                <StateChip kind="unsupported" detail="not served by the daemon API" />
-              </PipelineStage>
-              <PipelineStage icon={Server} label="Continuous integration">
-                <StateChip kind="unsupported" detail="no CI route in the dashboard API" />
-              </PipelineStage>
-              <PipelineStage icon={Package} label="Releases">
-                <StateChip kind="unsupported" detail="no release route in the dashboard API" />
-              </PipelineStage>
-              <PipelineStage icon={ScrollText} label="Index freshness">
-                <IndexFreshnessState />
-              </PipelineStage>
-            </div>
+            <PipelineOverview pending={overviewPending} result={overview} />
           </Panel>
 
           <RepoDetail body={selected} group={selectedGroup} nowSecs={nowSecs} />
@@ -232,78 +215,166 @@ function DeliveryBody_({
   );
 }
 
-function IndexFreshnessState() {
-  const query = useQuery({
-    queryKey: ['delivery', 'code-index-freshness'],
-    queryFn: () => fetchEnvelope('/api/code-index/freshness', z.unknown()),
-  });
-  if (query.isPending) {
-    return <StateChip kind="loading" detail="reading generation freshness" />;
+function PipelineOverview({
+  pending,
+  result,
+}: {
+  pending: boolean;
+  result: EnvelopeResult<DeliveryOverviewPayload> | undefined;
+}) {
+  if (pending) {
+    return <StateChip kind="loading" detail="reading delivery projections" />;
   }
-  const result = query.data;
   if (!result) {
-    return <StateChip kind="error" detail="generation freshness read failed" />;
+    return <StateChip kind="error" detail="delivery overview read failed" />;
   }
   if (result.outcome === 'transport') {
     return (
       <StateChip
         kind={result.state}
-        detail={
-          result.detail ??
-          `generation freshness ${result.state.replaceAll('_', ' ')}`
-        }
+        detail={result.detail ?? `delivery overview ${result.state.replaceAll('_', ' ')}`}
       />
     );
   }
+  const payload = result.envelope.payload;
+  const changesDetail =
+    payload.changes.state === 'ready' && payload.commits.state === 'ready'
+      ? `${commitCountDetail(payload.commits.value)} · ${countLabel(payload.changes.value.changed_paths.length, 'changed path')}`
+      : null;
+  const pullRequestDetail =
+    payload.pull_requests.state === 'ready' && payload.review_comments.state === 'ready'
+      ? `${payload.pull_requests.value.items.length} pull requests · ${payload.review_comments.value.items.length} review comments`
+      : null;
+  const ciDetail =
+    payload.ci_checks.state === 'ready' && payload.failure_localization.state === 'ready'
+      ? `${payload.ci_checks.value.items.length} checks · ${payload.failure_localization.value.items.length} localized failures`
+      : null;
+
   return (
-    <StateChip
-      kind={result.envelope.domain_state}
-      detail={generationFreshnessDetail(
-        result.envelope.freshness,
-        result.envelope.coverage,
-      )}
-    />
+    <div className="flex flex-col gap-2.5">
+      <p className="text-2xs leading-relaxed text-text-muted">
+        Active-checkout Git reads are bounded and live. External provider
+        projections stay explicitly unavailable until their read authorities
+        are mounted.
+      </p>
+      <PipelineStage icon={GitCommitHorizontal} label="Changes & commits">
+        {changesDetail ? (
+          <StateChip kind="ready" detail={changesDetail} />
+        ) : (
+          <ProjectionState projection={firstMissing(payload.changes, payload.commits)} />
+        )}
+      </PipelineStage>
+      <PipelineStage icon={GitPullRequest} label="Pull requests & review">
+        {pullRequestDetail ? (
+          <StateChip kind="ready" detail={pullRequestDetail} />
+        ) : (
+          <ProjectionState
+            projection={firstMissing(payload.pull_requests, payload.review_comments)}
+          />
+        )}
+      </PipelineStage>
+      <PipelineStage icon={Server} label="Continuous integration">
+        {ciDetail ? (
+          <StateChip kind="ready" detail={ciDetail} />
+        ) : (
+          <ProjectionState
+            projection={firstMissing(payload.ci_checks, payload.failure_localization)}
+          />
+        )}
+      </PipelineStage>
+      <PipelineStage icon={Package} label="Releases">
+        {payload.releases.state === 'ready' ? (
+          <StateChip
+            kind="ready"
+            detail={`${payload.releases.value.items.length} releases`}
+          />
+        ) : (
+          <ProjectionState projection={payload.releases} />
+        )}
+      </PipelineStage>
+      <PipelineStage icon={ScrollText} label="Index freshness">
+        {payload.generation_freshness.state === 'ready' ? (
+          <div className="flex flex-wrap items-center gap-1.5">
+            <StateChip
+              kind={payload.generation_freshness.value.comparison === 'current' ? 'ready' : 'stale'}
+              detail={`${payload.generation_freshness.value.comparison} · HEAD ${shortOid(payload.generation_freshness.value.head_commit)} · indexed ${shortOid(payload.generation_freshness.value.indexed_commit)}`}
+            />
+            <EvidencePattern
+              quality={
+                payload.generation_freshness.value.comparison === 'current'
+                  ? 'measured'
+                  : 'unknown'
+              }
+            />
+          </div>
+        ) : (
+          <div className="flex flex-wrap items-center gap-1.5">
+            <ProjectionState projection={payload.generation_freshness} />
+            <EvidencePattern quality="unknown" />
+          </div>
+        )}
+      </PipelineStage>
+    </div>
   );
 }
 
-function generationFreshnessDetail(
-  freshness: WireFreshness,
-  coverage: WireCoverage,
-): string {
-  return `${freshnessDetail(freshness)} · ${coverageDetail(coverage)}`;
+type ProjectionStateValue = {
+  state?: 'ready' | 'unavailable' | 'unsupported';
+  reason?: string;
+  required_authority?: string;
+};
+
+function firstMissing(
+  first: ProjectionStateValue,
+  second: ProjectionStateValue,
+): ProjectionStateValue {
+  return first.state === 'ready' ? second : first;
 }
 
-function freshnessDetail(freshness: WireFreshness): string {
-  switch (freshness.state) {
-    case 'fresh':
-    case 'stale':
-    case 'unknown':
-    case 'absent':
-      return `generation state ${freshness.state}`;
+function ProjectionState({ projection }: { projection: ProjectionStateValue }) {
+  switch (projection.state) {
+    case 'ready':
+      return <StateChip kind="ready" detail="projection ready" />;
+    case 'unavailable':
+      return (
+        <StateChip
+          kind="unknown"
+          detail={`unavailable · ${projection.reason ?? projection.required_authority ?? 'authority absent'}`}
+        />
+      );
     case 'unsupported':
-      return 'generation source unsupported';
-    default:
-      return assertNever(freshness.state);
+      return (
+        <StateChip
+          kind="unsupported"
+          detail={projection.reason ?? projection.required_authority ?? 'source unsupported'}
+        />
+      );
+    case undefined:
+      return <StateChip kind="unsupported_schema" detail="projection state is missing" />;
+    default: {
+      const exhaustive: never = projection.state;
+      return <StateChip kind="unsupported_schema" detail={String(exhaustive)} />;
+    }
   }
 }
 
-function coverageDetail(coverage: WireCoverage): string {
-  switch (coverage.completeness) {
-    case 'complete':
-      return coverage.denominator == null
-        ? 'coverage complete; denominator unavailable'
-        : `${coverage.examined ?? coverage.denominator} of ${coverage.denominator} ${coverage.unit ?? 'items'} examined`;
-    case 'partial':
-      return coverage.eligible == null || coverage.examined == null
-        ? 'coverage partial'
-        : `${coverage.examined} of ${coverage.eligible} ${coverage.unit ?? 'items'} examined`;
-    case 'unknown':
-      return 'coverage unknown';
-    case 'unsupported':
-      return 'coverage unsupported';
-    default:
-      return assertNever(coverage.completeness);
+function shortOid(value: string): string {
+  return value.slice(0, 8);
+}
+
+function countLabel(count: number, singular: string): string {
+  return `${count} ${singular}${count === 1 ? '' : 's'}`;
+}
+
+function commitCountDetail(commits: {
+  items?: readonly unknown[];
+  truncated?: boolean;
+}): string {
+  if (!commits.items || commits.truncated == null) {
+    return 'commit projection incomplete';
   }
+  const count = countLabel(commits.items.length, 'commit');
+  return commits.truncated ? `${count} shown · more commits not shown` : count;
 }
 
 /** The axes, printed. Both of them are easy to misread — one looks like commit
@@ -332,7 +403,8 @@ function FieldAxis({ field }: { field: DeliveryField }) {
       <p className="text-2xs leading-relaxed text-text-muted">
         Each body is one repository: column = when TraceDecay last indexed it —{' '}
         <span className="text-text-secondary">
-          not when it was last committed to; the daemon serves no commit times
+          not when it was last committed to; commit history is shown separately
+          for the active checkout
         </span>{' '}
         — height = how many branches it has ({field.branchFloor} to{' '}
         {field.branchCeiling}, log scale), size = how many checkouts map to it,

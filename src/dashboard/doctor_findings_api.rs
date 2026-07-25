@@ -41,6 +41,11 @@ pub(crate) struct DoctorFindingsPayloadV1 {
     pub remediations: Vec<DoctorRemediationDescriptorV1>,
     pub known_families: Vec<DoctorFindingFamilyV1>,
     pub note: String,
+    /// Storage-route-only producer-source coverage. General Doctor responses
+    /// omit this additive field; `/api/storage/findings` always supplies all
+    /// five Plan 38 producer statuses.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind_statuses: Option<Vec<super::storage_findings_api::StorageFindingKindStatusV1>>,
 }
 
 const KNOWN_FAMILIES: [DoctorFindingFamilyV1; 7] = [
@@ -75,6 +80,7 @@ pub(crate) async fn findings(
                 remediations: Vec::new(),
                 known_families: KNOWN_FAMILIES.to_vec(),
                 note: format!("unknown doctor finding family: {invalid}"),
+                kind_statuses: None,
             };
             let mut envelope = DashboardEnvelopeV1::unsupported(scope, payload);
             envelope.domain_state = DashboardDomainStateV1::Error;
@@ -211,6 +217,7 @@ async fn project_report(
             remediations,
             known_families: KNOWN_FAMILIES.to_vec(),
             note,
+            kind_statuses: None,
         },
         coverage,
         freshness,
@@ -390,6 +397,7 @@ fn unavailable_payload(
         remediations: Vec::new(),
         known_families: KNOWN_FAMILIES.to_vec(),
         note: note.into(),
+        kind_statuses: None,
     }
 }
 

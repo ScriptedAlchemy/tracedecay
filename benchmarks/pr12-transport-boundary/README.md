@@ -1,9 +1,7 @@
-# PR12 transport-boundary direct test fixture
+# PR12 transport-boundary acceptance packet
 
-This directory supplies a checked-in real fixture to the direct product test
-for the callable PR12 application boundary. It is not an acceptance packet,
-snapshot, gate manifest, or separate evidence authority. Product acceptance
-comes from direct tests and normal CI, with pending work reported as pending.
+This packet covers the callable PR12 application boundary rather than treating
+catalog availability followed by an `unavailable` response as acceptance.
 
 `goldens/application-surface-parity.json` is consumed by
 `tests/api_application_parity.rs`. Together they require:

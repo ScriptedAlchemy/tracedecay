@@ -64,11 +64,6 @@ export function KnowledgePage() {
 
   return (
     <ExplorerSplit
-      header={
-        <div className="border-b border-edge-subtle bg-surface-1 px-4 py-2">
-          <h1 className="text-sm font-semibold tracking-tight">Knowledge</h1>
-        </div>
-      }
       filters={
         <LegacyBoundary
           title="Memory"
@@ -233,7 +228,6 @@ export function KnowledgePage() {
         >
           {(data) => {
             const facts = data.holographic.facts ?? [];
-            const factsRead = data.holographic.reads?.facts;
             if (data.holographic.error) {
               return (
                 <p className="p-6 text-center text-sm text-text-muted">
@@ -241,23 +235,10 @@ export function KnowledgePage() {
                 </p>
               );
             }
-            if (factsRead?.state === 'error') {
-              return (
-                <p role="status" className="p-6 text-center text-sm text-state-error">
-                  Fact list read failed
-                  {factsRead.error ? `: ${factsRead.error}` : '.'}
-                </p>
-              );
-            }
             if (facts.length === 0) {
-              const coverage = data.holographic.facts_coverage;
-              const boundedQuery =
-                applied && coverage?.query_applied_after_limit
-                  ? `no match in the loaded top-${coverage.limit.toLocaleString()} slice for “${applied}”`
-                  : null;
               return (
                 <p className="p-6 text-center text-sm text-text-muted">
-                  {boundedQuery ?? (applied ? `no loaded facts match “${applied}”` : 'no facts recorded')}
+                  {applied ? `no facts match “${applied}”` : 'no facts recorded'}
                 </p>
               );
             }
