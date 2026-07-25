@@ -1489,6 +1489,31 @@ function memoryStatusPayload(): Record<string, unknown> {
       entity_count: 1186,
       estimated_capacity: 354_304,
       fact_count: 173,
+      // The four coarse trust bands. KnowledgePage reads these as its FALLBACK
+      // trust distribution, because on a real store the overview's ten-bucket
+      // `trust_histogram` comes back all-zero — `dashboard_compatibility_named_
+      // counts_tx` emits row names of the form `trust-<n>` and
+      // `facts.rs::trust_histogram` reads them with `parse::<usize>()`, which
+      // fails and skips every row.
+      //
+      // The overview fixture deliberately keeps a POPULATED histogram, so the
+      // audit renders the preferred source and the endpoint gate can assert the
+      // shape the route is specified to serve. The fallback path is covered by
+      // trust.test.ts against the exact all-zero payload the daemon sends.
+      trust_0_025_count: 0,
+      trust_025_050_count: 6,
+      trust_050_075_count: 21,
+      trust_075_100_count: 146,
+      helpful_count: 153,
+      unhelpful_count: 2,
+      feedback_funnel: {
+        access_count_total: 2275,
+        feedback_total: 155,
+        rated_fact_count: 56,
+        retrieval_count_total: 3207,
+        retrieved_fact_count: 170,
+        seen_to_feedback_ratio: 35,
+      },
     },
   };
 }

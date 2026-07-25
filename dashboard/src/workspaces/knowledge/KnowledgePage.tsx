@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import { Search } from 'lucide-react';
 import {
   DataRow,
@@ -15,11 +15,21 @@ import { cn } from '../../ui/cn';
 import { useLegacy } from '../../data/query/useLegacy.ts';
 import {
   MemoryOverviewPayloadSchema,
+  MemoryStatusSchema,
   type CategoryCount,
   type FactRow,
-  type GrowthPoint,
   type HrrCoverageRow,
 } from './contracts.ts';
+import {
+  composeTrustDistribution,
+  factsBelow,
+  hrrStatusLabel,
+  summarizeHrrCoverage,
+  summarizeLoadedTrust,
+  trustSourceNote,
+  type LoadedTrust,
+  type TrustDistribution,
+} from './trust.ts';
 
 const BASE = '/api/plugins/holographic';
 
@@ -34,6 +44,13 @@ export function KnowledgePage() {
     `${BASE}/?limit=100${applied ? `&q=${encodeURIComponent(applied)}` : ''}`,
     MemoryOverviewPayloadSchema,
   );
+  // The overview's own `trust_histogram` comes back all-zero against a real
+  // store (see trust.ts). This route reports the same distribution in four
+  // coarser bands and is correct, so it is read as the fallback source rather
+  // than leaving the plate empty. Cheap — ~0.1s against a live daemon.
+  const status = useLegacy(['memory', 'status'], `${BASE}/status`, MemoryStatusSchema);
+  const statusBands =
+    status.data?.outcome === 'ok' ? status.data.data.memory : undefined;
   const [selected, setSelected] = useState<FactRow | null>(null);
 
   return (
@@ -46,11 +63,11 @@ export function KnowledgePage() {
         >
           {(data) => {
             const stats = data.holographic.overview;
-            const histogram = (stats?.trust_histogram ?? []).map((b) => ({
-              label: b.label,
-              value: b.count,
-              hint: 'facts',
-            }));
+            const trust = composeTrustDistribution(
+              stats?.trust_histogram,
+              statusBands,
+              data.holographic.facts,
+            );
             // Ranked by count so the rail's length is a real ordering, not an
             // accident of whatever order the producer emitted rows in.
             const categories = [...(stats?.categories ?? [])].sort(
@@ -119,43 +136,7 @@ export function KnowledgePage() {
                     ) : null}
                   </div>
                 </div>
-                {histogram.length > 0 ? (
-                  <figure className="flex flex-col gap-1.5">
-                    <figcaption className="td-legend">trust distribution</figcaption>
-                    {/* Bucket labels read ".0-0.1", ".1-0.2" and so on; at 9px
-                     * every fifth one printed as unreadable debris under the
-                     * bars. The axis is a known 0→1 scale, so it is ruled with
-                     * its two ends instead of relabelled. */}
-                    <Chart
-                      ariaLabel={`Trust distribution across ${histogram.length} buckets; the facts list carries per-fact trust values`}
-                      height={80}
-                      option={{
-                        xAxis: {
-                          type: 'category',
-                          data: histogram.map((bucket) => bucket.label),
-                          axisLabel: { show: false },
-                          axisTick: { show: false },
-                        },
-                        yAxis: { type: 'value', axisLabel: { show: false } },
-                        grid: { left: 2, right: 2, top: 6, bottom: 2, containLabel: true },
-                        series: [
-                          {
-                            type: 'bar',
-                            barCategoryGap: '20%',
-                            data: histogram.map((bucket) => bucket.value),
-                          },
-                        ],
-                      }}
-                    />
-                    <div
-                      aria-hidden
-                      className="flex items-center justify-between border-t border-edge-subtle pt-1"
-                    >
-                      <span className="td-legend">0 · decayed</span>
-                      <span className="td-legend">1 · held</span>
-                    </div>
-                  </figure>
-                ) : null}
+                <TrustDistributionPlate distribution={trust} />
                 {categories.length > 0 ? (
                   <figure className="flex flex-col gap-2">
                     <figcaption className="td-legend">facts by category</figcaption>
@@ -170,16 +151,7 @@ export function KnowledgePage() {
                     </div>
                   </figure>
                 ) : null}
-                {(stats?.hrr_coverage ?? []).length > 0 ? (
-                  <figure className="flex flex-col gap-2">
-                    <figcaption className="td-legend">HRR vector coverage</figcaption>
-                    <div className="flex flex-col gap-2">
-                      {(stats?.hrr_coverage ?? []).map((row) => (
-                        <HrrCoverageBar key={row.category} row={row} />
-                      ))}
-                    </div>
-                  </figure>
-                ) : null}
+                <HrrCoveragePlate rows={stats?.hrr_coverage ?? []} />
                 {growth.length > 0 ? (
                   <figure className="flex flex-col gap-1.5">
                     <figcaption className="td-legend">growth</figcaption>
@@ -269,14 +241,35 @@ export function KnowledgePage() {
               (max, fact) => Math.max(max, fact.retrieval_count ?? 0),
               0,
             );
+            const loaded = summarizeLoadedTrust(facts);
+            const trust = composeTrustDistribution(
+              data.holographic.overview?.trust_histogram,
+              statusBands,
+              facts,
+            );
             return (
               <VirtualList
                 items={facts}
                 getKey={(fact) => String(fact.fact_id)}
+                estimateHeight={FACT_ROW_HEIGHT}
+                header={
+                  loaded ? (
+                    <FactListHeader
+                      loaded={loaded}
+                      distribution={trust}
+                      query={applied}
+                    />
+                  ) : null
+                }
                 renderItem={(fact) => (
                   <FactListRow
                     fact={fact}
                     recallCeiling={recallCeiling}
+                    // A rail scaled 0-1 across a slice whose trust never leaves
+                    // the top tenth is the same length on every row: not a
+                    // ranking, just ink. The header states the slice's spread
+                    // instead, and the printed figure keeps the precision.
+                    showTrustRail={loaded ? !loaded.flat : true}
                     selected={selected?.fact_id === fact.fact_id}
                     onSelect={() => setSelected(fact)}
                   />
@@ -313,33 +306,236 @@ export function KnowledgePage() {
   );
 }
 
-/** One fact, read as three ranked quantities and a sentence.
+/**
+ * The trust distribution, or a statement of why there is nothing to draw.
+ *
+ * This plate used to render ten bars from `overview.trust_histogram` and, on
+ * any real store, every one of those bars was zero — the producer names its
+ * rows `trust-<n>` and the consumer parses them as bare integers, so no bucket
+ * ever receives a count. An empty chart is not an honest empty state: it looks
+ * like a store with no trust rather than a reading that failed to arrive.
+ *
+ * `composeTrustDistribution` therefore takes the first source that carries any
+ * mass, and this plate prints which one it used. When the mass all lands in a
+ * single band there is no shape to draw, so the reading is stated instead —
+ * one full bar beside nine empty ones is the same non-information in a more
+ * confident costume.
+ */
+function TrustDistributionPlate({ distribution }: { distribution: TrustDistribution }) {
+  if (distribution.source === 'none') {
+    return (
+      <figure className="flex flex-col gap-1">
+        <figcaption className="td-legend">trust distribution</figcaption>
+        <p className="text-2xs leading-relaxed text-text-muted">
+          The store reported no trust distribution — not a distribution of zero, but
+          no reading at all.
+        </p>
+      </figure>
+    );
+  }
+  const occupied = distribution.bands.filter((band) => band.count > 0);
+  if (distribution.degenerate) {
+    const only = occupied[0]!;
+    return (
+      <figure className="flex flex-col gap-1">
+        <figcaption className="td-legend">trust distribution</figcaption>
+        <p className="text-2xs leading-relaxed text-text-secondary">
+          All {distribution.total.toLocaleString()} facts sit in one band,{' '}
+          <span className="td-value text-text-primary">{only.label}</span>. There is no
+          spread to draw.
+        </p>
+        <p className="text-3xs text-text-muted">{trustSourceNote(distribution.source)}</p>
+      </figure>
+    );
+  }
+  const ceiling = distribution.bands.reduce((max, band) => Math.max(max, band.count), 0);
+  return (
+    <figure className="flex flex-col gap-1.5">
+      <figcaption className="td-legend">trust distribution</figcaption>
+      <div className="flex flex-col gap-1">
+        {distribution.bands.map((band) => (
+          <div key={band.label} className="flex items-center gap-2">
+            <span
+              className="td-value w-16 shrink-0 text-3xs text-text-muted"
+              data-cell="numeric"
+            >
+              {band.label}
+            </span>
+            <Meter
+              fraction={ceiling > 0 ? band.count / ceiling : null}
+              className="h-1 min-w-0 flex-1"
+              tone={band.count === 0 ? 'bg-transparent' : undefined}
+            />
+            <span
+              className={cn(
+                'td-value w-8 shrink-0 text-right text-3xs',
+                band.count === 0 ? 'text-text-muted' : 'text-text-secondary',
+              )}
+              data-cell="numeric"
+            >
+              {band.count.toLocaleString()}
+            </span>
+          </div>
+        ))}
+      </div>
+      {/* Bands with no facts keep their row and print their zero: an absent
+        * band drawn as a missing row would read as a narrower scale than the
+        * one actually measured. */}
+      <figcaption className="text-3xs leading-relaxed text-text-muted">
+        {distribution.total.toLocaleString()} facts across{' '}
+        {distribution.bands.length} bands, {distribution.occupied} of them occupied ·{' '}
+        {trustSourceNote(distribution.source)}
+      </figcaption>
+    </figure>
+  );
+}
+
+/**
+ * HRR coverage as one sentence and its exceptions.
+ *
+ * Six category bars all sitting between 96% and 100% is one fact drawn six
+ * times, and it hides the reading that does vary — four of those six banks are
+ * stale or incompletely vectorized, which no coverage percentage shows. The
+ * uniformity is stated; only the banks that deviate get a row.
+ */
+function HrrCoveragePlate({ rows }: { rows: readonly HrrCoverageRow[] }) {
+  const summary = summarizeHrrCoverage(rows);
+  if (!summary) return null;
+  return (
+    <figure className="flex flex-col gap-1.5">
+      <figcaption className="td-legend">HRR vector coverage</figcaption>
+      <p className="text-2xs leading-relaxed text-text-secondary">{summary.line}</p>
+      {summary.exceptions.length > 0 ? (
+        <ul className="flex flex-col">
+          {/* Two lines, not one. The longest status in the taxonomy is
+            * "missing vectors"; beside a coverage figure in a 224px filter
+            * rail it leaves under seventy pixels for the category name, which
+            * clipped "decision" to "dec…" — the one word on the row a reader
+            * actually needs. */}
+          {summary.exceptions.map((row) => (
+            <li
+              key={row.category}
+              className="flex flex-col gap-0.5 border-b border-edge-subtle py-1 last:border-b-0"
+            >
+              <span className="flex items-baseline gap-2">
+                <span className="min-w-0 flex-1 truncate text-2xs text-text-primary">
+                  {row.category}
+                </span>
+                {/* missing_bank has no bank to measure against, so a percentage
+                  * would be a fabricated denominator; the status stands alone. */}
+                {row.status !== 'missing_bank' ? (
+                  <span
+                    className="td-value shrink-0 text-3xs text-text-muted"
+                    data-cell="numeric"
+                  >
+                    {Math.round(Math.max(0, Math.min(row.coverage, 1)) * 100)}% vectorized
+                  </span>
+                ) : null}
+              </span>
+              <span className="td-legend truncate text-state-stale">
+                {hrrStatusLabel(row.status)}
+              </span>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </figure>
+  );
+}
+
+/**
+ * What the loaded slice of facts is, stated above the rows.
+ *
+ * The list is a top-100 slice ordered so the highest-trust facts fill it. A
+ * reader scrolling ninety-six rows that all read 1.00 will conclude the store
+ * has no low-trust facts; the store in fact holds twenty-one below 0.75 that
+ * this slice never reaches. That is not a detail — it is the difference
+ * between "feedback never moves a score" and "you are looking at the top of
+ * the list".
+ */
+function FactListHeader({
+  loaded,
+  distribution,
+  query,
+}: {
+  loaded: LoadedTrust;
+  distribution: TrustDistribution;
+  query: string;
+}) {
+  const unreached = factsBelow(distribution, loaded.min);
+  const sameEverywhere = loaded.min === loaded.max;
+  return (
+    <div className="flex flex-col gap-0.5 border-b border-edge-subtle px-3 py-2">
+      <p className="td-legend">
+        {loaded.count.toLocaleString()} facts loaded
+        {query ? ` · matching “${query}”` : ''}
+      </p>
+      <p className="text-2xs leading-relaxed text-text-muted">
+        {sameEverywhere
+          ? `Every one is at trust ${loaded.max.toFixed(2)}.`
+          : `Trust ${loaded.min.toFixed(2)}–${loaded.max.toFixed(2)}, with ${loaded.atMax.toLocaleString()} at exactly ${loaded.max.toFixed(2)}.`}
+        {unreached != null && unreached > 0
+          ? ` The store holds ${unreached.toLocaleString()} further facts below ${loaded.min.toFixed(2)} that this slice does not reach.`
+          : ''}
+      </p>
+    </div>
+  );
+}
+
+/** Two lines of a fact's content, which is the height a 56px row can carry.
+ * A row taller than this stops being a list; a row shorter than this shows a
+ * ninety-character prefix of a nineteen-hundred-character fact. */
+export const FACT_ROW_HEIGHT = 56;
+
+/** One fact, read as two ranked quantities and as much of the fact as fits.
  *
  * The row previously spent forty pixels on a hairline trust bar with no
  * number, then printed the recall count as plain grey text — so a column of
  * facts carried no visible ordering at all and the two measurements that
  * define this product (how much a memory is trusted, how often it is
  * reinforced) were the least legible things on the row. Both now get a printed
- * figure AND a length: the digits for precision, the rail for ranking. */
+ * figure AND a length: the digits for precision, the rail for ranking.
+ *
+ * Two further problems the real store exposed. Facts here run to nearly two
+ * thousand characters on ONE line, so a single-line row truncated every
+ * interesting fact at its first clause and the reader had no way to tell a
+ * clipped row from a short one. The summary now clamps to two lines, carries
+ * the full text on `title`, and prints an explicit control on any row that is
+ * still cut — the control opens the same inspector the row does, where the
+ * content is shown in full. And the trust rail is suppressed when the loaded
+ * slice has no spread: ninety-six rails all drawn at 90-100% of their track
+ * are ninety-six copies of one length.
+ */
 function FactListRow({
   fact,
   recallCeiling,
+  showTrustRail,
   selected,
   onSelect,
 }: {
   fact: FactRow;
   recallCeiling: number;
+  showTrustRail: boolean;
   selected: boolean;
   onSelect: () => void;
 }) {
-  const summary = useMemo(
-    () => (fact.content ?? String(fact.fact_id)).split('\n')[0] ?? '',
-    [fact],
-  );
+  const content = fact.content ?? String(fact.fact_id);
+  const summary = useMemo(() => content.split('\n')[0] ?? '', [content]);
+  // Measured, not guessed. Whether two clamped lines hold a fact depends on
+  // the column's width, and this column is a third of a 1440px workspace or
+  // the whole of a 320px one — no character threshold is right at both. The
+  // element itself is asked.
+  const summaryRef = useRef<HTMLSpanElement>(null);
+  const clipped = useIsClamped(summaryRef, content);
   const trust = Math.max(0, Math.min(fact.trust_score, 1));
   const recalls = fact.retrieval_count ?? 0;
   return (
-    <DataRow selected={selected} onSelect={onSelect}>
+    <DataRow
+      selected={selected}
+      onSelect={onSelect}
+      height={FACT_ROW_HEIGHT}
+      align="start"
+    >
       <span className="flex w-14 shrink-0 flex-col gap-1">
         <span
           className={cn(
@@ -354,15 +550,30 @@ function FactListRow({
         >
           {trust.toFixed(2)}
         </span>
-        <Meter
-          fraction={trust}
-          className="h-[3px]"
-          tone={
-            trust >= 0.7 ? 'bg-accent' : trust >= 0.4 ? 'bg-accent/60' : 'bg-accent/30'
-          }
-        />
+        {showTrustRail ? (
+          <Meter
+            fraction={trust}
+            className="h-[3px]"
+            tone={
+              trust >= 0.7 ? 'bg-accent' : trust >= 0.4 ? 'bg-accent/60' : 'bg-accent/30'
+            }
+          />
+        ) : null}
       </span>
-      <span className="min-w-0 flex-1 truncate text-text-primary">{summary}</span>
+      <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+        <span
+          ref={summaryRef}
+          className="line-clamp-2 leading-snug text-text-primary"
+          title={content}
+        >
+          {summary}
+        </span>
+        {clipped ? (
+          <span className="td-legend text-accent">
+            {content.length.toLocaleString()} chars · open for the rest
+          </span>
+        ) : null}
+      </span>
       {/* Column priority under 768px: the fact itself and how far it can be
        * trusted are the row. Category and recall count are what a narrow
        * viewport gives up -- keeping all four columns crushed the summary to
@@ -386,6 +597,38 @@ function FactListRow({
       </span>
     </DataRow>
   );
+}
+
+/**
+ * Whether a line-clamped element is actually hiding anything right now.
+ *
+ * `scrollHeight > clientHeight` is the only reliable answer: it accounts for
+ * the column's real width, the reader's font size and the clamp together. It
+ * is re-checked when the viewport resizes, because a row that fits at 1440px
+ * clips at 320px and an affordance that lied in either direction would be
+ * worse than none — one hides a fact, the other promises a rest that is not
+ * there.
+ */
+function useIsClamped(
+  ref: RefObject<HTMLElement | null>,
+  content: string,
+): boolean {
+  const [clipped, setClipped] = useState(false);
+  useLayoutEffect(() => {
+    const element = ref.current;
+    if (!element) return;
+    const measure = () => {
+      // +1: sub-pixel line heights make an unclipped element report a
+      // scrollHeight a fraction above its clientHeight.
+      setClipped(element.scrollHeight > element.clientHeight + 1);
+    };
+    measure();
+    if (typeof ResizeObserver !== 'function') return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [ref, content]);
+  return clipped;
 }
 
 /** "2026-05-08" -> "May 8". The growth caption prints a date beside a

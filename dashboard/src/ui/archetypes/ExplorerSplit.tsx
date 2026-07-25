@@ -156,20 +156,32 @@ export function DataRow({
   onSelect,
   children,
   className,
+  height,
+  align = 'center',
 }: {
   selected?: boolean;
   onSelect?: () => void;
   children: ReactNode;
   className?: string;
+  /**
+   * Fixed row height in pixels, for lists whose rows carry more than one line.
+   * Still FIXED, never intrinsic: `VirtualList` positions windowed rows from a
+   * single estimate, so a row that measures itself would offset every row
+   * below it. Defaults to the `--row-height-data` token every other list uses.
+   */
+  height?: number;
+  /** Multi-line rows read from the top; single-line rows stay centred. */
+  align?: 'center' | 'start';
 }) {
   return (
     <button
       type="button"
       onClick={onSelect}
       aria-pressed={selected ?? false}
-      style={{ height: 'var(--row-height-data)' }}
+      style={{ height: height != null ? `${height}px` : 'var(--row-height-data)' }}
       className={cn(
-        'relative flex w-full items-center gap-3 border-b border-edge-subtle pl-3 pr-3 text-left text-xs',
+        'relative flex w-full gap-3 border-b border-edge-subtle pl-3 pr-3 text-left text-xs',
+        align === 'start' ? 'items-start pt-2' : 'items-center',
         'hover:bg-surface-1 focus-visible:bg-surface-1',
         selected && 'bg-surface-2',
         className,
