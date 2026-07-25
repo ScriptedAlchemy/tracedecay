@@ -373,15 +373,26 @@ function StoreCard({ store }: { store: ProjectStore }) {
           {store.store.storage_mode ?? '—'}
         </span>
       </header>
+      {/* Three cells across a 296px rail gave each legend about 60px, which
+        * clipped "branches" and "artifacts" to "BRANCH…" and "ARTIFAC…" — the
+        * two words that say what the numbers are. On disk is the headline (it
+        * is the quantity that grows without anyone asking) and the two counts
+        * share the row beneath it, where each has half the rail. */}
+      <div className="border-b border-edge-subtle px-3 py-2">
+        <Readout
+          label="on disk"
+          value={weight.value}
+          unit={weight.unit}
+          size="lg"
+          note={`${artifacts.length} ${artifacts.length === 1 ? 'artifact' : 'artifacts'}`}
+        />
+      </div>
       <div className="flex border-b border-edge-subtle">
         <div className="min-w-0 flex-1 px-3 py-2">
           <Readout label="branches" value={scopes.length} size="sm" />
         </div>
         <div className="min-w-0 flex-1 border-l border-edge-subtle px-3 py-2">
           <Readout label="artifacts" value={artifacts.length} size="sm" />
-        </div>
-        <div className="min-w-0 flex-1 border-l border-edge-subtle px-3 py-2">
-          <Readout label="on disk" value={weight.value} unit={weight.unit} size="sm" />
         </div>
       </div>
       {scopes.length > 0 ? (

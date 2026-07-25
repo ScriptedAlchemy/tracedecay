@@ -125,12 +125,18 @@ export function columnIndexFor(lastSeenAt: number, nowSeconds: number): number {
  * unit apart; a body may move up to `COLUMN_HALF_WIDTH` off its column's centre
  * line, which is comfortably less than half the gap, so a body can never be
  * mistaken for a member of the column next door. */
-const COLUMN_HALF_WIDTH = 0.4;
-const MASS_AXIS_HEIGHT = 2.6;
-/** Nearest two bodies may be before one is nudged sideways. */
-const BODY_CLEARANCE = 0.2;
-/** Step size for those nudges. */
-const NUDGE = 0.055;
+const COLUMN_HALF_WIDTH = 0.42;
+const MASS_AXIS_HEIGHT = 2.9;
+/** Step size for the sideways nudges that keep bodies off each other. */
+const NUDGE = 0.06;
+/** A body's drawn radius in field units, so the clearance test knows how much
+ * room each one actually takes. The canvas sizes bodies by the square root of
+ * mass, and this mirrors that curve — otherwise the two heaviest projects in a
+ * column, which are also the two largest discs, are the pair most likely to be
+ * left overlapping by a clearance tuned for the small ones. */
+function bodyRadius(mass: number, ceiling: number): number {
+  return 0.09 + 0.15 * Math.sqrt(mass / Math.max(ceiling, 1));
+}
 
 /**
  * Compose the registry into the field. Deterministic: the same payload and the
@@ -146,7 +152,16 @@ export function composeRegistryField(
     (max, project) => Math.max(max, indexedMass(project)),
     0,
   );
-  const massScale = Math.log1p(Math.max(massCeiling, 1));
+  // The axis runs between the lightest and heaviest projects actually present.
+  // Anchoring the floor at zero instead would spend a quarter of the field on a
+  // mass no registered project can have — every project holds at least one
+  // store — and squash the range that carries the reading.
+  const massFloor = projects.reduce(
+    (min, project) => Math.min(min, indexedMass(project)),
+    Infinity,
+  );
+  const axisLow = Math.log1p(Math.max(1, Number.isFinite(massFloor) ? massFloor : 1));
+  const axisSpan = Math.max(Math.log1p(Math.max(massCeiling, 1)) - axisLow, 0.001);
 
   const columns: FieldColumn[] = COLUMNS.map((column) => ({
     id: column.id,
@@ -176,15 +191,17 @@ export function composeRegistryField(
       (a, b) =>
         indexedMass(b) - indexedMass(a) || a.project_id.localeCompare(b.project_id),
     );
-    const settledHere: Array<{ offset: number; y: number }> = [];
+    const settledHere: Array<{ offset: number; y: number; radius: number }> = [];
     for (const project of ordered) {
       const mass = indexedMass(project);
-      // Negated because Sigma's y axis grows downward: heavier has to read
-      // HIGHER on the screen or the whole vertical reading inverts.
-      const y = -(Math.log1p(mass) / (massScale || 1)) * MASS_AXIS_HEIGHT;
-      const offset = clearOffset(y, settledHere);
+      // Sigma's y grows DOWNWARD on screen, so heavier has to be the larger
+      // y for mass to read as height.
+      const y =
+        ((Math.log1p(mass) - axisLow) / axisSpan) * MASS_AXIS_HEIGHT;
+      const radius = bodyRadius(mass, massCeiling);
+      const offset = clearOffset(y, radius, settledHere);
       const x = index + offset;
-      settledHere.push({ offset, y });
+      settledHere.push({ offset, y, radius });
       placedById.set(project.project_id, { x, y });
       nodes.push({
         id: project.project_id,
@@ -249,7 +266,7 @@ export function composeRegistryField(
     sharedRepoCount,
     extent: {
       x: [-margin, COLUMNS.length - 1 + margin],
-      y: [-MASS_AXIS_HEIGHT - margin, margin],
+      y: [-margin, MASS_AXIS_HEIGHT + margin],
     },
   };
 }
@@ -264,14 +281,16 @@ export function composeRegistryField(
  */
 function clearOffset(
   y: number,
-  settled: ReadonlyArray<{ offset: number; y: number }>,
+  radius: number,
+  settled: ReadonlyArray<{ offset: number; y: number; radius: number }>,
 ): number {
   const steps = Math.floor(COLUMN_HALF_WIDTH / NUDGE);
   for (let step = 0; step <= steps; step += 1) {
     for (const direction of step === 0 ? [0] : [1, -1]) {
       const offset = direction * step * NUDGE;
       const clear = settled.every(
-        (point) => Math.hypot(point.offset - offset, point.y - y) >= BODY_CLEARANCE,
+        (point) =>
+          Math.hypot(point.offset - offset, point.y - y) >= point.radius + radius,
       );
       if (clear) return offset;
     }
