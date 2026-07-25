@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::{self, error::TrySendError};
 use tracedecay_application::feedback::FeedbackObservationPort;
 use tracedecay_domain::feedback::{
-    FeedbackCycleObservationV1, FeedbackEvaluationInputV1, FeedbackObservationKindV1,
-    FeedbackSavedEvaluationV1, ProviderEvaluationStateV1,
+    CiFailureSourceDegradationV1, FeedbackCycleObservationV1, FeedbackEvaluationInputV1,
+    FeedbackObservationKindV1, FeedbackSavedEvaluationV1, ProviderEvaluationStateV1,
 };
 use tracedecay_domain::{ManifestDigest, UtcMicros, canonical_sha256};
 
@@ -362,6 +362,8 @@ pub enum Plan26FeedbackSourceEventV1 {
         provider: Plan26CiProviderV1,
         exact_evidence: bool,
         coverage: Plan26CoverageV1,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_degradation: Option<CiFailureSourceDegradationV1>,
         localized_count: u32,
         candidate_count: u32,
         duration_micros: Option<u64>,
@@ -1300,6 +1302,9 @@ mod tests {
             provider: Plan26CiProviderV1::GitHubActions,
             exact_evidence: true,
             coverage: Plan26CoverageV1::Partial,
+            source_degradation: Some(CiFailureSourceDegradationV1::Failed(
+                tracedecay_domain::feedback::CiFailureSourceFailureV1::Schema,
+            )),
             localized_count: 2,
             candidate_count: 3,
             duration_micros: Some(42),
@@ -1317,6 +1322,7 @@ mod tests {
             Some("feedback.ci.localization.observed.v1")
         );
         let encoded = serde_json::to_string(&first).unwrap();
+        assert!(encoded.contains("\"source_degradation\":{\"failed\":\"schema\"}"));
         assert!(!encoded.contains("file.feedback.observation"));
         assert!(!encoded.contains("symbol.feedback.observation"));
 
