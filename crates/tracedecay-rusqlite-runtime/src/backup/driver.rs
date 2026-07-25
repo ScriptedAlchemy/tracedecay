@@ -7,7 +7,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::Connection;
 use tracedecay_store::{
     FrozenWatermarkVectorV1, ShardWatermarkV1, StoreRuntimeBindingV1, StoreShardIdV1,
 };
@@ -326,10 +326,11 @@ impl SqliteBackupFilesystem for SnapshotDestination {
 /// Verifies a completed SQLite backup through the runtime's read-only
 /// `PRAGMA quick_check` authority.
 pub fn verify_sqlite_snapshot(path: &Path) -> Result<(), OnlineBackupError> {
-    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY
-        | OpenFlags::SQLITE_OPEN_NO_MUTEX
-        | OpenFlags::SQLITE_OPEN_PRIVATE_CACHE;
-    let connection = Connection::open_with_flags(path, flags).map_err(OnlineBackupError::Sqlite)?;
+    let connection = crate::connection::open_immutable_reader(path).map_err(|error| {
+        OnlineBackupError::Io(io::Error::other(format!(
+            "failed to open immutable SQLite snapshot: {error}"
+        )))
+    })?;
     let mut statement = connection
         .prepare("PRAGMA quick_check")
         .map_err(OnlineBackupError::Sqlite)?;

@@ -489,6 +489,7 @@ async fn verify_manifest_rejects_sqlite_target_without_verified_snapshot() {
         .insert_node(&sample_node("node-1", "process_data", "src/lib.rs"))
         .await
         .unwrap();
+    assert_eq!(source.get_all_nodes().await.unwrap().len(), 1);
     source.checkpoint().await.unwrap();
     source.close();
 
@@ -503,9 +504,9 @@ async fn verify_manifest_rejects_sqlite_target_without_verified_snapshot() {
         .insert_node(&sample_node("node-1", "process_data", "src/lib.rs"))
         .await
         .unwrap();
+    assert_eq!(target.get_all_nodes().await.unwrap().len(), 2);
     target.checkpoint().await.unwrap();
     target.close();
-    assert_ne!(fs::read(&source_db).unwrap(), fs::read(&target_db).unwrap());
 
     write_valid_branch_meta(&data_root.join("branch-meta.json"));
     fs::write(data_root.join("sessions.db"), b"sessions").unwrap();
