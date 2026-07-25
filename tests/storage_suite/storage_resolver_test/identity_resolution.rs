@@ -135,6 +135,13 @@ async fn legacy_profile_store_upgrade_preserves_data_across_repo_identity_change
 
     let legacy_project_id = "proj_legacy_path_hash";
     let cg = init_enrolled_legacy_shard(&project, legacy_project_id).await;
+    let lifecycle = acquire_fixture_maintenance();
+    let database_scope = tracedecay::db::enter_maintenance_database_scope(
+        &lifecycle,
+        &profile_root,
+        "seed legacy profile store",
+    )
+    .unwrap();
     cg.index_all().await.unwrap();
     let main_fact_id = cg
         .add_fact(fact_request("legacy main fact sentinel"))
@@ -148,8 +155,17 @@ async fn legacy_profile_store_upgrade_preserves_data_across_repo_identity_change
 
     cg.checkpoint().await.unwrap();
     cg.close();
+    drop(database_scope);
+    drop(lifecycle);
     git(&project, &["checkout", "-b", "feature/legacy-sentinel"]);
-    let branch = TraceDecay::open(&project).await.unwrap();
+    let branch = open_with_maintenance(&project).await.unwrap();
+    let lifecycle = acquire_fixture_maintenance();
+    let database_scope = tracedecay::db::enter_maintenance_database_scope(
+        &lifecycle,
+        &profile_root,
+        "seed legacy branch store",
+    )
+    .unwrap();
     let branch_fact_id = branch
         .add_fact(fact_request("legacy branch fact sentinel"))
         .await
@@ -159,6 +175,8 @@ async fn legacy_profile_store_upgrade_preserves_data_across_repo_identity_change
         .fact_id;
     branch.checkpoint().await.unwrap();
     branch.close();
+    drop(database_scope);
+    drop(lifecycle);
     git(&project, &["checkout", "main"]);
 
     let sessions = HostAdmissionTestRuntimeV1::project(
@@ -168,29 +186,27 @@ async fn legacy_profile_store_upgrade_preserves_data_across_repo_identity_change
     )
     .await
     .unwrap();
-    assert!(
-        sessions
-            .upsert_session_for_test(
-                tracedecay::application::host_admission::HostAdmissionScope::Project,
-                &SessionRecord {
-                    provider: "codex".to_string(),
-                    session_id: "legacy-session-sentinel".to_string(),
-                    project_key: current_project_id,
-                    project_path: project.to_string_lossy().to_string(),
-                    title: Some("legacy session sentinel".to_string()),
-                    started_at: Some(1_800_000_001),
-                    ended_at: Some(1_800_000_002),
-                    transcript_path: None,
-                    metadata_json: None,
-                    parent_session_id: None,
-                    is_subagent: false,
-                    agent_id: None,
-                    parent_tool_use_id: None,
-                },
-            )
-            .await
-            .unwrap()
-    );
+    assert!(sessions
+        .upsert_session_for_test(
+            tracedecay::application::host_admission::HostAdmissionScope::Project,
+            &SessionRecord {
+                provider: "codex".to_string(),
+                session_id: "legacy-session-sentinel".to_string(),
+                project_key: current_project_id,
+                project_path: project.to_string_lossy().to_string(),
+                title: Some("legacy session sentinel".to_string()),
+                started_at: Some(1_800_000_001),
+                ended_at: Some(1_800_000_002),
+                transcript_path: None,
+                metadata_json: None,
+                parent_session_id: None,
+                is_subagent: false,
+                agent_id: None,
+                parent_tool_use_id: None,
+            },
+        )
+        .await
+        .unwrap());
     drop(sessions);
 
     let automation_sentinel = current_root.join("automation/migration-sentinel.json");
@@ -203,7 +219,7 @@ async fn legacy_profile_store_upgrade_preserves_data_across_repo_identity_change
     let legacy_root = current_root.clone();
     demote_shard_to_unadopted_legacy(&project, &profile_root);
 
-    let adopted = TraceDecay::open(&project)
+    let adopted = open_with_maintenance(&project)
         .await
         .expect("upgrade must adopt the manifest-backed legacy store");
     assert_path_eq(&adopted.store_layout().data_root, &legacy_root);
@@ -220,6 +236,17 @@ async fn legacy_profile_store_upgrade_preserves_data_across_repo_identity_change
         fs::read_to_string(legacy_root.join("automation/migration-sentinel.json")).unwrap(),
         r#"{"preserved":true}"#
     );
+    let lifecycle = acquire_fixture_maintenance();
+    let database_scope = tracedecay::db::enter_maintenance_database_scope(
+        &lifecycle,
+        &profile_root,
+        "checkpoint adopted legacy store",
+    )
+    .unwrap();
+    adopted.checkpoint().await.unwrap();
+    adopted.close();
+    drop(database_scope);
+    drop(lifecycle);
 
     let sessions = HostAdmissionTestRuntimeV1::project(
         &profile_root,
@@ -244,7 +271,7 @@ async fn legacy_profile_store_upgrade_preserves_data_across_repo_identity_change
     );
     drop(sessions);
 
-    let branch = TraceDecay::open_branch(&project, "feature/legacy-sentinel")
+    let branch = open_branch_with_maintenance(&project, "feature/legacy-sentinel")
         .await
         .unwrap();
     assert_eq!(
@@ -262,11 +289,9 @@ async fn legacy_profile_store_upgrade_preserves_data_across_repo_identity_change
         .unwrap()
         .expect("successful adoption must persist repository identity");
     assert_eq!(marker.project_id, legacy_project_id);
-    adopted.checkpoint().await.unwrap();
-    adopted.close();
 
     fs::rename(&project, &moved).unwrap();
-    let reopened = TraceDecay::open(&moved).await.unwrap();
+    let reopened = open_with_maintenance(&moved).await.unwrap();
     assert_path_eq(&reopened.store_layout().data_root, &legacy_root);
     reopened.close();
 
@@ -274,7 +299,7 @@ async fn legacy_profile_store_upgrade_preserves_data_across_repo_identity_change
     {
         let alias = dir.path().join("repo-alias");
         symlink(&moved, &alias).unwrap();
-        let via_alias = TraceDecay::open(&alias).await.unwrap();
+        let via_alias = open_with_maintenance(&alias).await.unwrap();
         assert_path_eq(&via_alias.store_layout().data_root, &legacy_root);
         via_alias.close();
     }
@@ -289,7 +314,7 @@ async fn legacy_profile_store_upgrade_preserves_data_across_repo_identity_change
             linked.to_str().unwrap(),
         ],
     );
-    let linked_graph = TraceDecay::open(&linked).await.unwrap();
+    let linked_graph = open_with_maintenance(&linked).await.unwrap();
     assert_path_eq(&linked_graph.store_layout().data_root, &legacy_root);
     linked_graph.close();
 
@@ -301,7 +326,7 @@ async fn legacy_profile_store_upgrade_preserves_data_across_repo_identity_change
         !TraceDecay::has_initialized_store(&clone).await,
         "same-remote clones must not adopt another checkout's orphan manifest"
     );
-    let clone_graph = TraceDecay::init(&clone).await.unwrap();
+    let clone_graph = init_with_maintenance(&clone).await.unwrap();
     assert_ne!(
         normalize_test_path(&clone_graph.store_layout().data_root),
         normalize_test_path(&legacy_root),
@@ -324,6 +349,13 @@ async fn empty_cutover_store_is_atomically_replaced_by_healthy_legacy_store() {
 
     let legacy_project_id = "proj_healthy_legacy";
     let old = init_enrolled_legacy_shard(&project, legacy_project_id).await;
+    let lifecycle = acquire_fixture_maintenance();
+    let database_scope = tracedecay::db::enter_maintenance_database_scope(
+        &lifecycle,
+        &profile_root,
+        "seed healthy legacy store",
+    )
+    .unwrap();
     let fact_id = old
         .add_fact(fact_request("healthy legacy cutover fact"))
         .await
@@ -334,6 +366,8 @@ async fn empty_cutover_store_is_atomically_replaced_by_healthy_legacy_store() {
     let legacy_root = old.store_layout().data_root.clone();
     old.checkpoint().await.unwrap();
     old.close();
+    drop(database_scope);
+    drop(lifecycle);
     demote_shard_to_unadopted_legacy(&project, &profile_root);
 
     let cutover = default_profile_sharded_layout(&project, &profile_root).unwrap();
@@ -341,7 +375,7 @@ async fn empty_cutover_store_is_atomically_replaced_by_healthy_legacy_store() {
     initialize_empty_profile_layout(&cutover).await;
     write_repository_identity_marker(&project, &cutover_project_id).unwrap();
 
-    let repaired = TraceDecay::open(&project)
+    let repaired = open_with_maintenance(&project)
         .await
         .expect("an empty cutover shard may safely yield to the healthy legacy shard");
     assert_path_eq(&repaired.store_layout().data_root, &legacy_root);
@@ -396,6 +430,13 @@ async fn empty_cutover_store_adopts_healthy_legacy_linked_worktree_store() {
 
     let legacy_project_id = "proj_healthy_linked_legacy";
     let old = init_enrolled_legacy_shard(&project, legacy_project_id).await;
+    let lifecycle = acquire_fixture_maintenance();
+    let database_scope = tracedecay::db::enter_maintenance_database_scope(
+        &lifecycle,
+        &profile_root,
+        "seed healthy linked legacy store",
+    )
+    .unwrap();
     let fact_id = old
         .add_fact(fact_request("healthy linked legacy cutover fact"))
         .await
@@ -406,6 +447,8 @@ async fn empty_cutover_store_adopts_healthy_legacy_linked_worktree_store() {
     let legacy_root = old.store_layout().data_root.clone();
     old.checkpoint().await.unwrap();
     old.close();
+    drop(database_scope);
+    drop(lifecycle);
     demote_shard_to_unadopted_legacy(&project, &profile_root);
     // Bind the legacy shard's manifest to the linked worktree; it shares the
     // git common dir with the primary checkout, so the resolver must adopt it by
@@ -417,7 +460,7 @@ async fn empty_cutover_store_adopts_healthy_legacy_linked_worktree_store() {
     initialize_empty_profile_layout(&cutover).await;
     write_repository_identity_marker(&project, &cutover_project_id).unwrap();
 
-    let repaired = TraceDecay::open(&project)
+    let repaired = open_with_maintenance(&project)
         .await
         .expect("a linked worktree manifest with the same git common dir must be adopted");
     assert_path_eq(&repaired.store_layout().data_root, &legacy_root);
@@ -440,13 +483,22 @@ async fn corrupt_nonempty_cutover_store_reports_both_shards_without_switching() 
     let _home_guard = HomeGuard::set(&home);
     init_repo_with_commit(&project);
 
-    let old = TraceDecay::init(&project).await.unwrap();
+    let old = init_with_maintenance(&project).await.unwrap();
+    let lifecycle = acquire_fixture_maintenance();
+    let database_scope = tracedecay::db::enter_maintenance_database_scope(
+        &lifecycle,
+        &profile_root,
+        "seed split identity store",
+    )
+    .unwrap();
     old.add_fact(fact_request("legacy split identity fact"))
         .await
         .unwrap();
     let original_root = old.store_layout().data_root.clone();
     old.checkpoint().await.unwrap();
     old.close();
+    drop(database_scope);
+    drop(lifecycle);
     fs::remove_file(repository_identity_path(&project).unwrap()).unwrap();
     remove_sqlite_family(&profile_root.join("global.db"));
 
@@ -457,6 +509,7 @@ async fn corrupt_nonempty_cutover_store_reports_both_shards_without_switching() 
     let cutover = default_profile_sharded_layout(&project, &profile_root).unwrap();
     let cutover_project_id = cutover.identity.project_id.clone().unwrap();
     initialize_empty_profile_layout(&cutover).await;
+    remove_sqlite_family(&cutover.graph_db_path);
     fs::write(&cutover.graph_db_path, b"not a sqlite database").unwrap();
     let sessions = HostAdmissionTestRuntimeV1::project(
         &profile_root,
@@ -465,30 +518,29 @@ async fn corrupt_nonempty_cutover_store_reports_both_shards_without_switching() 
     )
     .await
     .unwrap();
-    assert!(
-        sessions
-            .upsert_session_for_test(
-                tracedecay::application::host_admission::HostAdmissionScope::Project,
-                &SessionRecord {
-                    provider: "codex".to_string(),
-                    session_id: "new-cutover-session".to_string(),
-                    project_key: cutover_project_id.clone(),
-                    project_path: project.to_string_lossy().to_string(),
-                    title: Some("new cutover session".to_string()),
-                    started_at: Some(1_800_000_010),
-                    ended_at: None,
-                    transcript_path: None,
-                    metadata_json: None,
-                    parent_session_id: None,
-                    is_subagent: false,
-                    agent_id: None,
-                    parent_tool_use_id: None,
-                },
-            )
-            .await
-            .unwrap()
-    );
+    assert!(sessions
+        .upsert_session_for_test(
+            tracedecay::application::host_admission::HostAdmissionScope::Project,
+            &SessionRecord {
+                provider: "codex".to_string(),
+                session_id: "new-cutover-session".to_string(),
+                project_key: cutover_project_id.clone(),
+                project_path: project.to_string_lossy().to_string(),
+                title: Some("new cutover session".to_string()),
+                started_at: Some(1_800_000_010),
+                ended_at: None,
+                transcript_path: None,
+                metadata_json: None,
+                parent_session_id: None,
+                is_subagent: false,
+                agent_id: None,
+                parent_tool_use_id: None,
+            },
+        )
+        .await
+        .unwrap());
     drop(sessions);
+    fs::remove_file(enrollment_marker_path(&project)).unwrap();
     write_repository_identity_marker(&project, &cutover_project_id).unwrap();
 
     let error = TraceDecay::resolve_store_layout_for_identity(&project)
@@ -565,11 +617,9 @@ async fn ambiguous_legacy_store_adoption_preserves_every_candidate() {
     .await
     .expect_err("ambiguous legacy manifests must not be selected implicitly");
 
-    assert!(
-        error
-            .to_string()
-            .contains("ambiguous legacy profile stores")
-    );
+    assert!(error
+        .to_string()
+        .contains("ambiguous legacy profile stores"));
     for project_id in ["proj_legacy_one", "proj_legacy_two"] {
         assert_eq!(
             fs::read_to_string(profile_root.join(format!("projects/{project_id}/tracedecay.db")))

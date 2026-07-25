@@ -135,6 +135,82 @@ fn assert_path_eq(actual: impl AsRef<Path>, expected: impl AsRef<Path>) {
     );
 }
 
+fn prepare_maintenance_profile(profile_root: &Path) {
+    fs::create_dir_all(profile_root).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        fs::set_permissions(profile_root, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+}
+
+async fn init_with_maintenance(
+    project_root: &Path,
+    profile_root: &Path,
+    open_options: TraceDecayOpenOptions,
+) -> tracedecay::errors::Result<TraceDecay> {
+    prepare_maintenance_profile(profile_root);
+    let lifecycle = tracedecay::lifecycle_lease::acquire_exclusive_for_profile(
+        profile_root,
+        "profile storage migration fixture initialization",
+    )
+    .unwrap();
+    let _database_scope = tracedecay::db::enter_maintenance_database_scope(
+        &lifecycle,
+        profile_root,
+        "profile storage migration fixture initialization",
+    )
+    .unwrap();
+    TraceDecay::init_with_exclusive_maintenance(project_root, open_options, &lifecycle).await
+}
+
+async fn open_with_maintenance(
+    project_root: &Path,
+    profile_root: &Path,
+    open_options: TraceDecayOpenOptions,
+) -> tracedecay::errors::Result<TraceDecay> {
+    prepare_maintenance_profile(profile_root);
+    let lifecycle = tracedecay::lifecycle_lease::acquire_exclusive_for_profile(
+        profile_root,
+        "profile storage migration fixture open",
+    )
+    .unwrap();
+    let _database_scope = tracedecay::db::enter_maintenance_database_scope(
+        &lifecycle,
+        profile_root,
+        "profile storage migration fixture open",
+    )
+    .unwrap();
+    TraceDecay::open_with_exclusive_maintenance(project_root, open_options, &lifecycle).await
+}
+
+async fn open_branch_with_maintenance(
+    project_root: &Path,
+    branch_name: &str,
+    profile_root: &Path,
+    open_options: TraceDecayOpenOptions,
+) -> tracedecay::errors::Result<TraceDecay> {
+    prepare_maintenance_profile(profile_root);
+    let lifecycle = tracedecay::lifecycle_lease::acquire_exclusive_for_profile(
+        profile_root,
+        "profile storage migration fixture branch open",
+    )
+    .unwrap();
+    let _database_scope = tracedecay::db::enter_maintenance_database_scope(
+        &lifecycle,
+        profile_root,
+        "profile storage migration fixture branch open",
+    )
+    .unwrap();
+    TraceDecay::open_branch_with_exclusive_maintenance(
+        project_root,
+        branch_name,
+        open_options,
+        &lifecycle,
+    )
+    .await
+}
+
 fn portable_relpath(path: &str) -> String {
     path.replace('\\', "/")
 }
@@ -1123,7 +1199,9 @@ async fn trace_decay_init_uses_profile_shard_when_enrolled() {
     )
     .unwrap();
 
-    let cg = TraceDecay::init(&project).await.unwrap();
+    let cg = init_with_maintenance(&project, &profile_root, TraceDecayOpenOptions::default())
+        .await
+        .unwrap();
 
     assert_path_eq(&cg.store_layout().data_root, &shard_root);
     assert_path_eq(cg.db_path(), shard_root.join("tracedecay.db"));
@@ -1167,7 +1245,7 @@ async fn trace_decay_init_with_options_uses_explicit_profile_identity() {
         "a marker alone must not initialize an explicit client profile"
     );
 
-    let cg = TraceDecay::init_with_options(&project, open_options.clone())
+    let cg = init_with_maintenance(&project, &client_profile, open_options.clone())
         .await
         .unwrap();
 
@@ -1213,7 +1291,7 @@ async fn trace_decay_options_global_db_path_implies_profile_root() {
         global_db_path: Some(client_profile.join("global.db")),
     };
 
-    let cg = TraceDecay::init_with_options(&project, open_options.clone())
+    let cg = init_with_maintenance(&project, &client_profile, open_options.clone())
         .await
         .unwrap();
 
@@ -1281,7 +1359,11 @@ async fn trace_decay_open_matches_renamed_git_checkout_by_registered_remote() {
     );
     let _home_guard = HomeEnvGuard::set(&home);
 
-    let initialized = TraceDecay::init(&project).await.unwrap();
+    let profile_root = home.join(".tracedecay");
+    let initialized =
+        init_with_maintenance(&project, &profile_root, TraceDecayOpenOptions::default())
+            .await
+            .unwrap();
     let original_project_id = initialized
         .store_layout()
         .identity
@@ -1292,7 +1374,9 @@ async fn trace_decay_open_matches_renamed_git_checkout_by_registered_remote() {
     drop(initialized);
     fs::rename(&project, &renamed).unwrap();
 
-    let reopened = TraceDecay::open(&renamed).await.unwrap();
+    let reopened = open_with_maintenance(&renamed, &profile_root, TraceDecayOpenOptions::default())
+        .await
+        .unwrap();
 
     assert_eq!(
         reopened.store_layout().identity.project_id.as_deref(),
@@ -1335,7 +1419,7 @@ async fn persisted_repository_identity_survives_rename_while_serve_open_fails_cl
         global_db_path: Some(client_profile.join("global.db")),
     };
 
-    let initialized = TraceDecay::init_with_options(&project, open_options.clone())
+    let initialized = init_with_maintenance(&project, &client_profile, open_options.clone())
         .await
         .unwrap();
     let original_data_root = initialized.store_layout().data_root.clone();
@@ -1358,7 +1442,7 @@ async fn persisted_repository_identity_survives_rename_while_serve_open_fails_cl
         "serve should direct callers to the sole database owner: {serve_error}"
     );
 
-    let reopened = TraceDecay::open_with_options(&renamed, open_options)
+    let reopened = open_with_maintenance(&renamed, &client_profile, open_options)
         .await
         .unwrap();
 
@@ -1374,6 +1458,42 @@ async fn persisted_repository_identity_survives_rename_while_serve_open_fails_cl
 }
 
 #[tokio::test]
+async fn branch_open_rejects_a_mismatched_maintenance_profile() {
+    let dir = TempDir::new().unwrap();
+    let project = dir.path().join("repo");
+    let requested_profile = dir.path().join("requested-profile");
+    let leased_profile = dir.path().join("leased-profile");
+    fs::create_dir_all(&project).unwrap();
+    prepare_maintenance_profile(&requested_profile);
+    prepare_maintenance_profile(&leased_profile);
+    let lifecycle = tracedecay::lifecycle_lease::acquire_exclusive_for_profile(
+        &leased_profile,
+        "mismatched branch fixture",
+    )
+    .unwrap();
+
+    let error = match TraceDecay::open_branch_with_exclusive_maintenance(
+        &project,
+        "main",
+        TraceDecayOpenOptions {
+            profile_root: Some(requested_profile.clone()),
+            global_db_path: Some(requested_profile.join("global.db")),
+        },
+        &lifecycle,
+    )
+    .await
+    {
+        Ok(_) => panic!("mismatched profile lease must be rejected"),
+        Err(error) => error,
+    };
+
+    assert_eq!(
+        error.to_string(),
+        "config error: branch open requires the exact profile's exclusive lifecycle lease"
+    );
+}
+
+#[tokio::test]
 async fn trace_decay_open_branch_uses_profile_shard_branch_db() {
     let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
@@ -1385,6 +1505,7 @@ async fn trace_decay_open_branch_uses_profile_shard_branch_db() {
     let branch_db = shard_root.join("branches/feature_profile.db");
     fs::create_dir_all(branch_db.parent().unwrap()).unwrap();
     fs::create_dir_all(project.join(".tracedecay")).unwrap();
+    run_git(&project, &["init"]);
     let _home_guard = HomeEnvGuard::set(&home);
     write_enrollment_marker(
         &project,
@@ -1413,9 +1534,14 @@ async fn trace_decay_open_branch_uses_profile_shard_branch_db() {
     meta.add_branch("feature/profile", "branches/feature_profile.db", "main");
     branch_meta::save_branch_meta(&shard_root, &meta).unwrap();
 
-    let cg = TraceDecay::open_branch(&project, "feature/profile")
-        .await
-        .unwrap();
+    let cg = open_branch_with_maintenance(
+        &project,
+        "feature/profile",
+        &profile_root,
+        TraceDecayOpenOptions::default(),
+    )
+    .await
+    .unwrap();
 
     assert_path_eq(&cg.store_layout().data_root, &shard_root);
     assert_path_eq(cg.db_path(), &branch_db);
@@ -1461,7 +1587,7 @@ async fn trace_decay_open_with_options_auto_tracks_branch_in_explicit_profile() 
         profile_root: Some(client_profile.clone()),
         global_db_path: Some(client_profile.join("global.db")),
     };
-    let main = TraceDecay::init_with_options(&project, open_options.clone())
+    let main = init_with_maintenance(&project, &client_profile, open_options.clone())
         .await
         .unwrap();
     let shard_root = main.store_layout().data_root.clone();
@@ -1469,7 +1595,7 @@ async fn trace_decay_open_with_options_auto_tracks_branch_in_explicit_profile() 
     drop(main);
 
     run_git(&project, &["checkout", "feature/client-profile"]);
-    let cg = TraceDecay::open_with_options(&project, open_options)
+    let cg = open_with_maintenance(&project, &client_profile, open_options)
         .await
         .unwrap();
 
