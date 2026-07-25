@@ -31,6 +31,17 @@ fn initialize_repository(path: &Path) {
     );
 }
 
+fn enroll_project(path: &Path, project_id: &ProjectId) {
+    crate::storage::write_enrollment_marker(
+        path,
+        &crate::storage::EnrollmentMarker {
+            project_id: project_id.as_str().to_owned(),
+            storage_mode: crate::storage::StorageMode::ProfileSharded,
+        },
+    )
+    .unwrap();
+}
+
 fn host_capture_request(scope: ObservationScopeV1, record_id: &str) -> CaptureObservationRequest {
     // Host admission sanitizes through the single provider-neutral
     // observation path (RecordSanitizerV1::observation_v1), so the fixture
@@ -86,7 +97,7 @@ fn host_capture_request(scope: ObservationScopeV1, record_id: &str) -> CaptureOb
 }
 
 #[test]
-fn probe_distinguishes_unknown_provider_and_missing_authority() {
+fn probe_distinguishes_unknown_provider_and_unbound_project_authority() {
     let facade = HostAdmissionFacade::new(HostAdmissionAuthorities::default());
     let unknown = facade.probe("other", HostAdmissionScope::Project);
     assert_eq!(unknown.status, HostAdmissionStatus::Unknown);
@@ -95,8 +106,8 @@ fn probe_distinguishes_unknown_provider_and_missing_authority() {
 
     let unavailable = facade.probe("claude", HostAdmissionScope::Project);
     assert_eq!(unavailable.status, HostAdmissionStatus::Unavailable);
-    assert_eq!(unavailable.reason_code, Some("authority_unavailable"));
-    assert!(unavailable.retryable);
+    assert_eq!(unavailable.reason_code, Some("project_authority_unbound"));
+    assert!(!unavailable.retryable);
 }
 
 #[test]
@@ -203,6 +214,7 @@ async fn host_ingress_binds_provenance_to_authoritative_project_and_replays_stab
         )
         .await
         .unwrap();
+    enroll_project(&repository_root, &project_id);
     let project_registered = registry
         .project_sessions(project_id.clone(), [repository_root.clone()])
         .await
@@ -443,6 +455,12 @@ async fn registered_profile_runtime_is_required_and_mismatch_never_falls_back() 
     ))
     .await;
     assert_eq!(revoked.status, HostAdmissionStatus::Unavailable);
+    let _inspection_scope = crate::db::enter_daemon_database_scope(
+        identity.profile_root(),
+        1,
+        "host-admission-authority-test",
+    )
+    .unwrap();
     assert_eq!(
         registered
             .observation_store()
@@ -475,6 +493,7 @@ async fn registered_project_runtime_is_exact_and_revocation_never_falls_back() {
         .await
         .unwrap();
     let project_id = ProjectId::new("project.registered.exact").unwrap();
+    enroll_project(&project_root, &project_id);
     let registered = registry
         .project_sessions(project_id.clone(), [project_root])
         .await
@@ -576,6 +595,12 @@ async fn registered_project_runtime_is_exact_and_revocation_never_falls_back() {
     ))
     .await;
     assert_eq!(revoked.status, HostAdmissionStatus::Unavailable);
+    let _inspection_scope = crate::db::enter_daemon_database_scope(
+        identity.profile_root(),
+        1,
+        "host-admission-project-authority-test",
+    )
+    .unwrap();
     assert_eq!(
         registered
             .observation_store()
