@@ -109,7 +109,7 @@ impl DaemonSessionRetrievalRoot {
         }
         let (store_id, graph_scope_id) = selected?;
 
-        let project_key = ProjectId::new(context.project.canonical_root.clone()).ok()?;
+        let project_key = ProjectId::new(context.project.project_id.clone()).ok()?;
         let repository_id = context
             .project
             .git_common_dir
