@@ -82,14 +82,15 @@ const PROJECTION_DURABLE: &str = "EXISTS (
 /// Externalization kind recorded on retention-offloaded payloads.
 const OFFLOAD_KIND: &str = "retention_offload";
 
-/// Per-table/per-store retention windows for the session store. Every window is
-/// `None` by default (unlimited): the session record is lossless unless an
-/// operator explicitly opts a store in, matching [`crate::retention`].
+/// Per-table/per-store retention windows for the session store. Lossless raw
+/// retention remains unlimited by default, while the redundant projected copy
+/// is removed after a conservative window once summary lineage proves the raw
+/// row projection-durable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LcmRetentionConfig {
     /// Master switch. When `false`, [`run_session_retention`] is a no-op even
     /// in [`RetentionMode::Apply`].
-    #[serde(default)]
+    #[serde(default = "default_retention_enabled")]
     pub enabled: bool,
     /// Window after which a projection-durable, still-inline raw row has its
     /// content offloaded to the content-addressed store. `None` disables the
@@ -103,7 +104,7 @@ pub struct LcmRetentionConfig {
     /// Window after which a projected `session_messages` row whose raw twin is
     /// still present is dropped as a redundant second content copy. `None`
     /// disables the dedupe pass.
-    #[serde(default)]
+    #[serde(default = "default_dedupe_projected_after_days")]
     pub dedupe_projected_after_days: Option<u32>,
     /// Upper bound on rows touched per pass, keeping each run incremental and
     /// off the hot path.
@@ -115,13 +116,22 @@ fn default_max_batch_size() -> usize {
     500
 }
 
+fn default_retention_enabled() -> bool {
+    true
+}
+
+#[allow(clippy::unnecessary_wraps)]
+fn default_dedupe_projected_after_days() -> Option<u32> {
+    Some(30)
+}
+
 impl Default for LcmRetentionConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: default_retention_enabled(),
             offload_after_days: None,
             drop_after_days: None,
-            dedupe_projected_after_days: None,
+            dedupe_projected_after_days: default_dedupe_projected_after_days(),
             max_batch_size: default_max_batch_size(),
         }
     }

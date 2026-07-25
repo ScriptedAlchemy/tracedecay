@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  LANES,
   codeHits,
   facetCounts,
   knowledgeHits,
@@ -33,12 +34,24 @@ describe('codeHits', () => {
       ['code:n1', 2],
     ]);
     expect(hits[0]?.context).toBe('src/dashboard/graph_service.rs:274');
+    expect(hits[0]?.contextFields).toEqual(['file_path', 'start_line']);
     expect(hits[0]?.matchedIn).toEqual(['name']);
+    expect(hits[0]?.orderLabel).toBe('graph endpoint rows');
     expect(hits[0]?.signal).toEqual({
       field: 'degree',
       value: 4,
       max: 9,
       display: '4 edges',
+      basis: 'maximum among loaded graph rows',
+    });
+  });
+
+  it('uses a returned identifier instead of inventing a row title', () => {
+    const [hit] = codeHits([{ id: 'node-without-name' }], []);
+
+    expect(hit).toMatchObject({
+      title: 'node-without-name',
+      titleField: 'id',
     });
   });
 });
@@ -68,16 +81,24 @@ describe('sessionHits', () => {
     expect(hits).toHaveLength(2);
     expect(hits[0]).toMatchObject({
       key: 'sessions:m1',
+      rank: 1,
+      orderLabel: 'message matches',
       facet: 'assistant',
       context: 'cursor · s1',
+      contextFields: ['provider', 'session_id'],
       titleField: 'snippet',
+      stampField: 'timestamp',
     });
     expect(hits[1]).toMatchObject({
       key: 'sessions:sum1',
+      rank: 1,
+      orderLabel: 'summary-node matches',
       facet: 'summary',
       context: 's2',
+      contextFields: ['session_id'],
       title: 'Graph endpoint investigation',
       titleField: 'summary',
+      stampField: 'latest_at',
     });
   });
 });
@@ -92,6 +113,7 @@ describe('knowledgeHits', () => {
           category: 'decision',
           tags: ['dashboard', 'api'],
           trust_score: 0.75,
+          last_recalled_at: 123,
         },
       ],
       ['graph'],
@@ -101,14 +123,28 @@ describe('knowledgeHits', () => {
       key: 'knowledge:42',
       facet: 'decision',
       context: 'dashboard · api',
+      contextFields: ['tags'],
       matchedIn: ['content'],
+      stampField: 'last_recalled_at',
+      orderLabel: 'bounded fact endpoint rows',
       signal: {
         field: 'trust_score',
         value: 0.75,
         max: 1,
         display: 'trust 0.75',
+        basis: 'fixed trust scale from 0 to 1',
       },
     });
+  });
+});
+
+describe('LANES', () => {
+  it('describes the bounded compatibility fields without claiming evidence or all providers', () => {
+    expect(LANES.map(({ id, searches }) => [id, searches])).toEqual([
+      ['code', 'name, qualified_name, signature, and file_path'],
+      ['sessions', 'message content and summary text in the active LCM store'],
+      ['knowledge', 'content and tags in a bounded fact overview'],
+    ]);
   });
 });
 

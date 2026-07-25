@@ -57,6 +57,7 @@ pub(super) async fn handle_dashboard(
     automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
     automation_writer: DashboardAutomationWriter,
     doctor_report_reader: Option<crate::dashboard::DoctorReportReader>,
+    doctor_remediation_dispatcher: Option<crate::dashboard::DoctorRemediationDispatcherV1>,
 ) -> Result<ToolResult> {
     let action = args
         .get("action")
@@ -124,6 +125,7 @@ pub(super) async fn handle_dashboard(
                 automation_scheduler_reconciler,
                 automation_writer,
                 doctor_report_reader,
+                doctor_remediation_dispatcher,
             )
             .await?;
 

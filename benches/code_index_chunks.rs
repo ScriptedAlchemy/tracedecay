@@ -223,6 +223,15 @@ struct RawSample {
     input_bytes: u64,
     output_bytes: u64,
     wall_ns: u64,
+    event_to_ready_ns: u64,
+    queue_delay_ns: u64,
+    changed_ranges: u64,
+    invalidated_chunks: u64,
+    embedding_batches: u64,
+    projection_operations: u64,
+    invalidation_amplification_per_changed_range: Option<f64>,
+    projection_amplification_per_changed_range: Option<f64>,
+    full_rebuild_reason: Option<String>,
     cpu_ticks: u64,
     cpu_ms: f64,
     peak_rss_bytes: u64,
@@ -285,6 +294,8 @@ struct CaseResult {
     case: CaseName,
     cache_state: String,
     wall_ns: Distribution,
+    event_to_ready_ns: Distribution,
+    queue_delay_ns: Distribution,
     cpu_ms: Distribution,
     peak_rss_bytes: Distribution,
     process_read_bytes: Distribution,
@@ -296,6 +307,13 @@ struct CaseResult {
     chunks_deleted: u64,
     chunks_reused: u64,
     projection_calls: u64,
+    changed_ranges: u64,
+    invalidated_chunks: u64,
+    embedding_batches: u64,
+    projection_operations: u64,
+    invalidation_amplification_per_changed_range: Option<f64>,
+    projection_amplification_per_changed_range: Option<f64>,
+    full_rebuild_reason: Option<String>,
     samples: Vec<RawSample>,
 }
 
@@ -471,7 +489,7 @@ fn run_measurement(output_path: &Path) -> Result<(), String> {
     }
 
     let result = BenchmarkResult {
-        schema_version: 1,
+        schema_version: 2,
         evidence_status: "provisional_baseline",
         workload_id: workload.workload_id.clone(),
         harness_revision: workload.harness_revision.clone(),
@@ -638,6 +656,21 @@ fn execute_case(
         .len() as u64;
     let wall_ns = u64::try_from(started.elapsed().as_nanos())
         .map_err(|_| "sample wall time overflowed u64".to_owned())?;
+    let changed_ranges = u64::from(case == CaseName::WarmOneFile);
+    let invalidated_chunks = changes.deleted.len() as u64
+        + changes
+            .added_or_changed
+            .iter()
+            .filter(|change| change.prior_digest.is_some())
+            .count() as u64;
+    let projection_operations =
+        changes.added_or_changed.len() as u64 + changes.deleted.len() as u64;
+    let invalidation_amplification_per_changed_range =
+        ratio_per_changed_range(invalidated_chunks, changed_ranges);
+    let projection_amplification_per_changed_range =
+        ratio_per_changed_range(projection_operations, changed_ranges);
+    let full_rebuild_reason =
+        (case == CaseName::IncompatibleRebuild).then(|| "chunker_incompatible".to_owned());
     let counters_after = process_counters()?;
     let cpu_ticks = counters_after
         .cpu_ticks
@@ -657,6 +690,15 @@ fn execute_case(
         input_bytes,
         output_bytes,
         wall_ns,
+        event_to_ready_ns: wall_ns,
+        queue_delay_ns: 0,
+        changed_ranges,
+        invalidated_chunks,
+        embedding_batches: 0,
+        projection_operations,
+        invalidation_amplification_per_changed_range,
+        projection_amplification_per_changed_range,
+        full_rebuild_reason,
         cpu_ticks,
         cpu_ms: cpu_ticks as f64 * 1_000.0 / clock_ticks_per_second()? as f64,
         peak_rss_bytes: process_peak_rss_kib()?.saturating_mul(1024),
@@ -1164,11 +1206,35 @@ fn summarize_case(
             case.name.as_str()
         ));
     }
+    let first = samples.first().expect("samples checked nonempty");
+    if samples.iter().any(|sample| {
+        sample.changed_ranges != first.changed_ranges
+            || sample.invalidated_chunks != first.invalidated_chunks
+            || sample.embedding_batches != first.embedding_batches
+            || sample.projection_operations != first.projection_operations
+            || sample.invalidation_amplification_per_changed_range
+                != first.invalidation_amplification_per_changed_range
+            || sample.projection_amplification_per_changed_range
+                != first.projection_amplification_per_changed_range
+            || sample.full_rebuild_reason != first.full_rebuild_reason
+    }) {
+        return Err(format!(
+            "{} {} produced nondeterministic incremental metrics",
+            scale.name,
+            case.name.as_str()
+        ));
+    }
     Ok(CaseResult {
         scale: scale.name.clone(),
         case: case.name,
         cache_state: case.cache_state.clone(),
         wall_ns: Distribution::from_values(samples.iter().map(|sample| sample.wall_ns as f64))?,
+        event_to_ready_ns: Distribution::from_values(
+            samples.iter().map(|sample| sample.event_to_ready_ns as f64),
+        )?,
+        queue_delay_ns: Distribution::from_values(
+            samples.iter().map(|sample| sample.queue_delay_ns as f64),
+        )?,
         cpu_ms: Distribution::from_values(samples.iter().map(|sample| sample.cpu_ms))?,
         peak_rss_bytes: Distribution::from_values(
             samples.iter().map(|sample| sample.peak_rss_bytes as f64),
@@ -1190,8 +1256,21 @@ fn summarize_case(
         chunks_deleted: expected.chunks_deleted,
         chunks_reused: expected.chunks_reused,
         projection_calls: expected.projection_calls,
+        changed_ranges: first.changed_ranges,
+        invalidated_chunks: first.invalidated_chunks,
+        embedding_batches: first.embedding_batches,
+        projection_operations: first.projection_operations,
+        invalidation_amplification_per_changed_range: first
+            .invalidation_amplification_per_changed_range,
+        projection_amplification_per_changed_range: first
+            .projection_amplification_per_changed_range,
+        full_rebuild_reason: first.full_rebuild_reason.clone(),
         samples,
     })
+}
+
+fn ratio_per_changed_range(value: u64, changed_ranges: u64) -> Option<f64> {
+    (changed_ranges > 0).then(|| value as f64 / changed_ranges as f64)
 }
 
 fn percentile(values: &[f64], percentile: usize) -> f64 {

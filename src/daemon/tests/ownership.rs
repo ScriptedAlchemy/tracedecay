@@ -1,6 +1,157 @@
 use super::*;
 
 #[cfg(unix)]
+#[derive(Clone, Copy)]
+enum ProjectGitState {
+    NonGit,
+    Unborn,
+    Committed,
+}
+
+#[cfg(unix)]
+async fn assert_fresh_project_open_owners(label: &str, git_state: ProjectGitState) {
+    let temp = TempDir::new().expect("project-open owners fixture");
+    let project = temp.path().join("project");
+    let profile_root = temp.path().join("profile");
+    std::fs::create_dir_all(project.join("src")).expect("project-open owners project");
+    std::fs::write(project.join("src/main.rs"), "fn main() {}\n")
+        .expect("project-open owners source");
+    let client_identity = test_client_identity_for(profile_root.clone());
+    initialize_test_project(&project, &client_identity).await;
+    if !matches!(git_state, ProjectGitState::NonGit) {
+        let initialized = Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&project)
+            .status()
+            .expect("run git init");
+        assert!(initialized.success(), "git init must succeed");
+    }
+    if matches!(git_state, ProjectGitState::Committed) {
+        let added = Command::new("git")
+            .args(["add", "--all"])
+            .current_dir(&project)
+            .status()
+            .expect("run git add");
+        assert!(added.success(), "git add must succeed");
+        let committed = Command::new("git")
+            .args([
+                "-c",
+                "user.name=TraceDecay Test",
+                "-c",
+                "user.email=tracedecay@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "test: initial",
+            ])
+            .current_dir(&project)
+            .status()
+            .expect("run git commit");
+        assert!(committed.success(), "git commit must succeed");
+    }
+    let handshake = DaemonHandshake {
+        project_path: Some(project.clone()),
+        client_identity,
+        ..test_handshake_defaults()
+    };
+    let _database_scope = enter_test_daemon_database_scope(&profile_root, label);
+    let engine = test_daemon_engine_for_profile(&profile_root);
+    let server = engine
+        .project_server(&handshake)
+        .await
+        .expect("fresh project-open owners");
+    let graph = server.cg().await;
+    let canonical_project = graph.project_root().to_path_buf();
+    let replay_root = graph.hook_store_layout().data_root.clone();
+
+    assert!(
+        engine
+            .invocation
+            .lsp_owner(Some(&canonical_project))
+            .await
+            .is_some(),
+        "fresh project open must retain its LSP owner"
+    );
+    assert_eq!(
+        engine
+            .invocation
+            .feedback_cycle(Some(&canonical_project))
+            .await
+            .is_some(),
+        matches!(git_state, ProjectGitState::Committed),
+        "feedback cycle presence must follow exact committed Git identity"
+    );
+    assert!(
+        crate::daemon::hook_v2_replay::hook_v2_replay_consumer_registered(&replay_root),
+        "fresh project open must start Hook V2 replay"
+    );
+    engine.shutdown_all().await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn fresh_committed_project_open_mounts_feedback_before_lsp() {
+    assert_fresh_project_open_owners("committed-project-open-owners", ProjectGitState::Committed)
+        .await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn non_git_project_open_retains_lsp_and_starts_hook_replay() {
+    assert_fresh_project_open_owners("non-git-project-open-owners", ProjectGitState::NonGit).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn unborn_git_project_open_retains_lsp_and_starts_hook_replay() {
+    assert_fresh_project_open_owners("unborn-project-open-owners", ProjectGitState::Unborn).await;
+}
+
+#[cfg(unix)]
+async fn maintenance_owner_fixture(
+    label: &str,
+) -> (
+    TempDir,
+    crate::db::DaemonDatabaseScope,
+    DaemonEngine,
+    ProjectServerKey,
+    DaemonHandshake,
+) {
+    let temp = TempDir::new().expect("maintenance fixture");
+    let project = temp.path().join("project");
+    let profile_root = temp.path().join("profile");
+    std::fs::create_dir_all(project.join("src")).expect("maintenance fixture project");
+    std::fs::write(project.join("src/main.rs"), "fn main() {}\n")
+        .expect("maintenance fixture source");
+    let client_identity = test_client_identity_for(profile_root.clone());
+    initialize_test_project(&project, &client_identity).await;
+    let handshake = DaemonHandshake {
+        project_path: Some(project.clone()),
+        client_identity,
+        ..test_handshake_defaults()
+    };
+    let engine = test_daemon_engine_for_profile(&profile_root);
+    let database_scope = enter_test_daemon_database_scope(&profile_root, label);
+    let cg = super::super::open_project_for_handshake(
+        &project,
+        &handshake,
+        &engine.store_administration,
+    )
+    .await
+    .expect("open maintenance fixture through daemon authority");
+    let key =
+        ProjectServerKey::from_open_project(&cg, &handshake).expect("maintenance fixture owner");
+    let server = crate::mcp::McpServer::new_with_global_db(cg, None, None).await;
+    engine
+        .store_administration
+        .project_servers()
+        .lock()
+        .await
+        .insert(key.clone(), server);
+    (temp, database_scope, engine, key, handshake)
+}
+
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn project_server_cache_hit_skips_open_and_singleflights_first_miss() {
     const PHASE_TIMEOUT: tokio::time::Duration = tokio::time::Duration::from_secs(20);
@@ -9,18 +160,12 @@ async fn project_server_cache_hit_skips_open_and_singleflights_first_miss() {
     let project = temp.path().join("project");
     let project_alias = temp.path().join("project-alias");
     let profile_root = temp.path().join("profile");
-    std::fs::create_dir_all(&project).expect("project dir");
+    std::fs::create_dir_all(project.join("src")).expect("project dir");
+    std::fs::write(project.join("src/main.rs"), "fn main() {}\n").expect("project source");
     std::os::unix::fs::symlink(&project, &project_alias).expect("project alias");
     let client_identity = test_client_identity_for(profile_root.clone());
-    let options = crate::tracedecay::TraceDecayOpenOptions {
-        profile_root: Some(profile_root.clone()),
-        global_db_path: Some(client_identity.global_db_path.clone()),
-    };
     eprintln!("[cache-test] phase=init start");
-    let initialized = crate::tracedecay::TraceDecay::init_with_options(&project, options)
-        .await
-        .expect("initialize project");
-    drop(initialized);
+    initialize_test_project(&project, &client_identity).await;
     let mut config = crate::config::load_config(&project).expect("load project config");
     config.sync.session_start_sync = false;
     crate::config::save_config(&project, &config)
@@ -40,7 +185,7 @@ async fn project_server_cache_hit_skips_open_and_singleflights_first_miss() {
     let _database_scope =
         crate::db::enter_daemon_database_scope(&profile_root, 1, "project-server-cache-test")
             .expect("daemon database scope");
-    let engine = DaemonEngine::default();
+    let engine = test_daemon_engine_for_profile(&profile_root);
     let direct_route = super::super::ProjectRouteKey::from_handshake(&project, &direct).unwrap();
     let alias_route = super::super::ProjectRouteKey::from_handshake(
         &project.canonicalize().expect("canonical project"),
@@ -174,6 +319,7 @@ async fn project_server_cache_hit_skips_open_and_singleflights_first_miss() {
     eprintln!(
         "same_worktree_live_engine_proxy clients={PARALLEL_CLIENT_IDENTITIES} open_attempts=1 retained_servers={retained_servers} cache_hits={PARALLEL_CLIENT_IDENTITIES}"
     );
+    let released_server = Arc::downgrade(&direct_server);
     drop(cached);
     drop(alias_server);
     drop(direct_server);
@@ -181,6 +327,10 @@ async fn project_server_cache_hit_skips_open_and_singleflights_first_miss() {
     tokio::time::timeout(PHASE_TIMEOUT, engine.shutdown_all())
         .await
         .expect("cache-test shutdown phase timed out");
+    assert!(
+        released_server.upgrade().is_none(),
+        "shutdown must break the server-to-administration ownership cycle"
+    );
     eprintln!("[cache-test] phase=shutdown done");
 }
 
@@ -193,16 +343,7 @@ async fn interrupted_post_insert_activation_retains_maintenance_ownership() {
     std::fs::create_dir_all(project.join("src")).expect("project dir");
     std::fs::write(project.join("src/main.rs"), "fn main() {}\n").expect("source file");
     let client_identity = test_client_identity_for(profile_root.clone());
-    let initialized = crate::tracedecay::TraceDecay::init_with_options(
-        &project,
-        crate::tracedecay::TraceDecayOpenOptions {
-            profile_root: Some(profile_root.clone()),
-            global_db_path: Some(client_identity.global_db_path.clone()),
-        },
-    )
-    .await
-    .expect("initialize project");
-    drop(initialized);
+    initialize_test_project(&project, &client_identity).await;
     let handshake = DaemonHandshake {
         project_path: Some(project),
         client_identity,
@@ -211,7 +352,7 @@ async fn interrupted_post_insert_activation_retains_maintenance_ownership() {
     let _database_scope =
         crate::db::enter_daemon_database_scope(&profile_root, 1, "interrupted-activation-test")
             .expect("daemon database scope");
-    let engine = DaemonEngine::default();
+    let engine = test_daemon_engine_for_profile(&profile_root);
 
     let (published_tx, published_rx) = tokio::sync::oneshot::channel();
     let request_engine = engine.clone();
@@ -549,19 +690,10 @@ fn database_owner_registry_evicts_lru_idle_and_protects_active_leases() {
 #[cfg(unix)]
 #[tokio::test]
 async fn project_rekey_cancels_stale_repair_owner_and_acquires_new_owner_once() {
-    let engine = DaemonEngine::default();
-    let old = ProjectServerKey {
-        owner: StoreOwnerKey {
-            profile_root: PathBuf::from("/profile"),
-            global_db_path: PathBuf::from("/profile/global.db"),
-            project_id: Some("project".to_string()),
-            store_root: PathBuf::from("/store"),
-            graph_db_path: PathBuf::from("/store/old.db"),
-        },
-        scope_prefix: None,
-    };
-    let mut new = old.clone();
-    new.owner.graph_db_path = PathBuf::from("/store/new.db");
+    let (_fixture, _database_scope, engine, new, handshake) =
+        maintenance_owner_fixture("project-rekey-test").await;
+    let mut old = new.clone();
+    old.owner.graph_db_path = old.owner.graph_db_path.with_extension("retiring.db");
     let task = tokio::spawn(std::future::pending::<()>());
     let stale_task = task.abort_handle();
     engine
@@ -575,8 +707,8 @@ async fn project_rekey_cancels_stale_repair_owner_and_acquires_new_owner_once() 
         .rekey_project_maintenance(
             &old,
             new.clone(),
-            PathBuf::from("/moved-project"),
-            test_handshake_defaults(),
+            handshake.project_path.clone().expect("project path"),
+            handshake,
             true,
         )
         .await;
@@ -1065,19 +1197,11 @@ async fn released_repair_tombstone_allows_one_eventual_replacement() {
         MemoryRepairSchedulerLifecycle, MemoryRepairSchedulerReconcileOutcome,
     };
 
-    let engine = DaemonEngine::default();
-    let old = ProjectServerKey {
-        owner: StoreOwnerKey {
-            profile_root: PathBuf::from("/profile"),
-            global_db_path: PathBuf::from("/profile/global.db"),
-            project_id: Some("project".to_string()),
-            store_root: PathBuf::from("/store"),
-            graph_db_path: PathBuf::from("/store/old.db"),
-        },
-        scope_prefix: None,
-    };
-    let mut new = old.clone();
-    new.owner.graph_db_path = PathBuf::from("/store/new.db");
+    let (_fixture, _database_scope, engine, new, handshake) =
+        maintenance_owner_fixture("repair-tombstone-test").await;
+    let project_path = handshake.project_path.clone().expect("project path");
+    let mut old = new.clone();
+    old.owner.graph_db_path = old.owner.graph_db_path.with_extension("retiring.db");
     let (task, started_rx, completed_rx, release) = spawn_noncooperative_test_task();
     started_rx
         .await
@@ -1094,8 +1218,8 @@ async fn released_repair_tombstone_allows_one_eventual_replacement() {
         engine.rekey_project_maintenance(
             &old,
             new.clone(),
-            PathBuf::from("/moved-project"),
-            test_handshake_defaults(),
+            project_path.clone(),
+            handshake.clone(),
             true,
         ),
     )
@@ -1109,11 +1233,7 @@ async fn released_repair_tombstone_allows_one_eventual_replacement() {
         .is_some_and(|owner| owner.lifecycle == MemoryRepairSchedulerLifecycle::Retiring);
     let reconcile = tokio::time::timeout(
         std::time::Duration::from_secs(2),
-        engine.ensure_memory_repair_scheduler(
-            new.clone(),
-            PathBuf::from("/moved-project"),
-            test_handshake_defaults(),
-        ),
+        engine.ensure_memory_repair_scheduler(new.clone(), project_path.clone(), handshake.clone()),
     )
     .await
     .ok();
@@ -1130,13 +1250,7 @@ async fn released_repair_tombstone_allows_one_eventual_replacement() {
     let completed = tokio::time::timeout(std::time::Duration::from_secs(2), completed_rx).await;
     let replaced = tokio::time::timeout(
         std::time::Duration::from_secs(2),
-        engine.rekey_project_maintenance(
-            &old,
-            new.clone(),
-            PathBuf::from("/moved-project"),
-            test_handshake_defaults(),
-            true,
-        ),
+        engine.rekey_project_maintenance(&old, new.clone(), project_path, handshake, true),
     )
     .await;
     let (owner_count, owns_new, live_replacement) = {
@@ -1205,15 +1319,24 @@ async fn released_automation_tombstone_allows_one_eventual_replacement() {
     let client_identity = test_client_identity_for(profile_root);
     std::fs::create_dir_all(project.join("src")).expect("src dir");
     std::fs::write(project.join("src/main.rs"), "fn main() {}\n").expect("source file");
-    let cg = crate::tracedecay::TraceDecay::init_with_options(
+    initialize_test_project(&project, &client_identity).await;
+    let engine = test_daemon_engine_for_profile(&client_identity.profile_root);
+    let _database_scope = enter_test_daemon_database_scope(
+        &client_identity.profile_root,
+        "automation-tombstone-test",
+    );
+    let handshake = DaemonHandshake {
+        project_path: Some(project.clone()),
+        client_identity,
+        ..test_handshake_defaults()
+    };
+    let cg = super::super::open_project_for_handshake(
         &project,
-        crate::tracedecay::TraceDecayOpenOptions {
-            profile_root: Some(client_identity.profile_root.clone()),
-            global_db_path: Some(client_identity.global_db_path.clone()),
-        },
+        &handshake,
+        &engine.store_administration,
     )
     .await
-    .expect("project init");
+    .expect("open automation fixture through daemon authority");
     let dashboard_root = cg.store_layout().dashboard_root.clone();
     save_scheduled_automation(&dashboard_root, true).await;
     save_scheduler_control(
@@ -1222,21 +1345,22 @@ async fn released_automation_tombstone_allows_one_eventual_replacement() {
     )
     .await
     .expect("pause scheduler work");
-    let handshake = DaemonHandshake {
-        project_path: Some(project.clone()),
-        client_identity,
-        ..test_handshake_defaults()
-    };
     let new = ProjectServerKey::from_open_project(&cg, &handshake).expect("new owner key");
     let mut old = new.clone();
     old.owner.graph_db_path = old.owner.graph_db_path.with_extension("retiring.db");
+    let server = crate::mcp::McpServer::new_with_global_db(cg, None, None).await;
 
     let (task, started_rx, completed_rx, release) = spawn_noncooperative_test_task();
     tokio::time::timeout(std::time::Duration::from_secs(2), started_rx)
         .await
         .expect("noncooperative owner start timed out")
         .expect("noncooperative owner start sender dropped");
-    let engine = DaemonEngine::default();
+    engine
+        .store_administration
+        .project_servers()
+        .lock()
+        .await
+        .insert(new.clone(), server);
     engine
         .store_administration
         .automation_schedulers()
@@ -1383,33 +1507,19 @@ async fn released_automation_tombstone_allows_one_eventual_replacement() {
 #[cfg(unix)]
 #[tokio::test]
 async fn concurrent_project_rekeys_are_bounded_and_keep_one_repair_owner() {
-    let engine = DaemonEngine::default();
-    let old = ProjectServerKey {
-        owner: StoreOwnerKey {
-            profile_root: PathBuf::from("/profile"),
-            global_db_path: PathBuf::from("/profile/global.db"),
-            project_id: Some("project".to_string()),
-            store_root: PathBuf::from("/store"),
-            graph_db_path: PathBuf::from("/store/old.db"),
-        },
-        scope_prefix: None,
-    };
-    let mut new = old.clone();
-    new.owner.graph_db_path = PathBuf::from("/store/new.db");
+    let (_fixture, _database_scope, engine, new, handshake) =
+        maintenance_owner_fixture("concurrent-project-rekey-test").await;
+    let project_path = handshake.project_path.clone().expect("project path");
+    let mut old = new.clone();
+    old.owner.graph_db_path = old.owner.graph_db_path.with_extension("retiring.db");
     let first = engine.rekey_project_maintenance(
         &old,
         new.clone(),
-        PathBuf::from("/moved-project"),
-        test_handshake_defaults(),
+        project_path.clone(),
+        handshake.clone(),
         true,
     );
-    let second = engine.rekey_project_maintenance(
-        &old,
-        new.clone(),
-        PathBuf::from("/moved-project"),
-        test_handshake_defaults(),
-        true,
-    );
+    let second = engine.rekey_project_maintenance(&old, new.clone(), project_path, handshake, true);
 
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         tokio::join!(first, second);

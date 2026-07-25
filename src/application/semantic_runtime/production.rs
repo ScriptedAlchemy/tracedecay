@@ -1059,7 +1059,7 @@ impl ProductionSemanticRuntimeV1 {
         fallback: Arc<Pr9FallbackSubpayload>,
     ) -> Result<SemanticQueryServiceOutcomeV1, SemanticQueryServiceError>
     where
-        C: SemanticExecutionControl,
+        C: SemanticExecutionControl + Sync,
     {
         let source_manifest_digest =
             semantic_source_manifest_digest(code_generation.projection().request());
@@ -1333,10 +1333,10 @@ impl PreparedSemanticEvaluationGenerationV1 {
         request
             .validate()
             .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
-        let embedder = self.query_factory.create(Arc::new(|| false));
         let control = SemanticEvaluationExecutionControlV1 {
             started: std::time::Instant::now(),
         };
+        let embedder = self.query_factory.create(&control);
         let scoped_vectors = ScopedSemanticEvaluationVectorReadPortV1 {
             inner: &self.vectors,
             allowed_chunks: context.semantic_allowed_chunks,
@@ -1912,7 +1912,7 @@ pub fn compose_application_semantic_search<'a, V, C>(
 ) -> Result<SemanticQueryServiceOutcomeV1, SemanticQueryServiceError>
 where
     V: SemanticVectorReadPort,
-    C: SemanticExecutionControl,
+    C: SemanticExecutionControl + Sync,
 {
     let readiness = semantic_lane_readiness_for_request(handle, request, generation, calibration);
     match readiness {
@@ -1933,7 +1933,7 @@ where
                     fallback,
                 );
             };
-            let embedder = factory.create(Arc::new(|| false));
+            let embedder = factory.create(control);
             let lane = SemanticCodeRetriever::new(&embedder, vectors, control);
             CalibratedSemanticQueryService::new(&lane).execute(
                 SemanticLaneReadinessV1::Ready {
@@ -1967,7 +1967,7 @@ pub async fn compose_project_application_semantic_search<C>(
     fallback: Arc<Pr9FallbackSubpayload>,
 ) -> Result<SemanticQueryServiceOutcomeV1, SemanticQueryServiceError>
 where
-    C: SemanticExecutionControl,
+    C: SemanticExecutionControl + Sync,
 {
     let Some(runtime) = project_semantic_production_runtime(project_root) else {
         return CalibratedSemanticQueryService::new(&NeverCalledSemanticLane).execute(
@@ -2192,6 +2192,7 @@ pub fn register_project_semantic_runtime(
 
 /// Drop a retained project semantic handle.
 pub fn unregister_project_semantic_runtime(project_root: &Path) {
+    super::unregister_project_semantic_redundancy_generation(project_root);
     project_semantic_handles()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -2272,11 +2273,15 @@ pub fn production_saved_generation_schedule_hook(
     project_semantic_production_runtimes()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert(project_root, runtime.as_ref().clone());
+        .insert(project_root.clone(), runtime.as_ref().clone());
     Arc::new(move |generation| {
         if generation.snapshot().worktree.as_ref() != Some(&worktree_id) {
             return false;
         }
+        super::register_project_semantic_redundancy_generation(
+            project_root.clone(),
+            generation.clone(),
+        );
         let runtime = Arc::clone(&runtime);
         let generation = generation.clone();
         let Ok(tokio) = tokio::runtime::Handle::try_current() else {
@@ -2467,18 +2472,23 @@ async fn replace_legacy_vectors_after_rebuild(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::mpsc;
 
     use tokio::sync::oneshot;
     use tracedecay_domain::configuration::{ConfigurationRevisionId, ConfigurationSnapshotId};
     use tracedecay_domain::{
-        BoundedSanitizedText, ChangedCodeChunkSetV1, ChunkerRevision, CodeGenerationId,
+        AdmittedEmbeddingProjectionKeyV1, AuthorizationRevision, BoundedSanitizedText,
+        CalibrationProfileId, ChangedCodeChunkSetV1, ChunkerRevision, CodeGenerationId,
         CodeSearchChunkAnchorV1, CodeSearchChunkGrainV1, CodeSearchChunkId, CodeSearchChunkV1,
-        ContentDigest, FileOccurrenceId, LanguageDescriptorRevision, ManifestDigest,
-        PolicyRevisionId, ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionReplayReasonV1,
-        SanitizerRevision, SensitivityDecision, SensitivityLevelV1, SourceSpan,
-        VectorGenerationIdV1,
+        ContentDigest, EphemeralSanitizedQueryViewV1, FallbackSubpayloadDigest, FileOccurrenceId,
+        FusionProfileId, LanguageDescriptorRevision, ManifestDigest, PolicyRevisionId, PrincipalId,
+        ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionReplayReasonV1, PublicRetrieverStatus,
+        QueryDigest, QueryMac, QueryNormalizationRevision, RepositoryId, RetrievalRequest,
+        RetrievalScope, RetrievalSnapshot, RetrieverKind, SanitizerRevision, SensitivityDecision,
+        SensitivityLevelV1, SingleRootScopeV1, SourceSpan, TemporalModeV1, VectorGenerationIdV1,
+        VectorWatermark,
     };
 
     use crate::semantic_code::{
@@ -2533,6 +2543,103 @@ mod tests {
             .expect("configuration snapshot"),
             effective_behavior_digest: ManifestDigest::new(format!("sha256:{}", "e".repeat(64)))
                 .expect("configuration digest"),
+        }
+    }
+
+    fn composition_request<'a>(
+        query_view: &'a EphemeralSanitizedQueryViewV1,
+        projection: &'a AdmittedEmbeddingProjectionKeyV1,
+        source: CodeGenerationId,
+        vector: VectorGenerationIdV1,
+    ) -> SemanticRetrievalRequestV1<'a> {
+        let query_digest = QueryDigest::new(
+            projection.privacy_domain().clone(),
+            projection.privacy_key_epoch(),
+            QueryMac::new(format!("hmac-sha256:{}", "33".repeat(32))).expect("query MAC"),
+        );
+        let budget = tracedecay_domain::RetrievalBudget {
+            max_candidates_per_lane: 8,
+            max_fused_candidates: 16,
+            max_hydrated_results: 8,
+            max_hydration_bytes: 65_536,
+            deadline_micros: None,
+        };
+        SemanticRetrievalRequestV1 {
+            base: RetrievalRequest {
+                principal: PrincipalId::try_from("principal.fixture".to_owned())
+                    .expect("principal"),
+                scope: RetrievalScope {
+                    privacy_domain: projection.privacy_domain().clone(),
+                    root: SingleRootScopeV1 {
+                        repository: RepositoryId::try_from("repository.fixture".to_owned())
+                            .expect("repository"),
+                        worktree: None,
+                        reference: None,
+                    },
+                },
+                temporal_mode: TemporalModeV1::Current,
+                snapshot: RetrievalSnapshot {
+                    watermarks: VectorWatermark::default(),
+                    freshness_digest: tracedecay_domain::FreshnessVectorDigest::try_from(format!(
+                        "sha256:{}",
+                        "a".repeat(64)
+                    ))
+                    .expect("freshness"),
+                    authorization_revision: AuthorizationRevision::try_from(
+                        "authorization.v1".to_owned(),
+                    )
+                    .expect("authorization"),
+                    captured_at: UtcMicros(1),
+                },
+                profile_id: FusionProfileId::try_from("profile.semantic.v1".to_owned())
+                    .expect("profile"),
+                budget,
+            },
+            query_digest,
+            query_view,
+            projection,
+            capability_manifest_digest: ManifestDigest::new(format!("sha256:{}", "b".repeat(64)))
+                .expect("capability"),
+            vector_generation: vector,
+            code_generation: source,
+            budget,
+        }
+    }
+
+    fn composition_fallback() -> Arc<Pr9FallbackSubpayload> {
+        let mut fallback = Pr9FallbackSubpayload {
+            profile_id: FusionProfileId::try_from("profile.pr9.semantic-contract.v1".to_owned())
+                .expect("profile"),
+            ordered_candidates: Vec::new(),
+            public_pr9_lane_coverage: BTreeMap::from([
+                (RetrieverKind::ExactLiteral, PublicRetrieverStatus::Complete),
+                (RetrieverKind::Lexical, PublicRetrieverStatus::Complete),
+                (RetrieverKind::Graph, PublicRetrieverStatus::Complete),
+            ]),
+            freshness: Vec::new(),
+            cursor: None,
+            digest: FallbackSubpayloadDigest::new(format!("sha256:{}", "0".repeat(64)))
+                .unwrap_or_else(|_| panic!("digest")),
+        };
+        fallback.digest = fallback.compute_digest().expect("fallback digest");
+        Arc::new(fallback)
+    }
+
+    fn composition_calibration(
+        request: &SemanticRetrievalRequestV1<'_>,
+    ) -> SemanticCalibrationProfileV1 {
+        SemanticCalibrationProfileV1 {
+            calibration_profile_id: CalibrationProfileId::try_from(
+                "calibration.semantic.fixture.v1".to_owned(),
+            )
+            .expect("calibration profile"),
+            cohort_digest: ManifestDigest::new(format!("sha256:{}", "7".repeat(64)))
+                .expect("cohort digest"),
+            projection_key: request.projection.projection_key().clone(),
+            vector_generation: request.vector_generation.clone(),
+            capability_manifest_digest: request.capability_manifest_digest.clone(),
+            maximum_distance_micros: i64::MAX,
+            minimum_margin_micros: 0,
         }
     }
 
@@ -2928,6 +3035,103 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn live_request_cancellation_reaches_query_runtime_before_vector_scan() {
+        struct PanicVectors;
+
+        impl SemanticVectorReadPort for PanicVectors {
+            fn scan_exact_flat(
+                &self,
+                _request: SemanticVectorReadRequestV1<'_>,
+                _visit: &mut dyn FnMut(&SemanticVectorRecordV1) -> Result<(), RetrievalPortError>,
+            ) -> Result<SemanticVectorScanSummaryV1, RetrievalPortError> {
+                panic!("cancelled query runtime must not scan vectors")
+            }
+        }
+
+        struct CancelAtRuntimeBoundary {
+            checks: AtomicUsize,
+        }
+
+        impl SemanticExecutionControl for CancelAtRuntimeBoundary {
+            fn is_cancelled(&self) -> bool {
+                self.checks.fetch_add(1, Ordering::SeqCst) != 0
+            }
+
+            fn elapsed_micros(&self) -> u64 {
+                0
+            }
+        }
+
+        let handle = DaemonSemanticRuntimeHandleV1::new(1, 8, 1 << 20).expect("handle");
+        let published = pointer('q', 'q');
+        let source = published.source_generation.clone();
+        let vector = published.generation.clone();
+        handle.schedule(SemanticRuntimeWorkV1::new(
+            source.clone(),
+            1,
+            move |_progress| async move {
+                Ok(PreparedSemanticRuntimeCommitV1::new(move || async move {
+                    Ok(published)
+                }))
+            },
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while handle.current().is_none() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("current generation published");
+        let authority = crate::semantic_code::session_pool::tests::authority();
+        handle
+            .bind_query_runtime_for_current(Arc::new(authority.clone()))
+            .expect("bind query runtime");
+
+        let query_view = EphemeralSanitizedQueryViewV1::sanitize(
+            "cancel before session acquisition",
+            SanitizerRevision::try_from("sanitizer.v1".to_owned()).expect("sanitizer"),
+            QueryNormalizationRevision::try_from("normalizer.v1".to_owned()).expect("normalizer"),
+        )
+        .expect("query view");
+        let request = composition_request(&query_view, authority.projection(), source, vector);
+        let complete = CompleteSemanticGenerationV1::new(
+            request.projection.projection_key().clone(),
+            request.vector_generation.clone(),
+            request.code_generation.clone(),
+            request.capability_manifest_digest.clone(),
+        )
+        .expect("complete generation");
+        let calibration = composition_calibration(&request);
+        let control = CancelAtRuntimeBoundary {
+            checks: AtomicUsize::new(0),
+        };
+
+        let outcome = compose_application_semantic_search(
+            &handle,
+            &request,
+            &complete,
+            Some(&calibration),
+            &PanicVectors,
+            &control,
+            SemanticQueryModeV1::FallbackAllowed,
+            composition_fallback(),
+        )
+        .expect("cancelled semantic composition");
+
+        assert!(matches!(
+            outcome,
+            SemanticQueryServiceOutcomeV1::Fallback {
+                abstention: crate::query::retrieval::semantic::SemanticAbstentionV1::Cancelled,
+                ..
+            }
+        ));
+        assert!(
+            control.checks.load(Ordering::SeqCst) >= 2,
+            "query runtime must poll the same live request control"
+        );
+    }
+
+    #[tokio::test]
     async fn current_scheduler_pointer_without_persisted_receipt_stays_degraded() {
         let handle = DaemonSemanticRuntimeHandleV1::new(1, 8, 1 << 20).expect("handle");
         let published = pointer('r', 'r');
@@ -3009,15 +3213,6 @@ mod tests {
 
     #[tokio::test]
     async fn compose_application_search_skips_retriever_while_indexing() {
-        use std::collections::BTreeMap;
-        use tracedecay_domain::{
-            AuthorizationRevision, EphemeralSanitizedQueryViewV1, FallbackSubpayloadDigest,
-            FusionProfileId, PrincipalId, PublicRetrieverStatus, QueryDigest, QueryMac,
-            QueryNormalizationRevision, RepositoryId, RetrievalRequest, RetrievalScope,
-            RetrievalSnapshot, RetrieverKind, SanitizerRevision, SingleRootScopeV1, TemporalModeV1,
-            VectorWatermark,
-        };
-
         let handle = DaemonSemanticRuntimeHandleV1::new(1, 8, 1 << 20).expect("handle");
         let (started_tx, started_rx) = oneshot::channel::<()>();
         let (release_tx, release_rx) = oneshot::channel::<()>();
@@ -3067,80 +3262,14 @@ mod tests {
             QueryNormalizationRevision::try_from("normalizer.v1".to_owned()).expect("normalizer"),
         )
         .expect("query view");
-        let query_digest = QueryDigest::new(
-            authority.projection().privacy_domain().clone(),
-            authority.projection().privacy_key_epoch(),
-            QueryMac::new(format!("hmac-sha256:{}", "33".repeat(32))).expect("mac"),
-        );
-        let budget = tracedecay_domain::RetrievalBudget {
-            max_candidates_per_lane: 8,
-            max_fused_candidates: 16,
-            max_hydrated_results: 8,
-            max_hydration_bytes: 65_536,
-            deadline_micros: None,
-        };
-        let request = SemanticRetrievalRequestV1 {
-            base: RetrievalRequest {
-                principal: PrincipalId::try_from("principal.fixture".to_owned())
-                    .expect("principal"),
-                scope: RetrievalScope {
-                    privacy_domain: authority.projection().privacy_domain().clone(),
-                    root: SingleRootScopeV1 {
-                        repository: RepositoryId::try_from("repository.fixture".to_owned())
-                            .expect("repository"),
-                        worktree: None,
-                        reference: None,
-                    },
-                },
-                temporal_mode: TemporalModeV1::Current,
-                snapshot: RetrievalSnapshot {
-                    watermarks: VectorWatermark::default(),
-                    freshness_digest: tracedecay_domain::FreshnessVectorDigest::try_from(format!(
-                        "sha256:{}",
-                        "a".repeat(64)
-                    ))
-                    .expect("freshness"),
-                    authorization_revision: AuthorizationRevision::try_from(
-                        "authorization.v1".to_owned(),
-                    )
-                    .expect("authorization"),
-                    captured_at: UtcMicros(1),
-                },
-                profile_id: FusionProfileId::try_from("profile.semantic.v1".to_owned())
-                    .expect("profile"),
-                budget,
-            },
-            query_digest,
-            query_view: &query_view,
-            projection: authority.projection(),
-            capability_manifest_digest: ManifestDigest::new(format!("sha256:{}", "b".repeat(64)))
-                .expect("capability"),
-            vector_generation: vector.clone(),
-            code_generation: source.clone(),
-            budget,
-        };
+        let request = composition_request(&query_view, authority.projection(), source, vector);
         let complete = CompleteSemanticGenerationV1::new(
-            authority.projection().projection_key().clone(),
-            vector,
-            source,
+            request.projection.projection_key().clone(),
+            request.vector_generation.clone(),
+            request.code_generation.clone(),
             request.capability_manifest_digest.clone(),
         )
         .expect("complete generation");
-        let mut fallback = Pr9FallbackSubpayload {
-            profile_id: FusionProfileId::try_from("profile.pr9.semantic-contract.v1".to_owned())
-                .expect("profile"),
-            ordered_candidates: Vec::new(),
-            public_pr9_lane_coverage: BTreeMap::from([
-                (RetrieverKind::ExactLiteral, PublicRetrieverStatus::Complete),
-                (RetrieverKind::Lexical, PublicRetrieverStatus::Complete),
-                (RetrieverKind::Graph, PublicRetrieverStatus::Complete),
-            ]),
-            freshness: Vec::new(),
-            cursor: None,
-            digest: FallbackSubpayloadDigest::new(format!("sha256:{}", "0".repeat(64)))
-                .unwrap_or_else(|_| panic!("digest")),
-        };
-        fallback.digest = fallback.compute_digest().expect("fallback digest");
 
         let outcome = compose_application_semantic_search(
             &handle,
@@ -3150,7 +3279,7 @@ mod tests {
             &PanicVectors,
             &IdleControl,
             SemanticQueryModeV1::FallbackAllowed,
-            Arc::new(fallback),
+            composition_fallback(),
         )
         .expect("compose while indexing");
         assert!(matches!(

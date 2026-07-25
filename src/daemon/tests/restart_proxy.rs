@@ -130,6 +130,7 @@ async fn initialize_root_routing_replaces_cached_project_and_scope() {
         .upsert_code_project("project-b", &project_b, None, None, None)
         .await
         .expect("register project b");
+    drop(registry);
     let mut base_handshake = test_handshake_defaults();
     base_handshake.project_path = Some(project_a.clone());
     base_handshake.scope_prefix = Some("src".to_string());
@@ -137,7 +138,9 @@ async fn initialize_root_routing_replaces_cached_project_and_scope() {
     base_handshake.client_identity = test_client_identity_for(profile.path().to_path_buf());
     base_handshake.client_identity.global_db_path = global_db_path;
     let mut routed_handshake = base_handshake.clone();
-    let store_administration = super::super::StoreAdministration::default();
+    let store_administration = test_store_administration_for_profile(profile.path());
+    let _database_scope =
+        enter_test_daemon_database_scope(profile.path(), "initialize-route-replacement-test");
 
     let line = json!({
         "jsonrpc": "2.0",
@@ -227,11 +230,14 @@ async fn daemon_resolves_registry_only_initialize_root_alias() {
         .upsert_project_alias(&alias, "project-registry-only")
         .await
         .expect("register project alias");
+    drop(registry);
     let mut handshake = test_handshake_defaults();
     handshake.allow_initialize_root_routing = true;
     handshake.client_identity = test_client_identity_for(profile.path().to_path_buf());
     handshake.client_identity.global_db_path = global_db_path;
-    let store_administration = super::super::StoreAdministration::default();
+    let store_administration = test_store_administration_for_profile(profile.path());
+    let _database_scope =
+        enter_test_daemon_database_scope(profile.path(), "initialize-route-alias-test");
     let line = json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -295,7 +301,9 @@ async fn initialize_root_routing_fails_closed_without_pinned_configuration() {
     std::fs::write(&config_path, &legacy_input).expect("write legacy config fixture");
 
     let mut routed_handshake = base_handshake.clone();
-    let store_administration = super::super::StoreAdministration::default();
+    let store_administration = test_store_administration_for_profile(profile.path());
+    let _database_scope =
+        enter_test_daemon_database_scope(profile.path(), "initialize-route-auto-init-test");
     super::super::reset_proxy_handshake_for_initialize(
         &base_handshake,
         &mut routed_handshake,

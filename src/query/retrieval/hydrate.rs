@@ -7,7 +7,7 @@
 //! diversity operate on compact candidates; final context hydration occurs
 //! only here.
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use thiserror::Error;
 use tracedecay_domain::{
@@ -40,7 +40,7 @@ pub struct HydrationPlanV1 {
 /// Implementations may read a cancellation token or a monotonic clock, but
 /// must not expose source payload.
 pub trait HydrationExecutionControlV1 {
-    fn now_micros(&self) -> i64;
+    fn elapsed_micros(&self) -> u64;
 
     fn is_cancelled(&self) -> bool;
 }
@@ -173,15 +173,13 @@ pub struct DeterministicLateHydration<'a, S> {
     source: &'a mut S,
 }
 
-struct SystemHydrationExecutionControl;
+struct SystemHydrationExecutionControl {
+    started: Instant,
+}
 
 impl HydrationExecutionControlV1 for SystemHydrationExecutionControl {
-    fn now_micros(&self) -> i64 {
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .ok()
-            .and_then(|duration| i64::try_from(duration.as_micros()).ok())
-            .unwrap_or(i64::MAX)
+    fn elapsed_micros(&self) -> u64 {
+        u64::try_from(self.started.elapsed().as_micros()).unwrap_or(u64::MAX)
     }
 
     fn is_cancelled(&self) -> bool {
@@ -214,7 +212,9 @@ impl<'a, S> DeterministicLateHydration<'a, S> {
     where
         S: LateHydrationSource<P>,
     {
-        let control = SystemHydrationExecutionControl;
+        let control = SystemHydrationExecutionControl {
+            started: Instant::now(),
+        };
         self.hydrate_with_control(request, selected, budget, &control)
     }
 
@@ -237,8 +237,7 @@ impl<'a, S> DeterministicLateHydration<'a, S> {
         let mut receipts = Vec::with_capacity(selected.len());
 
         for ranked in selected {
-            let outcome = if let Some(reason) =
-                prework_unavailable(request, budget, control, bytes_hydrated)
+            let outcome = if let Some(reason) = prework_unavailable(budget, control, bytes_hydrated)
             {
                 HydrationOutcomeV1::Unavailable(reason)
             } else {
@@ -250,7 +249,7 @@ impl<'a, S> DeterministicLateHydration<'a, S> {
                         HydrationOutcomeV1::Unavailable(reason)
                     }
                     HydrationAuthorizationV1::Authorized => {
-                        let permit = work_permit(request, ranked, budget, control, bytes_hydrated);
+                        let permit = work_permit(ranked, budget, control, bytes_hydrated);
                         match self.source.preflight_authorized(request, ranked, &permit) {
                             HydrationPreflightOutcomeV1::Unavailable(reason) => {
                                 HydrationOutcomeV1::Unavailable(reason)
@@ -265,17 +264,12 @@ impl<'a, S> DeterministicLateHydration<'a, S> {
                             }
                             HydrationPreflightOutcomeV1::Ready { estimated_bytes } => {
                                 if let Some(reason) =
-                                    prework_unavailable(request, budget, control, bytes_hydrated)
+                                    prework_unavailable(budget, control, bytes_hydrated)
                                 {
                                     HydrationOutcomeV1::Unavailable(reason)
                                 } else {
-                                    let permit = work_permit(
-                                        request,
-                                        ranked,
-                                        budget,
-                                        control,
-                                        bytes_hydrated,
-                                    );
+                                    let permit =
+                                        work_permit(ranked, budget, control, bytes_hydrated);
                                     if estimated_bytes > permit.remaining_bytes {
                                         HydrationOutcomeV1::Unavailable(
                                             HydrationUnavailableV1::BudgetExceeded,
@@ -319,7 +313,7 @@ impl<'a, S> DeterministicLateHydration<'a, S> {
         S: LateHydrationSource<P>,
     {
         let read = self.source.hydrate_authorized(request, ranked, permit);
-        if let Some(reason) = prework_unavailable(request, budget, control, *bytes_hydrated) {
+        if let Some(reason) = prework_unavailable(budget, control, *bytes_hydrated) {
             return Ok(HydrationOutcomeV1::Unavailable(reason));
         }
         Ok(match read {
@@ -367,7 +361,6 @@ impl<'a, S> DeterministicLateHydration<'a, S> {
 }
 
 fn prework_unavailable(
-    request: &RetrievalRequest,
     budget: &RetrievalBudget,
     control: &dyn HydrationExecutionControlV1,
     bytes_hydrated: u64,
@@ -378,10 +371,7 @@ fn prework_unavailable(
     if bytes_hydrated >= budget.max_hydration_bytes {
         return Some(HydrationUnavailableV1::BudgetExceeded);
     }
-    let elapsed = control
-        .now_micros()
-        .saturating_sub(request.snapshot.captured_at.0)
-        .max(0) as u64;
+    let elapsed = control.elapsed_micros();
     budget
         .deadline_micros
         .is_some_and(|deadline| elapsed >= deadline)
@@ -389,7 +379,6 @@ fn prework_unavailable(
 }
 
 fn work_permit(
-    request: &RetrievalRequest,
     ranked: &RankedCandidate,
     budget: &RetrievalBudget,
     control: &dyn HydrationExecutionControlV1,
@@ -403,10 +392,7 @@ fn work_permit(
         .collect::<Vec<_>>();
     source_occurrence_ids.sort();
     source_occurrence_ids.dedup();
-    let elapsed = control
-        .now_micros()
-        .saturating_sub(request.snapshot.captured_at.0)
-        .max(0) as u64;
+    let elapsed = control.elapsed_micros();
     HydrationWorkPermitV1 {
         anchor_id: ranked.candidate.anchor_id.clone(),
         source_occurrence_ids,

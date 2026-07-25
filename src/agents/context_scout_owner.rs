@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
-use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tokio::sync::{Mutex, RwLock};
@@ -46,6 +46,26 @@ pub struct ProjectContextScoutOwnerV1 {
     startup: ContextScoutDurableStartupOutcomeV1,
 }
 
+fn registered_context_scout_owners()
+-> &'static StdMutex<BTreeMap<[u8; 16], Vec<Weak<ProjectContextScoutOwnerV1>>>> {
+    static OWNERS: OnceLock<StdMutex<BTreeMap<[u8; 16], Vec<Weak<ProjectContextScoutOwnerV1>>>>> =
+        OnceLock::new();
+    OWNERS.get_or_init(|| StdMutex::new(BTreeMap::new()))
+}
+
+pub(crate) fn lookup_registered_context_scout_owners(
+    project_id: [u8; 16],
+) -> Vec<Arc<ProjectContextScoutOwnerV1>> {
+    let Ok(mut owners) = registered_context_scout_owners().lock() else {
+        return Vec::new();
+    };
+    let Some(project_owners) = owners.get_mut(&project_id) else {
+        return Vec::new();
+    };
+    project_owners.retain(|owner| owner.strong_count() > 0);
+    project_owners.iter().filter_map(Weak::upgrade).collect()
+}
+
 impl ProjectContextScoutOwnerV1 {
     pub async fn startup_configured(
         database: Database,
@@ -74,14 +94,19 @@ impl ProjectContextScoutOwnerV1 {
         .await?;
         let model = context_scout_model_assistant_from_project_config(model_config);
         let runtime = ContextScoutDurableRuntimeV1::new(Arc::clone(&store), model);
-        Some(Arc::new(Self {
+        let owner = Arc::new(Self {
             store,
             runtime: Mutex::new(runtime),
             configuration: RwLock::new(None),
             inflight: StdMutex::new(BTreeMap::new()),
             next_inflight_id: AtomicU64::new(1),
             startup,
-        }))
+        });
+        let mut owners = registered_context_scout_owners().lock().ok()?;
+        let project_owners = owners.entry(project_id).or_default();
+        project_owners.retain(|owner| owner.strong_count() > 0);
+        project_owners.push(Arc::downgrade(&owner));
+        Some(owner)
     }
 
     pub fn store(&self) -> Arc<ProjectContextScoutDurableStoreV1> {
@@ -532,6 +557,30 @@ impl ProjectContextScoutOwnerV1 {
     ) -> ContextScoutDurableClaimOutcomeV1 {
         self.store.claim(address, now, lease).await
     }
+
+    pub async fn claim_delivery_exact(
+        &self,
+        address: ContextScoutAddressV1,
+        window: ContextScoutDeliveryWindowV1,
+        now: UtcMicros,
+        lease: ContextScoutLeaseV1,
+    ) -> ContextScoutDurableClaimOutcomeV1 {
+        if !matches!(
+            window,
+            ContextScoutDeliveryWindowV1::IdleWindow | ContextScoutDeliveryWindowV1::OnRequest
+        ) {
+            return ContextScoutDurableClaimOutcomeV1::Unavailable;
+        }
+        let claimed = self.store.claim(address, now, lease).await;
+        let ContextScoutDurableClaimOutcomeV1::Claimed(claim) = claimed else {
+            return claimed;
+        };
+        if claim.entry.work.address == address && claim.entry.envelope.delivery_window == window {
+            return ContextScoutDurableClaimOutcomeV1::Claimed(claim);
+        }
+        let _ = self.store.requeue(claim).await;
+        ContextScoutDurableClaimOutcomeV1::Empty
+    }
 }
 
 fn delivery_window_admitted_at_hook(
@@ -720,6 +769,26 @@ mod tests {
         assert!(!delivery_window_admitted_at_hook(
             ContextScoutDeliveryWindowV1::IdleWindow,
             &session_end,
+        ));
+    }
+
+    #[test]
+    fn application_claim_windows_are_exact_and_never_inferred_from_hooks() {
+        assert!(matches!(
+            ContextScoutDeliveryWindowV1::IdleWindow,
+            ContextScoutDeliveryWindowV1::IdleWindow
+        ));
+        assert!(matches!(
+            ContextScoutDeliveryWindowV1::OnRequest,
+            ContextScoutDeliveryWindowV1::OnRequest
+        ));
+        assert!(!delivery_window_admitted_at_hook(
+            ContextScoutDeliveryWindowV1::IdleWindow,
+            &HookEventV2::PromptBoundary,
+        ));
+        assert!(!delivery_window_admitted_at_hook(
+            ContextScoutDeliveryWindowV1::OnRequest,
+            &HookEventV2::PromptBoundary,
         ));
     }
 }

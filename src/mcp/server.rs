@@ -133,6 +133,7 @@ pub(crate) struct CodeIndexSearchRequestV1 {
     pub(crate) project_root: PathBuf,
     pub(crate) query: String,
     pub(crate) limit: usize,
+    pub(crate) cursor: Option<tracedecay_domain::RetrievalCursor>,
     pub(crate) mode: CodeIndexSearchModeV1,
     pub(crate) authority: Option<CodeIndexSearchAuthorityV1>,
     pub(crate) deadline: Option<tracedecay_application::Deadline>,
@@ -202,6 +203,7 @@ pub(crate) struct CodeIndexSearchCompletedV1 {
     pub(crate) display_by_anchor:
         HashMap<tracedecay_domain::RetrievalAnchorId, CodeIndexSearchDisplayV1>,
     pub(crate) semantic: CodeIndexSemanticStatusV1,
+    pub(crate) next_cursor: Option<tracedecay_domain::RetrievalCursor>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -370,6 +372,8 @@ pub struct McpServer {
     database_owner_reconciler: Option<DatabaseOwnerReconciler>,
     dashboard_automation_writer: crate::dashboard::DashboardAutomationWriter,
     dashboard_doctor_report_reader: Option<crate::dashboard::DoctorReportReader>,
+    dashboard_doctor_remediation_dispatcher:
+        Option<crate::dashboard::DoctorRemediationDispatcherV1>,
     hook_branch_writer: HookBranchWriter,
     background_refresh_writer: BackgroundRefreshWriter,
     /// Bridge delivering after-edit hook paths into the daemon-owned code-index
@@ -701,6 +705,8 @@ impl McpServer {
             database_owner_reconciler,
             dashboard_automation_writer,
             dashboard_doctor_report_reader,
+            dashboard_doctor_remediation_dispatcher,
+            diagnostics_lsp,
             hook_branch_writer,
             background_refresh_writer,
             code_index_hook_sink,
@@ -743,14 +749,22 @@ impl McpServer {
         // never re-read legacy input, a database, or IPC per call.
         let sync_config = cg.get_config().sync.clone();
         let telemetry_config = cg.get_config().telemetry.clone();
-        let code_diagnostics_settings =
-            crate::diagnostics::lsp::settings::load_settings(&cg.store_layout().dashboard_root)
+        let diagnostics_lsp = match diagnostics_lsp {
+            Some(diagnostics_lsp) => diagnostics_lsp,
+            None => {
+                let code_diagnostics_settings = crate::diagnostics::lsp::settings::load_settings(
+                    &cg.store_layout().dashboard_root,
+                )
                 .await
                 .unwrap_or_default();
-        let diagnostics_lsp = crate::dashboard::code_diagnostics_broker(
-            cg.project_root().to_path_buf(),
-            code_diagnostics_settings,
-        );
+                Arc::new(tokio::sync::Mutex::new(
+                    crate::dashboard::code_diagnostics_broker(
+                        cg.project_root().to_path_buf(),
+                        code_diagnostics_settings,
+                    ),
+                ))
+            }
+        };
         let active_project_id = cg.store_layout().identity.project_id.clone();
         let project_session_retrieval_root = match registry_db.as_deref() {
             Some(registry) => DaemonSessionRetrievalRoot::project(&cg, registry).await,
@@ -845,7 +859,7 @@ impl McpServer {
             tool_call_counts: std::sync::Mutex::new(HashMap::new()),
             identical_read_coalescer: IdenticalReadCoalescer::default(),
             diagnostics_cache: crate::diagnostics::DiagnosticsCache::default(),
-            diagnostics_lsp: Arc::new(tokio::sync::Mutex::new(diagnostics_lsp)),
+            diagnostics_lsp,
             file_token_map: Arc::new(std::sync::Mutex::new(file_token_map)),
             tokens_saved: AtomicU64::new(persisted),
             last_flushed_tokens: AtomicU64::new(persisted),
@@ -876,6 +890,7 @@ impl McpServer {
             database_owner_reconciler,
             dashboard_automation_writer,
             dashboard_doctor_report_reader,
+            dashboard_doctor_remediation_dispatcher,
             hook_branch_writer,
             background_refresh_writer,
             code_index_hook_sink,

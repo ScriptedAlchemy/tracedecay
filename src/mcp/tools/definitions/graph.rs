@@ -27,6 +27,10 @@ pub(super) fn def_search() -> ToolDefinition {
                     "type": "number",
                     "description": "Maximum number of results to return (default: 10)"
                 },
+                "cursor": {
+                    "type": "string",
+                    "description": "Authenticated opaque continuation returned as next_cursor."
+                },
                 "semantic_mode": {
                     "type": "string",
                     "enum": ["fallback_allowed", "strict_semantic"],
@@ -417,6 +421,10 @@ mod semantic_search_tests {
         assert_eq!(
             definition.input_schema["properties"]["semantic_mode"]["enum"],
             serde_json::json!(["fallback_allowed", "strict_semantic"])
+        );
+        assert_eq!(
+            definition.input_schema["properties"]["cursor"]["type"],
+            "string"
         );
     }
 }

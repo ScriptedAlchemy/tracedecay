@@ -69,7 +69,9 @@ pub use github_runtime::{
     ProjectGitHubRegistrarAuthoritiesV1, ProjectGitHubReviewStoreV1,
     build_github_review_runtime_owner_v1, github_anchor_authorities_arc_v1,
     github_anchor_authorities_v1, register_github_read_only_credential_authority_v1,
+    register_profile_github_read_only_credential_authority_v1,
     unregister_github_read_only_credential_authority_v1,
+    unregister_profile_github_read_only_credential_authority_v1,
 };
 pub use host_delivery::{
     Pr13AdvisoryCompletedDeliveryV1, Pr13AdvisoryDaemonStartupErrorV1,

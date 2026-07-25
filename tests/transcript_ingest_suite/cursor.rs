@@ -294,10 +294,9 @@ async fn cursor_pre_compact_uses_cursor_agent_summary_for_lcm() {
     ];
     let project = init_project(&tmp);
     let project_id = mark_test_project(&project);
-    let enrollment =
-        HostAdmissionTestRuntimeV1::project(&profile, &project, project_id.clone())
-            .await
-            .unwrap();
+    let enrollment = HostAdmissionTestRuntimeV1::project(&profile, &project, project_id.clone())
+        .await
+        .unwrap();
     drop(enrollment);
 
     let transcript = tmp.path().join("cursor-session.jsonl");

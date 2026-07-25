@@ -421,8 +421,14 @@ impl StoreAdministration {
                     ),
                 }
             })?;
-        self.session_runtime_registry()
-            .await?
+        let registry = self.session_runtime_registry().await?;
+        // A mounted shard already carries the exact typed enrollment authority
+        // that opened it. Later client routes may be linked-worktree aliases;
+        // reuse by ProjectId instead of treating those paths as new authority.
+        if let Some(database) = registry.mounted_project_sessions(&project_id).await {
+            return Ok(database);
+        }
+        registry
             .project_sessions(project_id, enrollment_roots)
             .await
     }

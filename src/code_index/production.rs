@@ -6,7 +6,10 @@
 //! publication ports own their respective effects, and restart restores only
 //! the immutable generation returned by the publication port.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    sync::{Arc, Mutex},
+};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -148,6 +151,82 @@ struct FileGenerationArtifactsV1 {
     extraction: ExtractionBatchV1,
     artifacts: CodeFileIndexArtifactsV1,
     exact_authority: ExactExtractionAuthorityV1,
+}
+
+const PHYSICAL_CODE_ARTIFACT_REUSE_DIGEST_DOMAIN: &str =
+    "tracedecay.physical-code-artifact-reuse.v1";
+const MAX_PHYSICAL_CODE_ARTIFACTS: usize = 1_024;
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PhysicalCodeArtifactPoolStatsV1 {
+    pub inserted: u64,
+    pub reused: u64,
+}
+
+#[derive(Default)]
+struct PhysicalCodeArtifactPoolStateV1 {
+    artifacts: BTreeMap<ManifestDigest, Arc<FileGenerationArtifactsV1>>,
+    insertion_order: VecDeque<ManifestDigest>,
+    inserted: u64,
+    reused: u64,
+}
+
+/// Registry-scoped physical parse/chunk artifact pool. The key binds every
+/// input that can change extraction or chunking; generation-local artifacts
+/// are rematerialized before they leave the pool.
+#[derive(Clone, Default)]
+pub(crate) struct SharedPhysicalCodeArtifactPoolV1 {
+    state: Arc<Mutex<PhysicalCodeArtifactPoolStateV1>>,
+}
+
+impl SharedPhysicalCodeArtifactPoolV1 {
+    fn reuse(
+        &self,
+        key: &ManifestDigest,
+        generation_id: CodeGenerationId,
+        file_occurrence_id: FileOccurrenceId,
+    ) -> Option<FileGenerationArtifactsV1> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let artifact = state.artifacts.get(key)?.clone();
+        let rebound = artifact
+            .rematerialize_for_generation(generation_id, file_occurrence_id)
+            .ok()?;
+        state.reused = state.reused.saturating_add(1);
+        Some(rebound)
+    }
+
+    fn insert(&self, key: ManifestDigest, artifact: FileGenerationArtifactsV1) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.artifacts.contains_key(&key) {
+            return;
+        }
+        while state.artifacts.len() >= MAX_PHYSICAL_CODE_ARTIFACTS {
+            let Some(evicted) = state.insertion_order.pop_front() else {
+                break;
+            };
+            state.artifacts.remove(&evicted);
+        }
+        state.insertion_order.push_back(key.clone());
+        state.artifacts.insert(key, Arc::new(artifact));
+        state.inserted = state.inserted.saturating_add(1);
+    }
+
+    pub(crate) fn stats(&self) -> PhysicalCodeArtifactPoolStatsV1 {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        PhysicalCodeArtifactPoolStatsV1 {
+            inserted: state.inserted,
+            reused: state.reused,
+        }
+    }
 }
 
 const SEALED_GENERATION_FORMAT_REVISION_V1: u32 = 1;
@@ -529,6 +608,7 @@ pub struct CodeIndexProductionOwnerV1<P, S> {
     config: CodeIndexProductionConfigV1,
     publication: P,
     projection: S,
+    physical_artifacts: SharedPhysicalCodeArtifactPoolV1,
 }
 
 impl<P, S> CodeIndexProductionOwnerV1<P, S>
@@ -546,7 +626,16 @@ where
             config,
             publication,
             projection,
+            physical_artifacts: SharedPhysicalCodeArtifactPoolV1::default(),
         })
+    }
+
+    pub(crate) fn with_physical_artifact_pool(
+        mut self,
+        physical_artifacts: SharedPhysicalCodeArtifactPoolV1,
+    ) -> Self {
+        self.physical_artifacts = physical_artifacts;
+        self
     }
 
     /// Load the currently active immutable generation. A restart therefore
@@ -801,6 +890,26 @@ where
                 "validated snapshot language has no descriptor".to_owned(),
             )
         })?;
+        let physical_reuse_key = canonical_sha256(&(
+            PHYSICAL_CODE_ARTIFACT_REUSE_DIGEST_DOMAIN,
+            &self.config.repository,
+            &file.content_digest,
+            descriptor,
+            &self.config.sanitizer_revision,
+            &self.config.policy_revision,
+            &self.config.chunker_revision,
+            &self.config.privacy_domain,
+            self.config.privacy_key_epoch,
+        ))
+        .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+        if let Some(reused) = self.physical_artifacts.reuse(
+            &physical_reuse_key,
+            manifest.generation_id.clone(),
+            file.file_occurrence_id.clone(),
+        ) {
+            self.checkpoint(control)?;
+            return Ok(reused);
+        }
         let cancellation = ExtractionControlBridge { control };
         let extraction = TreeSitterExtractor::new()
             .extract(&receipt_bound, descriptor, &cancellation)
@@ -826,11 +935,14 @@ where
                 error => CodeIndexProductionErrorV1::Chunk(error),
             })?;
         self.checkpoint(control)?;
-        Ok(FileGenerationArtifactsV1 {
+        let artifact = FileGenerationArtifactsV1 {
             extraction,
             artifacts,
             exact_authority,
-        })
+        };
+        self.physical_artifacts
+            .insert(physical_reuse_key, artifact.clone());
+        Ok(artifact)
     }
 
     fn materialize_full(

@@ -83,6 +83,48 @@ const PROJECTS = {
   ],
 };
 
+const INDEX_FRESHNESS = {
+  schema_revision: 1,
+  scope: {
+    project_id: 'p1',
+    storage_mode: 'profile_sharded',
+    store_root: '/data/projects/p1',
+  },
+  version: { entity_version: null, graph_version: null },
+  time: { valid_time_micros: null, observation_time_micros: 100 },
+  source_watermark: null,
+  authorization: { outcome: 'authorized' },
+  coverage: {
+    completeness: 'unsupported',
+    eligible: null,
+    examined: null,
+    matched: null,
+    excluded: null,
+    omitted: null,
+    unknown: null,
+    denominator: null,
+    unit: null,
+    omission_reasons: [],
+  },
+  freshness: {
+    state: 'unsupported',
+    observed_at_micros: null,
+    watermark: null,
+  },
+  domain_state: 'unsupported',
+  legal_actions: [
+    {
+      kind: 'refresh',
+      operation: 'use-case.dashboard.code-index.freshness.refresh',
+    },
+  ],
+  payload: {
+    worktrees: [],
+    required_source: 'CodeIndexSchedulerRegistry read port',
+    note: 'generation source is not wired',
+  },
+};
+
 function serve(routes: Record<string, { status: number; body: unknown }>) {
   return vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
@@ -96,8 +138,18 @@ function serve(routes: Record<string, { status: number; body: unknown }>) {
   });
 }
 
-function renderDelivery(body: unknown = PROJECTS, status = 200) {
-  vi.stubGlobal('fetch', serve({ '/api/projects': { status, body } }));
+function renderDelivery(
+  body: unknown = PROJECTS,
+  status = 200,
+  freshness: unknown = INDEX_FRESHNESS,
+) {
+  vi.stubGlobal(
+    'fetch',
+    serve({
+      '/api/projects': { status, body },
+      '/api/code-index/freshness': { status: 200, body: freshness },
+    }),
+  );
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0 } },
   });
@@ -141,6 +193,33 @@ describe('DeliveryPage', () => {
     expect(screen.getByText('Releases')).toBeTruthy();
     expect(screen.getByText('Index freshness')).toBeTruthy();
     expect(screen.getByText(/no commit route; branch names only/)).toBeTruthy();
+  });
+
+  it('renders generation freshness from the typed daemon envelope', async () => {
+    renderDelivery(PROJECTS, 200, {
+      ...INDEX_FRESHNESS,
+      coverage: {
+        ...INDEX_FRESHNESS.coverage,
+        completeness: 'partial',
+        eligible: 2,
+        examined: 1,
+        omitted: 1,
+        denominator: 2,
+        unit: 'worktrees',
+        omission_reasons: ['one scheduler generation is unavailable'],
+      },
+      freshness: {
+        state: 'stale',
+        observed_at_micros: 90,
+        watermark: 'generation:4',
+      },
+      domain_state: 'partial',
+    });
+
+    await screen.findByText('Partial');
+    expect(
+      screen.getByText(/generation state stale · 1 of 2 worktrees examined/),
+    ).toBeTruthy();
   });
 
   it('uses the shared ordered freshness meter beside explicit index age', async () => {

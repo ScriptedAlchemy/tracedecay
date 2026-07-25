@@ -14,10 +14,13 @@ use tracedecay_application::{
 };
 use tracedecay_domain::{
     ActorId, AuthorizationRevision, CalibrationProfileId, CommitId, ComponentRevision,
-    DiversityPolicy, EphemeralSanitizedQueryViewV1, ExactAdmissionRuleRevision, FusionProfile,
-    ManifestDigest, PrincipalId, PrivacyDomainId, ProjectId, QueryNormalizationRevision, RefId,
-    RelationEdgeKindV1, RepositoryId, RetrievalBudget, RetrievalCursorKeyId, RetrieverKind,
-    SanitizerRevision, ScoreDomainId, UtcMicros, WorktreeId,
+    DiversityPolicy, EphemeralSanitizedQueryViewV1, ExactAdmissionRuleRevision, ExactClass,
+    FreshnessVectorDigest, FusedCandidate, FusionProfile, LogicalEvidenceId, ManifestDigest,
+    OptionalStagePublicStatus, PrincipalId, PrivacyDomainId, ProjectId, QueryNormalizationRevision,
+    RankedCandidate, RefId, RelationEdgeKindV1, RepositoryId, RerankPolicy, RetrievalAnchorId,
+    RetrievalBudget, RetrievalCursorKeyId, RetrievalRequest, RetrievalScope, RetrievalSnapshot,
+    RetrieverKind, SanitizerRevision, ScoreDomainId, SingleRootScopeV1, TemporalModeV1, UtcMicros,
+    VectorWatermark, WorktreeId,
 };
 
 #[cfg(feature = "semantic-fastembed")]
@@ -41,6 +44,11 @@ use super::{
 };
 use crate::query::retrieval::Pr9QueryAuthorityV1;
 use crate::query::retrieval::fusion::RetrievalCursorKeyringV1;
+use crate::query::retrieval::rerank::{
+    BoundedRerankRuntimeV1, DeterministicLocalRerankExecutorV1, LocalRerankFailureV1,
+    LocalRerankInputV1, LocalRerankPermitV1, RerankExecutionControlV1,
+};
+use crate::semantic_code::rerank_adapter::GenerationBoundCodeRerankViewsV1;
 
 struct GitFixture {
     root: TempDir,
@@ -116,6 +124,42 @@ fn published(outcome: CodeIndexReconcileOutcomeV1) -> super::CodeIndexPublishEvi
     match outcome {
         CodeIndexReconcileOutcomeV1::Published(evidence) => evidence,
         CodeIndexReconcileOutcomeV1::Noop(_) => panic!("expected a published generation"),
+    }
+}
+
+struct MixedAnchorReverseRerankExecutorV1;
+
+impl DeterministicLocalRerankExecutorV1 for MixedAnchorReverseRerankExecutorV1 {
+    fn planned_model_invocations(
+        &self,
+        _candidate_count: u32,
+    ) -> Result<u32, LocalRerankFailureV1> {
+        Ok(1)
+    }
+
+    fn rerank(
+        &self,
+        _policy: &RerankPolicy,
+        inputs: &[LocalRerankInputV1<'_>],
+        _permit: LocalRerankPermitV1,
+    ) -> Result<Vec<RetrievalAnchorId>, LocalRerankFailureV1> {
+        Ok(inputs
+            .iter()
+            .rev()
+            .map(|input| input.candidate.candidate.anchor_id.clone())
+            .collect())
+    }
+}
+
+struct ReadyRerankControlV1;
+
+impl RerankExecutionControlV1 for ReadyRerankControlV1 {
+    fn elapsed_micros(&self) -> u64 {
+        0
+    }
+
+    fn is_cancelled(&self) -> bool {
+        false
     }
 }
 
@@ -342,6 +386,124 @@ fn saved_edit_incremental_publish() {
 }
 
 #[test]
+fn generation_bound_rerank_authorizes_mixed_symbol_and_chunk_anchors() {
+    let fixture = GitFixture::new(&[(
+        "src/lib.rs",
+        "pub fn alpha() -> u32 { 1 }\npub fn beta() -> u32 { alpha() }\n",
+    )]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    published(scheduler.reconcile_now().expect("initial publish"));
+    let latest = scheduler.latest_complete().expect("latest generation");
+    let symbol_chunk = latest
+        .generation
+        .chunks()
+        .chunks()
+        .iter()
+        .find(|chunk| chunk.anchor.symbol_occurrence_id.is_some())
+        .expect("symbol chunk");
+    let symbol = symbol_chunk
+        .anchor
+        .symbol_occurrence_id
+        .as_ref()
+        .expect("symbol occurrence");
+    let chunk = latest
+        .generation
+        .chunks()
+        .chunks()
+        .iter()
+        .find(|chunk| chunk.id != symbol_chunk.id)
+        .unwrap_or(symbol_chunk);
+    let anchors = [
+        RetrievalAnchorId::new(format!("code-symbol:{}", symbol.as_str())).expect("symbol anchor"),
+        RetrievalAnchorId::new(format!("code-chunk:{}", chunk.id.as_str())).expect("chunk anchor"),
+    ];
+    let candidates = anchors
+        .iter()
+        .enumerate()
+        .map(|(ordinal, anchor)| RankedCandidate {
+            candidate: FusedCandidate {
+                anchor_id: anchor.clone(),
+                logical_evidence_id: LogicalEvidenceId::new(anchor.as_str().to_owned())
+                    .expect("logical evidence"),
+                occurrences: Vec::new(),
+                exact_class: ExactClass::Approximate,
+                utility_micros: 2 - ordinal as u64,
+                contributions: Vec::new(),
+                freshness: Vec::new(),
+                decisions: Vec::new(),
+            },
+            final_ordinal: ordinal as u32,
+        })
+        .collect::<Vec<_>>();
+    let request = RetrievalRequest {
+        principal: PrincipalId::new("principal.rerank-mixed").expect("principal"),
+        scope: RetrievalScope {
+            privacy_domain: latest.generation.manifest().privacy_domain.clone(),
+            root: SingleRootScopeV1 {
+                repository: latest.generation.snapshot().repository.clone(),
+                worktree: latest.generation.snapshot().worktree.clone(),
+                reference: latest.generation.snapshot().reference.clone(),
+            },
+        },
+        temporal_mode: TemporalModeV1::Current,
+        snapshot: RetrievalSnapshot {
+            watermarks: VectorWatermark::default(),
+            freshness_digest: FreshnessVectorDigest::new(format!("sha256:{}", "f".repeat(64)))
+                .expect("freshness digest"),
+            authorization_revision: AuthorizationRevision::new("authorization.rerank-mixed.v1")
+                .expect("authorization revision"),
+            captured_at: UtcMicros(1),
+        },
+        profile_id: "profile.rerank-mixed.v1"
+            .to_owned()
+            .try_into()
+            .expect("profile"),
+        budget: RetrievalBudget {
+            max_candidates_per_lane: 8,
+            max_fused_candidates: 8,
+            max_hydrated_results: 8,
+            max_hydration_bytes: 65_536,
+            deadline_micros: None,
+        },
+    };
+    let query = EphemeralSanitizedQueryViewV1::sanitize(
+        "alpha",
+        SanitizerRevision::new("sanitizer.rerank-mixed.v1").expect("sanitizer"),
+        QueryNormalizationRevision::new("normalization.rerank-mixed.v1").expect("normalization"),
+    )
+    .expect("query");
+    let policy = RerankPolicy {
+        policy_id: "rerank.mixed.v1".to_owned().try_into().expect("policy"),
+        evaluation_result_anchor: RetrievalAnchorId::new("evaluation.rerank-mixed.v1")
+            .expect("evaluation"),
+        max_candidates: 2,
+        max_input_bytes: u64::MAX,
+        max_input_tokens: u64::MAX,
+        max_work_units: 2,
+        max_model_invocations: 1,
+        deadline_micros: None,
+    };
+    let mut views = GenerationBoundCodeRerankViewsV1::new(&latest.generation, &query);
+    let outcome = BoundedRerankRuntimeV1::new(&mut views, &MixedAnchorReverseRerankExecutorV1)
+        .rerank(&request, &policy, &candidates, &ReadyRerankControlV1);
+
+    assert_eq!(outcome.public_status, OptionalStagePublicStatus::Complete);
+    assert_eq!(
+        outcome
+            .ordered_candidates
+            .iter()
+            .map(|candidate| candidate.candidate.anchor_id.clone())
+            .collect::<Vec<_>>(),
+        anchors.into_iter().rev().collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn duplicate_save_and_overflow_equals_clean_scan() {
     let fixture = GitFixture::new(&[
         ("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n"),
@@ -373,7 +535,13 @@ fn duplicate_save_and_overflow_equals_clean_scan() {
 #[test]
 fn cross_worktree_byte_reuse_without_identity_alias() {
     let first = GitFixture::new(&[("src/lib.rs", "pub fn shared() -> u32 { 7 }\n")]);
-    let second = GitFixture::new(&[("src/lib.rs", "pub fn shared() -> u32 { 7 }\n")]);
+    let linked_root = TempDir::new().expect("linked worktree root");
+    let linked = linked_root.path().join("linked");
+    let linked_arg = linked.to_str().expect("linked worktree path");
+    git(
+        first.path(),
+        &["worktree", "add", "-q", "-b", "linked", linked_arg, "main"],
+    );
     let store = TempDir::new().expect("store root");
     let registry = CodeIndexSchedulerRegistryV1::new(2);
 
@@ -381,16 +549,75 @@ fn cross_worktree_byte_reuse_without_identity_alias() {
         .open_worktree(first.path(), store.path().join("first"))
         .expect("first scheduler");
     let mut second_scheduler = registry
-        .open_worktree(second.path(), store.path().join("second"))
+        .open_worktree(&linked, store.path().join("second"))
         .expect("second scheduler");
     let first_publish = published(first_scheduler.reconcile_now().expect("first publish"));
     let second_publish = published(second_scheduler.reconcile_now().expect("second publish"));
+    let first_generation = first_scheduler
+        .latest_complete()
+        .expect("first generation")
+        .generation;
+    let second_generation = second_scheduler
+        .latest_complete()
+        .expect("second generation")
+        .generation;
+    let reuse = registry.byte_pool_stats();
 
-    assert!(registry.byte_pool_stats().reused >= 1);
-    assert_ne!(first_publish.repository_id, second_publish.repository_id);
+    assert!(reuse.reused >= 1, "sanitized source bytes must be shared");
+    assert!(
+        reuse.parse_chunk_reused >= 1,
+        "matching parse/chunk artifacts must be physically shared"
+    );
+    assert_eq!(first_publish.repository_id, second_publish.repository_id);
+    assert_ne!(
+        first_generation.snapshot().worktree,
+        second_generation.snapshot().worktree
+    );
+    assert_eq!(
+        first_publish.snapshot_content_identity,
+        second_publish.snapshot_content_identity
+    );
     assert_ne!(
         first_publish.file_occurrence_ids, second_publish.file_occurrence_ids,
-        "shared bytes must never alias repository/worktree occurrence identity"
+        "shared artifacts must never alias worktree occurrence identity"
+    );
+    assert_ne!(first_publish.generation_id, second_publish.generation_id);
+    assert_ne!(
+        first_generation.manifest().snapshot_digest,
+        second_generation.manifest().snapshot_digest
+    );
+    assert_ne!(
+        first_generation.capability().manifest_digest,
+        second_generation.capability().manifest_digest,
+        "authorization identity remains generation-local"
+    );
+    assert_ne!(
+        first_generation.projection().publication_digest(),
+        second_generation.projection().publication_digest(),
+        "publication identity remains generation-local"
+    );
+
+    write(&linked, "src/lib.rs", "pub fn shared() -> u32 { 8 }\n");
+    second_scheduler.notify_path(linked.join("src/lib.rs"));
+    published(
+        second_scheduler
+            .reconcile_now()
+            .expect("edited linked-worktree publish"),
+    );
+    let after_edit = registry.byte_pool_stats();
+    assert_eq!(
+        after_edit.parse_chunk_reused, reuse.parse_chunk_reused,
+        "changed source content must not reuse the prior parse/chunk artifact"
+    );
+    assert_eq!(
+        first_scheduler
+            .latest_complete()
+            .expect("first worktree remains current")
+            .generation
+            .manifest()
+            .generation_id,
+        first_publish.generation_id,
+        "editing one linked worktree must not invalidate its sibling"
     );
 }
 
@@ -1448,6 +1675,124 @@ fn classification_distinguishes_staged_unstaged_untracked_and_deleted() {
     assert!(
         !candidates.contains("src/d.rs"),
         "a deleted path is never a present-content candidate"
+    );
+}
+
+/// A filesystem rename is reconciled as the truthful delete-plus-add pair and
+/// produces the same final code lanes as a fresh scan of the renamed tree.
+#[test]
+fn rename_reconciliation_matches_clean_scan() {
+    let fixture = GitFixture::new(&[
+        ("src/old.rs", "pub fn renamed_symbol() -> u32 { 7 }\n"),
+        ("src/keep.rs", "pub fn keep_symbol() -> u32 { 1 }\n"),
+    ]);
+    let store = TempDir::new().expect("store root");
+    let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
+    let mut incremental = scheduler(
+        &fixture,
+        store.path().join("incremental"),
+        Arc::clone(&bytes),
+    );
+    published(incremental.reconcile_now().expect("baseline publish"));
+
+    std::fs::rename(
+        fixture.path().join("src/old.rs"),
+        fixture.path().join("src/new.rs"),
+    )
+    .expect("rename source file");
+    let classification =
+        WorktreeChangeClassificationV1::classify(&gix::open(fixture.path()).expect("open gix"))
+            .expect("classify rename");
+    assert_eq!(
+        classification.class_of("src/old.rs"),
+        Some(WorktreeChangeClassV1::UnstagedDeleted)
+    );
+    assert_eq!(
+        classification.class_of("src/new.rs"),
+        Some(WorktreeChangeClassV1::Untracked)
+    );
+
+    incremental.notify_path(fixture.path().join("src/old.rs"));
+    incremental.notify_path(fixture.path().join("src/new.rs"));
+    let renamed = published(
+        incremental
+            .reconcile_now()
+            .expect("incremental rename reconcile"),
+    );
+    let mut clean = scheduler(&fixture, store.path().join("clean"), bytes);
+    let clean = published(clean.reconcile_now().expect("clean renamed-tree scan"));
+
+    assert_eq!(
+        renamed.snapshot_content_identity, clean.snapshot_content_identity,
+        "rename reconciliation must capture the same final tree as a clean scan"
+    );
+    assert_eq!(
+        renamed.lane_digest, clean.lane_digest,
+        "rename reconciliation must publish byte-identical code lanes"
+    );
+    let latest = incremental.latest_complete().expect("renamed generation");
+    assert!(
+        latest
+            .generation()
+            .snapshot()
+            .files
+            .iter()
+            .any(|file| file.logical_path == "src/new.rs")
+    );
+    assert!(
+        latest
+            .generation()
+            .snapshot()
+            .files
+            .iter()
+            .all(|file| file.logical_path != "src/old.rs")
+    );
+}
+
+/// A staged-only edit (index differs from HEAD while the worktree matches the
+/// staged bytes) is real indexing work and converges with a fresh scan.
+#[test]
+fn index_only_reconciliation_matches_clean_scan() {
+    let fixture = GitFixture::new(&[
+        ("src/lib.rs", "pub fn staged_symbol() -> u32 { 1 }\n"),
+        ("src/keep.rs", "pub fn keep_symbol() -> u32 { 2 }\n"),
+    ]);
+    let store = TempDir::new().expect("store root");
+    let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
+    let mut incremental = scheduler(
+        &fixture,
+        store.path().join("incremental"),
+        Arc::clone(&bytes),
+    );
+    published(incremental.reconcile_now().expect("baseline publish"));
+
+    fixture.edit("src/lib.rs", "pub fn staged_symbol() -> u32 { 10 }\n");
+    git(fixture.path(), &["add", "src/lib.rs"]);
+    let classification =
+        WorktreeChangeClassificationV1::classify(&gix::open(fixture.path()).expect("open gix"))
+            .expect("classify staged-only edit");
+    assert_eq!(
+        classification.class_of("src/lib.rs"),
+        Some(WorktreeChangeClassV1::StagedModified)
+    );
+    assert_eq!(classification.changes().len(), 1);
+
+    let staged = published(
+        incremental
+            .reconcile_now()
+            .expect("incremental staged-only reconcile"),
+    );
+    let mut clean = scheduler(&fixture, store.path().join("clean"), bytes);
+    let clean = published(clean.reconcile_now().expect("clean staged-tree scan"));
+
+    assert_eq!(staged.reextracted_files, 1);
+    assert_eq!(
+        staged.snapshot_content_identity, clean.snapshot_content_identity,
+        "staged-only reconciliation must capture the same final tree as a clean scan"
+    );
+    assert_eq!(
+        staged.lane_digest, clean.lane_digest,
+        "staged-only reconciliation must publish byte-identical code lanes"
     );
 }
 
@@ -2657,5 +3002,138 @@ async fn compiler_publication_without_a_resolver_is_named_not_guessed() {
     assert_eq!(
         outcome,
         CompilerDiagnosticPublicationOutcomeV1::CodeIndexIdentityUnavailable
+    );
+}
+
+/// A real branch switch under one worktree reconciles to the same immutable
+/// publication inputs and code lanes as a clean scan of the switched-to branch.
+#[test]
+fn real_branch_switch_reconcile_matches_clean_scan() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    git(fixture.path(), &["switch", "-q", "-c", "feature"]);
+    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
+    git(fixture.path(), &["commit", "-qam", "feature"]);
+    git(fixture.path(), &["switch", "-q", "main"]);
+
+    let store = TempDir::new().expect("store root");
+    let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
+    let mut live = scheduler(&fixture, store.path().join("live"), Arc::clone(&bytes));
+    published(live.reconcile_now().expect("main baseline"));
+    let main_snapshot = live
+        .latest_complete()
+        .expect("main generation")
+        .generation()
+        .snapshot()
+        .clone();
+
+    git(fixture.path(), &["switch", "-q", "feature"]);
+    let switched = published(live.reconcile_now().expect("branch-switch reconcile"));
+    let switched_generation = live.latest_complete().expect("switched generation");
+
+    let mut clean = scheduler(&fixture, store.path().join("clean"), bytes);
+    let clean_publish = published(clean.reconcile_now().expect("clean feature scan"));
+    let clean_generation = clean.latest_complete().expect("clean generation");
+
+    assert_eq!(
+        switched.snapshot_content_identity,
+        clean_publish.snapshot_content_identity
+    );
+    assert_eq!(switched.lane_digest, clean_publish.lane_digest);
+    assert_eq!(
+        main_snapshot.reference.as_ref().map(RefId::as_str),
+        Some("refs/heads/main")
+    );
+    assert_eq!(
+        switched_generation
+            .generation()
+            .snapshot()
+            .reference
+            .as_ref()
+            .map(RefId::as_str),
+        Some("refs/heads/feature")
+    );
+    assert_ne!(
+        switched_generation.generation().snapshot().source_revision,
+        main_snapshot.source_revision
+    );
+    assert_eq!(
+        switched_generation.generation().snapshot().reference,
+        clean_generation.generation().snapshot().reference
+    );
+    assert_eq!(
+        switched_generation.generation().snapshot().source_revision,
+        clean_generation.generation().snapshot().source_revision
+    );
+}
+
+/// A real Git rebase reconciles the rewritten branch tip to the same immutable
+/// publication inputs and code lanes as a clean scan of the rebased checkout.
+#[test]
+fn real_rebase_reconcile_matches_clean_scan() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    git(fixture.path(), &["switch", "-q", "-c", "feature"]);
+    write(
+        fixture.path(),
+        "src/feature.rs",
+        "pub fn feature() -> u32 { 2 }\n",
+    );
+    git(fixture.path(), &["add", "."]);
+    git(fixture.path(), &["commit", "-qm", "feature"]);
+
+    let store = TempDir::new().expect("store root");
+    let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
+    let mut live = scheduler(&fixture, store.path().join("live"), Arc::clone(&bytes));
+    published(live.reconcile_now().expect("pre-rebase baseline"));
+    let pre_rebase_revision = live
+        .latest_complete()
+        .expect("pre-rebase generation")
+        .generation()
+        .snapshot()
+        .source_revision
+        .clone();
+
+    git(fixture.path(), &["switch", "-q", "main"]);
+    write(
+        fixture.path(),
+        "src/main_only.rs",
+        "pub fn main_only() -> u32 { 3 }\n",
+    );
+    git(fixture.path(), &["add", "."]);
+    git(fixture.path(), &["commit", "-qm", "advance main"]);
+    git(fixture.path(), &["switch", "-q", "feature"]);
+    git(fixture.path(), &["rebase", "-q", "main"]);
+
+    let rebased = published(live.reconcile_now().expect("rebase reconcile"));
+    let rebased_generation = live.latest_complete().expect("rebased generation");
+
+    let mut clean = scheduler(&fixture, store.path().join("clean"), bytes);
+    let clean_publish = published(clean.reconcile_now().expect("clean rebased scan"));
+    let clean_generation = clean.latest_complete().expect("clean generation");
+
+    assert_eq!(
+        rebased.snapshot_content_identity,
+        clean_publish.snapshot_content_identity
+    );
+    assert_eq!(rebased.lane_digest, clean_publish.lane_digest);
+    assert_eq!(
+        rebased_generation
+            .generation()
+            .snapshot()
+            .reference
+            .as_ref()
+            .map(RefId::as_str),
+        Some("refs/heads/feature")
+    );
+    assert_ne!(
+        rebased_generation.generation().snapshot().source_revision,
+        pre_rebase_revision
+    );
+    assert_eq!(
+        rebased_generation.generation().snapshot().reference,
+        clean_generation.generation().snapshot().reference
+    );
+    assert_eq!(
+        rebased_generation.generation().snapshot().source_revision,
+        clean_generation.generation().snapshot().source_revision
     );
 }

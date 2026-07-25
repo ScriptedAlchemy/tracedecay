@@ -21,8 +21,8 @@ use crate::config::DEFAULT_FASTEMBED_MODEL_ID;
 
 use super::artifact_store::{
     ArtifactImportErrorV1, ArtifactInventoryRecordV1, ArtifactLeaseKindV1, ArtifactLeaseV1,
-    ConfiguredHttpsArtifactSourceV1, ExplicitHttpsArtifactTransportV1, ModelArtifactStore,
-    RetentionPolicyV1,
+    ConfiguredHttpsArtifactSourceV1, ExplicitHttpsArtifactTransportV1, GcReceiptV1,
+    ModelArtifactStore, RetentionPolicyV1, RuntimeEnvironmentV1,
 };
 use super::manifest::{ArtifactMemberRoleV1, ModelArtifactManifestV1};
 use super::model_catalog::{
@@ -31,6 +31,11 @@ use super::model_catalog::{
 
 const LIFECYCLE_SCHEMA_V1: &str = "tracedecay.fastembed.model-lifecycle.v1";
 const INSTALL_META_SCHEMA_V1: &str = "tracedecay.fastembed.model-install.v1";
+const ARTIFACT_GC_LEASE_SECONDS: u64 = 5 * 60;
+const RERANKER_ACTIVE_LEASE_ID_V1: &str = "reranker:active:v1";
+const RERANKER_ROLLBACK_LEASE_ID_V1: &str = "reranker:rollback:v1";
+static SHARED_LIFECYCLE_OWNER: std::sync::OnceLock<Option<Arc<SemanticModelLifecycleOwnerV1>>> =
+    std::sync::OnceLock::new();
 
 /// Doctor/status lifecycle states for the selected `FastEmbed` model.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -187,6 +192,12 @@ pub struct SemanticModelLifecycleStatusV1 {
     pub semantics_omitted: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RerankerArtifactLifecycleStatusV1 {
+    pub active_artifact_digest: Option<super::manifest::Sha256DigestHex>,
+    pub rollback_artifact_digest: Option<super::manifest::Sha256DigestHex>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DurableLifecycleV1 {
@@ -318,6 +329,152 @@ impl SemanticModelLifecycleOwnerV1 {
 
     pub fn catalog(&self) -> &FastEmbedModelCatalogV1 {
         &self.catalog
+    }
+
+    /// Re-admit the independently evaluated reranker selected by exact
+    /// compatibility pins. No catalog lookup, network access, or ambient
+    /// cache participates in this mount.
+    pub(crate) fn mount_reranker(
+        &self,
+        pins: crate::config::retrieval::RerankCompatibilityPinsV1,
+    ) -> Result<super::rerank_adapter::ProductionCodeRerankAuthorityV1, ModelLifecycleErrorV1> {
+        let digest = pins
+            .artifact_manifest_digest
+            .as_str()
+            .strip_prefix("sha256:")
+            .ok_or(ModelLifecycleErrorV1::VerificationFailed)
+            .and_then(|digest| {
+                super::manifest::Sha256DigestHex::new(digest.to_owned())
+                    .map_err(|_| ModelLifecycleErrorV1::VerificationFailed)
+            })?;
+        let artifact = self
+            .artifact_store
+            .admit_leased_for_runtime_by_digest(
+                &digest,
+                &RuntimeEnvironmentV1::detect_fastembed_process()
+                    .map_err(|_| ModelLifecycleErrorV1::VerificationFailed)?,
+                RERANKER_ACTIVE_LEASE_ID_V1,
+                ArtifactLeaseKindV1::Active,
+                current_unix_seconds()?,
+            )
+            .map_err(|_| ModelLifecycleErrorV1::VerificationFailed)?;
+        super::rerank_adapter::ProductionCodeRerankAuthorityV1::from_admitted(artifact, pins)
+            .map_err(|_| ModelLifecycleErrorV1::VerificationFailed)
+    }
+
+    pub fn import_local_reranker_artifact(
+        &self,
+        pins: crate::config::retrieval::RerankCompatibilityPinsV1,
+        manifest: &ModelArtifactManifestV1,
+        source: &Path,
+        now_unix: u64,
+    ) -> Result<RerankerArtifactLifecycleStatusV1, ModelLifecycleErrorV1> {
+        super::rerank_adapter::validate_reranker_manifest_pins(manifest, &pins)
+            .map_err(|_| ModelLifecycleErrorV1::VerificationFailed)?;
+        let record = self
+            .artifact_store
+            .import_local_directory(manifest, source, now_unix)?;
+        self.publish_reranker_artifact(pins, record, now_unix)
+    }
+
+    pub fn import_configured_https_reranker_artifact(
+        &self,
+        pins: crate::config::retrieval::RerankCompatibilityPinsV1,
+        manifest: &ModelArtifactManifestV1,
+        source: &ConfiguredHttpsArtifactSourceV1,
+        transport: &dyn ExplicitHttpsArtifactTransportV1,
+        resume_staging_id: Option<&str>,
+        now_unix: u64,
+    ) -> Result<RerankerArtifactLifecycleStatusV1, ModelLifecycleErrorV1> {
+        super::rerank_adapter::validate_reranker_manifest_pins(manifest, &pins)
+            .map_err(|_| ModelLifecycleErrorV1::VerificationFailed)?;
+        let record = self.artifact_store.import_configured_https(
+            manifest,
+            source,
+            transport,
+            resume_staging_id,
+            now_unix,
+        )?;
+        self.publish_reranker_artifact(pins, record, now_unix)
+    }
+
+    fn publish_reranker_artifact(
+        &self,
+        pins: crate::config::retrieval::RerankCompatibilityPinsV1,
+        record: ArtifactInventoryRecordV1,
+        now_unix: u64,
+    ) -> Result<RerankerArtifactLifecycleStatusV1, ModelLifecycleErrorV1> {
+        let environment = RuntimeEnvironmentV1::detect_fastembed_process()
+            .map_err(|_| ModelLifecycleErrorV1::VerificationFailed)?;
+        let admitted = self
+            .artifact_store
+            .admit_for_runtime_by_digest(&record.artifact_digest, &environment)
+            .map_err(|_| ModelLifecycleErrorV1::VerificationFailed)?;
+        super::rerank_adapter::ProductionCodeRerankAuthorityV1::from_admitted(admitted, pins)
+            .map_err(|_| ModelLifecycleErrorV1::VerificationFailed)?;
+        self.artifact_store.activate_artifact_with_rollback(
+            &record.artifact_digest,
+            RERANKER_ACTIVE_LEASE_ID_V1,
+            RERANKER_ROLLBACK_LEASE_ID_V1,
+            now_unix,
+        )?;
+        self.reranker_artifact_status()
+    }
+
+    pub fn reranker_artifact_status(
+        &self,
+    ) -> Result<RerankerArtifactLifecycleStatusV1, ModelLifecycleErrorV1> {
+        let now_unix = current_unix_seconds()?;
+        Ok(RerankerArtifactLifecycleStatusV1 {
+            active_artifact_digest: self.artifact_store.artifact_digest_for_lease(
+                RERANKER_ACTIVE_LEASE_ID_V1,
+                ArtifactLeaseKindV1::Active,
+                now_unix,
+            )?,
+            rollback_artifact_digest: self.artifact_store.artifact_digest_for_lease(
+                RERANKER_ROLLBACK_LEASE_ID_V1,
+                ArtifactLeaseKindV1::Rollback,
+                now_unix,
+            )?,
+        })
+    }
+
+    pub fn rollback_reranker_artifact(
+        &self,
+        now_unix: u64,
+    ) -> Result<RerankerArtifactLifecycleStatusV1, ModelLifecycleErrorV1> {
+        let rollback = self
+            .reranker_artifact_status()?
+            .rollback_artifact_digest
+            .ok_or(ModelLifecycleErrorV1::Rejected)?;
+        self.artifact_store.activate_artifact_with_rollback(
+            &rollback,
+            RERANKER_ACTIVE_LEASE_ID_V1,
+            RERANKER_ROLLBACK_LEASE_ID_V1,
+            now_unix,
+        )?;
+        self.reranker_artifact_status()
+    }
+
+    pub(crate) fn mounted_shared() -> Option<Arc<Self>> {
+        SHARED_LIFECYCLE_OWNER.get().cloned().flatten()
+    }
+
+    pub(crate) fn run_daemon_artifact_gc(
+        &self,
+        now_unix: u64,
+    ) -> Result<Vec<GcReceiptV1>, ModelLifecycleErrorV1> {
+        let expires_at_unix = now_unix
+            .checked_add(ARTIFACT_GC_LEASE_SECONDS)
+            .ok_or(ModelLifecycleErrorV1::Rejected)?;
+        let lease = self.artifact_store.acquire_daemon_gc_lease(
+            format!("daemon:{}:{now_unix}", std::process::id()),
+            expires_at_unix,
+            now_unix,
+        )?;
+        self.artifact_store
+            .gc_with_daemon_lease(&lease, now_unix)
+            .map_err(Into::into)
     }
 
     /// Explicitly import a complete local package through the verified store.
@@ -852,6 +1009,13 @@ impl SemanticModelLifecycleOwnerV1 {
     }
 }
 
+fn current_unix_seconds() -> Result<u64, ModelLifecycleErrorV1> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .map_err(|_| ModelLifecycleErrorV1::StoreUnavailable)
+}
+
 fn run_acquisition(
     root: &Path,
     catalog: &FastEmbedModelCatalogV1,
@@ -1254,9 +1418,7 @@ pub fn lifecycle_to_runtime_state(
 
 /// Process-wide lifecycle owner under the user semantic-models root.
 pub fn shared_lifecycle_owner() -> Option<Arc<SemanticModelLifecycleOwnerV1>> {
-    use std::sync::OnceLock;
-    static OWNER: OnceLock<Option<Arc<SemanticModelLifecycleOwnerV1>>> = OnceLock::new();
-    OWNER
+    SHARED_LIFECYCLE_OWNER
         .get_or_init(|| {
             let root = default_lifecycle_root()?;
             SemanticModelLifecycleOwnerV1::open_default(root)
@@ -1478,6 +1640,297 @@ mod tests {
             status.state,
             Some(SemanticModelLifecycleStateV1::Installed { .. })
         ));
+    }
+
+    #[test]
+    fn daemon_artifact_gc_collects_only_unreferenced_installs_with_a_receipt() {
+        const IMPORTED_AT: u64 = 10;
+        const COLLECTED_AT: u64 = IMPORTED_AT + 7 * 24 * 60 * 60;
+
+        let fixture = tempfile::tempdir().unwrap();
+        let (catalog, model_id) = tiny_catalog(fixture.path());
+        let model = catalog.get(&model_id).unwrap().clone();
+        let root = tempfile::tempdir().unwrap();
+        let owner = SemanticModelLifecycleOwnerV1::open(
+            root.path(),
+            catalog,
+            Arc::new(HfHubModelMemberSourceV1),
+        )
+        .unwrap();
+
+        let active_manifest = tiny_manifest(&model);
+        let active = owner
+            .import_local_artifact(&model_id, &active_manifest, fixture.path(), IMPORTED_AT)
+            .unwrap()
+            .state
+            .unwrap();
+
+        let mut rollback_manifest = active_manifest.clone();
+        rollback_manifest.payload.artifact_id = "rollback-fixture".to_owned();
+        let rollback = owner
+            .artifact_store
+            .import_local_directory(&rollback_manifest, fixture.path(), IMPORTED_AT)
+            .unwrap();
+        owner
+            .artifact_store
+            .acquire_artifact_lease(
+                &rollback.artifact_digest,
+                ArtifactLeaseV1 {
+                    lease_id: "rollback-fixture".to_owned(),
+                    kind: ArtifactLeaseKindV1::Rollback,
+                    expires_at_unix: u64::MAX,
+                },
+                IMPORTED_AT,
+            )
+            .unwrap();
+
+        let mut orphan_manifest = active_manifest;
+        orphan_manifest.payload.artifact_id = "orphan-fixture".to_owned();
+        let orphan = owner
+            .artifact_store
+            .import_local_directory(&orphan_manifest, fixture.path(), IMPORTED_AT)
+            .unwrap();
+
+        let receipts = owner.run_daemon_artifact_gc(COLLECTED_AT).unwrap();
+
+        assert_eq!(
+            receipts
+                .iter()
+                .map(|receipt| receipt.artifact_digest.clone())
+                .collect::<Vec<_>>(),
+            vec![orphan.artifact_digest.clone()]
+        );
+        let inventory = owner.artifact_store.inventory().unwrap();
+        assert!(inventory.records.contains_key(active.artifact_digest()));
+        assert!(
+            inventory
+                .records
+                .contains_key(&rollback.artifact_digest.to_string())
+        );
+        assert!(
+            !inventory
+                .records
+                .contains_key(&orphan.artifact_digest.to_string())
+        );
+        let receipt_log =
+            fs::read_to_string(root.path().join("verified-artifacts/receipts/gc.jsonl")).unwrap();
+        assert_eq!(receipt_log.lines().count(), 1);
+    }
+
+    fn reranker_manifest(
+        model: &CatalogedFastEmbedModelV1,
+        artifact_id: &str,
+    ) -> ModelArtifactManifestV1 {
+        let mut manifest = tiny_manifest(model);
+        manifest.payload.artifact_id = artifact_id.to_owned();
+        manifest.payload.profile_kind = ArtifactProfileKindV1::Reranker;
+        manifest.payload.runtime.runtime =
+            super::super::artifact_store::FASTEMBED_RUNTIME_FAMILY_V1.to_owned();
+        manifest.payload.runtime.build_revision =
+            super::super::artifact_store::FASTEMBED_RUNTIME_BUILD_REVISION_V1.to_owned();
+        manifest.payload.runtime.platforms = vec![PlatformTargetV1 {
+            os: std::env::consts::OS.to_owned(),
+            arch: std::env::consts::ARCH.to_owned(),
+        }];
+        manifest
+    }
+
+    fn reranker_pins(
+        manifest: &ModelArtifactManifestV1,
+    ) -> crate::config::retrieval::RerankCompatibilityPinsV1 {
+        use tracedecay_domain::{ComponentRevision, ManifestDigest, canonical_sha256};
+
+        crate::config::retrieval::RerankCompatibilityPinsV1 {
+            implementation_revision: ComponentRevision::new(
+                super::super::rerank_adapter::RERANK_IMPLEMENTATION_REVISION_V1,
+            )
+            .unwrap(),
+            artifact_manifest_digest: ManifestDigest::new(format!(
+                "sha256:{}",
+                manifest.artifact_identity_digest()
+            ))
+            .unwrap(),
+            runtime_compatibility_digest: canonical_sha256(&(
+                super::super::rerank_adapter::RERANK_RUNTIME_DIGEST_DOMAIN_V1,
+                &manifest.payload.runtime.runtime,
+                &manifest.payload.runtime.build_revision,
+                manifest.payload.device,
+                manifest.payload.precision,
+            ))
+            .unwrap(),
+        }
+    }
+
+    #[test]
+    fn independent_reranker_import_rotates_active_and_rollback_leases() {
+        let fixture = tempfile::tempdir().unwrap();
+        let (catalog, model_id) = tiny_catalog(fixture.path());
+        let model = catalog.get(&model_id).unwrap().clone();
+        let root = tempfile::tempdir().unwrap();
+        let owner = SemanticModelLifecycleOwnerV1::open(
+            root.path(),
+            catalog,
+            Arc::new(HfHubModelMemberSourceV1),
+        )
+        .unwrap();
+        let first = reranker_manifest(&model, "BAAI/bge-reranker-base");
+        let first_pins = reranker_pins(&first);
+        let first_digest = first.artifact_identity_digest();
+
+        let first_status = owner
+            .import_local_reranker_artifact(first_pins.clone(), &first, fixture.path(), 10)
+            .unwrap();
+        assert_eq!(
+            first_status.active_artifact_digest,
+            Some(first_digest.clone())
+        );
+        assert_eq!(first_status.rollback_artifact_digest, None);
+        assert!(owner.mount_reranker(first_pins.clone()).is_ok());
+
+        let second = reranker_manifest(&model, "jinaai/jina-reranker-v1-turbo-en");
+        let second_pins = reranker_pins(&second);
+        let second_digest = second.artifact_identity_digest();
+        let second_status = owner
+            .import_local_reranker_artifact(second_pins.clone(), &second, fixture.path(), 11)
+            .unwrap();
+        assert_eq!(
+            second_status.active_artifact_digest,
+            Some(second_digest.clone())
+        );
+        assert_eq!(
+            second_status.rollback_artifact_digest,
+            Some(first_digest.clone())
+        );
+        assert!(owner.mount_reranker(first_pins).is_err());
+        assert!(owner.mount_reranker(second_pins).is_ok());
+
+        let rolled_back = owner.rollback_reranker_artifact(12).unwrap();
+        assert_eq!(rolled_back.active_artifact_digest, Some(first_digest));
+        assert_eq!(rolled_back.rollback_artifact_digest, Some(second_digest));
+    }
+
+    struct FixtureRerankerHttpsTransport {
+        members: BTreeMap<String, Vec<u8>>,
+        revision: String,
+    }
+
+    impl ExplicitHttpsArtifactTransportV1 for FixtureRerankerHttpsTransport {
+        fn fetch_range(
+            &self,
+            request: &super::super::artifact_store::HttpsArtifactRangeRequestV1,
+        ) -> Result<super::super::artifact_store::HttpsArtifactRangeResponseV1, ArtifactImportErrorV1>
+        {
+            let bytes = self
+                .members
+                .iter()
+                .find_map(|(path, bytes)| {
+                    request.url.ends_with(&format!("/{path}")).then_some(bytes)
+                })
+                .ok_or(ArtifactImportErrorV1::MemberMismatch)?;
+            let start = usize::try_from(request.offset)
+                .map_err(|_| ArtifactImportErrorV1::ImmutableRangeMismatch)?;
+            let count = usize::try_from(request.max_bytes)
+                .map_err(|_| ArtifactImportErrorV1::ImmutableRangeMismatch)?;
+            let end = start.saturating_add(count).min(bytes.len());
+            Ok(super::super::artifact_store::HttpsArtifactRangeResponseV1 {
+                offset: request.offset,
+                total_length: bytes.len() as u64,
+                immutable_revision: self.revision.clone(),
+                bytes: bytes[start..end].to_vec(),
+            })
+        }
+    }
+
+    #[test]
+    fn configured_https_reranker_acquisition_uses_immutable_member_pins() {
+        let fixture = tempfile::tempdir().unwrap();
+        let (catalog, model_id) = tiny_catalog(fixture.path());
+        let model = catalog.get(&model_id).unwrap().clone();
+        let root = tempfile::tempdir().unwrap();
+        let owner = SemanticModelLifecycleOwnerV1::open(
+            root.path(),
+            catalog,
+            Arc::new(HfHubModelMemberSourceV1),
+        )
+        .unwrap();
+        let manifest = reranker_manifest(&model, "BAAI/bge-reranker-base");
+        let pins = reranker_pins(&manifest);
+        let transport = FixtureRerankerHttpsTransport {
+            members: manifest
+                .payload
+                .members
+                .iter()
+                .map(|member| {
+                    (
+                        member.path.clone(),
+                        fs::read(fixture.path().join(&member.path)).unwrap(),
+                    )
+                })
+                .collect(),
+            revision: "immutable-reranker-revision".to_owned(),
+        };
+        let source = ConfiguredHttpsArtifactSourceV1::new(
+            "https://models.example.test/reranker",
+            transport.revision.clone(),
+        )
+        .unwrap();
+
+        let status = owner
+            .import_configured_https_reranker_artifact(
+                pins.clone(),
+                &manifest,
+                &source,
+                &transport,
+                None,
+                20,
+            )
+            .unwrap();
+
+        assert_eq!(
+            status.active_artifact_digest,
+            Some(manifest.artifact_identity_digest())
+        );
+        assert!(owner.mount_reranker(pins).is_ok());
+    }
+
+    #[test]
+    fn reranker_import_rejects_unevaluated_pins_before_installation() {
+        let fixture = tempfile::tempdir().unwrap();
+        let (catalog, model_id) = tiny_catalog(fixture.path());
+        let model = catalog.get(&model_id).unwrap().clone();
+        let root = tempfile::tempdir().unwrap();
+        let owner = SemanticModelLifecycleOwnerV1::open(
+            root.path(),
+            catalog,
+            Arc::new(HfHubModelMemberSourceV1),
+        )
+        .unwrap();
+        let manifest = reranker_manifest(&model, "BAAI/bge-reranker-base");
+        let mut pins = reranker_pins(&manifest);
+        pins.runtime_compatibility_digest =
+            tracedecay_domain::ManifestDigest::new(format!("sha256:{}", "f".repeat(64))).unwrap();
+
+        assert_eq!(
+            owner
+                .import_local_reranker_artifact(pins, &manifest, fixture.path(), 30)
+                .unwrap_err(),
+            ModelLifecycleErrorV1::VerificationFailed
+        );
+        assert_eq!(
+            owner.reranker_artifact_status().unwrap(),
+            RerankerArtifactLifecycleStatusV1 {
+                active_artifact_digest: None,
+                rollback_artifact_digest: None,
+            }
+        );
+        assert!(
+            !owner
+                .artifact_store
+                .inventory()
+                .unwrap()
+                .records
+                .contains_key(&manifest.artifact_identity_digest().to_string())
+        );
     }
 
     #[test]

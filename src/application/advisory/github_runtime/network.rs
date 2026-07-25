@@ -9,11 +9,11 @@ use tracedecay_application::feedback::FeedbackPortFuture;
 #[cfg(test)]
 use tracedecay_application::feedback::GitHubReviewReadRequestV1;
 use tracedecay_application::{RequestAdmission, RequestContext};
-use tracedecay_domain::UtcMicros;
 use tracedecay_domain::feedback::{
     GitHubReviewCursorV1, GitHubReviewEtagV1, GitHubReviewRateLimitCheckpointV1,
     GitHubReviewReadOperationV1,
 };
+use tracedecay_domain::{UserProfileId, UtcMicros};
 use url::Url;
 use zeroize::Zeroizing;
 
@@ -125,6 +125,15 @@ impl GitHubReadOnlyCredentialSecretV1 {
     fn authorization_header(&self) -> Zeroizing<String> {
         Zeroizing::new(format!("Bearer {}", self.0.as_str()))
     }
+
+    pub(crate) fn from_zeroizing(value: Zeroizing<String>) -> Option<Self> {
+        (!value.is_empty()
+            && value.len() <= 4096
+            && !value
+                .bytes()
+                .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace()))
+        .then_some(Self(value))
+    }
 }
 
 /// Result supplied by an authority that has already verified the provider's
@@ -155,6 +164,24 @@ pub trait GitHubReadOnlyCredentialAuthorityV1: Send + Sync {
 struct RegisteredGitHubReadOnlyCredentialAuthorityV1 {
     authority: Arc<dyn GitHubReadOnlyCredentialAuthorityV1>,
     active: Arc<AtomicBool>,
+}
+
+enum ProfileGitHubReadOnlyCredentialAuthorityV1 {
+    Public,
+    Private {
+        authority: Arc<dyn GitHubReadOnlyCredentialAuthorityV1>,
+    },
+}
+
+fn profile_github_read_only_credential_authorities() -> &'static Mutex<
+    BTreeMap<(UserProfileId, String, String), ProfileGitHubReadOnlyCredentialAuthorityV1>,
+> {
+    static AUTHORITIES: OnceLock<
+        Mutex<
+            BTreeMap<(UserProfileId, String, String), ProfileGitHubReadOnlyCredentialAuthorityV1>,
+        >,
+    > = OnceLock::new();
+    AUTHORITIES.get_or_init(|| Mutex::new(BTreeMap::new()))
 }
 
 fn registered_github_read_only_credential_authorities()
@@ -194,6 +221,219 @@ pub fn register_github_read_only_credential_authority_v1(
         },
     );
     true
+}
+
+/// Installs one process-local credential authority for an exact daemon profile
+/// and repository.
+///
+/// The authority remains the only owner of secret material. This boundary
+/// stores no token bytes and is intentionally separate from durable,
+/// redacted configuration metadata.
+pub fn register_profile_github_read_only_credential_authority_v1(
+    profile_id: UserProfileId,
+    repository_owner: impl Into<String>,
+    repository_name: impl Into<String>,
+    authority: &Arc<dyn GitHubReadOnlyCredentialAuthorityV1>,
+) -> bool {
+    let repository_owner = repository_owner.into();
+    let repository_name = repository_name.into();
+    if profile_id.validate().is_err()
+        || !valid_path_segment(&repository_owner)
+        || !valid_path_segment(&repository_name)
+    {
+        return false;
+    }
+    let Ok(mut authorities) = profile_github_read_only_credential_authorities().lock() else {
+        return false;
+    };
+    let key = (profile_id, repository_owner, repository_name);
+    if let Some(existing) = authorities.get(&key) {
+        return matches!(
+            existing,
+            ProfileGitHubReadOnlyCredentialAuthorityV1::Private {
+                authority: existing,
+            } if Arc::ptr_eq(existing, authority)
+        );
+    }
+    authorities.insert(
+        key,
+        ProfileGitHubReadOnlyCredentialAuthorityV1::Private {
+            authority: Arc::clone(authority),
+        },
+    );
+    true
+}
+
+pub(crate) fn register_profile_github_public_repository_v1(
+    profile_id: UserProfileId,
+    repository_owner: impl Into<String>,
+    repository_name: impl Into<String>,
+) -> bool {
+    let repository_owner = repository_owner.into();
+    let repository_name = repository_name.into();
+    if profile_id.validate().is_err()
+        || !valid_path_segment(&repository_owner)
+        || !valid_path_segment(&repository_name)
+    {
+        return false;
+    }
+    let Ok(mut authorities) = profile_github_read_only_credential_authorities().lock() else {
+        return false;
+    };
+    let key = (profile_id, repository_owner, repository_name);
+    if let Some(existing) = authorities.get(&key) {
+        return matches!(existing, ProfileGitHubReadOnlyCredentialAuthorityV1::Public);
+    }
+    authorities.insert(key, ProfileGitHubReadOnlyCredentialAuthorityV1::Public);
+    true
+}
+
+pub(crate) fn unregister_profile_github_public_repository_v1(
+    profile_id: &UserProfileId,
+    repository_owner: &str,
+    repository_name: &str,
+) -> bool {
+    let Ok(mut authorities) = profile_github_read_only_credential_authorities().lock() else {
+        return false;
+    };
+    let key = (
+        profile_id.clone(),
+        repository_owner.to_owned(),
+        repository_name.to_owned(),
+    );
+    if !matches!(
+        authorities.get(&key),
+        Some(ProfileGitHubReadOnlyCredentialAuthorityV1::Public)
+    ) {
+        return false;
+    }
+    authorities.remove(&key).is_some()
+}
+
+/// Removes the exact process-local profile credential authority and revokes
+/// its mounted application credential, if any.
+pub fn unregister_profile_github_read_only_credential_authority_v1(
+    profile_id: &UserProfileId,
+    repository_owner: &str,
+    repository_name: &str,
+    authority: &Arc<dyn GitHubReadOnlyCredentialAuthorityV1>,
+) -> bool {
+    let Ok(mut authorities) = profile_github_read_only_credential_authorities().lock() else {
+        return false;
+    };
+    let key = (
+        profile_id.clone(),
+        repository_owner.to_owned(),
+        repository_name.to_owned(),
+    );
+    if !matches!(
+        authorities.get(&key),
+        Some(ProfileGitHubReadOnlyCredentialAuthorityV1::Private {
+            authority: existing,
+        }) if Arc::ptr_eq(existing, authority)
+    ) {
+        return false;
+    }
+    let removed = authorities.remove(&key).is_some();
+    drop(authorities);
+    let _ = unregister_github_read_only_credential_authority_v1(
+        repository_owner,
+        repository_name,
+        authority,
+    );
+    removed
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProfileGitHubReadOnlyCredentialMountOutcomeV1 {
+    Mounted,
+    Public,
+    NotConfigured,
+    Rejected,
+}
+
+/// Mounts only the credential configured for the exact active daemon profile.
+///
+/// Wrong-profile and missing configuration never fall back to another
+/// process-local authority. Conflicting live application mounts fail closed.
+pub(crate) fn mount_profile_github_read_only_credential_authority_v1(
+    profile_id: &UserProfileId,
+    repository_owner: &str,
+    repository_name: &str,
+) -> ProfileGitHubReadOnlyCredentialMountOutcomeV1 {
+    if profile_id.validate().is_err()
+        || !valid_path_segment(repository_owner)
+        || !valid_path_segment(repository_name)
+    {
+        return ProfileGitHubReadOnlyCredentialMountOutcomeV1::Rejected;
+    }
+    let configured = match profile_github_read_only_credential_authorities().lock() {
+        Ok(authorities) => authorities
+            .get(&(
+                profile_id.clone(),
+                repository_owner.to_owned(),
+                repository_name.to_owned(),
+            ))
+            .map(|configured| match configured {
+                ProfileGitHubReadOnlyCredentialAuthorityV1::Public => None,
+                ProfileGitHubReadOnlyCredentialAuthorityV1::Private { authority } => {
+                    Some(Arc::clone(authority))
+                }
+            }),
+        Err(_) => return ProfileGitHubReadOnlyCredentialMountOutcomeV1::Rejected,
+    };
+    let Some(configured) = configured else {
+        return ProfileGitHubReadOnlyCredentialMountOutcomeV1::NotConfigured;
+    };
+    let Some(authority) = configured else {
+        return ProfileGitHubReadOnlyCredentialMountOutcomeV1::Public;
+    };
+    if register_github_read_only_credential_authority_v1(
+        repository_owner,
+        repository_name,
+        &authority,
+    ) {
+        ProfileGitHubReadOnlyCredentialMountOutcomeV1::Mounted
+    } else {
+        ProfileGitHubReadOnlyCredentialMountOutcomeV1::Rejected
+    }
+}
+
+/// Revokes the mounted application credential for one exact profile and
+/// repository without removing the injected profile authority.
+pub(crate) fn unmount_profile_github_read_only_credential_authority_v1(
+    profile_id: &UserProfileId,
+    repository_owner: &str,
+    repository_name: &str,
+) -> bool {
+    if profile_id.validate().is_err()
+        || !valid_path_segment(repository_owner)
+        || !valid_path_segment(repository_name)
+    {
+        return false;
+    }
+    let authority = match profile_github_read_only_credential_authorities().lock() {
+        Ok(authorities) => authorities
+            .get(&(
+                profile_id.clone(),
+                repository_owner.to_owned(),
+                repository_name.to_owned(),
+            ))
+            .and_then(|configured| match configured {
+                ProfileGitHubReadOnlyCredentialAuthorityV1::Public => None,
+                ProfileGitHubReadOnlyCredentialAuthorityV1::Private { authority } => {
+                    Some(Arc::clone(authority))
+                }
+            }),
+        Err(_) => return false,
+    };
+    authority.is_some_and(|authority| {
+        unregister_github_read_only_credential_authority_v1(
+            repository_owner,
+            repository_name,
+            &authority,
+        )
+    })
 }
 
 /// Removes only the exact authority previously registered for this repository.
@@ -1651,6 +1891,153 @@ mod tests {
                 serde::Serialize,
                 serde::de::DeserializeOwned
         );
+        assert_not_impl_any!(
+            ProfileGitHubReadOnlyCredentialAuthorityV1:
+                std::fmt::Debug,
+                serde::Serialize,
+                serde::de::DeserializeOwned
+        );
+    }
+
+    #[test]
+    fn exact_profile_configuration_mount_authenticates_project_open_review_read() {
+        struct PullRequestReadCredential;
+
+        impl GitHubReadOnlyCredentialAuthorityV1 for PullRequestReadCredential {
+            fn resolve(
+                &self,
+                repository_owner: &str,
+                repository_name: &str,
+            ) -> GitHubReadOnlyCredentialAuthorityOutcomeV1 {
+                if repository_owner != "ScriptedAlchemy"
+                    || repository_name != "profile-mounted-private"
+                {
+                    return GitHubReadOnlyCredentialAuthorityOutcomeV1::Indeterminate;
+                }
+                GitHubReadOnlyCredentialAuthorityOutcomeV1::Verified {
+                    secret: GitHubReadOnlyCredentialSecretV1::new(
+                        "github_pat_exact_profile_fixture",
+                    )
+                    .unwrap(),
+                    exact_permissions: BTreeSet::from([GitHubReadPermissionV1::PullRequests]),
+                }
+            }
+        }
+
+        let profile_root = tempfile::tempdir().unwrap();
+        let exact_profile = UserProfileId::new("profile.github.exact").unwrap();
+        let other_profile = UserProfileId::new("profile.github.other").unwrap();
+        let authority: Arc<dyn GitHubReadOnlyCredentialAuthorityV1> =
+            Arc::new(PullRequestReadCredential);
+        assert!(register_profile_github_read_only_credential_authority_v1(
+            exact_profile.clone(),
+            "ScriptedAlchemy",
+            "profile-mounted-private",
+            &authority,
+        ));
+        assert_eq!(
+            mount_profile_github_read_only_credential_authority_v1(
+                &other_profile,
+                "ScriptedAlchemy",
+                "profile-mounted-private",
+            ),
+            ProfileGitHubReadOnlyCredentialMountOutcomeV1::NotConfigured
+        );
+        assert!(matches!(
+            resolve_registered_github_read_only_credential_v1(
+                "ScriptedAlchemy",
+                "profile-mounted-private",
+            ),
+            RegisteredGitHubReadOnlyCredentialV1::Missing
+        ));
+        assert_eq!(
+            mount_profile_github_read_only_credential_authority_v1(
+                &exact_profile,
+                "ScriptedAlchemy",
+                "profile-mounted-private",
+            ),
+            ProfileGitHubReadOnlyCredentialMountOutcomeV1::Mounted
+        );
+        let RegisteredGitHubReadOnlyCredentialV1::Verified(credential) =
+            resolve_registered_github_read_only_credential_v1(
+                "ScriptedAlchemy",
+                "profile-mounted-private",
+            )
+        else {
+            panic!("exact-profile project-open mount must resolve");
+        };
+        assert!(credential.permits(GitHubReadPermissionV1::PullRequests));
+        assert!(!credential.permits(GitHubReadPermissionV1::Actions));
+        assert!(!credential.permits(GitHubReadPermissionV1::Checks));
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let (headers, _) = read_http_request_with_headers(&mut stream);
+            let fixture: serde_json::Value = serde_json::from_str(THREAD_CAPTURE).unwrap();
+            write_http_json(&mut stream, &fixture["response"]);
+            headers
+        });
+        let client = GitHubReadOnlyClientV1 {
+            agent: ureq::Agent::config_builder()
+                .https_only(false)
+                .http_status_as_error(false)
+                .build()
+                .into(),
+            target: GitHubRepositoryTargetV1 {
+                owner: "ScriptedAlchemy".to_owned(),
+                repository: "profile-mounted-private".to_owned(),
+                pull_request_number: 421,
+                pull_request_id: GitHubPullRequestIdV1::new("4026204542").unwrap(),
+            },
+            credential,
+            config: GitHubHttpReadConfigV1 {
+                rest_base_uri: format!("http://{address}"),
+                graphql_uri: format!("http://{address}/graphql"),
+                ..GitHubHttpReadConfigV1::default()
+            },
+        };
+        let request_scope = scope("exact-profile-project-open");
+        let outcome = client.execute_graphql(
+            &context(&request_scope),
+            &GitHubGraphQlReadRequestV1 {
+                scope: request_scope,
+                pull_request_id: GitHubPullRequestIdV1::new("4026204542").unwrap(),
+                resume: GitHubReadResumeV1::empty(),
+            },
+        );
+        let GitHubReadNetworkOutcomeV1::Response(response) = outcome else {
+            panic!("exact-profile project-open review read must contribute a response");
+        };
+        let envelope: GraphQlResponseV1 = serde_json::from_slice(&response.body).unwrap();
+        assert!(
+            !envelope
+                .data
+                .unwrap()
+                .repository
+                .unwrap()
+                .pull_request
+                .unwrap()
+                .review_threads
+                .nodes
+                .is_empty()
+        );
+        let headers = server.join().unwrap().to_ascii_lowercase();
+        assert!(headers.contains("authorization: bearer github_pat_exact_profile_fixture\r\n"));
+        assert!(
+            std::fs::read_dir(profile_root.path())
+                .unwrap()
+                .next()
+                .is_none(),
+            "credential mount must not persist token material",
+        );
+        assert!(unregister_profile_github_read_only_credential_authority_v1(
+            &exact_profile,
+            "ScriptedAlchemy",
+            "profile-mounted-private",
+            &authority,
+        ));
     }
 
     #[test]
@@ -2027,7 +2414,7 @@ mod tests {
         ));
     }
 
-    fn read_http_request(stream: &mut TcpStream) -> serde_json::Value {
+    fn read_http_request_with_headers(stream: &mut TcpStream) -> (String, serde_json::Value) {
         let mut bytes = Vec::new();
         let mut buffer = [0_u8; 4096];
         let header_end = loop {
@@ -2053,11 +2440,19 @@ mod tests {
             assert!(read > 0, "fixture client closed before request body");
             bytes.extend_from_slice(&buffer[..read]);
         }
-        if content_length == 0 {
+        let body = if content_length == 0 {
             serde_json::Value::Null
         } else {
             serde_json::from_slice(&bytes[header_end..header_end + content_length]).unwrap()
-        }
+        };
+        (
+            String::from_utf8(bytes[..header_end].to_vec()).unwrap(),
+            body,
+        )
+    }
+
+    fn read_http_request(stream: &mut TcpStream) -> serde_json::Value {
+        read_http_request_with_headers(stream).1
     }
 
     fn write_http_json(stream: &mut TcpStream, value: &serde_json::Value) {

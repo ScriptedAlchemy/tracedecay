@@ -1052,6 +1052,34 @@ mod tests {
     }
 
     #[test]
+    fn kimi_and_opencode_rendered_bundles_queue_native_scout_lifecycle_events() {
+        let kimi = verified_embedded_default_host_component_set(HostKindV1::KimiCode, 0).unwrap();
+        let manifest = kimi
+            .component_set
+            .components
+            .iter()
+            .flat_map(|component| &component.contents)
+            .find(|asset| asset.relative_path.ends_with(".kimi-plugin/plugin.json"))
+            .map(|asset| String::from_utf8(asset.bytes.clone()).unwrap())
+            .unwrap();
+        assert!(manifest.contains("hook-kimi-event"));
+        assert!(manifest.contains("\"PostToolUse\""));
+
+        let opencode =
+            verified_embedded_default_host_component_set(HostKindV1::OpenCode, 0).unwrap();
+        let plugin = opencode
+            .component_set
+            .components
+            .iter()
+            .flat_map(|component| &component.contents)
+            .find(|asset| asset.relative_path.ends_with("plugins/tracedecay.ts"))
+            .map(|asset| String::from_utf8(asset.bytes.clone()).unwrap())
+            .unwrap();
+        assert!(plugin.contains("await dispatch(\"hook-opencode-tool-after\", { input, output })"));
+        assert!(plugin.contains("await dispatch(\"hook-opencode-event\", event)"));
+    }
+
+    #[test]
     fn project_local_sets_have_only_project_scoped_receipt_paths() {
         let component_set =
             verified_embedded_project_host_component_set(HostKindV1::OpenCode, "opencode", 0)

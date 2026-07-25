@@ -55,6 +55,10 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) database_owner_reconciler: Option<DatabaseOwnerReconciler>,
     pub(crate) dashboard_automation_writer: crate::dashboard::DashboardAutomationWriter,
     pub(crate) dashboard_doctor_report_reader: Option<crate::dashboard::DoctorReportReader>,
+    pub(crate) dashboard_doctor_remediation_dispatcher:
+        Option<crate::dashboard::DoctorRemediationDispatcherV1>,
+    pub(crate) diagnostics_lsp:
+        Option<Arc<tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>>>,
     pub(crate) hook_branch_writer: HookBranchWriter,
     pub(crate) background_refresh_writer: BackgroundRefreshWriter,
     pub(crate) code_index_hook_sink: Option<super::CodeIndexHookSink>,
@@ -133,6 +137,8 @@ impl McpServerConstructionContext {
             database_owner_reconciler: None,
             dashboard_automation_writer: crate::dashboard::direct_dashboard_automation_writer(),
             dashboard_doctor_report_reader: None,
+            dashboard_doctor_remediation_dispatcher: None,
+            diagnostics_lsp: None,
             hook_branch_writer: direct_hook_branch_writer(),
             background_refresh_writer: direct_background_refresh_writer(),
             code_index_hook_sink: None,
@@ -202,6 +208,8 @@ impl McpServerConstructionContext {
             database_owner_reconciler: Some(database_owner_reconciler),
             dashboard_automation_writer: writers.dashboard_automation,
             dashboard_doctor_report_reader: None,
+            dashboard_doctor_remediation_dispatcher: None,
+            diagnostics_lsp: None,
             hook_branch_writer: writers.hook_branch,
             background_refresh_writer: writers.background_refresh,
             code_index_hook_sink: None,
@@ -275,6 +283,22 @@ impl McpServerConstructionContext {
         reader: crate::dashboard::DoctorReportReader,
     ) -> Self {
         self.dashboard_doctor_report_reader = Some(reader);
+        self
+    }
+
+    pub(crate) fn with_dashboard_doctor_remediation_dispatcher(
+        mut self,
+        dispatcher: crate::dashboard::DoctorRemediationDispatcherV1,
+    ) -> Self {
+        self.dashboard_doctor_remediation_dispatcher = Some(dispatcher);
+        self
+    }
+
+    pub(crate) fn with_diagnostics_lsp(
+        mut self,
+        diagnostics_lsp: Arc<tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>>,
+    ) -> Self {
+        self.diagnostics_lsp = Some(diagnostics_lsp);
         self
     }
 

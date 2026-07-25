@@ -44,7 +44,9 @@ use crate::application::feedback::owner::{
     FeedbackReadInvocationResultV1, FeedbackReadOperationV1, FeedbackReadOwnerErrorV1,
 };
 use crate::application::operation_stream::{
-    ManagedTestRunSnapshot, OperationEventAuthority, OperationEventError, operation_event_authority,
+    CanonicalManagedTestRunReader, ManagedTestRunCurrentScope, ManagedTestRunReadOutcome,
+    ManagedTestRunSnapshot, ManagedTestRunStaleReason, ManagedTestRunUnavailableReason,
+    operation_event_authority,
 };
 use crate::daemon::lsp_gateway::LspAnalyzerCancellationAuthority;
 use crate::daemon::lsp_gateway::{
@@ -721,25 +723,25 @@ pub trait LspTestRunProjectionPort: Send + Sync {
 }
 
 #[derive(Clone)]
-pub struct OperationEventTestRunProjection {
-    events: OperationEventAuthority,
+pub(crate) struct OperationEventTestRunProjection {
+    reader: CanonicalManagedTestRunReader,
     project: Arc<RegisteredProjectLspAuthority>,
 }
 
 impl OperationEventTestRunProjection {
-    pub fn new(
-        events: OperationEventAuthority,
+    pub(crate) fn new(
+        reader: CanonicalManagedTestRunReader,
         project: Arc<RegisteredProjectLspAuthority>,
     ) -> Self {
-        Self { events, project }
+        Self { reader, project }
     }
 }
 
-pub fn lsp_test_result_port(
+pub(crate) fn lsp_test_result_port(
     project: Arc<RegisteredProjectLspAuthority>,
 ) -> Arc<dyn LspTestRunProjectionPort> {
     Arc::new(OperationEventTestRunProjection::new(
-        operation_event_authority(),
+        CanonicalManagedTestRunReader::new(operation_event_authority()),
         project,
     ))
 }
@@ -764,12 +766,57 @@ impl LspTestRunProjectionPort for OperationEventTestRunProjection {
                     };
                 }
             };
-            match projection.events.latest_managed_test_run(root.uri()).await {
-                Ok(snapshot) => test_run_projection(root, document_uri, scope, snapshot),
-                Err(OperationEventError::FrontierExpired) => ContextProjectionOutcome::Deferred {
+            let current = ManagedTestRunCurrentScope {
+                root_uri: root.uri().to_owned(),
+                head_commit_id: Some(scope.head_commit_id.clone()),
+                code_generation_id: Some(scope.code_generation_id.clone()),
+                document_uri: document_uri.clone(),
+                document_content_digest: scope.document_content_digest.clone(),
+            };
+            match projection.reader.latest_current(&current).await {
+                ManagedTestRunReadOutcome::Current(snapshot) => {
+                    test_run_projection(root, document_uri, scope, snapshot)
+                }
+                ManagedTestRunReadOutcome::Unavailable(
+                    ManagedTestRunUnavailableReason::FrontierExpired,
+                ) => ContextProjectionOutcome::Deferred {
                     reason: "managed-test-run-frontier-expired".to_owned(),
                 },
-                Err(_) => ContextProjectionOutcome::Failed {
+                ManagedTestRunReadOutcome::Unavailable(
+                    ManagedTestRunUnavailableReason::RetainedHeadUnbound,
+                ) => ContextProjectionOutcome::Deferred {
+                    reason: "managed-test-run-head-unbound".to_owned(),
+                },
+                ManagedTestRunReadOutcome::Unavailable(
+                    ManagedTestRunUnavailableReason::RetainedCodeGenerationUnbound,
+                ) => ContextProjectionOutcome::Deferred {
+                    reason: "managed-test-run-code-generation-unbound".to_owned(),
+                },
+                ManagedTestRunReadOutcome::Unavailable(
+                    ManagedTestRunUnavailableReason::CurrentDocumentUnbound
+                    | ManagedTestRunUnavailableReason::RetainedDocumentUnbound,
+                ) => ContextProjectionOutcome::Deferred {
+                    reason: "managed-test-run-document-content-unbound".to_owned(),
+                },
+                ManagedTestRunReadOutcome::Unavailable(
+                    ManagedTestRunUnavailableReason::CurrentHeadUnbound
+                    | ManagedTestRunUnavailableReason::CurrentCodeGenerationUnbound,
+                ) => ContextProjectionOutcome::Deferred {
+                    reason: "managed-test-run-current-identity-unbound".to_owned(),
+                },
+                ManagedTestRunReadOutcome::Stale(ManagedTestRunStaleReason::SourceIdentity) => {
+                    ContextProjectionOutcome::Deferred {
+                        reason: "managed-test-run-source-identity-stale".to_owned(),
+                    }
+                }
+                ManagedTestRunReadOutcome::Stale(ManagedTestRunStaleReason::DocumentContent) => {
+                    ContextProjectionOutcome::Deferred {
+                        reason: "managed-test-run-document-content-stale".to_owned(),
+                    }
+                }
+                ManagedTestRunReadOutcome::Unavailable(
+                    ManagedTestRunUnavailableReason::AuthorityFailure,
+                ) => ContextProjectionOutcome::Failed {
                     reason: "managed-test-run-projection-failed".to_owned(),
                 },
             }
@@ -1521,6 +1568,23 @@ fn test_run_projection(
         return ContextProjectionOutcome::Deferred {
             reason: "managed-test-run-source-identity-stale".to_owned(),
         };
+    }
+    if let Some(document_uri) = document_uri.as_ref() {
+        let Some(current_digest) = scope.document_content_digest.as_ref() else {
+            return ContextProjectionOutcome::Deferred {
+                reason: "managed-test-run-document-content-unbound".to_owned(),
+            };
+        };
+        let Some(retained_digest) = snapshot.document_content_digests.get(document_uri) else {
+            return ContextProjectionOutcome::Deferred {
+                reason: "managed-test-run-document-content-unbound".to_owned(),
+            };
+        };
+        if retained_digest != current_digest {
+            return ContextProjectionOutcome::Deferred {
+                reason: "managed-test-run-document-content-stale".to_owned(),
+            };
+        }
     }
     let missing_results = snapshot
         .completed
@@ -2394,6 +2458,82 @@ mod projection_tests {
         assert_eq!(envelope.producer_state, ContextProducerState::Complete);
         assert_eq!(envelope.items.len(), 1);
         assert_eq!(envelope.items[0].summary, "passed: suite::passes");
+    }
+
+    #[test]
+    fn saved_document_drift_rejects_stale_test_run_results() {
+        let document_uri = "file:///root/src/lib.rs";
+        let current_digest =
+            ContentDigest::new(format!("sha256:{}", "d".repeat(64))).expect("current digest");
+        let stale_digest =
+            ContentDigest::new(format!("sha256:{}", "e".repeat(64))).expect("stale digest");
+        let scope = LspFeedbackProjectionScope {
+            document_content_digest: Some(current_digest),
+            ..projection_scope()
+        };
+        let snapshot = ManagedTestRunSnapshot {
+            operation_id: OperationId::from_request(
+                RequestId::new("request.test-run.saved-drift").expect("request"),
+            ),
+            generation: 7,
+            head_commit_id: Some(scope.head_commit_id.clone()),
+            code_generation_id: Some(scope.code_generation_id.clone()),
+            document_content_digests: BTreeMap::from([(document_uri.to_owned(), stale_digest)]),
+            deadline: Deadline::new(UtcMicros(i64::MAX)).expect("deadline"),
+            results: Vec::new(),
+            completed: 0,
+            total: Some(0),
+            termination: Some(OperationTermination::Completed),
+        };
+
+        assert_eq!(
+            test_run_projection(
+                AdmittedRoot::new("file:///root"),
+                Some(document_uri.to_owned()),
+                scope,
+                snapshot,
+            ),
+            ContextProjectionOutcome::Deferred {
+                reason: "managed-test-run-document-content-stale".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn overlay_projection_requires_test_run_document_identity() {
+        let document_uri = "file:///root/src/lib.rs";
+        let scope = LspFeedbackProjectionScope {
+            document_content_digest: Some(
+                ContentDigest::new(format!("sha256:{}", "d".repeat(64))).expect("document digest"),
+            ),
+            ..projection_scope()
+        };
+        let snapshot = ManagedTestRunSnapshot {
+            operation_id: OperationId::from_request(
+                RequestId::new("request.test-run.overlay-unbound").expect("request"),
+            ),
+            generation: 7,
+            head_commit_id: Some(scope.head_commit_id.clone()),
+            code_generation_id: Some(scope.code_generation_id.clone()),
+            document_content_digests: BTreeMap::new(),
+            deadline: Deadline::new(UtcMicros(i64::MAX)).expect("deadline"),
+            results: Vec::new(),
+            completed: 0,
+            total: Some(0),
+            termination: Some(OperationTermination::Completed),
+        };
+
+        assert_eq!(
+            test_run_projection(
+                AdmittedRoot::new("file:///root"),
+                Some(document_uri.to_owned()),
+                scope,
+                snapshot,
+            ),
+            ContextProjectionOutcome::Deferred {
+                reason: "managed-test-run-document-content-unbound".to_owned(),
+            }
+        );
     }
 
     #[test]

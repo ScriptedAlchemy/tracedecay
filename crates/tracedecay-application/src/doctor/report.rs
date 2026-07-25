@@ -15,9 +15,12 @@ use crate::RequestContext;
 use crate::error::ApplicationContractError;
 
 use super::sources::{
-    CodeIndexMountDoctorPort, ConfigurationAuthorityDoctorPort, DoctorStorageFamilyReadV1,
-    HostIntegrationDoctorPort, RuntimeHealthDoctorPort, StorageDoctorPort, code_index_finding,
-    configuration_finding, host_integration_finding, runtime_health_finding,
+    AdvisoryFeedbackDoctorPort, CodeIndexMountDoctorPort, ConfigurationAuthorityDoctorPort,
+    DoctorStorageFamilyReadV1, HostIntegrationDoctorPort, LanguageServerDoctorPort,
+    ObservabilityDoctorPort, RuntimeHealthDoctorPort, StorageDoctorPort,
+    advisory_feedback_findings, code_index_finding, configuration_finding,
+    host_integration_finding, language_server_finding, observability_finding,
+    runtime_health_finding,
 };
 use super::types::{
     DoctorCoverageCompletenessV1, DoctorCoverageStatementV1, DoctorEvidenceRefV1,
@@ -264,7 +267,10 @@ pub struct DoctorReportComposerV1<'a> {
     configuration: Option<&'a dyn ConfigurationAuthorityDoctorPort>,
     runtime: Option<&'a dyn RuntimeHealthDoctorPort>,
     host: Option<&'a dyn HostIntegrationDoctorPort>,
+    advisory_feedback: Option<&'a dyn AdvisoryFeedbackDoctorPort>,
+    language_server: Option<&'a dyn LanguageServerDoctorPort>,
     code_index: Option<&'a dyn CodeIndexMountDoctorPort>,
+    observability: Option<&'a dyn ObservabilityDoctorPort>,
     storage: Option<&'a dyn StorageDoctorPort>,
 }
 
@@ -297,10 +303,31 @@ impl<'a> DoctorReportComposerV1<'a> {
         self
     }
 
+    /// Wire the mounted canonical feedback read model (Advisory family).
+    #[must_use]
+    pub fn with_advisory_feedback(mut self, port: &'a dyn AdvisoryFeedbackDoctorPort) -> Self {
+        self.advisory_feedback = Some(port);
+        self
+    }
+
+    /// Wire live language-server/analyzer state (LanguageServer family).
+    #[must_use]
+    pub fn with_language_server(mut self, port: &'a dyn LanguageServerDoctorPort) -> Self {
+        self.language_server = Some(port);
+        self
+    }
+
     /// Wire the code/semantic index mount source (SemanticIndex family).
     #[must_use]
     pub fn with_code_index(mut self, port: &'a dyn CodeIndexMountDoctorPort) -> Self {
         self.code_index = Some(port);
+        self
+    }
+
+    /// Wire the canonical durable Plan-26 read model (Observability family).
+    #[must_use]
+    pub fn with_observability(mut self, port: &'a dyn ObservabilityDoctorPort) -> Self {
+        self.observability = Some(port);
         self
     }
 
@@ -321,16 +348,15 @@ impl<'a> DoctorReportComposerV1<'a> {
 
         for family in REPORT_FAMILIES {
             let (family_entries, consultation) = match family {
-                DoctorFindingFamilyV1::Advisory => self.compose_host(context).await?,
+                DoctorFindingFamilyV1::Advisory => self.compose_advisory(context).await?,
                 DoctorFindingFamilyV1::Configuration => self.compose_configuration(context).await?,
                 DoctorFindingFamilyV1::StorageRuntime => self.compose_runtime(context).await?,
                 DoctorFindingFamilyV1::Storage => self.compose_storage(context).await?,
-                DoctorFindingFamilyV1::SemanticIndex => self.compose_code_index(context).await?,
-                // No source port is wired for these families yet; they are
-                // carried as unwired rather than omitted.
-                DoctorFindingFamilyV1::LanguageServer | DoctorFindingFamilyV1::Observability => {
-                    unwired_family(family)?
+                DoctorFindingFamilyV1::LanguageServer => {
+                    self.compose_language_server(context).await?
                 }
+                DoctorFindingFamilyV1::SemanticIndex => self.compose_code_index(context).await?,
+                DoctorFindingFamilyV1::Observability => self.compose_observability(context).await?,
             };
             entries.extend(family_entries);
             coverage.push(DoctorFamilyCoverageV1 {
@@ -409,6 +435,70 @@ impl<'a> DoctorReportComposerV1<'a> {
         Ok((vec![DoctorReportEntryV1::new(finding, None)?], consultation))
     }
 
+    async fn compose_advisory(
+        &self,
+        context: &RequestContext,
+    ) -> Result<(Vec<DoctorReportEntryV1>, DoctorFamilyConsultationV1), ApplicationContractError>
+    {
+        if self.host.is_none() && self.advisory_feedback.is_none() {
+            return unwired_family(DoctorFindingFamilyV1::Advisory);
+        }
+        let mut entries = Vec::new();
+        let mut consultations = Vec::new();
+        if self.host.is_some() {
+            let (host_entries, host_consultation) = self.compose_host(context).await?;
+            entries.extend(host_entries);
+            consultations.push(host_consultation);
+        }
+        if let Some(port) = self.advisory_feedback {
+            let read = port.advisory_feedback(context).await;
+            use super::sources::AdvisoryFeedbackReadV1 as Read;
+            let consultation = match &read {
+                Read::Observed { findings } if !findings.is_empty() => {
+                    DoctorFamilyConsultationV1::Consulted
+                }
+                Read::Observed { .. } | Read::Absent => {
+                    unavailable(DoctorFamilyUnavailableReasonV1::Absent)
+                }
+                Read::Unsupported => unavailable(DoctorFamilyUnavailableReasonV1::Unsupported),
+                Read::Denied => unavailable(DoctorFamilyUnavailableReasonV1::Denied),
+                Read::Unknown => unavailable(DoctorFamilyUnavailableReasonV1::Unknown),
+            };
+            for finding in advisory_feedback_findings(&read)? {
+                entries.push(DoctorReportEntryV1::new(finding, None)?);
+            }
+            consultations.push(consultation);
+        }
+        let consultation = consultations
+            .iter()
+            .copied()
+            .find(|consultation| consultation.is_consulted())
+            .unwrap_or_else(|| {
+                consultations
+                    .into_iter()
+                    .max_by_key(|consultation| match consultation {
+                        DoctorFamilyConsultationV1::Consulted => 5,
+                        DoctorFamilyConsultationV1::Unavailable {
+                            reason: DoctorFamilyUnavailableReasonV1::Unknown,
+                        } => 4,
+                        DoctorFamilyConsultationV1::Unavailable {
+                            reason: DoctorFamilyUnavailableReasonV1::Denied,
+                        } => 3,
+                        DoctorFamilyConsultationV1::Unavailable {
+                            reason: DoctorFamilyUnavailableReasonV1::Absent,
+                        } => 2,
+                        DoctorFamilyConsultationV1::Unavailable {
+                            reason: DoctorFamilyUnavailableReasonV1::Unsupported,
+                        } => 1,
+                        DoctorFamilyConsultationV1::Unavailable {
+                            reason: DoctorFamilyUnavailableReasonV1::Unwired,
+                        } => 0,
+                    })
+                    .expect("at least one advisory port is wired")
+            });
+        Ok((entries, consultation))
+    }
+
     async fn compose_code_index(
         &self,
         context: &RequestContext,
@@ -427,6 +517,48 @@ impl<'a> DoctorReportComposerV1<'a> {
             Read::Unknown => unavailable(DoctorFamilyUnavailableReasonV1::Unknown),
         };
         let finding = code_index_finding(&read)?;
+        Ok((vec![DoctorReportEntryV1::new(finding, None)?], consultation))
+    }
+
+    async fn compose_language_server(
+        &self,
+        context: &RequestContext,
+    ) -> Result<(Vec<DoctorReportEntryV1>, DoctorFamilyConsultationV1), ApplicationContractError>
+    {
+        let Some(port) = self.language_server else {
+            return unwired_family(DoctorFindingFamilyV1::LanguageServer);
+        };
+        let read = port.language_server_health(context).await;
+        use super::sources::LanguageServerReadV1 as Read;
+        let consultation = match read {
+            Read::Observed { .. } => DoctorFamilyConsultationV1::Consulted,
+            Read::Unsupported => unavailable(DoctorFamilyUnavailableReasonV1::Unsupported),
+            Read::Absent => unavailable(DoctorFamilyUnavailableReasonV1::Absent),
+            Read::Denied => unavailable(DoctorFamilyUnavailableReasonV1::Denied),
+            Read::Unknown => unavailable(DoctorFamilyUnavailableReasonV1::Unknown),
+        };
+        let finding = language_server_finding(&read)?;
+        Ok((vec![DoctorReportEntryV1::new(finding, None)?], consultation))
+    }
+
+    async fn compose_observability(
+        &self,
+        context: &RequestContext,
+    ) -> Result<(Vec<DoctorReportEntryV1>, DoctorFamilyConsultationV1), ApplicationContractError>
+    {
+        let Some(port) = self.observability else {
+            return unwired_family(DoctorFindingFamilyV1::Observability);
+        };
+        let read = port.observability_health(context).await;
+        use super::sources::ObservabilityReadV1 as Read;
+        let consultation = match read {
+            Read::Observed { .. } => DoctorFamilyConsultationV1::Consulted,
+            Read::Unsupported => unavailable(DoctorFamilyUnavailableReasonV1::Unsupported),
+            Read::Absent => unavailable(DoctorFamilyUnavailableReasonV1::Absent),
+            Read::Denied => unavailable(DoctorFamilyUnavailableReasonV1::Denied),
+            Read::Unknown => unavailable(DoctorFamilyUnavailableReasonV1::Unknown),
+        };
+        let finding = observability_finding(&read)?;
         Ok((vec![DoctorReportEntryV1::new(finding, None)?], consultation))
     }
 

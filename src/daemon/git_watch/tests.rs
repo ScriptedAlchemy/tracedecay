@@ -5,6 +5,23 @@ use std::process::Command;
 use tokio::sync::oneshot;
 
 #[test]
+fn debris_retention_enables_maintenance_without_orphan_gc() {
+    let mut retention = crate::config::RetentionConfig::default();
+    retention.session_lcm.enabled = false;
+    retention.observation.enabled = false;
+    retention.orphan_store_gc_days = None;
+    retention.incident_debris_retention_days = Some(30);
+    retention.compaction = None;
+
+    assert!(retention_maintenance_enabled(&retention, false));
+}
+
+#[test]
+fn retention_window_conversion_never_wraps_negative() {
+    assert_eq!(store_maintenance::retention_window_secs(u64::MAX), i64::MAX);
+}
+
+#[test]
 fn dirty_set_coalesces_and_takes_once() {
     let mut set = DirtySet::default();
     assert!(set.is_clean());

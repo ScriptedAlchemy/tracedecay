@@ -784,6 +784,31 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
             .len(),
         1
     );
+    let canonical_test_results = assert_application_transport_parity(
+        &fixture,
+        "test-results",
+        ApplicationSurfaceOperation::TestResults,
+        serde_json::json!({}),
+    )
+    .await;
+    let http_test_results =
+        run_application_http(&fixture, "/tests/results", &serde_json::json!({})).await;
+    assert_eq!(
+        successful_http_payload(&http_test_results),
+        &canonical_test_results
+    );
+    assert_eq!(
+        canonical_test_results["head_commit_id"],
+        test_results["result"]["identity"]["headCommitId"]
+    );
+    assert_eq!(
+        canonical_test_results["code_generation_id"],
+        test_results["result"]["identity"]["codeGenerationId"]
+    );
+    assert_eq!(
+        canonical_test_results["results"].as_array().map(Vec::len),
+        Some(1)
+    );
 
     let lsp_handle = projection["result"]["retrievalHandle"]
         .as_str()

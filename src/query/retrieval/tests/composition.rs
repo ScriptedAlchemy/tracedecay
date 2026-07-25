@@ -673,13 +673,13 @@ fn hydration_preserves_partial_outcomes_and_stops_at_the_ranked_prefix_bound() {
 
 #[derive(Clone, Copy)]
 struct FixedHydrationExecutionControl {
-    now_micros: i64,
+    elapsed_micros: u64,
     cancelled: bool,
 }
 
 impl HydrationExecutionControlV1 for FixedHydrationExecutionControl {
-    fn now_micros(&self) -> i64 {
-        self.now_micros
+    fn elapsed_micros(&self) -> u64 {
+        self.elapsed_micros
     }
 
     fn is_cancelled(&self) -> bool {
@@ -693,6 +693,7 @@ struct PreflightHydrationSource {
     reads: usize,
     estimated_bytes: u64,
     mismatched_receipt: bool,
+    remaining_deadlines: Vec<Option<u64>>,
 }
 
 impl LateHydrationSource<String> for PreflightHydrationSource {
@@ -712,6 +713,8 @@ impl LateHydrationSource<String> for PreflightHydrationSource {
         permit: &HydrationWorkPermitV1,
     ) -> HydrationPreflightOutcomeV1 {
         self.preflights += 1;
+        self.remaining_deadlines
+            .push(permit.remaining_deadline_micros);
         assert_eq!(permit.anchor_id, candidate.candidate.anchor_id);
         assert!(!permit.source_occurrence_ids.is_empty());
         HydrationPreflightOutcomeV1::Ready {
@@ -727,6 +730,8 @@ impl LateHydrationSource<String> for PreflightHydrationSource {
     ) -> HydrationReadOutcomeV1<String> {
         assert!(self.estimated_bytes <= permit.remaining_bytes);
         self.reads += 1;
+        self.remaining_deadlines
+            .push(permit.remaining_deadline_micros);
         let mut receipt = receipt(candidate, self.estimated_bytes);
         if self.mismatched_receipt {
             receipt.source_occurrence_id = id("occurrence.not-permitted");
@@ -772,7 +777,7 @@ fn hydration_preflights_deadline_bytes_and_cancellation_before_payload_work() {
     let request = request();
     let ranked = single_ranked_candidate();
     let active = FixedHydrationExecutionControl {
-        now_micros: request.snapshot.captured_at.0,
+        elapsed_micros: 0,
         cancelled: false,
     };
 
@@ -784,6 +789,7 @@ fn hydration_preflights_deadline_bytes_and_cancellation_before_payload_work() {
         reads: 0,
         estimated_bytes: 5,
         mismatched_receipt: false,
+        remaining_deadlines: Vec::new(),
     };
     let byte_page = DeterministicLateHydration::new(&mut byte_source)
         .hydrate_with_control(&request, &ranked, &byte_budget, &active)
@@ -798,7 +804,7 @@ fn hydration_preflights_deadline_bytes_and_cancellation_before_payload_work() {
     assert!(byte_page.receipts.is_empty());
 
     let cancelled = FixedHydrationExecutionControl {
-        now_micros: request.snapshot.captured_at.0,
+        elapsed_micros: 0,
         cancelled: true,
     };
     let mut cancelled_source = PreflightHydrationSource {
@@ -807,6 +813,7 @@ fn hydration_preflights_deadline_bytes_and_cancellation_before_payload_work() {
         reads: 0,
         estimated_bytes: 1,
         mismatched_receipt: false,
+        remaining_deadlines: Vec::new(),
     };
     let cancelled_page = DeterministicLateHydration::new(&mut cancelled_source)
         .hydrate_with_control(&request, &ranked, &budget(), &cancelled)
@@ -827,7 +834,7 @@ fn hydration_preflights_deadline_bytes_and_cancellation_before_payload_work() {
     let mut deadline_budget = budget();
     deadline_budget.deadline_micros = Some(1);
     let expired = FixedHydrationExecutionControl {
-        now_micros: request.snapshot.captured_at.0 + 1,
+        elapsed_micros: 1,
         cancelled: false,
     };
     let mut deadline_source = PreflightHydrationSource {
@@ -836,6 +843,7 @@ fn hydration_preflights_deadline_bytes_and_cancellation_before_payload_work() {
         reads: 0,
         estimated_bytes: 1,
         mismatched_receipt: false,
+        remaining_deadlines: Vec::new(),
     };
     let deadline_page = DeterministicLateHydration::new(&mut deadline_source)
         .hydrate_with_control(&request, &ranked, &deadline_budget, &expired)
@@ -855,31 +863,100 @@ fn hydration_preflights_deadline_bytes_and_cancellation_before_payload_work() {
 }
 
 #[test]
-fn default_hydration_control_enforces_elapsed_deadline_before_payload_work() {
+fn hydration_deadline_is_request_relative_for_older_generation_and_still_cancellable() {
+    let mut request = request();
+    request.snapshot.captured_at = tracedecay_domain::UtcMicros(1);
+    let ranked = single_ranked_candidate();
+    let mut deadline_budget = budget();
+    deadline_budget.deadline_micros = Some(10);
+    let active = FixedHydrationExecutionControl {
+        elapsed_micros: 1,
+        cancelled: false,
+    };
+    let mut active_source = PreflightHydrationSource {
+        authorizations: 0,
+        preflights: 0,
+        reads: 0,
+        estimated_bytes: 1,
+        mismatched_receipt: false,
+        remaining_deadlines: Vec::new(),
+    };
+
+    let active_page = DeterministicLateHydration::new(&mut active_source)
+        .hydrate_with_control(&request, &ranked, &deadline_budget, &active)
+        .expect("an older generation does not consume the request deadline");
+
+    assert_eq!(
+        (
+            active_source.authorizations,
+            active_source.preflights,
+            active_source.reads,
+        ),
+        (1, 1, 1)
+    );
+    assert!(matches!(
+        active_page.results[0].outcome,
+        HydrationOutcomeV1::Complete(_)
+    ));
+    assert_eq!(active_source.remaining_deadlines, vec![Some(9), Some(9)]);
+
+    let cancelled = FixedHydrationExecutionControl {
+        elapsed_micros: 1,
+        cancelled: true,
+    };
+    let mut cancelled_source = PreflightHydrationSource {
+        authorizations: 0,
+        preflights: 0,
+        reads: 0,
+        estimated_bytes: 1,
+        mismatched_receipt: false,
+        remaining_deadlines: Vec::new(),
+    };
+    let cancelled_page = DeterministicLateHydration::new(&mut cancelled_source)
+        .hydrate_with_control(&request, &ranked, &deadline_budget, &cancelled)
+        .expect("cancellation remains a positional result");
+
+    assert_eq!(
+        (
+            cancelled_source.authorizations,
+            cancelled_source.preflights,
+            cancelled_source.reads,
+        ),
+        (0, 0, 0)
+    );
+    assert!(matches!(
+        cancelled_page.results[0].outcome,
+        HydrationOutcomeV1::Unavailable(HydrationUnavailableV1::Cancelled)
+    ));
+}
+
+#[test]
+fn default_hydration_control_does_not_charge_generation_age_to_request_deadline() {
     let mut request = request();
     request.snapshot.captured_at = tracedecay_domain::UtcMicros(0);
     let ranked = single_ranked_candidate();
     let mut deadline_budget = budget();
-    deadline_budget.deadline_micros = Some(1);
+    deadline_budget.deadline_micros = Some(1_000_000);
     let mut source = PreflightHydrationSource {
         authorizations: 0,
         preflights: 0,
         reads: 0,
         estimated_bytes: 1,
         mismatched_receipt: false,
+        remaining_deadlines: Vec::new(),
     };
 
     let page = DeterministicLateHydration::new(&mut source)
         .hydrate(&request, &ranked, &deadline_budget)
-        .expect("expired deadline is a positional result");
+        .expect("an older generation does not consume the request deadline");
 
     assert_eq!(
         (source.authorizations, source.preflights, source.reads),
-        (0, 0, 0)
+        (1, 1, 1)
     );
     assert!(matches!(
         page.results[0].outcome,
-        HydrationOutcomeV1::Unavailable(HydrationUnavailableV1::BudgetExceeded)
+        HydrationOutcomeV1::Complete(_)
     ));
 }
 
@@ -888,7 +965,7 @@ fn hydration_rejects_receipts_outside_the_issued_work_permit() {
     let request = request();
     let ranked = single_ranked_candidate();
     let control = FixedHydrationExecutionControl {
-        now_micros: request.snapshot.captured_at.0,
+        elapsed_micros: 0,
         cancelled: false,
     };
     let mut source = PreflightHydrationSource {
@@ -897,6 +974,7 @@ fn hydration_rejects_receipts_outside_the_issued_work_permit() {
         reads: 0,
         estimated_bytes: 1,
         mismatched_receipt: true,
+        remaining_deadlines: Vec::new(),
     };
 
     assert!(matches!(
@@ -915,13 +993,13 @@ fn hydration_rejects_receipts_outside_the_issued_work_permit() {
 }
 
 struct MutableHydrationExecutionControl {
-    now_micros: i64,
+    elapsed_micros: u64,
     cancelled: Rc<Cell<bool>>,
 }
 
 impl HydrationExecutionControlV1 for MutableHydrationExecutionControl {
-    fn now_micros(&self) -> i64 {
-        self.now_micros
+    fn elapsed_micros(&self) -> u64 {
+        self.elapsed_micros
     }
 
     fn is_cancelled(&self) -> bool {
@@ -971,7 +1049,7 @@ fn hydration_rechecks_cancellation_after_source_work_before_publishing_payload()
     let ranked = single_ranked_candidate();
     let cancelled = Rc::new(Cell::new(false));
     let control = MutableHydrationExecutionControl {
-        now_micros: request.snapshot.captured_at.0,
+        elapsed_micros: 0,
         cancelled: Rc::clone(&cancelled),
     };
     let mut source = CancellingHydrationSource { cancelled };

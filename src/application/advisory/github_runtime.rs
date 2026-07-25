@@ -56,10 +56,17 @@ pub use network::{
     GitHubReadOnlyCredentialAuthorityV1, GitHubReadOnlyCredentialSecretV1,
     GitHubReadOnlyCredentialV1, GitHubReadPermissionV1, GitHubRepositoryTargetV1,
     register_github_read_only_credential_authority_v1,
+    register_profile_github_read_only_credential_authority_v1,
     unregister_github_read_only_credential_authority_v1,
+    unregister_profile_github_read_only_credential_authority_v1,
 };
 pub(crate) use network::{
-    RegisteredGitHubReadOnlyCredentialV1, resolve_registered_github_read_only_credential_v1,
+    ProfileGitHubReadOnlyCredentialMountOutcomeV1, RegisteredGitHubReadOnlyCredentialV1,
+    mount_profile_github_read_only_credential_authority_v1,
+    register_profile_github_public_repository_v1,
+    resolve_registered_github_read_only_credential_v1,
+    unmount_profile_github_read_only_credential_authority_v1,
+    unregister_profile_github_public_repository_v1,
 };
 pub use owner::{
     GitHubReviewRuntimeOwnerBuildErrorV1, GitHubReviewRuntimeOwnerConfigV1,

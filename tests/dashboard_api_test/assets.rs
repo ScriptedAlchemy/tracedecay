@@ -1,0 +1,81 @@
+use crate::dashboard_api_support::*;
+
+fn quoted_attribute(html: &str, prefix: &str) -> String {
+    html.split_once(prefix)
+        .and_then(|(_, tail)| tail.split_once('"'))
+        .map(|(value, _)| value.to_string())
+        .unwrap_or_else(|| panic!("dashboard index omitted {prefix:?}: {html}"))
+}
+
+#[test]
+fn dashboard_root_serves_the_embedded_single_app_bundle() {
+    let _env_lock = GLOBAL_DB_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_dashboard_fixture_without_memory().await;
+        let agent = http_agent();
+
+        let mut index_response = agent
+            .get(&format!("{}/", fixture.base_url))
+            .call()
+            .expect("embedded dashboard index should be served");
+        assert_eq!(index_response.status().as_u16(), 200);
+        assert_eq!(
+            index_response
+                .headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok()),
+            Some("text/html; charset=utf-8")
+        );
+        let index = index_response
+            .body_mut()
+            .read_to_string()
+            .expect("embedded dashboard index should be readable");
+        assert!(index.contains("<title>TraceDecay</title>"), "{index}");
+        assert!(
+            !index.contains("rebuild in progress"),
+            "production root served the legacy placeholder"
+        );
+
+        let script = quoted_attribute(&index, "src=\"");
+        assert!(
+            script.starts_with("/static/js/"),
+            "production index must load the Rsbuild single-app entry: {script}"
+        );
+        let mut script_response = agent
+            .get(&format!("{}{}", fixture.base_url, script))
+            .call()
+            .expect("embedded dashboard entry script should be served");
+        assert_eq!(script_response.status().as_u16(), 200);
+        assert_eq!(
+            script_response
+                .headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok()),
+            Some("application/javascript")
+        );
+        let script_body = script_response
+            .body_mut()
+            .read_to_string()
+            .expect("embedded dashboard entry script should be readable");
+        assert!(
+            script_body.len() > 704,
+            "production JavaScript must not regress to the historical 704-byte placeholder"
+        );
+
+        let mut deep_link_response = agent
+            .get(&format!("{}/delivery", fixture.base_url))
+            .call()
+            .expect("SPA deep link should return the embedded index");
+        assert_eq!(deep_link_response.status().as_u16(), 200);
+        assert_eq!(
+            deep_link_response
+                .body_mut()
+                .read_to_string()
+                .expect("SPA fallback should be readable"),
+            index
+        );
+    });
+}

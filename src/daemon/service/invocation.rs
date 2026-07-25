@@ -113,7 +113,8 @@ use crate::application::semantic_runtime::{
     SemanticProtectedActivationOperationV1, SemanticProtectedRollbackOperationV1,
 };
 use crate::application_surface::{
-    ConfigurationSurfaceRequest, GitApplySurfaceRequest, GitPreviewSurfaceRequest,
+    ConfigurationSurfaceRequest, ContextScoutSurfaceRequest, GitApplySurfaceRequest,
+    GitPreviewSurfaceRequest,
 };
 use crate::daemon::callable_code_authorization::DaemonCallableCodeAuthorizationSource;
 use crate::daemon::git_transactions::{
@@ -177,6 +178,7 @@ pub(crate) enum DaemonInvocationOperation {
     CodePhraseSearch,
     CodeCallees,
     Configuration,
+    ContextScout,
     SemanticEvaluateAndPublish,
     LspOpen,
     LspFrame,
@@ -205,6 +207,7 @@ impl DaemonInvocationOperation {
             Self::CodePhraseSearch => "code_phrase_search",
             Self::CodeCallees => "code_callees",
             Self::Configuration => "configuration",
+            Self::ContextScout => "context_scout",
             Self::SemanticEvaluateAndPublish => "semantic_evaluate_and_publish",
             Self::LspOpen => "lsp_open",
             Self::LspFrame => "lsp_frame",
@@ -364,6 +367,13 @@ pub(crate) enum DaemonInvocationPayload {
     Configuration {
         surface_operation: crate::application_surface::ApplicationSurfaceOperation,
         request: ConfigurationSurfaceRequest,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
+    ContextScout {
+        surface_operation: crate::application_surface::ApplicationSurfaceOperation,
+        request: ContextScoutSurfaceRequest,
         observed_at: UtcMicros,
         deadline: Deadline,
         cancellation: CancellationContext,
@@ -535,6 +545,19 @@ impl DaemonInvocationRequest {
             | crate::application_surface::ApplicationSurfaceOperation::ConfigurationAudit => {
                 unreachable!("configuration operations use their typed constructor")
             }
+            crate::application_surface::ApplicationSurfaceOperation::ContextScoutStatus
+            | crate::application_surface::ApplicationSurfaceOperation::ContextScoutRecent
+            | crate::application_surface::ApplicationSurfaceOperation::ContextScoutExplain
+            | crate::application_surface::ApplicationSurfaceOperation::ContextScoutCapability
+            | crate::application_surface::ApplicationSurfaceOperation::ContextScoutBudget
+            | crate::application_surface::ApplicationSurfaceOperation::ContextScoutPause
+            | crate::application_surface::ApplicationSurfaceOperation::ContextScoutResume
+            | crate::application_surface::ApplicationSurfaceOperation::ContextScoutCancel
+            | crate::application_surface::ApplicationSurfaceOperation::ContextScoutClaim
+            | crate::application_surface::ApplicationSurfaceOperation::ContextScoutDelivery
+            | crate::application_surface::ApplicationSurfaceOperation::ContextScoutFeedback => {
+                unreachable!("Context Scout operations use their typed constructor")
+            }
         };
         Self {
             protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
@@ -680,6 +703,29 @@ impl DaemonInvocationRequest {
             request_id: request_id.into(),
             delivery_route: None,
             payload: DaemonInvocationPayload::Configuration {
+                surface_operation,
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            },
+        }
+    }
+
+    pub(crate) fn context_scout(
+        request_id: impl Into<String>,
+        surface_operation: crate::application_surface::ApplicationSurfaceOperation,
+        request: ContextScoutSurfaceRequest,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    ) -> Self {
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: request_id.into(),
+            delivery_route: None,
+            payload: DaemonInvocationPayload::ContextScout {
                 surface_operation,
                 request,
                 observed_at,
@@ -893,6 +939,7 @@ impl DaemonInvocationRequest {
             DaemonInvocationPayload::Configuration { .. } => {
                 DaemonInvocationOperation::Configuration
             }
+            DaemonInvocationPayload::ContextScout { .. } => DaemonInvocationOperation::ContextScout,
             DaemonInvocationPayload::SemanticEvaluateAndPublish { .. } => {
                 DaemonInvocationOperation::SemanticEvaluateAndPublish
             }
@@ -926,6 +973,7 @@ impl DaemonInvocationRequest {
                 | DaemonInvocationOperation::CodePhraseSearch
                 | DaemonInvocationOperation::CodeCallees
                 | DaemonInvocationOperation::Configuration
+                | DaemonInvocationOperation::ContextScout
                 | DaemonInvocationOperation::SemanticEvaluateAndPublish
                 | DaemonInvocationOperation::LspOpen
         )
@@ -1070,6 +1118,28 @@ impl DaemonInvocationRequest {
                     )
                 );
                 if !matches {
+                    return Err(DaemonInvocationProblem::InvalidRequest);
+                }
+            }
+            DaemonInvocationPayload::ContextScout {
+                surface_operation,
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+                ..
+            } => {
+                if observed_at.0 <= 0
+                    || deadline.expires_at.0 <= 0
+                    || cancellation.token_id.as_str().len() > MAX_OPAQUE_HANDLE_BYTES
+                    || !request.matches(*surface_operation)
+                    || matches!(
+                        request,
+                        ContextScoutSurfaceRequest::Recent(request)
+                            | ContextScoutSurfaceRequest::Explain(request)
+                            if !(1..=32).contains(&request.limit)
+                    )
+                {
                     return Err(DaemonInvocationProblem::InvalidRequest);
                 }
             }
@@ -2046,6 +2116,399 @@ fn callable_code_response<T: Serialize>(
 }
 
 #[allow(clippy::too_many_arguments)]
+async fn execute_context_scout(
+    service: &DaemonInvocationService,
+    wire_request_id: String,
+    registered: Option<RegisteredConfigurationRuntime>,
+    surface_operation: crate::application_surface::ApplicationSurfaceOperation,
+    request: ContextScoutSurfaceRequest,
+    observed_at: UtcMicros,
+    deadline: Deadline,
+    cancellation: CancellationContext,
+) -> DaemonInvocationResponse {
+    let Some(registered) = registered else {
+        return DaemonInvocationResponse::problem(
+            wire_request_id,
+            DaemonInvocationProblem::NotFoundOrNotAuthorized,
+        );
+    };
+    let current = match registered.runtime.client().current().await {
+        Ok(current) => crate::application::configuration::ConfigurationCurrentStateV1 {
+            revision_id: current.revision_id,
+            snapshot: current.snapshot,
+        },
+        Err(error) => {
+            return application_problem(wire_request_id, configuration_problem(error));
+        }
+    };
+    let Some(configuration) =
+        crate::agents::context_scout_ports::ContextScoutConfigurationPinV1::from_current(&current)
+    else {
+        return DaemonInvocationResponse::problem(
+            wire_request_id,
+            DaemonInvocationProblem::NotFoundOrNotAuthorized,
+        );
+    };
+    let registry = service
+        .context_scout_registries
+        .lock()
+        .await
+        .get(&registered.scope.project_id)
+        .cloned();
+    let Some(registry) = registry else {
+        return DaemonInvocationResponse::problem(
+            wire_request_id,
+            DaemonInvocationProblem::NotFoundOrNotAuthorized,
+        );
+    };
+    let address = request.address();
+    if !registry
+        .authorize_current_exact_address(address, &configuration, &registered.scope)
+        .await
+    {
+        return DaemonInvocationResponse::problem(
+            wire_request_id,
+            DaemonInvocationProblem::NotFoundOrNotAuthorized,
+        );
+    }
+    let mut owner = None;
+    for candidate in crate::agents::context_scout_owner::lookup_registered_context_scout_owners(
+        address.project_id,
+    ) {
+        if candidate.configured_status().await.is_ok_and(|status| {
+            status.configuration_revision == configuration.control().configuration_revision
+        }) {
+            if owner.is_some() {
+                return DaemonInvocationResponse::problem(
+                    wire_request_id,
+                    DaemonInvocationProblem::NotFoundOrNotAuthorized,
+                );
+            }
+            owner = Some(candidate);
+        }
+    }
+    let Some(owner) = owner else {
+        return DaemonInvocationResponse::problem(
+            wire_request_id,
+            DaemonInvocationProblem::NotFoundOrNotAuthorized,
+        );
+    };
+    if let ContextScoutSurfaceRequest::Pause(control)
+    | ContextScoutSurfaceRequest::Resume(control) = &request
+    {
+        let target = match &request {
+            ContextScoutSurfaceRequest::Pause(_) => {
+                tracedecay_domain::configuration::ContextScoutConfigurationStateV1::Paused
+            }
+            ContextScoutSurfaceRequest::Resume(_) => {
+                tracedecay_domain::configuration::ContextScoutConfigurationStateV1::Active
+            }
+            _ => unreachable!("pause/resume matched above"),
+        };
+        return execute_context_scout_state_transition(
+            wire_request_id,
+            registered,
+            owner,
+            control,
+            target,
+            current,
+            observed_at,
+            deadline,
+            cancellation,
+        )
+        .await;
+    }
+    let authority = match context_scout_request_authority(
+        &registered,
+        &wire_request_id,
+        surface_operation,
+        observed_at,
+        deadline.clone(),
+        cancellation,
+    ) {
+        Ok(authority) => authority,
+        Err(problem) => return application_problem(wire_request_id, problem),
+    };
+    let payload = match request {
+        ContextScoutSurfaceRequest::Status(_) => owner
+            .configured_status()
+            .await
+            .ok()
+            .and_then(|status| serde_json::to_value(status).ok()),
+        ContextScoutSurfaceRequest::Recent(request) => owner
+            .recent_exact(request.address, request.limit)
+            .await
+            .ok()
+            .and_then(|recent| serde_json::to_value(recent).ok()),
+        ContextScoutSurfaceRequest::Explain(request) => owner
+            .explain_exact(request.address, request.limit)
+            .await
+            .ok()
+            .and_then(|explanation| serde_json::to_value(explanation).ok()),
+        ContextScoutSurfaceRequest::Capability(_) => owner
+            .capability()
+            .await
+            .ok()
+            .and_then(|capability| serde_json::to_value(capability).ok()),
+        ContextScoutSurfaceRequest::Budget(_) => owner
+            .budget()
+            .await
+            .ok()
+            .and_then(|budget| serde_json::to_value(budget).ok()),
+        ContextScoutSurfaceRequest::Cancel(request) if request.work.address == request.address => {
+            owner
+                .cancel(request.work)
+                .await
+                .ok()
+                .filter(|outcome| {
+                    *outcome
+                        != crate::agents::context_scout_v2::ContextScoutDurableStoreOutcomeV1::Unavailable
+                })
+                .map(|outcome| {
+                    serde_json::json!({ "outcome": context_scout_store_outcome(outcome) })
+                })
+        }
+        ContextScoutSurfaceRequest::Claim(request) => {
+            let window = match request.window {
+                crate::application_surface::ContextScoutClaimWindowSurfaceV1::IdleWindow => {
+                    crate::agents::context_scout_v2::ContextScoutDeliveryWindowV1::IdleWindow
+                }
+                crate::application_surface::ContextScoutClaimWindowSurfaceV1::OnRequest => {
+                    crate::agents::context_scout_v2::ContextScoutDeliveryWindowV1::OnRequest
+                }
+            };
+            let digest = canonical_sha256(&(
+                "tracedecay.context-scout.delivery-lease.v1",
+                &wire_request_id,
+                request.address,
+                request.window,
+                observed_at,
+            ))
+            .ok();
+            let lease = digest.and_then(|digest| {
+                let bytes = digest.as_str().as_bytes();
+                (bytes.len() >= 16).then(|| {
+                    let mut lease_id = [0; 16];
+                    lease_id.copy_from_slice(&bytes[..16]);
+                    crate::agents::context_scout_v2::ContextScoutLeaseV1 {
+                        lease_id,
+                        expires_at: UtcMicros(
+                            deadline
+                                .expires_at
+                                .0
+                                .min(observed_at.0.saturating_add(30_000_000)),
+                        ),
+                    }
+                })
+            });
+            match lease {
+                Some(lease) => match owner
+                    .claim_delivery_exact(request.address, window, observed_at, lease)
+                    .await
+                {
+                    crate::agents::context_scout_v2::ContextScoutDurableClaimOutcomeV1::Claimed(
+                        claim,
+                    ) => serde_json::to_value(claim).ok(),
+                    crate::agents::context_scout_v2::ContextScoutDurableClaimOutcomeV1::Empty => {
+                        Some(serde_json::json!({ "outcome": "empty" }))
+                    }
+                    crate::agents::context_scout_v2::ContextScoutDurableClaimOutcomeV1::Unavailable => {
+                        None
+                    }
+                },
+                None => None,
+            }
+        }
+        ContextScoutSurfaceRequest::Delivery(request)
+            if request.claim.entry.work.address == request.address =>
+        {
+            let outcome = owner
+                .record_delivery(&request.claim, &request.receipt)
+                .await;
+            (outcome
+                != crate::agents::context_scout_v2::ContextScoutDurableStoreOutcomeV1::Unavailable)
+                .then(|| {
+                    serde_json::json!({
+                        "outcome": context_scout_store_outcome(outcome)
+                    })
+                })
+        }
+        ContextScoutSurfaceRequest::Feedback(request) => {
+            let outcome = owner
+                .record_feedback_exact(request.address, &request.receipt, request.feedback)
+                .await;
+            (outcome
+                != crate::agents::context_scout_v2::ContextScoutDurableStoreOutcomeV1::Unavailable)
+                .then(|| {
+                    serde_json::json!({
+                        "outcome": context_scout_store_outcome(outcome)
+                    })
+                })
+        }
+        ContextScoutSurfaceRequest::Pause(_)
+        | ContextScoutSurfaceRequest::Resume(_)
+        | ContextScoutSurfaceRequest::Cancel(_)
+        | ContextScoutSurfaceRequest::Delivery(_) => None,
+    };
+    let Some(payload) = payload else {
+        return application_problem(
+            wire_request_id,
+            ApplicationProblem::unavailable(SafeDiagnostic {
+                code: "context_scout.unavailable".to_owned(),
+                message: "The exact-address Context Scout operation is unavailable".to_owned(),
+            }),
+        );
+    };
+    match configuration_evidence(payload, authority, observed_at, deadline) {
+        Ok(outcome) => DaemonInvocationResponse::with_outcome(
+            wire_request_id,
+            DaemonInvocationOutcome::ContextScout {
+                scope: registered.scope,
+                outcome,
+            },
+        ),
+        Err(error) => application_problem(wire_request_id, configuration_problem(error)),
+    }
+}
+
+async fn execute_context_scout_state_transition(
+    wire_request_id: String,
+    registered: RegisteredConfigurationRuntime,
+    owner: Arc<crate::agents::context_scout_owner::ProjectContextScoutOwnerV1>,
+    control: &crate::application_surface::ContextScoutControlSurfaceRequest,
+    target: tracedecay_domain::configuration::ContextScoutConfigurationStateV1,
+    current: crate::application::configuration::ConfigurationCurrentStateV1,
+    observed_at: UtcMicros,
+    deadline: Deadline,
+    cancellation: CancellationContext,
+) -> DaemonInvocationResponse {
+    if control.expected_revision != current.revision_id {
+        return application_problem(
+            wire_request_id,
+            ApplicationProblem::unavailable(SafeDiagnostic {
+                code: "context_scout.configuration_stale".to_owned(),
+                message: "The Context Scout configuration revision is stale".to_owned(),
+            }),
+        );
+    }
+    let Some(key) = tracedecay_domain::configuration::SettingKey::new(
+        tracedecay_domain::configuration::CONTEXT_SCOUT_SETTINGS_SETTING_KEY,
+    )
+    .ok() else {
+        return DaemonInvocationResponse::problem(
+            wire_request_id,
+            DaemonInvocationProblem::Unavailable,
+        );
+    };
+    let Some(tracedecay_domain::configuration::ConfigurationValueV1::ContextScoutSettings(
+        mut settings,
+    )) = current.snapshot.effective_values.get(&key).cloned()
+    else {
+        return DaemonInvocationResponse::problem(
+            wire_request_id,
+            DaemonInvocationProblem::NotFoundOrNotAuthorized,
+        );
+    };
+    let valid_transition = matches!(
+        (settings.state, target),
+        (
+            tracedecay_domain::configuration::ContextScoutConfigurationStateV1::Active,
+            tracedecay_domain::configuration::ContextScoutConfigurationStateV1::Paused
+        ) | (
+            tracedecay_domain::configuration::ContextScoutConfigurationStateV1::Paused,
+            tracedecay_domain::configuration::ContextScoutConfigurationStateV1::Active
+        )
+    );
+    if !valid_transition {
+        return application_problem(
+            wire_request_id,
+            ApplicationProblem::unavailable(SafeDiagnostic {
+                code: "context_scout.invalid_state_transition".to_owned(),
+                message: "The Context Scout state transition is unavailable".to_owned(),
+            }),
+        );
+    }
+    settings.state = target;
+    let response = execute_configuration(
+        wire_request_id,
+        Some(registered.clone()),
+        crate::application_surface::ApplicationSurfaceOperation::ConfigurationSet,
+        ConfigurationSurfaceRequest::Set(
+            crate::application_surface::ConfigurationSetSurfaceRequest {
+                layer: tracedecay_domain::configuration::ConfigurationLayerIdV1::Project {
+                    project_id: registered.scope.project_id.clone(),
+                },
+                key,
+                value: tracedecay_domain::configuration::ConfigurationValueV1::ContextScoutSettings(
+                    settings,
+                ),
+                expected_revision: current.revision_id,
+            },
+        ),
+        observed_at,
+        deadline,
+        cancellation,
+    )
+    .await;
+    let DaemonInvocationResponse {
+        protocol,
+        revision,
+        request_id,
+        outcome,
+    } = response;
+    let DaemonInvocationOutcome::Configuration { scope, outcome } = outcome else {
+        return DaemonInvocationResponse {
+            protocol,
+            revision,
+            request_id,
+            outcome,
+        };
+    };
+    let refreshed = registered
+        .runtime
+        .client()
+        .current()
+        .await
+        .ok()
+        .map(
+            |current| crate::application::configuration::ConfigurationCurrentStateV1 {
+                revision_id: current.revision_id,
+                snapshot: current.snapshot,
+            },
+        )
+        .and_then(|current| {
+            crate::agents::context_scout_ports::ContextScoutConfigurationPinV1::from_current(
+                &current,
+            )
+        });
+    if let Some(refreshed) = refreshed {
+        let _ = owner.install_configuration(refreshed, None).await;
+    } else {
+        return DaemonInvocationResponse::problem(request_id, DaemonInvocationProblem::Unavailable);
+    }
+    DaemonInvocationResponse::with_outcome(
+        request_id,
+        DaemonInvocationOutcome::ContextScout { scope, outcome },
+    )
+}
+
+const fn context_scout_store_outcome(
+    outcome: crate::agents::context_scout_v2::ContextScoutDurableStoreOutcomeV1,
+) -> &'static str {
+    match outcome {
+        crate::agents::context_scout_v2::ContextScoutDurableStoreOutcomeV1::Stored => "stored",
+        crate::agents::context_scout_v2::ContextScoutDurableStoreOutcomeV1::Duplicate => {
+            "duplicate"
+        }
+        crate::agents::context_scout_v2::ContextScoutDurableStoreOutcomeV1::Superseded => {
+            "superseded"
+        }
+        crate::agents::context_scout_v2::ContextScoutDurableStoreOutcomeV1::Unavailable => {
+            "unavailable"
+        }
+    }
+}
+
 async fn execute_configuration(
     wire_request_id: String,
     registered: Option<RegisteredConfigurationRuntime>,
@@ -2673,6 +3136,69 @@ fn configuration_request_authority(
     .map_err(|_| invalid_configuration_request())
 }
 
+fn context_scout_request_authority(
+    registered: &RegisteredConfigurationRuntime,
+    request_id: &str,
+    operation: crate::application_surface::ApplicationSurfaceOperation,
+    observed_at: UtcMicros,
+    deadline: Deadline,
+    cancellation: CancellationContext,
+) -> Result<AuthorityReceipt, ApplicationProblem> {
+    if observed_at >= registered.grants.expires_at {
+        return Err(ApplicationProblem::not_found_or_not_authorized(
+            RetryDirective::Never,
+        ));
+    }
+    let application_operation =
+        tracedecay_application::context_scout::context_scout_surface_operation(operation.as_str())
+            .map_err(|_| invalid_configuration_request())?
+            .ok_or_else(invalid_configuration_request)?;
+    let expires_at = UtcMicros(deadline.expires_at.0.min(registered.grants.expires_at.0));
+    let grant = CapabilityGrantSnapshot::new(
+        CapabilityGrantId::new(format!("grant.daemon.context-scout.{request_id}"))
+            .map_err(|_| invalid_configuration_request())?,
+        1,
+        stable_digest(&(
+            "tracedecay.daemon.context-scout-route-grant.v1",
+            request_id,
+            &registered.scope,
+            operation,
+        ))?,
+        ActorId::new("actor.tracedecay-daemon").map_err(|_| invalid_configuration_request())?,
+        observed_at,
+        expires_at,
+        registered.scope.clone(),
+        std::collections::BTreeSet::from([application_operation.capability_id().clone()]),
+        std::collections::BTreeSet::from([application_operation.use_case_id().clone()]),
+        DisclosureClass::Sensitive,
+    )
+    .map_err(|_| invalid_configuration_request())?;
+    let context = RequestContext::new(
+        registered.actor.clone(),
+        registered.scope.clone(),
+        grant,
+        RequestId::new(request_id).map_err(|_| invalid_configuration_request())?,
+        deadline,
+        cancellation,
+    )
+    .map_err(|_| invalid_configuration_request())?;
+    let policy_digest = ManifestDigest::new(registered.grants.policy_digest.as_str().to_owned())
+        .map_err(|_| invalid_configuration_request())?;
+    AuthorityReceipt::from_context(
+        &context,
+        PolicyDecisionRef::new(
+            "policy.daemon.context-scout.v1",
+            registered.grants.policy_epoch,
+            policy_digest,
+            ComponentVersion::new("tracedecay.daemon.context-scout-policy.v1")
+                .map_err(|_| invalid_configuration_request())?,
+        )
+        .map_err(|_| invalid_configuration_request())?,
+        observed_at,
+    )
+    .map_err(|_| invalid_configuration_request())
+}
+
 fn configuration_evidence(
     payload: serde_json::Value,
     authority: AuthorityReceipt,
@@ -2892,6 +3418,10 @@ pub(crate) enum DaemonInvocationOutcome {
         scope: ResolvedScope,
         outcome: ApplicationOutcome<serde_json::Value>,
     },
+    ContextScout {
+        scope: ResolvedScope,
+        outcome: ApplicationOutcome<serde_json::Value>,
+    },
     SemanticEvaluatedProfilePublished {
         scope: ResolvedScope,
         profile_digest: ManifestDigest,
@@ -2990,10 +3520,11 @@ pub(crate) struct Pr13HookOrchestrationRequestV1 {
     pub lifecycle: Option<ContextScoutLifecycleAddressV1>,
     pub hook_configuration_revision: u64,
     pub trigger: Pr13HookOrchestrationTriggerV1,
+    completion: Option<Arc<dyn Fn() + Send + Sync + 'static>>,
 }
 
 impl Pr13HookOrchestrationRequestV1 {
-    fn from_envelope(
+    pub(in crate::daemon) fn from_envelope(
         envelope: HookEventEnvelopeV2,
         binding: &HookScopeBindingV1,
         lifecycle: Option<ContextScoutLifecycleAddressV1>,
@@ -3017,6 +3548,7 @@ impl Pr13HookOrchestrationRequestV1 {
             lifecycle,
             hook_configuration_revision: configuration_revision,
             trigger,
+            completion: None,
         })
     }
 }
@@ -3060,11 +3592,15 @@ impl Pr13HookOrchestrationPortV1 for BoundedPr13HookOrchestratorV1 {
             return Pr13HookOrchestrationAdmissionV1::Backpressured;
         };
         let work = Arc::clone(&self.work);
+        let completion = request.completion.clone();
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
             return Pr13HookOrchestrationAdmissionV1::Unavailable;
         };
         handle.spawn(async move {
             (work)(request).await;
+            if let Some(completion) = completion {
+                completion();
+            }
             drop(permit);
         });
         Pr13HookOrchestrationAdmissionV1::Enqueued
@@ -3085,8 +3621,9 @@ pub(crate) fn admit_registered_pr13_hook_orchestration(
     lifecycle: Option<ContextScoutLifecycleAddressV1>,
     configuration_revision: u64,
     explicit: bool,
+    completion: Option<Arc<dyn Fn() + Send + Sync + 'static>>,
 ) -> Pr13HookOrchestrationAdmissionV1 {
-    let Some(request) = Pr13HookOrchestrationRequestV1::from_envelope(
+    let Some(mut request) = Pr13HookOrchestrationRequestV1::from_envelope(
         envelope,
         &binding,
         lifecycle,
@@ -3110,6 +3647,7 @@ pub(crate) fn admit_registered_pr13_hook_orchestration(
     else {
         return Pr13HookOrchestrationAdmissionV1::Unavailable;
     };
+    request.completion = completion;
     runtime.admit(request)
 }
 
@@ -3117,16 +3655,73 @@ struct SwitchableFeedbackCycleRuntimeV1 {
     current: RwLock<Arc<dyn FeedbackCycleRuntimePort>>,
 }
 
-struct UnavailableFeedbackCycleRuntimeV1;
+pub(in crate::daemon) fn observe_accepted_feedback_cycle_terminal(
+    observations: &Arc<dyn Plan26FeedbackObservationEmitterV1 + Send + Sync>,
+    project_id: &ProjectId,
+    request: &FeedbackCycleRequest,
+    outcome: Plan26FeedbackOutcomeV1,
+) {
+    let trigger = match request.trigger {
+        crate::daemon::lsp_gateway::DiagnosticTrigger::DocumentSave => "document_save",
+        crate::daemon::lsp_gateway::DiagnosticTrigger::ExplicitDocumentDiagnostics => {
+            "explicit_document_diagnostics"
+        }
+    };
+    let Ok(subject) = canonical_sha256(&(
+        "tracedecay.feedback.accepted-cycle.v1",
+        project_id,
+        &request.root_uri,
+        &request.document_uri,
+        trigger,
+    )) else {
+        return;
+    };
+    observations.observe_source_event_for_subject(
+        subject,
+        now_micros(),
+        Plan26FeedbackSourceEventV1::Delivery {
+            operation: Plan26FeedbackOperationV1::FeedbackCycle,
+            route: Plan26DeliveryRouteV1::Lsp,
+            outcome,
+            item_count: 0,
+            duration_micros: None,
+        },
+    );
+}
+
+struct UnavailableFeedbackCycleRuntimeV1 {
+    project_id: ProjectId,
+    observations: Arc<dyn Plan26FeedbackObservationEmitterV1 + Send + Sync>,
+}
+
+impl UnavailableFeedbackCycleRuntimeV1 {
+    fn new(
+        project_id: ProjectId,
+        observations: Arc<dyn Plan26FeedbackObservationEmitterV1 + Send + Sync>,
+    ) -> Self {
+        Self {
+            project_id,
+            observations,
+        }
+    }
+}
 
 impl FeedbackCycleRuntimePort for UnavailableFeedbackCycleRuntimeV1 {
     fn execute(
         &self,
-        _request: FeedbackCycleRequest,
+        request: FeedbackCycleRequest,
     ) -> crate::daemon::lsp_gateway::LspRuntimeFuture<
         Result<(), crate::daemon::lsp_gateway::LspRuntimeFailure>,
     > {
-        Box::pin(async {
+        let project_id = self.project_id.clone();
+        let observations = Arc::clone(&self.observations);
+        Box::pin(async move {
+            observe_accepted_feedback_cycle_terminal(
+                &observations,
+                &project_id,
+                &request,
+                Plan26FeedbackOutcomeV1::Unavailable,
+            );
             Err(crate::daemon::lsp_gateway::LspRuntimeFailure::new(
                 "feedback-cycle-unavailable",
             ))
@@ -3469,6 +4064,18 @@ impl DaemonFeedbackRuntimeRegistrar {
         }
     }
 
+    /// Resolve the read store from the feedback runtime mounted for this exact
+    /// project root. Doctor receives no provider runtime or write authority.
+    pub(crate) async fn doctor_read_store(
+        &self,
+        project_root: &Path,
+    ) -> Option<ProjectFeedbackStore> {
+        self.service
+            .feedback_runtime(Some(project_root))
+            .await
+            .map(|runtime| runtime.publication_store())
+    }
+
     /// Registers feedback readers from the authoritative admission result.
     pub(crate) async fn open_and_register(
         &self,
@@ -3501,6 +4108,10 @@ impl DaemonFeedbackRuntimeRegistrar {
             },
         );
         let publications = runtime.publication_store();
+        let unavailable_cycle = Arc::new(UnavailableFeedbackCycleRuntimeV1::new(
+            project_id.clone(),
+            runtime.observation_port(),
+        ));
         runtimes.insert(
             project_root.clone(),
             RegisteredFeedbackRuntime {
@@ -3515,9 +4126,7 @@ impl DaemonFeedbackRuntimeRegistrar {
             .await
             .entry(project_root)
             .or_insert_with(|| {
-                Arc::new(SwitchableFeedbackCycleRuntimeV1::new(Arc::new(
-                    UnavailableFeedbackCycleRuntimeV1,
-                )))
+                Arc::new(SwitchableFeedbackCycleRuntimeV1::new(unavailable_cycle))
             });
         Ok(publications)
     }
@@ -5202,6 +5811,25 @@ impl DaemonInvocationService {
                 )
                 .await
             }
+            DaemonInvocationPayload::ContextScout {
+                surface_operation,
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            } => {
+                execute_context_scout(
+                    self,
+                    request_id,
+                    configuration_runtime,
+                    surface_operation,
+                    request,
+                    observed_at,
+                    deadline,
+                    cancellation,
+                )
+                .await
+            }
             DaemonInvocationPayload::SemanticEvaluateAndPublish { candidate } => {
                 self.execute_semantic_evaluation(project_root, request_id, candidate)
                     .await
@@ -5552,6 +6180,7 @@ fn plan26_feedback_operation(operation: DaemonInvocationOperation) -> Plan26Feed
         | DaemonInvocationOperation::CodePhraseSearch
         | DaemonInvocationOperation::CodeCallees
         | DaemonInvocationOperation::Configuration
+        | DaemonInvocationOperation::ContextScout
         | DaemonInvocationOperation::SemanticEvaluateAndPublish
         | DaemonInvocationOperation::GitPreview
         | DaemonInvocationOperation::GitApply => Plan26FeedbackOperationV1::FeedbackCycle,
@@ -5574,6 +6203,7 @@ fn plan26_response_outcome(response: &DaemonInvocationResponse) -> Plan26Feedbac
         DaemonInvocationOutcome::GitPreview { .. }
         | DaemonInvocationOutcome::GitApply { .. }
         | DaemonInvocationOutcome::Configuration { .. }
+        | DaemonInvocationOutcome::ContextScout { .. }
         | DaemonInvocationOutcome::SemanticEvaluatedProfilePublished { .. }
         | DaemonInvocationOutcome::ObservationAccepted
         | DaemonInvocationOutcome::LspOpened { .. }
@@ -5803,6 +6433,39 @@ fn valid_printable(value: &str, max_len: usize) -> bool {
 mod tests {
     use super::*;
 
+    #[derive(Default)]
+    struct RecordingFeedbackCycleObservations(
+        std::sync::Mutex<Vec<Plan26FeedbackSourceEventV1>>,
+    );
+
+    impl Plan26FeedbackObservationEmitterV1 for RecordingFeedbackCycleObservations {
+        fn observe_source_event(
+            &self,
+            _input: &tracedecay_domain::feedback::FeedbackEvaluationInputV1,
+            source_event: Plan26FeedbackSourceEventV1,
+        ) {
+            self.0.lock().expect("observations").push(source_event);
+        }
+
+        fn observe_source_event_for_subject(
+            &self,
+            _subject_digest: ManifestDigest,
+            _observed_at: UtcMicros,
+            source_event: Plan26FeedbackSourceEventV1,
+        ) {
+            self.0.lock().expect("observations").push(source_event);
+        }
+    }
+
+    fn unavailable_feedback_cycle(
+        observations: Arc<RecordingFeedbackCycleObservations>,
+    ) -> UnavailableFeedbackCycleRuntimeV1 {
+        UnavailableFeedbackCycleRuntimeV1::new(
+            ProjectId::new("project.feedback-cycle-unavailable").expect("project"),
+            observations,
+        )
+    }
+
     struct UnavailableDiagnosticAuthority;
 
     impl crate::daemon::lsp_gateway::CanonicalDiagnosticSnapshotAuthority
@@ -5863,7 +6526,9 @@ mod tests {
     fn unavailable_lsp_session_factory() -> Arc<Pr12LspSessionFactory> {
         Arc::new(Pr12LspSessionFactory::new(
             tokio::runtime::Handle::current(),
-            Arc::new(UnavailableFeedbackCycleRuntimeV1),
+            Arc::new(unavailable_feedback_cycle(Arc::new(
+                RecordingFeedbackCycleObservations::default(),
+            ))),
             Arc::new(crate::daemon::lsp_gateway::UnavailableSemanticProvider),
             Arc::new(UnavailableDiagnosticAuthority),
             Arc::new(UnavailableCancellationAuthority),
@@ -5894,8 +6559,10 @@ mod tests {
     async fn feedback_cycle_router_upgrades_existing_lsp_sessions_to_advisory_runtime() {
         let proximity_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let advisory_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let router =
-            SwitchableFeedbackCycleRuntimeV1::new(Arc::new(UnavailableFeedbackCycleRuntimeV1));
+        let observations = Arc::new(RecordingFeedbackCycleObservations::default());
+        let router = SwitchableFeedbackCycleRuntimeV1::new(Arc::new(
+            unavailable_feedback_cycle(Arc::clone(&observations)),
+        ));
         let request = FeedbackCycleRequest {
             root_uri: "file:///project".to_owned(),
             document_uri: "file:///project/src/lib.rs".to_owned(),
@@ -5903,6 +6570,16 @@ mod tests {
         };
 
         assert!(router.execute(request.clone()).await.is_err());
+        assert!(matches!(
+            observations.0.lock().expect("observations").as_slice(),
+            [Plan26FeedbackSourceEventV1::Delivery {
+                operation: Plan26FeedbackOperationV1::FeedbackCycle,
+                route: Plan26DeliveryRouteV1::Lsp,
+                outcome: Plan26FeedbackOutcomeV1::Unavailable,
+                item_count: 0,
+                ..
+            }]
+        ));
         router
             .replace(Arc::new(CountingFeedbackCycle(Arc::clone(
                 &proximity_calls,
@@ -6108,6 +6785,7 @@ mod tests {
                 None,
                 1,
                 false,
+                None,
             ),
             Pr13HookOrchestrationAdmissionV1::Enqueued
         );

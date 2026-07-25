@@ -330,30 +330,54 @@ pub(super) fn def_feedback_list() -> ToolDefinition {
     )
 }
 
+fn context_scout_address_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "description": "Opaque exact Context Scout address returned by the daemon.",
+        "additionalProperties": false,
+        "required": [
+            "profile_id", "provider_id", "protected_session_id", "thread_id",
+            "turn_id", "agent_id", "logical_message_id", "project_id"
+        ],
+        "properties": {
+            "profile_id": {"type": "array", "minItems": 16, "maxItems": 16, "items": {"type": "integer", "minimum": 0, "maximum": 255}},
+            "provider_id": {"type": "array", "minItems": 16, "maxItems": 16, "items": {"type": "integer", "minimum": 0, "maximum": 255}},
+            "protected_session_id": {"type": "array", "minItems": 32, "maxItems": 32, "items": {"type": "integer", "minimum": 0, "maximum": 255}},
+            "thread_id": {"type": "array", "minItems": 16, "maxItems": 16, "items": {"type": "integer", "minimum": 0, "maximum": 255}},
+            "turn_id": {"type": "array", "minItems": 16, "maxItems": 16, "items": {"type": "integer", "minimum": 0, "maximum": 255}},
+            "agent_id": {"type": "array", "minItems": 16, "maxItems": 16, "items": {"type": "integer", "minimum": 0, "maximum": 255}},
+            "logical_message_id": {"type": "array", "minItems": 16, "maxItems": 16, "items": {"type": "integer", "minimum": 0, "maximum": 255}},
+            "project_id": {"type": "array", "minItems": 16, "maxItems": 16, "items": {"type": "integer", "minimum": 0, "maximum": 255}}
+        }
+    })
+}
+
 fn context_scout_read_definition(name: &str, title: &str, description: &str) -> ToolDefinition {
+    let mut properties = json!({"address": context_scout_address_schema()});
+    if matches!(
+        name,
+        "tracedecay_context_scout_recent" | "tracedecay_context_scout_explain"
+    ) {
+        properties["limit"] = json!({
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 32,
+            "default": 8
+        });
+    }
     def(
         name,
         title,
         description,
-        required_object_schema(
-            json!({
-                "envelope": {
-                    "type": "object",
-                    "description": "Exact authenticated Hook V2 envelope for the owning session."
-                },
-                "native_session_id": string_property(
-                    "Native session identity whose protected digest must match the envelope."
-                ),
-                "limit": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": 32,
-                    "default": 8,
-                    "description": "Maximum bounded recent Scout records."
-                }
-            }),
-            &["envelope", "native_session_id"],
-        ),
+        required_object_schema(properties, &["address"]),
+    )
+}
+
+pub(super) fn def_context_scout_status() -> ToolDefinition {
+    context_scout_read_definition(
+        "tracedecay_context_scout_status",
+        "Read Context Scout status",
+        "Read authenticated Context Scout status for the exact owning session.",
     )
 }
 
@@ -387,6 +411,70 @@ pub(super) fn def_context_scout_budget() -> ToolDefinition {
         "Read Context Scout budget",
         "Read authenticated Scout limits and the latest model usage receipt.",
     )
+}
+
+fn context_scout_control_definition(
+    operation: &str,
+    title: &str,
+    description: &str,
+    mut properties: serde_json::Value,
+    required: &[&str],
+) -> ToolDefinition {
+    properties["address"] = context_scout_address_schema();
+    let name = format!("tracedecay_context_scout_{operation}");
+    def_rw(
+        &name,
+        title,
+        description,
+        required_object_schema(properties, required),
+    )
+}
+
+pub(super) fn context_scout_control_definitions() -> Vec<ToolDefinition> {
+    vec![
+        context_scout_control_definition(
+            "pause",
+            "Pause Context Scout",
+            "Persist a paused Scout state through the canonical configuration authority.",
+            json!({"expected_revision": string_property("Exact configuration revision for CAS.")}),
+            &["address", "expected_revision"],
+        ),
+        context_scout_control_definition(
+            "resume",
+            "Resume Context Scout",
+            "Persist an active Scout state through the canonical configuration authority.",
+            json!({"expected_revision": string_property("Exact configuration revision for CAS.")}),
+            &["address", "expected_revision"],
+        ),
+        context_scout_control_definition(
+            "cancel",
+            "Cancel Context Scout work",
+            "Cancel one exact-address Scout work generation.",
+            json!({"work": {"type": "object"}}),
+            &["address", "work"],
+        ),
+        context_scout_control_definition(
+            "claim",
+            "Claim Context Scout delivery",
+            "Claim one exact idle-window or explicit-request suggestion.",
+            json!({"window": {"type": "string", "enum": ["idle_window", "on_request"]}}),
+            &["address", "window"],
+        ),
+        context_scout_control_definition(
+            "delivery",
+            "Record Context Scout delivery",
+            "Complete one exact-address delivery claim with its typed receipt.",
+            json!({"claim": {"type": "object"}, "receipt": {"type": "object"}}),
+            &["address", "claim", "receipt"],
+        ),
+        context_scout_control_definition(
+            "feedback",
+            "Record Context Scout feedback",
+            "Record explicit feedback against one exact-address delivery receipt.",
+            json!({"receipt": {"type": "object"}, "feedback": {"type": "object"}}),
+            &["address", "receipt", "feedback"],
+        ),
+    ]
 }
 
 pub(super) fn def_feedback_impact() -> ToolDefinition {

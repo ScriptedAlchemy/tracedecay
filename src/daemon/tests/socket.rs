@@ -1,5 +1,32 @@
 use super::*;
 
+fn closed_feedback_list_request(
+    request_id: &str,
+    request_handle: &str,
+) -> super::super::DaemonInvocationRequest {
+    let observed_at = tracedecay_domain::UtcMicros(
+        i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_micros(),
+        )
+        .unwrap_or(i64::MAX),
+    );
+    super::super::DaemonInvocationRequest::feedback(
+        request_id,
+        crate::application_surface::ApplicationSurfaceOperation::FeedbackList,
+        request_handle.to_owned(),
+        observed_at,
+        tracedecay_application::Deadline::new(tracedecay_domain::UtcMicros(
+            observed_at.0.saturating_add(60_000_000),
+        ))
+        .expect("future deadline"),
+        tracedecay_application::CancellationContext::active(format!("cancel.{request_id}"))
+            .expect("cancellation"),
+    )
+}
+
 #[test]
 fn tool_json_payload_requires_exactly_one_json_block() {
     let valid = serde_json::json!({
@@ -32,16 +59,16 @@ fn tool_json_payload_requires_exactly_one_json_block() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn socket_client_rejects_tool_calls_without_project() {
+async fn socket_client_requires_user_storage_scope_without_project() {
     let home = TempDir::new().expect("home");
     let home = home.path().canonicalize().expect("canonical home");
     let client_identity = test_client_identity_for(home.join("client"));
+    let engine = test_daemon_engine_for_profile(&client_identity.profile_root);
+    let _database_scope =
+        enter_test_daemon_database_scope(&client_identity.profile_root, "projectless-socket-test");
 
     let (client, server) = tokio::net::UnixStream::pair().expect("unix stream pair");
-    let server_task = tokio::spawn(super::super::serve_socket_client(
-        server,
-        super::super::DaemonEngine::default(),
-    ));
+    let server_task = tokio::spawn(super::super::serve_socket_client(server, engine));
 
     let (reader, mut writer) = client.into_split();
     let handshake = DaemonHandshake {
@@ -84,7 +111,7 @@ async fn socket_client_rejects_tool_calls_without_project() {
     let response: Value = serde_json::from_str(&line).expect("response json");
     assert_eq!(response["id"], json!(7));
     assert_eq!(
-        response["error"]["message"], "tracedecay_lcm_status requires an initialized code project",
+        response["error"]["message"], "projectless LCM dispatch requires storage_scope=user",
         "projectless handshake should return the stable current contract"
     );
 
@@ -100,11 +127,13 @@ async fn socket_client_routes_multiple_closed_invocations_without_falling_back_t
     let home = TempDir::new().expect("home");
     let home = home.path().canonicalize().expect("canonical home");
     let client_identity = test_client_identity_for(home.join("client"));
+    let engine = test_daemon_engine_for_profile(&client_identity.profile_root);
+    let _database_scope = enter_test_daemon_database_scope(
+        &client_identity.profile_root,
+        "closed-invocation-socket-test",
+    );
     let (client, server) = tokio::net::UnixStream::pair().expect("unix stream pair");
-    let server_task = tokio::spawn(super::super::serve_socket_client(
-        server,
-        super::super::DaemonEngine::default(),
-    ));
+    let server_task = tokio::spawn(super::super::serve_socket_client(server, engine));
 
     let (reader, mut writer) = client.into_split();
     let handshake = DaemonHandshake {
@@ -120,15 +149,9 @@ async fn socket_client_routes_multiple_closed_invocations_without_falling_back_t
     for (request_id, request_handle) in [("request.1", "handle.1"), ("request.2", "handle.2")] {
         writer
             .write_all(
-                serde_json::to_string(&serde_json::json!({
-                    "protocol": "tracedecay.daemon.invocation",
-                    "revision": 1,
-                    "request_id": request_id,
-                    "operation": "feedback_list",
-                    "request_handle": request_handle,
-                }))
-                .expect("invocation json")
-                .as_bytes(),
+                serde_json::to_string(&closed_feedback_list_request(request_id, request_handle))
+                    .expect("invocation json")
+                    .as_bytes(),
             )
             .await
             .expect("write invocation");
@@ -188,10 +211,10 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
         &["config", "user.email", "tracedecay@example.com"],
     );
     std::fs::write(repository.path().join("packet.txt"), "base\n").expect("base file");
-    git(repository.path(), &["add", "packet.txt"]);
+    std::fs::create_dir_all(repository.path().join("src")).expect("source dir");
+    std::fs::write(repository.path().join("src/main.rs"), "fn main() {}\n").expect("source file");
+    git(repository.path(), &["add", "."]);
     git(repository.path(), &["commit", "--quiet", "-m", "base"]);
-    std::fs::write(repository.path().join("packet.txt"), "base\nnext\n").expect("changed file");
-    git(repository.path(), &["add", "packet.txt"]);
 
     let handshake = DaemonHandshake {
         project_path: Some(repository.path().to_path_buf()),
@@ -199,11 +222,22 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
         client_identity: test_client_identity_for(home.join("client")),
         ..test_handshake_defaults()
     };
-    let engine = super::super::DaemonEngine::default();
+    let engine = test_daemon_engine_for_profile(&handshake.client_identity.profile_root);
+    let _database_scope = enter_test_daemon_database_scope(
+        &handshake.client_identity.profile_root,
+        "git-socket-test",
+    );
     let (key, _, _, _) = engine
         .open_project_server(&handshake)
         .await
         .expect("mount project owner");
+    git(repository.path(), &["add", "."]);
+    git(
+        repository.path(),
+        &["commit", "--quiet", "-m", "daemon enrollment"],
+    );
+    std::fs::write(repository.path().join("packet.txt"), "base\nnext\n").expect("changed file");
+    git(repository.path(), &["add", "packet.txt"]);
     let project_id =
         tracedecay_domain::ProjectId::new(key.owner.project_id.expect("durable test project id"))
             .expect("typed project id");
@@ -377,7 +411,10 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
         let response: Value = serde_json::from_str(&line).expect("apply JSON");
         assert_eq!(response["request_id"], expected_request_id);
         assert_eq!(response["status"], "git_apply", "{response:#}");
-        assert_eq!(response["effect"]["receipt"]["outcome"], "completed");
+        assert_eq!(
+            response["effect"]["receipt"]["outcome"], "completed",
+            "{response:#}"
+        );
         assert_ne!(response["effect"]["execution"]["started_at"], 1);
     }
 
@@ -410,7 +447,6 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
     )
     .expect("recovery fixture change");
     git(repository.path(), &["add", "packet.txt"]);
-    let recovery_repository_id = RepositoryId::new("repository.socket-git").unwrap();
     let recovery_preview_request = super::super::DaemonInvocationRequest::git_preview(
         "request.socket.recovery-preview",
         crate::application_surface::GitPreviewSurfaceRequest {
@@ -419,8 +455,8 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
             repository_snapshot: super::super::git_transactions::capture_exact_snapshot_for_test(
                 repository.path(),
                 project_id.clone(),
-                recovery_repository_id.clone(),
-                WorktreeId::new("worktree.socket-git").unwrap(),
+                git_scope.repository_id.clone(),
+                git_scope.worktree_id.clone(),
                 observed_at,
             ),
             selected_hunks: Vec::new(),
@@ -554,6 +590,11 @@ async fn portable_broker_routes_multiple_closed_invocations_without_falling_back
     let home = TempDir::new().expect("home");
     let home = home.path().canonicalize().expect("canonical home");
     let client_identity = test_client_identity_for(home.join("client"));
+    let store_administration = test_store_administration_for_profile(&client_identity.profile_root);
+    let _database_scope = enter_test_daemon_database_scope(
+        &client_identity.profile_root,
+        "portable-closed-invocation-test",
+    );
     let (listener, endpoint) = super::super::transport::BrokerListener::bind(
         &super::super::transport::default_loopback_endpoint(),
     )
@@ -566,7 +607,7 @@ async fn portable_broker_routes_multiple_closed_invocations_without_falling_back
             stream,
             TOKEN,
             &lifecycle,
-            StoreAdministration::default(),
+            store_administration,
             Arc::new(tokio::sync::Mutex::new(
                 super::super::ProjectOpenGates::default(),
             )),
@@ -597,15 +638,9 @@ async fn portable_broker_routes_multiple_closed_invocations_without_falling_back
     for (request_id, request_handle) in [("request.1", "handle.1"), ("request.2", "handle.2")] {
         writer
             .write_all(
-                serde_json::to_string(&serde_json::json!({
-                    "protocol": "tracedecay.daemon.invocation",
-                    "revision": 1,
-                    "request_id": request_id,
-                    "operation": "feedback_list",
-                    "request_handle": request_handle,
-                }))
-                .expect("invocation json")
-                .as_bytes(),
+                serde_json::to_string(&closed_feedback_list_request(request_id, request_handle))
+                    .expect("invocation json")
+                    .as_bytes(),
             )
             .await
             .expect("write invocation");
@@ -657,6 +692,8 @@ async fn daemon_linked_worktree_route_repairs_primary_identity_and_keeps_alias()
         );
     };
     git(&primary, &["init", "-b", "main", "--quiet"]);
+    std::fs::create_dir_all(primary.join("src")).expect("fixture source dir");
+    std::fs::write(primary.join("src/main.rs"), "fn main() {}\n").expect("fixture source");
     std::fs::write(primary.join("README.md"), "linked worktree route\n").expect("fixture");
     git(&primary, &["add", "."]);
     git(&primary, &["commit", "-m", "fixture", "--quiet"]);
@@ -673,13 +710,21 @@ async fn daemon_linked_worktree_route_repairs_primary_identity_and_keeps_alias()
     );
 
     let client_identity = test_client_identity_for(profile_root.clone());
-    let options = crate::tracedecay::TraceDecayOpenOptions {
-        profile_root: Some(profile_root.clone()),
-        global_db_path: Some(client_identity.global_db_path.clone()),
+    initialize_test_project(&primary, &client_identity).await;
+    let _database_scope =
+        crate::db::enter_daemon_database_scope(&profile_root, 1, "linked-worktree-route-test")
+            .expect("daemon database scope");
+    let engine = test_daemon_engine_for_profile(&profile_root);
+    let primary_handshake = DaemonHandshake {
+        project_path: Some(primary.clone()),
+        client_identity: client_identity.clone(),
+        ..test_handshake_defaults()
     };
-    let primary_cg = crate::tracedecay::TraceDecay::init_with_options(&primary, options.clone())
+    let primary_server = engine
+        .project_server(&primary_handshake)
         .await
-        .expect("primary init");
+        .expect("mount primary daemon owner");
+    let primary_cg = primary_server.cg().await;
     primary_cg.index_all().await.expect("primary index");
     primary_cg
         .db()
@@ -692,7 +737,7 @@ async fn daemon_linked_worktree_route_repairs_primary_identity_and_keeps_alias()
         .project_id
         .clone()
         .expect("profile project id");
-    let registry = primary_cg.profile_database();
+    let registry = Arc::clone(primary_cg.profile_database());
     let mut config = crate::config::load_config(&linked).expect("load project config");
     config.sync.session_start_sync = false;
     crate::config::save_config(&linked, &config)
@@ -708,21 +753,23 @@ async fn daemon_linked_worktree_route_repairs_primary_identity_and_keeps_alias()
         )
         .await
         .expect("seed stale linked canonical root");
+    drop(registry);
 
     let handshake = DaemonHandshake {
         project_path: Some(linked.clone()),
         client_identity,
         ..test_handshake_defaults()
     };
-    let _database_scope =
-        crate::db::enter_daemon_database_scope(&profile_root, 1, "linked-worktree-route-test")
-            .expect("daemon database scope");
-    let engine = super::super::DaemonEngine::default();
     engine
         .project_server(&handshake)
         .await
         .expect("daemon linked-worktree route");
 
+    let registry = engine
+        .store_administration
+        .registered_profile_database()
+        .await
+        .expect("daemon profile registry");
     let context = registry
         .project_registry_context_by_id(&project_id)
         .await

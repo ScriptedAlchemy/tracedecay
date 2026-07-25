@@ -14,6 +14,7 @@ mod fair_scheduler;
 mod owner;
 mod ports;
 mod production;
+mod redundancy;
 
 pub(crate) use accepted_profile_authority::{
     RegisteredSemanticAcceptedProfileAuthorityV1, SemanticAcceptedProfileAuthorityErrorV1,
@@ -69,6 +70,11 @@ pub(crate) use production::{
     project_semantic_application_status, project_semantic_production_runtime,
     project_semantic_source_generation, register_project_semantic_runtime,
     unregister_project_semantic_runtime,
+};
+pub(crate) use redundancy::{
+    SemanticRedundancyGenerationV1, SemanticRedundancyVectorV1,
+    project_semantic_redundancy_generation, register_project_semantic_redundancy_generation,
+    unregister_project_semantic_redundancy_generation,
 };
 
 #[cfg(test)]

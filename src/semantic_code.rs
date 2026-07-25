@@ -12,7 +12,8 @@ use tracedecay_domain::{
 use crate::application::semantic_runtime::SemanticFallbackReasonV1;
 use crate::query::retrieval::ports::RetrievalPortError;
 use crate::query::retrieval::semantic::{
-    EphemeralQueryEmbeddingV1, SemanticQueryEmbeddingPort, SemanticQueryEmbeddingRequestV1,
+    EphemeralQueryEmbeddingV1, SemanticExecutionControl, SemanticQueryEmbeddingPort,
+    SemanticQueryEmbeddingRequestV1,
 };
 
 use self::fastembed_adapter::{
@@ -38,6 +39,7 @@ mod manifest;
 mod model_catalog;
 mod model_lifecycle;
 pub(crate) mod projector;
+pub(crate) mod rerank_adapter;
 mod runtime_query;
 mod runtime_service;
 pub(crate) mod session_pool;
@@ -313,11 +315,11 @@ pub(crate) fn prepare_semantic_evaluation_projection(
 }
 
 impl DaemonSemanticQueryFactoryV1 {
-    pub(crate) fn create(
-        &self,
-        cancelled: Arc<dyn Fn() -> bool + Send + Sync + 'static>,
-    ) -> DaemonSemanticQueryEmbedderV1 {
-        let cancellation = Arc::new(QueryCancellationV1(cancelled));
+    pub(crate) fn create<'a, C>(&self, control: &'a C) -> DaemonSemanticQueryEmbedderV1<'a>
+    where
+        C: SemanticExecutionControl + Sync,
+    {
+        let cancellation = Arc::new(QueryCancellationV1(control));
         DaemonSemanticQueryEmbedderV1 {
             inner: self.inner.create(cancellation),
         }
@@ -328,19 +330,22 @@ impl DaemonSemanticQueryFactoryV1 {
     }
 }
 
-struct QueryCancellationV1(Arc<dyn Fn() -> bool + Send + Sync + 'static>);
+struct QueryCancellationV1<'a, C>(&'a C);
 
-impl CancellationSignal for QueryCancellationV1 {
+impl<C> CancellationSignal for QueryCancellationV1<'_, C>
+where
+    C: SemanticExecutionControl + Sync,
+{
     fn cancelled(&self) -> bool {
-        (self.0)()
+        self.0.is_cancelled()
     }
 }
 
-pub(crate) struct DaemonSemanticQueryEmbedderV1 {
-    inner: PooledSemanticQueryEmbedder<FastEmbedEmbeddingRuntime>,
+pub(crate) struct DaemonSemanticQueryEmbedderV1<'a> {
+    inner: PooledSemanticQueryEmbedder<'a, FastEmbedEmbeddingRuntime>,
 }
 
-impl SemanticQueryEmbeddingPort for DaemonSemanticQueryEmbedderV1 {
+impl SemanticQueryEmbeddingPort for DaemonSemanticQueryEmbedderV1<'_> {
     fn embed_query(
         &self,
         request: SemanticQueryEmbeddingRequestV1<'_>,

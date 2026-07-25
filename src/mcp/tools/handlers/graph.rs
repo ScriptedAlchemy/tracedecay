@@ -45,6 +45,22 @@ fn semantic_search_mode(args: &Value) -> Result<crate::mcp::server::CodeIndexSea
     }
 }
 
+fn retrieval_cursor(args: &Value) -> Result<Option<tracedecay_domain::RetrievalCursor>> {
+    let Some(encoded) = args.get("cursor").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    if encoded.len() > 4_096 {
+        return Err(TraceDecayError::Config {
+            message: "cursor exceeds its bounded authenticated envelope".to_owned(),
+        });
+    }
+    let cursor: tracedecay_domain::RetrievalCursor = serde_json::from_str(encoded)?;
+    cursor.validate().map_err(|_| TraceDecayError::Config {
+        message: "cursor is not a valid authenticated retrieval continuation".to_owned(),
+    })?;
+    Ok(Some(cursor))
+}
+
 async fn execute_code_index_search(
     executor: Option<&crate::mcp::server::CodeIndexSearchExecutor>,
     request: crate::mcp::server::CodeIndexSearchRequestV1,
@@ -178,6 +194,7 @@ pub(super) async fn handle_search(
             })?;
 
     let semantic_mode = semantic_search_mode(&args)?;
+    let cursor = retrieval_cursor(&args)?;
     let limit = args
         .get("limit")
         .and_then(serde_json::Value::as_u64)
@@ -194,6 +211,7 @@ pub(super) async fn handle_search(
             project_root: cg.project_root().to_path_buf(),
             query: query.to_owned(),
             limit,
+            cursor,
             mode: semantic_mode,
             authority: search_authority.cloned(),
             deadline,
@@ -225,6 +243,10 @@ pub(super) async fn handle_search(
                 "code_generation": complete.code_generation,
                 "pr9_fallback_digest": &complete.pr9_fallback.digest,
                 "semantic": semantic_status_value(semantic_mode, &complete.semantic),
+                "next_cursor": complete.next_cursor
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()?,
             });
             if let Some(scope) = scope_prefix {
                 output["scope_prefix"] = json!(scope);
@@ -1916,6 +1938,7 @@ mod tests {
                 project_root: std::path::PathBuf::from("/fixture"),
                 query: "fixture".to_owned(),
                 limit: 10,
+                cursor: None,
                 mode: crate::mcp::server::CodeIndexSearchModeV1::FallbackAllowed,
                 authority: None,
                 deadline: None,
@@ -1944,6 +1967,7 @@ mod tests {
                 project_root: std::path::PathBuf::from("/fixture"),
                 query: "fixture".to_owned(),
                 limit: 10,
+                cursor: None,
                 mode: crate::mcp::server::CodeIndexSearchModeV1::StrictSemantic,
                 authority: None,
                 deadline: None,

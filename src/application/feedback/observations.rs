@@ -182,6 +182,67 @@ pub enum Plan26CoverageV1 {
     Capped,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FeedbackObservationDeliveryV1 {
+    pub emitted: u64,
+    pub delayed: u64,
+    pub dropped: u64,
+    pub coverage: Plan26CoverageV1,
+}
+
+impl FeedbackObservationDeliveryV1 {
+    pub const fn pending() -> Self {
+        Self {
+            emitted: 0,
+            delayed: 0,
+            dropped: 0,
+            coverage: Plan26CoverageV1::Unknown,
+        }
+    }
+
+    pub const fn delivered(dropped: u64) -> Self {
+        Self {
+            emitted: 1,
+            delayed: 0,
+            dropped,
+            coverage: if dropped == 0 {
+                Plan26CoverageV1::Known
+            } else {
+                Plan26CoverageV1::Partial
+            },
+        }
+    }
+
+    fn validate(&self, persisted: bool) -> Option<()> {
+        match self.coverage {
+            Plan26CoverageV1::Known
+                if (!persisted || self.emitted == 1) && self.delayed == 0 && self.dropped == 0 =>
+            {
+                Some(())
+            }
+            Plan26CoverageV1::Partial
+                if (!persisted || self.emitted == 1) && (self.delayed > 0 || self.dropped > 0) =>
+            {
+                Some(())
+            }
+            Plan26CoverageV1::Unknown if !persisted && self.emitted == 0 => Some(()),
+            Plan26CoverageV1::Sampled | Plan26CoverageV1::Capped | Plan26CoverageV1::Stale
+                if !persisted || self.emitted == 1 =>
+            {
+                Some(())
+            }
+            _ => None,
+        }
+    }
+}
+
+impl Default for FeedbackObservationDeliveryV1 {
+    fn default() -> Self {
+        Self::pending()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum Plan26ProximityTransitionV1 {
@@ -336,6 +397,11 @@ pub enum Plan26FeedbackSourceEventV1 {
         item_count: u32,
         duration_micros: Option<u64>,
     },
+    TelemetryDropObserved {
+        dropped_count: u64,
+        last_sequence: u64,
+        terminal: bool,
+    },
 }
 
 impl Plan26FeedbackSourceEventV1 {
@@ -360,6 +426,7 @@ impl Plan26FeedbackSourceEventV1 {
             Self::HookScout { .. } => "feedback.hook_scout.observed.v1",
             Self::Cancellation { .. } => "feedback.cancellation.observed.v1",
             Self::SseLifecycle { .. } => "feedback.sse.lifecycle.observed.v1",
+            Self::TelemetryDropObserved { .. } => "telemetry.drop.observed.v1",
         }
     }
 
@@ -385,6 +452,11 @@ impl Plan26FeedbackSourceEventV1 {
                 candidate_count,
                 ..
             } => (localized_count <= candidate_count).then_some(()),
+            Self::TelemetryDropObserved {
+                dropped_count,
+                terminal,
+                ..
+            } => (*terminal || *dropped_count > 0).then_some(()),
             _ => Some(()),
         }
     }
@@ -405,10 +477,25 @@ pub struct FeedbackObservationEnvelopeV1 {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_event: Option<Plan26FeedbackSourceEventV1>,
     pub observed_at: UtcMicros,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub producer_boot_id: Option<ManifestDigest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub producer_sequence: Option<u64>,
+    #[serde(default)]
+    pub delivery: FeedbackObservationDeliveryV1,
 }
 
 impl FeedbackObservationEnvelopeV1 {
     pub fn validate(&self) -> Option<()> {
+        let persisted = match (&self.producer_boot_id, self.producer_sequence) {
+            (None, None) => false,
+            (Some(boot_id), Some(sequence)) if sequence > 0 => {
+                boot_id.validate().ok()?;
+                true
+            }
+            _ => return None,
+        };
+        self.delivery.validate(persisted)?;
         if self.schema_version != 1
             || self.privacy_class != "operational_no_content"
             || self.idempotency_key.validate().is_err()
@@ -444,6 +531,25 @@ impl FeedbackObservationEnvelopeV1 {
         (expected_key == self.idempotency_key).then_some(())
     }
 
+    pub fn assign_delivery(
+        &mut self,
+        boot_id: ManifestDigest,
+        producer_sequence: u64,
+        delivery: FeedbackObservationDeliveryV1,
+    ) -> Option<()> {
+        if self.producer_boot_id.is_some() || self.producer_sequence.is_some() {
+            return None;
+        }
+        boot_id.validate().ok()?;
+        if producer_sequence == 0 {
+            return None;
+        }
+        self.producer_boot_id = Some(boot_id);
+        self.producer_sequence = Some(producer_sequence);
+        self.delivery = delivery;
+        self.validate()
+    }
+
     /// Stable identity used by bounded ingress queues to converge retries and
     /// replay before an envelope reaches the durable observability authority.
     pub fn replay_identity(&self) -> Option<&str> {
@@ -476,13 +582,52 @@ pub struct FeedbackObservationReadModelV1 {
     pub first_observed_at: Option<UtcMicros>,
     pub last_observed_at: Option<UtcMicros>,
     pub event_counts: BTreeMap<String, u64>,
+    pub coverage: Plan26CoverageV1,
+    pub watermark: FeedbackObservationWatermarkV1,
+    pub denominators: FeedbackObservationDenominatorsV1,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FeedbackObservationWatermarkV1 {
+    pub producer_boot_id: Option<ManifestDigest>,
+    pub producer_sequence: Option<u64>,
+    pub observed_through: Option<UtcMicros>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FeedbackObservationDenominatorsV1 {
+    pub eligible: u64,
+    pub persisted: u64,
+    pub emitted: u64,
+    pub delayed: u64,
+    pub dropped: u64,
+    pub retention_dropped: u64,
+    pub incomplete_boots: u64,
 }
 
 impl FeedbackObservationReadModelV1 {
     pub fn project(observations: &[FeedbackObservationEnvelopeV1]) -> Option<Self> {
+        Self::project_with_accounting(observations, 0, 0)
+    }
+
+    pub fn project_with_accounting(
+        observations: &[FeedbackObservationEnvelopeV1],
+        retention_dropped: u64,
+        incomplete_boots: u64,
+    ) -> Option<Self> {
         let mut event_counts = BTreeMap::<String, u64>::new();
         let mut first_observed_at = None;
         let mut last_observed_at = None;
+        let mut emitted = 0u64;
+        let mut delayed = 0u64;
+        let mut dropped = 0u64;
+        let mut watermark = FeedbackObservationWatermarkV1 {
+            producer_boot_id: None,
+            producer_sequence: None,
+            observed_through: None,
+        };
         for observation in observations {
             let kind = observation.event_kind()?;
             let count = event_counts.entry(kind.to_owned()).or_default();
@@ -497,13 +642,57 @@ impl FeedbackObservationReadModelV1 {
                     last.max(observation.observed_at)
                 }),
             );
+            emitted = emitted.saturating_add(observation.delivery.emitted);
+            delayed = delayed.saturating_add(observation.delivery.delayed);
+            dropped = dropped.saturating_add(observation.delivery.dropped);
+            if let (Some(boot_id), Some(sequence)) = (
+                observation.producer_boot_id.as_ref(),
+                observation.producer_sequence,
+            ) {
+                watermark.producer_boot_id = Some(boot_id.clone());
+                watermark.producer_sequence = Some(sequence);
+                watermark.observed_through = Some(observation.observed_at);
+            }
         }
+        let persisted = observations.len().try_into().unwrap_or(u64::MAX);
+        let eligible = emitted
+            .max(persisted)
+            .saturating_add(delayed)
+            .saturating_add(dropped)
+            .saturating_add(retention_dropped);
+        let coverage = if incomplete_boots > 0 {
+            Plan26CoverageV1::Unknown
+        } else if retention_dropped > 0 {
+            Plan26CoverageV1::Capped
+        } else if delayed > 0 || dropped > 0 {
+            Plan26CoverageV1::Partial
+        } else if observations.is_empty() {
+            Plan26CoverageV1::Unknown
+        } else if observations
+            .iter()
+            .all(|observation| observation.producer_sequence.is_some())
+        {
+            Plan26CoverageV1::Known
+        } else {
+            Plan26CoverageV1::Unknown
+        };
         Some(Self {
             schema_version: 1,
-            total_count: observations.len().try_into().unwrap_or(u64::MAX),
+            total_count: persisted,
             first_observed_at,
             last_observed_at,
             event_counts,
+            coverage,
+            watermark,
+            denominators: FeedbackObservationDenominatorsV1 {
+                eligible,
+                persisted,
+                emitted,
+                delayed,
+                dropped,
+                retention_dropped,
+                incomplete_boots,
+            },
         })
     }
 }
@@ -547,6 +736,9 @@ fn observation_envelope(
         observed_at: observation.observed_at,
         observation: Some(observation),
         source_event: None,
+        producer_boot_id: None,
+        producer_sequence: None,
+        delivery: FeedbackObservationDeliveryV1::pending(),
     };
     envelope.validate()?;
     Some(envelope)
@@ -591,6 +783,9 @@ pub fn plan26_feedback_source_event_envelope_for_subject(
         observation: None,
         source_event: Some(source_event),
         observed_at,
+        producer_boot_id: None,
+        producer_sequence: None,
+        delivery: FeedbackObservationDeliveryV1::pending(),
     };
     envelope.validate()?;
     Some(envelope)
@@ -1313,6 +1508,38 @@ mod tests {
         );
         assert_eq!(model.first_observed_at, Some(input.observed_at));
         assert_eq!(model.last_observed_at, Some(input.observed_at));
+    }
+
+    #[test]
+    fn read_model_exposes_delivery_denominators_watermark_and_unknown_boot_gap() {
+        let input = saved_input();
+        let mut envelope = feedback_observation_envelope(
+            &input,
+            FeedbackCycleObservationV1::trigger(&input).unwrap(),
+        )
+        .unwrap();
+        let boot_id = canonical_sha256(&"feedback-observation-boot").unwrap();
+        assert!(
+            envelope
+                .assign_delivery(
+                    boot_id.clone(),
+                    7,
+                    FeedbackObservationDeliveryV1::delivered(2),
+                )
+                .is_some()
+        );
+
+        let model =
+            FeedbackObservationReadModelV1::project_with_accounting(&[envelope], 3, 1).unwrap();
+        assert_eq!(model.coverage, Plan26CoverageV1::Unknown);
+        assert_eq!(model.watermark.producer_boot_id, Some(boot_id));
+        assert_eq!(model.watermark.producer_sequence, Some(7));
+        assert_eq!(model.denominators.persisted, 1);
+        assert_eq!(model.denominators.emitted, 1);
+        assert_eq!(model.denominators.dropped, 2);
+        assert_eq!(model.denominators.retention_dropped, 3);
+        assert_eq!(model.denominators.incomplete_boots, 1);
+        assert_eq!(model.denominators.eligible, 6);
     }
 
     #[test]

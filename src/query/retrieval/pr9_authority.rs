@@ -37,6 +37,9 @@ pub struct AuthorizedPr9FallbackV1 {
     /// Already-ranked fallback candidates must never be treated as a lane.
     pub pr9_lanes: Vec<CompositionLaneInput>,
     pub page_size: usize,
+    /// Authenticated client continuation supplied for this page. It remains
+    /// outside the canonical fallback subpayload.
+    pub request_cursor: Option<RetrievalCursor>,
 }
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -194,7 +197,36 @@ impl Pr9QueryAuthorityV1 {
             composition,
             pr9_lanes,
             page_size,
+            request_cursor: cursor.cloned(),
         })
+    }
+
+    pub(crate) fn continuation_cursor_at(
+        &self,
+        request: &RetrievalRequest,
+        query_view: &EphemeralSanitizedQueryViewV1,
+        composition: &CompositionOutputV1,
+        next_ordinal: usize,
+    ) -> Result<RetrievalCursor, Pr9QueryAuthorityErrorV1> {
+        self.validate_request(request)?;
+        Ok(self.kernel.cursor_at(
+            request,
+            query_view,
+            &self.keyring,
+            composition,
+            next_ordinal,
+            request.snapshot.captured_at,
+        )?)
+    }
+
+    pub(crate) fn bind_semantic_continuation(
+        &self,
+        cursor: &mut RetrievalCursor,
+        semantic: tracedecay_domain::SemanticRetrievalContinuationV1,
+    ) -> Result<(), Pr9QueryAuthorityErrorV1> {
+        cursor.semantic = Some(semantic);
+        self.keyring.resign_cursor(cursor)?;
+        Ok(())
     }
 
     fn validate_request(&self, request: &RetrievalRequest) -> Result<(), Pr9QueryAuthorityErrorV1> {

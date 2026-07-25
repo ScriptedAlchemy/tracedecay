@@ -9,6 +9,7 @@ pub mod advisory;
 pub mod authorization;
 pub mod configuration;
 pub mod context;
+pub mod context_scout;
 pub mod diagnostics;
 pub mod doctor;
 pub mod external_source;
@@ -39,6 +40,10 @@ pub use context::{
     CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass, RequestAdmission,
     RequestContext, RequestId, ResolvedScope,
 };
+pub use context_scout::{
+    context_scout_surface_catalog_contribution, context_scout_surface_handler_descriptors,
+    context_scout_surface_operation,
+};
 pub use diagnostics::{
     AnalyzerAdmittedDiagnosticProviderV1, CurrentDiagnosticsRequest, DiagnosticProviderDescriptor,
     DiagnosticProviderFuture, DiagnosticProviderIdentity, DiagnosticProviderIdentityParts,
@@ -48,6 +53,7 @@ pub use diagnostics::{
     ProviderSourceIdentity, RevisionDigest,
 };
 pub use doctor::{
+    AdvisoryFeedbackDoctorPort, AdvisoryFeedbackFindingReadV1, AdvisoryFeedbackReadV1,
     CodeIndexMountDoctorPort, CodeIndexMountReadV1, CodeIndexMountStateV1,
     ConfigurationAuthorityDoctorPort, ConfigurationAuthorityReadV1, ConfigurationDriftV1,
     DoctorConfirmationRequirementV1, DoctorCoverageCompletenessV1, DoctorCoverageStatementV1,
@@ -59,8 +65,8 @@ pub use doctor::{
     DoctorReportCoverageV1, DoctorReportEntryV1, DoctorReportV1, DoctorSourceFuture,
     DoctorStorageFamilyReadV1, DoctorStorageFindingKindV1, DoctorStorageFindingV1,
     HostConformanceV1, HostIntegrationDoctorPort, HostIntegrationReadV1, RuntimeHealthDoctorPort,
-    RuntimeHealthReadV1, RuntimeLivenessV1, StorageDoctorPort, code_index_finding,
-    configuration_finding, host_integration_finding, runtime_health_finding,
+    RuntimeHealthReadV1, RuntimeLivenessV1, StorageDoctorPort, advisory_feedback_findings,
+    code_index_finding, configuration_finding, host_integration_finding, runtime_health_finding,
 };
 pub use error::ApplicationContractError;
 pub use external_source::{

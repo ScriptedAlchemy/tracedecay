@@ -350,10 +350,11 @@ impl DaemonGitIndexTransactionServiceRegistry {
         project_id: ProjectId,
         observed_at: UtcMicros,
     ) -> Result<Arc<DaemonProjectGitIndexTransactionService>, GitIndexTransactionPortError> {
-        let database_path = database
-            .db_path()
-            .canonicalize()
-            .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
+        // `RegisteredGlobalDb` already carries the canonical path admitted by
+        // its retained runtime authority. Do not rediscover identity through
+        // the filesystem: a newly opened SQLite shard may not have
+        // materialized its directory entry yet.
+        let database_path = database.db_path().to_path_buf();
         self.ensure_with(
             database_path,
             repository_root,
@@ -372,6 +373,9 @@ impl DaemonGitIndexTransactionServiceRegistry {
         project_id: ProjectId,
         observed_at: UtcMicros,
     ) -> Result<Arc<DaemonProjectGitIndexTransactionService>, GitIndexTransactionPortError> {
+        let database_path = database_path
+            .canonicalize()
+            .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
         let store_path = database_path.clone();
         self.ensure_with(
             database_path,
@@ -396,9 +400,6 @@ impl DaemonGitIndexTransactionServiceRegistry {
             super::SharedDaemonGitIndexTransactionStore,
         >,
     {
-        let database_path = database_path
-            .canonicalize()
-            .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
         let repository_root = repository_root
             .canonicalize()
             .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;

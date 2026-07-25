@@ -2,10 +2,10 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracedecay_application::ResolvedScope;
-use tracedecay_domain::{ProjectId, UtcMicros};
+use tracedecay_domain::{ObservationId, ProjectId, SessionId, UtcMicros};
 use tracedecay_hooks::{
     AsyncHookAdmissionPortV1, HookAdmissionFutureV1, HookConfigurationFileReaderV1,
     HookConfigurationReadOutcomeV1, HookConfigurationSubscriberV1, HookEventEnvelopeV2,
@@ -187,6 +187,39 @@ struct NativeIdentityOutputMetadata {
     files: Vec<NativeIdentityFile>,
 }
 
+/// Provider-native lifecycle identity that may cross the local hook/daemon
+/// boundary. Both values come from checked-in host fields; paths, payloads,
+/// and derived placeholder identities are deliberately unrepresentable.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct NativeContextScoutLifecycleV1 {
+    pub(crate) session_id: SessionId,
+    pub(crate) call_id: ObservationId,
+}
+
+impl NativeContextScoutLifecycleV1 {
+    pub(crate) fn new(session_id: &str, call_id: &str) -> Option<Self> {
+        Some(Self {
+            session_id: SessionId::new(session_id.to_owned()).ok()?,
+            call_id: ObservationId::new(call_id.to_owned()).ok()?,
+        })
+    }
+
+    pub(crate) fn matches_envelope(&self, envelope: &HookEventEnvelopeV2) -> bool {
+        matches!(
+            envelope.producer,
+            HookHostV1::KimiCode | HookHostV1::OpenCode
+        ) && protected_session_id_for_native(self.session_id.as_str())
+            == envelope.protected_session_id
+            && hash16(self.call_id.as_str().as_bytes()) == envelope.event_id
+            && matches!(
+                envelope.event,
+                tracedecay_hooks::HookEventV2::SavedEdit { .. }
+                    | tracedecay_hooks::HookEventV2::ToolLifecycle { .. }
+            )
+    }
+}
+
 #[derive(Deserialize)]
 struct NativeIdentityFile {
     #[serde(alias = "filePath")]
@@ -267,9 +300,19 @@ impl NativeIdentityFields {
     }
 }
 
+fn native_context_scout_lifecycle(
+    host: HookHostV1,
+    fields: &NativeIdentityFields,
+) -> Option<NativeContextScoutLifecycleV1> {
+    matches!(host, HookHostV1::KimiCode | HookHostV1::OpenCode)
+        .then(|| NativeContextScoutLifecycleV1::new(fields.session_id()?, fields.call_id()?))
+        .flatten()
+}
+
 struct DaemonAdmissionPort<'a> {
     project_root: &'a Path,
     session_id: Option<&'a str>,
+    lifecycle: Option<&'a NativeContextScoutLifecycleV1>,
     feedback_notice: Mutex<Option<crate::application::advisory::Pr13AdvisoryHookLookupNoticeV1>>,
 }
 
@@ -390,6 +433,7 @@ impl AsyncHookAdmissionPortV1 for DaemonAdmissionPort<'_> {
                         "action": "hook_v2_admit",
                         "envelope": envelope,
                         "native_session_id": self.session_id,
+                        "native_lifecycle": self.lifecycle,
                     }),
                     None,
                 ),
@@ -482,7 +526,10 @@ async fn dispatch_decoded(
     let native_fields =
         serde_json::from_str::<NativeIdentityFields>(event_json).unwrap_or_default();
     let native_session_id = native_fields.session_id().map(str::to_owned);
-    let material = native_material(event_json, decoded.family(), now);
+    let native_lifecycle = native_context_scout_lifecycle(host, &native_fields);
+    let Some(material) = native_material(event_json, decoded.family(), now) else {
+        return unavailable();
+    };
     let Ok(envelope) =
         decode_bound_native_hook_event(host, event_json.as_bytes(), binding, material)
     else {
@@ -492,6 +539,7 @@ async fn dispatch_decoded(
     let port = DaemonAdmissionPort {
         project_root,
         session_id: native_session_id.as_deref(),
+        lifecycle: native_lifecycle.as_ref(),
         feedback_notice: Mutex::new(None),
     };
     let immediate = match admission_window(started) {
@@ -731,26 +779,44 @@ fn native_material(
     event_json: &str,
     family: tracedecay_hooks::HookEventFamily,
     observed_at: UtcMicros,
-) -> NativeEnvelopeMaterialV1 {
+) -> Option<NativeEnvelopeMaterialV1> {
     let fields = serde_json::from_str::<NativeIdentityFields>(event_json).unwrap_or_default();
-    let session = fields.session_id().unwrap_or("unknown-session");
-    let event_key = fields.event_key().unwrap_or(event_json);
-    let file = fields.file_path().unwrap_or(event_key);
-    let tool = fields.tool_name().unwrap_or(event_key);
-    NativeEnvelopeMaterialV1 {
-        event_id: hash16(event_key.as_bytes()),
+    let session = fields.session_id()?;
+    let event_id = fields.event_key().map_or_else(
+        || typed_native_event_fallback(session, family, observed_at),
+        |event_key| hash16(event_key.as_bytes()),
+    );
+    Some(NativeEnvelopeMaterialV1 {
+        event_id,
         protected_session_id: protected_session_id_for_native(session),
         observed_at,
-        tool_id: (family == tracedecay_hooks::HookEventFamily::ToolLifecycle)
-            .then(|| hash16(tool.as_bytes())),
+        tool_id: (family == tracedecay_hooks::HookEventFamily::ToolLifecycle).then_some(event_id),
         effect_receipt_id: fields.call_id().map(|value| hash16(value.as_bytes())),
-        file_id: (family == tracedecay_hooks::HookEventFamily::SavedEdit)
-            .then(|| hash16(file.as_bytes())),
+        file_id: (family == tracedecay_hooks::HookEventFamily::SavedEdit).then_some(event_id),
         changed_range_count: fields
             .edits
             .as_ref()
             .map_or(1, |edits| edits.len().min(64) as u8),
-    }
+    })
+}
+
+fn typed_native_event_fallback(
+    session_id: &str,
+    family: tracedecay_hooks::HookEventFamily,
+    observed_at: UtcMicros,
+) -> [u8; 16] {
+    let family = match family {
+        tracedecay_hooks::HookEventFamily::SessionBoundary => 1u8,
+        tracedecay_hooks::HookEventFamily::PromptBoundary => 2,
+        tracedecay_hooks::HookEventFamily::ToolLifecycle => 3,
+        tracedecay_hooks::HookEventFamily::SavedEdit => 4,
+        tracedecay_hooks::HookEventFamily::TestLifecycle => 5,
+    };
+    let mut material = Vec::with_capacity(session_id.len() + 10);
+    material.extend_from_slice(session_id.as_bytes());
+    material.push(family);
+    material.extend_from_slice(&observed_at.0.to_le_bytes());
+    hash16(&material)
 }
 
 fn hash16(bytes: &[u8]) -> [u8; 16] {
@@ -1052,11 +1118,12 @@ mod tests {
             }"#,
             tracedecay_hooks::HookEventFamily::SavedEdit,
             UtcMicros(41),
-        );
+        )
+        .unwrap();
 
         assert_eq!(material.event_id, hash16(b"event-17"));
         assert_eq!(material.protected_session_id, hash32(b"session-23"));
-        assert_eq!(material.file_id, Some(hash16(b"/project/src/lib.rs")));
+        assert_eq!(material.file_id, Some(hash16(b"event-17")));
     }
 
     #[test]
@@ -1076,11 +1143,115 @@ mod tests {
             }"#,
             tracedecay_hooks::HookEventFamily::SavedEdit,
             UtcMicros(43),
-        );
+        )
+        .unwrap();
 
         assert_eq!(material.event_id, hash16(b"call-31"));
         assert_eq!(material.protected_session_id, hash32(b"session-29"));
         assert_eq!(material.effect_receipt_id, Some(hash16(b"call-31")));
-        assert_eq!(material.file_id, Some(hash16(b"/project/src/main.rs")));
+        assert_eq!(material.file_id, Some(hash16(b"call-31")));
+    }
+
+    #[test]
+    fn native_path_tool_and_payload_aliases_cannot_change_native_identity() {
+        let first = native_material(
+            r#"{
+                "input": {
+                    "tool": "apply_patch",
+                    "sessionID": "session-29",
+                    "callID": "call-31",
+                    "args": {"patchText": "first payload"}
+                },
+                "output": {
+                    "metadata": {
+                        "files": [{"filePath": "/project/first.rs"}]
+                    }
+                }
+            }"#,
+            tracedecay_hooks::HookEventFamily::SavedEdit,
+            UtcMicros(43),
+        )
+        .unwrap();
+        let aliases_changed = native_material(
+            r#"{
+                "input": {
+                    "tool": "write",
+                    "sessionID": "session-29",
+                    "callID": "call-31",
+                    "args": {"patchText": "unrelated payload"}
+                },
+                "output": {
+                    "metadata": {
+                        "files": [{"filePath": "/elsewhere/alias.rs"}]
+                    }
+                }
+            }"#,
+            tracedecay_hooks::HookEventFamily::SavedEdit,
+            UtcMicros(43),
+        )
+        .unwrap();
+        let different_native_event = native_material(
+            r#"{
+                "input": {
+                    "tool": "write",
+                    "sessionID": "session-29",
+                    "callID": "call-32"
+                }
+            }"#,
+            tracedecay_hooks::HookEventFamily::SavedEdit,
+            UtcMicros(43),
+        )
+        .unwrap();
+
+        assert_eq!(aliases_changed.event_id, first.event_id);
+        assert_eq!(aliases_changed.file_id, first.file_id);
+        assert_ne!(different_native_event.event_id, first.event_id);
+        assert_ne!(different_native_event.file_id, first.file_id);
+    }
+
+    #[test]
+    fn kimi_rendered_hook_fixture_queues_only_native_session_and_call_identity() {
+        let fixture = include_str!(
+            "../../crates/tracedecay-hooks/fixtures/host_events/kimi/post-tool-use-edit.json"
+        )
+        .replace("<SESSION_ID>", "session.kimi.native")
+        .replace("<TOOL_CALL_ID>", "call.kimi.native");
+        let fields = serde_json::from_str::<NativeIdentityFields>(&fixture).unwrap();
+
+        let lifecycle = native_context_scout_lifecycle(HookHostV1::KimiCode, &fields).unwrap();
+
+        assert_eq!(lifecycle.session_id.as_str(), "session.kimi.native");
+        assert_eq!(lifecycle.call_id.as_str(), "call.kimi.native");
+    }
+
+    #[test]
+    fn opencode_rendered_plugin_queues_only_tool_after_lifecycle_identity() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../crates/tracedecay-hooks/fixtures/host_events/opencode/baseline.json"
+        ))
+        .unwrap();
+        let tool_after = fixture["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|event| event["identity"] == "post_tool_use")
+            .unwrap()["request"]
+            .to_string()
+            .replace("<SESSION_ID>", "session.opencode.native")
+            .replace("<CALL_ID>", "call.opencode.native");
+        let fields = serde_json::from_str::<NativeIdentityFields>(&tool_after).unwrap();
+        let lifecycle = native_context_scout_lifecycle(HookHostV1::OpenCode, &fields).unwrap();
+        assert_eq!(lifecycle.session_id.as_str(), "session.opencode.native");
+        assert_eq!(lifecycle.call_id.as_str(), "call.opencode.native");
+
+        let file_edit = fixture["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|event| event["identity"] == "saved_edit")
+            .unwrap()["request"]
+            .to_string();
+        let fields = serde_json::from_str::<NativeIdentityFields>(&file_edit).unwrap();
+        assert!(native_context_scout_lifecycle(HookHostV1::OpenCode, &fields).is_none());
     }
 }

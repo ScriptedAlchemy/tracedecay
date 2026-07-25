@@ -21,7 +21,11 @@
 //! - daemon/runtime health snapshot → [`DoctorFindingFamilyV1::StorageRuntime`]
 //! - host/agent integration conformance → [`DoctorFindingFamilyV1::Advisory`] (PR13
 //!   host-capability/conformance evidence)
+//! - mounted canonical feedback owner → [`DoctorFindingFamilyV1::Advisory`]
+//!   (finding/scope/generation/provider/evidence/coverage identity)
 //! - code/semantic index mount state → [`DoctorFindingFamilyV1::SemanticIndex`]
+//! - live language-server/analyzer state → [`DoctorFindingFamilyV1::LanguageServer`]
+//! - durable Plan-26 feedback observations → [`DoctorFindingFamilyV1::Observability`]
 //! - storage retention/size → [`DoctorFindingFamilyV1::Storage`] (producers in
 //!   [`crate::storage::findings`]; this port collects their typed findings)
 
@@ -29,6 +33,10 @@ use std::future::Future;
 use std::pin::Pin;
 
 use serde::{Deserialize, Serialize};
+use tracedecay_domain::{
+    CodeGenerationId, FeedbackCycleId, FeedbackFindingId, FeedbackFindingLifecycleV1,
+    FeedbackResultId, FeedbackScopeV1, ProviderEvaluationStateV1, RetrievalAnchorId,
+};
 
 use crate::RequestContext;
 use crate::error::ApplicationContractError;
@@ -446,6 +454,210 @@ pub trait HostIntegrationDoctorPort: Send + Sync {
     ) -> DoctorSourceFuture<'a, HostIntegrationReadV1>;
 }
 
+// --- Canonical advisory feedback (Advisory family) --------------------------
+
+/// One canonical advisory finding projected from the mounted feedback read
+/// model. Identity and scope remain typed until Doctor converts them into
+/// durable evidence references.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AdvisoryFeedbackFindingReadV1 {
+    pub result_id: FeedbackResultId,
+    pub cycle_id: FeedbackCycleId,
+    pub finding_id: FeedbackFindingId,
+    pub scope: FeedbackScopeV1,
+    pub generation_id: CodeGenerationId,
+    pub lifecycle: FeedbackFindingLifecycleV1,
+    pub provider_state: ProviderEvaluationStateV1,
+    pub evidence_anchors: Vec<RetrievalAnchorId>,
+    pub total_findings: u64,
+    pub returned_findings: u64,
+    pub omitted_findings: u64,
+}
+
+/// Canonical feedback-owner read for Doctor's advisory source.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum AdvisoryFeedbackReadV1 {
+    Observed {
+        findings: Vec<AdvisoryFeedbackFindingReadV1>,
+    },
+    Unsupported,
+    Absent,
+    Denied,
+    Unknown,
+}
+
+const fn feedback_lifecycle_slug(lifecycle: FeedbackFindingLifecycleV1) -> &'static str {
+    match lifecycle {
+        FeedbackFindingLifecycleV1::Active => "active",
+        FeedbackFindingLifecycleV1::Superseded => "superseded",
+        FeedbackFindingLifecycleV1::Resolved => "resolved",
+        FeedbackFindingLifecycleV1::Cleared => "cleared",
+    }
+}
+
+const fn feedback_provider_state_slug(state: ProviderEvaluationStateV1) -> &'static str {
+    match state {
+        ProviderEvaluationStateV1::SupportedCompletedComplete => "supported_completed_complete",
+        ProviderEvaluationStateV1::Unsupported => "unsupported",
+        ProviderEvaluationStateV1::Absent => "absent",
+        ProviderEvaluationStateV1::Indexing => "indexing",
+        ProviderEvaluationStateV1::Stale => "stale",
+        ProviderEvaluationStateV1::Cancelled => "cancelled",
+        ProviderEvaluationStateV1::TimedOut => "timed_out",
+        ProviderEvaluationStateV1::Failed => "failed",
+        ProviderEvaluationStateV1::Partial => "partial",
+        ProviderEvaluationStateV1::Unavailable => "unavailable",
+    }
+}
+
+fn feedback_evidence(
+    reference: impl Into<String>,
+) -> Result<DoctorEvidenceRefV1, ApplicationContractError> {
+    Ok(DoctorEvidenceRefV1::new(
+        DoctorFindingFamilyV1::Advisory,
+        DoctorEvidenceReferenceV1::new(reference)?,
+    ))
+}
+
+fn advisory_feedback_finding(
+    read: &AdvisoryFeedbackFindingReadV1,
+) -> Result<DoctorFindingV1, ApplicationContractError> {
+    let coverage_complete = read.omitted_findings == 0
+        && read.returned_findings == read.total_findings
+        && read.provider_state == ProviderEvaluationStateV1::SupportedCompletedComplete;
+    let completeness = if coverage_complete {
+        DoctorCoverageCompletenessV1::Complete
+    } else {
+        DoctorCoverageCompletenessV1::Partial
+    };
+    let state = match read.provider_state {
+        ProviderEvaluationStateV1::SupportedCompletedComplete => {
+            if matches!(
+                read.lifecycle,
+                FeedbackFindingLifecycleV1::Resolved
+                    | FeedbackFindingLifecycleV1::Cleared
+                    | FeedbackFindingLifecycleV1::Superseded
+            ) && coverage_complete
+            {
+                DoctorEvidenceStateV1::HealthyCompleteCoverage
+            } else {
+                DoctorEvidenceStateV1::Degraded
+            }
+        }
+        ProviderEvaluationStateV1::Unsupported => DoctorEvidenceStateV1::Unsupported,
+        ProviderEvaluationStateV1::Absent => DoctorEvidenceStateV1::Absent,
+        ProviderEvaluationStateV1::Indexing | ProviderEvaluationStateV1::Stale => {
+            DoctorEvidenceStateV1::Stale
+        }
+        ProviderEvaluationStateV1::Partial => DoctorEvidenceStateV1::Partial,
+        ProviderEvaluationStateV1::Cancelled
+        | ProviderEvaluationStateV1::TimedOut
+        | ProviderEvaluationStateV1::Failed
+        | ProviderEvaluationStateV1::Unavailable => DoctorEvidenceStateV1::Unknown,
+    };
+    let mut evidence = vec![
+        feedback_evidence(format!("feedback.result:{}", read.result_id.as_str()))?,
+        feedback_evidence(format!("feedback.cycle:{}", read.cycle_id.as_str()))?,
+        feedback_evidence(format!("feedback.finding:{}", read.finding_id.as_str()))?,
+        feedback_evidence(format!(
+            "feedback.scope.project:{}",
+            read.scope.project_id.as_str()
+        ))?,
+        feedback_evidence(format!(
+            "feedback.scope.repository:{}",
+            read.scope.repository_id.as_str()
+        ))?,
+        feedback_evidence(format!(
+            "feedback.scope.worktree:{}",
+            read.scope.worktree_id.as_str()
+        ))?,
+        feedback_evidence(format!("feedback.scope.branch:{}", read.scope.branch_ref))?,
+        feedback_evidence(format!(
+            "feedback.scope.head:{}",
+            read.scope.head_commit_id.as_str()
+        ))?,
+        feedback_evidence(format!(
+            "feedback.generation:{}",
+            read.generation_id.as_str()
+        ))?,
+        feedback_evidence(format!(
+            "feedback.lifecycle:{}",
+            feedback_lifecycle_slug(read.lifecycle)
+        ))?,
+        feedback_evidence(format!(
+            "feedback.provider_state:{}",
+            feedback_provider_state_slug(read.provider_state)
+        ))?,
+    ];
+    for anchor in &read.evidence_anchors {
+        evidence.push(feedback_evidence(format!(
+            "feedback.anchor:{}",
+            anchor.as_str()
+        ))?);
+    }
+    let statement = format!(
+        "feedback coverage returned {}/{} findings; omitted {}",
+        read.returned_findings, read.total_findings, read.omitted_findings
+    );
+    let remediation = (!state.is_healthy_complete())
+        .then(|| action_remediation(operations::FEEDBACK_GET_FINDING))
+        .transpose()?;
+    DoctorFindingV1::new(
+        DoctorFindingFamilyV1::Advisory,
+        state,
+        evidence,
+        DoctorCoverageStatementV1::new(completeness, statement)?,
+        remediation,
+    )
+}
+
+/// Map the mounted canonical feedback-owner read into distinct Advisory
+/// findings. Host conformance is deliberately not part of this producer.
+pub fn advisory_feedback_findings(
+    read: &AdvisoryFeedbackReadV1,
+) -> Result<Vec<DoctorFindingV1>, ApplicationContractError> {
+    match read {
+        AdvisoryFeedbackReadV1::Observed { findings } if !findings.is_empty() => {
+            findings.iter().map(advisory_feedback_finding).collect()
+        }
+        AdvisoryFeedbackReadV1::Observed { .. } | AdvisoryFeedbackReadV1::Absent => {
+            Ok(vec![unobservable_finding(
+                DoctorFindingFamilyV1::Advisory,
+                DoctorEvidenceStateV1::Absent,
+                "feedback.absent",
+                "canonical advisory feedback produced no findings",
+            )?])
+        }
+        AdvisoryFeedbackReadV1::Unsupported => Ok(vec![unobservable_finding(
+            DoctorFindingFamilyV1::Advisory,
+            DoctorEvidenceStateV1::Unsupported,
+            "feedback.unsupported",
+            "canonical advisory feedback unsupported",
+        )?]),
+        AdvisoryFeedbackReadV1::Denied => Ok(vec![unobservable_finding(
+            DoctorFindingFamilyV1::Advisory,
+            DoctorEvidenceStateV1::Denied,
+            "feedback.denied",
+            "canonical advisory feedback read denied",
+        )?]),
+        AdvisoryFeedbackReadV1::Unknown => Ok(vec![unobservable_finding(
+            DoctorFindingFamilyV1::Advisory,
+            DoctorEvidenceStateV1::Unknown,
+            "feedback.unknown",
+            "canonical advisory feedback undetermined",
+        )?]),
+    }
+}
+
+/// Narrow Doctor port owned by the mounted canonical feedback read model.
+pub trait AdvisoryFeedbackDoctorPort: Send + Sync {
+    fn advisory_feedback<'a>(
+        &'a self,
+        context: &'a RequestContext,
+    ) -> DoctorSourceFuture<'a, AdvisoryFeedbackReadV1>;
+}
+
 // --- Code/semantic index mount (SemanticIndex family) ------------------------
 
 /// The observed mount state of the code/semantic index.
@@ -564,6 +776,240 @@ pub trait CodeIndexMountDoctorPort: Send + Sync {
         &'a self,
         context: &'a RequestContext,
     ) -> DoctorSourceFuture<'a, CodeIndexMountReadV1>;
+}
+
+// --- Language server/analyzer (LanguageServer family) ------------------------
+
+/// Aggregate state of the project-active language-server analyzers.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum LanguageServerStateV1 {
+    /// Every active analyzer is ready.
+    Ready,
+    /// At least one analyzer is installed but has not produced a ready snapshot.
+    Available,
+    /// At least one analyzer is currently refreshing/indexing.
+    Refreshing,
+    /// At least one project analyzer is disabled.
+    Disabled,
+    /// At least one project analyzer executable is unavailable.
+    Unavailable,
+    /// At least one analyzer process crashed.
+    Crashed,
+}
+
+/// One live read from the daemon language-server/analyzer owner.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum LanguageServerReadV1 {
+    /// The owner observed all project-active analyzer states.
+    Observed {
+        state: LanguageServerStateV1,
+        coverage: DoctorCoverageCompletenessV1,
+    },
+    /// Language-server inspection is unsupported on this build/platform.
+    Unsupported,
+    /// No project-active analyzer is configured.
+    Absent,
+    /// Authorization to inspect analyzer state was denied.
+    Denied,
+    /// Analyzer state could not be determined.
+    Unknown,
+}
+
+/// Map a live analyzer read into its `LanguageServer`-family finding.
+pub fn language_server_finding(
+    read: &LanguageServerReadV1,
+) -> Result<DoctorFindingV1, ApplicationContractError> {
+    let family = DoctorFindingFamilyV1::LanguageServer;
+    match read {
+        LanguageServerReadV1::Observed { state, coverage } => match state {
+            LanguageServerStateV1::Ready => clean_finding(
+                family,
+                "language-server.analyzer.ready",
+                *coverage,
+                "all project-active language-server analyzers are ready",
+            ),
+            LanguageServerStateV1::Available => source_finding(
+                family,
+                DoctorEvidenceStateV1::Partial,
+                "language-server.analyzer.available",
+                DoctorCoverageCompletenessV1::Partial,
+                "project analyzers are available but readiness is not yet observed",
+                None,
+            ),
+            LanguageServerStateV1::Refreshing => source_finding(
+                family,
+                DoctorEvidenceStateV1::Partial,
+                "language-server.analyzer.refreshing",
+                DoctorCoverageCompletenessV1::Partial,
+                "at least one project analyzer is refreshing or indexing",
+                None,
+            ),
+            LanguageServerStateV1::Disabled => source_finding(
+                family,
+                DoctorEvidenceStateV1::Degraded,
+                "language-server.analyzer.disabled",
+                *coverage,
+                "at least one project analyzer is disabled",
+                None,
+            ),
+            LanguageServerStateV1::Unavailable => source_finding(
+                family,
+                DoctorEvidenceStateV1::Degraded,
+                "language-server.analyzer.unavailable",
+                *coverage,
+                "at least one project analyzer executable is unavailable",
+                None,
+            ),
+            LanguageServerStateV1::Crashed => source_finding(
+                family,
+                DoctorEvidenceStateV1::Degraded,
+                "language-server.analyzer.crashed",
+                *coverage,
+                "at least one project analyzer process crashed",
+                None,
+            ),
+        },
+        LanguageServerReadV1::Unsupported => unobservable_finding(
+            family,
+            DoctorEvidenceStateV1::Unsupported,
+            "language-server.unsupported",
+            "language-server inspection unsupported on this platform",
+        ),
+        LanguageServerReadV1::Absent => unobservable_finding(
+            family,
+            DoctorEvidenceStateV1::Absent,
+            "language-server.absent",
+            "no project-active language-server analyzer is configured",
+        ),
+        LanguageServerReadV1::Denied => unobservable_finding(
+            family,
+            DoctorEvidenceStateV1::Denied,
+            "language-server.denied",
+            "language-server analyzer inspection denied",
+        ),
+        LanguageServerReadV1::Unknown => unobservable_finding(
+            family,
+            DoctorEvidenceStateV1::Unknown,
+            "language-server.unknown",
+            "language-server analyzer state undetermined",
+        ),
+    }
+}
+
+/// Narrow source port for live language-server/analyzer state.
+pub trait LanguageServerDoctorPort: Send + Sync {
+    /// Read current project-active analyzer state.
+    fn language_server_health<'a>(
+        &'a self,
+        context: &'a RequestContext,
+    ) -> DoctorSourceFuture<'a, LanguageServerReadV1>;
+}
+
+// --- Durable feedback observations (Observability family) --------------------
+
+/// Freshness state of the canonical durable observation projection.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ObservabilityStateV1 {
+    Current,
+    Stale,
+}
+
+/// One canonical Plan-26 feedback-observation read.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum ObservabilityReadV1 {
+    /// The durable read model contains observations through this watermark.
+    Observed {
+        state: ObservabilityStateV1,
+        total_count: u64,
+        last_observed_at_micros: Option<i64>,
+        coverage: DoctorCoverageCompletenessV1,
+    },
+    /// Durable observation projection is unsupported on this build/platform.
+    Unsupported,
+    /// The canonical projection contains no observations.
+    Absent,
+    /// Authorization to read the observation projection was denied.
+    Denied,
+    /// The observation state could not be determined.
+    Unknown,
+}
+
+/// Map the canonical Plan-26 read model into its `Observability` finding.
+pub fn observability_finding(
+    read: &ObservabilityReadV1,
+) -> Result<DoctorFindingV1, ApplicationContractError> {
+    let family = DoctorFindingFamilyV1::Observability;
+    match read {
+        ObservabilityReadV1::Observed {
+            state,
+            total_count,
+            last_observed_at_micros,
+            coverage,
+        } => match state {
+            ObservabilityStateV1::Stale => source_finding(
+                family,
+                DoctorEvidenceStateV1::Stale,
+                "observability.plan26.stale",
+                *coverage,
+                "canonical Plan-26 feedback projection is stale at its retained watermark",
+                None,
+            ),
+            ObservabilityStateV1::Current => {
+                let statement = if last_observed_at_micros.is_some() {
+                    format!(
+                        "canonical Plan-26 feedback projection contains {total_count} retained observations through its latest watermark"
+                    )
+                } else {
+                    format!(
+                        "canonical Plan-26 feedback projection contains {total_count} retained observations without a watermark"
+                    )
+                };
+                clean_finding(
+                    family,
+                    "observability.plan26.feedback-projection",
+                    *coverage,
+                    &statement,
+                )
+            }
+        },
+        ObservabilityReadV1::Unsupported => unobservable_finding(
+            family,
+            DoctorEvidenceStateV1::Unsupported,
+            "observability.unsupported",
+            "durable feedback observation projection unsupported on this platform",
+        ),
+        ObservabilityReadV1::Absent => unobservable_finding(
+            family,
+            DoctorEvidenceStateV1::Absent,
+            "observability.plan26.absent",
+            "canonical Plan-26 feedback projection contains no observations",
+        ),
+        ObservabilityReadV1::Denied => unobservable_finding(
+            family,
+            DoctorEvidenceStateV1::Denied,
+            "observability.denied",
+            "durable feedback observation projection read denied",
+        ),
+        ObservabilityReadV1::Unknown => unobservable_finding(
+            family,
+            DoctorEvidenceStateV1::Unknown,
+            "observability.unknown",
+            "durable feedback observation state undetermined",
+        ),
+    }
+}
+
+/// Narrow source port for the canonical durable Plan-26 read model.
+pub trait ObservabilityDoctorPort: Send + Sync {
+    /// Read current durable feedback-observation state.
+    fn observability_health<'a>(
+        &'a self,
+        context: &'a RequestContext,
+    ) -> DoctorSourceFuture<'a, ObservabilityReadV1>;
 }
 
 // --- Storage retention/size (Storage family) ---------------------------------
@@ -740,5 +1186,31 @@ mod tests {
                 .as_str(),
             operations::CODE_INDEX_REMOUNT
         );
+    }
+
+    #[test]
+    fn language_server_refreshing_is_partial() {
+        let finding = language_server_finding(&LanguageServerReadV1::Observed {
+            state: LanguageServerStateV1::Refreshing,
+            coverage: DoctorCoverageCompletenessV1::Complete,
+        })
+        .expect("finding");
+        assert_eq!(finding.family(), DoctorFindingFamilyV1::LanguageServer);
+        assert_eq!(finding.state(), DoctorEvidenceStateV1::Partial);
+        assert!(finding.remediation().is_none());
+    }
+
+    #[test]
+    fn observability_partial_projection_cannot_claim_health() {
+        let finding = observability_finding(&ObservabilityReadV1::Observed {
+            state: ObservabilityStateV1::Current,
+            total_count: 17,
+            last_observed_at_micros: Some(42),
+            coverage: DoctorCoverageCompletenessV1::Partial,
+        })
+        .expect("finding");
+        assert_eq!(finding.family(), DoctorFindingFamilyV1::Observability);
+        assert_eq!(finding.state(), DoctorEvidenceStateV1::Partial);
+        assert!(finding.remediation().is_none());
     }
 }

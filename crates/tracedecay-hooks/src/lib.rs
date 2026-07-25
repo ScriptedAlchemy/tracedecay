@@ -16,7 +16,8 @@ pub mod spool;
 
 pub use admission_ledger::{
     HookAdmissionDecisionV1, HookAdmissionLedgerError, HookAdmissionLedgerLimitsV1,
-    HookAdmissionLedgerOpenReportV1, HookAdmissionLedgerV1, hook_admission_digest,
+    HookAdmissionLedgerOpenReportV1, HookAdmissionLedgerReceiptV1, HookAdmissionLedgerV1,
+    hook_admission_digest,
 };
 pub use config::{
     HOOK_CONFIGURATION_SCHEMA_VERSION, HookConfigurationFileReaderV1,

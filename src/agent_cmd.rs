@@ -2432,6 +2432,38 @@ mod tests {
         canonical_host_component_set, component_set_request, finish_legacy_hermes_migration,
     };
 
+    fn seed_opencode_non_context_state(
+        home: &std::path::Path,
+    ) -> (PathBuf, PathBuf, PathBuf) {
+        let config_path = home.join(".config/opencode/opencode.json");
+        let core_path = home.join(".config/opencode/plugins/tracedecay.ts");
+        let agent_set = canonical_host_component_set(
+            "opencode",
+            Some(crate::cli::HostBundleComponentArg::Agent),
+            0,
+        )
+        .unwrap()
+        .unwrap();
+        let agent_path =
+            home.join(&agent_set.component_set.components[0].manifest.artifacts[0].relative_path);
+        for path in [&config_path, &core_path, &agent_path] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        }
+        std::fs::write(&config_path, b"{\"unrelated\":{\"keep\":true}}\n").unwrap();
+        std::fs::write(&core_path, b"core-sentinel\n").unwrap();
+        std::fs::write(&agent_path, b"agent-sentinel\n").unwrap();
+        (config_path, core_path, agent_path)
+    }
+
+    fn assert_opencode_non_context_state(paths: &(PathBuf, PathBuf, PathBuf)) {
+        assert_eq!(
+            std::fs::read(&paths.0).unwrap(),
+            b"{\"unrelated\":{\"keep\":true}}\n"
+        );
+        assert_eq!(std::fs::read(&paths.1).unwrap(), b"core-sentinel\n");
+        assert_eq!(std::fs::read(&paths.2).unwrap(), b"agent-sentinel\n");
+    }
+
     #[tokio::test]
     async fn codex_automation_project_initializes_through_daemon() {
         let project = tempfile::tempdir().unwrap();
@@ -2545,6 +2577,87 @@ mod tests {
             kiro.component_set.components[0].manifest.component,
             tracedecay::agents::host_bundle_v2::HostBundleComponentV1::Core
         );
+    }
+
+    #[test]
+    fn explicit_context_component_lifecycle_preserves_other_opencode_state() {
+        let home = tempfile::tempdir().unwrap();
+        let lifecycle = tempfile::tempdir().unwrap();
+        let preserved = seed_opencode_non_context_state(home.path());
+        let component_set = canonical_host_component_set(
+            "opencode",
+            Some(crate::cli::HostBundleComponentArg::ContextMcp),
+            0,
+        )
+        .unwrap()
+        .unwrap();
+        let options = crate::cli::HostBundleCliOptions {
+            component: Some(crate::cli::HostBundleComponentArg::ContextMcp),
+            dry_run: false,
+            yes: true,
+        };
+
+        apply_canonical_component_set(
+            "opencode",
+            HostBundleCliOperation::Install,
+            &component_set,
+            &options,
+            home.path(),
+            lifecycle.path(),
+        )
+        .unwrap();
+        assert_opencode_non_context_state(&preserved);
+
+        apply_canonical_component_set(
+            "opencode",
+            HostBundleCliOperation::Uninstall,
+            &component_set,
+            &options,
+            home.path(),
+            lifecycle.path(),
+        )
+        .unwrap();
+        assert_opencode_non_context_state(&preserved);
+    }
+
+    #[test]
+    fn explicit_context_component_rollback_preserves_other_opencode_state() {
+        use tracedecay::agents::host_bundle_v2::HostComponentSetRegistrationV1;
+
+        let home = tempfile::tempdir().unwrap();
+        let lifecycle = tempfile::tempdir().unwrap();
+        let preserved = seed_opencode_non_context_state(home.path());
+        let component_set = canonical_host_component_set(
+            "opencode",
+            Some(crate::cli::HostBundleComponentArg::ContextMcp),
+            0,
+        )
+        .unwrap()
+        .unwrap();
+        let request =
+            component_set_request(&component_set, HostBundleCliOperation::Install, true).unwrap();
+        let mut registration = CompatibilityAgentRegistrationDelegate::new(
+            "opencode",
+            home.path(),
+            lifecycle.path(),
+            request.lifecycle.operation,
+        )
+        .unwrap();
+
+        registration
+            .preflight(&component_set.component_set, &request)
+            .unwrap();
+        registration
+            .stage(&component_set.component_set, &request)
+            .unwrap();
+        registration
+            .apply(&component_set.component_set, &request)
+            .unwrap();
+        registration
+            .rollback(&component_set.component_set, &request)
+            .unwrap();
+
+        assert_opencode_non_context_state(&preserved);
     }
 
     #[test]

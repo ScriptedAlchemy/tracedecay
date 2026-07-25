@@ -25,6 +25,7 @@ mod steering;
 pub mod tool_hints;
 mod v2;
 pub(crate) use v2::HOOK_V2_BOUND_HOSTS;
+pub(crate) use v2::NativeContextScoutLifecycleV1;
 pub(crate) use v2::project_and_worktree_locators_for_scope as hook_v2_scope_locators;
 pub(crate) use v2::project_id_for_layout as hook_v2_project_id_for_layout;
 pub(crate) use v2::protected_session_id_for_native as hook_v2_protected_session_id_for_native;

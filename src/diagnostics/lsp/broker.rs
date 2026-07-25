@@ -530,6 +530,17 @@ impl DiagnosticBroker {
         }
     }
 
+    /// Current statuses for only the languages active in this project.
+    ///
+    /// Doctor consumes this live owner view so disabled adapters for languages
+    /// absent from the project cannot be misreported as project degradation.
+    pub fn project_engine_statuses(&self) -> Vec<EngineStatus> {
+        self.engine_statuses()
+            .into_iter()
+            .filter(|status| self.project_languages.contains(&status.language))
+            .collect()
+    }
+
     pub fn adapter_for(&self, language: &str) -> Option<LspAdapterDefinition> {
         self.adapters
             .iter()

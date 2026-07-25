@@ -88,6 +88,7 @@ assert_required_assets() {
     "plugin/.cursor-plugin/plugin.json"
     "plugin/.kimi-plugin/plugin.json"
     "plugin/cursor-native-extension/dist/extension.js"
+    "dashboard/app-dist/index.html"
     "src/agents/host_bundle_registry.rs"
     "src/agents/host_bundle_v2.rs"
     "src/application/advisory/host_delivery.rs"
@@ -129,6 +130,20 @@ assert_required_assets() {
     [[ -f "$api_package/$required" ]] ||
       die "packaged tracedecay-api crate is missing $required"
   done
+  local -a dashboard_scripts=("$root_package"/dashboard/app-dist/static/js/*.js)
+  [[ -e ${dashboard_scripts[0]:-} ]] ||
+    die "packaged tracedecay crate has no single-app dashboard JavaScript"
+  python3 - "$root_package/dashboard/app-dist/index.html" "${dashboard_scripts[@]}" <<'PY'
+import pathlib
+import sys
+
+index = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+if "/static/js/" not in index:
+    raise SystemExit("distribution acceptance: dashboard index does not load the single-app JavaScript")
+scripts = [pathlib.Path(raw) for raw in sys.argv[2:]]
+if max((path.stat().st_size for path in scripts), default=0) <= 704:
+    raise SystemExit("distribution acceptance: packaged dashboard JavaScript is still placeholder-sized")
+PY
 
   python3 - \
     "$root_package/plugin/.lsp.json" \
@@ -321,6 +336,10 @@ run_self_test() {
     mkdir -p -- "$api/$(dirname -- "$path")"
     : >"$api/$path"
   done
+  mkdir -p -- "$root/dashboard/app-dist/static/js"
+  printf '<script src="/static/js/index.fixture.js"></script>\n' \
+    >"$root/dashboard/app-dist/index.html"
+  printf '%0800d' 0 >"$root/dashboard/app-dist/static/js/index.fixture.js"
   assert_required_assets "$root" "$application" "$api"
   rm -- "$root/plugin/.lsp.json"
   if (assert_required_assets "$root" "$application" "$api") >/dev/null 2>&1; then

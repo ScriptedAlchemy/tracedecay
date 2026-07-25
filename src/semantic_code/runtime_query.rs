@@ -32,10 +32,10 @@ where
         &self.runtime
     }
 
-    pub(super) fn create(
+    pub(super) fn create<'a>(
         self: &Arc<Self>,
-        cancellation: Arc<dyn CancellationSignal>,
-    ) -> PooledSemanticQueryEmbedder<R> {
+        cancellation: Arc<dyn CancellationSignal + 'a>,
+    ) -> PooledSemanticQueryEmbedder<'a, R> {
         PooledSemanticQueryEmbedder {
             factory: Arc::clone(self),
             cancellation,
@@ -83,12 +83,12 @@ where
 
 /// Request-scoped adapter that obtains one bounded warmed session and emits
 /// exactly one ephemeral query vector.
-pub(super) struct PooledSemanticQueryEmbedder<R: EmbeddingRuntime> {
+pub(super) struct PooledSemanticQueryEmbedder<'a, R: EmbeddingRuntime> {
     factory: Arc<PooledSemanticQueryEmbedderFactory<R>>,
-    cancellation: Arc<dyn CancellationSignal>,
+    cancellation: Arc<dyn CancellationSignal + 'a>,
 }
 
-impl<R> SemanticQueryEmbeddingPort for PooledSemanticQueryEmbedder<R>
+impl<R> SemanticQueryEmbeddingPort for PooledSemanticQueryEmbedder<'_, R>
 where
     R: EmbeddingRuntime + Send + Sync + 'static,
 {

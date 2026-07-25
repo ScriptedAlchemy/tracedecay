@@ -308,15 +308,7 @@ async fn portable_broker_bootstrap_bypasses_project_writer_gate() {
     let profile_root = temp.path().join("profile");
     std::fs::create_dir_all(&project).expect("project dir");
     let client_identity = test_client_identity_for(profile_root.clone());
-    let options = crate::tracedecay::TraceDecayOpenOptions {
-        profile_root: Some(profile_root.clone()),
-        global_db_path: Some(client_identity.global_db_path.clone()),
-    };
-    drop(
-        crate::tracedecay::TraceDecay::init_with_options(&project, options)
-            .await
-            .expect("initialize project"),
-    );
+    initialize_test_project(&project, &client_identity).await;
     let mut config = crate::config::load_config(&project).expect("load project config");
     config.sync.session_start_sync = false;
     crate::config::save_config(&project, &config)
@@ -329,10 +321,11 @@ async fn portable_broker_bootstrap_bypasses_project_writer_gate() {
         client_identity,
         ..test_handshake_defaults()
     };
-    let route =
-        super::super::ProjectRouteKey::from_handshake(&project, &handshake).expect("project route");
     let owners = Arc::new(tokio::sync::Mutex::new(DatabaseOwnerRegistry::default()));
-    let store_administration = StoreAdministration::with_project_servers(Arc::clone(&owners));
+    let profile_identity = crate::daemon::profile_identity::load_or_create(&profile_root)
+        .expect("load test profile identity");
+    let store_administration = StoreAdministration::with_project_servers(Arc::clone(&owners))
+        .with_profile_identity(profile_identity);
     let gates = Arc::new(tokio::sync::Mutex::new(
         super::super::ProjectOpenGates::default(),
     ));
@@ -475,25 +468,15 @@ async fn portable_broker_bootstrap_bypasses_project_writer_gate() {
     assert!(portable_context_description.contains("10 calls maximum"));
     assert!(portable_context_description.contains("project graph is warming"));
 
-    tokio::time::timeout(PHASE_TIMEOUT, async {
-        loop {
-            if owners.lock().await.get_route(&route).is_some() {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("portable initialize background warmup timed out");
+    lifecycle.begin_draining();
+    tokio::time::timeout(PHASE_TIMEOUT, lifecycle.wait_for_idle())
+        .await
+        .expect("portable warmup lifecycle drain timed out");
     assert_eq!(
         attempts.load(std::sync::atomic::Ordering::Relaxed),
         1,
         "portable initialize warmup must singleflight one project open"
     );
-    lifecycle.begin_draining();
-    tokio::time::timeout(PHASE_TIMEOUT, lifecycle.wait_for_idle())
-        .await
-        .expect("portable warmup lifecycle drain timed out");
     super::super::shutdown_project_servers(&store_administration).await;
 }
 
@@ -505,7 +488,7 @@ async fn project_server_warmup_drops_lifecycle_activity_on_draining() {
     let profile_root = temp.path().join("profile");
     std::fs::create_dir_all(&project).expect("project dir");
     std::fs::create_dir_all(&profile_root).expect("profile dir");
-    let engine = DaemonEngine::default();
+    let engine = test_daemon_engine_for_profile(&profile_root);
     let handshake = DaemonHandshake {
         project_path: Some(project),
         client_identity: test_client_identity_for(profile_root),
@@ -598,15 +581,16 @@ async fn scheduler_activation_drain_wins_when_discovery_is_simultaneously_ready(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn portable_project_warmup_cancels_before_shutdown_snapshot() {
+async fn portable_project_warmup_rejects_after_shutdown_snapshot() {
     let temp = TempDir::new().expect("temp dir");
     let project = temp.path().join("project");
     let profile_root = temp.path().join("profile");
     std::fs::create_dir_all(&project).expect("project dir");
-    std::fs::create_dir_all(&profile_root).expect("profile dir");
+    prepare_test_profile_root(&profile_root);
+    let client_identity = test_client_identity_for(profile_root.clone());
     let handshake = DaemonHandshake {
         project_path: Some(project),
-        client_identity: test_client_identity_for(profile_root),
+        client_identity,
         ..test_handshake_defaults()
     };
     let initialize_request: crate::mcp::JsonRpcRequest =
@@ -618,28 +602,18 @@ async fn portable_project_warmup_cancels_before_shutdown_snapshot() {
         }))
         .expect("initialize request");
     let owners = Arc::new(tokio::sync::Mutex::new(DatabaseOwnerRegistry::default()));
-    let store_administration = StoreAdministration::with_project_servers(Arc::clone(&owners));
+    let profile_identity = crate::daemon::profile_identity::load_or_create(&profile_root)
+        .expect("load test profile identity");
+    let store_administration = StoreAdministration::with_project_servers(Arc::clone(&owners))
+        .with_profile_identity(profile_identity);
     let project_open_gates = Arc::new(tokio::sync::Mutex::new(
         super::super::ProjectOpenGates::default(),
     ));
     let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let lifecycle = DaemonLifecycle::default();
 
-    let blocker_administration = store_administration.clone();
-    let writer_held = Arc::new(tokio::sync::Notify::new());
-    let writer_held_by_blocker = Arc::clone(&writer_held);
-    let (release_writer, writer_release) = tokio::sync::oneshot::channel();
-    let blocker = tokio::spawn(async move {
-        blocker_administration
-            .with_writer(|| async move {
-                writer_held_by_blocker.notify_one();
-                writer_release.await.expect("release writer gate");
-            })
-            .await;
-    });
-    writer_held.notified().await;
-
-    Box::pin(super::super::schedule_portable_project_server_warmup(
+    lifecycle.begin_draining();
+    let error = Box::pin(super::super::schedule_portable_project_server_warmup(
         lifecycle.clone(),
         store_administration,
         project_open_gates,
@@ -650,24 +624,18 @@ async fn portable_project_warmup_cancels_before_shutdown_snapshot() {
         Some(Arc::clone(&attempts)),
     ))
     .await
-    .expect("schedule portable project warmup");
-    tokio::task::yield_now().await;
-    lifecycle.begin_draining();
-    let idle_before_writer_release = tokio::time::timeout(
+    .expect_err("draining must reject a new portable project warmup");
+    assert!(error.to_string().contains("draining"), "{error}");
+    tokio::time::timeout(
         tokio::time::Duration::from_secs(1),
         lifecycle.wait_for_idle(),
     )
-    .await;
-
-    release_writer.send(()).expect("signal writer gate release");
-    blocker.await.expect("writer gate blocker task");
-
-    idle_before_writer_release
-        .expect("portable warmup must release lifecycle activity before writer release");
+    .await
+    .expect("rejected portable warmup must not retain lifecycle activity");
     assert_eq!(
         attempts.load(std::sync::atomic::Ordering::Relaxed),
         0,
-        "draining portable warmup must not start a project open"
+        "draining must reject a portable warmup before opening a project"
     );
     assert!(
         owners.lock().await.values().next().is_none(),
@@ -676,7 +644,7 @@ async fn portable_project_warmup_cancels_before_shutdown_snapshot() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn project_warmup_drain_wins_when_open_is_simultaneously_ready() {
+async fn project_warmup_settles_when_drain_is_simultaneously_ready() {
     let initialize_request: crate::mcp::JsonRpcRequest =
         serde_json::from_value(serde_json::json!({
             "jsonrpc": "2.0",
@@ -729,8 +697,8 @@ async fn project_warmup_drain_wins_when_open_is_simultaneously_ready() {
         .await
         .expect("simultaneous warmup drain timed out");
         assert!(
-            !open_won.load(std::sync::atomic::Ordering::Acquire),
-            "draining must win when project open becomes ready on the same tick"
+            open_won.load(std::sync::atomic::Ordering::Acquire),
+            "an admitted open must settle before draining releases its lifecycle activity"
         );
         super::super::ProjectOpenTasks::wait_for_completion(state)
             .await
@@ -749,27 +717,25 @@ async fn mcp_bootstrap_catalog_bypasses_project_writer_gate() {
     std::fs::create_dir_all(&project).expect("project dir");
     let project = project.canonicalize().expect("canonical project");
     let client_identity = test_client_identity_for(profile_root.clone());
-    let options = crate::tracedecay::TraceDecayOpenOptions {
-        profile_root: Some(profile_root.clone()),
-        global_db_path: Some(client_identity.global_db_path.clone()),
-    };
-    let project_runtime = crate::tracedecay::TraceDecay::init_with_options(&project, options)
+    initialize_test_project(&project, &client_identity).await;
+    let engine = test_daemon_engine_for_profile(&profile_root);
+    let _database_scope =
+        crate::db::enter_daemon_database_scope(&profile_root, 1, "mcp-bootstrap-cache-test")
+            .expect("daemon database scope");
+    let registry = engine
+        .store_administration
+        .registered_profile_database()
         .await
-        .expect("initialize project");
-    let registry = Arc::clone(project_runtime.profile_database());
+        .expect("open registered profile database");
     registry
         .upsert_code_project("mcp-bootstrap-route-project", &project, None, None, None)
         .await
         .expect("register initialize root");
-    drop(project_runtime);
+    drop(registry);
     let mut config = crate::config::load_config(&project).expect("load project config");
     config.sync.session_start_sync = false;
     crate::config::save_config(&project, &config)
         .expect("disable unrelated startup transcript ingestion");
-    let _database_scope =
-        crate::db::enter_daemon_database_scope(&profile_root, 1, "mcp-bootstrap-cache-test")
-            .expect("daemon database scope");
-    let engine = DaemonEngine::default();
     let handshake = DaemonHandshake {
         project_path: Some(project.clone()),
         client_identity,
@@ -876,26 +842,9 @@ async fn mcp_bootstrap_catalog_bypasses_project_writer_gate() {
     assert!(context_description.contains("10 calls maximum"));
     assert!(context_description.contains("project graph is warming"));
 
-    let project_path = handshake.project_path.as_ref().expect("project path");
-    let route =
-        super::super::ProjectRouteKey::from_handshake(project_path, &handshake).expect("route");
-    tokio::time::timeout(PHASE_TIMEOUT, async {
-        loop {
-            let warmed = engine
-                .store_administration
-                .project_servers()
-                .lock()
-                .await
-                .get_route(&route)
-                .is_some();
-            if warmed {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("initialize background warmup timed out");
+    tokio::time::timeout(PHASE_TIMEOUT, engine.shutdown_all())
+        .await
+        .expect("bootstrap-cache shutdown timed out");
     assert_eq!(
         engine
             .project_open_attempts
@@ -903,10 +852,6 @@ async fn mcp_bootstrap_catalog_bypasses_project_writer_gate() {
         1,
         "initialize warmup must singleflight one project open"
     );
-
-    tokio::time::timeout(PHASE_TIMEOUT, engine.shutdown_all())
-        .await
-        .expect("bootstrap-cache shutdown timed out");
 }
 
 #[cfg(unix)]
@@ -919,15 +864,7 @@ async fn direct_tool_cache_miss_returns_warming_while_project_opens_in_backgroun
     std::fs::create_dir_all(&project).expect("project dir");
     let project = project.canonicalize().expect("canonical project");
     let client_identity = test_client_identity_for(profile_root.clone());
-    let options = crate::tracedecay::TraceDecayOpenOptions {
-        profile_root: Some(profile_root.clone()),
-        global_db_path: Some(client_identity.global_db_path.clone()),
-    };
-    drop(
-        crate::tracedecay::TraceDecay::init_with_options(&project, options)
-            .await
-            .expect("initialize project"),
-    );
+    initialize_test_project(&project, &client_identity).await;
     let mut config = crate::config::load_config(&project).expect("load project config");
     config.sync.session_start_sync = false;
     crate::config::save_config(&project, &config)
@@ -935,7 +872,7 @@ async fn direct_tool_cache_miss_returns_warming_while_project_opens_in_backgroun
     let _database_scope =
         crate::db::enter_daemon_database_scope(&profile_root, 1, "direct-warmup-test")
             .expect("daemon database scope");
-    let engine = DaemonEngine::default();
+    let engine = test_daemon_engine_for_profile(&profile_root);
     let handshake = DaemonHandshake {
         project_path: Some(project.clone()),
         client_identity,

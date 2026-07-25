@@ -1,7 +1,7 @@
 //! Daemon-side adapters for the Doctor kernel source ports (Plan 09 §PR14).
 //!
 //! The transport-neutral Doctor kernel
-//! ([`tracedecay_application::doctor`]) defines five narrow source ports and one
+//! ([`tracedecay_application::doctor`]) defines seven narrow source ports and one
 //! [`DoctorReportComposerV1`] that composes their findings into a
 //! [`DoctorReportV1`]. The kernel owns no store, runtime, or health formula; the
 //! adapters that read real daemon state live here, in the daemon that owns that
@@ -16,7 +16,7 @@
 //! `Unsupported`/`Absent`/`Denied`/`Unknown` read — never a fabricated healthy
 //! result — and partial coverage carries its real reason.
 //!
-//! The [`compose_doctor_report`] factory wires all five adapters into the kernel
+//! The [`compose_doctor_report`] factory wires all seven adapters into the kernel
 //! composer from a [`DoctorKernelInputsV1`] bundle. Any surface (the dashboard
 //! `/api/doctor/findings` handler, the MCP doctor tools) builds that bundle from
 //! the real signals it can reach and requests a composed report; the surface
@@ -35,12 +35,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tracedecay_application::doctor::{
+    AdvisoryFeedbackDoctorPort, AdvisoryFeedbackFindingReadV1, AdvisoryFeedbackReadV1,
     CodeIndexMountDoctorPort, CodeIndexMountReadV1, CodeIndexMountStateV1,
     ConfigurationAuthorityDoctorPort, ConfigurationAuthorityReadV1, ConfigurationDriftV1,
     DoctorCoverageCompletenessV1, DoctorReportComposerV1, DoctorReportV1, DoctorSourceFuture,
     DoctorStorageFamilyReadV1, DoctorStorageFindingV1, HostConformanceV1,
-    HostIntegrationDoctorPort, HostIntegrationReadV1, RuntimeHealthDoctorPort, RuntimeHealthReadV1,
-    RuntimeLivenessV1, StorageDoctorPort,
+    HostIntegrationDoctorPort, HostIntegrationReadV1, LanguageServerDoctorPort,
+    LanguageServerReadV1, LanguageServerStateV1, ObservabilityDoctorPort, ObservabilityReadV1,
+    ObservabilityStateV1, RuntimeHealthDoctorPort, RuntimeHealthReadV1, RuntimeLivenessV1,
+    StorageDoctorPort,
 };
 use tracedecay_application::{
     ApplicationContractError, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot,
@@ -355,6 +358,85 @@ impl HostIntegrationDoctorPort for HostIntegrationDoctorAdapterV1 {
     }
 }
 
+// === Canonical advisory feedback (Advisory family) ==========================
+
+/// Project the latest exact-scope durable feedback publication into Doctor's
+/// distinct advisory port. Host conformance remains a separate source.
+#[must_use]
+pub fn advisory_feedback_read_from_publication(
+    publication: Option<&tracedecay_application::feedback::FeedbackCompletedPublicationV1>,
+) -> AdvisoryFeedbackReadV1 {
+    let Some(publication) = publication else {
+        return AdvisoryFeedbackReadV1::Absent;
+    };
+    if publication.validate().is_err() {
+        return AdvisoryFeedbackReadV1::Unknown;
+    }
+    let Some(generation_id) = publication.input.target.generation_id.clone() else {
+        return AdvisoryFeedbackReadV1::Unknown;
+    };
+    if publication.result.findings.is_empty() {
+        return AdvisoryFeedbackReadV1::Absent;
+    }
+    let impact_anchors = publication
+        .result
+        .impact
+        .as_ref()
+        .map(|impact| impact.evidence_anchors.as_slice())
+        .unwrap_or_default();
+    let findings = publication
+        .result
+        .findings
+        .iter()
+        .map(|finding| {
+            let mut evidence_anchors = finding
+                .retrieval_anchor_id
+                .iter()
+                .cloned()
+                .chain(impact_anchors.iter().cloned())
+                .collect::<Vec<_>>();
+            evidence_anchors.sort();
+            evidence_anchors.dedup();
+            AdvisoryFeedbackFindingReadV1 {
+                result_id: publication.result.result_id.clone(),
+                cycle_id: publication.result.cycle_id.clone(),
+                finding_id: finding.finding_id.clone(),
+                scope: publication.result.scope.clone(),
+                generation_id: generation_id.clone(),
+                lifecycle: finding.lifecycle,
+                provider_state: finding.provider_state,
+                evidence_anchors,
+                total_findings: publication.result.total_findings,
+                returned_findings: publication.result.returned_findings,
+                omitted_findings: publication.result.omitted_findings,
+            }
+        })
+        .collect();
+    AdvisoryFeedbackReadV1::Observed { findings }
+}
+
+/// Adapter over the mounted feedback owner's canonical read store.
+pub struct AdvisoryFeedbackDoctorAdapterV1 {
+    read: AdvisoryFeedbackReadV1,
+}
+
+impl AdvisoryFeedbackDoctorAdapterV1 {
+    #[must_use]
+    pub fn from_read(read: AdvisoryFeedbackReadV1) -> Self {
+        Self { read }
+    }
+}
+
+impl AdvisoryFeedbackDoctorPort for AdvisoryFeedbackDoctorAdapterV1 {
+    fn advisory_feedback<'a>(
+        &'a self,
+        _context: &'a RequestContext,
+    ) -> DoctorSourceFuture<'a, AdvisoryFeedbackReadV1> {
+        let read = self.read.clone();
+        Box::pin(async move { read })
+    }
+}
+
 // === Code/semantic index mount (SemanticIndex family) ========================
 
 /// The real code-index mount signal the daemon reads from its scheduler
@@ -435,6 +517,135 @@ impl CodeIndexMountDoctorPort for CodeIndexMountDoctorAdapterV1 {
         &'a self,
         _context: &'a RequestContext,
     ) -> DoctorSourceFuture<'a, CodeIndexMountReadV1> {
+        let read = self.read.clone();
+        Box::pin(async move { read })
+    }
+}
+
+// === Language server/analyzer (LanguageServer family) ========================
+
+/// Map the daemon diagnostic broker's project-active engine statuses.
+#[must_use]
+pub fn language_server_read_from_engine_states(
+    states: impl IntoIterator<Item = crate::diagnostics::lsp::broker::EngineState>,
+) -> LanguageServerReadV1 {
+    use crate::diagnostics::lsp::broker::EngineState;
+
+    let states = states.into_iter().collect::<Vec<_>>();
+    if states.is_empty() {
+        return LanguageServerReadV1::Absent;
+    }
+    let state = if states.contains(&EngineState::Crashed) {
+        LanguageServerStateV1::Crashed
+    } else if states.contains(&EngineState::Unavailable) {
+        LanguageServerStateV1::Unavailable
+    } else if states.contains(&EngineState::Disabled) {
+        LanguageServerStateV1::Disabled
+    } else if states.contains(&EngineState::Refreshing) {
+        LanguageServerStateV1::Refreshing
+    } else if states.iter().all(|state| *state == EngineState::Ready) {
+        LanguageServerStateV1::Ready
+    } else {
+        LanguageServerStateV1::Available
+    };
+    LanguageServerReadV1::Observed {
+        state,
+        coverage: DoctorCoverageCompletenessV1::Complete,
+    }
+}
+
+/// Read live project-active analyzer state from the daemon diagnostic owner.
+pub async fn language_server_read_from_broker(
+    broker: &tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>,
+) -> LanguageServerReadV1 {
+    let statuses = broker.lock().await.project_engine_statuses();
+    language_server_read_from_engine_states(statuses.into_iter().map(|status| status.state))
+}
+
+/// Adapter over live language-server/analyzer state.
+pub struct LanguageServerDoctorAdapterV1 {
+    read: LanguageServerReadV1,
+}
+
+impl LanguageServerDoctorAdapterV1 {
+    #[must_use]
+    pub fn from_read(read: LanguageServerReadV1) -> Self {
+        Self { read }
+    }
+}
+
+impl LanguageServerDoctorPort for LanguageServerDoctorAdapterV1 {
+    fn language_server_health<'a>(
+        &'a self,
+        _context: &'a RequestContext,
+    ) -> DoctorSourceFuture<'a, LanguageServerReadV1> {
+        let read = self.read.clone();
+        Box::pin(async move { read })
+    }
+}
+
+// === Canonical Plan-26 observations (Observability family) ===================
+
+/// Map the canonical durable Plan-26 read model into a truthful Doctor read.
+#[must_use]
+pub fn observability_read_from_model(
+    model: Result<
+        crate::application::feedback::observations::FeedbackObservationReadModelV1,
+        crate::application::feedback::concrete::Pr12FeedbackRuntimeError,
+    >,
+) -> ObservabilityReadV1 {
+    match model {
+        Ok(model) if model.total_count == 0 => ObservabilityReadV1::Absent,
+        Ok(model) => {
+            use crate::application::feedback::observations::Plan26CoverageV1;
+            let (state, coverage) = match model.coverage {
+                Plan26CoverageV1::Known => (
+                    ObservabilityStateV1::Current,
+                    DoctorCoverageCompletenessV1::Complete,
+                ),
+                Plan26CoverageV1::Stale => (
+                    ObservabilityStateV1::Stale,
+                    DoctorCoverageCompletenessV1::Partial,
+                ),
+                Plan26CoverageV1::Partial
+                | Plan26CoverageV1::Sampled
+                | Plan26CoverageV1::Capped => (
+                    ObservabilityStateV1::Current,
+                    DoctorCoverageCompletenessV1::Partial,
+                ),
+                Plan26CoverageV1::Unknown => (
+                    ObservabilityStateV1::Current,
+                    DoctorCoverageCompletenessV1::Unknown,
+                ),
+            };
+            ObservabilityReadV1::Observed {
+                state,
+                total_count: model.total_count,
+                last_observed_at_micros: model.watermark.observed_through.map(|value| value.0),
+                coverage,
+            }
+        }
+        Err(_) => ObservabilityReadV1::Unknown,
+    }
+}
+
+/// Adapter over the canonical durable Plan-26 observation read model.
+pub struct ObservabilityDoctorAdapterV1 {
+    read: ObservabilityReadV1,
+}
+
+impl ObservabilityDoctorAdapterV1 {
+    #[must_use]
+    pub fn from_read(read: ObservabilityReadV1) -> Self {
+        Self { read }
+    }
+}
+
+impl ObservabilityDoctorPort for ObservabilityDoctorAdapterV1 {
+    fn observability_health<'a>(
+        &'a self,
+        _context: &'a RequestContext,
+    ) -> DoctorSourceFuture<'a, ObservabilityReadV1> {
         let read = self.read.clone();
         Box::pin(async move { read })
     }
@@ -764,7 +975,7 @@ impl StorageDoctorPort for StorageDoctorAdapterV1 {
 
 // === Composer factory ========================================================
 
-/// The five resolved kernel reads a daemon-owned Doctor report composes from.
+/// The seven resolved kernel reads a daemon-owned Doctor report composes from.
 ///
 /// A surface (the dashboard doctor-findings handler, the MCP doctor tools)
 /// builds this bundle from the real signals it can reach — via the `*_read` /
@@ -779,8 +990,14 @@ pub struct DoctorKernelInputsV1 {
     pub runtime: RuntimeHealthReadV1,
     /// Host/agent integration conformance read (Advisory family).
     pub host: HostIntegrationReadV1,
+    /// Mounted canonical feedback-owner read (Advisory family).
+    pub advisory_feedback: AdvisoryFeedbackReadV1,
+    /// Live daemon language-server/analyzer read (`LanguageServer` family).
+    pub language_server: LanguageServerReadV1,
     /// Code/semantic index mount read (`SemanticIndex` family).
     pub code_index: CodeIndexMountReadV1,
+    /// Canonical durable Plan-26 feedback read (`Observability` family).
+    pub observability: ObservabilityReadV1,
     /// Storage retention/size read (Storage family).
     pub storage: DoctorStorageFamilyReadV1,
 }
@@ -797,7 +1014,10 @@ impl DoctorKernelInputsV1 {
             configuration: ConfigurationAuthorityReadV1::Unknown,
             runtime: RuntimeHealthReadV1::Unknown,
             host: HostIntegrationReadV1::Unknown,
+            advisory_feedback: AdvisoryFeedbackReadV1::Unknown,
+            language_server: LanguageServerReadV1::Unknown,
             code_index: CodeIndexMountReadV1::Unknown,
+            observability: ObservabilityReadV1::Unknown,
             storage: DoctorStorageFamilyReadV1::Unknown,
         }
     }
@@ -805,7 +1025,7 @@ impl DoctorKernelInputsV1 {
 
 /// Compose a Doctor report from the daemon-owned source adapters.
 ///
-/// Wires all five adapters into the kernel [`DoctorReportComposerV1`] and
+/// Wires all seven adapters into the kernel [`DoctorReportComposerV1`] and
 /// composes. The composer enumerates every finding family truthfully: a family
 /// whose read is unavailable is carried with its real evidence state and an
 /// explicit coverage record, and the report asserts health only when every
@@ -818,14 +1038,21 @@ pub async fn compose_doctor_report(
         ConfigurationAuthorityDoctorAdapterV1::from_read(inputs.configuration.clone());
     let runtime = RuntimeHealthDoctorAdapterV1::from_read(inputs.runtime.clone());
     let host = HostIntegrationDoctorAdapterV1::from_read(inputs.host.clone());
+    let advisory_feedback =
+        AdvisoryFeedbackDoctorAdapterV1::from_read(inputs.advisory_feedback.clone());
+    let language_server = LanguageServerDoctorAdapterV1::from_read(inputs.language_server.clone());
     let code_index = CodeIndexMountDoctorAdapterV1::from_read(inputs.code_index.clone());
+    let observability = ObservabilityDoctorAdapterV1::from_read(inputs.observability.clone());
     let storage = StorageDoctorAdapterV1::from_read(inputs.storage.clone());
 
     let composer = DoctorReportComposerV1::new()
         .with_configuration(&configuration)
         .with_runtime(&runtime)
         .with_host(&host)
+        .with_advisory_feedback(&advisory_feedback)
+        .with_language_server(&language_server)
         .with_code_index(&code_index)
+        .with_observability(&observability)
         .with_storage(&storage);
 
     composer.compose(context).await
@@ -848,6 +1075,8 @@ pub(in crate::daemon) fn production_doctor_report_reader(
     profile_root: PathBuf,
     retention: crate::config::RetentionConfig,
     schedulers: crate::daemon::code_index_scheduler::CodeIndexSchedulerRegistryV1,
+    diagnostic_broker: Arc<tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>>,
+    feedback_runtimes: crate::daemon::service::invocation::DaemonFeedbackRuntimeRegistrar,
 ) -> crate::dashboard::DoctorReportReader {
     Arc::new(move || {
         let project_root = project_root.clone();
@@ -860,6 +1089,8 @@ pub(in crate::daemon) fn production_doctor_report_reader(
         let profile_root = profile_root.clone();
         let retention = retention.clone();
         let schedulers = schedulers.clone();
+        let diagnostic_broker = Arc::clone(&diagnostic_broker);
+        let feedback_runtimes = feedback_runtimes.clone();
         Box::pin(async move {
             let scope =
                 super::project_open_owners::resolved_scope_for_project(&project_root, &project_id)
@@ -942,6 +1173,22 @@ pub(in crate::daemon) fn production_doctor_report_reader(
             .into_iter()
             .reduce(merge_storage_reads)
             .unwrap_or(DoctorStorageFamilyReadV1::Absent);
+            let language_server = language_server_read_from_broker(&diagnostic_broker).await;
+            let observability = observability_read_from_model(
+                crate::application::feedback::concrete::plan26_feedback_observation_read_model(
+                    &graph,
+                )
+                .await,
+            );
+            let advisory_feedback = match feedback_runtimes.doctor_read_store(&project_root).await {
+                Some(store) => match store.doctor_latest_publication(&context).await {
+                    Ok(publication) => {
+                        advisory_feedback_read_from_publication(publication.as_ref())
+                    }
+                    Err(_) => AdvisoryFeedbackReadV1::Unknown,
+                },
+                None => AdvisoryFeedbackReadV1::Absent,
+            };
             let inputs = DoctorKernelInputsV1 {
                 configuration: configuration_read_from_pin::<crate::errors::TraceDecayError>(
                     &pinned,
@@ -959,7 +1206,10 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                 // retain honest unknown until the profile host registry is
                 // injected rather than probing mutable paths here.
                 host: HostIntegrationReadV1::Unknown,
+                advisory_feedback,
+                language_server,
                 code_index: code_index_read_from_registry(&schedulers, &project_root).await,
+                observability,
                 storage,
             };
             let report = compose_doctor_report(&context, &inputs).await?;

@@ -239,6 +239,11 @@ fn project_server_capacity_response_is_typed_json_rpc_data() {
 #[tokio::test]
 async fn reserved_doctor_request_answers_under_general_saturation() {
     const TOKEN: &str = "0123456789abcdef0123456789abcdef";
+    let profile = TempDir::new().expect("profile");
+    let client_identity = test_client_identity_for(profile.path().join("client"));
+    let store_administration = test_store_administration_for_profile(&client_identity.profile_root);
+    let _database_scope =
+        enter_test_daemon_database_scope(&client_identity.profile_root, "reserved-doctor-test");
 
     let admission = super::super::DaemonClientAdmission::with_reserved_capacity(2, 1);
     let general = match admission.try_admit() {
@@ -274,7 +279,7 @@ async fn reserved_doctor_request_answers_under_general_saturation() {
             stream,
             TOKEN,
             &lifecycle,
-            StoreAdministration::default(),
+            store_administration,
             Arc::new(tokio::sync::Mutex::new(
                 super::super::ProjectOpenGates::default(),
             )),
@@ -300,10 +305,13 @@ async fn reserved_doctor_request_answers_under_general_saturation() {
     writer.write_all(b"\n").await.expect("preface newline");
     writer
         .write_all(
-            test_handshake_defaults()
-                .to_line()
-                .expect("handshake")
-                .as_bytes(),
+            DaemonHandshake {
+                client_identity,
+                ..test_handshake_defaults()
+            }
+            .to_line()
+            .expect("handshake")
+            .as_bytes(),
         )
         .await
         .expect("write handshake");
@@ -415,16 +423,9 @@ async fn portable_broker_requests_reuse_one_authenticated_project_owner() {
     let project = temp.path().join("project");
     let profile_root = temp.path().join("profile");
     std::fs::create_dir_all(&project).expect("project dir");
+    gix::init(&project).expect("initialize project repository");
     let client_identity = test_client_identity_for(profile_root.clone());
-    let options = crate::tracedecay::TraceDecayOpenOptions {
-        profile_root: Some(profile_root.clone()),
-        global_db_path: Some(client_identity.global_db_path.clone()),
-    };
-    drop(
-        crate::tracedecay::TraceDecay::init_with_options(&project, options)
-            .await
-            .expect("initialize project"),
-    );
+    initialize_test_project(&project, &client_identity).await;
     let mut config = crate::config::load_config(&project).expect("load project config");
     config.sync.session_start_sync = false;
     crate::config::save_config(&project, &config)
@@ -442,7 +443,11 @@ async fn portable_broker_requests_reuse_one_authenticated_project_owner() {
     let owners = std::sync::Arc::new(tokio::sync::Mutex::new(
         super::super::DatabaseOwnerRegistry::default(),
     ));
-    let store_administration = StoreAdministration::with_project_servers(Arc::clone(&owners));
+    prepare_test_profile_root(&profile_root);
+    let profile_identity = crate::daemon::profile_identity::load_or_create(&profile_root)
+        .expect("load test profile identity");
+    let store_administration = StoreAdministration::with_project_servers(Arc::clone(&owners))
+        .with_profile_identity(profile_identity);
     let gates = std::sync::Arc::new(tokio::sync::Mutex::new(
         super::super::ProjectOpenGates::default(),
     ));
@@ -536,13 +541,20 @@ async fn portable_broker_requests_reuse_one_authenticated_project_owner() {
     tokio::time::timeout(tokio::time::Duration::from_secs(20), async {
         loop {
             if owners.lock().await.get_route(&route).is_some() {
-                break;
+                return Ok(());
+            }
+            if let Some(failure) =
+                super::super::portable_cached_project_open_failure(gates.as_ref(), &handshake)
+                    .await?
+            {
+                return Err(failure.to_error());
             }
             tokio::task::yield_now().await;
         }
     })
     .await
-    .expect("portable project warmup timed out");
+    .expect("portable project warmup timed out")
+    .expect("portable project warmup failed");
 
     assert_eq!(
         attempts.load(std::sync::atomic::Ordering::Relaxed),

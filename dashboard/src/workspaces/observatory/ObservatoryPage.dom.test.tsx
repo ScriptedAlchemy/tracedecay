@@ -94,6 +94,36 @@ describe('ObservatoryPage store telemetry', () => {
     expect(unknown?.tone).toBe('unknown');
     expect(unset?.tone).not.toBe(unknown?.tone);
   });
+
+  it('renders the canonical Doctor storage family with typed kinds and provenance', async () => {
+    stubTelemetry(telemetryPayload(), storageFindingsPayload());
+    renderObservatory();
+
+    expect(await screen.findByText('Over-budget stores')).toBeTruthy();
+    for (const label of [
+      'Orphan stores',
+      'Stale branch databases',
+      'Incident debris',
+      'Retention backlog',
+    ]) {
+      expect(screen.getByText(label)).toBeTruthy();
+    }
+    expect(document.querySelectorAll('[data-storage-finding-kind]')).toHaveLength(5);
+    expect(
+      document.querySelector('[data-storage-finding-kind="over_budget_store"]')?.textContent,
+    ).toContain('Degraded');
+    expect(
+      document.querySelector('[data-storage-finding-kind="stale_branch_dbs"]')?.textContent,
+    ).toContain('Stale');
+    expect(screen.getByText('store size observed against soft budget')).toBeTruthy();
+    expect(
+      screen.getByText('storage.over_budget_store.sessions.db.observed-8388608b.overage-4194304b'),
+    ).toBeTruthy();
+    expect(
+      screen.getAllByText('use-case.application.storage.retention-collect'),
+    ).toHaveLength(2);
+    expect(screen.queryByText(/requires:/)).toBeNull();
+  });
 });
 
 function renderObservatory() {
@@ -107,14 +137,17 @@ function renderObservatory() {
   );
 }
 
-function stubTelemetry(payload: unknown) {
+function stubTelemetry(
+  payload: unknown,
+  findingsPayload: unknown = emptyStorageFindingsPayload(),
+) {
   vi.stubGlobal(
     'fetch',
     vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url === '/api/storage/telemetry') return jsonResponse(envelope(payload));
       if (url === '/api/storage/findings') {
-        return jsonResponse(envelope({ kinds: [], note: 'no storage findings source' }));
+        return jsonResponse(envelope(findingsPayload));
       }
       if (url === '/api/doctor/findings') {
         return jsonResponse(
@@ -131,6 +164,135 @@ function stubTelemetry(payload: unknown) {
       throw new Error(`unexpected fetch ${url}`);
     }),
   );
+}
+
+function emptyStorageFindingsPayload() {
+  return {
+    family_filter: 'storage',
+    entries: [],
+    report_coverage: null,
+    remediations: [],
+    known_families: ['storage'],
+    note: 'canonical Doctor storage family contained no entries',
+  };
+}
+
+function storageFindingsPayload() {
+  const operation = {
+    retention: 'use-case.application.storage.retention-collect',
+    orphan: 'use-case.application.storage.collect-orphan-store',
+    branch: 'use-case.application.storage.branch-gc',
+    debris: 'use-case.application.storage.quarantine-and-collect-debris',
+  } as const;
+  const entry = (
+    storageKind:
+      | 'over_budget_store'
+      | 'orphan_store'
+      | 'stale_branch_dbs'
+      | 'incident_debris_present'
+      | 'retention_backlog',
+    state: 'degraded' | 'stale',
+    reference: string,
+    statement: string,
+    owningOperation: string,
+  ) => ({
+    finding: {
+      family: 'storage',
+      state,
+      evidence: [{ family: 'storage', reference }],
+      coverage: { completeness: 'complete', statement },
+      remediation: { owning_operation: owningOperation, kind: 'action' },
+    },
+    storage_kind: storageKind,
+  });
+  return {
+    family_filter: 'storage',
+    entries: [
+      entry(
+        'over_budget_store',
+        'degraded',
+        'storage.over_budget_store.sessions.db.observed-8388608b.overage-4194304b',
+        'store size observed against soft budget',
+        operation.retention,
+      ),
+      entry(
+        'orphan_store',
+        'degraded',
+        'storage.orphan_store.orphan.db.age-86400000000us.size-1048576b',
+        'store identity no longer resolves to a live repository root',
+        operation.orphan,
+      ),
+      entry(
+        'stale_branch_dbs',
+        'stale',
+        'storage.stale_branch_dbs.branch.db.branch-feature.size-2097152b',
+        "branch-scoped store whose git ref is gone awaits lifecycle removal",
+        operation.branch,
+      ),
+      entry(
+        'incident_debris_present',
+        'degraded',
+        'storage.incident_debris_present.graph.db.count-2.bytes-3145728b',
+        'quarantine-eligible incident artifacts present beside a live store',
+        operation.debris,
+      ),
+      entry(
+        'retention_backlog',
+        'stale',
+        'storage.retention_backlog.sessions.db.table-lcm_raw_messages.bytes-4194304b',
+        'retention-eligible rows are past their window awaiting collection',
+        operation.retention,
+      ),
+    ],
+    report_coverage: {
+      families: [{ family: 'storage', consultation: { status: 'consulted' } }],
+      completeness: 'complete',
+      statement: {
+        completeness: 'complete',
+        statement: 'storage retention and size authorities were consulted',
+      },
+    },
+    remediations: [
+      {
+        operation: operation.retention,
+        surface: 'storage_runtime',
+        preview_available: true,
+        action_confirmation: 'required',
+        summary: 'collect retention-eligible rows or reclaim an over-budget store',
+      },
+      {
+        operation: operation.orphan,
+        surface: 'storage_runtime',
+        preview_available: true,
+        action_confirmation: 'required',
+        summary: 'collect a store whose project identity no longer resolves',
+      },
+      {
+        operation: operation.branch,
+        surface: 'storage_runtime',
+        preview_available: true,
+        action_confirmation: 'required',
+        summary: 'remove branch-scoped databases whose git refs are gone',
+      },
+      {
+        operation: operation.debris,
+        surface: 'storage_runtime',
+        preview_available: true,
+        action_confirmation: 'required',
+        summary: 'quarantine and collect incident debris beside a live store',
+      },
+    ],
+    known_families: [
+      'advisory',
+      'configuration',
+      'storage_runtime',
+      'storage',
+      'language_server',
+      'semantic_index',
+      'observability',
+    ],
+    note: 'storage retention and size authorities were consulted',
+  };
 }
 
 function telemetryPayload() {

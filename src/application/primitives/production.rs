@@ -1,6 +1,6 @@
 //! Production PR12 primitive owners over `TraceDecay` graph/query authorities.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use ignore::overrides::OverrideBuilder;
@@ -24,9 +24,9 @@ use tracedecay_application::{
     RequestContext, ResolvedScope, RetrievalEvidence, TemporalState,
 };
 use tracedecay_domain::{
-    CodeGenerationId, ManifestDigest, ProjectId, ProviderEvaluationStateV1, RetrievalAnchorId,
-    RetrievalGrainV1, SessionId, SignedCursorKeyRefV1, TemporalModeV1, UtcMicros, WorktreeId,
-    canonical_sha256,
+    CodeGenerationId, CommitId, ManifestDigest, ProjectId, ProviderEvaluationStateV1,
+    RetrievalAnchorId, RetrievalGrainV1, SessionId, SignedCursorKeyRefV1, TemporalModeV1,
+    UtcMicros, WorktreeId, canonical_sha256,
 };
 use tracedecay_tool_catalog::SortContractId;
 use url::Url;
@@ -36,7 +36,8 @@ use super::runtime::{
     CallChainPrimitiveRequest, CallChainPrimitiveResult, DiagnosticPrimitiveRecord,
     DiagnosticsPrimitiveRequest, DiagnosticsPrimitiveResult, FileDependentsPrimitiveRequest,
     FileDependentsPrimitiveResult, FileMetadataPrimitiveRequest, FileMetadataPrimitiveResult,
-    FileMetadataRecord, ModuleApiPrimitiveRequest, ModuleApiPrimitiveResult,
+    FileMetadataRecord, ManagedTestRunCurrentIdentity, ManagedTestRunCurrentIdentityFuture,
+    ManagedTestRunCurrentScopePort, ModuleApiPrimitiveRequest, ModuleApiPrimitiveResult,
     Pr12ExtendedPrimitiveFuture, Pr12ExtendedPrimitivePort, Pr12OperationalPrimitive,
     Pr12OperationalPrimitiveFuture, Pr12OperationalPrimitivePort, Pr12OperationalPrimitiveRequest,
     Pr12PrimitiveProjectRuntime, QualifiedNamePrimitiveRequest, QualifiedNamePrimitiveResult,
@@ -45,6 +46,7 @@ use super::runtime::{
     open_pr12_primitive_project_runtime,
 };
 use super::symbol_graph::{SymbolGraphCursorPort, symbol_record};
+use crate::application::lsp_runtime::LspCodeIndexProjectionIdentityPort;
 use crate::application::operation_stream::OperationEventAuthority;
 use crate::application::source_authorization::ProjectSourceAccessSnapshot;
 use crate::code_index::provider::{
@@ -1450,6 +1452,8 @@ pub(crate) async fn open_pr12_production_primitive_runtime(
     database: Database,
     graph: Arc<TraceDecay>,
     session_db: Arc<RegisteredGlobalDb>,
+    project_root: PathBuf,
+    code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
     scope: ResolvedScope,
     access: ProjectSourceAccessSnapshot,
     admitted_root_uri: String,
@@ -1488,6 +1492,11 @@ pub(crate) async fn open_pr12_production_primitive_runtime(
     let cursors: Arc<dyn SymbolGraphCursorPort> = Arc::new(
         AuthenticatedSymbolGraphCursorAdapter::new(snapshots, authenticator),
     );
+    let test_run_scope: Arc<dyn ManagedTestRunCurrentScopePort> =
+        Arc::new(ProductionManagedTestRunCurrentScope {
+            project_root,
+            code_index,
+        });
     open_pr12_primitive_project_runtime(
         database,
         Arc::clone(&graph),
@@ -1504,7 +1513,51 @@ pub(crate) async fn open_pr12_production_primitive_runtime(
         access,
         admitted_root_uri,
         operation_events,
+        test_run_scope,
     )
+}
+
+#[derive(Clone)]
+struct ProductionManagedTestRunCurrentScope {
+    project_root: PathBuf,
+    code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
+}
+
+impl ManagedTestRunCurrentScopePort for ProductionManagedTestRunCurrentScope {
+    fn current_identity(&self) -> ManagedTestRunCurrentIdentityFuture<'_> {
+        let project_root = self.project_root.clone();
+        let code_index = Arc::clone(&self.code_index);
+        Box::pin(async move {
+            let head_commit_id = current_managed_test_run_head(&project_root)?;
+            let current = code_index
+                .current_identity(project_root, None)
+                .await
+                .map_err(|_| ApplicationContractError::Inconsistent {
+                    field: "PR12 managed test result code generation",
+                })?;
+            Ok(ManagedTestRunCurrentIdentity {
+                head_commit_id,
+                code_generation_id: current.code_generation_id,
+            })
+        })
+    }
+}
+
+fn current_managed_test_run_head(
+    project_root: &Path,
+) -> Result<CommitId, ApplicationContractError> {
+    let repository =
+        gix::open(project_root).map_err(|_| ApplicationContractError::Inconsistent {
+            field: "PR12 managed test result repository",
+        })?;
+    let head_commit_id = repository
+        .head_commit()
+        .ok()
+        .and_then(|commit| CommitId::new(commit.id().to_hex().to_string()).ok())
+        .ok_or(ApplicationContractError::Inconsistent {
+            field: "PR12 managed test result head",
+        })?;
+    Ok(head_commit_id)
 }
 
 pub fn admitted_root_uri_for_project(
