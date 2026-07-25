@@ -1,3 +1,4 @@
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -264,10 +265,22 @@ impl DaemonGitHubReadOnlyCredentialLifecycleV1 {
         verifier: GitHubProviderPermissionVerifierV1,
     ) {
         let configured = load_configured_repositories(identity.profile_root());
+        let mut repositories = BTreeMap::new();
+        for repository in configured.github_review_sources {
+            let key = (repository.owner.clone(), repository.repository.clone());
+            match repositories.entry(key) {
+                Entry::Vacant(entry) => {
+                    entry.insert(Some(repository));
+                }
+                Entry::Occupied(mut entry) => {
+                    entry.insert(None);
+                }
+            }
+        }
         let Ok(mut registrations) = self.registrations.lock() else {
             return;
         };
-        for repository in configured.github_review_sources {
+        for repository in repositories.into_values().flatten() {
             let key = (
                 identity.profile_id().clone(),
                 repository.owner.clone(),
@@ -569,6 +582,18 @@ keyring_account = "missing"
 owner = "ScriptedAlchemy"
 repository = "explicit-public"
 access = "public"
+
+[[github_review_sources]]
+owner = "ScriptedAlchemy"
+repository = "duplicate"
+access = "public"
+
+[[github_review_sources]]
+owner = "ScriptedAlchemy"
+repository = "duplicate"
+access = "os_keyring"
+keyring_service = "tracedecay.github"
+keyring_account = "read"
 "#,
         )
         .expect("profile configuration");
@@ -682,6 +707,14 @@ access = "public"
                 identity.profile_id(),
                 "ScriptedAlchemy",
                 "unconfigured-public",
+            ),
+            ProfileGitHubReadOnlyCredentialMountOutcomeV1::NotConfigured
+        );
+        assert_eq!(
+            invocation.mount_github_read_only_credential_authority_for_project(
+                identity.profile_id(),
+                "ScriptedAlchemy",
+                "duplicate",
             ),
             ProfileGitHubReadOnlyCredentialMountOutcomeV1::NotConfigured
         );
