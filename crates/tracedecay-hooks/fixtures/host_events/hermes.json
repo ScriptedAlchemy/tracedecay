@@ -15,6 +15,11 @@
       "path": "crates/tracedecay-hooks/fixtures/host_events/hermes/stop.json"
     },
     {
+      "kind": "production_adapter_projection",
+      "path": "crates/tracedecay-hooks/fixtures/host_events/hermes/terminal-receipt.json",
+      "source_capture": "crates/tracedecay-hooks/fixtures/host_events/hermes/saved-edit.json"
+    },
+    {
       "kind": "official_documented_shell_wire",
       "url": "https://hermes-agent.nousresearch.com/docs/user-guide/features/hooks",
       "sections": ["post_tool_call", "on_session_end", "JSON wire protocol"],
@@ -42,10 +47,11 @@
       }
     },
     {
-      "identity": "saved_edit",
-      "family": "saved_edit",
+      "identity": "tool_completed",
+      "family": "tool_lifecycle",
       "support": "native",
       "capture_path": "crates/tracedecay-hooks/fixtures/host_events/hermes/saved-edit.json",
+      "adapter_projection_path": "crates/tracedecay-hooks/fixtures/host_events/hermes/terminal-receipt.json",
       "request": {
         "cwd": "<PROJECT_ROOT>",
         "extra": {
