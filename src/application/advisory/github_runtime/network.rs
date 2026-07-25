@@ -893,7 +893,10 @@ impl GitHubReadOnlyClientV1 {
                 .filter(|checkpoint| checkpoint.remaining == 0)
                 .cloned()
             {
-                return network_failure(HttpResponseV1::RateLimited(checkpoint));
+                return network_failure(HttpResponseV1::RateLimited {
+                    checkpoint: Some(checkpoint),
+                    retry_at: None,
+                });
             }
             return GitHubReadNetworkOutcomeV1::Unavailable;
         }
@@ -937,6 +940,7 @@ impl GitHubReadOnlyClientV1 {
                 etag: None,
                 next_cursor,
                 rate_limit,
+                retry_at: None,
             },
             body,
         })
@@ -995,7 +999,10 @@ impl GitHubReadOnlyClientV1 {
                         .filter(|checkpoint| checkpoint.remaining == 0)
                         .cloned()
                     {
-                        return Err(HttpResponseV1::RateLimited(checkpoint));
+                        return Err(HttpResponseV1::RateLimited {
+                            checkpoint: Some(checkpoint),
+                            retry_at: None,
+                        });
                     }
                     return Err(HttpResponseV1::Unavailable);
                 }
@@ -1120,6 +1127,7 @@ impl GitHubReadOnlyClientV1 {
                             GitHubReviewCursorV1::new(format!("rest-page:{page}")).ok()
                         }),
                         rate_limit,
+                        retry_at: None,
                     },
                     body,
                 })
@@ -1131,21 +1139,24 @@ impl GitHubReadOnlyClientV1 {
                         etag,
                         next_cursor: None,
                         rate_limit,
+                        retry_at: None,
                     },
                     body: Vec::new(),
                 })
             }
-            HttpResponseV1::RateLimited(checkpoint) => {
-                GitHubReadNetworkOutcomeV1::Response(GitHubReadNetworkResponseV1 {
-                    metadata: GitHubReadNetworkMetadataV1 {
-                        status: GitHubReadNetworkStatusV1::RateLimited,
-                        etag: None,
-                        next_cursor: None,
-                        rate_limit: Some(checkpoint),
-                    },
-                    body: Vec::new(),
-                })
-            }
+            HttpResponseV1::RateLimited {
+                checkpoint,
+                retry_at,
+            } => GitHubReadNetworkOutcomeV1::Response(GitHubReadNetworkResponseV1 {
+                metadata: GitHubReadNetworkMetadataV1 {
+                    status: GitHubReadNetworkStatusV1::RateLimited,
+                    etag: None,
+                    next_cursor: None,
+                    rate_limit: checkpoint,
+                    retry_at,
+                },
+                body: Vec::new(),
+            }),
             HttpResponseV1::Denied => GitHubReadNetworkOutcomeV1::Denied,
             HttpResponseV1::Unavailable => GitHubReadNetworkOutcomeV1::Unavailable,
         }
@@ -1485,9 +1496,10 @@ impl GitHubCiReadOnlyClientV1 {
                 Some(HttpResponseV1::Ok { body, .. }) if body.len() <= MAX_CI_RESPONSE_BYTES_V1 => {
                     GitHubCiTransportOutcomeV1::Response(body)
                 }
-                Some(HttpResponseV1::RateLimited(limit)) => {
-                    GitHubCiTransportOutcomeV1::RateLimited(limit)
-                }
+                Some(HttpResponseV1::RateLimited {
+                    checkpoint: Some(limit),
+                    ..
+                }) => GitHubCiTransportOutcomeV1::RateLimited(limit),
                 Some(HttpResponseV1::Denied) => GitHubCiTransportOutcomeV1::Denied,
                 _ => GitHubCiTransportOutcomeV1::Unavailable,
             }
@@ -1569,24 +1581,29 @@ enum HttpResponseV1 {
         etag: Option<GitHubReviewEtagV1>,
         rate_limit: Option<GitHubReviewRateLimitCheckpointV1>,
     },
-    RateLimited(GitHubReviewRateLimitCheckpointV1),
+    RateLimited {
+        checkpoint: Option<GitHubReviewRateLimitCheckpointV1>,
+        retry_at: Option<UtcMicros>,
+    },
     Denied,
     Unavailable,
 }
 
 fn network_failure(failure: HttpResponseV1) -> GitHubReadNetworkOutcomeV1 {
     match failure {
-        HttpResponseV1::RateLimited(checkpoint) => {
-            GitHubReadNetworkOutcomeV1::Response(GitHubReadNetworkResponseV1 {
-                metadata: GitHubReadNetworkMetadataV1 {
-                    status: GitHubReadNetworkStatusV1::RateLimited,
-                    etag: None,
-                    next_cursor: None,
-                    rate_limit: Some(checkpoint),
-                },
-                body: Vec::new(),
-            })
-        }
+        HttpResponseV1::RateLimited {
+            checkpoint,
+            retry_at,
+        } => GitHubReadNetworkOutcomeV1::Response(GitHubReadNetworkResponseV1 {
+            metadata: GitHubReadNetworkMetadataV1 {
+                status: GitHubReadNetworkStatusV1::RateLimited,
+                etag: None,
+                next_cursor: None,
+                rate_limit: checkpoint,
+                retry_at,
+            },
+            body: Vec::new(),
+        }),
         HttpResponseV1::Denied => GitHubReadNetworkOutcomeV1::Denied,
         _ => GitHubReadNetworkOutcomeV1::Unavailable,
     }
@@ -1627,10 +1644,17 @@ fn decode_ureq_response(
         },
         401 => HttpResponseV1::Denied,
         403 | 429 => {
-            let retry_after = retry_after_checkpoint(response.headers(), rate_limit.as_ref());
-            retry_after
-                .or_else(|| rate_limit.filter(|limit| limit.remaining == 0))
-                .map_or(HttpResponseV1::Denied, HttpResponseV1::RateLimited)
+            let retry_at = retry_after_at(response.headers());
+            let checkpoint = retry_after_checkpoint(rate_limit.as_ref(), retry_at)
+                .or_else(|| rate_limit.filter(|limit| limit.remaining == 0));
+            if checkpoint.is_some() || retry_at.is_some() {
+                HttpResponseV1::RateLimited {
+                    checkpoint,
+                    retry_at,
+                }
+            } else {
+                HttpResponseV1::Denied
+            }
         }
         _ => HttpResponseV1::Unavailable,
     }
@@ -1705,22 +1729,30 @@ fn rate_limit_checkpoint(
 }
 
 fn retry_after_checkpoint(
-    headers: &ureq::http::HeaderMap,
     primary: Option<&GitHubReviewRateLimitCheckpointV1>,
+    retry_at: Option<UtcMicros>,
 ) -> Option<GitHubReviewRateLimitCheckpointV1> {
     let primary = primary?;
-    let delay_seconds = header(headers, "retry-after")?.parse::<i64>().ok()?;
-    let reset_at = UtcMicros(
-        now_micros()
-            .0
-            .checked_add(delay_seconds.checked_mul(1_000_000)?)?,
-    );
+    let reset_at = retry_at?;
     let checkpoint = GitHubReviewRateLimitCheckpointV1 {
         limit: primary.limit,
         remaining: primary.remaining,
         reset_at,
     };
     checkpoint.validate().is_ok().then_some(checkpoint)
+}
+
+fn retry_after_at(headers: &ureq::http::HeaderMap) -> Option<UtcMicros> {
+    const MAX_RETRY_AFTER_SECONDS_V1: i64 = 24 * 60 * 60;
+    let delay_seconds = header(headers, "retry-after")?.parse::<i64>().ok()?;
+    if !(0..=MAX_RETRY_AFTER_SECONDS_V1).contains(&delay_seconds) {
+        return None;
+    }
+    Some(UtcMicros(
+        now_micros()
+            .0
+            .checked_add(delay_seconds.checked_mul(1_000_000)?)?,
+    ))
 }
 
 fn merge_rate_limit(
@@ -2020,6 +2052,64 @@ mod tests {
             GitHubReadPermissionV1::PullRequests,
         );
         server.join().unwrap()
+    }
+
+    #[test]
+    fn retry_after_without_primary_rate_headers_is_not_authorization_denial() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = read_http_request(&mut stream);
+            write!(
+                stream,
+                "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 60\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
+        });
+        let client = GitHubReadOnlyClientV1 {
+            agent: ureq::Agent::config_builder()
+                .https_only(false)
+                .http_status_as_error(false)
+                .build()
+                .into(),
+            target: GitHubRepositoryTargetV1 {
+                owner: "ScriptedAlchemy".to_owned(),
+                repository: "retry-after-only".to_owned(),
+                pull_request_number: 421,
+                pull_request_id: GitHubPullRequestIdV1::new("4026204542").unwrap(),
+            },
+            credential: GitHubReadOnlyCredentialV1::anonymous(),
+            config: GitHubHttpReadConfigV1 {
+                rest_base_uri: format!("http://{address}"),
+                graphql_uri: format!("http://{address}/graphql"),
+                ..GitHubHttpReadConfigV1::default()
+            },
+        };
+
+        let response = client.get(
+            &format!("http://{address}/fixture"),
+            None,
+            GitHubReadPermissionV1::PullRequests,
+        );
+        server.join().unwrap();
+
+        let outcome = network_failure(response);
+        assert!(
+            matches!(
+                outcome,
+                GitHubReadNetworkOutcomeV1::Response(GitHubReadNetworkResponseV1 {
+                    metadata: GitHubReadNetworkMetadataV1 {
+                        status: GitHubReadNetworkStatusV1::RateLimited,
+                        rate_limit: None,
+                        retry_at: Some(_),
+                        ..
+                    },
+                    ..
+                })
+            ),
+            "Retry-After is rate-limit evidence, not authorization denial"
+        );
     }
 
     #[test]
