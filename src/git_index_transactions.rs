@@ -233,6 +233,96 @@ impl FixedGitIndexRunner {
         Ok(())
     }
 
+    pub(crate) fn repository_root(&self) -> &Path {
+        &self.repository_root
+    }
+
+    pub(crate) fn is_bare_repository(&self) -> Result<bool, NativeGitIndexError> {
+        let output = self.run_git("rev-parse", &["rev-parse", "--is-bare-repository"])?;
+        match String::from_utf8(output.stdout)
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .as_deref()
+        {
+            Some("true") => Ok(true),
+            Some("false") => Ok(false),
+            _ => Err(NativeGitIndexError::MalformedOutput {
+                operation: "rev-parse",
+            }),
+        }
+    }
+
+    pub(crate) fn object_format(&self) -> Result<String, NativeGitIndexError> {
+        let output = self.run_git("rev-parse", &["rev-parse", "--show-object-format"])?;
+        String::from_utf8(output.stdout)
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .ok_or(NativeGitIndexError::MalformedOutput {
+                operation: "rev-parse",
+            })
+    }
+
+    pub(crate) fn has_applicable_commit_hooks(&self) -> Result<bool, NativeGitIndexError> {
+        match self.ensure_no_applicable_hooks() {
+            Ok(()) => Ok(false),
+            Err(NativeGitIndexError::UnsupportedHookPolicy) => Ok(true),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub(crate) fn signing_key_available(
+        &self,
+        key_reference: &str,
+    ) -> Result<bool, NativeGitIndexError> {
+        let format = self.run_git_output(&["config", "--get", "gpg.format"])?;
+        let format = if format.status.success() {
+            String::from_utf8(format.stdout)
+                .map_err(|_| NativeGitIndexError::MalformedOutput {
+                    operation: "config",
+                })?
+                .trim()
+                .to_owned()
+        } else if format.status.code() == Some(1) {
+            "openpgp".to_owned()
+        } else {
+            return Err(NativeGitIndexError::GitFailed {
+                operation: "config",
+                status: format.status.to_string(),
+            });
+        };
+        if format != "openpgp" {
+            // SSH and X.509 key availability can depend on an agent or
+            // provider that cannot be proven by a read-only native probe.
+            return Ok(false);
+        }
+        let configured_program = self.run_git_output(&["config", "--get", "gpg.program"])?;
+        if configured_program.status.success() && !configured_program.stdout.is_empty() {
+            // Apply would use an arbitrary configured provider. V1 does not
+            // execute it during preview, so availability remains unproven.
+            return Ok(false);
+        }
+        if !configured_program.status.success() && configured_program.status.code() != Some(1) {
+            return Err(NativeGitIndexError::GitFailed {
+                operation: "config",
+                status: configured_program.status.to_string(),
+            });
+        }
+        let output = Command::new("gpg")
+            .args([
+                "--batch",
+                "--list-secret-keys",
+                "--with-colons",
+                "--",
+                key_reference,
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .output();
+        Ok(output.is_ok_and(|output| output.status.success()))
+    }
+
     pub(crate) fn acquire_index_lock(&self) -> Result<NativeIndexLock, NativeGitIndexError> {
         let path = self.index_lock_path();
         let file = OpenOptions::new()
