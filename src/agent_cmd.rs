@@ -2512,6 +2512,13 @@ mod tests {
         assert_eq!(installed["unrelated"], "keep");
         assert_eq!(installed["plugins"].as_array().unwrap().len(), 1);
         assert_eq!(installed["plugins"][0]["id"], "foreign");
+        for artifact in &component_set.component_set.components[0].manifest.artifacts {
+            assert!(
+                !home.path().join(&artifact.relative_path).exists(),
+                "uninstall must remove owned Kimi artifact {}",
+                artifact.relative_path
+            );
+        }
         assert!(!code_home.join("plugins/managed/tracedecay").exists());
     }
 
