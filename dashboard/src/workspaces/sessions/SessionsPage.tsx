@@ -21,7 +21,25 @@ const OverviewPayload = z
   .object({ exists: z.boolean().optional(), latest_sessions: z.array(AnyObject).optional() })
   .passthrough();
 const TimelinePayload = z
-  .object({ exists: z.boolean().optional(), buckets: z.array(AnyObject).optional() })
+  .object({
+    exists: z.boolean().optional(),
+    buckets: z.array(AnyObject).optional(),
+    undated: z
+      .object({ count: z.number().optional(), token_estimate: z.number().optional() })
+      .passthrough()
+      .optional(),
+    coverage: z
+      .object({
+        limit: z.number(),
+        returned_buckets: z.number(),
+        total_dated_buckets: z.number(),
+        truncated: z.boolean(),
+        ordering: z.literal('most_recent'),
+        next_before_bucket: z.string().nullable().optional(),
+      })
+      .passthrough()
+      .optional(),
+  })
   .passthrough();
 /** Wire-true transcript search (lcm_api.rs search): hits nest under
  * matches.messages / matches.summary_nodes. */
@@ -58,6 +76,11 @@ export function SessionsPage() {
 
   return (
     <ExplorerSplit
+      header={
+        <div className="border-b border-edge-subtle bg-surface-1 px-4 py-2">
+          <h1 className="text-sm font-semibold tracking-tight">Sessions</h1>
+        </div>
+      }
       filters={
         <div className="flex flex-col gap-3">
           <form
@@ -96,21 +119,40 @@ export function SessionsPage() {
             }));
             const total = buckets.reduce((sum, b) => sum + b.value, 0);
             const split = splitCount(total);
+            const coverage = data.coverage;
+            const undated = data.undated?.count ?? 0;
             return (
               <div className="flex flex-col gap-3">
                 <div className="td-raised border border-edge-subtle px-3 py-3">
                   <Readout
-                    label="messages tracked"
+                    label="messages in loaded recent window"
                     size="xl"
                     value={split.value}
                     unit={split.unit}
-                    note={`${total.toLocaleString()} across ${buckets.length} days`}
+                    note={`${total.toLocaleString()} in ${buckets.length} loaded recent days`}
                   />
                 </div>
                 <figure className="flex flex-col gap-1.5">
-                  <figcaption className="td-legend">daily volume</figcaption>
+                  <figcaption className="td-legend">recent daily volume</figcaption>
                   <ActivityColumns buckets={buckets.slice(-46)} height={56} />
                 </figure>
+                {coverage ? (
+                  <p className="text-3xs leading-relaxed text-text-muted">
+                    {coverage.returned_buckets.toLocaleString()} of{' '}
+                    {coverage.total_dated_buckets.toLocaleString()} dated day buckets loaded
+                    (limit {coverage.limit.toLocaleString()})
+                    {coverage.truncated ? '; older days omitted' : ''}.
+                  </p>
+                ) : (
+                  <p className="text-3xs leading-relaxed text-text-secondary">
+                    Timeline coverage was not reported.
+                  </p>
+                )}
+                {undated > 0 ? (
+                  <p className="text-3xs leading-relaxed text-text-muted">
+                    {undated.toLocaleString()} undated messages are separate from this chart.
+                  </p>
+                ) : null}
               </div>
             );
           }}
