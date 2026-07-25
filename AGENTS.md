@@ -11,18 +11,18 @@
   including manifests, profiles, features, build settings, and build-script
   configuration. Preserve stock-Cargo contributor, CI, release, and published
   package behavior; never hard-code this machine's target paths or slot policy.
-- Invoke ordinary `cargo` commands. Zack's machine-local cargo shim/cargo-slot
-  transparently allocates non-blocking lanes for concurrent Rust operations; do
-  not bypass it, add repository lane coordination, or serialize Cargo work to
-  avoid contention.
+- Invoke ordinary `cargo` commands; no build shim or cargo-slot is installed
+  (an earlier shim was removed by explicit direction). Concurrent agents share
+  this checkout's repo-local `target/`, so waiting on cargo's directory lock is
+  normal contention rather than a hang, and a long wait under many concurrent
+  Rust processes is expected. Never kill another agent's cargo process, and do
+  not add repository lane coordination.
 - Do not pause, kill, or disable Rust Analyzer to improve build timings. Its
   Claude Code LSP-owned processes are outside repository build optimization.
-- The shim's local policy uses the checkout's repo-local `target/` by default
-  and allocates isolated targets under `/fast/cargo-target/` when a non-blocking
-  lane needs one. Let the shim select the lane; agents do not set
-  `CARGO_TARGET_DIR` or `TRACEDECAY_DATA_DIR` to manage contention.
-- Cargo-launched TraceDecay test data follows the target selected by the shim.
-  Never redirect targets or test data under `/tmp`, `$HOME`, or the root disk.
+- Agents do not set `CARGO_TARGET_DIR` or `TRACEDECAY_DATA_DIR` to manage
+  contention; scope checks and tests narrowly instead.
+- Cargo-launched TraceDecay test data follows the repo-local target. Never
+  redirect targets or test data under `/tmp`, `$HOME`, or the root disk.
 - During development, scope checks and test compilation to the smallest touched
   package, target, and feature set. A test-name filter does not reduce which
   test binary Cargo compiles, so batch focused tests by target where practical.
@@ -58,7 +58,7 @@
 
 ## Learned Workspace Facts
 
-- Parallel branch work uses git worktrees under `.worktrees/` in the repo root (for example `.worktrees/codex-cli-args-stdin`); aggregate multi-PR verification uses a detached temporary worktree on `origin/master`, merges all target branches, then runs ordinary Cargo tests through the local shim.
+- Parallel branch work uses git worktrees under `.worktrees/` in the repo root (for example `.worktrees/codex-cli-args-stdin`); aggregate multi-PR verification uses a detached temporary worktree on `origin/master`, merges all target branches, then runs ordinary Cargo tests.
 - Integration/default branch is `master` (GitHub: ScriptedAlchemy/tracedecay).
 - Cursor's TraceDecay plugin uses the MCP key `tracedecay`; Claude and Codex retain the `graph` key.
 - V2 Plan 35 assigns the daemon the LSP gateway/broker and an intentional versioned `experimental.tracedecay` context projection channel over standard LSP/JSON-RPC; PR12 projects diagnostics, impact, and test context, while later providers advertise only once mounted. Claude Code connects through one configured-language plugin, while non-LSP hosts receive equivalent evidence through hooks, hints, or MCP.
