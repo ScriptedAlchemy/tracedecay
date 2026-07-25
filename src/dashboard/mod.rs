@@ -385,6 +385,7 @@ async fn build_state_inner(
     warm_token_counts: bool,
     automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
     automation_writer: DashboardAutomationWriter,
+    doctor_report_reader: Option<DoctorReportReader>,
 ) -> Result<DashboardState> {
     let (mem_db_path, mem_db) = resolve_project_memory_store(cg);
     let memory_owner = project_memory_owner(cg)?;
@@ -429,7 +430,7 @@ async fn build_state_inner(
         code_diagnostics_backfill_started: Arc::new(AtomicBool::new(false)),
         automation_scheduler_reconciler,
         automation_writer,
-        doctor_report_reader: None,
+        doctor_report_reader,
         doctor_remediation_dispatcher: None,
     };
     // Pre-count non-usage messages in the background so the first Savings
@@ -453,6 +454,7 @@ pub(crate) async fn build_state(cg: &TraceDecay) -> Result<DashboardState> {
         true,
         None,
         direct_dashboard_automation_writer(),
+        None,
     )
     .await
 }
@@ -464,6 +466,7 @@ pub(crate) async fn build_state_with_automation_reconciler(
     registered_savings_db: Option<Arc<RegisteredGlobalDb>>,
     automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
     automation_writer: DashboardAutomationWriter,
+    doctor_report_reader: Option<DoctorReportReader>,
 ) -> Result<DashboardState> {
     build_state_inner(
         cg.as_ref(),
@@ -474,6 +477,7 @@ pub(crate) async fn build_state_with_automation_reconciler(
         true,
         automation_scheduler_reconciler,
         automation_writer,
+        doctor_report_reader,
     )
     .await
 }
@@ -494,6 +498,10 @@ pub(crate) async fn build_selected_project_state(
         false,
         None,
         Arc::clone(&active.automation_writer),
+        // The active reader is bound to the active project's exact scope.
+        // Never reuse it for a selected project without a separately admitted
+        // daemon owner for that project's identity.
+        None,
     )
     .await
 }
@@ -626,6 +634,7 @@ where
         options.warm_token_counts,
         None,
         direct_dashboard_automation_writer(),
+        None,
     )
     .await?;
     let app = router(cg, state).await?;
@@ -1299,6 +1308,13 @@ mod authority_tests {
                 .await
                 .expect("project init"),
         );
+        let doctor_reader: DoctorReportReader = Arc::new(|| {
+            Box::pin(async {
+                Err(tracedecay_application::ApplicationContractError::Inconsistent {
+                    field: "dashboard authority test reader",
+                })
+            })
+        });
 
         let state = build_state_with_automation_reconciler(
             Arc::clone(&cg),
@@ -1307,6 +1323,7 @@ mod authority_tests {
             None,
             None,
             direct_dashboard_automation_writer(),
+            Some(Arc::clone(&doctor_reader)),
         )
         .await
         .expect("dashboard state");
@@ -1314,6 +1331,13 @@ mod authority_tests {
         assert!(Arc::ptr_eq(
             state.project_graph.as_ref().expect("retained graph"),
             &cg,
+        ));
+        assert!(Arc::ptr_eq(
+            state
+                .doctor_report_reader
+                .as_ref()
+                .expect("admitted Doctor reader"),
+            &doctor_reader,
         ));
     }
 

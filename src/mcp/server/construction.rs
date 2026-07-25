@@ -54,6 +54,7 @@ pub(crate) struct McpServerConstructionContext {
         Option<crate::dashboard::AutomationSchedulerReconciler>,
     pub(crate) database_owner_reconciler: Option<DatabaseOwnerReconciler>,
     pub(crate) dashboard_automation_writer: crate::dashboard::DashboardAutomationWriter,
+    pub(crate) dashboard_doctor_report_reader: Option<crate::dashboard::DoctorReportReader>,
     pub(crate) hook_branch_writer: HookBranchWriter,
     pub(crate) background_refresh_writer: BackgroundRefreshWriter,
     pub(crate) code_index_hook_sink: Option<super::CodeIndexHookSink>,
@@ -130,6 +131,7 @@ impl McpServerConstructionContext {
             automation_scheduler_reconciler: None,
             database_owner_reconciler: None,
             dashboard_automation_writer: crate::dashboard::direct_dashboard_automation_writer(),
+            dashboard_doctor_report_reader: None,
             hook_branch_writer: direct_hook_branch_writer(),
             background_refresh_writer: direct_background_refresh_writer(),
             code_index_hook_sink: None,
@@ -197,6 +199,7 @@ impl McpServerConstructionContext {
             automation_scheduler_reconciler: None,
             database_owner_reconciler: Some(database_owner_reconciler),
             dashboard_automation_writer: writers.dashboard_automation,
+            dashboard_doctor_report_reader: None,
             hook_branch_writer: writers.hook_branch,
             background_refresh_writer: writers.background_refresh,
             code_index_hook_sink: None,
@@ -251,6 +254,14 @@ impl McpServerConstructionContext {
         reconciler: crate::dashboard::AutomationSchedulerReconciler,
     ) -> Self {
         self.automation_scheduler_reconciler = Some(reconciler);
+        self
+    }
+
+    pub(crate) fn with_dashboard_doctor_report_reader(
+        mut self,
+        reader: crate::dashboard::DoctorReportReader,
+    ) -> Self {
+        self.dashboard_doctor_report_reader = Some(reader);
         self
     }
 
