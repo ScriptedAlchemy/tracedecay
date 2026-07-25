@@ -19,14 +19,13 @@ use tracedecay_domain::{
     CheckSnapshotAnchorRefV1, CiFailureLocalizationResultV1, ConflictEvidenceAnchorRefV1,
     CoverageReportV1, DomainError, FactOwnerV1, FrozenWatermarkResolutionV1,
     GenerationBoundRepositoryProvenanceV1, GitHubReviewIngressResultV1, GitHubReviewItemV1,
-    GitHubStackCapabilitySnapshotV1, GitHubStackSnapshotV1, GitIndexPreviewV1,
-    GitIndexTransactionReceiptV1, GitTopologyAnchorTargetV1, GitTopologyGenerationRefV1,
-    IntegrationReceiptAnchorRefV1, NativeGitObjectAnchorRefV1, ObservationScopeV1,
-    PayloadAccessState, PreflightPreviewAnchorRefV1, PullRequestSnapshotAnchorRefV1,
-    RefSnapshotAnchorRefV1, RepositoryCaptureAnchorRefV1, RepositoryStateSnapshotV1,
-    ResolutionAuthorizationV1, RetrievalAnchorId, RetrievalAnchorRecordV2,
-    RetrievalAnchorRecordV2Parts, RetrievalAnchorTargetV2, ReviewSnapshotAnchorRefV1,
-    VectorWatermark, canonical_sha256, derive_git_topology_anchor_id,
+    GitIndexPreviewV1, GitIndexTransactionReceiptV1, GitTopologyAnchorTargetV1,
+    GitTopologyGenerationRefV1, IntegrationReceiptAnchorRefV1, NativeGitObjectAnchorRefV1,
+    ObservationScopeV1, PayloadAccessState, PreflightPreviewAnchorRefV1,
+    PullRequestSnapshotAnchorRefV1, RefSnapshotAnchorRefV1, RepositoryCaptureAnchorRefV1,
+    RepositoryStateSnapshotV1, ResolutionAuthorizationV1, RetrievalAnchorId,
+    RetrievalAnchorRecordV2, RetrievalAnchorRecordV2Parts, RetrievalAnchorTargetV2,
+    ReviewSnapshotAnchorRefV1, VectorWatermark, canonical_sha256, derive_git_topology_anchor_id,
 };
 use tracedecay_store::ObservedEvidenceAnchorResolution;
 
@@ -314,26 +313,6 @@ pub fn apply_check_anchor(
     GitTopologyAnchorApplicationV1::new(owner, GitTopologyAnchorTargetV1::CheckSnapshot(target))
 }
 
-pub fn apply_github_stack_capability_anchor(
-    owner: ObservationScopeV1,
-    target: GitHubStackCapabilitySnapshotV1,
-) -> Result<GitTopologyAnchorApplicationV1, DomainError> {
-    GitTopologyAnchorApplicationV1::new(
-        owner,
-        GitTopologyAnchorTargetV1::GitHubStackCapability(target),
-    )
-}
-
-pub fn apply_github_stack_snapshot_anchor(
-    owner: ObservationScopeV1,
-    target: GitHubStackSnapshotV1,
-) -> Result<GitTopologyAnchorApplicationV1, DomainError> {
-    GitTopologyAnchorApplicationV1::new(
-        owner,
-        GitTopologyAnchorTargetV1::GitHubStackSnapshot(target),
-    )
-}
-
 pub fn apply_conflict_anchor(
     owner: ObservationScopeV1,
     repository: RepositoryCaptureAnchorRefV1,
@@ -475,11 +454,6 @@ impl AuthorizedGitTopologyDrilldownV1 {
                     )?,
                 }
             }
-        } else if target.requires_observed_currentness() {
-            GitTopologyResolutionStateV1::Stale {
-                anchored_generation: target.generation(),
-                resolution_state: AnchorResolutionStateV2::Unavailable,
-            }
         } else {
             GitTopologyResolutionStateV1::Current
         };
@@ -521,8 +495,7 @@ mod tests {
 
     use tracedecay_domain::{
         AccessPolicyDigest, AnchorDurabilityClass, AnchorSourceGenerationV2,
-        CanonicalObservationIdV1, CapabilityId, CommitId, EvidenceClass,
-        GitHubStackCapabilitySnapshotV1, GitHubStackCapabilityStateV1, GitTopologySourceRoleV1,
+        CanonicalObservationIdV1, CapabilityId, CommitId, EvidenceClass, GitTopologySourceRoleV1,
         ManifestDigest, ObservationScopeV1, OrderedGitTopologySourceV1,
         PrivacyDomainBoundLocatorDigest, PrivacyDomainId, ProjectId, ProjectionGenerationId,
         ProviderId, PullRequestSnapshotAnchorRefV1, RetentionClass, RetrievalAnchorRecordV2Parts,
@@ -651,24 +624,6 @@ mod tests {
                 anchor_id: source_anchor_id,
             }],
         })
-    }
-
-    fn github_stack_capability_target(
-        source_anchor_id: RetrievalAnchorId,
-        generation: &str,
-    ) -> GitTopologyAnchorTargetV1 {
-        GitTopologyAnchorTargetV1::GitHubStackCapability(
-            GitHubStackCapabilitySnapshotV1::new(
-                ProviderId::new("provider.github").unwrap(),
-                ProjectId::new("project.fixture").unwrap(),
-                tracedecay_domain::RepositoryId::new("repository.fixture").unwrap(),
-                WorktreeId::new("worktree.fixture").unwrap(),
-                GitHubStackCapabilityStateV1::Enabled,
-                ProjectionGenerationId::new(generation).unwrap(),
-                source_anchor_id,
-            )
-            .unwrap(),
-        )
     }
 
     fn topology_record(
@@ -922,68 +877,6 @@ mod tests {
         assert!(matches!(
             stale.state(),
             GitTopologyResolutionStateV1::Stale { .. }
-        ));
-    }
-
-    #[test]
-    fn github_stack_currentness_requires_an_exact_fresh_observation() {
-        let source = project_observation_record('e');
-        let anchored_target =
-            github_stack_capability_target(source.anchor_id().clone(), "projection.stack.1");
-        let root_record = topology_record(anchored_target.clone(), &source);
-        let root_report = || {
-            EvidenceAnchorResolutionReport::from_observation(
-                root_record.anchor_id().clone(),
-                ObservedEvidenceAnchorResolution::Resolved {
-                    record: Box::new(root_record.clone()),
-                    observed_watermark: watermark(&[("observation.projection", 1)]),
-                },
-                authorization(),
-            )
-            .unwrap()
-        };
-        let source_report = || {
-            EvidenceAnchorResolutionReport::from_observation(
-                source.anchor_id().clone(),
-                ObservedEvidenceAnchorResolution::Resolved {
-                    record: Box::new(source.clone()),
-                    observed_watermark: watermark(&[("observation.projection", 1)]),
-                },
-                authorization(),
-            )
-            .unwrap()
-        };
-
-        let absent =
-            AuthorizedGitTopologyDrilldownV1::new(root_report(), vec![source_report()], None)
-                .unwrap();
-        assert!(matches!(
-            absent.state(),
-            GitTopologyResolutionStateV1::Stale {
-                resolution_state: AnchorResolutionStateV2::Unavailable,
-                ..
-            }
-        ));
-
-        let current = AuthorizedGitTopologyDrilldownV1::new(
-            root_report(),
-            vec![source_report()],
-            Some(&anchored_target),
-        )
-        .unwrap();
-        assert_eq!(current.state(), &GitTopologyResolutionStateV1::Current);
-
-        let observed =
-            github_stack_capability_target(source.anchor_id().clone(), "projection.stack.2");
-        let retargeted = AuthorizedGitTopologyDrilldownV1::new(
-            root_report(),
-            vec![source_report()],
-            Some(&observed),
-        )
-        .unwrap();
-        assert!(matches!(
-            retargeted.state(),
-            GitTopologyResolutionStateV1::Retargeted { .. }
         ));
     }
 }
