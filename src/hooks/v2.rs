@@ -1226,6 +1226,42 @@ mod tests {
         assert_eq!(material.file_id, Some(hash16(b"event-17")));
     }
 
+    #[tokio::test]
+    async fn opencode_lsp_updated_uses_project_scoped_daemon_action() {
+        let project = tempfile::tempdir().unwrap();
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../crates/tracedecay-hooks/fixtures/host_events/opencode/baseline.json"
+        ))
+        .unwrap();
+        let event = fixture["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|event| event["identity"] == "lsp_updated")
+            .unwrap()["request"]
+            .clone();
+        let event_json = serde_json::to_string(&event).unwrap();
+        let guard = crate::hooks::TestDaemonHookActionGuard::install([serde_json::json!({
+            "action": "opencode_lsp_updated",
+            "status": "accepted",
+        })]);
+
+        let dispatch = dispatch_opencode_lsp_updated(&event_json, project.path()).await;
+
+        assert!(matches!(
+            dispatch,
+            HookV2Dispatch::Handled {
+                guidance: None,
+                disposition: HookTransportDispositionV1::Accepted,
+            }
+        ));
+        let calls = guard.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0.as_deref(), Some(project.path()));
+        assert_eq!(calls[0].1["action"], "opencode_lsp_updated");
+        assert_eq!(calls[0].1["event"], event);
+    }
+
     #[test]
     fn opencode_tool_event_uses_nested_input_and_output_identity() {
         let material = native_material(
