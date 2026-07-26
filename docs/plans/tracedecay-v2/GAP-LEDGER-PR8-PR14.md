@@ -102,9 +102,11 @@ the temporary-alias deletion slices.
   implemented but unverified.
 - `27-cross-host-agent-plugin-bundles.md`: four declared safety/evidence guards
   are not production-reached, and Cursor Cloud has no default component set.
-- `31-native-fastembed-semantic-code-search.md`: downstream semantic machinery
-  is real, but no production path can install a model; lifecycle/Doctor and
-  cold-offline acceptance remain open.
+- `31-native-fastembed-semantic-code-search.md`: daemon-owned immutable
+  `hf-hub` background acquisition shipped in `dd4adbe2a`, including verified
+  online acquisition and packaged offline-cache acceptance. Manual local/HTTPS
+  import APIs remain production-unwired, and semantic results remain omitted
+  until compatible indexing is ready.
 - `32-dynamic-workflow-runtime-and-sdk.md`: explicitly PR17-only.
 - `34-workspace-refactoring-and-api-migration.md`: rename preview is live;
   API migration is an unimplemented PR11–PR12 deliverable consumed by PR19,
