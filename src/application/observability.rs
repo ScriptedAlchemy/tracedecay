@@ -224,11 +224,7 @@ impl ObservabilityQueryPort for RegisteredObservabilityPortV1<'_> {
             if invalid_in_page {
                 coverage = merge_coverage_state(coverage, CoverageStateV1::Partial);
             }
-            let mut events = eligible
-                .into_iter()
-                .map(|(_, envelope)| envelope)
-                .collect::<Vec<_>>();
-            events.sort_by(|left, right| {
+            eligible.sort_by(|(_, left), (_, right)| {
                 (
                     left.event_time_micros,
                     left.observation_time_micros,
@@ -242,8 +238,17 @@ impl ObservabilityQueryPort for RegisteredObservabilityPortV1<'_> {
                         right.event_id.as_str(),
                     ))
             });
+            let event_cursors = eligible
+                .iter()
+                .map(|(id, _)| format!("analytics:{id}"))
+                .collect();
+            let events = eligible
+                .into_iter()
+                .map(|(_, envelope)| envelope)
+                .collect::<Vec<_>>();
             Ok(ObservabilityPageV1 {
                 events,
+                event_cursors,
                 watermark: watermark_id.map_or_else(
                     || "analytics:empty".to_string(),
                     |id| format!("analytics:{id}"),

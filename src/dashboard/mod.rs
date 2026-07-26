@@ -21,7 +21,6 @@
 //! `/api/capabilities` advertises which features are live so hosts (or a
 //! richer Hermes wrapper) can extend the surface without forking the UI.
 
-pub(crate) mod activity_bus;
 pub(crate) mod analytics_api;
 pub(crate) mod assets;
 mod automation_config_api;
