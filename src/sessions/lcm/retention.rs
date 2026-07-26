@@ -45,7 +45,8 @@
 //!    the content-addressed store (deduplicated by hash) and replaced with a
 //!    recoverable placeholder, reclaiming the inline column and its FTS shadow.
 //! 3. **Projected dedupe** (shortest window): a projected `session_messages`
-//!    row whose raw twin is still present is pure duplication of the retained
+//!    row is eligible only when its raw twin is still present and that raw row
+//!    has durable summary lineage. It is then pure duplication of the retained
 //!    raw copy, so it is dropped — the raw row is the single content copy and
 //!    the projected form is reconstructable from it.
 //!
@@ -298,21 +299,20 @@ pub async fn read_session_retention_backlog(
 
     if let Some(days) = config.dedupe_projected_after_days {
         let watermark = cutoff_secs(days, now);
-        let mut rows = conn
-            .query(
-                "SELECT MIN(sm.timestamp),
-                        COALESCE(SUM(LENGTH(COALESCE(sm.text, ''))), 0)
-                 FROM session_messages sm
-                 WHERE sm.timestamp IS NOT NULL
-                   AND sm.timestamp < ?1
-                   AND EXISTS (
-                       SELECT 1 FROM lcm_raw_messages r
-                       WHERE r.provider = sm.provider
-                         AND r.message_id = sm.message_id
-                   )",
-                params![watermark],
-            )
-            .await?;
+        let sql = format!(
+            "SELECT MIN(sm.timestamp),
+                    COALESCE(SUM(LENGTH(COALESCE(sm.text, ''))), 0)
+             FROM session_messages sm
+             WHERE sm.timestamp IS NOT NULL
+               AND sm.timestamp < ?1
+               AND EXISTS (
+                   SELECT 1 FROM lcm_raw_messages r
+                   WHERE r.provider = sm.provider
+                     AND r.message_id = sm.message_id
+                     AND {PROJECTION_DURABLE}
+               )"
+        );
+        let mut rows = conn.query(&sql, params![watermark]).await?;
         let row = rows.next().await?.ok_or_else(|| {
             LcmError::Db("retention backlog projection aggregate returned no row".to_string())
         })?;
@@ -860,22 +860,25 @@ async fn run_dedupe_pass(
         return Ok(report);
     };
     let cutoff = cutoff_secs(window, now);
-    // Only dedupe a projected row whose raw twin is still present: the raw row
-    // is the single retained content copy the projected form is reconstructable
-    // from. A projected row with no raw twin is the sole copy and is never
-    // touched here.
-    let sql = "SELECT sm.provider, sm.message_id, sm.timestamp,
-                      LENGTH(COALESCE(sm.text, '')) AS text_len
+    // Only dedupe a projected row whose raw twin is still present and covered
+    // by durable summary lineage. A projected row without both proofs remains
+    // immediately queryable and is never touched here.
+    let sql = format!(
+        "SELECT sm.provider, sm.message_id, sm.timestamp,
+                LENGTH(COALESCE(sm.text, '')) AS text_len
          FROM session_messages sm
          WHERE (?1 = 'all' OR sm.provider = ?1)
            AND (?2 IS NULL OR sm.session_id = ?2)
            AND sm.timestamp IS NOT NULL AND sm.timestamp < ?3
            AND EXISTS (
                SELECT 1 FROM lcm_raw_messages r
-               WHERE r.provider = sm.provider AND r.message_id = sm.message_id
+               WHERE r.provider = sm.provider
+                 AND r.message_id = sm.message_id
+                 AND {PROJECTION_DURABLE}
            )
          ORDER BY sm.timestamp ASC, sm.message_id ASC
-         LIMIT ?4";
+         LIMIT ?4"
+    );
     let transaction = if mode.is_apply() {
         authorize("begin session retention dedupe pass")?;
         Some(
@@ -891,7 +894,7 @@ async fn run_dedupe_pass(
     );
     let mut rows = query_executor
         .query(
-            sql,
+            &sql,
             params![
                 provider,
                 util::opt_text(session_id),
@@ -917,11 +920,22 @@ async fn run_dedupe_pass(
     }
 
     let txn = transaction.expect("apply mode starts a session retention dedupe transaction");
+    let delete_sql = format!(
+        "DELETE FROM session_messages
+         WHERE provider = ?1
+           AND message_id = ?2
+           AND EXISTS (
+               SELECT 1 FROM lcm_raw_messages r
+               WHERE r.provider = session_messages.provider
+                 AND r.message_id = session_messages.message_id
+                 AND {PROJECTION_DURABLE}
+           )"
+    );
     for (provider_val, message_id, _, text_len) in &targets {
         authorize("dedupe session retention projected row")?;
         match txn
             .execute(
-                "DELETE FROM session_messages WHERE provider = ?1 AND message_id = ?2",
+                &delete_sql,
                 params![provider_val.as_str(), message_id.as_str()],
             )
             .await
