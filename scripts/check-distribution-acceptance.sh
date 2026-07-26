@@ -109,6 +109,8 @@ assert_required_assets() {
     "tests/fixtures/analytics/codex_skill_prose.txt"
     "benchmarks/pr5-observation/workload-v1.json"
     "benchmarks/pr7-memory/workload-v1.json"
+    "tests/fixtures/search_quality/pr9-pr10-candidate-workload-v1.json"
+    "benchmarks/search-quality/pr9-fallback-report-v1.json"
   )
   local -a application_assets=(
     "src/feedback/read.rs"
@@ -316,7 +318,9 @@ run_self_test() {
     tests/fixtures/provider_normalization/codex/agent_message.input.json \
     tests/fixtures/analytics/codex_skill_prose.txt \
     benchmarks/pr5-observation/workload-v1.json \
-    benchmarks/pr7-memory/workload-v1.json; do
+    benchmarks/pr7-memory/workload-v1.json \
+    tests/fixtures/search_quality/pr9-pr10-candidate-workload-v1.json \
+    benchmarks/search-quality/pr9-fallback-report-v1.json; do
     mkdir -p -- "$root/$(dirname -- "$path")"
     : >"$root/$path"
   done
