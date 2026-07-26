@@ -16,9 +16,9 @@ import {
 import { NavLink } from 'react-router';
 import { useQuery } from '@tanstack/react-query';
 import {
-  ObservatoryStorageFindingsPayloadSchema,
-  type StorageFindingSourceStatus,
-} from '../../workspaces/observatory/contracts.ts';
+  StorageFindingsPayloadSchema,
+  type StorageFindingKindStatus,
+} from '../../contracts/wire.ts';
 import { fetchEnvelope } from '../../data/query/envelope.ts';
 import { scopeKey, scopedUrl, useScope } from '../../data/scope/store.ts';
 import { cn } from '../../ui/cn';
@@ -86,7 +86,7 @@ const DOCTOR_HEALTH: Record<
  * — established nothing either way, and reporting "no evidence" as a clean bill
  * of health is the whole defect this dot exists to avoid.
  */
-function kindHealth(status: StorageFindingSourceStatus): DoctorHealth {
+function kindHealth(status: StorageFindingKindStatus): DoctorHealth {
   if (status.observed_entries > 0) return 'attention';
   switch (status.state) {
     case 'real':
@@ -187,12 +187,12 @@ function DoctorDot({ health }: { health: DoctorHealth }) {
  * back with nothing to read is `unknown`; only a resolved report whose every
  * producer looked and found nothing is `healthy`.
  *
- * Parsed with Observatory's route contract, not the generated
- * `StorageFindingsPayloadSchema`. That generated shape describes a `{ kinds }`
- * payload this route does not serve — `storage_findings_api.rs` sets
- * `payload.kind_statuses` — so validating against it fails on every real
- * response and pins the dot to `unknown` forever. Wrong in the safe direction,
- * but it makes `healthy` unreachable and the indicator meaningless.
+ * Parsed with the generated `StorageFindingsPayloadSchema`, which is what
+ * `storage_findings_api.rs` actually serves. Observatory used to hold a
+ * hand-written copy of this shape and this dot validated against that instead;
+ * the copy extended the wrong payload and pinned the producer count at exactly
+ * five, so a sixth storage finding kind in Rust would have failed the parse on
+ * every real response and left the app-wide indicator stuck on `unknown`.
  */
 function useDoctorHealth(): DoctorHealth {
   const scope = useScope((s) => s.scope);
@@ -201,7 +201,7 @@ function useDoctorHealth(): DoctorHealth {
     queryFn: () =>
       fetchEnvelope(
         scopedUrl(scope, '/api/storage/findings'),
-        ObservatoryStorageFindingsPayloadSchema,
+        StorageFindingsPayloadSchema,
       ),
     refetchInterval: 60_000,
   });
