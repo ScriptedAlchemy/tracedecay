@@ -48,6 +48,14 @@ wiring also exist. The Rust `dashboard_api_test` suite has not completed
 successfully, so Settings CAS, Delivery, Explorer routes, Doctor, storage
 telemetry, Loom, and asset serving remain **implemented but unverified**.
 
+**Reachability correction (2026-07-26).** All twelve PR14 workspaces are
+registered as lazy routes in `dashboard/src/app/routes.tsx`, and `build.rs`
+implements the source-stamp, packaged-asset, and `include_bytes!` embed
+contract. An audit score of zero "implemented and reachable" was a labelling
+artifact, not evidence that the dashboard or embed path is absent. The
+specific unverified and unreachable sub-surfaces named in this plan remain
+open; the twelve workspace routes and embed mechanism must not be replanned.
+
 ## Rejected and superseded frontend approaches
 
 - **Module Federation is rejected.** The dashboard is one ordinary Rsbuild
@@ -250,10 +258,13 @@ Styling system (design-owned; foundation lanes do not restyle or restructure):
 
 Visualization:
 
-- The renderer-neutral `ProjectionView` model is the only semantic source for
-  graph/timeline views. Sigma.js + Graphology (MIT, WebGL, offline) is the
-  default connected-graph renderer adapter — it is the only permissive
-  renderer that honors the representative/large graph tiers below;
+- Renderer-neutral semantics from the generated dashboard contract are the
+  only semantic source for graph/timeline views. The historical
+  `ProjectionView`/`ProjectionManifest` frontend type design is abandoned; no
+  such Rust or TypeScript types exist, and they are not missing PR14 work.
+  Sigma.js + Graphology (MIT, WebGL, offline) is the default connected-graph
+  renderer adapter — it is the only permissive renderer that honors the
+  representative/large graph tiers below;
   `d3-force`/d3 scales remain as layout physics for small ego-views and as
   the scale/axis toolkit for bespoke canvas surfaces (Loom temporal traces,
   conflict heatmaps), which are hand-rolled Canvas/WebGL over D3 scales
@@ -286,7 +297,7 @@ Legacy-surface dispositions (from the 2026-07-23 inventory):
 
 The dashboard remains one product package with one responsive shell, one
 generated daemon contract boundary, one revision-monotone HTTP/SSE state path,
-one reusable evidence surface, and one renderer-neutral projection model.
+one reusable evidence surface, and renderer-neutral projection semantics.
 Workspaces and inspectors may be reorganized without changing those ownership
 boundaries. No workspace may ship as a navigation stub or fixture-only page,
 and presentation code must not import or reproduce Git, runtime, task-policy,
@@ -330,12 +341,14 @@ action reference; source bytes, prompt/output excerpts, raw paths, arguments,
 environment, and secrets are absent. Zero rows or a friendly illustration
 never establish a domain state.
 
-`ProjectionView` carries stable entity, edge, cluster, frame, selection, scope,
-coverage, evidence-anchor, legal-action, and cursor identities plus accessible
-node/relation/event rows. `ProjectionManifest` normalizes those semantics for
-renderer and Work-lens parity. A projection-specific aggregation declares its
-hidden stable-ID count and expansion cursor; it cannot silently drop selected
-or inaccessible entities.
+The generated workspace payloads and renderer adapter inputs carry stable
+entity, edge, cluster, frame, selection, scope, coverage, evidence-anchor,
+legal-action, and cursor identities plus accessible node/relation/event rows.
+They normalize those semantics for renderer and Work-lens parity. A
+projection-specific aggregation declares its hidden stable-ID count and
+expansion cursor; it cannot silently drop selected or inaccessible entities.
+`ProjectionView` and `ProjectionManifest` were abandoned design names, not
+contracts to implement.
 
 `PlannerQueryRequest` is a typed application query, not a browser DSL.
 `PlannerQueryRun` carries `run_id`, request/plan/merge revisions, required
@@ -350,13 +363,16 @@ query, renders independent source progress and partial pages, cancels by run
 ID, and ignores stale events. After reconnect it deduplicates by
 run/event/revision and refetches on a revision gap.
 
-`EvidencePacket` carries packet/query/result IDs and revision, exact scope,
-authority outcomes, freshness, coverage, server rank, typed scores,
-retriever contributions, server-authored why-this-result reasons, citations,
-omissions, and late-context state. Every compact result renders an always
-visible `EvidenceTruthStrip` with authority, coverage, freshness, citation
-count, omission count, and score kind; none may be hidden only in a tooltip or
-drawer.
+The frontend does not define or consume an `EvidencePacket` contract. It
+renders evidence fields from generated dashboard envelopes through the
+`EvidenceTruthStrip`: authority outcomes, freshness, coverage, server rank,
+typed scores, retriever contributions, server-authored why-this-result
+reasons, citations, omissions, and late-context state. The Rust
+`tracedecay_application::EvidencePacket` is a separate live application type
+with production consumers and a public export; this frontend correction is
+not permission to delete or deprecate it. Every compact result renders the
+truth strip with authority, coverage, freshness, citation count, omission
+count, and score kind; none may be hidden only in a tooltip or drawer.
 
 - Retriever rows preserve server order and identify retriever/revision, stage,
   contribution/abstention/exclusion/unavailable state, score kind and
@@ -640,9 +656,9 @@ and works offline. Its adapter exposes only mounting, rendering, viewport,
 transient-selection, focus, and destruction behavior; callbacks emit stable-ID
 presentation intents. Semantic cluster
 membership, labels, explanations, causal edges, rank, critical path, legal
-actions, readiness, and coverage arrive in `ProjectionView`. An adapter may
-position or visually bundle entities but may not create or persist those
-semantics.
+actions, readiness, and coverage arrive in generated dashboard payloads and
+renderer inputs. An adapter may position or visually bundle entities but may
+not create or persist those semantics.
 
 Filtering uses typed application descriptors. A local mask may preview
 already-loaded visibility but cannot change authoritative counts, coverage,

@@ -27,6 +27,12 @@ implemented across `crates/tracedecay-domain/src/research/`,
 Per-section verdicts follow. Known pending: dedicated GitHub-stack anchor targets
 (Required behavior 19).
 
+**Status split (2026-07-26).** The core above is delivered PR7 behavior.
+Dedicated `GitHubStackCapabilitySnapshotV1`/`GitHubStackSnapshotV1` anchor
+targets are not delivered and remain a named PR13/Plan 37 integration follow-up;
+their absence must not be hidden by the "landed" header or refiled as a PR14
+dashboard gap.
+
 ## Outcome
 
 Any authorized result can lead back to the exact retained observation or entity that
