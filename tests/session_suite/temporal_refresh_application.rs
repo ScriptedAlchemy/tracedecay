@@ -364,7 +364,7 @@ async fn query_only_mode_and_grain_share_one_projection_refresh() {
                     session,
                     4,
                     TemporalModeV1::Forensic,
-                    RetrievalGrainV1::EvidenceSpan,
+                    RetrievalGrainV1::Occurrence,
                 ),
             )
             .await,
