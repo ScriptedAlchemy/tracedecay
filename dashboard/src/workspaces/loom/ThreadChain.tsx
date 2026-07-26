@@ -4,7 +4,7 @@ import { StateChip } from '../../ui/StateChip';
 import { Legend, Meter, Panel } from '../../ui/instrument.tsx';
 import { formatCount } from '../../ui/format.ts';
 import { useLegacy } from '../../data/query/useLegacy.ts';
-import { formatDuration, formatMoment } from './tracks.ts';
+import { formatDurationSeconds, formatMoment } from './tracks.ts';
 import { summarizeChain, type PlacedThread } from './weave.ts';
 import {
   LoomChainPayloadSchema,
@@ -80,7 +80,7 @@ export function ThreadChain({
             label="extent"
             value={
               thread.end != null
-                ? formatDuration(thread.end - thread.start)
+                ? formatDurationSeconds(thread.end - thread.start)
                 : 'unrecorded'
             }
             muted={thread.end == null}
@@ -336,7 +336,7 @@ function ChainTerminus({
                   {span.branch ?? 'branch unrecorded'} · {span.worktree}
                 </span>
                 <span className="text-3xs text-text-muted">
-                  {formatDuration(span.last_at - span.first_at)} ·{' '}
+                  {formatDurationSeconds(span.last_at - span.first_at)} ·{' '}
                   {span.event_count} {span.event_count === 1 ? 'event' : 'events'}
                 </span>
               </li>
