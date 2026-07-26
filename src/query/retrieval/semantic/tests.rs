@@ -1318,10 +1318,12 @@ fn mismatched_complete_generation_bypasses_semantic_authorities() {
         FakeVectorReadPort::new(&request, vec![record(&request, "ignored", vec![1.0, 0.0])]);
     let control = FixedExecutionControl::default();
     let lane = SemanticCodeRetriever::new(&embedder, &vectors, &control);
+    let mut shifted_search_index = request.search_index_key.clone();
+    shifted_search_index.profile_digest = digest('6');
     let generation = CompleteSemanticGenerationV1::new(
         request.projection.projection_key().clone(),
-        request.search_index_key.clone(),
-        VectorGenerationIdV1::new(digest('6')),
+        shifted_search_index,
+        request.vector_generation.clone(),
         request.code_generation.clone(),
         request.capability_manifest_digest.clone(),
     )

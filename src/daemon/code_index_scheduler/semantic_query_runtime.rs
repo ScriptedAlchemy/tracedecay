@@ -1462,6 +1462,18 @@ mod tests {
             &search_index_key(),
             &ranking_revision,
         ));
+        let mut changed_search_index = search_index_key();
+        changed_search_index.profile_digest = digest('e');
+        assert!(!semantic_cursor_matches_activation(
+            Some(&cursor),
+            &original_profile,
+            &digest::<ManifestDigest>('c'),
+            &code_generation,
+            &vector_generation,
+            &projection,
+            &changed_search_index,
+            &ranking_revision,
+        ));
         let fallback = fallback_page(&[2, 3]);
         let identity = Arc::as_ptr(&fallback);
         let outcome = semantic_abstention(
