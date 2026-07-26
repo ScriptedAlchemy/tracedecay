@@ -1,6 +1,8 @@
 //! Stdio MCP proxy: forwards host traffic to the daemon over the broker
 //! transport, tracking initialize-route and tool-catalog metadata.
 
+#[cfg(unix)]
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -19,9 +21,13 @@ use super::{
     version_skew_action,
 };
 use crate::errors::{Result, TraceDecayError};
+#[cfg(not(unix))]
+use crate::mcp::McpTransport;
+#[cfg(unix)]
+use crate::mcp::transport::{McpDuplexTransport, McpTransportReader, McpTransportWriter};
 #[cfg(unix)]
 use crate::mcp::{ErrorCode, JsonRpcResponse};
-use crate::mcp::{JsonRpcRequest, McpTransport, StdioTransport};
+use crate::mcp::{JsonRpcRequest, StdioTransport};
 
 // A cold project open (create/migrate DBs, config runtime, first index) takes
 // ~2.5s release / ~3.3s debug even for a tiny repo, so a 2s grace abandoned
@@ -130,23 +136,116 @@ pub async fn proxy_transport_to_daemon(
     socket_path: &Path,
     handshake: &DaemonHandshake,
     replay_line: Option<String>,
-    transport: &mut impl McpTransport,
+    transport: &mut impl McpDuplexTransport,
+) -> Result<()> {
+    let (mut reader, mut writer) = transport.split();
+    let (input_tx, mut input_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (eof_tx, mut eof_rx) = tokio::sync::watch::channel(false);
+
+    let read_host = async {
+        loop {
+            match reader.read_line().await {
+                Ok(Some(line)) => {
+                    if input_tx.send(line).is_err() {
+                        return Ok(());
+                    }
+                }
+                Ok(None) => {
+                    let _ = eof_tx.send(true);
+                    return Ok(());
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    };
+    let proxy = proxy_host_input_to_daemon(
+        socket_path,
+        handshake,
+        replay_line,
+        &mut input_rx,
+        &mut eof_rx,
+        &mut writer,
+    );
+    tokio::try_join!(read_host, proxy)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn proxy_host_input_to_daemon(
+    socket_path: &Path,
+    handshake: &DaemonHandshake,
+    replay_line: Option<String>,
+    input: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+    eof: &mut tokio::sync::watch::Receiver<bool>,
+    writer: &mut impl McpTransportWriter,
 ) -> Result<()> {
     let mut routed_handshake = handshake.clone();
+    let mut pending = VecDeque::new();
     if let Some(line) = replay_line {
-        reset_proxy_handshake_for_initialize(handshake, &mut routed_handshake, &line);
-        let metadata =
-            proxy_request_line_to_daemon(socket_path, &routed_handshake, &line, transport).await?;
-        apply_proxy_initialize_metadata(&mut routed_handshake, metadata);
+        pending.push_back(line);
     }
 
-    while let Some(line) = transport.read_line().await? {
+    loop {
+        if *eof.borrow() {
+            return Ok(());
+        }
+        let line = match pending.pop_front() {
+            Some(line) => line,
+            None => {
+                tokio::select! {
+                    changed = eof.changed() => {
+                        changed.map_err(|error| TraceDecayError::Config {
+                            message: format!("host EOF monitor closed unexpectedly: {error}"),
+                        })?;
+                        if *eof.borrow() {
+                            return Ok(());
+                        }
+                        continue;
+                    }
+                    line = input.recv() => {
+                        let Some(line) = line else {
+                            return Ok(());
+                        };
+                        line
+                    }
+                }
+            }
+        };
         reset_proxy_handshake_for_initialize(handshake, &mut routed_handshake, &line);
-        let metadata =
-            proxy_request_line_to_daemon(socket_path, &routed_handshake, &line, transport).await?;
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let result = {
+            let daemon_request = send_daemon_request_line_with_project_warming_retry(
+                socket_path,
+                &routed_handshake,
+                &line,
+            );
+            tokio::pin!(daemon_request);
+            loop {
+                tokio::select! {
+                    result = &mut daemon_request => break result,
+                    changed = eof.changed() => {
+                        changed.map_err(|error| TraceDecayError::Config {
+                            message: format!("host EOF monitor closed unexpectedly: {error}"),
+                        })?;
+                        if *eof.borrow() {
+                            return Ok(());
+                        }
+                    }
+                    next = input.recv() => {
+                        let Some(next) = next else {
+                            return Ok(());
+                        };
+                        pending.push_back(next);
+                    }
+                }
+            }
+        };
+        let metadata = write_proxy_request_result(&line, result, writer).await?;
         apply_proxy_initialize_metadata(&mut routed_handshake, metadata);
     }
-    Ok(())
 }
 
 #[cfg(unix)]
@@ -259,37 +358,32 @@ pub(crate) async fn resolve_daemon_initialize_route(
 }
 
 #[cfg(unix)]
-pub(crate) async fn proxy_request_line_to_daemon(
-    socket_path: &Path,
-    handshake: &DaemonHandshake,
+async fn write_proxy_request_result(
     line: &str,
-    transport: &mut impl McpTransport,
+    result: Result<Vec<String>>,
+    writer: &mut impl McpTransportWriter,
 ) -> Result<ProxyInitializeMetadata> {
-    if line.trim().is_empty() {
-        return Ok(ProxyInitializeMetadata::default());
-    }
-
-    match send_daemon_request_line_with_project_warming_retry(socket_path, handshake, line).await {
+    match result {
         Ok(responses) => {
             let metadata = proxy_initialize_metadata(line, &responses);
             if let Some(warning) = daemon_version_skew_warning(line, &responses, binary_version()) {
                 eprintln!("[tracedecay] warning: {warning}");
             }
             for response in responses {
-                transport.write_line(&response).await?;
+                writer.write_line(&response).await?;
                 if !response.ends_with('\n') {
-                    transport.write_line("\n").await?;
+                    writer.write_line("\n").await?;
                 }
             }
-            transport.flush().await?;
+            writer.flush().await?;
             Ok(metadata)
         }
         Err(err) => {
             if let Some(response) = daemon_proxy_error_response(line, &err) {
                 let json_line = serde_json::to_string(&response)?;
-                transport.write_line(&json_line).await?;
-                transport.write_line("\n").await?;
-                transport.flush().await?;
+                writer.write_line(&json_line).await?;
+                writer.write_line("\n").await?;
+                writer.flush().await?;
             } else {
                 log_daemon_event(
                     "daemon_proxy_drop",

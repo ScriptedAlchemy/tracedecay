@@ -1153,6 +1153,52 @@ impl HostAdmissionTestRuntimeV1 {
         .await
     }
 
+    /// Opens one tracked branch through this retained registered runtime.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-transport"))]
+    pub async fn open_project_branch_for_test(
+        &self,
+        project_root: &Path,
+        branch_name: &str,
+        open_options: crate::tracedecay::TraceDecayOpenOptions,
+    ) -> crate::errors::Result<crate::tracedecay::TraceDecay> {
+        let project_id =
+            self.project_id
+                .as_ref()
+                .ok_or_else(|| crate::errors::TraceDecayError::Config {
+                    message: "project branch open requires project-scoped test authority"
+                        .to_owned(),
+                })?;
+        let project_database = self.project_registered.as_ref().cloned().ok_or_else(|| {
+            crate::errors::TraceDecayError::Config {
+                message: "project branch open requires a registered project session".to_owned(),
+            }
+        })?;
+        let store_layout = crate::tracedecay::TraceDecay::resolve_registered_configuration_layout(
+            project_root,
+            &open_options,
+            self.profile_database.as_ref(),
+            true,
+        )
+        .await?;
+        if store_layout.identity.project_id.as_deref() != Some(project_id.as_str()) {
+            return Err(crate::errors::TraceDecayError::Config {
+                message: "project branch identity differs from registered test authority"
+                    .to_owned(),
+            });
+        }
+        crate::tracedecay::TraceDecay::open_branch_with_registered_configuration(
+            project_root,
+            branch_name,
+            open_options,
+            store_layout,
+            project_database,
+            Arc::clone(&self.profile_database),
+            Arc::clone(&self._session_registry),
+        )
+        .await
+    }
+
     /// Reopens an existing project graph read-only through the retained
     /// registered runtime without inferring configuration authority.
     #[doc(hidden)]
