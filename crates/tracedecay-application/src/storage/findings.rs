@@ -31,7 +31,9 @@ use super::inventory::{
     CodeGenerationRetentionRecordV1, OrphanStoreRecordV1, RetentionBacklogRecordV1,
     StaleBranchDbRecordV1,
 };
-use super::telemetry::{StorageTelemetryReadV1, StoreBudgetEvaluationV1, StoreSizeBudgetV1};
+use super::telemetry::{
+    StorageTelemetryReadV1, StoreBudgetEvaluationV1, StoreSizeBudgetV1, TableGrowthDoctorEvidenceV1,
+};
 
 /// Stable slug for a storage finding subclass, embedded in the evidence
 /// reference so a consumer can recover the subclass from a `Storage` finding.
@@ -42,6 +44,7 @@ const fn kind_slug(kind: DoctorStorageFindingKindV1) -> &'static str {
         DoctorStorageFindingKindV1::StaleBranchDbs => "stale_branch_dbs",
         DoctorStorageFindingKindV1::IncidentDebrisPresent => "incident_debris_present",
         DoctorStorageFindingKindV1::RetentionBacklog => "retention_backlog",
+        DoctorStorageFindingKindV1::TableGrowth => "table_growth",
     }
 }
 
@@ -60,6 +63,7 @@ const fn owning_operation(kind: DoctorStorageFindingKindV1) -> &'static str {
         DoctorStorageFindingKindV1::IncidentDebrisPresent => {
             "use-case.application.storage.quarantine-and-collect-debris"
         }
+        DoctorStorageFindingKindV1::TableGrowth => "use-case.application.storage.telemetry.read",
     }
 }
 
@@ -172,6 +176,100 @@ fn clean_finding(
         coverage(completeness, coverage_statement)?,
         None,
     )
+}
+
+/// Wrap one prepared table-growth evidence item in the canonical typed Storage
+/// finding. Significant growth is informational and carries no remediation;
+/// baseline and unavailable reads retain their exact non-healthy evidence state.
+pub fn table_growth_finding(
+    evidence_item: &TableGrowthDoctorEvidenceV1,
+) -> Result<DoctorStorageFindingV1, ApplicationContractError> {
+    let kind = DoctorStorageFindingKindV1::TableGrowth;
+    let (store, state, completeness, detail, statement) = match evidence_item {
+        TableGrowthDoctorEvidenceV1::SignificantGrowth {
+            store,
+            table,
+            previous_bytes,
+            current_bytes,
+            growth_bytes,
+            previous_observed_at,
+            current_observed_at,
+        } => (
+            store,
+            DoctorEvidenceStateV1::HealthyCompleteCoverage,
+            DoctorCoverageCompletenessV1::Complete,
+            format!(
+                "table-{}.previous-{}b.current-{}b.growth-{}b.from-{}us.to-{}us",
+                table.as_str(),
+                previous_bytes.get(),
+                current_bytes.get(),
+                growth_bytes.get(),
+                previous_observed_at.0,
+                current_observed_at.0,
+            ),
+            "table payload growth crossed the informational significance threshold",
+        ),
+        TableGrowthDoctorEvidenceV1::BaselineEstablished {
+            store,
+            observed_at,
+            tables_observed,
+        } => (
+            store,
+            DoctorEvidenceStateV1::Partial,
+            DoctorCoverageCompletenessV1::Partial,
+            format!(
+                "baseline-pending.tables-{tables_observed}.observed-at-{}us",
+                observed_at.0
+            ),
+            "table payload baseline established; growth needs a subsequent observation",
+        ),
+        TableGrowthDoctorEvidenceV1::TableBaselinePending {
+            store,
+            table,
+            current_bytes,
+            observed_at,
+        } => (
+            store,
+            DoctorEvidenceStateV1::Partial,
+            DoctorCoverageCompletenessV1::Partial,
+            format!(
+                "table-{}.baseline-pending.current-{}b.observed-at-{}us",
+                table.as_str(),
+                current_bytes.get(),
+                observed_at.0,
+            ),
+            "table has no previous payload watermark; growth remains baseline-pending",
+        ),
+        TableGrowthDoctorEvidenceV1::Unsupported { store } => (
+            store,
+            DoctorEvidenceStateV1::Unsupported,
+            DoctorCoverageCompletenessV1::Unknown,
+            "unsupported".to_string(),
+            "table payload growth measurement is unsupported",
+        ),
+        TableGrowthDoctorEvidenceV1::Denied { store } => (
+            store,
+            DoctorEvidenceStateV1::Denied,
+            DoctorCoverageCompletenessV1::Unknown,
+            "denied".to_string(),
+            "table payload growth measurement was denied",
+        ),
+        TableGrowthDoctorEvidenceV1::Unknown { store } => (
+            store,
+            DoctorEvidenceStateV1::Unknown,
+            DoctorCoverageCompletenessV1::Unknown,
+            "unknown".to_string(),
+            "table payload growth measurement is unavailable",
+        ),
+    };
+    let finding = DoctorFindingV1::new(
+        DoctorFindingFamilyV1::Storage,
+        state,
+        vec![evidence(kind, store, &detail)?],
+        coverage(completeness, statement)?,
+        None,
+    )?;
+    DoctorStorageFindingV1::new(kind, finding)
 }
 
 /// Produce the `OverBudgetStore` finding from a telemetry read and its budget.
@@ -456,7 +554,7 @@ mod tests {
     use crate::storage::identity::{
         BranchRefV1, RelativeArtifactPathV1, StorageByteSizeV1, TableNameV1,
     };
-    use crate::storage::telemetry::StoreSizeSampleV1;
+    use crate::storage::telemetry::{StoreSizeSampleV1, TableGrowthDoctorEvidenceV1};
     use tracedecay_domain::UtcMicros;
 
     fn store() -> StoreKeyV1 {
@@ -482,6 +580,47 @@ mod tests {
 
     fn only_evidence(finding: &DoctorStorageFindingV1) -> &str {
         finding.finding().evidence()[0].reference().as_str()
+    }
+
+    // --- TableGrowth ---------------------------------------------------------
+
+    #[test]
+    fn significant_table_growth_is_informational_without_remediation() {
+        let finding = table_growth_finding(&TableGrowthDoctorEvidenceV1::SignificantGrowth {
+            store: store(),
+            table: TableNameV1::new("messages").expect("valid"),
+            previous_bytes: StorageByteSizeV1(10 * 1024 * 1024),
+            current_bytes: StorageByteSizeV1(11 * 1024 * 1024),
+            growth_bytes: StorageByteSizeV1(1024 * 1024),
+            previous_observed_at: UtcMicros(1),
+            current_observed_at: UtcMicros(2),
+        })
+        .expect("finding");
+
+        assert_eq!(finding.kind(), DoctorStorageFindingKindV1::TableGrowth);
+        assert!(finding.finding().state().is_healthy_complete());
+        assert!(finding.finding().remediation().is_none());
+        assert!(only_evidence(&finding).contains("table-messages"));
+        assert!(only_evidence(&finding).contains("growth-1048576b"));
+    }
+
+    #[test]
+    fn table_growth_baseline_is_partial_and_unknown_has_no_zero_measurement() {
+        let baseline = table_growth_finding(&TableGrowthDoctorEvidenceV1::BaselineEstablished {
+            store: store(),
+            observed_at: UtcMicros(2),
+            tables_observed: 3,
+        })
+        .expect("baseline finding");
+        assert_eq!(baseline.finding().state(), DoctorEvidenceStateV1::Partial);
+        assert!(only_evidence(&baseline).contains("baseline-pending"));
+
+        let unknown =
+            table_growth_finding(&TableGrowthDoctorEvidenceV1::Unknown { store: store() })
+                .expect("unknown finding");
+        assert_eq!(unknown.finding().state(), DoctorEvidenceStateV1::Unknown);
+        assert!(!only_evidence(&unknown).contains("0b"));
+        assert!(unknown.finding().remediation().is_none());
     }
 
     // --- OverBudgetStore -----------------------------------------------------
