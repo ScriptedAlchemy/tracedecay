@@ -282,10 +282,6 @@ pub(in super::super) async fn ensure_observation_projection_schema(
          CREATE INDEX IF NOT EXISTS idx_observation_projection_provenance_global_output
          ON observation_projection_provenance
             (output_provider, output_message_id, projector_version);
-         CREATE INDEX IF NOT EXISTS idx_observations_identity_receipt
-         ON observations (observation_id, receipt_id);
-         CREATE INDEX IF NOT EXISTS idx_projection_dispositions_observation_receipt
-         ON observation_projection_dispositions (observation_id, receipt_id);
          CREATE INDEX IF NOT EXISTS idx_observation_workflow_facts_query
          ON observation_workflow_facts
             (provider, session_id, semantic_kind, status, observation_sequence);
@@ -310,6 +306,24 @@ pub(in super::super) async fn ensure_observation_projection_schema(
     .await?;
     ensure_v4_projection_binding_triggers(conn).await?;
     backfill_v4_projection_anchor_bindings(conn).await
+}
+
+pub(in super::super) async fn ensure_observation_projection_performance_indexes(
+    conn: &impl Executor,
+) -> Result<(), Error> {
+    // Install each historical-data index as its own durable schema step. These
+    // cannot share the lease-bounded all-schema transaction: an interrupted
+    // later build would otherwise roll back every earlier completed build.
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_observations_identity_receipt
+         ON observations (observation_id, receipt_id);",
+    )
+    .await?;
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_projection_dispositions_observation_receipt
+         ON observation_projection_dispositions (observation_id, receipt_id);",
+    )
+    .await
 }
 
 /// Binds the canonical retrieval anchor onto v4 projection rows that predate the
@@ -1207,5 +1221,41 @@ mod tests {
         let row = rows.next().await.unwrap().unwrap();
         assert_eq!(row.get::<i64>(0).unwrap(), 3);
         assert_eq!(row.get::<String>(1).unwrap(), "building");
+    }
+
+    #[tokio::test]
+    async fn performance_indexes_install_outside_schema_transaction() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("global.db");
+        let conn = open_registered_schema(&path).await.unwrap();
+        conn.execute_batch(
+            "DROP INDEX idx_observations_identity_receipt;
+             DROP INDEX idx_projection_dispositions_observation_receipt;",
+        )
+        .await
+        .unwrap();
+
+        let transaction = conn
+            .transaction_with_behavior(crate::db::engine::TransactionBehavior::Immediate)
+            .await
+            .unwrap();
+        super::ensure_observation_projection_schema(&transaction)
+            .await
+            .unwrap();
+        let mut rows = transaction
+            .query(
+                "SELECT name FROM sqlite_schema
+                 WHERE name IN (
+                    'idx_observations_identity_receipt',
+                    'idx_projection_dispositions_observation_receipt'
+                 )",
+                (),
+            )
+            .await
+            .unwrap();
+        assert!(
+            rows.next().await.unwrap().is_none(),
+            "large performance indexes must not be built inside the lease-bounded schema transaction"
+        );
     }
 }
