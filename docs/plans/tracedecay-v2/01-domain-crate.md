@@ -2,8 +2,15 @@
 
 ## Status / Role
 
-PR5 observation contracts are complete. `tracedecay-domain` is the pure value-and-validation
-boundary used by vertical product PRs. It is not a standalone framework roadmap.
+PR5 **session-observation** contracts are complete. That completion statement
+does not certify the external-source semantic contract below as delivered:
+the retained external-source values have no production capture/authorization
+composition, adapter, or backing migration. They are an intentionally retained
+future seam, neither PR5/PR6 completion nor PR8–PR14 work to implement or
+delete (status corrected 2026-07-26).
+
+`tracedecay-domain` is the pure value-and-validation boundary used by vertical
+product PRs. It is not a standalone framework roadmap.
 Delivery order and global rules live in [the plan index](00-plan-set-index.md)
 and [the V2 overview](README.md).
 
