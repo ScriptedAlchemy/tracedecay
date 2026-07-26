@@ -43,17 +43,20 @@ use tokio::time::{Instant, timeout_at};
 
 use tracedecay::application_surface::{
     ApplicationSurfaceInvocationResult, ApplicationSurfaceOperation,
-    observe_surface_argument_rejection, parse_application_surface_request,
+    normalize_application_tool_args, observe_surface_argument_rejection,
+    parse_application_surface_request, resolve_catalog_tool_binding,
 };
 use tracedecay::daemon::{DaemonHandshake, call_default_tool_within};
 use tracedecay::daemon_client::{DaemonInvocationClient, RequestedOutputFormat};
 use tracedecay::errors::{Result, TraceDecayError};
+use tracedecay::mcp::tools::internal_daemon_tool_definition;
 use tracedecay::mcp::tools::{
-    RESERVED_FLAGS_FOOTER, ToolDefinition, get_tool_definitions, render_tool_cli_help,
-    short_tool_name,
+    LegacyToolCompatibilityOwner, RESERVED_FLAGS_FOOTER, ToolDefinition, get_tool_definitions,
+    render_tool_cli_help, short_tool_name,
 };
 use tracedecay_application::{CancellationSignal, Deadline, RequestId};
 use tracedecay_domain::UtcMicros;
+use tracedecay_tool_catalog::BindingSurface;
 
 use crate::cli::dispatch::resolve_cli_application_surface;
 
@@ -170,7 +173,12 @@ pub(crate) async fn run(
     };
 
     let canonical = canonical_tool_name(&raw_name);
-    let Some(def) = defs.iter().find(|d| d.name == canonical) else {
+    let internal_def = internal_daemon_tool_definition(&canonical);
+    let Some(def) = defs
+        .iter()
+        .find(|definition| definition.name == canonical)
+        .or(internal_def.as_ref())
+    else {
         let suggestion = nearest_tool_name(&canonical, &defs)
             .map(|name| format!(" Did you mean '{name}'?"))
             .unwrap_or_default();
@@ -207,6 +215,11 @@ pub(crate) async fn run(
         .checked_add(tool_command_deadline()?)
         .ok_or_else(tool_deadline_range_error)?;
     if let Some(operation) = ApplicationSurfaceOperation::from_tool_name(&def.name) {
+        let tool_args = normalize_application_tool_args(&def.name, tool_args).map_err(|error| {
+            TraceDecayError::Config {
+                message: error.to_string(),
+            }
+        })?;
         return dispatch_cli_application_surface(
             operation,
             tool_args,
@@ -216,7 +229,27 @@ pub(crate) async fn run(
         )
         .await;
     }
-    dispatch_daemon_tool(
+    // Catalog-declared operations must pass the same binding resolver as the
+    // typed application surfaces before entering the retained compatibility
+    // owner. Operations with no catalog contract remain explicitly owned by
+    // the root MCP handler migration, rather than an unclassified fallback.
+    let _catalog_binding =
+        resolve_catalog_tool_binding(BindingSurface::Cli, &def.name).map_err(|error| {
+            TraceDecayError::Config {
+                message: error.to_string(),
+            }
+        })?;
+    if !LegacyToolCompatibilityOwner::admits(&def.name) {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "{} does not own {}: {}",
+                LegacyToolCompatibilityOwner::OWNER,
+                def.name,
+                LegacyToolCompatibilityOwner::REASON
+            ),
+        });
+    }
+    dispatch_compatibility_tool(
         DaemonToolDispatch::for_tool(explicit_project, &def.name, &tool_args),
         &def.name,
         tool_args,
@@ -404,7 +437,12 @@ fn map_tool_deadline_error(tool_name: &str, error: TraceDecayError) -> TraceDeca
     }
 }
 
-async fn dispatch_daemon_tool(
+/// Compatibility owner for advertised tools that do not yet have a typed
+/// `ApplicationSurfaceRequest`.
+///
+/// Owner: root MCP tool-dispatch migration. The operation has already passed
+/// definition admission and, when declared, catalog binding resolution.
+async fn dispatch_compatibility_tool(
     dispatch: DaemonToolDispatch,
     tool_name: &str,
     tool_args: Value,

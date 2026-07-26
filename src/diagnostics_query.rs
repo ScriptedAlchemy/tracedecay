@@ -65,7 +65,7 @@ pub enum DiagnosticQueryCoverage {
 pub struct DiagnosticQueryCursor(String);
 
 impl DiagnosticQueryCursor {
-    fn after_anchor(anchor: &RetrievalAnchorId) -> Self {
+    pub(crate) fn after_anchor(anchor: &RetrievalAnchorId) -> Self {
         Self(format!("{CURSOR_PREFIX}{}", anchor.as_str()))
     }
 
@@ -84,7 +84,7 @@ impl DiagnosticQueryCursor {
         Ok(Self(encoded.to_owned()))
     }
 
-    fn anchor(&self) -> &str {
+    pub(crate) fn anchor(&self) -> &str {
         &self.0[CURSOR_PREFIX.len()..]
     }
 }
@@ -107,6 +107,7 @@ impl DiagnosticPageRequest {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DiagnosticPage {
     pub records: Vec<GenerationDiagnosticV1>,
+    pub total: usize,
     pub coverage: DiagnosticQueryCoverage,
     pub next_cursor: Option<DiagnosticQueryCursor>,
 }
@@ -115,6 +116,7 @@ impl DiagnosticPage {
     fn unavailable(operation: &'static str, error: impl fmt::Display) -> Self {
         Self {
             records: Vec::new(),
+            total: 0,
             coverage: DiagnosticQueryCoverage::StoreUnavailable {
                 operation,
                 reason: error.to_string(),
@@ -128,6 +130,13 @@ impl DiagnosticPage {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DiagnosticAnchorLookup {
     pub record: Option<GenerationDiagnosticV1>,
+    pub coverage: DiagnosticQueryCoverage,
+}
+
+/// Exact clean generation currently eligible for active diagnostic reads.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CurrentDiagnosticGeneration {
+    pub generation: Option<CodeGenerationId>,
     pub coverage: DiagnosticQueryCoverage,
 }
 
@@ -294,6 +303,26 @@ impl<'a> DiagnosticsQuery<'a> {
         }
     }
 
+    /// Reads the clean-generation publication pointer. A completed empty
+    /// publication returns `Some(generation)` even when it contains no
+    /// findings; no pointer is distinct from a clean result.
+    pub async fn current_generation(&self) -> CurrentDiagnosticGeneration {
+        let operation = "diagnostics query current_generation";
+        match self.store.current_generation().await {
+            Ok(generation) => CurrentDiagnosticGeneration {
+                generation,
+                coverage: DiagnosticQueryCoverage::Complete,
+            },
+            Err(error) => CurrentDiagnosticGeneration {
+                generation: None,
+                coverage: DiagnosticQueryCoverage::StoreUnavailable {
+                    operation,
+                    reason: error.to_string(),
+                },
+            },
+        }
+    }
+
     /// Current records bound to `generation`, paged in ascending anchor
     /// order.
     pub async fn current_by_generation(
@@ -418,6 +447,7 @@ impl<'a> DiagnosticsQuery<'a> {
             Ok(None) => {
                 return Ok(DiagnosticPage {
                     records: Vec::new(),
+                    total: 0,
                     coverage: DiagnosticQueryCoverage::Complete,
                     next_cursor: None,
                 });
@@ -765,10 +795,12 @@ fn paginate_sorted(
     records: Vec<GenerationDiagnosticV1>,
     request: &DiagnosticPageRequest,
 ) -> DiagnosticPage {
+    let total = records.len();
     let (records, coverage, next_cursor) =
         paginate_items(records, |record| record.diagnostic_anchor.as_str(), request);
     DiagnosticPage {
         records,
+        total,
         coverage,
         next_cursor,
     }
@@ -804,6 +836,7 @@ fn paginate_chain(
     };
     Ok(DiagnosticPage {
         records: page,
+        total: chain.len(),
         coverage,
         next_cursor,
     })
@@ -960,6 +993,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(anchors(&first), vec!["anchor.diagnostic.3"]);
+        assert_eq!(first.total, 2);
         assert_eq!(first.coverage, DiagnosticQueryCoverage::Truncated);
         let cursor = first.next_cursor.clone().expect("truncated page resumes");
 
@@ -968,6 +1002,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(anchors(&second), vec!["anchor.diagnostic.4"]);
+        assert_eq!(second.total, 2);
         assert_eq!(second.coverage, DiagnosticQueryCoverage::Complete);
         assert!(second.next_cursor.is_none());
 
@@ -996,6 +1031,30 @@ mod tests {
             vec!["anchor.diagnostic.3", "anchor.diagnostic.4"]
         );
         assert_eq!(full.coverage, DiagnosticQueryCoverage::Complete);
+    }
+
+    #[tokio::test]
+    async fn current_generation_distinguishes_clean_empty_from_unavailable() {
+        let temp = tempfile::tempdir().unwrap();
+        let conn = open_store(&temp.path().join("diagnostics.db")).await;
+        DiagnosticsStore::new_runtime(&conn)
+            .publish_clean_generation(&id(GEN1), &[])
+            .await
+            .expect("publish clean empty generation");
+        let query = DiagnosticsQuery::new(&conn);
+        let current = query.current_generation().await;
+        assert_eq!(current.generation, Some(id(GEN1)));
+        assert_eq!(current.coverage, DiagnosticQueryCoverage::Complete);
+
+        conn.execute_batch("DROP TABLE diagnostic_generation_publications;")
+            .await
+            .expect("drop current-generation authority");
+        let unavailable = query.current_generation().await;
+        assert!(unavailable.generation.is_none());
+        assert!(matches!(
+            unavailable.coverage,
+            DiagnosticQueryCoverage::StoreUnavailable { .. }
+        ));
     }
 
     #[tokio::test]

@@ -277,6 +277,8 @@ pub(crate) async fn mcp_runtime_events(
             session_id: Some(session_id.to_string()),
             event_kind: Some("mcp_tool_call".to_string()),
             since: None,
+            until: None,
+            before_id: None,
             limit: 100,
         })
         .await

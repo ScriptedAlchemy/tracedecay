@@ -118,20 +118,27 @@ impl ShardRuntimePublisher for LifecycleShardRuntimePublisher {
         request: ShardRuntimeBuildRequest,
     ) -> StoreRuntimeRegistryFuture<'_, Result<PublishedShardRuntime, StoreRuntimeRegistryFailure>>
     {
-        Box::pin(publish_lifecycle_runtime(request))
+        Box::pin(async move {
+            let admission = AdmissionConfigV1::default();
+            let pinned_profile =
+                matches!(request.binding.shard_id.scope, StoreShardScopeV1::Profile);
+            let runtime = Arc::new(ShardRuntime::new(request.binding.clone(), pinned_profile));
+            runtime
+                .transition(RuntimeMaintenanceStateV1::Opening)
+                .map_err(runtime_lifecycle_failure)?;
+            let mut attachment =
+                LifecycleShardRuntimeAttachment::new(RepositoryPhysicalAttachmentFactory);
+            let physical = attachment.attach(&request, admission)?;
+            publish_lifecycle_runtime(request, runtime, physical).await
+        })
     }
 }
 
 async fn publish_lifecycle_runtime(
     request: ShardRuntimeBuildRequest,
+    runtime: Arc<ShardRuntime>,
+    attachment: LifecyclePhysicalAttachment,
 ) -> Result<PublishedShardRuntime, StoreRuntimeRegistryFailure> {
-    let admission = AdmissionConfigV1::default();
-    let pinned_profile = matches!(request.binding.shard_id.scope, StoreShardScopeV1::Profile);
-    let runtime = Arc::new(ShardRuntime::new(request.binding.clone(), pinned_profile));
-    runtime
-        .transition(RuntimeMaintenanceStateV1::Opening)
-        .map_err(runtime_lifecycle_failure)?;
-    let attachment = LifecyclePhysicalAttachment::open(&request, admission)?;
     let migrated = if request.mode == StoreRuntimeOpenMode::Initialize {
         match migrate_before_publication(&request, attachment.as_physical()).await {
             Ok(migrated) => migrated,
@@ -168,11 +175,20 @@ enum LifecyclePhysicalAttachment {
     Repository(RepositoryRuntimePhysicalAttachment),
 }
 
-impl LifecyclePhysicalAttachment {
-    fn open(
+struct LifecycleShardRuntimeAttachment {
+    repository: RepositoryPhysicalAttachmentFactory,
+}
+
+impl LifecycleShardRuntimeAttachment {
+    const fn new(repository: RepositoryPhysicalAttachmentFactory) -> Self {
+        Self { repository }
+    }
+
+    fn attach(
+        &mut self,
         request: &ShardRuntimeBuildRequest,
         admission: AdmissionConfigV1,
-    ) -> Result<Self, StoreRuntimeRegistryFailure> {
+    ) -> Result<LifecyclePhysicalAttachment, StoreRuntimeRegistryFailure> {
         if request.locator.is_prospective() && request.mode != StoreRuntimeOpenMode::Initialize {
             return Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
                 operation: "open prospective SQLite runtime",
@@ -208,18 +224,17 @@ impl LifecyclePhysicalAttachment {
                 operation: "attach rusqlite graph runtime",
                 message: error.to_string(),
             })?;
-            Ok(Self::Graph(attachment))
+            Ok(LifecyclePhysicalAttachment::Graph(attachment))
         } else {
-            let factory = RepositoryPhysicalAttachmentFactory;
             let attachment = if request.locator.is_prospective() {
-                factory.initialize(
+                self.repository.initialize(
                     request.binding.clone(),
                     request.locator.verified().clone(),
                     request.locator.path().to_path_buf(),
                     admission,
                 )
             } else {
-                factory.attach(
+                self.repository.attach(
                     request.binding.clone(),
                     request.locator.verified().clone(),
                     request.locator.path().to_path_buf(),
@@ -230,10 +245,12 @@ impl LifecyclePhysicalAttachment {
                 operation: "attach rusqlite repository runtime",
                 message: error.to_string(),
             })?;
-            Ok(Self::Repository(attachment))
+            Ok(LifecyclePhysicalAttachment::Repository(attachment))
         }
     }
+}
 
+impl LifecyclePhysicalAttachment {
     fn as_physical(&self) -> &dyn PhysicalRuntimeAttachment {
         match self {
             Self::Graph(attachment) => attachment,
@@ -433,6 +450,14 @@ impl PhysicalRuntimeAttachment for GraphRuntimePhysicalAttachment {
         )
     }
 
+    fn storage_table_bytes(&self, reader_wait: Duration) -> Result<Vec<(String, u64)>, String> {
+        retained_storage_table_bytes(
+            GraphRuntimePhysicalAttachment::migration_sql_handle(self)
+                .map_err(|error| error.to_string())?,
+            reader_wait,
+        )
+    }
+
     fn run_bounded_incremental_compaction(
         &self,
         max_pages: u32,
@@ -560,6 +585,14 @@ impl PhysicalRuntimeAttachment for RepositoryRuntimePhysicalAttachment {
         )
     }
 
+    fn storage_table_bytes(&self, reader_wait: Duration) -> Result<Vec<(String, u64)>, String> {
+        retained_storage_table_bytes(
+            RepositoryRuntimePhysicalAttachment::migration_sql_handle(self)
+                .map_err(|error| error.to_string())?,
+            reader_wait,
+        )
+    }
+
     fn run_bounded_incremental_compaction(
         &self,
         max_pages: u32,
@@ -657,6 +690,20 @@ fn retained_storage_page_counts(
         sample.page_count,
         sample.freelist_pages,
     ))
+}
+
+fn retained_storage_table_bytes(
+    handle: tracedecay_rusqlite_runtime::migration_sql::MigrationSqlHandle,
+    reader_wait: Duration,
+) -> Result<Vec<(String, u64)>, String> {
+    let samples = handle
+        .read_only_clone()
+        .table_size_telemetry(reader_wait, || None)
+        .map_err(|error| error.to_string())?;
+    Ok(samples
+        .into_iter()
+        .map(|sample| (sample.table_name, sample.bytes))
+        .collect())
 }
 
 #[derive(Clone, Debug)]

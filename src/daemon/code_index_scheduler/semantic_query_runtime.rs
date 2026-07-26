@@ -5,7 +5,7 @@
 //! independently activated PASS profile carrying exact calibration and vector
 //! compatibility pins.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -44,6 +44,7 @@ use crate::semantic_code::rerank_adapter::ProductionCodeRerankAuthorityV1;
 #[derive(Clone)]
 pub(in crate::daemon) struct SemanticQueryAuthorityV1 {
     activation: SemanticCurrentLinkedActivationV1,
+    profile_digest: tracedecay_domain::ManifestDigest,
     profile: FusionProfile,
     diversity: DiversityPolicy,
     rerank_policy: Option<RerankPolicy>,
@@ -80,6 +81,7 @@ impl SemanticQueryAuthorityV1 {
         ]);
         let rerank_policy = accepted.rerank().cloned();
         let rerank_pins = accepted.compatibility().rerank.clone();
+        let profile_digest = accepted.profile_digest().clone();
         if activation.receipt.activated_generation != pins.vector_generation_id
             || pins.calibration.projection_key != *pins.projection.projection_key()
             || pins.calibration.vector_generation != pins.vector_generation_id
@@ -112,6 +114,7 @@ impl SemanticQueryAuthorityV1 {
         });
         Ok(Self {
             activation,
+            profile_digest,
             profile,
             diversity,
             rerank_policy,
@@ -171,8 +174,30 @@ impl SemanticAugmentationOutcomeV1 {
 pub(in crate::daemon) enum Pr9SemanticSearchExecutionErrorV1 {
     #[error(transparent)]
     Pr9(#[from] Pr9SearchExecutionErrorV1),
+    #[error(
+        "strict semantic retrieval is unavailable for code generation {generation}: {abstention:?}"
+    )]
+    StrictSemanticUnavailable {
+        generation: tracedecay_domain::CodeGenerationId,
+        abstention: SemanticAbstentionV1,
+    },
     #[error(transparent)]
     Semantic(#[from] SemanticQueryServiceError),
+}
+
+fn bind_semantic_execution_error(
+    generation: &tracedecay_domain::CodeGenerationId,
+    error: SemanticQueryServiceError,
+) -> Pr9SemanticSearchExecutionErrorV1 {
+    match error {
+        SemanticQueryServiceError::StrictUnavailable(abstention) => {
+            Pr9SemanticSearchExecutionErrorV1::StrictSemanticUnavailable {
+                generation: generation.clone(),
+                abstention,
+            }
+        }
+        error => Pr9SemanticSearchExecutionErrorV1::Semantic(error),
+    }
 }
 
 pub(crate) const fn semantic_abstention_reason(abstention: &SemanticAbstentionV1) -> &'static str {
@@ -316,7 +341,8 @@ impl CodeIndexSchedulerRegistryV1 {
                 mode,
                 SemanticAbstentionV1::IndexStale,
                 Arc::clone(&pr9.authorized.fallback),
-            )?;
+            )
+            .map_err(|error| bind_semantic_execution_error(&pr9.generation, error))?;
             return Ok(ExecutedPr9SemanticSearchV1 { pr9, semantic });
         };
         let semantic = self
@@ -330,7 +356,8 @@ impl CodeIndexSchedulerRegistryV1 {
                 control,
                 mode,
             )
-            .await?;
+            .await
+            .map_err(|error| bind_semantic_execution_error(&pr9.generation, error))?;
         Ok(ExecutedPr9SemanticSearchV1 { pr9, semantic })
     }
 
@@ -363,6 +390,7 @@ impl CodeIndexSchedulerRegistryV1 {
         if !semantic_cursor_matches_activation(
             authorized_pr9.request_cursor.as_ref(),
             &authority.profile.profile_id,
+            &authority.profile_digest,
             &code_generation.manifest().generation_id,
             &pins.vector_generation_id,
             pins.projection.projection_key(),
@@ -436,14 +464,24 @@ impl CodeIndexSchedulerRegistryV1 {
                         );
                     }
                 };
-                let rerank = execute_rerank_after_fusion(
-                    authority.as_ref(),
-                    code_generation,
-                    base,
-                    query_view,
-                    control,
-                    &mut composition,
-                )?;
+                let rerank = match authorized_pr9
+                    .request_cursor
+                    .as_ref()
+                    .and_then(|cursor| cursor.semantic.as_ref())
+                {
+                    Some(continuation) => {
+                        restore_frozen_semantic_order(continuation, &mut composition)?;
+                        continuation.rerank.clone()
+                    }
+                    None => execute_rerank_after_fusion(
+                        authority.as_ref(),
+                        code_generation,
+                        base,
+                        query_view,
+                        control,
+                        &mut composition,
+                    )?,
+                };
                 let Some(pr9_authority) = self.pr9_query_authority_for_scope(scope).await else {
                     return Err(SemanticQueryServiceError::InvalidCursor);
                 };
@@ -452,11 +490,13 @@ impl CodeIndexSchedulerRegistryV1 {
                     base,
                     query_view,
                     authorized_pr9,
+                    &authority.profile_digest,
                     &code_generation.manifest().generation_id,
                     &pins.vector_generation_id,
                     pins.projection.projection_key(),
                     &pins.fusion_revision,
                     &authority.profile.retrieval_budget,
+                    &rerank,
                     &mut composition,
                 )?;
                 Ok(SemanticAugmentationOutcomeV1::Augmented {
@@ -475,6 +515,7 @@ impl CodeIndexSchedulerRegistryV1 {
 fn semantic_cursor_matches_activation(
     cursor: Option<&tracedecay_domain::RetrievalCursor>,
     profile_id: &tracedecay_domain::FusionProfileId,
+    profile_digest: &tracedecay_domain::ManifestDigest,
     code_generation: &tracedecay_domain::CodeGenerationId,
     vector_generation: &tracedecay_domain::VectorGenerationIdV1,
     projection_key: &tracedecay_domain::ProjectionKeyV1,
@@ -487,10 +528,42 @@ fn semantic_cursor_matches_activation(
         return cursor.next_ordinal == 0;
     };
     semantic.profile_id == *profile_id
+        && semantic.profile_digest == *profile_digest
         && semantic.code_generation == *code_generation
         && semantic.vector_generation == *vector_generation
         && semantic.projection_key == *projection_key
         && semantic.ranking_revision.as_str() == semantic_ranking_revision.as_str()
+}
+
+fn restore_frozen_semantic_order(
+    continuation: &SemanticRetrievalContinuationV1,
+    composition: &mut CompositionOutputV1,
+) -> Result<(), SemanticQueryServiceError> {
+    let mut by_anchor = composition
+        .ranked_candidates
+        .drain(..)
+        .map(|candidate| (candidate.candidate.anchor_id.clone(), candidate))
+        .collect::<BTreeMap<_, _>>();
+    if by_anchor.len() != continuation.ordered_candidate_anchors.len() {
+        return Err(SemanticQueryServiceError::InvalidCursor);
+    }
+    let mut ordered = Vec::with_capacity(by_anchor.len());
+    for anchor in &continuation.ordered_candidate_anchors {
+        ordered.push(
+            by_anchor
+                .remove(anchor)
+                .ok_or(SemanticQueryServiceError::InvalidCursor)?,
+        );
+    }
+    if !by_anchor.is_empty() {
+        return Err(SemanticQueryServiceError::InvalidCursor);
+    }
+    for (ordinal, candidate) in ordered.iter_mut().enumerate() {
+        candidate.final_ordinal =
+            u32::try_from(ordinal).map_err(|_| SemanticQueryServiceError::InvalidCursor)?;
+    }
+    composition.ranked_candidates = ordered;
+    Ok(())
 }
 
 struct SemanticRerankControlV1<'a, C: ?Sized>(&'a C);
@@ -569,11 +642,13 @@ fn paginate_semantic_composition(
     request: &RetrievalRequest,
     query_view: &EphemeralSanitizedQueryViewV1,
     authorized_pr9: &AuthorizedPr9FallbackV1,
+    profile_digest: &tracedecay_domain::ManifestDigest,
     code_generation: &tracedecay_domain::CodeGenerationId,
     vector_generation: &tracedecay_domain::VectorGenerationIdV1,
     projection_key: &tracedecay_domain::ProjectionKeyV1,
     semantic_ranking_revision: &tracedecay_domain::ComponentRevision,
     semantic_budget: &tracedecay_domain::RetrievalBudget,
+    rerank: &OptionalStagePublicStatus,
     composition: &mut CompositionOutputV1,
 ) -> Result<Option<tracedecay_domain::RetrievalCursor>, SemanticQueryServiceError> {
     let candidate_set_digest = digest_candidate_set(&composition.ranked_candidates)
@@ -593,6 +668,7 @@ fn paginate_semantic_composition(
     let semantic_start = match supplied_semantic {
         Some(cursor)
             if cursor.profile_id == composition.profile_id
+                && cursor.profile_digest == *profile_digest
                 && cursor.code_generation == *code_generation
                 && cursor.vector_generation == *vector_generation
                 && cursor.projection_key == *projection_key
@@ -611,6 +687,7 @@ fn paginate_semantic_composition(
     }
     let semantic_page_size = usize::try_from(semantic_budget.max_hydrated_results)
         .map_err(|_| SemanticQueryServiceError::InvalidCursor)?;
+    let semantic_page_size = semantic_page_size.min(authorized_pr9.page_size);
     if semantic_page_size == 0 {
         return Err(SemanticQueryServiceError::InvalidCursor);
     }
@@ -639,6 +716,7 @@ fn paginate_semantic_composition(
                 &mut cursor,
                 SemanticRetrievalContinuationV1 {
                     profile_id: composition.profile_id.clone(),
+                    profile_digest: profile_digest.clone(),
                     code_generation: code_generation.clone(),
                     vector_generation: vector_generation.clone(),
                     projection_key: projection_key.clone(),
@@ -646,6 +724,12 @@ fn paginate_semantic_composition(
                     public_lane_statuses: composition.public_lane_statuses.clone(),
                     lane_checkpoints: composition.lane_checkpoints.clone(),
                     ranking_revision,
+                    rerank: rerank.clone(),
+                    ordered_candidate_anchors: composition
+                        .ranked_candidates
+                        .iter()
+                        .map(|candidate| candidate.candidate.anchor_id.clone())
+                        .collect(),
                     next_ordinal: u32::try_from(semantic_end)
                         .map_err(|_| SemanticQueryServiceError::InvalidCursor)?,
                 },
@@ -944,11 +1028,13 @@ mod tests {
                 &request,
                 &query_view,
                 &authorized,
+                &digest::<ManifestDigest>('c'),
                 &code_generation,
                 &vector_generation,
                 &projection,
                 &ranking_revision,
                 &semantic_budget(2),
+                &OptionalStagePublicStatus::NotRequested,
                 &mut semantic_composition,
             )
             .expect("authenticated semantic page");
@@ -970,6 +1056,188 @@ mod tests {
         }
 
         assert_eq!(seen, vec![0, 1, 2, 3, 4, 5]);
+    }
+
+    #[test]
+    fn requested_limit_caps_the_active_profile_hydration_page() {
+        let request = request();
+        let query_view = EphemeralSanitizedQueryViewV1::sanitize(
+            "pagination",
+            id::<SanitizerRevision>("sanitizer.pagination.v1"),
+            id::<QueryNormalizationRevision>("normalization.pagination.v1"),
+        )
+        .expect("query view");
+        let authority = pr9_authority(&request);
+        let mut semantic_composition = composition(
+            id("profile.semantic.pagination.v1"),
+            &[
+                RetrieverKind::ExactLiteral,
+                RetrieverKind::Lexical,
+                RetrieverKind::Graph,
+                RetrieverKind::Semantic,
+            ],
+        );
+        let authorized = AuthorizedPr9FallbackV1 {
+            query_digest: authority
+                .authenticate_query(&request, &query_view)
+                .expect("query digest"),
+            fallback: fallback(),
+            composition: composition(pr9_profile().profile_id, &RetrieverKind::PR9_FALLBACK_LANES),
+            pr9_lanes: Vec::new(),
+            page_size: 1,
+            request_cursor: None,
+        };
+
+        let cursor = paginate_semantic_composition(
+            &authority,
+            &request,
+            &query_view,
+            &authorized,
+            &digest::<ManifestDigest>('c'),
+            &id::<CodeGenerationId>("code-generation.pagination.v1"),
+            &VectorGenerationIdV1::new(digest::<ManifestDigest>('a')),
+            &ProjectionKeyV1 {
+                kind: ProjectionKindV1::Embedding,
+                schema_revision: "projection.pagination.v1".to_owned(),
+                profile_digest: digest('b'),
+            },
+            &id::<ComponentRevision>("ranking.semantic.pagination.v1"),
+            &semantic_budget(2),
+            &OptionalStagePublicStatus::NotRequested,
+            &mut semantic_composition,
+        )
+        .expect("bounded semantic page")
+        .expect("continuation");
+
+        assert_eq!(semantic_composition.ranked_candidates.len(), 1);
+        assert_eq!(cursor.next_ordinal, 1);
+        assert_eq!(cursor.semantic.expect("semantic cursor").next_ordinal, 1);
+    }
+
+    #[test]
+    fn frozen_rerank_order_is_restored_without_reexecuting_the_optional_stage() {
+        let request = request();
+        let query_view = EphemeralSanitizedQueryViewV1::sanitize(
+            "pagination",
+            id::<SanitizerRevision>("sanitizer.pagination.v1"),
+            id::<QueryNormalizationRevision>("normalization.pagination.v1"),
+        )
+        .expect("query view");
+        let authority = pr9_authority(&request);
+        let pr9_composition =
+            composition(pr9_profile().profile_id, &RetrieverKind::PR9_FALLBACK_LANES);
+        let profile_digest = digest::<ManifestDigest>('c');
+        let code_generation = id::<CodeGenerationId>("code-generation.pagination.v1");
+        let vector_generation = VectorGenerationIdV1::new(digest::<ManifestDigest>('a'));
+        let projection = ProjectionKeyV1 {
+            kind: ProjectionKindV1::Embedding,
+            schema_revision: "projection.pagination.v1".to_owned(),
+            profile_digest: digest('b'),
+        };
+        let ranking_revision = id::<ComponentRevision>("ranking.semantic.pagination.v1");
+        let mut first = composition(
+            id("profile.semantic.pagination.v1"),
+            &[
+                RetrieverKind::ExactLiteral,
+                RetrieverKind::Lexical,
+                RetrieverKind::Graph,
+                RetrieverKind::Semantic,
+            ],
+        );
+        first.ranked_candidates.reverse();
+        for (ordinal, candidate) in first.ranked_candidates.iter_mut().enumerate() {
+            candidate.final_ordinal = ordinal as u32;
+        }
+        let authorized = AuthorizedPr9FallbackV1 {
+            query_digest: authority
+                .authenticate_query(&request, &query_view)
+                .expect("query digest"),
+            fallback: fallback(),
+            composition: pr9_composition.clone(),
+            pr9_lanes: Vec::new(),
+            page_size: 2,
+            request_cursor: None,
+        };
+        let cursor = paginate_semantic_composition(
+            &authority,
+            &request,
+            &query_view,
+            &authorized,
+            &profile_digest,
+            &code_generation,
+            &vector_generation,
+            &projection,
+            &ranking_revision,
+            &semantic_budget(2),
+            &OptionalStagePublicStatus::Complete,
+            &mut first,
+        )
+        .expect("first reranked page")
+        .expect("continuation");
+        let continuation = cursor.semantic.as_ref().expect("semantic continuation");
+        let continuation_rerank = continuation.rerank.clone();
+
+        let mut resumed = composition(
+            id("profile.semantic.pagination.v1"),
+            &[
+                RetrieverKind::ExactLiteral,
+                RetrieverKind::Lexical,
+                RetrieverKind::Graph,
+                RetrieverKind::Semantic,
+            ],
+        );
+        restore_frozen_semantic_order(continuation, &mut resumed)
+            .expect("authenticated order restores");
+        assert_eq!(
+            resumed
+                .ranked_candidates
+                .iter()
+                .map(|candidate| candidate.candidate.anchor_id.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "anchor.pagination.5",
+                "anchor.pagination.4",
+                "anchor.pagination.3",
+                "anchor.pagination.2",
+                "anchor.pagination.1",
+                "anchor.pagination.0",
+            ]
+        );
+        let authorized = AuthorizedPr9FallbackV1 {
+            query_digest: authority
+                .authenticate_query(&request, &query_view)
+                .expect("query digest"),
+            fallback: fallback(),
+            composition: pr9_composition,
+            pr9_lanes: Vec::new(),
+            page_size: 2,
+            request_cursor: Some(cursor),
+        };
+        let next = paginate_semantic_composition(
+            &authority,
+            &request,
+            &query_view,
+            &authorized,
+            &profile_digest,
+            &code_generation,
+            &vector_generation,
+            &projection,
+            &ranking_revision,
+            &semantic_budget(2),
+            &continuation_rerank,
+            &mut resumed,
+        )
+        .expect("second frozen page");
+
+        assert!(next.is_some());
+        assert_eq!(
+            resumed
+                .ranked_candidates
+                .iter()
+                .map(|candidate| candidate.candidate.anchor_id.as_str())
+                .collect::<Vec<_>>(),
+            ["anchor.pagination.3", "anchor.pagination.2"]
+        );
     }
 
     #[test]
@@ -1010,6 +1278,7 @@ mod tests {
             &request,
             &query_view,
             &authorized,
+            &digest::<ManifestDigest>('c'),
             &id::<CodeGenerationId>("code-generation.pagination.v1"),
             &VectorGenerationIdV1::new(digest::<ManifestDigest>('a')),
             &ProjectionKeyV1 {
@@ -1019,6 +1288,7 @@ mod tests {
             },
             &id::<ComponentRevision>("ranking.semantic.pagination.v1"),
             &semantic_budget(2),
+            &OptionalStagePublicStatus::NotRequested,
             &mut semantic_composition,
         )
         .expect("terminal semantic page");
@@ -1066,6 +1336,7 @@ mod tests {
         assert!(!semantic_cursor_matches_activation(
             Some(&legacy_cursor),
             &semantic_profile,
+            &digest::<ManifestDigest>('c'),
             &code_generation,
             &vector_generation,
             &projection,
@@ -1151,11 +1422,13 @@ mod tests {
             &request,
             &query_view,
             &authorized,
+            &digest::<ManifestDigest>('c'),
             &code_generation,
             &vector_generation,
             &projection,
             &ranking_revision,
             &semantic_budget(2),
+            &OptionalStagePublicStatus::NotRequested,
             &mut semantic_composition,
         )
         .expect("first semantic page")
@@ -1164,6 +1437,16 @@ mod tests {
         assert!(semantic_cursor_matches_activation(
             Some(&cursor),
             &original_profile,
+            &digest::<ManifestDigest>('c'),
+            &code_generation,
+            &vector_generation,
+            &projection,
+            &ranking_revision,
+        ));
+        assert!(!semantic_cursor_matches_activation(
+            Some(&cursor),
+            &original_profile,
+            &digest::<ManifestDigest>('d'),
             &code_generation,
             &vector_generation,
             &projection,
@@ -1172,6 +1455,7 @@ mod tests {
         assert!(!semantic_cursor_matches_activation(
             Some(&cursor),
             &changed_profile,
+            &digest::<ManifestDigest>('c'),
             &code_generation,
             &vector_generation,
             &projection,
@@ -1237,6 +1521,25 @@ mod tests {
             Err(SemanticQueryServiceError::StrictUnavailable(
                 SemanticAbstentionV1::CalibrationUnavailable
             ))
+        ));
+    }
+
+    #[test]
+    fn strict_semantic_execution_error_preserves_the_pr9_generation() {
+        let generation = id::<CodeGenerationId>("code-generation.strict-semantic-selected.v1");
+        let error = bind_semantic_execution_error(
+            &generation,
+            SemanticQueryServiceError::StrictUnavailable(
+                SemanticAbstentionV1::CalibrationUnavailable,
+            ),
+        );
+
+        assert!(matches!(
+            error,
+            Pr9SemanticSearchExecutionErrorV1::StrictSemanticUnavailable {
+                generation: selected,
+                abstention: SemanticAbstentionV1::CalibrationUnavailable,
+            } if selected == generation
         ));
     }
 

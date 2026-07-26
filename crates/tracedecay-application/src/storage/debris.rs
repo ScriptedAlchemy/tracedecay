@@ -1,7 +1,7 @@
 //! Incident-debris ownership (Plan 38 §5).
 //!
-//! Recovery and corruption artifacts (`*.corrupt-*`, `*.recovered*`,
-//! `recovery-*`) accumulate as loose siblings of live stores with no owner
+//! Recovery and corruption artifacts (`*.corrupt-*`, `*.corrupt`,
+//! `*.recovered*`, `recovery-*`) accumulate as loose siblings of live stores with no owner
 //! surface. This module gives them a typed classifier, a single quarantine
 //! location contract with metadata, and a scan read model that a Doctor producer
 //! turns into an `IncidentDebrisPresent` finding. It performs no filesystem
@@ -21,7 +21,8 @@ use super::identity::{
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum IncidentDebrisKindV1 {
-    /// A `*.corrupt-*` sibling: a store copied aside after corruption detection.
+    /// A `*.corrupt-*` or `*.corrupt` sibling: a store copied aside after
+    /// corruption detection.
     Corrupt,
     /// A `*.recovered*` sibling: the output of a recovery pass.
     Recovered,
@@ -35,8 +36,8 @@ impl IncidentDebrisKindV1 {
     ///
     /// Matching is deliberately narrow so a live store (`sessions.db`,
     /// `sessions.db-wal`, `sessions.db-shm`) is never misclassified as debris.
-    /// The patterns mirror the measured evidence: `*.corrupt-*`, `*.recovered*`,
-    /// and `recovery-*`.
+    /// The patterns mirror the measured evidence: `*.corrupt-*`, `*.corrupt`,
+    /// `*.recovered*`, and `recovery-*`.
     #[must_use]
     pub fn classify(file_name: &str) -> Option<Self> {
         // `recovery-*` scratch: prefix match, but not the bare word.
@@ -44,7 +45,10 @@ impl IncidentDebrisKindV1 {
             return Some(Self::RecoveryScratch);
         }
         // `*.corrupt-<suffix>`: a `.corrupt-` segment somewhere in the name.
-        if file_name.contains(".corrupt-") {
+        // The bare `*.corrupt` suffix is the same artifact from an older
+        // quarantine naming convention; profiles upgraded across that change
+        // still carry it, and no live store name ends in `.corrupt`.
+        if file_name.contains(".corrupt-") || file_name.ends_with(".corrupt") {
             return Some(Self::Corrupt);
         }
         // `*.recovered*`: a `.recovered` segment somewhere in the name.
@@ -219,6 +223,19 @@ mod tests {
         assert_eq!(
             IncidentDebrisKindV1::classify("recovery-scratch-42.tmp"),
             Some(IncidentDebrisKindV1::RecoveryScratch)
+        );
+    }
+
+    /// The pre-timestamp quarantine naming an upgraded profile still carries.
+    #[test]
+    fn classifier_matches_bare_corrupt_suffix() {
+        assert_eq!(
+            IncidentDebrisKindV1::classify("tracedecay.db.corrupt"),
+            Some(IncidentDebrisKindV1::Corrupt)
+        );
+        assert_eq!(
+            IncidentDebrisKindV1::classify("sessions.db.corrupt"),
+            Some(IncidentDebrisKindV1::Corrupt)
         );
     }
 

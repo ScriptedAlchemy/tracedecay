@@ -108,6 +108,28 @@ pub struct UserConfig {
     #[serde(default = "default_true")]
     pub memory_injection_enabled: bool,
 
+    /// Whether LCM raw-message ingest redacts sensitive values (API keys,
+    /// bearer tokens, password assignments, private keys) before persisting
+    /// transcript payloads.
+    ///
+    /// Off by default because redaction is irreversible: LCM raw payloads are
+    /// the lossless archive that summaries and expansions drill back into, and
+    /// a redacted payload cannot be restored. An owner who prefers secret
+    /// safety over losslessness sets this to `true`.
+    ///
+    /// This is the profile-level default. A per-message
+    /// `lcm_ingest.sensitive_patterns_enabled` metadata key still overrides it
+    /// in either direction for a single message.
+    #[serde(default)]
+    pub lcm_sensitive_redaction_enabled: bool,
+
+    /// Which redactors run when [`Self::lcm_sensitive_redaction_enabled`] is
+    /// on. Empty means the built-in set (`api_key`, `bearer_token`,
+    /// `password_assignment`, `private_key`); `all` or `default` selects every
+    /// built-in redactor.
+    #[serde(default)]
+    pub lcm_sensitive_redaction_patterns: Vec<String>,
+
     /// Unknown user config keys preserved for forward compatibility.
     #[serde(default, flatten)]
     pub extra: BTreeMap<String, toml::Value>,
@@ -147,6 +169,8 @@ impl Default for UserConfig {
             extraction_timeout_secs: default_extraction_timeout_secs(),
             automation: AutomationConfig::default(),
             memory_injection_enabled: true,
+            lcm_sensitive_redaction_enabled: false,
+            lcm_sensitive_redaction_patterns: Vec::new(),
             extra: BTreeMap::new(),
         }
     }
@@ -446,10 +470,12 @@ impl UserConfig {
             return Err(ConfigSaveError::PathUnavailable);
         };
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|source| ConfigSaveError::Io {
-                path: parent.to_path_buf(),
-                message: "failed to create config directory".to_string(),
-                source,
+            crate::storage::PrivateStoreIo::create_dir_all(parent).map_err(|source| {
+                ConfigSaveError::Io {
+                    path: parent.to_path_buf(),
+                    message: "failed to create config directory".to_string(),
+                    source,
+                }
             })?;
         }
 
@@ -510,10 +536,12 @@ impl UserConfig {
         })?;
 
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|source| ConfigSaveError::Io {
-                path: parent.to_path_buf(),
-                message: "failed to create config directory".to_string(),
-                source,
+            crate::storage::PrivateStoreIo::create_dir_all(parent).map_err(|source| {
+                ConfigSaveError::Io {
+                    path: parent.to_path_buf(),
+                    message: "failed to create config directory".to_string(),
+                    source,
+                }
             })?;
         }
 
@@ -806,13 +834,27 @@ mod tests {
     fn save_regenerates_when_no_file_exists() {
         let _lock = lock_user_data_dir_test_env();
         let temp = TempDir::new().unwrap();
-        let _env = EnvRestore::set(USER_DATA_DIR_ENV, temp.path());
+        let profile_root = temp.path().join("profile");
+        let _env = EnvRestore::set(USER_DATA_DIR_ENV, &profile_root);
         let path = config_path().expect("config path should resolve");
 
         let config = UserConfig::default();
         config.save().expect("save should create a fresh file");
         let saved = std::fs::read_to_string(&path).unwrap();
         toml::from_str::<UserConfig>(&saved).expect("fresh config parses");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            assert_eq!(
+                std::fs::metadata(profile_root)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+        }
     }
 
     #[test]

@@ -19,14 +19,14 @@ use tracedecay_application::retrieval::grep_analysis::{
 };
 use tracedecay_application::retrieval::{
     AffectedFileTestsPrimitiveRequest, AffectedFileTestsPrimitiveResultV1, ExactSymbolRequest,
-    GraphImpactPrimitiveRequest, GraphRelationRequest, HealthReadRequest, ImplementationsRequest,
-    OperationalRetrievalPort, RetrievalPortContext, RetrievalPortOutcome, SessionLookupRequest,
-    SignatureSearchRequest, SourceLinesRequest, SourceReadPortContext, SourceReadPortOutcome,
-    SourceReadPrimitivePort, SourceReadPrimitiveRequest, SourceRetrievalPort, SymbolGraphPage,
-    SymbolGraphPortContext, SymbolGraphPortOutcome, SymbolGraphPrimitivePort,
-    SymbolSearchPrimitiveRequest, TemporalRetrievalPort, TestMapPrimitiveRequest,
-    TestMapPrimitiveResultV1, TestPrimitivePort, TestPrimitivePortContext,
-    TestPrimitivePortOutcome, TypeHierarchyRequest,
+    GraphImpactPrimitiveRequest, GraphRelationRequest, HealthDeltaRequest, HealthDeltaResult,
+    HealthReadRequest, ImplementationsRequest, OperationalRetrievalPort, RetrievalPortContext,
+    RetrievalPortOutcome, SessionLookupRequest, SignatureSearchRequest, SourceLinesRequest,
+    SourceReadPortContext, SourceReadPortOutcome, SourceReadPrimitivePort,
+    SourceReadPrimitiveRequest, SourceRetrievalPort, SymbolGraphPage, SymbolGraphPortContext,
+    SymbolGraphPortOutcome, SymbolGraphPrimitivePort, SymbolSearchPrimitiveRequest,
+    TemporalRetrievalPort, TestMapPrimitiveRequest, TestMapPrimitiveResultV1, TestPrimitivePort,
+    TestPrimitivePortContext, TestPrimitivePortOutcome, TypeHierarchyRequest,
 };
 use tracedecay_application::{
     ApplicationContractError, ApplicationEnvelope, ApplicationOperation, ApplicationOutcome,
@@ -34,11 +34,13 @@ use tracedecay_application::{
     CancellationContext, CancellationObservation, CancellationStage, CapabilityGrantId,
     CapabilityGrantSnapshot, CoverageCompleteness, CoverageDomainState, Deadline, DisclosureClass,
     EvidenceCoverage, EvidenceDomain, EvidencePacket, LegalAction, OpaqueCursor,
-    OperationBudgetUsage, OperationReceipt, OperationTermination, PageState, PolicyDecisionRef,
-    RequestAdmission, RequestContext, RequestId, ResolvedScope, RetrievalEvidence, RetryDirective,
-    SafeDiagnostic, TemporalState,
+    OperationBudgetUsage, OperationReceipt, OperationTermination, PageRequest, PageState,
+    PolicyDecisionRef, RequestAdmission, RequestContext, RequestId, ResolvedScope,
+    RetrievalEvidence, RetryDirective, SafeDiagnostic, TemporalState,
 };
-use tracedecay_domain::{CodeGenerationId, CommitId, ComponentVersion, UtcMicros};
+use tracedecay_domain::{
+    CodeGenerationId, CommitId, ComponentVersion, GenerationDiagnosticV1, UtcMicros,
+};
 use tracedecay_tool_catalog::SortContractId;
 use url::Url;
 
@@ -260,11 +262,32 @@ pub struct StorageStatusPrimitiveRequest {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+pub struct StorageStatusHistoryPointV1 {
+    pub observed_at: i64,
+    pub database_bytes: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct StorageStatusPrimitiveResult {
     pub status: String,
     pub read_only: bool,
     pub database_bytes: Option<u64>,
+    #[serde(default)]
+    pub page_size_bytes: Option<u32>,
+    #[serde(default)]
+    pub page_count: Option<u64>,
+    #[serde(default)]
+    pub freelist_pages: Option<u64>,
     pub details: Vec<String>,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub store_path: Option<String>,
+    #[serde(default)]
+    pub history: Vec<StorageStatusHistoryPointV1>,
+    #[serde(default)]
+    pub history_coverage: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -280,22 +303,25 @@ pub enum DiagnosticsPrimitiveScope {
 pub struct DiagnosticsPrimitiveRequest {
     pub scope: DiagnosticsPrimitiveScope,
     pub maximum_diagnostics: u32,
+    #[serde(default)]
+    pub cursor: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct DiagnosticPrimitiveRecord {
-    pub file: String,
-    pub line: u32,
-    pub severity: String,
-    pub code: Option<String>,
-    pub message: String,
+    pub logical_path: String,
+    pub diagnostic: GenerationDiagnosticV1,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct DiagnosticsPrimitiveResult {
+    pub generation_id: CodeGenerationId,
+    pub clean_generation: bool,
+    pub findings_cleared: bool,
     pub diagnostics: Vec<DiagnosticPrimitiveRecord>,
+    pub next_cursor: Option<String>,
 }
 
 /// Typed extension over existing query/source/system services. Every method is
@@ -344,6 +370,12 @@ pub trait Pr12ExtendedPrimitivePort: Send + Sync {
         request: &'a FileMetadataPrimitiveRequest,
     ) -> Pr12ExtendedPrimitiveFuture<'a, FileMetadataPrimitiveResult>;
 
+    fn health_delta<'a>(
+        &'a self,
+        context: RetrievalPortContext<'a>,
+        request: &'a HealthDeltaRequest,
+    ) -> Pr12ExtendedPrimitiveFuture<'a, HealthDeltaResult>;
+
     fn storage_status<'a>(
         &'a self,
         context: RetrievalPortContext<'a>,
@@ -388,10 +420,11 @@ pub enum Pr12PrimitiveRequest {
     ModuleApi(ModuleApiPrimitiveRequest),
     FileMetadata(FileMetadataPrimitiveRequest),
     HealthRead(HealthReadRequest),
+    HealthDelta(HealthDeltaRequest),
     StorageStatus(StorageStatusPrimitiveRequest),
     DiagnosticsRead(DiagnosticsPrimitiveRequest),
     Operational(Pr12OperationalPrimitiveRequest),
-    RecentTestResults,
+    RecentTestResults(PageRequest),
 }
 
 /// One catalog operation plus its closed typed primitive request.
@@ -1147,6 +1180,14 @@ async fn dispatch_admitted(
                 .health_read(&retrieval_context(&context, &operation), &request);
             retrieval_outcome(&runtime.access, &context, &operation, outcome, observed_at)
         }
+        Pr12PrimitiveRequest::HealthDelta(request) => {
+            let outcome = runtime
+                .project_runtime
+                .extended
+                .health_delta(retrieval_context(&context, &operation), &request)
+                .await;
+            retrieval_outcome(&runtime.access, &context, &operation, outcome, observed_at)
+        }
         Pr12PrimitiveRequest::StorageStatus(request) => {
             let outcome = runtime
                 .project_runtime
@@ -1175,8 +1216,8 @@ async fn dispatch_admitted(
                 .await;
             validate_operational_result(&context, &operation, maximum_output_bytes, result)
         }
-        Pr12PrimitiveRequest::RecentTestResults => {
-            recent_test_results(runtime, &context, &operation, observed_at).await
+        Pr12PrimitiveRequest::RecentTestResults(page) => {
+            recent_test_results(runtime, &context, &operation, &page, observed_at).await
         }
     }
 }
@@ -1728,6 +1769,7 @@ async fn recent_test_results(
     runtime: &OwnedPr12PrimitiveRuntime,
     context: &RequestContext,
     operation: &ApplicationOperation,
+    page: &PageRequest,
     observed_at: UtcMicros,
 ) -> ApplicationResult<Value> {
     let current = match runtime.test_run_scope.current_identity().await {
@@ -1740,7 +1782,7 @@ async fn recent_test_results(
         },
         Err(_) => return unavailable(context, operation),
     };
-    let snapshot = match runtime.test_runs.latest_current(&current).await {
+    let snapshot = match runtime.test_runs.latest_current_page(&current, page).await {
         ManagedTestRunReadOutcome::Current(snapshot) => snapshot,
         ManagedTestRunReadOutcome::Stale(
             ManagedTestRunStaleReason::SourceIdentity | ManagedTestRunStaleReason::DocumentContent,
@@ -1760,6 +1802,12 @@ async fn recent_test_results(
         ManagedTestRunReadOutcome::Unavailable(_) => return unavailable(context, operation),
     };
     let returned = snapshot.results.len() as u64;
+    let available_results = snapshot.available_results as u64;
+    let termination = snapshot.termination;
+    let next_cursor = snapshot.next_cursor;
+    let partial = !matches!(termination, Some(OperationTermination::Completed))
+        || next_cursor.is_some()
+        || available_results < snapshot.completed;
     let payload = json!({
         "operation_id": snapshot.operation_id.to_string(),
         "generation": snapshot.generation,
@@ -1777,17 +1825,28 @@ async fn recent_test_results(
         })).collect::<Vec<_>>(),
         "completed": snapshot.completed,
         "total": snapshot.total,
-        "termination": snapshot.termination,
+        "termination": termination,
+        "result_offset": snapshot.result_offset,
+        "available_results": available_results,
     });
-    let partial = !matches!(snapshot.termination, Some(OperationTermination::Completed));
     evidence_result(
         &runtime.access,
         context,
         operation,
         EvidenceDomain::Test,
         payload,
-        simple_coverage(partial, returned),
-        None,
+        PrimitiveCoverageV1 {
+            completeness: if partial {
+                CoverageCompleteness::Partial
+            } else {
+                CoverageCompleteness::Complete
+            },
+            returned,
+            visited: Some(available_results),
+            eligible: Some(available_results),
+            unsupported_languages: Vec::new(),
+        },
+        next_cursor,
         observed_at,
         OperationBudgetUsage::default(),
         partial,

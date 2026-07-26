@@ -102,7 +102,7 @@ type Theme = (typeof THEMES)[number];
 /** A JSON body, or an explicit HTTP failure to simulate a broken read. */
 type Override = { status: number; body: unknown };
 
-interface Scenario {
+export interface Scenario {
   readonly id: string;
   readonly route: string;
   /** What this scenario is evidence FOR, recorded in findings.json. */
