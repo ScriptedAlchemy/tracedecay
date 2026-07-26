@@ -3,8 +3,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::symlink;
 use std::time::SystemTime;
 
-use rusqlite::Connection as RusqliteConnection;
-
 use super::*;
 use crate::global_db::StoreInstanceUpsert;
 use crate::storage::{
@@ -1647,7 +1645,7 @@ async fn temporal_fts_health_and_repair_are_explicit_bounded_and_idempotent() {
 }
 
 #[tokio::test]
-async fn temporal_fts_repair_accepts_only_exact_malformed_index_damage() {
+async fn temporal_fts_repair_refuses_ambiguous_index_damage() {
     let dir = tempfile::TempDir::new().unwrap();
     let runtime = DoctorTestRuntime::open(
         &dir.path().join("profile"),
@@ -1685,11 +1683,13 @@ async fn temporal_fts_repair_accepts_only_exact_malformed_index_damage() {
             {"kind": "occurrence_fts_corruption", "count": 1},
         ])
     );
-    assert_eq!(db.repair_session_temporal_fts(true).await.unwrap(), (1, 1));
-    db.checkpoint_result().await.unwrap();
+    let error = db
+        .repair_session_temporal_fts(true)
+        .await
+        .expect_err("ambiguous whole-database damage must not be rebuilt as FTS-only corruption");
     assert_eq!(
-        serde_json::to_value(db.session_temporal_doctor_health().await).unwrap()["findings"],
-        serde_json::json!([])
+        error.to_string(),
+        "whole-database quick check failed; FTS repair is unsafe"
     );
 }
 
@@ -1703,11 +1703,15 @@ async fn temporal_health_detects_cross_session_ownership() {
     .await;
     let db = runtime.database();
     db.checkpoint_result().await.unwrap();
-    let writer = RusqliteConnection::open(db.db_path()).unwrap();
+    let writer = db.writer_connection().unwrap();
     writer
         .execute_batch(
-            "PRAGMA foreign_keys = OFF;
-             DROP TRIGGER session_summary_sources_owner_guard_v1;
+            "DROP TRIGGER session_summary_sources_owner_guard_v1;
+             INSERT INTO retrieval_anchors (
+                 anchor_id, anchor_json, owner_json, projection_generation
+             ) VALUES
+                 ('anchor-a', '{}', '{}', 'doctor-fixture'),
+                 ('anchor-b', '{}', '{}', 'doctor-fixture');
              INSERT INTO session_summary_nodes (
                  summary_id, session_id, summary_anchor_id, summary_text, index_text,
                  source_horizon_json, publication_json, created_at
@@ -1718,6 +1722,7 @@ async fn temporal_health_detects_cross_session_ownership() {
                  summary_id, source_ordinal, source_kind, source_anchor_id, source_summary_id
              ) VALUES ('summary-b', 0, 'summary', NULL, 'summary-a');",
         )
+        .await
         .unwrap();
     drop(writer);
     db.checkpoint_result().await.unwrap();

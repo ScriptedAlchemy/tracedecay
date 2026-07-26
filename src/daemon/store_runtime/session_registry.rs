@@ -843,9 +843,12 @@ mod tests {
         seeded_sessions
             .writer_connection()
             .expect("schema corruption writer")
-            .execute_batch("DROP TABLE projects")
+            .execute_batch(
+                "DROP TABLE sessions;
+                 CREATE TABLE sessions(provider TEXT NOT NULL);",
+            )
             .await
-            .expect("remove required registry table");
+            .expect("replace required session table with an incompatible shape");
         drop(seeded_sessions);
         drop(seed_registry);
 
@@ -858,7 +861,8 @@ mod tests {
         };
 
         assert!(
-            error.to_string().contains("authority schema"),
+            error.to_string().contains("no such column: project_key")
+                && error.to_string().contains("initialize transcript schema"),
             "unexpected mount error: {error}"
         );
     }
