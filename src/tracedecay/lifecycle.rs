@@ -1,8 +1,12 @@
 //! Lifecycle: init/open/branch-tracking entry points plus the profile-store
 //! registration helpers they rely on.
 
+#[cfg(not(any(test, feature = "test-transport")))]
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+#[cfg(not(any(test, feature = "test-transport")))]
+use std::sync::{LazyLock, Mutex, Weak};
 
 use crate::application::configuration::ProjectConfigurationRuntime;
 use crate::branch;
@@ -27,6 +31,11 @@ use super::locking::{
 };
 use super::{TraceDecay, TraceDecayOpenOptions, current_timestamp};
 
+#[cfg(not(any(test, feature = "test-transport")))]
+static STANDALONE_MAINTENANCE_SCOPES: LazyLock<
+    Mutex<HashMap<PathBuf, Weak<crate::db::OwnedMaintenanceDatabaseScope>>>,
+> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
 impl TraceDecay {
     pub(super) fn registered_project_id(store_layout: &StoreLayout) -> Result<ProjectId> {
         let project_id =
@@ -41,6 +50,32 @@ impl TraceDecay {
         ProjectId::new(project_id.clone()).map_err(|error| TraceDecayError::Config {
             message: format!("invalid registered project identity: {error}"),
         })
+    }
+
+    #[cfg(not(any(test, feature = "test-transport")))]
+    fn standalone_maintenance_scope(
+        open_options: &TraceDecayOpenOptions,
+        operation: &'static str,
+    ) -> Result<Arc<crate::db::OwnedMaintenanceDatabaseScope>> {
+        let profile_root = open_options.resolved_profile_root()?;
+        let mut scopes = STANDALONE_MAINTENANCE_SCOPES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        scopes.retain(|_, scope| scope.strong_count() > 0);
+        let profile_key = crate::lifecycle_lease::canonical_or_original(&profile_root);
+        if let Some(scope) = scopes.get(&profile_key).and_then(Weak::upgrade) {
+            return Ok(scope);
+        }
+        let lifecycle =
+            crate::lifecycle_lease::acquire_exclusive_for_profile(&profile_root, operation)?;
+        let scope = Arc::new(crate::db::enter_owned_maintenance_database_scope(
+            lifecycle,
+            &profile_root,
+            operation,
+        )?);
+        let profile_key = crate::lifecycle_lease::canonical_or_original(&profile_root);
+        scopes.insert(profile_key, Arc::downgrade(&scope));
+        Ok(scope)
     }
 
     #[cfg(any(test, feature = "test-transport"))]
@@ -63,6 +98,11 @@ impl TraceDecay {
         open_options: &TraceDecayOpenOptions,
     ) -> Result<Arc<crate::application::host_admission::HostAdmissionTestRuntimeV1>> {
         let profile_root = open_options.resolved_profile_root()?;
+        if !crate::db::is_isolated_test_path(project_root)
+            || !crate::db::is_isolated_test_path(&profile_root)
+        {
+            return Err(configuration_runtime_unavailable());
+        }
         let project_id = storage::read_enrollment_marker(project_root)?
             .map(|marker| marker.project_id)
             .unwrap_or_else(|| storage::default_profile_project_id(project_root));
@@ -137,8 +177,16 @@ impl TraceDecay {
         }
         #[cfg(not(any(test, feature = "test-transport")))]
         {
-            let _ = (project_root, open_options);
-            Err(configuration_runtime_unavailable())
+            let maintenance =
+                Self::standalone_maintenance_scope(&open_options, "direct project initialization")?;
+            let mut graph = Self::init_with_exclusive_maintenance(
+                project_root,
+                open_options,
+                maintenance.lifecycle(),
+            )
+            .await?;
+            graph.standalone_maintenance_scope = Some(maintenance);
+            Ok(graph)
         }
     }
 
@@ -192,6 +240,40 @@ impl TraceDecay {
             runtime_registry,
         )
         .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn init_test_fixture_with_registered_runtime(
+        project_root: &Path,
+        project_id: &str,
+    ) -> Result<(
+        Self,
+        Arc<crate::application::host_admission::HostAdmissionTestRuntimeV1>,
+    )> {
+        let profile_root = crate::storage::default_profile_root()?;
+        let project_id = tracedecay_domain::ProjectId::new(project_id).map_err(|error| {
+            TraceDecayError::Config {
+                message: format!("invalid test fixture project identity: {error}"),
+            }
+        })?;
+        let runtime = Arc::new(
+            crate::application::host_admission::HostAdmissionTestRuntimeV1::project(
+                &profile_root,
+                project_root,
+                project_id,
+            )
+            .await?,
+        );
+        let graph = runtime
+            .initialize_project_graph_for_test(
+                project_root,
+                TraceDecayOpenOptions {
+                    profile_root: Some(profile_root),
+                    global_db_path: None,
+                },
+            )
+            .await?;
+        Ok((graph, runtime))
     }
 
     pub(crate) async fn init_with_registered_configuration(
@@ -260,6 +342,7 @@ impl TraceDecay {
             context_scout_claim_authorities: Default::default(),
             #[cfg(any(test, feature = "test-transport"))]
             test_runtime_guard: None,
+            standalone_maintenance_scope: None,
         };
         // First-touch parity with the registered open path: daemon warm-up
         // refuses to advertise an identity-bearing project whose Context
@@ -442,7 +525,7 @@ impl TraceDecay {
         .await
     }
 
-    pub(super) async fn registered_enrollment_roots(
+    pub(crate) async fn registered_enrollment_roots(
         project_root: &Path,
         store_layout: &StoreLayout,
         project_id: &ProjectId,
@@ -697,8 +780,16 @@ impl TraceDecay {
         }
         #[cfg(not(any(test, feature = "test-transport")))]
         {
-            let _ = (project_root, open_options);
-            Err(configuration_runtime_unavailable())
+            let maintenance =
+                Self::standalone_maintenance_scope(&open_options, "direct project open")?;
+            let mut graph = Self::open_with_exclusive_maintenance(
+                project_root,
+                open_options,
+                maintenance.lifecycle(),
+            )
+            .await?;
+            graph.standalone_maintenance_scope = Some(maintenance);
+            Ok(graph)
         }
     }
 
@@ -1008,6 +1099,7 @@ impl TraceDecay {
             context_scout_claim_authorities: Default::default(),
             #[cfg(any(test, feature = "test-transport"))]
             test_runtime_guard: None,
+            standalone_maintenance_scope: None,
         };
 
         crate::hooks::publish_hook_v2_bindings(&ts.store_layout)?;
@@ -1067,9 +1159,62 @@ impl TraceDecay {
         }
         #[cfg(not(any(test, feature = "test-transport")))]
         {
-            let _ = (project_root, open_options);
-            Err(configuration_runtime_unavailable())
+            let maintenance =
+                Self::standalone_maintenance_scope(&open_options, "direct read-only project open")?;
+            let mut graph = Self::open_read_only_with_exclusive_maintenance(
+                project_root,
+                open_options,
+                maintenance.lifecycle(),
+            )
+            .await?;
+            graph.standalone_maintenance_scope = Some(maintenance);
+            Ok(graph)
         }
+    }
+
+    async fn open_read_only_with_exclusive_maintenance(
+        project_root: &Path,
+        open_options: TraceDecayOpenOptions,
+        lifecycle_lease: &crate::lifecycle_lease::LifecycleLease,
+    ) -> Result<Self> {
+        let profile_root = open_options.resolved_profile_root()?;
+        if !lifecycle_lease.is_exclusive() || !lifecycle_lease.guards_profile(&profile_root) {
+            return Err(TraceDecayError::Config {
+                message:
+                    "read-only project open requires the exact profile's exclusive lifecycle lease"
+                        .to_owned(),
+            });
+        }
+        let identity = crate::daemon::profile_identity::load_or_create(&profile_root)?;
+        let runtime_registry = Arc::new(DaemonSessionRuntimeRegistryV1::open(identity).await?);
+        let profile_database = runtime_registry.profile_database().await?;
+        let store_layout = Self::resolve_registered_configuration_layout(
+            project_root,
+            &open_options,
+            profile_database.as_ref(),
+            false,
+        )
+        .await?;
+        let project_id = Self::registered_project_id(&store_layout)?;
+        let enrollment_roots = Self::registered_enrollment_roots(
+            project_root,
+            &store_layout,
+            &project_id,
+            profile_database.as_ref(),
+        )
+        .await?;
+        let configuration_database = runtime_registry
+            .project_sessions(project_id, enrollment_roots)
+            .await?;
+        Self::open_read_only_with_registered_configuration(
+            project_root,
+            open_options,
+            store_layout,
+            configuration_database,
+            profile_database,
+            runtime_registry,
+        )
+        .await
     }
 
     pub(crate) async fn open_read_only_with_registered_configuration(
@@ -1141,6 +1286,7 @@ impl TraceDecay {
             context_scout_claim_authorities: Default::default(),
             #[cfg(any(test, feature = "test-transport"))]
             test_runtime_guard: None,
+            standalone_maintenance_scope: None,
         })
     }
 
@@ -1278,6 +1424,7 @@ impl TraceDecay {
             context_scout_claim_authorities: Default::default(),
             #[cfg(any(test, feature = "test-transport"))]
             test_runtime_guard: self.test_runtime_guard.clone(),
+            standalone_maintenance_scope: self.standalone_maintenance_scope.clone(),
         };
 
         let mut attempts = 0;
@@ -1527,8 +1674,17 @@ impl TraceDecay {
         }
         #[cfg(not(any(test, feature = "test-transport")))]
         {
-            let _ = (project_root, branch_name, open_options);
-            Err(configuration_runtime_unavailable())
+            let maintenance =
+                Self::standalone_maintenance_scope(&open_options, "direct branch open")?;
+            let mut graph = Self::open_branch_with_exclusive_maintenance(
+                project_root,
+                branch_name,
+                open_options,
+                maintenance.lifecycle(),
+            )
+            .await?;
+            graph.standalone_maintenance_scope = Some(maintenance);
+            Ok(graph)
         }
     }
 
@@ -1681,6 +1837,7 @@ impl TraceDecay {
             context_scout_claim_authorities: Default::default(),
             #[cfg(any(test, feature = "test-transport"))]
             test_runtime_guard: None,
+            standalone_maintenance_scope: None,
         })
     }
 
@@ -1968,6 +2125,7 @@ impl TraceDecay {
     }
 }
 
+#[cfg(any(test, feature = "test-transport"))]
 fn configuration_runtime_unavailable() -> TraceDecayError {
     TraceDecayError::Config {
         message:
@@ -2174,6 +2332,7 @@ fn count_tree_files(root: &Path) -> u64 {
 pub(crate) fn is_fts_only_corruption(problem: &str) -> bool {
     problem.contains("malformed inverted index for FTS5 table main.nodes_fts")
         || problem.contains("malformed inverted index for FTS5 table nodes_fts")
+        || (problem.contains("fts5: corruption found") && problem.contains("nodes_fts"))
 }
 
 /// Whether a read-only preflight failure means the store needs ordinary

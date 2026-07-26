@@ -51,8 +51,9 @@ use tracedecay_domain::configuration::{
 };
 use tracedecay_domain::{
     ActorId, CommitId, GitCommitIdentityV1, GitIndexCommitIntentV1, GitIndexPreviewId,
-    GitIndexPreviewV1, GitIndexSigningPolicyV1, GitIndexTransactionOperationV1, LocatorDigest,
-    ManifestDigest, ProjectId, RefId, RepositoryId, UtcMicros, WorktreeId,
+    GitIndexPreviewV1, GitIndexReceiptOutcomeV1, GitIndexSigningPolicyV1,
+    GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1, LocatorDigest, ManifestDigest,
+    ProjectId, RefId, RepositoryId, UtcMicros, WorktreeId,
 };
 use tracedecay_tool_catalog::{BindingSurface, CapabilityId, UseCaseId};
 
@@ -192,6 +193,25 @@ fn git(project: &Path, args: &[&str]) {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[cfg(unix)]
+fn git_stdout(project: &Path, args: &[&str]) -> String {
+    let output = std::process::Command::new(common::git_program())
+        .current_dir(project)
+        .args(args)
+        .output()
+        .expect("run Git fixture command");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .expect("Git fixture output is UTF-8")
+        .trim()
+        .to_owned()
 }
 
 async fn poll_lsp_response(session: &mut DaemonLspSessionClient, response_id: u64) -> Value {
@@ -414,6 +434,62 @@ fn run_application_tool(
         .stdin(Stdio::null())
         .output()
         .expect("run application tool")
+}
+
+#[cfg(unix)]
+async fn preview_commit_via_mcp(
+    fixture: &RuntimeFixture,
+    scope: &ResolvedScope,
+    request_id: &str,
+    message: &str,
+) -> GitIndexPreviewV1 {
+    let captured_at = wall_clock_micros();
+    let snapshot = tracedecay::daemon::capture_exact_git_snapshot_for_test(
+        &fixture.project,
+        scope.project_id.clone(),
+        scope.repository_id.clone(),
+        scope.worktree_id.clone(),
+        captured_at,
+    );
+    let identity = GitCommitIdentityV1 {
+        name: "TraceDecay Test".to_owned(),
+        email: "tracedecay@example.com".to_owned(),
+        at: captured_at,
+    };
+    let request = GitPreviewSurfaceRequest {
+        operation: GitIndexTransactionOperationV1::CommitIndex,
+        preview_id: GitIndexPreviewId::new("preview.transport-input").expect("preview id"),
+        repository_snapshot: snapshot,
+        selected_hunks: Vec::new(),
+        commit_intent: Some(
+            GitIndexCommitIntentV1::new(
+                message.to_owned(),
+                identity.clone(),
+                identity,
+                GitIndexSigningPolicyV1::UnsignedPermitted,
+            )
+            .expect("commit intent"),
+        ),
+    };
+    let result = resolve_mcp_application_surface(
+        ApplicationSurfaceOperation::GitPreview,
+        RequestId::new(request_id).expect("MCP preview request id"),
+        ApplicationSurfaceRequest::GitPreview(request),
+        RequestedOutputFormat::Json,
+        Some(&fixture.client),
+    )
+    .await
+    .expect("MCP Git preview dispatch");
+    let ApplicationOutcome::Preview(preview) = &result
+        .result
+        .as_ref()
+        .expect("MCP Git preview result")
+        .outcome
+    else {
+        panic!("MCP git_preview must return a preview outcome");
+    };
+    serde_json::from_value(preview.payload.clone().expect("MCP immutable Git preview"))
+        .expect("typed MCP Git preview")
 }
 
 async fn assert_application_transport_parity(
@@ -784,6 +860,7 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
         .expect("Git status result")
         .scope
         .clone();
+    let original_head = git_stdout(&fixture.project, &["rev-parse", "HEAD"]);
     let captured_at = wall_clock_micros();
     let snapshot = tracedecay::daemon::capture_exact_git_snapshot_for_test(
         &fixture.project,
@@ -910,6 +987,19 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
         cli_apply.execution.termination,
         OperationTermination::Completed
     );
+    let cli_receipt: GitIndexTransactionReceiptV1 =
+        serde_json::from_value(cli_apply.payload.clone().expect("CLI durable Git receipt"))
+            .expect("typed CLI Git receipt");
+    assert_eq!(cli_receipt.outcome, GitIndexReceiptOutcomeV1::Committed);
+    let committed_head = git_stdout(&fixture.project, &["rev-parse", "HEAD"]);
+    assert_ne!(
+        committed_head, original_head,
+        "CLI apply must commit the previewed native Git index"
+    );
+    assert_eq!(
+        git_stdout(&fixture.project, &["log", "-1", "--format=%s"]),
+        "test: prove Git transport parity"
+    );
 
     let mcp_apply = resolve_mcp_application_surface(
         ApplicationSurfaceOperation::GitApply,
@@ -948,7 +1038,185 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
         value
     };
     assert_eq!(normalize_replay(&cli_apply), normalize_replay(mcp_apply));
+    assert_eq!(
+        git_stdout(&fixture.project, &["rev-parse", "HEAD"]),
+        committed_head,
+        "an MCP replay must return the original receipt without a duplicate commit"
+    );
     git(&fixture.project, &["diff", "--cached", "--quiet"]);
+
+    std::fs::write(
+        fixture.project.join("src/main.rs"),
+        "mod cli;\n\nfn main() {\n    cli::run();\n}\n\n// conflicting replay\n",
+    )
+    .expect("write conflicting replay change");
+    git(&fixture.project, &["add", "src/main.rs"]);
+    let conflicting_preview = preview_commit_via_mcp(
+        &fixture,
+        &scope,
+        "request.git-parity.conflicting-preview",
+        "test: conflicting replay\n",
+    )
+    .await;
+    let before_conflicting_replay_tree = git_stdout(&fixture.project, &["write-tree"]);
+    let conflicting_replay = resolve_mcp_application_surface(
+        ApplicationSurfaceOperation::GitApply,
+        RequestId::new("request.git-parity.conflicting-replay")
+            .expect("conflicting replay request id"),
+        ApplicationSurfaceRequest::GitApply(GitApplySurfaceRequest {
+            preview: conflicting_preview,
+            idempotency_key: IdempotencyKey::new("idempotency.git-transport-parity")
+                .expect("reused idempotency key"),
+        }),
+        RequestedOutputFormat::Json,
+        Some(&fixture.client),
+    )
+    .await
+    .expect("MCP conflicting replay dispatch");
+    let conflicting_problem = conflicting_replay
+        .result
+        .expect_err("changed input under one idempotency key must be rejected");
+    assert_eq!(
+        conflicting_problem.problem.kind(),
+        ApplicationProblemKind::Conflict
+    );
+    assert_eq!(
+        git_stdout(&fixture.project, &["rev-parse", "HEAD"]),
+        committed_head
+    );
+    assert_eq!(
+        git_stdout(&fixture.project, &["write-tree"]),
+        before_conflicting_replay_tree,
+        "conflicting replay rejection must not alter the native index"
+    );
+
+    let stale_preview = preview_commit_via_mcp(
+        &fixture,
+        &scope,
+        "request.git-parity.stale-preview",
+        "test: stale CAS must not commit\n",
+    )
+    .await;
+    std::fs::write(
+        fixture.project.join("src/main.rs"),
+        "mod cli;\n\nfn main() {\n    cli::run();\n}\n\n// drift after preview\n",
+    )
+    .expect("write post-preview drift");
+    git(&fixture.project, &["add", "src/main.rs"]);
+    let drifted_index_tree = git_stdout(&fixture.project, &["write-tree"]);
+    let stale_apply_arguments = serde_json::to_value(GitApplySurfaceRequest {
+        preview: stale_preview,
+        idempotency_key: IdempotencyKey::new("idempotency.git-transport-parity.stale")
+            .expect("stale apply idempotency key"),
+    })
+    .expect("stale apply arguments");
+    let stale_cli_apply = run_application_tool(
+        fixture.home(),
+        &fixture.project,
+        ApplicationSurfaceOperation::GitApply,
+        &stale_apply_arguments,
+    );
+    assert_command_success("CLI stale git_apply", &stale_cli_apply);
+    let stale_cli_apply: ApplicationEnvelope<Value> =
+        serde_json::from_slice(&stale_cli_apply.stdout).expect("CLI stale apply envelope");
+    let ApplicationOutcome::Effect(stale_cli_apply) = stale_cli_apply.outcome else {
+        panic!("stale CLI git_apply must return an authoritative no-change effect");
+    };
+    assert_eq!(
+        stale_cli_apply.execution.termination,
+        OperationTermination::Failed
+    );
+    let stale_receipt: GitIndexTransactionReceiptV1 = serde_json::from_value(
+        stale_cli_apply
+            .payload
+            .expect("CLI stale apply no-change receipt"),
+    )
+    .expect("typed CLI stale apply receipt");
+    assert_eq!(
+        stale_receipt.outcome,
+        GitIndexReceiptOutcomeV1::AbortedNoChange
+    );
+    assert_eq!(
+        git_stdout(&fixture.project, &["rev-parse", "HEAD"]),
+        committed_head,
+        "CAS drift must not create a commit"
+    );
+    assert_eq!(
+        git_stdout(&fixture.project, &["write-tree"]),
+        drifted_index_tree,
+        "CAS drift rejection must preserve the caller's newer index"
+    );
+
+    let cancellation_preview = preview_commit_via_mcp(
+        &fixture,
+        &scope,
+        "request.git-parity.cancellation-preview",
+        "test: cancelled apply must not commit\n",
+    )
+    .await;
+    let cancellation_head = git_stdout(&fixture.project, &["rev-parse", "HEAD"]);
+    let cancellation_tree = git_stdout(&fixture.project, &["write-tree"]);
+    let cancellation_deadline =
+        Deadline::new(UtcMicros(wall_clock_micros().0.saturating_add(60_000_000)))
+            .expect("cancellation deadline");
+    let mut canonical_cancellation = None;
+    for (surface, surface_name) in [(BindingSurface::Cli, "cli"), (BindingSurface::Mcp, "mcp")] {
+        let request_id = RequestId::new(format!("request.git-parity.cancelled.{surface_name}"))
+            .expect("cancelled apply request id");
+        let cancellation = CancellationSignal::active(format!("cancel.git-parity.{surface_name}"))
+            .expect("cancelled apply signal");
+        assert!(cancellation.cancel(wall_clock_micros()));
+        let dispatched = resolve_application_surface_dispatch_with_controls(
+            surface,
+            ApplicationSurfaceOperation::GitApply,
+            request_id,
+            ApplicationSurfaceRequest::GitApply(GitApplySurfaceRequest {
+                preview: cancellation_preview.clone(),
+                idempotency_key: IdempotencyKey::new("idempotency.git-transport-parity.cancelled")
+                    .expect("cancelled apply idempotency key"),
+            }),
+            PageRequest::first(10).expect("page"),
+            Some(cancellation_deadline.clone()),
+            cancellation,
+            RequestedOutputFormat::Json,
+        )
+        .expect("cancelled Git apply dispatch");
+        let result = execute_application_surface(
+            ApplicationSurfaceOperation::GitApply,
+            dispatched,
+            Some(&fixture.client),
+        )
+        .await
+        .expect("cancelled Git apply invocation");
+        assert_eq!(
+            result.binding_id.as_str(),
+            format!("binding.{surface_name}.git_apply.v1")
+        );
+        let problem = result
+            .result
+            .expect_err("pre-cancelled Git apply must not be admitted");
+        assert_eq!(problem.problem.kind(), ApplicationProblemKind::Cancelled);
+        assert_eq!(
+            problem.problem.cancellation_stage,
+            Some(CancellationStage::BeforeAdmission)
+        );
+        let mut normalized = serde_json::to_value(problem).expect("cancelled Git apply problem");
+        normalize_application_envelope(&mut normalized);
+        if let Some(expected) = &canonical_cancellation {
+            assert_eq!(&normalized, expected);
+        } else {
+            canonical_cancellation = Some(normalized);
+        }
+    }
+    assert_eq!(
+        git_stdout(&fixture.project, &["rev-parse", "HEAD"]),
+        cancellation_head
+    );
+    assert_eq!(
+        git_stdout(&fixture.project, &["write-tree"]),
+        cancellation_tree,
+        "CLI/MCP cancellation must leave native Git state unchanged"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

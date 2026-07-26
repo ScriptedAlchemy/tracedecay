@@ -36,17 +36,6 @@ impl SessionRetrievalStore for CapabilityDeniedSessionPorts {
         panic!("capability guard was bypassed")
     }
 
-    async fn expand_derived_members_supported(
-        &self,
-        _permit: SessionTemporalPageRetrievePermit,
-        _snapshot: SessionTemporalSnapshotV1,
-        _evidence_kind: tracedecay_domain::DerivedEvidenceKindV1,
-        _evidence_id: tracedecay_domain::DerivedEvidenceIdV1,
-        _after_ordinal: Option<u32>,
-        _limit: usize,
-    ) -> SessionStoreResult<tracedecay_store::DerivedEvidenceMemberPageV1> {
-        panic!("capability guard was bypassed")
-    }
 }
 
 impl SessionTemporalProjectionStore for CapabilityDeniedSessionPorts {

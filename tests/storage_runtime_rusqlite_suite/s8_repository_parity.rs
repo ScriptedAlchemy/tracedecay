@@ -118,11 +118,8 @@ fn profile_project_and_session_fixture_matches_the_public_attachment_catalog() {
 
     assert_eq!(
         observed.keys().cloned().collect::<Vec<_>>(),
-        vec![
-            "profile".to_owned(),
-            "project".to_owned(),
-            "sessions".to_owned()
-        ]
+        expected.keys().cloned().collect::<Vec<_>>(),
+        "public repository families must exactly match the S8 route fixture"
     );
     for (name, expected) in expected {
         let observed = observed

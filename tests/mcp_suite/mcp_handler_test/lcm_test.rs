@@ -2871,6 +2871,71 @@ async fn lcm_expand_paginates_summary_sources_over_mcp() {
         3
     );
     assert!(continued["next_cursor"].is_null());
+
+    let first_query_page = handle_real_server_tool_call(
+        &server,
+        "tracedecay_lcm_expand_query",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-page-session",
+            "prompt": "Recover every paged source",
+            "node_ids": [summary_id],
+            "max_results": 2,
+            "context_max_tokens": 4096
+        }),
+    )
+    .await;
+    let first_query_page: Value =
+        serde_json::from_str(extract_real_server_text(&first_query_page)).unwrap();
+    assert!(
+        first_query_page["context_blocks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|block| block["content"] == "paged source body 1")
+    );
+    assert!(
+        first_query_page["context_blocks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|block| block["content"] == "paged source body 2")
+    );
+    let query_cursor = first_query_page["next_cursor"]
+        .as_str()
+        .expect("expand-query source page should return a cursor");
+
+    let continued_query_page = handle_real_server_tool_call(
+        &server,
+        "tracedecay_lcm_expand_query",
+        json!({
+            "provider": "cursor",
+            "session_id": "lcm-page-session",
+            "prompt": "Recover every paged source",
+            "node_ids": [summary_id],
+            "max_results": 2,
+            "context_max_tokens": 4096,
+            "cursor": query_cursor
+        }),
+    )
+    .await;
+    let continued_query_page: Value =
+        serde_json::from_str(extract_real_server_text(&continued_query_page)).unwrap();
+    assert!(
+        continued_query_page["context_blocks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|block| block["content"] == "paged source body 3")
+    );
+    assert!(
+        continued_query_page["context_blocks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|block| block["content"] == "paged source body 4")
+    );
+    assert!(continued_query_page["next_cursor"].is_null());
     server.shutdown().await;
 }
 

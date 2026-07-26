@@ -497,7 +497,7 @@ pub struct AdvisoryFeedbackSummaryReadV1 {
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum AdvisoryFeedbackReadV1 {
     Observed {
-        summary: AdvisoryFeedbackSummaryReadV1,
+        summary: Box<AdvisoryFeedbackSummaryReadV1>,
         findings: Vec<AdvisoryFeedbackFindingReadV1>,
     },
     Unsupported,
@@ -683,15 +683,12 @@ fn advisory_feedback_finding(
         "feedback coverage returned {}/{} findings; omitted {}",
         read.returned_findings, read.total_findings, read.omitted_findings
     );
-    let remediation = (!state.is_healthy_complete())
-        .then(|| action_remediation(operations::FEEDBACK_GET_FINDING))
-        .transpose()?;
     DoctorFindingV1::new(
         DoctorFindingFamilyV1::Advisory,
         state,
         evidence,
         DoctorCoverageStatementV1::new(completeness, statement)?,
-        remediation,
+        None,
     )
 }
 
@@ -757,15 +754,12 @@ fn advisory_feedback_summary_finding(
         "feedback coverage returned {}/{} findings; omitted {}",
         read.returned_findings, read.total_findings, read.omitted_findings
     );
-    let remediation = (!state.is_healthy_complete())
-        .then(|| action_remediation(operations::FEEDBACK_LIST_FINDINGS))
-        .transpose()?;
     DoctorFindingV1::new(
         DoctorFindingFamilyV1::Advisory,
         state,
         evidence,
         DoctorCoverageStatementV1::new(completeness, statement)?,
-        remediation,
+        None,
     )
 }
 

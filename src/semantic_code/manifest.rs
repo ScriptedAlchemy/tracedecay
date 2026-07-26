@@ -76,8 +76,11 @@ impl std::fmt::Display for Sha256DigestHex {
 /// installed embedding profile and, independently, an optional
 /// reranker profile (Plan 31 "Model and offline lifecycle").
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ArtifactProfileKindV1 {
+    #[serde(alias = "Embedding")]
     Embedding,
+    #[serde(alias = "Reranker")]
     Reranker,
 }
 

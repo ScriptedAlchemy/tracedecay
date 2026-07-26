@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
     CalibrationProfileId, CodeGenerationId, ManifestDigest, Pr9FallbackSubpayload, ProjectionKeyV1,
-    RetrieverBatch, RetrieverKind, RetrieverOutcome, VectorGenerationIdV1, canonical_sha256,
+    RetrieverBatch, RetrieverKind, RetrieverOutcome, SemanticSearchIndexKeyV1,
+    VectorGenerationIdV1, canonical_sha256,
 };
 use tracedecay_policy::retrieval_selection::{
     RetrievalAvailabilityV1, RetrievalRequirementV1, RetrievalSelectionV1, select_retrieval,
@@ -45,6 +46,7 @@ pub enum SemanticIndexStateV1 {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompleteSemanticGenerationV1 {
     projection_key: ProjectionKeyV1,
+    search_index_key: SemanticSearchIndexKeyV1,
     vector_generation: VectorGenerationIdV1,
     source_generation: CodeGenerationId,
     capability_manifest_digest: ManifestDigest,
@@ -53,6 +55,7 @@ pub struct CompleteSemanticGenerationV1 {
 impl CompleteSemanticGenerationV1 {
     pub fn new(
         projection_key: ProjectionKeyV1,
+        search_index_key: SemanticSearchIndexKeyV1,
         vector_generation: VectorGenerationIdV1,
         source_generation: CodeGenerationId,
         capability_manifest_digest: ManifestDigest,
@@ -67,8 +70,12 @@ impl CompleteSemanticGenerationV1 {
         capability_manifest_digest
             .validate()
             .map_err(|_| SemanticAbstentionV1::IndexIncompatible)?;
+        search_index_key
+            .validate()
+            .map_err(|_| SemanticAbstentionV1::IndexIncompatible)?;
         Ok(Self {
             projection_key,
+            search_index_key,
             vector_generation,
             source_generation,
             capability_manifest_digest,
@@ -77,6 +84,7 @@ impl CompleteSemanticGenerationV1 {
 
     fn matches(&self, request: &SemanticRetrievalRequestV1<'_>) -> bool {
         self.projection_key == *request.projection.projection_key()
+            && self.search_index_key == *request.search_index_key
             && self.vector_generation == request.vector_generation
             && self.source_generation == request.code_generation
             && self.capability_manifest_digest == request.capability_manifest_digest

@@ -419,6 +419,56 @@ impl<T> DashboardEnvelopeV1<T> {
         )
     }
 
+    /// A mounted read model whose owning source is temporarily unavailable.
+    /// This is distinct from `unsupported`: the capability exists, but no
+    /// value or denominator may be claimed for this observation.
+    #[must_use]
+    pub fn unavailable(scope: DashboardScopeV1, payload: T, reason: impl Into<String>) -> Self {
+        let mut coverage = DashboardCoverageV1::unknown();
+        coverage.omission_reasons.push(reason.into());
+        Self::new(
+            scope,
+            DashboardDomainStateV1::Unknown,
+            coverage,
+            DashboardFreshnessV1::unknown(),
+            payload,
+        )
+    }
+
+    /// A partial observation with a known eligible population.
+    #[must_use]
+    pub fn partial(
+        scope: DashboardScopeV1,
+        eligible: u64,
+        examined: u64,
+        unit: impl Into<String>,
+        omission_reasons: Vec<String>,
+        payload: T,
+    ) -> Self {
+        Self::new(
+            scope,
+            DashboardDomainStateV1::Partial,
+            DashboardCoverageV1::partial(eligible, examined, unit, omission_reasons),
+            DashboardFreshnessV1::unknown(),
+            payload,
+        )
+    }
+
+    /// A known caller without permission. Payload types must use a safe empty
+    /// or redacted representation; the envelope never fabricates coverage.
+    #[must_use]
+    pub fn denied(scope: DashboardScopeV1, payload: T) -> Self {
+        let mut envelope = Self::new(
+            scope,
+            DashboardDomainStateV1::Denied,
+            DashboardCoverageV1::unknown(),
+            DashboardFreshnessV1::unknown(),
+            payload,
+        );
+        envelope.authorization = DashboardAuthorizationV1::Denied;
+        envelope
+    }
+
     /// A `complete_zero_findings` envelope. Only constructible from complete
     /// coverage — the plan's rule that the empty result is legal only under
     /// genuinely complete coverage is enforced here: a non-complete coverage
@@ -522,6 +572,35 @@ mod tests {
             envelope.freshness.state,
             DashboardFreshnessStateV1::Unsupported
         );
+    }
+
+    #[test]
+    fn unavailable_partial_and_denied_never_claim_complete_coverage() {
+        let unavailable =
+            DashboardEnvelopeV1::unavailable(scope(), (), "source_temporarily_unavailable");
+        assert_eq!(unavailable.domain_state, DashboardDomainStateV1::Unknown);
+        assert!(!unavailable.coverage.is_complete());
+        assert_eq!(
+            unavailable.coverage.omission_reasons,
+            ["source_temporarily_unavailable"]
+        );
+
+        let partial = DashboardEnvelopeV1::partial(
+            scope(),
+            10,
+            4,
+            "rows",
+            vec!["source_timeout".to_owned()],
+            (),
+        );
+        assert_eq!(partial.domain_state, DashboardDomainStateV1::Partial);
+        assert_eq!(partial.coverage.denominator, Some(10));
+        assert!(!partial.coverage.is_complete());
+
+        let denied = DashboardEnvelopeV1::denied(scope(), ());
+        assert_eq!(denied.domain_state, DashboardDomainStateV1::Denied);
+        assert_eq!(denied.authorization, DashboardAuthorizationV1::Denied);
+        assert!(!denied.coverage.is_complete());
     }
 
     #[test]

@@ -39,6 +39,24 @@ pub(crate) enum MemoryV2FeedbackHistoryRepairBatchOutcome {
     NotRequired,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub(super) struct MemoryV2CutoverCoverage {
+    pub(super) source_fact_count: i64,
+    pub(super) represented_fact_count: i64,
+    pub(super) source_feedback_count: i64,
+    pub(super) represented_feedback_count: i64,
+    pub(super) source_oplog_count: i64,
+    pub(super) represented_oplog_count: i64,
+}
+
+impl MemoryV2CutoverCoverage {
+    pub(super) fn is_complete(self) -> bool {
+        self.source_fact_count == self.represented_fact_count
+            && self.source_feedback_count == self.represented_feedback_count
+            && self.source_oplog_count == self.represented_oplog_count
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct MemoryV2CutoverReceipt {
     receipt_id: ProvenanceId,
@@ -46,6 +64,8 @@ pub(crate) struct MemoryV2CutoverReceipt {
     pub(super) source_store_id: SourceStoreId,
     pub(super) frontiers: CapturedMemoryV2Frontiers,
     pub(super) dual_write_activated_at: UtcMicros,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) coverage: Option<MemoryV2CutoverCoverage>,
 }
 
 impl MemoryV2CutoverReceipt {
@@ -68,7 +88,14 @@ impl MemoryV2CutoverReceipt {
             source_store_id,
             frontiers,
             dual_write_activated_at,
+            coverage: None,
         })
+    }
+
+    pub(super) fn with_verified_coverage(&self, coverage: MemoryV2CutoverCoverage) -> Self {
+        let mut receipt = self.clone();
+        receipt.coverage = Some(coverage);
+        receipt
     }
 }
 
