@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::future::Future;
 use std::pin::Pin;
 
@@ -14,7 +15,9 @@ use tracedecay_application::{
     Deadline, OpaqueCursor, PageRequest, ProblemOwningLayer, RequestId, ResultContractRef,
     RetryDirective, SafeDiagnostic,
 };
-use tracedecay_tool_catalog::SchemaId;
+use tracedecay_tool_catalog::{
+    BindingSurface, CapabilityId, CatalogSnapshotV1, FeatureId, ProfileId, SchemaId, ScopeDimension,
+};
 
 use crate::{CanonicalInvocationResult, HttpJsonEnvelope, HttpProblemEnvelope};
 
@@ -36,8 +39,6 @@ const fn default_http_page_size() -> u32 {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum HttpApplicationOperation {
-    GitPreview,
-    GitApply,
     TestResults,
     CodeExactOccurrence,
     CodePhraseSearch,
@@ -88,7 +89,6 @@ pub enum HttpApplicationOperation {
 /// The canonical application owner family responsible for one HTTP binding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum HttpApplicationOwnerKind {
-    Git,
     CallableCode,
     Primitive,
     Configuration,
@@ -96,10 +96,62 @@ pub enum HttpApplicationOwnerKind {
 }
 
 impl HttpApplicationOperation {
+    pub const ALL: [Self; 45] = [
+        Self::TestResults,
+        Self::CodeExactOccurrence,
+        Self::CodePhraseSearch,
+        Self::CodeSymbolSearch,
+        Self::CodeSignatureSearch,
+        Self::CodeImplementations,
+        Self::CodeTypeHierarchy,
+        Self::CodeCallers,
+        Self::CodeCallees,
+        Self::SessionLookup,
+        Self::QualifiedName,
+        Self::CallChain,
+        Self::FileDependents,
+        Self::SourceLines,
+        Self::SourceBody,
+        Self::SourceOutline,
+        Self::ModuleApi,
+        Self::FileMetadata,
+        Self::HealthRead,
+        Self::StorageStatus,
+        Self::DiagnosticsRead,
+        Self::ConfigurationList,
+        Self::ConfigurationExplain,
+        Self::ConfigurationGet,
+        Self::ConfigurationSet,
+        Self::ConfigurationUnset,
+        Self::ConfigurationBatch,
+        Self::ConfigurationWriteCredential,
+        Self::ConfigurationObservedState,
+        Self::ConfigurationProtectedPreview,
+        Self::ConfigurationProtectedApply,
+        Self::ConfigurationRollbackPreview,
+        Self::ConfigurationRollbackApply,
+        Self::ConfigurationAudit,
+        Self::ContextScoutStatus,
+        Self::ContextScoutRecent,
+        Self::ContextScoutExplain,
+        Self::ContextScoutCapability,
+        Self::ContextScoutBudget,
+        Self::ContextScoutPause,
+        Self::ContextScoutResume,
+        Self::ContextScoutCancel,
+        Self::ContextScoutClaim,
+        Self::ContextScoutDelivery,
+        Self::ContextScoutFeedback,
+    ];
+
+    pub fn from_catalog_name(name: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|operation| operation.as_str() == name)
+    }
+
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::GitPreview => "git_preview",
-            Self::GitApply => "git_apply",
             Self::TestResults => "test_results",
             Self::CodeExactOccurrence => "code_exact_occurrence",
             Self::CodePhraseSearch => "code_phrase_search",
@@ -150,7 +202,6 @@ impl HttpApplicationOperation {
 
     pub const fn owner_kind(self) -> HttpApplicationOwnerKind {
         match self {
-            Self::GitPreview | Self::GitApply => HttpApplicationOwnerKind::Git,
             Self::CodeExactOccurrence | Self::CodePhraseSearch | Self::CodeCallees => {
                 HttpApplicationOwnerKind::CallableCode
             }
@@ -198,6 +249,90 @@ impl HttpApplicationOperation {
             | Self::ContextScoutFeedback => HttpApplicationOwnerKind::ContextScout,
         }
     }
+
+    pub fn route_path(self) -> String {
+        match self {
+            Self::TestResults => "/tests/results".to_owned(),
+            operation
+                if matches!(
+                    operation,
+                    Self::CodeExactOccurrence
+                        | Self::CodePhraseSearch
+                        | Self::CodeSymbolSearch
+                        | Self::CodeSignatureSearch
+                        | Self::CodeImplementations
+                        | Self::CodeTypeHierarchy
+                        | Self::CodeCallers
+                        | Self::CodeCallees
+                ) =>
+            {
+                format!("/code/{}", operation.as_str())
+            }
+            operation if operation.owner_kind() == HttpApplicationOwnerKind::Primitive => {
+                format!("/primitives/{}", operation.as_str())
+            }
+            operation if operation.owner_kind() == HttpApplicationOwnerKind::Configuration => {
+                format!("/configuration/{}", operation.as_str())
+            }
+            operation => format!("/context-scout/{}", operation.as_str()),
+        }
+    }
+}
+
+/// Generated route documentation derived from the same catalog snapshot and
+/// operation enum used by the shipped HTTP router.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct HttpRouteDocumentV1 {
+    pub method: &'static str,
+    pub path: String,
+    pub operation: String,
+    pub capability_id: String,
+    pub binding_id: String,
+    pub request_schema: String,
+    pub request_schema_revision: u32,
+    pub result_schema: String,
+    pub result_schema_revision: u32,
+}
+
+/// Generate authorized HTTP route documentation. Hidden profile, scope,
+/// authorization, feature, or availability entries are omitted exactly like
+/// discovery; no static OpenAPI list can drift from the catalog.
+pub fn http_route_documents(
+    catalog: &CatalogSnapshotV1,
+    profile_id: &ProfileId,
+    authorized_capabilities: &BTreeSet<CapabilityId>,
+    available_scope: &BTreeSet<ScopeDimension>,
+    negotiated_features: &BTreeSet<FeatureId>,
+    protocol_revision: u32,
+) -> Vec<HttpRouteDocumentV1> {
+    let mut documents = Vec::new();
+    for (binding, capability) in catalog.visible_bindings(
+        profile_id,
+        BindingSurface::Http,
+        protocol_revision,
+        negotiated_features,
+        authorized_capabilities,
+        available_scope,
+    ) {
+        let Some(operation) =
+            HttpApplicationOperation::from_catalog_name(binding.operation().as_str())
+        else {
+            continue;
+        };
+        documents.push(HttpRouteDocumentV1 {
+            method: "POST",
+            path: operation.route_path(),
+            operation: operation.as_str().to_owned(),
+            capability_id: capability.capability_id().as_str().to_owned(),
+            binding_id: binding.binding_id().as_str().to_owned(),
+            request_schema: capability.request_schema().schema_id().as_str().to_owned(),
+            request_schema_revision: capability.request_schema().revision(),
+            result_schema: capability.result_schema().schema_id().as_str().to_owned(),
+            result_schema_revision: capability.result_schema().revision(),
+        });
+    }
+    documents.sort_by(|left, right| left.path.cmp(&right.path));
+    documents
 }
 
 #[derive(Clone, Debug)]
@@ -224,8 +359,6 @@ pub type HttpApplicationInvocationFuture =
 /// Each method delegates to the corresponding application owner family. The
 /// adapter performs only extraction, owner selection, and canonical encoding.
 pub trait HttpApplicationOwners: Clone + Send + Sync + 'static {
-    fn invoke_git(&self, request: HttpApplicationRequest) -> HttpApplicationInvocationFuture;
-
     fn invoke_callable_code(
         &self,
         request: HttpApplicationRequest,
@@ -249,10 +382,6 @@ where
     F: Fn(HttpApplicationRequest) -> Fut + Clone + Send + Sync + 'static,
     Fut: Future<Output = CanonicalInvocationResult<Value>> + Send + 'static,
 {
-    fn invoke_git(&self, request: HttpApplicationRequest) -> HttpApplicationInvocationFuture {
-        Box::pin((self)(request))
-    }
-
     fn invoke_callable_code(
         &self,
         request: HttpApplicationRequest,
@@ -378,8 +507,6 @@ where
     O: HttpApplicationOwners,
 {
     Router::new()
-        .route("/git/preview", post(git_preview::<O>))
-        .route("/git/apply", post(git_apply::<O>))
         .route("/tests/results", post(test_results::<O>))
         .route("/code/{operation}", post(callable_code_read::<O>))
         .route("/primitives/{operation}", post(primitive_read::<O>))
@@ -393,48 +520,6 @@ where
         )
         .layer(DefaultBodyLimit::max(MAX_HTTP_APPLICATION_BODY_BYTES))
         .with_state(owners)
-}
-
-async fn git_preview<O>(
-    state: State<O>,
-    request_id: Extension<RequestId>,
-    cancellation: Extension<HttpApplicationControls>,
-    page: Result<Query<HttpPageQuery>, QueryRejection>,
-    body: Result<Json<Value>, JsonRejection>,
-) -> Response
-where
-    O: HttpApplicationOwners,
-{
-    invoke_route(
-        HttpApplicationOperation::GitPreview,
-        state,
-        request_id,
-        cancellation,
-        page,
-        body,
-    )
-    .await
-}
-
-async fn git_apply<O>(
-    state: State<O>,
-    request_id: Extension<RequestId>,
-    cancellation: Extension<HttpApplicationControls>,
-    page: Result<Query<HttpPageQuery>, QueryRejection>,
-    body: Result<Json<Value>, JsonRejection>,
-) -> Response
-where
-    O: HttpApplicationOwners,
-{
-    invoke_route(
-        HttpApplicationOperation::GitApply,
-        state,
-        request_id,
-        cancellation,
-        page,
-        body,
-    )
-    .await
 }
 
 async fn test_results<O>(
@@ -469,41 +554,42 @@ async fn primitive_read<O>(
 where
     O: HttpApplicationOwners,
 {
-    let operation = match operation.as_str() {
-        "session_lookup" => HttpApplicationOperation::SessionLookup,
-        "qualified_name" => HttpApplicationOperation::QualifiedName,
-        "call_chain" => HttpApplicationOperation::CallChain,
-        "file_dependents" => HttpApplicationOperation::FileDependents,
-        "source_lines" => HttpApplicationOperation::SourceLines,
-        "source_body" => HttpApplicationOperation::SourceBody,
-        "source_outline" => HttpApplicationOperation::SourceOutline,
-        "module_api" => HttpApplicationOperation::ModuleApi,
-        "file_metadata" => HttpApplicationOperation::FileMetadata,
-        "health_read" => HttpApplicationOperation::HealthRead,
-        "storage_status" => HttpApplicationOperation::StorageStatus,
-        "diagnostics_read" => HttpApplicationOperation::DiagnosticsRead,
-        _ => {
-            return application_problem_response(adapter_problem(
-                request_id.0,
-                ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
-            ));
-        }
+    let Some(operation) =
+        HttpApplicationOperation::from_catalog_name(&operation).filter(|operation| {
+            operation.owner_kind() == HttpApplicationOwnerKind::Primitive
+                && *operation != HttpApplicationOperation::TestResults
+                && !matches!(
+                    operation,
+                    HttpApplicationOperation::CodeSymbolSearch
+                        | HttpApplicationOperation::CodeSignatureSearch
+                        | HttpApplicationOperation::CodeImplementations
+                        | HttpApplicationOperation::CodeTypeHierarchy
+                        | HttpApplicationOperation::CodeCallers
+                )
+        })
+    else {
+        return application_problem_response(adapter_problem(
+            request_id.0,
+            ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
+        ));
     };
     invoke_route(operation, state, request_id, cancellation, page, body).await
 }
 
 fn parse_callable_code_operation(operation: &str) -> Option<HttpApplicationOperation> {
-    match operation {
-        "code_exact_occurrence" => Some(HttpApplicationOperation::CodeExactOccurrence),
-        "code_phrase_search" => Some(HttpApplicationOperation::CodePhraseSearch),
-        "code_symbol_search" => Some(HttpApplicationOperation::CodeSymbolSearch),
-        "code_signature_search" => Some(HttpApplicationOperation::CodeSignatureSearch),
-        "code_implementations" => Some(HttpApplicationOperation::CodeImplementations),
-        "code_type_hierarchy" => Some(HttpApplicationOperation::CodeTypeHierarchy),
-        "code_callers" => Some(HttpApplicationOperation::CodeCallers),
-        "code_callees" => Some(HttpApplicationOperation::CodeCallees),
-        _ => None,
-    }
+    HttpApplicationOperation::from_catalog_name(operation).filter(|operation| {
+        matches!(
+            operation,
+            HttpApplicationOperation::CodeExactOccurrence
+                | HttpApplicationOperation::CodePhraseSearch
+                | HttpApplicationOperation::CodeSymbolSearch
+                | HttpApplicationOperation::CodeSignatureSearch
+                | HttpApplicationOperation::CodeImplementations
+                | HttpApplicationOperation::CodeTypeHierarchy
+                | HttpApplicationOperation::CodeCallers
+                | HttpApplicationOperation::CodeCallees
+        )
+    })
 }
 
 async fn callable_code_read<O>(
@@ -527,34 +613,8 @@ where
 }
 
 fn parse_configuration_operation(operation: &str) -> Option<HttpApplicationOperation> {
-    match operation {
-        "configuration_list" => Some(HttpApplicationOperation::ConfigurationList),
-        "configuration_explain" => Some(HttpApplicationOperation::ConfigurationExplain),
-        "configuration_get" => Some(HttpApplicationOperation::ConfigurationGet),
-        "configuration_set" => Some(HttpApplicationOperation::ConfigurationSet),
-        "configuration_unset" => Some(HttpApplicationOperation::ConfigurationUnset),
-        "configuration_batch" => Some(HttpApplicationOperation::ConfigurationBatch),
-        "configuration_write_credential" => {
-            Some(HttpApplicationOperation::ConfigurationWriteCredential)
-        }
-        "configuration_observed_state" => {
-            Some(HttpApplicationOperation::ConfigurationObservedState)
-        }
-        "configuration_protected_preview" => {
-            Some(HttpApplicationOperation::ConfigurationProtectedPreview)
-        }
-        "configuration_protected_apply" => {
-            Some(HttpApplicationOperation::ConfigurationProtectedApply)
-        }
-        "configuration_rollback_preview" => {
-            Some(HttpApplicationOperation::ConfigurationRollbackPreview)
-        }
-        "configuration_rollback_apply" => {
-            Some(HttpApplicationOperation::ConfigurationRollbackApply)
-        }
-        "configuration_audit" => Some(HttpApplicationOperation::ConfigurationAudit),
-        _ => None,
-    }
+    HttpApplicationOperation::from_catalog_name(operation)
+        .filter(|operation| operation.owner_kind() == HttpApplicationOwnerKind::Configuration)
 }
 
 async fn configuration_operation<O>(
@@ -578,20 +638,8 @@ where
 }
 
 fn parse_context_scout_operation(operation: &str) -> Option<HttpApplicationOperation> {
-    match operation {
-        "context_scout_status" => Some(HttpApplicationOperation::ContextScoutStatus),
-        "context_scout_recent" => Some(HttpApplicationOperation::ContextScoutRecent),
-        "context_scout_explain" => Some(HttpApplicationOperation::ContextScoutExplain),
-        "context_scout_capability" => Some(HttpApplicationOperation::ContextScoutCapability),
-        "context_scout_budget" => Some(HttpApplicationOperation::ContextScoutBudget),
-        "context_scout_pause" => Some(HttpApplicationOperation::ContextScoutPause),
-        "context_scout_resume" => Some(HttpApplicationOperation::ContextScoutResume),
-        "context_scout_cancel" => Some(HttpApplicationOperation::ContextScoutCancel),
-        "context_scout_claim" => Some(HttpApplicationOperation::ContextScoutClaim),
-        "context_scout_delivery" => Some(HttpApplicationOperation::ContextScoutDelivery),
-        "context_scout_feedback" => Some(HttpApplicationOperation::ContextScoutFeedback),
-        _ => None,
-    }
+    HttpApplicationOperation::from_catalog_name(operation)
+        .filter(|operation| operation.owner_kind() == HttpApplicationOwnerKind::ContextScout)
 }
 
 async fn context_scout_operation<O>(
@@ -666,7 +714,6 @@ where
         body,
     };
     let invocation = match owner_kind {
-        HttpApplicationOwnerKind::Git => owners.invoke_git(request),
         HttpApplicationOwnerKind::CallableCode => owners.invoke_callable_code(request),
         HttpApplicationOwnerKind::Primitive => owners.invoke_primitive(request),
         HttpApplicationOwnerKind::Configuration => owners.invoke_configuration(request),

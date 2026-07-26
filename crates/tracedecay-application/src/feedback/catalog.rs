@@ -8,17 +8,19 @@ use tracedecay_tool_catalog::{
     CancellationContract, CancellationPoint, CapabilityId, CapabilityManifestInputV1,
     CapabilityManifestV1, CatalogContributionInputV1, CatalogContributionV1, ContributionId,
     DeadlineBehavior, DeadlineContract, DeniedDisclosurePolicy, EffectClass, IdempotencyContract,
-    LifecycleClass, PaginationContract, PrivacyClass, ProfileId, ProtocolRevisionRange,
-    ReceiptContract, ReconciliationContract, RevalidationContract, RevalidationPoint,
-    RoutingContractV1, SchemaId, SchemaRef, ScopeDimension, ScopeRequirement, StreamingContract,
-    SurfaceBindingInputV1, SurfaceBindingV1, SurfaceOperationName, TerminalState,
-    TerminalStateContract, UnavailabilityReason, UseCaseId,
+    LifecycleClass, PaginationContract, PrivacyClass, ProtocolRevisionRange, ReceiptContract,
+    ReconciliationContract, RevalidationContract, RevalidationPoint, RoutingContractV1, SchemaId,
+    SchemaRef, ScopeDimension, ScopeRequirement, StreamingContract, SurfaceBindingInputV1,
+    SurfaceBindingV1, SurfaceOperationName, TerminalState, TerminalStateContract,
+    UnavailabilityReason, UseCaseId,
 };
 
 use crate::error::ApplicationContractError;
 use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
 use crate::result::ResultContractRef;
-use crate::retrieval::catalog::APPLICATION_DEFAULT_PROFILE_ID;
+use crate::retrieval::catalog::{
+    APPLICATION_COMPACT_PROFILE_ID, APPLICATION_DEFAULT_PROFILE_ID, application_profile_ids,
+};
 
 use super::{
     CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1, CI_FAILURE_LOCALIZE_USE_CASE_ID_V1,
@@ -207,8 +209,11 @@ fn feedback_surface_catalog_contribution_for_handlers(
     for spec in &FEEDBACK_SPECS {
         let capability_id = CapabilityId::new(spec.capability)?;
         let mut binding_ids = Vec::new();
-        let callable =
-            spec.operation == "test_results" && handlers.contains(&handler_descriptor(spec)?);
+        // Handler registration is the executable-owner proof. Keep this
+        // symmetric with `feedback_surface_handler_descriptors`: narrowing a
+        // registered handler here leaves root composition with a handler for
+        // an unavailable capability and breaks the catalog/handler bijection.
+        let callable = handlers.contains(&handler_descriptor(spec)?);
         if callable {
             binding_ids.reserve(spec.surfaces.len());
             for &surface in spec.surfaces {
@@ -344,7 +349,14 @@ fn capability(
         },
         binding_ids,
         profile_eligibility: if callable {
-            vec![ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID)?]
+            application_profile_ids(if spec.operation == "test_results" {
+                &[
+                    APPLICATION_DEFAULT_PROFILE_ID,
+                    APPLICATION_COMPACT_PROFILE_ID,
+                ]
+            } else {
+                &[APPLICATION_DEFAULT_PROFILE_ID]
+            })?
         } else {
             Vec::new()
         },
@@ -384,7 +396,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalog_advertises_only_feedback_operations_with_host_routes() {
+    fn catalog_advertises_every_registered_feedback_operation() {
         let contribution = feedback_surface_catalog_contribution().expect("contribution");
         let mut names: Vec<_> = contribution
             .bindings()
@@ -393,7 +405,12 @@ mod tests {
             .collect();
         names.sort();
         names.dedup();
-        assert_eq!(names, vec!["test_results".to_owned()]);
+        let mut expected = FEEDBACK_SPECS
+            .iter()
+            .map(|spec| spec.operation.to_owned())
+            .collect::<Vec<_>>();
+        expected.sort();
+        assert_eq!(names, expected);
     }
 
     #[test]
@@ -417,13 +434,8 @@ mod tests {
                 .iter()
                 .find(|capability| capability.capability_id().as_str() == spec.capability)
                 .expect("registered feedback capability");
-            if spec.operation == "test_results" {
-                assert!(capability.availability().is_callable());
-                assert_eq!(capability.binding_ids().len(), spec.surfaces.len());
-            } else {
-                assert!(!capability.availability().is_callable());
-                assert!(capability.binding_ids().is_empty());
-            }
+            assert!(capability.availability().is_callable());
+            assert_eq!(capability.binding_ids().len(), spec.surfaces.len());
         }
     }
 }

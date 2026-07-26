@@ -26,8 +26,8 @@ fn direct_symbol_search_contribution_has_one_matching_handler_descriptor() {
     assert_eq!(handler.request_schema(), capability.request_schema());
     assert_eq!(handler.result_schema(), capability.result_schema());
     assert!(capability.availability().is_callable());
-    assert_eq!(capability.binding_ids().len(), 3);
-    assert_eq!(contribution.bindings().len(), 3);
+    assert_eq!(capability.binding_ids().len(), 4);
+    assert_eq!(contribution.bindings().len(), 4);
     for surface in [
         BindingSurface::Cli,
         BindingSurface::Mcp,
@@ -41,6 +41,10 @@ fn direct_symbol_search_contribution_has_one_matching_handler_descriptor() {
                     && binding.operation().as_str() == "code_symbol_search")
         );
     }
+    assert!(contribution.bindings().iter().any(|binding| {
+        binding.surface() == BindingSurface::Lsp
+            && binding.operation().as_str() == "workspace/symbol"
+    }));
 }
 
 #[test]
@@ -51,7 +55,7 @@ fn application_contribution_set_uses_registered_feedback_handlers() {
     let feedback = feedback_surface_catalog_contribution().unwrap();
     let feedback_handlers = feedback_surface_handler_descriptors().unwrap();
 
-    assert_eq!(contributions.len(), 8);
+    assert_eq!(contributions.len(), 10);
     assert!(contributions.contains(&callable_code));
     assert!(contributions.contains(&feedback));
     assert_eq!(

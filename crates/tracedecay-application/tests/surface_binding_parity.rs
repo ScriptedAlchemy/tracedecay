@@ -1,4 +1,4 @@
-//! CLI/MCP/HTTP semantic parity for Git and feedback surface contracts.
+//! Declared transport parity for Git and feedback surface contracts.
 
 use tracedecay_application::{
     ApplicationHandlerDescriptor, configuration_surface_catalog_contribution,
@@ -32,34 +32,7 @@ fn git_and_feedback_bindings_have_declared_surface_parity() {
     let git_handlers = git_surface_handler_descriptors().expect("git handlers");
     let feedback_handlers = feedback_surface_handler_descriptors().expect("feedback handlers");
 
-    let git_read_overrides = [
-        (
-            "capability.application.git.status",
-            CLI_MCP_SURFACES.as_slice(),
-        ),
-        (
-            "capability.application.git.diff",
-            CLI_MCP_SURFACES.as_slice(),
-        ),
-        (
-            "capability.application.git.history",
-            CLI_MCP_SURFACES.as_slice(),
-        ),
-        (
-            "capability.application.git.blame",
-            CLI_MCP_SURFACES.as_slice(),
-        ),
-        (
-            "capability.application.git.hunks",
-            CLI_MCP_SURFACES.as_slice(),
-        ),
-    ];
-    assert_surface_contract_parity(
-        &git,
-        &git_handlers,
-        &TRANSPORT_SURFACES,
-        &git_read_overrides,
-    );
+    assert_surface_contract_parity(&git, &git_handlers, &CLI_MCP_SURFACES, &[]);
     let advisory_overrides =
         ADVISORY_CAPABILITIES.map(|capability_id| (capability_id, ADVISORY_SURFACES.as_slice()));
     assert_surface_contract_parity(
