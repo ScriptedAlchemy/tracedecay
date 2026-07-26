@@ -10,6 +10,8 @@
 //! post-processing passes (project selectors, LCM storage scope, format).
 
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
+use tracedecay_tool_catalog::{CapabilityId, FeatureId, ProfileId, ScopeDimension};
 
 use super::ToolDefinition;
 use super::dispatch_policy::REGISTERED_PROJECT_READER_TOOL_NAMES;
@@ -315,6 +317,66 @@ pub fn get_tool_definitions_with_budget(node_count: u64, budget: u8) -> Vec<Tool
         }
     }
     defs
+}
+
+/// Build the live MCP discovery result from the application catalog rather
+/// than publishing the static compatibility registry as an unfiltered
+/// superset.
+pub fn get_catalog_filtered_tool_definitions_with_budget(
+    node_count: u64,
+    budget: u8,
+    profile_id: &ProfileId,
+    authorized_capabilities: &BTreeSet<CapabilityId>,
+    available_scope: &BTreeSet<ScopeDimension>,
+) -> Result<Vec<ToolDefinition>, crate::application_surface::ApplicationSurfaceAdapterError> {
+    let catalog = crate::application_surface::application_surface_catalog()?;
+    let visible_operations = catalog
+        .visible_bindings(
+            profile_id,
+            tracedecay_tool_catalog::BindingSurface::Mcp,
+            1,
+            &BTreeSet::<FeatureId>::new(),
+            authorized_capabilities,
+            available_scope,
+        )
+        .into_iter()
+        .map(|(binding, _)| format!("tracedecay_{}", binding.operation().as_str()))
+        .collect::<BTreeSet<_>>();
+    let catalog_operations = catalog
+        .capabilities()
+        .flat_map(|capability| capability.binding_ids())
+        .filter_map(|binding_id| catalog.binding(binding_id))
+        .filter(|binding| binding.surface() == tracedecay_tool_catalog::BindingSurface::Mcp)
+        .map(|binding| format!("tracedecay_{}", binding.operation().as_str()))
+        .collect::<BTreeSet<_>>();
+    Ok(get_tool_definitions_with_budget(node_count, budget)
+        .into_iter()
+        .filter(|definition| {
+            !catalog_operations.contains(&definition.name)
+                || visible_operations.contains(&definition.name)
+        })
+        .collect())
+}
+
+pub fn default_catalog_discovery_authority()
+-> Result<BTreeSet<CapabilityId>, crate::application_surface::ApplicationSurfaceAdapterError> {
+    Ok(crate::application_surface::application_surface_catalog()?
+        .capabilities()
+        .map(|capability| capability.capability_id().clone())
+        .collect())
+}
+
+pub fn project_catalog_discovery_scope() -> BTreeSet<ScopeDimension> {
+    [
+        ScopeDimension::Project,
+        ScopeDimension::Repository,
+        ScopeDimension::Worktree,
+        ScopeDimension::Branch,
+        ScopeDimension::Session,
+        ScopeDimension::Resource,
+    ]
+    .into_iter()
+    .collect()
 }
 
 /// Returns tool definitions with a conservative temporary context budget while
@@ -915,6 +977,33 @@ mod tests {
             .unwrap();
         assert!(context_tool.description.contains("4 calls maximum"));
         assert!(context_tool.description.contains("10000 nodes"));
+    }
+
+    #[test]
+    fn catalog_filter_preserves_non_catalog_tools_and_filters_catalog_bindings() {
+        let profile =
+            ProfileId::new(tracedecay_application::APPLICATION_DEFAULT_PROFILE_ID).unwrap();
+        let definitions = get_catalog_filtered_tool_definitions_with_budget(
+            10_000,
+            4,
+            &profile,
+            &BTreeSet::new(),
+            &project_catalog_discovery_scope(),
+        )
+        .unwrap();
+
+        assert!(
+            definitions
+                .iter()
+                .any(|definition| definition.name == "tracedecay_context"),
+            "legacy production tools remain discoverable until cataloged"
+        );
+        assert!(
+            definitions
+                .iter()
+                .all(|definition| definition.name != "tracedecay_git_preview"),
+            "catalog-bound tools require explicit capability authority"
+        );
     }
 
     #[test]

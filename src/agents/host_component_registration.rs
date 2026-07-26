@@ -219,17 +219,7 @@ impl HostComponentRegistrationDelegate {
                     let aliases_tracedecay = registration
                         .get("command")
                         .is_some_and(|command| command.to_string().contains("tracedecay"));
-                    let overlaps_extensions = registration
-                        .get("extensions")
-                        .and_then(serde_json::Value::as_array)
-                        .is_some_and(|extensions| {
-                            extensions.iter().filter_map(serde_json::Value::as_str).any(
-                                |extension| {
-                                    super::opencode::TRACEDECAY_LSP_EXTENSIONS.contains(&extension)
-                                },
-                            )
-                        });
-                    (aliases_tracedecay || overlaps_extensions).then(|| {
+                    aliases_tracedecay.then(|| {
                         crate::agents::host_bundle_v2::CompetingHostExtensionClaimV1 {
                             extension_id: name.clone(),
                             capability: crate::agents::host_bundle_v2::HostCapabilityV1::Lsp,

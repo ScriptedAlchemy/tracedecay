@@ -96,14 +96,17 @@ pub async fn hook_kimi_v2(event_json: &str, project_root: &Path) -> Option<Strin
 
 pub async fn hook_opencode_v2_event(event_json: &str, project_root: &Path) -> Option<String> {
     let telemetry = record_other_hook_invoked(Some(project_root), "openCodeV2Event", event_json);
-    v2::dispatch(
-        tracedecay_hooks::HookHostV1::OpenCode,
-        event_json,
-        project_root,
-    )
-    .await
-    .into_recorded_guidance(&telemetry)
-    .flatten()
+    let dispatch = if tracedecay_hooks::decode_opencode_lsp_event(event_json.as_bytes()).is_ok() {
+        v2::dispatch_opencode_lsp_updated(event_json, project_root).await
+    } else {
+        v2::dispatch(
+            tracedecay_hooks::HookHostV1::OpenCode,
+            event_json,
+            project_root,
+        )
+        .await
+    };
+    dispatch.into_recorded_guidance(&telemetry).flatten()
 }
 
 pub async fn hook_opencode_v2_tool_after(event_json: &str, project_root: &Path) -> Option<String> {

@@ -64,7 +64,10 @@ import { useReducedMotion, type MotionPreference } from '../../viz/trace/reduced
 import type { SensoryChannelState, TraceModel, TraceNode } from '../../viz/trace/types.ts';
 import { CallChain } from './CallChain.tsx';
 import { NodeEvidence } from './NodeEvidence.tsx';
-import { GraphNeighborsPayloadSchema, type GraphNode } from './contracts.ts';
+import {
+  GraphNeighborsPayloadSchema,
+  type GraphNode,
+} from '../../contracts/uncontracted/graph.ts';
 
 const BASE = '/api/plugins/graph';
 /** The endpoint's own hard cap (`coerce_limit(params.limit, 50, 200)`). */

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { absenceVerdict } from './absence.ts';
-import { ExplorerQueryRunSchema } from './contracts.ts';
+import { ExplorerQueryRunSchema } from '../../contracts/wire.ts';
 
 /**
  * Coverage fields a source may report. Defaults describe a source that examined
