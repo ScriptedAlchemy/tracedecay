@@ -14,6 +14,7 @@ import {
   refreshOperation,
   storageFindingLabel,
   storeRolesLabel,
+  tableGrowthOmissionPresentation,
   tableGrowthPresentation,
 } from './storageModel.ts';
 
@@ -258,6 +259,68 @@ describe('table growth presentation', () => {
 
     expect(presentation.notes).toEqual([reason]);
     expect(presentation.summary).not.toMatch(/zero|no growth/i);
+    // An observed read that could not compare every current table says so in
+    // the summary, so a partial comparison never reads as a complete one.
+    expect(presentation.summary).toContain('partial table coverage');
+    // Partial coverage is still a measurement, not a fault.
+    expect(presentation.tone).toBe('ready');
+  });
+
+  it('omits the partial-coverage wording once every current table was compared', () => {
+    const presentation = tableGrowthPresentation({
+      state: 'observed',
+      coverage: {
+        completeness: 'complete',
+        eligible: 2,
+        examined: 2,
+        matched: null,
+        excluded: null,
+        omitted: 0,
+        unknown: null,
+        denominator: 2,
+        unit: 'current_tables',
+        omission_reasons: [],
+      },
+      significant_samples: [],
+      omissions: [],
+      omission_reasons: [],
+    });
+
+    expect(presentation.summary).not.toContain('partial');
+    expect(presentation.notes).toEqual([]);
+  });
+
+  it('formats below-threshold omission bytes and never invents a baseline delta', () => {
+    expect(
+      tableGrowthOmissionPresentation({
+        kind: 'below_threshold',
+        table: 'metadata',
+        previous_bytes: 104_857_600,
+        current_bytes: 105_381_888,
+        growth_bytes: 524_288,
+        previous_observed_at: 10,
+        current_observed_at: 20,
+        reason: 'observed growth was below the informational significance threshold',
+      }),
+    ).toEqual({
+      kind: 'below_threshold',
+      table: 'metadata',
+      figure: '+512.0 KiB',
+      detail: '100.0 MiB → 100.5 MiB',
+    });
+
+    // A table with no previous watermark has a current size and nothing to
+    // subtract it from: it must never render a delta, signed or zero.
+    const pending = tableGrowthOmissionPresentation({
+      kind: 'baseline_pending',
+      table: 'embeddings',
+      current_bytes: 4_194_304,
+      observed_at: 20,
+      reason: 'embeddings: no previous table watermark exists; baseline pending',
+    });
+    expect(pending.figure).toBe('4.0 MiB now');
+    expect(pending.detail).toBe('no previous watermark · baseline pending');
+    expect(pending.figure).not.toMatch(/^[+−-]/);
   });
 });
 

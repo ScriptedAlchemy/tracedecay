@@ -5,6 +5,7 @@ import type {
   StoreBudgetDimension,
   StoreGrowthDimension,
   TableGrowthDimension,
+  TableGrowthOmission,
   WireLegalActionRef,
 } from '../../contracts/wire.ts';
 
@@ -180,10 +181,17 @@ export function tableGrowthPresentation(growth: TableGrowthDimension): Dimension
     case 'observed':
       return {
         state: 'observed',
+        // An observed comparison is a measurement, never a verdict, so a growing
+        // store keeps the observed tone. Incomplete table coverage is said in
+        // words rather than coloured like a fault.
         tone: 'ready',
         summary: `${growth.significant_samples.length} significant table ${
           growth.significant_samples.length === 1 ? 'change' : 'changes'
-        } · ${growth.omissions.length} omitted from significant list`,
+        } · ${growth.omissions.length} omitted from significant list${
+          growth.coverage.completeness === 'complete' ? '' : ' · partial table coverage'
+        }`,
+        // Every omitted table keeps its server reason here, so a partial
+        // comparison can never read as a complete one.
         notes: growth.omission_reasons,
       };
     case 'baseline_established':
@@ -218,6 +226,43 @@ export function tableGrowthPresentation(growth: TableGrowthDimension): Dimension
       };
     default:
       return assertNever(growth);
+  }
+}
+
+export interface TableGrowthOmissionPresentation {
+  kind: TableGrowthOmission['kind'];
+  table: string;
+  /** The headline figure this omission actually has: a measured delta for a
+   * compared table, or the current size for one with nothing to compare to. */
+  figure: string;
+  /** The byte window behind the figure, or the reason no window exists. A
+   * baseline-pending table never reports a delta, not even zero. */
+  detail: string;
+}
+
+/** Present one omitted table. The wire keeps byte evidence structured so units
+ * are formatted here rather than baked into a server sentence; the server's own
+ * `reason` is still rendered verbatim beside the panel. */
+export function tableGrowthOmissionPresentation(
+  omission: TableGrowthOmission,
+): TableGrowthOmissionPresentation {
+  switch (omission.kind) {
+    case 'below_threshold':
+      return {
+        kind: omission.kind,
+        table: omission.table,
+        figure: `+${formatBytes(omission.growth_bytes)}`,
+        detail: `${formatBytes(omission.previous_bytes)} → ${formatBytes(omission.current_bytes)}`,
+      };
+    case 'baseline_pending':
+      return {
+        kind: omission.kind,
+        table: omission.table,
+        figure: `${formatBytes(omission.current_bytes)} now`,
+        detail: 'no previous watermark · baseline pending',
+      };
+    default:
+      return assertNever(omission);
   }
 }
 
