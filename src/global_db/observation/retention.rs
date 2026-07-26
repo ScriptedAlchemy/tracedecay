@@ -15,7 +15,7 @@
 //! dispositions — superseded and deleted dispositions release their storage."
 //! This module is the retention pass that does exactly that, mirroring the
 //! sibling LCM slice ([`crate::sessions::lcm::retention`]): a bounded,
-//! DryRun/Apply, before/after-measured, inert-by-default engine.
+//! DryRun/Apply, before/after-measured engine.
 //!
 //! # The disposition ledger is the governing authority
 //!
@@ -56,15 +56,15 @@
 //! it governs" means when referential integrity forbids deleting the rows
 //! themselves.
 //!
-//! Because `retrieval_anchors` and `observation_repository_provenance` carry
-//! their own `BEFORE UPDATE` immutability triggers, each releasing transaction
-//! drops the relevant update trigger, rewrites the payload column, and
-//! recreates the identical trigger — all inside one `Immediate` transaction, so
-//! immutability is never observably relaxed and a crash mid-batch rolls back to
-//! the fully-triggered schema. (`observations` carries no update trigger in the
-//! canonical schema, so its payload is released with a plain `UPDATE`.)
+//! `retrieval_anchors`, `observations`, and
+//! `observation_repository_provenance` carry `BEFORE UPDATE` immutability
+//! triggers. Each releasing transaction drops only its relevant update trigger,
+//! rewrites the payload column, and recreates the identical canonical trigger
+//! — all inside one `Immediate` transaction, so immutability is never
+//! observably relaxed and a crash mid-batch rolls back to the fully-triggered
+//! schema.
 //!
-//! # Three passes, generation-scoped, bounded, inert by default
+//! # Three passes, generation-scoped, and bounded
 //!
 //! Each pass has its own window (`None` = disabled) and is scoped to an
 //! optional `projection_generation`. Every pass is capped by `max_batch_size`
@@ -73,12 +73,8 @@
 //! dry run counts eligible rows and the bytes that *would* be reclaimed without
 //! mutating anything.
 //!
-//! Until the daemon seam is wired (see
-//! [`crate::global_db::RegisteredGlobalDb::run_observation_retention`]), the engine is reachable
-//! only from the retention tests, so its items are `dead_code` in a
-//! non-`cfg(test)` library build. The allow is removed the moment a scheduler
-//! calls the entry point.
-#![allow(dead_code)]
+//! The daemon reaches this engine through
+//! [`crate::global_db::RegisteredGlobalDb::run_observation_retention`].
 
 use serde::{Deserialize, Serialize};
 
@@ -120,12 +116,25 @@ const CREATE_ANCHOR_UPDATE_TRIGGER: &str = "CREATE TRIGGER IF NOT EXISTS \
      retrieval_anchors_immutable_update BEFORE UPDATE ON retrieval_anchors BEGIN \
      SELECT RAISE(ABORT, 'retrieval anchors are immutable'); END";
 
+const DROP_OBSERVATION_UPDATE_TRIGGER: &str =
+    "DROP TRIGGER IF EXISTS observations_immutable_update";
+const CREATE_OBSERVATION_UPDATE_TRIGGER: &str = "CREATE TRIGGER \
+     observations_immutable_update BEFORE UPDATE ON observations BEGIN \
+     SELECT RAISE(ABORT, 'observations are immutable'); END";
+
 const DROP_PROVENANCE_UPDATE_TRIGGER: &str =
     "DROP TRIGGER IF EXISTS observation_repository_provenance_immutable_update";
 const CREATE_PROVENANCE_UPDATE_TRIGGER: &str = "CREATE TRIGGER IF NOT EXISTS \
      observation_repository_provenance_immutable_update BEFORE UPDATE ON \
      observation_repository_provenance BEGIN SELECT RAISE(ABORT, \
      'observation repository provenance is immutable'); END";
+
+const DROP_CURSOR_ADVANCE_DELETE_TRIGGER: &str =
+    "DROP TRIGGER IF EXISTS source_cursor_advances_immutable_delete_v1";
+const CREATE_CURSOR_ADVANCE_DELETE_TRIGGER: &str = "CREATE TRIGGER \
+     source_cursor_advances_immutable_delete_v1 BEFORE DELETE ON \
+     source_cursor_advances BEGIN SELECT RAISE(ABORT, \
+     'source cursor advances are immutable'); END";
 
 fn db_error(source: impl std::error::Error + Send + Sync + 'static) -> TraceDecayError {
     TraceDecayError::database_operation(OPERATION, source)
@@ -135,32 +144,36 @@ fn opt_text(value: Option<&str>) -> Value {
     value.map_or(Value::Null, |text| Value::Text(text.to_string()))
 }
 
-/// Per-table retention windows for the observation evidence stores. Every
-/// window is `None` by default (unlimited): the evidence record is lossless
-/// unless an operator explicitly opts a store in, matching
-/// [`crate::sessions::lcm::retention::LcmRetentionConfig`] and
-/// [`crate::retention`].
+/// Per-table retention windows for the observation evidence stores. Released
+/// dispositions are no longer live evidence; their bulky payloads default to a
+/// conservative 30-day recovery horizon while the immutable identity and
+/// disposition ledgers remain durable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObservationRetentionConfig {
     /// Master switch. When `false`, [`run_observation_retention`] is a no-op
     /// even in [`RetentionMode::Apply`].
-    #[serde(default)]
+    #[serde(default = "default_retention_enabled")]
     pub enabled: bool,
     /// Window (days since the governing disposition took effect) after which a
     /// superseded/deleted anchor's `anchor_json` payload is released. `None`
     /// disables the anchor pass.
-    #[serde(default)]
+    #[serde(default = "default_evidence_release_after_days")]
     pub anchor_release_after_days: Option<u32>,
     /// Window after which an observation whose bound anchor is superseded/
     /// deleted has its `observation_json` payload released. `None` disables the
     /// observation pass.
-    #[serde(default)]
+    #[serde(default = "default_evidence_release_after_days")]
     pub observation_release_after_days: Option<u32>,
     /// Window after which a provenance row whose anchor is superseded/deleted
     /// has its `availability_json`/`capture_json` payload released. `None`
     /// disables the provenance pass.
-    #[serde(default)]
+    #[serde(default = "default_evidence_release_after_days")]
     pub provenance_release_after_days: Option<u32>,
+    /// Reclaim cursor-advance receipts that are strictly superseded by the
+    /// current source frontier. The exact receipt supporting the current
+    /// frontier is always retained.
+    #[serde(default = "default_reclaim_superseded_cursor_advances")]
+    pub reclaim_superseded_cursor_advances: bool,
     /// Upper bound on rows touched per pass, keeping each run incremental and
     /// off the hot path.
     #[serde(default = "default_max_batch_size")]
@@ -171,13 +184,27 @@ fn default_max_batch_size() -> usize {
     500
 }
 
+fn default_retention_enabled() -> bool {
+    true
+}
+
+fn default_reclaim_superseded_cursor_advances() -> bool {
+    true
+}
+
+#[allow(clippy::unnecessary_wraps)]
+fn default_evidence_release_after_days() -> Option<u32> {
+    Some(30)
+}
+
 impl Default for ObservationRetentionConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
-            anchor_release_after_days: None,
-            observation_release_after_days: None,
-            provenance_release_after_days: None,
+            enabled: default_retention_enabled(),
+            anchor_release_after_days: default_evidence_release_after_days(),
+            observation_release_after_days: default_evidence_release_after_days(),
+            provenance_release_after_days: default_evidence_release_after_days(),
+            reclaim_superseded_cursor_advances: default_reclaim_superseded_cursor_advances(),
             max_batch_size: default_max_batch_size(),
         }
     }
@@ -194,6 +221,7 @@ impl ObservationRetentionConfig {
         self.anchor_release_after_days.is_some()
             || self.observation_release_after_days.is_some()
             || self.provenance_release_after_days.is_some()
+            || self.reclaim_superseded_cursor_advances
     }
 }
 
@@ -240,6 +268,9 @@ pub struct ObservationRetentionReport {
     pub anchors_released: ObservationRetentionPhaseReport,
     pub observations_released: ObservationRetentionPhaseReport,
     pub provenance_released: ObservationRetentionPhaseReport,
+    /// Superseded append-only cursor-advance receipts reclaimed by the
+    /// daemon-authorized maintenance transaction.
+    pub cursor_advances_reclaimed: ObservationRetentionPhaseReport,
     /// Count of `retrieval_anchors` whose `anchor_json` still carries a payload
     /// (not yet released), before/after the run.
     pub anchor_payloads_before: u64,
@@ -248,6 +279,8 @@ pub struct ObservationRetentionReport {
     /// before/after the run.
     pub observation_payloads_before: u64,
     pub observation_payloads_after: u64,
+    pub cursor_advances_before: u64,
+    pub cursor_advances_after: u64,
     /// Database `PRAGMA freelist_count` before/after (freed pages are the
     /// measurable, VACUUM-free signal that space was reclaimed).
     pub freelist_before: u64,
@@ -265,6 +298,7 @@ impl ObservationRetentionReport {
             .bytes_reclaimed
             .saturating_add(self.observations_released.bytes_reclaimed)
             .saturating_add(self.provenance_released.bytes_reclaimed)
+            .saturating_add(self.cursor_advances_reclaimed.bytes_reclaimed)
     }
 }
 
@@ -275,6 +309,16 @@ fn cutoff_secs(window_days: u32, now_secs: i64) -> i64 {
 async fn pragma_u64(conn: &(impl QueryExecutor + ?Sized), pragma: &str) -> u64 {
     let sql = format!("PRAGMA {pragma}");
     let Ok(mut rows) = conn.query(&sql, ()).await else {
+        return 0;
+    };
+    match rows.next().await {
+        Ok(Some(row)) => row.get::<i64>(0).unwrap_or(0).max(0) as u64,
+        _ => 0,
+    }
+}
+
+async fn row_count(conn: &(impl QueryExecutor + ?Sized), sql: &str) -> u64 {
+    let Ok(mut rows) = conn.query(sql, ()).await else {
         return 0;
     };
     match rows.next().await {
@@ -313,6 +357,8 @@ const OBSERVATION_PAYLOAD_COUNT_SQL: &str = "SELECT COUNT(*) FROM observations o
      ))
        AND json_extract(o.observation_json, '$.__retention_released') IS NULL";
 
+const CURSOR_ADVANCE_COUNT_SQL: &str = "SELECT COUNT(*) FROM source_cursor_advances";
+
 /// Runs the configured observation-evidence retention passes.
 ///
 /// `generation` scopes every pass to a single `projection_generation` (`None`
@@ -347,6 +393,7 @@ pub(crate) async fn run_observation_retention_authorized(
         live_payload_count(conn, ANCHOR_PAYLOAD_COUNT_SQL, generation).await;
     let observation_payloads_before =
         live_payload_count(conn, OBSERVATION_PAYLOAD_COUNT_SQL, generation).await;
+    let cursor_advances_before = row_count(conn, CURSOR_ADVANCE_COUNT_SQL).await;
     let freelist_before = pragma_u64(conn, "freelist_count").await;
     let page_count_before = pragma_u64(conn, "page_count").await;
 
@@ -358,10 +405,13 @@ pub(crate) async fn run_observation_retention_authorized(
         anchors_released: ObservationRetentionPhaseReport::default(),
         observations_released: ObservationRetentionPhaseReport::default(),
         provenance_released: ObservationRetentionPhaseReport::default(),
+        cursor_advances_reclaimed: ObservationRetentionPhaseReport::default(),
         anchor_payloads_before,
         anchor_payloads_after: anchor_payloads_before,
         observation_payloads_before,
         observation_payloads_after: observation_payloads_before,
+        cursor_advances_before,
+        cursor_advances_after: cursor_advances_before,
         freelist_before,
         freelist_after: freelist_before,
         page_count_before,
@@ -406,12 +456,15 @@ pub(crate) async fn run_observation_retention_authorized(
         authorize,
     )
     .await?;
+    report.cursor_advances_reclaimed =
+        run_cursor_advance_pass(conn, config, mode, &mut report.errors, authorize).await?;
 
     report.ended_at = now;
     report.anchor_payloads_after =
         live_payload_count(conn, ANCHOR_PAYLOAD_COUNT_SQL, generation).await;
     report.observation_payloads_after =
         live_payload_count(conn, OBSERVATION_PAYLOAD_COUNT_SQL, generation).await;
+    report.cursor_advances_after = row_count(conn, CURSOR_ADVANCE_COUNT_SQL).await;
     report.freelist_after = pragma_u64(conn, "freelist_count").await;
     report.page_count_after = pragma_u64(conn, "page_count").await;
     Ok(report)
@@ -618,8 +671,10 @@ async fn run_observation_pass(
     // bound to it has reached a released disposition past the window. One
     // active, unavailable, missing-disposition, or not-yet-due binding keeps
     // the shared payload live, including bindings outside `generation`.
-    // `observations` carries no update trigger in the canonical schema, so a
-    // plain UPDATE releases its payload.
+    // The production authority schema makes observations immutable. The
+    // maintenance transaction temporarily suspends only its UPDATE guard,
+    // rewrites the payload, and restores the exact canonical trigger before
+    // commit.
     let sql = format!(
         "SELECT o.observation_id, LENGTH(o.observation_json) AS len,
                 released.effective_at
@@ -706,6 +761,13 @@ async fn run_observation_pass(
     }
 
     let txn = transaction.expect("apply mode starts an observation retention transaction");
+    execute_authorized_required(
+        &txn,
+        authorize,
+        "drop observation immutability trigger for retention",
+        DROP_OBSERVATION_UPDATE_TRIGGER,
+    )
+    .await?;
     for target in &targets {
         authorize("release observation retention payload")?;
         match txn
@@ -728,6 +790,13 @@ async fn run_observation_pass(
             )),
         }
     }
+    execute_authorized_required(
+        &txn,
+        authorize,
+        "restore observation immutability trigger after retention",
+        CREATE_OBSERVATION_UPDATE_TRIGGER,
+    )
+    .await?;
     commit_authorized(txn, authorize, "commit observation retention pass").await?;
     Ok(report)
 }
@@ -858,6 +927,126 @@ async fn run_provenance_pass(
     )
     .await?;
     commit_authorized(txn, authorize, "commit provenance retention pass").await?;
+    Ok(report)
+}
+
+struct CursorAdvanceTarget {
+    rowid: i64,
+    original_len: u64,
+}
+
+/// Reclaims only advance receipts that the current cursor frontier strictly
+/// supersedes. An advance at the exact current generation/domain/end is kept:
+/// it may be the sole durable authority for a non-observation cursor advance.
+/// Older generations and lower positions in the current generation are no
+/// longer replayable frontiers and can be removed without weakening recovery.
+async fn run_cursor_advance_pass(
+    conn: &Connection,
+    config: &ObservationRetentionConfig,
+    mode: RetentionMode,
+    errors: &mut Vec<String>,
+    authorize: &(dyn Fn(&str) -> Result<()> + Send + Sync),
+) -> Result<ObservationRetentionPhaseReport> {
+    let mut report = ObservationRetentionPhaseReport::default();
+    if !config.reclaim_superseded_cursor_advances {
+        return Ok(report);
+    }
+    let sql = "SELECT advance.rowid,
+                LENGTH(advance.source_json) + LENGTH(advance.scope_json)
+                + LENGTH(advance.coverage_json) + LENGTH(advance.reason)
+                + LENGTH(COALESCE(advance.receipt_id, '')) AS payload_len
+         FROM source_cursor_advances AS advance
+         JOIN source_cursors AS current
+           ON current.source_json = advance.source_json
+          AND current.scope_json = advance.scope_json
+         WHERE (
+             CAST(json_extract(current.cursor_json, '$.generation') AS INTEGER)
+               > CAST(json_extract(advance.coverage_json, '$.generation') AS INTEGER)
+             OR (
+                 CAST(json_extract(current.cursor_json, '$.generation') AS INTEGER)
+                   = CAST(json_extract(advance.coverage_json, '$.generation') AS INTEGER)
+                 AND COALESCE(
+                     json_extract(current.cursor_json, '$.ordering_domain'),
+                     'file_bytes'
+                 ) = json_extract(advance.coverage_json, '$.ordering_domain')
+                 AND CAST(json_extract(current.cursor_json, '$.byte_offset') AS INTEGER)
+                   > CAST(json_extract(advance.coverage_json, '$.range.end') AS INTEGER)
+             )
+         )
+         ORDER BY advance.rowid
+         LIMIT ?1";
+    let transaction = if mode.is_apply() {
+        authorize("begin source cursor advance retention pass")?;
+        Some(
+            conn.transaction_with_behavior(TransactionBehavior::Immediate)
+                .await
+                .map_err(db_error)?,
+        )
+    } else {
+        None
+    };
+    let query_executor = transaction.as_ref().map_or(
+        RetentionQueryExecutor::Connection(conn),
+        RetentionQueryExecutor::Transaction,
+    );
+    let mut rows = query_executor
+        .query(sql, params![config.batch_limit()])
+        .await
+        .map_err(db_error)?;
+    let mut targets = Vec::new();
+    while let Some(row) = rows.next().await.map_err(db_error)? {
+        targets.push(CursorAdvanceTarget {
+            rowid: row.get(0).map_err(db_error)?,
+            original_len: row.get::<i64>(1).map_err(db_error)?.max(0) as u64,
+        });
+    }
+    report.eligible = targets.len() as u64;
+    report.bytes_reclaimed = targets.iter().map(|target| target.original_len).sum();
+    if !mode.is_apply() || targets.is_empty() {
+        return Ok(report);
+    }
+
+    let txn = transaction.expect("apply mode starts a cursor advance retention transaction");
+    execute_authorized_required(
+        &txn,
+        authorize,
+        "drop cursor advance delete trigger for retention",
+        DROP_CURSOR_ADVANCE_DELETE_TRIGGER,
+    )
+    .await?;
+    for target in &targets {
+        authorize("reclaim superseded source cursor advance")?;
+        match txn
+            .execute(
+                "DELETE FROM source_cursor_advances WHERE rowid = ?1",
+                params![target.rowid],
+            )
+            .await
+        {
+            Ok(1) => report.acted += 1,
+            Ok(_) => errors.push(format!(
+                "reclaim source cursor advance rowid {}: row disappeared",
+                target.rowid
+            )),
+            Err(error) => errors.push(format!(
+                "reclaim source cursor advance rowid {}: {error}",
+                target.rowid
+            )),
+        }
+    }
+    execute_authorized_required(
+        &txn,
+        authorize,
+        "restore cursor advance delete trigger after retention",
+        CREATE_CURSOR_ADVANCE_DELETE_TRIGGER,
+    )
+    .await?;
+    commit_authorized(
+        txn,
+        authorize,
+        "commit source cursor advance retention pass",
+    )
+    .await?;
     Ok(report)
 }
 

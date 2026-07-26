@@ -5,10 +5,9 @@
 //!
 //! * `analytics_events` — hook/tool/skill telemetry. Derived, reconstructable
 //!   signal, so it carries a **safe default retention of 180 days**.
-//! * `session_messages` and `lcm_raw_messages` — the lossless record of every
-//!   ingested session transcript. These are **never pruned by default**
-//!   (window defaults to `None` = unlimited); an operator must explicitly opt
-//!   in per table.
+//! * `session_messages` and `lcm_raw_messages` — legacy session copies retained
+//!   for a six-month recovery horizon. Current session stores additionally use
+//!   projection-durability-aware retention in [`crate::sessions::lcm`].
 //!
 //! Every window is expressed in whole days. Rows are pruned only when their
 //! timestamp is both present and strictly older than the cutoff, so rows with
@@ -46,6 +45,8 @@ const TIMESTAMP_COLUMN: &str = "timestamp";
 /// are a derived signal, so a generous six-month window loses nothing that
 /// cannot be recomputed from the source transcripts.
 pub const DEFAULT_ANALYTICS_EVENTS_RETENTION_DAYS: u32 = 180;
+/// Default recovery horizon for legacy session rows.
+pub const DEFAULT_LEGACY_SESSION_RETENTION_DAYS: u32 = 180;
 
 /// Per-table retention windows. A `None` window disables pruning for that
 /// table (unlimited retention).
@@ -55,13 +56,11 @@ pub struct RetentionConfig {
     /// [`DEFAULT_ANALYTICS_EVENTS_RETENTION_DAYS`].
     #[serde(default = "default_analytics_events_days")]
     pub analytics_events_days: Option<u32>,
-    /// Retention window for `session_messages`. Defaults to `None`
-    /// (unlimited): this is part of the lossless session record.
-    #[serde(default)]
+    /// Retention window for legacy `session_messages`.
+    #[serde(default = "default_legacy_session_days")]
     pub session_messages_days: Option<u32>,
-    /// Retention window for `lcm_raw_messages`. Defaults to `None`
-    /// (unlimited): this is part of the lossless session record.
-    #[serde(default)]
+    /// Retention window for legacy `lcm_raw_messages`.
+    #[serde(default = "default_legacy_session_days")]
     pub lcm_raw_messages_days: Option<u32>,
 }
 
@@ -71,12 +70,17 @@ fn default_analytics_events_days() -> Option<u32> {
     Some(DEFAULT_ANALYTICS_EVENTS_RETENTION_DAYS)
 }
 
+#[allow(clippy::unnecessary_wraps)]
+fn default_legacy_session_days() -> Option<u32> {
+    Some(DEFAULT_LEGACY_SESSION_RETENTION_DAYS)
+}
+
 impl Default for RetentionConfig {
     fn default() -> Self {
         Self {
             analytics_events_days: default_analytics_events_days(),
-            session_messages_days: None,
-            lcm_raw_messages_days: None,
+            session_messages_days: default_legacy_session_days(),
+            lcm_raw_messages_days: default_legacy_session_days(),
         }
     }
 }
@@ -190,8 +194,10 @@ async fn delete_before(
     cutoff: i64,
 ) -> Result<u64> {
     let name = table.table_name();
+    let eligibility = retention_eligibility(table);
     let sql = format!(
-        "DELETE FROM {name} WHERE {TIMESTAMP_COLUMN} IS NOT NULL AND {TIMESTAMP_COLUMN} < ?1"
+        "DELETE FROM {name} WHERE {TIMESTAMP_COLUMN} IS NOT NULL
+         AND {TIMESTAMP_COLUMN} < ?1 AND {eligibility}"
     );
     executor
         .execute(&sql, crate::db::engine::params![cutoff])
@@ -205,9 +211,11 @@ async fn count_before(
     cutoff: i64,
 ) -> Result<u64> {
     let name = table.table_name();
+    let eligibility = retention_eligibility(table);
     let sql = format!(
         "SELECT COUNT(*) FROM {name} \
-         WHERE {TIMESTAMP_COLUMN} IS NOT NULL AND {TIMESTAMP_COLUMN} < ?1"
+         WHERE {TIMESTAMP_COLUMN} IS NOT NULL AND {TIMESTAMP_COLUMN} < ?1
+         AND {eligibility}"
     );
     let mut result = executor
         .query(&sql, crate::db::engine::params![cutoff])
@@ -221,6 +229,32 @@ async fn count_before(
         .and_then(|row| row.get::<i64>(0).ok())
         .unwrap_or(0)
         .max(0) as u64)
+}
+
+/// Legacy session windows still obey the current projection-durability
+/// authority. Age alone never makes lossless content eligible.
+fn retention_eligibility(table: RetentionTable) -> &'static str {
+    match table {
+        RetentionTable::AnalyticsEvents => "1 = 1",
+        RetentionTable::SessionMessages => {
+            "EXISTS (
+                SELECT 1
+                FROM lcm_raw_messages AS raw
+                JOIN lcm_summary_sources AS source
+                  ON source.source_kind = 'raw_message'
+                 AND source.source_id = CAST(raw.store_id AS TEXT)
+                WHERE raw.provider = session_messages.provider
+                  AND raw.message_id = session_messages.message_id
+            )"
+        }
+        RetentionTable::LcmRawMessages => {
+            "EXISTS (
+                SELECT 1 FROM lcm_summary_sources AS source
+                WHERE source.source_kind = 'raw_message'
+                  AND source.source_id = CAST(lcm_raw_messages.store_id AS TEXT)
+            )"
+        }
+    }
 }
 
 macro_rules! retention_backend {
@@ -292,8 +326,7 @@ where
 
 /// Runs retention for the global-database tables
 /// ([`RetentionTable::GLOBAL_TABLES`]) using `config`, returning a per-table
-/// report. Session data is only touched when the operator has explicitly
-/// configured a window for it.
+/// report.
 pub async fn prune_global_tables<E>(
     conn: &E,
     config: &RetentionConfig,
@@ -374,6 +407,12 @@ mod tests {
         rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
     }
 
+    async fn count_message(conn: &Connection, table: &str, message_id: &str) -> i64 {
+        let sql = format!("SELECT COUNT(*) FROM {table} WHERE message_id = ?1");
+        let mut rows = conn.query(&sql, params![message_id]).await.unwrap();
+        rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap()
+    }
+
     fn config_days(days: Option<u32>) -> RetentionConfig {
         RetentionConfig {
             analytics_events_days: days,
@@ -383,21 +422,20 @@ mod tests {
     }
 
     #[test]
-    fn defaults_keep_session_data_and_prune_analytics() {
+    fn defaults_bound_legacy_session_data_and_prune_analytics() {
         let config = RetentionConfig::default();
         assert_eq!(config.analytics_events_days, Some(180));
-        assert_eq!(config.session_messages_days, None);
-        assert_eq!(config.lcm_raw_messages_days, None);
+        assert_eq!(config.session_messages_days, Some(180));
+        assert_eq!(config.lcm_raw_messages_days, Some(180));
     }
 
     #[test]
-    fn config_deserializes_partial_toml_without_touching_session_defaults() {
-        // Only analytics is set; session tables must stay unlimited.
+    fn config_deserializes_partial_toml_with_bounded_session_defaults() {
         let config: RetentionConfig =
             serde_json::from_str(r#"{"analytics_events_days": 30}"#).unwrap();
         assert_eq!(config.analytics_events_days, Some(30));
-        assert_eq!(config.session_messages_days, None);
-        assert_eq!(config.lcm_raw_messages_days, None);
+        assert_eq!(config.session_messages_days, Some(180));
+        assert_eq!(config.lcm_raw_messages_days, Some(180));
 
         // An empty object falls back to the safe defaults.
         let empty: RetentionConfig = serde_json::from_str("{}").unwrap();
@@ -488,6 +526,64 @@ mod tests {
             3,
             "rows inside the window and NULL-timestamp rows are retained"
         );
+    }
+
+    #[tokio::test]
+    async fn legacy_windows_require_durable_summary_lineage() {
+        let directory = tempfile::tempdir().unwrap();
+        let conn = test_conn(&directory);
+        let now = 1_000_000_000;
+        conn.execute_batch(
+            "CREATE TABLE session_messages (
+                provider TEXT NOT NULL,
+                message_id TEXT NOT NULL,
+                timestamp INTEGER
+             );
+             CREATE TABLE lcm_raw_messages (
+                store_id INTEGER PRIMARY KEY,
+                provider TEXT NOT NULL,
+                message_id TEXT NOT NULL,
+                timestamp INTEGER
+             );
+             CREATE TABLE lcm_summary_sources (
+                source_kind TEXT NOT NULL,
+                source_id TEXT NOT NULL
+             );
+             INSERT INTO session_messages VALUES
+                ('claude', 'durable', 1),
+                ('claude', 'live', 1);
+             INSERT INTO lcm_raw_messages VALUES
+                (1, 'claude', 'durable', 1),
+                (2, 'claude', 'live', 1);
+             INSERT INTO lcm_summary_sources VALUES ('raw_message', '1');",
+        )
+        .await
+        .unwrap();
+
+        let config = RetentionConfig::default();
+        prune_table(
+            &*conn,
+            RetentionTable::SessionMessages,
+            config.session_messages_days,
+            RetentionMode::Apply,
+            now,
+        )
+        .await
+        .unwrap();
+        prune_table(
+            &*conn,
+            RetentionTable::LcmRawMessages,
+            config.lcm_raw_messages_days,
+            RetentionMode::Apply,
+            now,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(count_message(&conn, "session_messages", "durable").await, 0);
+        assert_eq!(count_message(&conn, "lcm_raw_messages", "durable").await, 0);
+        assert_eq!(count_message(&conn, "session_messages", "live").await, 1);
+        assert_eq!(count_message(&conn, "lcm_raw_messages", "live").await, 1);
     }
 
     #[tokio::test]
