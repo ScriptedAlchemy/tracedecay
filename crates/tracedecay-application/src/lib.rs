@@ -17,6 +17,7 @@ pub mod feedback;
 pub mod framed_log;
 pub mod git;
 pub mod handlers;
+pub mod lsp_context_catalog;
 pub mod observability;
 pub mod policy;
 pub mod result;
@@ -102,6 +103,7 @@ pub use handlers::{
     ApplicationHandlerDescriptor, ApplicationHandlerDescriptors, ApplicationOperation,
     application_handler_descriptors,
 };
+pub use lsp_context_catalog::{lsp_context_catalog_contribution, lsp_context_handler_descriptors};
 pub use observability::*;
 pub use policy::{
     PolicyConsumerV1, PolicyEvaluationContextV1, PolicyEvaluationV1, PolicyEvaluatorCompositionV1,
@@ -126,7 +128,11 @@ pub use retained_surfaces::{
     RetainedSurfaceOperation, retained_surface_application_operation,
     retained_surface_catalog_contribution, retained_surface_handler_descriptors,
 };
-pub use retrieval::catalog::{APPLICATION_DEFAULT_PROFILE_ID, application_catalog_contributions};
+pub use retrieval::catalog::{
+    APPLICATION_ADMINISTRATIVE_PROFILE_ID, APPLICATION_COMPACT_PROFILE_ID,
+    APPLICATION_DEFAULT_PROFILE_ID, APPLICATION_HOST_LIMITED_PROFILE_ID,
+    application_catalog_contributions,
+};
 pub use retrieval::{
     AffectedTestsRequest, AffectedTestsRetrievalPort, AnchorExpandRequest, AnchorExpandResult,
     AnchorHydrationPort, CALLABLE_CODE_OPERATION_COUNT, CallableCodeAuthorizationAdmission,

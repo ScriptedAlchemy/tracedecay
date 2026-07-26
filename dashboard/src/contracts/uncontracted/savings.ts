@@ -1,13 +1,15 @@
-// LEGACY BOUNDARY — pending envelope migration.
-// These schemas describe the pre-envelope plugin JSON endpoints
-// (`/api/plugins/*`, `/api/projects`), NOT the DashboardEnvelopeV1 wire surface
-// in `../../contracts/generated.ts`. They are hand-matched to their Rust
-// producers and remain until these routes move to typed envelopes; new
-// envelope-backed reads must use the single wire boundary in `contracts/`.
+/**
+ * UNCONTRACTED — `GET /api/plugins/savings/overview`.
+ *
+ * Producer: `src/dashboard/savings_api.rs`, returning `serde_json::Value`.
+ * Nothing here is generated; see `./README.md`.
+ *
+ * Note that the Rust contract catalog does carry a `CostsReadModelV1`
+ * (`dashboard/contract_schema.rs`), but it belongs to the envelope-backed
+ * costs read model, not to this pre-envelope plugin route. The Costs workspace
+ * still reads this one, so the gap is real.
+ */
 import { z } from 'zod';
-
-/** Wire-true shapes for /api/plugins/savings/overview
- * (src/dashboard/savings_api.rs). */
 
 const SavingsSumSchema = z
   .object({ saved_tokens: z.number(), calls: z.number() })

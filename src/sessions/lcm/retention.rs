@@ -83,10 +83,10 @@ const PROJECTION_DURABLE: &str = "EXISTS (
 /// Externalization kind recorded on retention-offloaded payloads.
 const OFFLOAD_KIND: &str = "retention_offload";
 
-/// Per-table/per-store retention windows for the session store. Lossless raw
-/// retention remains unlimited by default, while the redundant projected copy
-/// is removed after a conservative window once summary lineage proves the raw
-/// row projection-durable.
+/// Per-table/per-store retention windows for the session store. Defaults keep
+/// a six-month recovery horizon for projection-durable raw evidence, offload
+/// its bulky inline payload after 30 days, and remove the redundant projected
+/// copy after 30 days. Rows without durable summary lineage remain untouched.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LcmRetentionConfig {
     /// Master switch. When `false`, [`run_session_retention`] is a no-op even
@@ -96,11 +96,11 @@ pub struct LcmRetentionConfig {
     /// Window after which a projection-durable, still-inline raw row has its
     /// content offloaded to the content-addressed store. `None` disables the
     /// offload pass.
-    #[serde(default)]
+    #[serde(default = "default_offload_after_days")]
     pub offload_after_days: Option<u32>,
     /// Window after which a projection-durable raw row (and its projected twin)
     /// is dropped. `None` disables the drop pass.
-    #[serde(default)]
+    #[serde(default = "default_drop_after_days")]
     pub drop_after_days: Option<u32>,
     /// Window after which a projected `session_messages` row whose raw twin is
     /// still present is dropped as a redundant second content copy. `None`
@@ -122,6 +122,16 @@ fn default_retention_enabled() -> bool {
 }
 
 #[allow(clippy::unnecessary_wraps)]
+fn default_offload_after_days() -> Option<u32> {
+    Some(30)
+}
+
+#[allow(clippy::unnecessary_wraps)]
+fn default_drop_after_days() -> Option<u32> {
+    Some(180)
+}
+
+#[allow(clippy::unnecessary_wraps)]
 fn default_dedupe_projected_after_days() -> Option<u32> {
     Some(30)
 }
@@ -130,8 +140,8 @@ impl Default for LcmRetentionConfig {
     fn default() -> Self {
         Self {
             enabled: default_retention_enabled(),
-            offload_after_days: None,
-            drop_after_days: None,
+            offload_after_days: default_offload_after_days(),
+            drop_after_days: default_drop_after_days(),
             dedupe_projected_after_days: default_dedupe_projected_after_days(),
             max_batch_size: default_max_batch_size(),
         }

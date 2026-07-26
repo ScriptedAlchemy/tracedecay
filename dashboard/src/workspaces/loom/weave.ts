@@ -37,7 +37,7 @@
  * renders those rows without projecting a made-up continuous coordinate.
  */
 import { packTrack, type LoomSpan } from './tracks.ts';
-import type { LoomSession } from './contracts.ts';
+import type { SessionRow } from '../../contracts/uncontracted/sessions.ts';
 
 /** One session, reduced to the quantities the weave actually draws. */
 export interface WeaveThread {
@@ -112,7 +112,7 @@ export interface Weave {
 
 /** Distinct model names on a session's accounting rows, in wire order and
  * without the null placeholder the daemon uses for untagged turns. */
-function modelsOf(session: LoomSession): string[] {
+function modelsOf(session: SessionRow): string[] {
   const out: string[] = [];
   for (const row of session.models ?? []) {
     const model = row.model;
@@ -128,7 +128,7 @@ function modelsOf(session: LoomSession): string[] {
  * than placed at an invented time — there is no honest y for it — and the
  * caller is told how many were dropped so the count can be printed.
  */
-export function threadsFrom(sessions: readonly LoomSession[]): {
+export function threadsFrom(sessions: readonly SessionRow[]): {
   threads: WeaveThread[];
   undated: number;
 } {
@@ -205,7 +205,7 @@ export function extentOf(threads: readonly WeaveThread[]): WeaveExtent | null {
  * than a constant because only the renderer knows the current scale.
  */
 export function composeWeave(
-  sessions: readonly LoomSession[],
+  sessions: readonly SessionRow[],
   minGapSeconds = 0,
 ): Weave & { undated: number } {
   const { threads, undated } = threadsFrom(sessions);

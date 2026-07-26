@@ -1,14 +1,20 @@
-// LEGACY BOUNDARY — pending envelope migration.
-// These schemas describe the pre-envelope plugin JSON endpoints
-// (`/api/plugins/*`, `/api/projects`), NOT the DashboardEnvelopeV1 wire surface
-// in `../../contracts/generated.ts`. They are hand-matched to their Rust
-// producers and remain until these routes move to typed envelopes; new
-// envelope-backed reads must use the single wire boundary in `contracts/`.
+/**
+ * UNCONTRACTED — the holographic memory plugin routes.
+ *
+ *   GET /api/plugins/holographic/            (overview)
+ *   GET /api/plugins/holographic/status
+ *   GET /api/plugins/holographic/fact/{id}
+ *
+ * Producer: `src/dashboard/memory_api.rs` and
+ * `src/dashboard/memory_service/facts.rs` (`overview_payload`,
+ * `fact_summary_json`), all returning `serde_json::Value`. Nothing here is
+ * generated; see `./README.md`.
+ *
+ * `status` was modelled twice: in full by the Knowledge workspace and as a
+ * three-field subset by Brain's scoped rail (`ScopedMemoryStatusSchema`). One
+ * route, one schema — Brain reads the same body, it just reads less of it.
+ */
 import { z } from 'zod';
-
-/** Wire-true shapes for GET /api/plugins/holographic (memory overview).
- * Fact rows come from fact_summary_json in
- * src/dashboard/memory_service/facts.rs. */
 
 export const FactRowSchema = z
   .object({
@@ -43,7 +49,7 @@ export const TrustBucketSchema = z
   .object({ bucket: z.number(), label: z.string(), count: z.number() })
   .passthrough();
 
-/** One per-category HRR coverage row from overview_payload in facts.rs. */
+/** One per-category HRR coverage row from `overview_payload`. */
 export const HrrCoverageRowSchema = z
   .object({
     category: z.string(),
@@ -60,14 +66,14 @@ export const HrrCoverageRowSchema = z
   .passthrough();
 export type HrrCoverageRow = z.infer<typeof HrrCoverageRowSchema>;
 
-/** One `categories` row from overview_payload in facts.rs. */
+/** One `categories` row from `overview_payload`. */
 export const CategoryCountSchema = z
   .object({ category: z.string(), count: z.number() })
   .passthrough();
 export type CategoryCount = z.infer<typeof CategoryCountSchema>;
 
-/** One `growth` point from overview_payload in facts.rs (period bucket, facts
- * added in that bucket, and the running total at that point). */
+/** One `growth` point from `overview_payload` (period bucket, facts added in
+ * that bucket, and the running total at that point). */
 export const GrowthPointSchema = z
   .object({
     date: z.string(),
@@ -134,14 +140,14 @@ export const FactDetailPayloadSchema = z
   .passthrough();
 
 /**
- * GET /api/plugins/holographic/status (src/dashboard/memory_api.rs `status`).
+ * `GET /api/plugins/holographic/status` (`memory_api.rs::status`).
  *
- * Read here for one reason: `memory.trust_*_count` is the only trust
- * distribution a real store currently reports correctly. The overview's
- * `trust_histogram` is produced with row names of the form `trust-<n>` and
- * consumed with `parse::<usize>()`, so every bucket comes back zero.
+ * `memory.trust_*_count` is the only trust distribution a real store currently
+ * reports correctly. The overview's `trust_histogram` is produced with row
+ * names of the form `trust-<n>` and consumed with `parse::<usize>()`, so every
+ * bucket comes back zero.
  */
-export const MemoryStatusSchema = z
+export const MemoryStatusPayloadSchema = z
   .object({
     exists: z.boolean().optional(),
     error: z.string().optional(),
@@ -170,4 +176,4 @@ export const MemoryStatusSchema = z
       .optional(),
   })
   .passthrough();
-export type MemoryStatusPayload = z.infer<typeof MemoryStatusSchema>;
+export type MemoryStatusPayload = z.infer<typeof MemoryStatusPayloadSchema>;
