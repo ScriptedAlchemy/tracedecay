@@ -71,7 +71,7 @@ change any recommendation) is recorded in §5.
     compress it to a ~0.008 score swing.
 - **Critical dependency:** tuning the fusion (M2) or holographic weight (M3)
   re-ranks every existing query and must be guarded by a **ranking eval harness
-  that does not exist yet** (`tests/memory_eval_test.rs` covers hygiene contracts
+  that does not exist yet** (`tests/memory_suite/memory_eval_test.rs` covers hygiene contracts
   only). → **Ticket M1 (prerequisite), then Q5 (entities) + M4 (morphology).**
 
 ### 2c. Trust-decay semantics — **decision adopted: Option 1**
@@ -144,7 +144,7 @@ concurrently without collision:
 | **Q4** | f64 → f32 vector serialization + incremental VACUUM (one-way door; backfill + tolerance test) | `src/memory/encoding.rs`, `src/db/migrations.rs`, `src/memory/store.rs` | codex-gpt-5-5 |
 | **Q5** | Fix entity extraction coverage + brittle verb list (stem/prefix + head noun) | `src/memory/entities.rs` | codex-gpt-5-3 |
 | **Q6** | DONE: feedback-history read API (trust explainability) — `TraceDecay::fact_trust_history`, MCP fact `get` `trust_history`, `GET /api/plugins/holographic/fact/{id}/trust-history` | `src/memory/store.rs`, `src/mcp/tools/handlers/memory.rs`, `src/dashboard/memory_api.rs` | codex-gpt-5-4 |
-| **M1** | Ranking-quality eval scenario family (prereq for M2/M3) | `tests/memory_eval_test.rs`, `eval/scenarios/*` | codex-gpt-5-4 |
+| **M1** | Ranking-quality eval scenario family (prereq for M2/M3) | `tests/memory_suite/memory_eval_test.rs`, `eval/scenarios/*` | codex-gpt-5-4 |
 | **D-A** | DONE: dynamic-only persisted-trust policy adopted; do not build an aging scheduler unless product asks for persisted forgetting | decision only | inherit |
 
 **Dependency links:** Q6 → after Q3 (shared dashboard/MCP surface). Everything

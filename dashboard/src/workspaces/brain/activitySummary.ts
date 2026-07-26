@@ -84,11 +84,13 @@ export function familyLabel(family: string): string {
  * event observed yet, or a non-finite/negative delta) renders as an em dash
  * rather than a fabricated "0s".
  *
- * The unit is in the name on purpose. Loom's `tracks.ts` exports a
- * `formatDuration` that takes SECONDS, so a bare `formatDuration` import gave
- * two functions of the same name whose inputs differ by 1000x — and reaching
- * for the wrong one prints a wrong duration rather than failing, which is a
- * falsified value on screen. Callers now have to name the unit they hold.
+ * The unit is in the name on purpose. Loom's `tracks.ts` formats the same
+ * vocabulary from epoch SECONDS, so while both were called `formatDuration`
+ * there were two functions of one name whose inputs differ by 1000x — and
+ * reaching for the wrong one prints a wrong duration rather than failing,
+ * which is a falsified value on screen. Loom's is now
+ * `formatDurationSeconds`; callers of either have to name the unit they hold,
+ * and `tracks.test.ts` fails if a bare `formatDuration` reappears.
  */
 export function formatDurationMs(ms: number | null): string {
   if (ms == null || !Number.isFinite(ms) || ms < 0) return '—';
