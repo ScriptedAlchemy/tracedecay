@@ -2006,12 +2006,10 @@ mod tests {
             tracedecay::agents::host_bundle_v2::HostBundleComponentV1::Core
         );
         let kiro = canonical_host_component_set("kiro", None, 0)
-            .unwrap()
-            .expect("Kiro has a first-party default Core set");
-        assert_eq!(kiro.component_set.components.len(), 1);
-        assert_eq!(
-            kiro.component_set.components[0].manifest.component,
-            tracedecay::agents::host_bundle_v2::HostBundleComponentV1::Core
+            .expect("Kiro compatibility lookup remains valid");
+        assert!(
+            kiro.is_none(),
+            "a degraded hook route must not become a supported component set"
         );
     }
 
@@ -2097,87 +2095,20 @@ mod tests {
     }
 
     #[test]
-    fn kiro_canonical_component_set_runs_full_lifecycle() {
-        let home = tempfile::tempdir().unwrap();
-        let lifecycle = tempfile::tempdir().unwrap();
-        let mcp_path = home.path().join(".kiro/settings/mcp.json");
-        std::fs::create_dir_all(mcp_path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &mcp_path,
-            r#"{"mcpServers":{"other":{"command":"other"}},"unrelated":true}"#,
-        )
-        .unwrap();
-        let component_set = canonical_host_component_set("kiro", None, 0)
-            .unwrap()
-            .unwrap();
-        let options = crate::cli::HostBundleCliOptions {
-            component: None,
-            dry_run: false,
-            yes: true,
-        };
-
-        for operation in [
-            HostBundleCliOperation::Install,
-            HostBundleCliOperation::Update,
-        ] {
-            apply_canonical_component_set(
-                "kiro",
-                operation,
-                &component_set,
-                &options,
-                home.path(),
-                lifecycle.path(),
-            )
-            .unwrap();
-        }
-        std::fs::write(
-            home.path().join(".kiro/steering/tracedecay.md"),
-            "stale tracedecay steering",
-        )
-        .unwrap();
-        apply_canonical_component_set(
-            "kiro",
-            HostBundleCliOperation::Repair,
-            &component_set,
-            &options,
-            home.path(),
-            lifecycle.path(),
-        )
-        .unwrap();
-
-        let mcp: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&mcp_path).unwrap()).unwrap();
-        assert_eq!(mcp["unrelated"], true);
-        assert_eq!(mcp["mcpServers"]["other"]["command"], "other");
-        assert!(mcp["mcpServers"]["tracedecay"].is_object());
+    fn kiro_canonical_component_set_refuses_degraded_hook_route() {
         assert!(
-            home.path()
-                .join(".kiro/tracedecay/component.json")
-                .is_file()
-        );
-        assert!(home.path().join(".kiro/agents/tracedecay.json").is_file());
-        assert!(
-            std::fs::read_to_string(home.path().join(".kiro/steering/tracedecay.md"))
+            canonical_host_component_set("kiro", None, 0)
                 .unwrap()
-                .contains("## TraceDecay: mandatory tool routing")
+                .is_none()
         );
-
-        apply_canonical_component_set(
-            "kiro",
-            HostBundleCliOperation::Uninstall,
-            &component_set,
-            &options,
-            home.path(),
-            lifecycle.path(),
-        )
-        .unwrap();
-        let mcp: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&mcp_path).unwrap()).unwrap();
-        assert_eq!(mcp["unrelated"], true);
-        assert_eq!(mcp["mcpServers"]["other"]["command"], "other");
-        assert!(mcp["mcpServers"].get("tracedecay").is_none());
-        assert!(!home.path().join(".kiro/tracedecay/component.json").exists());
-        assert!(!home.path().join(".kiro/agents/tracedecay.json").exists());
+        assert!(
+            canonical_host_component_set(
+                "kiro",
+                Some(crate::cli::HostBundleComponentArg::Core),
+                0,
+            )
+            .is_err()
+        );
     }
 
     #[test]

@@ -27,6 +27,10 @@ const OPENCODE_PLUGIN_SOURCE: &str = include_str!("../../plugin/opencode/tracede
 const OPENCODE_PLUGIN_MARKER: &str = "TraceDecayPlugin";
 /// Deployed path of the managed plugin relative to the `OpenCode` config dir.
 pub(crate) const OPENCODE_PLUGIN_RELATIVE: &str = "plugins/tracedecay.ts";
+pub(crate) const TRACEDECAY_LSP_EXTENSIONS: &[&str] = &[
+    ".rs", ".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".c", ".h", ".cc", ".cpp", ".cxx", ".hh",
+    ".hpp", ".hxx", ".m", ".mm", ".zig", ".lua", ".php",
+];
 
 impl AgentIntegration for OpenCodeIntegration {
     fn name(&self) -> &'static str {
@@ -398,11 +402,7 @@ fn install_mcp_server(config_path: &Path, tracedecay_bin: &str) -> Result<()> {
             "tracedecay".to_string(),
             json!({
                 "command": [tracedecay_bin, "lsp", "bridge", "--stdio", "--project", "."],
-                "extensions": [
-                    ".rs", ".ts", ".tsx", ".js", ".jsx", ".py", ".go", ".c", ".h",
-                    ".cc", ".cpp", ".cxx", ".hh", ".hpp", ".hxx", ".m", ".mm", ".zig",
-                    ".lua", ".php"
-                ],
+                "extensions": TRACEDECAY_LSP_EXTENSIONS,
                 "env": {
                     "TRACEDECAY_LSP_BROKER_UPSTREAM": "0"
                 },
