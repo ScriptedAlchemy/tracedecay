@@ -707,5 +707,26 @@ fn structure_visualization_endpoints_report_measured_data() {
                 })),
             "test map should report the covering test: {tests}"
         );
+        let (status, sessions) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/graph/node/n-route/sessions",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200, "{sessions}");
+        assert_eq!(sessions["payload"]["status"], "measured");
+        assert_eq!(
+            sessions["payload"]["measurement"]["available_granularities"],
+            serde_json::json!(["file"])
+        );
+        assert_eq!(
+            sessions["payload"]["measurement"]["linkage"]["providers"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            sessions["payload"]["measurement"]["symbol_granularity_available"],
+            false
+        );
     });
 }

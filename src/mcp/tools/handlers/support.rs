@@ -252,7 +252,7 @@ async fn unique_project_basename_context(
     basename: &str,
 ) -> Result<Option<ProjectRegistryContext>> {
     let mut matching_ids = Vec::new();
-    for project in db.search_code_projects(basename, usize::MAX).await {
+    for project in db.try_search_code_projects(basename, usize::MAX).await? {
         if !project_basename_matches(&project, basename)
             || matching_ids.contains(&project.project_id)
         {

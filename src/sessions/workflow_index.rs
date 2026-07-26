@@ -66,6 +66,17 @@ impl From<crate::db::engine::Error> for WorkflowIndexError {
     }
 }
 
+impl From<crate::sessions::git_correlation::GitCorrelationError> for WorkflowIndexError {
+    fn from(err: crate::sessions::git_correlation::GitCorrelationError) -> Self {
+        match err {
+            crate::sessions::git_correlation::GitCorrelationError::Db(message) => Self::Db(message),
+            crate::sessions::git_correlation::GitCorrelationError::InvalidArgument(message) => {
+                Self::InvalidArgument(message)
+            }
+        }
+    }
+}
+
 /// Lifecycle state of a workflow run or agent.
 ///
 /// Mirrors the Claude Code run JSON `status` / agent `state` vocabulary while
@@ -673,7 +684,7 @@ pub(crate) async fn runs_for_session(
     parent_session_id: &str,
     limit: usize,
 ) -> Result<Vec<WorkflowRun>, WorkflowIndexError> {
-    if !tables_present(conn).await.unwrap_or(false) {
+    if !tables_present(conn).await? {
         return Ok(Vec::new());
     }
     let sql = format!(
@@ -698,7 +709,7 @@ pub(crate) async fn run_for_id(
     conn: &impl QueryExecutor,
     run_id: &str,
 ) -> Result<Option<WorkflowRun>, WorkflowIndexError> {
-    if !tables_present(conn).await.unwrap_or(false) {
+    if !tables_present(conn).await? {
         return Ok(None);
     }
     let sql = format!("SELECT {RUN_COLUMNS} FROM workflow_runs WHERE run_id = ?1");
@@ -716,7 +727,7 @@ pub(crate) async fn agents_for_run(
     run_id: &str,
     limit: usize,
 ) -> Result<Vec<WorkflowAgent>, WorkflowIndexError> {
-    if !tables_present(conn).await.unwrap_or(false) {
+    if !tables_present(conn).await? {
         return Ok(Vec::new());
     }
     let sql = format!(
@@ -754,7 +765,7 @@ pub(crate) async fn runs_for_git_scope(
             "runs_for_git_scope requires at least one of branch/worktree/commit".to_string(),
         ));
     }
-    if !tables_present(conn).await.unwrap_or(false) {
+    if !tables_present(conn).await? {
         return Ok(Vec::new());
     }
     // A git-scoped run query against a store written before the correlation
@@ -762,7 +773,7 @@ pub(crate) async fn runs_for_git_scope(
     // EXISTS against missing tables.
     if !crate::sessions::git_correlation::tables_present(conn)
         .await
-        .unwrap_or(false)
+        .map_err(WorkflowIndexError::from)?
     {
         return Ok(Vec::new());
     }
