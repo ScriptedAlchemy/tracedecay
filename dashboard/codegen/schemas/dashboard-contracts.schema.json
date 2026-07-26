@@ -82,6 +82,180 @@
         }
       ]
     },
+    "AutomationPendingReviewCountV1": {
+      "description": "One human-review queue: a count, or the reason there is no count.\n\nKept as a tagged reading rather than a bare number because these two queues\nare the entire human-approval step of the automation pipeline. A queue whose\nauthority is unmounted must not report `0`, which reads as \"checked, nothing\nwaiting\" — the precise false zero this shape exists to prevent.",
+      "oneOf": [
+        {
+          "properties": {
+            "count": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "state": {
+              "const": "measured",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "count",
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "count": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "reason": {
+              "type": "string"
+            },
+            "state": {
+              "const": "unreadable",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "count",
+            "reason"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "AutomationPendingReviewV1": {
+      "properties": {
+        "fact_proposals": {
+          "$ref": "#/$defs/AutomationPendingReviewCountV1"
+        },
+        "skills": {
+          "$ref": "#/$defs/AutomationPendingReviewCountV1"
+        }
+      },
+      "required": [
+        "fact_proposals",
+        "skills"
+      ],
+      "type": "object"
+    },
+    "AutomationSchedulerStatusV1": {
+      "description": "The scheduler reading served by all three of `status`, `pause`, and\n`resume`.\n\nThe two control routes return this same payload rather than an\nacknowledgement because the pause flag is the thing a caller is actually\nasking about, and a bare `{\"ok\":true}` would leave the dashboard to assume\nthe new state instead of observing it. Returning the re-read means a client\nnever has to optimistically flip a control it has not seen take effect.\n\nTyped here, rather than assembled with `json!`, so the shape reaches\n`contract_schema.rs` and the dashboard consumes a generated contract. The\nfield set is deliberately identical to the `json!` literal it replaces: this\nis the same wire, described, not a new one.",
+      "properties": {
+        "control_path": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "last_session_activity": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "now": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "paused": {
+          "type": "boolean"
+        },
+        "pending_fact_proposals": {
+          "description": "Null — never zero — when the queue could not be read. `pending_review`\ncarries which reading each figure actually is; these two flat fields\nremain for clients predating that block.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "pending_review": {
+          "$ref": "#/$defs/AutomationPendingReviewV1"
+        },
+        "pending_skills": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "project_config_path": {
+          "type": "string"
+        },
+        "scheduler_tick_secs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "status": {
+          "description": "Coarse label: `paused`, `automation_disabled`, `delegated_host`,\n`backend_disabled`, or `configured`.",
+          "type": "string"
+        },
+        "tasks": {
+          "items": {
+            "$ref": "#/$defs/AutomationTaskStatusV1"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "status",
+        "paused",
+        "pending_fact_proposals",
+        "pending_skills",
+        "pending_review",
+        "enabled",
+        "scheduler_tick_secs",
+        "now",
+        "last_session_activity",
+        "project_config_path",
+        "control_path",
+        "tasks"
+      ],
+      "type": "object"
+    },
+    "AutomationTaskStatusV1": {
+      "properties": {
+        "due": {
+          "type": "boolean"
+        },
+        "last_scheduler_run": {
+          "description": "The most recent scheduler-triggered ledger record, passed through\nverbatim. Left untyped because `AutomationRunLedgerRecord` is an\ninternal automation-crate record rather than a dashboard wire type, and\nprojecting it here would change this payload's shape; typing it belongs\nwith the run-artifact routes, which are the surfaces that read it."
+        },
+        "skip_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "task": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "task",
+        "due",
+        "skip_reason",
+        "last_scheduler_run"
+      ],
+      "type": "object"
+    },
     "BranchCollisionPolicyV1": {
       "oneOf": [
         {
@@ -2350,6 +2524,45 @@
       "description": "Strongly typed algorithm-tagged integrity digest: `LocatorDigest`.",
       "type": "string"
     },
+    "LoomFileSessionProjectionV1": {
+      "properties": {
+        "authority": {
+          "type": "string"
+        },
+        "eligible_sessions": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "granularity": {
+          "type": "string"
+        },
+        "matched_sessions": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "providers": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "sessions": {
+          "items": true,
+          "type": "array"
+        }
+      },
+      "required": [
+        "granularity",
+        "authority",
+        "providers",
+        "eligible_sessions",
+        "matched_sessions",
+        "sessions"
+      ],
+      "type": "object"
+    },
     "ManifestDigest": {
       "description": "Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.",
       "type": "string"
@@ -2384,6 +2597,36 @@
         "kind",
         "file_path",
         "start_line"
+      ],
+      "type": "object"
+    },
+    "NodeSessionsMeasurementV1": {
+      "properties": {
+        "available_granularities": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "linkage": {
+          "$ref": "#/$defs/LoomFileSessionProjectionV1"
+        },
+        "node": {
+          "$ref": "#/$defs/NodeRefV1"
+        },
+        "symbol_granularity_available": {
+          "type": "boolean"
+        },
+        "symbol_granularity_reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "node",
+        "linkage",
+        "available_granularities",
+        "symbol_granularity_available",
+        "symbol_granularity_reason"
       ],
       "type": "object"
     },
@@ -4018,6 +4261,70 @@
         }
       ]
     },
+    "StructureReadV15": {
+      "oneOf": [
+        {
+          "properties": {
+            "measurement": {
+              "$ref": "#/$defs/NodeSessionsMeasurementV1"
+            },
+            "status": {
+              "const": "measured",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "measurement"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "detail": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "status": {
+              "const": "unmeasured",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "reason",
+            "detail"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "detail": {
+              "type": "string"
+            },
+            "retryable": {
+              "type": "boolean"
+            },
+            "status": {
+              "const": "failed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "code",
+            "detail",
+            "retryable"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "TestMapMeasurementV1": {
       "properties": {
         "algorithm": {
@@ -4374,6 +4681,10 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "properties": {
+    "automation_scheduler_status": {
+      "$ref": "#/$defs/AutomationSchedulerStatusV1",
+      "description": "Served identically by `GET /api/automation/scheduler/status` and by the\n`pause`/`resume` controls, which re-read rather than acknowledge."
+    },
     "code_index_freshness": {
       "$ref": "#/$defs/CodeIndexFreshnessPayloadV1"
     },
@@ -4401,6 +4712,9 @@
     "graph_fact_matches": {
       "$ref": "#/$defs/StructureReadV13"
     },
+    "graph_node_sessions": {
+      "$ref": "#/$defs/StructureReadV15"
+    },
     "graph_strata": {
       "$ref": "#/$defs/StructureReadV12"
     },
@@ -4427,7 +4741,9 @@
     "graph_call_chain",
     "graph_strata",
     "graph_fact_matches",
-    "graph_test_map"
+    "graph_test_map",
+    "graph_node_sessions",
+    "automation_scheduler_status"
   ],
   "schemaRevision": 1,
   "title": "DashboardContractCatalogV1",

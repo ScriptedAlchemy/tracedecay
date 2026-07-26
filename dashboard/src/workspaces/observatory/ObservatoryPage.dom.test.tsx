@@ -284,6 +284,7 @@ function storageFindingsPayload() {
         surface: 'storage_runtime',
         preview_available: true,
         action_confirmation: 'required',
+        target: null,
         summary: 'collect retention-eligible rows or reclaim an over-budget store',
       },
       {
@@ -291,6 +292,7 @@ function storageFindingsPayload() {
         surface: 'storage_runtime',
         preview_available: true,
         action_confirmation: 'required',
+        target: null,
         summary: 'collect a store whose project identity no longer resolves',
       },
       {
@@ -298,6 +300,7 @@ function storageFindingsPayload() {
         surface: 'storage_runtime',
         preview_available: true,
         action_confirmation: 'required',
+        target: null,
         summary: 'remove branch-scoped databases whose git refs are gone',
       },
       {
@@ -305,6 +308,7 @@ function storageFindingsPayload() {
         surface: 'storage_runtime',
         preview_available: true,
         action_confirmation: 'required',
+        target: null,
         summary: 'quarantine and collect incident debris beside a live store',
       },
     ],
