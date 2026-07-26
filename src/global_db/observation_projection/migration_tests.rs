@@ -1209,10 +1209,41 @@ async fn schema_open_defers_rebuild_until_background_migration_advances_it() {
     );
     drop(second_writer);
     let database = registered_database(&second_open);
+    let cancelled = AtomicBool::new(true);
+    assert!(
+        !database
+            .advance_projection_version_migration_until_cancelled(&cancelled)
+            .await
+            .unwrap(),
+        "a cancelled background worker must leave the rebuild pending"
+    );
+    let writer = database.writer_connection().unwrap();
+    let mut rows = writer
+        .query(
+            "SELECT aliases_staged_through, staged_through
+             FROM observation_projection_rebuilds
+             WHERE projector_version = ?1",
+            params![SESSION_MESSAGE_PROJECTOR_VERSION_V4],
+        )
+        .await
+        .unwrap();
+    let cancelled_progress = rows
+        .next()
+        .await
+        .unwrap()
+        .map(|row| (row.get::<i64>(0).unwrap(), row.get::<i64>(1).unwrap()));
+    drop(rows);
+    drop(writer);
+    assert_eq!(
+        cancelled_progress,
+        Some(before),
+        "cancellation must stop at the last committed rebuild checkpoint"
+    );
+    cancelled.store(false, Ordering::Release);
     let mut complete = false;
     for _ in 0..16 {
         complete = database
-            .advance_projection_version_migration()
+            .advance_projection_version_migration_until_cancelled(&cancelled)
             .await
             .unwrap();
         if complete {

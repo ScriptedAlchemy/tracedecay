@@ -1,3 +1,5 @@
+use std::sync::atomic::AtomicBool;
+
 use tracedecay_store::{
     ProjectionStoreResult, SESSION_MESSAGE_PROJECTOR_VERSION, SESSION_MESSAGE_PROJECTOR_VERSION_V1,
     SESSION_MESSAGE_PROJECTOR_VERSION_V2, SESSION_MESSAGE_PROJECTOR_VERSION_V3,
@@ -56,13 +58,14 @@ pub(crate) async fn prepare_projection_version_migration_with_engine(
     }
 }
 
-pub(crate) async fn advance_projection_version_migration_with_engine(
+pub(crate) async fn advance_projection_version_migration_until_cancelled_with_engine(
     conn: &Connection,
+    cancelled: &AtomicBool,
 ) -> ProjectionStoreResult<bool> {
     if !migration_target_is_registered()? {
         return Ok(true);
     }
-    if let Some(complete) = resume_projection_rebuild_with_engine(conn).await? {
+    if let Some(complete) = resume_projection_rebuild_with_engine(conn, cancelled).await? {
         finish_projection_rebuild_migration(conn, complete).await?;
     } else {
         prepare_projection_version_migration_with_engine(conn).await?;
