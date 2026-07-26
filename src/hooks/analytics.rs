@@ -11,6 +11,7 @@ use crate::application::host_admission::{
     HostAdmissionTelemetryDisposition as HookDispositionTelemetry,
 };
 use crate::errors::TraceDecayError;
+use tracedecay_hooks::HookTransportDispositionV1;
 
 use super::tool_hints::{HintAgent, ToolHint};
 use super::{HookWorkspaceStatus, claude, prompt_like_text};
@@ -138,6 +139,22 @@ impl HookTimingSpan {
         prompt_category: Option<&'static str>,
         payload_bytes: Option<u64>,
     ) -> Self {
+        Self::new_named(
+            root,
+            agent.as_key(),
+            hook_name,
+            prompt_category,
+            payload_bytes,
+        )
+    }
+
+    fn new_named(
+        root: Option<&Path>,
+        agent: &'static str,
+        hook_name: &str,
+        prompt_category: Option<&'static str>,
+        payload_bytes: Option<u64>,
+    ) -> Self {
         // Hooks must not synchronously open a store, contact the daemon, or
         // parse legacy configuration. A daemon-published snapshot is the only
         // source; absent authority disables optional telemetry fail-closed.
@@ -146,7 +163,7 @@ impl HookTimingSpan {
             .is_some_and(|telemetry| telemetry.timings);
         Self {
             root: root.map(Path::to_path_buf),
-            agent: agent.as_key(),
+            agent,
             hook_name: bounded_identifier(hook_name),
             prompt_category,
             started: Instant::now(),
@@ -191,6 +208,13 @@ impl HookTimingSpan {
         merge_disposition(
             &mut state.disposition,
             disposition_unknown("notify_outcome_unavailable"),
+        );
+    }
+
+    pub(crate) fn note_hook_v2_disposition(&self, disposition: HookTransportDispositionV1) {
+        merge_disposition(
+            &mut self.state().disposition,
+            disposition_from_hook_v2(disposition),
         );
     }
 
@@ -275,6 +299,26 @@ fn note_result(state: &mut HookTimingState, result: &Result<Value, TraceDecayErr
         Err(error) => {
             merge_disposition(&mut state.disposition, disposition_from_daemon_error(error));
         }
+    }
+}
+
+fn disposition_from_hook_v2(disposition: HookTransportDispositionV1) -> HookDispositionTelemetry {
+    match disposition {
+        HookTransportDispositionV1::Accepted => HookDispositionTelemetry::from_parts(
+            HostAdmissionStatus::Supported,
+            Some(false),
+            Some("hook_v2_accepted".to_owned()),
+        ),
+        HookTransportDispositionV1::AcceptedForReplay => HookDispositionTelemetry::from_parts(
+            HostAdmissionStatus::AcceptedForReplay,
+            Some(true),
+            Some("hook_v2_spooled".to_owned()),
+        ),
+        HookTransportDispositionV1::CatchupRequired => HookDispositionTelemetry::from_parts(
+            HostAdmissionStatus::Degraded,
+            Some(true),
+            Some("hook_v2_catchup_required".to_owned()),
+        ),
     }
 }
 
@@ -487,6 +531,29 @@ pub(crate) fn record_hook_invoked(
         }),
     );
     HookTimingSpan::new(root, agent, hook_name, prompt_category, payload_bytes)
+}
+
+pub(crate) fn record_other_hook_invoked(
+    root: Option<&Path>,
+    hook_name: &str,
+    event_json: &str,
+) -> HookTimingSpan {
+    let parsed: Value = serde_json::from_str(event_json).unwrap_or(Value::Null);
+    let payload_bytes = measure_host_event_payload_bytes(event_json);
+    let prompt_category = inferred_prompt_category(&parsed);
+    record_hook_analytics(
+        root,
+        "hook_invoked",
+        serde_json::json!({
+            "schema_version": HOST_HOOK_TELEMETRY_SCHEMA_VERSION,
+            "coverage": HostHookTelemetryCoverage::HostMeasured,
+            "agent": "other",
+            "hook_name": bounded_identifier(hook_name),
+            "prompt_category": prompt_category,
+            "payload_bytes": payload_bytes,
+        }),
+    );
+    HookTimingSpan::new_named(root, "other", hook_name, prompt_category, payload_bytes)
 }
 
 pub(super) fn mint_hint_id() -> String {
@@ -755,6 +822,23 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(untrusted.reason_code.as_deref(), Some("unclassified"));
+    }
+
+    #[test]
+    fn hook_v2_transport_dispositions_remain_distinct_in_telemetry() {
+        let accepted = disposition_from_hook_v2(HookTransportDispositionV1::Accepted);
+        let spooled = disposition_from_hook_v2(HookTransportDispositionV1::AcceptedForReplay);
+        let catchup = disposition_from_hook_v2(HookTransportDispositionV1::CatchupRequired);
+
+        assert_eq!(accepted.status, HostAdmissionStatus::Supported);
+        assert_eq!(accepted.reason_code.as_deref(), Some("hook_v2_accepted"));
+        assert_eq!(spooled.status, HostAdmissionStatus::AcceptedForReplay);
+        assert_eq!(spooled.reason_code.as_deref(), Some("hook_v2_spooled"));
+        assert_eq!(catchup.status, HostAdmissionStatus::Degraded);
+        assert_eq!(
+            catchup.reason_code.as_deref(),
+            Some("hook_v2_catchup_required")
+        );
     }
 
     #[test]

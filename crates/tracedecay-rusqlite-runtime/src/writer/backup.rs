@@ -588,9 +588,6 @@ fn map_backup_error(
         (SqliteBackupError::Cancelled, None) => {
             WriterActorError::OnlineBackupFailed(WriterOnlineBackupError::Cancelled)
         }
-        (SqliteBackupError::DeadlineExceeded, None) => {
-            WriterActorError::OnlineBackupFailed(WriterOnlineBackupError::DeadlineExceeded)
-        }
         (SqliteBackupError::Filesystem(error), None) => WriterActorError::OnlineBackupFailed(error),
         (error, None) => {
             WriterActorError::OnlineBackupFailed(WriterOnlineBackupError::Sqlite(error.to_string()))
