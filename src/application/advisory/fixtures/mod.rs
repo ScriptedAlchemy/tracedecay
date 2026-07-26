@@ -8,6 +8,7 @@
 use std::collections::BTreeSet;
 
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracedecay_domain::feedback::{
     CiFailureBranchEvidenceV1, CiFailureCallerEvidenceV1, CiFailureCoverageV1,
@@ -329,6 +330,39 @@ pub fn load_pr13_source_backed_composite_fixture_v1()
     let _typed_comment =
         serde_json::from_value::<RestReviewCommentV1>(comment["response"].clone())?;
     let _typed_threads = serde_json::from_value::<GraphQlResponseV1>(thread["response"].clone())?;
+    require_eq(
+        str_at(&comment, "/capture/method")?,
+        "GET".to_owned(),
+        "review-comment capture method",
+    )?;
+    require_eq(
+        str_at(&comment, "/capture/api_version")?,
+        "2022-11-28".to_owned(),
+        "review-comment API version",
+    )?;
+    require_eq(
+        str_at(&thread, "/capture/operation_kind")?,
+        "query".to_owned(),
+        "review-thread operation kind",
+    )?;
+    require_eq(
+        str_at(&thread, "/capture/operation_name")?,
+        "TraceDecayPR13ReviewThreads".to_owned(),
+        "review-thread operation name",
+    )?;
+    require_eq(
+        digest_at(&comment, "/integrity/body_sha256")?,
+        raw_text_digest(&str_at(&comment, "/response/body")?)?,
+        "review-comment body digest",
+    )?;
+    require_eq(
+        digest_at(&thread, "/integrity/body_text_sha256")?,
+        raw_text_digest(&str_at(
+            &thread,
+            "/response/data/repository/pullRequest/reviewThreads/nodes/0/comments/nodes/0/bodyText",
+        )?)?,
+        "review-thread body digest",
+    )?;
 
     let repository_id = u64_at(&pull_request, "/response/head/repo/id")?;
     let pull_request_id = u64_at(&pull_request, "/response/id")?;
@@ -637,6 +671,14 @@ fn digest_at(
     pointer: &'static str,
 ) -> Result<ManifestDigest, Pr13SourceBackedFixtureErrorV1> {
     ManifestDigest::new(str_at(value, pointer)?).map_err(|_| inconsistent(pointer))
+}
+
+fn raw_text_digest(value: &str) -> Result<ManifestDigest, Pr13SourceBackedFixtureErrorV1> {
+    ManifestDigest::new(format!(
+        "sha256:{}",
+        hex::encode(Sha256::digest(value.as_bytes()))
+    ))
+    .map_err(|_| inconsistent("fixture text digest"))
 }
 
 fn require_eq<T: PartialEq>(

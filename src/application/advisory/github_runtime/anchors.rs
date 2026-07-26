@@ -844,7 +844,7 @@ mod tests {
         );
     }
 
-    fn context(scope: &FeedbackScopeV1, project_id: ProjectId) -> RequestContext {
+    fn request_context(scope: &FeedbackScopeV1, project_id: ProjectId) -> RequestContext {
         let resolved = ResolvedScope::new(
             project_id,
             scope.repository_id.clone(),
@@ -941,7 +941,7 @@ mod tests {
             .resolve(&request, &seed)
             .await
             .expect("canonical body anchor");
-        let context = context(&scope, scope.project_id.clone());
+        let context = request_context(&scope, scope.project_id.clone());
         let access = Access::new([
             GitHubProviderLifecycleV1::Ready,
             GitHubProviderLifecycleV1::Ready,
@@ -965,7 +965,8 @@ mod tests {
                 .await,
             GitHubReviewBodyReadOutcomeV1::Denied
         ));
-        let wrong_project = context(&scope, ProjectId::new("project.github.body.other").unwrap());
+        let wrong_project =
+            request_context(&scope, ProjectId::new("project.github.body.other").unwrap());
         let never_called = Access::new([]);
         assert!(matches!(
             authority
