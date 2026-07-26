@@ -3,10 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 
 use crate::binding::{BindingSurface, SurfaceBindingV1, SurfaceOperationName};
-use crate::id::{
-    BindingId, CapabilityId, ContributionId, ProfileId, RetrieverId, SchemaId, UseCaseId,
-};
-use crate::manifest::{CapabilityManifestV1, EffectClass, SchemaRef};
+use crate::id::{BindingId, CapabilityId, ContributionId, ProfileId, RetrieverId, UseCaseId};
+use crate::manifest::{CapabilityManifestV1, EffectClass};
 use crate::profile::{ProfileDefinition, RoutingFixtureExpectation};
 use crate::retrieval::RetrievalPrimitiveManifestV1;
 use crate::snapshot::{ApplicationHandlerDescriptorV1, CatalogContributionV1};
@@ -108,8 +106,6 @@ pub enum CatalogValidationError {
         "retrieval primitive {retriever_id} has lifecycle metadata incompatible with its capability"
     )]
     RetrievalLifecycleMismatch { retriever_id: RetrieverId },
-    #[error("schema {schema_id}@{revision} has incompatible canonical sizes")]
-    IncompatibleSchemaReference { schema_id: SchemaId, revision: u32 },
     #[error("duplicate profile ID {0}")]
     DuplicateProfileId(ProfileId),
     #[error("capability {capability_id} references missing profile {profile_id}")]
@@ -175,7 +171,6 @@ pub(crate) fn validate_catalog(
     validate_handler_contracts(&capabilities, &handlers)?;
     validate_profile_membership(&capabilities, &profiles)?;
     validate_retrieval_contracts(&retrievals, &capabilities)?;
-    validate_schema_references(&capabilities, &retrievals)?;
     validate_profiles(&profiles, &capabilities, &bindings)?;
     Ok(())
 }
@@ -471,41 +466,6 @@ fn validate_retrieval_contracts(
     Ok(())
 }
 
-fn validate_schema_references(
-    capabilities: &BTreeMap<CapabilityId, &CapabilityManifestV1>,
-    retrievals: &BTreeMap<CapabilityId, &RetrievalPrimitiveManifestV1>,
-) -> Result<(), CatalogValidationError> {
-    let mut schemas = BTreeMap::new();
-    for schema in capabilities
-        .values()
-        .flat_map(|capability| capability.schema_refs())
-        .chain(
-            retrievals
-                .values()
-                .flat_map(|retrieval| retrieval.schema_refs()),
-        )
-    {
-        validate_schema_size(&mut schemas, schema)?;
-    }
-    Ok(())
-}
-
-fn validate_schema_size(
-    schemas: &mut BTreeMap<(SchemaId, u32), u32>,
-    schema: &SchemaRef,
-) -> Result<(), CatalogValidationError> {
-    let key = (schema.schema_id().clone(), schema.revision());
-    if let Some(existing) = schemas.insert(key.clone(), schema.canonical_size_bytes())
-        && existing != schema.canonical_size_bytes()
-    {
-        return Err(CatalogValidationError::IncompatibleSchemaReference {
-            schema_id: key.0,
-            revision: key.1,
-        });
-    }
-    Ok(())
-}
-
 fn index_profiles<'a>(
     profiles: &'a [ProfileDefinition],
     capabilities: &BTreeMap<CapabilityId, &CapabilityManifestV1>,
@@ -609,27 +569,12 @@ fn validate_profile_budget(
         });
     }
 
-    let mut schemas = BTreeMap::new();
     let mut routing_tokens = 0_u64;
     for capability_id in profile.capability_ids() {
         let capability = capabilities
             .get(capability_id)
             .expect("profile capability was indexed before budget validation");
         routing_tokens += u64::from(capability.routing().estimated_routing_tokens());
-        for schema in capability.schema_refs() {
-            schemas
-                .entry((schema.schema_id().clone(), schema.revision()))
-                .or_insert(schema.canonical_size_bytes());
-        }
-    }
-    let schema_bytes: u64 = schemas.values().copied().map(u64::from).sum();
-    if schema_bytes > u64::from(budget.maximum_schema_bytes()) {
-        return Err(CatalogValidationError::ProfileBudgetExceeded {
-            profile_id: profile.profile_id().clone(),
-            budget: "schema bytes",
-            actual: schema_bytes,
-            maximum: u64::from(budget.maximum_schema_bytes()),
-        });
     }
     if routing_tokens > u64::from(budget.maximum_routing_tokens()) {
         return Err(CatalogValidationError::ProfileBudgetExceeded {

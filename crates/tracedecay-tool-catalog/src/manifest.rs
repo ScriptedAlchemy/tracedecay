@@ -6,37 +6,25 @@ use crate::validation::CatalogValidationError;
 
 /// A reviewed reference to a typed request or result schema.
 ///
-/// The catalog never carries schema bodies. The declared canonical byte size is
-/// the reviewed routing-budget footprint for this exact schema revision.
+/// The catalog never carries schema bodies. Identity and revision bind each
+/// capability to its reviewed request and result contracts.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub struct SchemaRef {
     schema_id: SchemaId,
     revision: u32,
-    canonical_size_bytes: u32,
 }
 
 impl SchemaRef {
-    pub fn new(
-        schema_id: SchemaId,
-        revision: u32,
-        canonical_size_bytes: u32,
-    ) -> Result<Self, CatalogValidationError> {
+    pub fn new(schema_id: SchemaId, revision: u32) -> Result<Self, CatalogValidationError> {
         if revision == 0 {
             return Err(CatalogValidationError::InvalidValue {
                 field: "schema revision",
                 reason: "must be greater than zero",
             });
         }
-        if canonical_size_bytes == 0 {
-            return Err(CatalogValidationError::InvalidValue {
-                field: "schema canonical size",
-                reason: "must be greater than zero",
-            });
-        }
         Ok(Self {
             schema_id,
             revision,
-            canonical_size_bytes,
         })
     }
 
@@ -46,10 +34,6 @@ impl SchemaRef {
 
     pub const fn revision(&self) -> u32 {
         self.revision
-    }
-
-    pub const fn canonical_size_bytes(&self) -> u32 {
-        self.canonical_size_bytes
     }
 }
 
