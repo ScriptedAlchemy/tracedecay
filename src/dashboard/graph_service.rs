@@ -1,6 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
 
+use schemars::JsonSchema;
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use crate::types::{FileRecord, GraphStats};
@@ -19,6 +22,156 @@ const DEGREE_POOL_CAP: i64 = 500;
 /// Cap on edges fetched among the default-mode candidate pool before the
 /// per-response `limit_edges` cap is applied.
 const DEFAULT_POOL_EDGE_CAP: i64 = 4_000;
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub(super) struct GraphSpanV1 {
+    start_line: i64,
+    end_line: i64,
+    start_column: i64,
+    end_column: i64,
+    attrs_start_line: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub(super) struct GraphNodeV1 {
+    id: String,
+    kind: String,
+    name: Option<String>,
+    qualified_name: Option<String>,
+    file_path: Option<String>,
+    start_line: Option<i64>,
+    end_line: Option<i64>,
+    start_column: Option<i64>,
+    end_column: Option<i64>,
+    attrs_start_line: Option<i64>,
+    doc: Option<String>,
+    signature: Option<String>,
+    visibility: Option<String>,
+    is_async: Option<i64>,
+    branches: Option<i64>,
+    loops: Option<i64>,
+    returns: Option<i64>,
+    max_nesting: Option<i64>,
+    unsafe_blocks: Option<i64>,
+    unchecked_calls: Option<i64>,
+    assertions: Option<i64>,
+    updated_at: Option<i64>,
+    parent_id: Option<String>,
+    degree: Option<i64>,
+    span: Option<GraphSpanV1>,
+    edge_kind: Option<String>,
+    edge_line: Option<i64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub(super) struct GraphEdgeV1 {
+    source: String,
+    target: String,
+    kind: String,
+    line: Option<i64>,
+    source_name: Option<String>,
+    target_name: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct GraphKindCountV1 {
+    kind: String,
+    count: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct GraphLanguageCountV1 {
+    language: String,
+    count: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct GraphLargestFileV1 {
+    path: String,
+    node_count: i64,
+    size: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct GraphTotalsV1 {
+    nodes: u64,
+    edges: u64,
+    files: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub(super) struct GraphOverviewPayloadV1 {
+    totals: GraphTotalsV1,
+    nodes_by_kind: Vec<GraphKindCountV1>,
+    edges_by_kind: Vec<GraphKindCountV1>,
+    files_by_language: Vec<GraphLanguageCountV1>,
+    largest_files: Vec<GraphLargestFileV1>,
+    path: String,
+    top_connected: Vec<GraphNodeV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub(super) struct GraphSearchPayloadV1 {
+    query: String,
+    limit: i64,
+    offset: i64,
+    pub(super) total: i64,
+    count: usize,
+    pub(super) results: Vec<GraphNodeV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub(super) struct GraphNodePayloadV1 {
+    node: GraphNodeV1,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub(super) struct GraphNeighborsPayloadV1 {
+    node_id: String,
+    depth: i64,
+    limit: i64,
+    callers: Vec<GraphNodeV1>,
+    callees: Vec<GraphNodeV1>,
+    edges: Vec<GraphEdgeV1>,
+    edges_by_kind: Vec<GraphKindCountV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct GraphCappedV1 {
+    nodes: bool,
+    edges: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct GraphLimitsV1 {
+    nodes: i64,
+    edges: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub(super) struct GraphSubgraphPayloadV1 {
+    seed_id: Option<String>,
+    mode: String,
+    nodes: Vec<GraphNodeV1>,
+    edges: Vec<GraphEdgeV1>,
+    capped: GraphCappedV1,
+    limits: GraphLimitsV1,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub(super) struct GraphPathPayloadV1 {
+    from: String,
+    to: String,
+    found: bool,
+    path: Vec<String>,
+    nodes: Vec<GraphNodeV1>,
+    edges: Vec<GraphEdgeV1>,
+    max_depth: i64,
+}
+
+fn decode_payload<T: DeserializeOwned>(payload: Value) -> Result<T, String> {
+    serde_json::from_value(payload).map_err(|error| error.to_string())
+}
 
 fn language_for_path(path: &str) -> &'static str {
     let Some((_, ext)) = path.rsplit_once('.') else {
@@ -260,7 +413,9 @@ async fn degree_summary(state: &DashboardState) -> Result<Arc<DegreeSummary>, St
     Ok(summary)
 }
 
-pub(crate) async fn overview_payload(state: &DashboardState) -> Result<Value, String> {
+pub(crate) async fn overview_payload(
+    state: &DashboardState,
+) -> Result<GraphOverviewPayloadV1, String> {
     let (stats, files, summary) = tokio::join!(
         state.mem_db.get_stats(),
         state.mem_db.get_all_files(),
@@ -274,7 +429,7 @@ pub(crate) async fn overview_payload(state: &DashboardState) -> Result<Value, St
         object.insert("path".into(), json!(state.graph_db_path));
         object.insert("top_connected".into(), json!(summary.top_connected));
     }
-    Ok(payload)
+    decode_payload(payload)
 }
 
 pub(crate) async fn search_payload(
@@ -282,14 +437,14 @@ pub(crate) async fn search_payload(
     query: &str,
     limit: i64,
     offset: i64,
-) -> Result<Value, String> {
+) -> Result<GraphSearchPayloadV1, String> {
     let total = graph_queries::search_total(&state.graph_conn, query).await?;
     let results = graph_queries::search_rows(&state.graph_conn, query, limit, offset).await?;
     let ids = collect_node_ids(&results);
     let degrees = degrees_for_ids(state, &ids).await?;
     let results = attach_degrees(results.into_iter().map(node_with_span).collect(), &degrees);
 
-    Ok(json!({
+    decode_payload(json!({
         "query": query,
         "limit": limit,
         "offset": offset,
@@ -306,7 +461,7 @@ pub(crate) async fn node_exists(state: &DashboardState, node_id: &str) -> Result
 pub(crate) async fn node_payload(
     state: &DashboardState,
     node_id: &str,
-) -> Result<Option<Value>, String> {
+) -> Result<Option<GraphNodePayloadV1>, String> {
     let Some(row) = graph_queries::node_row(&state.graph_conn, node_id).await? else {
         return Ok(None);
     };
@@ -314,15 +469,15 @@ pub(crate) async fn node_payload(
     let node = attach_degrees(vec![node_with_span(row)], &degrees)
         .into_iter()
         .next()
-        .unwrap_or(Value::Null);
-    Ok(Some(json!({ "node": node })))
+        .ok_or_else(|| format!("graph node disappeared while reading {node_id}"))?;
+    decode_payload(json!({ "node": node })).map(Some)
 }
 
 pub(crate) async fn neighbors_payload(
     state: &DashboardState,
     node_id: &str,
     limit: i64,
-) -> Result<Value, String> {
+) -> Result<GraphNeighborsPayloadV1, String> {
     let callers = graph_queries::caller_rows(&state.graph_conn, node_id, limit).await?;
     let callees = graph_queries::callee_rows(&state.graph_conn, node_id, limit).await?;
     let edges = graph_queries::neighborhood_edge_rows(&state.graph_conn, node_id, limit).await?;
@@ -336,7 +491,7 @@ pub(crate) async fn neighbors_payload(
     let callers = attach_degrees(callers.into_iter().map(node_with_span).collect(), &degrees);
     let callees = attach_degrees(callees.into_iter().map(node_with_span).collect(), &degrees);
 
-    Ok(json!({
+    decode_payload(json!({
         "node_id": node_id,
         "depth": 1,
         "limit": limit,
@@ -361,7 +516,7 @@ async fn default_subgraph(
     state: &DashboardState,
     node_limit: i64,
     edge_limit: i64,
-) -> Result<Value, String> {
+) -> Result<GraphSubgraphPayloadV1, String> {
     // Candidate pool: 2x the node budget so selection has room to work with,
     // served as a prefix of the cached top-degree summary.
     let pool_limit = usize::try_from((node_limit * 2).min(DEGREE_POOL_CAP)).unwrap_or(0);
@@ -466,7 +621,7 @@ async fn default_subgraph(
     let nodes = attach_degrees(nodes_by_ids(state, &selected).await?, &degrees);
     let total_nodes = graph_queries::total_nodes(&state.graph_conn).await?;
 
-    Ok(json!({
+    decode_payload(json!({
         "seed_id": Value::Null,
         "mode": "default",
         "nodes": nodes,
@@ -488,7 +643,7 @@ pub(crate) async fn subgraph_payload(
     query: &str,
     node_limit: i64,
     edge_limit: i64,
-) -> Result<Value, String> {
+) -> Result<GraphSubgraphPayloadV1, String> {
     let seed_id = match node_id.filter(|id| !id.trim().is_empty()) {
         Some(id) => Some(id),
         None if !query.is_empty() => {
@@ -496,7 +651,7 @@ pub(crate) async fn subgraph_payload(
             else {
                 // Explicit query with no hit: an empty payload, not the
                 // default slice, so a failed search reads as "no match".
-                return Ok(json!({
+                return decode_payload(json!({
                     "seed_id": Value::Null,
                     "mode": "seeded",
                     "nodes": [],
@@ -533,7 +688,7 @@ pub(crate) async fn subgraph_payload(
     let capped_edges = edge_count > edge_limit as usize;
     let visible_edges: Vec<Value> = edges.into_iter().take(edge_limit as usize).collect();
 
-    Ok(json!({
+    decode_payload(json!({
         "seed_id": seed_id,
         "mode": "seeded",
         "nodes": nodes,
@@ -557,7 +712,7 @@ pub(crate) async fn path_payload(
     from: &str,
     to: &str,
     max_depth: i64,
-) -> Result<Value, String> {
+) -> Result<GraphPathPayloadV1, String> {
     let mut payload = json!({
         "from": from,
         "to": to,
@@ -568,7 +723,7 @@ pub(crate) async fn path_payload(
         "max_depth": max_depth,
     });
     if from.is_empty() || to.is_empty() {
-        return Ok(payload);
+        return decode_payload(payload);
     }
 
     // child -> (parent, edge row) back-pointers for path reconstruction.
@@ -614,7 +769,7 @@ pub(crate) async fn path_payload(
     }
 
     if !found {
-        return Ok(payload);
+        return decode_payload(payload);
     }
 
     let mut path_ids = vec![to.to_string()];
@@ -639,7 +794,7 @@ pub(crate) async fn path_payload(
         obj.insert("nodes".into(), json!(nodes));
         obj.insert("edges".into(), json!(path_edges));
     }
-    Ok(payload)
+    decode_payload(payload)
 }
 
 #[cfg(test)]
