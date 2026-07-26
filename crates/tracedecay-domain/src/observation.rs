@@ -1833,20 +1833,15 @@ impl<'de> Deserialize<'de> for DurableObservationV1 {
             wire.payload,
         )
         .map_err(serde::de::Error::custom)?;
-        if observation.observation_id != expected_observation_id {
-            let legacy_observation_id =
-                legacy_observation_id(&observation.identity).map_err(serde::de::Error::custom)?;
-            if expected_observation_id != legacy_observation_id {
-                return Err(serde::de::Error::custom(
-                    ObservationContractError::ObservationIdentityMismatch,
-                ));
-            }
+        let accepted =
+            accepted_identity_digests(&observation.observation_id, &observation.identity)
+                .map_err(serde::de::Error::custom)?;
+        if !accepted.contains(&expected_observation_id) {
+            return Err(serde::de::Error::custom(
+                ObservationContractError::ObservationIdentityMismatch,
+            ));
         }
-        let legacy_idempotency_key =
-            legacy_idempotency_key(&observation.identity).map_err(serde::de::Error::custom)?;
-        if expected_idempotency_key != *observation.idempotency_key()
-            && expected_idempotency_key != legacy_idempotency_key
-        {
+        if !accepted.contains(&expected_idempotency_key) {
             return Err(serde::de::Error::custom(
                 ObservationContractError::IdempotencyKeyMismatch,
             ));
@@ -1906,32 +1901,51 @@ fn domain_digest(
     Ok(format_sha256(&hasher.finalize()))
 }
 
-fn legacy_idempotency_key(
-    material: &ClaudeObservationIdentityMaterialV1,
-) -> Result<IdempotencyKeyV1, ObservationContractError> {
-    IdempotencyKeyV1::new(domain_digest(LEGACY_IDEMPOTENCY_KEY_DOMAIN, material)?)
-}
-
-/// The observation id this material produced before a native record id
-/// participated in default-provider derivation.
+/// Every digest this identity material has legitimately produced, newest
+/// first. Element zero is the only one ever written.
 ///
-/// Changing a derivation without accepting the previous one on decode makes
-/// every row already committed permanently undecodable, and there is no repair
-/// path that can quarantine such a row. Only the current derivation is ever
-/// written; this exists solely so stored rows still decode.
+/// A stored row carries this digest under two names — `observation_id` and its
+/// `idempotency_key` alias, see [`DurableObservationV1::idempotency_key`] — so
+/// the two fields have to accept the same set. They did not, and that is how
+/// the same defect shipped twice: `observation_id` accepted the current and
+/// pre-native forms while `idempotency_key` accepted the current and pre-alias
+/// forms, so a row written between those two changes decoded for one field and
+/// was rejected by the other.
 ///
-/// Non-default providers are returned unchanged because their derivation did
-/// not move.
-fn legacy_observation_id(
+/// Three derivations have existed:
+///
+/// 1. Current, from `fix(ingest): preserve native observation identity`, which
+///    folds a native record id into the digest.
+/// 2. From `refactor(domain): canonicalize receipt identity`, which aliased
+///    `idempotency_key` onto `observation_id`. Rows written between it and (1)
+///    carry the whole material under the provider's domain.
+/// 3. The original `idempotency_key`, under its own domain separator, from
+///    before the two fields were one value.
+///
+/// Accepting an older entry grants nothing: every one digests the same identity
+/// material under a domain separator, so a row still binds to its own evidence.
+/// Rejecting them instead makes committed rows permanently undecodable, and
+/// nothing downstream can quarantine a row that will not decode.
+///
+/// A new derivation goes at the front of this list and nowhere else.
+///
+/// `current` is the caller's already-derived id rather than a re-derivation,
+/// because the warm-up authority audit runs this once per row over the whole
+/// `observations` table.
+fn accepted_identity_digests(
+    current: &CanonicalObservationIdV1,
     material: &ClaudeObservationIdentityMaterialV1,
-) -> Result<CanonicalObservationIdV1, ObservationContractError> {
-    if is_default_observation_provider(material.source().provider()) {
-        return CanonicalObservationIdV1::new(domain_digest(
-            CLAUDE_OBSERVATION_ID_DOMAIN,
-            material,
-        )?);
-    }
-    CanonicalObservationIdV1::derive(material)
+) -> Result<[CanonicalObservationIdV1; 3], ObservationContractError> {
+    let provider_domain = if is_default_observation_provider(material.source().provider()) {
+        CLAUDE_OBSERVATION_ID_DOMAIN
+    } else {
+        OBSERVATION_ID_DOMAIN
+    };
+    Ok([
+        current.clone(),
+        CanonicalObservationIdV1::new(domain_digest(provider_domain, material)?)?,
+        CanonicalObservationIdV1::new(domain_digest(LEGACY_IDEMPOTENCY_KEY_DOMAIN, material)?)?,
+    ])
 }
 
 fn sha256_digest(bytes: &[u8]) -> String {
