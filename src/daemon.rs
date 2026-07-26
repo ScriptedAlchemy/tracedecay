@@ -72,6 +72,11 @@ const MAX_CACHED_PROJECT_SERVERS: usize = 8;
 const MAX_TRACKED_PROJECT_OPEN_TASKS: usize = MAX_CACHED_PROJECT_SERVERS;
 const PROJECT_OPEN_REQUEST_DEADLINE: Duration = Duration::from_millis(500);
 const PROJECT_OPEN_FAILURE_RETRY_BACKOFF: Duration = Duration::from_millis(250);
+/// Backoff for a persisted-row authority defect, which only an operator can
+/// clear. Reopening re-runs the exhaustive authority audit over every
+/// `observations` row and fails on the same row every time, so the debounce
+/// cadence above would saturate a core for as long as the daemon runs.
+const PROJECT_OPEN_UNREPAIRABLE_RETRY_BACKOFF: Duration = Duration::from_secs(300);
 const PROJECT_OPEN_FAILURE_RETRY_HINT: &str =
     "project route open is backed off after an invariant rejection";
 
@@ -1974,18 +1979,39 @@ enum ProjectOpenTaskClaim {
     Saturated,
 }
 
-fn is_invariant_rejected_project_route(error: &TraceDecayError) -> bool {
+/// Whether a global-database authority failure is a persisted row that cannot
+/// be decoded, rather than a transient condition.
+///
+/// `decode_authority_json` formats every persisted-authority decode failure as
+/// `invalid <label> JSON: <cause>`, covering committed observations, source
+/// cursors, cursor advances, projected observations, and sanitization
+/// receipts. A row that fails to decode fails identically on every open — for
+/// example when a stored `observation_id` no longer matches the derivation the
+/// running binary applies to its identity material.
+fn is_persisted_authority_decode_defect(message: &str) -> bool {
+    message.starts_with("invalid ") && message.contains(" JSON: ")
+}
+
+/// How long a failed project-open route declines reopening, or `None` when the
+/// failure may clear on its own.
+fn project_open_retry_backoff(error: &TraceDecayError) -> Option<Duration> {
     match error {
-        TraceDecayError::Config { message } => {
-            message.contains("identity cutover conflict")
-                || message.contains("ambiguous legacy profile stores")
-                || message.contains("enrollment marker did not resolve a profile store")
-        }
+        TraceDecayError::Config { message } => (message.contains("identity cutover conflict")
+            || message.contains("ambiguous legacy profile stores")
+            || message.contains("enrollment marker did not resolve a profile store"))
+        .then_some(PROJECT_OPEN_FAILURE_RETRY_BACKOFF),
         TraceDecayError::Database { message, operation } => {
-            operation == "ensure global database authority invariants"
-                && message.contains("session temporal receipts or cursor keys are mutable")
+            if operation != "ensure global database authority invariants" {
+                return None;
+            }
+            if is_persisted_authority_decode_defect(message) {
+                return Some(PROJECT_OPEN_UNREPAIRABLE_RETRY_BACKOFF);
+            }
+            message
+                .contains("session temporal receipts or cursor keys are mutable")
+                .then_some(PROJECT_OPEN_FAILURE_RETRY_BACKOFF)
         }
-        _ => false,
+        _ => None,
     }
 }
 
@@ -1994,8 +2020,7 @@ impl ProjectOpenFailure {
         // Operator-repairable authority rejections decline implicit repair.
         // Reopening before maintenance changes that state is not useful and
         // only multiplies daemon warm-up tasks.
-        let retry_at = is_invariant_rejected_project_route(error)
-            .then(|| Instant::now() + PROJECT_OPEN_FAILURE_RETRY_BACKOFF);
+        let retry_at = project_open_retry_backoff(error).map(|backoff| Instant::now() + backoff);
         Self {
             message: error.to_string(),
             retry_at,

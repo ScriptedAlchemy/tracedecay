@@ -959,3 +959,61 @@ fn workflow_lifecycle_payload_dedupe_and_conflict_remain_deterministic() {
         ObservationCollisionOutcomeV1::IdentityCollision
     );
 }
+
+/// Rows committed before native record ids joined default-provider derivation
+/// must still decode. Changing a derivation without accepting the previous one
+/// makes every such row permanently undecodable, and nothing downstream can
+/// quarantine an undecodable observation.
+#[test]
+fn durable_observations_written_before_native_identity_still_decode() {
+    let material = ClaudeObservationIdentityMaterialV1::for_native_record(
+        ObservationSourceIdentityV1::for_source(
+            SessionId::new("session.fixture").unwrap(),
+            SessionId::new("source.fixture").unwrap(),
+        )
+        .unwrap(),
+        ObservationScopeV1::Profile,
+        ClaudeFileGenerationV1::new(3).unwrap(),
+        ClaudeByteRangeV1::new(10, 11).unwrap(),
+        ObservationOrderingDomainV1::FileBytes,
+        ObservationId::new("message.fixture").unwrap(),
+    )
+    .unwrap();
+
+    let payload = json!({"text": "sanitized"});
+    let observation = durable(material.clone(), payload.clone());
+
+    // The derivation this row was written with: the whole material under the
+    // Claude domain, with no separate native-record-id structure.
+    let mut hasher = Sha256::new();
+    hasher.update(b"tracedecay.claude.observation.v1\0");
+    hasher.update(tracedecay_domain::canonical_json_bytes(&material).unwrap());
+    let mut digest = String::with_capacity(64);
+    for byte in hasher.finalize() {
+        write!(&mut digest, "{byte:02x}").unwrap();
+    }
+    let legacy_observation_id = format!("sha256:{digest}");
+
+    assert_ne!(
+        legacy_observation_id,
+        observation.observation_id().as_str(),
+        "fixture must exercise the derivation change, not agree with it"
+    );
+
+    let mut wire: Value = serde_json::from_slice(&serde_json::to_vec(&observation).unwrap())
+        .expect("durable observation serializes to an object");
+    wire["observation_id"] = json!(legacy_observation_id);
+
+    let decoded: DurableClaudeObservationV1 =
+        serde_json::from_value(wire.clone()).expect("a pre-change row must still decode");
+    assert_eq!(decoded.identity(), observation.identity());
+    assert_eq!(decoded.payload(), &payload);
+
+    // Accepting the previous derivation must not accept an arbitrary id.
+    wire["observation_id"] = json!(format!("sha256:{}", "0".repeat(64)));
+    let rejected = serde_json::from_value::<DurableClaudeObservationV1>(wire);
+    assert!(
+        rejected.is_err(),
+        "an id matching neither derivation must still be rejected"
+    );
+}

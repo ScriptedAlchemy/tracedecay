@@ -9,6 +9,24 @@ verified Kimi Code and OpenCode capabilities and turns that foundation into
 installable, repairable host integrations that deliver the working feedback
 journey. It does not add a second catalog or a generic connector framework.
 
+**PR13 reachability correction (2026-07-26).** The PR6 observation foundation
+above is not a completion statement for the PR13 lifecycle guards below:
+
+- official component-set dry run passes an empty competing-extension claim
+  slice, so conflict discovery never supplies the guard;
+- `cline_family_evidence`, `require_capability`, and
+  `native_host_edit_stop_conformance_evidence` have no production callers
+  (`require_capability` is exercised only by tests);
+- the native-fixture helper reads repository-relative paths at runtime and
+  names `crates/tracedecay-hooks/fixtures/host_events/opencode.json`, which is
+  absent; and
+- `CursorCloud` falls through to an empty default component set.
+
+These are active PR13 delivery gaps, not delivered guards and not PR14
+dashboard work. `CursorCloud` must remain typed unavailable unless an
+installable component set is delivered; its presence in an enum or capability
+catalog is not host-support evidence.
+
 PR6 bundle names, generated matrices, packet gates, exact file inventories,
 and intermediate registration scaffolding are historical evidence, not
 prerequisites or artifacts to recreate. Installed/persisted lifecycle state
