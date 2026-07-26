@@ -19,6 +19,8 @@ use super::dto::{
 };
 use super::{GitHubReadNetworkMetadataV1, GitHubReadNetworkStatusV1, GitHubReadResponseDecoderV1};
 
+pub const MAX_GITHUB_REVIEW_BODY_BYTES_V1: usize = 256 * 1024;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GitHubReviewProviderIdentityV1 {
     pub provider: ProviderId,
@@ -94,6 +96,9 @@ pub struct GitHubReviewAnchorSeedV1 {
     pub comment_id: GitHubReviewCommentIdV1,
     pub author_node_id: String,
     pub body_digest: ManifestDigest,
+    /// Sanitized provider prose retained only behind `body_anchor`. The
+    /// canonical ingress item remains reference-only.
+    pub retained_body: String,
     pub safe_url: String,
     pub path: String,
     pub original_commit_id: CommitId,
@@ -264,7 +269,9 @@ where
             .ok()?;
         let original_commit_id = CommitId::new(comment.original_commit_id).ok()?;
         let observed_commit_id = CommitId::new(comment.commit_id).ok()?;
-        let body_digest = body_digest(comment.body.as_deref()?)?;
+        let body = comment.body.as_deref()?;
+        let body_digest = body_digest(body)?;
+        let retained_body = retained_review_body(body)?;
         let version_digest = review_version_digest(
             &comment_id,
             &comment.updated_at,
@@ -285,6 +292,7 @@ where
             comment_id: comment_id.clone(),
             author_node_id: user_node_id,
             body_digest: body_digest.clone(),
+            retained_body,
             safe_url: comment.html_url,
             path: comment.path,
             original_commit_id,
@@ -396,7 +404,9 @@ where
                 .clone(),
         )
         .ok()?;
-        let body_digest = body_digest(comment.body_text.as_deref()?)?;
+        let body = comment.body_text.as_deref()?;
+        let body_digest = body_digest(body)?;
+        let retained_body = retained_review_body(body)?;
         let version_digest = review_version_digest(
             &comment_id,
             &comment.updated_at,
@@ -408,8 +418,9 @@ where
             .then_some(())?;
         let seed = GitHubReviewAnchorSeedV1 {
             comment_id: comment_id.clone(),
-            author_node_id: comment.author.as_ref()?.id.clone(),
+            author_node_id: comment.author.as_ref()?.login.clone(),
             body_digest: body_digest.clone(),
+            retained_body,
             safe_url: comment.url,
             path: thread.path.clone(),
             original_commit_id,
@@ -496,6 +507,14 @@ fn provider_state(
 fn body_digest(body: &str) -> Option<ManifestDigest> {
     let digest = Sha256::digest(body.as_bytes());
     ManifestDigest::new(format!("sha256:{}", hex::encode(digest))).ok()
+}
+
+fn retained_review_body(body: &str) -> Option<String> {
+    if body.is_empty() || body.len() > MAX_GITHUB_REVIEW_BODY_BYTES_V1 {
+        return None;
+    }
+    let retained = crate::privacy::sanitize_provider_metadata_text(body)?;
+    (!retained.is_empty() && retained.len() <= MAX_GITHUB_REVIEW_BODY_BYTES_V1).then_some(retained)
 }
 
 fn review_version_digest(

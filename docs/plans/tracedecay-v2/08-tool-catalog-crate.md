@@ -19,6 +19,15 @@ artifacts.
   the same catalog; it creates no task-specific registry.
 - tracedecay-tool-catalog describes callable product capabilities. It does not discover them by parsing source code.
 
+**Callable-surface correction (2026-07-26).** Catalog registration now
+distinguishes an internal application handler from a host-constructible
+request. The handle-gated feedback read/provider operations therefore retain
+their internal owners but advertise no CLI/MCP/HTTP/LSP/dashboard binding;
+`test_results` is the only currently callable feedback contribution in that
+catalog family. The symbol-search manifest advertises only its implemented
+`Current` temporal mode, not `AsOf`. These removals narrow discovery to
+dispatchable behavior and must not be re-filed as missing bindings.
+
 ## Outcome
 
 Every public surface resolves stable capability IDs to the same application

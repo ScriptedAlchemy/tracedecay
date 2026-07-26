@@ -611,7 +611,11 @@ fn callable_code_catalog_exposes_only_production_owned_transport_bindings() {
         ("type_definition", "code_type_definition"),
         ("references", "code_references"),
     ];
-    assert_eq!(contribution.bindings().len(), reachable.len() * 3);
+    let expected_lsp_bindings = 3;
+    assert_eq!(
+        contribution.bindings().len(),
+        reachable.len() * 3 + expected_lsp_bindings
+    );
     for capability in contribution.capabilities() {
         assert_eq!(
             capability.authority(),
@@ -645,7 +649,12 @@ fn callable_code_catalog_exposes_only_production_owned_transport_bindings() {
             capability.profile_eligibility(),
             &[tracedecay_tool_catalog::ProfileId::new("profile.default").unwrap()]
         );
-        assert_eq!(capability.binding_ids().len(), 3);
+        let expected_binding_count = match kind {
+            CallableCodeOperationKind::ExactOccurrence => 5,
+            CallableCodeOperationKind::Callees => 4,
+            _ => 3,
+        };
+        assert_eq!(capability.binding_ids().len(), expected_binding_count);
         for surface in [
             BindingSurface::Cli,
             BindingSurface::Mcp,

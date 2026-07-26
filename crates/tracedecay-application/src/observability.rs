@@ -102,6 +102,7 @@ pub enum MetricEvidenceClassV1 {
 #[serde(rename_all = "snake_case")]
 pub enum MetricSourceV1 {
     ObservabilityEnvelope,
+    FeedbackObservations,
     AccountingTurn,
     SavingsLedger,
 }

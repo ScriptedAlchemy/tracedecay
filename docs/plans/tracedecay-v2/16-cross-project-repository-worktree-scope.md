@@ -16,6 +16,15 @@ compatibility and migration obligations; all other retention is evaluated
 through the direct scope, inventory, Git, platform, and regression behavior
 below.
 
+**Local identity correction (2026-07-26).** Repository-level project/store
+identity now collapses a linked worktree onto its primary checkout through
+`repository_identity_root` at the single `default_profile_project_id` minting
+door. This does not merge worktree snapshot authority: exact worktree/ref
+identity still selects graph generations. Durable profiles also refuse roots
+under the OS temporary directory at `upsert_code_project`, and registry reaping
+retains a dead-looking project row whenever its store directory still contains
+data; it deletes registry rows only, never stores or session artifacts.
+
 ## User outcome
 
 A user can name several repositories or worktrees directly or through a saved

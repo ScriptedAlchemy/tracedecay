@@ -41,10 +41,9 @@ Announce: "Using tracedecay:reviewing-changes for <diff/PR>."
    and `tracedecay_git_hunks`. These reads never authorize a ref or index
    mutation.
 9. Branch feedback cycle (CI localization, GitHub review comments, proximity):
-   `tracedecay_feedback_diagnostics` → `tracedecay_feedback_list` /
-   `tracedecay_feedback_get` → `tracedecay_feedback_expand` /
-   `tracedecay_feedback_impact`. Read-only; never post, update, resolve, or
-   reply on GitHub.
+   `tracedecay_feedback_advisory_cycle`. It returns the canonical diagnostics
+   result and daemon-minted read handle. Read-only; never post, update,
+   resolve, or reply on GitHub.
 
 ## Safety audit (ship-readiness) and dead-code cleanup
 

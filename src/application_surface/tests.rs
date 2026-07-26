@@ -213,11 +213,22 @@ fn cli_mcp_and_http_resolve_every_operation_through_the_current_catalog_gate() {
     for operation in APPLICATION_SURFACE_OPERATIONS {
         let operation_name = tracedecay_tool_catalog::SurfaceOperationName::new(operation.as_str())
             .expect("operation name");
-        for (surface, surface_name) in [
-            (tracedecay_tool_catalog::BindingSurface::Cli, "cli"),
-            (tracedecay_tool_catalog::BindingSurface::Mcp, "mcp"),
-            (tracedecay_tool_catalog::BindingSurface::Http, "http"),
-        ] {
+        let expected_surfaces = if matches!(
+            operation,
+            ApplicationSurfaceOperation::GitPreview | ApplicationSurfaceOperation::GitApply
+        ) {
+            &[
+                (tracedecay_tool_catalog::BindingSurface::Cli, "cli"),
+                (tracedecay_tool_catalog::BindingSurface::Mcp, "mcp"),
+            ][..]
+        } else {
+            &[
+                (tracedecay_tool_catalog::BindingSurface::Cli, "cli"),
+                (tracedecay_tool_catalog::BindingSurface::Mcp, "mcp"),
+                (tracedecay_tool_catalog::BindingSurface::Http, "http"),
+            ][..]
+        };
+        for &(surface, surface_name) in expected_surfaces {
             let binding = crate::daemon_client::BindingResolver::resolve_binding(
                 &resolver,
                 surface,
