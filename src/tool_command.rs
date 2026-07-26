@@ -35,7 +35,6 @@
 
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
@@ -54,7 +53,8 @@ use tracedecay::mcp::tools::{
     LegacyToolCompatibilityOwner, RESERVED_FLAGS_FOOTER, ToolDefinition, get_tool_definitions,
     render_tool_cli_help, short_tool_name,
 };
-use tracedecay_application::{CancellationSignal, Deadline, RequestId};
+use tracedecay::request_identity::{GlobalRequestSurface, mint_global_request_id};
+use tracedecay_application::{CancellationSignal, Deadline};
 use tracedecay_domain::UtcMicros;
 use tracedecay_tool_catalog::BindingSurface;
 
@@ -90,7 +90,6 @@ const FIRST_TOUCH_STORE_TOOLS: &[&str] = &[
 const DEFAULT_TOOL_DEADLINE: Duration = Duration::from_secs(30);
 const MAX_TOOL_DEADLINE: Duration = Duration::from_secs(24 * 60 * 60);
 const TOOL_DEADLINE_ENV: &str = "TRACEDECAY_TOOL_DEADLINE_MS";
-static NEXT_APPLICATION_SURFACE_REQUEST: AtomicU64 = AtomicU64::new(1);
 
 fn tool_deadline_range_error() -> TraceDecayError {
     TraceDecayError::Config {
@@ -266,16 +265,10 @@ async fn dispatch_cli_application_surface(
     raw_json: bool,
     deadline: Instant,
 ) -> Result<()> {
-    let sequence = NEXT_APPLICATION_SURFACE_REQUEST.fetch_add(1, Ordering::Relaxed);
-    let request_id = RequestId::new(format!(
-        "request.cli.{}.{}.{}",
-        tracedecay::tracedecay::current_timestamp(),
-        std::process::id(),
-        sequence
-    ))
-    .map_err(|_| TraceDecayError::Config {
-        message: "could not allocate an application surface request id".to_owned(),
-    })?;
+    let request_id =
+        mint_global_request_id(GlobalRequestSurface::Cli).map_err(|_| TraceDecayError::Config {
+            message: "could not allocate an application surface request id".to_owned(),
+        })?;
     let request = match parse_application_surface_request(operation, tool_args) {
         Ok(request) => request,
         Err(error) => {
@@ -584,6 +577,8 @@ fn group_for(def: &ToolDefinition) -> &'static str {
         || n == "tracedecay_replace_symbol"
         || n == "tracedecay_insert_at_symbol"
         || n == "tracedecay_move_symbol"
+        || n == "tracedecay_api_migration_plan"
+        || n == "tracedecay_api_migration_apply"
     {
         "edit"
     } else if n == "tracedecay_fact_store"

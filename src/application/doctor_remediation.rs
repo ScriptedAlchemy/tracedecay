@@ -25,6 +25,9 @@ use crate::application::operation_stream::OperationId;
 use crate::application_surface::{
     ConfigurationProtectedApplySurfaceRequest, ConfigurationProtectedPreviewSurfaceRequest,
 };
+use crate::request_identity::{
+    derive_doctor_remediation_apply_operation, derive_doctor_remediation_preview_operation,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DoctorRemediationDispatchCommandV1 {
@@ -690,11 +693,7 @@ pub fn operation_id_for_command(
 ) -> Result<OperationId, DoctorRemediationDispatchErrorV1> {
     let digest = match command {
         DoctorRemediationDispatchCommandV1::Preview { operation, target } => {
-            tracedecay_domain::canonical_sha256(&(
-                "tracedecay.doctor-remediation-preview-operation.v1",
-                operation,
-                target.digest()?,
-            ))
+            derive_doctor_remediation_preview_operation(operation, &target.digest()?)
         }
         DoctorRemediationDispatchCommandV1::Apply {
             operation,
@@ -707,12 +706,9 @@ pub fn operation_id_for_command(
             target,
             idempotency_key,
             ..
-        } => tracedecay_domain::canonical_sha256(&(
-            "tracedecay.doctor-remediation-apply-operation.v1",
-            operation,
-            target.digest()?,
-            idempotency_key,
-        )),
+        } => {
+            derive_doctor_remediation_apply_operation(operation, &target.digest()?, idempotency_key)
+        }
         DoctorRemediationDispatchCommandV1::Status { operation_id } => {
             return Ok(operation_id.clone());
         }

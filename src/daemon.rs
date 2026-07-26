@@ -3284,12 +3284,17 @@ async fn ensure_user_profile_host_admission_replay_for_identity(
     store_administration: &StoreAdministration,
     _client_identity: &DaemonClientIdentity,
 ) -> Result<()> {
-    let Ok(user_session_db) = store_administration
+    let user_session_db = match store_administration
         .registered_profile_session_database()
         .await
-    else {
-        eprintln!("[tracedecay] user-profile host admission disposition: authority_unavailable");
-        return Ok(());
+    {
+        Ok(database) => database,
+        Err(error) => {
+            eprintln!(
+                "[tracedecay] user-profile host admission disposition: authority_unavailable: {error}"
+            );
+            return Ok(());
+        }
     };
     let Ok(state) = store_administration
         .host_admission_broker(&user_session_db)
