@@ -46,6 +46,9 @@ pub use inventory::{
     StaleBranchDbRecordV1,
 };
 pub use telemetry::{
-    StorageTelemetryFuture, StorageTelemetryReadV1, StoreBudgetEvaluationV1, StoreSizeBudgetV1,
-    StoreSizeSampleV1, StoreSizeTelemetryPort, TableGrowthSampleV1,
+    SIGNIFICANT_TABLE_GROWTH_ABSOLUTE_BYTES, SIGNIFICANT_TABLE_GROWTH_PERCENT,
+    SIGNIFICANT_TABLE_GROWTH_RELATIVE_FLOOR_BYTES, StorageTelemetryFuture, StorageTelemetryReadV1,
+    StoreBudgetEvaluationV1, StoreSizeBudgetV1, StoreSizeSampleV1, StoreSizeTelemetryPort,
+    TableGrowthDoctorEvidenceV1, TableGrowthSampleV1, TableGrowthTelemetryReadV1,
+    is_significant_table_growth, table_growth_doctor_evidence,
 };

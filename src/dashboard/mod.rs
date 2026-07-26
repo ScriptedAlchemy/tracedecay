@@ -174,11 +174,24 @@ pub(crate) type DoctorReportReader =
 #[derive(Clone)]
 pub(crate) struct AdmittedDoctorReportV1 {
     pub(crate) report: tracedecay_application::doctor::DoctorReportV1,
+    pub(crate) table_growth_evidence:
+        Vec<tracedecay_application::storage::TableGrowthDoctorEvidenceV1>,
 }
 
 impl AdmittedDoctorReportV1 {
     pub(crate) fn new(report: tracedecay_application::doctor::DoctorReportV1) -> Self {
-        Self { report }
+        Self {
+            report,
+            table_growth_evidence: Vec::new(),
+        }
+    }
+
+    pub(crate) fn with_table_growth_evidence(
+        mut self,
+        evidence: Vec<tracedecay_application::storage::TableGrowthDoctorEvidenceV1>,
+    ) -> Self {
+        self.table_growth_evidence = evidence;
+        self
     }
 }
 
