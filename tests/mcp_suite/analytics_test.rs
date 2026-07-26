@@ -96,6 +96,22 @@ async fn analytics_reports_tool_tiers_top_tools_and_zero_call_tools() {
         handle_real_server_tool_call(&server, "tracedecay_analytics", json!({"format": "json"}))
             .await;
     let payload = extract_json(&json_res);
+    assert!(
+        payload["observatory"]["metrics"]
+            .as_array()
+            .is_some_and(|metrics| !metrics.is_empty()),
+        "MCP analytics must expose canonical Observatory values and coverage"
+    );
+    assert!(
+        payload["costs"]["usage"]
+            .as_array()
+            .is_some_and(|metrics| !metrics.is_empty()),
+        "MCP analytics must expose canonical Costs values and coverage"
+    );
+    assert!(
+        payload["observatory"]["metrics"][0]["coverage"]["state"].is_string(),
+        "MCP Observatory metrics must retain typed coverage"
+    );
     let tools = &payload["tools"];
     assert_eq!(tools["available"].as_bool(), Some(true));
     assert_eq!(tools["distinct_tools_called"].as_i64(), Some(2));

@@ -167,6 +167,10 @@ struct ExpectedCase {
     chunks_deleted: u64,
     chunks_reused: u64,
     projection_calls: u64,
+    changed_ranges: u64,
+    invalidated_chunks: u64,
+    projection_operations: u64,
+    full_rebuild_reason: Option<String>,
     input_bytes: u64,
     output_bytes: u64,
 }
@@ -227,7 +231,8 @@ struct RawSample {
     queue_delay_ns: u64,
     changed_ranges: u64,
     invalidated_chunks: u64,
-    embedding_batches: u64,
+    embedding_batches: Option<u64>,
+    embedding_chunks: Option<u64>,
     projection_operations: u64,
     invalidation_amplification_per_changed_range: Option<f64>,
     projection_amplification_per_changed_range: Option<f64>,
@@ -237,6 +242,8 @@ struct RawSample {
     peak_rss_bytes: u64,
     process_read_bytes: u64,
     process_write_bytes: u64,
+    process_read_amplification_per_input_byte: Option<f64>,
+    process_write_amplification_per_output_byte: Option<f64>,
 }
 
 impl RawSample {
@@ -248,6 +255,10 @@ impl RawSample {
             chunks_deleted: self.chunks_deleted,
             chunks_reused: self.chunks_reused,
             projection_calls: self.projection_calls,
+            changed_ranges: self.changed_ranges,
+            invalidated_chunks: self.invalidated_chunks,
+            projection_operations: self.projection_operations,
+            full_rebuild_reason: self.full_rebuild_reason.clone(),
             input_bytes: self.input_bytes,
             output_bytes: self.output_bytes,
         }
@@ -300,6 +311,8 @@ struct CaseResult {
     peak_rss_bytes: Distribution,
     process_read_bytes: Distribution,
     process_write_bytes: Distribution,
+    process_read_amplification_per_input_byte: Option<Distribution>,
+    process_write_amplification_per_output_byte: Option<Distribution>,
     input_bytes: u64,
     output_bytes: u64,
     files_parsed: u64,
@@ -309,7 +322,8 @@ struct CaseResult {
     projection_calls: u64,
     changed_ranges: u64,
     invalidated_chunks: u64,
-    embedding_batches: u64,
+    embedding_batches: Option<u64>,
+    embedding_chunks: Option<u64>,
     projection_operations: u64,
     invalidation_amplification_per_changed_range: Option<f64>,
     projection_amplification_per_changed_range: Option<f64>,
@@ -676,6 +690,13 @@ fn execute_case(
         .cpu_ticks
         .saturating_sub(counters_before.cpu_ticks);
 
+    let process_read_bytes = counters_after
+        .read_bytes
+        .saturating_sub(counters_before.read_bytes);
+    let process_write_bytes = counters_after
+        .write_bytes
+        .saturating_sub(counters_before.write_bytes);
+
     Ok(RawSample {
         scale: scale.name.clone(),
         case,
@@ -694,7 +715,8 @@ fn execute_case(
         queue_delay_ns: 0,
         changed_ranges,
         invalidated_chunks,
-        embedding_batches: 0,
+        embedding_batches: None,
+        embedding_chunks: None,
         projection_operations,
         invalidation_amplification_per_changed_range,
         projection_amplification_per_changed_range,
@@ -702,12 +724,13 @@ fn execute_case(
         cpu_ticks,
         cpu_ms: cpu_ticks as f64 * 1_000.0 / clock_ticks_per_second()? as f64,
         peak_rss_bytes: process_peak_rss_kib()?.saturating_mul(1024),
-        process_read_bytes: counters_after
-            .read_bytes
-            .saturating_sub(counters_before.read_bytes),
-        process_write_bytes: counters_after
-            .write_bytes
-            .saturating_sub(counters_before.write_bytes),
+        process_read_bytes,
+        process_write_bytes,
+        process_read_amplification_per_input_byte: ratio_per_bytes(process_read_bytes, input_bytes),
+        process_write_amplification_per_output_byte: ratio_per_bytes(
+            process_write_bytes,
+            output_bytes,
+        ),
     })
 }
 
@@ -1120,7 +1143,7 @@ fn validate_manifests(
 ) -> Result<(), String> {
     if workload.schema_version != 1
         || workload.workload_id != "pr9-code-index-v1"
-        || workload.harness_revision != "code-index-chunks.v1"
+        || workload.harness_revision != "code-index-chunks.v2"
     {
         return Err("unsupported workload identity or revision".to_owned());
     }
@@ -1211,6 +1234,7 @@ fn summarize_case(
         sample.changed_ranges != first.changed_ranges
             || sample.invalidated_chunks != first.invalidated_chunks
             || sample.embedding_batches != first.embedding_batches
+            || sample.embedding_chunks != first.embedding_chunks
             || sample.projection_operations != first.projection_operations
             || sample.invalidation_amplification_per_changed_range
                 != first.invalidation_amplification_per_changed_range
@@ -1249,6 +1273,16 @@ fn summarize_case(
                 .iter()
                 .map(|sample| sample.process_write_bytes as f64),
         )?,
+        process_read_amplification_per_input_byte: optional_distribution(
+            samples
+                .iter()
+                .map(|sample| sample.process_read_amplification_per_input_byte),
+        )?,
+        process_write_amplification_per_output_byte: optional_distribution(
+            samples
+                .iter()
+                .map(|sample| sample.process_write_amplification_per_output_byte),
+        )?,
         input_bytes: expected.input_bytes,
         output_bytes: expected.output_bytes,
         files_parsed: expected.files_parsed,
@@ -1259,6 +1293,7 @@ fn summarize_case(
         changed_ranges: first.changed_ranges,
         invalidated_chunks: first.invalidated_chunks,
         embedding_batches: first.embedding_batches,
+        embedding_chunks: first.embedding_chunks,
         projection_operations: first.projection_operations,
         invalidation_amplification_per_changed_range: first
             .invalidation_amplification_per_changed_range,
@@ -1271,6 +1306,17 @@ fn summarize_case(
 
 fn ratio_per_changed_range(value: u64, changed_ranges: u64) -> Option<f64> {
     (changed_ranges > 0).then(|| value as f64 / changed_ranges as f64)
+}
+
+fn ratio_per_bytes(value: u64, denominator: u64) -> Option<f64> {
+    (denominator > 0).then(|| value as f64 / denominator as f64)
+}
+
+fn optional_distribution(
+    values: impl IntoIterator<Item = Option<f64>>,
+) -> Result<Option<Distribution>, String> {
+    let values = values.into_iter().collect::<Option<Vec<_>>>();
+    values.map(Distribution::from_values).transpose()
 }
 
 fn percentile(values: &[f64], percentile: usize) -> f64 {

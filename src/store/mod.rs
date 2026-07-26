@@ -52,6 +52,12 @@ pub mod vector_generation_test_support {
 /// application extends it with session merge reads and git evidence that must
 /// commit in the same authoritative transaction.
 pub(crate) trait TranscriptIngestStore: TranscriptStore {
+    /// Optional registered observation authority paired with this adapter.
+    /// Test stores and portable adapters remain observation-neutral.
+    fn registered_observation_database(&self) -> Option<&crate::global_db::RegisteredGlobalDb> {
+        None
+    }
+
     fn get_session(
         &self,
         provider: &str,

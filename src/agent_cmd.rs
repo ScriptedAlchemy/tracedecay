@@ -5,8 +5,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use tracedecay::agents::host_registration::{
-    CompatibilityAgentRegistrationDelegate, project_local_registration_path,
+use tracedecay::agents::host_component_registration::{
+    HostComponentRegistrationDelegate as CompatibilityAgentRegistrationDelegate,
+    project_local_registration_path,
 };
 use tracedecay::automation::config::{
     AutomationBackend, AutomationConfigPatch, AutomationHostMode, AutomationTaskPatch,
@@ -1856,9 +1857,10 @@ pub(crate) async fn handle_uninstall_command(
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::{OsStr, OsString};
     use std::path::PathBuf;
     use std::sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     };
 
@@ -1869,6 +1871,34 @@ mod tests {
         apply_canonical_component_set, broker_codex_daemon_automation_project,
         canonical_host_component_set, component_set_request, finish_legacy_hermes_migration,
     };
+
+    const OPENCODE_UNRELATED_CONFIG: &[u8] = br#"{"lsp":{"other":{"command":["tracedecay","lsp","bridge","--stdio"]}},"unrelated":{"keep":true}}
+"#;
+    const OPENCODE_CONTEXT_CONFIG: &[u8] = br#"{"mcp":{"tracedecay":{"type":"local","command":["tracedecay","serve"]},"other":{"type":"local","command":["other"]}},"unrelated":{"keep":true}}
+"#;
+    static HOST_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: impl AsRef<OsStr>) -> Self {
+            let previous = std::env::var_os(key);
+            unsafe { std::env::set_var(key, value) };
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(previous) => unsafe { std::env::set_var(self.key, previous) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
 
     fn seed_opencode_non_context_state(home: &std::path::Path) -> (PathBuf, PathBuf, PathBuf) {
         let config_path = home.join(".config/opencode/opencode.json");
@@ -1885,19 +1915,26 @@ mod tests {
         for path in [&config_path, &core_path, &agent_path] {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         }
-        std::fs::write(&config_path, b"{\"unrelated\":{\"keep\":true}}\n").unwrap();
+        std::fs::write(&config_path, OPENCODE_UNRELATED_CONFIG).unwrap();
         std::fs::write(&core_path, b"core-sentinel\n").unwrap();
         std::fs::write(&agent_path, b"agent-sentinel\n").unwrap();
         (config_path, core_path, agent_path)
     }
 
     fn assert_opencode_non_context_state(paths: &(PathBuf, PathBuf, PathBuf)) {
+        let config: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&paths.0).unwrap()).unwrap();
+        assert_eq!(config["unrelated"]["keep"], true);
         assert_eq!(
-            std::fs::read(&paths.0).unwrap(),
-            b"{\"unrelated\":{\"keep\":true}}\n"
+            config["lsp"]["other"]["command"],
+            serde_json::json!(["tracedecay", "lsp", "bridge", "--stdio"])
         );
         assert_eq!(std::fs::read(&paths.1).unwrap(), b"core-sentinel\n");
         assert_eq!(std::fs::read(&paths.2).unwrap(), b"agent-sentinel\n");
+        assert!(
+            !PathBuf::from(format!("{}.bak", paths.0.display())).exists(),
+            "component lifecycle must not leave a legacy config backup"
+        );
     }
 
     #[tokio::test]
@@ -2006,12 +2043,10 @@ mod tests {
             tracedecay::agents::host_bundle_v2::HostBundleComponentV1::Core
         );
         let kiro = canonical_host_component_set("kiro", None, 0)
-            .unwrap()
-            .expect("Kiro has a first-party default Core set");
-        assert_eq!(kiro.component_set.components.len(), 1);
-        assert_eq!(
-            kiro.component_set.components[0].manifest.component,
-            tracedecay::agents::host_bundle_v2::HostBundleComponentV1::Core
+            .expect("Kiro compatibility lookup remains valid");
+        assert!(
+            kiro.is_none(),
+            "a degraded hook route must not become a supported component set"
         );
     }
 
@@ -2086,6 +2121,8 @@ mod tests {
         registration
             .stage(&component_set.component_set, &request)
             .unwrap();
+        let prompt_path = home.path().join(".config/opencode/AGENTS.md");
+        std::fs::write(&prompt_path, b"concurrent prompt edit\n").unwrap();
         registration
             .apply(&component_set.component_set, &request)
             .unwrap();
@@ -2094,20 +2131,297 @@ mod tests {
             .unwrap();
 
         assert_opencode_non_context_state(&preserved);
+        assert_eq!(
+            std::fs::read(&prompt_path).unwrap(),
+            b"concurrent prompt edit\n"
+        );
     }
 
     #[test]
-    fn kiro_canonical_component_set_runs_full_lifecycle() {
+    fn opencode_non_owner_component_cannot_remove_context_registration() {
+        let home = tempfile::tempdir().unwrap();
+        let config_path = home.path().join(".config/opencode/opencode.json");
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        std::fs::write(&config_path, OPENCODE_CONTEXT_CONFIG).unwrap();
+        let integration = tracedecay::agents::get_integration("opencode").unwrap();
+        let context = tracedecay::agents::InstallContext {
+            home: home.path().to_path_buf(),
+            tracedecay_bin: "tracedecay".to_string(),
+            tool_permissions: Vec::new(),
+            project_root: None,
+            dashboard: true,
+        };
+
+        integration
+            .activate_deployed_host_component_registration(
+                &[tracedecay::agents::host_bundle_v2::HostBundleComponentV1::OperatorMcp],
+                &context,
+            )
+            .unwrap();
+        integration
+            .deactivate_deployed_host_component_registration(
+                &[tracedecay::agents::host_bundle_v2::HostBundleComponentV1::OperatorMcp],
+                &context,
+            )
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read(&config_path).unwrap(),
+            OPENCODE_CONTEXT_CONFIG
+        );
+    }
+
+    #[test]
+    fn current_opencode_context_install_is_byte_preserving() {
+        use tracedecay::agents::host_bundle_v2::HostComponentSetRegistrationV1;
+
         let home = tempfile::tempdir().unwrap();
         let lifecycle = tempfile::tempdir().unwrap();
-        let mcp_path = home.path().join(".kiro/settings/mcp.json");
-        std::fs::create_dir_all(mcp_path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &mcp_path,
-            r#"{"mcpServers":{"other":{"command":"other"}},"unrelated":true}"#,
+        let config_path = home.path().join(".config/opencode/opencode.json");
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        std::fs::write(&config_path, OPENCODE_CONTEXT_CONFIG).unwrap();
+        let component_set = canonical_host_component_set(
+            "opencode",
+            Some(crate::cli::HostBundleComponentArg::ContextMcp),
+            0,
+        )
+        .unwrap()
+        .unwrap();
+        let request =
+            component_set_request(&component_set, HostBundleCliOperation::Install, true).unwrap();
+        let mut registration = CompatibilityAgentRegistrationDelegate::new(
+            "opencode",
+            home.path(),
+            lifecycle.path(),
+            request.lifecycle.operation,
         )
         .unwrap();
-        let component_set = canonical_host_component_set("kiro", None, 0)
+
+        registration
+            .preflight(&component_set.component_set, &request)
+            .unwrap();
+        registration
+            .stage(&component_set.component_set, &request)
+            .unwrap();
+        registration
+            .apply(&component_set.component_set, &request)
+            .unwrap();
+        registration
+            .commit(&component_set.component_set, &request)
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read(&config_path).unwrap(),
+            OPENCODE_CONTEXT_CONFIG
+        );
+    }
+
+    #[test]
+    fn opencode_core_rollback_restores_every_registration_side_effect() {
+        use tracedecay::agents::host_bundle_v2::HostComponentSetRegistrationV1;
+
+        let home = tempfile::tempdir().unwrap();
+        let lifecycle = tempfile::tempdir().unwrap();
+        let config_path = home.path().join(".config/opencode/opencode.json");
+        let prompt_path = home.path().join(".config/opencode/AGENTS.md");
+        let targets_path = home
+            .path()
+            .join(".tracedecay/agent_managed/memory_digest_targets.json");
+        for path in [&config_path, &prompt_path, &targets_path] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        }
+        let original_config = b"{\"unrelated\":\"keep\"}\n";
+        let original_prompt = b"user prompt\n";
+        let original_targets = b"{\"foreign\":\"keep\"}\n";
+        std::fs::write(&config_path, original_config).unwrap();
+        std::fs::write(&prompt_path, original_prompt).unwrap();
+        std::fs::write(&targets_path, original_targets).unwrap();
+        let component_set = canonical_host_component_set(
+            "opencode",
+            Some(crate::cli::HostBundleComponentArg::Core),
+            0,
+        )
+        .unwrap()
+        .unwrap();
+        let request =
+            component_set_request(&component_set, HostBundleCliOperation::Repair, true).unwrap();
+        let mut registration = CompatibilityAgentRegistrationDelegate::new(
+            "opencode",
+            home.path(),
+            lifecycle.path(),
+            request.lifecycle.operation,
+        )
+        .unwrap();
+
+        registration
+            .preflight(&component_set.component_set, &request)
+            .unwrap();
+        registration
+            .stage(&component_set.component_set, &request)
+            .unwrap();
+        registration
+            .apply(&component_set.component_set, &request)
+            .unwrap();
+        registration
+            .rollback(&component_set.component_set, &request)
+            .unwrap();
+
+        assert_eq!(std::fs::read(&config_path).unwrap(), original_config);
+        assert_eq!(std::fs::read(&prompt_path).unwrap(), original_prompt);
+        assert_eq!(std::fs::read(&targets_path).unwrap(), original_targets);
+    }
+
+    #[test]
+    fn explicit_core_component_lifecycle_preserves_opencode_companions() {
+        let home = tempfile::tempdir().unwrap();
+        let lifecycle = tempfile::tempdir().unwrap();
+        let config_path = home.path().join(".config/opencode/opencode.json");
+        let context_set = canonical_host_component_set(
+            "opencode",
+            Some(crate::cli::HostBundleComponentArg::ContextMcp),
+            0,
+        )
+        .unwrap()
+        .unwrap();
+        let agent_set = canonical_host_component_set(
+            "opencode",
+            Some(crate::cli::HostBundleComponentArg::Agent),
+            0,
+        )
+        .unwrap()
+        .unwrap();
+        let context_path = home
+            .path()
+            .join(&context_set.component_set.components[0].manifest.artifacts[0].relative_path);
+        let agent_path = home
+            .path()
+            .join(&agent_set.component_set.components[0].manifest.artifacts[0].relative_path);
+        for path in [&config_path, &context_path, &agent_path] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        }
+        std::fs::write(&config_path, OPENCODE_CONTEXT_CONFIG).unwrap();
+        std::fs::write(&context_path, b"context-sentinel\n").unwrap();
+        std::fs::write(&agent_path, b"agent-sentinel\n").unwrap();
+        let core_set = canonical_host_component_set(
+            "opencode",
+            Some(crate::cli::HostBundleComponentArg::Core),
+            0,
+        )
+        .unwrap()
+        .unwrap();
+        let options = crate::cli::HostBundleCliOptions {
+            component: Some(crate::cli::HostBundleComponentArg::Core),
+            dry_run: false,
+            yes: true,
+        };
+
+        for operation in [
+            HostBundleCliOperation::Install,
+            HostBundleCliOperation::Update,
+            HostBundleCliOperation::Repair,
+            HostBundleCliOperation::Uninstall,
+        ] {
+            apply_canonical_component_set(
+                "opencode",
+                operation,
+                &core_set,
+                &options,
+                home.path(),
+                lifecycle.path(),
+            )
+            .unwrap();
+            let config: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+            assert_eq!(config["unrelated"]["keep"], true);
+            assert_eq!(
+                config["mcp"]["other"]["command"],
+                serde_json::json!(["other"])
+            );
+            assert_eq!(
+                config["mcp"]["tracedecay"]["command"],
+                serde_json::json!(["tracedecay", "serve"])
+            );
+            if operation == HostBundleCliOperation::Uninstall {
+                assert!(config["lsp"].get("tracedecay").is_none());
+            } else {
+                let tracedecay_bin = tracedecay::agents::which_tracedecay()
+                    .unwrap_or_else(|| "tracedecay".to_string());
+                assert_eq!(
+                    config["lsp"]["tracedecay"]["command"],
+                    serde_json::json!([
+                        tracedecay_bin,
+                        "lsp",
+                        "bridge",
+                        "--stdio",
+                        "--project",
+                        "."
+                    ])
+                );
+            }
+            assert_eq!(std::fs::read(&context_path).unwrap(), b"context-sentinel\n");
+            assert_eq!(std::fs::read(&agent_path).unwrap(), b"agent-sentinel\n");
+            assert!(!PathBuf::from(format!("{}.bak", config_path.display())).exists());
+        }
+    }
+
+    #[test]
+    fn opencode_core_refuses_a_competing_analyzer_without_mutation() {
+        let home = tempfile::tempdir().unwrap();
+        let lifecycle = tempfile::tempdir().unwrap();
+        let config_path = home.path().join(".config/opencode/opencode.json");
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        std::fs::write(&config_path, OPENCODE_UNRELATED_CONFIG).unwrap();
+        let component_set = canonical_host_component_set(
+            "opencode",
+            Some(crate::cli::HostBundleComponentArg::Core),
+            0,
+        )
+        .unwrap()
+        .unwrap();
+        let options = crate::cli::HostBundleCliOptions {
+            component: Some(crate::cli::HostBundleComponentArg::Core),
+            dry_run: false,
+            yes: true,
+        };
+
+        let error = apply_canonical_component_set(
+            "opencode",
+            HostBundleCliOperation::Install,
+            &component_set,
+            &options,
+            home.path(),
+            lifecycle.path(),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("ownership marker conflicts"));
+        assert_eq!(
+            std::fs::read(&config_path).unwrap(),
+            OPENCODE_UNRELATED_CONFIG
+        );
+        for artifact in &component_set.component_set.components[0].manifest.artifacts {
+            assert!(!home.path().join(&artifact.relative_path).exists());
+        }
+    }
+
+    #[test]
+    fn kimi_canonical_component_set_uses_deployed_registration_lifecycle() {
+        let _env_lock = HOST_ENV_LOCK.lock().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let lifecycle = tempfile::tempdir().unwrap();
+        let empty_path = tempfile::tempdir().unwrap();
+        let code_home = home.path().join(".kimi-code");
+        let _kimi_home = EnvVarGuard::set(tracedecay::agents::kimi::KIMI_CODE_HOME_ENV, &code_home);
+        let _path = EnvVarGuard::set("PATH", empty_path.path());
+        let installed_path = code_home.join("plugins/installed.json");
+        std::fs::create_dir_all(installed_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &installed_path,
+            br#"{"version":1,"plugins":[{"id":"foreign","enabled":true}],"unrelated":"keep"}
+"#,
+        )
+        .unwrap();
+        let component_set = canonical_host_component_set("kimi", None, 0)
             .unwrap()
             .unwrap();
         let options = crate::cli::HostBundleCliOptions {
@@ -2119,9 +2433,10 @@ mod tests {
         for operation in [
             HostBundleCliOperation::Install,
             HostBundleCliOperation::Update,
+            HostBundleCliOperation::Repair,
         ] {
             apply_canonical_component_set(
-                "kiro",
+                "kimi",
                 operation,
                 &component_set,
                 &options,
@@ -2130,40 +2445,39 @@ mod tests {
             )
             .unwrap();
         }
-        std::fs::write(
-            home.path().join(".kiro/steering/tracedecay.md"),
-            "stale tracedecay steering",
-        )
-        .unwrap();
-        apply_canonical_component_set(
-            "kiro",
-            HostBundleCliOperation::Repair,
-            &component_set,
-            &options,
-            home.path(),
-            lifecycle.path(),
-        )
-        .unwrap();
 
-        let mcp: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&mcp_path).unwrap()).unwrap();
-        assert_eq!(mcp["unrelated"], true);
-        assert_eq!(mcp["mcpServers"]["other"]["command"], "other");
-        assert!(mcp["mcpServers"]["tracedecay"].is_object());
+        let installed: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&installed_path).unwrap()).unwrap();
+        assert_eq!(installed["unrelated"], "keep");
         assert!(
-            home.path()
-                .join(".kiro/tracedecay/component.json")
+            installed["plugins"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|plugin| plugin["id"] == "foreign")
+        );
+        assert!(
+            installed["plugins"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|plugin| plugin["id"] == "tracedecay")
+        );
+        assert!(
+            code_home
+                .join("plugins/managed/tracedecay/.kimi-plugin/plugin.json")
                 .is_file()
         );
-        assert!(home.path().join(".kiro/agents/tracedecay.json").is_file());
         assert!(
-            std::fs::read_to_string(home.path().join(".kiro/steering/tracedecay.md"))
-                .unwrap()
-                .contains("## TraceDecay: mandatory tool routing")
+            !home
+                .path()
+                .join(".tracedecay/host-bundle-stage/kimi")
+                .exists(),
+            "the component transaction deploys assets directly; registration must not rerun the legacy installer"
         );
 
         apply_canonical_component_set(
-            "kiro",
+            "kimi",
             HostBundleCliOperation::Uninstall,
             &component_set,
             &options,
@@ -2171,13 +2485,89 @@ mod tests {
             lifecycle.path(),
         )
         .unwrap();
-        let mcp: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&mcp_path).unwrap()).unwrap();
-        assert_eq!(mcp["unrelated"], true);
-        assert_eq!(mcp["mcpServers"]["other"]["command"], "other");
-        assert!(mcp["mcpServers"].get("tracedecay").is_none());
-        assert!(!home.path().join(".kiro/tracedecay/component.json").exists());
-        assert!(!home.path().join(".kiro/agents/tracedecay.json").exists());
+        let installed: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&installed_path).unwrap()).unwrap();
+        assert_eq!(installed["unrelated"], "keep");
+        assert_eq!(installed["plugins"].as_array().unwrap().len(), 1);
+        assert_eq!(installed["plugins"][0]["id"], "foreign");
+        for artifact in &component_set.component_set.components[0].manifest.artifacts {
+            assert!(
+                !home.path().join(&artifact.relative_path).exists(),
+                "uninstall must remove owned Kimi artifact {}",
+                artifact.relative_path
+            );
+        }
+    }
+
+    #[test]
+    fn kimi_registration_rollback_survives_delegate_restart() {
+        use tracedecay::agents::host_bundle_v2::HostComponentSetRegistrationV1;
+
+        let _env_lock = HOST_ENV_LOCK.lock().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let lifecycle = tempfile::tempdir().unwrap();
+        let empty_path = tempfile::tempdir().unwrap();
+        let code_home = home.path().join(".kimi-code");
+        let _kimi_home = EnvVarGuard::set(tracedecay::agents::kimi::KIMI_CODE_HOME_ENV, &code_home);
+        let _path = EnvVarGuard::set("PATH", empty_path.path());
+        let installed_path = code_home.join("plugins/installed.json");
+        std::fs::create_dir_all(installed_path.parent().unwrap()).unwrap();
+        let original =
+            br#"{"version":1,"plugins":[{"id":"foreign","enabled":true}],"unrelated":"keep"}
+"#;
+        std::fs::write(&installed_path, original).unwrap();
+        let component_set = canonical_host_component_set("kimi", None, 0)
+            .unwrap()
+            .unwrap();
+        let request =
+            component_set_request(&component_set, HostBundleCliOperation::Install, true).unwrap();
+        let mut registration = CompatibilityAgentRegistrationDelegate::new(
+            "kimi",
+            home.path(),
+            lifecycle.path(),
+            request.lifecycle.operation,
+        )
+        .unwrap();
+        registration
+            .preflight(&component_set.component_set, &request)
+            .unwrap();
+        registration
+            .stage(&component_set.component_set, &request)
+            .unwrap();
+        registration
+            .apply(&component_set.component_set, &request)
+            .unwrap();
+        drop(registration);
+
+        let mut restarted = CompatibilityAgentRegistrationDelegate::new(
+            "kimi",
+            home.path(),
+            lifecycle.path(),
+            request.lifecycle.operation,
+        )
+        .unwrap();
+        restarted
+            .rollback(&component_set.component_set, &request)
+            .unwrap();
+
+        assert_eq!(std::fs::read(installed_path).unwrap(), original);
+    }
+
+    #[test]
+    fn kiro_canonical_component_set_refuses_degraded_hook_route() {
+        assert!(
+            canonical_host_component_set("kiro", None, 0)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            canonical_host_component_set(
+                "kiro",
+                Some(crate::cli::HostBundleComponentArg::Core),
+                0,
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -2219,7 +2609,7 @@ mod tests {
             .confirm_preview(&component_set.component_set, &request, &preview)
             .unwrap();
 
-        let registration_path = registration.registration_path().unwrap().to_path_buf();
+        let registration_path = home.path().join(".config/opencode/opencode.json");
         std::fs::create_dir_all(registration_path.parent().unwrap()).unwrap();
         std::fs::write(&registration_path, b"{\"external\":true}").unwrap();
         assert_eq!(
