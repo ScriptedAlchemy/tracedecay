@@ -11,8 +11,8 @@ use tracedecay::application::advisory::ci_runtime::{
     GitHubCiOfficialResponseDecoderV1, ProjectCiCodeAnchorStoreV1,
 };
 use tracedecay::application::advisory::github_runtime::{
-    GitHubReviewAtomicRefreshStoreV1, GitHubReviewRefreshCoordinatorV1,
-    GitHubReviewRefreshOutcomeV1, GitHubReviewRefreshStateV1,
+    GITHUB_REVIEW_THREADS_QUERY_V1, GitHubReviewAtomicRefreshStoreV1,
+    GitHubReviewRefreshCoordinatorV1, GitHubReviewRefreshOutcomeV1, GitHubReviewRefreshStateV1,
     GitHubReviewRefreshStoreCommitOutcomeV1, GitHubReviewRefreshStoreReadOutcomeV1,
     GitHubSourceAccessAuthorityV1,
 };
@@ -44,11 +44,12 @@ use tracedecay_domain::configuration::{
     ProtectedChangePlan,
 };
 use tracedecay_domain::feedback::{
-    FeedbackScopeV1, GitHubPullRequestIdV1, GitHubReviewReadOperationV1,
+    FeedbackScopeV1, GitHubPullRequestIdV1, GitHubReviewCurrentBranchRemapV1,
+    GitHubReviewImmutableAnchorV1, GitHubReviewReadOperationV1,
 };
 use tracedecay_domain::{
-    ActorId, CanonicalObservationIdV1, CommitId, ManifestDigest, ProjectId, ProviderId, RefId,
-    RepositoryId, RetrievalAnchorId, UtcMicros, WorktreeId,
+    ActorId, CanonicalObservationIdV1, CommitId, ContentDigest, FileOccurrenceId, ManifestDigest,
+    ProjectId, ProviderId, RefId, RepositoryId, RetrievalAnchorId, UtcMicros, WorktreeId,
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
@@ -63,6 +64,40 @@ impl GitHubCanonicalReviewAnchorAuthorityV1 for NoAnchors {
         _seed: &'a GitHubReviewAnchorSeedV1,
     ) -> FeedbackPortFuture<'a, Option<GitHubCanonicalReviewAnchorsV1>> {
         Box::pin(async { None })
+    }
+}
+
+struct FixtureAnchors;
+
+impl GitHubCanonicalReviewAnchorAuthorityV1 for FixtureAnchors {
+    fn resolve<'a>(
+        &'a self,
+        request: &'a GitHubReviewReadRequestV1,
+        seed: &'a GitHubReviewAnchorSeedV1,
+    ) -> FeedbackPortFuture<'a, Option<GitHubCanonicalReviewAnchorsV1>> {
+        Box::pin(async move {
+            let original = GitHubReviewImmutableAnchorV1 {
+                repository_id: request.scope.repository_id.clone(),
+                commit_id: seed.original_commit_id.clone(),
+                retrieval_anchor_id: RetrievalAnchorId::new("anchor.fixture.github.original")
+                    .ok()?,
+                file: FileOccurrenceId::new("file.fixture.github.review").ok()?,
+                content_digest: ContentDigest::new(format!("sha256:{}", "c".repeat(64))).ok()?,
+                span: None,
+                symbol: None,
+            };
+            Some(GitHubCanonicalReviewAnchorsV1 {
+                initial_remap: GitHubReviewCurrentBranchRemapV1::unmapped(
+                    original.clone(),
+                    request.scope.clone(),
+                )
+                .ok()?,
+                original,
+                author_anchor: RetrievalAnchorId::new("anchor.fixture.github.author").ok()?,
+                body_anchor: RetrievalAnchorId::new("anchor.fixture.github.body").ok()?,
+                safe_url_anchor: Some(RetrievalAnchorId::new("anchor.fixture.github.url").ok()?),
+            })
+        })
     }
 }
 
@@ -207,6 +242,44 @@ async fn authentic_github_and_ci_responses_use_production_decoders() {
             )
             .await
             .is_some()
+    );
+
+    assert!(GITHUB_REVIEW_THREADS_QUERY_V1.contains("author { __typename login }"));
+    assert!(!GITHUB_REVIEW_THREADS_QUERY_V1.contains("author { __typename id }"));
+    let graphql_decoder = GitHubOfficialResponseDecoderV1::new(
+        GitHubReviewProviderIdentityV1 {
+            provider: ProviderId::new("provider.github").unwrap(),
+            repository_owner: "ScriptedAlchemy".to_owned(),
+            repository_name: "tracedecay".to_owned(),
+            pull_request_number: 421,
+            base_commit_id: CommitId::new("8339371d01311289e2b7cd7b0669ea3549308b8c").unwrap(),
+            head_commit_id: request.scope.head_commit_id.clone(),
+            merge_base_commit_id: CommitId::new("8339371d01311289e2b7cd7b0669ea3549308b8c")
+                .unwrap(),
+        },
+        FixtureAnchors,
+    )
+    .unwrap();
+    let thread = captured_response(include_str!(
+        "../src/application/advisory/fixtures/pr13_branch_pr/review_thread.graphql.json"
+    ));
+    let thread_request = GitHubReviewReadRequestV1 {
+        operation: GitHubReviewReadOperationV1::GraphQlQueryPullRequestReviewThreads,
+        ..request.clone()
+    };
+    let ingress = graphql_decoder
+        .decode(
+            &thread_request,
+            &metadata,
+            serde_json::to_vec(&thread).unwrap().as_slice(),
+        )
+        .await
+        .expect("authentic GraphQL review thread decodes through sanitizer");
+    assert_eq!(ingress.items.len(), 1);
+    assert_eq!(ingress.items[0].comment_id.as_str(), "3556767423");
+    assert_eq!(
+        ingress.items[0].body_anchor.as_str(),
+        "anchor.fixture.github.body"
     );
 
     let ci = GitHubCiOfficialResponseDecoderV1::decode(
