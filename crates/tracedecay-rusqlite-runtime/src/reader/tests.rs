@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     path::PathBuf,
     sync::{
         Arc,
@@ -8,6 +9,12 @@ use std::{
 };
 
 use rusqlite::{Connection, Transaction};
+use tracedecay_application::{
+    CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
+    RequestContext, RequestId, ResolvedScope,
+    storage::{StorageTelemetryReadV1, StoreKeyV1, StoreSizeTelemetryPort},
+};
+use tracedecay_domain::{ActorId, ManifestDigest, ProjectId, RepositoryId, UtcMicros, WorktreeId};
 use tracedecay_store::{
     AdmissionConfigV1, CommitSequenceV1, LocatorDigest, OperationPriorityV1,
     RuntimeCancellationIdentityV1, RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeReadCoverageV1,
@@ -17,12 +24,14 @@ use tracedecay_store::{
 
 use super::*;
 use crate::{
+    SqliteStoreSizeTelemetryPort,
     read_consistency::{
         ReadConsistencyConfig, ReadConsistencyCoordinator, RetainedSnapshotRegistry,
         RetainedSnapshotState,
     },
     watermark::CommittedWatermarkPublisher,
 };
+use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 #[derive(Clone)]
 struct CountExecutor;
@@ -108,6 +117,42 @@ impl TestStore {
         );
         ExistingReaderLocator::new(self.binding.clone(), locator, self.path.clone()).unwrap()
     }
+}
+
+fn telemetry_context(scope: ResolvedScope) -> RequestContext {
+    let actor = ActorId::new("actor.storage-telemetry-test").unwrap();
+    let grant = CapabilityGrantSnapshot::new(
+        CapabilityGrantId::new("grant.storage-telemetry-test").unwrap(),
+        1,
+        ManifestDigest::new(format!("sha256:{}", "d".repeat(64))).unwrap(),
+        actor.clone(),
+        UtcMicros(1),
+        UtcMicros(i64::MAX),
+        scope.clone(),
+        BTreeSet::from([CapabilityId::new("capability.storage.telemetry").unwrap()]),
+        BTreeSet::from([UseCaseId::new("use-case.storage.telemetry.read").unwrap()]),
+        DisclosureClass::Metadata,
+    )
+    .unwrap();
+    RequestContext::new(
+        actor,
+        scope,
+        grant,
+        RequestId::new("request.storage-telemetry-test").unwrap(),
+        Deadline::new(UtcMicros(i64::MAX)).unwrap(),
+        CancellationContext::active("cancel.storage-telemetry-test").unwrap(),
+    )
+    .unwrap()
+}
+
+fn telemetry_scope() -> ResolvedScope {
+    ResolvedScope::new(
+        ProjectId::new("project.storage-telemetry-test").unwrap(),
+        RepositoryId::new("repository.storage-telemetry-test").unwrap(),
+        WorktreeId::new("worktree.storage-telemetry-test").unwrap(),
+        None,
+    )
+    .unwrap()
 }
 
 struct Probe {
@@ -289,11 +334,86 @@ fn reserved_health_reader_reports_exact_store_size_pragmas() {
     assert!(
         table_sizes
             .iter()
-            .any(|sample| sample.table_name == "markers" && sample.bytes > 0)
+            .any(|sample| sample.table_name == "markers" && sample.bytes == 0),
+        "an empty table has zero payload bytes rather than one page of fabricated payload"
     );
     let snapshot = pool.snapshot();
     assert_eq!(snapshot.leased_health, 0);
     assert_eq!(snapshot.available_health, 1);
+}
+
+#[test]
+fn application_telemetry_port_reads_real_store_size() {
+    let store = TestStore::new();
+    let pool = ReaderPool::start(
+        store.locator(),
+        AdmissionConfigV1::default().readers,
+        CountExecutor,
+    )
+    .unwrap();
+    let scope = telemetry_scope();
+    let context = telemetry_context(scope.clone());
+    let port = SqliteStoreSizeTelemetryPort::new(
+        crate::migration_sql::MigrationSqlHandle::attach_read_only(&pool),
+        StoreKeyV1::new("reader.db").unwrap(),
+        scope,
+        Duration::from_millis(100),
+    );
+
+    let read = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap()
+        .block_on(port.store_size(&context, &StoreKeyV1::new("reader.db").unwrap()));
+
+    let StorageTelemetryReadV1::Observed { sample } = read else {
+        panic!("production telemetry port must observe the retained store");
+    };
+    assert!(sample.page_size_bytes > 0);
+    assert!(sample.page_count > 0);
+    assert!(sample.freelist_pages <= sample.page_count);
+}
+
+#[test]
+fn application_telemetry_port_compares_table_payload_watermarks() {
+    let store = TestStore::new();
+    let pool = ReaderPool::start(
+        store.locator(),
+        AdmissionConfigV1::default().readers,
+        CountExecutor,
+    )
+    .unwrap();
+    let scope = telemetry_scope();
+    let context = telemetry_context(scope.clone());
+    let port = SqliteStoreSizeTelemetryPort::new(
+        crate::migration_sql::MigrationSqlHandle::attach_read_only(&pool),
+        StoreKeyV1::new("reader.db").unwrap(),
+        scope,
+        Duration::from_millis(100),
+    );
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+
+    assert!(
+        runtime
+            .block_on(port.table_growth(&context, &StoreKeyV1::new("reader.db").unwrap()))
+            .is_empty(),
+        "the first read establishes a baseline"
+    );
+    let connection = Connection::open(&store.path).unwrap();
+    for value in 0..256 {
+        connection
+            .execute("INSERT INTO markers(value) VALUES (?1)", [value])
+            .unwrap();
+    }
+
+    let growth =
+        runtime.block_on(port.table_growth(&context, &StoreKeyV1::new("reader.db").unwrap()));
+    let markers = growth
+        .iter()
+        .find(|sample| sample.table.as_str() == "markers")
+        .expect("markers growth sample");
+    assert!(markers.current_bytes > markers.previous_bytes);
 }
 
 #[test]

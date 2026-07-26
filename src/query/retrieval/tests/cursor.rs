@@ -233,6 +233,9 @@ fn pr9_cursor_mac_authenticates_the_semantic_continuation_envelope() {
             schema_revision: "projection.cursor.v1".to_owned(),
             profile_digest: super::digest_id('b'),
         },
+        search_index_key: tracedecay_domain::SemanticSearchIndexProfileV1::exact_flat_v1()
+            .and_then(|profile| profile.index_key())
+            .expect("search index key"),
         candidate_set_digest: cursor.candidate_set_digest.clone(),
         public_lane_statuses: statuses,
         lane_checkpoints: Vec::new(),
