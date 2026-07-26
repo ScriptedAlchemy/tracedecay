@@ -372,7 +372,7 @@ pub fn stock_host_native_fixture_evidence(host: HostKindV1) -> Option<HostNative
         HostKindV1::ClaudeCode => (
             "claude",
             "crates/tracedecay-hooks/fixtures/host_events/claude.json",
-            include_bytes!("../../crates/tracedecay-hooks/fixtures/host_events/claude.json"),
+            include_bytes!("../../tests/fixtures/packaged_host_events/claude.json"),
             "PostToolUse,Stop",
             Supported,
             Supported,
@@ -380,7 +380,7 @@ pub fn stock_host_native_fixture_evidence(host: HostKindV1) -> Option<HostNative
         HostKindV1::Codex => (
             "codex",
             "crates/tracedecay-hooks/fixtures/host_events/codex.json",
-            include_bytes!("../../crates/tracedecay-hooks/fixtures/host_events/codex.json"),
+            include_bytes!("../../tests/fixtures/packaged_host_events/codex.json"),
             "Stop",
             unavailable,
             Supported,
@@ -388,7 +388,7 @@ pub fn stock_host_native_fixture_evidence(host: HostKindV1) -> Option<HostNative
         HostKindV1::CursorDesktop => (
             "cursor",
             "crates/tracedecay-hooks/fixtures/host_events/cursor.json",
-            include_bytes!("../../crates/tracedecay-hooks/fixtures/host_events/cursor.json"),
+            include_bytes!("../../tests/fixtures/packaged_host_events/cursor.json"),
             "afterFileEdit",
             Supported,
             unavailable,
@@ -396,7 +396,7 @@ pub fn stock_host_native_fixture_evidence(host: HostKindV1) -> Option<HostNative
         HostKindV1::Hermes => (
             "hermes",
             "crates/tracedecay-hooks/fixtures/host_events/hermes.json",
-            include_bytes!("../../crates/tracedecay-hooks/fixtures/host_events/hermes.json"),
+            include_bytes!("../../tests/fixtures/packaged_host_events/hermes.json"),
             "post_tool_call,on_session_end",
             Supported,
             Supported,
@@ -404,7 +404,7 @@ pub fn stock_host_native_fixture_evidence(host: HostKindV1) -> Option<HostNative
         HostKindV1::Kiro => (
             "kiro",
             "crates/tracedecay-hooks/fixtures/host_events/kiro.json",
-            include_bytes!("../../crates/tracedecay-hooks/fixtures/host_events/kiro.json"),
+            include_bytes!("../../tests/fixtures/packaged_host_events/kiro.json"),
             "userPromptSubmit",
             unavailable,
             unavailable,
@@ -412,7 +412,7 @@ pub fn stock_host_native_fixture_evidence(host: HostKindV1) -> Option<HostNative
         HostKindV1::KimiCode => (
             "kimi_code",
             "crates/tracedecay-hooks/fixtures/host_events/kimi-code.json",
-            include_bytes!("../../crates/tracedecay-hooks/fixtures/host_events/kimi-code.json"),
+            include_bytes!("../../tests/fixtures/packaged_host_events/kimi-code.json"),
             "PostToolUse,Stop",
             Supported,
             Supported,
@@ -420,9 +420,7 @@ pub fn stock_host_native_fixture_evidence(host: HostKindV1) -> Option<HostNative
         HostKindV1::OpenCode => (
             "opencode",
             "crates/tracedecay-hooks/fixtures/host_events/opencode/baseline.json",
-            include_bytes!(
-                "../../crates/tracedecay-hooks/fixtures/host_events/opencode/baseline.json"
-            ),
+            include_bytes!("../../tests/fixtures/packaged_host_events/opencode/baseline.json"),
             "file.edited,session.idle",
             Degraded(NativeFixtureLimited),
             Degraded(NativeFixtureLimited),
