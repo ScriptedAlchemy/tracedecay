@@ -52,6 +52,11 @@ import { chromium, type Browser, type Page } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
 import { installApiFixtures } from '../stories/fixtures/route.ts';
 import { resolveFixture } from '../stories/fixtures/data.ts';
+import {
+  VISIBILITY_PROBE,
+  assertVisibilityReport,
+  type VisibilityReport,
+} from './visibility.ts';
 
 const ROOT = process.cwd();
 const LABEL = process.env['AXE_LABEL'] ?? 'current';
@@ -73,11 +78,19 @@ const WIDTHS = [320, 768, 1440] as const;
 const VIEWPORT_HEIGHT = 900;
 const PORT = Number(process.env['AXE_PORT'] ?? 5241);
 /**
- * Reproduce the defect this harness was fixed for, to prove it was real:
- * `AXE_TRAP=1` reverts to the old stillness (shorten the animation instead
- * of removing it, no `data-motion`, no reduced-motion emulation). Expected
- * result is that `assertActuallyVisible` fails on faded regions — i.e. the old
- * method was photographing blank content and Axe was scoring it clean.
+ * `AXE_TRAP=1` reverts to the old stillness (shorten the animation instead of
+ * removing it, no `data-motion`, no reduced-motion emulation).
+ *
+ * Be precise about what this currently demonstrates. The mechanism is real —
+ * `--anim-enter` fills `both` and opens at `opacity: 0`, so zeroing its
+ * duration pins it invisible — but the only rules that apply it are
+ * `.td-enter` and `.td-stagger > *`, and a repo-wide search finds those class
+ * names nowhere outside `tokens.css`. **No component uses them, so the trap
+ * fades nothing today and this flag does not currently reproduce a defect.**
+ * It becomes a live reproduction the moment a component adopts either
+ * primitive, which is exactly when `assertActuallyVisible` has to catch it.
+ * Do not cite a clean `AXE_TRAP=1` run as evidence that the guard works —
+ * `visibility.dom.test.ts` is the evidence, and it fails on a faded page.
  */
 export const TRAP_MODE = process.env['AXE_TRAP'] === '1';
 /** Substring filter over scenario ids, so one state can be iterated on without
@@ -149,46 +162,19 @@ export async function expectAbsent(page: Page, selector: string, what: string): 
 }
 
 /**
- * The guard against photographing blank regions: every entrance-animated region
- * on the page must have settled to full opacity, and the main region must have
- * real painted size. Runs before every scan, at every viewport and theme.
+ * The guard against photographing blank regions. Runs before every scan, at
+ * every viewport and theme.
+ *
+ * The measurement and the pass/fail rule live in `visibility.ts`, without a
+ * Playwright import, so `visibility.dom.test.ts` can drive the shipped probe
+ * against a real DOM under `npm test` and watch it reject a faded page. The
+ * previous version swept `.td-enter, .td-stagger > *` — primitives no
+ * component uses — so it matched nothing and passed on every page regardless
+ * of what was on screen.
  */
 export async function assertActuallyVisible(page: Page, tag: string): Promise<void> {
-  const report = await page.evaluate(() => {
-    const main = document.querySelector('main#td-main');
-    const rect = main?.getBoundingClientRect();
-    const animated = Array.from(document.querySelectorAll('.td-enter, .td-stagger > *'));
-    let faded = 0;
-    let worst = 1;
-    for (const el of animated) {
-      const o = Number.parseFloat(getComputedStyle(el).opacity || '1');
-      if (o < 0.99) {
-        faded += 1;
-        worst = Math.min(worst, o);
-      }
-    }
-    return {
-      mainW: rect?.width ?? 0,
-      mainH: rect?.height ?? 0,
-      textLen: (main?.textContent ?? '').trim().length,
-      animatedCount: animated.length,
-      faded,
-      worst,
-      motion: document.documentElement.dataset['motion'] ?? 'unset',
-    };
-  });
-  if (report.mainW < 100 || report.mainH < 100) {
-    throw new Error(`${tag}: main region has no painted size (${report.mainW}x${report.mainH})`);
-  }
-  if (report.textLen < 40) {
-    throw new Error(`${tag}: main region rendered almost no text (${report.textLen} chars)`);
-  }
-  if (report.faded > 0) {
-    throw new Error(
-      `${tag}: ${report.faded}/${report.animatedCount} entrance regions still at opacity ` +
-        `${report.worst} — the capture would be blank (data-motion=${report.motion})`,
-    );
-  }
+  const report = (await page.evaluate(VISIBILITY_PROBE)) as VisibilityReport;
+  assertVisibilityReport(report, tag);
 }
 
 /**

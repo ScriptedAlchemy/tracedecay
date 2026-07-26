@@ -686,6 +686,45 @@
       ],
       "type": "object"
     },
+    "DashboardDoctorRemediationDescriptorV1": {
+      "description": "A typed description of what an owner-supplied remediation operation would do.\n\nThis is a *description*, not an effect. It never carries argv, a path, or an\ninline action, and resolving it performs no work.",
+      "properties": {
+        "action_confirmation": {
+          "$ref": "#/$defs/DoctorConfirmationRequirementV1"
+        },
+        "operation": {
+          "$ref": "#/$defs/DoctorOwningOperationRefV1"
+        },
+        "preview_available": {
+          "type": "boolean"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "surface": {
+          "$ref": "#/$defs/DoctorOwningSurfaceV1"
+        },
+        "target": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DoctorRemediationTargetV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "operation",
+        "surface",
+        "preview_available",
+        "action_confirmation",
+        "summary",
+        "target"
+      ],
+      "type": "object"
+    },
     "DashboardDomainStateV1": {
       "description": "The normative dashboard domain-state union.\n\nThe first sixteen variants are the plan's exact `DashboardDomainState`\ndiscriminated union. [`Self::Unsupported`] is the PR14 backend-gap binding\nstate: the read model's HTTP surface exists, but its live producer/source is\nnot yet wired server-side. It is never healthy or empty — the frontend\nrenders a distinct \"not yet available\" state — and it is deliberately\nseparate from [`Self::UnsupportedSchema`] (an undecodable schema/variant).",
       "oneOf": [
@@ -1246,16 +1285,6 @@
             }
           ]
         },
-        "kind_statuses": {
-          "description": "Storage-route-only producer-source coverage. General Doctor responses\nomit this additive field; `/api/storage/findings` always supplies all\nfive Plan 38 producer statuses.",
-          "items": {
-            "$ref": "#/$defs/StorageFindingKindStatusV1"
-          },
-          "type": [
-            "array",
-            "null"
-          ]
-        },
         "known_families": {
           "items": {
             "$ref": "#/$defs/DoctorFindingFamilyV1"
@@ -1267,7 +1296,7 @@
         },
         "remediations": {
           "items": {
-            "$ref": "#/$defs/DoctorRemediationDescriptorV1"
+            "$ref": "#/$defs/DashboardDoctorRemediationDescriptorV1"
           },
           "type": "array"
         },
@@ -1359,34 +1388,6 @@
         "preview_id",
         "idempotency_key",
         "confirmed"
-      ],
-      "type": "object"
-    },
-    "DoctorRemediationDescriptorV1": {
-      "description": "A typed description of what an owner-supplied remediation operation would do.\n\nThis is a *description*, not an effect. It never carries argv, a path, or an\ninline action, and resolving it performs no work.",
-      "properties": {
-        "action_confirmation": {
-          "$ref": "#/$defs/DoctorConfirmationRequirementV1"
-        },
-        "operation": {
-          "$ref": "#/$defs/DoctorOwningOperationRefV1"
-        },
-        "preview_available": {
-          "type": "boolean"
-        },
-        "summary": {
-          "type": "string"
-        },
-        "surface": {
-          "$ref": "#/$defs/DoctorOwningSurfaceV1"
-        }
-      },
-      "required": [
-        "operation",
-        "surface",
-        "preview_available",
-        "action_confirmation",
-        "summary"
       ],
       "type": "object"
     },
@@ -3051,6 +3052,68 @@
       ],
       "type": "string"
     },
+    "StorageFindingsPayloadV1": {
+      "description": "Route-specific payload for `/api/storage/findings`.\n\nStorage producer coverage is required here rather than an optional field on\nthe general Doctor payload, so generated consumers cannot mistake one route\nfor the other.",
+      "properties": {
+        "entries": {
+          "items": {
+            "$ref": "#/$defs/DoctorReportEntryV1"
+          },
+          "type": "array"
+        },
+        "family_filter": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DoctorFindingFamilyV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "kind_statuses": {
+          "items": {
+            "$ref": "#/$defs/StorageFindingKindStatusV1"
+          },
+          "type": "array"
+        },
+        "known_families": {
+          "items": {
+            "$ref": "#/$defs/DoctorFindingFamilyV1"
+          },
+          "type": "array"
+        },
+        "note": {
+          "type": "string"
+        },
+        "remediations": {
+          "items": {
+            "$ref": "#/$defs/DashboardDoctorRemediationDescriptorV1"
+          },
+          "type": "array"
+        },
+        "report_coverage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DoctorReportCoverageV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "family_filter",
+        "entries",
+        "report_coverage",
+        "remediations",
+        "known_families",
+        "note",
+        "kind_statuses"
+      ],
+      "type": "object"
+    },
     "StorageTelemetryPayloadV1": {
       "description": "Telemetry payload: one entry per distinct store the dashboard holds a\nconnection to.",
       "properties": {
@@ -4344,6 +4407,9 @@
     "graph_test_map": {
       "$ref": "#/$defs/StructureReadV14"
     },
+    "storage_findings": {
+      "$ref": "#/$defs/StorageFindingsPayloadV1"
+    },
     "storage_telemetry": {
       "$ref": "#/$defs/StorageTelemetryPayloadV1"
     }
@@ -4351,6 +4417,7 @@
   "required": [
     "envelope",
     "storage_telemetry",
+    "storage_findings",
     "doctor_findings",
     "doctor_remediation_preview_request",
     "doctor_remediation_apply_request",

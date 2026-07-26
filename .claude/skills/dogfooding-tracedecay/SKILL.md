@@ -25,8 +25,15 @@ The command builds the release binary, copies it outside the repository to
 `~/.local/lib/tracedecay/dogfood/tracedecay`, atomically replaces
 `~/.local/bin/tracedecay`, refreshes tracked integrations through the normal
 post-update lifecycle, restarts the managed daemon, and runs health checks.
-Cargo's isolated `target/test-profile/.tracedecay` profile is removed before
-the live refresh.
+`scripts/dogfood.sh` unsets `TRACEDECAY_DATA_DIR` and
+`TRACEDECAY_DISABLE_GLOBAL_DB` before the live refresh, so post-update work
+targets the real user profile rather than Cargo's isolated
+`target/test-profile/.tracedecay`. That profile is left on disk, not deleted.
+
+The release build runs `build.rs`, and `dashboard/app-dist/` is git-ignored, so
+a fresh worktree has no bundle and the build shells out to `npm ci` plus
+`npm run build` in `dashboard/`. Node.js 22+ and npm must be on PATH, and the
+first dogfood in a new worktree pays that frontend build.
 
 ## Verify live use
 

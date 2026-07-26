@@ -20,7 +20,7 @@ import { kindColorVars } from '../../viz/graph/kindColor.ts';
 import { useLegacy } from '../../data/query/useLegacy.ts';
 import { MARK_PITCH_PX, PLOT_HEIGHT, WeaveCanvas } from './WeaveCanvas.tsx';
 import { ThreadChain } from './ThreadChain.tsx';
-import { formatDuration, formatMoment } from './tracks.ts';
+import { formatDurationSeconds, formatMoment } from './tracks.ts';
 import {
   composeWeave,
   extentOf,
@@ -180,7 +180,7 @@ export function LoomPage() {
                   {
                     label: 'window',
                     value: weave.extent
-                      ? formatDuration(weave.extent.end - weave.extent.start)
+                      ? formatDurationSeconds(weave.extent.end - weave.extent.start)
                       : '—',
                     note: weave.extent ? formatMoment(weave.extent.end) : undefined,
                   },
@@ -510,7 +510,7 @@ function ThreadTable({
                 </td>
                 <td className="px-2 py-1 text-text-muted">
                   {thread.end != null
-                    ? formatDuration(thread.end - thread.start)
+                    ? formatDurationSeconds(thread.end - thread.start)
                     : 'unrecorded'}
                 </td>
               </tr>
