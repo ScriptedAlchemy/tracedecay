@@ -683,8 +683,19 @@ describe('ExplorerPage', () => {
     await user.click(await screen.findByRole('button', { name: /Using graph search/ }));
 
     expect(await screen.findByText('Session context')).toBeTruthy();
-    expect(screen.getByText('Raw token estimate')).toBeTruthy();
-    expect(screen.getAllByText('120').length).toBeGreaterThan(0);
+    // `120` also appears in the raw read-context payload table further down, so
+    // `getAllByText('120').length > 0` passed whether or not the token estimate
+    // row rendered at all, and passed if that row showed one of the other
+    // counts from the same payload. Each figure is pinned to the term it is
+    // labelled with instead, so a transposed or unread count fails here.
+    const counts = within(
+      screen.getByText('Raw token estimate').closest('dl') as HTMLElement,
+    );
+    const valueFor = (term: string): string | null =>
+      counts.getByText(term).nextElementSibling?.textContent ?? null;
+    expect(valueFor('Messages')).toBe('4');
+    expect(valueFor('Summary nodes')).toBe('1');
+    expect(valueFor('Raw token estimate')).toBe('120');
     expect(
       screen.getByText(/Loaded 1 raw messages and 1 summary nodes in asc order; more rows remain/),
     ).toBeTruthy();
