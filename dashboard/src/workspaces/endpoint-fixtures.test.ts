@@ -41,6 +41,7 @@ import {
   ProjectsPayloadSchema,
   SavingsOverviewPayloadSchema,
   SavingsSessionsPayloadSchema,
+  SettingsPayloadV1Schema,
   StorageFindingsPayloadSchema,
   StorageTelemetryPayloadSchema,
 } from '../contracts/wire.ts';
@@ -596,9 +597,22 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
     expect(Array.isArray(data['proposals'])).toBe(true);
   });
 
-  it('GET /api/settings — settings (AnyObject)', () => {
-    const data = parse(AnyObject, '/api/settings');
-    expect(data['storage']).toBeDefined();
+  // Validated against the generated `SettingsPayloadV1Schema` inside the
+  // envelope the route actually answers with. Under the previous `AnyObject`
+  // check the fixture went on serving a bare payload after `/api/settings`
+  // started wrapping one, and SettingsPage read envelope metadata as
+  // configuration without a single test noticing.
+  it('GET /api/settings — settings envelope', () => {
+    const env = parse(EnvelopeSchema(SettingsPayloadV1Schema), '/api/settings');
+    expect(env.payload.storage.store_root.length).toBeGreaterThan(0);
+    // The two write scopes are advertised independently, so the editor can
+    // disable one without claiming the other is unauthorized too.
+    expect(
+      env.legal_actions
+        .filter((action) => action.kind === 'request_apply')
+        .map((action) => action.operation)
+        .sort(),
+    ).toEqual(['configuration_batch', 'user_settings_mutate']);
   });
 
   it('GET /api/capabilities — capabilities gateway', () => {

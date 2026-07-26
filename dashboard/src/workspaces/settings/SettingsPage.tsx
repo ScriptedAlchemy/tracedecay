@@ -2,7 +2,11 @@ import * as Dialog from '@radix-ui/react-dialog';
 import { useMutation } from '@tanstack/react-query';
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Search, X } from 'lucide-react';
-import { AnyObject } from '../../data/query/legacy.ts';
+import {
+  EnvelopeSchema,
+  SettingsPayloadV1Schema,
+  type WireLegalActionRef,
+} from '../../contracts/wire.ts';
 import { useLegacy } from '../../data/query/useLegacy.ts';
 import { scopedUrl, useScope } from '../../data/scope/store.ts';
 import { LegacyBoundary } from '../../ui/LegacyStates.tsx';
@@ -56,15 +60,20 @@ import {
  */
 export function SettingsPage() {
   const scope = useScope((state) => state.scope);
-  const settings = useLegacy(['settings'], '/api/settings', AnyObject);
+  const settings = useLegacy(
+    ['settings'],
+    '/api/settings',
+    EnvelopeSchema(SettingsPayloadV1Schema),
+  );
   const readUrl = scopedUrl(scope, '/api/settings');
 
   return (
     <div className="flex h-full min-h-0 flex-col">
       <LegacyBoundary title="Settings" pending={settings.isPending} result={settings.data}>
-        {(data) => (
+        {(envelope) => (
           <SettingsSurface
-            payload={data}
+            payload={envelope.payload}
+            writable={writableScopes(envelope.legal_actions)}
             readUrl={readUrl}
             projectPatchUrl={scopedUrl(scope, '/api/settings/project')}
             userPatchUrl={scopedUrl(scope, '/api/settings/user')}
@@ -76,14 +85,41 @@ export function SettingsPage() {
   );
 }
 
+/**
+ * Which settings scopes the server currently authorizes a write for.
+ *
+ * The two scopes have different authorities — a project batch is applied by
+ * the daemon-owned configuration control plane, user settings by the profile
+ * authority — so the envelope advertises them separately and a dashboard
+ * without the control plane omits the project action. Offering the editor
+ * anyway would put a control on screen whose only outcome is a 503.
+ */
+function writableScopes(legalActions: readonly WireLegalActionRef[]): WritableScopes {
+  const authorizes = (operation: string) =>
+    legalActions.some(
+      (action) => action.kind === 'request_apply' && action.operation === operation,
+    );
+  return {
+    project: authorizes('configuration_batch'),
+    user: authorizes('user_settings_mutate'),
+  };
+}
+
+interface WritableScopes {
+  readonly project: boolean;
+  readonly user: boolean;
+}
+
 function SettingsSurface({
   payload,
+  writable,
   readUrl,
   projectPatchUrl,
   userPatchUrl,
   onApplied,
 }: {
   payload: unknown;
+  writable: WritableScopes;
   readUrl: string;
   projectPatchUrl: string;
   userPatchUrl: string;
@@ -212,6 +248,7 @@ function SettingsSurface({
               {query === '' ? (
                 <SettingsEditorPanel
                   payload={payload}
+                  writable={writable}
                   readUrl={readUrl}
                   projectPatchUrl={projectPatchUrl}
                   userPatchUrl={userPatchUrl}
@@ -247,12 +284,14 @@ type PendingSettingsReview =
 
 function SettingsEditorPanel({
   payload,
+  writable,
   readUrl,
   projectPatchUrl,
   userPatchUrl,
   onApplied,
 }: {
   payload: unknown;
+  writable: WritableScopes;
   readUrl: string;
   projectPatchUrl: string;
   userPatchUrl: string;
@@ -371,6 +410,7 @@ function SettingsEditorPanel({
           values={project}
           errors={clientErrors}
           dirty={projectPlan?.outcome !== 'unchanged'}
+          writable={writable.project}
           onChange={setProject}
           onReview={openProjectReview}
         />
@@ -378,6 +418,7 @@ function SettingsEditorPanel({
           values={user}
           errors={clientErrors}
           dirty={userPlan?.outcome !== 'unchanged'}
+          writable={writable.user}
           onChange={setUser}
           onReview={openUserReview}
         />
@@ -438,19 +479,24 @@ function ProjectSettingsFields({
   values,
   errors,
   dirty,
+  writable,
   onChange,
   onReview,
 }: {
   values: ProjectSettingsValues;
   errors: readonly SettingsValidationError[];
   dirty: boolean;
+  writable: boolean;
   onChange: (values: ProjectSettingsValues) => void;
   onReview: () => void;
 }) {
   return (
-    <fieldset className="min-w-0 border border-edge-subtle bg-surface-1 p-3">
+    <fieldset
+      className="min-w-0 border border-edge-subtle bg-surface-1 p-3"
+      disabled={!writable}
+    >
       <legend className="px-1 text-xs font-semibold text-text-primary">Project settings</legend>
-      <EditState scope="project" dirty={dirty} />
+      {writable ? <EditState scope="project" dirty={dirty} /> : <ReadOnlyScope scope="project" />}
       <div className="grid gap-2 sm:grid-cols-2">
         <SettingsTextArea
           label="Include globs"
@@ -511,9 +557,11 @@ function ProjectSettingsFields({
           onChange={(checked) => onChange({ ...values, auto_track_pr_branches: checked })}
         />
       </div>
-      <button type="button" className={`${settingsButtonClass} mt-3`} onClick={onReview}>
-        Review project changes
-      </button>
+      {writable ? (
+        <button type="button" className={`${settingsButtonClass} mt-3`} onClick={onReview}>
+          Review project changes
+        </button>
+      ) : null}
       <FieldError error={errorFor(errors, 'project')} />
     </fieldset>
   );
@@ -523,19 +571,24 @@ function UserSettingsFields({
   values,
   errors,
   dirty,
+  writable,
   onChange,
   onReview,
 }: {
   values: UserSettingsValues;
   errors: readonly SettingsValidationError[];
   dirty: boolean;
+  writable: boolean;
   onChange: (values: UserSettingsValues) => void;
   onReview: () => void;
 }) {
   return (
-    <fieldset className="min-w-0 border border-edge-subtle bg-surface-1 p-3">
+    <fieldset
+      className="min-w-0 border border-edge-subtle bg-surface-1 p-3"
+      disabled={!writable}
+    >
       <legend className="px-1 text-xs font-semibold text-text-primary">User settings</legend>
-      <EditState scope="user" dirty={dirty} />
+      {writable ? <EditState scope="user" dirty={dirty} /> : <ReadOnlyScope scope="user" />}
       <div className="grid gap-2">
         <SettingsInput
           label="Watcher debounce"
@@ -557,9 +610,11 @@ function UserSettingsFields({
           onChange={(checked) => onChange({ ...values, upload_enabled: checked })}
         />
       </div>
-      <button type="button" className={`${settingsButtonClass} mt-3`} onClick={onReview}>
-        Review user changes
-      </button>
+      {writable ? (
+        <button type="button" className={`${settingsButtonClass} mt-3`} onClick={onReview}>
+          Review user changes
+        </button>
+      ) : null}
       <FieldError error={errorFor(errors, 'user')} />
     </fieldset>
   );
@@ -764,6 +819,13 @@ function MutationFeedback({
   if (result.outcome === 'validation') {
     return <ValidationErrors errors={result.errors} />;
   }
+  if (result.outcome === 'unavailable') {
+    return (
+      <p role="alert" className="text-xs text-state-unsupported-schema">
+        {result.detail}
+      </p>
+    );
+  }
   return (
     <p role="alert" className="text-xs text-state-error">
       {result.detail}
@@ -808,6 +870,21 @@ function EditState({ scope, dirty }: { scope: SettingsMutationScope; dirty: bool
       )}
     >
       {dirty ? `Unsaved ${scope} changes` : `Current ${scope} values`}
+    </p>
+  );
+}
+
+/** A scope the envelope carries no apply action for.
+ *
+ * This states only what the wire states — the server does not currently
+ * authorize this write — rather than guessing at which authority is missing. */
+function ReadOnlyScope({ scope }: { scope: SettingsMutationScope }) {
+  return (
+    <p
+      aria-live="polite"
+      className="mb-2 text-3xs font-semibold uppercase tracking-[0.16em] text-state-unsupported-schema"
+    >
+      Read-only · this dashboard is not authorized to apply {scope} settings
     </p>
   );
 }

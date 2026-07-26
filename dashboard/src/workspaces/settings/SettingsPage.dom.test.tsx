@@ -26,10 +26,9 @@ describe('SettingsPage authorized changes', () => {
         }
         if (url === '/api/settings/project' && method === 'PATCH') {
           applied = true;
-          return jsonResponse({
-            ...updatedSettings('rev-43'),
-            resync_recommended: true,
-          });
+          const envelope = updatedSettings('rev-43');
+          settingsBody(envelope)['resync_recommended'] = true;
+          return jsonResponse(envelope);
         }
         throw new Error(`unexpected request ${method} ${url}`);
       }),
@@ -83,7 +82,7 @@ describe('SettingsPage authorized changes', () => {
           getCount += 1;
           if (getCount === 1) return jsonResponse(settings());
           const current = updatedSettings('rev-43');
-          const project = current['project'] as Record<string, unknown>;
+          const project = settingsBody(current)['project'] as Record<string, unknown>;
           const config = project['config'] as Record<string, unknown>;
           config['max_file_size'] = 4096;
           return jsonResponse(current);
@@ -113,6 +112,83 @@ describe('SettingsPage authorized changes', () => {
     await user.click(screen.getByRole('button', { name: 'Load current values' }));
     expect(await screen.findByDisplayValue('4096')).toBeTruthy();
     expect(methods).toEqual(['GET /api/settings', 'GET /api/settings', 'GET /api/settings']);
+  });
+
+  it('withdraws only the scope the envelope stops authorizing', async () => {
+    const calls: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        calls.push(`${init?.method ?? 'GET'} ${String(input)}`);
+        return jsonResponse(settingsWithout('configuration_batch'));
+      }),
+    );
+    const user = userEvent.setup();
+    renderSettings();
+
+    expect(
+      await screen.findByText(
+        'Read-only · this dashboard is not authorized to apply project settings',
+      ),
+    ).toBeTruthy();
+    expect(
+      screen.getByLabelText('Maximum file size (bytes)').closest('fieldset')?.disabled,
+    ).toBe(true);
+    expect(screen.queryByRole('button', { name: 'Review project changes' })).toBeNull();
+
+    // The user scope keeps its own authority, so withdrawing the project
+    // action must not take the whole editor read-only with it.
+    expect(
+      screen.queryByText(
+        'Read-only · this dashboard is not authorized to apply user settings',
+      ),
+    ).toBeNull();
+    expect(screen.getByLabelText('Watcher debounce').closest('fieldset')?.disabled).toBe(
+      false,
+    );
+    await user.click(screen.getByRole('button', { name: 'Review user changes' }));
+    expect(calls).toEqual(['GET /api/settings']);
+  });
+
+  it('reports a withdrawn authority as unavailable rather than a failed write', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = init?.method ?? 'GET';
+        if (url === '/api/settings' && method === 'GET') return jsonResponse(settings());
+        if (url === '/api/settings/project' && method === 'PATCH') {
+          return jsonResponse(
+            {
+              code: 'configuration_authority_unavailable',
+              detail: 'configuration authority is unavailable',
+            },
+            503,
+          );
+        }
+        throw new Error(`unexpected request ${method} ${url}`);
+      }),
+    );
+    const user = userEvent.setup();
+    renderSettings();
+
+    const maxFileSize = await screen.findByLabelText('Maximum file size (bytes)');
+    await user.clear(maxFileSize);
+    await user.type(maxFileSize, '2097152');
+    await user.click(screen.getByRole('button', { name: 'Review project changes' }));
+    await user.click(
+      screen.getByRole('checkbox', {
+        name: /I confirm this change against configuration revision rev-42/,
+      }),
+    );
+    await user.click(screen.getByRole('button', { name: 'Apply project settings' }));
+
+    expect(
+      await screen.findByText(
+        'Nothing was applied: configuration authority is unavailable.',
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByText('Project settings saved')).toBeNull();
   });
 
   it('shows client validation without sending an invalid patch', async () => {
@@ -227,12 +303,13 @@ describe('Settings response authority', () => {
     expect(result).toEqual({
       outcome: 'protocol_error',
       authority: 'GET /api/settings',
-      detail: 'GET /api/settings violated the settings contract: expected a JSON object.',
+      detail:
+        'GET /api/settings violated the settings contract: expected an envelope carrying a payload.',
     });
   });
 
   it('classifies an incomplete refresh payload as a settings contract violation', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({})));
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({ payload: {} })));
 
     const result = await applySettingsMutation({
       scope: 'project',
@@ -271,7 +348,7 @@ describe('Settings response authority', () => {
       outcome: 'protocol_error',
       authority: 'PATCH /api/settings/project',
       detail:
-        'PATCH /api/settings/project violated the settings contract: expected a JSON object.',
+        'PATCH /api/settings/project violated the settings contract: expected an envelope carrying a payload.',
     });
   });
 
@@ -281,7 +358,7 @@ describe('Settings response authority', () => {
       vi
         .fn()
         .mockResolvedValueOnce(jsonResponse(settings()))
-        .mockResolvedValueOnce(jsonResponse({})),
+        .mockResolvedValueOnce(jsonResponse({ payload: {} })),
     );
 
     const result = await applySettingsMutation({
@@ -322,10 +399,12 @@ describe('Settings response authority', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async () => {
-        const payload = settings();
-        const project = payload['project'] as Record<string, unknown>;
-        delete project['configuration_revision_id'];
-        return jsonResponse(payload);
+        // A revision the contract admits as a string but that names no
+        // revision, so the editor has nothing to compare and set against.
+        const envelope = settings();
+        const project = settingsBody(envelope)['project'] as Record<string, unknown>;
+        project['configuration_revision_id'] = '';
+        return jsonResponse(envelope);
       }),
     );
 
@@ -338,12 +417,30 @@ describe('Settings response authority', () => {
     ).toBeTruthy();
   });
 
+  it('refuses a response that omits a field the settings contract requires', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        const envelope = settings();
+        const project = settingsBody(envelope)['project'] as Record<string, unknown>;
+        delete project['configuration_revision_id'];
+        return jsonResponse(envelope);
+      }),
+    );
+
+    renderSettings();
+
+    // A payload that does not satisfy the generated contract is an unsupported
+    // schema, not settings to render with one group quietly missing.
+    expect(await screen.findByText('Unsupported schema')).toBeTruthy();
+  });
+
   it('renders automation source failure without presenting a global fallback as effective', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async () => {
-        const payload = settings();
-        payload['automation'] = {
+        const envelope = settings();
+        settingsBody(envelope)['automation'] = {
           config_endpoint: '/api/plugins/holographic/curation/config',
           availability: {
             available: false,
@@ -356,7 +453,7 @@ describe('Settings response authority', () => {
             effective: 'unavailable',
           },
         };
-        return jsonResponse(payload);
+        return jsonResponse(envelope);
       }),
     );
 
@@ -398,16 +495,32 @@ function renderSettings() {
   );
 }
 
+/** The envelope `/api/settings` answers with, as the route serves it. */
 function settings(): Record<string, unknown> {
   return structuredClone(FIXTURES['/api/settings']) as Record<string, unknown>;
 }
 
+/** The settings groups inside an envelope this test is about to edit. */
+function settingsBody(envelope: Record<string, unknown>): Record<string, unknown> {
+  return envelope['payload'] as Record<string, unknown>;
+}
+
 function updatedSettings(revision: string): Record<string, unknown> {
   const value = settings();
-  const project = value['project'] as Record<string, unknown>;
+  const project = settingsBody(value)['project'] as Record<string, unknown>;
   const config = project['config'] as Record<string, unknown>;
   project['configuration_revision_id'] = revision;
   config['max_file_size'] = 2_097_152;
+  return value;
+}
+
+/** The same envelope with one write scope withdrawn, as a dashboard without
+ * that scope's authority receives it. */
+function settingsWithout(operation: string): Record<string, unknown> {
+  const value = settings();
+  value['legal_actions'] = (
+    value['legal_actions'] as Array<{ kind: string; operation: string }>
+  ).filter((action) => action.operation !== operation);
   return value;
 }
 
