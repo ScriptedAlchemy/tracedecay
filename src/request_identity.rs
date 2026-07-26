@@ -302,6 +302,36 @@ impl ConnectionLocalRequestSequence {
     }
 }
 
+/// Checked sequence for correlation ids whose complete lifetime is one process.
+///
+/// This is intentionally distinct from [`mint_global_request_id`]: callers may
+/// use it only when no id survives restart or crosses a process boundary.
+#[derive(Debug)]
+pub struct ProcessLocalRequestSequence {
+    next: AtomicU64,
+}
+
+impl ProcessLocalRequestSequence {
+    pub const fn starting_at(first: u64) -> Self {
+        Self {
+            next: AtomicU64::new(first),
+        }
+    }
+
+    pub fn next_number(&self) -> Result<u64, RequestIdentityError> {
+        self.next
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                value.checked_add(1)
+            })
+            .map_err(|_| RequestIdentityError::SequenceExhausted)
+    }
+
+    pub fn next_string(&self, prefix: &str) -> Result<String, RequestIdentityError> {
+        self.next_number()
+            .map(|sequence| format!("{prefix}{sequence}"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -495,6 +525,12 @@ mod tests {
     #[test]
     fn connection_local_sequence_never_wraps_to_a_duplicate() {
         let mut sequence = ConnectionLocalRequestSequence::starting_at(u64::MAX);
+        assert!(sequence.next_number().is_err());
+    }
+
+    #[test]
+    fn process_local_sequence_never_wraps_to_a_duplicate() {
+        let sequence = ProcessLocalRequestSequence::starting_at(u64::MAX);
         assert!(sequence.next_number().is_err());
     }
 }
