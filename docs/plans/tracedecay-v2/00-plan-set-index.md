@@ -477,6 +477,23 @@ Delivery, Explorer routes, Doctor, storage telemetry, Loom, and asset serving
 must retain that status until the suite executes successfully; none may be
 reported as verified from implementation or frontend tests alone.
 
+**Audit corrections (2026-07-26; see
+[`GAP-LEDGER-PR8-PR14.md`](GAP-LEDGER-PR8-PR14.md)).** Three qualifications
+attach to the checkpoint above and must not be dropped when it is next revised:
+
+- Loom's only backend test is `tests/dashboard_api_test/loom.rs`, whose module
+  is not declared in `tests/dashboard_api_test/main.rs:13-29`. It never
+  compiles or runs, so Loom stays unverified even after the suite first passes.
+- Doctor remediation is not reachable from the dashboard. The frontend omits
+  the `target` field that both requests require
+  (`dashboard/src/data/query/doctor.ts:27`,
+  `dashboard/src/workspaces/observatory/DoctorInspector.tsx:156-162` against
+  `dashboard/src/contracts/generated.ts:451-457`, `:509-512`, and
+  `src/dashboard/doctor_remediation_api.rs:589-604`), so preview and apply
+  throw before issuing a request and `npm run typecheck` fails.
+- The dashboard's five graph-structure endpoints and the Automations action
+  routes are registered with no frontend consumer.
+
 **Direct acceptance.** Starting from a real PR13 finding, navigate to retained
 evidence, diagnose an injected operational fault, apply an authorized
 remediation or setting change, observe the resulting state, and verify
