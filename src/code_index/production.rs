@@ -20,7 +20,7 @@ use tracedecay_domain::{
     IntakeRejectionV1, ManifestDigest, PolicyRevisionId, PrivacyDomainId, ProjectionBatchReceiptV1,
     ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionReplayReasonV1, ProviderEvaluationStateV1,
     RepositoryId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision,
-    SnapshotFileDispositionV1, SymbolLineageCandidateV1, SymbolOccurrenceId,
+    SensitivityLevelV1, SnapshotFileDispositionV1, SymbolLineageCandidateV1, SymbolOccurrenceId,
     TestAttributionEvidenceClassV1, UtcMicros, ValidatedCodeFileV1, ValidatedCodeSnapshotV1,
     canonical_sha256,
 };
@@ -92,6 +92,7 @@ impl CodeIndexProductionConfigV1 {
 pub struct CodeIndexCapturedFileV1 {
     pub file_occurrence_id: FileOccurrenceId,
     pub sanitized_bytes: Vec<u8>,
+    pub sensitivity_level: SensitivityLevelV1,
 }
 
 /// Inputs for one complete immutable code-index generation.
@@ -1094,14 +1095,13 @@ where
         capability: &SanitizedSnapshotCapabilityV1,
         manifest: &CodeGenerationManifestV1,
         file: &SanitizedCodeFileV1,
-        captured_files: &BTreeMap<FileOccurrenceId, Vec<u8>>,
+        captured_files: &BTreeMap<FileOccurrenceId, CodeIndexCapturedFileV1>,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<FileGenerationArtifactsV1, CodeIndexProductionErrorV1> {
         self.checkpoint(control)?;
-        let sanitized_bytes = captured_files
+        let captured = captured_files
             .get(&file.file_occurrence_id)
-            .ok_or(CodeIndexInputErrorV1::MissingCapturedFile)?
-            .clone();
+            .ok_or(CodeIndexInputErrorV1::MissingCapturedFile)?;
         let receipt_bound = intake
             .bind_file(
                 capability,
@@ -1109,7 +1109,7 @@ where
                     generation_id: manifest.generation_id.clone(),
                     file: file.clone(),
                     snapshot_digest: capability.snapshot().intake_digest.clone(),
-                    sanitized_bytes,
+                    sanitized_bytes: captured.sanitized_bytes.clone(),
                 },
             )
             .map_err(CodeIndexProductionErrorV1::Intake)?;
@@ -1134,6 +1134,7 @@ where
             &self.config.chunker_revision,
             &self.config.privacy_domain,
             self.config.privacy_key_epoch,
+            captured.sensitivity_level,
         ))
         .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
         if let Some(reused) = self.physical_artifacts.reuse(
@@ -1161,7 +1162,8 @@ where
             self.config.policy_revision.clone(),
             self.config.chunker_revision.clone(),
             crate::extraction::LanguageRegistry::new(),
-        );
+        )
+        .with_sensitivity_level(captured.sensitivity_level);
         let (artifacts, exact_authority) = chunker
             .index_file_with_authority(&receipt_bound, &extraction, descriptor, &cancellation)
             .map_err(|error| match error {
@@ -1185,7 +1187,7 @@ where
         capability: &SanitizedSnapshotCapabilityV1,
         manifest: &CodeGenerationManifestV1,
         snapshot: &SanitizedCodeSnapshotV1,
-        captured_files: &BTreeMap<FileOccurrenceId, Vec<u8>>,
+        captured_files: &BTreeMap<FileOccurrenceId, CodeIndexCapturedFileV1>,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<StagedGenerationV1, CodeIndexProductionErrorV1> {
         let mut files = Vec::new();
@@ -1212,7 +1214,7 @@ where
         manifest: &CodeGenerationManifestV1,
         active: &CodeIndexPublishedGenerationV1,
         increment: &super::generations::GenerationIncrementPlanV1,
-        captured_files: &BTreeMap<FileOccurrenceId, Vec<u8>>,
+        captured_files: &BTreeMap<FileOccurrenceId, CodeIndexCapturedFileV1>,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<StagedGenerationV1, CodeIndexProductionErrorV1> {
         let prior_files = active
@@ -1411,7 +1413,7 @@ fn registry_for_snapshot(
 fn captured_files(
     snapshot: &SanitizedCodeSnapshotV1,
     captured: Vec<CodeIndexCapturedFileV1>,
-) -> Result<BTreeMap<FileOccurrenceId, Vec<u8>>, CodeIndexInputErrorV1> {
+) -> Result<BTreeMap<FileOccurrenceId, CodeIndexCapturedFileV1>, CodeIndexInputErrorV1> {
     let present = snapshot
         .files
         .iter()
@@ -1427,7 +1429,7 @@ fn captured_files(
             return Err(CodeIndexInputErrorV1::ContentDigestMismatch);
         }
         if captured_files
-            .insert(captured.file_occurrence_id, captured.sanitized_bytes)
+            .insert(captured.file_occurrence_id.clone(), captured)
             .is_some()
         {
             return Err(CodeIndexInputErrorV1::DuplicateCapturedFile);
@@ -1486,13 +1488,6 @@ fn projection_request(
         active.map(|active| active.projection.request().target_projection_key.clone());
     let replay_reason = match (active, increment) {
         (None, _) => ProjectionReplayReasonV1::InitialProjection,
-        (_, Some(increment))
-            if increment
-                .rebuild_triggers
-                .contains(&RebuildTriggerV1::QuarantinedCorruption) =>
-        {
-            ProjectionReplayReasonV1::QuarantinedCorruption
-        }
         (_, Some(increment)) if increment.is_full_rebuild() => {
             ProjectionReplayReasonV1::FullRebuildIncompatible
         }

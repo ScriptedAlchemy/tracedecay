@@ -112,17 +112,24 @@ pub(crate) fn projection_metadata(
     generation: &CodeGenerationId,
     compatibility: FreshnessCompatibilityV1,
 ) -> CodeLexicalProjectionMetadataV1 {
+    let mut logical_paths = (0..=128)
+        .map(|ordinal| {
+            (
+                id::<FileOccurrenceId>(&format!("file.{ordinal}")),
+                format!("src/file-{ordinal}.rs"),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    logical_paths.extend((0..=128).map(|ordinal| {
+        (
+            id::<FileOccurrenceId>(&format!("file.admitted.{ordinal}")),
+            format!("src/admitted_{ordinal}.rs"),
+        )
+    }));
     CodeLexicalProjectionMetadataV1 {
         generation: generation.clone(),
         repository_id: Some(id::<RepositoryId>("repository.fixture")),
-        logical_paths: (0..=128)
-            .map(|ordinal| {
-                (
-                    id::<FileOccurrenceId>(&format!("file.{ordinal}")),
-                    format!("src/file-{ordinal}.rs"),
-                )
-            })
-            .collect::<BTreeMap<_, _>>(),
+        logical_paths,
         freshness: freshness(compatibility),
         exact_retriever_revision: id::<ComponentRevision>("retriever.exact.v1"),
         lexical_retriever_revision: id::<ComponentRevision>("retriever.lexical.v1"),
@@ -708,9 +715,9 @@ fn lexical_source_occurrence_identity_is_generation_exact() {
             .expect("second retrieval succeeds"),
     );
 
-    assert_eq!(
-        first.candidates[0].anchor_id,
-        second.candidates[0].anchor_id
+    assert_ne!(
+        first.candidates[0].anchor_id, second.candidates[0].anchor_id,
+        "symbol occurrence anchors are generation-bound"
     );
     assert_ne!(
         first.candidates[0].source_occurrence_id, second.candidates[0].source_occurrence_id,
@@ -729,14 +736,14 @@ fn pr10_workload_and_incremental_fixture_are_byte_exact() {
 
     assert_eq!(
         compute_workload_digest(&workload).expect("workload digest"),
-        "sha256:de09c679414055db7e0998931e33d9d2280f7af4ae7e31a32ab22282a7c2b502"
+        "sha256:16c69d766a82cb8cea96316771881fbdc1744a71dfd54a6f211fece732840cd2"
     );
     assert_eq!(
         summary.workload_digest,
         compute_workload_digest(&workload).expect("summary workload digest")
     );
     assert_eq!(workload.execution_contract.exact_file_count, 13);
-    assert_eq!(workload.execution_contract.exact_corpus_bytes, 306_536);
+    assert_eq!(workload.execution_contract.exact_corpus_bytes, 147_447);
     assert_eq!(
         workload.execution_contract.exact_eligible_chunks_current,
         1_960

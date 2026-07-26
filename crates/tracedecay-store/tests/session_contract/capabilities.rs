@@ -36,17 +36,6 @@ impl SessionRetrievalStore for CapabilityDeniedSessionPorts {
         panic!("capability guard was bypassed")
     }
 
-    async fn expand_derived_members_supported(
-        &self,
-        _permit: SessionTemporalPageRetrievePermit,
-        _snapshot: SessionTemporalSnapshotV1,
-        _evidence_kind: tracedecay_domain::DerivedEvidenceKindV1,
-        _evidence_id: tracedecay_domain::DerivedEvidenceIdV1,
-        _after_ordinal: Option<u32>,
-        _limit: usize,
-    ) -> SessionStoreResult<tracedecay_store::DerivedEvidenceMemberPageV1> {
-        panic!("capability guard was bypassed")
-    }
 }
 
 impl SessionTemporalProjectionStore for CapabilityDeniedSessionPorts {
@@ -71,16 +60,6 @@ impl SessionTemporalProjectionStore for CapabilityDeniedSessionPorts {
         _permit: SessionGenerationActivatePermit,
         _request: SessionGenerationActivationRequestV1,
     ) -> SessionStoreResult<SessionGenerationActivationReceiptV1> {
-        panic!("capability guard was bypassed")
-    }
-}
-
-impl SessionSummaryStore for CapabilityDeniedSessionPorts {
-    async fn publish_immutable_session_summary_supported(
-        &self,
-        _permit: SessionSummaryPublishOrReplayPermit,
-        _request: SessionSummaryPublicationRequestV1,
-    ) -> SessionStoreResult<SessionSummaryPublicationReceiptV1> {
         panic!("capability guard was bypassed")
     }
 }
@@ -143,26 +122,8 @@ impl SessionRefreshStore for CapabilityDeniedSessionPorts {
     }
 }
 
-impl SessionTemporalMigrationStore for CapabilityDeniedSessionPorts {
-    async fn apply_session_temporal_migration_batch_supported(
-        &self,
-        _permit: SessionTemporalMigrationBatchApplyPermit,
-        _batch: SessionTemporalMigrationBatchV1,
-    ) -> SessionStoreResult<SessionTemporalMigrationReceiptV1> {
-        panic!("capability guard was bypassed")
-    }
-
-    async fn session_temporal_migration_receipt_supported(
-        &self,
-        _permit: SessionTemporalMigrationReceiptReadPermit,
-        _request: SessionTemporalMigrationReceiptRequestV1,
-    ) -> SessionStoreResult<Option<SessionTemporalMigrationReceiptV1>> {
-        panic!("capability guard was bypassed")
-    }
-}
-
 #[test]
-fn refresh_and_migration_ports_deny_every_unsupported_capability() {
+fn refresh_ports_deny_every_unsupported_capability() {
     let ports = CapabilityDeniedSessionPorts::new();
     let session_id = session("session.fixture");
     let operation_id = operation_id();
@@ -241,32 +202,6 @@ fn refresh_and_migration_ports_deny_every_unsupported_capability() {
             }) if actual == capability
         ));
     }
-
-    let projection = projection_batch(&session_id);
-    let migration_batch = SessionTemporalMigrationBatchV1::new(
-        session_id.clone(),
-        digest(),
-        generation(8),
-        0,
-        projection.watermarks().clone(),
-        projection,
-        vec![],
-    )
-    .unwrap();
-    for result in [
-        ready(ports.apply_session_temporal_migration_batch(migration_batch)).map(|_| ()),
-        ready(ports.session_temporal_migration_receipt(
-            SessionTemporalMigrationReceiptRequestV1::new(session_id, generation(8), 0),
-        ))
-        .map(|_| ()),
-    ] {
-        assert!(matches!(
-            result,
-            Err(SessionStoreError::UnsupportedCapability {
-                capability: SessionTemporalCapabilityV1::MigrationReceipts
-            })
-        ));
-    }
 }
 
 #[test]
@@ -304,9 +239,6 @@ fn adapter_capabilities_override_forged_snapshot_capabilities() {
         forged.clone(),
     )
     .unwrap();
-    let summary_request =
-        SessionSummaryPublicationRequestV1::new(summary(&session_id, "summary.forged", 1), forged)
-            .unwrap();
     let projection = projection_batch(&session_id);
 
     let results = [
@@ -319,14 +251,12 @@ fn adapter_capabilities_override_forged_snapshot_capabilities() {
         ready(ports.begin_session_generation_rebuild(rebuild)).map(|_| ()),
         ready(ports.persist_session_temporal_projection_batch(projection)).map(|_| ()),
         ready(ports.activate_session_temporal_generation(activation)).map(|_| ()),
-        ready(ports.publish_immutable_session_summary(summary_request)).map(|_| ()),
     ];
     let required = [
         SessionTemporalCapabilityV1::FrozenWatermarks,
         SessionTemporalCapabilityV1::GenerationRebuild,
         SessionTemporalCapabilityV1::GenerationRebuild,
         SessionTemporalCapabilityV1::GenerationRebuild,
-        SessionTemporalCapabilityV1::ImmutableSummaryPublication,
     ];
     for (result, expected) in results.into_iter().zip(required) {
         assert!(matches!(
@@ -338,8 +268,8 @@ fn adapter_capabilities_override_forged_snapshot_capabilities() {
 }
 
 #[test]
-fn guarded_refresh_and_migration_dispatch_never_enters_denied_adapters() {
-    refresh_and_migration_ports_deny_every_unsupported_capability();
+fn guarded_refresh_dispatch_never_enters_denied_adapters() {
+    refresh_ports_deny_every_unsupported_capability();
 }
 
 #[test]
@@ -392,22 +322,6 @@ fn yielding_in_memory_adapter_exercises_every_guarded_port() {
         Some(generation(7))
     );
 
-    let publication = SessionSummaryPublicationRequestV1::new(
-        summary(&session_id, "summary.adapter", 1),
-        snapshot.clone(),
-    )
-    .unwrap();
-    let published = ready(ports.publish_immutable_session_summary(publication.clone())).unwrap();
-    let summary_replay = ready(ports.publish_immutable_session_summary(publication)).unwrap();
-    assert_eq!(
-        published.disposition(),
-        SessionSummaryPublicationDispositionV1::Published
-    );
-    assert_eq!(
-        summary_replay.disposition(),
-        SessionSummaryPublicationDispositionV1::ExactReplay
-    );
-
     let page = ready(
         ports.retrieve_session_temporal_page(
             SessionTemporalRetrievalRequestV1::new(
@@ -422,7 +336,7 @@ fn yielding_in_memory_adapter_exercises_every_guarded_port() {
         ),
     )
     .unwrap();
-    assert_eq!(page.summaries().len(), 1);
+    assert!(page.summaries().is_empty());
 
     let target = SessionRefreshFrontierV1::new(10, 10).unwrap();
     let join_request = SessionRefreshBeginOrJoinRequestV1::new(session_id.clone(), target);
@@ -473,26 +387,5 @@ fn yielding_in_memory_adapter_exercises_every_guarded_port() {
         )
         .unwrap()
         .is_some()
-    );
-
-    let migration = SessionTemporalMigrationBatchV1::new(
-        session_id,
-        digest(),
-        generation(8),
-        0,
-        projection.watermarks().clone(),
-        projection,
-        vec![],
-    )
-    .unwrap();
-    let applied = ready(ports.apply_session_temporal_migration_batch(migration.clone())).unwrap();
-    let already_applied = ready(ports.apply_session_temporal_migration_batch(migration)).unwrap();
-    assert_eq!(
-        applied.disposition(),
-        SessionTemporalMigrationDispositionV1::Applied
-    );
-    assert_eq!(
-        already_applied.disposition(),
-        SessionTemporalMigrationDispositionV1::AlreadyApplied
     );
 }

@@ -17,6 +17,7 @@ mod path_layout;
 pub(crate) use bootstrap::windows_hard_link_count;
 use bootstrap::{BootstrapAuthority, acquire_bootstrap_authority, reject_hard_linked_database};
 pub use lease::enter_maintenance_database_scope;
+pub(crate) use lease::enter_owned_maintenance_database_scope;
 use lease::{acquire_process_lease, exact_scoped_runtime_role, scoped_runtime_role};
 pub(crate) use lease::{
     database_path_is_tombstoned, enter_daemon_database_scope, probe_writer_owner,
@@ -116,6 +117,17 @@ pub struct MaintenanceDatabaseScope<'lease> {
     _lifecycle: std::marker::PhantomData<&'lease crate::lifecycle_lease::LifecycleLease>,
 }
 
+/// Maintenance scope that owns the lifecycle lease it validates.
+///
+/// Dropping the scope revokes database authority before its retained lifecycle
+/// lease is released.
+#[derive(Debug)]
+pub(crate) struct OwnedMaintenanceDatabaseScope {
+    profile_root: PathBuf,
+    token: String,
+    lifecycle: crate::lifecycle_lease::LifecycleLease,
+}
+
 impl MaintenanceDatabaseScope<'_> {
     /// Issues database authority for one exact artifact beneath this retained
     /// exclusive-maintenance profile scope.
@@ -145,6 +157,12 @@ impl MaintenanceDatabaseScope<'_> {
             ));
         }
         DatabaseAuthority::acquire_identity(identity, DatabaseAuthorityRole::Maintenance, intent)
+    }
+}
+
+impl OwnedMaintenanceDatabaseScope {
+    pub(crate) fn lifecycle(&self) -> &crate::lifecycle_lease::LifecycleLease {
+        &self.lifecycle
     }
 }
 
@@ -525,7 +543,7 @@ fn access_io_error(operation: &str, path: &Path, error: &std::io::Error) -> Trac
 }
 
 #[cfg(any(test, feature = "test-transport"))]
-pub(super) fn is_isolated_test_path(path: &Path) -> bool {
+pub(crate) fn is_isolated_test_path(path: &Path) -> bool {
     let root = std::env::temp_dir();
     if path.starts_with(root.canonicalize().unwrap_or(root)) {
         return true;

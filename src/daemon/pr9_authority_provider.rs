@@ -684,6 +684,9 @@ pub(crate) mod tests {
                 .expect("fusion revision"),
             artifact_manifest_digest: artifact,
             runtime_compatibility_digest: digest('e'),
+            search_index_key: tracedecay_domain::SemanticSearchIndexProfileV1::exact_flat_v1()
+                .and_then(|profile| profile.index_key())
+                .expect("search index key"),
             calibration: SemanticCalibrationProfileV1 {
                 calibration_profile_id: id("calibration.semantic.semantic-active"),
                 cohort_digest: digest('f'),

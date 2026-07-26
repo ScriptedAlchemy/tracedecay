@@ -111,6 +111,19 @@ async fn make_healthy_project_store(root: &Path) {
         .unwrap();
 }
 
+fn sqlite_table_exists(path: &Path, table: &str) -> bool {
+    let conn =
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .unwrap();
+    conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name=?1",
+        rusqlite::params![table],
+        |row| row.get::<_, i64>(0),
+    )
+    .unwrap()
+        > 0
+}
+
 fn make_damaged_sqlite(path: &Path) {
     let conn = rusqlite::Connection::open(path).unwrap();
     conn.execute(
@@ -593,8 +606,8 @@ async fn inventory_reports_global_db_metadata() {
     let project = root.join("registered");
     fs::create_dir_all(&project).unwrap();
     db.upsert(&project, 42).await;
-    assert!(db.ensure_token_count_cache_for_test().await);
     drop(db);
+    assert!(!sqlite_table_exists(&db_path, "dashboard_token_counts"));
 
     let report = build_inventory_with_env_lock(MigrationInventoryOptions {
         roots: Vec::new(),
@@ -618,7 +631,6 @@ async fn inventory_reports_global_db_metadata() {
             .collect::<Vec<_>>(),
         vec![inventory_path(&project)]
     );
-    assert!(global.token_cache_present);
     assert!(global.path_overridden);
     assert!(global.warnings.is_empty());
 }

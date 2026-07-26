@@ -211,7 +211,7 @@ fn oversized_symbol_bodies_use_bounded_deterministic_fallback_windows() {
 fn multiple_file_windows_have_unique_stable_ids_and_ordinals() {
     let mut gap = String::new();
     while gap.len() <= MAX_CHUNK_TEXT_BYTES + 4096 {
-        gap.push_str("// deterministic unowned gap filler\n");
+        gap.push_str("use crate::deterministic_unowned_gap;\n");
     }
     let source =
         format!("pub fn first() {{}}\n{gap}pub fn second() {{}}\n{gap}pub fn third() {{}}\n");

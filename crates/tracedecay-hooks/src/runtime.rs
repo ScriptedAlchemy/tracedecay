@@ -17,7 +17,6 @@ use crate::{
 };
 
 pub const HOOK_SYNCHRONOUS_BUDGET_MICROS: u64 = 100_000;
-pub const MAX_GUIDANCE_LOOKUP_ITEMS: u8 = 1;
 
 /// Non-widenable deadline token furnished to admission and replay ports.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -134,17 +133,6 @@ pub enum HookImmediateAdmissionStateV1 {
     Backpressured,
 }
 
-/// The host transport receives the hard deadline and must return by it. The
-/// port cannot return future work; model, query, cycle, and network follow-up
-/// run outside the synchronous hook process.
-pub trait HookAdmissionPortV1 {
-    fn try_admit(
-        &self,
-        envelope: &HookEventEnvelopeV2,
-        deadline: HookSynchronousDeadlineV1,
-    ) -> HookImmediateAdmissionV1;
-}
-
 pub type HookAdmissionFutureV1<'a> =
     Pin<Box<dyn Future<Output = HookImmediateAdmissionV1> + Send + 'a>>;
 
@@ -173,16 +161,6 @@ pub async fn admit_async_exact_scope(
         .validate(binding)
         .map_err(HookRuntimeErrorV1::EnvelopeRejected)?;
     Ok(port.try_admit_async(envelope, deadline).await)
-}
-
-/// Adapter over the existing bounded replay spool. Implementations append the
-/// exact validated envelope and never open an application/query store.
-pub trait HookReplaySpoolPortV1 {
-    fn append_for_replay(
-        &mut self,
-        envelope: &HookEventEnvelopeV2,
-        deadline: HookSynchronousDeadlineV1,
-    ) -> SpoolAppendOutcomeV1;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -316,43 +294,6 @@ fn guidance_result(
     }
 }
 
-/// A later host lookup is exact-event addressed and can return at most one
-/// already-ready suggestion. It cannot request search, model, cycle, or task
-/// execution.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct HookGuidanceLookupRequestV1 {
-    pub event_id: [u8; 16],
-    pub protected_session_id: [u8; 32],
-    pub configuration_revision: u64,
-    pub max_items: u8,
-}
-
-impl HookGuidanceLookupRequestV1 {
-    pub fn validate(self) -> Result<(), HookRuntimeErrorV1> {
-        if self.event_id == [0; 16]
-            || self.protected_session_id == [0; 32]
-            || self.configuration_revision == 0
-            || self.max_items != MAX_GUIDANCE_LOOKUP_ITEMS
-        {
-            return Err(HookRuntimeErrorV1::InvalidLookup);
-        }
-        Ok(())
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum HookGuidanceLookupOutcomeV1 {
-    Ready(HookReadyGuidanceV1),
-    NotReady,
-    Paused,
-    Unavailable,
-}
-
-pub trait HookGuidanceLookupPortV1 {
-    fn lookup_ready(&self, request: HookGuidanceLookupRequestV1) -> HookGuidanceLookupOutcomeV1;
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HookFeedbackDeliveryRouteV1 {
@@ -413,8 +354,6 @@ pub struct HookRuntimeStatusV1 {
 pub enum HookRuntimeErrorV1 {
     #[error("hook runtime control is invalid or stale")]
     InvalidControl,
-    #[error("hook guidance lookup is not exact and bounded")]
-    InvalidLookup,
     #[error("hook admission receipt timing is invalid")]
     InvalidAdmission,
     #[error("hook envelope does not satisfy the daemon-issued binding")]

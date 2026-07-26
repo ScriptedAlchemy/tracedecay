@@ -223,6 +223,7 @@ pub async fn run_skill_writer_with_backend_and_retrieval(
         sessions_db,
         retrieval,
         Some(cg.project_root()),
+        Some(cg.profile_database().as_ref()),
         config,
         backend,
         options,
@@ -265,6 +266,7 @@ pub(crate) async fn run_user_skill_writer_with_backend_and_retrieval(
         sessions_db,
         retrieval,
         None,
+        None,
         config,
         backend,
         options,
@@ -277,6 +279,7 @@ async fn run_skill_writer_for_store(
     sessions_db: Arc<RegisteredGlobalDb>,
     retrieval: &dyn AutomationSessionRetrieval,
     analytics_project_root: Option<&std::path::Path>,
+    analytics_db: Option<&RegisteredGlobalDb>,
     config: &AutomationConfig,
     backend: &dyn AgentTaskBackend,
     options: SkillWriterAutomationOptions,
@@ -295,27 +298,23 @@ async fn run_skill_writer_for_store(
     {
         return Ok(rejected_skill_writer_run(&run, config, reason, None));
     }
-    let evidence_bundle = match build_skill_writer_evidence(
-        retrieval,
-        analytics_project_root,
-        None,
-        options,
-    )
-    .await?
-    {
-        SkillWriterEvidenceOutcome::Ready(bundle) => bundle,
-        SkillWriterEvidenceOutcome::Skipped {
-            reason,
-            evidence_hash,
-        } => {
-            return Ok(rejected_skill_writer_run(
-                &run,
-                config,
+    let evidence_bundle =
+        match build_skill_writer_evidence(retrieval, analytics_project_root, analytics_db, options)
+            .await?
+        {
+            SkillWriterEvidenceOutcome::Ready(bundle) => bundle,
+            SkillWriterEvidenceOutcome::Skipped {
                 reason,
                 evidence_hash,
-            ));
-        }
-    };
+            } => {
+                return Ok(rejected_skill_writer_run(
+                    &run,
+                    config,
+                    reason,
+                    evidence_hash,
+                ));
+            }
+        };
     let SkillWriterEvidenceBundle {
         profile_root,
         evidence,
@@ -662,15 +661,21 @@ async fn run_combined_review_for_retrieval(
                 });
             }
         };
-    let skill_bundle =
-        match build_skill_writer_evidence(retrieval, None, None, options.skill_writer).await? {
-            SkillWriterEvidenceOutcome::Ready(bundle) => bundle,
-            SkillWriterEvidenceOutcome::Skipped { .. } => {
-                return Ok(CombinedReviewDispatch::NotCombined {
-                    reason: "skill_writer_evidence_unavailable",
-                });
-            }
-        };
+    let skill_bundle = match build_skill_writer_evidence(
+        retrieval,
+        Some(cg.project_root()),
+        Some(cg.profile_database().as_ref()),
+        options.skill_writer,
+    )
+    .await?
+    {
+        SkillWriterEvidenceOutcome::Ready(bundle) => bundle,
+        SkillWriterEvidenceOutcome::Skipped { .. } => {
+            return Ok(CombinedReviewDispatch::NotCombined {
+                reason: "skill_writer_evidence_unavailable",
+            });
+        }
+    };
 
     let (reflector_gate, _) = task_run_gate(
         config,

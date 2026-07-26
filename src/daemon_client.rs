@@ -4,8 +4,7 @@
 //! admission/reconnect seams only. It does not invoke application services,
 //! query stores, or render results.
 
-use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::io::{AsyncWriteExt, BufReader, ReadHalf, WriteHalf};
@@ -13,8 +12,8 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use tracedecay_application::{
     ApplicationProblem, ApplicationProblemKind, CancellationSignal, CancellationStage, Deadline,
-    LegalAction, OpaqueCursor, OperationTermination, PageRequest, RequestId, RetryDirective,
-    SafeDiagnostic, StreamEvent, StreamEventKind, StreamTermination,
+    LegalAction, OpaqueCursor, PageRequest, RequestId, RetryDirective, SafeDiagnostic, StreamEvent,
+    StreamEventKind, StreamTermination,
 };
 use tracedecay_domain::{ManifestDigest, ProjectId, UtcMicros};
 use tracedecay_tool_catalog::{
@@ -276,7 +275,14 @@ pub fn resolve_dispatch<T>(
     ))
 }
 
-/// An invocation paired with the request identity used for daemon correlation.
+/// The daemon admission lanes used by the live invocation error mapping.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DaemonAdmissionClass {
+    General,
+    ReservedControl,
+}
+
+/// An invocation paired with the request identity used for daemon dispatch.
 pub struct DispatchedInvocation<T> {
     pub request_id: RequestId,
     pub surface: BindingSurface,
@@ -293,203 +299,6 @@ impl<T> DispatchedInvocation<T> {
             request_id,
             surface,
             invocation,
-        }
-    }
-
-    pub fn correlation(&self, class: DaemonAdmissionClass) -> RequestCorrelation {
-        RequestCorrelation {
-            request_id: self.request_id.clone(),
-            binding_id: self.invocation.binding_id.clone(),
-            class,
-        }
-    }
-}
-
-/// The daemon admission lanes recognized by the multiplexed-client seam.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DaemonAdmissionClass {
-    General,
-    ReservedControl,
-}
-
-/// Typed pre-admission states. These states must not be stringified or
-/// collapsed into a terminal application receipt.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AdmissionOutcome {
-    Admitted,
-    CancelledBeforeAdmission,
-    TimedOutBeforeAdmission,
-    Unavailable,
-    Saturated { class: DaemonAdmissionClass },
-}
-
-impl AdmissionOutcome {
-    /// Maps only pre-admission states to the canonical Plan 09 problem shape.
-    /// An admitted request has no pre-admission problem.
-    pub fn into_application_problem(self) -> Option<ApplicationProblem> {
-        match self {
-            Self::Admitted => None,
-            Self::CancelledBeforeAdmission => {
-                Some(ApplicationProblem::cancelled_before_admission())
-            }
-            Self::TimedOutBeforeAdmission => Some(ApplicationProblem::timed_out_before_admission()),
-            Self::Unavailable => Some(ApplicationProblem::unavailable(SafeDiagnostic {
-                code: "daemon_unavailable".to_owned(),
-                message: "The owning TraceDecay daemon is unavailable".to_owned(),
-            })),
-            Self::Saturated { class } => Some(ApplicationProblem::Saturated {
-                diagnostic: SafeDiagnostic {
-                    code: match class {
-                        DaemonAdmissionClass::General => "daemon_general_capacity_saturated",
-                        DaemonAdmissionClass::ReservedControl => {
-                            "daemon_control_capacity_saturated"
-                        }
-                    }
-                    .to_owned(),
-                    message: "The owning TraceDecay daemon has no admission capacity".to_owned(),
-                },
-                retry: RetryDirective::AfterDelay,
-                legal_actions: vec![LegalAction::Retry],
-            }),
-        }
-    }
-}
-
-/// A policy seam for class-aware daemon admission.
-pub trait AdmissionPolicy {
-    fn admit(&self, correlation: &RequestCorrelation) -> AdmissionOutcome;
-}
-
-/// One request's identity while an adapter waits for or reconnects to the
-/// daemon. No request payload is retained here.
-#[derive(Clone, Debug)]
-pub struct RequestCorrelation {
-    pub request_id: RequestId,
-    pub binding_id: BindingId,
-    pub class: DaemonAdmissionClass,
-}
-
-/// Typed reconnect state for a client transport hook.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ReconnectOutcome {
-    Reconnected,
-    Unavailable,
-}
-
-/// A reconnect hook supplied by the daemon transport implementation.
-pub trait ReconnectHook {
-    fn reconnect(&self) -> ReconnectOutcome;
-}
-
-/// Receipt lookup states after a reconnect.
-///
-/// `Terminal` preserves the Plan 09 operation termination exactly, including
-/// `Partial` and `EffectUnknown`; adapters must not substitute a locally
-/// observed disconnect or timeout for it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ReceiptInspection {
-    Pending,
-    Terminal(OperationTermination),
-    Unavailable,
-    Saturated { class: DaemonAdmissionClass },
-    UnknownRequest,
-}
-
-/// A receipt-inspection hook supplied by the daemon transport implementation.
-pub trait ReceiptInspector {
-    fn inspect_receipt(&self, correlation: &RequestCorrelation) -> ReceiptInspection;
-}
-
-/// Failures confined to the local correlation registry.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CorrelationRegistryError {
-    DuplicateRequest,
-    CapacityExceeded,
-    RegistryUnavailable,
-}
-
-const MAX_IN_FLIGHT_CORRELATIONS: usize = 4_096;
-
-/// A request-correlation registry shared by CLI and MCP adapters.
-///
-/// It intentionally has no socket, store, query, or application-service
-/// dependency. A later transport owns dispatch I/O and supplies the hooks
-/// above.
-#[derive(Default)]
-pub struct MultiplexedDaemonClient {
-    correlations: Mutex<BTreeMap<RequestId, RequestCorrelation>>,
-}
-
-impl MultiplexedDaemonClient {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn register(
-        &self,
-        correlation: RequestCorrelation,
-    ) -> Result<(), CorrelationRegistryError> {
-        let mut correlations = self
-            .correlations
-            .lock()
-            .map_err(|_| CorrelationRegistryError::RegistryUnavailable)?;
-        if correlations.contains_key(&correlation.request_id) {
-            return Err(CorrelationRegistryError::DuplicateRequest);
-        }
-        if correlations.len() >= MAX_IN_FLIGHT_CORRELATIONS {
-            return Err(CorrelationRegistryError::CapacityExceeded);
-        }
-        correlations.insert(correlation.request_id.clone(), correlation);
-        Ok(())
-    }
-
-    /// Releases client-side correlation state after the caller has observed a
-    /// canonical terminal receipt. This does not delete the daemon receipt.
-    pub fn finish(
-        &self,
-        request_id: &RequestId,
-    ) -> Result<Option<RequestCorrelation>, CorrelationRegistryError> {
-        let mut correlations = self
-            .correlations
-            .lock()
-            .map_err(|_| CorrelationRegistryError::RegistryUnavailable)?;
-        Ok(correlations.remove(request_id))
-    }
-
-    pub fn correlation(
-        &self,
-        request_id: &RequestId,
-    ) -> Result<Option<RequestCorrelation>, CorrelationRegistryError> {
-        let correlations = self
-            .correlations
-            .lock()
-            .map_err(|_| CorrelationRegistryError::RegistryUnavailable)?;
-        Ok(correlations.get(request_id).cloned())
-    }
-
-    pub fn admit(
-        &self,
-        policy: &impl AdmissionPolicy,
-        correlation: &RequestCorrelation,
-    ) -> AdmissionOutcome {
-        policy.admit(correlation)
-    }
-
-    /// Reconnects and asks the transport for the daemon's canonical receipt
-    /// state. A reconnect failure never fabricates a terminal outcome.
-    pub fn reconnect_and_inspect(
-        &self,
-        request_id: &RequestId,
-        reconnect: &impl ReconnectHook,
-        inspector: &impl ReceiptInspector,
-    ) -> Result<ReceiptInspection, CorrelationRegistryError> {
-        let Some(correlation) = self.correlation(request_id)? else {
-            return Ok(ReceiptInspection::UnknownRequest);
-        };
-
-        match reconnect.reconnect() {
-            ReconnectOutcome::Reconnected => Ok(inspector.inspect_receipt(&correlation)),
-            ReconnectOutcome::Unavailable => Ok(ReceiptInspection::Unavailable),
         }
     }
 }
@@ -559,9 +368,20 @@ impl DaemonInvocationError {
         match self {
             Self::Cancelled { .. } => ApplicationProblem::cancelled_before_admission(),
             Self::TimedOut { .. } => ApplicationProblem::timed_out_before_admission(),
-            Self::Saturated { class } => AdmissionOutcome::Saturated { class }
-                .into_application_problem()
-                .unwrap_or_else(|| panic!("saturation always maps to an application problem")),
+            Self::Saturated { class } => ApplicationProblem::Saturated {
+                diagnostic: SafeDiagnostic {
+                    code: match class {
+                        DaemonAdmissionClass::General => "daemon_general_capacity_saturated",
+                        DaemonAdmissionClass::ReservedControl => {
+                            "daemon_control_capacity_saturated"
+                        }
+                    }
+                    .to_owned(),
+                    message: "The owning TraceDecay daemon has no admission capacity".to_owned(),
+                },
+                retry: RetryDirective::AfterDelay,
+                legal_actions: vec![LegalAction::Retry],
+            },
             Self::Backpressured { stage } => ApplicationProblem::Saturated {
                 diagnostic: SafeDiagnostic {
                     code: format!("daemon_backpressured_{}", cancellation_stage_name(stage)),
@@ -1041,50 +861,42 @@ fn invocation_outcome_error(
 #[cfg(test)]
 mod tests {
     use super::{
-        AdmissionOutcome, InvocationCancellationPolicy, SemanticEvaluationPublicationResultV1,
+        DaemonInvocationError, InvocationCancellationPolicy, SemanticEvaluationPublicationResultV1,
     };
     use tracedecay_application::{
         ApplicationProblem, ApplicationProblemKind, CancellationStage, RetryDirective,
     };
 
     #[test]
-    fn pre_admission_outcomes_keep_canonical_problem_categories() {
-        for (outcome, expected) in [
+    fn daemon_invocation_errors_keep_canonical_problem_categories() {
+        for (error, expected) in [
             (
-                AdmissionOutcome::CancelledBeforeAdmission,
+                DaemonInvocationError::Cancelled {
+                    stage: CancellationStage::BeforeAdmission,
+                },
                 ApplicationProblemKind::Cancelled,
             ),
             (
-                AdmissionOutcome::TimedOutBeforeAdmission,
+                DaemonInvocationError::TimedOut {
+                    stage: CancellationStage::BeforeAdmission,
+                },
                 ApplicationProblemKind::TimedOut,
             ),
             (
-                AdmissionOutcome::Unavailable,
+                DaemonInvocationError::Unavailable,
                 ApplicationProblemKind::Unavailable,
             ),
         ] {
-            assert_eq!(
-                outcome
-                    .into_application_problem()
-                    .expect("pre-admission problem")
-                    .kind(),
-                expected
-            );
+            assert_eq!(error.into_application_problem().kind(), expected);
         }
-        assert!(
-            AdmissionOutcome::Admitted
-                .into_application_problem()
-                .is_none()
-        );
     }
 
     #[test]
     fn saturation_mapping_preserves_retry_without_resource_detail() {
-        let problem = AdmissionOutcome::Saturated {
+        let problem = DaemonInvocationError::Saturated {
             class: super::DaemonAdmissionClass::General,
         }
-        .into_application_problem()
-        .expect("saturation problem");
+        .into_application_problem();
 
         assert!(matches!(
             problem,

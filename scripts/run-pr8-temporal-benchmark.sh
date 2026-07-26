@@ -43,7 +43,6 @@ phases = [
     "exact_replay",
     "compact_rank",
     "late_hydrate",
-    "member_expand",
 ]
 p95_label = "descriptive nearest-rank sample p95"
 p99_label = "descriptive nearest-rank sample p99 (sample maximum when n=30)"
