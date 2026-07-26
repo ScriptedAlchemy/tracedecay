@@ -40,18 +40,6 @@ jobs:
         working-directory: dashboard
         run: npm ci
 
-      - name: Typecheck dashboard
-        working-directory: dashboard
-        run: npm run typecheck
-
-      - name: Check generated wire contracts are current
-        working-directory: dashboard
-        run: npm run contracts:check
-
-      - name: Run dashboard unit tests
-        working-directory: dashboard
-        run: npm test
-
       - name: Build dashboard
         working-directory: dashboard
         run: npm run build
@@ -854,6 +842,28 @@ jobs:
         with:
           shared-key: ci-dashboard-full-${{ runner.os }}
           cache-on-failure: true
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Install dashboard dependencies
+        working-directory: dashboard
+        run: npm ci
+
+      - name: Typecheck dashboard
+        working-directory: dashboard
+        run: npm run typecheck
+
+      - name: Check generated wire contracts are current
+        working-directory: dashboard
+        run: npm run contracts:check
+
+      - name: Run dashboard unit tests
+        working-directory: dashboard
+        run: npm test
 
       - name: Run dashboard integration tests
         run: cargo nextest run --all-features --test dashboard_api_test --no-fail-fast --locked
