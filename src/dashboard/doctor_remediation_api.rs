@@ -1058,6 +1058,20 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
+        let envelope: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), 1 << 20)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(envelope["domain_state"], "offline");
+        assert_eq!(
+            envelope["payload"],
+            serde_json::json!({
+                "status": "unavailable",
+                "reason": "owner_unavailable",
+            })
+        );
         let dispatched = dispatched
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1111,6 +1125,20 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
+        let envelope: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), 1 << 20)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(envelope["domain_state"], "offline");
+        assert_eq!(
+            envelope["payload"],
+            serde_json::json!({
+                "status": "unavailable",
+                "reason": "owner_unavailable",
+            })
+        );
         let dispatched = dispatched
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
