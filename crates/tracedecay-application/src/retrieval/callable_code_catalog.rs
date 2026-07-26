@@ -126,6 +126,21 @@ pub fn callable_code_catalog_contribution()
             })?);
             binding_ids.push(binding_id);
         }
+        for method in lsp_methods(kind) {
+            let method_id = method.to_ascii_lowercase().replace('/', "-");
+            let binding_id = BindingId::new(format!("binding.lsp.{operation}.{method_id}.v1"))?;
+            bindings.push(SurfaceBindingV1::new(SurfaceBindingInputV1 {
+                binding_id: binding_id.clone(),
+                capability_id: code_query_capability_id(kind)?,
+                surface: BindingSurface::Lsp,
+                operation: SurfaceOperationName::new(*method)?,
+                protocol_revisions: ProtocolRevisionRange::new(1, 1)?,
+                required_features: Vec::new(),
+                status: BindingStatus::Current,
+                alias_of: None,
+            })?);
+            binding_ids.push(binding_id);
+        }
         capabilities.push(code_query_capability(kind, binding_ids)?);
     }
     debug_assert_eq!(
@@ -189,6 +204,16 @@ fn reachable_surface_operation(kind: CallableCodeOperationKind) -> Option<&'stat
         | CallableCodeOperationKind::Impact
         | CallableCodeOperationKind::ModuleApi
         | CallableCodeOperationKind::SourceMetadata => None,
+    }
+}
+
+fn lsp_methods(kind: CallableCodeOperationKind) -> &'static [&'static str] {
+    match kind {
+        CallableCodeOperationKind::ExactOccurrence => {
+            &["textDocument/definition", "textDocument/references"]
+        }
+        CallableCodeOperationKind::Callees => &["callHierarchy/outgoingCalls"],
+        _ => &[],
     }
 }
 

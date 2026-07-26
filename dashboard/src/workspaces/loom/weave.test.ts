@@ -5,11 +5,11 @@ import {
   summarizeChain,
   threadsFrom,
 } from './weave.ts';
-import type { LoomSession } from './contracts.ts';
+import type { SessionRow } from '../../contracts/uncontracted/sessions.ts';
 
 /** A wire-shaped session row. Defaults mirror the real payload: a start, a
  * message count, and NO end — which is the majority case on the real profile. */
-function session(overrides: Partial<LoomSession> = {}): LoomSession {
+function session(overrides: Partial<SessionRow> = {}): SessionRow {
   return {
     session_id: 'sess-1',
     provider: 'cursor',

@@ -44,7 +44,7 @@ import {
   columnIndexFor,
   recencyVitality,
 } from '../brain/field.ts';
-import type { ProjectRepoGroup } from './contracts.ts';
+import type { ProjectRepoGroup } from '../../contracts/uncontracted/projects.ts';
 
 export interface DeliveryBody {
   id: string;

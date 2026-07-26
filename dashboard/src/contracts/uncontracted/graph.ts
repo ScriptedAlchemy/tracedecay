@@ -1,17 +1,33 @@
-// LEGACY BOUNDARY — pending envelope migration.
-// These schemas describe the pre-envelope plugin JSON endpoints
-// (`/api/plugins/*`, `/api/projects`), NOT the DashboardEnvelopeV1 wire surface
-// in `../../contracts/generated.ts`. They are hand-matched to their Rust
-// producers and remain until these routes move to typed envelopes; new
-// envelope-backed reads must use the single wire boundary in `contracts/`.
+/**
+ * UNCONTRACTED — the legacy graph plugin routes.
+ *
+ *   GET /api/plugins/graph/overview
+ *   GET /api/plugins/graph/search
+ *   GET /api/plugins/graph/subgraph
+ *   GET /api/plugins/graph/node/{id}/neighbors
+ *
+ * Producer: `src/dashboard/graph_service.rs` (`overview_payload`,
+ * `search_payload`, `subgraph_payload`, `neighbors_payload`), all returning
+ * `serde_json::Value`. Nothing here is generated; see `./README.md`.
+ *
+ * These are read twice over: the Code workspace calls them directly, and the
+ * Brain workspace calls the same handlers through the project-scoped gateway
+ * (`/api/projects/{id}/plugins/graph/...`, which `src/dashboard/mod.rs` rewrites
+ * to `/api/...` against that project's state). Same handler, same body — but
+ * they used to be modelled twice, as `GraphNode`/`SubgraphPayload`/
+ * `GraphOverviewPayload` in `workspaces/code/contracts.ts` and as
+ * `ScopedSubgraphNode`/`ScopedSubgraphPayload`/`ScopedGraphOverview` in
+ * `workspaces/brain/contracts.ts`. The `Scoped*` copies had gone all-optional
+ * against a producer that emits every field on every response, so the two
+ * described different contracts for one route and nothing connected them.
+ */
 import { z } from 'zod';
 
-/** Wire-true shapes for /api/plugins/graph (src/dashboard/graph_service.rs). */
+export const KindCountSchema = z.object({ kind: z.string(), count: z.number() }).passthrough();
 
-export const KindCountSchema = z
-  .object({ kind: z.string(), count: z.number() })
-  .passthrough();
-
+/** `overview_payload`. Every key is emitted on success; the optional markers
+ * are retained from the Code workspace's original reading rather than tightened
+ * here, because this route has no contract to tighten against. */
 export const GraphOverviewPayloadSchema = z
   .object({
     totals: z
@@ -63,15 +79,14 @@ export const SubgraphEdgeSchema = z
   .passthrough();
 
 /**
- * GET /api/plugins/graph/node/{id}/neighbors (graph_service.rs
- * `neighbors_payload`). Feeds the TRACE drill-in.
+ * `neighbors_payload`. Feeds the TRACE drill-in.
  *
- * `callers` / `callees` are `calls` edges only and carry ONE ROW PER EDGE —
- * a caller with four call sites appears four times with different
- * `edge_line`, which is the only place the wire carries a call-site count.
- * `edges` is every edge kind incident on the requested node (`source = ?1 OR
- * target = ?1`), so a `contains` row here is always the container OF that
- * node. Both lists are truncated at `limit`.
+ * `callers` / `callees` are `calls` edges only and carry ONE ROW PER EDGE — a
+ * caller with four call sites appears four times with different `edge_line`,
+ * which is the only place the wire carries a call-site count. `edges` is every
+ * edge kind incident on the requested node (`source = ?1 OR target = ?1`), so a
+ * `contains` row here is always the container OF that node. Both lists are
+ * truncated at `limit`.
  */
 export const NeighborRowSchema = GraphNodeSchema.extend({
   edge_kind: z.string().nullable().optional(),
@@ -97,22 +112,22 @@ export const GraphNeighborsPayloadSchema = z
     callers: z.array(NeighborRowSchema).optional(),
     callees: z.array(NeighborRowSchema).optional(),
     edges: z.array(NeighborEdgeSchema).optional(),
-    edges_by_kind: z
-      .array(z.object({ kind: z.string(), count: z.number() }).passthrough())
-      .optional(),
+    edges_by_kind: z.array(KindCountSchema).optional(),
   })
   .passthrough();
 export type GraphNeighborsPayload = z.infer<typeof GraphNeighborsPayloadSchema>;
 
+/** `subgraph_payload`. Every branch of the handler — default slice, seeded
+ * slice, and the explicit no-match case — writes all five keys, so these are
+ * required. The unseeded call returns the project's most-connected
+ * neighborhood, already capped by the daemon. */
 export const SubgraphPayloadSchema = z
   .object({
     seed_id: z.string().nullable(),
     mode: z.string(),
     nodes: z.array(GraphNodeSchema),
     edges: z.array(SubgraphEdgeSchema),
-    capped: z
-      .object({ nodes: z.boolean(), edges: z.boolean() })
-      .passthrough(),
+    capped: z.object({ nodes: z.boolean(), edges: z.boolean() }).passthrough(),
   })
   .passthrough();
 export type SubgraphPayload = z.infer<typeof SubgraphPayloadSchema>;
