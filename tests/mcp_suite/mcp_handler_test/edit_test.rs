@@ -6,6 +6,18 @@ use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs as unix_fs;
 
+fn extract_edit_json(value: &Value) -> Value {
+    value["content"]
+        .as_array()
+        .and_then(|items| {
+            items.iter().find_map(|item| {
+                let text = item["text"].as_str()?;
+                serde_json::from_str(text).ok()
+            })
+        })
+        .unwrap_or_else(|| panic!("missing JSON content item in {value}"))
+}
+
 // ---------------------------------------------------------------------------
 // Edit tools: tracedecay_str_replace, tracedecay_multi_str_replace, tracedecay_insert_at
 // ---------------------------------------------------------------------------
@@ -790,8 +802,10 @@ async fn test_str_replace_unsupported_file_type_succeeds() {
     .await
     .unwrap();
 
-    let text = extract_text(&result.value);
-    let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
+    let warning = extract_text(&result.value);
+    assert!(warning.contains("style.css"), "{warning}");
+    assert!(warning.contains("edited after the last sync"), "{warning}");
+    let parsed = extract_edit_json(&result.value);
     assert_eq!(parsed["success"], true);
 
     let content = fs::read_to_string(project.join("style.css")).unwrap();
@@ -948,8 +962,10 @@ async fn test_multi_str_replace_unsupported_file_type_succeeds() {
     .await
     .unwrap();
 
-    let text = extract_text(&result.value);
-    let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
+    let warning = extract_text(&result.value);
+    assert!(warning.contains("style.css"), "{warning}");
+    assert!(warning.contains("edited after the last sync"), "{warning}");
+    let parsed = extract_edit_json(&result.value);
     assert_eq!(parsed["success"], true);
     assert_eq!(parsed["applied_count"], 2);
 
