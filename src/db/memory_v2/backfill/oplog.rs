@@ -4,7 +4,7 @@ use crate::db::engine::params;
 use crate::errors::Result;
 
 use super::super::types::{LegacyOplog, MemoryV2BackfillBatchOutcome, OwnerKey, Progress};
-use super::super::writers::{insert_quarantine, purge_memory_v2_fact_inner};
+use super::super::writers::{PurgeIntent, insert_quarantine, purge_memory_v2_fact_inner};
 use super::super::{
     MemoryV2Executor, OPERATION, db_error, seconds_to_micros, update_cursor, update_phase,
 };
@@ -77,7 +77,7 @@ pub(in crate::db) async fn backfill_oplog_batch(
                     owner_key,
                     source_store_id,
                     &fact_id,
-                    None,
+                    PurgeIntent::ReplayLegacyTombstone,
                     occurred_at,
                 )
                 .await?;
