@@ -111,6 +111,7 @@ fn graph_impact_and_affected_tests_bind_exact_occurrences() {
         },
         Some(AffectedTestsResult {
             tests: vec![id("symbol.test")],
+            attributions: Vec::new(),
         }),
     )
     .expect("complete test provider result");

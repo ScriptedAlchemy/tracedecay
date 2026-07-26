@@ -12,6 +12,9 @@ use tracedecay_domain::{
     CalibrationProfileId, CodeGenerationId, ManifestDigest, Pr9FallbackSubpayload, ProjectionKeyV1,
     RetrieverBatch, RetrieverKind, RetrieverOutcome, VectorGenerationIdV1, canonical_sha256,
 };
+use tracedecay_policy::retrieval_selection::{
+    RetrievalAvailabilityV1, RetrievalRequirementV1, RetrievalSelectionV1, select_retrieval,
+};
 
 use super::{
     CanonicalSemanticDistanceV1, CodeSemanticEvidenceV1, SemanticLaneRetriever,
@@ -211,15 +214,40 @@ where
         if fallback.validate().is_err() {
             return Err(SemanticQueryServiceError::InvalidFallback);
         }
-        let (request, generation, calibration) = match readiness {
-            SemanticLaneReadinessV1::Ready {
-                request,
-                generation,
-                calibration,
-            } => (request, generation, calibration),
-            SemanticLaneReadinessV1::Unavailable(state) => {
-                return self.abstain(mode, index_abstention(state), fallback);
+        let requirement = match mode {
+            SemanticQueryModeV1::FallbackAllowed => RetrievalRequirementV1::FallbackAllowed,
+            SemanticQueryModeV1::StrictSemantic => RetrievalRequirementV1::StrictSemantic,
+        };
+        let availability = match &readiness {
+            SemanticLaneReadinessV1::Ready { .. } => RetrievalAvailabilityV1::Ready,
+            SemanticLaneReadinessV1::Unavailable(state) => policy_availability(*state),
+        };
+        let selection = select_retrieval(availability, requirement);
+        let (request, generation, calibration) = match (selection, readiness) {
+            (
+                RetrievalSelectionV1::Semantic,
+                SemanticLaneReadinessV1::Ready {
+                    request,
+                    generation,
+                    calibration,
+                },
+            ) => (request, generation, calibration),
+            (RetrievalSelectionV1::FrozenFallback, SemanticLaneReadinessV1::Unavailable(state)) => {
+                return Ok(SemanticQueryServiceOutcomeV1::Fallback {
+                    abstention: index_abstention(state),
+                    fallback,
+                });
             }
+            (RetrievalSelectionV1::Unavailable, SemanticLaneReadinessV1::Unavailable(state)) => {
+                return Err(SemanticQueryServiceError::StrictUnavailable(
+                    index_abstention(state),
+                ));
+            }
+            (RetrievalSelectionV1::Semantic, SemanticLaneReadinessV1::Unavailable(_))
+            | (
+                RetrievalSelectionV1::FrozenFallback | RetrievalSelectionV1::Unavailable,
+                SemanticLaneReadinessV1::Ready { .. },
+            ) => unreachable!("retrieval selection must match the immutable readiness facts"),
         };
         if !generation.matches(request) {
             return self.abstain(mode, SemanticAbstentionV1::IndexIncompatible, fallback);
@@ -296,6 +324,17 @@ fn index_abstention(state: SemanticIndexStateV1) -> SemanticAbstentionV1 {
         SemanticIndexStateV1::Failed => SemanticAbstentionV1::IndexFailed,
         SemanticIndexStateV1::Stale => SemanticAbstentionV1::IndexStale,
         SemanticIndexStateV1::Incompatible => SemanticAbstentionV1::IndexIncompatible,
+    }
+}
+
+const fn policy_availability(state: SemanticIndexStateV1) -> RetrievalAvailabilityV1 {
+    match state {
+        SemanticIndexStateV1::Unavailable => RetrievalAvailabilityV1::Unavailable,
+        SemanticIndexStateV1::Indexing => RetrievalAvailabilityV1::Indexing,
+        SemanticIndexStateV1::Degraded => RetrievalAvailabilityV1::Degraded,
+        SemanticIndexStateV1::Failed => RetrievalAvailabilityV1::Failed,
+        SemanticIndexStateV1::Stale => RetrievalAvailabilityV1::Stale,
+        SemanticIndexStateV1::Incompatible => RetrievalAvailabilityV1::Incompatible,
     }
 }
 
