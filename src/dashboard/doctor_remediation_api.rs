@@ -56,7 +56,7 @@ pub(crate) enum DoctorRemediationDispatchCommandV1 {
     },
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "owner_operation", content = "target", rename_all = "snake_case")]
 pub(crate) enum DoctorRemediationTargetV1 {
     StorageRetentionCollect,
