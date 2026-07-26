@@ -687,37 +687,6 @@ pub(super) fn def_read() -> ToolDefinition {
     )
 }
 
-#[allow(dead_code)] // Plan 21 call_chain tool def — not yet registered
-pub(super) fn def_call_chain() -> ToolDefinition {
-    def(
-        "tracedecay_call_chain",
-        "Call Chain",
-        "Find the shortest directed call chain between two symbols, following \
-         only outgoing `calls` edges. Returns the ordered sequence of nodes \
-         and edges that connect `from_id` to `to_id`, or a not-found result. \
-         Use `tracedecay_search` or `tracedecay_by_qualified_name` first to \
-         resolve symbol names into node IDs.",
-        json!({
-            "type": "object",
-            "properties": {
-                "from_id": {
-                    "type": "string",
-                    "description": "Source node ID (the caller end of the chain)."
-                },
-                "to_id": {
-                    "type": "string",
-                    "description": "Target node ID (the callee end of the chain)."
-                },
-                "max_depth": {
-                    "type": "number",
-                    "description": "Maximum BFS depth (default: 8, max: 20)."
-                }
-            },
-            "required": ["from_id", "to_id"]
-        }),
-    )
-}
-
 #[allow(dead_code)] // Plan 21 file_dependents tool def — not yet registered
 pub(super) fn def_file_dependents() -> ToolDefinition {
     def(

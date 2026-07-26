@@ -255,14 +255,6 @@ mod tests {
             HttpApplicationOwnerKind::Git
         );
         assert_eq!(
-            HttpApplicationOperation::FeedbackDiagnostics.owner_kind(),
-            HttpApplicationOwnerKind::Feedback
-        );
-        assert_eq!(
-            HttpApplicationOperation::AffectedTests.owner_kind(),
-            HttpApplicationOwnerKind::Feedback
-        );
-        assert_eq!(
             HttpApplicationOperation::DiagnosticsRead.owner_kind(),
             HttpApplicationOwnerKind::Primitive
         );
