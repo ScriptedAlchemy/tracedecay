@@ -1434,7 +1434,7 @@ impl TraceDecay {
 
         let mut attempts = 0;
         loop {
-            match branch_graph.sync().await {
+            match branch_graph.sync_checkpointed().await {
                 Ok(_) => {
                     branch_graph
                         .register_project_store_in_global_registry()
