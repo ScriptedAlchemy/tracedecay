@@ -10,8 +10,8 @@ use super::doctor_remediation_api::{
 };
 use super::explorer_api::ExplorerQueryRunV1;
 use super::graph_structure_api::{
-    CallChainMeasurementV1, FactMatchesMeasurementV1, StrataMeasurementV1, StructureReadV1,
-    TestMapMeasurementV1,
+    CallChainMeasurementV1, FactMatchesMeasurementV1, NodeSessionsMeasurementV1,
+    StrataMeasurementV1, StructureReadV1, TestMapMeasurementV1,
 };
 use super::read_model::{DASHBOARD_SCHEMA_REVISION_V1, DashboardEnvelopeV1};
 use super::storage_findings_api::StorageFindingsPayloadV1;
@@ -33,6 +33,7 @@ struct DashboardContractCatalogV1 {
     graph_strata: StructureReadV1<StrataMeasurementV1>,
     graph_fact_matches: StructureReadV1<FactMatchesMeasurementV1>,
     graph_test_map: StructureReadV1<TestMapMeasurementV1>,
+    graph_node_sessions: StructureReadV1<NodeSessionsMeasurementV1>,
 }
 
 #[derive(JsonSchema)]
