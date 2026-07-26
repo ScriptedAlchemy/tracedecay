@@ -2,6 +2,7 @@
 
 use schemars::JsonSchema;
 use schemars::generate::SchemaSettings;
+use tracedecay_application::{CostsReadModelV1, ObservatoryReadModelV1};
 
 use super::automation_scheduler_api::AutomationSchedulerStatusV1;
 use super::code_index_freshness_api::CodeIndexFreshnessPayloadV1;
@@ -34,6 +35,8 @@ struct DashboardContractCatalogV1 {
     settings: SettingsPayloadV1,
     settings_project_patch: ProjectSettingsPatch,
     settings_user_patch: UserSettingsPatch,
+    observatory: ObservatoryReadModelV1,
+    costs: CostsReadModelV1,
     graph_call_chain: StructureReadV1<CallChainMeasurementV1>,
     graph_strata: StructureReadV1<StrataMeasurementV1>,
     graph_fact_matches: StructureReadV1<FactMatchesMeasurementV1>,
