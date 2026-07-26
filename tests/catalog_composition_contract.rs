@@ -40,9 +40,9 @@ fn root_snapshot_validates_every_application_contribution_against_declared_descr
             assert_eq!(handler.request_schema(), capability.request_schema());
             assert_eq!(handler.result_schema(), capability.result_schema());
             assert_eq!(
-                capability.availability().is_callable(),
+                capability.availability().is_callable() && !capability.binding_ids().is_empty(),
                 !capability.profile_eligibility().is_empty(),
-                "{} availability and profile eligibility disagree",
+                "{} transport bindings and profile eligibility disagree",
                 capability.capability_id()
             );
         }
@@ -61,8 +61,14 @@ fn root_snapshot_validates_every_application_contribution_against_declared_descr
             .collect::<Vec<_>>(),
         vec![
             "capability.application.code-query.callees",
+            "capability.application.code-query.declaration",
+            "capability.application.code-query.definition",
             "capability.application.code-query.exact-occurrence",
+            "capability.application.code-query.facets",
             "capability.application.code-query.phrase-search",
+            "capability.application.code-query.references",
+            "capability.application.code-query.timeline",
+            "capability.application.code-query.type-definition",
             "capability.application.configuration.audit",
             "capability.application.configuration.batch",
             "capability.application.configuration.explain",
@@ -87,6 +93,13 @@ fn root_snapshot_validates_every_application_contribution_against_declared_descr
             "capability.application.context-scout-recent",
             "capability.application.context-scout-resume",
             "capability.application.context-scout-status",
+            "capability.application.feedback.advisory-cycle",
+            "capability.application.feedback.affected-tests",
+            "capability.application.feedback.diagnostics",
+            "capability.application.feedback.expand",
+            "capability.application.feedback.get",
+            "capability.application.feedback.impact",
+            "capability.application.feedback.list",
             "capability.application.feedback.test-results",
             "capability.application.git.apply",
             "capability.application.git.blame",
@@ -103,6 +116,7 @@ fn root_snapshot_validates_every_application_contribution_against_declared_descr
             "capability.application.primitive.diagnostics-read",
             "capability.application.primitive.file-dependents",
             "capability.application.primitive.file-metadata",
+            "capability.application.primitive.health-delta",
             "capability.application.primitive.health-read",
             "capability.application.primitive.module-api",
             "capability.application.primitive.qualified-name",
@@ -150,22 +164,22 @@ fn root_snapshot_composes_every_explicit_profile_without_widening_eligibility() 
         (
             "profile.default",
             ProfileKind::Default,
-            ProfileBudget::new(256, 80_000_000, 18_000).unwrap(),
+            ProfileBudget::new(320, 90_000_000, 18_000).unwrap(),
         ),
         (
             "profile.compact",
             ProfileKind::Compact,
-            ProfileBudget::COMPACT,
+            ProfileBudget::new(22, 12_000_000, 4_000).unwrap(),
         ),
         (
             "profile.administrative",
             ProfileKind::Administrative,
-            ProfileBudget::ADMINISTRATIVE,
+            ProfileBudget::new(40, 16_000_000, 8_000).unwrap(),
         ),
         (
             "profile.host-limited",
             ProfileKind::HostLimited,
-            ProfileBudget::HOST_LIMITED,
+            ProfileBudget::new(17, 8_000_000, 2_000).unwrap(),
         ),
     ];
 
@@ -187,9 +201,13 @@ fn root_snapshot_composes_every_explicit_profile_without_widening_eligibility() 
         assert_eq!(profile.kind(), kind);
         assert_eq!(profile.budget(), budget);
         assert_eq!(profile.capability_ids(), eligible_capability_ids);
+        let enabled_features = snapshot
+            .capabilities()
+            .flat_map(|capability| capability.required_features().iter().cloned())
+            .collect();
         assert_eq!(
             snapshot
-                .visible_capabilities(&profile_id, &BTreeSet::new())
+                .visible_capabilities(&profile_id, &enabled_features)
                 .into_iter()
                 .map(|capability| capability.capability_id().clone())
                 .collect::<Vec<_>>(),

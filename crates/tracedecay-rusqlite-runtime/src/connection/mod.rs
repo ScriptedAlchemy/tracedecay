@@ -618,7 +618,9 @@ fn is_read_only_introspection_pragma(pragma_name: &str) -> bool {
 }
 
 fn is_safe_writer_pragma(pragma_name: &str, pragma_value: &str) -> bool {
-    pragma_name.eq_ignore_ascii_case("wal_autocheckpoint")
+    pragma_name.eq_ignore_ascii_case("busy_timeout")
+        || pragma_name.eq_ignore_ascii_case("incremental_vacuum")
+        || pragma_name.eq_ignore_ascii_case("wal_autocheckpoint")
         || pragma_name.eq_ignore_ascii_case("wal_checkpoint")
         || (pragma_name.eq_ignore_ascii_case("auto_vacuum")
             && (pragma_value.eq_ignore_ascii_case("incremental") || pragma_value == "2"))

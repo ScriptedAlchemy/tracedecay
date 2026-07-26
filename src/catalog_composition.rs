@@ -140,25 +140,25 @@ fn application_profiles(
         (
             APPLICATION_DEFAULT_PROFILE_ID,
             ProfileKind::Default,
-            ProfileBudget::new(288, 90_000_000, 18_000)?,
+            ProfileBudget::new(320, 90_000_000, 18_000)?,
             true,
         ),
         (
             APPLICATION_COMPACT_PROFILE_ID,
             ProfileKind::Compact,
-            ProfileBudget::new(20, 12_000_000, 4_000)?,
+            ProfileBudget::new(22, 12_000_000, 4_000)?,
             false,
         ),
         (
             APPLICATION_ADMINISTRATIVE_PROFILE_ID,
             ProfileKind::Administrative,
-            ProfileBudget::new(32, 16_000_000, 8_000)?,
+            ProfileBudget::new(40, 16_000_000, 8_000)?,
             false,
         ),
         (
             APPLICATION_HOST_LIMITED_PROFILE_ID,
             ProfileKind::HostLimited,
-            ProfileBudget::new(12, 8_000_000, 2_000)?,
+            ProfileBudget::new(17, 8_000_000, 2_000)?,
             false,
         ),
     ]
@@ -215,10 +215,27 @@ fn application_profile(
     if !capability_ids.is_empty() {
         let git_preview = CapabilityId::new("capability.application.git.preview")?;
         let git_apply = CapabilityId::new("capability.application.git.apply")?;
-        if capability_ids.contains(&git_preview) && capability_ids.contains(&git_apply) {
+        if capability_ids.len() > 1 {
+            let (query, ambiguous_capability_ids) =
+                if capability_ids.contains(&git_preview) && capability_ids.contains(&git_apply) {
+                    (
+                        "Preview and apply these index changes".to_owned(),
+                        vec![git_preview, git_apply],
+                    )
+                } else {
+                    let first = capabilities[0];
+                    let second = capabilities[1];
+                    (
+                        format!("{} or {}", first.routing().name(), second.routing().name()),
+                        vec![
+                            first.capability_id().clone(),
+                            second.capability_id().clone(),
+                        ],
+                    )
+                };
             routing_fixtures.push(RoutingFixtureV1::new(
-                "Preview and apply these index changes",
-                RoutingFixtureExpectation::ambiguous(vec![git_preview, git_apply])?,
+                query,
+                RoutingFixtureExpectation::ambiguous(ambiguous_capability_ids)?,
             )?);
         }
         routing_fixtures.push(RoutingFixtureV1::new(
@@ -465,9 +482,9 @@ mod tests {
             .filter(|binding| profile.enables_surface(binding.surface()))
             .count();
 
-        assert_eq!(profile.budget().maximum_bindings(), 288);
+        assert_eq!(profile.budget().maximum_bindings(), 320);
         assert!(
-            eager_binding_count > 256
+            eager_binding_count > 288
                 && eager_binding_count <= profile.budget().maximum_bindings() as usize,
             "acceptance must exercise the raised budget with the full eager profile loaded"
         );
@@ -537,7 +554,7 @@ mod tests {
                     && default_profile.enables_surface(binding.surface())
             })
             .count();
-        assert_eq!(default_profile.budget().maximum_bindings(), 288);
+        assert_eq!(default_profile.budget().maximum_bindings(), 320);
         assert!(default_binding_count > 0);
         assert!(default_binding_count <= default_profile.budget().maximum_bindings() as usize);
         let mut default_schemas = std::collections::BTreeMap::new();

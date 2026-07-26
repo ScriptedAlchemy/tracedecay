@@ -1167,21 +1167,17 @@ pub(crate) async fn seed_project_registry(db_path: &Path, project_root: &Path) {
         .unwrap();
 }
 
-/// Searches for `name` via the search handler and returns the first matching
-/// node id whose name field equals `name`.
+/// Searches the indexed fixture for `name` and returns its exact node id.
 pub(crate) async fn find_node_id(cg: &TraceDecay, name: &str) -> String {
-    let result = handle_tool_call(cg, "tracedecay_search", json!({"query": name}), None, None)
+    cg.search(name, 10)
         .await
-        .unwrap();
-    let text = extract_text(&result.value);
-    let items: Vec<Value> = serde_json::from_str(text).unwrap();
-    items
-        .iter()
-        .find(|item| item["name"].as_str() == Some(name))
-        .unwrap_or_else(|| panic!("node '{}' not found via search", name))["id"]
-        .as_str()
         .unwrap()
-        .to_string()
+        .iter()
+        .find(|result| result.node.name == name)
+        .unwrap_or_else(|| panic!("node '{name}' not found in indexed fixture"))
+        .node
+        .id
+        .clone()
 }
 
 // ---------------------------------------------------------------------------

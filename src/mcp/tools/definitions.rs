@@ -20,6 +20,14 @@ use super::dispatch_policy::REGISTERED_PROJECT_READER_TOOL_NAMES;
 /// Count-contract tests share this source of truth so branch rebases cannot
 /// leave independent stale literals on the unit and integration surfaces.
 pub const ALWAYS_REGISTERED_TOOL_COUNT: usize = 161;
+pub(crate) const UNADVERTISED_HANDLE_GATED_TOOL_NAMES: &[&str] = &[
+    "tracedecay_feedback_diagnostics",
+    "tracedecay_feedback_get",
+    "tracedecay_feedback_expand",
+    "tracedecay_feedback_list",
+    "tracedecay_feedback_impact",
+    "tracedecay_affected_tests",
+];
 
 mod admin;
 mod analysis;
@@ -439,6 +447,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         def_context_scout_explain(),
         def_context_scout_capability(),
         def_context_scout_budget(),
+        def_feedback_advisory_cycle(),
         def_test_results(),
         def_code_exact_occurrence(),
         def_code_phrase_search(),
@@ -684,13 +693,7 @@ const FORMAT_CAPABLE_TOOL_NAMES: &[&str] = &[
     // application surfaces
     "tracedecay_git_preview",
     "tracedecay_git_apply",
-    "tracedecay_feedback_diagnostics",
-    "tracedecay_feedback_get",
-    "tracedecay_feedback_expand",
-    "tracedecay_feedback_list",
     "tracedecay_feedback_advisory_cycle",
-    "tracedecay_feedback_impact",
-    "tracedecay_affected_tests",
     "tracedecay_test_results",
     "tracedecay_code_exact_occurrence",
     "tracedecay_code_phrase_search",
@@ -929,14 +932,7 @@ mod tests {
     #[test]
     fn feedback_tools_without_client_constructible_requests_are_not_advertised() {
         let definitions = get_tool_definitions();
-        for name in [
-            "tracedecay_feedback_diagnostics",
-            "tracedecay_feedback_get",
-            "tracedecay_feedback_expand",
-            "tracedecay_feedback_list",
-            "tracedecay_feedback_impact",
-            "tracedecay_affected_tests",
-        ] {
+        for &name in UNADVERTISED_HANDLE_GATED_TOOL_NAMES {
             assert!(
                 definitions.iter().all(|definition| definition.name != name),
                 "{name} must not be advertised until its request authority is reachable"
