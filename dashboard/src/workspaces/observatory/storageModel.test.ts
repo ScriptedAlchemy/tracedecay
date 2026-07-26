@@ -123,6 +123,7 @@ describe('Observatory storage read models', () => {
           'stale_branch_dbs',
           'incident_debris_present',
           'retention_backlog',
+          'table_growth',
         ] as const
       ).map(storageFindingLabel),
     ).toEqual([
@@ -131,6 +132,7 @@ describe('Observatory storage read models', () => {
       'Stale branch databases',
       'Incident debris',
       'Retention backlog',
+      'Table growth',
     ]);
     expect(payload.entries[0]?.storage_kind).toBe('over_budget_store');
     expect(payload.entries[0]?.finding.coverage.statement).toBe(
@@ -173,10 +175,45 @@ describe('Observatory storage read models', () => {
             total_bytes: 32768,
             reason: 'first watermark recorded in this daemon lifetime',
           },
+          table_growth: {
+            state: 'baseline_established',
+            coverage: {
+              completeness: 'partial',
+              eligible: 1,
+              examined: 0,
+              matched: null,
+              excluded: null,
+              omitted: 1,
+              unknown: null,
+              denominator: 1,
+              unit: 'store_table_growth_reads',
+              omission_reasons: ['no baseline yet'],
+            },
+            observed_at: 123,
+            tables_observed: 4,
+            omission_reasons: ['no baseline yet'],
+          },
         },
       ],
       budget_note: 'budget note',
       growth_note: 'growth note',
+      table_growth_threshold: {
+        absolute_bytes: 67_108_864,
+        relative_floor_bytes: 1_048_576,
+        relative_percent: 10,
+      },
+      table_growth_coverage: {
+        completeness: 'partial',
+        eligible: 1,
+        examined: 0,
+        matched: null,
+        excluded: null,
+        omitted: 1,
+        unknown: null,
+        denominator: 1,
+        unit: 'store_table_growth_reads',
+        omission_reasons: ['graph.db: no baseline yet'],
+      },
     });
 
     const store = payload.stores[0]!;

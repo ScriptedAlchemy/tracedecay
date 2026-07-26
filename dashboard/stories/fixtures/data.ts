@@ -1605,6 +1605,65 @@ const GROWTH_COVERAGE =
   'since-daemon-start: bounded in-process watermark ring recorded on each telemetry sample, not a persisted historical series';
 const GROWTH_BASELINE_REASON =
   'first watermark recorded in this daemon lifetime; a growth delta needs a second sample';
+const TABLE_GROWTH_COVERAGE = {
+  completeness: 'complete',
+  eligible: 1,
+  examined: 1,
+  matched: null,
+  excluded: null,
+  omitted: 0,
+  unknown: null,
+  denominator: 1,
+  unit: 'store_table_growth_reads',
+  omission_reasons: [],
+};
+const TABLE_GROWTH_STATES = [
+  {
+    state: 'observed',
+    coverage: TABLE_GROWTH_COVERAGE,
+    significant_samples: [
+      {
+        table: 'messages',
+        previous_bytes: 10_485_760,
+        current_bytes: 11_534_336,
+        growth_bytes: 1_048_576,
+        previous_observed_at: nowMicros - 3_600_000_000,
+        current_observed_at: nowMicros,
+      },
+    ],
+    omissions: [
+      {
+        table: 'metadata',
+        reason:
+          'observed growth of 524288 bytes was below the informational threshold (at least 67108864 bytes, or at least 1048576 bytes and 10% of the previous size)',
+      },
+    ],
+  },
+  {
+    state: 'denied',
+    coverage: { ...TABLE_GROWTH_COVERAGE, completeness: 'partial', examined: 0, omitted: 1 },
+    omission_reasons: ['per-table payload growth measurement was denied for this store'],
+  },
+  {
+    state: 'baseline_established',
+    coverage: { ...TABLE_GROWTH_COVERAGE, completeness: 'partial', examined: 0, omitted: 1 },
+    observed_at: nowMicros,
+    tables_observed: 7,
+    omission_reasons: [
+      'no baseline yet; this read established the first per-table payload watermark',
+    ],
+  },
+  {
+    state: 'unsupported',
+    coverage: { ...TABLE_GROWTH_COVERAGE, completeness: 'partial', examined: 0, omitted: 1 },
+    omission_reasons: ['per-table payload growth measurement is unsupported for this store'],
+  },
+  {
+    state: 'unknown',
+    coverage: { ...TABLE_GROWTH_COVERAGE, completeness: 'partial', examined: 0, omitted: 1 },
+    omission_reasons: ['per-table payload growth measurement is unavailable for this store'],
+  },
+] as const;
 
 /** GET /api/storage/telemetry — observatory (StorageTelemetryPayloadSchema).
  *
@@ -1795,11 +1854,33 @@ const storageTelemetry = envelope({
           'no watermark could be recorded because the store size read did not produce a sample',
       },
     },
-  ],
+  ].map((store, index) => ({ ...store, table_growth: TABLE_GROWTH_STATES[index] })),
   budget_note:
     'budgets are owner configuration: sync.retention.v1 store_soft_budgets_bytes, keyed by store key; a store with no entry reports unset (no budget configured), never a fabricated pass',
   growth_note:
     'growth is measured over the store-size watermarks this daemon has recorded since it started; no persisted historical watermark series exists, so the window is not historical',
+  table_growth_threshold: {
+    absolute_bytes: 67_108_864,
+    relative_floor_bytes: 1_048_576,
+    relative_percent: 10,
+  },
+  table_growth_coverage: {
+    completeness: 'partial',
+    eligible: 5,
+    examined: 1,
+    matched: null,
+    excluded: null,
+    omitted: 4,
+    unknown: null,
+    denominator: 5,
+    unit: 'store_table_growth_reads',
+    omission_reasons: [
+      'lcm.db: denied',
+      'savings.db: no baseline yet',
+      'sessions.db: unsupported',
+      'incident.db: unavailable',
+    ],
+  },
 });
 
 /** One of the five stores failed its pragma read, so the endpoint's coverage is
@@ -1872,6 +1953,12 @@ const storageFindings = envelope({
       state: 'real',
       observed_entries: 0,
       reason: 'owner retention windows were evaluated with complete coverage',
+    },
+    {
+      kind: 'table_growth',
+      state: 'partial',
+      observed_entries: 1,
+      reason: 'canonical Doctor producer returned table growth evidence with partial coverage',
     },
   ],
 });

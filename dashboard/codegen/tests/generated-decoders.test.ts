@@ -127,6 +127,27 @@ describe("wire envelope decoder", () => {
 });
 
 describe("wire storage payload decoders", () => {
+  const tableGrowthCoverage = {
+    completeness: "complete",
+    eligible: 1,
+    examined: 1,
+    matched: null,
+    excluded: null,
+    omitted: 0,
+    unknown: null,
+    denominator: 1,
+    unit: "store_table_growth_reads",
+    omission_reasons: [],
+  };
+  const tableGrowthPayload = {
+    table_growth_coverage: tableGrowthCoverage,
+    table_growth_threshold: {
+      absolute_bytes: 67_108_864,
+      relative_floor_bytes: 1_048_576,
+      relative_percent: 10,
+    },
+  };
+
   it("decodes a storage telemetry payload", () => {
     const parsed = StorageTelemetryPayloadSchema.parse({
       stores: [
@@ -168,10 +189,17 @@ describe("wire storage payload decoders", () => {
               { measured_at: 2, total_bytes: 100, free_bytes: 0 },
             ],
           },
+          table_growth: {
+            state: "observed",
+            coverage: tableGrowthCoverage,
+            significant_samples: [],
+            omissions: [],
+          },
         },
       ],
       budget_note: "n",
       growth_note: "m",
+      ...tableGrowthPayload,
     });
     expect(parsed.stores[0]!.read.kind).toBe("observed");
     expect(parsed.stores[0]!.roles).toEqual(["graph", "memory"]);
@@ -192,12 +220,24 @@ describe("wire storage payload decoders", () => {
       free_page_ratio: null,
       budget: { state: "unknown", reason: "r" },
       growth: { state: "unknown", reason: "r" },
+      table_growth: {
+        state: "unknown",
+        coverage: {
+          ...tableGrowthCoverage,
+          completeness: "partial",
+          examined: 0,
+          omitted: 1,
+          omission_reasons: ["measurement unavailable"],
+        },
+        omission_reasons: ["measurement unavailable"],
+      },
     };
     expect(
       StorageTelemetryPayloadSchema.safeParse({
         stores: [entry],
         budget_note: "n",
         growth_note: "m",
+        ...tableGrowthPayload,
       }).success,
     ).toBe(true);
     // `unsupported` budgets and `absent` growth no longer exist on the wire.
@@ -212,6 +252,7 @@ describe("wire storage payload decoders", () => {
           stores: [drift],
           budget_note: "n",
           growth_note: "m",
+          ...tableGrowthPayload,
         }).success,
       ).toBe(false);
     }

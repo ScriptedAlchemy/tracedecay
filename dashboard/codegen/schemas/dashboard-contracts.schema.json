@@ -3191,6 +3191,11 @@
           "const": "retention_backlog",
           "description": "Retention-eligible rows or stores are past their window and awaiting\noffload/collection.",
           "type": "string"
+        },
+        {
+          "const": "table_growth",
+          "description": "Per-table SQLite payload growth observed between two retained\nwatermarks, including baseline and unavailable measurement states.",
+          "type": "string"
         }
       ]
     },
@@ -8642,6 +8647,46 @@
       ],
       "type": "object"
     },
+    "SignificantTableGrowthSampleV1": {
+      "description": "One significant table-growth sample exposed to the dashboard.",
+      "properties": {
+        "current_bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "current_observed_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "growth_bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "previous_bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "previous_observed_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "table": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "table",
+        "previous_bytes",
+        "current_bytes",
+        "growth_bytes",
+        "previous_observed_at",
+        "current_observed_at"
+      ],
+      "type": "object"
+    },
     "SourceKindV1": {
       "enum": [
         "claude",
@@ -8823,12 +8868,22 @@
             "$ref": "#/$defs/StoreTelemetryEntryV1"
           },
           "type": "array"
+        },
+        "table_growth_coverage": {
+          "$ref": "#/$defs/DashboardCoverageV1",
+          "description": "Aggregate coverage across the expected per-store table-growth reads."
+        },
+        "table_growth_threshold": {
+          "$ref": "#/$defs/TableGrowthThresholdV1",
+          "description": "The exact significance rule applied to `table_growth` samples."
         }
       },
       "required": [
         "stores",
         "budget_note",
-        "growth_note"
+        "growth_note",
+        "table_growth_threshold",
+        "table_growth_coverage"
       ],
       "type": "object"
     },
@@ -9370,6 +9425,10 @@
           "description": "Stable store key (the store's file name), or the raw file name when it is\nnot a valid [`StoreKeyV1`].",
           "type": "string"
         },
+        "table_growth": {
+          "$ref": "#/$defs/TableGrowthDimensionV1",
+          "description": "Per-table payload growth from the SQLite `dbstat` watermarks retained by\nthe production telemetry port."
+        },
         "total_bytes": {
           "format": "uint64",
           "minimum": 0,
@@ -9389,7 +9448,8 @@
         "free_bytes",
         "free_page_ratio",
         "budget",
-        "growth"
+        "growth",
+        "table_growth"
       ],
       "type": "object"
     },
@@ -9937,6 +9997,186 @@
       "required": [
         "auto_track_pr_branches",
         "auto_track_pr_poll_secs"
+      ],
+      "type": "object"
+    },
+    "TableGrowthDimensionV1": {
+      "description": "Per-store typed table-growth state. Unavailable reads carry no byte values;\neach state includes source coverage and explicit omissions.",
+      "oneOf": [
+        {
+          "properties": {
+            "coverage": {
+              "$ref": "#/$defs/DashboardCoverageV1"
+            },
+            "omissions": {
+              "items": {
+                "$ref": "#/$defs/TableGrowthOmissionV1"
+              },
+              "type": "array"
+            },
+            "significant_samples": {
+              "items": {
+                "$ref": "#/$defs/SignificantTableGrowthSampleV1"
+              },
+              "type": "array"
+            },
+            "state": {
+              "const": "observed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "coverage",
+            "significant_samples",
+            "omissions"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "coverage": {
+              "$ref": "#/$defs/DashboardCoverageV1"
+            },
+            "observed_at": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "omission_reasons": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "state": {
+              "const": "baseline_established",
+              "type": "string"
+            },
+            "tables_observed": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "state",
+            "coverage",
+            "observed_at",
+            "tables_observed",
+            "omission_reasons"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "coverage": {
+              "$ref": "#/$defs/DashboardCoverageV1"
+            },
+            "omission_reasons": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "state": {
+              "const": "unsupported",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "coverage",
+            "omission_reasons"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "coverage": {
+              "$ref": "#/$defs/DashboardCoverageV1"
+            },
+            "omission_reasons": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "state": {
+              "const": "denied",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "coverage",
+            "omission_reasons"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "coverage": {
+              "$ref": "#/$defs/DashboardCoverageV1"
+            },
+            "omission_reasons": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "state": {
+              "const": "unknown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "coverage",
+            "omission_reasons"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "TableGrowthOmissionV1": {
+      "description": "One observed table omitted from the significant-sample list, with the\nconcrete reason it was omitted.",
+      "properties": {
+        "reason": {
+          "type": "string"
+        },
+        "table": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "table",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "TableGrowthThresholdV1": {
+      "description": "Informational threshold applied to per-table payload growth samples.",
+      "properties": {
+        "absolute_bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "relative_floor_bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "relative_percent": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "absolute_bytes",
+        "relative_floor_bytes",
+        "relative_percent"
       ],
       "type": "object"
     },

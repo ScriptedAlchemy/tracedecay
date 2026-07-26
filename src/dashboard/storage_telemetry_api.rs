@@ -39,7 +39,11 @@ use serde::Serialize;
 use tracedecay_application::storage::identity::StoreKeyV1;
 use tracedecay_application::storage::telemetry::{
     StorageTelemetryReadV1, StoreBudgetEvaluationV1, StoreSizeBudgetV1, StoreSizeSampleV1,
-    StoreSizeTelemetryPort,
+    StoreSizeTelemetryPort, TableGrowthTelemetryReadV1,
+};
+use tracedecay_application::storage::{
+    SIGNIFICANT_TABLE_GROWTH_ABSOLUTE_BYTES, SIGNIFICANT_TABLE_GROWTH_PERCENT,
+    SIGNIFICANT_TABLE_GROWTH_RELATIVE_FLOOR_BYTES, is_significant_table_growth,
 };
 use tracedecay_application::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
@@ -79,6 +83,9 @@ pub(crate) struct StoreTelemetryEntryV1 {
     pub free_page_ratio: Option<f64>,
     pub budget: StoreBudgetDimensionV1,
     pub growth: StoreGrowthDimensionV1,
+    /// Per-table payload growth from the SQLite `dbstat` watermarks retained by
+    /// the production telemetry port.
+    pub table_growth: TableGrowthDimensionV1,
 }
 
 /// The budget-evaluation dimension, sourced from owner configuration.
@@ -143,6 +150,63 @@ pub(crate) enum StoreGrowthDimensionV1 {
     Unknown { reason: String },
 }
 
+/// Informational threshold applied to per-table payload growth samples.
+#[derive(Clone, Copy, Debug, Serialize, JsonSchema)]
+pub(crate) struct TableGrowthThresholdV1 {
+    pub absolute_bytes: u64,
+    pub relative_floor_bytes: u64,
+    pub relative_percent: u64,
+}
+
+/// One significant table-growth sample exposed to the dashboard.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub(crate) struct SignificantTableGrowthSampleV1 {
+    pub table: String,
+    pub previous_bytes: u64,
+    pub current_bytes: u64,
+    pub growth_bytes: u64,
+    pub previous_observed_at: i64,
+    pub current_observed_at: i64,
+}
+
+/// One observed table omitted from the significant-sample list, with the
+/// concrete reason it was omitted.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub(crate) struct TableGrowthOmissionV1 {
+    pub table: String,
+    pub reason: String,
+}
+
+/// Per-store typed table-growth state. Unavailable reads carry no byte values;
+/// each state includes source coverage and explicit omissions.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case", tag = "state")]
+pub(crate) enum TableGrowthDimensionV1 {
+    Observed {
+        coverage: DashboardCoverageV1,
+        significant_samples: Vec<SignificantTableGrowthSampleV1>,
+        omissions: Vec<TableGrowthOmissionV1>,
+    },
+    BaselineEstablished {
+        coverage: DashboardCoverageV1,
+        observed_at: i64,
+        tables_observed: u64,
+        omission_reasons: Vec<String>,
+    },
+    Unsupported {
+        coverage: DashboardCoverageV1,
+        omission_reasons: Vec<String>,
+    },
+    Denied {
+        coverage: DashboardCoverageV1,
+        omission_reasons: Vec<String>,
+    },
+    Unknown {
+        coverage: DashboardCoverageV1,
+        omission_reasons: Vec<String>,
+    },
+}
+
 /// Telemetry payload: one entry per distinct store the dashboard holds a
 /// connection to.
 #[derive(Clone, Debug, Serialize, JsonSchema)]
@@ -152,6 +216,10 @@ pub(crate) struct StorageTelemetryPayloadV1 {
     pub budget_note: String,
     /// The growth window's coverage, stated once for the whole read.
     pub growth_note: String,
+    /// The exact significance rule applied to `table_growth` samples.
+    pub table_growth_threshold: TableGrowthThresholdV1,
+    /// Aggregate coverage across the expected per-store table-growth reads.
+    pub table_growth_coverage: DashboardCoverageV1,
 }
 
 /// The owner setting path that configures a store's soft byte budget.
@@ -168,6 +236,14 @@ const GROWTH_BASELINE_REASON: &str =
     "first watermark recorded in this daemon lifetime; a growth delta needs a second sample";
 const GROWTH_UNKNOWN_REASON: &str =
     "no watermark could be recorded because the store size read did not produce a sample";
+const TABLE_GROWTH_BASELINE_REASON: &str =
+    "no baseline yet; this read established the first per-table payload watermark";
+const TABLE_GROWTH_UNSUPPORTED_REASON: &str =
+    "per-table payload growth measurement is unsupported for this store";
+const TABLE_GROWTH_DENIED_REASON: &str =
+    "per-table payload growth measurement was denied for this store";
+const TABLE_GROWTH_UNKNOWN_REASON: &str =
+    "per-table payload growth measurement is unavailable for this store";
 const BUDGET_NO_SAMPLE_REASON: &str =
     "no observed size sample, so a configured budget could not be evaluated";
 
@@ -184,6 +260,9 @@ struct SampledStoreV1 {
     pub roles: Vec<String>,
     /// The typed size read: `observed` with a sample, or `unknown`.
     pub read: StorageTelemetryReadV1,
+    /// `None` is used only by budget-only collection, which deliberately does
+    /// not advance the table-growth watermark.
+    pub table_growth_read: Option<TableGrowthTelemetryReadV1>,
     /// Why this expected store could not be examined. Kept alongside the
     /// sample so envelope coverage can name the actual omission rather than
     /// silently shrinking its denominator.
@@ -255,7 +334,10 @@ fn resolve_store_budget(
 
 /// Enumerate every store the dashboard holds a connection to, deduplicated by
 /// store file identity, each with one live size sample.
-async fn collect_store_samples(state: &DashboardState) -> Vec<SampledStoreV1> {
+async fn collect_store_samples(
+    state: &DashboardState,
+    include_table_growth: bool,
+) -> Vec<SampledStoreV1> {
     let mut entries: Vec<SampledStoreV1> = Vec::new();
     let mut seen: HashMap<String, usize> = HashMap::new();
     let Some(context) = storage_telemetry_context(state) else {
@@ -292,6 +374,7 @@ async fn collect_store_samples(state: &DashboardState) -> Vec<SampledStoreV1> {
         &state.graph_db_path,
         graph,
         &context,
+        include_table_growth,
     )
     .await;
     // Project-memory store. In project storage mode this resolves to the same
@@ -304,6 +387,7 @@ async fn collect_store_samples(state: &DashboardState) -> Vec<SampledStoreV1> {
         &state.mem_db_path,
         state.mem_db.storage_telemetry_handle().ok(),
         &context,
+        include_table_growth,
     )
     .await;
     // LCM session store, when a retained runtime is held.
@@ -315,6 +399,7 @@ async fn collect_store_samples(state: &DashboardState) -> Vec<SampledStoreV1> {
             &state.lcm_db_path,
             db.storage_telemetry_handle().ok(),
             &context,
+            include_table_growth,
         )
         .await;
     }
@@ -327,6 +412,7 @@ async fn collect_store_samples(state: &DashboardState) -> Vec<SampledStoreV1> {
             &state.savings_db_path,
             db.storage_telemetry_handle().ok(),
             &context,
+            include_table_growth,
         )
         .await;
     }
@@ -339,7 +425,7 @@ async fn collect_store_samples(state: &DashboardState) -> Vec<SampledStoreV1> {
 /// finding route uses this to state whether `OverBudgetStore` was evaluated,
 /// unset, or only partially observable.
 pub(crate) async fn budget_source_summary(state: &DashboardState) -> StoreBudgetSourceSummaryV1 {
-    let samples = collect_store_samples(state).await;
+    let samples = collect_store_samples(state, false).await;
     let mut summary = StoreBudgetSourceSummaryV1 {
         stores: samples.len(),
         ..StoreBudgetSourceSummaryV1::default()
@@ -412,17 +498,24 @@ pub(crate) async fn telemetry(
     // runtime configuration.
     let retention = &state.retention_config;
 
-    let samples = collect_store_samples(&state).await;
+    let samples = collect_store_samples(&state, true).await;
     let coverage = telemetry_coverage(&samples);
     let entries: Vec<StoreTelemetryEntryV1> = samples
         .into_iter()
         .map(|sampled| telemetry_entry(sampled, Some(retention)))
         .collect();
+    let table_growth_coverage = table_growth_payload_coverage(&entries);
 
     let payload = StorageTelemetryPayloadV1 {
         stores: entries,
         budget_note: BUDGET_NOTE.to_string(),
         growth_note: GROWTH_NOTE.to_string(),
+        table_growth_threshold: TableGrowthThresholdV1 {
+            absolute_bytes: SIGNIFICANT_TABLE_GROWTH_ABSOLUTE_BYTES,
+            relative_floor_bytes: SIGNIFICANT_TABLE_GROWTH_RELATIVE_FLOOR_BYTES,
+            relative_percent: SIGNIFICANT_TABLE_GROWTH_PERCENT,
+        },
+        table_growth_coverage,
     };
 
     let envelope = DashboardEnvelopeV1::ready(scope_from_state(&state), coverage, payload)
@@ -532,6 +625,7 @@ async fn push_or_merge_role(
     path: &str,
     handle: Option<tracedecay_rusqlite_runtime::migration_sql::MigrationSqlHandle>,
     context: &RequestContext,
+    include_table_growth: bool,
 ) {
     let identity = store_identity(path);
     if let Some(index) = seen.get(&identity).copied() {
@@ -541,7 +635,7 @@ async fn push_or_merge_role(
         }
         return;
     }
-    let entry = sample_store(role, path, handle, context).await;
+    let entry = sample_store(role, path, handle, context, include_table_growth).await;
     seen.insert(identity, entries.len());
     entries.push(entry);
 }
@@ -573,12 +667,16 @@ fn push_or_merge_unknown_role(
         StoreKeyV1::new(sanitize_store_key(&store_name))
             .unwrap_or_else(|_| StoreKeyV1::new("store").expect("static key"))
     });
+    let table_growth_store = store.clone();
     seen.insert(identity, entries.len());
     entries.push(SampledStoreV1 {
         store: store_name,
         path: path.to_string(),
         roles: vec![role.to_string()],
         read: StorageTelemetryReadV1::Unknown { store },
+        table_growth_read: Some(TableGrowthTelemetryReadV1::Unknown {
+            store: table_growth_store,
+        }),
         omission_reason: Some(omission_reason),
     });
 }
@@ -621,33 +719,48 @@ async fn sample_store(
     path: &str,
     handle: Option<tracedecay_rusqlite_runtime::migration_sql::MigrationSqlHandle>,
     context: &RequestContext,
+    include_table_growth: bool,
 ) -> SampledStoreV1 {
     let store_name = store_file_name(path);
-    let (read, omission_reason) = match storage_telemetry_port(path, handle, context) {
-        Some((store, port)) => {
-            let read = port.store_size(context, &store).await;
-            let omission = (!matches!(read, StorageTelemetryReadV1::Observed { .. }))
-                .then(|| format!("store telemetry read failed for {role} role"));
-            (read, omission)
-        }
-        // The store file name is not a valid store key; report the read as
-        // unknown against a sanitized fallback key rather than inventing size.
-        None => (
-            StorageTelemetryReadV1::Unknown {
-                store: StoreKeyV1::new(sanitize_store_key(&store_name))
-                    .unwrap_or_else(|_| StoreKeyV1::new("store").expect("static key")),
-            },
-            Some(format!(
-                "store telemetry runtime is unavailable for {role} role"
-            )),
-        ),
-    };
+    let (read, table_growth_read, omission_reason) =
+        match storage_telemetry_port(path, handle, context) {
+            Some((store, port)) => {
+                let (read, table_growth_read) = if include_table_growth {
+                    let (read, table_growth) = tokio::join!(
+                        port.store_size(context, &store),
+                        port.table_growth(context, &store)
+                    );
+                    (read, Some(table_growth))
+                } else {
+                    (port.store_size(context, &store).await, None)
+                };
+                let omission = (!matches!(read, StorageTelemetryReadV1::Observed { .. }))
+                    .then(|| format!("store telemetry read failed for {role} role"));
+                (read, table_growth_read, omission)
+            }
+            // The store file name is not a valid store key; report the read as
+            // unknown against a sanitized fallback key rather than inventing size.
+            None => {
+                let store = StoreKeyV1::new(sanitize_store_key(&store_name))
+                    .unwrap_or_else(|_| StoreKeyV1::new("store").expect("static key"));
+                (
+                    StorageTelemetryReadV1::Unknown {
+                        store: store.clone(),
+                    },
+                    include_table_growth.then_some(TableGrowthTelemetryReadV1::Unknown { store }),
+                    Some(format!(
+                        "store telemetry runtime is unavailable for {role} role"
+                    )),
+                )
+            }
+        };
 
     SampledStoreV1 {
         store: store_name,
         path: path.to_string(),
         roles: vec![role.to_string()],
         read,
+        table_growth_read,
         omission_reason,
     }
 }
@@ -669,6 +782,11 @@ fn telemetry_entry(
     let budget = budget_dimension(&sampled.store, sample, retention);
     let growth = growth_dimension(&store_identity(&sampled.path), total_bytes, free_bytes);
     let role = sampled.primary_role();
+    let table_growth = table_growth_dimension(sampled.table_growth_read.unwrap_or_else(|| {
+        let store = StoreKeyV1::new(sanitize_store_key(&sampled.store))
+            .unwrap_or_else(|_| StoreKeyV1::new("store").expect("static key"));
+        TableGrowthTelemetryReadV1::Unknown { store }
+    }));
 
     StoreTelemetryEntryV1 {
         store: sampled.store,
@@ -681,7 +799,129 @@ fn telemetry_entry(
         free_page_ratio,
         budget,
         growth,
+        table_growth,
     }
+}
+
+fn unavailable_table_growth_coverage(reason: &str) -> DashboardCoverageV1 {
+    DashboardCoverageV1::partial(1, 0, "store_table_growth_reads", vec![reason.to_string()])
+}
+
+/// Project the application telemetry read into the dashboard contract without
+/// inventing bytes for unavailable states or silently dropping below-threshold
+/// tables.
+fn table_growth_dimension(read: TableGrowthTelemetryReadV1) -> TableGrowthDimensionV1 {
+    match read {
+        TableGrowthTelemetryReadV1::Observed { samples, .. } => {
+            let denominator = samples.len() as u64;
+            let mut significant_samples = Vec::new();
+            let mut omissions = Vec::new();
+            for sample in samples {
+                if is_significant_table_growth(&sample) {
+                    significant_samples.push(SignificantTableGrowthSampleV1 {
+                        table: sample.table.as_str().to_string(),
+                        previous_bytes: sample.previous_bytes.get(),
+                        current_bytes: sample.current_bytes.get(),
+                        growth_bytes: sample.growth_bytes().get(),
+                        previous_observed_at: sample.previous_observed_at.0,
+                        current_observed_at: sample.current_observed_at.0,
+                    });
+                } else {
+                    omissions.push(TableGrowthOmissionV1 {
+                        table: sample.table.as_str().to_string(),
+                        reason: format!(
+                            "observed growth of {} bytes was below the informational threshold (at least {} bytes, or at least {} bytes and {}% of the previous size)",
+                            sample.growth_bytes().get(),
+                            SIGNIFICANT_TABLE_GROWTH_ABSOLUTE_BYTES,
+                            SIGNIFICANT_TABLE_GROWTH_RELATIVE_FLOOR_BYTES,
+                            SIGNIFICANT_TABLE_GROWTH_PERCENT,
+                        ),
+                    });
+                }
+            }
+            TableGrowthDimensionV1::Observed {
+                coverage: DashboardCoverageV1::complete(
+                    denominator,
+                    "observed_table_growth_samples",
+                ),
+                significant_samples,
+                omissions,
+            }
+        }
+        TableGrowthTelemetryReadV1::BaselineEstablished {
+            observed_at,
+            tables_observed,
+            ..
+        } => {
+            let reason = TABLE_GROWTH_BASELINE_REASON.to_string();
+            TableGrowthDimensionV1::BaselineEstablished {
+                coverage: unavailable_table_growth_coverage(&reason),
+                observed_at: observed_at.0,
+                tables_observed,
+                omission_reasons: vec![reason],
+            }
+        }
+        TableGrowthTelemetryReadV1::Unsupported { .. } => {
+            let reason = TABLE_GROWTH_UNSUPPORTED_REASON.to_string();
+            TableGrowthDimensionV1::Unsupported {
+                coverage: unavailable_table_growth_coverage(&reason),
+                omission_reasons: vec![reason],
+            }
+        }
+        TableGrowthTelemetryReadV1::Denied { .. } => {
+            let reason = TABLE_GROWTH_DENIED_REASON.to_string();
+            TableGrowthDimensionV1::Denied {
+                coverage: unavailable_table_growth_coverage(&reason),
+                omission_reasons: vec![reason],
+            }
+        }
+        TableGrowthTelemetryReadV1::Unknown { .. } => {
+            let reason = TABLE_GROWTH_UNKNOWN_REASON.to_string();
+            TableGrowthDimensionV1::Unknown {
+                coverage: unavailable_table_growth_coverage(&reason),
+                omission_reasons: vec![reason],
+            }
+        }
+    }
+}
+
+fn table_growth_payload_coverage(entries: &[StoreTelemetryEntryV1]) -> DashboardCoverageV1 {
+    let denominator = entries.len() as u64;
+    let examined = entries
+        .iter()
+        .filter(|entry| matches!(entry.table_growth, TableGrowthDimensionV1::Observed { .. }))
+        .count() as u64;
+    if examined == denominator {
+        return DashboardCoverageV1::complete(denominator, "store_table_growth_reads");
+    }
+
+    let omission_reasons = entries
+        .iter()
+        .flat_map(|entry| match &entry.table_growth {
+            TableGrowthDimensionV1::Observed { .. } => Vec::new(),
+            TableGrowthDimensionV1::BaselineEstablished {
+                omission_reasons, ..
+            }
+            | TableGrowthDimensionV1::Unsupported {
+                omission_reasons, ..
+            }
+            | TableGrowthDimensionV1::Denied {
+                omission_reasons, ..
+            }
+            | TableGrowthDimensionV1::Unknown {
+                omission_reasons, ..
+            } => omission_reasons
+                .iter()
+                .map(|reason| format!("{}: {reason}", entry.store))
+                .collect(),
+        })
+        .collect();
+    DashboardCoverageV1::partial(
+        denominator,
+        examined,
+        "store_table_growth_reads",
+        omission_reasons,
+    )
 }
 
 /// Resolve the budget dimension for one store from owner configuration.
@@ -1000,6 +1240,88 @@ mod tests {
             budget_dimension("probe.db", None, Some(&configured)),
             StoreBudgetDimensionV1::Unknown { .. }
         ));
+    }
+
+    #[test]
+    fn table_growth_projection_keeps_unavailable_and_baseline_states_typed() {
+        let store = StoreKeyV1::new("probe.db").expect("key");
+        let baseline = table_growth_dimension(TableGrowthTelemetryReadV1::BaselineEstablished {
+            store: store.clone(),
+            observed_at: UtcMicros(42),
+            tables_observed: 7,
+        });
+        match baseline {
+            TableGrowthDimensionV1::BaselineEstablished {
+                tables_observed,
+                omission_reasons,
+                ..
+            } => {
+                assert_eq!(tables_observed, 7);
+                assert!(
+                    omission_reasons
+                        .iter()
+                        .any(|reason| reason.contains("no baseline yet"))
+                );
+            }
+            other => panic!("expected baseline state, got {other:?}"),
+        }
+
+        let unknown = table_growth_dimension(TableGrowthTelemetryReadV1::Unknown { store });
+        match unknown {
+            TableGrowthDimensionV1::Unknown {
+                omission_reasons, ..
+            } => {
+                let serialized = serde_json::to_string(&omission_reasons).expect("serialize");
+                assert!(serialized.contains("unavailable"));
+                assert!(!serialized.contains("0 B"));
+            }
+            other => panic!("expected unknown state, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn table_growth_projection_reports_significant_samples_and_omissions() {
+        let store = StoreKeyV1::new("probe.db").expect("key");
+        let significant = tracedecay_application::storage::TableGrowthSampleV1 {
+            store: store.clone(),
+            table: tracedecay_application::storage::TableNameV1::new("messages").expect("table"),
+            previous_bytes: tracedecay_application::storage::StorageByteSizeV1(10 * 1024 * 1024),
+            current_bytes: tracedecay_application::storage::StorageByteSizeV1(11 * 1024 * 1024),
+            previous_observed_at: UtcMicros(10),
+            current_observed_at: UtcMicros(20),
+        };
+        let insignificant = tracedecay_application::storage::TableGrowthSampleV1 {
+            store: store.clone(),
+            table: tracedecay_application::storage::TableNameV1::new("metadata").expect("table"),
+            previous_bytes: tracedecay_application::storage::StorageByteSizeV1(100 * 1024 * 1024),
+            current_bytes: tracedecay_application::storage::StorageByteSizeV1(
+                100 * 1024 * 1024 + 512 * 1024,
+            ),
+            previous_observed_at: UtcMicros(10),
+            current_observed_at: UtcMicros(20),
+        };
+
+        match table_growth_dimension(TableGrowthTelemetryReadV1::Observed {
+            store,
+            samples: vec![significant, insignificant],
+        }) {
+            TableGrowthDimensionV1::Observed {
+                significant_samples,
+                omissions,
+                coverage,
+            } => {
+                assert_eq!(significant_samples.len(), 1);
+                assert_eq!(significant_samples[0].table, "messages");
+                assert_eq!(significant_samples[0].growth_bytes, 1024 * 1024);
+                assert_eq!(significant_samples[0].previous_observed_at, 10);
+                assert_eq!(significant_samples[0].current_observed_at, 20);
+                assert_eq!(omissions.len(), 1);
+                assert_eq!(omissions[0].table, "metadata");
+                assert!(omissions[0].reason.contains("below"));
+                assert!(coverage.is_complete());
+            }
+            other => panic!("expected observed state, got {other:?}"),
+        }
     }
 
     #[test]
