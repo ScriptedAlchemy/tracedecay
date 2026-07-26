@@ -5,7 +5,6 @@
 //! with downstream adapters.
 
 mod common;
-mod migration;
 mod projection;
 mod refresh;
 mod retrieval;
@@ -23,18 +22,10 @@ pub use common::{
     SessionRefreshProgressReadPermit, SessionRefreshReceiptReadOperation,
     SessionRefreshReceiptReadPermit, SessionRefreshStateV1, SessionSnapshotFreezeOperation,
     SessionSnapshotFreezePermit, SessionStoreError, SessionStoreResult,
-    SessionSummaryPublishOrReplayOperation, SessionSummaryPublishOrReplayPermit,
     SessionTemporalCapabilitiesV1, SessionTemporalCapabilityProvider, SessionTemporalCapabilityV1,
-    SessionTemporalDigestInvalidReasonV1, SessionTemporalDigestV1,
-    SessionTemporalMigrationBatchApplyOperation, SessionTemporalMigrationBatchApplyPermit,
-    SessionTemporalMigrationReceiptReadOperation, SessionTemporalMigrationReceiptReadPermit,
-    SessionTemporalOperationPermit, SessionTemporalPageRetrieveOperation,
-    SessionTemporalPageRetrievePermit, SessionTemporalSnapshotRequestV1, SessionTemporalSnapshotV1,
-};
-pub use migration::{
-    MAX_SESSION_TEMPORAL_MIGRATION_BATCH_ITEMS, SessionTemporalMigrationBatchV1,
-    SessionTemporalMigrationDispositionV1, SessionTemporalMigrationReceiptRequestV1,
-    SessionTemporalMigrationReceiptV1, SessionTemporalMigrationStore,
+    SessionTemporalDigestInvalidReasonV1, SessionTemporalDigestV1, SessionTemporalOperationPermit,
+    SessionTemporalPageRetrieveOperation, SessionTemporalPageRetrievePermit,
+    SessionTemporalSnapshotRequestV1, SessionTemporalSnapshotV1,
 };
 pub use projection::{
     MAX_SESSION_TEMPORAL_PROJECTION_BATCH_ITEMS, SessionGenerationActivationReceiptV1,
@@ -56,7 +47,4 @@ pub use retrieval::{
     MAX_SESSION_TEMPORAL_RETRIEVAL_PAGE_SIZE, SessionRetrievalPageV1, SessionRetrievalStore,
     SessionTemporalRetrievalRequestV1,
 };
-pub use summary::{
-    MAX_SESSION_SUMMARY_SOURCE_ANCHORS, SessionSummaryPublicationDispositionV1,
-    SessionSummaryPublicationReceiptV1, SessionSummaryPublicationRequestV1, SessionSummaryStore,
-};
+pub use summary::{MAX_SESSION_SUMMARY_SOURCE_ANCHORS, SessionSummaryPublicationRequestV1};

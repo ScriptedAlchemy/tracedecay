@@ -80,6 +80,53 @@ async fn daemon_cutover_binds_raw_v1_rows_without_query_fallback() {
         compatibility_mapping_count(&db, &owner, &source_store_id).await,
         202
     );
+    let cutover_receipt = {
+        let writer = db
+            .writer_connection("read verified compatibility cutover receipt")
+            .await
+            .unwrap();
+        let mut rows = writer
+            .query_engine(
+                "SELECT cutover_receipt_json FROM memory_v2_backfill_progress
+                 WHERE owner_kind = 'profile' AND project_id = '' AND source_store_id = ?1",
+                params![source_store_id.as_str()],
+            )
+            .await
+            .unwrap();
+        let receipt = rows
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<String>(0)
+            .unwrap();
+        drop(rows);
+        serde_json::from_str::<serde_json::Value>(&receipt).unwrap()
+    };
+    assert_eq!(
+        cutover_receipt["coverage"]["source_fact_count"],
+        serde_json::json!(202)
+    );
+    assert_eq!(
+        cutover_receipt["coverage"]["represented_fact_count"],
+        serde_json::json!(202)
+    );
+    assert_eq!(
+        cutover_receipt["coverage"]["source_feedback_count"],
+        serde_json::json!(0)
+    );
+    assert_eq!(
+        cutover_receipt["coverage"]["represented_feedback_count"],
+        serde_json::json!(0)
+    );
+    assert_eq!(
+        cutover_receipt["coverage"]["source_oplog_count"],
+        serde_json::json!(0)
+    );
+    assert_eq!(
+        cutover_receipt["coverage"]["represented_oplog_count"],
+        serde_json::json!(0)
+    );
 
     let projection = store.get_compatibility_fact(target).await.unwrap().unwrap();
     let mapping = projection
@@ -96,6 +143,154 @@ async fn daemon_cutover_binds_raw_v1_rows_without_query_fallback() {
             .unwrap(),
         CompatibilityLegacyMemoryCutoverProgressV1::Complete
     );
+    let remove = CompatibilityFactRemoveCommandV1::new(
+        CompatibilityFactTargetV1::Legacy(
+            LegacyFactQuery::new(owner.clone(), source_store_id.clone(), 1).unwrap(),
+        ),
+        ProvenanceId::new("compatibility-cutover-live-purge-test".to_owned()).unwrap(),
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(
+        store
+            .remove_compatibility_fact(remove)
+            .await
+            .unwrap()
+            .removed()
+    );
+    let writer = db
+        .writer_connection("verify guarded compatibility purge")
+        .await
+        .unwrap();
+    let mut rows = writer
+        .query_engine(
+            "SELECT
+               EXISTS(SELECT 1 FROM memory_facts WHERE fact_id = 1),
+               EXISTS(
+                 SELECT 1 FROM memory_v2_assertion_payloads
+                 WHERE fact_id = ?1
+               )",
+            params![mapping.fact_id().as_str()],
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().unwrap();
+    assert_eq!(row.get::<i64>(0).unwrap(), 0);
+    assert_eq!(row.get::<i64>(1).unwrap(), 0);
+}
+
+#[tokio::test]
+async fn cutover_refuses_completion_when_a_v1_fact_loses_its_v2_payload() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("compatibility-cutover-coverage.db");
+    let authority =
+        DatabaseAuthority::acquire_test(&path, "compatibility cutover coverage test").unwrap();
+    let (db, _) =
+        Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
+            .await
+            .unwrap();
+    let owner = FactOwnerV1::Profile;
+    let source_store_id = compatibility_source_store_id().unwrap();
+    db.writer_connection("seed cutover coverage fixture")
+        .await
+        .unwrap()
+        .execute_engine(
+            "INSERT INTO memory_facts(
+                fact_id, content, category, tags, trust_score, source,
+                metadata, hrr_vector, created_at, updated_at
+             ) VALUES(1, 'coverage must be verified', 'project', '[]', 0.5,
+                      'manual', '{}', NULL, 10, 10)",
+            (),
+        )
+        .await
+        .unwrap();
+
+    let store = DatabaseFactStore::new(&db);
+    let request = CompatibilityLegacyMemoryCutoverCommandV1::new(
+        owner,
+        ProvenanceId::new("compatibility-cutover-coverage-test".to_owned()).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        store
+            .advance_compatibility_legacy_memory_cutover(request.clone())
+            .await
+            .unwrap(),
+        CompatibilityLegacyMemoryCutoverProgressV1::Incomplete { processed: 1 }
+    );
+    db.writer_connection("remove canonical payload before cutover finalization")
+        .await
+        .unwrap()
+        .execute_engine(
+            "DELETE FROM memory_v2_assertion_payloads
+             WHERE fact_id = (
+                 SELECT fact_id FROM memory_v2_legacy_map
+                 WHERE owner_kind = 'profile' AND project_id = ''
+                   AND source_store_id = ?1 AND legacy_fact_id = 1
+             )",
+            params![source_store_id.as_str()],
+        )
+        .await
+        .unwrap();
+
+    store
+        .advance_compatibility_legacy_memory_cutover(request)
+        .await
+        .expect_err("cutover must refuse incomplete V1-to-V2 coverage");
+    let writer = db
+        .writer_connection("read refused cutover phase")
+        .await
+        .unwrap();
+    let mut rows = writer
+        .query_engine(
+            "SELECT phase FROM memory_v2_backfill_progress
+             WHERE owner_kind = 'profile' AND project_id = '' AND source_store_id = ?1",
+            params![source_store_id.as_str()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<String>(0)
+            .unwrap(),
+        "awaiting_cutover"
+    );
+}
+
+#[tokio::test]
+async fn memory_status_does_not_claim_unstarted_legacy_backfill_is_complete() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("compatibility-cutover-status.db");
+    let authority =
+        DatabaseAuthority::acquire_test(&path, "compatibility cutover status test").unwrap();
+    let (db, _) =
+        Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
+            .await
+            .unwrap();
+    db.writer_connection("seed unstarted compatibility cutover fixture")
+        .await
+        .unwrap()
+        .execute_engine(
+            "INSERT INTO memory_facts(
+                fact_id, content, category, tags, trust_score, source,
+                metadata, hrr_vector, created_at, updated_at
+             ) VALUES(1, 'unstarted cutover is incomplete', 'project', '[]', 0.5,
+                      'manual', '{}', NULL, 10, 10)",
+            (),
+        )
+        .await
+        .unwrap();
+
+    let status = DatabaseFactStore::new(&db)
+        .compatibility_memory_status(FactOwnerV1::Profile)
+        .await
+        .unwrap();
+
+    assert!(!status.legacy_backfill_complete());
 }
 
 async fn compatibility_mapping_count(
