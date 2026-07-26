@@ -8,20 +8,20 @@ use crate::global_db::{
     CodeProjectRecord, ProjectAliasRecord, ProjectRegistryContext, ProjectStoreContext,
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ProjectRegistryView {
     pub summary: ProjectRegistrySummary,
     pub project_tree: Vec<ProjectRepoGroup>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ProjectRegistrySummary {
     pub project_count: usize,
     pub repo_count: usize,
     pub truncated: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ProjectRepoGroup {
     pub label: String,
     pub git_common_dir: Option<String>,
@@ -30,7 +30,7 @@ pub struct ProjectRepoGroup {
     pub projects: Vec<ProjectRegistryEntry>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ProjectRegistryEntry {
     pub project_id: String,
     pub label: String,
@@ -48,7 +48,7 @@ pub struct ProjectRegistryEntry {
     pub is_active: Option<bool>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PublicCodeProject {
     pub project_id: String,
     pub label: String,

@@ -294,13 +294,13 @@ pub struct TrustHistoryEntry {
     pub note: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct MemoryRepairStats {
     pub missing_vectors_repaired: usize,
     pub banks_rebuilt: usize,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct MemoryStatus {
     pub fact_count: usize,
     pub entity_count: usize,
@@ -328,7 +328,7 @@ pub struct MemoryStatus {
 /// Fact-store adoption funnel: seen (retrieved/accessed) vs. rated
 /// (helpful/unhelpful). A dead funnel — facts seen many times but never
 /// rated — means trust scores stay entirely seed-time values, never earned.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct MemoryFeedbackFunnel {
     /// Sum of `memory_facts.retrieval_count` across all facts — total times
     /// any fact was returned by a recall/search query.

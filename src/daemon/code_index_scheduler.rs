@@ -16,7 +16,10 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use serde::{Deserialize, Serialize};
+use notify_debouncer_full::{
+    DebounceEventResult, Debouncer, RecommendedCache, new_debouncer,
+    notify::{RecommendedWatcher, RecursiveMode},
+};
 use thiserror::Error;
 use tracedecay_domain::{
     ChunkerRevision, CodeGenerationId, ComponentRevision, ContentDigest,
@@ -58,6 +61,9 @@ use crate::{
         },
         ports::RetrievalPortError,
     },
+    retention::code_index_generations::{
+        DurablePublicationPointerV1, acquire_code_generation_store_lock,
+    },
 };
 
 const MAX_PENDING_HINTS: usize = 1_024;
@@ -68,6 +74,16 @@ const SUPERSEDED_RECONCILE_RETRY_BACKOFF: Duration = Duration::from_millis(75);
 /// reconciliation re-checks gix truth before serving. Git-mediated changes are
 /// caught immediately by the tier-1 metadata check regardless of this bound.
 const DEFAULT_STALENESS_THRESHOLD: Duration = Duration::from_secs(30);
+
+pub(in crate::daemon) fn scoped_code_index_store_root(
+    store_root: &Path,
+    canonical_project_root: &Path,
+) -> PathBuf {
+    crate::retention::code_index_generations::scoped_code_index_store_root(
+        store_root,
+        canonical_project_root,
+    )
+}
 
 /// How the scheduler is hinted about changes.
 ///
@@ -143,17 +159,6 @@ struct DaemonCodeIndexPublicationStoreV1 {
     active_path: PathBuf,
     generations_root: PathBuf,
     expected_sanitizer_revision: SanitizerRevision,
-}
-
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct DurablePublicationPointerV1 {
-    generation_id: String,
-    snapshot_content_identity: String,
-    publication_digest: String,
-    sealed_at_micros: i64,
-    generation_file: String,
-    state_digest: String,
 }
 
 impl DaemonCodeIndexPublicationStoreV1 {
@@ -323,6 +328,12 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
         expected_active_generation: Option<&CodeGenerationId>,
         generation: CodeIndexPublishedGenerationV1,
     ) -> Result<(), CodeIndexPublicationStoreErrorV1> {
+        let store_root = self
+            .active_path
+            .parent()
+            .ok_or_else(|| Self::unavailable("active code-generation pointer has no store root"))?;
+        let _store_lock =
+            acquire_code_generation_store_lock(store_root).map_err(Self::unavailable)?;
         let _ = self.load_active()?;
         let mut active = self.active.lock().map_err(|_| {
             CodeIndexPublicationStoreErrorV1::Unavailable(

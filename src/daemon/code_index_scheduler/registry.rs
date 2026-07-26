@@ -17,7 +17,7 @@ use tracedecay_domain::{CodeGenerationId, ManifestDigest, RepositoryId, Worktree
 use super::{
     CodeIndexBytePoolStatsV1, CodeIndexPublishEvidenceV1, CodeIndexReconcileOutcomeV1,
     CodeIndexSchedulerErrorV1, CodeIndexWorktreeSchedulerV1, LatestCompleteCodeIndexV1,
-    SharedCodeIndexBytePoolV1, now_micros, sha256_hex,
+    SharedCodeIndexBytePoolV1, now_micros,
 };
 
 const MAX_CONCURRENT_BACKGROUND_RECONCILES: usize = 1;
@@ -158,7 +158,7 @@ impl CodeIndexSchedulerRegistryV1 {
         }
         let mut opened = self.open_worktree(
             &project_root,
-            store_root.join(sha256_hex(project_root.to_string_lossy().as_bytes())),
+            super::scoped_code_index_store_root(&store_root, &project_root),
         )?;
         if let Some(hook) = semantic_schedule {
             if let Some(latest) = opened.latest_complete() {

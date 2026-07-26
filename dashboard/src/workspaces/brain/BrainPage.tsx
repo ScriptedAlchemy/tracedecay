@@ -19,10 +19,10 @@ import {
 } from './field.ts';
 import { ScopedBrain } from './ScopedBrain.tsx';
 import {
-  ProjectsPayloadSchema,
   type ProjectRegistryEntry,
   type ProjectRepoGroup,
-} from '../../contracts/uncontracted/projects.ts';
+  ProjectsPayloadSchema,
+} from '../../contracts/wire.ts';
 
 /** Brain. Two surfaces, because the question genuinely changes when a project
  * is selected.

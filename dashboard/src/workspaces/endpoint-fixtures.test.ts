@@ -5,10 +5,10 @@
  * `stories/fixtures/data.ts` during the visual audit and MSW/DOM tests. This
  * suite asserts that each fixture payload parses against the exact zod schema
  * its consuming workspace validates it with — either a generated wire schema
- * from `contracts/wire.ts`, the single shared declaration for an uncontracted
- * route under `contracts/uncontracted/`, or (for pages whose schema is a
- * module-local const) a faithful mirror of that page's schema with a source
- * citation. If a fixture drifts from a contract, this fails.
+ * from `contracts/wire.ts`, or (for the few routes Rust still answers with a
+ * bare `Value`, whose pages read them through a module-local const) a faithful
+ * mirror of that page's schema with a source citation. If a fixture drifts
+ * from a contract, this fails.
  *
  * A route read by two workspaces gets ONE test against ONE schema. It used to
  * get two, because `/api/projects` was modelled twice under two export names,
@@ -26,17 +26,24 @@ import type { ZodType } from 'zod';
 import { resolveFixture } from '../../stories/fixtures/data.ts';
 import { AnyObject } from '../data/query/legacy.ts';
 import {
+  AnalyticsOverviewPayloadSchema,
+  AnalyticsUsageSummarySchema,
+  DoctorFindingsPayloadSchema,
   DoctorStorageFindingKindSchema,
   EnvelopeSchema,
-  StorageFindingsPayloadSchema,
-  StorageTelemetryPayloadSchema,
-  DoctorFindingsPayloadSchema,
-} from '../contracts/wire.ts';
-import { AnalyticsOverviewPayloadSchema } from '../contracts/uncontracted/analytics.ts';
-import {
+  GraphOverviewPayloadSchema,
+  GraphSearchPayloadSchema,
+  GraphSubgraphPayloadSchema,
+  LcmSessionPayloadSchema,
+  MemoryOverviewPayloadSchema,
+  MemoryStatusPayloadSchema,
   ProjectContextPayloadSchema,
   ProjectsPayloadSchema,
-} from '../contracts/uncontracted/projects.ts';
+  SavingsOverviewPayloadSchema,
+  SavingsSessionsPayloadSchema,
+  StorageFindingsPayloadSchema,
+  StorageTelemetryPayloadSchema,
+} from '../contracts/wire.ts';
 import {
   ANALYTICS_EVENT_LIMIT,
   describeWindow,
@@ -47,22 +54,8 @@ import {
 } from './agents/usage.ts';
 import { columnIndexFor, indexedMass } from './brain/field.ts';
 import { composeDeliveryField } from './delivery/field.ts';
-import {
-  ChainPayloadSchema,
-  SessionsPayloadSchema,
-} from '../contracts/uncontracted/sessions.ts';
 import { composeWeave, summarizeChain } from './loom/weave.ts';
-import {
-  GraphOverviewPayloadSchema,
-  GraphSearchPayloadSchema,
-  SubgraphPayloadSchema,
-} from '../contracts/uncontracted/graph.ts';
-import {
-  MemoryOverviewPayloadSchema,
-  MemoryStatusPayloadSchema,
-} from '../contracts/uncontracted/memory.ts';
 import { composeTrustDistribution } from './knowledge/trust.ts';
-import { SavingsOverviewPayloadSchema } from '../contracts/uncontracted/savings.ts';
 
 /** Parse a resolved fixture, surfacing zod issues on failure. */
 function parse<T>(schema: ZodType<T>, pathname: string, search = ''): T {
@@ -140,8 +133,7 @@ const CapabilitiesSchema = z
 
 // SessionsPage.tsx: OverviewPayload. (LoomPage no longer reads this route —
 // `/api/plugins/hermes-lcm/overview` 500s on the real profile, so the weave
-// draws from `/api/plugins/savings/sessions` instead; see
-// `contracts/uncontracted/sessions.ts`.)
+// draws from `/api/plugins/savings/sessions` instead.)
 const OverviewPayload = z
   .object({ latest_sessions: z.array(AnyObject).optional() })
   .passthrough();
@@ -167,21 +159,6 @@ const MemoryListPayload = z
     holographic: z
       .object({ facts: z.array(AnyObject).optional() })
       .passthrough()
-      .optional(),
-  })
-  .passthrough();
-
-// AgentsPage.tsx: UsagePayload.
-const UsagePayload = z
-  .object({
-    available: z.boolean(),
-    event_count: z.number().optional(),
-    by_category: z
-      .array(
-        z
-          .object({ kind: z.string(), category: z.string(), events: z.number() })
-          .passthrough(),
-      )
       .optional(),
   })
   .passthrough();
@@ -261,7 +238,7 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
   // `/api/projects` and used to assert it against two hand-written copies of
   // its body under two different export names, which is how the copies drifted
   // apart without anything noticing. Both surfaces' density requirements now
-  // sit on the single `contracts/uncontracted/projects.ts` contract.
+  // sit on the one generated `ProjectsPayloadSchema`.
   it('GET /api/projects — brain + delivery registry (ProjectsPayloadSchema)', () => {
     const data = parse(ProjectsPayloadSchema, '/api/projects');
     const tree = data.project_tree ?? [];
@@ -324,9 +301,9 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
     );
   });
 
-  it('GET /api/plugins/graph/subgraph — scoped brain field (SubgraphPayloadSchema)', () => {
+  it('GET /api/plugins/graph/subgraph — scoped brain field (GraphSubgraphPayloadSchema)', () => {
     const data = parse(
-      SubgraphPayloadSchema,
+      GraphSubgraphPayloadSchema,
       '/api/projects/tracedecay/plugins/graph/subgraph',
     );
     expect((data.nodes ?? []).length).toBeGreaterThanOrEqual(20);
@@ -405,8 +382,8 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
     }
   });
 
-  it('GET /api/plugins/savings/sessions — loom threads (SessionsPayloadSchema)', () => {
-    const data = parse(SessionsPayloadSchema, '/api/plugins/savings/sessions');
+  it('GET /api/plugins/savings/sessions — loom threads (SavingsSessionsPayloadSchema)', () => {
+    const data = parse(SavingsSessionsPayloadSchema, '/api/plugins/savings/sessions');
     const sessions = data.sessions ?? [];
     expect(sessions.length).toBeGreaterThanOrEqual(30);
     expect(new Set(sessions.map((s) => s.provider)).size).toBe(3);
@@ -445,9 +422,9 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
     expect(weave.extent).not.toBeNull();
   });
 
-  it('GET /api/plugins/hermes-lcm/session/{id} — loom chain (ChainPayloadSchema)', () => {
+  it('GET /api/plugins/hermes-lcm/session/{id} — loom chain (LcmSessionPayloadSchema)', () => {
     const data = parse(
-      ChainPayloadSchema,
+      LcmSessionPayloadSchema,
       '/api/plugins/hermes-lcm/session/035c8f3c-d4e6-4176-afea-6f52e770501e',
     );
     expect(data.exists).toBe(true);
@@ -477,22 +454,21 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
     const data = parse(GraphOverviewPayloadSchema, '/api/plugins/graph/overview');
     const hubs = (data.top_connected ?? []) as Array<Record<string, unknown>>;
     // `graph_queries::top_connected_rows` is a `LIMIT 12` subquery selecting
-    // exactly five columns, so the fixture must serve twelve rows of that
-    // shape and no more. The old bound (>= 15) locked in a fixture that
-    // emitted eighteen FULL node records — a payload the daemon cannot
-    // produce — which meant the Code workspace was being designed and audited
-    // against fields (`qualified_name`, `signature`, `start_line`) this route
-    // never returns.
+    // exactly five columns, so the fixture must serve twelve rows and no more.
+    // The route decodes those rows into `GraphNodeV1`, whose other fields are
+    // `Option` and serialize as explicit nulls — so the five selected columns
+    // must be the only ones carrying a value. Asserting that, rather than the
+    // key set, keeps the original guarantee: the Code workspace cannot be
+    // designed or audited against `qualified_name`, `signature` or
+    // `start_line`, because this route never populates them.
     expect(hubs.length).toBe(12);
+    const SELECTED = ['id', 'name', 'kind', 'file_path', 'degree'];
     for (const hub of hubs) {
       expect(typeof hub['degree']).toBe('number');
-      expect(Object.keys(hub).sort()).toEqual([
-        'degree',
-        'file_path',
-        'id',
-        'kind',
-        'name',
-      ]);
+      const populated = Object.keys(hub)
+        .filter((key) => hub[key] !== null)
+        .sort();
+      expect(populated).toEqual([...SELECTED].sort());
     }
     // Degrees arrive already ranked, highest first.
     const degrees = hubs.map((hub) => hub['degree'] as number);
@@ -510,16 +486,16 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
     expect((data.results ?? []).length).toBeGreaterThanOrEqual(250);
   });
 
-  it('GET /api/plugins/graph/subgraph — code unseeded (SubgraphPayloadSchema)', () => {
-    const data = parse(SubgraphPayloadSchema, '/api/plugins/graph/subgraph');
+  it('GET /api/plugins/graph/subgraph — code unseeded (GraphSubgraphPayloadSchema)', () => {
+    const data = parse(GraphSubgraphPayloadSchema, '/api/plugins/graph/subgraph');
     expect(data.seed_id).toBeNull();
     expect(data.mode).toBe('default');
     expect(data.nodes.length).toBeGreaterThanOrEqual(30);
     expect(data.edges.length).toBeGreaterThanOrEqual(40);
   });
 
-  it('GET /api/plugins/graph/subgraph?node_id= — code seeded (SubgraphPayloadSchema)', () => {
-    const data = parse(SubgraphPayloadSchema, '/api/plugins/graph/subgraph', '?node_id=sym-0');
+  it('GET /api/plugins/graph/subgraph?node_id= — code seeded (GraphSubgraphPayloadSchema)', () => {
+    const data = parse(GraphSubgraphPayloadSchema, '/api/plugins/graph/subgraph', '?node_id=sym-0');
     expect(data.seed_id).toBe('sym-0');
     expect(data.mode).toBe('seeded');
     expect(data.nodes.some((n) => n.id === 'sym-0')).toBe(true);
@@ -535,8 +511,8 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
     expect(data.turns.available).toBe(true);
   });
 
-  it('GET /api/plugins/analytics/usage — agents (UsagePayload)', () => {
-    const data = parse(UsagePayload, '/api/plugins/analytics/usage');
+  it('GET /api/plugins/analytics/usage — agents (AnalyticsUsageSummarySchema)', () => {
+    const data = parse(AnalyticsUsageSummarySchema, '/api/plugins/analytics/usage');
     expect(data.available).toBe(true);
     const rows = data.by_category ?? [];
     expect(rows.length).toBeGreaterThanOrEqual(3);
