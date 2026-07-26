@@ -210,6 +210,7 @@ async function main(): Promise<void> {
   let browser: Browser | null = null;
   const surfaces: SurfaceEntry[] = [];
   const axeTotals = { violations: 0, byImpact: {} as Record<string, number> };
+  const pageErrors: string[] = [];
   let screenshotCount = 0;
 
   try {
@@ -220,6 +221,13 @@ async function main(): Promise<void> {
     browser = await chromium.launch({ headless: true });
     const context = await browser.newContext({ deviceScaleFactor: 1 });
     const page = await context.newPage();
+    // A crashed route renders the router's own accessible error boundary, which
+    // screenshots happily and scores a clean axe pass. A page error therefore
+    // fails the run rather than being invisible in the manifest.
+    page.on('pageerror', (error) => {
+      pageErrors.push(error.message);
+      console.error(`[audit] PAGEERROR ${error.message}`);
+    });
     await installApiFixtures(page);
     await page.addInitScript(() => {
       const inject = () => {
@@ -328,9 +336,18 @@ async function main(): Promise<void> {
     );
   }
 
+  // THE GATE. This used to fail only on shots that could not be rendered, so a
+  // run could report accessibility violations in its own summary and still exit
+  // 0 — which is what every CI runner and every reviewer reads. Recording a
+  // violation is not the same as failing on one.
   const failed = surfaces.flatMap((s) => s.shots).filter((sh) => sh.error);
   if (failed.length > 0) {
     console.error(`[audit] ${failed.length} shot(s) failed to render`);
+  }
+  if (pageErrors.length > 0) {
+    console.error(`[audit] ${pageErrors.length} page error(s)`);
+  }
+  if (failed.length > 0 || pageErrors.length > 0 || axeTotals.violations > 0) {
     process.exitCode = 1;
   }
 }
