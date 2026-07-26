@@ -54,8 +54,13 @@ async fn unknown_tables(path: &Path, classify: fn(&str) -> Option<&'static str>)
 
 fn graph_table_disposition(table: &str) -> Option<&'static str> {
     match table {
-        "external_source_states_v1"
-        | "memory_entities"
+        // Reducer state is copied by immutable binding identity. Equal rows
+        // deduplicate; divergent histories fail closed because choosing either
+        // state would discard durable receipts and projection effects.
+        "external_source_states_v1" => {
+            Some("unioned by binding identity; divergent collisions rejected")
+        }
+        "memory_entities"
         | "memory_fact_entities"
         | "memory_fact_relations"
         | "memory_facts"
@@ -133,6 +138,9 @@ fn graph_table_disposition(table: &str) -> Option<&'static str> {
 
 fn session_table_disposition(table: &str) -> Option<&'static str> {
     match table {
+        "external_source_states_v1" => {
+            Some("unioned by binding identity; divergent collisions rejected")
+        }
         "analytics_events"
         | "commit_sessions"
         | "configuration_access_rules"
@@ -152,7 +160,6 @@ fn session_table_disposition(table: &str) -> Option<&'static str> {
         | "configuration_topology_policies"
         | "configuration_topology_protected_refs"
         | "configuration_topology_roots"
-        | "external_source_states_v1"
         | "git_correlation_meta"
         | "git_index_preview_commitments"
         | "git_index_repository_quarantines"
