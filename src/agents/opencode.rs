@@ -504,6 +504,35 @@ fn install_registration_entries(
         );
     }
     if install_lsp {
+        let retained_analyzer_owners = config_object
+            .get("lsp")
+            .and_then(serde_json::Value::as_object)
+            .into_iter()
+            .flat_map(|servers| servers.iter())
+            .filter(|(name, registration)| {
+                name.as_str() != "tracedecay"
+                    && registration
+                        .get("disabled")
+                        .and_then(serde_json::Value::as_bool)
+                        != Some(true)
+            })
+            .flat_map(|(name, registration)| {
+                registration
+                    .get("extensions")
+                    .and_then(serde_json::Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(serde_json::Value::as_str)
+                    .filter(|extension| TRACEDECAY_LSP_EXTENSIONS.contains(extension))
+                    .map(move |extension| (extension.to_owned(), name.clone()))
+            })
+            .fold(
+                std::collections::BTreeMap::<String, Vec<String>>::new(),
+                |mut owners, (extension, owner)| {
+                    owners.entry(extension).or_default().push(owner);
+                    owners
+                },
+            );
         let lsp_value = config_object.entry("lsp").or_insert_with(|| json!({}));
         if lsp_value == &json!(true) {
             // OpenCode documents object-form `lsp` as retaining built-in servers
@@ -530,7 +559,11 @@ fn install_registration_entries(
                     "initialization": {
                         "tracedecay": {
                             "brokerUpstream": false,
-                            "duplicateAnalyzerAvoidance": true
+                            "duplicateAnalyzerAvoidance": true,
+                            "analyzerOwnership": {
+                                "mode": "projection_only",
+                                "retainedByExtension": retained_analyzer_owners
+                            }
                         }
                     }
                 }),
@@ -730,5 +763,56 @@ fn doctor_check_plugin(dc: &mut DoctorCounters, home: &Path) {
             "native edit/idle plugin missing from {} — run `tracedecay install --agent opencode`",
             plugin_path.display()
         ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lsp_registration_records_retained_analyzers_per_extension() {
+        let home = tempfile::tempdir().unwrap();
+        let config_path = home.path().join("opencode.json");
+        std::fs::write(
+            &config_path,
+            serde_json::to_vec_pretty(&json!({
+                "lsp": {
+                    "rust-analyzer": {
+                        "command": ["rust-analyzer"],
+                        "extensions": [".rs"]
+                    },
+                    "disabled-typescript": {
+                        "disabled": true,
+                        "extensions": [".ts"]
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        install_mcp_server(&config_path, "/usr/bin/tracedecay").unwrap();
+
+        let config = load_json_file_strict(&config_path).unwrap();
+        assert_eq!(
+            config["lsp"]["tracedecay"]["initialization"]["tracedecay"]["analyzerOwnership"]["mode"],
+            "projection_only"
+        );
+        assert_eq!(
+            config["lsp"]["tracedecay"]["initialization"]["tracedecay"]["analyzerOwnership"]["retainedByExtension"]
+                [".rs"],
+            json!(["rust-analyzer"])
+        );
+        assert!(
+            config["lsp"]["tracedecay"]["initialization"]["tracedecay"]
+                ["analyzerOwnership"]["retainedByExtension"]
+                .get(".ts")
+                .is_none()
+        );
+        assert_eq!(
+            config["lsp"]["rust-analyzer"]["command"],
+            json!(["rust-analyzer"])
+        );
     }
 }

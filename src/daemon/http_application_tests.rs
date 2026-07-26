@@ -33,7 +33,7 @@ async fn request(
     request_path(
         service,
         "POST",
-        &format!("/projects/{PROJECT_ID}/application/git/apply"),
+        &format!("/projects/{PROJECT_ID}/application/tests/results"),
         authorization,
         origin,
     )
@@ -209,7 +209,7 @@ async fn service_with_probe() -> (DaemonHttpApplicationService, Arc<AtomicUsize>
     let calls = Arc::new(AtomicUsize::new(0));
     let probe_calls = Arc::clone(&calls);
     let canonical = Router::new().route(
-        "/git/apply",
+        "/tests/results",
         post(move || {
             let calls = Arc::clone(&probe_calls);
             async move {
@@ -230,7 +230,7 @@ async fn service_with_probe() -> (DaemonHttpApplicationService, Arc<AtomicUsize>
 }
 
 #[tokio::test]
-async fn daemon_http_requires_bearer_before_git_apply_dispatch() {
+async fn daemon_http_requires_bearer_before_application_dispatch() {
     let (service, calls) = service_with_probe().await;
     let response = request(&service, None, Some(service.origin())).await;
 
@@ -240,7 +240,7 @@ async fn daemon_http_requires_bearer_before_git_apply_dispatch() {
 }
 
 #[tokio::test]
-async fn daemon_http_requires_exact_local_origin_before_git_apply_dispatch() {
+async fn daemon_http_requires_exact_local_origin_before_application_dispatch() {
     let (service, calls) = service_with_probe().await;
     let authorization = format!("Bearer {AUTH_TOKEN}");
     let response = request(
@@ -362,7 +362,7 @@ async fn daemon_http_accepts_project_router_mounted_after_listener_start() {
         .mount(
             PROJECT_ID,
             Router::new().route(
-                "/git/apply",
+                "/tests/results",
                 post(move || {
                     let calls = Arc::clone(&probe_calls);
                     async move {
@@ -399,7 +399,7 @@ async fn daemon_http_cold_entry_resolves_project_before_canonical_dispatch() {
                 resolver_calls.fetch_add(1, Ordering::Relaxed);
                 assert_eq!(project_id.as_str(), PROJECT_ID);
                 Ok(Some(Router::new().route(
-                    "/git/apply",
+                    "/tests/results",
                     post(move || {
                         let calls = Arc::clone(&calls);
                         async move {
