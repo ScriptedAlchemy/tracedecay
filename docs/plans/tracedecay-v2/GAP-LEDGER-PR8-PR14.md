@@ -145,12 +145,13 @@ the temporary-alias deletion slices.
   the daemon gateway, `src/lsp_bridge.rs`, `src/diagnostics/lsp/`, and
   `tracedecay lsp servers|bridge`; the old `--no-lsp`/environment/config/module
   proposal is not a missing plan requirement.
-- `38-storage-retention-size-and-efficiency.md` and `NEXT.md`: projected
-  message dedupe is engaged by default, but raw offload/drop, legacy
-  session/raw windows, observation-evidence release, and
-  `source_cursor_advances` reclamation are not. Its immutable triggers are a
-  real obstacle, but the whole `global.db` is only 0.98 GiB and no historical
-  per-table byte claim has been reproduced through the product.
+- `38-storage-retention-size-and-efficiency.md` and `NEXT.md`: raw LCM
+  offload/drop, projected-message dedupe, legacy session/raw pruning, and
+  observation-evidence release now have bounded defaults. Superseded
+  `source_cursor_advances` are reclaimed by the daemon-authorized retention
+  transaction while preserving the current-frontier receipt and restoring the
+  immutable delete trigger before commit. No historical per-table byte claim
+  has been reproduced through the product, but
   `SqliteStoreSizeTelemetryPort` now implements scoped store-size and `dbstat`
   table-growth telemetry consumed by Doctor. Plan 38 also records that the
   reachable debris collector originally missed bare `.corrupt` artifacts
