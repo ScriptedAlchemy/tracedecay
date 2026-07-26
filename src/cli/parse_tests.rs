@@ -1737,8 +1737,46 @@ fn migrate_storage_report_parses() {
     assert!(matches!(
         cli.command,
         Some(Commands::Migrate {
-            action: MigrateAction::StorageReport { profile_root, json }
-        }) if profile_root.as_deref() == Some("/tmp/profile") && json
+            action: MigrateAction::StorageReport {
+                profile_root,
+                project_id,
+                project_root,
+                json,
+            }
+        }) if profile_root.as_deref() == Some("/tmp/profile")
+            && project_id.is_none()
+            && project_root.is_none()
+            && json
+    ));
+}
+
+#[test]
+fn migrate_storage_report_parses_targeted_project() {
+    let cli = Cli::try_parse_from([
+        "tracedecay",
+        "migrate",
+        "storage-report",
+        "--profile-root",
+        "/tmp/profile",
+        "--project-id",
+        "proj_a",
+        "--project-root",
+        "/repos/a",
+    ])
+    .expect("targeted migrate storage-report should parse");
+
+    assert!(matches!(
+        cli.command,
+        Some(Commands::Migrate {
+            action: MigrateAction::StorageReport {
+                profile_root,
+                project_id,
+                project_root,
+                json: false,
+            }
+        }) if profile_root.as_deref() == Some("/tmp/profile")
+            && project_id.as_deref() == Some("proj_a")
+            && project_root.as_deref() == Some("/repos/a")
     ));
 }
 

@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::cli::MigrateAction;
 
@@ -123,9 +123,12 @@ pub(crate) async fn handle_migrate_action(action: MigrateAction) -> tracedecay::
             apply,
             json,
         } => handle_migrate_registry_gc(prefix, apply, json).await,
-        MigrateAction::StorageReport { profile_root, json } => {
-            handle_migrate_storage_report(profile_root, json).await
-        }
+        MigrateAction::StorageReport {
+            profile_root,
+            project_id,
+            project_root,
+            json,
+        } => handle_migrate_storage_report(profile_root, project_id, project_root, json).await,
         MigrateAction::Rollback {
             manifest,
             confirm_token,
@@ -755,19 +758,32 @@ async fn handle_migrate_registry_gc(
 }
 
 /// Read-only per-store size / free-page-ratio / unregistered-directory report
-/// (plan 38 §7). Reads `global.db` and every registered project's graph
-/// database directly through `sqlite_read_snapshot` — never through a daemon
-/// broker, never a write path, so this always works even with no daemon
-/// running and never competes with one that is.
+/// (plan 38 §7). Reads `global.db` through `sqlite_read_snapshot` and project
+/// graph databases through strictly read-only handles — never through a daemon
+/// broker or a write path, so this works with no daemon running.
 async fn handle_migrate_storage_report(
     profile_root: Option<String>,
+    project_id: Option<String>,
+    project_root: Option<String>,
     json: bool,
 ) -> tracedecay::errors::Result<()> {
     let profile_root = match profile_root {
         Some(path) => PathBuf::from(path),
         None => tracedecay::storage::default_profile_root()?,
     };
-    let report = tracedecay::retention::storage_report::build_storage_report(&profile_root).await?;
+    let report = match (project_id, project_root) {
+        (Some(project_id), Some(project_root)) => {
+            tracedecay::retention::storage_report::build_project_storage_report(
+                &profile_root,
+                &project_id,
+                Path::new(&project_root),
+            )?
+        }
+        (None, None) => {
+            tracedecay::retention::storage_report::build_storage_report(&profile_root).await?
+        }
+        _ => unreachable!("clap requires project id and root together"),
+    };
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(());
@@ -795,6 +811,36 @@ async fn handle_migrate_storage_report(
             store.canonical_root,
             format_bytes(store.total_bytes),
         );
+    }
+    for retention in &report.code_generation_retention {
+        println!(
+            "  code-index retention dry run for {}: active {} ({}), rollback floor {}",
+            retention.project_id,
+            retention.active_generation_id,
+            retention.active_generation_file,
+            retention.rollback_floor
+        );
+        println!(
+            "    superseded: {} generation(s), {} bytes ({})",
+            retention.superseded_generation_count,
+            retention.superseded_generation_bytes,
+            format_bytes(retention.superseded_generation_bytes)
+        );
+        println!(
+            "    would delete: {} generation(s), {} bytes ({})",
+            retention.collectable_generation_count,
+            retention.collectable_generation_bytes,
+            format_bytes(retention.collectable_generation_bytes)
+        );
+        for generation in &retention.collectable_generations {
+            println!(
+                "      {}/code-generations-v1/{} ({} bytes, sealed_at_micros={})",
+                retention.store_root,
+                generation.generation_file,
+                generation.size_bytes,
+                generation.sealed_at_micros
+            );
+        }
     }
     println!(
         "  unregistered directories: {} ({})",

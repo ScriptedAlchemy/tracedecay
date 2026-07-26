@@ -34,14 +34,17 @@ pub use debris::{
     QuarantinedArtifactV1,
 };
 pub use findings::{
-    incident_debris_finding, orphan_store_finding, over_budget_finding, retention_backlog_finding,
-    stale_branch_dbs_finding,
+    code_generation_retention_finding, incident_debris_finding, orphan_store_finding,
+    over_budget_finding, retention_backlog_finding, stale_branch_dbs_finding,
 };
 pub use identity::{
     BranchRefV1, FreePageRatioV1, QuarantineLocationV1, RelativeArtifactPathV1, StorageByteSizeV1,
     StoreKeyV1, TableNameV1,
 };
-pub use inventory::{OrphanStoreRecordV1, RetentionBacklogRecordV1, StaleBranchDbRecordV1};
+pub use inventory::{
+    CodeGenerationRetentionRecordV1, OrphanStoreRecordV1, RetentionBacklogRecordV1,
+    StaleBranchDbRecordV1,
+};
 pub use telemetry::{
     StorageTelemetryFuture, StorageTelemetryReadV1, StoreBudgetEvaluationV1, StoreSizeBudgetV1,
     StoreSizeSampleV1, StoreSizeTelemetryPort, TableGrowthSampleV1,
