@@ -93,7 +93,7 @@ pub fn callable_code_handler_descriptors()
 pub fn callable_code_catalog_contribution()
 -> Result<CatalogContributionV1, ApplicationContractError> {
     let mut capabilities = Vec::with_capacity(CALLABLE_CODE_OPERATION_COUNT);
-    let mut bindings = Vec::with_capacity(9);
+    let mut bindings = Vec::with_capacity(27);
     for kind in CallableCodeOperationKind::ALL
         .into_iter()
         .filter(|kind| canonical_surface_equivalent(*kind).is_none())
@@ -159,7 +159,13 @@ fn canonical_surface_equivalent(kind: CallableCodeOperationKind) -> Option<&'sta
         CallableCodeOperationKind::SourceMetadata => Some("file_metadata"),
         CallableCodeOperationKind::ExactOccurrence
         | CallableCodeOperationKind::PhraseSearch
-        | CallableCodeOperationKind::Callees => None,
+        | CallableCodeOperationKind::Callees
+        | CallableCodeOperationKind::Facets
+        | CallableCodeOperationKind::Timeline
+        | CallableCodeOperationKind::Declaration
+        | CallableCodeOperationKind::Definition
+        | CallableCodeOperationKind::TypeDefinition
+        | CallableCodeOperationKind::References => None,
     }
 }
 
@@ -168,6 +174,12 @@ fn reachable_surface_operation(kind: CallableCodeOperationKind) -> Option<&'stat
         CallableCodeOperationKind::ExactOccurrence => Some("code_exact_occurrence"),
         CallableCodeOperationKind::PhraseSearch => Some("code_phrase_search"),
         CallableCodeOperationKind::Callees => Some("code_callees"),
+        CallableCodeOperationKind::Facets => Some("code_facets"),
+        CallableCodeOperationKind::Timeline => Some("code_timeline"),
+        CallableCodeOperationKind::Declaration => Some("code_declaration"),
+        CallableCodeOperationKind::Definition => Some("code_definition"),
+        CallableCodeOperationKind::TypeDefinition => Some("code_type_definition"),
+        CallableCodeOperationKind::References => Some("code_references"),
         CallableCodeOperationKind::SymbolSearch
         | CallableCodeOperationKind::QualifiedName
         | CallableCodeOperationKind::SignatureSearch

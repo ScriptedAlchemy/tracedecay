@@ -82,15 +82,11 @@ fn diagnostics_scope_schema() -> serde_json::Value {
         "oneOf": [
             {"const": "workspace"},
             closed_object_schema(
-                json!({"package": string_property("Exact package diagnostic scope.")}),
-                &["package"]
-            ),
-            closed_object_schema(
                 json!({"file": string_property("Exact file diagnostic scope.")}),
                 &["file"]
             )
         ],
-        "description": "Workspace, package, or file diagnostic scope."
+        "description": "Workspace or exact file diagnostic scope."
     })
 }
 
@@ -327,6 +323,20 @@ pub(super) fn def_feedback_list() -> ToolDefinition {
         "List feedback findings",
         "Resolve the catalog feedback list binding and return its canonical application result with opaque continuation semantics.",
         false,
+    )
+}
+
+pub(super) fn def_feedback_advisory_cycle() -> ToolDefinition {
+    def(
+        "tracedecay_feedback_advisory_cycle",
+        "Run advisory feedback cycle",
+        "Run one authorized four-pillar feedback cycle for a saved document. The daemon resolves project scope and providers, then returns a canonical diagnostics result with a daemon-minted read handle.",
+        closed_object_schema(
+            json!({
+                "document_uri": string_property("Canonical file URI for the saved document in the admitted project.")
+            }),
+            &["document_uri"],
+        ),
     )
 }
 
@@ -634,6 +644,27 @@ pub(super) fn def_health_read() -> ToolDefinition {
     )
 }
 
+pub(super) fn def_health_delta() -> ToolDefinition {
+    primitive_read_definition(
+        "health_delta",
+        "Compare pinned project health",
+        json!({
+            "before_cursor": {
+                "type": "string",
+                "maxLength": 96,
+                "description": "Stable cursor returned by an earlier health_delta call. Omit to pin the current state."
+            },
+            "path_prefix": {
+                "type": "string",
+                "maxLength": 4096,
+                "description": "Optional project-relative scope prefix."
+            },
+            "meta": retrieval_meta_schema()
+        }),
+        &["meta"],
+    )
+}
+
 pub(super) fn def_storage_status_read() -> ToolDefinition {
     def_always_load(
         "tracedecay_storage_status",
@@ -658,7 +689,12 @@ pub(super) fn def_diagnostics_read() -> ToolDefinition {
         "Read canonical diagnostics",
         json!({
             "scope": diagnostics_scope_schema(),
-            "maximum_diagnostics": {"type": "integer", "minimum": 1, "maximum": 10000}
+            "maximum_diagnostics": {"type": "integer", "minimum": 1, "maximum": 1000},
+            "cursor": {
+                "type": ["string", "null"],
+                "minLength": 1,
+                "description": "Opaque cursor returned by the prior diagnostic page."
+            }
         }),
         &["scope", "maximum_diagnostics"],
     )
@@ -808,9 +844,47 @@ pub(super) fn def_code_phrase_search() -> ToolDefinition {
                     "maxLength": 4096
                 },
                 "description": "Required bounded phrases that constrain lexical matching."
+            },
+            "field_filters": {
+                "type": "array",
+                "maxItems": 32,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "field": {
+                            "type": "string",
+                            "enum": [
+                                "symbol_name",
+                                "qualified_name",
+                                "path",
+                                "body_text",
+                                "preamble_text",
+                                "exact_term",
+                                "subtoken"
+                            ]
+                        },
+                        "include": {"type": "boolean"}
+                    },
+                    "required": ["field", "include"],
+                    "additionalProperties": false
+                },
+                "description": "Typed lexical fields to include or exclude."
+            },
+            "fuzzy_budget": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 64,
+                "description": "Maximum bounded fuzzy term expansions."
             }
         }),
-        &["query", "phrases", "scope", "meta"],
+        &[
+            "query",
+            "phrases",
+            "field_filters",
+            "fuzzy_budget",
+            "scope",
+            "meta",
+        ],
     )
 }
 
@@ -980,6 +1054,66 @@ pub(super) fn def_code_callees() -> ToolDefinition {
     )
 }
 
+pub(super) fn def_code_facets() -> ToolDefinition {
+    callable_code_definition(
+        "code_facets",
+        "Read callable code facets",
+        "Aggregate one typed facet over the selected immutable code generation.",
+        json!({
+            "dimension": {
+                "type": "string",
+                "enum": ["kind", "language", "path"]
+            }
+        }),
+        &["dimension", "scope", "meta"],
+    )
+}
+
+pub(super) fn def_code_timeline() -> ToolDefinition {
+    callable_code_definition(
+        "code_timeline",
+        "Read callable code timeline",
+        "Read the selected immutable code generation's bounded timeline record.",
+        json!({}),
+        &["scope", "meta"],
+    )
+}
+
+fn callable_code_navigation_definition(operation: &str, title: &str) -> ToolDefinition {
+    callable_code_definition(
+        operation,
+        title,
+        "Navigate generation-bound code evidence from one exact symbol occurrence.",
+        json!({
+            "node_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 4096
+            }
+        }),
+        &["node_id", "scope", "meta"],
+    )
+}
+
+pub(super) fn def_code_declaration() -> ToolDefinition {
+    callable_code_navigation_definition("code_declaration", "Read callable code declaration")
+}
+
+pub(super) fn def_code_definition() -> ToolDefinition {
+    callable_code_navigation_definition("code_definition", "Read callable code definition")
+}
+
+pub(super) fn def_code_type_definition() -> ToolDefinition {
+    callable_code_navigation_definition(
+        "code_type_definition",
+        "Read callable code type definition",
+    )
+}
+
+pub(super) fn def_code_references() -> ToolDefinition {
+    callable_code_navigation_definition("code_references", "Read callable code references")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -991,6 +1125,7 @@ mod tests {
             def_feedback_get(),
             def_feedback_expand(),
             def_feedback_list(),
+            def_feedback_advisory_cycle(),
             def_feedback_impact(),
             def_affected_tests(),
             def_test_results(),
@@ -1004,6 +1139,7 @@ mod tests {
             def_module_api_read(),
             def_file_metadata_read(),
             def_health_read(),
+            def_health_delta(),
             def_storage_status_read(),
             def_diagnostics_read(),
             def_code_exact_occurrence(),
@@ -1014,6 +1150,12 @@ mod tests {
             def_code_type_hierarchy(),
             def_code_callers(),
             def_code_callees(),
+            def_code_facets(),
+            def_code_timeline(),
+            def_code_declaration(),
+            def_code_definition(),
+            def_code_type_definition(),
+            def_code_references(),
         ];
 
         for definition in definitions {
@@ -1072,6 +1214,12 @@ mod tests {
             def_code_type_hierarchy(),
             def_code_callers(),
             def_code_callees(),
+            def_code_facets(),
+            def_code_timeline(),
+            def_code_declaration(),
+            def_code_definition(),
+            def_code_type_definition(),
+            def_code_references(),
         ];
 
         assert_eq!(
@@ -1085,6 +1233,12 @@ mod tests {
                 "tracedecay_code_type_hierarchy",
                 "tracedecay_code_callers",
                 "tracedecay_code_callees",
+                "tracedecay_code_facets",
+                "tracedecay_code_timeline",
+                "tracedecay_code_declaration",
+                "tracedecay_code_definition",
+                "tracedecay_code_type_definition",
+                "tracedecay_code_references",
             ]
         );
     }
@@ -1135,7 +1289,14 @@ mod tests {
         let phrase = def_code_phrase_search();
         assert_eq!(
             phrase.input_schema["required"],
-            json!(["query", "phrases", "scope", "meta"])
+            json!([
+                "query",
+                "phrases",
+                "field_filters",
+                "fuzzy_budget",
+                "scope",
+                "meta"
+            ])
         );
         assert_eq!(phrase.input_schema["properties"]["phrases"]["maxItems"], 32);
 
@@ -1203,6 +1364,28 @@ mod tests {
         assert_eq!(
             callees.input_schema["properties"]["maximum_depth"]["maximum"],
             10
+        );
+
+        let phrase = def_code_phrase_search();
+        assert_eq!(
+            phrase.input_schema["properties"]["fuzzy_budget"]["maximum"],
+            64
+        );
+        assert_eq!(
+            phrase.input_schema["properties"]["field_filters"]["items"]["additionalProperties"],
+            json!(false)
+        );
+
+        let facets = def_code_facets();
+        assert_eq!(
+            facets.input_schema["properties"]["dimension"]["enum"],
+            json!(["kind", "language", "path"])
+        );
+
+        let references = def_code_references();
+        assert_eq!(
+            references.input_schema["required"],
+            json!(["node_id", "scope", "meta"])
         );
     }
 }

@@ -1,11 +1,14 @@
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 
 use tempfile::TempDir;
+use tracedecay_rusqlite_runtime::migration_sql::{
+    MigrationSqlError, MigrationSqlWriteAuthority, MigrationSqlWriteIntent,
+};
 
 use crate::db::engine::{Connection, TestConnection};
 use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 
-use super::{create_schema_connection, migrate_connection};
+use super::{LATEST_VERSION, create_schema_connection, migrate_connection};
 
 mod fts;
 mod memory_v2_v19_v23;
@@ -15,19 +18,29 @@ mod pre_v19;
 // Helpers
 // ---------------------------------------------------------------------------
 
+struct AllowMigrationWrites;
+
+impl MigrationSqlWriteAuthority for AllowMigrationWrites {
+    fn verify(&self, _intent: MigrationSqlWriteIntent) -> Result<(), MigrationSqlError> {
+        Ok(())
+    }
+}
+
 /// Creates a database owned by the engine test runtime.
 async fn create_raw_db() -> (TestConnection, TempDir) {
     let dir = TempDir::new().expect("failed to create temp dir");
     let db_path = dir.path().join("test.db");
-    let conn = TestConnection::open(&db_path);
-    conn.execute_batch(
-        "PRAGMA auto_vacuum = INCREMENTAL;
-         PRAGMA journal_mode = WAL;
-         PRAGMA foreign_keys = ON;
-         PRAGMA busy_timeout = 5000;",
-    )
-    .await
-    .expect("failed to apply pragmas");
+    let setup = rusqlite::Connection::open(&db_path).expect("open migration fixture");
+    setup
+        .execute_batch(
+            "PRAGMA auto_vacuum = INCREMENTAL;
+             PRAGMA journal_mode = WAL;
+             PRAGMA foreign_keys = ON;
+             PRAGMA busy_timeout = 5000;",
+        )
+        .expect("failed to apply pragmas");
+    drop(setup);
+    let conn = TestConnection::open_with_write_authority(&db_path, Arc::new(AllowMigrationWrites));
     (conn, dir)
 }
 
@@ -613,11 +626,16 @@ async fn interrupted_fresh_schema_rolls_back_ddl_and_version_before_retry() {
 
 #[tokio::test]
 async fn exclusive_maintenance_completes_deferred_auto_vacuum_repair() {
-    let (conn, _dir) = create_raw_db().await;
+    let (conn, dir) = create_raw_db().await;
+    let db_path = dir.path().join("test.db");
     create_schema_connection(&conn).await.unwrap();
-    conn.execute_batch("PRAGMA auto_vacuum = NONE; VACUUM;")
-        .await
+    drop(conn);
+    let setup = rusqlite::Connection::open(&db_path).unwrap();
+    setup
+        .execute_batch("PRAGMA auto_vacuum = NONE; VACUUM;")
         .unwrap();
+    drop(setup);
+    let conn = TestConnection::open(&db_path);
     assert_eq!(super::auto_vacuum_mode(&*conn, "test").await.unwrap(), 0);
 
     assert!(!migrate_connection(&conn).await.unwrap());

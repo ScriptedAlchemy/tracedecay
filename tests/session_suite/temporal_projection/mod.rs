@@ -203,7 +203,7 @@ pub(crate) fn anchored_write_with_lineage(
     if let Some(valid_at) = occurred_at {
         anchor_json["occurred_at"] = json!({
             "start": valid_at,
-            "end": valid_at,
+            "end": valid_at.saturating_add(1),
         });
     }
     let anchor: RetrievalAnchorRecordV2 = serde_json::from_value(anchor_json).unwrap();

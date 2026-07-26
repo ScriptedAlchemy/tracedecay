@@ -1,9 +1,9 @@
 //! Daemon-owned `FastEmbed` model acquisition lifecycle.
 //!
 //! Settings select a cataloged model (default [`DEFAULT_FASTEMBED_MODEL_ID`]).
-//! Acquisition is a separate explicit local-path or configured-HTTPS action
-//! backed by the verified artifact store. Startup and search stay offline:
-//! neither discovers an ambient hub/cache nor downloads model bytes.
+//! Installation stays offline-safe; after startup, the daemon may acquire the
+//! immutable catalog revision in the background. Search never discovers an
+//! ambient hub/cache or downloads model bytes at query time.
 #![allow(dead_code)] // fastembed model lifecycle; Plan 31 — staged
 
 use std::fs::{self, File};
@@ -16,6 +16,9 @@ use std::thread::{self, JoinHandle};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+
+#[cfg(feature = "semantic-fastembed")]
+use hf_hub::{Cache, Repo, RepoType, api::sync::ApiBuilder};
 
 use crate::config::DEFAULT_FASTEMBED_MODEL_ID;
 
@@ -32,6 +35,7 @@ use super::model_catalog::{
 const LIFECYCLE_SCHEMA_V1: &str = "tracedecay.fastembed.model-lifecycle.v1";
 const INSTALL_META_SCHEMA_V1: &str = "tracedecay.fastembed.model-install.v1";
 const ARTIFACT_GC_LEASE_SECONDS: u64 = 5 * 60;
+const HF_HUB_CACHE_DIRECTORY_V1: &str = "hf-hub-cache";
 const RERANKER_ACTIVE_LEASE_ID_V1: &str = "reranker:active:v1";
 const RERANKER_ROLLBACK_LEASE_ID_V1: &str = "reranker:rollback:v1";
 static SHARED_LIFECYCLE_OWNER: std::sync::OnceLock<Option<Arc<SemanticModelLifecycleOwnerV1>>> =
@@ -238,8 +242,8 @@ pub enum ModelLifecycleErrorV1 {
 
 /// Supplies package member bytes for a cataloged model.
 ///
-/// Retained for injected test sources and compatibility. Production explicit
-/// import uses the verified-store local/HTTPS APIs below.
+/// Production uses the daemon-owned hub source against the catalog's immutable
+/// repository revision. Tests may inject a fixture source through this port.
 pub trait ModelMemberSourceV1: Send + Sync {
     fn fetch_member(
         &self,
@@ -249,10 +253,22 @@ pub trait ModelMemberSourceV1: Send + Sync {
     ) -> Result<(), ModelLifecycleErrorV1>;
 }
 
-/// Compatibility source retained for existing constructors. Production no
-/// longer performs ambient hf-hub discovery or download through this type.
-#[derive(Debug, Default)]
-pub struct HfHubModelMemberSourceV1;
+/// Daemon-owned Hugging Face source scoped to the lifecycle root.
+///
+/// The client never uses FastEmbed's ambient cache discovery: it resolves the
+/// cataloged repository and immutable revision into this explicit cache, then
+/// the lifecycle independently checks every member's length and SHA-256 before
+/// atomically publishing an install.
+#[derive(Debug)]
+pub struct HfHubModelMemberSourceV1 {
+    cache_dir: PathBuf,
+}
+
+impl HfHubModelMemberSourceV1 {
+    fn new(cache_dir: PathBuf) -> Self {
+        Self { cache_dir }
+    }
+}
 
 impl ModelMemberSourceV1 for HfHubModelMemberSourceV1 {
     fn fetch_member(
@@ -261,16 +277,59 @@ impl ModelMemberSourceV1 for HfHubModelMemberSourceV1 {
         upstream_path: &str,
         destination: &Path,
     ) -> Result<(), ModelLifecycleErrorV1> {
-        reject_ambient_hub_fetch(model, upstream_path, destination)
+        fetch_hf_hub_member(&self.cache_dir, model, upstream_path, destination)
     }
 }
 
-fn reject_ambient_hub_fetch(
+#[cfg(feature = "semantic-fastembed")]
+fn fetch_hf_hub_member(
+    cache_dir: &Path,
     model: &CatalogedFastEmbedModelV1,
     upstream_path: &str,
     destination: &Path,
 ) -> Result<(), ModelLifecycleErrorV1> {
-    let _ = (model, upstream_path, destination);
+    let cache = Cache::new(cache_dir.to_path_buf());
+    let repository = Repo::with_revision(
+        model.model_code.clone(),
+        RepoType::Model,
+        model.source.revision.clone(),
+    );
+    let cached = cache.repo(repository.clone()).get(upstream_path);
+    let source = match cached {
+        Some(path) => path,
+        None if hf_hub_offline() => return Err(ModelLifecycleErrorV1::DownloadFailed),
+        None => ApiBuilder::from_cache(cache)
+            .with_token(None)
+            .with_progress(false)
+            .with_retries(3)
+            .build()
+            .map_err(|_| ModelLifecycleErrorV1::DownloadFailed)?
+            .repo(repository)
+            .get(upstream_path)
+            .map_err(|_| ModelLifecycleErrorV1::DownloadFailed)?,
+    };
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent).map_err(|_| ModelLifecycleErrorV1::StoreUnavailable)?;
+    }
+    fs::copy(source, destination)
+        .map(|_| ())
+        .map_err(|_| ModelLifecycleErrorV1::DownloadFailed)
+}
+
+#[cfg(feature = "semantic-fastembed")]
+fn hf_hub_offline() -> bool {
+    std::env::var("HF_HUB_OFFLINE")
+        .is_ok_and(|value| !value.is_empty() && !matches!(value.as_str(), "0" | "false" | "FALSE"))
+}
+
+#[cfg(not(feature = "semantic-fastembed"))]
+fn fetch_hf_hub_member(
+    cache_dir: &Path,
+    model: &CatalogedFastEmbedModelV1,
+    upstream_path: &str,
+    destination: &Path,
+) -> Result<(), ModelLifecycleErrorV1> {
+    let _ = (cache_dir, model, upstream_path, destination);
     Err(ModelLifecycleErrorV1::Rejected)
 }
 
@@ -320,11 +379,11 @@ impl SemanticModelLifecycleOwnerV1 {
     }
 
     pub fn open_default(root: impl Into<PathBuf>) -> Result<Self, ModelLifecycleErrorV1> {
-        Self::open(
-            root,
-            FastEmbedModelCatalogV1::production(),
-            Arc::new(HfHubModelMemberSourceV1),
-        )
+        let root = root.into();
+        let source = Arc::new(HfHubModelMemberSourceV1::new(
+            root.join(HF_HUB_CACHE_DIRECTORY_V1),
+        ));
+        Self::open(root, FastEmbedModelCatalogV1::production(), source)
     }
 
     pub fn catalog(&self) -> &FastEmbedModelCatalogV1 {
@@ -611,21 +670,29 @@ impl SemanticModelLifecycleOwnerV1 {
         model_id: Option<&str>,
         auto_download: bool,
     ) -> Result<SemanticModelLifecycleStatusV1, ModelLifecycleErrorV1> {
-        let mut guard = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
-        guard.durable.auto_download = auto_download;
-        match model_id {
-            None => {
-                guard.durable.selected_model = None;
-                guard.durable.state = None;
-            }
+        let selected = match model_id {
             Some(model_id) => {
                 let model = self
                     .catalog
                     .get(model_id)
                     .ok_or(CatalogErrorV1::UnknownModel)?;
+                Some((model, self.re_admit_durable_selection(model)?))
+            }
+            None => None,
+        };
+        let mut guard = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        guard.durable.auto_download = auto_download;
+        match selected {
+            None => {
+                guard.durable.selected_model = None;
+                guard.durable.state = None;
+            }
+            Some((model, durable_selection)) => {
                 let digest = catalog_package_digest(model);
                 guard.durable.selected_model = Some(model.model_id.clone());
-                if let Some(path) = existing_install_path(&self.root, model, &digest) {
+                if let Some(state) = durable_selection {
+                    guard.durable.state = Some(state);
+                } else if let Some(path) = existing_install_path(&self.root, model, &digest) {
                     guard.durable.state = Some(SemanticModelLifecycleStateV1::Installed {
                         model_id: model.model_id.clone(),
                         revision: model.source.revision.clone(),
@@ -645,6 +712,67 @@ impl SemanticModelLifecycleOwnerV1 {
         persist_durable(&self.root, &guard.durable)?;
         drop(guard);
         Ok(self.status())
+    }
+
+    fn re_admit_durable_selection(
+        &self,
+        model: &CatalogedFastEmbedModelV1,
+    ) -> Result<Option<SemanticModelLifecycleStateV1>, ModelLifecycleErrorV1> {
+        let state = {
+            let guard = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+            guard.durable.state.clone()
+        };
+        let (was_ready, artifact_digest) = match state {
+            Some(SemanticModelLifecycleStateV1::Installed {
+                model_id,
+                revision,
+                artifact_digest,
+                ..
+            }) if model_id == model.model_id && revision == model.source.revision => {
+                (false, artifact_digest)
+            }
+            Some(SemanticModelLifecycleStateV1::Ready {
+                model_id,
+                revision,
+                artifact_digest,
+                ..
+            }) if model_id == model.model_id && revision == model.source.revision => {
+                (true, artifact_digest)
+            }
+            _ => return Ok(None),
+        };
+        let digest = super::manifest::Sha256DigestHex::new(artifact_digest.clone())
+            .map_err(|_| ModelLifecycleErrorV1::VerificationFailed)?;
+        let environment = RuntimeEnvironmentV1::detect_fastembed_process()
+            .map_err(|_| ModelLifecycleErrorV1::VerificationFailed)?;
+        let lease_id = format!("active:{}:{}", model.model_id, model.source.revision);
+        let admitted = self
+            .artifact_store
+            .admit_leased_for_runtime_by_digest(
+                &digest,
+                &environment,
+                &lease_id,
+                ArtifactLeaseKindV1::Active,
+                current_unix_seconds()?,
+            )
+            .map_err(|_| ModelLifecycleErrorV1::VerificationFailed)?;
+        verify_catalog_manifest(model, admitted.manifest())?;
+        let install_path = self.artifact_store.installed_directory(&digest);
+        Ok(Some(if was_ready {
+            SemanticModelLifecycleStateV1::Ready {
+                model_id: model.model_id.clone(),
+                revision: model.source.revision.clone(),
+                artifact_digest,
+                install_path,
+            }
+        } else {
+            SemanticModelLifecycleStateV1::Installed {
+                model_id: model.model_id.clone(),
+                revision: model.source.revision.clone(),
+                artifact_digest,
+                install_path,
+            }
+        }))
     }
 
     /// Queue background acquisition when a selected model is not yet installed.
@@ -709,6 +837,11 @@ impl SemanticModelLifecycleOwnerV1 {
                 let _ = fs::remove_dir_all(path);
             }
         }
+        {
+            let mut guard = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+            guard.durable.state = None;
+            persist_durable(&self.root, &guard.durable)?;
+        }
         let model_id = status.selected_model.clone();
         self.select_model(model_id.as_deref(), status.auto_download)
     }
@@ -735,7 +868,9 @@ impl SemanticModelLifecycleOwnerV1 {
                 ArtifactLeaseKindV1::Active,
             );
         }
-        if let Ok(digest) =
+        if install_path_of(&previous).is_some_and(|path| {
+            path.starts_with(self.root.join("verified-artifacts").join("artifacts"))
+        }) && let Ok(digest) =
             super::manifest::Sha256DigestHex::new(previous.artifact_digest().to_owned())
         {
             self.artifact_store.acquire_artifact_lease(
@@ -1428,7 +1563,7 @@ pub fn shared_lifecycle_owner() -> Option<Arc<SemanticModelLifecycleOwnerV1>> {
         .clone()
 }
 
-/// Apply config selection and queue first-startup acquisition when appropriate.
+/// Apply config selection and queue explicitly enabled background acquisition.
 pub fn apply_config_and_queue_startup(
     selected_model: Option<&str>,
     auto_download: bool,
@@ -1576,11 +1711,12 @@ mod tests {
                 },
                 precision: EmbeddingPrecisionV1::Fp32,
                 runtime: RuntimeCompatibilityV1 {
-                    runtime: "fastembed-ort".to_owned(),
-                    build_revision: "fixture".to_owned(),
+                    runtime: super::super::artifact_store::FASTEMBED_RUNTIME_FAMILY_V1.to_owned(),
+                    build_revision:
+                        super::super::artifact_store::FASTEMBED_RUNTIME_BUILD_REVISION_V1.to_owned(),
                     platforms: vec![PlatformTargetV1 {
-                        os: "linux".to_owned(),
-                        arch: "x86_64".to_owned(),
+                        os: std::env::consts::OS.to_owned(),
+                        arch: std::env::consts::ARCH.to_owned(),
                     }],
                 },
                 device: DeviceClassV1::Cpu,
@@ -1600,6 +1736,12 @@ mod tests {
                 },
             },
         }
+    }
+
+    fn scoped_hub_source(root: &Path) -> Arc<dyn ModelMemberSourceV1> {
+        Arc::new(HfHubModelMemberSourceV1::new(
+            root.join(HF_HUB_CACHE_DIRECTORY_V1),
+        ))
     }
 
     #[test]
@@ -1630,7 +1772,7 @@ mod tests {
         let owner = SemanticModelLifecycleOwnerV1::open(
             root.path(),
             catalog,
-            Arc::new(HfHubModelMemberSourceV1),
+            scoped_hub_source(root.path()),
         )
         .unwrap();
         let status = owner
@@ -1640,6 +1782,56 @@ mod tests {
             status.state,
             Some(SemanticModelLifecycleStateV1::Installed { .. })
         ));
+    }
+
+    #[test]
+    fn restart_re_admits_explicit_import_without_legacy_acquisition() {
+        let fixture = tempfile::tempdir().unwrap();
+        let (catalog, model_id) = tiny_catalog(fixture.path());
+        let model = catalog.get(&model_id).unwrap().clone();
+        let root = tempfile::tempdir().unwrap();
+        let imported = SemanticModelLifecycleOwnerV1::open(
+            root.path(),
+            catalog.clone(),
+            scoped_hub_source(root.path()),
+        )
+        .unwrap()
+        .import_local_artifact(&model_id, &tiny_manifest(&model), fixture.path(), 10)
+        .unwrap()
+        .state
+        .unwrap();
+
+        let restarted = SemanticModelLifecycleOwnerV1::open(
+            root.path(),
+            catalog,
+            scoped_hub_source(root.path()),
+        )
+        .unwrap();
+        let status = restarted.select_model(Some(&model_id), true).unwrap();
+
+        assert!(matches!(
+            status.state,
+            Some(SemanticModelLifecycleStateV1::Installed { .. })
+        ));
+        assert_eq!(
+            status.state.as_ref().unwrap().artifact_digest(),
+            imported.artifact_digest()
+        );
+        assert!(!restarted.enqueue_startup_acquisition_if_needed());
+
+        restarted.mark_ready().unwrap();
+        let ready_restart = SemanticModelLifecycleOwnerV1::open(
+            root.path(),
+            tiny_catalog(fixture.path()).0,
+            scoped_hub_source(root.path()),
+        )
+        .unwrap();
+        let ready = ready_restart.select_model(Some(&model_id), true).unwrap();
+        assert!(matches!(
+            ready.state,
+            Some(SemanticModelLifecycleStateV1::Ready { .. })
+        ));
+        assert!(!ready_restart.enqueue_startup_acquisition_if_needed());
     }
 
     #[test]
@@ -1654,7 +1846,7 @@ mod tests {
         let owner = SemanticModelLifecycleOwnerV1::open(
             root.path(),
             catalog,
-            Arc::new(HfHubModelMemberSourceV1),
+            scoped_hub_source(root.path()),
         )
         .unwrap();
 
@@ -1770,7 +1962,7 @@ mod tests {
         let owner = SemanticModelLifecycleOwnerV1::open(
             root.path(),
             catalog,
-            Arc::new(HfHubModelMemberSourceV1),
+            scoped_hub_source(root.path()),
         )
         .unwrap();
         let first = reranker_manifest(&model, "BAAI/bge-reranker-base");
@@ -1850,7 +2042,7 @@ mod tests {
         let owner = SemanticModelLifecycleOwnerV1::open(
             root.path(),
             catalog,
-            Arc::new(HfHubModelMemberSourceV1),
+            scoped_hub_source(root.path()),
         )
         .unwrap();
         let manifest = reranker_manifest(&model, "BAAI/bge-reranker-base");
@@ -1902,7 +2094,7 @@ mod tests {
         let owner = SemanticModelLifecycleOwnerV1::open(
             root.path(),
             catalog,
-            Arc::new(HfHubModelMemberSourceV1),
+            scoped_hub_source(root.path()),
         )
         .unwrap();
         let manifest = reranker_manifest(&model, "BAAI/bge-reranker-base");

@@ -570,6 +570,8 @@ struct OccurrenceMapEntry {
 
 struct PublishedCorpus {
     generation: CodeIndexPublishedGenerationV1,
+    lexical_projections: BTreeMap<Vec<String>, CodeLexicalProjectionAdapterV1>,
+    graph_projections: BTreeMap<Vec<String>, CodeGraphEvidenceAdapterV1>,
     incremental_generation: CodeIndexPublishedGenerationV1,
     incremental_before_content_digest: String,
     incremental_after_content_digest: String,
@@ -582,6 +584,91 @@ struct PublishedCorpus {
     eligible_chunks: u64,
     no_op_generation: CodeIndexPublishedGenerationV1,
     deletion_generation: CodeIndexPublishedGenerationV1,
+}
+
+fn canonical_scope_key(scopes: &[String]) -> Vec<String> {
+    let mut key = scopes.to_vec();
+    key.sort();
+    key.dedup();
+    key
+}
+
+fn build_query_projections(
+    generation: &CodeIndexPublishedGenerationV1,
+    file_scopes: &BTreeMap<String, String>,
+    queries: &[WorkloadQueryV1],
+) -> Result<
+    (
+        BTreeMap<Vec<String>, CodeLexicalProjectionAdapterV1>,
+        BTreeMap<Vec<String>, CodeGraphEvidenceAdapterV1>,
+    ),
+    CandidateOutputError,
+> {
+    let generation_id = generation.manifest().generation_id.clone();
+    let freshness = production_code_index_freshness(
+        generation.manifest().seal.sealed_at,
+        id::<ComponentRevision>("policy.candidate.v1")?,
+    )
+    .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
+    let metadata = CodeLexicalProjectionMetadataV1 {
+        generation: generation_id.clone(),
+        repository_id: Some(generation.snapshot().repository.clone()),
+        logical_paths: generation
+            .snapshot()
+            .files
+            .iter()
+            .map(|file| (file.file_occurrence_id.clone(), file.logical_path.clone()))
+            .collect(),
+        freshness: freshness.clone(),
+        exact_retriever_revision: id(crate::query::retrieval::PR9_EXACT_RETRIEVER_REVISION_V1)?,
+        lexical_retriever_revision: id(crate::query::retrieval::PR9_LEXICAL_RETRIEVER_REVISION_V1)?,
+        exact_score_domain: id(crate::query::retrieval::PR9_EXACT_SCORE_DOMAIN_V1)?,
+    };
+    let admitted = generation
+        .admitted_chunks()
+        .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
+    let mut lexical = BTreeMap::new();
+    let mut graph = BTreeMap::new();
+    for scope_key in queries
+        .iter()
+        .map(|query| canonical_scope_key(&query.allowed_scopes))
+        .collect::<BTreeSet<_>>()
+    {
+        let scope_contains = |file_occurrence_id: &str| {
+            file_scopes
+                .get(file_occurrence_id)
+                .is_some_and(|scope| scope_key.binary_search(scope).is_ok())
+        };
+        let scoped_admitted = admitted
+            .iter()
+            .filter(|chunk| scope_contains(chunk.chunk().anchor.file_occurrence_id.as_str()))
+            .cloned()
+            .collect();
+        lexical.insert(
+            scope_key.clone(),
+            CodeLexicalProjectionAdapterV1::new_admitted(metadata.clone(), scoped_admitted)
+                .map_err(|error| CandidateOutputError::Contract(error.to_string()))?,
+        );
+        let graph_chunks = generation
+            .chunks()
+            .chunks()
+            .iter()
+            .filter(|chunk| scope_contains(chunk.anchor.file_occurrence_id.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        graph.insert(
+            scope_key,
+            CodeGraphEvidenceAdapterV1::new(
+                generation_id.clone(),
+                Some(generation.snapshot().repository.clone()),
+                freshness.clone(),
+                generation.edges(),
+                &graph_chunks,
+            )
+            .map_err(|error| CandidateOutputError::Contract(error.to_string()))?,
+        );
+    }
+    Ok((lexical, graph))
 }
 
 /// Load the checked-in PR9/PR10 direct-evaluation workload.
@@ -1804,40 +1891,17 @@ fn prepare_production_query(
     )
     .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
 
-    let freshness = production_code_index_freshness(
-        published.generation.manifest().seal.sealed_at,
-        id::<ComponentRevision>("policy.candidate.v1")?,
-    )
-    .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
-    let metadata = CodeLexicalProjectionMetadataV1 {
-        generation: generation_id.clone(),
-        repository_id: Some(published.generation.snapshot().repository.clone()),
-        logical_paths: published
-            .generation
-            .snapshot()
-            .files
-            .iter()
-            .map(|file| (file.file_occurrence_id.clone(), file.logical_path.clone()))
-            .collect(),
-        freshness: freshness.clone(),
-        exact_retriever_revision: id(crate::query::retrieval::PR9_EXACT_RETRIEVER_REVISION_V1)?,
-        lexical_retriever_revision: id(crate::query::retrieval::PR9_LEXICAL_RETRIEVER_REVISION_V1)?,
-        exact_score_domain: id(crate::query::retrieval::PR9_EXACT_SCORE_DOMAIN_V1)?,
-    };
-    let admitted = published
-        .generation
-        .admitted_chunks()
-        .map_err(|error| CandidateOutputError::Contract(error.to_string()))?
-        .into_iter()
-        .filter(|chunk| {
-            published
-                .file_scopes
-                .get(chunk.chunk().anchor.file_occurrence_id.as_str())
-                .is_some_and(|scope| query.allowed_scopes.contains(scope))
-        })
-        .collect();
-    let lexical_projection = CodeLexicalProjectionAdapterV1::new_admitted(metadata, admitted)
-        .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
+    let scope_key = canonical_scope_key(&query.allowed_scopes);
+    let lexical_projection = published
+        .lexical_projections
+        .get(&scope_key)
+        .cloned()
+        .ok_or_else(|| {
+            CandidateOutputError::Contract(format!(
+                "missing lexical projection for query {}",
+                query.query_id
+            ))
+        })?;
     let authority = CentralExactAdmissionAuthorityV1::new(id::<ExactAdmissionRuleRevision>(
         crate::query::retrieval::PR9_EXACT_RULE_REVISION_V1,
     )?);
@@ -1846,28 +1910,17 @@ fn prepare_production_query(
         lexical_projection.exact_adapter(authority.clone()),
     );
     let lexical_lane = LexicalLane::new(lexical_projection);
-    let graph_chunks: Vec<_> = published
-        .generation
-        .chunks()
-        .chunks()
-        .iter()
-        .filter(|chunk| {
-            published
-                .file_scopes
-                .get(chunk.anchor.file_occurrence_id.as_str())
-                .is_some_and(|scope| query.allowed_scopes.contains(scope))
-        })
-        .cloned()
-        .collect();
     let graph_lane = GraphLane::new(
-        CodeGraphEvidenceAdapterV1::new(
-            generation_id.clone(),
-            Some(published.generation.snapshot().repository.clone()),
-            freshness,
-            published.generation.edges(),
-            &graph_chunks,
-        )
-        .map_err(|error| CandidateOutputError::Contract(error.to_string()))?,
+        published
+            .graph_projections
+            .get(&scope_key)
+            .cloned()
+            .ok_or_else(|| {
+                CandidateOutputError::Contract(format!(
+                    "missing graph projection for query {}",
+                    query.query_id
+                ))
+            })?,
     );
 
     let budget = retrieval_budget();
@@ -2756,8 +2809,12 @@ fn publish_corpus_with_scale(
         .admitted_chunks()
         .map_err(|error| CandidateOutputError::Contract(error.to_string()))?
         .len() as u64;
+    let (lexical_projections, graph_projections) =
+        build_query_projections(&generation, &file_scopes, &workload.queries)?;
     Ok(PublishedCorpus {
         generation,
+        lexical_projections,
+        graph_projections,
         incremental_generation,
         incremental_before_content_digest,
         incremental_after_content_digest,
@@ -3519,6 +3576,7 @@ mod tests {
 
         let mut missing = workload();
         missing.queries.retain(|query| query.partition == "train");
+        missing.execution_contract.exact_query_count = missing.queries.len() as u64;
         let error = validate_workload_for_tuning(&missing).expect_err("empty validation partition");
         assert!(
             error

@@ -10,7 +10,7 @@ async fn raw_quick_check_detects_corruption(db_path: &Path) -> bool {
 }
 
 #[tokio::test]
-async fn fts_corruption_falls_back_without_rebuild_or_write() {
+async fn fts_corruption_propagates_without_rebuild_or_write() {
     let (db, _dir, db_path) = setup_db().await;
 
     // Insert data so FTS has content
@@ -24,27 +24,17 @@ async fn fts_corruption_falls_back_without_rebuild_or_write() {
     let results = db.search_nodes("important_handler", 10).await.unwrap();
     assert_eq!(results[0].node.id, "e1");
 
-    // Capture an FTS segment, then corrupt only its payload on disk. The nodes
-    // table and primary database B-trees remain healthy.
-    let segment = db
-        .query_scalar_blob(
-            "capture FTS corruption segment",
-            "SELECT block FROM nodes_fts_data WHERE id > 10 ORDER BY id DESC LIMIT 1",
-        )
-        .await
-        .unwrap();
+    // Desynchronize only the derivable FTS index. The nodes table and primary
+    // database B-trees remain healthy.
+    db.execute_write_batch(
+        "clear FTS corruption fixture",
+        "DELETE FROM nodes_fts_data WHERE id > 10;",
+    )
+    .await
+    .unwrap();
     db.checkpoint().await.unwrap();
     db.close();
-
-    // Corrupt both FTS and an unrelated table. Checking only `nodes` would
-    // incorrectly permit the LIKE fallback because its B-tree is still sound.
-    let mut bytes = std::fs::read(&db_path).unwrap();
-    let offset = bytes
-        .windows(segment.len())
-        .position(|candidate| candidate == segment)
-        .expect("FTS segment must be present in the checkpointed database");
-    bytes[offset..offset + 8].fill(0xff);
-    std::fs::write(&db_path, bytes).unwrap();
+    truncate_fixture_wal(&db_path);
 
     assert!(
         raw_quick_check_detects_corruption(&db_path).await,
@@ -65,6 +55,14 @@ async fn fts_corruption_falls_back_without_rebuild_or_write() {
         "e1",
         "the intact nodes table must remain readable"
     );
+    assert_eq!(
+        conn.query_row("PRAGMA quick_check(nodes)", [], |row| {
+            row.get::<_, String>(0)
+        })
+        .unwrap(),
+        "ok",
+        "the nodes table and its ordinary indexes must remain healthy"
+    );
     let mut statement = conn
         .prepare("SELECT rowid FROM nodes_fts WHERE nodes_fts MATCH '\"important_handler\"*'")
         .unwrap();
@@ -77,21 +75,22 @@ async fn fts_corruption_falls_back_without_rebuild_or_write() {
     drop(statement);
     drop(conn);
 
-    let error = match crate::common::open_test_database(&db_path).await {
-        Err(error) => error,
-        Ok((db, _)) => {
-            db.close();
-            panic!("writable open must fail closed on corruption");
-        }
-    };
+    let (reopened, _) = crate::common::open_test_database(&db_path)
+        .await
+        .expect("direct database open should retain read fallback access");
+    let error = reopened
+        .search_nodes("important_handler", 10)
+        .await
+        .expect_err("direct database access must fail closed on FTS corruption");
     assert!(
-        error.to_string().contains("database quick_check failed"),
-        "unexpected error: {error}"
+        error.to_string().contains("fts5: corruption found"),
+        "unexpected direct database error: {error}"
     );
+    reopened.close();
     assert_eq!(
         std::fs::read(&db_path).unwrap(),
         corrupted_bytes,
-        "failed open must not rebuild or otherwise write"
+        "direct database open must not rebuild or otherwise write"
     );
 }
 
@@ -102,13 +101,12 @@ async fn whole_database_corruption_propagates_without_write() {
         .await
         .unwrap();
 
-    let segment = db
-        .query_scalar_blob(
-            "capture whole-database corruption FTS segment",
-            "SELECT block FROM nodes_fts_data WHERE id > 10 ORDER BY id DESC LIMIT 1",
-        )
-        .await
-        .unwrap();
+    db.execute_write_batch(
+        "clear whole-database corruption FTS fixture",
+        "DELETE FROM nodes_fts_data WHERE id > 10;",
+    )
+    .await
+    .unwrap();
     let root_page = db
         .query_scalar_i64(
             "read corruption fixture root page",
@@ -122,13 +120,9 @@ async fn whole_database_corruption_propagates_without_write() {
         .unwrap() as u64;
     db.checkpoint().await.unwrap();
     db.close();
+    truncate_fixture_wal(&db_path);
 
     let mut bytes = std::fs::read(&db_path).unwrap();
-    let fts_offset = bytes
-        .windows(segment.len())
-        .position(|candidate| candidate == segment)
-        .expect("FTS segment must be present in the checkpointed database");
-    bytes[fts_offset..fts_offset + 8].fill(0xff);
     bytes[((root_page - 1) * page_size) as usize] = 0xff;
     std::fs::write(&db_path, bytes).unwrap();
 
@@ -141,12 +135,16 @@ async fn whole_database_corruption_propagates_without_write() {
     let error = match crate::common::open_test_database(&db_path).await {
         Err(error) => error,
         Ok((db, _)) => {
+            let error = db
+                .search_nodes("whole_db_probe", 10)
+                .await
+                .expect_err("whole-database corruption must not use the LIKE fallback");
             db.close();
-            panic!("writable open must fail closed on corruption");
+            error
         }
     };
     assert!(
-        error.to_string().contains("database quick_check failed"),
+        Database::is_corruption_error(&error),
         "unexpected error: {error}"
     );
     assert_eq!(

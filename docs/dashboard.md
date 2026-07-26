@@ -430,12 +430,11 @@ per message:
   approximation, marked `≈` in the UI and `"exact": false` in the API's
   per-row `tokenizer` block. This is the primary tier for Cursor (whose
   transcripts carry **no** token counters at all), cline, and vibe stores.
-  Counts are cached per message — in process memory and in a
-  `dashboard_token_counts` sidecar table in the global accounting DB — so
-  large stores (15k+ messages) only pay the counting cost once; a background
-  warm task runs at dashboard startup. Built behind the `token-counting`
-  cargo feature (on by default; ~4 MB of embedded vocabularies, decoded
-  lazily on first use).
+  Counts are cached per message for the lifetime of the dashboard process.
+  The cache is derived acceleration and is never persisted as an independent
+  storage authority; a background warm task runs at dashboard startup. Built
+  behind the `token-counting` cargo feature (on by default; ~4 MB of embedded
+  vocabularies, decoded lazily on first use).
 - **`estimated`** — the fallback ~4 chars/token heuristic the LCM views use
   (`(LENGTH(text)+3)/4`), attributing non-assistant text to input and
   assistant text to output. Applies when the binary was built without
@@ -1154,6 +1153,13 @@ regenerates all three files, and exits non-zero if any committed file differs.
 It is a blocking step of the `Dashboard integration` CI job, not an advisory
 comparison against a preview artifact. Regenerate with `npm run
 contracts:generate` and commit the result; never hand-edit the outputs.
+
+The typed graph-structure routes are registered from the same declarations that
+name their response schemas. Schema export asserts every one of those registered
+responses exists in the contract catalog before writing generated output. A new
+typed route with no catalog entry therefore fails `contracts:check` with its
+method, path, and missing response type. Legacy type-erased plugin routes are
+not represented as fake `serde_json::Value` contracts.
 
 `npm run build` invokes Rsbuild using `dashboard/rsbuild.config.ts`, with
 `dashboard/src/app/main.tsx` as the entry point and `dashboard/app-dist/` as

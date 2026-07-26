@@ -473,8 +473,9 @@ pub(super) async fn write_ingest_frontier(
 }
 
 /// Drive a set of sources against `db` for `project_root` under bounded fair
-/// multi-source admission. Separated from [`ingest_global_sources`] so tests can
-/// supply sources rooted at a temporary home directory instead of the real `~`.
+/// multi-source admission. Separated from the project catch-up driver so tests
+/// can supply sources rooted at a temporary home directory instead of the
+/// real `~`.
 pub(crate) async fn ingest_sources(
     db: &RegisteredGlobalDb,
     project_root: &Path,

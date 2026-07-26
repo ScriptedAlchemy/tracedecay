@@ -419,6 +419,24 @@ mod tests {
     }
 
     #[test]
+    fn doctor_registry_does_not_advertise_unroutable_feedback_actions() {
+        let registry = DoctorRemediationRegistryV1::default_registry();
+        let error = registry
+            .resolve(&reference(
+                operations::FEEDBACK_GET_FINDING,
+                DoctorRemediationKindV1::Action,
+            ))
+            .expect_err("feedback read is not a Doctor remediation action");
+
+        assert_eq!(
+            error,
+            DoctorRemediationResolutionErrorV1::UnknownOperation {
+                operation: operations::FEEDBACK_GET_FINDING.to_string(),
+            }
+        );
+    }
+
+    #[test]
     fn doctor_registry_rejects_preview_when_operation_offers_none() {
         let registry = DoctorRemediationRegistryV1::default_registry();
         let error = registry

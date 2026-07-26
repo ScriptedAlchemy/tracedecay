@@ -12,12 +12,14 @@ mod test_attribution;
 
 pub use callable_code::{
     CALLABLE_CODE_OPERATION_COUNT, CallableCodeOperationKind, CallableCodeOperations,
-    CodeHierarchyRequest, CodeImpactRequest, CodeImplementationsRequest, CodeOccurrenceRecord,
-    CodeQueryPage, CodeQueryScope, CodeRelationRequest, CodeSignatureRequest,
-    CodeSymbolSearchRequest, ExactOccurrenceRecord, ExactOccurrenceRequest,
-    LexicalOccurrenceRecord, MAX_CALLABLE_CODE_DEPTH, MAX_CALLABLE_CODE_FILTERS,
-    MAX_CALLABLE_CODE_QUERY_BYTES, MAX_SOURCE_METADATA_FILES, ModuleApiRequest,
-    PhraseSearchRequest, QualifiedNameRequest, SourceMetadataRecord, SourceMetadataRequest,
+    CodeFacetDimension, CodeFacetRecord, CodeFacetRequest, CodeHierarchyRequest, CodeImpactRequest,
+    CodeImplementationsRequest, CodeLexicalField, CodeLexicalFieldFilter, CodeNavigationRequest,
+    CodeOccurrenceRecord, CodeQueryPage, CodeQueryScope, CodeRelationRequest, CodeSignatureRequest,
+    CodeSymbolSearchRequest, CodeTimelineRecord, CodeTimelineRequest, ExactOccurrenceRecord,
+    ExactOccurrenceRequest, LexicalOccurrenceRecord, MAX_CALLABLE_CODE_DEPTH,
+    MAX_CALLABLE_CODE_FILTERS, MAX_CALLABLE_CODE_FUZZY_EXPANSIONS, MAX_CALLABLE_CODE_QUERY_BYTES,
+    MAX_SOURCE_METADATA_FILES, ModuleApiRequest, PhraseSearchRequest, QualifiedNameRequest,
+    SourceMetadataRecord, SourceMetadataRequest,
 };
 pub use callable_code_catalog::{
     callable_code_catalog_contribution, callable_code_handler_descriptors, callable_code_operation,
@@ -34,12 +36,14 @@ pub use ports::{
     SymbolRetrievalPort, TemporalRetrievalPort, TestRetrievalPort,
 };
 pub use requests::{
-    AffectedTestsRequest, AffectedTestsResult, AnchorExpandRequest, AnchorExpandResult,
-    GraphCallersRequest, GraphCallersResult, GraphImpactRequest, GraphImpactResult,
-    HealthReadRequest, HealthReadResult, MAX_APPLICATION_PAGE_SIZE, PageRequest, ResultProjection,
-    RetrievalOrder, RetrievalRequestMeta, SessionLookupRequest, SessionLookupResult,
-    SourceLinesRequest, SourceLinesResult, SourceReference, SymbolSearchRequest,
-    SymbolSearchResult,
+    AffectedTestAttributionV1, AffectedTestsRequest, AffectedTestsResult, AnchorExpandRequest,
+    AnchorExpandResult, GraphCallersRequest, GraphCallersResult, GraphImpactRequest,
+    GraphImpactResult, HealthDeltaCoverageV1, HealthDeltaCurrentnessV1, HealthDeltaPointV1,
+    HealthDeltaRequest, HealthDeltaResult, HealthDeltaScopeV1, HealthDimensionDeltaV1,
+    HealthDimensionPointV1, HealthReadRequest, HealthReadResult, MAX_APPLICATION_PAGE_SIZE,
+    PageRequest, ResultProjection, RetrievalOrder, RetrievalRequestMeta, SessionLookupRequest,
+    SessionLookupResult, SourceLinesRequest, SourceLinesResult, SourceReference,
+    SymbolSearchRequest, SymbolSearchResult,
 };
 pub use source_read::{
     MAX_SOURCE_READ_PATH_BYTES, SourceReadModeV1, SourceReadPortContext, SourceReadPortFuture,

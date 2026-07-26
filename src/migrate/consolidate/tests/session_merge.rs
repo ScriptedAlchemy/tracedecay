@@ -91,12 +91,6 @@ async fn planning_rejects_future_source_lcm_schema_before_target_normalization()
     let target = layout_for_id(&fixture.project, &fixture.profile, &fixture.target_id)
         .unwrap()
         .sessions_db_path;
-    execute_owned_session_sql(
-        &fixture,
-        &fixture.target_id,
-        "DROP TABLE dashboard_token_counts",
-    )
-    .await;
     set_lcm_schema_version(
         &source,
         crate::sessions::lcm::LCM_SCHEMA_VERSION.saturating_add(1),
@@ -125,15 +119,9 @@ async fn planning_rejects_future_target_lcm_schema_without_normalization() {
     let target = layout_for_id(&fixture.project, &fixture.profile, &fixture.target_id)
         .unwrap()
         .sessions_db_path;
-    execute_owned_session_sql(
-        &fixture,
-        &fixture.target_id,
-        &format!(
-            "DROP TABLE dashboard_token_counts;
-             UPDATE session_schema_migrations SET version={}
-             WHERE name='lcm'",
-            crate::sessions::lcm::LCM_SCHEMA_VERSION.saturating_add(1)
-        ),
+    set_lcm_schema_version(
+        &target,
+        crate::sessions::lcm::LCM_SCHEMA_VERSION.saturating_add(1),
     )
     .await;
     let target_before = file_digest(&target).unwrap();
@@ -148,6 +136,42 @@ async fn planning_rejects_future_target_lcm_schema_without_normalization() {
     );
     assert_eq!(file_digest(&target).unwrap(), target_before);
     assert!(!session_table_exists(&target, "dashboard_token_counts").await);
+}
+
+#[tokio::test]
+async fn consolidation_discards_legacy_dashboard_token_count_cache() {
+    let fixture = fixture().await;
+    execute_owned_session_sql(
+        &fixture,
+        &fixture.source_id,
+        "CREATE TABLE dashboard_token_counts (
+             store TEXT NOT NULL,
+             provider TEXT NOT NULL,
+             message_id TEXT NOT NULL,
+             text_len INTEGER NOT NULL,
+             encoder TEXT NOT NULL,
+             token_count INTEGER NOT NULL,
+             computed_at INTEGER NOT NULL,
+             PRIMARY KEY (store, provider, message_id)
+         );
+         INSERT INTO dashboard_token_counts(
+             store, provider, message_id, text_len, encoder, token_count, computed_at
+         ) VALUES ('legacy.db', 'codex', 'message-current-session', 12, 'o200k_base', 3, 1);",
+    )
+    .await;
+
+    let options = fixture.options();
+    let report = plan(&options).await.unwrap();
+    let applied = apply(&options, &report.confirmation_token).await.unwrap();
+    let destination = layout_for_id(
+        &fixture.project,
+        &fixture.profile,
+        &applied.destination_project_id,
+    )
+    .unwrap()
+    .sessions_db_path;
+
+    assert!(!session_table_exists(&destination, "dashboard_token_counts").await);
 }
 
 #[tokio::test]

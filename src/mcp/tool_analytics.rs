@@ -199,7 +199,7 @@ pub(super) fn hook_route_analytics_event(
         "current_branch": optional_hashed_label(current_branch),
         "thread_id": bounded_lookup_identifier(route.thread_id.as_deref()),
         "rel_path_count": event.rel_paths.len(),
-        "has_command": event.command.is_some(),
+        "has_command": event.had_command,
         "admission_seq": admission_seq,
         "idempotency_key": idempotency_key.clone(),
     });
@@ -277,7 +277,7 @@ mod tests {
             agent: HookAgent::Codex,
             kind: HookEventKind::Shell,
             rel_paths: Vec::new(),
-            command: Some("cargo test --secret=leak".to_string()),
+            had_command: true,
             cwd: Some(PathBuf::from("/home/user/private-repo")),
             route: Some(HookRouteMetadata {
                 session_id: Some("session-123".to_string()),
@@ -336,7 +336,7 @@ mod tests {
             agent: HookAgent::Codex,
             kind: HookEventKind::Shell,
             rel_paths: Vec::new(),
-            command: None,
+            had_command: false,
             cwd: Some(PathBuf::from("/repo")),
             route: Some(HookRouteMetadata {
                 session_id: Some("session-123".to_string()),
