@@ -28,11 +28,11 @@ import {
   type PlacedThread,
 } from './weave.ts';
 import {
-  LoomTemporalPayloadSchema,
-  TimelinePayloadSchema,
+  LcmTimelinePayloadSchema,
   type LoomSourceStatus,
   type LoomTemporalPayload,
-} from '../../contracts/uncontracted/sessions.ts';
+  LoomTemporalPayloadSchema,
+} from '../../contracts/wire.ts';
 
 /**
  * Loom — time and causality.
@@ -69,7 +69,7 @@ export function LoomPage() {
   const timeline = useLegacy(
     ['loom', 'timeline'],
     '/api/plugins/hermes-lcm/timeline',
-    TimelinePayloadSchema,
+    LcmTimelinePayloadSchema,
   );
   const [selectedId, setSelectedId] = useState<string | null>(null);
 

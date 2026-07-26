@@ -53,39 +53,71 @@ const SESSIONS = {
   ],
 };
 
+/** `lcm_queries` selects a literal `0 AS pinned` and never resolves a source or
+ * storage kind for these rows, so every column below the tool name comes back
+ * as the null (or zero) the query left behind. */
+function chainMessage(over: Record<string, unknown>) {
+  return {
+    session_id: 'sess-open',
+    role: null,
+    content: null,
+    ordinal: null,
+    timestamp: null,
+    tool_name: null,
+    token_estimate: null,
+    pinned: 0,
+    source: 'cursor',
+    storage_kind: 'message',
+    store_id: null,
+    summary_node_ids: [],
+    metadata_json: null,
+    ...over,
+  };
+}
+
 const CHAIN = {
   exists: true,
   session_id: 'sess-open',
+  path: '/home/zack/.tracedecay/projects/project-loom/sessions.db',
+  storage_scope: 'profile_sharded',
+  order: 'asc',
+  limit: 200,
+  offset: 0,
+  has_more: false,
   has_more_messages: false,
-  counts: { message_count: 405, token_estimate_total: 5583 },
+  has_more_summary_nodes: false,
+  counts: {
+    message_count: 405,
+    token_estimate_total: 5583,
+    source_token_count: 0,
+    summary_node_count: 0,
+    summary_token_count: 0,
+  },
+  summary_nodes: [],
   messages: [
-    {
+    chainMessage({
       message_id: 'm0',
       role: 'user',
       content: 'Verify durable code-generation restart.',
       ordinal: 0,
-      timestamp: null,
-      tool_name: null,
       token_estimate: 12,
-    },
-    {
+    }),
+    chainMessage({
       message_id: 'm1',
       role: 'assistant',
       content: 'Reading the reconciliation path.',
       ordinal: 1,
-      timestamp: null,
       tool_name: 'Read',
       token_estimate: 20,
-    },
-    {
+    }),
+    chainMessage({
       message_id: 'm2',
       role: 'assistant',
       content: 'Running the suite.',
       ordinal: 2,
-      timestamp: null,
       tool_name: 'Bash',
       token_estimate: 26,
-    },
+    }),
   ],
 };
 

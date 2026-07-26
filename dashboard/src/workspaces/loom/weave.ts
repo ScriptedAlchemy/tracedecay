@@ -37,7 +37,30 @@
  * renders those rows without projecting a made-up continuous coordinate.
  */
 import { packTrack, type LoomSpan } from './tracks.ts';
-import type { SessionRow } from '../../contracts/uncontracted/sessions.ts';
+
+/**
+ * A session as the weave needs to read it.
+ *
+ * Two contracted routes serve session rows and they are not the same shape:
+ * `/api/loom/temporal` serves `LoomSessionRow`, which records a session end and
+ * whether edits were captured, while `/api/plugins/savings/sessions` serves
+ * `SavingsSessionRow`, which carries token accounting and neither of those two.
+ * Both satisfy this, so the placement logic reads what a row actually has and
+ * the absent quantities stay absent — which is exactly the distinction the
+ * open-tail idiom below depends on.
+ */
+export interface WeaveSession {
+  session_id: string;
+  provider: string;
+  title?: string | null;
+  started_at: number | null;
+  ended_at?: number | null;
+  last_message_at?: number | null;
+  messages: number;
+  is_subagent?: boolean;
+  edited_files_recorded?: boolean;
+  models?: readonly { model?: string | null }[] | null;
+}
 
 /** One session, reduced to the quantities the weave actually draws. */
 export interface WeaveThread {
@@ -112,7 +135,7 @@ export interface Weave {
 
 /** Distinct model names on a session's accounting rows, in wire order and
  * without the null placeholder the daemon uses for untagged turns. */
-function modelsOf(session: SessionRow): string[] {
+function modelsOf(session: WeaveSession): string[] {
   const out: string[] = [];
   for (const row of session.models ?? []) {
     const model = row.model;
@@ -128,7 +151,7 @@ function modelsOf(session: SessionRow): string[] {
  * than placed at an invented time — there is no honest y for it — and the
  * caller is told how many were dropped so the count can be printed.
  */
-export function threadsFrom(sessions: readonly SessionRow[]): {
+export function threadsFrom(sessions: readonly WeaveSession[]): {
   threads: WeaveThread[];
   undated: number;
 } {
@@ -205,7 +228,7 @@ export function extentOf(threads: readonly WeaveThread[]): WeaveExtent | null {
  * than a constant because only the renderer knows the current scale.
  */
 export function composeWeave(
-  sessions: readonly SessionRow[],
+  sessions: readonly WeaveSession[],
   minGapSeconds = 0,
 ): Weave & { undated: number } {
   const { threads, undated } = threadsFrom(sessions);

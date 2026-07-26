@@ -171,18 +171,7 @@ function syntheticGroup(repo: {
 /** GET /api/projects — brain/delivery registry (one shared
  * `contracts/uncontracted/projects.ts` ProjectsPayloadSchema;
  * src/dashboard/projects.rs `list`). */
-const projects: Record<string, unknown> = {
-  status: 'ok',
-  truncated: false,
-  active_project_id: 'tracedecay',
-  active_project_root: '/fast/projects/tracedecay',
-  summary: {
-    // tracedecay (2 checkouts) + lynx + hermes + the two non-git entries.
-    project_count: 6 + SYNTHETIC_REPOS.length,
-    repo_count: 5 + SYNTHETIC_REPOS.length,
-    truncated: false,
-  },
-  project_tree: [
+const projectTree: ReadonlyArray<Record<string, unknown>> = [
     {
       label: 'tracedecay',
       git_common_dir: '/fast/projects/tracedecay/.git',
@@ -260,7 +249,42 @@ const projects: Record<string, unknown> = {
         },
       ],
     },
-  ],
+];
+
+/** `projects.rs` answers with BOTH shapes: the grouped `project_tree` the Brain
+ * field draws, and a flat `projects` list of `PublicCodeProject` — a narrower
+ * record with `created_at`, `display_root` and `git_common_dir` that the
+ * registry entries do not carry. Derived from the tree so the two views can
+ * never disagree about which projects exist. */
+const flatProjects: ReadonlyArray<Record<string, unknown>> = projectTree.flatMap((group) =>
+  (group['projects'] as ReadonlyArray<Record<string, unknown>>).map((entry) => ({
+    project_id: entry['project_id'],
+    label: entry['label'],
+    project_root: entry['project_root'],
+    canonical_root: entry['canonical_root'],
+    display_root: entry['project_root'],
+    git_common_dir: group['git_common_dir'],
+    default_branch: entry['default_branch'],
+    created_at: (entry['last_seen_at'] as number) - 30 * DAY,
+    last_seen_at: entry['last_seen_at'],
+    is_active: entry['is_active'],
+  })),
+);
+
+const projects: Record<string, unknown> = {
+  status: 'ok',
+  limit: 100,
+  truncated: false,
+  projects: flatProjects,
+  active_project_id: 'tracedecay',
+  active_project_root: '/fast/projects/tracedecay',
+  summary: {
+    // tracedecay (2 checkouts) + lynx + hermes + the two non-git entries.
+    project_count: 6 + SYNTHETIC_REPOS.length,
+    repo_count: 5 + SYNTHETIC_REPOS.length,
+    truncated: false,
+  },
+  project_tree: projectTree,
 };
 
 /* ==========================================================================
@@ -348,6 +372,9 @@ function memoryFacts(): Record<string, unknown>[] {
       content: FACT_CONTENTS[i % FACT_CONTENTS.length],
       category: FACT_CATEGORIES[i % FACT_CATEGORIES.length],
       tags: FACT_TAGS[i % FACT_TAGS.length],
+      // `fact_summary_json` never attaches entities to a summary row; the typed
+      // row carries the null the decode left behind.
+      entities: null,
     };
   });
 }
@@ -473,6 +500,16 @@ function memoryPayload(query = ''): Record<string, unknown> {
       facts,
       entities,
       graph: { nodes: [], edges: [] },
+      // Per-read outcome, seeded `pending` and overwritten as each of the three
+      // reads lands (memory_api.rs::overview). All three succeeded here.
+      reads: {
+        facts: { state: 'ready' },
+        entities: { state: 'ready' },
+        graph: { state: 'ready' },
+      },
+      // The fact list is bounded by `limit`, and the query — empty here — is
+      // applied after that bound, so `bounded` is what the route reports.
+      facts_coverage: { completeness: 'bounded', limit: 100, query_applied_after_limit: query !== '' },
       error: '',
     },
   };
@@ -666,11 +703,59 @@ const GRAPH_FILES = [
   'dashboard/src/workspaces/code/CodePage.tsx',
 ] as const;
 
+/**
+ * Every `GraphNodeV1` key at its absent value.
+ *
+ * A query that selects a subset of `NODE_COLUMNS` still deserializes into the
+ * full struct, so the columns it left out reach the browser as explicit nulls.
+ * Spreading this first is what keeps a partial row wire-true instead of merely
+ * short.
+ */
+const GRAPH_NODE_ABSENT = {
+  name: null,
+  qualified_name: null,
+  file_path: null,
+  start_line: null,
+  end_line: null,
+  start_column: null,
+  end_column: null,
+  attrs_start_line: null,
+  doc: null,
+  signature: null,
+  visibility: null,
+  is_async: null,
+  branches: null,
+  loops: null,
+  returns: null,
+  max_nesting: null,
+  unsafe_blocks: null,
+  unchecked_calls: null,
+  assertions: null,
+  updated_at: null,
+  parent_id: null,
+  degree: null,
+  span: null,
+  edge_kind: null,
+  edge_line: null,
+} as const;
+
+/**
+ * One node exactly as `GraphNodeV1` serializes it.
+ *
+ * Every key is present because none of the Rust fields is
+ * `skip_serializing_if`: an absent column reaches the browser as an explicit
+ * null, not as a missing key. The metric columns are SQLite integers, so
+ * `is_async` is 0/1 rather than a boolean — a fixture that sent `true` here
+ * would be testing the surface against a payload the daemon cannot produce.
+ * `edge_kind` and `edge_line` are null on every row except the caller/callee
+ * rows of the neighbors route, which set them per edge.
+ */
 function graphNode(i: number, prefix: string, degree: number): Record<string, unknown> {
   const kind = pick(GRAPH_KINDS, i);
   const file = pick(GRAPH_FILES, i);
   const name = `${prefix}_${i}`;
   const startLine = 40 + i * 7;
+  const callable = kind === 'function' || kind === 'method';
   return {
     id: `${prefix}-${i}`,
     kind,
@@ -683,9 +768,20 @@ function graphNode(i: number, prefix: string, degree: number): Record<string, un
     end_column: 4,
     attrs_start_line: startLine - 1,
     doc: i % 3 === 0 ? `Doc for ${name}.` : null,
-    signature: kind === 'function' || kind === 'method' ? `fn ${name}(state: &DashboardState) -> Value` : null,
+    signature: callable ? `fn ${name}(state: &DashboardState) -> Value` : null,
     visibility: i % 4 === 0 ? 'pub' : 'pub(crate)',
-    is_async: i % 5 === 0,
+    is_async: i % 5 === 0 ? 1 : 0,
+    // Complexity columns are extracted for callables only; everything else
+    // carries the nulls the extractor left behind.
+    branches: callable ? i % 7 : null,
+    loops: callable ? i % 3 : null,
+    returns: callable ? 1 + (i % 2) : null,
+    max_nesting: callable ? 1 + (i % 4) : null,
+    unsafe_blocks: callable ? 0 : null,
+    unchecked_calls: callable ? i % 5 : null,
+    assertions: callable ? i % 2 : null,
+    updated_at: 1_784_000_000 + i * 37,
+    parent_id: i % 6 === 0 ? null : `${prefix}-${Math.max(i - (i % 6), 0)}`,
     degree,
     span: {
       start_line: startLine,
@@ -694,6 +790,8 @@ function graphNode(i: number, prefix: string, degree: number): Record<string, un
       end_column: 4,
       attrs_start_line: startLine - 1,
     },
+    edge_kind: null,
+    edge_line: null,
   };
 }
 
@@ -717,7 +815,17 @@ function buildBaseGraph(): BaseGraph {
     const key = `${ids[a]}→${ids[b]}→${kind}`;
     if (edgeSet.has(key)) return;
     edgeSet.add(key);
-    edges.push({ source: ids[a], target: ids[b], kind, line: 20 + (a * 7 + b) % 300 });
+    // `edge_rows_for_ids` groups on (source, target, kind) and never joins
+    // `nodes`, so the subgraph's edges carry null names — unlike the neighbors
+    // route, which does resolve them.
+    edges.push({
+      source: ids[a],
+      target: ids[b],
+      kind,
+      line: 20 + ((a * 7 + b) % 300),
+      source_name: null,
+      target_name: null,
+    });
   };
 
   // Four hubs radiating to overlapping ranges of leaves.
@@ -942,6 +1050,10 @@ function graphOverviewPayload(): Record<string, unknown> {
   // degree in a symbol graph is power-law, not linear — one run-away hub, a
   // steep fall, then near-ties bunching at the bottom of the twelve.
   //
+  // The row still deserializes into the whole `GraphNodeV1`, so the twenty-two
+  // columns the query never asked for go out as nulls rather than as absent
+  // keys. Only those five carry a value.
+  //
   // The NAMES matter as much as the degrees, and `hub_0 … hub_11` hid the
   // single hardest thing about this row set. On a real Rust graph the most
   // connected symbols are language primitives and one-word generics — `path`,
@@ -964,6 +1076,7 @@ function graphOverviewPayload(): Record<string, unknown> {
     ['u32', 'impl', 'src/db/engine/value.rs', 390],
   ];
   const topConnected = HUBS.map(([name, kind, file_path, degree], i) => ({
+    ...GRAPH_NODE_ABSENT,
     id: `${kind}:hub-${i}`,
     name,
     kind,
@@ -1070,6 +1183,7 @@ function savingsPayload(): Record<string, unknown> {
     savings: {
       available: true,
       db: '/home/zack/.tracedecay/global.db',
+      error: null,
       recording: { enabled: true, mode: 'auto' },
       ledger: {
         today: sum(27_897_298, 222),
@@ -1080,6 +1194,12 @@ function savingsPayload(): Record<string, unknown> {
       lifetime_counters: {
         total_tokens_saved: SAVINGS_PROJECTS.reduce((sum, [, saved]) => sum + saved, 0),
         projects: SAVINGS_PROJECTS.map(([path, tokens_saved]) => ({ path, tokens_saved })),
+        // `savings_api` lists at most `PROJECT_LIMIT` (25) project rows and
+        // reports the true distinct-project count beside them, so the surface
+        // can say how many it is not showing.
+        project_total: SAVINGS_PROJECTS.length,
+        projects_limit: 25,
+        projects_truncated: false,
       },
     },
     // The session ledger's own accounting, which CostsPage now reads for the
@@ -1095,6 +1215,10 @@ function savingsPayload(): Record<string, unknown> {
       available: true,
       db: '/fast/projects/tracedecay/.tracedecay/sessions.db',
       scope: 'profile_sharded',
+      // `status`/`error` carry `read_failed` and a message when the session
+      // ledger read fails; a successful read leaves both null.
+      status: null,
+      error: null,
       session_count: 6_054,
       model_count: 41,
       unknown_model_messages: 187_066,
@@ -1118,6 +1242,8 @@ function savingsPayload(): Record<string, unknown> {
     },
     turns: {
       available: true,
+      status: null,
+      error: null,
       turn_count: 57_704,
       total_cost_usd: 8148.9744974,
       total_tokens: 683_965_063,
@@ -1129,6 +1255,119 @@ function savingsPayload(): Record<string, unknown> {
       offline: false,
       model_count: 214,
     },
+    costs: costsReadModel(),
+  };
+}
+
+/** The Plan 26 Costs projection `savings_api::overview` embeds
+ * (`application::observability::costs_read_model`, called unscoped and from
+ * epoch). Its numbers are the same ledger totals the summaries above report,
+ * because they are read from the same store.
+ *
+ * `provider_cost` is deliberately valueless: prices are recorded at ingest and
+ * this projection never recomputes them, so with no pricing revision it reports
+ * `unavailable_reason` rather than a dollar figure. That one unknown-coverage
+ * metric is what makes the model `current: false`. */
+function costsReadModel(): Record<string, unknown> {
+  const observedAtMicros = nowMicros;
+  const horizon = { since_micros: 0, until_micros: observedAtMicros };
+  const accountingWatermark = 'turns:57704:1784052000';
+  const savingsWatermark = 'savings:1784052117';
+  const known = (eligible: number) => ({
+    eligible,
+    observed: eligible,
+    completed: eligible,
+    censored: 0,
+    unknown: 0,
+    excluded: 0,
+    state: 'known',
+  });
+  const measurement = (
+    metric: string,
+    value: number | null,
+    unit: string,
+    denominator: string,
+    coverage: Record<string, unknown>,
+    source: string,
+    sourceRevision: string,
+    watermark: string,
+    unavailableReason: string | null,
+  ) => ({
+    descriptor_revision: 'provider-costs.v1',
+    metric,
+    value,
+    unit,
+    denominator,
+    denominator_value: coverage['eligible'],
+    coverage,
+    evidence_class: 'measurement',
+    provenance: {
+      source,
+      source_revision: sourceRevision,
+      projector_revision: 'costs-projector.v1',
+      watermark,
+    },
+    cohort: { descriptor_revision: `${denominator}.v1`, eligible_population: denominator },
+    temporal: { horizon, baseline_watermark: null, delta: null },
+    uncertainty:
+      value === null
+        ? { lower: null, upper: null, reason: unavailableReason }
+        : { lower: value, upper: value, reason: null },
+    calibration: null,
+    unavailable_reason: unavailableReason,
+  });
+  return {
+    authorized_scope_ref: 'all',
+    horizon,
+    watermark: `${accountingWatermark};${savingsWatermark}`,
+    observed_at_micros: observedAtMicros,
+    current: false,
+    usage: [
+      measurement(
+        'provider_tokens',
+        683_965_063,
+        'tokens',
+        'ingested_provider_turns',
+        known(57_704),
+        'accounting_turn',
+        'accounting-turn.v1',
+        accountingWatermark,
+        null,
+      ),
+      measurement(
+        'saved_tokens',
+        4_902_796_408,
+        'tokens',
+        'eligible_savings_calls',
+        known(147_230),
+        'savings_ledger',
+        'savings-ledger.v1',
+        savingsWatermark,
+        null,
+      ),
+    ],
+    estimated_cost: [
+      measurement(
+        'provider_cost',
+        null,
+        'usd',
+        'priced_provider_turns',
+        {
+          eligible: null,
+          observed: 57_704,
+          completed: 57_704,
+          censored: 0,
+          unknown: 1,
+          excluded: 0,
+          state: 'unknown',
+        },
+        'accounting_turn',
+        'accounting-turn.v1',
+        accountingWatermark,
+        'pricing_revision_unavailable',
+      ),
+    ],
+    pricing_revision: null,
   };
 }
 
@@ -1891,7 +2130,9 @@ function loomChainPayload(): Record<string, unknown> {
       timestamp: null,
       tool_name: tool,
       token_estimate: 18 + (i % 9) * 7,
-      pinned: false,
+      // `lcm_queries` selects a literal `0 AS pinned`: pinning is not tracked
+      // yet, and the column is an integer, not a boolean.
+      pinned: 0,
       source: 'cursor',
       storage_kind: 'message',
       store_id: 90_000 + i,
@@ -1986,12 +2227,22 @@ function memoryStatusPayload(): Record<string, unknown> {
     path: '/fast/projects/tracedecay/.tracedecay/memory.db',
     largest_bank_fact_count: 169,
     largest_bank_utilization_pct: 0.0477,
+    // A store past its legacy backfill with no outstanding feedback repair —
+    // the steady state, and the one the Brain readout is designed against.
+    feedback_history_repair: { state: 'not_required', processed: 0, remaining: null },
     memory: {
       algebra_name: 'amari_fhrr',
       bank_count: 7,
+      // 2048-dimension FHRR (the `hrr_dim` migration default), which is what
+      // sets `estimated_capacity` below.
+      hrr_dim: 2048,
       entity_count: 1186,
       estimated_capacity: 354_304,
       fact_count: 173,
+      below_default_recall_threshold_count: 4,
+      missing_vector_count: 0,
+      legacy_backfill_complete: true,
+      repair: { banks_rebuilt: 0, missing_vectors_repaired: 0 },
       // The four coarse trust bands. KnowledgePage reads these as its FALLBACK
       // trust distribution, because on a real store the overview's ten-bucket
       // `trust_histogram` comes back all-zero — `dashboard_compatibility_named_
@@ -2038,6 +2289,69 @@ function analyticsOverviewPayload(): Record<string, unknown> {
         { category: 'lcm_session', events: 22, kind: 'tool' },
       ],
     },
+    observatory: observatoryReadModel(),
+  };
+}
+
+/** The Plan 26 Observatory projection `analytics_api::overview` embeds
+ * (`application::observability::observatory_read_model`). It is never absent on
+ * this route — a missing store yields the `analytics:unavailable` model with
+ * `current: false`, not a null — so the fixture carries the complete-coverage
+ * variant: every envelope in the horizon parsed, so each metric reports an
+ * exact value and `unavailable_reason` stays null. */
+function observatoryReadModel(): Record<string, unknown> {
+  const horizon = {
+    since_micros: nowMicros - 30 * DAY * 1_000_000,
+    until_micros: nowMicros,
+  };
+  const observed = 4182;
+  const watermark = 'analytics:evt_9f31c4';
+  // `complete` coverage: nothing invalid, nothing dropped, so `eligible` is the
+  // exact observed count and the interval collapses onto the value.
+  const coverage = {
+    eligible: observed,
+    observed,
+    completed: observed,
+    censored: 0,
+    unknown: 0,
+    excluded: 0,
+    state: 'known',
+  };
+  const metric = (name: string, value: number) => ({
+    descriptor_revision: 'analytics-events.v1',
+    metric: name,
+    value,
+    unit: 'events',
+    denominator: 'eligible_observability_events',
+    denominator_value: coverage.eligible,
+    coverage,
+    evidence_class: 'measurement',
+    provenance: {
+      source: 'observability_envelope',
+      source_revision: 'observability-envelope.v1',
+      projector_revision: 'observatory-projector.v1',
+      watermark,
+    },
+    cohort: {
+      descriptor_revision: 'eligible_observability_events.v1',
+      eligible_population: 'eligible_observability_events',
+    },
+    temporal: { horizon, baseline_watermark: null, delta: null },
+    uncertainty: { lower: value, upper: value, reason: null },
+    calibration: null,
+    unavailable_reason: null,
+  });
+  return {
+    authorized_scope_ref: 'proj_a5b3d7e3ebe14ca7',
+    horizon,
+    watermark,
+    observed_at_micros: nowMicros,
+    current: true,
+    metrics: [
+      metric('observability_events', observed),
+      metric('observability_failures', 37),
+      metric('telemetry_drops_lower_bound', 0),
+    ],
   };
 }
 
@@ -2051,12 +2365,24 @@ export const EMPTY_FIXTURE: Record<string, unknown> = {};
  * depends on, so the fixture answers for any id rather than only known ones.
  */
 function projectContextPayload(projectId: string): Record<string, unknown> {
-  const known = (projects['project_tree'] as Array<Record<string, unknown>>)
-    .flatMap((group) => group['projects'] as Array<Record<string, unknown>>)
-    .find((entry) => entry['project_id'] === projectId);
-  const entry =
-    known ?? projectEntry(projectId, projectId, `/fast/projects/${projectId}`, 3 * DAY);
-  const root = entry['canonical_root'] as string;
+  // `context` answers with a `PublicCodeProject`, the same narrow record the
+  // list route's flat `projects` carries — not the registry entry the tree
+  // holds — so the two routes are read from one source here.
+  const known = flatProjects.find((entry) => entry['project_id'] === projectId);
+  const root = `/fast/projects/${projectId}`;
+  const entry = known ?? {
+    project_id: projectId,
+    label: projectId,
+    project_root: root,
+    canonical_root: root,
+    display_root: root,
+    git_common_dir: `${root}/.git`,
+    default_branch: 'master',
+    created_at: nowSecs - 33 * DAY,
+    last_seen_at: nowSecs - 3 * DAY,
+    is_active: false,
+  };
+  const canonicalRoot = entry['canonical_root'] as string;
   const lastSeen = entry['last_seen_at'] as number;
   const branches = ['master', 'codex/tracedecay-total-redesign-plan', 'release/2.4'];
   return {
@@ -2064,10 +2390,10 @@ function projectContextPayload(projectId: string): Record<string, unknown> {
     is_active: entry['is_active'] === true,
     project: entry,
     aliases: [
-      { project_id: projectId, alias_path: root, last_seen_at: lastSeen },
+      { project_id: projectId, alias_path: canonicalRoot, last_seen_at: lastSeen },
       ...branches.slice(1).map((branch, i) => ({
         project_id: projectId,
-        alias_path: `${root}/.worktrees/${branch.replace(/\//g, '-')}`,
+        alias_path: `${canonicalRoot}/.worktrees/${branch.replace(/\//g, '-')}`,
         last_seen_at: lastSeen - (i + 1) * 4 * 3600,
       })),
     ],

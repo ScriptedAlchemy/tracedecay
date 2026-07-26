@@ -100,20 +100,11 @@ pub(crate) async fn overview(State(state): State<DashboardState>) -> Response {
         ),
     };
     let hints = hint_summary(state.lcm_db.as_deref(), durable_events.as_deref()).await;
-    let usage = usage_summary(state.lcm_db.as_deref(), durable_events.as_deref()).await;
-    let usage = match serde_json::from_value::<AnalyticsUsageSummaryV1>(usage) {
-        Ok(usage) => usage,
-        Err(error) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "status": "contract_invalid",
-                    "error": format!("analytics usage summary did not match its contract: {error}"),
-                })),
-            )
-                .into_response();
-        }
-    };
+    let usage =
+        match typed_usage_summary(state.lcm_db.as_deref(), durable_events.as_deref()).await {
+            Ok(usage) => usage,
+            Err(response) => return response,
+        };
     let agents = agent_usage_summary(state.lcm_db.as_deref()).await;
     let diagnostics = diagnostics_summary(&state, durable_events.as_deref()).await;
     let underused = underused_tool_families(state.lcm_db.as_deref()).await;
@@ -274,9 +265,12 @@ pub(crate) async fn hints(State(state): State<DashboardState>) -> Json<Value> {
 }
 
 /// `GET /api/plugins/analytics/usage`
-pub(crate) async fn usage(State(state): State<DashboardState>) -> Json<Value> {
+pub(crate) async fn usage(State(state): State<DashboardState>) -> Response {
     let durable_events = durable_analytics_rows_for_state(&state).await;
-    Json(usage_summary(state.lcm_db.as_deref(), durable_events.as_deref()).await)
+    match typed_usage_summary(state.lcm_db.as_deref(), durable_events.as_deref()).await {
+        Ok(usage) => Json(usage).into_response(),
+        Err(response) => response,
+    }
 }
 
 /// `GET /api/plugins/analytics/diagnostics`
@@ -693,6 +687,31 @@ fn increment_usage_count(counts: &mut BTreeMap<(String, String), i64>, kind: &st
     *counts
         .entry((kind.to_string(), category.to_string()))
         .or_default() += 1;
+}
+
+/// The contract form of the usage summary, shared by `GET .../usage` and the
+/// `usage` member of the overview payload.
+///
+/// `usage_summary` builds two different literals — the unavailable branch omits
+/// `source` and `event_count` rather than sending them null — so serving that
+/// value raw would put a shape on the wire that the declared contract rejects.
+/// Round-tripping through the struct is what makes the absent count arrive as an
+/// explicit null, which is the distinction the readers depend on.
+async fn typed_usage_summary(
+    db: Option<&RegisteredGlobalDb>,
+    durable_events: Option<&[Value]>,
+) -> Result<AnalyticsUsageSummaryV1, Response> {
+    let usage = usage_summary(db, durable_events).await;
+    serde_json::from_value::<AnalyticsUsageSummaryV1>(usage).map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "status": "contract_invalid",
+                "error": format!("analytics usage summary did not match its contract: {error}"),
+            })),
+        )
+            .into_response()
+    })
 }
 
 async fn usage_summary(db: Option<&RegisteredGlobalDb>, durable_events: Option<&[Value]>) -> Value {

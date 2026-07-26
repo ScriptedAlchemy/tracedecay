@@ -25,17 +25,15 @@ import { AnyObject, type LegacyResult } from '../../data/query/legacy.ts';
 import { fetchEnvelope, type EnvelopeResult } from '../../data/query/envelope.ts';
 import { useLegacy } from '../../data/query/useLegacy.ts';
 import {
-  ExplorerQueryRunSchema,
   type ExplorerQueryRun,
+  ExplorerQueryRunSchema,
+  type ExplorerReadContext,
+  ExplorerReadContextSchema,
+  type ExplorerSessionSize,
+  ExplorerSessionSizeSchema,
   type ExplorerSourceId,
   type ExplorerSourceProgress,
 } from '../../contracts/wire.ts';
-import {
-  ExplorerReadContextSchema,
-  ExplorerSessionSizeSchema,
-  type ExplorerReadContext,
-  type ExplorerSessionSize,
-} from '../../contracts/uncontracted/explorer.ts';
 import {
   LANES,
   codeHits,

@@ -1,5 +1,6 @@
 import type { z } from 'zod';
 import { EnvelopeSchema, type WireDomainState, type WireEnvelope } from '../../contracts/wire.ts';
+import type { WireSchema } from './wireSchema.ts';
 
 /** Result of an envelope fetch. Transport failures become truthful domain
  * states rather than exceptions: the UI always has a state to render. */
@@ -14,7 +15,7 @@ export type EnvelopeResult<T> =
  */
 export async function fetchEnvelope<T>(
   url: string,
-  payloadSchema: z.ZodType<T>,
+  payloadSchema: WireSchema<T>,
   init?: RequestInit,
 ): Promise<EnvelopeResult<T>> {
   let response: Response;

@@ -3,7 +3,9 @@ import { render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { BrainPage } from './BrainPage.tsx';
 import { useScope } from '../../data/scope/store.ts';
-import { ProjectsPayloadSchema } from '../../contracts/uncontracted/projects.ts';
+import {
+  ProjectsPayloadSchema,
+} from '../../contracts/wire.ts';
 
 /** Wire-true `GET /api/projects` body. `projects.rs::list` answers both failure
  * statuses with an explicit `"summary": null` / `"project_tree": null` — the
