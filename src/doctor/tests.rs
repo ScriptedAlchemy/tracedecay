@@ -24,6 +24,60 @@ fn canonical_temp_path(path: &Path) -> PathBuf {
     }
 }
 
+#[test]
+fn table_growth_lines_report_baseline_and_unknown_without_zero() {
+    let status = serde_json::json!({
+        "kind": "observed",
+        "table_growth_evidence": [
+            {
+                "kind": "baseline_established",
+                "store": "sessions.db",
+                "observed_at": 2_000,
+                "tables_observed": 3
+            },
+            {
+                "kind": "unknown",
+                "store": "graph.db"
+            }
+        ]
+    });
+
+    let lines = table_growth_doctor_lines(&status);
+
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0].level, StorageGrowthDoctorLineLevel::Warning);
+    assert!(lines[0].message.contains("no prior baseline"));
+    assert!(lines[0].message.contains("sessions.db"));
+    assert_eq!(lines[1].level, StorageGrowthDoctorLineLevel::Warning);
+    assert!(lines[1].message.contains("unavailable"));
+    assert!(lines[1].message.contains("graph.db"));
+    assert!(!lines[1].message.contains("0 B"));
+}
+
+#[test]
+fn significant_table_growth_line_is_informational() {
+    let status = serde_json::json!({
+        "kind": "observed",
+        "table_growth_evidence": [{
+            "kind": "significant_growth",
+            "store": "sessions.db",
+            "table": "messages",
+            "previous_bytes": 10_485_760,
+            "current_bytes": 11_534_336,
+            "growth_bytes": 1_048_576,
+            "previous_observed_at": 1_000,
+            "current_observed_at": 2_000
+        }]
+    });
+
+    let lines = table_growth_doctor_lines(&status);
+
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0].level, StorageGrowthDoctorLineLevel::Information);
+    assert!(lines[0].message.contains("sessions.db.messages"));
+    assert!(lines[0].message.contains("1.0 MB"));
+}
+
 /// A directory guaranteed to sit outside `std::env::temp_dir()`, for fixtures
 /// that must NOT be classified as "ephemeral" by
 /// `migrate::registry::classify_project_root` (which rejects project roots
@@ -978,7 +1032,7 @@ fn daemon_runtime_parser_extracts_storage_health_and_owner() {
             {"type": "text", "text": "daemon notice"},
             {
                 "type": "text",
-                "text": r#"{"tracedecay_version":"0.0.66","process":{"pid":1234},"database":{"canonical_db_path":"/tmp/project.db","quick_check_ok":true,"authority_audit_ok":true,"authority_audit_error":null,"dirty_marker":{"exists":false}},"session_temporal_health":{"status":"complete","findings":[]},"cursor_session_ingest":{"tracked_transcripts":1,"pending_transcripts":0,"pending_bytes":0,"max_transcript_pending_bytes":0},"cursor_session_placeholder_paths":["${workspaceFolder}/cursor.jsonl"]}"#
+                "text": r#"{"tracedecay_version":"0.0.66","process":{"pid":1234},"database":{"canonical_db_path":"/tmp/project.db","quick_check_ok":true,"authority_audit_ok":true,"authority_audit_error":null,"dirty_marker":{"exists":false}},"doctor_report":{"kind":"unknown","table_growth_evidence":[]},"session_temporal_health":{"status":"complete","findings":[]},"cursor_session_ingest":{"tracked_transcripts":1,"pending_transcripts":0,"pending_bytes":0,"max_transcript_pending_bytes":0},"cursor_session_placeholder_paths":["${workspaceFolder}/cursor.jsonl"]}"#
             }
         ]
     }))
@@ -1015,6 +1069,10 @@ fn daemon_runtime_parser_extracts_storage_health_and_owner() {
     assert_eq!(
         parsed.pointer("/session_temporal_health/status"),
         Some(&serde_json::json!("complete"))
+    );
+    assert_eq!(
+        parsed.pointer("/doctor_report/kind"),
+        Some(&serde_json::json!("unknown"))
     );
 }
 
@@ -1149,6 +1207,7 @@ fn daemon_runtime_request_enables_authority_audit() {
         serde_json::json!({
             "format": "json",
             "authority_audit": true,
+            "doctor_report": true,
             "session_ingest_health": true,
         })
     );
