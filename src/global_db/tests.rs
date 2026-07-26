@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use super::{AnalyticsEventInsert, ParseOffset, RegisteredGlobalDb};
 
-pub(super) mod harness;
+pub(crate) mod harness;
 
 use harness::RegisteredGlobalDbHarness;
 
@@ -599,6 +599,116 @@ async fn concurrent_registered_writes_remain_isolated() {
     }
 
     assert_eq!(handles[0].sum_savings(None, 0).await.calls, 12);
+}
+
+#[tokio::test]
+async fn observability_append_is_idempotent_and_rejects_changed_input() {
+    let harness = RegisteredGlobalDbHarness::open("observability-idempotency").await;
+    let event = AnalyticsEventInsert {
+        provider: "tracedecay-observability".to_string(),
+        project_id: "scope:fixture".to_string(),
+        session_id: None,
+        timestamp: 1,
+        event_kind: "retrieval.query.observed.v1".to_string(),
+        hook_name: None,
+        tool_name: None,
+        tool_category: None,
+        skill_name: None,
+        hint_category: None,
+        hint_id: Some("idempotency:fixture".to_string()),
+        outcome: Some("succeeded".to_string()),
+        metadata_json: Some("{\"canonical\":true}".to_string()),
+    };
+    let first = harness
+        .registered
+        .append_observability_event(&event)
+        .await
+        .expect("first append");
+    let replay = harness
+        .registered
+        .append_observability_event(&event)
+        .await
+        .expect("idempotent replay");
+    assert_eq!(first, replay);
+
+    let mut changed = event;
+    changed.metadata_json = Some("{\"canonical\":false}".to_string());
+    let error = harness
+        .registered
+        .append_observability_event(&changed)
+        .await
+        .expect_err("changed canonical input must conflict");
+    assert!(error.contains("idempotency conflict"), "{error}");
+    assert_eq!(
+        harness
+            .registered
+            .count_analytics_events(Some("scope:fixture"), 0)
+            .await
+            .expect("event count"),
+        1
+    );
+}
+
+#[tokio::test]
+async fn analytics_query_honors_upper_horizon_and_row_cursor() {
+    let harness = RegisteredGlobalDbHarness::open("analytics-query-bounds").await;
+    let event = |timestamp: i64| AnalyticsEventInsert {
+        provider: "codex".to_string(),
+        project_id: "project".to_string(),
+        session_id: None,
+        timestamp,
+        event_kind: "fixture".to_string(),
+        hook_name: None,
+        tool_name: None,
+        tool_category: None,
+        skill_name: None,
+        hint_category: None,
+        hint_id: None,
+        outcome: None,
+        metadata_json: None,
+    };
+    for timestamp in [1, 2, 3] {
+        harness
+            .registered
+            .append_analytics_event(&event(timestamp))
+            .await
+            .expect("append event");
+    }
+    let bounded = harness
+        .registered
+        .query_analytics_events(&super::AnalyticsEventQuery {
+            project_id: Some("project".to_string()),
+            until: Some(3),
+            limit: 10,
+            ..Default::default()
+        })
+        .await
+        .expect("bounded query");
+    assert_eq!(
+        bounded
+            .iter()
+            .map(|event| event.timestamp)
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+    let cursor = bounded.last().expect("cursor row").id;
+    let older = harness
+        .registered
+        .query_analytics_events(&super::AnalyticsEventQuery {
+            project_id: Some("project".to_string()),
+            before_id: Some(cursor),
+            limit: 10,
+            ..Default::default()
+        })
+        .await
+        .expect("cursor query");
+    assert_eq!(
+        older
+            .iter()
+            .map(|event| event.timestamp)
+            .collect::<Vec<_>>(),
+        vec![1]
+    );
 }
 
 #[tokio::test]

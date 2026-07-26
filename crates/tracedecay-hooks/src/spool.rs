@@ -44,6 +44,7 @@ const MAX_REPLAY_SESSIONS: usize = 4;
 const RECORDS_FILE: &str = "records.v1.bin";
 const META_FILE: &str = "meta.v1.json";
 const LEASE_FILE: &str = "writer.v1.lease";
+const REPLAY_CURSOR_FILE: &str = "replay-cursor.v1.bin";
 const DIRECTORY_POLICY: DirectorySyncPolicy = DirectorySyncPolicy::Strict;
 
 /// Per-host and per-session bounds. Callers may narrow these for a host test
@@ -373,6 +374,7 @@ impl HookSpoolV1 {
                 SpoolIntegrityV1::Corrupted { at_offset } => Some(at_offset),
             },
         };
+        let round_robin_after = read_replay_cursor(&root)?;
         let mut spool = Self {
             root,
             config,
@@ -382,7 +384,7 @@ impl HookSpoolV1 {
             pending,
             pending_by_session,
             physical_len: scan.physical_len,
-            round_robin_after: None,
+            round_robin_after,
             replay_claims: BTreeMap::new(),
             recovery_required: false,
         };
@@ -518,9 +520,9 @@ impl HookSpoolV1 {
         }
         let candidates = replayable_sessions(&self.pending, now);
         let ordered = round_robin_after(&candidates, self.round_robin_after);
-        let mut batches = Vec::new();
+        let mut selected = Vec::new();
         for session in ordered {
-            if batches.len() == session_cap || self.replay_claims.contains_key(&session) {
+            if selected.len() == session_cap || self.replay_claims.contains_key(&session) {
                 continue;
             }
             let records = batch_for_session(&self.pending, session, now)?;
@@ -529,14 +531,27 @@ impl HookSpoolV1 {
             }
             let byte_count = records.iter().map(|record| record.framed_len).sum::<u32>();
             let claim_id = next_token();
-            self.replay_claims.insert(session, claim_id);
-            self.round_robin_after = Some(session);
-            batches.push(HookReplayBatchV1 {
+            selected.push((
+                session,
                 claim_id,
-                protected_session_id: session,
-                records,
-                byte_count,
-            });
+                HookReplayBatchV1 {
+                    claim_id,
+                    protected_session_id: session,
+                    records,
+                    byte_count,
+                },
+            ));
+        }
+        if let Some((last_session, _, _)) = selected.last()
+            && self.round_robin_after != Some(*last_session)
+        {
+            write_replay_cursor(&self.root, *last_session)?;
+            self.round_robin_after = Some(*last_session);
+        }
+        let mut batches = Vec::with_capacity(selected.len());
+        for (session, claim_id, batch) in selected {
+            self.replay_claims.insert(session, claim_id);
+            batches.push(batch);
         }
         Ok(batches)
     }
@@ -741,6 +756,10 @@ fn lease_path(root: &Path) -> PathBuf {
     root.join(LEASE_FILE)
 }
 
+fn replay_cursor_path(root: &Path) -> PathBuf {
+    root.join(REPLAY_CURSOR_FILE)
+}
+
 fn ensure_root(root: &Path) -> Result<(), HookSpoolError> {
     match fs::symlink_metadata(root) {
         Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
@@ -788,6 +807,26 @@ fn write_meta(root: &Path, meta: &HookSpoolMetaV1) -> Result<(), HookSpoolError>
     }
     shared_atomic_write(&meta_path(root), "meta", &bytes, DIRECTORY_POLICY)
         .map_err(|_| HookSpoolError::Io)
+}
+
+fn read_replay_cursor(root: &Path) -> Result<Option<[u8; 32]>, HookSpoolError> {
+    read_bounded(&replay_cursor_path(root), 32)?
+        .map(|bytes| {
+            bytes
+                .try_into()
+                .map_err(|_| HookSpoolError::MetadataCorrupted)
+        })
+        .transpose()
+}
+
+fn write_replay_cursor(root: &Path, cursor: [u8; 32]) -> Result<(), HookSpoolError> {
+    shared_atomic_write(
+        &replay_cursor_path(root),
+        "replay-cursor",
+        &cursor,
+        DIRECTORY_POLICY,
+    )
+    .map_err(|_| HookSpoolError::Io)
 }
 
 fn write_lease_file(file: &mut File, lease: HookSpoolWriterLeaseV1) -> Result<(), HookSpoolError> {
@@ -1559,6 +1598,34 @@ mod tests {
         }
         let next = spool.claim_replay_batches(UtcMicros(11), 1).unwrap();
         assert_eq!(next[0].protected_session_id, [9; 32]);
+    }
+
+    #[test]
+    fn fair_replay_cursor_survives_spool_reopen() {
+        let root = TestDir::new("fair-reopen");
+        {
+            let (mut spool, _) = HookSpoolV1::open(&root.0, config(), UtcMicros(10)).unwrap();
+            for event in 1..=5 {
+                spool
+                    .append(envelope(event, event + 8), &binding(), UtcMicros(10))
+                    .unwrap();
+            }
+            let first = spool.claim_replay_batches(UtcMicros(11), 4).unwrap();
+            assert_eq!(
+                first
+                    .iter()
+                    .map(|batch| batch.protected_session_id)
+                    .collect::<Vec<_>>(),
+                [[9; 32], [10; 32], [11; 32], [12; 32]]
+            );
+        }
+
+        let (mut reopened, _) = HookSpoolV1::open(&root.0, config(), UtcMicros(12)).unwrap();
+        let next = reopened.claim_replay_batches(UtcMicros(12), 1).unwrap();
+        assert_eq!(
+            next[0].protected_session_id, [13; 32],
+            "reopening the spool must not starve sessions after the first four"
+        );
     }
 
     #[test]

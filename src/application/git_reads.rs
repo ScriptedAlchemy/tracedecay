@@ -45,6 +45,28 @@ pub enum GitReadRequestV1 {
     },
 }
 
+impl GitReadRequestV1 {
+    pub fn capability_id(&self) -> &'static str {
+        match self {
+            Self::Status => "capability.application.git.status",
+            Self::Diff { .. } => "capability.application.git.diff",
+            Self::History { .. } => "capability.application.git.history",
+            Self::Blame { .. } => "capability.application.git.blame",
+            Self::Hunks { .. } => "capability.application.git.hunks",
+        }
+    }
+
+    pub fn use_case_id(&self) -> &'static str {
+        match self {
+            Self::Status => "use-case.application.git.status",
+            Self::Diff { .. } => "use-case.application.git.diff",
+            Self::History { .. } => "use-case.application.git.history",
+            Self::Blame { .. } => "use-case.application.git.blame",
+            Self::Hunks { .. } => "use-case.application.git.hunks",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "query", content = "result", rename_all = "snake_case")]
 pub enum GitReadResultV1 {

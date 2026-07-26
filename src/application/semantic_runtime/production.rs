@@ -1480,6 +1480,24 @@ struct PublishedSemanticVectorReadPortV1 {
     rows: Vec<SemanticVectorRecordV1>,
 }
 
+fn semantic_candidate_identity(
+    chunk: &CodeSearchChunkV1,
+) -> Result<(RetrievalAnchorId, LogicalEvidenceId, SourceOccurrenceId), RetrievalPortError> {
+    let chunk_id = chunk.id.as_str();
+    let evidence_id = chunk.anchor.symbol_occurrence_id.as_ref().map_or_else(
+        || format!("code-chunk:{chunk_id}"),
+        |symbol| format!("code-symbol:{}", symbol.as_str()),
+    );
+    Ok((
+        RetrievalAnchorId::new(evidence_id.clone())
+            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
+        LogicalEvidenceId::new(evidence_id)
+            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
+        SourceOccurrenceId::new(format!("code-chunk:{chunk_id}"))
+            .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
+    ))
+}
+
 struct ScopedSemanticEvaluationVectorReadPortV1<'a> {
     inner: &'a PublishedSemanticVectorReadPortV1,
     allowed_chunks: &'a BTreeSet<tracedecay_domain::CodeSearchChunkId>,
@@ -1535,18 +1553,11 @@ impl PublishedSemanticVectorReadPortV1 {
                 .get(&vector.chunk_id)
                 .ok_or(RetrievalPortError::GenerationMismatch)?;
             let chunk_id = &vector.chunk_id;
-            let anchor_id = RetrievalAnchorId::new(format!("code-chunk:{}", chunk_id.as_str()))
-                .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
-            let source_occurrence =
-                SourceOccurrenceId::new(format!("code-chunk:{}", chunk_id.as_str()))
-                    .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+            let (anchor_id, logical_evidence_id, source_occurrence) =
+                semantic_candidate_identity(chunk)?;
             let candidate = CompactCandidate {
                 anchor_id: anchor_id.clone(),
-                logical_evidence_id: LogicalEvidenceId::new(format!(
-                    "code-chunk:{}",
-                    chunk_id.as_str()
-                ))
-                .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
+                logical_evidence_id,
                 source_occurrence_id: source_occurrence.clone(),
                 source_namespace: freshness.source_namespace.clone(),
                 repository_id: Some(code.snapshot().repository.clone()),
@@ -1622,18 +1633,11 @@ impl PublishedSemanticVectorReadPortV1 {
             let chunk = chunks
                 .get(chunk_id)
                 .ok_or(RetrievalPortError::GenerationMismatch)?;
-            let anchor_id = RetrievalAnchorId::new(format!("code-chunk:{}", chunk_id.as_str()))
-                .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
-            let source_occurrence =
-                SourceOccurrenceId::new(format!("code-chunk:{}", chunk_id.as_str()))
-                    .map_err(|error| RetrievalPortError::Contract(error.to_string()))?;
+            let (anchor_id, logical_evidence_id, source_occurrence) =
+                semantic_candidate_identity(chunk)?;
             let candidate = CompactCandidate {
                 anchor_id: anchor_id.clone(),
-                logical_evidence_id: LogicalEvidenceId::new(format!(
-                    "code-chunk:{}",
-                    chunk_id.as_str()
-                ))
-                .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
+                logical_evidence_id,
                 source_occurrence_id: source_occurrence.clone(),
                 source_namespace: freshness.source_namespace.clone(),
                 repository_id: Some(code.snapshot().repository.clone()),
@@ -2219,18 +2223,20 @@ pub fn project_semantic_production_runtime(
 /// selected at admission. A stale or merely indexing vector generation never
 /// becomes eligible for semantic composition.
 pub(crate) fn project_semantic_source_generation(project_root: &Path) -> Option<CodeGenerationId> {
+    project_semantic_generation_pointer(project_root).map(|pointer| pointer.source_generation)
+}
+
+pub(crate) fn project_semantic_generation_pointer(
+    project_root: &Path,
+) -> Option<SemanticGenerationPointerV1> {
     if let Some(runtime) = project_semantic_production_runtime(project_root) {
-        return runtime
-            .handle
-            .current()
-            .map(|pointer| pointer.source_generation);
+        return runtime.handle.current();
     }
     project_semantic_handles()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get(project_root)
         .and_then(DaemonSemanticRuntimeHandleV1::current)
-        .map(|pointer| pointer.source_generation)
 }
 
 /// Application status for a mounted project semantic scheduler, if any.
@@ -2692,6 +2698,37 @@ mod tests {
             subtokens: Vec::new(),
             sanitized_text: BoundedSanitizedText::new("code").expect("sanitized text"),
         }
+    }
+
+    #[test]
+    fn symbol_backed_semantic_identity_dedupes_with_lexical_evidence() {
+        let source = source_generation('a');
+        let mut chunk = canonical_chunk(&source, 'a');
+        let symbol = tracedecay_domain::SymbolOccurrenceId::new("symbol.fixture")
+            .expect("symbol occurrence");
+        chunk.anchor.symbol_occurrence_id = Some(symbol.clone());
+
+        let (semantic_anchor, semantic_logical_evidence, source_occurrence) =
+            semantic_candidate_identity(&chunk).expect("semantic identity");
+        let lexical_evidence = format!("code-symbol:{}", symbol.as_str());
+        let lexical_anchor =
+            RetrievalAnchorId::new(lexical_evidence.clone()).expect("lexical anchor");
+        let mixed_anchors = BTreeSet::from([semantic_anchor.clone(), lexical_anchor]);
+
+        assert_eq!(mixed_anchors.len(), 1);
+        assert_eq!(
+            semantic_anchor,
+            RetrievalAnchorId::new(lexical_evidence.clone()).expect("semantic anchor")
+        );
+        assert_eq!(
+            semantic_logical_evidence,
+            LogicalEvidenceId::new(lexical_evidence).expect("logical evidence")
+        );
+        assert_eq!(
+            source_occurrence,
+            SourceOccurrenceId::new(format!("code-chunk:{}", chunk.id.as_str()))
+                .expect("source occurrence")
+        );
     }
 
     #[derive(Clone)]

@@ -13,8 +13,9 @@ use tracedecay_domain::configuration::{
     SOURCE_BINDINGS_SETTING_KEY, SettingKey, resolve_restrictive_capabilities,
 };
 use tracedecay_domain::{
-    ActorId, CapabilityId as DomainCapabilityId, GitHeadStateV1, GitIndexPreviewV1,
-    GitIndexTransactionOperationV1, ManifestDigest, ProjectId, UtcMicros, canonical_sha256,
+    ActorId, CapabilityId as DomainCapabilityId, GitHeadStateV1, GitIndexPreviewDispositionV1,
+    GitIndexPreviewV1, GitIndexTransactionOperationV1, GitIndexUnsupportedStateV1, ManifestDigest,
+    ProjectId, RepositoryIndexStateV1, RepositoryWorkingTreeStateV1, UtcMicros, canonical_sha256,
 };
 use tracedecay_policy::{GitConflictRiskV1, GitEffectAuthorizationV1, GitEffectClassifierV1};
 use tracedecay_tool_catalog::CapabilityId;
@@ -48,10 +49,19 @@ pub(crate) struct DaemonGitAuthorityStateV1 {
 }
 
 pub(crate) trait DaemonGitAuthoritySource: Send + Sync {
+    fn current_capability(
+        &self,
+        capability_id: &CapabilityId,
+    ) -> Result<DaemonGitAuthorityStateV1, GitIndexTransactionPortError>;
+
     fn current(
         &self,
         operation: GitIndexTransactionOperationV1,
-    ) -> Result<DaemonGitAuthorityStateV1, GitIndexTransactionPortError>;
+    ) -> Result<DaemonGitAuthorityStateV1, GitIndexTransactionPortError> {
+        let binding = GitIndexOperationBindingV1::for_operation(operation)
+            .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
+        self.current_capability(&binding.capability_id)
+    }
 }
 
 struct ProductionDaemonGitAuthoritySource {
@@ -61,25 +71,26 @@ struct ProductionDaemonGitAuthoritySource {
 }
 
 impl DaemonGitAuthoritySource for ProductionDaemonGitAuthoritySource {
-    fn current(
+    fn current_capability(
         &self,
-        operation: GitIndexTransactionOperationV1,
+        capability_id: &CapabilityId,
     ) -> Result<DaemonGitAuthorityStateV1, GitIndexTransactionPortError> {
         let evaluated_at = current_micros();
         if evaluated_at >= self.access.grant_expires_at {
             return Err(GitIndexTransactionPortError::PolicyDenied);
         }
-        let current = self
-            .runtime
-            .block_on(self.configuration.current())
-            .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
+        // The Git transaction port is intentionally synchronous while the
+        // configuration authority is asynchronous. Production calls arrive
+        // on Tokio workers, so yield this worker before waiting on the same
+        // runtime; calling `Handle::block_on` directly here panics because it
+        // attempts to enter a runtime that is already driving this task.
+        let current =
+            tokio::task::block_in_place(|| self.runtime.block_on(self.configuration.current()))
+                .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
         if current.snapshot.validate().is_err() {
             return Err(GitIndexTransactionPortError::PolicyDenied);
         }
 
-        let binding = GitIndexOperationBindingV1::for_operation(operation)
-            .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
-        let capability_id = binding.capability_id;
         let bindings_key = SettingKey::new(SOURCE_BINDINGS_SETTING_KEY)
             .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
         let Some(ConfigurationValueV1::SourceBindings(bindings)) =
@@ -138,13 +149,13 @@ impl DaemonGitAuthoritySource for ProductionDaemonGitAuthoritySource {
             .map(|capability| CapabilityId::new(capability.as_str().to_owned()))
             .collect::<Result<BTreeSet<_>, _>>()
             .map_err(|_| GitIndexTransactionPortError::PolicyDenied)?;
-        if !effective_capabilities.contains(&capability_id) {
+        if !effective_capabilities.contains(capability_id) {
             return Err(GitIndexTransactionPortError::PolicyDenied);
         }
         let catalog = build_application_catalog_snapshot()
             .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
         let manifest = catalog
-            .capability(&capability_id)
+            .capability(capability_id)
             .ok_or(GitIndexTransactionPortError::PolicyDenied)?;
         let catalog_digest = ManifestDigest::new(catalog.digest().to_string())
             .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
@@ -204,9 +215,9 @@ impl DaemonGitAuthoritySlot {
 }
 
 impl DaemonGitAuthoritySource for DaemonGitAuthoritySlot {
-    fn current(
+    fn current_capability(
         &self,
-        operation: GitIndexTransactionOperationV1,
+        capability_id: &CapabilityId,
     ) -> Result<DaemonGitAuthorityStateV1, GitIndexTransactionPortError> {
         let source = self
             .source
@@ -215,7 +226,7 @@ impl DaemonGitAuthoritySource for DaemonGitAuthoritySlot {
             .as_ref()
             .ok_or(GitIndexTransactionPortError::PolicyDenied)?
             .clone();
-        source.current(operation)
+        source.current_capability(capability_id)
     }
 }
 
@@ -266,12 +277,49 @@ impl GitIndexPolicyRecheckPort for DaemonGitIndexPolicyRecheck {
                 capability_granted,
                 owner_scope_matches,
             },
-            conflict_risk: GitConflictRiskV1::NoneKnown,
+            conflict_risk: preview_conflict_risk(preview),
             policy_revision: current.policy_revision,
             policy_digest: current.policy_digest,
             configuration_digest: current.configuration_digest,
             evaluated_at: current.evaluated_at,
         })
+    }
+}
+
+pub(super) fn preview_conflict_risk(preview: &GitIndexPreviewV1) -> GitConflictRiskV1 {
+    let snapshot = &preview.repository_snapshot;
+    if snapshot.index.state == RepositoryIndexStateV1::Unmerged
+        || snapshot.working_tree.state == RepositoryWorkingTreeStateV1::Conflicted
+        || matches!(
+            preview.disposition,
+            GitIndexPreviewDispositionV1::Unsupported(
+                GitIndexUnsupportedStateV1::UnmergedIndex
+                    | GitIndexUnsupportedStateV1::ConflictedWorkingTree
+            )
+        )
+    {
+        return GitConflictRiskV1::Confirmed;
+    }
+    if !snapshot.coverage.is_complete()
+        || !matches!(
+            snapshot.index.state,
+            RepositoryIndexStateV1::Clean | RepositoryIndexStateV1::Staged
+        )
+        || snapshot.operation_state != tracedecay_domain::GitOperationStateV1::None
+        || matches!(
+            preview.disposition,
+            GitIndexPreviewDispositionV1::Unsupported(
+                GitIndexUnsupportedStateV1::UnreadableIndex
+                    | GitIndexUnsupportedStateV1::UnreadableWorkingTree
+                    | GitIndexUnsupportedStateV1::InProgressOperation
+                    | GitIndexUnsupportedStateV1::SparseIndex
+                    | GitIndexUnsupportedStateV1::SplitIndex
+            )
+        )
+    {
+        GitConflictRiskV1::Possible
+    } else {
+        GitConflictRiskV1::NoneKnown
     }
 }
 
@@ -323,6 +371,15 @@ impl DaemonGitInvocationOwner {
         operation: GitIndexTransactionOperationV1,
     ) -> Result<DaemonGitAuthorityStateV1, GitIndexTransactionPortError> {
         self.authority.current(operation)
+    }
+
+    pub(crate) fn current_read_authority(
+        &self,
+        request: &crate::application::git_reads::GitReadRequestV1,
+    ) -> Result<DaemonGitAuthorityStateV1, GitIndexTransactionPortError> {
+        let capability = CapabilityId::new(request.capability_id().to_owned())
+            .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
+        self.authority.current_capability(&capability)
     }
 }
 

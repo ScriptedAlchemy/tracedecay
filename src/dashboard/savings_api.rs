@@ -255,13 +255,47 @@ pub(crate) async fn overview(State(state): State<DashboardState>) -> Json<Value>
         "offline": pricing_full.get("offline"),
         "model_count": pricing_full.get("model_count"),
     });
+    let costs = state.savings_db.as_deref().map(|db| async move {
+        crate::application::observability::costs_read_model(db, None, 0).await
+    });
+    let costs = match costs {
+        Some(costs) => serde_json::to_value(costs.await).unwrap_or(Value::Null),
+        None => serde_json::to_value(
+            crate::application::observability::costs_unavailable_read_model(
+                None,
+                0,
+                "accounting_store_unavailable",
+            ),
+        )
+        .unwrap_or(Value::Null),
+    };
 
     Json(json!({
         "savings": savings,
         "sessions": sessions,
         "turns": turns,
         "pricing": pricing,
+        "costs": costs,
     }))
+}
+
+/// Canonical Plan 26 Costs projection; all dollar values were priced at ingest.
+pub(crate) async fn costs(State(state): State<DashboardState>) -> Json<Value> {
+    let value = match state.savings_db.as_deref() {
+        Some(db) => serde_json::to_value(
+            crate::application::observability::costs_read_model(db, None, 0).await,
+        )
+        .unwrap_or(Value::Null),
+        None => serde_json::to_value(
+            crate::application::observability::costs_unavailable_read_model(
+                None,
+                0,
+                "accounting_store_unavailable",
+            ),
+        )
+        .unwrap_or(Value::Null),
+    };
+    Json(value)
 }
 
 async fn savings_overview(gdb: &RegisteredGlobalDb, db_path: &str) -> Value {

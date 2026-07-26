@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use tracedecay_domain::{CodeGenerationId, ManifestDigest, RepositoryId, WorktreeId};
 
@@ -47,6 +47,17 @@ pub(in crate::daemon) struct CodeIndexSchedulerRegistryV1 {
     pub(super) byte_pool: Arc<SharedCodeIndexBytePoolV1>,
     pub(super) mounted: Arc<tokio::sync::Mutex<BTreeMap<PathBuf, MountedCodeIndexWorktreeV1>>>,
     background_reconcile_admission: Arc<tokio::sync::Semaphore>,
+    test_attribution_authorities: Arc<
+        RwLock<
+            BTreeMap<
+                PathBuf,
+                (
+                    CodeGenerationId,
+                    crate::code_index::production::PublishedGenerationTestAttributionAuthorityV1,
+                ),
+            >,
+        >,
+    >,
 }
 
 impl CodeIndexSchedulerRegistryV1 {
@@ -58,6 +69,7 @@ impl CodeIndexSchedulerRegistryV1 {
             background_reconcile_admission: Arc::new(tokio::sync::Semaphore::new(
                 MAX_CONCURRENT_BACKGROUND_RECONCILES,
             )),
+            test_attribution_authorities: Arc::new(RwLock::new(BTreeMap::new())),
         }
     }
 
@@ -366,6 +378,88 @@ impl CodeIndexSchedulerRegistryV1 {
             .map(|latest| latest.generation.manifest().generation_id.clone())
     }
 
+    /// Exact live dashboard projection for one mounted worktree.
+    ///
+    /// The freshness ladder runs before projection. Generation and scope fields
+    /// are copied from the durable sealed generation, never reconstructed from
+    /// the dashboard's display path.
+    pub(in crate::daemon) async fn dashboard_freshness(
+        &self,
+        project_root: &Path,
+    ) -> Option<crate::dashboard::code_index_freshness_api::CodeIndexWorktreeFreshnessV1> {
+        let canonical_root = project_root.canonicalize().ok()?;
+        let scheduler = {
+            let mounted = self.mounted.lock().await;
+            Arc::clone(&mounted.get(&canonical_root)?.scheduler)
+        };
+        tokio::task::spawn_blocking(move || {
+            let mut scheduler = scheduler
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let reconciled = scheduler.ensure_fresh_for_query().is_ok();
+            let latest = reconciled.then(|| scheduler.latest_complete()).flatten();
+            let hook_hint_count = scheduler.pending_hint_count();
+            let (
+                repository_id,
+                worktree_id,
+                source_reference,
+                generation_id,
+                content_identity,
+                sealed,
+            ) = latest
+                .as_ref()
+                .map_or((None, None, None, None, None, None), |latest| {
+                    let generation = &latest.generation;
+                    let snapshot = generation.snapshot();
+                    (
+                        Some(snapshot.repository.as_str().to_owned()),
+                        snapshot
+                            .worktree
+                            .as_ref()
+                            .map(|worktree| worktree.as_str().to_owned()),
+                        snapshot
+                            .reference
+                            .as_ref()
+                            .map(|reference| reference.as_str().to_owned()),
+                        Some(generation.manifest().generation_id.as_str().to_owned()),
+                        Some(snapshot.content_identity.as_str().to_owned()),
+                        Some(generation.manifest().seal.sealed_at.0),
+                    )
+                });
+            crate::dashboard::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
+                worktree_root: canonical_root.display().to_string(),
+                repository_id,
+                worktree_id,
+                source_reference,
+                latest_generation_id: generation_id,
+                snapshot_content_identity: content_identity,
+                sealed_at_micros: sealed,
+                last_reconcile_micros: Some(scheduler.last_reconciled_at_micros()),
+                staleness_state: Some(
+                    if !reconciled {
+                        "unknown"
+                    } else if latest.is_some() {
+                        "fresh"
+                    } else {
+                        "indexing"
+                    }
+                    .to_owned(),
+                ),
+                hook_hint_count,
+                coverage: if !reconciled {
+                    "unknown_reconcile_failed"
+                } else if hook_hint_count.is_some() {
+                    "complete"
+                } else {
+                    "partial_hook_hint_overflow"
+                }
+                .to_owned(),
+            }
+        })
+        .await
+        .ok()
+    }
+
     /// Query-admission entry point: run the freshness ladder (tier-1 git
     /// metadata, tier-2 bounded staleness, tier-3 identity re-resolution) before
     /// returning the latest complete generation, so external out-of-band changes
@@ -387,7 +481,7 @@ impl CodeIndexSchedulerRegistryV1 {
         // Run the synchronous reconcile off the async executor. Freshness is an
         // admission requirement: if it cannot be established, fail closed
         // rather than serving a last-known generation that may now be stale.
-        tokio::task::spawn_blocking(move || {
+        let latest = tokio::task::spawn_blocking(move || {
             let mut scheduler = scheduler
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -396,7 +490,23 @@ impl CodeIndexSchedulerRegistryV1 {
         })
         .await
         .ok()
-        .flatten()
+        .flatten();
+        if let Some(latest) = &latest
+            && let Ok(authority) = latest.test_attribution_authority()
+        {
+            let mut authorities = self
+                .test_attribution_authorities
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            authorities.insert(
+                project_root,
+                (
+                    latest.generation.manifest().generation_id.clone(),
+                    authority,
+                ),
+            );
+        }
+        latest
     }
 
     /// Resolve one mounted root by the exact admitted repository/worktree/ref
@@ -498,6 +608,10 @@ impl CodeIndexSchedulerRegistryV1 {
 
     pub async fn shutdown(&self) {
         let mounted = std::mem::take(&mut *self.mounted.lock().await);
+        self.test_attribution_authorities
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
         for worktree in mounted.values() {
             let scheduler = worktree
                 .scheduler
@@ -620,6 +734,44 @@ impl crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1
                 ),
             )
         })
+    }
+}
+
+impl crate::code_index::provider::GenerationTestAttributionJoinReadPort
+    for CodeIndexSchedulerRegistryV1
+{
+    fn read_test_attribution(
+        &self,
+        generation: &CodeGenerationId,
+    ) -> crate::code_index::provider::GenerationProviderReadV1<
+        crate::code_index::test_attribution::GenerationTestJoinV1,
+    > {
+        let authorities = self
+            .test_attribution_authorities
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut matching = authorities
+            .values()
+            .filter(|(candidate, _)| candidate == generation);
+        let Some((_, authority)) = matching.next() else {
+            return crate::code_index::provider::GenerationProviderReadV1::new(
+                tracedecay_domain::ProviderEvaluationStateV1::Unavailable,
+                crate::code_index::provider::GenerationProviderCoverageV1::Unavailable,
+                None,
+            )
+            .unwrap_or_else(|_| panic!("static unavailable attribution read"));
+        };
+        if matching.next().is_some() {
+            return crate::code_index::provider::GenerationProviderReadV1::new(
+                tracedecay_domain::ProviderEvaluationStateV1::Unavailable,
+                crate::code_index::provider::GenerationProviderCoverageV1::Unavailable,
+                None,
+            )
+            .unwrap_or_else(|_| panic!("static ambiguous attribution read"));
+        }
+        crate::code_index::provider::GenerationTestAttributionJoinReadPort::read_test_attribution(
+            authority, generation,
+        )
     }
 }
 
