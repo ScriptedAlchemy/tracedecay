@@ -78,6 +78,9 @@ pub enum DoctorStorageFindingKindV1 {
     /// Retention-eligible rows or stores are past their window and awaiting
     /// offload/collection.
     RetentionBacklog,
+    /// Per-table SQLite payload growth observed between two retained
+    /// watermarks, including baseline and unavailable measurement states.
+    TableGrowth,
 }
 
 /// Exact Doctor evidence states from Plan 09 §PR14.
@@ -834,6 +837,7 @@ mod tests {
                 DoctorStorageFindingKindV1::RetentionBacklog,
                 "retention_backlog",
             ),
+            (DoctorStorageFindingKindV1::TableGrowth, "table_growth"),
         ] {
             let encoded = serde_json::to_string(&kind).expect("serialize");
             assert_eq!(encoded, format!("\"{expected}\""), "{kind:?}");
