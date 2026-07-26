@@ -4,9 +4,9 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 use crate::agents::host_bundle_v2::{
-    HostBundleComponentV1, HostBundleError, HostBundleLifecycleOpV1, HostBundleRegistrationStateV1,
-    HostComponentSetExecutionRequestV1, HostComponentSetLifecyclePreviewV1,
-    HostComponentSetRegistrationV1, HostComponentSetV1,
+    CompetingHostExtensionClaimV1, HostBundleComponentV1, HostBundleError, HostBundleLifecycleOpV1,
+    HostBundleRegistrationStateV1, HostCapabilityV1, HostComponentSetExecutionRequestV1,
+    HostComponentSetLifecyclePreviewV1, HostComponentSetRegistrationV1, HostComponentSetV1,
 };
 use crate::agents::{
     AgentIntegration, HealthcheckContext, InstallContext, expected_tool_perms, get_integration,
@@ -143,28 +143,48 @@ impl CompatibilityAgentRegistrationDelegate {
             .is_some_and(|bytes| bytes == b"1")
     }
 
-    fn competing_opencode_analyzer_present(&self) -> bool {
+    fn competing_opencode_analyzer_claim(&self) -> Option<CompetingHostExtensionClaimV1> {
         if self.integration.id() != "opencode" {
-            return false;
+            return None;
         }
         let Some(path) = &self.registration_path else {
-            return false;
+            return None;
         };
         let Ok(bytes) = fs::read(path) else {
-            return false;
+            return None;
         };
         let Ok(config) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-            return false;
+            return None;
         };
+        let evidence_digest = Sha256::digest(&bytes).into();
         config
             .get("lsp")
             .and_then(serde_json::Value::as_object)
-            .is_some_and(|servers| {
-                servers.iter().any(|(name, registration)| {
-                    name != "tracedecay"
-                        && registration
-                            .get("command")
-                            .is_some_and(|command| command.to_string().contains("tracedecay"))
+            .and_then(|servers| {
+                servers.iter().find_map(|(name, registration)| {
+                    if name == "tracedecay" {
+                        return None;
+                    }
+                    let aliases_tracedecay = registration
+                        .get("command")
+                        .is_some_and(|command| command.to_string().contains("tracedecay"));
+                    let overlaps_extensions = registration
+                        .get("extensions")
+                        .and_then(serde_json::Value::as_array)
+                        .is_some_and(|extensions| {
+                            extensions.iter().filter_map(serde_json::Value::as_str).any(
+                                |extension| {
+                                    super::opencode::TRACEDECAY_LSP_EXTENSIONS.contains(&extension)
+                                },
+                            )
+                        });
+                    (aliases_tracedecay || overlaps_extensions).then(|| {
+                        CompetingHostExtensionClaimV1 {
+                            extension_id: name.clone(),
+                            capability: HostCapabilityV1::Lsp,
+                            evidence_digest,
+                        }
+                    })
                 })
             })
     }
@@ -337,7 +357,7 @@ impl HostComponentSetRegistrationV1 for CompatibilityAgentRegistrationDelegate {
         {
             return Err(HostBundleError::StalePreview);
         }
-        if self.competing_opencode_analyzer_present() {
+        if self.competing_opencode_analyzer_claim().is_some() {
             return Err(HostBundleError::OwnershipConflict);
         }
         let states = component_set

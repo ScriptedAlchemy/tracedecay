@@ -6,16 +6,21 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 use tracedecay::agents::host_bundle_registry::{
-    default_components, verified_embedded_default_host_component_set, verified_embedded_host_bundle,
+    HostBundleRegistryError, default_components, verified_embedded_default_host_component_set,
+    verified_embedded_host_bundle, verified_embedded_host_component_set,
 };
 use tracedecay::agents::host_bundle_v2::{
     HostBundleComponentDoctorStateV1, HostBundleComponentV1, HostBundleError,
     HostBundleInstallReceiptV1, HostBundleLifecycleOpV1, HostBundleReceiptArtifactV1,
     HostBundleRegistrationInspectorV1, HostBundleRegistrationStateV1, HostBundleRollbackBoundaryV1,
-    HostBundleWriterV1, HostComponentSetExecutionRequestV1, HostComponentSetLifecycleRequestV1,
-    HostComponentSetRegistrationV1, HostComponentSetTransactionV1, HostKindV1,
-    inspect_installed_host_bundle_components_at, stock_host_kinds,
+    HostBundleWriterV1, HostCapabilityStateV1, HostComponentSetExecutionRequestV1,
+    HostComponentSetLifecycleRequestV1, HostComponentSetRegistrationV1,
+    HostComponentSetTransactionV1, HostKindV1,
+    dry_run_host_component_set_lifecycle_with_lifecycle_root_at,
+    inspect_installed_host_bundle_components_at, native_host_edit_stop_conformance_evidence,
+    stock_host_kinds, stock_host_registration_evidence,
 };
+use tracedecay::agents::host_registration::CompatibilityAgentRegistrationDelegate;
 use tracedecay::agents::{
     AgentIntegration, HealthcheckContext, KimiIntegration, OpenCodeIntegration,
     inspect_receipt_backed_host_components,
@@ -320,6 +325,127 @@ fn cursor_native_extension_receipt_matches_embedded_assets() {
             .artifacts
             .iter()
             .all(|artifact| artifact.observed_digest == Some(artifact.expected_digest))
+    );
+}
+
+#[test]
+fn component_set_dry_run_refuses_overlapping_opencode_analyzer_and_accepts_clean_host() {
+    let home = tempfile::tempdir().unwrap();
+    let lifecycle = tempfile::tempdir().unwrap();
+    let component_set =
+        verified_embedded_default_host_component_set(HostKindV1::OpenCode, 0).unwrap();
+    let request = HostComponentSetExecutionRequestV1 {
+        lifecycle: HostComponentSetLifecycleRequestV1 {
+            operation: HostBundleLifecycleOpV1::Repair,
+            expected_host: HostKindV1::OpenCode,
+            expected_components: default_components(HostKindV1::OpenCode),
+            explicit_confirmation: true,
+            hermes_profile_bindings: 0,
+        },
+        operation_id: [31; 16],
+    };
+
+    let mut clean_registration = CompatibilityAgentRegistrationDelegate::new(
+        "opencode",
+        home.path(),
+        lifecycle.path(),
+        request.lifecycle.operation,
+    )
+    .unwrap();
+    dry_run_host_component_set_lifecycle_with_lifecycle_root_at(
+        home.path(),
+        lifecycle.path(),
+        &component_set.component_set,
+        &request,
+        &component_set,
+        &mut clean_registration,
+    )
+    .expect("a clean temporary OpenCode profile passes dry run");
+
+    let config_path = home.path().join(".config/opencode/opencode.json");
+    fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    fs::write(
+        &config_path,
+        serde_json::to_vec_pretty(&json!({
+            "lsp": {
+                "rust-analyzer": {
+                    "command": ["rust-analyzer"],
+                    "extensions": [".rs"]
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let mut conflicting_registration = CompatibilityAgentRegistrationDelegate::new(
+        "opencode",
+        home.path(),
+        lifecycle.path(),
+        request.lifecycle.operation,
+    )
+    .unwrap();
+    assert_eq!(
+        dry_run_host_component_set_lifecycle_with_lifecycle_root_at(
+            home.path(),
+            lifecycle.path(),
+            &component_set.component_set,
+            &request,
+            &component_set,
+            &mut conflicting_registration,
+        ),
+        Err(HostBundleError::OwnershipConflict),
+        "dry run must refuse an analyzer claiming a TraceDecay extension"
+    );
+}
+
+#[test]
+fn unsupported_host_components_are_not_advertised_or_constructible() {
+    for host in [
+        HostKindV1::CursorCloud,
+        HostKindV1::Kiro,
+        HostKindV1::ClineFamily,
+        HostKindV1::Cline,
+        HostKindV1::RooCode,
+        HostKindV1::Kilo,
+    ] {
+        assert!(
+            default_components(host).is_empty(),
+            "{host:?} must stay typed unavailable until its safety evidence is sufficient"
+        );
+        assert_eq!(
+            verified_embedded_host_component_set(host, &[HostBundleComponentV1::Core], 0),
+            Err(HostBundleRegistryError::Incompatible),
+            "{host:?} must refuse an explicit component request too"
+        );
+    }
+}
+
+#[test]
+fn native_host_evidence_is_embedded_and_covers_every_advertised_native_route() {
+    let evidence = native_host_edit_stop_conformance_evidence();
+    for host in [
+        HostKindV1::ClaudeCode,
+        HostKindV1::CursorDesktop,
+        HostKindV1::Codex,
+        HostKindV1::Hermes,
+        HostKindV1::KimiCode,
+        HostKindV1::OpenCode,
+    ] {
+        let record = evidence
+            .iter()
+            .find(|record| record.host == host)
+            .unwrap_or_else(|| panic!("{host:?} has no embedded native fixture evidence"));
+        assert_ne!(record.fixture_digest, [0; 32]);
+        assert!(!record.source_path.is_empty());
+    }
+}
+
+#[test]
+fn cursor_cloud_is_recognized_but_never_advertised_as_supported() {
+    assert!(
+        stock_host_registration_evidence(HostKindV1::CursorCloud)
+            .iter()
+            .all(|record| matches!(record.state, HostCapabilityStateV1::Unavailable(_)))
     );
 }
 
