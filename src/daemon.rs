@@ -4553,9 +4553,7 @@ async fn serve_broker_socket_client(
     }
     if let Some(request) = parse_branch_add_request(&first_request_line) {
         let response = match Box::pin(engine.project_server_for_request(&handshake)).await {
-            Ok(_) => {
-                branch_add_response(&engine.store_administration, &handshake, &request).await
-            }
+            Ok(_) => branch_add_response(&engine.store_administration, &handshake, &request).await,
             Err(error) => JsonRpcResponse::error(
                 request.id.clone(),
                 ErrorCode::InternalError,
