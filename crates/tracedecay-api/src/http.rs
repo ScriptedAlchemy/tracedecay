@@ -610,7 +610,7 @@ fn invalid_request_response(
     application_problem_response(invalid_request_problem(request_id, code, message))
 }
 
-/// Build the shipped application routes at relative paths.
+/// Build the catalog-advertised application routes at relative paths.
 ///
 /// The executable nests this router at its root-owned prefix behind
 /// authentication and origin middleware. Authorization remains part of
@@ -623,7 +623,6 @@ where
 {
     Router::new()
         .route("/git/{operation}", post(git_read::<O>))
-        .route("/feedback/{operation}", post(feedback_operation::<O>))
         .route("/tests/affected", post(affected_tests::<O>))
         .route("/tests/results", post(test_results::<O>))
         .route("/code/{operation}", post(callable_code_read::<O>))
