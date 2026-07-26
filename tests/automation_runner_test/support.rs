@@ -1037,21 +1037,11 @@ pub(crate) async fn init_project(project_root: &Path) -> TraceDecay {
     TraceDecay::init(project_root).await.unwrap()
 }
 
-pub(crate) async fn project_session_runtime(cg: &TraceDecay) -> HostAdmissionTestRuntimeV1 {
-    let project_id = cg
-        .store_layout()
-        .identity
-        .project_id
-        .as_deref()
-        .and_then(|project_id| ProjectId::new(project_id.to_string()).ok())
-        .expect("active project identity should be available");
-    HostAdmissionTestRuntimeV1::project(
-        tracedecay::storage::default_profile_root().expect("active test profile root"),
-        cg.project_root(),
-        project_id,
-    )
-    .await
-    .expect("registered project session runtime should open")
+pub(crate) async fn project_session_runtime(
+    cg: &TraceDecay,
+) -> std::sync::Arc<HostAdmissionTestRuntimeV1> {
+    cg.test_runtime_for_test()
+        .expect("project graph should retain its registered test runtime")
 }
 
 pub(crate) async fn seed_session_evidence(cg: &TraceDecay) {

@@ -446,10 +446,12 @@ impl UserConfig {
             return Err(ConfigSaveError::PathUnavailable);
         };
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|source| ConfigSaveError::Io {
-                path: parent.to_path_buf(),
-                message: "failed to create config directory".to_string(),
-                source,
+            crate::storage::PrivateStoreIo::create_dir_all(parent).map_err(|source| {
+                ConfigSaveError::Io {
+                    path: parent.to_path_buf(),
+                    message: "failed to create config directory".to_string(),
+                    source,
+                }
             })?;
         }
 
@@ -510,10 +512,12 @@ impl UserConfig {
         })?;
 
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|source| ConfigSaveError::Io {
-                path: parent.to_path_buf(),
-                message: "failed to create config directory".to_string(),
-                source,
+            crate::storage::PrivateStoreIo::create_dir_all(parent).map_err(|source| {
+                ConfigSaveError::Io {
+                    path: parent.to_path_buf(),
+                    message: "failed to create config directory".to_string(),
+                    source,
+                }
             })?;
         }
 
