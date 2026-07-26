@@ -1,4 +1,4 @@
-//! Focused acceptance checks for the inert PR13 application runtime contracts.
+//! Focused acceptance checks for the PR13 application runtime contracts.
 
 use tracedecay_application::feedback::{
     CiFailureLocalizationRequestV1, GitHubReviewReadRequestV1, ProximityEvaluationRequestV1,
@@ -69,12 +69,13 @@ fn ci_and_proximity_requests_are_exactly_scope_bound() {
 
 #[test]
 fn feedback_catalog_binds_pr13_advisory_handlers_to_supported_surfaces() {
-    const PR12_TRANSPORT: [BindingSurface; 3] = [
+    const PR14_READ_TRANSPORT: [BindingSurface; 4] = [
         BindingSurface::Cli,
         BindingSurface::Mcp,
         BindingSurface::Http,
+        BindingSurface::Dashboard,
     ];
-    const PR13_TRANSPORT_AND_LSP: [BindingSurface; 4] = [
+    const PR13_ADVISORY_TRANSPORT: [BindingSurface; 4] = [
         BindingSurface::Cli,
         BindingSurface::Mcp,
         BindingSurface::Http,
@@ -86,7 +87,7 @@ fn feedback_catalog_binds_pr13_advisory_handlers_to_supported_surfaces() {
         "capability.application.feedback.expand",
         "capability.application.feedback.list",
     ];
-    const PR13_ADVISORY: [&str; 3] = [
+    const PR13_PROVIDER_CONTRIBUTIONS: [&str; 3] = [
         "capability.application.feedback.github-review-ingest",
         "capability.application.feedback.ci-failure-localize",
         "capability.application.feedback.proximity",
@@ -104,14 +105,13 @@ fn feedback_catalog_binds_pr13_advisory_handlers_to_supported_surfaces() {
             .filter(|binding| binding.capability_id() == capability.capability_id())
             .map(|binding| binding.surface())
             .collect::<Vec<_>>();
-        assert_eq!(surfaces.len(), PR12_TRANSPORT.len());
-        for surface in PR12_TRANSPORT {
+        assert_eq!(surfaces.len(), PR14_READ_TRANSPORT.len());
+        for surface in PR14_READ_TRANSPORT {
             assert!(surfaces.contains(&surface));
         }
         assert!(!surfaces.contains(&BindingSurface::Lsp));
-        assert!(!surfaces.contains(&BindingSurface::Dashboard));
     }
-    for capability_id in PR13_ADVISORY {
+    for capability_id in PR13_PROVIDER_CONTRIBUTIONS {
         let capability = catalog
             .capabilities()
             .iter()
@@ -124,10 +124,24 @@ fn feedback_catalog_binds_pr13_advisory_handlers_to_supported_surfaces() {
             .filter(|binding| binding.capability_id() == capability.capability_id())
             .map(|binding| binding.surface())
             .collect::<Vec<_>>();
-        assert_eq!(surfaces.len(), PR13_TRANSPORT_AND_LSP.len());
-        for surface in PR13_TRANSPORT_AND_LSP {
-            assert!(surfaces.contains(&surface));
-        }
+        assert!(surfaces.is_empty());
         assert!(!surfaces.contains(&BindingSurface::Dashboard));
+    }
+    let advisory = catalog
+        .capabilities()
+        .iter()
+        .find(|capability| {
+            capability.capability_id().as_str() == "capability.application.feedback.advisory-cycle"
+        })
+        .expect("combined advisory capability");
+    let surfaces = catalog
+        .bindings()
+        .iter()
+        .filter(|binding| binding.capability_id() == advisory.capability_id())
+        .map(|binding| binding.surface())
+        .collect::<Vec<_>>();
+    assert_eq!(surfaces.len(), PR13_ADVISORY_TRANSPORT.len());
+    for surface in PR13_ADVISORY_TRANSPORT {
+        assert!(surfaces.contains(&surface));
     }
 }

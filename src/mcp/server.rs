@@ -228,25 +228,6 @@ pub(crate) type CodeIndexSearchFuture =
 pub(crate) type CodeIndexSearchExecutor =
     Arc<dyn Fn(CodeIndexSearchRequestV1) -> CodeIndexSearchFuture + Send + Sync + 'static>;
 
-pub(crate) struct GitReadInvocationV1 {
-    pub(crate) project_root: PathBuf,
-    pub(crate) request: crate::application::git_reads::GitReadRequestV1,
-    pub(crate) bounds: crate::git_query::GitQueryBounds,
-    pub(crate) deadline: Option<tracedecay_application::Deadline>,
-    pub(crate) cancellation: Option<tracedecay_application::CancellationSignal>,
-}
-
-pub(crate) type GitReadFuture = std::pin::Pin<
-    Box<
-        dyn std::future::Future<Output = crate::application::git_reads::GitReadOutcomeV1>
-            + Send
-            + 'static,
-    >,
->;
-
-pub(crate) type GitReadExecutor =
-    Arc<dyn Fn(GitReadInvocationV1) -> GitReadFuture + Send + Sync + 'static>;
-
 /// User-controlled fields admitted at the MCP source-edit boundary.
 ///
 /// The daemon-owned executor closes over project authority and constructs the
@@ -375,6 +356,8 @@ pub struct McpServer {
     dashboard_doctor_report_reader: Option<crate::dashboard::DoctorReportReader>,
     dashboard_doctor_remediation_dispatcher:
         Option<crate::dashboard::DoctorRemediationDispatcherV1>,
+    dashboard_code_index_freshness_reader:
+        Option<crate::dashboard::code_index_freshness_api::CodeIndexFreshnessReader>,
     hook_branch_writer: HookBranchWriter,
     background_refresh_writer: BackgroundRefreshWriter,
     /// Bridge delivering after-edit hook paths into the daemon-owned code-index
@@ -386,8 +369,6 @@ pub struct McpServer {
     code_index_publication_identity: Option<CodeIndexPublicationIdentityResolver>,
     /// Daemon-owned, authority-gated PR9/PR10 search bridge.
     code_index_search_executor: Option<CodeIndexSearchExecutor>,
-    /// Daemon-owned, authority-gated PR9 typed Git-read bridge.
-    git_read_executor: Option<GitReadExecutor>,
     /// Installed only after project-open has resolved current source-edit
     /// authority. Direct servers remain fail-closed.
     source_edit_executor: tokio::sync::OnceCell<SourceEditExecutor>,
@@ -707,13 +688,13 @@ impl McpServer {
             dashboard_automation_writer,
             dashboard_doctor_report_reader,
             dashboard_doctor_remediation_dispatcher,
+            dashboard_code_index_freshness_reader,
             diagnostics_lsp,
             hook_branch_writer,
             background_refresh_writer,
             code_index_hook_sink,
             code_index_publication_identity,
             code_index_search_executor,
-            git_read_executor,
             code_index_search_authority,
             retained_project_graph_resolver,
             #[cfg(any(test, feature = "test-transport"))]
@@ -759,7 +740,7 @@ impl McpServer {
                 .await
                 .unwrap_or_default();
                 Arc::new(tokio::sync::Mutex::new(
-                    crate::dashboard::code_diagnostics_broker(
+                    crate::application::dashboard_diagnostics::diagnostic_broker(
                         cg.project_root().to_path_buf(),
                         code_diagnostics_settings,
                     ),
@@ -775,7 +756,7 @@ impl McpServer {
             Some(identity) => root.with_project_runtime_shard(identity),
             None => Some(root),
         });
-        #[cfg(feature = "test-transport")]
+        #[cfg(any(test, feature = "test-transport"))]
         let project_session_retrieval_root = project_session_retrieval_root.or_else(|| {
             session_db
                 .as_ref()
@@ -892,12 +873,12 @@ impl McpServer {
             dashboard_automation_writer,
             dashboard_doctor_report_reader,
             dashboard_doctor_remediation_dispatcher,
+            dashboard_code_index_freshness_reader,
             hook_branch_writer,
             background_refresh_writer,
             code_index_hook_sink,
             code_index_publication_identity,
             code_index_search_executor,
-            git_read_executor,
             source_edit_executor: tokio::sync::OnceCell::new(),
             source_edit_reconciliation_executor: tokio::sync::OnceCell::new(),
             code_index_search_authority,
@@ -1053,6 +1034,12 @@ impl McpServer {
     #[doc(hidden)]
     pub async fn cg(&self) -> Arc<TraceDecay> {
         self.cg_snapshot().await
+    }
+
+    pub(crate) fn profile_identity(
+        &self,
+    ) -> Option<&crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1> {
+        self.profile_identity.as_ref()
     }
 
     pub fn diagnostics_lsp(

@@ -291,6 +291,18 @@ pub(super) async fn handle_analytics(
         .count_analytics_events(scope.filter.as_deref(), since)
         .await
         .map_err(config_error)?;
+    let observatory = crate::application::observability::observatory_read_model(
+        gdb,
+        scope.filter.as_deref(),
+        since,
+    )
+    .await;
+    let observatory = crate::application::observability::observatory_mcp_value(&observatory)
+        .map_err(config_error)?;
+    let costs =
+        crate::application::observability::costs_read_model(gdb, scope.filter.as_deref(), since)
+            .await;
+    let costs = crate::application::observability::costs_mcp_value(&costs).map_err(config_error)?;
 
     let mut value = json!({
         "status": "ok",
@@ -301,6 +313,8 @@ pub(super) async fn handle_analytics(
         "since": since,
         "event_count": event_count,
         "event_count_truncated": false,
+        "observatory": observatory,
+        "costs": costs,
     });
 
     if wants_section(section, "tools") {

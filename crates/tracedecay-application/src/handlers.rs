@@ -12,7 +12,7 @@ use tracedecay_tool_catalog::{
 
 use crate::error::ApplicationContractError;
 use crate::policy::{
-    PolicyConsumerV1, PolicyEvaluationContextV1, PolicyEvaluationV1, PolicyEvaluatorCompositionV1,
+    PolicyEvaluationContextV1, PolicyEvaluationV1, PolicyEvaluatorCompositionV1,
     PolicyEvidenceHorizonV1,
 };
 use crate::result::ResultContractRef;
@@ -67,17 +67,16 @@ impl ApplicationOperation {
     /// scope-mismatch and effect-class gates compare a value against itself, so
     /// they can never reject anything.
     #[allow(clippy::too_many_arguments)]
-    pub fn evaluate_policy_route(
+    pub fn evaluate_local_live_policy(
         &self,
         composition: &PolicyEvaluatorCompositionV1,
-        consumer: PolicyConsumerV1,
         context: &PolicyEvaluationContextV1,
         runtime_availability: CapabilityAvailabilityV1,
         scope_match: ScopeMatchV1,
         truth_source_state: TruthSourceStateV1,
         required_effect_class: CapabilityEffectClassV1,
         required_freshness: TruthFreshnessRequirementV1,
-        evidence_horizon: Option<PolicyEvidenceHorizonV1>,
+        evidence_horizon: PolicyEvidenceHorizonV1,
         evaluated_at: UtcMicros,
     ) -> Result<
         PolicyEvaluationV1<tracedecay_policy::routing::CapabilityRoutingDecisionV1>,
@@ -99,7 +98,7 @@ impl ApplicationOperation {
             required_freshness,
             evaluated_at,
         )?;
-        composition.route(consumer, context, &request, evidence_horizon)
+        composition.route_local_live(context, &request, evidence_horizon)
     }
 }
 
@@ -329,6 +328,7 @@ pub fn application_handler_descriptors()
     descriptors.extend(crate::context_scout::context_scout_surface_handler_descriptors()?);
     descriptors.extend(crate::feedback::feedback_surface_handler_descriptors()?);
     descriptors.extend(crate::lsp_context_catalog::lsp_context_handler_descriptors()?);
+    descriptors.extend(crate::retained_surfaces::retained_surface_handler_descriptors()?);
     descriptors.extend(crate::source_edit::source_edit_handler_descriptors()?);
     ApplicationHandlerDescriptors::new(descriptors)
 }

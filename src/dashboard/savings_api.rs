@@ -36,10 +36,14 @@
 use std::collections::HashMap;
 
 use axum::extract::State;
-use axum::response::Json;
+use axum::http::{HeaderValue, StatusCode, header};
+use axum::response::{IntoResponse, Json, Response};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use tracedecay_application::CostsReadModelV1;
+use tracedecay_domain::CoverageStateV1;
 
+use super::read_model::{DashboardCoverageV1, DashboardEnvelopeV1, scope_from_state};
 use super::token_count::{
     MESSAGE_TOKENS_CTE, MessageTokens, counting_available, encoder_for_model,
 };
@@ -255,13 +259,97 @@ pub(crate) async fn overview(State(state): State<DashboardState>) -> Json<Value>
         "offline": pricing_full.get("offline"),
         "model_count": pricing_full.get("model_count"),
     });
+    let costs = state.savings_db.as_deref().map(|db| async move {
+        crate::application::observability::costs_read_model(db, None, 0).await
+    });
+    let costs = match costs {
+        Some(costs) => serde_json::to_value(costs.await).unwrap_or(Value::Null),
+        None => serde_json::to_value(
+            crate::application::observability::costs_unavailable_read_model(
+                None,
+                0,
+                "accounting_store_unavailable",
+            ),
+        )
+        .unwrap_or(Value::Null),
+    };
 
     Json(json!({
         "savings": savings,
         "sessions": sessions,
         "turns": turns,
         "pricing": pricing,
+        "costs": costs,
     }))
+}
+
+/// Canonical Plan 26 Costs projection; all dollar values were priced at ingest.
+pub(crate) async fn costs(
+    State(state): State<DashboardState>,
+) -> Json<DashboardEnvelopeV1<CostsReadModelV1>> {
+    let model = costs_model(&state).await;
+    let metrics = model.usage.iter().chain(&model.estimated_cost);
+    let eligible = metrics.clone().count() as u64;
+    let known = metrics
+        .filter(|metric| metric.coverage.state == CoverageStateV1::Known)
+        .count() as u64;
+    let envelope = if model.current && known == eligible {
+        DashboardEnvelopeV1::ready(
+            scope_from_state(&state),
+            DashboardCoverageV1::complete(eligible, "metrics"),
+            model,
+        )
+    } else {
+        DashboardEnvelopeV1::partial(
+            scope_from_state(&state),
+            eligible,
+            known,
+            "metrics",
+            vec!["incomplete_metric_coverage".to_owned()],
+            model,
+        )
+    };
+    Json(envelope)
+}
+
+pub(crate) async fn costs_http(State(state): State<DashboardState>) -> Response {
+    let model = costs_model(&state).await;
+    match crate::application::observability::costs_http_value(&model) {
+        Ok(value) => Json(value).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+pub(crate) async fn costs_export(State(state): State<DashboardState>) -> Response {
+    let model = costs_model(&state).await;
+    match crate::application::observability::costs_export_bytes(&model) {
+        Ok(bytes) => (
+            [
+                (
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/json"),
+                ),
+                (
+                    header::CONTENT_DISPOSITION,
+                    HeaderValue::from_static("attachment; filename=\"tracedecay-costs-v1.json\""),
+                ),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn costs_model(state: &DashboardState) -> CostsReadModelV1 {
+    match state.savings_db.as_deref() {
+        Some(db) => crate::application::observability::costs_read_model(db, None, 0).await,
+        None => crate::application::observability::costs_unavailable_read_model(
+            None,
+            0,
+            "accounting_store_unavailable",
+        ),
+    }
 }
 
 async fn savings_overview(gdb: &RegisteredGlobalDb, db_path: &str) -> Value {

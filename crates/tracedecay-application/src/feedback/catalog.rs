@@ -23,6 +23,7 @@ use crate::retrieval::catalog::{
 };
 
 use super::{
+    ADVISORY_CYCLE_CAPABILITY_ID_V1, ADVISORY_CYCLE_USE_CASE_ID_V1,
     CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1, CI_FAILURE_LOCALIZE_USE_CASE_ID_V1,
     FEEDBACK_DIAGNOSTICS_CAPABILITY_ID_V1, FEEDBACK_DIAGNOSTICS_USE_CASE_ID_V1,
     FEEDBACK_EXPAND_CAPABILITY_ID_V1, FEEDBACK_EXPAND_USE_CASE_ID_V1,
@@ -44,18 +45,20 @@ struct FeedbackSurfaceSpec {
     surfaces: &'static [BindingSurface],
 }
 
-/// Canonical feedback reads remain callable through the shared PR12
-/// CLI/MCP/HTTP transport owner.
-const PR12_TRANSPORT_SURFACES: [BindingSurface; 3] = [
+/// Canonical feedback reads retain their PR12 transports and gain the PR14
+/// dashboard adapter without changing the application owner.
+const FEEDBACK_READ_SURFACES: [BindingSurface; 4] = [
     BindingSurface::Cli,
     BindingSurface::Mcp,
     BindingSurface::Http,
+    BindingSurface::Dashboard,
 ];
 
 /// PR13 advisory producers retain the shared transport reads and additionally
 /// project the same canonical result through the mounted LSP/native host path.
 /// Hook delivery is host-registration metadata rather than a callable catalog
-/// surface, and dashboard binding remains owned by PR14.
+/// surface. Dashboard consumes their results through the canonical feedback
+/// readers above rather than advertising producer operations it cannot invoke.
 const PR13_ADVISORY_SURFACES: [BindingSurface; 4] = [
     BindingSurface::Cli,
     BindingSurface::Mcp,
@@ -63,7 +66,12 @@ const PR13_ADVISORY_SURFACES: [BindingSurface; 4] = [
     BindingSurface::Lsp,
 ];
 
-const FEEDBACK_SPECS: [FeedbackSurfaceSpec; 10] = [
+/// Producer contributions are application-callable only through the combined
+/// cycle. They remain visible capability metadata for LSP/native projection,
+/// but do not create three independent network orchestration paths.
+const PR13_PROVIDER_CONTRIBUTION_SURFACES: [BindingSurface; 0] = [];
+
+const FEEDBACK_SPECS: [FeedbackSurfaceSpec; 11] = [
     FeedbackSurfaceSpec {
         capability: FEEDBACK_DIAGNOSTICS_CAPABILITY_ID_V1,
         use_case: FEEDBACK_DIAGNOSTICS_USE_CASE_ID_V1,
@@ -74,7 +82,7 @@ const FEEDBACK_SPECS: [FeedbackSurfaceSpec; 10] = [
         description: "Read the canonical completed feedback cycle for the authorized branch head.",
         example: "Read diagnostics from the current branch feedback cycle",
         paginated: false,
-        surfaces: &PR12_TRANSPORT_SURFACES,
+        surfaces: &FEEDBACK_READ_SURFACES,
     },
     FeedbackSurfaceSpec {
         capability: FEEDBACK_GET_CAPABILITY_ID_V1,
@@ -86,7 +94,7 @@ const FEEDBACK_SPECS: [FeedbackSurfaceSpec; 10] = [
         description: "Fetch one authorized feedback finding by durable identity.",
         example: "Get this feedback finding",
         paginated: false,
-        surfaces: &PR12_TRANSPORT_SURFACES,
+        surfaces: &FEEDBACK_READ_SURFACES,
     },
     FeedbackSurfaceSpec {
         capability: FEEDBACK_EXPAND_CAPABILITY_ID_V1,
@@ -98,7 +106,7 @@ const FEEDBACK_SPECS: [FeedbackSurfaceSpec; 10] = [
         description: "Expand authorized anchors and evidence for one feedback finding.",
         example: "Expand this feedback finding",
         paginated: false,
-        surfaces: &PR12_TRANSPORT_SURFACES,
+        surfaces: &FEEDBACK_READ_SURFACES,
     },
     FeedbackSurfaceSpec {
         capability: FEEDBACK_LIST_CAPABILITY_ID_V1,
@@ -110,7 +118,7 @@ const FEEDBACK_SPECS: [FeedbackSurfaceSpec; 10] = [
         description: "List authorized feedback findings with Plan 05 cursors.",
         example: "List feedback findings for this branch",
         paginated: true,
-        surfaces: &PR12_TRANSPORT_SURFACES,
+        surfaces: &FEEDBACK_READ_SURFACES,
     },
     FeedbackSurfaceSpec {
         capability: "capability.application.feedback.impact",
@@ -122,7 +130,7 @@ const FEEDBACK_SPECS: [FeedbackSurfaceSpec; 10] = [
         description: "Project the canonical impact and affected-test state from an authorized completed feedback cycle.",
         example: "Read impact from the current branch feedback cycle",
         paginated: false,
-        surfaces: &PR12_TRANSPORT_SURFACES,
+        surfaces: &FEEDBACK_READ_SURFACES,
     },
     FeedbackSurfaceSpec {
         capability: "capability.application.feedback.affected-tests",
@@ -134,7 +142,7 @@ const FEEDBACK_SPECS: [FeedbackSurfaceSpec; 10] = [
         description: "Project affected-test state from an authorized completed feedback cycle.",
         example: "Read affected tests from this feedback cycle",
         paginated: true,
-        surfaces: &PR12_TRANSPORT_SURFACES,
+        surfaces: &FEEDBACK_READ_SURFACES,
     },
     FeedbackSurfaceSpec {
         capability: "capability.application.feedback.test-results",
@@ -146,7 +154,19 @@ const FEEDBACK_SPECS: [FeedbackSurfaceSpec; 10] = [
         description: "Read the latest daemon-retained managed test result for the admitted project root.",
         example: "Read the latest managed test results",
         paginated: false,
-        surfaces: &PR12_TRANSPORT_SURFACES,
+        surfaces: &FEEDBACK_READ_SURFACES,
+    },
+    FeedbackSurfaceSpec {
+        capability: ADVISORY_CYCLE_CAPABILITY_ID_V1,
+        use_case: ADVISORY_CYCLE_USE_CASE_ID_V1,
+        request_schema: "schema.application.feedback.advisory-cycle.request",
+        result_schema: "schema.application.feedback.advisory-cycle.result",
+        operation: "feedback_advisory_cycle",
+        summary: "Run the advisory feedback cycle",
+        description: "Run one authorized four-pillar feedback cycle and return a daemon-minted canonical read handle.",
+        example: "Run the complete advisory cycle for this saved document",
+        paginated: false,
+        surfaces: &PR13_ADVISORY_SURFACES,
     },
     FeedbackSurfaceSpec {
         capability: GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,
@@ -155,10 +175,10 @@ const FEEDBACK_SPECS: [FeedbackSurfaceSpec; 10] = [
         result_schema: "schema.application.feedback.github-review-ingest.result",
         operation: "github_review_ingest",
         summary: "Ingest existing GitHub review evidence",
-        description: "Read allowlisted existing GitHub review comments and threads without a write path.",
+        description: "Contribute allowlisted existing GitHub review comments and threads to feedback_advisory_cycle without an independent write or orchestration path.",
         example: "Read existing review threads for this pull request",
         paginated: true,
-        surfaces: &PR13_ADVISORY_SURFACES,
+        surfaces: &PR13_PROVIDER_CONTRIBUTION_SURFACES,
     },
     FeedbackSurfaceSpec {
         capability: CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1,
@@ -167,10 +187,10 @@ const FEEDBACK_SPECS: [FeedbackSurfaceSpec; 10] = [
         result_schema: "schema.application.feedback.ci-failure-localize.result",
         operation: "ci_failure_localize",
         summary: "Localize a reported CI failure",
-        description: "Map anchored CI evidence to exact branch, generation, symbol, caller, and test evidence without running CI.",
+        description: "Contribute anchored CI localization to feedback_advisory_cycle without running CI or exposing an independent orchestration path.",
         example: "Localize this reported CI failure",
         paginated: false,
-        surfaces: &PR13_ADVISORY_SURFACES,
+        surfaces: &PR13_PROVIDER_CONTRIBUTION_SURFACES,
     },
     FeedbackSurfaceSpec {
         capability: PROXIMITY_CAPABILITY_ID_V1,
@@ -179,10 +199,10 @@ const FEEDBACK_SPECS: [FeedbackSurfaceSpec; 10] = [
         result_schema: "schema.application.feedback.proximity.result",
         operation: "feedback_proximity",
         summary: "Inspect advisory concurrent-work proximity",
-        description: "Return immediate or configured-threshold proximity evidence without locks, scheduling, or continuation.",
+        description: "Contribute immediate or configured-threshold proximity evidence to feedback_advisory_cycle without locks, scheduling, continuation, or an independent orchestration path.",
         example: "Inspect concurrent-work proximity for this branch",
         paginated: false,
-        surfaces: &PR13_ADVISORY_SURFACES,
+        surfaces: &PR13_PROVIDER_CONTRIBUTION_SURFACES,
     },
 ];
 
@@ -191,7 +211,7 @@ const FEEDBACK_SPECS: [FeedbackSurfaceSpec; 10] = [
 /// Registration proves the handler exists; it does not prove that a host can
 /// construct the request. Transport availability is narrowed independently
 /// below.
-const REGISTERED_FEEDBACK_HANDLER_SPECS: [usize; 10] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+const REGISTERED_FEEDBACK_HANDLER_SPECS: [usize; 11] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 
 pub fn feedback_surface_catalog_contribution()
 -> Result<CatalogContributionV1, ApplicationContractError> {
@@ -348,7 +368,7 @@ fn capability(
             }
         },
         binding_ids,
-        profile_eligibility: if callable {
+        profile_eligibility: if callable && !spec.surfaces.is_empty() {
             application_profile_ids(if spec.operation == "test_results" {
                 &[
                     APPLICATION_DEFAULT_PROFILE_ID,

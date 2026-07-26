@@ -27,7 +27,8 @@ use tracedecay_application::feedback::{
 use tracedecay_domain::ProviderId;
 use tracedecay_domain::feedback::{
     CiFailureCoverageV1, CiFailureLocalizationResultV1, CiFailureLocalizationStateV1,
-    CiFailureRunIdentityV1,
+    CiFailureRunIdentityV1, CiFailureSourceDegradationV1, CiFailureSourceFailureV1,
+    FeedbackScopeV1,
 };
 
 use super::github_runtime::{
@@ -53,6 +54,7 @@ pub struct CiProviderReadResultV1<R> {
     pub run: CiFailureRunIdentityV1,
     pub state: CiFailureLocalizationStateV1,
     pub coverage: CiFailureCoverageV1,
+    pub source_degradation: Option<CiFailureSourceDegradationV1>,
     pub failures: usize,
     pub checks: usize,
     pub annotations: usize,
@@ -65,6 +67,10 @@ impl<R> CiProviderReadResultV1<R> {
             && self.run.validate().is_ok()
             && self.run == request.run
             && state_matches_coverage(self.state, self.coverage)
+            && self
+                .source_degradation
+                .as_ref()
+                .is_none_or(|cause| cause.validate().is_ok())
             && self.failures <= MAX_CI_RETAINED_FAILURES_V1
             && self.checks <= MAX_CI_RETAINED_CHECKS_V1
             && self.annotations <= MAX_CI_RETAINED_ANNOTATIONS_V1
@@ -77,7 +83,28 @@ impl<R> CiProviderReadResultV1<R> {
                 self.state,
                 CiFailureLocalizationStateV1::Denied | CiFailureLocalizationStateV1::Unavailable
             ) || self.record.is_none())
+            && (self.state != CiFailureLocalizationStateV1::Failed
+                || self.source_degradation.is_some())
+            && (self.state != CiFailureLocalizationStateV1::Stale
+                || self.source_degradation.is_some())
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CiSourceAccessOutcomeV1 {
+    Ready,
+    Denied,
+    Stale,
+    Ambiguous,
+    Unavailable,
+}
+
+pub trait CiSourceAccessAuthorityV1: Send + Sync {
+    fn authorize_ci<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        scope: &'a FeedbackScopeV1,
+    ) -> FeedbackPortFuture<'a, CiSourceAccessOutcomeV1>;
 }
 
 const fn state_matches_coverage(
@@ -301,9 +328,21 @@ where
                 CiFailureLocalizationStateV1::Denied => {
                     return CiFailureLocalizationPortOutcomeV1::Denied;
                 }
-                CiFailureLocalizationStateV1::Unavailable
-                | CiFailureLocalizationStateV1::Failed => {
+                CiFailureLocalizationStateV1::Unavailable => {
                     return CiFailureLocalizationPortOutcomeV1::Unavailable;
+                }
+                CiFailureLocalizationStateV1::Failed => {
+                    return match read.source_degradation {
+                        Some(CiFailureSourceDegradationV1::RateLimited(checkpoint)) => {
+                            CiFailureLocalizationPortOutcomeV1::RateLimited(checkpoint)
+                        }
+                        Some(CiFailureSourceDegradationV1::Failed(cause)) => {
+                            CiFailureLocalizationPortOutcomeV1::Failed(cause)
+                        }
+                        None => CiFailureLocalizationPortOutcomeV1::Failed(
+                            CiFailureSourceFailureV1::Schema,
+                        ),
+                    };
                 }
                 CiFailureLocalizationStateV1::Complete
                 | CiFailureLocalizationStateV1::Partial

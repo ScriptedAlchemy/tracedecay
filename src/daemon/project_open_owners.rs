@@ -16,10 +16,13 @@ use sha2::{Digest, Sha256};
 use tracedecay_application::feedback::{
     CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1, FEEDBACK_DIAGNOSTICS_CAPABILITY_ID_V1,
     FEEDBACK_EXPAND_CAPABILITY_ID_V1, FEEDBACK_GET_CAPABILITY_ID_V1,
-    FEEDBACK_LIST_CAPABILITY_ID_V1, GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,
-    GitHubReviewReadRequestV1, PROXIMITY_CAPABILITY_ID_V1, ProximityEvaluationRequestV1,
+    FEEDBACK_LIST_CAPABILITY_ID_V1, FeedbackDiagnosticsReadRequestV1,
+    GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1, GitHubReviewReadRequestV1, PROXIMITY_CAPABILITY_ID_V1,
+    ProximityEvaluationRequestV1,
 };
-use tracedecay_application::{ApplicationContractError, ResolvedScope};
+use tracedecay_application::{
+    ApplicationContractError, ApplicationProblem, ResolvedScope, SafeDiagnostic,
+};
 use tracedecay_domain::configuration::{
     ACCESS_RULES_SETTING_KEY, AuthorityRef, CapabilityResolutionContextV1, ConfigurationValueV1,
     SOURCE_BINDINGS_SETTING_KEY, ScopeSourceBinding, SettingKey, SourceBindingId, SourceKindV1,
@@ -39,7 +42,9 @@ use tracedecay_tool_catalog::CapabilityId;
 use super::{
     BoundedPr13HookOrchestratorV1, DaemonAdvisoryRuntimeRegistrationError,
     DaemonContextScoutRuntimeRegistrationError, DaemonFeedbackRuntimeRegistrationError,
-    DaemonInvocationState, DaemonPrimitiveRuntimeRegistrationError, Pr13HookOrchestrationRequestV1,
+    DaemonInvocationState, DaemonPrimitiveRuntimeRegistrationError,
+    Pr13AdvisoryCycleInvocationFutureV1, Pr13AdvisoryCycleInvocationPortV1,
+    Pr13AdvisoryCycleInvocationRequestV1, Pr13HookOrchestrationRequestV1,
     Pr13HookOrchestrationTriggerV1,
 };
 use crate::agents::context_scout_ports::{
@@ -60,15 +65,15 @@ use crate::application::advisory::github_runtime::{
     resolve_registered_github_read_only_credential_v1,
 };
 use crate::application::advisory::{
-    GitHubHttpReadConfigV1, GitHubReadOnlyCredentialV1, GitHubReadPermissionV1,
-    GitHubRepositoryTargetV1, GitHubReviewProviderIdentityV1, GitHubReviewRuntimeOwnerConfigV1,
-    Pr13AdvisoryCycleControlV1, Pr13AdvisoryCycleRequestV1, Pr13AdvisoryHookLookupNoticeV1,
-    Pr13AdvisoryHookNoticeQueueV1, Pr13AdvisoryHookNoticeSinkV1, Pr13AdvisoryProductionOpenV1,
+    CiSourceAccessAuthorityV1, GitHubCiRepositoryTargetV1, GitHubHttpReadConfigV1,
+    GitHubReadOnlyCredentialV1, GitHubReadPermissionV1, GitHubRepositoryTargetV1,
+    GitHubReviewProviderIdentityV1, GitHubReviewRuntimeOwnerConfigV1, Pr13AdvisoryCycleControlV1,
+    Pr13AdvisoryCycleRequestV1, Pr13AdvisoryHookLookupNoticeV1, Pr13AdvisoryHookNoticeQueueV1,
+    Pr13AdvisoryHookNoticeSinkV1, Pr13AdvisoryProductionOpenV1,
     Pr13AdvisoryProductionStartupRegistrationV1, Pr13AdvisoryRuntimeOpenV1,
     ProductionCiProviderConfigV1, ProjectCiCodeAnchorStoreV1, ProjectCiRetainedObservationStoreV1,
     discover_production_ci_failure_request_v1, register_pr13_advisory_hook_notice_queue,
 };
-use crate::application::configuration::ConfigurationControlStore;
 use crate::application::context::{CancellationToken, MonotonicDeadline};
 use crate::application::feedback::observations::{
     Plan26DeliveryRouteV1, Plan26FeedbackObservationEmitterV1, Plan26FeedbackOperationV1,
@@ -107,12 +112,97 @@ const GRANT_HORIZON: Duration = Duration::from_hours(24);
 const POLICY_REVISION_V1: u64 = 1;
 const LSP_DIAGNOSTICS_QUIET: Duration = Duration::from_secs(2);
 
+#[derive(Clone)]
 struct ProjectOpenAdvisoryFeedbackCycleV1 {
     registration: Arc<Pr13AdvisoryProductionStartupRegistrationV1>,
     lsp_input: Pr12FeedbackCycleLspInput,
     feedback_scope: FeedbackScopeV1,
     github_pull_request_id: Option<GitHubPullRequestIdV1>,
     ci_discovery_config: Option<ProductionCiProviderConfigV1>,
+    root_uri: String,
+    feedback_runtime: Arc<crate::application::feedback::concrete::Pr12FeedbackRuntime>,
+}
+
+impl ProjectOpenAdvisoryFeedbackCycleV1 {
+    async fn run_cycle(
+        &self,
+        request: FeedbackCycleRequest,
+        deadline: MonotonicDeadline,
+    ) -> std::result::Result<
+        crate::application::advisory::Pr13AdvisoryCycleOutcomeV1,
+        LspRuntimeFailure,
+    > {
+        let registration = Arc::clone(&self.registration);
+        let lsp_input = Arc::clone(&self.lsp_input);
+        let feedback_scope = self.feedback_scope.clone();
+        let github_pull_request_id = self.github_pull_request_id.clone();
+        let ci_discovery_config = self.ci_discovery_config.clone();
+        let terminal_request = request.clone();
+        let invocation = match lsp_input(request).await {
+            Ok(invocation) => invocation,
+            Err(error) => {
+                observe_accepted_feedback_cycle_terminal(
+                    &registration.host_delivery.source_observations,
+                    &feedback_scope.project_id,
+                    &terminal_request,
+                    Plan26FeedbackOutcomeV1::Unavailable,
+                );
+                return Err(error);
+            }
+        };
+        let observed_at = invocation.request.input.observed_at;
+        let ci = match ci_discovery_config.as_ref() {
+            Some(config) => {
+                discover_production_ci_failure_request_v1(
+                    &invocation.context,
+                    config,
+                    &feedback_scope,
+                )
+                .await
+            }
+            None => {
+                crate::application::advisory::ProductionCiFailureDiscoveryOutcomeV1::NotConfigured
+            }
+        };
+        let expires_at = UtcMicros(observed_at.0.saturating_add(5 * 60 * 1_000_000));
+        let operation = daemon_operation_event_authority()
+            .begin(
+                &invocation.context,
+                OperationKind::FeedbackDiagnostics,
+                observed_at,
+            )
+            .await
+            .map_err(|_| LspRuntimeFailure::new("feedback-cycle-advisory-operation"))?;
+        let advisory = Pr13AdvisoryCycleRequestV1 {
+            feedback: invocation.request,
+            github: github_pull_request_id.map(|pull_request_id| GitHubReviewReadRequestV1 {
+                operation: GitHubReviewReadOperationV1::GraphQlQueryPullRequestReviewThreads,
+                scope: feedback_scope.clone(),
+                pull_request_id,
+            }),
+            ci,
+            proximity: Some(ProximityEvaluationRequestV1 {
+                scope: feedback_scope,
+                observed_at,
+            }),
+            validity: tracedecay_application::AdvisoryFindingValidityWindowV1 {
+                valid_at: observed_at,
+                expires_at,
+            },
+        };
+        registration
+            .runtime()
+            .run_once(
+                &invocation.context,
+                Pr13AdvisoryCycleControlV1 {
+                    operation,
+                    deadline,
+                },
+                advisory,
+            )
+            .await
+            .map_err(|_| LspRuntimeFailure::new("feedback-cycle-advisory-execution"))
+    }
 }
 
 impl FeedbackCycleRuntimePort for ProjectOpenAdvisoryFeedbackCycleV1 {
@@ -120,80 +210,72 @@ impl FeedbackCycleRuntimePort for ProjectOpenAdvisoryFeedbackCycleV1 {
         &self,
         request: FeedbackCycleRequest,
     ) -> LspRuntimeFuture<std::result::Result<(), LspRuntimeFailure>> {
-        let registration = Arc::clone(&self.registration);
-        let lsp_input = Arc::clone(&self.lsp_input);
-        let feedback_scope = self.feedback_scope.clone();
-        let github_pull_request_id = self.github_pull_request_id.clone();
-        let ci_discovery_config = self.ci_discovery_config.clone();
+        let owner = self.clone();
         Box::pin(async move {
-            let terminal_request = request.clone();
-            let invocation = match lsp_input(request).await {
-                Ok(invocation) => invocation,
-                Err(error) => {
-                    observe_accepted_feedback_cycle_terminal(
-                        &registration.host_delivery.source_observations,
-                        &feedback_scope.project_id,
-                        &terminal_request,
-                        Plan26FeedbackOutcomeV1::Unavailable,
-                    );
-                    return Err(error);
-                }
-            };
-            let observed_at = invocation.request.input.observed_at;
-            let ci = match ci_discovery_config.as_ref() {
-                Some(config) => {
-                    discover_production_ci_failure_request_v1(
-                        &invocation.context,
-                        config,
-                        &feedback_scope,
-                    )
-                    .await
-                }
-                None => {
-                    crate::application::advisory::ProductionCiFailureDiscoveryOutcomeV1::NotConfigured
-                }
-            };
-            let expires_at = UtcMicros(observed_at.0.saturating_add(5 * 60 * 1_000_000));
-            let operation = daemon_operation_event_authority()
-                .begin(
-                    &invocation.context,
-                    OperationKind::FeedbackDiagnostics,
-                    observed_at,
+            owner
+                .run_cycle(
+                    request,
+                    MonotonicDeadline::at(Instant::now() + Duration::from_secs(5)),
                 )
-                .await
-                .map_err(|_| LspRuntimeFailure::new("feedback-cycle-advisory-operation"))?;
-            let advisory = Pr13AdvisoryCycleRequestV1 {
-                feedback: invocation.request,
-                github: github_pull_request_id.map(|pull_request_id| GitHubReviewReadRequestV1 {
-                    operation: GitHubReviewReadOperationV1::GraphQlQueryPullRequestReviewThreads,
-                    scope: feedback_scope.clone(),
-                    pull_request_id,
-                }),
-                ci,
-                proximity: Some(ProximityEvaluationRequestV1 {
-                    scope: feedback_scope,
-                    observed_at,
-                }),
-                validity: tracedecay_application::AdvisoryFindingValidityWindowV1 {
-                    valid_at: observed_at,
-                    expires_at,
-                },
-            };
-            registration
-                .runtime()
-                .run_once(
-                    &invocation.context,
-                    Pr13AdvisoryCycleControlV1 {
-                        operation,
-                        deadline: MonotonicDeadline::at(Instant::now() + Duration::from_secs(5)),
-                    },
-                    advisory,
-                )
-                .await
-                .map_err(|_| LspRuntimeFailure::new("feedback-cycle-advisory-execution"))?;
+                .await?;
             Ok(())
         })
     }
+}
+
+impl Pr13AdvisoryCycleInvocationPortV1 for ProjectOpenAdvisoryFeedbackCycleV1 {
+    fn invoke(
+        &self,
+        request: Pr13AdvisoryCycleInvocationRequestV1,
+    ) -> Pr13AdvisoryCycleInvocationFutureV1<'_> {
+        Box::pin(async move {
+            if request.cancellation.is_cancelled() {
+                return Err(ApplicationProblem::cancelled_before_admission());
+            }
+            if request.deadline.is_elapsed_at(request.observed_at) {
+                return Err(ApplicationProblem::timed_out_before_admission());
+            }
+            let remaining_micros = request
+                .deadline
+                .expires_at
+                .0
+                .saturating_sub(request.observed_at.0)
+                .clamp(1, 5 * 1_000_000);
+            let outcome = self
+                .run_cycle(
+                    FeedbackCycleRequest {
+                        root_uri: self.root_uri.clone(),
+                        document_uri: request.document_uri,
+                        trigger: DiagnosticTrigger::ExplicitDocumentDiagnostics,
+                    },
+                    MonotonicDeadline::at(
+                        Instant::now()
+                            + Duration::from_micros(
+                                remaining_micros.try_into().unwrap_or(u64::MAX),
+                            ),
+                    ),
+                )
+                .await
+                .map_err(|_| advisory_cycle_problem())?;
+            let publication = outcome.publication().ok_or_else(advisory_cycle_problem)?;
+            self.feedback_runtime
+                .mint_diagnostics(
+                    format!("{}.diagnostics", request.request_id),
+                    FeedbackDiagnosticsReadRequestV1 {
+                        head_commit_id: publication.result.scope.head_commit_id.clone(),
+                    },
+                    request.observed_at,
+                )
+                .map_err(|_| advisory_cycle_problem())
+        })
+    }
+}
+
+fn advisory_cycle_problem() -> ApplicationProblem {
+    ApplicationProblem::unavailable(SafeDiagnostic {
+        code: "feedback.advisory_cycle_unavailable".to_owned(),
+        message: "The advisory feedback cycle did not publish a canonical result".to_owned(),
+    })
 }
 
 struct ProjectOpenFeedbackCycleAuthorizationV1 {
@@ -785,6 +867,14 @@ pub(crate) async fn register_project_open_production_owners(
             project_root.to_path_buf(),
             Arc::clone(graph.configuration_runtime()),
             scope.clone(),
+            server
+                .profile_identity()
+                .ok_or_else(|| TraceDecayError::Config {
+                    message: "project-open configuration requires exact profile authority"
+                        .to_owned(),
+                })?
+                .profile_id()
+                .clone(),
             requester.clone(),
             grant_expires_at,
             None,
@@ -832,6 +922,7 @@ pub(crate) async fn register_project_open_production_owners(
         Arc::clone(&session_db),
         project_root.to_path_buf(),
         Arc::new(invocation.code_index_schedulers.clone()),
+        Arc::new(invocation.code_index_schedulers.clone()),
         scope.clone(),
         access.clone(),
         admitted_root_uri.clone(),
@@ -868,6 +959,22 @@ pub(crate) async fn register_project_open_production_owners(
         .filter_map(AdmittedLspProvider::mounted)
         .collect::<Vec<_>>();
 
+    let feedback_cycle = register_production_feedback_cycle(
+        invocation,
+        project_root,
+        database.clone(),
+        Arc::clone(&session_db),
+        Arc::clone(&graph),
+        scope.clone(),
+        configuration,
+        requester,
+        mounted_providers.clone(),
+    )
+    .await?;
+
+    // The LSP gateway can immediately emit post-edit feedback. Publish the
+    // corresponding feedback cycle first so no admitted request observes a
+    // gateway whose downstream owner is still absent.
     let lsp_session_factory = register_production_lsp_owner(
         invocation,
         project_root,
@@ -878,25 +985,12 @@ pub(crate) async fn register_project_open_production_owners(
     )
     .await?;
 
-    // Hook V2 envelopes that missed their synchronous budget are durable in the
-    // per-host transport spool. Replay depends on the admitted project graph,
-    // not on exact Git identity, so non-Git and unborn projects must also drain.
+    // Hook V2 envelopes that missed their synchronous budget are durable in
+    // the per-host transport spool. Replay is project-scoped, not Git-scoped:
+    // non-Git and unborn projects must drain their admitted envelopes too.
     crate::daemon::hook_v2_replay::register_hook_v2_replay_consumer(Arc::clone(&graph));
 
-    let Some((feedback_cycle, feedback_scope, feedback_lsp_input)) =
-        register_production_feedback_cycle(
-            invocation,
-            project_root,
-            database.clone(),
-            Arc::clone(&session_db),
-            Arc::clone(&graph),
-            scope.clone(),
-            configuration,
-            requester,
-            mounted_providers.clone(),
-        )
-        .await?
-    else {
+    let Some((feedback_cycle, feedback_scope, feedback_lsp_input)) = feedback_cycle else {
         // Feedback and advisory evidence requires an exact Git branch, HEAD,
         // and current saved document identity. Non-Git, unborn, and empty
         // projects retain the observing unavailable cycle installed above; no
@@ -1138,6 +1232,7 @@ async fn register_production_feedback_cycle(
         runtime_state: Arc::clone(&runtime_state) as _,
         document_identity: Arc::new(invocation.code_index_schedulers.clone()),
         code_index_identity: Arc::new(invocation.code_index_schedulers.clone()),
+        test_attribution: Arc::new(invocation.code_index_schedulers.clone()),
         mounted_providers,
     })
     .await
@@ -1275,7 +1370,7 @@ async fn register_production_advisory_owner(
         &graph.store_layout().dashboard_root,
     )
     .await?;
-    let (github, github_source_access) = match resolve_production_github_review_config(
+    let remote = resolve_production_github_provider_config(
         invocation,
         project_root,
         database.clone(),
@@ -1284,13 +1379,13 @@ async fn register_production_advisory_owner(
         &source_access,
         feedback_scope.clone(),
     )
-    .await
-    {
-        Some((github, source_access)) => (Some(github), Some(source_access)),
-        None => (None, None),
-    };
-    let (github, ci_config, github_pull_request_id) =
-        optional_remote_provider_configuration(github, github_source_access.as_ref());
+    .await;
+    let (github, github_source_access, ci_config) = remote.map_or((None, None, None), |remote| {
+        (remote.github, Some(remote.github_source_access), remote.ci)
+    });
+    let github_pull_request_id = github
+        .as_ref()
+        .map(|github| github.target.pull_request_id.clone());
     let ci_discovery_config = ci_config.clone();
     let ci_retained = Arc::new(
         ProjectCiRetainedObservationStoreV1::new(database.clone(), feedback_scope.clone())
@@ -1373,21 +1468,28 @@ async fn register_production_advisory_owner(
             });
         }
     };
+    let advisory_cycle = Arc::new(ProjectOpenAdvisoryFeedbackCycleV1 {
+        registration: Arc::clone(&registration),
+        lsp_input: Arc::clone(&feedback_lsp_input),
+        feedback_scope: feedback_scope_for_work.clone(),
+        github_pull_request_id: github_pull_request_id.clone(),
+        ci_discovery_config: ci_discovery_config.clone(),
+        root_uri: root_uri.clone(),
+        feedback_runtime: Arc::clone(&feedback_runtime),
+    });
     invocation
         .feedback_runtime_registrar()
-        .install_advisory_cycle_input(
-            project_root,
-            Arc::new(ProjectOpenAdvisoryFeedbackCycleV1 {
-                registration: Arc::clone(&registration),
-                lsp_input: Arc::clone(&feedback_lsp_input),
-                feedback_scope: feedback_scope_for_work.clone(),
-                github_pull_request_id: github_pull_request_id.clone(),
-                ci_discovery_config: ci_discovery_config.clone(),
-            }),
-        )
+        .install_advisory_cycle_input(project_root, advisory_cycle.clone())
         .await
         .map_err(|error| TraceDecayError::Config {
             message: format!("project-open advisory LSP cycle registration failed: {error}"),
+        })?;
+    invocation
+        .advisory_runtime_registrar()
+        .register_cycle_invoker(project_root.to_path_buf(), advisory_cycle)
+        .await
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("project-open advisory surface registration failed: {error}"),
         })?;
     let registered_root = project_root.to_path_buf();
     let work_root = registered_root.clone();
@@ -1780,40 +1882,11 @@ fn hash16(value: &[u8]) -> [u8; 16] {
     value
 }
 
-fn optional_remote_provider_configuration(
-    github: Option<GitHubReviewRuntimeOwnerConfigV1>,
-    github_source_access: Option<&Arc<dyn GitHubSourceAccessAuthorityV1>>,
-) -> (
-    Option<GitHubReviewRuntimeOwnerConfigV1>,
-    Option<ProductionCiProviderConfigV1>,
-    Option<GitHubPullRequestIdV1>,
-) {
-    let ci_config = github
-        .as_ref()
-        .filter(|github| {
-            github.credential.permits(GitHubReadPermissionV1::Actions)
-                && github.credential.permits(GitHubReadPermissionV1::Checks)
-        })
-        .and_then(|github| {
-            let source_access = github_source_access.map(Arc::clone)?;
-            Some(production_ci_provider_configuration(
-                github.target.clone(),
-                github.credential.clone(),
-                github.http.clone(),
-                source_access,
-            ))
-        });
-    let github_pull_request_id = github
-        .as_ref()
-        .map(|github| github.target.pull_request_id.clone());
-    (github, ci_config, github_pull_request_id)
-}
-
 fn production_ci_provider_configuration(
-    target: GitHubRepositoryTargetV1,
+    target: GitHubCiRepositoryTargetV1,
     credential: GitHubReadOnlyCredentialV1,
     http: GitHubHttpReadConfigV1,
-    source_access: Arc<dyn GitHubSourceAccessAuthorityV1>,
+    source_access: Arc<dyn CiSourceAccessAuthorityV1>,
 ) -> ProductionCiProviderConfigV1 {
     ProductionCiProviderConfigV1 {
         provider: ProviderId::new("provider.github-actions")
@@ -1845,7 +1918,13 @@ const fn host_kind_for_hook(host: HookHostV1) -> HostKindV1 {
     }
 }
 
-async fn resolve_production_github_review_config(
+struct ProductionGitHubProviderConfigV1 {
+    github: Option<GitHubReviewRuntimeOwnerConfigV1>,
+    github_source_access: Arc<dyn GitHubSourceAccessAuthorityV1>,
+    ci: Option<ProductionCiProviderConfigV1>,
+}
+
+async fn resolve_production_github_provider_config(
     invocation: &DaemonInvocationState,
     project_root: &Path,
     database: crate::db::Database,
@@ -1853,10 +1932,7 @@ async fn resolve_production_github_review_config(
     resolved_scope: ResolvedScope,
     project_source_access: &ProjectSourceAccessSnapshot,
     feedback_scope: FeedbackScopeV1,
-) -> Option<(
-    GitHubReviewRuntimeOwnerConfigV1,
-    Arc<dyn GitHubSourceAccessAuthorityV1>,
-)> {
+) -> Option<ProductionGitHubProviderConfigV1> {
     let (owner, repository) =
         github_repository_from_remote(&crate::tracedecay::git_remote_url(project_root)?)?;
     let profile_id = &project_runtime_db.binding().shard_id.profile_id;
@@ -1885,63 +1961,89 @@ async fn resolve_production_github_review_config(
     let configuration = OwnedGlobalDbConfigurationControlStore::from_registered_project_runtime_db(
         project_runtime_db,
     );
-    let source_access: Arc<dyn GitHubSourceAccessAuthorityV1> =
-        Arc::new(ConfiguredGitHubSourceAccessAuthorityV1::new(
-            configuration,
-            resolved_scope.clone(),
-            &owner,
-            &repository,
-        )?);
-    let authorization_context =
-        github_discovery_authorization_context(project_source_access, &feedback_scope)?;
-    let discovery_request = github_discovery_source_access_request(&feedback_scope)?;
+    let configured_source_access = Arc::new(ConfiguredGitHubSourceAccessAuthorityV1::new(
+        configuration,
+        resolved_scope.clone(),
+        &owner,
+        &repository,
+    )?);
+    let source_access: Arc<dyn GitHubSourceAccessAuthorityV1> = configured_source_access.clone();
+    let ci_source_access: Arc<dyn CiSourceAccessAuthorityV1> = configured_source_access;
+    let ci = (credential.permits(GitHubReadPermissionV1::Actions)
+        && credential.permits(GitHubReadPermissionV1::Checks))
+    .then(|| {
+        production_ci_provider_configuration(
+            GitHubCiRepositoryTargetV1 {
+                owner: owner.clone(),
+                repository: repository.clone(),
+            },
+            credential.clone(),
+            GitHubHttpReadConfigV1::default(),
+            ci_source_access,
+        )
+    });
+    let review_discovery_authority =
+        github_discovery_authorization_context(project_source_access, &feedback_scope)
+            .zip(github_discovery_source_access_request(&feedback_scope));
     let head_commit_id = feedback_scope.head_commit_id.clone();
     let http = GitHubHttpReadConfigV1::default();
     let discovery_http = http.clone();
     let discovery_credential = credential.clone();
-    let discovery = discover_github_pull_request_after_authorization(
-        || source_access.authorize(&authorization_context, &discovery_request),
-        move || {
-            discover_exact_commit_pull_request_v1(
-                &owner,
-                &repository,
-                &head_commit_id,
-                &discovery_http,
-                &discovery_credential,
+    let discovery = match review_discovery_authority.as_ref() {
+        Some((authorization_context, discovery_request)) => {
+            discover_github_pull_request_after_authorization(
+                || source_access.authorize(authorization_context, discovery_request),
+                move || {
+                    discover_exact_commit_pull_request_v1(
+                        &owner,
+                        &repository,
+                        &head_commit_id,
+                        &discovery_http,
+                        &discovery_credential,
+                    )
+                },
             )
-        },
-    )
-    .await?;
-    let GitHubExactCommitDiscoveryOutcomeV1::Found(pull) = discovery else {
-        return None;
+            .await
+        }
+        None => None,
     };
-    let target = pull.target.clone();
-    let exact_request = GitHubReviewReadRequestV1 {
-        operation: GitHubReviewReadOperationV1::GraphQlQueryPullRequestReviewThreads,
-        scope: feedback_scope.clone(),
-        pull_request_id: target.pull_request_id.clone(),
+    let github = match (discovery, review_discovery_authority.as_ref()) {
+        (
+            Some(GitHubExactCommitDiscoveryOutcomeV1::Found(pull)),
+            Some((authorization_context, _)),
+        ) => {
+            let target = pull.target.clone();
+            let exact_request = GitHubReviewReadRequestV1 {
+                operation: GitHubReviewReadOperationV1::GraphQlQueryPullRequestReviewThreads,
+                scope: feedback_scope.clone(),
+                pull_request_id: target.pull_request_id.clone(),
+            };
+            if source_access
+                .authorize(&authorization_context, &exact_request)
+                .await
+                != GitHubProviderLifecycleV1::Ready
+            {
+                None
+            } else {
+                resolve_production_github_identity(project_root, &feedback_scope, &target, pull)
+                    .map(|identity| GitHubReviewRuntimeOwnerConfigV1 {
+                        database,
+                        resolved_scope,
+                        feedback_scope,
+                        target,
+                        credential,
+                        http,
+                        identity,
+                    })
+            }
+        }
+        _ => None,
     };
-    if source_access
-        .authorize(&authorization_context, &exact_request)
-        .await
-        != GitHubProviderLifecycleV1::Ready
-    {
-        return None;
-    }
-    let identity =
-        resolve_production_github_identity(project_root, &feedback_scope, &target, pull)?;
-    Some((
-        GitHubReviewRuntimeOwnerConfigV1 {
-            database,
-            resolved_scope,
-            feedback_scope,
-            target,
-            credential,
-            http,
-            identity,
-        },
-        source_access,
-    ))
+    Some(ProductionGitHubProviderConfigV1 {
+        github,
+        github_source_access: source_access,
+        ci,
+    })
 }
 
 async fn discover_github_pull_request_after_authorization<A, AF, F>(
@@ -2301,6 +2403,11 @@ fn production_owner_capabilities()
         "capability.application.primitive.health-read",
         "capability.application.primitive.storage-status",
         "capability.application.primitive.diagnostics-read",
+        "capability.application.git.status",
+        "capability.application.git.diff",
+        "capability.application.git.history",
+        "capability.application.git.blame",
+        "capability.application.git.hunks",
         "capability.application.source-edit.ast-grep-rewrite",
         "capability.application.source-edit.insert-at",
         "capability.application.source-edit.insert-at-symbol",
@@ -2359,6 +2466,26 @@ fn now_micros() -> UtcMicros {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn production_project_owner_grants_every_cataloged_git_read() {
+        let capabilities = production_owner_capabilities().expect("production capabilities");
+
+        for capability in [
+            "capability.application.git.status",
+            "capability.application.git.diff",
+            "capability.application.git.history",
+            "capability.application.git.blame",
+            "capability.application.git.hunks",
+        ] {
+            let capability = CapabilityId::new(capability).expect("Git read capability");
+            assert!(
+                capabilities.contains(&capability),
+                "{} must be granted to the daemon-owned project route",
+                capability.as_str()
+            );
+        }
+    }
 
     #[derive(Default)]
     struct RecordingHookCycleObservations(std::sync::Mutex<Vec<Plan26FeedbackSourceEventV1>>);
@@ -2663,15 +2790,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn non_github_project_keeps_remote_provider_configuration_optional() {
-        let (github, ci, pull_request) = optional_remote_provider_configuration(None, None);
-
-        assert!(github.is_none());
-        assert!(ci.is_none());
-        assert!(pull_request.is_none());
-    }
-
     #[tokio::test]
     async fn denied_or_stale_github_source_access_makes_zero_discovery_network_calls() {
         for lifecycle in [
@@ -2890,25 +3008,24 @@ mod tests {
     fn configured_github_mounts_real_ci_provider_configuration() {
         struct ReadyGitHubSourceAccess;
 
-        impl GitHubSourceAccessAuthorityV1 for ReadyGitHubSourceAccess {
-            fn authorize<'a>(
+        impl CiSourceAccessAuthorityV1 for ReadyGitHubSourceAccess {
+            fn authorize_ci<'a>(
                 &'a self,
                 _context: &'a tracedecay_application::RequestContext,
-                _request: &'a GitHubReviewReadRequestV1,
-            ) -> tracedecay_application::feedback::FeedbackPortFuture<'a, GitHubProviderLifecycleV1>
-            {
-                Box::pin(async { GitHubProviderLifecycleV1::Ready })
+                _scope: &'a FeedbackScopeV1,
+            ) -> tracedecay_application::feedback::FeedbackPortFuture<
+                'a,
+                crate::application::advisory::CiSourceAccessOutcomeV1,
+            > {
+                Box::pin(async { crate::application::advisory::CiSourceAccessOutcomeV1::Ready })
             }
         }
 
-        let target = GitHubRepositoryTargetV1 {
+        let target = GitHubCiRepositoryTargetV1 {
             owner: "ScriptedAlchemy".to_owned(),
             repository: "tracedecay".to_owned(),
-            pull_request_number: 421,
-            pull_request_id: GitHubPullRequestIdV1::new("pull-request.421").expect("pull request"),
         };
-        let source_access: Arc<dyn GitHubSourceAccessAuthorityV1> =
-            Arc::new(ReadyGitHubSourceAccess);
+        let source_access: Arc<dyn CiSourceAccessAuthorityV1> = Arc::new(ReadyGitHubSourceAccess);
         let ci = production_ci_provider_configuration(
             target.clone(),
             GitHubReadOnlyCredentialV1::anonymous(),

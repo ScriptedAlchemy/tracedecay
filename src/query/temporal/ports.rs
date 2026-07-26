@@ -16,7 +16,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracedecay_domain::{
-    LogicalCopyRecordV1, RetrievalGrainV1, SessionContractError, SessionId,
+    LogicalCopyRecordV1, RetrievalGrainV1, SESSION_TEMPORAL_CURSOR_MAX_CANONICAL_BYTES,
+    SESSION_TEMPORAL_CURSOR_MAX_PARTICIPANTS, SessionContractError, SessionId,
     SessionSourceCoverageReasonV1, SessionSourceCoverageReceiptV1, SessionSourceCoverageStateV1,
     SessionSourceCoverageV1, SessionSourceFrontierV1, SessionSourceIdV1, SessionSummaryRecordV1,
     SessionTemporalCoverageRequestV1, SignedCursorKeyRefV1, TemporalModeV1,
@@ -40,8 +41,9 @@ const MAX_CONTINUATION_KEY_BYTES: usize = 4_096;
 const MAX_BOUNDED_PAGE_PREALLOC: usize = 64;
 const MAX_CURSOR_SECRET_BYTES: usize = 256;
 const PROFILE_ROOT_PROJECT_KEY: &str = "user";
-pub const MAX_TEMPORAL_PARTICIPANTS: usize = 256;
-pub const MAX_TEMPORAL_PARTICIPANT_MANIFEST_BYTES: usize = 65_536;
+pub const MAX_TEMPORAL_PARTICIPANTS: usize = SESSION_TEMPORAL_CURSOR_MAX_PARTICIPANTS;
+pub const MAX_TEMPORAL_PARTICIPANT_MANIFEST_BYTES: usize =
+    SESSION_TEMPORAL_CURSOR_MAX_CANONICAL_BYTES;
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum TemporalPortError {
@@ -513,6 +515,8 @@ impl Default for TemporalMessageTypeFilterV1 {
 pub(crate) struct TemporalCandidateFilterV1 {
     pub(crate) project_key: Option<String>,
     pub(crate) parent_session_id: Option<String>,
+    pub(crate) source: Option<String>,
+    pub(crate) include_summaries: bool,
     pub(crate) session_scope: TemporalSessionScopeFilterV1,
     pub(crate) message_type: TemporalMessageTypeFilterV1,
     pub(crate) roles: Vec<String>,
@@ -545,6 +549,7 @@ impl TemporalCandidateFilterV1 {
         for (field, value) in [
             ("project_key", self.project_key.as_deref()),
             ("parent_session_id", self.parent_session_id.as_deref()),
+            ("source", self.source.as_deref()),
             ("git_branch", self.git_branch.as_deref()),
             ("git_worktree", self.git_worktree.as_deref()),
             ("git_commit", self.git_commit.as_deref()),
@@ -2472,6 +2477,49 @@ mod tests {
                 maximum: MAX_TEMPORAL_PARTICIPANTS,
             }) if observed == MAX_TEMPORAL_PARTICIPANTS + 1
         ));
+    }
+
+    fn participant_entries_with_canonical_bytes(
+        target_bytes: usize,
+    ) -> Vec<TemporalParticipantGeneration> {
+        let mut entries = (0..128)
+            .map(|index| participant("session-1", &format!("s{index:03}"), 1))
+            .collect::<Vec<_>>();
+        let base_bytes = serde_json::to_vec(&entries).unwrap().len();
+        assert!(base_bytes <= target_bytes);
+        let mut remaining = target_bytes - base_bytes;
+        for entry in &mut entries {
+            let available = 512_usize.saturating_sub(entry.source_id.len());
+            let add = available.min(remaining);
+            entry.source_id.push_str(&"x".repeat(add));
+            remaining -= add;
+            if remaining == 0 {
+                break;
+            }
+        }
+        assert_eq!(remaining, 0, "test entries could not reach target size");
+        assert_eq!(serde_json::to_vec(&entries).unwrap().len(), target_bytes);
+        entries
+    }
+
+    #[test]
+    fn participant_manifest_accepts_exact_canonical_byte_limit() {
+        let entries =
+            participant_entries_with_canonical_bytes(MAX_TEMPORAL_PARTICIPANT_MANIFEST_BYTES);
+        assert!(TemporalParticipantManifest::new(entries).is_ok());
+    }
+
+    #[test]
+    fn participant_manifest_rejects_one_byte_over_canonical_limit() {
+        let entries =
+            participant_entries_with_canonical_bytes(MAX_TEMPORAL_PARTICIPANT_MANIFEST_BYTES + 1);
+        assert_eq!(
+            TemporalParticipantManifest::new(entries),
+            Err(TemporalPortError::ParticipantManifestBytesExceeded {
+                observed: MAX_TEMPORAL_PARTICIPANT_MANIFEST_BYTES + 1,
+                maximum: MAX_TEMPORAL_PARTICIPANT_MANIFEST_BYTES,
+            })
+        );
     }
 
     struct ScopeObservingPort {

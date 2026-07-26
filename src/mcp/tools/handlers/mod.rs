@@ -47,20 +47,27 @@ pub(crate) use session::{
     SessionRefreshServiceOutcome, SessionRefreshServicePort, utc_micros_value,
 };
 
+use std::collections::BTreeSet;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use serde_json::{Value, json};
+use tracedecay_application::handlers::CanonicalApplicationDispatcher;
+use tracedecay_application::{
+    APPLICATION_DEFAULT_PROFILE_ID, ApplicationOperation, RetainedSurfaceOperation,
+    retained_surface_application_operation,
+};
+use tracedecay_tool_catalog::{BindingSurface, ProfileId, SurfaceOperationName};
 
 #[cfg(test)]
 use crate::application_surface::APPLICATION_SURFACE_OPERATIONS;
 use crate::application_surface::{ApplicationSurfaceOperation, resolve_catalog_tool_binding};
+use crate::catalog_composition::{ApplicationCatalogComposition, compose_application_catalog};
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::RegisteredGlobalDb;
 use crate::mcp::response_handles::{ResponseHandleLookup, retrieve_response_handle};
 use crate::tracedecay::TraceDecay;
 use crate::tracedecay::current_timestamp;
-use tracedecay_tool_catalog::BindingSurface;
 
 pub async fn handle_user_lcm_tool(
     tool_name: &str,
@@ -454,9 +461,11 @@ pub struct ToolCallRegistryOptions<'a> {
     pub automation_writer: crate::dashboard::DashboardAutomationWriter,
     pub doctor_report_reader: Option<crate::dashboard::DoctorReportReader>,
     pub doctor_remediation_dispatcher: Option<crate::dashboard::DoctorRemediationDispatcherV1>,
+    pub code_index_freshness_reader:
+        Option<crate::dashboard::code_index_freshness_api::CodeIndexFreshnessReader>,
     pub diagnostics_cache: Option<&'a crate::diagnostics::DiagnosticsCache>,
     pub diagnostics_lsp:
-        Option<&'a tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>>,
+        Option<Arc<tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>>>,
     pub application_invocation_client: Option<&'a crate::daemon_client::DaemonInvocationClient>,
     pub application_request_id: Option<tracedecay_application::RequestId>,
     pub application_deadline: Option<tracedecay_application::Deadline>,
@@ -465,7 +474,6 @@ pub struct ToolCallRegistryOptions<'a> {
     pub code_index_publication_identity:
         Option<crate::mcp::server::CodeIndexPublicationIdentityResolver>,
     pub code_index_search_executor: Option<crate::mcp::server::CodeIndexSearchExecutor>,
-    pub git_read_executor: Option<crate::mcp::server::GitReadExecutor>,
     pub source_edit_executor: Option<crate::mcp::server::SourceEditExecutor>,
     pub source_edit_reconciliation_executor:
         Option<crate::mcp::server::SourceEditReconciliationExecutor>,
@@ -485,9 +493,10 @@ impl Default for ToolCallRegistryOptions<'_> {
             allow_default_registry_fallback: true,
             implicit_project_path: None,
             automation_scheduler_reconciler: None,
-            automation_writer: crate::dashboard::direct_dashboard_automation_writer(),
+            automation_writer: crate::dashboard::standalone_dashboard_automation_writer(),
             doctor_report_reader: None,
             doctor_remediation_dispatcher: None,
+            code_index_freshness_reader: None,
             diagnostics_cache: None,
             diagnostics_lsp: None,
             application_invocation_client: None,
@@ -496,7 +505,6 @@ impl Default for ToolCallRegistryOptions<'_> {
             application_cancellation: None,
             code_index_publication_identity: None,
             code_index_search_executor: None,
-            git_read_executor: None,
             source_edit_executor: None,
             source_edit_reconciliation_executor: None,
             code_index_search_authority: None,
@@ -536,6 +544,16 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
                         options.allow_default_registry_fallback,
                     )?,
                 };
+                if let Some(operation) = RetainedSurfaceOperation::from_name(tool_name) {
+                    return dispatch_profile_retained_application_tool(
+                        operation,
+                        tool_name,
+                        args,
+                        &profile_root,
+                        &options,
+                    )
+                    .await;
+                }
                 return handle_user_lcm_tool_with_db(
                     tool_name,
                     args,
@@ -652,9 +670,7 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
     if let Some(result) = dispatch_admin_tools(tool_name, cg, &args, &options).await {
         return result;
     }
-    if let Some(result) =
-        dispatch_analysis_tools(tool_name, cg, &args, scope_prefix, &options).await
-    {
+    if let Some(result) = dispatch_analysis_tools(tool_name, cg, &args, scope_prefix).await {
         return result;
     }
     if let Some(result) = dispatch_git_tools(tool_name, cg, &args, &options).await {
@@ -675,13 +691,23 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
     {
         return result;
     }
+    if let Some(result) = dispatch_retained_application_tools(
+        tool_name,
+        cg,
+        &args,
+        scope_prefix,
+        active_project_session_db,
+        active_lcm_context,
+        &options,
+    )
+    .await
+    {
+        return result;
+    }
     if let Some(result) = dispatch_memory_tools(tool_name, cg, &args, &options).await {
         return result;
     }
-    if let Some(result) =
-        dispatch_session_workflow_tools(tool_name, cg, &args, active_project_session_db, &options)
-            .await
-    {
+    if let Some(result) = dispatch_session_workflow_tools(tool_name, cg, &args, &options).await {
         return result;
     }
     match tool_name {
@@ -690,6 +716,210 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
         }
         _ => Err(TraceDecayError::Config {
             message: format!("unknown tool: {tool_name}"),
+        }),
+    }
+}
+
+#[derive(Debug)]
+struct CatalogBoundRetainedMcpRequest {
+    operation: RetainedSurfaceOperation,
+    arguments: Value,
+}
+
+#[derive(Clone, Copy)]
+enum RetainedMcpExecutionContext<'call, 'authority> {
+    Profile {
+        tool_name: &'call str,
+        profile_root: &'call Path,
+        options: &'call ToolCallRegistryOptions<'authority>,
+    },
+    Project {
+        tool_name: &'call str,
+        cg: &'call TraceDecay,
+        scope_prefix: Option<&'call str>,
+        active_project_session_db: Option<&'call Arc<RegisteredGlobalDb>>,
+        active_lcm_context: session::LcmHandlerContext<'call>,
+        options: &'call ToolCallRegistryOptions<'authority>,
+    },
+}
+
+static RETAINED_MCP_COMPOSITION: OnceLock<
+    std::result::Result<ApplicationCatalogComposition<()>, String>,
+> = OnceLock::new();
+
+struct RetainedMcpCatalogDispatcher<'call, 'authority> {
+    context: RetainedMcpExecutionContext<'call, 'authority>,
+}
+
+type RetainedMcpInvocationFuture<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + 'a>>;
+
+impl<'call, 'authority> CanonicalApplicationDispatcher<CatalogBoundRetainedMcpRequest>
+    for RetainedMcpCatalogDispatcher<'call, 'authority>
+{
+    type Output = RetainedMcpInvocationFuture<'call>;
+
+    fn invoke(
+        &self,
+        operation: &ApplicationOperation,
+        request: CatalogBoundRetainedMcpRequest,
+    ) -> Self::Output {
+        let expected = match retained_surface_application_operation(request.operation)
+            .map_err(retained_catalog_error)
+        {
+            Ok(expected) => expected,
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
+        if operation != &expected {
+            let error = retained_catalog_error(
+                "resolved retained MCP handler does not own the requested operation",
+            );
+            return Box::pin(async move { Err(error) });
+        }
+        let context = self.context;
+        Box::pin(async move {
+            match context {
+                RetainedMcpExecutionContext::Profile {
+                    tool_name,
+                    profile_root,
+                    options,
+                } => {
+                    execute_profile_retained_application_tool(
+                        request,
+                        tool_name,
+                        profile_root,
+                        options,
+                    )
+                    .await
+                }
+                RetainedMcpExecutionContext::Project {
+                    tool_name,
+                    cg,
+                    scope_prefix,
+                    active_project_session_db,
+                    active_lcm_context,
+                    options,
+                } => {
+                    execute_project_retained_application_tool(
+                        request,
+                        tool_name,
+                        cg,
+                        scope_prefix,
+                        active_project_session_db,
+                        active_lcm_context,
+                        options,
+                    )
+                    .await
+                }
+            }
+        })
+    }
+}
+
+fn retained_catalog_error(error: impl std::fmt::Display) -> TraceDecayError {
+    TraceDecayError::Config {
+        message: format!("retained application catalog is unavailable: {error}"),
+    }
+}
+
+fn retained_mcp_composition() -> Result<&'static ApplicationCatalogComposition<()>> {
+    RETAINED_MCP_COMPOSITION
+        .get_or_init(|| compose_application_catalog(()).map_err(|error| error.to_string()))
+        .as_ref()
+        .map_err(retained_catalog_error)
+}
+
+async fn invoke_retained_mcp_request<'call, 'authority>(
+    context: RetainedMcpExecutionContext<'call, 'authority>,
+    operation: RetainedSurfaceOperation,
+    arguments: Value,
+) -> Result<ToolResult> {
+    let composition = retained_mcp_composition()?;
+    let profile_id =
+        ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID).map_err(retained_catalog_error)?;
+    let operation_name =
+        SurfaceOperationName::new(operation.as_str()).map_err(retained_catalog_error)?;
+    let capability = composition
+        .snapshot()
+        .resolve_binding(
+            &profile_id,
+            BindingSurface::Mcp,
+            &operation_name,
+            1,
+            &BTreeSet::new(),
+        )
+        .ok_or_else(|| retained_catalog_error("retained MCP binding is not callable"))?;
+    let expected =
+        retained_surface_application_operation(operation).map_err(retained_catalog_error)?;
+    if capability.capability_id() != expected.capability_id()
+        || capability.use_case_id() != expected.use_case_id()
+    {
+        return Err(retained_catalog_error(
+            "retained MCP binding resolves a different application operation",
+        ));
+    }
+    let dispatcher = RetainedMcpCatalogDispatcher { context };
+    let handler = composition
+        .bind_handler(capability.use_case_id(), &dispatcher)
+        .ok_or_else(|| retained_catalog_error("retained MCP handler is not registered"))?;
+    handler
+        .invoke(CatalogBoundRetainedMcpRequest {
+            operation,
+            arguments,
+        })
+        .await
+}
+
+async fn dispatch_profile_retained_application_tool(
+    operation: RetainedSurfaceOperation,
+    tool_name: &str,
+    args: Value,
+    profile_root: &Path,
+    options: &ToolCallRegistryOptions<'_>,
+) -> Result<ToolResult> {
+    invoke_retained_mcp_request(
+        RetainedMcpExecutionContext::Profile {
+            tool_name,
+            profile_root,
+            options,
+        },
+        operation,
+        args,
+    )
+    .await
+}
+
+async fn execute_profile_retained_application_tool(
+    request: CatalogBoundRetainedMcpRequest,
+    tool_name: &str,
+    profile_root: &Path,
+    options: &ToolCallRegistryOptions<'_>,
+) -> Result<ToolResult> {
+    match request.operation {
+        RetainedSurfaceOperation::MessageSearch
+        | RetainedSurfaceOperation::LcmStatus
+        | RetainedSurfaceOperation::LcmDoctor
+        | RetainedSurfaceOperation::LcmLoadSession
+        | RetainedSurfaceOperation::LcmGrep
+        | RetainedSurfaceOperation::LcmDescribe
+        | RetainedSurfaceOperation::LcmExpand
+        | RetainedSurfaceOperation::LcmExpandQuery
+        | RetainedSurfaceOperation::LcmPreflight
+        | RetainedSurfaceOperation::LcmCompress
+        | RetainedSurfaceOperation::LcmSessionBoundary => {
+            handle_user_lcm_tool_with_db(
+                tool_name,
+                request.arguments,
+                profile_root,
+                options.session_authorities.user,
+                options.global_db,
+                options.allow_default_registry_fallback,
+                options.session_authorities.profile_retrieval,
+            )
+            .await
+        }
+        _ => Err(TraceDecayError::Config {
+            message: format!("storage_scope=user is not supported for `{tool_name}`"),
         }),
     }
 }
@@ -880,11 +1110,22 @@ async fn dispatch_application_surface_tools(
     options: &ToolCallRegistryOptions<'_>,
 ) -> Option<Result<ToolResult>> {
     let operation = ApplicationSurfaceOperation::from_tool_name(tool_name)?;
+    let normalized_args = match crate::application_surface::normalize_application_tool_args(
+        tool_name,
+        args.clone(),
+    ) {
+        Ok(args) => args,
+        Err(error) => {
+            return Some(Err(TraceDecayError::Config {
+                message: error.to_string(),
+            }));
+        }
+    };
     Some(
         application_surface::handle_application_surface(
             cg,
             operation,
-            args,
+            &normalized_args,
             options.application_invocation_client,
             options.application_request_id.clone(),
             options.application_deadline.clone(),
@@ -901,7 +1142,6 @@ async fn dispatch_analysis_tools(
     cg: &TraceDecay,
     args: &Value,
     scope_prefix: Option<&str>,
-    options: &ToolCallRegistryOptions<'_>,
 ) -> Option<Result<ToolResult>> {
     let result = match tool_name {
         "tracedecay_dead_code" => analysis::handle_dead_code(cg, args.clone(), scope_prefix).await,
@@ -930,16 +1170,6 @@ async fn dispatch_analysis_tools(
         "tracedecay_unsafe_patterns" => {
             analysis::handle_unsafe_patterns(cg, args.clone(), scope_prefix).await
         }
-        "tracedecay_diagnostics" => {
-            analysis::handle_diagnostics(
-                cg,
-                args.clone(),
-                options.diagnostics_cache,
-                options.diagnostics_lsp,
-                options.registered_project_session_db.as_deref(),
-            )
-            .await
-        }
         "tracedecay_constructors" => {
             analysis::handle_constructors(cg, args.clone(), scope_prefix).await
         }
@@ -957,59 +1187,9 @@ async fn dispatch_git_tools(
     tool_name: &str,
     cg: &TraceDecay,
     args: &Value,
-    options: &ToolCallRegistryOptions<'_>,
+    _options: &ToolCallRegistryOptions<'_>,
 ) -> Option<Result<ToolResult>> {
     let result = match tool_name {
-        "tracedecay_git_status" => {
-            git::handle_git_status(
-                cg,
-                args,
-                options.git_read_executor.as_ref(),
-                options.application_deadline.clone(),
-                options.application_cancellation.clone(),
-            )
-            .await
-        }
-        "tracedecay_git_diff" => {
-            git::handle_git_diff(
-                cg,
-                args,
-                options.git_read_executor.as_ref(),
-                options.application_deadline.clone(),
-                options.application_cancellation.clone(),
-            )
-            .await
-        }
-        "tracedecay_git_history" => {
-            git::handle_git_history(
-                cg,
-                args,
-                options.git_read_executor.as_ref(),
-                options.application_deadline.clone(),
-                options.application_cancellation.clone(),
-            )
-            .await
-        }
-        "tracedecay_git_blame" => {
-            git::handle_git_blame(
-                cg,
-                args,
-                options.git_read_executor.as_ref(),
-                options.application_deadline.clone(),
-                options.application_cancellation.clone(),
-            )
-            .await
-        }
-        "tracedecay_git_hunks" => {
-            git::handle_git_hunks(
-                cg,
-                args,
-                options.git_read_executor.as_ref(),
-                options.application_deadline.clone(),
-                options.application_cancellation.clone(),
-            )
-            .await
-        }
         "tracedecay_admin_branch_add" => git::handle_admin_branch_add(cg, args.clone()).await,
         "tracedecay_affected" => git::handle_affected(cg, args.clone()).await,
         "tracedecay_diff_context" => git::handle_diff_context(cg, args.clone()).await,
@@ -1094,15 +1274,135 @@ async fn dispatch_health_tools(
         }
         "tracedecay_dsm" => health::handle_dsm(cg, args.clone(), scope_prefix).await,
         "tracedecay_test_risk" => health::handle_test_risk(cg, args.clone(), scope_prefix).await,
-        "tracedecay_session_start" => {
-            health::handle_session_start(cg, args.clone(), scope_prefix).await
-        }
-        "tracedecay_session_end" => {
-            health::handle_session_end(cg, args.clone(), scope_prefix).await
-        }
         _ => return None,
     };
     Some(result)
+}
+
+/// Dispatch retained memory, session, and workflow operations only after the
+/// application-owned catalog has resolved their stable operation identity.
+async fn dispatch_retained_application_tools(
+    tool_name: &str,
+    cg: &TraceDecay,
+    args: &Value,
+    scope_prefix: Option<&str>,
+    active_project_session_db: Option<&Arc<RegisteredGlobalDb>>,
+    active_lcm_context: session::LcmHandlerContext<'_>,
+    options: &ToolCallRegistryOptions<'_>,
+) -> Option<Result<ToolResult>> {
+    let operation = RetainedSurfaceOperation::from_name(tool_name)?;
+    Some(
+        invoke_retained_mcp_request(
+            RetainedMcpExecutionContext::Project {
+                tool_name,
+                cg,
+                scope_prefix,
+                active_project_session_db,
+                active_lcm_context,
+                options,
+            },
+            operation,
+            args.clone(),
+        )
+        .await,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_project_retained_application_tool(
+    request: CatalogBoundRetainedMcpRequest,
+    tool_name: &str,
+    cg: &TraceDecay,
+    scope_prefix: Option<&str>,
+    active_project_session_db: Option<&Arc<RegisteredGlobalDb>>,
+    active_lcm_context: session::LcmHandlerContext<'_>,
+    options: &ToolCallRegistryOptions<'_>,
+) -> Result<ToolResult> {
+    match request.operation {
+        RetainedSurfaceOperation::FactStore => {
+            memory::handle_fact_store(
+                cg,
+                request.arguments,
+                options.global_db,
+                options.allow_default_registry_fallback,
+            )
+            .await
+        }
+        RetainedSurfaceOperation::FactFeedback => {
+            memory::handle_fact_feedback(
+                cg,
+                request.arguments,
+                options.global_db,
+                options.allow_default_registry_fallback,
+            )
+            .await
+        }
+        RetainedSurfaceOperation::MemoryStatus => {
+            memory::handle_memory_status(
+                cg,
+                request.arguments,
+                options.global_db,
+                options.allow_default_registry_fallback,
+            )
+            .await
+        }
+        RetainedSurfaceOperation::SessionRefresh => {
+            session::handle_session_refresh(
+                request.arguments,
+                options.session_authorities.refresh_services(),
+            )
+            .await
+        }
+        RetainedSurfaceOperation::MessageSearch => {
+            Box::pin(session::message_search::handle_message_search_with_service(
+                Some(cg.project_root()),
+                session::message_search::SessionRetrievalStoreScope::Project,
+                request.arguments,
+                options.session_authorities.project_retrieval,
+            ))
+            .await
+        }
+        RetainedSurfaceOperation::SessionsFor => {
+            session::handle_sessions_for(
+                cg,
+                active_project_session_db.map(Arc::as_ref),
+                request.arguments,
+            )
+            .await
+        }
+        RetainedSurfaceOperation::Workflows => {
+            workflow_query::handle_workflows(
+                cg,
+                request.arguments,
+                options.session_authorities.project_registered,
+            )
+            .await
+        }
+        RetainedSurfaceOperation::LcmStatus
+        | RetainedSurfaceOperation::LcmDoctor
+        | RetainedSurfaceOperation::LcmLoadSession
+        | RetainedSurfaceOperation::LcmGrep
+        | RetainedSurfaceOperation::LcmDescribe
+        | RetainedSurfaceOperation::LcmExpand
+        | RetainedSurfaceOperation::LcmExpandQuery
+        | RetainedSurfaceOperation::LcmPreflight
+        | RetainedSurfaceOperation::LcmCompress
+        | RetainedSurfaceOperation::LcmSessionBoundary => {
+            dispatch_lcm_tool(tool_name, request.arguments, active_lcm_context).await
+        }
+        RetainedSurfaceOperation::SessionStart => {
+            let db = active_project_session_db.ok_or_else(|| TraceDecayError::Config {
+                message: "health-delta observation authority is unavailable".to_owned(),
+            })?;
+            health::handle_session_start(cg, db.as_ref(), request.arguments, scope_prefix).await
+        }
+        RetainedSurfaceOperation::SessionEnd => {
+            let db = active_project_session_db.ok_or_else(|| TraceDecayError::Config {
+                message: "health-delta observation authority is unavailable".to_owned(),
+            })?;
+            health::handle_session_end(cg, db.as_ref(), request.arguments, scope_prefix).await
+        }
+    }
 }
 
 /// Dispatch memory, skill, and analytics tools (`tracedecay_fact_store`,
@@ -1114,33 +1414,6 @@ async fn dispatch_memory_tools(
     options: &ToolCallRegistryOptions<'_>,
 ) -> Option<Result<ToolResult>> {
     let result = match tool_name {
-        "tracedecay_fact_store" => {
-            memory::handle_fact_store(
-                cg,
-                args.clone(),
-                options.global_db,
-                options.allow_default_registry_fallback,
-            )
-            .await
-        }
-        "tracedecay_fact_feedback" => {
-            memory::handle_fact_feedback(
-                cg,
-                args.clone(),
-                options.global_db,
-                options.allow_default_registry_fallback,
-            )
-            .await
-        }
-        "tracedecay_memory_status" => {
-            memory::handle_memory_status(
-                cg,
-                args.clone(),
-                options.global_db,
-                options.allow_default_registry_fallback,
-            )
-            .await
-        }
         "tracedecay_automation_run_artifact_view" => {
             skills::handle_automation_run_artifact_view(cg, args.clone()).await
         }
@@ -1172,7 +1445,6 @@ async fn dispatch_session_workflow_tools(
     tool_name: &str,
     cg: &TraceDecay,
     args: &Value,
-    active_project_session_db: Option<&Arc<RegisteredGlobalDb>>,
     options: &ToolCallRegistryOptions<'_>,
 ) -> Option<Result<ToolResult>> {
     let result = match tool_name {
@@ -1203,38 +1475,8 @@ async fn dispatch_session_workflow_tools(
                 options.automation_writer.clone(),
                 options.doctor_report_reader.clone(),
                 options.doctor_remediation_dispatcher.clone(),
-            )
-            .await
-        }
-        "tracedecay_session_refresh" => {
-            session::handle_session_refresh(
-                args.clone(),
-                options.session_authorities.refresh_services(),
-            )
-            .await
-        }
-        "tracedecay_message_search" => {
-            Box::pin(session::message_search::handle_message_search_with_service(
-                Some(cg.project_root()),
-                session::message_search::SessionRetrievalStoreScope::Project,
-                args.clone(),
-                options.session_authorities.project_retrieval,
-            ))
-            .await
-        }
-        "tracedecay_sessions_for" => {
-            session::handle_sessions_for(
-                cg,
-                active_project_session_db.map(Arc::as_ref),
-                args.clone(),
-            )
-            .await
-        }
-        "tracedecay_workflows" => {
-            workflow_query::handle_workflows(
-                cg,
-                args.clone(),
-                options.session_authorities.project_registered,
+                options.code_index_freshness_reader.clone(),
+                options.diagnostics_lsp.clone(),
             )
             .await
         }
@@ -1252,13 +1494,12 @@ async fn dispatch_session_workflow_tools(
     clippy::uninlined_format_args
 )]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::ffi::{OsStr, OsString};
     use std::fmt::Write as _;
     use std::fs;
     use std::path::Path;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, Ordering};
 
     use serde_json::json;
     use tempfile::TempDir;
@@ -1267,8 +1508,6 @@ mod tests {
     use super::*;
     use crate::config::{USER_DATA_DIR_ENV, lock_user_data_dir_test_env};
     use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
-
-    static SELECTOR_RUNTIME_NONCE: AtomicU64 = AtomicU64::new(1);
 
     struct SelectorRegistry {
         database: Arc<RegisteredGlobalDb>,
@@ -1281,11 +1520,10 @@ mod tests {
             let profile_root = crate::config::user_data_dir().expect("selector profile root");
             let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
                 .expect("selector profile identity");
-            let nonce = SELECTOR_RUNTIME_NONCE.fetch_add(1, Ordering::Relaxed);
             let scope = crate::db::enter_daemon_database_scope(
                 identity.profile_root(),
-                nonce,
-                "mcp-selector-test",
+                1,
+                "host-admission-test-runtime",
             )
             .expect("selector daemon database scope");
             let registry = DaemonSessionRuntimeRegistryV1::open(identity)
@@ -1300,6 +1538,28 @@ mod tests {
                 _registry: registry,
                 _scope: scope,
             }
+        }
+    }
+
+    fn selector_options<'a>(
+        registry: &'a SelectorRegistry,
+        graphs: Vec<Arc<TraceDecay>>,
+    ) -> ToolCallRegistryOptions<'a> {
+        let graphs = Arc::new(
+            graphs
+                .into_iter()
+                .map(|graph| (graph.project_root().to_path_buf(), graph))
+                .collect::<BTreeMap<_, _>>(),
+        );
+        let resolver: crate::mcp::server::RetainedProjectGraphResolver = Arc::new(move |root| {
+            let graph = graphs.get(&root).cloned();
+            Box::pin(async move { graph })
+        });
+        ToolCallRegistryOptions {
+            global_db: Some(registry.database.as_ref()),
+            allow_default_registry_fallback: false,
+            retained_project_graph_resolver: Some(resolver),
+            ..Default::default()
         }
     }
 
@@ -1427,6 +1687,33 @@ mod tests {
                 .into_iter()
                 .map(|operation| format!("tracedecay_{}", operation.as_str())),
         );
+        for operation in RetainedSurfaceOperation::ALL {
+            let tool_name = format!("tracedecay_{}", operation.as_str());
+            let composition = retained_mcp_composition()
+                .unwrap_or_else(|error| panic!("{tool_name} catalog composition failed: {error}"));
+            let profile = ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID).unwrap();
+            let operation_name = SurfaceOperationName::new(operation.as_str()).unwrap();
+            let capability = composition
+                .snapshot()
+                .resolve_binding(
+                    &profile,
+                    BindingSurface::Mcp,
+                    &operation_name,
+                    1,
+                    &BTreeSet::new(),
+                )
+                .unwrap_or_else(|| panic!("{tool_name} catalog binding is not callable"));
+            let expected = retained_surface_application_operation(operation).unwrap();
+            assert_eq!(capability.capability_id(), expected.capability_id());
+            assert_eq!(capability.use_case_id(), expected.use_case_id());
+            assert!(
+                composition
+                    .bind_handler(capability.use_case_id(), &())
+                    .is_some(),
+                "{tool_name} application handler is not registered"
+            );
+            handler_names.insert(tool_name);
+        }
         for internal in INTERNAL_DAEMON_TOOL_NAMES {
             handler_names.remove(*internal);
         }
@@ -1498,8 +1785,19 @@ mod tests {
         fs::write(active_project.join("src/active.rs"), "pub fn active() {}\n").unwrap();
         fs::write(target_project.join("src/target.rs"), "pub fn target() {}\n").unwrap();
 
-        let active = TraceDecay::init(&active_project).await.unwrap();
-        let target = TraceDecay::init(&target_project).await.unwrap();
+        let (active, _active_runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+            &active_project,
+            "project.mcp-active-selector",
+        )
+        .await
+        .unwrap();
+        let (target, _target_runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+            &target_project,
+            "project.mcp-target-selector",
+        )
+        .await
+        .unwrap();
+        let target = Arc::new(target);
         let target_still_stale = target
             .sync_if_stale(&["src/target.rs".to_string()])
             .await
@@ -1517,7 +1815,7 @@ mod tests {
             .expect("target project should be registered")
             .to_string();
 
-        let result = handle_tool_call_with_registry(
+        let result = handle_tool_call_with_registry_and_implicit_project(
             &active,
             "tracedecay_files",
             json!({
@@ -1526,8 +1824,7 @@ mod tests {
             }),
             None,
             Some("tests"),
-            Some(registry.database.as_ref()),
-            false,
+            selector_options(&registry, vec![Arc::clone(&target)]),
         )
         .await
         .unwrap();
@@ -1545,7 +1842,9 @@ mod tests {
         active.checkpoint().await.unwrap();
         target.checkpoint().await.unwrap();
         active.close();
-        target.close();
+        Arc::into_inner(target)
+            .expect("selector target graph should no longer be retained")
+            .close();
     }
 
     #[tokio::test]
@@ -1560,12 +1859,23 @@ mod tests {
         fs::write(active_project.join("src/active.rs"), "pub fn active() {}\n").unwrap();
         fs::write(target_project.join("src/target.rs"), "pub fn target() {}\n").unwrap();
 
-        let active = TraceDecay::init(&active_project).await.unwrap();
-        let target = TraceDecay::init(&target_project).await.unwrap();
+        let (active, _active_runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+            &active_project,
+            "project.mcp-active-basename",
+        )
+        .await
+        .unwrap();
+        let (target, _target_runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+            &target_project,
+            "project.mcp-target-basename",
+        )
+        .await
+        .unwrap();
+        let target = Arc::new(target);
         target.index_all().await.unwrap();
         let registry = SelectorRegistry::open().await;
 
-        let result = handle_tool_call_with_registry(
+        let result = handle_tool_call_with_registry_and_implicit_project(
             &active,
             "tracedecay_grep",
             json!({
@@ -1575,8 +1885,7 @@ mod tests {
             }),
             None,
             None,
-            Some(registry.database.as_ref()),
-            false,
+            selector_options(&registry, vec![Arc::clone(&target)]),
         )
         .await
         .unwrap();
@@ -1594,7 +1903,9 @@ mod tests {
         active.checkpoint().await.unwrap();
         target.checkpoint().await.unwrap();
         active.close();
-        target.close();
+        Arc::into_inner(target)
+            .expect("basename target graph should no longer be retained")
+            .close();
     }
 
     #[tokio::test]
@@ -1609,9 +1920,24 @@ mod tests {
         fs::create_dir_all(&first_target).unwrap();
         fs::create_dir_all(&second_target).unwrap();
 
-        let active = TraceDecay::init(&active_project).await.unwrap();
-        let first = TraceDecay::init(&first_target).await.unwrap();
-        let second = TraceDecay::init(&second_target).await.unwrap();
+        let (active, _active_runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+            &active_project,
+            "project.mcp-active-ambiguous",
+        )
+        .await
+        .unwrap();
+        let (first, _first_runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+            &first_target,
+            "project.mcp-first-ambiguous",
+        )
+        .await
+        .unwrap();
+        let (second, _second_runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+            &second_target,
+            "project.mcp-second-ambiguous",
+        )
+        .await
+        .unwrap();
         let registry = SelectorRegistry::open().await;
 
         let err = handle_tool_call_with_registry(
@@ -1649,7 +1975,12 @@ mod tests {
         let project = dir.path().join("active");
         fs::create_dir_all(project.join("src")).unwrap();
         fs::write(project.join("src/lib.rs"), "pub fn active_symbol() {}\n").unwrap();
-        let cg = TraceDecay::init(&project).await.unwrap();
+        let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+            &project,
+            "project.mcp-unsupported-selector",
+        )
+        .await
+        .unwrap();
         cg.index_all().await.unwrap();
 
         let err = handle_tool_call(
@@ -1681,7 +2012,12 @@ mod tests {
         let project = dir.path().join("active");
         fs::create_dir_all(project.join("src")).unwrap();
         fs::write(project.join("src/lib.rs"), "pub fn active_symbol() {}\n").unwrap();
-        let cg = TraceDecay::init(&project).await.unwrap();
+        let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+            &project,
+            "project.mcp-cross-selector",
+        )
+        .await
+        .unwrap();
 
         let err = handle_tool_call(
             &cg,
@@ -1706,7 +2042,7 @@ mod tests {
     #[tokio::test]
     async fn selected_project_retrieve_finds_selected_project_response_handle() {
         const LARGE_RESPONSE_MARKER_COUNT: usize = 200;
-        const LAST_LARGE_RESPONSE_MARKER: usize = LARGE_RESPONSE_MARKER_COUNT - 1;
+        const LAST_RETURNED_RESPONSE_MARKER: usize = 19;
 
         let _env_lock = lock_user_data_dir_test_env();
         let dir = TempDir::new().unwrap();
@@ -1722,16 +2058,28 @@ mod tests {
         .unwrap();
 
         let mut target_source = String::new();
+        let response_padding = "x".repeat(256);
         for i in 0..LARGE_RESPONSE_MARKER_COUNT {
             let _ = writeln!(
                 target_source,
-                "pub fn selected_project_handle_marker_{i:03}() -> &'static str {{ \"marker-{i:03}\" }}"
+                "pub fn selected_project_handle_marker_{i:03}() -> &'static str {{ \"marker-{i:03}-{response_padding}\" }}"
             );
         }
         fs::write(target_project.join("src/lib.rs"), target_source).unwrap();
 
-        let active = TraceDecay::init(&active_project).await.unwrap();
-        let target = TraceDecay::init(&target_project).await.unwrap();
+        let (active, _active_runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+            &active_project,
+            "project.mcp-active-retrieval",
+        )
+        .await
+        .unwrap();
+        let (target, _target_runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+            &target_project,
+            "project.mcp-target-retrieval",
+        )
+        .await
+        .unwrap();
+        let target = Arc::new(target);
         active.index_all().await.unwrap();
         target.index_all().await.unwrap();
         let target_project_id = target
@@ -1742,17 +2090,20 @@ mod tests {
             .expect("target project should be registered")
             .to_string();
 
-        let result = handle_tool_call(
+        let registry = SelectorRegistry::open().await;
+        let result = handle_tool_call_with_registry_and_implicit_project(
             &active,
             "tracedecay_grep",
             json!({
                 "pattern": "selected_project_handle_marker",
                 "project_id": target_project_id,
                 "max_results": LARGE_RESPONSE_MARKER_COUNT,
+                "context_lines": 3,
                 "format": "json"
             }),
             None,
             None,
+            selector_options(&registry, vec![Arc::clone(&target)]),
         )
         .await
         .unwrap();
@@ -1774,7 +2125,7 @@ mod tests {
             "selected-project envelopes should tell clients to retrieve from the same project: {retrieve_instruction}"
         );
 
-        let retrieved = handle_tool_call(
+        let retrieved = handle_tool_call_with_registry_and_implicit_project(
             &active,
             "tracedecay_retrieve",
             json!({
@@ -1784,6 +2135,7 @@ mod tests {
             }),
             None,
             None,
+            selector_options(&registry, vec![Arc::clone(&target)]),
         )
         .await
         .unwrap();
@@ -1799,7 +2151,7 @@ mod tests {
             payload["content"]
                 .as_str()
                 .is_some_and(|content| content.contains(&format!(
-                    "selected_project_handle_marker_{LAST_LARGE_RESPONSE_MARKER:03}"
+                    "selected_project_handle_marker_{LAST_RETURNED_RESPONSE_MARKER:03}"
                 ))),
             "selected project retrieve should return the full selected-project response: {payload}"
         );

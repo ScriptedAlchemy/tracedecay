@@ -32,6 +32,15 @@
       ]
     },
     {
+      "family": "external_source",
+      "write_payloads": [
+        "external_source"
+      ],
+      "read_operations": [
+        "external_source_state"
+      ]
+    },
+    {
       "family": "sessions",
       "write_payloads": [
         "session_projection",
@@ -61,6 +70,10 @@
       "callee": ".project.execute_diagnostic_write"
     },
     {
+      "variant": "ExternalSource",
+      "callee": ".project.execute_external_source_write"
+    },
+    {
       "variant": "SessionProjection",
       "callee": ".session.execute_projection_write"
     },
@@ -77,6 +90,10 @@
     {
       "variant": "Project",
       "callee": ".project.execute_read"
+    },
+    {
+      "variant": "ExternalSource",
+      "callee": ".project.execute_external_source_read"
     },
     {
       "variant": "Session",

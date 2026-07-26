@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -7,11 +7,12 @@ use std::collections::{BTreeSet, VecDeque};
 use std::sync::Mutex;
 
 use tracedecay_application::{
-    AuthorityReceipt, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline,
-    DisclosureClass, GitIndexApplyRequestV1, GitIndexEffectProofV1, GitIndexOperationBindingV1,
-    GitIndexPreviewPortResultV1, GitIndexPreviewRequestV1, GitIndexTransactionPort,
-    GitIndexTransactionPortError, IdempotencyKey, OperationBudgetUsage, OperationReceipt,
-    OperationTermination, PolicyDecisionRef, RequestContext, RequestId, ResolvedScope,
+    AuthorityReceipt, CancellationContext, CancellationStage, CapabilityGrantId,
+    CapabilityGrantSnapshot, Deadline, DisclosureClass, GitIndexApplyRequestV1,
+    GitIndexEffectProofV1, GitIndexOperationBindingV1, GitIndexPreviewPortResultV1,
+    GitIndexPreviewRequestV1, GitIndexTransactionPort, GitIndexTransactionPortError,
+    IdempotencyKey, OperationBudgetUsage, OperationReceipt, OperationTermination,
+    PolicyDecisionRef, RequestContext, RequestId, ResolvedScope,
 };
 use tracedecay_domain::{
     ActorId, ComponentVersion, GitCommitIdentityV1, GitCoverageV1, GitHeadStateV1,
@@ -32,7 +33,7 @@ use tracedecay_store::{
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
-use super::owner::{DaemonGitAuthoritySource, DaemonGitIndexPolicyRecheck};
+use super::owner::{DaemonGitAuthoritySource, DaemonGitIndexPolicyRecheck, preview_conflict_risk};
 use super::queue::{RepositoryMutationQueue, RepositoryMutationQueueError};
 use super::recovery::{GitIndexRecoveryError, GitIndexRecoveryExecutor};
 use super::service::{
@@ -94,6 +95,58 @@ fn repository_mutation_capacity_fails_closed_before_waiting() {
         queue.with_repository(&repository, || ()).is_ok(),
         "capacity is released when an operation exits"
     );
+}
+
+#[test]
+fn queued_repository_mutation_observes_live_cancellation() {
+    let queue = Arc::new(RepositoryMutationQueue::default());
+    let repository = RepositoryId::new("repository.cancellation").expect("repository id");
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let holder_queue = Arc::clone(&queue);
+    let holder_repository = repository.clone();
+    let holder = thread::spawn(move || {
+        holder_queue
+            .with_repository(&holder_repository, || {
+                entered_tx.send(()).expect("signal queue holder");
+                release_rx.recv().expect("release queue holder");
+            })
+            .expect("holder queue");
+    });
+    entered_rx.recv().expect("queue holder entered");
+
+    let cancellation = Arc::new(AtomicBool::new(false));
+    let checks = Arc::new(AtomicUsize::new(0));
+    let waiter_queue = Arc::clone(&queue);
+    let waiter_cancellation = Arc::clone(&cancellation);
+    let waiter_checks = Arc::clone(&checks);
+    let waiter = thread::spawn(move || {
+        waiter_queue
+            .with_repository_cancellable(
+                &repository,
+                || {
+                    waiter_checks.fetch_add(1, Ordering::SeqCst);
+                    waiter_cancellation
+                        .load(Ordering::SeqCst)
+                        .then_some(UtcMicros(25))
+                },
+                |observed| observed.is_some(),
+            )
+            .expect("waiter queue")
+    });
+
+    while checks.load(Ordering::SeqCst) < 2 {
+        thread::yield_now();
+    }
+    cancellation.store(true, Ordering::SeqCst);
+    let checks_before_cancellation = checks.load(Ordering::SeqCst);
+    while checks.load(Ordering::SeqCst) == checks_before_cancellation {
+        thread::yield_now();
+    }
+    release_tx.send(()).expect("release holder");
+
+    holder.join().expect("holder joins");
+    assert!(waiter.join().expect("waiter joins"));
 }
 
 fn id<T>(value: &str) -> T
@@ -188,6 +241,26 @@ fn preview_with_expiry(expires_at: UtcMicros) -> GitIndexPreviewV1 {
         expires_at,
     )
     .expect("preview")
+}
+
+#[test]
+fn policy_recheck_uses_previewed_conflict_evidence() {
+    let clean = preview();
+    assert_eq!(preview_conflict_risk(&clean), GitConflictRiskV1::NoneKnown);
+
+    let mut possible = clean.clone();
+    possible.repository_snapshot.operation_state = GitOperationStateV1::Merge;
+    assert_eq!(
+        preview_conflict_risk(&possible),
+        GitConflictRiskV1::Possible
+    );
+
+    let mut confirmed = clean;
+    confirmed.repository_snapshot.index.state = RepositoryIndexStateV1::Unmerged;
+    assert_eq!(
+        preview_conflict_risk(&confirmed),
+        GitConflictRiskV1::Confirmed
+    );
 }
 
 fn apply_request(preview: &GitIndexPreviewV1, key: &str) -> GitIndexApplyRequestV1 {
@@ -345,6 +418,7 @@ struct FakeNative {
     apply_calls: Arc<AtomicUsize>,
     recovery_calls: Arc<AtomicUsize>,
     discard_calls: Arc<AtomicUsize>,
+    entered_native: Arc<AtomicBool>,
 }
 
 impl FakeNative {
@@ -358,6 +432,7 @@ impl FakeNative {
             apply_calls: Arc::new(AtomicUsize::new(0)),
             recovery_calls: Arc::new(AtomicUsize::new(0)),
             discard_calls: Arc::new(AtomicUsize::new(0)),
+            entered_native: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -376,6 +451,7 @@ impl GitIndexNativeExecutor for FakeNative {
         preview: &GitIndexPreviewV1,
         request: &GitIndexApplyRequestV1,
     ) -> Result<NativeGitIndexApplyOutcomeV1, GitIndexTransactionPortError> {
+        self.entered_native.store(true, Ordering::SeqCst);
         self.apply_calls.fetch_add(1, Ordering::SeqCst);
         let mode = self
             .apply_modes
@@ -476,9 +552,9 @@ struct MutableDaemonGitAuthority {
 }
 
 impl DaemonGitAuthoritySource for MutableDaemonGitAuthority {
-    fn current(
+    fn current_capability(
         &self,
-        _operation: GitIndexTransactionOperationV1,
+        _capability_id: &CapabilityId,
     ) -> Result<DaemonGitAuthorityStateV1, GitIndexTransactionPortError> {
         Ok(self.current.lock().expect("authority state").clone())
     }
@@ -535,6 +611,7 @@ struct TestHarness {
     apply_calls: Arc<AtomicUsize>,
     recovery_calls: Arc<AtomicUsize>,
     discard_calls: Arc<AtomicUsize>,
+    entered_native: Arc<AtomicBool>,
     allow: Arc<std::sync::atomic::AtomicBool>,
     policy_calls: Arc<AtomicUsize>,
     policy_evaluated_at: Arc<Mutex<Option<UtcMicros>>>,
@@ -627,6 +704,7 @@ fn test_port(
     let apply_calls = Arc::clone(&native.apply_calls);
     let recovery_calls = Arc::clone(&native.recovery_calls);
     let discard_calls = Arc::clone(&native.discard_calls);
+    let entered_native = Arc::clone(&native.entered_native);
     let policy = TestPolicy::allowing();
     let allow = Arc::clone(&policy.allow);
     let policy_calls = Arc::clone(&policy.calls);
@@ -644,6 +722,7 @@ fn test_port(
         apply_calls,
         recovery_calls,
         discard_calls,
+        entered_native,
         allow,
         policy_calls,
         policy_evaluated_at,
@@ -802,6 +881,62 @@ fn deadline_elapsed_during_policy_recheck_never_reaches_native_git() {
     );
     assert_eq!(harness.apply_calls.load(Ordering::SeqCst), 0);
     assert_eq!(harness.discard_calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn cancellation_at_the_last_pre_native_boundary_returns_a_cancelled_receipt() {
+    let harness = test_port([], []);
+    let cancellation_checks = AtomicUsize::new(0);
+
+    let result = harness
+        .port
+        .apply_cancellable(&harness.request, || {
+            (cancellation_checks.fetch_add(1, Ordering::SeqCst) + 1 >= 5).then_some(UtcMicros(25))
+        })
+        .expect("pre-native cancellation is a durable no-change result");
+
+    assert_eq!(
+        result.receipt.outcome,
+        GitIndexReceiptOutcomeV1::AbortedNoChange
+    );
+    assert_eq!(
+        result.execution.termination,
+        OperationTermination::Cancelled
+    );
+    let cancellation = result
+        .execution
+        .cancellation
+        .as_ref()
+        .expect("canonical cancellation observation");
+    assert_eq!(cancellation.stage, CancellationStage::BeforeEffect);
+    assert_eq!(cancellation.observed_at, UtcMicros(25));
+    assert_eq!(harness.apply_calls.load(Ordering::SeqCst), 0);
+    result
+        .validate_for(&harness.request)
+        .expect("cancelled apply result contract");
+}
+
+#[test]
+fn cancellation_after_native_entry_does_not_rewrite_the_terminal_outcome() {
+    let harness = test_port([NativeMode::ProvenNoMutation], []);
+
+    let result = harness
+        .port
+        .apply_cancellable(&harness.request, || {
+            harness
+                .entered_native
+                .load(Ordering::SeqCst)
+                .then_some(UtcMicros(25))
+        })
+        .expect("native outcome remains authoritative");
+
+    assert_eq!(harness.apply_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        result.receipt.outcome,
+        GitIndexReceiptOutcomeV1::AbortedNoChange
+    );
+    assert_eq!(result.execution.termination, OperationTermination::Failed);
+    assert!(result.execution.cancellation.is_none());
 }
 
 #[test]
