@@ -132,7 +132,7 @@ export async function applySettingsMutation(
 function unavailableDetail(body: unknown): string {
   const detail = isRecord(body) ? body['detail'] : undefined;
   return typeof detail === 'string' && detail.length > 0
-    ? `Nothing was applied: ${detail}.`
+    ? `Nothing was applied: ${detail.replace(/\.$/, '')}.`
     : 'Nothing was applied: the authority for this write is unavailable.';
 }
 
