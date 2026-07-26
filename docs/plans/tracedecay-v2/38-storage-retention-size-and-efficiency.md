@@ -21,12 +21,15 @@ delete trigger before commit. Direct tests cover dry-run/apply, live-evidence
 preservation, current-frontier preservation, authority-loss rollback, and
 trigger restoration.
 
-Size evidence is currently file- and directory-level only:
-`StoreSizeTelemetryPort` has no implementation, so TraceDecay has no supported
-per-table measurement path. No plan status may publish ad hoc per-table byte
-figures. In particular, `source_cursor_advances` lives inside the single
-profile `global.db`, whose entire measured size is 0.98 GiB; its retention
-obstacle is qualitative, not a table-size claim.
+Size evidence published in this plan remains file- and directory-level only.
+`SqliteStoreSizeTelemetryPort` now implements `StoreSizeTelemetryPort` over the
+runtime's read-only SQLite health reader, including `dbstat` table-payload
+samples, and Doctor calls its store-size and table-growth reads. That capability
+does not retroactively validate any ad hoc table-size estimate: no plan status
+may publish a per-table byte figure until the product path reproduces it. In
+particular, `source_cursor_advances` lives inside the single profile
+`global.db`, whose entire measured size is 0.98 GiB; its retention obstacle is
+qualitative, not a table-size claim.
 
 Commits `4444833b8` and `76895d201` additionally wire real storage-budget
 findings and preserve unreadable storage roles instead of converting them to
@@ -64,8 +67,9 @@ measurements, not inferred table sizes.
    `sessions.db` population totals 35.7 GiB and includes a 15.7 GiB single
    file. Structurally, `lcm_raw_messages` and `session_messages` can retain the
    same conversations in raw and projected form, with FTS shadows and
-   append-only evidence beside them. Per-table contribution is unknown until
-   the product telemetry port has a real implementation.
+   append-only evidence beside them. This plan does not assign per-table
+   contributions because no cited dogfood measurement has been reproduced
+   through the product telemetry path.
 5. **Incident debris classifier that existed but never fired on live names.**
    The live profile carried bare `tracedecay.db.corrupt` artifacts totalling
    125 MiB. `IncidentDebrisKindV1::classify` recognized only
@@ -128,8 +132,12 @@ measurements, not inferred table sizes.
   daemon-authorized retention owner. The exact receipt supporting the current
   source frontier is retained; the delete trigger is suspended and restored
   inside one immediate transaction, with rollback on authority loss.
-- `StoreSizeTelemetryPort` has no implementation. Per-store/per-table growth
-  telemetry remains a required §7 seam, not a delivered measurement source.
+- `StoreSizeTelemetryPort` is implemented by
+  `SqliteStoreSizeTelemetryPort`. Its first table read establishes scoped
+  watermarks, later reads return `dbstat` payload-growth samples, and Doctor
+  consumes those reads without converting failures to zero. This delivers the
+  §7 measurement source, not acceptance of historical ad hoc per-table
+  figures.
 - Direct tests only: seeded stores with stale branches/orphans/debris must
   produce the findings and the collections; retention windows must be
   provable with ordinary tests. They create no locked gate or PR acceptance
