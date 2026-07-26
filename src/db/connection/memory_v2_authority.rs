@@ -1,4 +1,4 @@
-use tracedecay_domain::{FactEventId, FactId, FactOwnerV1, SourceStoreId, UtcMicros};
+use tracedecay_domain::{ActorId, FactEventId, FactId, FactOwnerV1, SourceStoreId, UtcMicros};
 
 use crate::db::{
     DatabaseMemoryTransaction, MemoryV2CutoverOutcome, MemoryV2CutoverReceipt,
@@ -163,13 +163,10 @@ impl Database {
         memory_v2::finalize_memory_v2_cutover(&writer.conn, receipt).await
     }
 
-    /// The production live-purge entry point for one legacy-backed fact.
-    ///
-    /// Reclaiming the legacy compatibility row is only reachable through
-    /// `memory_v2`'s cutover authorization token, so this call fails closed
-    /// unless the backfill for that exact owner/store reached
-    /// `cutover_complete`, and it carries the lineage CAS expectation that
-    /// proves no concurrent write raced the purge.
+    /// Standalone entry point retained for destructive temporary-database
+    /// tests. Production deletion joins the compatibility command transaction
+    /// through `purge_memory_v2_legacy_fact_payload_in_transaction`.
+    #[cfg(test)]
     pub(crate) async fn purge_memory_v2_legacy_fact_payload(
         &self,
         owner: &FactOwnerV1,
@@ -195,6 +192,34 @@ impl Database {
             self.run_incremental_vacuum(64).await?;
         }
         Ok(receipt)
+    }
+
+    /// Applies the guarded migrated-V1 deletion path inside the compatibility
+    /// command's authority transaction, preserving one atomic receipt.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn purge_memory_v2_legacy_fact_payload_in_transaction(
+        &self,
+        transaction: &DatabaseMemoryTransaction<'_>,
+        owner: &FactOwnerV1,
+        source_store_id: &SourceStoreId,
+        fact_id: &FactId,
+        expected_last_event_id: &FactEventId,
+        actor: Option<&ActorId>,
+        occurred_at: UtcMicros,
+    ) -> Result<MemoryV2LegacyPurgeReceipt> {
+        self.require_active_write_scope(
+            "purge memory v2 legacy fact payload in writer transaction",
+        )?;
+        memory_v2::purge_memory_v2_fact_in_transaction(
+            transaction,
+            owner,
+            source_store_id,
+            fact_id,
+            expected_last_event_id,
+            actor,
+            occurred_at,
+        )
+        .await
     }
 
     pub(crate) async fn reopen_memory_v2_cutover_for_legacy_union(
