@@ -7,7 +7,6 @@ use crate::errors::TraceDecayError;
 use super::{
     CodeProjectRecord, GraphScopeRecord, ProjectAliasRecord, ProjectRegistryContext,
     ProjectStoreContext, RegisteredGlobalDb, StoreArtifactRecord, StoreInstanceRecord,
-    TokenCountUpsert,
 };
 
 type Result<T> = std::result::Result<T, TraceDecayError>;
@@ -478,90 +477,6 @@ impl RegisteredGlobalDb {
             .await
             .map_err(|error| dashboard_error("commit orphan store retirement", error))?;
         Ok(retired)
-    }
-
-    pub(crate) async fn ensure_token_count_cache(&self) -> bool {
-        let Ok(transaction) = self.begin_write_transaction().await else {
-            return false;
-        };
-        if transaction
-            .execute_batch(
-                "CREATE TABLE IF NOT EXISTS dashboard_token_counts (
-                    store TEXT NOT NULL,
-                    provider TEXT NOT NULL,
-                    message_id TEXT NOT NULL,
-                    text_len INTEGER NOT NULL,
-                    encoder TEXT NOT NULL,
-                    token_count INTEGER NOT NULL,
-                    computed_at INTEGER NOT NULL,
-                    PRIMARY KEY (store, provider, message_id)
-                )",
-            )
-            .await
-            .is_err()
-        {
-            return false;
-        }
-        transaction.commit().await.is_ok()
-    }
-
-    pub(crate) async fn load_token_counts(&self, store: &str) -> Vec<(String, String, i64, i64)> {
-        let Ok(snapshot) = self.read_snapshot().await else {
-            return Vec::new();
-        };
-        let Ok(mut rows) = snapshot
-            .query(
-                "SELECT provider, message_id, text_len, token_count
-                 FROM dashboard_token_counts WHERE store = ?1",
-                crate::db::engine::params![store],
-            )
-            .await
-        else {
-            return Vec::new();
-        };
-        let mut counts = Vec::new();
-        while let Ok(Some(row)) = rows.next().await {
-            let (Ok(provider), Ok(message_id), Ok(text_len), Ok(token_count)) = (
-                row.get::<String>(0),
-                row.get::<String>(1),
-                row.get::<i64>(2),
-                row.get::<i64>(3),
-            ) else {
-                continue;
-            };
-            counts.push((provider, message_id, text_len, token_count));
-        }
-        counts
-    }
-
-    pub(crate) async fn save_token_counts(&self, store: &str, rows: &[TokenCountUpsert]) {
-        let Ok(transaction) = self.begin_write_transaction().await else {
-            return;
-        };
-        let now = crate::tracedecay::current_timestamp();
-        for row in rows {
-            if transaction
-                .execute(
-                    "INSERT OR REPLACE INTO dashboard_token_counts
-                     (store, provider, message_id, text_len, encoder, token_count, computed_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                    crate::db::engine::params![
-                        store,
-                        row.provider.as_str(),
-                        row.message_id.as_str(),
-                        row.text_len,
-                        row.encoder,
-                        row.token_count,
-                        now
-                    ],
-                )
-                .await
-                .is_err()
-            {
-                return;
-            }
-        }
-        let _ = transaction.commit().await;
     }
 
     async fn dashboard_snapshot(&self, operation: &'static str) -> Result<ReadSnapshot> {

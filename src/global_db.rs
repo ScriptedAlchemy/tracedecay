@@ -96,17 +96,6 @@ pub struct SavingsDay {
     pub calls: u64,
 }
 
-/// One freshly computed token count headed for the dashboard sidecar cache
-/// (see [`RegisteredGlobalDb::save_token_counts`]).
-#[derive(Debug, Clone)]
-pub struct TokenCountUpsert {
-    pub provider: String,
-    pub message_id: String,
-    pub text_len: i64,
-    pub encoder: &'static str,
-    pub token_count: i64,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnalyticsEventInsert {
     pub provider: String,
