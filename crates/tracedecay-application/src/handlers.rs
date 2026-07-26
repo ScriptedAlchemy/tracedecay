@@ -330,6 +330,5 @@ pub fn application_handler_descriptors()
     descriptors.extend(crate::lsp_context_catalog::lsp_context_handler_descriptors()?);
     descriptors.extend(crate::retained_surfaces::retained_surface_handler_descriptors()?);
     descriptors.extend(crate::source_edit::source_edit_handler_descriptors()?);
-    descriptors.extend(crate::api_migration::api_migration_handler_descriptors()?);
     ApplicationHandlerDescriptors::new(descriptors)
 }

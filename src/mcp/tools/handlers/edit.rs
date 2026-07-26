@@ -3,9 +3,8 @@
 
 use serde_json::{Value, json};
 use tracedecay_application::{
-    ApiMigrationPlanRequestV1, ApiMigrationPlanV1, CancellationSignal, Deadline, EffectId,
-    IdempotencyKey, RequestId, SourceEditKind, SourceEditReconciliationDispositionV1,
-    SourceEditRequest,
+    CancellationSignal, Deadline, EffectId, IdempotencyKey, RequestId, SourceEditKind,
+    SourceEditReconciliationDispositionV1, SourceEditRequest,
 };
 use tracedecay_domain::ManifestDigest;
 
@@ -491,64 +490,6 @@ pub(super) async fn handle_ast_grep_rewrite(
             path: path.to_owned(),
             pattern: pattern.to_owned(),
             rewrite: rewrite.to_owned(),
-            dry_run,
-            verify,
-        },
-        invocation,
-    )
-    .await
-}
-
-pub(super) async fn handle_api_migration_plan(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
-    let request = serde_json::from_value::<ApiMigrationPlanRequestV1>(json!({
-        "family_id": required_str(&args, "family_id")?,
-        "operations": required_array(&args, "operations")?,
-    }))
-    .map_err(|error| TraceDecayError::Config {
-        message: format!("invalid API migration plan request: {error}"),
-    })?;
-    let plan = crate::application::api_migration::plan_api_migration(cg, request).await?;
-    let value = serde_json::to_value(&plan).map_err(|error| TraceDecayError::Config {
-        message: format!("cannot render API migration plan: {error}"),
-    })?;
-    let touched_files = plan
-        .files
-        .iter()
-        .map(|file| file.path.clone())
-        .collect::<Vec<_>>();
-    let text = render::finalize(Some(cg.project_root()), &args, &value, || {
-        render::generic_md(&value)
-    });
-    Ok(ToolResult::new(
-        json!({ "content": [{ "type": "text", "text": text }] }),
-        touched_files,
-    )
-    .with_semantic_error(plan.blocked))
-}
-
-pub(super) async fn handle_api_migration_apply(
-    cg: &TraceDecay,
-    args: Value,
-    invocation: SourceEditInvocationContext,
-) -> Result<ToolResult> {
-    let plan = serde_json::from_value::<ApiMigrationPlanV1>(
-        args.get("plan")
-            .cloned()
-            .ok_or_else(|| missing_required_param("plan"))?,
-    )
-    .map_err(|error| TraceDecayError::Config {
-        message: format!("invalid API migration plan: {error}"),
-    })?;
-    let plan_digest = ManifestDigest::new(required_str(&args, "plan_digest")?)
-        .map_err(source_edit_identity_error)?;
-    let dry_run = args.get("dry_run").and_then(Value::as_bool).unwrap_or(true);
-    let verify = args.get("verify").and_then(Value::as_bool).unwrap_or(true);
-    source_edit_tool_result(
-        cg,
-        &args,
-        SourceEditRequest::ApiMigrationApply {
-            plan,
-            plan_digest,
             dry_run,
             verify,
         },
