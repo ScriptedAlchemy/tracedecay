@@ -23,6 +23,8 @@ const REDACTED_ENTROPY: &str = "[TraceDecay redacted: high-entropy token]";
 const REDACTED_SENSITIVE_FIELD: &str = "[TraceDecay redacted: sensitive field]";
 const MEMORY_FACT_SANITIZER_VERSION_V1: &str = "privacy.memory-fact.v1";
 const MEMORY_FACT_RECEIPT_DOMAIN_V1: &[u8] = b"tracedecay.privacy.memory-fact.receipt.v1\0";
+pub const CODE_SOURCE_SANITIZER_VERSION_V1: &str = "privacy.code-source.v1";
+const CODE_SOURCE_RECEIPT_DOMAIN_V1: &[u8] = b"tracedecay.privacy.code-source.receipt.v1\0";
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PrivacyDetectorV1 {
     ExactCredential,
@@ -107,6 +109,25 @@ pub(crate) enum MemoryFactSanitizationV1 {
         receipt: SanitizationReceiptV1,
     },
     Quarantined,
+}
+
+pub(crate) struct CodeSourceSanitizationV1 {
+    sanitized_bytes: Vec<u8>,
+    receipt: SanitizationReceiptV1,
+}
+
+impl CodeSourceSanitizationV1 {
+    pub(crate) fn sanitized_bytes(&self) -> &[u8] {
+        &self.sanitized_bytes
+    }
+
+    pub(crate) fn receipt(&self) -> &SanitizationReceiptV1 {
+        &self.receipt
+    }
+
+    pub(crate) fn into_parts(self) -> (Vec<u8>, SanitizationReceiptV1) {
+        (self.sanitized_bytes, self.receipt)
+    }
 }
 
 pub(crate) struct DetectionResult {
@@ -212,6 +233,71 @@ pub(crate) fn sanitize_provider_metadata_text(text: &str) -> Option<String> {
         return None;
     }
     result.payload.as_str().map(str::to_owned)
+}
+
+/// Sanitizes arbitrary source bytes through the canonical credential detector
+/// and issues receipt evidence bound to both the raw input and sanitized text.
+pub(crate) fn sanitize_code_source_bytes(
+    raw: &[u8],
+) -> Result<CodeSourceSanitizationV1, DetectionError> {
+    let source = String::from_utf8_lossy(raw);
+    let invalid_utf8 = matches!(source, std::borrow::Cow::Owned(_));
+    let detected = redact_sensitive_values(Value::String(source.into_owned()), &BTreeSet::new())?;
+    if !detected.quarantine_findings.is_empty() {
+        return Err(DetectionError::Receipt);
+    }
+    let sanitized = detected
+        .payload
+        .as_str()
+        .ok_or(DetectionError::Receipt)?
+        .to_owned();
+    let disposition = if detected.findings.is_empty() && !invalid_utf8 {
+        SanitizerDispositionV1::Accepted
+    } else {
+        SanitizerDispositionV1::Redacted
+    };
+    let sensitivity = if detected.findings.is_empty() && !invalid_utf8 {
+        SensitivityV1::NonSensitive
+    } else {
+        SensitivityV1::Secret
+    };
+    let payload_reference = PayloadReferenceV1::for_payload(&Value::String(sanitized.clone()))
+        .map_err(|_| DetectionError::Receipt)?;
+    let sanitizer_version = ComponentVersion::new(CODE_SOURCE_SANITIZER_VERSION_V1)
+        .map_err(|_| DetectionError::Receipt)?;
+    let raw_digest = Sha256::digest(raw);
+    let payload_len = payload_reference.byte_len().to_be_bytes();
+    let mut hasher = Sha256::new();
+    for value in [
+        CODE_SOURCE_RECEIPT_DOMAIN_V1,
+        sanitizer_version.as_str().as_bytes(),
+        disposition.as_str().as_bytes(),
+        sensitivity.as_str().as_bytes(),
+        raw_digest.as_slice(),
+        payload_reference.digest().as_str().as_bytes(),
+        payload_len.as_slice(),
+    ] {
+        hasher.update((value.len() as u64).to_be_bytes());
+        hasher.update(value);
+    }
+    let receipt_id = SanitizationReceiptId::new(format!(
+        "privacy.code-source.v1.{}",
+        hex::encode(hasher.finalize())
+    ))
+    .map_err(|_| DetectionError::Receipt)?;
+    let receipt_ref = SanitizationReceiptRefV1::new(receipt_id, sanitizer_version)
+        .map_err(|_| DetectionError::Receipt)?;
+    let receipt = SanitizationReceiptV1::new(
+        receipt_ref,
+        disposition,
+        sensitivity,
+        Some(payload_reference),
+    )
+    .map_err(|_| DetectionError::Receipt)?;
+    Ok(CodeSourceSanitizationV1 {
+        sanitized_bytes: sanitized.into_bytes(),
+        receipt,
+    })
 }
 
 /// Sanitizes one structured legacy fact payload and binds durable output to

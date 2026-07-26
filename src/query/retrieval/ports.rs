@@ -9,9 +9,9 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
-    ChangedCodeChunkSetV1, CodeGenerationId, CodeIndexCapabilityManifestV1, CodeSearchChunkId,
-    CompactCandidate, ExactTechnicalTermKindV1, FileOccurrenceId, LanguageDescriptorRevision,
-    RetrievalAnchorId, RetrieverBatch, RetrieverOutcome, SourceOccurrenceId, SymbolOccurrenceId,
+    CodeGenerationId, CodeSearchChunkId, CompactCandidate, ExactTechnicalTermKindV1,
+    FileOccurrenceId, LanguageDescriptorRevision, RetrievalAnchorId, RetrieverBatch,
+    RetrieverOutcome, SourceOccurrenceId, SymbolOccurrenceId,
 };
 
 use super::exact::{ExactLaneEvidence, ExactLaneRequest};
@@ -81,29 +81,6 @@ pub trait GraphEvidenceReadPort {
         &self,
         request: &GraphLaneRequest,
     ) -> Result<RetrieverOutcome<RetrieverBatch<GraphLaneEvidence>>, RetrievalPortError>;
-}
-
-/// Read-only port supplying the mandatory base capability manifest for one
-/// code generation (Plan 25: consumers must reject a missing, incompatible,
-/// mixed-generation, or unauthorized base manifest before candidate
-/// production).
-pub trait CodeIndexCapabilityReadPort {
-    /// Load the validated base capability manifest for `generation`.
-    fn capability_manifest(
-        &self,
-        generation: &CodeGenerationId,
-    ) -> Result<CodeIndexCapabilityManifestV1, RetrievalPortError>;
-}
-
-/// Read-only port over the ordered changed/reused/deleted chunk manifests
-/// used by generation-aware joins and projections (Plan 25).
-pub trait ChangedChunkReadPort {
-    /// Load the ordered change set between two generations, or `None` when
-    /// no prior generation exists.
-    fn changed_chunks(
-        &self,
-        generation: &CodeGenerationId,
-    ) -> Result<Option<ChangedCodeChunkSetV1>, RetrievalPortError>;
 }
 
 /// Compact-candidate lane adapter surface. Each PR9 lane adapts its typed

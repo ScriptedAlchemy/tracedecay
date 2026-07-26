@@ -71,48 +71,70 @@ impl std::fmt::Display for Sha256DigestHex {
 /// installed embedding profile and, independently, an optional
 /// reranker profile (Plan 31 "Model and offline lifecycle").
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ArtifactProfileKindV1 {
+    #[serde(alias = "Embedding")]
     Embedding,
+    #[serde(alias = "Reranker")]
     Reranker,
 }
 
 /// Canonical vector distance metric pinned by the projection identity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SemanticMetricV1 {
+    #[serde(alias = "Cosine")]
     Cosine,
+    #[serde(alias = "DotProduct")]
     DotProduct,
+    #[serde(alias = "EuclideanL2")]
     EuclideanL2,
 }
 
 /// Output-vector normalization pinned by the projection identity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum EmbeddingNormalizationV1 {
-    L2,
+    #[serde(alias = "None")]
     None,
+    #[serde(alias = "L2")]
+    L2,
 }
 
 /// Token-to-vector pooling pinned by the projection identity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum EmbeddingPoolingV1 {
+    #[serde(alias = "Mean")]
     Mean,
+    #[serde(alias = "Cls")]
     Cls,
+    #[serde(alias = "LastToken")]
     LastToken,
+    #[serde(alias = "MeanSqrtLength")]
     MeanSqrtLength,
 }
 
 /// Numeric precision / quantization of the artifact weights.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum EmbeddingPrecisionV1 {
+    #[serde(alias = "Fp32")]
     Fp32,
+    #[serde(alias = "Fp16")]
     Fp16,
+    #[serde(alias = "Bf16")]
     Bf16,
+    #[serde(alias = "Int8")]
     Int8,
 }
 
 /// Deterministic device class. PR10 admits CPU only; accelerator classes are
 /// later measured candidate profiles, not defaults.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DeviceClassV1 {
+    #[serde(alias = "Cpu")]
     Cpu,
 }
 
@@ -126,8 +148,11 @@ pub struct TruncationPolicyV1 {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TruncationSideV1 {
+    #[serde(alias = "Left")]
     Left,
+    #[serde(alias = "Right")]
     Right,
 }
 
@@ -543,6 +568,27 @@ mod tests {
         let bytes = manifest.to_canonical_bytes();
         let parsed = ModelArtifactManifestV1::parse(&bytes).unwrap();
         assert_eq!(manifest, parsed);
+    }
+
+    #[test]
+    fn embedding_enums_write_snake_case_and_read_legacy_names() {
+        assert_eq!(
+            serde_json::to_value(EmbeddingNormalizationV1::L2).unwrap(),
+            serde_json::json!("l2")
+        );
+        assert_eq!(
+            serde_json::from_value::<EmbeddingNormalizationV1>(serde_json::json!("L2")).unwrap(),
+            EmbeddingNormalizationV1::L2
+        );
+        assert_eq!(
+            serde_json::to_value(EmbeddingPoolingV1::MeanSqrtLength).unwrap(),
+            serde_json::json!("mean_sqrt_length")
+        );
+        assert_eq!(
+            serde_json::from_value::<EmbeddingPoolingV1>(serde_json::json!("MeanSqrtLength"))
+                .unwrap(),
+            EmbeddingPoolingV1::MeanSqrtLength
+        );
     }
 
     #[test]

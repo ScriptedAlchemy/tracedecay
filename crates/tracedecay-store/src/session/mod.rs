@@ -52,7 +52,6 @@ pub use refresh::{
     SessionRefreshTerminalStateV1,
 };
 pub use retrieval::{
-    DerivedEvidenceMemberPageItemV1, DerivedEvidenceMemberPageV1,
     MAX_SESSION_TEMPORAL_RETRIEVAL_PAGE_SIZE, SessionRetrievalPageV1, SessionRetrievalStore,
     SessionTemporalRetrievalRequestV1,
 };

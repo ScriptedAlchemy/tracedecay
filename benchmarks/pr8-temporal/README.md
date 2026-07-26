@@ -33,8 +33,7 @@ cargo bench --bench session_temporal --all-features -- --run
 ```
 
 Dry-run is Cargo-free. `--run` isolates `HOME` and `TRACEDECAY_DATA_DIR` and
-measures: `rebuild_activate`, `exact_replay`, `compact_rank`, `late_hydrate`,
-`member_expand`.
+measures: `rebuild_activate`, `exact_replay`, `compact_rank`, and `late_hydrate`.
 
 ## Observed focused tests
 

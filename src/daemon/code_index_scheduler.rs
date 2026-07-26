@@ -1,6 +1,6 @@
 //! Daemon-owned scheduling and reconciliation for production code generations.
 //!
-//! Notify events are bounded wake-up hints only. Every run reconstructs its
+//! Hook events are bounded wake-up hints only. Every run reconstructs its
 //! source snapshot from gix's HEAD-tree/index/worktree status before content
 //! digests decide whether publication is necessary.
 #![allow(dead_code)] // Plan 25 code-intelligence indexing — reconciliation surface staged
@@ -16,10 +16,6 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use notify_debouncer_full::{
-    DebounceEventResult, Debouncer, RecommendedCache, new_debouncer,
-    notify::{RecommendedWatcher, RecursiveMode},
-};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
@@ -27,8 +23,9 @@ use tracedecay_domain::{
     ExactAdmissionRuleRevision, FileOccurrenceId, ManifestDigest, PolicyRevisionId,
     PrivacyDomainId, ProjectionBatchReceiptV1, ProjectionBatchRequestV1, ProjectionKeyV1,
     ProjectionKindV1, ProjectionOperationV1, ProjectionOutcomeV1, RepositoryId,
-    SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision,
-    ScoreDomainId, SnapshotFileDispositionV1, UtcMicros, WorktreeId, canonical_sha256,
+    SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerDispositionV1,
+    SanitizerRevision, ScoreDomainId, SensitivityLevelV1, SnapshotFileDispositionV1, UtcMicros,
+    WorktreeId, canonical_sha256,
 };
 
 use crate::{
@@ -58,11 +55,14 @@ use crate::{
         },
         ports::RetrievalPortError,
     },
+    privacy::{
+        CODE_SOURCE_SANITIZER_VERSION_V1, CodeSourceSanitizationV1, sanitize_code_source_bytes,
+    },
 };
 
 const MAX_PENDING_HINTS: usize = 1_024;
 const MAX_SUPERSEDED_RECONCILE_RETRIES: usize = 4;
-const WATCH_DEBOUNCE: Duration = Duration::from_millis(75);
+const SUPERSEDED_RECONCILE_RETRY_BACKOFF: Duration = Duration::from_millis(75);
 /// Freshness contract for non-git-mediated mutations (raw file writes, rsync,
 /// out-of-agent saves): a query admitted after this bound since the last
 /// reconciliation re-checks gix truth before serving. Git-mediated changes are
@@ -75,13 +75,9 @@ const DEFAULT_STALENESS_THRESHOLD: Duration = Duration::from_secs(30);
 /// touched paths through host after-file-edit hooks; those are the primary
 /// hint source and require no standing filesystem watches. gix status remains
 /// the sole truth, reconciled lazily (on open, on hook receipt, and on the
-/// query-admission freshness ladder). A recursive `notify` watcher is a
-/// non-agent-driven fallback only: it can exhaust inotify descriptors on large
-/// trees, so it is off by default and nothing depends on it being enabled.
+/// query-admission freshness ladder).
 #[derive(Clone, Copy, Debug)]
 pub(super) struct CodeIndexHintPolicyV1 {
-    /// Opt-in recursive filesystem watcher for non-agent-driven setups.
-    pub watch_filesystem: bool,
     /// Tier-2 bounded-staleness reconcile threshold for non-git mutations.
     pub staleness_threshold: Duration,
 }
@@ -89,7 +85,6 @@ pub(super) struct CodeIndexHintPolicyV1 {
 impl Default for CodeIndexHintPolicyV1 {
     fn default() -> Self {
         Self {
-            watch_filesystem: false,
             staleness_threshold: DEFAULT_STALENESS_THRESHOLD,
         }
     }
@@ -147,6 +142,7 @@ struct DaemonCodeIndexPublicationStoreV1 {
     active: Arc<Mutex<Option<CodeIndexPublishedGenerationV1>>>,
     active_path: PathBuf,
     generations_root: PathBuf,
+    expected_sanitizer_revision: SanitizerRevision,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -161,13 +157,17 @@ struct DurablePublicationPointerV1 {
 }
 
 impl DaemonCodeIndexPublicationStoreV1 {
-    fn new(store_root: &Path) -> Result<Self, CodeIndexSchedulerErrorV1> {
+    fn new(
+        store_root: &Path,
+        expected_sanitizer_revision: SanitizerRevision,
+    ) -> Result<Self, CodeIndexSchedulerErrorV1> {
         let generations_root = store_root.join("code-generations-v1");
         std::fs::create_dir_all(&generations_root)?;
         Ok(Self {
             active: Arc::new(Mutex::new(None)),
             active_path: store_root.join("active-code-generation-v1.json"),
             generations_root,
+            expected_sanitizer_revision,
         })
     }
 
@@ -243,6 +243,9 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
         }
         let generation = CodeIndexPublishedGenerationV1::decode_sealed(&generation_bytes)
             .map_err(Self::unavailable)?;
+        if generation.manifest().sanitizer_revision != self.expected_sanitizer_revision {
+            return Ok(None);
+        }
         if generation.manifest().generation_id.as_str() != pointer.generation_id
             || generation.snapshot().content_identity.as_str() != pointer.snapshot_content_identity
             || generation.projection().publication_digest().as_str() != pointer.publication_digest
@@ -615,8 +618,8 @@ pub(super) enum CodeIndexSchedulerErrorV1 {
     Production(#[from] CodeIndexProductionErrorV1),
     #[error("code-index production owner configuration failed: {0}")]
     ProductionOpen(String),
-    #[error("code-index watcher failed: {0}")]
-    Watch(String),
+    #[error("code-index privacy sanitizer failed: {0}")]
+    Privacy(String),
 }
 
 pub(super) struct CodeIndexWorktreeSchedulerV1 {
@@ -632,6 +635,8 @@ pub(super) struct CodeIndexWorktreeSchedulerV1 {
     git_metadata: identity::GitMetadataFingerprintV1,
     /// Tier-2 bounded-staleness clock: when truth was last reconciled.
     last_reconciled_at: Instant,
+    /// Durable-clock observation for bounded dashboard/status reads.
+    last_reconciled_micros: Option<i64>,
     /// Tier-2 cheap prefilter: stat-level (path, mtime, size) signature of the
     /// present source candidates at last reconcile. A quiet repository whose
     /// signature is unchanged resets the staleness clock without paying the
@@ -646,7 +651,6 @@ pub(super) struct CodeIndexWorktreeSchedulerV1 {
     epoch: Arc<AtomicU64>,
     shutting_down: Arc<AtomicBool>,
     latest_content_identity: Option<ContentDigest>,
-    watcher: Option<Debouncer<RecommendedWatcher, RecommendedCache>>,
     /// Optional PR10 hook: schedule `FastEmbed` projection without joining it.
     semantic_schedule:
         Option<crate::application::semantic_runtime::SavedCodeGenerationScheduleHookV1>,
@@ -680,11 +684,14 @@ impl CodeIndexWorktreeSchedulerV1 {
         let repository_id = identity.repository_id().clone();
         let worktree_id = identity.worktree_id().clone();
         let git_metadata = identity::GitMetadataFingerprintV1::capture(&project_root);
-        let publication = DaemonCodeIndexPublicationStoreV1::new(&store_root)?;
+        let sanitizer_revision =
+            id::<SanitizerRevision>(CODE_SOURCE_SANITIZER_VERSION_V1)?;
+        let publication =
+            DaemonCodeIndexPublicationStoreV1::new(&store_root, sanitizer_revision.clone())?;
         let owner = open_production_code_index_owner_v1(
             CodeIndexProductionConfigV1 {
                 repository: repository_id.clone(),
-                sanitizer_revision: id::<SanitizerRevision>("sanitizer.daemon.v1")?,
+                sanitizer_revision,
                 policy_revision: id::<PolicyRevisionId>("policy.daemon.v1")?,
                 chunker_revision: id::<ChunkerRevision>("chunker.daemon.v1")?,
                 privacy_domain: id::<PrivacyDomainId>("privacy.local-code-index")?,
@@ -713,10 +720,13 @@ impl CodeIndexWorktreeSchedulerV1 {
         let latest_content_identity = restored
             .as_ref()
             .map(|generation| generation.snapshot().content_identity.clone());
+        let last_reconciled_micros = restored
+            .as_ref()
+            .map(|generation| generation.manifest().seal.sealed_at.0);
         let hints = Arc::new(Mutex::new(PendingHintsV1::default()));
         let wake = Arc::new(tokio::sync::Notify::new());
         let epoch = Arc::new(AtomicU64::new(0));
-        let mut scheduler = Self {
+        let scheduler = Self {
             project_root,
             identity,
             repository_id,
@@ -724,6 +734,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             policy,
             git_metadata,
             last_reconciled_at: Instant::now(),
+            last_reconciled_micros,
             last_stat_signature: None,
             byte_pool,
             retained_snapshot_bytes: Vec::new(),
@@ -733,15 +744,8 @@ impl CodeIndexWorktreeSchedulerV1 {
             epoch,
             shutting_down: Arc::new(AtomicBool::new(false)),
             latest_content_identity,
-            watcher: None,
             semantic_schedule: None,
         };
-        // The recursive filesystem watcher is an opt-in fallback only. By
-        // default the scheduler is driven by host hooks and lazy reconciliation,
-        // which need no standing inotify descriptors.
-        if scheduler.policy.watch_filesystem {
-            scheduler.mount_watcher()?;
-        }
         Ok(scheduler)
     }
 
@@ -753,40 +757,6 @@ impl CodeIndexWorktreeSchedulerV1 {
         hook: Option<crate::application::semantic_runtime::SavedCodeGenerationScheduleHookV1>,
     ) {
         self.semantic_schedule = hook;
-    }
-
-    fn mount_watcher(&mut self) -> Result<(), CodeIndexSchedulerErrorV1> {
-        let hints = Arc::clone(&self.hints);
-        let wake = Arc::clone(&self.wake);
-        let epoch = Arc::clone(&self.epoch);
-        let mut debouncer =
-            new_debouncer(WATCH_DEBOUNCE, None, move |result: DebounceEventResult| {
-                let mut hints = hints
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                match result {
-                    Ok(events) => {
-                        for event in events {
-                            if event.need_rescan() {
-                                hints.overflow();
-                            } else {
-                                for path in &event.paths {
-                                    hints.path(path.clone());
-                                }
-                            }
-                        }
-                    }
-                    Err(_) => hints.overflow(),
-                }
-                DaemonCodeIndexControlV1::advance(&epoch);
-                wake.notify_one();
-            })
-            .map_err(|error| CodeIndexSchedulerErrorV1::Watch(error.to_string()))?;
-        debouncer
-            .watch(&self.project_root, RecursiveMode::Recursive)
-            .map_err(|error| CodeIndexSchedulerErrorV1::Watch(error.to_string()))?;
-        self.watcher = Some(debouncer);
-        Ok(())
     }
 
     pub fn notify_path(&self, path: PathBuf) {
@@ -879,7 +849,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                 )) if retry < MAX_SUPERSEDED_RECONCILE_RETRIES
                     && !self.shutting_down.load(Ordering::Acquire) =>
                 {
-                    std::thread::sleep(WATCH_DEBOUNCE);
+                    std::thread::sleep(SUPERSEDED_RECONCILE_RETRY_BACKOFF);
                     continue;
                 }
                 Err(error) => return Err(error.into()),
@@ -934,6 +904,42 @@ impl CodeIndexWorktreeSchedulerV1 {
         self.git_metadata = metadata;
         self.last_stat_signature = signature;
         self.last_reconciled_at = Instant::now();
+        self.last_reconciled_micros = Some(now_micros().0);
+    }
+
+    pub(super) fn freshness_read(
+        &self,
+    ) -> (
+        Option<CodeGenerationId>,
+        Option<i64>,
+        &'static str,
+        Option<u64>,
+    ) {
+        let hints = self
+            .hints
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let hook_hint_count = (!hints.overflow).then(|| {
+            u64::try_from(hints.paths.len()).unwrap_or(u64::MAX)
+        });
+        let staleness_state = if self.shutting_down.load(Ordering::Acquire) {
+            "retiring"
+        } else if hints.overflow || !hints.paths.is_empty() {
+            "queued"
+        } else if self.last_reconciled_at.elapsed() < self.policy.staleness_threshold {
+            "fresh"
+        } else {
+            "stale"
+        };
+        let generation_id = self
+            .latest_complete()
+            .map(|latest| latest.generation.manifest().generation_id.clone());
+        (
+            generation_id,
+            self.last_reconciled_micros,
+            staleness_state,
+            hook_hint_count,
+        )
     }
 
     /// A cheap stat-level (path, mtime, size) signature of the present source
@@ -1071,6 +1077,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         let registry = StaticLanguageRegistry::new();
         let mut files = Vec::new();
         let mut captured_files = Vec::new();
+        let mut sanitization_receipts = BTreeSet::new();
         for logical_path in candidate_paths {
             let absolute = self.project_root.join(&logical_path);
             if !absolute.is_file() {
@@ -1083,14 +1090,30 @@ impl CodeIndexWorktreeSchedulerV1 {
             else {
                 continue;
             };
-            let bytes = std::fs::read(&absolute)?;
-            let (digest, shared) = self.byte_pool.intern(bytes);
+            let raw_bytes = std::fs::read(&absolute)?;
+            let sanitized: CodeSourceSanitizationV1 = sanitize_code_source_bytes(&raw_bytes)
+                .map_err(|error| CodeIndexSchedulerErrorV1::Privacy(error.to_string()))?;
+            let sensitivity_level = match sanitized.receipt().disposition() {
+                SanitizerDispositionV1::Accepted => SensitivityLevelV1::Public,
+                SanitizerDispositionV1::Redacted => SensitivityLevelV1::Redacted,
+                SanitizerDispositionV1::Rejected | SanitizerDispositionV1::Quarantined => {
+                    return Err(CodeIndexSchedulerErrorV1::Privacy(
+                        "durable code source carried a non-durable sanitizer disposition"
+                            .to_owned(),
+                    ));
+                }
+            };
+            let receipt_id = sanitized.receipt().receipt().receipt_id().clone();
+            sanitization_receipts.insert(receipt_id.clone());
+            let (sanitized_bytes, _) = sanitized.into_parts();
+            let (digest, shared) = self.byte_pool.intern(sanitized_bytes);
             retained_bytes.push(Arc::clone(&shared));
             let occurrence = file_occurrence_id(
                 &self.repository_id,
                 &self.worktree_id,
                 &logical_path,
                 &digest,
+                &receipt_id,
             )?;
             files.push(SanitizedCodeFileV1 {
                 file_occurrence_id: occurrence.clone(),
@@ -1102,6 +1125,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             captured_files.push(CodeIndexCapturedFileV1 {
                 file_occurrence_id: occurrence,
                 sanitized_bytes: shared.to_vec(),
+                sensitivity_level,
             });
         }
         files.sort_by(|left, right| {
@@ -1110,15 +1134,18 @@ impl CodeIndexWorktreeSchedulerV1 {
         });
         captured_files
             .sort_by(|left, right| left.file_occurrence_id.cmp(&right.file_occurrence_id));
-        let content_identity = snapshot_content_identity(&files);
+        let sanitization_receipts = sanitization_receipts.into_iter().collect::<Vec<_>>();
+        let content_identity = snapshot_content_identity(&files, &sanitization_receipts);
         Ok(CapturedSnapshotV1 {
             snapshot: SanitizedCodeSnapshotV1 {
                 repository: self.repository_id.clone(),
                 worktree: Some(self.worktree_id.clone()),
                 reference: self.identity.head_ref().cloned(),
                 source_revision: self.identity.head_commit().cloned(),
-                sanitizer_revision: id::<SanitizerRevision>("sanitizer.daemon.v1")?,
-                sanitization_receipts: vec![sanitization_receipt(&content_identity)?],
+                sanitizer_revision: id::<SanitizerRevision>(
+                    CODE_SOURCE_SANITIZER_VERSION_V1,
+                )?,
+                sanitization_receipts,
                 content_identity,
                 captured_at: now_micros(),
                 files,
@@ -1133,7 +1160,6 @@ impl CodeIndexWorktreeSchedulerV1 {
 impl Drop for CodeIndexWorktreeSchedulerV1 {
     fn drop(&mut self) {
         self.shutting_down.store(true, Ordering::Release);
-        self.watcher.take();
     }
 }
 
@@ -1151,30 +1177,20 @@ fn file_occurrence_id(
     worktree: &WorktreeId,
     logical_path: &str,
     digest: &ContentDigest,
+    receipt: &SanitizationReceiptId,
 ) -> Result<FileOccurrenceId, CodeIndexSchedulerErrorV1> {
     id(&format!(
         "file.daemon.{}",
         sha256_hex(
             format!(
-                "{}\0{}\0{logical_path}\0{}",
+                "{}\0{}\0{logical_path}\0{}\0{}",
                 repository.as_str(),
                 worktree.as_str(),
-                digest.as_str()
+                digest.as_str(),
+                receipt.as_str(),
             )
             .as_bytes()
         )
-    ))
-}
-
-fn sanitization_receipt(
-    content_identity: &ContentDigest,
-) -> Result<SanitizationReceiptId, CodeIndexSchedulerErrorV1> {
-    id(&format!(
-        "receipt.daemon.{}",
-        content_identity
-            .as_str()
-            .strip_prefix("sha256:")
-            .unwrap_or(content_identity.as_str())
     ))
 }
 
@@ -1186,13 +1202,20 @@ fn projection_key() -> Result<ProjectionKeyV1, CodeIndexSchedulerErrorV1> {
     })
 }
 
-fn snapshot_content_identity(files: &[SanitizedCodeFileV1]) -> ContentDigest {
+fn snapshot_content_identity(
+    files: &[SanitizedCodeFileV1],
+    sanitization_receipts: &[SanitizationReceiptId],
+) -> ContentDigest {
     let mut bytes = Vec::new();
     for file in files {
         bytes.extend_from_slice(file.logical_path.as_bytes());
         bytes.push(0);
         bytes.extend_from_slice(file.content_digest.as_str().as_bytes());
         bytes.push(0xff);
+    }
+    for receipt in sanitization_receipts {
+        bytes.extend_from_slice(receipt.as_str().as_bytes());
+        bytes.push(0xfe);
     }
     content_digest(&bytes)
 }
@@ -1229,4 +1252,7 @@ pub(crate) mod semantic_query_runtime;
 // The registry surface lives in `registry.rs`; re-export it so its public path
 // (`code_index_scheduler::CodeIndexSchedulerRegistryV1`) and method signatures
 // stay stable for the daemon and MCP server that mount and query worktrees.
-pub(in crate::daemon) use registry::CodeIndexSchedulerRegistryV1;
+pub(crate) use registry::CodeIndexSchedulerRegistryV1;
+pub(crate) type CodeIndexGenerationPublishedV1 = registry::CodeIndexGenerationPublishedV1;
+pub(crate) type CodeIndexWorktreeFreshnessReadV1 =
+    registry::CodeIndexWorktreeFreshnessReadV1;

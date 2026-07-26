@@ -1,7 +1,6 @@
 use std::future::Future;
 
 use tracedecay_domain::{
-    DerivedEvidenceIdV1, DerivedEvidenceKindV1, DerivedEvidenceMemberRoleV1, HydrationStateV1,
     LogicalCopyRecordV1, MessageOccurrenceIdV1, MessageOccurrenceRecordV1, RetrievalGrainV1,
     SessionId, SessionSummaryRecordV1, TemporalAssertionRecordV1, TemporalCoverageCountsV1,
     TemporalModeV1,
@@ -205,85 +204,6 @@ fn deep_record_count(
     )
 }
 
-/// One paged member of a generation-bound derived evidence record.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DerivedEvidenceMemberPageItemV1 {
-    pub ordinal: u32,
-    pub occurrence_id: Option<MessageOccurrenceIdV1>,
-    pub member_role: DerivedEvidenceMemberRoleV1,
-    pub availability: HydrationStateV1,
-}
-
-/// Bounded lossless expansion of derived evidence members.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DerivedEvidenceMemberPageV1 {
-    evidence_id: DerivedEvidenceIdV1,
-    evidence_kind: DerivedEvidenceKindV1,
-    members: Vec<DerivedEvidenceMemberPageItemV1>,
-    next_after_ordinal: Option<u32>,
-}
-
-impl DerivedEvidenceMemberPageV1 {
-    pub fn new(
-        evidence_id: DerivedEvidenceIdV1,
-        evidence_kind: DerivedEvidenceKindV1,
-        members: Vec<DerivedEvidenceMemberPageItemV1>,
-        next_after_ordinal: Option<u32>,
-    ) -> SessionStoreResult<Self> {
-        if members.len() > MAX_SESSION_TEMPORAL_RETRIEVAL_PAGE_SIZE {
-            return Err(SessionStoreError::BatchLimitExceeded {
-                field: "derived evidence member page",
-                count: members.len(),
-                max: MAX_SESSION_TEMPORAL_RETRIEVAL_PAGE_SIZE,
-            });
-        }
-        if members
-            .windows(2)
-            .any(|pair| pair[0].ordinal >= pair[1].ordinal)
-        {
-            return Err(SessionStoreError::InvalidStateTransition {
-                context: "derived evidence member ordinal order",
-            });
-        }
-        if members.iter().any(|member| {
-            (member.availability == HydrationStateV1::Available) != member.occurrence_id.is_some()
-        }) {
-            return Err(SessionStoreError::InvalidStateTransition {
-                context: "derived evidence member availability",
-            });
-        }
-        if next_after_ordinal.is_some()
-            && next_after_ordinal != members.last().map(|member| member.ordinal)
-        {
-            return Err(SessionStoreError::InvalidStateTransition {
-                context: "derived evidence member continuation",
-            });
-        }
-        Ok(Self {
-            evidence_id,
-            evidence_kind,
-            members,
-            next_after_ordinal,
-        })
-    }
-
-    pub fn evidence_id(&self) -> &DerivedEvidenceIdV1 {
-        &self.evidence_id
-    }
-
-    pub const fn evidence_kind(&self) -> DerivedEvidenceKindV1 {
-        self.evidence_kind
-    }
-
-    pub fn members(&self) -> &[DerivedEvidenceMemberPageItemV1] {
-        &self.members
-    }
-
-    pub const fn next_after_ordinal(&self) -> Option<u32> {
-        self.next_after_ordinal
-    }
-}
-
 /// Frozen, side-effect-free temporal reads.
 ///
 /// `Send + Sync` is required because daemon adapters are shared across
@@ -325,36 +245,4 @@ pub trait SessionRetrievalStore: SessionTemporalCapabilityProvider + Send + Sync
         request: SessionTemporalRetrievalRequestV1,
     ) -> impl Future<Output = SessionStoreResult<SessionRetrievalPageV1>> + Send;
 
-    fn expand_derived_members(
-        &self,
-        snapshot: SessionTemporalSnapshotV1,
-        evidence_kind: DerivedEvidenceKindV1,
-        evidence_id: DerivedEvidenceIdV1,
-        after_ordinal: Option<u32>,
-        limit: usize,
-    ) -> impl Future<Output = SessionStoreResult<DerivedEvidenceMemberPageV1>> + Send {
-        async move {
-            let permit =
-                SessionTemporalPageRetrievePermit::grant(self.session_temporal_capabilities())?;
-            self.expand_derived_members_supported(
-                permit,
-                snapshot,
-                evidence_kind,
-                evidence_id,
-                after_ordinal,
-                limit,
-            )
-            .await
-        }
-    }
-
-    fn expand_derived_members_supported(
-        &self,
-        permit: SessionTemporalPageRetrievePermit,
-        snapshot: SessionTemporalSnapshotV1,
-        evidence_kind: DerivedEvidenceKindV1,
-        evidence_id: DerivedEvidenceIdV1,
-        after_ordinal: Option<u32>,
-        limit: usize,
-    ) -> impl Future<Output = SessionStoreResult<DerivedEvidenceMemberPageV1>> + Send;
 }

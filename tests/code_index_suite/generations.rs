@@ -94,7 +94,7 @@ fn immutable_generation_seals_are_deterministic_and_parent_bound() {
 }
 
 #[test]
-fn explicit_identity_and_corruption_invalidations_force_typed_full_rebuilds() {
+fn explicit_runtime_invalidations_force_typed_full_rebuilds() {
     let planner = planner();
     let prior_snapshot = snapshot(vec![
         file("file.a", "src/a.rs", 'a'),
@@ -108,9 +108,9 @@ fn explicit_identity_and_corruption_invalidations_force_typed_full_rebuilds() {
         file("file.b2", "src/b.rs", 'b'),
     ]));
     let invalidations = BTreeSet::from([
-        RebuildTriggerV1::CanonicalSchema,
-        RebuildTriggerV1::IdentityInputs,
-        RebuildTriggerV1::QuarantinedCorruption,
+        RebuildTriggerV1::SanitizerRevision,
+        RebuildTriggerV1::ChunkerRevision,
+        RebuildTriggerV1::PrivacyKeyEpoch,
     ]);
 
     let plan = planner
@@ -127,9 +127,9 @@ fn explicit_identity_and_corruption_invalidations_force_typed_full_rebuilds() {
     assert_eq!(
         plan.rebuild_triggers,
         vec![
-            RebuildTriggerV1::CanonicalSchema,
-            RebuildTriggerV1::IdentityInputs,
-            RebuildTriggerV1::QuarantinedCorruption,
+            RebuildTriggerV1::SanitizerRevision,
+            RebuildTriggerV1::ChunkerRevision,
+            RebuildTriggerV1::PrivacyKeyEpoch,
         ]
     );
     assert_eq!(plan.carried_forward, 0);
@@ -151,9 +151,9 @@ fn invalidation_digest_fences_sibling_generation_identity_and_publication() {
     let current = validated(snapshot(vec![file("file.a2", "src/a.rs", 'a')]));
     let no_invalidations = BTreeSet::new();
     let declared_invalidations = BTreeSet::from([
-        RebuildTriggerV1::CanonicalSchema,
-        RebuildTriggerV1::IdentityInputs,
-        RebuildTriggerV1::QuarantinedCorruption,
+        RebuildTriggerV1::SanitizerRevision,
+        RebuildTriggerV1::ChunkerRevision,
+        RebuildTriggerV1::PrivacyKeyEpoch,
     ]);
 
     let incremental = planner

@@ -19,8 +19,8 @@ use tracedecay_domain::{
     OptionalStagePublicStatus, PrincipalId, PrivacyDomainId, ProjectId, QueryNormalizationRevision,
     RankedCandidate, RefId, RelationEdgeKindV1, RepositoryId, RerankPolicy, RetrievalAnchorId,
     RetrievalBudget, RetrievalCursorKeyId, RetrievalRequest, RetrievalScope, RetrievalSnapshot,
-    RetrieverKind, SanitizerRevision, ScoreDomainId, SingleRootScopeV1, TemporalModeV1, UtcMicros,
-    VectorWatermark, WorktreeId,
+    RetrieverKind, SanitizerRevision, ScoreDomainId, SensitivityLevelV1, SingleRootScopeV1,
+    TemporalModeV1, UtcMicros, VectorWatermark, WorktreeId,
 };
 
 #[cfg(feature = "semantic-fastembed")]
@@ -349,6 +349,87 @@ fn semantic_mcp_reasons_bind_runtime_state_and_exact_source_generation() {
             reason
         );
     }
+}
+
+#[test]
+fn capture_sanitizes_code_and_propagates_scan_evidence() {
+    let secret = ["sk", "-test-", "1234567890abcdef"].concat();
+    let source = format!("pub const TOKEN: &str = \"{secret}\";\n");
+    let fixture = GitFixture::new(&[("src/lib.rs", &source)]);
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = scheduler(
+        &fixture,
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+
+    published(scheduler.reconcile_now().expect("publish sanitized code"));
+    let latest = scheduler.latest_complete().expect("latest generation");
+    let snapshot = latest.generation.snapshot();
+
+    assert_eq!(
+        snapshot.sanitizer_revision.as_str(),
+        crate::privacy::CODE_SOURCE_SANITIZER_VERSION_V1
+    );
+    assert!(snapshot.sanitization_receipts.iter().all(|receipt| {
+        receipt
+            .as_str()
+            .starts_with("privacy.code-source.v1.")
+    }));
+    assert!(latest.generation.chunks().chunks().iter().all(|chunk| {
+        !chunk.sanitized_text.as_str().contains(&secret)
+    }));
+    assert!(
+        latest
+            .generation
+            .chunks()
+            .chunks()
+            .iter()
+            .any(|chunk| chunk.sensitivity.level == SensitivityLevelV1::Redacted)
+    );
+}
+
+#[tokio::test]
+async fn registry_feeds_publications_and_bounded_freshness_reads() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    let mut publications = registry.subscribe_generation_publications();
+
+    registry
+        .mount_worktree(fixture.path(), store.path().to_path_buf(), None)
+        .await
+        .expect("mount worktree");
+    let initial = tokio::time::timeout(Duration::from_secs(2), publications.recv())
+        .await
+        .expect("initial publication timeout")
+        .expect("initial publication event");
+    assert_eq!(
+        initial.project_root,
+        fixture.path().canonicalize().expect("canonical fixture")
+    );
+
+    let freshness = registry.freshness_snapshot().await;
+    assert_eq!(freshness.len(), 1);
+    assert_eq!(
+        freshness[0].latest_generation_id.as_ref(),
+        Some(&initial.generation_id)
+    );
+    assert!(freshness[0].last_reconcile_micros.is_some());
+    assert_eq!(freshness[0].staleness_state, "fresh");
+    assert_eq!(freshness[0].hook_hint_count, Some(0));
+
+    fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
+    assert!(
+        registry
+            .notify_hook_paths(fixture.path(), &["src/lib.rs".to_owned()])
+            .await
+    );
+    let changed = tokio::time::timeout(Duration::from_secs(2), publications.recv())
+        .await
+        .expect("changed publication timeout")
+        .expect("changed publication event");
+    assert_ne!(changed.generation_id, initial.generation_id);
 }
 
 #[test]
@@ -1899,7 +1980,6 @@ fn threshold_expiry_reconciles_out_of_band_write_without_watcher() {
     let store = TempDir::new().expect("store root");
     let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
     let policy = CodeIndexHintPolicyV1 {
-        watch_filesystem: false,
         staleness_threshold: Duration::ZERO,
     };
     let mut scheduler = scheduler_with_policy(&fixture, store.path().to_path_buf(), bytes, policy);
@@ -1939,7 +2019,6 @@ fn threshold_expiry_without_change_skips_full_reconcile() {
     let store = TempDir::new().expect("store root");
     let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
     let policy = CodeIndexHintPolicyV1 {
-        watch_filesystem: false,
         staleness_threshold: Duration::ZERO,
     };
     let mut scheduler = scheduler_with_policy(&fixture, store.path().to_path_buf(), bytes, policy);
@@ -1978,7 +2057,6 @@ fn git_op_in_another_process_detected_via_metadata() {
     let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
     // Long staleness bound so only tier-1 (git metadata) can fire.
     let policy = CodeIndexHintPolicyV1 {
-        watch_filesystem: false,
         staleness_threshold: Duration::from_hours(1),
     };
     let mut scheduler = scheduler_with_policy(&fixture, store.path().to_path_buf(), bytes, policy);
@@ -2018,7 +2096,6 @@ fn identity_move_reconciles_and_never_mixes_identity() {
     let store = TempDir::new().expect("store root");
     let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
     let policy = CodeIndexHintPolicyV1 {
-        watch_filesystem: false,
         staleness_threshold: Duration::from_hours(1),
     };
     let mut scheduler = scheduler_with_policy(&fixture, store.path().to_path_buf(), bytes, policy);

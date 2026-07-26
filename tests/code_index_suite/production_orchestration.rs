@@ -189,6 +189,7 @@ fn request(file_occurrence: &str, sealed_at: i64) -> CodeIndexBuildRequestV1 {
         captured_files: vec![CodeIndexCapturedFileV1 {
             file_occurrence_id: file.file_occurrence_id,
             sanitized_bytes: source.to_vec(),
+            sensitivity_level: tracedecay_domain::SensitivityLevelV1::Public,
         }],
         changed_files: BTreeSet::new(),
         invalidations: BTreeSet::new(),
