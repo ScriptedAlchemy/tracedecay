@@ -785,8 +785,8 @@ const REQUIRED_CAPABILITIES: [&str; 10] = [
 
 const REQUIRED_HOSTS: [HostKindV1; 6] = [
     HostKindV1::ClaudeCode,
-    HostKindV1::Codex,
     HostKindV1::CursorDesktop,
+    HostKindV1::Codex,
     HostKindV1::Hermes,
     HostKindV1::KimiCode,
     HostKindV1::OpenCode,
