@@ -615,7 +615,9 @@ fn map_execution_error(
         SessionTemporalExecutionError::Deleted => SessionRetrievalOutcome::Deleted,
         SessionTemporalExecutionError::Denied => SessionRetrievalOutcome::Denied,
         SessionTemporalExecutionError::Unavailable => SessionRetrievalOutcome::Unavailable,
-        SessionTemporalExecutionError::Empty => SessionRetrievalOutcome::Unavailable,
+        SessionTemporalExecutionError::Empty { freshness } => {
+            SessionRetrievalOutcome::CompleteZero { freshness }
+        }
         SessionTemporalExecutionError::BudgetExhausted => SessionRetrievalOutcome::BudgetExhausted,
         SessionTemporalExecutionError::Cancelled => SessionRetrievalOutcome::Cancelled,
         SessionTemporalExecutionError::Kernel(error) => map_kernel_error(error),
@@ -989,10 +991,14 @@ mod tests {
     }
 
     #[test]
-    fn receiptless_empty_execution_does_not_fabricate_freshness() {
+    fn evidence_bearing_empty_execution_maps_to_complete_zero() {
         assert_eq!(
-            map_execution_error(SessionTemporalExecutionError::Empty),
-            SessionRetrievalOutcome::Unavailable
+            map_execution_error(SessionTemporalExecutionError::Empty {
+                freshness: SessionDataFreshness::Fresh,
+            }),
+            SessionRetrievalOutcome::CompleteZero {
+                freshness: SessionDataFreshness::Fresh,
+            }
         );
         assert_eq!(
             map_kernel_error(TemporalKernelError::Port(
