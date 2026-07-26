@@ -2498,6 +2498,7 @@ fn publish_corpus_with_scale(
                 captured.push(CodeIndexCapturedFileV1 {
                     file_occurrence_id,
                     sanitized_bytes: bytes,
+                    sensitivity_level: tracedecay_domain::SensitivityLevelV1::Public,
                 });
             }
         }
@@ -2980,6 +2981,7 @@ fn prove_cancellation(
     captured.push(CodeIndexCapturedFileV1 {
         file_occurrence_id,
         sanitized_bytes: bytes.clone(),
+        sensitivity_level: tracedecay_domain::SensitivityLevelV1::Public,
     });
     let snapshot = SanitizedCodeSnapshotV1 {
         repository: id::<RepositoryId>("repository.candidate.cancel")?,
