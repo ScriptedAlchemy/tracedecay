@@ -1,6 +1,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
 use tokio::sync::Mutex;
 use tracedecay::application::host_admission::HostAdmissionTestRuntimeV1;
@@ -947,5 +949,63 @@ async fn legacy_projects_tokens_saved_schema_and_queries_still_work() {
     assert_eq!(db.get_project_tokens(&project_two.join(".")).await, 22);
     assert_eq!(db.global_tokens_saved().await, Some(55));
     assert_eq!(db.list_project_paths_compat().await.len(), 2);
+    close_profile_runtime(db).await;
+}
+
+#[tokio::test]
+async fn registry_gc_reaps_dead_paths_without_discarding_retained_store_authority() {
+    let _guard = GLOBAL_REGISTRY_TEST_LOCK.lock().await;
+    let profile = TempDir::new().unwrap();
+    #[cfg(unix)]
+    fs::set_permissions(profile.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    let orphan_root = profile.path().join("gone-orphan");
+    let retained_root = profile.path().join("gone-with-store");
+
+    let db = HostAdmissionTestRuntimeV1::profile(profile.path())
+        .await
+        .unwrap();
+    for root in [&orphan_root, &retained_root] {
+        db.upsert(root, 1).await;
+    }
+    db.upsert_code_project("proj_orphan", &orphan_root, None, None, None)
+        .await
+        .unwrap();
+    db.upsert_code_project("proj_retained", &retained_root, None, None, None)
+        .await
+        .unwrap();
+    upsert_test_store(&db, "proj_retained", "store_retained").await;
+    close_profile_runtime(db).await;
+
+    let runtime = tracedecay::migrate::registry::MigrationRegistryRuntime::open(profile.path())
+        .await
+        .unwrap();
+    let preview = runtime
+        .registry_gc(profile.path(), None, false)
+        .await
+        .unwrap();
+    assert_eq!(preview.code_project_candidate_count, 1);
+    assert_eq!(preview.storage_project_candidate_count, 2);
+    assert_eq!(preview.protected_code_project_count, 1);
+
+    let applied = runtime
+        .registry_gc(profile.path(), None, true)
+        .await
+        .unwrap();
+    assert_eq!(applied.deleted_code_project_count, 1);
+    assert_eq!(applied.deleted_storage_project_count, 2);
+    drop(runtime);
+
+    let db = HostAdmissionTestRuntimeV1::profile(profile.path())
+        .await
+        .unwrap();
+    assert!(db.get_code_project("proj_orphan").await.is_none());
+    assert!(
+        db.get_code_project("proj_retained").await.is_some(),
+        "a missing root must not discard authority for a retained store"
+    );
+    assert!(
+        db.list_project_paths_compat().await.is_empty(),
+        "dead savings-ledger paths should be reapable independently of stores"
+    );
     close_profile_runtime(db).await;
 }

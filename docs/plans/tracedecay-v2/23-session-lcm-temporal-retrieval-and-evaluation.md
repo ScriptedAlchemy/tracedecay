@@ -5,6 +5,12 @@
 **Status:** completed PR8 product delivery and retained temporal retrieval authority.
 **Depends on:** [01 domain](01-domain-crate.md), [02 store](02-store-crate.md), [03 capture](03-capture-crate.md), [04 projectors](04-projectors-crate.md), [05 query](05-query-crate.md), [09 application](09-application-crate.md), [13 anchors](13-research-provenance-and-context-anchors.md), and [18 privacy](18-secret-detection-redaction-and-private-data-safety.md). PR8 implements against explicitly resolved current-project/single-root scope and address contracts available by then; the [multi-root scope plan](16-cross-project-repository-worktree-scope.md) later composes this same retrieval kernel with canonical cross-project/repository/worktree resolution and is not a PR8 implementation prerequisite.
 
+**Retention ownership correction (2026-07-26).** Plan 23 owns retrieval-time
+retention-expiry rechecks and truthful `RetentionWithheld` coverage reporting.
+Plan 38 owns raw LCM offload/drop, projected-copy dedupe, observation-evidence
+release, and any future `source_cursor_advances` reclamation. Missing retention
+writers or immutable-table changes are not unfinished PR8 work.
+
 Plan 23 remains the owner of the behavior in this document. Plans 15, 24, and
 37 and the application/public-surface plans are later consumers. They must
  reuse PR8's accepted behavior; they do not have
