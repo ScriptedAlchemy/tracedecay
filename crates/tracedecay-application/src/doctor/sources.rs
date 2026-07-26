@@ -497,7 +497,7 @@ pub struct AdvisoryFeedbackSummaryReadV1 {
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum AdvisoryFeedbackReadV1 {
     Observed {
-        summary: AdvisoryFeedbackSummaryReadV1,
+        summary: Box<AdvisoryFeedbackSummaryReadV1>,
         findings: Vec<AdvisoryFeedbackFindingReadV1>,
     },
     Unsupported,

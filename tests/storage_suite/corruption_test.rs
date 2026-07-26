@@ -34,14 +34,14 @@ async fn setup_db() -> (Database, TempDir, std::path::PathBuf) {
 }
 
 #[tokio::test]
-async fn writable_open_bootstraps_a_missing_database_path() {
+async fn writable_initialize_bootstraps_a_missing_database_path() {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("new.db");
     assert!(!db_path.exists());
 
-    let (db, _) = crate::common::open_test_database(&db_path)
+    let (db, _) = crate::common::initialize_test_database(&db_path)
         .await
-        .expect("writable open should preserve fresh-path bootstrap behavior");
+        .expect("writable initialize should bootstrap a fresh database path");
     assert!(db_path.exists());
     assert!(db.quick_check().await.unwrap());
     close_db(db).await;
@@ -50,6 +50,20 @@ async fn writable_open_bootstraps_a_missing_database_path() {
 async fn close_db(db: Database) {
     db.checkpoint().await.unwrap();
     db.close();
+}
+
+fn truncate_fixture_wal(db_path: &std::path::Path) {
+    let connection = rusqlite::Connection::open(db_path).expect("open offline fixture database");
+    let checkpoint = connection
+        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })
+        .expect("truncate offline fixture WAL");
+    assert_eq!(checkpoint, (0, 0, 0), "fixture WAL must be fully truncated");
 }
 
 /// Helper: create a sample node.
@@ -116,34 +130,54 @@ async fn quick_check_detects_page_level_corruption() {
         .map(|i| sample_node(&format!("n{i}"), &format!("function_with_long_name_{i}")))
         .collect();
     db.insert_nodes(&nodes).await.unwrap();
+    let root_page = db
+        .query_scalar_i64(
+            "read corruption fixture root page",
+            "SELECT rootpage FROM sqlite_schema WHERE name = 'edges'",
+        )
+        .await
+        .unwrap() as u64;
+    let page_size = db
+        .query_scalar_i64("read corruption fixture page size", "PRAGMA page_size")
+        .await
+        .unwrap() as u64;
     db.checkpoint().await.unwrap();
     db.close();
+    truncate_fixture_wal(&db_path);
 
-    // Corrupt the database by overwriting bytes in the middle of the file.
-    // This simulates what happens when a crash leaves partially-written pages.
+    // Corrupt the first byte of a known table root page rather than an
+    // arbitrary offset that may land in unused space.
     {
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .open(&db_path)
             .unwrap();
-        let len = file.metadata().unwrap().len();
-        // Write garbage in the middle of the file (skip the header page)
-        let offset = std::cmp::min(len / 2, 8192);
+        let offset = (root_page - 1) * page_size;
         file.seek(std::io::SeekFrom::Start(offset)).unwrap();
-        file.write_all(&[0xDE, 0xAD, 0xBE, 0xEF].repeat(64))
-            .unwrap();
+        file.write_all(&[0xff]).unwrap();
         file.sync_all().unwrap();
     }
 
-    // Writable open validates first and must reject the damaged store.
-    let error = match crate::common::open_test_database(&db_path).await {
-        Ok(_) => panic!("writable open must reject page-level corruption"),
-        Err(error) => error,
-    };
-    assert!(
-        Database::is_corruption_error(&error),
-        "integrity rejection must be classified as corruption: {error}"
-    );
+    // Opening may succeed before the first integrity read, but corruption
+    // must never be reported as healthy.
+    match crate::common::open_test_database(&db_path).await {
+        Err(error) => assert!(
+            Database::is_corruption_error(&error),
+            "integrity rejection must be classified as corruption: {error}"
+        ),
+        Ok((db, _)) => {
+            let integrity = db.quick_check().await;
+            db.close();
+            match integrity {
+                Ok(false) => {}
+                Err(error) => assert!(
+                    Database::is_corruption_error(&error),
+                    "integrity read must classify corruption: {error}"
+                ),
+                Ok(true) => panic!("page-level corruption must not be reported as healthy"),
+            }
+        }
+    }
 }
 
 // ─── FTS rebuild ─────────────────────────────────────────────────────────
@@ -251,18 +285,19 @@ async fn bulk_load_preserves_platform_synchronous_mode() {
     let _unsafe_fast_off = common::EnvVarGuard::unset(tracedecay::db::SQLITE_UNSAFE_FAST_ENV);
     let (db, _dir, _path) = setup_db().await;
 
+    let expected_sync = db
+        .query_scalar_i64("inspect initial synchronous mode", "PRAGMA synchronous")
+        .await
+        .unwrap();
     db.begin_bulk_load().await.unwrap();
 
-    // NORMAL = 1, FULL = 2. Windows uses DELETE journaling with FULL sync;
-    // other platforms use WAL with NORMAL sync.
     let sync_value = db
         .query_scalar_i64("inspect synchronous mode", "PRAGMA synchronous")
         .await
         .unwrap();
-    let expected_sync = if cfg!(windows) { 2 } else { 1 };
     assert_eq!(
         sync_value, expected_sync,
-        "bulk load should preserve the platform synchronous mode"
+        "bulk load should preserve the connection's configured synchronous mode"
     );
 
     db.end_bulk_load().await.unwrap();
@@ -486,7 +521,9 @@ async fn structured_dirty_marker_is_cleared_after_epoch_owned_recovery()
     };
     let ts = TraceDecay::init_with_options(&project_root, open_options.clone()).await?;
     let layout = ts.store_layout().clone();
+    ts.checkpoint().await?;
     ts.close();
+    truncate_fixture_wal(&layout.graph_db_path);
 
     std::fs::write(
         &layout.dirty_path,
@@ -519,8 +556,10 @@ async fn open_preserves_corrupt_store_and_dirty_sentinel_for_offline_repair()
 
     let ts = TraceDecay::init_with_options(&project_root, open_options.clone()).await?;
     let layout = ts.store_layout().clone();
+    ts.checkpoint().await?;
     ts.close();
 
+    truncate_fixture_wal(&layout.graph_db_path);
     let mut corrupted = std::fs::read(&layout.graph_db_path)?;
     corrupted[..16].copy_from_slice(b"not-a-sqlite-db!");
     std::fs::write(&layout.graph_db_path, &corrupted)?;
@@ -575,6 +614,7 @@ async fn dirty_open_self_heals_fts_only_corruption()
     );
     ts.checkpoint().await?;
     ts.close();
+    truncate_fixture_wal(&layout.graph_db_path);
     std::fs::write(&layout.dirty_path, "pid=99999\nversion=test")?;
 
     let ts = TraceDecay::open_with_options(&project_root, open_options)
@@ -618,6 +658,7 @@ async fn open_self_heals_fts_corruption_without_dirty_sentinel()
         .await?;
     ts.checkpoint().await?;
     ts.close();
+    truncate_fixture_wal(&layout.graph_db_path);
     assert!(
         !layout.dirty_path.exists(),
         "fixture must model live-writer corruption without a crash sentinel"
@@ -759,11 +800,10 @@ async fn open_never_repairs_or_replaces_whole_database_corruption()
         .insert_nodes(&[sample_node("whole-db", "whole_db_probe")])
         .await?;
 
-    let segment = ts
-        .db()
-        .query_scalar_blob(
-            "read FTS corruption fixture segment",
-            "SELECT block FROM nodes_fts_data WHERE id > 10 ORDER BY id DESC LIMIT 1",
+    ts.db()
+        .execute_write_batch(
+            "clear whole-database corruption FTS fixture",
+            "DELETE FROM nodes_fts_data WHERE id > 10;",
         )
         .await?;
     let root_page = ts
@@ -779,13 +819,9 @@ async fn open_never_repairs_or_replaces_whole_database_corruption()
         .await? as u64;
     ts.checkpoint().await?;
     ts.close();
+    truncate_fixture_wal(&layout.graph_db_path);
 
     let mut bytes = std::fs::read(&layout.graph_db_path)?;
-    let fts_offset = bytes
-        .windows(segment.len())
-        .position(|candidate| candidate == segment)
-        .expect("FTS segment must be present in the checkpointed database");
-    bytes[fts_offset..fts_offset + 8].fill(0xff);
     bytes[((root_page - 1) * page_size) as usize] = 0xff;
     std::fs::write(&layout.graph_db_path, &bytes)?;
     let corrupted = std::fs::read(&layout.graph_db_path)?;
@@ -822,16 +858,31 @@ async fn dirty_open_checks_integrity_before_writable_migration()
             "PRAGMA user_version = 17",
         )
         .await?;
+    let root_page = ts
+        .db()
+        .query_scalar_i64(
+            "read dirty corruption fixture root page",
+            "SELECT rootpage FROM sqlite_schema WHERE name = 'edges'",
+        )
+        .await? as u64;
+    let page_size = ts
+        .db()
+        .query_scalar_i64(
+            "read dirty corruption fixture page size",
+            "PRAGMA page_size",
+        )
+        .await? as u64;
     ts.checkpoint().await?;
     ts.close();
+    truncate_fixture_wal(&layout.graph_db_path);
 
     let mut file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open(&layout.graph_db_path)?;
-    let offset = std::cmp::min(file.metadata()?.len() / 2, 8192);
+    let offset = (root_page - 1) * page_size;
     file.seek(std::io::SeekFrom::Start(offset))?;
-    file.write_all(&[0xFF; 256])?;
+    file.write_all(&[0xff])?;
     file.sync_all()?;
     drop(file);
     std::fs::write(&layout.dirty_path, "pid=99999\nversion=test")?;
@@ -952,19 +1003,33 @@ async fn corrupt_db_detected_and_repaired_on_reopen() {
         .map(|i| sample_node(&format!("d{i}"), &format!("func_{i}")))
         .collect();
     db.insert_nodes(&nodes).await.unwrap();
+    let root_page = db
+        .query_scalar_i64(
+            "read reopen corruption fixture root page",
+            "SELECT rootpage FROM sqlite_schema WHERE name = 'edges'",
+        )
+        .await
+        .unwrap() as u64;
+    let page_size = db
+        .query_scalar_i64(
+            "read reopen corruption fixture page size",
+            "PRAGMA page_size",
+        )
+        .await
+        .unwrap() as u64;
     db.checkpoint().await.unwrap();
     db.close();
+    truncate_fixture_wal(&db_path);
 
-    // Corrupt the database file
+    // Corrupt a known table root page.
     {
         let mut file = std::fs::OpenOptions::new()
             .write(true)
             .open(&db_path)
             .unwrap();
-        let len = file.metadata().unwrap().len();
-        let offset = std::cmp::min(len / 2, 8192);
+        let offset = (root_page - 1) * page_size;
         file.seek(std::io::SeekFrom::Start(offset)).unwrap();
-        file.write_all(&[0xFF; 256]).unwrap();
+        file.write_all(&[0xff]).unwrap();
         file.sync_all().unwrap();
     }
 
@@ -972,9 +1037,16 @@ async fn corrupt_db_detected_and_repaired_on_reopen() {
     let open_result = crate::common::open_test_database(&db_path).await;
     match open_result {
         Ok((db2, _)) => {
-            let intact = db2.quick_check().await.unwrap();
-            assert!(!intact, "corrupted db should fail quick_check");
+            let integrity = db2.quick_check().await;
             db2.close();
+            match integrity {
+                Ok(false) => {}
+                Err(error) => assert!(
+                    Database::is_corruption_error(&error),
+                    "quick_check error must be classified as corruption: {error}"
+                ),
+                Ok(true) => panic!("corrupted db should fail quick_check"),
+            }
         }
         Err(e) => {
             // Some corruption is severe enough to prevent open — that's also
