@@ -230,6 +230,9 @@ renderer, or context assembler performs a second payload lookup.
 `src/query/temporal/cursor.rs` owns the only continuation cursor used by search,
 direct-anchor lookup, describe, expansion, expand-query, hydration, replay, and
 legacy LCM adapters. MAC verification precedes binding diagnostics.
+This is a bounded integrity check at the concrete untrusted-continuation
+boundary, not a first-party signature, trust root, attestation, or acceptance
+artifact.
 
 The cursor binds canonical query text and every semantic filter, resolved
 authorization/root/provider/session scope, grain, temporal mode/cutoff,

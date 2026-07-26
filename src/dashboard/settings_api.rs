@@ -201,13 +201,12 @@ async fn settings_payload(state: &DashboardState) -> std::result::Result<Value, 
         .unwrap_or_default();
 
     let global_automation = user.automation.clone();
-    let project_automation = automation_config::load_project_config(&state.dashboard_root)
-        .await
-        .ok()
-        .flatten();
-    let automation =
-        automation_config::effective_config(&global_automation, project_automation.as_ref())
-            .unwrap_or(global_automation);
+    let automation = automation_settings_payload(
+        &global_automation,
+        automation_config::load_project_config(&state.dashboard_root)
+            .await
+            .map_err(|err| err.to_string()),
+    );
 
     Ok(json!({
         "project": {
@@ -228,12 +227,7 @@ async fn settings_payload(state: &DashboardState) -> std::result::Result<Value, 
             "extraction_timeout_secs": user.extraction_timeout_secs,
             "installed_agents": user.installed_agents,
         },
-        "automation": {
-            "config_endpoint": AUTOMATION_CONFIG_ENDPOINT,
-            "enabled": automation.enabled,
-            "backend": automation.backend,
-            "host_mode": automation.host_mode,
-        },
+        "automation": automation,
         "environment": environment_payload(),
         "storage": {
             "project_id": state.project_id,
@@ -253,6 +247,69 @@ async fn settings_payload(state: &DashboardState) -> std::result::Result<Value, 
             "cached_latest_version": non_empty(&user.cached_latest_version),
         },
     }))
+}
+
+fn automation_settings_payload(
+    global: &automation_config::AutomationConfig,
+    project: Result<Option<automation_config::AutomationConfigPatch>, String>,
+) -> Value {
+    let (project, project_coverage) = match project {
+        Ok(project) => {
+            let coverage = if project.is_some() {
+                "available"
+            } else {
+                "absent"
+            };
+            (project, coverage)
+        }
+        Err(err) => {
+            return json!({
+                "config_endpoint": AUTOMATION_CONFIG_ENDPOINT,
+                "availability": {
+                    "available": false,
+                    "reason": format!("project automation configuration could not be read: {err}"),
+                    "required_authority": "project automation configuration",
+                },
+                "source_coverage": {
+                    "global": "available",
+                    "project": "error",
+                    "effective": "unavailable",
+                },
+            });
+        }
+    };
+
+    match automation_config::effective_config(global, project.as_ref()) {
+        Ok(automation) => json!({
+            "config_endpoint": AUTOMATION_CONFIG_ENDPOINT,
+            "availability": {
+                "available": true,
+            },
+            "source_coverage": {
+                "global": "available",
+                "project": project_coverage,
+                "effective": "complete",
+            },
+            "enabled": automation.enabled,
+            "backend": automation.backend,
+            "host_mode": automation.host_mode,
+        }),
+        Err(err) => json!({
+            "config_endpoint": AUTOMATION_CONFIG_ENDPOINT,
+            "availability": {
+                "available": false,
+                "reason": format!(
+                    "effective automation configuration could not be resolved: {err}"
+                ),
+                "required_authority": "effective automation configuration",
+            },
+            "source_coverage": {
+                "global": "available",
+                "project": project_coverage,
+                "effective": "error",
+            },
+        }),
+    }
 }
 
 /// Lists the PR branches the daemon currently auto-tracks for this project, read
@@ -443,4 +500,46 @@ fn configuration_unavailable(_err: &impl ToString) -> JsonError {
             "detail": "configuration authority is unavailable",
         })),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn automation_settings_payload_preserves_project_authority_failure() {
+        let payload = automation_settings_payload(
+            &automation_config::AutomationConfig::default(),
+            Err("project config unreadable".to_owned()),
+        );
+
+        assert_eq!(payload["availability"]["available"], false);
+        assert_eq!(
+            payload["availability"]["required_authority"],
+            "project automation configuration"
+        );
+        assert_eq!(payload["source_coverage"]["global"], "available");
+        assert_eq!(payload["source_coverage"]["project"], "error");
+        assert_eq!(payload["source_coverage"]["effective"], "unavailable");
+        assert!(payload.get("enabled").is_none());
+        assert!(payload.get("backend").is_none());
+        assert!(payload.get("host_mode").is_none());
+    }
+
+    #[test]
+    fn automation_settings_payload_preserves_effective_resolution_failure() {
+        let mut global = automation_config::AutomationConfig::default();
+        global.timeout_secs = 0;
+        let payload = automation_settings_payload(&global, Ok(None));
+
+        assert_eq!(payload["availability"]["available"], false);
+        assert_eq!(
+            payload["availability"]["required_authority"],
+            "effective automation configuration"
+        );
+        assert_eq!(payload["source_coverage"]["global"], "available");
+        assert_eq!(payload["source_coverage"]["project"], "absent");
+        assert_eq!(payload["source_coverage"]["effective"], "error");
+        assert!(payload.get("enabled").is_none());
+    }
 }

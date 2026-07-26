@@ -43,7 +43,9 @@ use serde_json::{Value, json};
 use super::token_count::{
     MESSAGE_TOKENS_CTE, MessageTokens, counting_available, encoder_for_model,
 };
-use super::util::{JsonQuery, coerce_limit, i64_field, query_i64, query_rows, str_field};
+use super::util::{
+    JsonQuery, coerce_limit, i64_field, query_i64, query_i64_result, query_rows, str_field,
+};
 use super::{DashboardState, savings_pricing, token_count};
 use crate::accounting::metrics::parse_range;
 use crate::db::engine::{Value as DbValue, params, params_from_iter};
@@ -295,6 +297,7 @@ pub(crate) async fn costs(State(state): State<DashboardState>) -> Json<Value> {
 }
 
 async fn savings_overview(gdb: &RegisteredGlobalDb, db_path: &str) -> Value {
+    const PROJECT_LIMIT: i64 = 25;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -307,20 +310,58 @@ async fn savings_overview(gdb: &RegisteredGlobalDb, db_path: &str) -> Value {
     // Legacy lifetime counters (`projects.tokens_saved`) predate the ledger
     // and often carry history the event log does not — surface both.
     let conn = gdb.read_connection();
-    let lifetime_projects = query_rows(
+    let lifetime_projects = match query_rows(
         conn,
         "SELECT path, tokens_saved FROM projects
-         WHERE tokens_saved > 0 ORDER BY tokens_saved DESC LIMIT 25",
-        (),
+         WHERE tokens_saved > 0 ORDER BY tokens_saved DESC LIMIT ?1",
+        params![PROJECT_LIMIT],
     )
     .await
-    .unwrap_or_default();
-    let lifetime_total = query_i64(
+    {
+        Ok(projects) => projects,
+        Err(error) => {
+            return json!({
+                "available": false,
+                "db": db_path,
+                "recording": recording_block(),
+                "error": format!("failed to read lifetime project savings: {error}"),
+            });
+        }
+    };
+    let lifetime_total = match query_i64_result(
         conn,
         "SELECT COALESCE(SUM(tokens_saved), 0) FROM projects",
         (),
     )
-    .await;
+    .await
+    {
+        Ok(total) => total,
+        Err(error) => {
+            return json!({
+                "available": false,
+                "db": db_path,
+                "recording": recording_block(),
+                "error": format!("failed to read lifetime savings total: {error}"),
+            });
+        }
+    };
+    let project_total = match query_i64_result(
+        conn,
+        "SELECT COUNT(*) FROM projects WHERE tokens_saved > 0",
+        (),
+    )
+    .await
+    {
+        Ok(total) => total,
+        Err(error) => {
+            return json!({
+                "available": false,
+                "db": db_path,
+                "recording": recording_block(),
+                "error": format!("failed to read lifetime project count: {error}"),
+            });
+        }
+    };
 
     let sum_json = |total: &crate::global_db::SavingsTotal| json!({ "saved_tokens": total.saved_tokens, "calls": total.calls });
     json!({
@@ -335,6 +376,9 @@ async fn savings_overview(gdb: &RegisteredGlobalDb, db_path: &str) -> Value {
         },
         "lifetime_counters": {
             "total_tokens_saved": lifetime_total,
+            "project_total": project_total,
+            "projects_limit": PROJECT_LIMIT,
+            "projects_truncated": project_total > lifetime_projects.len() as i64,
             "projects": lifetime_projects.iter().map(|row| json!({
                 "path": str_field(row, "path"),
                 "tokens_saved": i64_field(row, "tokens_saved"),
@@ -352,9 +396,36 @@ async fn sessions_overview(db: &RegisteredGlobalDb, state: &DashboardState) -> V
                 SUM(CASE WHEN model = '' THEN 1 ELSE 0 END) AS unknown_model_messages
          FROM ({MESSAGE_TOKENS_CTE})"
     );
-    let rows = query_rows(conn, &sql, ()).await.unwrap_or_default();
-    let agg = rows.first().cloned().unwrap_or_else(|| json!({}));
-    let session_count = query_i64(conn, "SELECT COUNT(*) FROM sessions", ()).await;
+    let rows = match query_rows(conn, &sql, ()).await {
+        Ok(rows) => rows,
+        Err(error) => {
+            return json!({
+                "available": false,
+                "db": state.lcm_db_path,
+                "scope": state.lcm_scope,
+                "error": format!("failed to aggregate session tokens: {error}"),
+            });
+        }
+    };
+    let Some(agg) = rows.first().cloned() else {
+        return json!({
+            "available": false,
+            "db": state.lcm_db_path,
+            "scope": state.lcm_scope,
+            "error": "session token aggregate returned no row",
+        });
+    };
+    let session_count = match query_i64_result(conn, "SELECT COUNT(*) FROM sessions", ()).await {
+        Ok(count) => count,
+        Err(error) => {
+            return json!({
+                "available": false,
+                "db": state.lcm_db_path,
+                "scope": state.lcm_scope,
+                "error": format!("failed to count sessions: {error}"),
+            });
+        }
+    };
 
     let overlay = token_count::non_usage_message_tokens(state).await;
     let total_tiers = overlay.as_deref().map(|messages| {
@@ -380,9 +451,34 @@ async fn sessions_overview(db: &RegisteredGlobalDb, state: &DashboardState) -> V
 }
 
 async fn turns_overview(gdb: &RegisteredGlobalDb) -> Value {
-    let turn_count = query_i64(gdb.read_connection(), "SELECT COUNT(*) FROM turns", ()).await;
-    let total_cost = gdb.total_cost_since(0).await.unwrap_or(0.0);
-    let total_tokens = gdb.total_tokens_since(0).await.unwrap_or(0);
+    let turn_count =
+        match query_i64_result(gdb.read_connection(), "SELECT COUNT(*) FROM turns", ()).await {
+            Ok(count) => count,
+            Err(error) => {
+                return json!({
+                    "available": false,
+                    "error": format!("failed to count priced turns: {error}"),
+                });
+            }
+        };
+    let total_cost = match gdb.try_total_cost_since(0).await {
+        Ok(cost) => cost,
+        Err(error) => {
+            return json!({
+                "available": false,
+                "error": format!("failed to sum priced turn cost: {error}"),
+            });
+        }
+    };
+    let total_tokens = match gdb.try_total_tokens_since(0).await {
+        Ok(tokens) => tokens,
+        Err(error) => {
+            return json!({
+                "available": false,
+                "error": format!("failed to sum priced turn tokens: {error}"),
+            });
+        }
+    };
     json!({
         "available": true,
         "turn_count": turn_count,

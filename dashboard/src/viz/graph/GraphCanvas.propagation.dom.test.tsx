@@ -3,6 +3,7 @@ import type Graph from 'graphology';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { GraphCanvas } from './GraphCanvas.tsx';
 import { ActivationField } from './activation.ts';
+import { setMotionPreference } from '../trace/reducedMotion.ts';
 
 /**
  * End-to-end evidence for travelling activation.
@@ -49,12 +50,15 @@ vi.mock('sigma', () => ({
 }));
 
 /** A manually pumped animation clock, so "the loop is asleep" and "the loop
- * ran a frame" are both directly observable rather than inferred from timing. */
-const frames: FrameRequestCallback[] = [];
+ * ran a frame" are both directly observable rather than inferred from timing.
+ * Handles are stable and cancellation genuinely dequeues, because "stopped" is
+ * one of the states under test and a no-op cancel cannot distinguish it. */
+const frames: { id: number; run: FrameRequestCallback }[] = [];
+let nextFrameId = 1;
 
 function pump(now: number) {
   const due = frames.splice(0, frames.length);
-  for (const frame of due) frame(now);
+  for (const frame of due) frame.run(now);
 }
 
 /** The Brain's own shape: one repository hub wired to one checkout. */
@@ -81,6 +85,7 @@ describe('GraphCanvas travelling activation', () => {
     sigmaState.edgeReducer = undefined;
     sigmaState.refreshes = 0;
     frames.length = 0;
+    nextFrameId = 1;
     Object.defineProperty(HTMLCanvasElement.prototype, 'getContext', {
       configurable: true,
       value: (kind: string) => (kind.startsWith('webgl') ? ({} as RenderingContext) : null),
@@ -94,14 +99,19 @@ describe('GraphCanvas travelling activation', () => {
       value: vi.fn().mockReturnValue({ matches: false }),
     });
     vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
-      frames.push(callback);
-      return frames.length;
+      const id = nextFrameId++;
+      frames.push({ id, run: callback });
+      return id;
     });
-    vi.stubGlobal('cancelAnimationFrame', () => {});
+    vi.stubGlobal('cancelAnimationFrame', (id: number) => {
+      const at = frames.findIndex((frame) => frame.id === id);
+      if (at >= 0) frames.splice(at, 1);
+    });
   });
 
   afterEach(() => {
     vi.unstubAllGlobals();
+    localStorage.removeItem('td.motion-preference');
   });
 
   it('carries an externally delivered strike along the real edge and then sleeps', async () => {
@@ -188,6 +198,71 @@ describe('GraphCanvas travelling activation', () => {
     expect(frames).toHaveLength(0);
     expect(pulseNodes(graph)).toEqual([]);
     expect(graph.hasNode('__halo__p1')).toBe(true);
+  });
+
+  // The canvas used to read `prefers-reduced-motion` directly, which meant the
+  // app's own persisted control — the one a reader actually sets, and the only
+  // way to ask for stillness on an OS that reports no preference — had no effect
+  // on the single most motion-heavy surface in the product. These two cover both
+  // directions of that pin, because a control that can only agree with the OS is
+  // not a control.
+  it('honours a pinned "reduced" preference on an OS that reports no preference', async () => {
+    localStorage.setItem('td.motion-preference', 'reduced');
+    const field = new ActivationField({ halfLifeMs: 4200 });
+    render(<GraphCanvas nodes={NODES} edges={EDGES} activation={field} />);
+    await waitFor(() => expect(sigmaState.graph).toBeDefined());
+    const graph = sigmaState.graph!;
+
+    field.strike(['p1'], 0.9);
+    field.strike(['repo:r'], 0.3);
+
+    expect(frames).toHaveLength(0);
+    expect(pulseNodes(graph)).toEqual([]);
+    // The reading still arrives, statically.
+    expect(graph.hasNode('__halo__p1')).toBe(true);
+  });
+
+  it('honours a pinned "full" preference on an OS that asks for reduced motion', async () => {
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: vi.fn().mockReturnValue({ matches: true }),
+    });
+    localStorage.setItem('td.motion-preference', 'full');
+    const field = new ActivationField({ halfLifeMs: 4200 });
+    render(<GraphCanvas nodes={NODES} edges={EDGES} activation={field} />);
+    await waitFor(() => expect(sigmaState.graph).toBeDefined());
+    const graph = sigmaState.graph!;
+
+    field.strike(['p1'], 0.9);
+    field.strike(['repo:r'], 0.3);
+
+    expect(frames).toHaveLength(1);
+    pump(0);
+    expect(pulseNodes(graph)).toEqual(['__pulse__0']);
+  });
+
+  it('stops a running loop the moment motion is turned off mid-flight', async () => {
+    const field = new ActivationField({ halfLifeMs: 4200 });
+    const { rerender } = render(
+      <GraphCanvas nodes={NODES} edges={EDGES} activation={field} />,
+    );
+    await waitFor(() => expect(sigmaState.graph).toBeDefined());
+    const graph = sigmaState.graph!;
+
+    field.strike(['p1'], 0.9);
+    field.strike(['repo:r'], 0.3);
+    pump(0);
+    expect(pulseNodes(graph)).toEqual(['__pulse__0']);
+
+    // Setting the preference notifies every `useReducedMotion` subscriber; React
+    // re-renders and the canvas settles. A shortened animation would leave the
+    // traveller parked somewhere on the curve — a genuine no-motion path has
+    // nowhere for it to be, so it is gone.
+    setMotionPreference('reduced');
+    rerender(<GraphCanvas nodes={NODES} edges={EDGES} activation={field} />);
+    await waitFor(() => expect(pulseNodes(graph)).toEqual([]));
+    expect(frames).toHaveLength(0);
+    expect(field.warm).toBe(true);
   });
 
   it('does not rebuild the renderer when only the select handler identity changes', async () => {

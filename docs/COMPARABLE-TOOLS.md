@@ -8,7 +8,7 @@ Dual-Graph (also known as GrapeRoot, repository: [kunal12203/Codex-CLI-Compact](
 
 ### 1. Architecture & Design Philosophy
 
-**tracedecay** is a queryable code intelligence engine. It builds a symbol-level graph (functions, structs, fields, call edges, type hierarchies, complexity metrics) in a libSQL database, then exposes more than 70 specialized MCP tools that let the AI ask precise, targeted questions. The AI drives the exploration -- it decides what to query and when.
+**tracedecay** is a queryable code intelligence engine. It builds a symbol-level graph (functions, structs, fields, call edges, type hierarchies, complexity metrics) in SQLite through its `rusqlite` runtime, then exposes more than 70 specialized MCP tools that let the AI ask precise, targeted questions. The AI drives the exploration -- it decides what to query and when.
 
 **Dual-Graph** is a context prefill layer. It scans the codebase into a file/symbol/import graph stored in JSON files, then intercepts prompts and pre-loads ranked files before the AI sees them. The AI is mostly passive -- it receives pre-selected context and works with it. It also exposes a few MCP tools for deeper exploration when needed.
 
@@ -26,9 +26,9 @@ This is a fundamental difference. tracedecay trusts the AI to ask the right ques
 | Type hierarchy | Recursive trait/interface/class inheritance trees | No |
 | Complexity metrics | AST-extracted: cyclomatic, branches, loops, nesting depth, unsafe blocks, unwrap detection | No |
 | Cross-file impact | `impact` + `affected` trace the full blast radius of any symbol change | No |
-| Storage | libSQL with FTS5 full-text search, WAL mode, async I/O | JSON files (`info_graph.json`, `chat_action_graph.json`, `context-store.json`) |
+| Storage | SQLite via the `rusqlite` runtime, with FTS5 and WAL mode | JSON files (`info_graph.json`, `chat_action_graph.json`, `context-store.json`) |
 
-The JSON storage choice is significant. JSON doesn't support indexed queries, FTS, or concurrent writers -- every lookup is a full scan. libSQL gives tracedecay O(1) lookups, full-text search, and WAL-mode concurrent reads.
+The JSON storage choice is significant. JSON doesn't support indexed queries, FTS, or concurrent writers -- every lookup is a full scan. SQLite gives tracedecay indexed lookups, full-text search, and WAL-mode concurrent reads.
 
 ---
 
@@ -182,7 +182,7 @@ Dual-Graph exposes environment variables (`DG_HARD_MAX_READ_CHARS`, `DG_TURN_REA
 
 ### 11. Where tracedecay Is Ahead
 
-tracedecay's advantages are covered in detail in sections 2-9 above. The short version: 70+ vs 5 MCP tools, symbol-level vs file-level granularity, full call graphs and impact analysis, 50+ vs 11 languages, libSQL vs JSON storage, on-demand freshness with catch-up sync on connect, 12+ vs 6 agent integrations, MIT-licensed Rust vs proprietary Python core, zero runtime dependencies, and per-call token savings reporting.
+tracedecay's advantages are covered in detail in sections 2-9 above. The short version: 70+ vs 5 MCP tools, symbol-level vs file-level granularity, full call graphs and impact analysis, 50+ vs 11 languages, indexed SQLite vs JSON storage, on-demand freshness with catch-up sync on connect, 12+ vs 6 agent integrations, MIT-licensed Rust vs proprietary Python core, zero runtime dependencies, and per-call token savings reporting.
 
 ---
 
@@ -230,7 +230,7 @@ tracedecay started as a Rust port of CodeGraph and shares the core idea: parse a
 | Test mapping | Yes | No |
 | Rename preview | Yes | No |
 | Annotation extraction | 13 languages (Rust, Swift, Dart, Scala, PHP, C++, VB.NET, Java, Kotlin, TypeScript, C#, Python, Zig) | No |
-| DB engine | libSQL (SQLite fork, WAL, async) | better-sqlite3 / wa-sqlite (WASM) |
+| DB engine | SQLite (`rusqlite` runtime, WAL) | better-sqlite3 / wa-sqlite (WASM) |
 | Indexing speed | ~1.2s for 1,782 files | ~4s for 1,782 files |
 | Binary size | ~25 MB (all grammars bundled) | ~80 MB (node_modules + WASM) |
 | Test coverage | 84% (v3.4.0), 1,000+ tests | Minimal |
@@ -334,7 +334,7 @@ Both tools follow the same pipeline: tree-sitter parsing, SQLite storage, MCP ex
 | | **tracedecay** | **code-review-graph** |
 |---|---|---|
 | Implementation | Rust (single binary) | Python 3.10+ |
-| DB engine | libSQL (SQLite fork, WAL, async) | SQLite |
+| DB engine | SQLite (`rusqlite` runtime, WAL) | SQLite |
 | Parsing | Bundled tree-sitter grammars (zero runtime deps) | tree-sitter via Python bindings |
 | MCP server | Built into the binary (`tracedecay serve`) | Separate process (`code-review-graph serve`) |
 | Incremental sync | Hash + mtime/size pre-filter, PID-locked | SHA-256 hash diff |

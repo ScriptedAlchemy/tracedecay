@@ -11,6 +11,23 @@ fn test_conn() -> (tempfile::TempDir, crate::db::engine::TestConnection) {
     (directory, connection)
 }
 
+struct FailingQueryExecutor;
+
+impl QueryExecutor for FailingQueryExecutor {
+    async fn query<P>(
+        &self,
+        _sql: &str,
+        _params: P,
+    ) -> crate::db::engine::Result<crate::db::engine::Rows>
+    where
+        P: crate::db::engine::IntoParams,
+    {
+        Err(crate::db::engine::Error::Runtime(
+            "injected workflow read failure".to_string(),
+        ))
+    }
+}
+
 async fn ensure_git_scope_fixture(conn: &impl Executor, session_id: &str, branch: &str) {
     ensure_git_correlation_schema_in_transaction(conn)
         .await
@@ -79,6 +96,17 @@ async fn queries_are_empty_before_schema_exists() {
     );
     assert!(run_for_id(&conn, "wf_x").await.unwrap().is_none());
     assert!(agents_for_run(&conn, "wf_x", 10).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn schema_read_failures_are_not_reported_as_empty_or_absent() {
+    let conn = FailingQueryExecutor;
+
+    assert!(runs_for_session(&conn, "sess", 10).await.is_err());
+    assert!(run_for_id(&conn, "wf_x").await.is_err());
+    assert!(agents_for_run(&conn, "wf_x", 10).await.is_err());
+    let filter = GitScopeFilter::from_args(Some("main"), None, None).unwrap();
+    assert!(runs_for_git_scope(&conn, &filter, 10).await.is_err());
 }
 
 #[tokio::test]

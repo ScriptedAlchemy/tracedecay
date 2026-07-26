@@ -139,7 +139,7 @@ pub(crate) struct StorageTelemetryPayloadV1 {
 }
 
 /// The owner setting path that configures a store's soft byte budget.
-const BUDGET_SETTING_KEY: &str = "sync.retention.v1 store_soft_budgets_bytes";
+pub(crate) const BUDGET_SETTING_KEY: &str = "sync.retention.v1 store_soft_budgets_bytes";
 const BUDGET_UNSET_REASON: &str = "no soft size budget is configured by the owner for this store (set \
      sync.retention.v1 store_soft_budgets_bytes for the store key to configure one)";
 const BUDGET_NOTE: &str = "budgets are owner configuration: sync.retention.v1 store_soft_budgets_bytes, keyed by store \
@@ -199,6 +199,16 @@ enum ResolvedStoreBudgetV1 {
     Configured(StoreSizeBudgetV1),
     Unset,
     Unknown(String),
+}
+
+/// Aggregate source coverage for the `OverBudgetStore` producer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct StoreBudgetSourceSummaryV1 {
+    pub stores: usize,
+    pub evaluated: usize,
+    pub over_budget: usize,
+    pub unset: usize,
+    pub unknown: usize,
 }
 
 /// Resolve one store's owner-configured soft budget from the retention config.
@@ -293,6 +303,38 @@ async fn collect_store_samples(state: &DashboardState) -> Vec<SampledStoreV1> {
         history,
         history_coverage,
     }]
+}
+
+/// Read canonical StorageStatus samples and summarize owner-budget coverage.
+pub(crate) async fn budget_source_summary(state: &DashboardState) -> StoreBudgetSourceSummaryV1 {
+    let samples = collect_store_samples(state).await;
+    let mut summary = StoreBudgetSourceSummaryV1 {
+        stores: samples.len(),
+        ..StoreBudgetSourceSummaryV1::default()
+    };
+    for sampled in samples {
+        let total_bytes = match &sampled.read {
+            StorageTelemetryReadV1::Observed { sample } => Some(sample.total_bytes().get()),
+            StorageTelemetryReadV1::ObservedBytes { total_bytes, .. } => Some(total_bytes.get()),
+            _ => None,
+        };
+        match budget_dimension(
+            &sampled.store,
+            sampled.sample(),
+            total_bytes,
+            Some(&state.retention_config),
+        ) {
+            StoreBudgetDimensionV1::Evaluated { evaluation, .. } => {
+                summary.evaluated += 1;
+                if evaluation.is_over_budget() {
+                    summary.over_budget += 1;
+                }
+            }
+            StoreBudgetDimensionV1::Unset { .. } => summary.unset += 1,
+            StoreBudgetDimensionV1::Unknown { .. } => summary.unknown += 1,
+        }
+    }
+    summary
 }
 
 /// `GET /api/storage/telemetry`

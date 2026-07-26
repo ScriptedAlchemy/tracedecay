@@ -28,7 +28,12 @@ export type SettingsMutationResult =
       readonly errors: readonly SettingsValidationError[];
     }
   | {
-      readonly outcome: 'offline' | 'error' | 'unsupported_schema';
+      readonly outcome: 'offline' | 'error';
+      readonly detail: string;
+    }
+  | {
+      readonly outcome: 'protocol_error';
+      readonly authority: string;
       readonly detail: string;
     };
 
@@ -52,10 +57,13 @@ export async function applySettingsMutation(
     };
   }
   if (!isRecord(current.body)) {
-    return {
-      outcome: 'unsupported_schema',
-      detail: 'The current settings response could not be decoded.',
-    };
+    return protocolError(`GET ${request.readUrl}`, 'expected a JSON object.');
+  }
+  if (!buildSettingsEditor(current.body)) {
+    return protocolError(
+      `GET ${request.readUrl}`,
+      'the response omitted editable values or revision identity.',
+    );
   }
   const conflict = settingsRevisionConflict(
     request.scope,
@@ -84,17 +92,14 @@ export async function applySettingsMutation(
     };
   }
   if (!isRecord(patched.body)) {
-    return {
-      outcome: 'unsupported_schema',
-      detail: 'The updated settings response could not be decoded.',
-    };
+    return protocolError(`PATCH ${request.patchUrl}`, 'expected a JSON object.');
   }
   const editor = buildSettingsEditor(patched.body);
   if (!editor) {
-    return {
-      outcome: 'unsupported_schema',
-      detail: 'The updated settings response omitted editable values or revision identity.',
-    };
+    return protocolError(
+      `PATCH ${request.patchUrl}`,
+      'the response omitted editable values or revision identity.',
+    );
   }
   return {
     outcome: 'success',
@@ -112,11 +117,13 @@ export async function applySettingsMutation(
 type JsonFetchResult =
   | { readonly outcome: 'response'; readonly response: Response; readonly body: unknown }
   | {
-      readonly outcome: 'offline' | 'unsupported_schema';
+      readonly outcome: 'offline';
       readonly detail: string;
-    };
+    }
+  | Extract<SettingsMutationResult, { outcome: 'protocol_error' }>;
 
 async function fetchJson(url: string, init?: RequestInit): Promise<JsonFetchResult> {
+  const authority = `${init?.method ?? 'GET'} ${url}`;
   let response: Response;
   try {
     response = await fetch(url, {
@@ -129,11 +136,19 @@ async function fetchJson(url: string, init?: RequestInit): Promise<JsonFetchResu
   try {
     return { outcome: 'response', response, body: await response.json() };
   } catch {
-    return {
-      outcome: 'unsupported_schema',
-      detail: 'The daemon returned a response that was not JSON.',
-    };
+    return protocolError(authority, 'expected JSON.');
   }
+}
+
+function protocolError(
+  authority: string,
+  reason: string,
+): Extract<SettingsMutationResult, { outcome: 'protocol_error' }> {
+  return {
+    outcome: 'protocol_error',
+    authority,
+    detail: `${authority} violated the settings contract: ${reason}`,
+  };
 }
 
 function readValidation(body: unknown): SettingsMutationResult | null {

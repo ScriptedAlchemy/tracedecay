@@ -189,20 +189,19 @@ pub(crate) async fn setup_project(
             ProjectId::new(format!("dashboard_fixture_{suffix}"))
                 .unwrap_or_else(|error| panic!("mint dashboard fixture identity: {error}"))
         });
-    let profile_root = project_root
-        .parent()
-        .unwrap_or(project_root)
-        .join("tracedecay-profile");
+    let profile_root = tracedecay::storage::default_profile_root()
+        .unwrap_or_else(|error| panic!("resolve dashboard fixture profile root: {error}"));
+    let open_options = tracedecay::tracedecay::TraceDecayOpenOptions {
+        profile_root: Some(profile_root.clone()),
+        global_db_path: None,
+    };
     let runtime = Arc::new(
-        HostAdmissionTestRuntimeV1::project(profile_root, project_root, project_id)
+        HostAdmissionTestRuntimeV1::project(&profile_root, project_root, project_id)
             .await
             .unwrap_or_else(|error| panic!("open dashboard fixture authority: {error}")),
     );
     let graph = runtime
-        .initialize_project_graph_for_test(
-            project_root,
-            tracedecay::tracedecay::TraceDecayOpenOptions::default(),
-        )
+        .initialize_project_graph_for_test(project_root, open_options)
         .await
         .unwrap_or_else(|error| panic!("initialize dashboard fixture graph: {error}"));
     (graph, runtime)
@@ -723,7 +722,7 @@ async fn start_dashboard_fixture_with_options(
     if let Err(err) = write_enrollment_marker(
         &project_root,
         &EnrollmentMarker {
-            project_id: "dashboard_fixture".to_string(),
+            project_id: "dashboard_fixture_project".to_string(),
             storage_mode: StorageMode::ProfileSharded,
         },
     ) {
