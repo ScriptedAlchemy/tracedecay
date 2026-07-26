@@ -14,6 +14,8 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use schemars::JsonSchema;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -47,7 +49,7 @@ pub(crate) struct LoomTemporalParamsV1 {
     offset: Option<i64>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, JsonSchema)]
 struct LoomSourceCoverageV1 {
     completeness: &'static str,
     eligible: Option<u64>,
@@ -58,7 +60,7 @@ struct LoomSourceCoverageV1 {
     reason: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, JsonSchema)]
 struct LoomSourceStatusV1 {
     id: &'static str,
     label: &'static str,
@@ -72,7 +74,7 @@ struct LoomSourceStatusV1 {
     coverage: LoomSourceCoverageV1,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, JsonSchema)]
 struct LoomTemporalRefreshV1 {
     state: DashboardDomainStateV1,
     active_generations: u64,
@@ -80,15 +82,69 @@ struct LoomTemporalRefreshV1 {
     authority: &'static str,
 }
 
-#[derive(Clone, Debug, Serialize)]
-struct LoomTemporalPayloadV1 {
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct LoomSessionModelV1 {
+    model: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct LoomSessionRowV1 {
+    provider: String,
+    session_id: String,
+    title: Option<String>,
+    started_at: Option<i64>,
+    ended_at: Option<i64>,
+    last_message_at: Option<i64>,
+    is_subagent: bool,
+    messages: i64,
+    edited_files_recorded: bool,
+    models: Vec<LoomSessionModelV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct LoomCommitV1 {
+    provider: String,
+    session_id: String,
+    commit_sha: String,
+    committed_at: i64,
+    branch: Option<String>,
+    worktree: Option<String>,
+    relation: String,
+    evidence: String,
+    confidence: f64,
+    span_overlap_kind: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct LoomEditedFileV1 {
+    provider: String,
+    session_id: String,
+    path: String,
+    change_type: Option<String>,
+    hunks: Option<i64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct LoomBranchSpanV1 {
+    provider: String,
+    session_id: String,
+    branch: Option<String>,
+    worktree: String,
+    first_at: i64,
+    last_at: i64,
+    event_count: i64,
+    source: String,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub(super) struct LoomTemporalPayloadV1 {
     available: bool,
     total: u64,
-    sessions: Vec<Value>,
+    sessions: Vec<LoomSessionRowV1>,
     source_statuses: Vec<LoomSourceStatusV1>,
-    commits: Vec<Value>,
-    edited_files: Vec<Value>,
-    branch_spans: Vec<Value>,
+    commits: Vec<LoomCommitV1>,
+    edited_files: Vec<LoomEditedFileV1>,
+    branch_spans: Vec<LoomBranchSpanV1>,
     temporal_refresh: LoomTemporalRefreshV1,
 }
 
@@ -98,7 +154,12 @@ struct LoomReadV1 {
     latest_activated_at: Option<i64>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+fn decode_rows<T: DeserializeOwned>(rows: Vec<Value>, label: &str) -> Result<Vec<T>, String> {
+    serde_json::from_value(Value::Array(rows))
+        .map_err(|error| format!("{label} did not match its response contract: {error}"))
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
 pub(crate) struct LoomFileSessionProjectionV1 {
     pub(crate) granularity: &'static str,
     pub(crate) authority: &'static str,
@@ -411,11 +472,11 @@ async fn read_temporal(
         payload: LoomTemporalPayloadV1 {
             available: true,
             total,
-            sessions,
+            sessions: decode_rows(sessions, "Loom sessions")?,
             source_statuses: statuses,
-            commits,
-            edited_files,
-            branch_spans,
+            commits: decode_rows(commits, "Loom commits")?,
+            edited_files: decode_rows(edited_files, "Loom edited files")?,
+            branch_spans: decode_rows(branch_spans, "Loom branch spans")?,
             temporal_refresh: LoomTemporalRefreshV1 {
                 state: refresh_state,
                 active_generations,

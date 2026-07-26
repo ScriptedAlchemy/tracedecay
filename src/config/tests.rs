@@ -2026,7 +2026,7 @@ mod runtime_configuration_cutover {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod retention_config_tests {
-    use crate::config::{RetentionConfig, SyncConfig};
+    use crate::config::{CompactionThresholdConfig, RetentionConfig, SyncConfig};
 
     #[test]
     fn default_retention_runs_only_safe_bounded_maintenance() {
@@ -2035,13 +2035,22 @@ mod retention_config_tests {
             retention.session_lcm.enabled,
             "projection-durable session dedupe enabled by default"
         );
-        assert_eq!(retention.session_lcm.offload_after_days, None);
-        assert_eq!(retention.session_lcm.drop_after_days, None);
+        assert_eq!(retention.session_lcm.offload_after_days, Some(30));
+        assert_eq!(retention.session_lcm.drop_after_days, Some(180));
         assert_eq!(retention.session_lcm.dedupe_projected_after_days, Some(30));
         assert_eq!(retention.session_lcm.max_batch_size, 500);
         assert!(
-            !retention.observation.enabled,
-            "live observation evidence stays disabled by default"
+            retention.observation.enabled,
+            "released observation evidence maintenance is active by default"
+        );
+        assert_eq!(retention.observation.anchor_release_after_days, Some(30));
+        assert_eq!(
+            retention.observation.observation_release_after_days,
+            Some(30)
+        );
+        assert_eq!(
+            retention.observation.provenance_release_after_days,
+            Some(30)
         );
         assert_eq!(retention.orphan_store_gc_days, Some(30));
         assert_eq!(retention.incident_debris_retention_days, Some(30));
@@ -2049,6 +2058,7 @@ mod retention_config_tests {
         assert!((compaction.free_page_ratio_threshold - 0.25).abs() < f64::EPSILON);
         assert_eq!(compaction.minimum_reclaimable_bytes, 64 * 1024 * 1024);
         assert_eq!(compaction.max_pages_per_tick, 1024);
+        assert_eq!(compaction, CompactionThresholdConfig::default());
         assert!(retention.store_soft_budgets_bytes.is_empty());
         // A default SyncConfig carries the same bounded retention tree.
         assert_eq!(SyncConfig::default().retention, retention);
@@ -2060,6 +2070,11 @@ mod retention_config_tests {
         // must resolve the same safe maintenance policy.
         let retention: RetentionConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(retention, RetentionConfig::default());
+
+        let nested: RetentionConfig =
+            serde_json::from_str(r#"{"session_lcm":{},"observation":{}}"#).unwrap();
+        assert_eq!(nested, RetentionConfig::default());
+        assert!(nested.observation.reclaim_superseded_cursor_advances);
     }
 
     #[test]

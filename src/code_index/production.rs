@@ -15,12 +15,14 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
     CanonicalRelationEdgeV1, CodeGenerationId, CodeGenerationManifestV1,
-    CodeIndexCapabilityManifestV1, CodeSearchEligibilityV1, CoverageSummaryV1, ExtractionBatchV1,
-    ExtractionFailureV1, FileOccurrenceId, IntakeRejectionV1, ManifestDigest, PolicyRevisionId,
-    PrivacyDomainId, ProjectionBatchReceiptV1, ProjectionBatchRequestV1, ProjectionKeyV1,
-    ProjectionReplayReasonV1, RepositoryId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1,
-    SanitizerRevision, SnapshotFileDispositionV1, SymbolLineageCandidateV1, UtcMicros,
-    ValidatedCodeFileV1, canonical_sha256,
+    CodeIndexCapabilityManifestV1, CodeSearchEligibilityV1, ComponentVersion, CoverageSummaryV1,
+    ExtractionBatchV1, ExtractionFailureV1, FileOccurrenceId, GenerationTestAttributionV1,
+    IntakeRejectionV1, ManifestDigest, PolicyRevisionId, PrivacyDomainId, ProjectionBatchReceiptV1,
+    ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionReplayReasonV1, ProviderEvaluationStateV1,
+    RepositoryId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision,
+    SensitivityLevelV1, SnapshotFileDispositionV1, SymbolLineageCandidateV1, SymbolOccurrenceId,
+    TestAttributionEvidenceClassV1, UtcMicros, ValidatedCodeFileV1, ValidatedCodeSnapshotV1,
+    canonical_sha256,
 };
 
 use super::{
@@ -44,6 +46,14 @@ use super::{
     projection::{
         CodeChunkProjectionSink, ProjectionPublicationErrorV1, ProjectionPublicationHandoffV1,
         expected_request_digest, project_for_publication,
+    },
+    provider::{
+        GenerationProviderCoverageV1, GenerationProviderReadV1,
+        GenerationTestAttributionJoinReadPort,
+    },
+    test_attribution::{
+        GenerationTestJoinV1, TestAttributionJoinInputCoverageV1, TestAttributionOccurrenceV1,
+        TestAttributionWatermarkV1,
     },
 };
 
@@ -82,6 +92,7 @@ impl CodeIndexProductionConfigV1 {
 pub struct CodeIndexCapturedFileV1 {
     pub file_occurrence_id: FileOccurrenceId,
     pub sanitized_bytes: Vec<u8>,
+    pub sensitivity_level: SensitivityLevelV1,
 }
 
 /// Inputs for one complete immutable code-index generation.
@@ -302,6 +313,34 @@ pub struct CodeIndexPublishedGenerationV1 {
     projection: ProjectionPublicationHandoffV1,
 }
 
+/// Immutable test-attribution reader derived from one sealed production code
+/// generation. The reader owns no second graph or test store: it projects
+/// conservative candidates from the generation's canonical relation graph and
+/// retains the exact generation/test watermark produced at construction.
+#[derive(Clone)]
+pub struct PublishedGenerationTestAttributionAuthorityV1 {
+    generation_id: CodeGenerationId,
+    read: GenerationProviderReadV1<GenerationTestJoinV1>,
+}
+
+impl GenerationTestAttributionJoinReadPort for PublishedGenerationTestAttributionAuthorityV1 {
+    fn read_test_attribution(
+        &self,
+        generation: &CodeGenerationId,
+    ) -> GenerationProviderReadV1<GenerationTestJoinV1> {
+        if generation == &self.generation_id {
+            self.read.clone()
+        } else {
+            GenerationProviderReadV1::new(
+                ProviderEvaluationStateV1::Stale,
+                GenerationProviderCoverageV1::Unavailable,
+                None,
+            )
+            .unwrap_or_else(|_| panic!("static stale attribution read"))
+        }
+    }
+}
+
 impl CodeIndexPublishedGenerationV1 {
     pub fn manifest(&self) -> &CodeGenerationManifestV1 {
         &self.manifest
@@ -341,6 +380,201 @@ impl CodeIndexPublishedGenerationV1 {
 
     pub fn projection(&self) -> &ProjectionPublicationHandoffV1 {
         &self.projection
+    }
+
+    /// Build the production generation-bound affected-test authority.
+    ///
+    /// Test candidates are deliberately conservative: each callable symbol in
+    /// a test-path file covers itself and every canonical graph occurrence
+    /// reachable from it. Missing graph edges remain partial coverage rather
+    /// than being upgraded into complete evidence.
+    pub fn test_attribution_authority(
+        &self,
+    ) -> Result<PublishedGenerationTestAttributionAuthorityV1, CodeIndexProductionErrorV1> {
+        let mut file_by_occurrence = BTreeMap::new();
+        for file in &self.snapshot.files {
+            file_by_occurrence.insert(
+                file.file_occurrence_id.clone(),
+                (file.logical_path.as_str(), file.content_digest.clone()),
+            );
+        }
+
+        let mut occurrence_files: BTreeMap<
+            SymbolOccurrenceId,
+            (FileOccurrenceId, tracedecay_domain::ContentDigest),
+        > = BTreeMap::new();
+        for chunk in self.chunks.chunks() {
+            let Some(occurrence) = &chunk.anchor.symbol_occurrence_id else {
+                continue;
+            };
+            let Some((_, content_digest)) =
+                file_by_occurrence.get(&chunk.anchor.file_occurrence_id)
+            else {
+                return Err(CodeIndexProductionErrorV1::Contract(
+                    "test attribution chunk refers to a missing snapshot file".to_owned(),
+                ));
+            };
+            match occurrence_files.entry(occurrence.clone()) {
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert((
+                        chunk.anchor.file_occurrence_id.clone(),
+                        content_digest.clone(),
+                    ));
+                }
+                std::collections::btree_map::Entry::Occupied(entry)
+                    if entry.get().0 != chunk.anchor.file_occurrence_id =>
+                {
+                    return Err(CodeIndexProductionErrorV1::Contract(
+                        "test attribution occurrence crosses snapshot files".to_owned(),
+                    ));
+                }
+                std::collections::btree_map::Entry::Occupied(_) => {}
+            }
+        }
+
+        let callable_occurrences = self
+            .symbols
+            .symbols
+            .iter()
+            .filter(|symbol| {
+                matches!(
+                    symbol.kind.as_str(),
+                    "function"
+                        | "method"
+                        | "struct_method"
+                        | "abstract_method"
+                        | "constructor"
+                        | "arrow_function"
+                        | "procedure"
+                )
+            })
+            .map(|symbol| symbol.occurrence.clone())
+            .collect::<BTreeSet<_>>();
+        let test_occurrences = occurrence_files
+            .iter()
+            .filter_map(|(occurrence, (file, _))| {
+                callable_occurrences.contains(occurrence).then_some(())?;
+                file_by_occurrence
+                    .get(file)
+                    .filter(|(path, _)| crate::tracedecay::is_test_file(path))
+                    .map(|_| occurrence.clone())
+            })
+            .collect::<Vec<_>>();
+        let mut outgoing: BTreeMap<SymbolOccurrenceId, Vec<SymbolOccurrenceId>> = BTreeMap::new();
+        for edge in &self.edges {
+            if occurrence_files.contains_key(&edge.from_occurrence)
+                && occurrence_files.contains_key(&edge.to_occurrence)
+            {
+                outgoing
+                    .entry(edge.from_occurrence.clone())
+                    .or_default()
+                    .push(edge.to_occurrence.clone());
+            }
+        }
+        for destinations in outgoing.values_mut() {
+            destinations.sort();
+            destinations.dedup();
+        }
+
+        let attribution_revision =
+            ComponentVersion::new("code-index.test-attribution.conservative.v1")
+                .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+        let mut attributions = Vec::with_capacity(test_occurrences.len());
+        for test_occurrence in test_occurrences {
+            let mut covered = BTreeSet::from([test_occurrence.clone()]);
+            let mut pending = VecDeque::from([test_occurrence.clone()]);
+            while let Some(occurrence) = pending.pop_front() {
+                for destination in outgoing.get(&occurrence).into_iter().flatten() {
+                    if covered.insert(destination.clone()) {
+                        pending.push_back(destination.clone());
+                    }
+                }
+            }
+            attributions.push(GenerationTestAttributionV1 {
+                generation_id: self.manifest.generation_id.clone(),
+                source_revision: self.snapshot.source_revision.clone(),
+                test_occurrence,
+                covered_occurrences: covered.into_iter().collect(),
+                evidence_class: TestAttributionEvidenceClassV1::ConservativeDependencyCandidates,
+                attribution_revision: attribution_revision.clone(),
+            });
+        }
+
+        let occurrences = occurrence_files
+            .into_iter()
+            .map(|(occurrence_id, (file_occurrence_id, content_digest))| {
+                TestAttributionOccurrenceV1 {
+                    occurrence_id,
+                    file_occurrence_id,
+                    content_digest,
+                }
+            })
+            .collect::<Vec<_>>();
+        let unknown = self.edge_abstentions.len() as u64
+            + self.coverage.files_partial
+            + self.coverage.files_unsupported
+            + self.coverage.ranges_unsupported;
+        let input_coverage = if unknown == 0 {
+            TestAttributionJoinInputCoverageV1::Complete
+        } else {
+            TestAttributionJoinInputCoverageV1::Partial {
+                reason: "canonical graph or source coverage is incomplete".to_owned(),
+            }
+        };
+        let mut watermark = TestAttributionWatermarkV1 {
+            generation_id: self.manifest.generation_id.clone(),
+            snapshot_digest: self.manifest.snapshot_digest.clone(),
+            content_identity: self.snapshot.content_identity.clone(),
+            source_revision: self.snapshot.source_revision.clone(),
+            attribution_revision,
+            evidence_digest: ManifestDigest::new(format!("sha256:{}", "0".repeat(64)))
+                .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?,
+            coverage: input_coverage,
+        };
+        watermark.evidence_digest = watermark
+            .recompute_evidence_digest(&attributions, &occurrences)
+            .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+        let snapshot = ValidatedCodeSnapshotV1 {
+            snapshot: self.snapshot.clone(),
+            intake_digest: self.manifest.snapshot_digest.clone(),
+            validated_at: self.manifest.seal.sealed_at,
+        };
+        let join = GenerationTestJoinV1::join(
+            &self.manifest,
+            &snapshot,
+            &attributions,
+            &occurrences,
+            &watermark,
+        )
+        .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+        let eligible = attributions.len() as u64;
+        let (provider_state, coverage) = if unknown == 0 {
+            (
+                ProviderEvaluationStateV1::SupportedCompletedComplete,
+                GenerationProviderCoverageV1::Complete {
+                    examined: eligible,
+                    eligible,
+                    excluded: 0,
+                },
+            )
+        } else {
+            (
+                ProviderEvaluationStateV1::Partial,
+                GenerationProviderCoverageV1::Partial {
+                    examined: eligible.saturating_add(unknown),
+                    eligible,
+                    excluded: 0,
+                    unknown,
+                    capped: false,
+                },
+            )
+        };
+        let read = GenerationProviderReadV1::new(provider_state, coverage, Some(join))
+            .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
+        Ok(PublishedGenerationTestAttributionAuthorityV1 {
+            generation_id: self.manifest.generation_id.clone(),
+            read,
+        })
     }
 
     /// Return chunks re-admitted through their parser-backed exact authority.
@@ -861,14 +1095,13 @@ where
         capability: &SanitizedSnapshotCapabilityV1,
         manifest: &CodeGenerationManifestV1,
         file: &SanitizedCodeFileV1,
-        captured_files: &BTreeMap<FileOccurrenceId, Vec<u8>>,
+        captured_files: &BTreeMap<FileOccurrenceId, CodeIndexCapturedFileV1>,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<FileGenerationArtifactsV1, CodeIndexProductionErrorV1> {
         self.checkpoint(control)?;
-        let sanitized_bytes = captured_files
+        let captured = captured_files
             .get(&file.file_occurrence_id)
-            .ok_or(CodeIndexInputErrorV1::MissingCapturedFile)?
-            .clone();
+            .ok_or(CodeIndexInputErrorV1::MissingCapturedFile)?;
         let receipt_bound = intake
             .bind_file(
                 capability,
@@ -876,7 +1109,7 @@ where
                     generation_id: manifest.generation_id.clone(),
                     file: file.clone(),
                     snapshot_digest: capability.snapshot().intake_digest.clone(),
-                    sanitized_bytes,
+                    sanitized_bytes: captured.sanitized_bytes.clone(),
                 },
             )
             .map_err(CodeIndexProductionErrorV1::Intake)?;
@@ -893,6 +1126,7 @@ where
         let physical_reuse_key = canonical_sha256(&(
             PHYSICAL_CODE_ARTIFACT_REUSE_DIGEST_DOMAIN,
             &self.config.repository,
+            &file.logical_path,
             &file.content_digest,
             descriptor,
             &self.config.sanitizer_revision,
@@ -900,6 +1134,7 @@ where
             &self.config.chunker_revision,
             &self.config.privacy_domain,
             self.config.privacy_key_epoch,
+            captured.sensitivity_level,
         ))
         .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
         if let Some(reused) = self.physical_artifacts.reuse(
@@ -927,7 +1162,8 @@ where
             self.config.policy_revision.clone(),
             self.config.chunker_revision.clone(),
             crate::extraction::LanguageRegistry::new(),
-        );
+        )
+        .with_sensitivity_level(captured.sensitivity_level);
         let (artifacts, exact_authority) = chunker
             .index_file_with_authority(&receipt_bound, &extraction, descriptor, &cancellation)
             .map_err(|error| match error {
@@ -951,7 +1187,7 @@ where
         capability: &SanitizedSnapshotCapabilityV1,
         manifest: &CodeGenerationManifestV1,
         snapshot: &SanitizedCodeSnapshotV1,
-        captured_files: &BTreeMap<FileOccurrenceId, Vec<u8>>,
+        captured_files: &BTreeMap<FileOccurrenceId, CodeIndexCapturedFileV1>,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<StagedGenerationV1, CodeIndexProductionErrorV1> {
         let mut files = Vec::new();
@@ -978,7 +1214,7 @@ where
         manifest: &CodeGenerationManifestV1,
         active: &CodeIndexPublishedGenerationV1,
         increment: &super::generations::GenerationIncrementPlanV1,
-        captured_files: &BTreeMap<FileOccurrenceId, Vec<u8>>,
+        captured_files: &BTreeMap<FileOccurrenceId, CodeIndexCapturedFileV1>,
         control: &dyn CodeIndexExecutionControlV1,
     ) -> Result<StagedGenerationV1, CodeIndexProductionErrorV1> {
         let prior_files = active
@@ -1177,7 +1413,7 @@ fn registry_for_snapshot(
 fn captured_files(
     snapshot: &SanitizedCodeSnapshotV1,
     captured: Vec<CodeIndexCapturedFileV1>,
-) -> Result<BTreeMap<FileOccurrenceId, Vec<u8>>, CodeIndexInputErrorV1> {
+) -> Result<BTreeMap<FileOccurrenceId, CodeIndexCapturedFileV1>, CodeIndexInputErrorV1> {
     let present = snapshot
         .files
         .iter()
@@ -1193,7 +1429,7 @@ fn captured_files(
             return Err(CodeIndexInputErrorV1::ContentDigestMismatch);
         }
         if captured_files
-            .insert(captured.file_occurrence_id, captured.sanitized_bytes)
+            .insert(captured.file_occurrence_id.clone(), captured)
             .is_some()
         {
             return Err(CodeIndexInputErrorV1::DuplicateCapturedFile);
@@ -1252,13 +1488,6 @@ fn projection_request(
         active.map(|active| active.projection.request().target_projection_key.clone());
     let replay_reason = match (active, increment) {
         (None, _) => ProjectionReplayReasonV1::InitialProjection,
-        (_, Some(increment))
-            if increment
-                .rebuild_triggers
-                .contains(&RebuildTriggerV1::QuarantinedCorruption) =>
-        {
-            ProjectionReplayReasonV1::QuarantinedCorruption
-        }
         (_, Some(increment)) if increment.is_full_rebuild() => {
             ProjectionReplayReasonV1::FullRebuildIncompatible
         }

@@ -1,3 +1,7 @@
+use tracedecay_application::feedback::{
+    CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1, GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,
+    PROXIMITY_CAPABILITY_ID_V1,
+};
 use tracedecay_application::{
     application_catalog_contributions, application_handler_descriptors,
     callable_code_catalog_contribution, feedback_surface_catalog_contribution,
@@ -26,8 +30,8 @@ fn direct_symbol_search_contribution_has_one_matching_handler_descriptor() {
     assert_eq!(handler.request_schema(), capability.request_schema());
     assert_eq!(handler.result_schema(), capability.result_schema());
     assert!(capability.availability().is_callable());
-    assert_eq!(capability.binding_ids().len(), 3);
-    assert_eq!(contribution.bindings().len(), 3);
+    assert_eq!(capability.binding_ids().len(), 4);
+    assert_eq!(contribution.bindings().len(), 4);
     for surface in [
         BindingSurface::Cli,
         BindingSurface::Mcp,
@@ -41,6 +45,10 @@ fn direct_symbol_search_contribution_has_one_matching_handler_descriptor() {
                     && binding.operation().as_str() == "code_symbol_search")
         );
     }
+    assert!(contribution.bindings().iter().any(|binding| {
+        binding.surface() == BindingSurface::Lsp
+            && binding.operation().as_str() == "workspace/symbol"
+    }));
 }
 
 #[test]
@@ -51,7 +59,6 @@ fn application_contribution_set_uses_registered_feedback_handlers() {
     let feedback = feedback_surface_catalog_contribution().unwrap();
     let feedback_handlers = feedback_surface_handler_descriptors().unwrap();
 
-    assert_eq!(contributions.len(), 8);
     assert!(contributions.contains(&callable_code));
     assert!(contributions.contains(&feedback));
     assert_eq!(
@@ -84,14 +91,26 @@ fn application_contribution_set_uses_registered_feedback_handlers() {
             "{} is callable after its production owner was registered",
             capability.capability_id()
         );
-        assert!(!capability.binding_ids().is_empty());
+        let provider_contribution = [
+            GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,
+            CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1,
+            PROXIMITY_CAPABILITY_ID_V1,
+        ]
+        .contains(&capability.capability_id().as_str());
+        assert_eq!(
+            capability.binding_ids().is_empty(),
+            provider_contribution,
+            "{} must use the combined advisory transport",
+            capability.capability_id()
+        );
     }
-    assert!(
-        feedback
-            .bindings()
-            .iter()
-            .all(|binding| binding.surface() != BindingSurface::Dashboard)
-    );
+    assert!(feedback.bindings().iter().any(|binding| {
+        binding.surface() == BindingSurface::Dashboard
+            && feedback
+                .capabilities()
+                .iter()
+                .any(|capability| capability.binding_ids().contains(binding.binding_id()))
+    }));
     assert!(
         git_index_catalog_contribution()
             .unwrap()

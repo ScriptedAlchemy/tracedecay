@@ -13,7 +13,7 @@ use tracedecay_domain::{
 use super::host_bundle_v2::{
     HostBundleArtifactContentV1, HostBundleArtifactV1, HostBundleComponentV1, HostBundleError,
     HostBundleManifestV1, HostBundleVerificationAdapterV1, HostComponentSetEntryV1,
-    HostComponentSetV1, HostKindV1, validate_identifier,
+    HostComponentSetV1, HostKindV1, require_component_capabilities, validate_identifier,
 };
 
 pub const FIRST_PARTY_COMPONENT_CATALOG_VERSION: u64 = 1;
@@ -77,9 +77,9 @@ pub enum HostBundleRegistryError {
     Incompatible,
 }
 
-/// Canonical default install set. Operator MCP remains explicitly selected;
-/// Kimi's plugin manifest already owns its MCP registration, so its Core
-/// component is the complete default and is not duplicated.
+/// Canonical default install set. Each native MCP registration has one
+/// component owner. Kimi's plugin manifest carries its MCP route inside Core;
+/// hosts with a separable route use Context MCP.
 pub fn default_components(host: HostKindV1) -> Vec<HostBundleComponentV1> {
     match host {
         HostKindV1::ClaudeCode | HostKindV1::Codex => vec![
@@ -91,10 +91,7 @@ pub fn default_components(host: HostKindV1) -> Vec<HostBundleComponentV1> {
             HostBundleComponentV1::Agent,
             HostBundleComponentV1::ContextMcp,
         ],
-        HostKindV1::Hermes | HostKindV1::Kiro | HostKindV1::KimiCode => {
-            vec![HostBundleComponentV1::Core]
-        }
-        HostKindV1::Cline | HostKindV1::RooCode | HostKindV1::Kilo => {
+        HostKindV1::Hermes | HostKindV1::KimiCode => {
             vec![HostBundleComponentV1::Core]
         }
         HostKindV1::OpenCode => vec![
@@ -235,6 +232,8 @@ pub fn verified_embedded_host_bundle(
     component: HostBundleComponentV1,
     _now_unix: u64,
 ) -> Result<VerifiedEmbeddedHostBundleV1, HostBundleRegistryError> {
+    require_component_capabilities(host, component)
+        .map_err(|_| HostBundleRegistryError::Incompatible)?;
     let host_name = host_name(host);
     let component_name = component_name(component);
     let assets = component_assets(host, component)?;
@@ -438,31 +437,15 @@ fn component_assets(
             .collect());
     }
 
-    // The managed Kimi plugin directory is rewritten by the legacy installer
-    // that the compatibility registration adapter re-runs during apply, and the
-    // component-set transaction verifies installed digests afterwards. Deploy
-    // the installer's own rendered inventory (same bin resolution as
-    // `InstallContext::tracedecay_bin`) so both writers produce identical
-    // bytes; the raw template still carries its unstamped version and
-    // unresolved command placeholders.
-    if host == HostKindV1::KimiCode
-        && matches!(
-            component,
-            HostBundleComponentV1::Core
-                | HostBundleComponentV1::ContextMcp
-                | HostBundleComponentV1::OperatorMcp
-        )
-    {
+    // Kimi's Core bundle owns its manifest-declared hooks and MCP route as one
+    // native plugin. Render the complete managed inventory with the installed
+    // binary path; companion MCP components would duplicate that ownership.
+    if (host, component) == (HostKindV1::KimiCode, HostBundleComponentV1::Core) {
         let bin = super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
         let files = super::kimi::rendered_plugin_files(&bin)
             .map_err(|_| HostBundleRegistryError::Incompatible)?;
-        // Kimi's plugin manifest declares its own MCP server, so the MCP
-        // companion components address that manifest alone while Core keeps the
-        // full deploy set.
-        let manifest_only = component != HostBundleComponentV1::Core;
         return Ok(files
             .into_iter()
-            .filter(|(relative, _)| !manifest_only || *relative == ".kimi-plugin/plugin.json")
             .map(|(relative, body)| {
                 (
                     format!(".kimi-code/plugins/managed/tracedecay/{relative}"),
@@ -472,18 +455,10 @@ fn component_assets(
             .collect());
     }
 
-    // The managed OpenCode plugin file is also written by the legacy installer
-    // that the compatibility registration adapter re-runs during apply, and the
-    // component-set transaction verifies installed digests afterwards. Deploy
-    // the installer's own rendered inventory (same bin resolution as
-    // `InstallContext::tracedecay_bin`) so both writers produce identical
-    // bytes. `render_compiled_asset` below resolves the binary from
-    // `std::env::current_exe()` instead, which disagrees with
-    // `which_tracedecay()` whenever the running binary lives outside the
-    // installed path (for example `./target/release/tracedecay reinstall`) and
-    // corrupted every OpenCode transaction. The MCP companion and Agent
-    // components keep the compiled-asset path: the legacy installer never
-    // writes those files.
+    // Render OpenCode Core with the installed binary path. The generic renderer
+    // uses `std::env::current_exe()`, which can differ from the installed path
+    // during an in-tree reinstall. Context MCP and Agent remain disjoint
+    // compiled assets.
     if (host, component) == (HostKindV1::OpenCode, HostBundleComponentV1::Core) {
         let bin = super::which_tracedecay().unwrap_or_else(|| "tracedecay".to_string());
         let files = super::opencode::rendered_plugin_files(&bin)
@@ -531,10 +506,7 @@ fn component_assets(
             ".config/opencode",
             super::plugin_bundle::opencode_agent_files(),
         ),
-        (
-            HostKindV1::OpenCode,
-            HostBundleComponentV1::ContextMcp | HostBundleComponentV1::OperatorMcp,
-        ) => (
+        (HostKindV1::OpenCode, HostBundleComponentV1::ContextMcp) => (
             ".config/opencode",
             vec![
                 (
@@ -623,11 +595,6 @@ mod tests {
                 HostKindV1::Hermes,
                 HostBundleComponentV1::Core,
                 ".hermes/plugins/tracedecay/plugin.yaml",
-            ),
-            (
-                HostKindV1::KimiCode,
-                HostBundleComponentV1::ContextMcp,
-                ".kimi-plugin/plugin.json",
             ),
             (
                 HostKindV1::OpenCode,
@@ -895,7 +862,6 @@ mod tests {
             HostKindV1::CursorDesktop,
             HostKindV1::Codex,
             HostKindV1::Hermes,
-            HostKindV1::Kiro,
             HostKindV1::KimiCode,
             HostKindV1::OpenCode,
         ] {
@@ -945,78 +911,41 @@ mod tests {
     }
 
     #[test]
-    fn cline_roo_and_kilo_have_distinct_canonical_supported_routes() {
-        for (host, expected_path, expected_evidence) in [
-            (
-                HostKindV1::Cline,
-                ".cline/data/settings/tracedecay/component.json",
-                "src/agents/cline.rs",
-            ),
-            (
-                HostKindV1::RooCode,
-                ".roo/tracedecay/component.json",
-                "src/agents/roo_code.rs",
-            ),
-            (
-                HostKindV1::Kilo,
-                ".config/kilo/tracedecay/component.json",
-                "src/agents/kilo.rs",
-            ),
+    fn shared_mcp_manifests_have_one_canonical_component_owner() {
+        for (host, unsupported) in [
+            (HostKindV1::OpenCode, HostBundleComponentV1::OperatorMcp),
+            (HostKindV1::KimiCode, HostBundleComponentV1::ContextMcp),
+            (HostKindV1::KimiCode, HostBundleComponentV1::OperatorMcp),
         ] {
-            let component_set = verified_embedded_default_host_component_set(host, 0).unwrap();
-            assert_eq!(component_set.component_set.components.len(), 1);
             assert_eq!(
-                component_set.component_set.components[0].manifest.artifacts[0].relative_path,
-                expected_path
+                verified_embedded_host_bundle(host, unsupported, 0),
+                Err(HostBundleRegistryError::Incompatible)
             );
-            let evidence = crate::agents::host_bundle_v2::stock_host_registration_evidence(host);
-            assert!(evidence.iter().any(|record| {
-                record.route == crate::agents::host_bundle_v2::HostRegistrationRouteV1::Mcp
-                    && record.state
-                        == crate::agents::host_bundle_v2::HostCapabilityStateV1::Supported
-                    && record.evidence_ref == expected_evidence
-            }));
-            assert!(evidence.iter().any(|record| {
-                record.route == crate::agents::host_bundle_v2::HostRegistrationRouteV1::Hook
-                    && matches!(
-                        record.state,
-                        crate::agents::host_bundle_v2::HostCapabilityStateV1::Unavailable(_)
-                    )
-            }));
         }
     }
 
     #[test]
-    fn kiro_default_set_packages_its_evidence_backed_hook_and_mcp_route() {
-        let component_set =
-            verified_embedded_default_host_component_set(HostKindV1::Kiro, 0).unwrap();
-        assert_eq!(component_set.component_set.components.len(), 1);
-        let component = &component_set.component_set.components[0];
-        assert_eq!(component.manifest.component, HostBundleComponentV1::Core);
+    fn cline_roo_and_kilo_refuse_components_without_native_evidence() {
+        for host in [HostKindV1::Cline, HostKindV1::RooCode, HostKindV1::Kilo] {
+            assert!(default_components(host).is_empty());
+            assert_eq!(
+                verified_embedded_host_component_set(host, &[HostBundleComponentV1::Core], 0),
+                Err(HostBundleRegistryError::Incompatible)
+            );
+        }
+    }
+
+    #[test]
+    fn kiro_degraded_hook_route_is_not_packaged_as_supported() {
+        assert!(default_components(HostKindV1::Kiro).is_empty());
         assert_eq!(
-            component.manifest.artifacts[0].relative_path,
-            ".kiro/tracedecay/component.json"
+            verified_embedded_host_component_set(
+                HostKindV1::Kiro,
+                &[HostBundleComponentV1::Core],
+                0
+            ),
+            Err(HostBundleRegistryError::Incompatible)
         );
-        let declaration: serde_json::Value =
-            serde_json::from_slice(&component.contents[0].bytes).unwrap();
-        assert_eq!(declaration["route"], "hook+mcp");
-        assert_eq!(
-            declaration["native_events"],
-            "userPromptSubmit,preToolUse,postToolUse"
-        );
-        let evidence =
-            crate::agents::host_bundle_v2::stock_host_registration_evidence(HostKindV1::Kiro);
-        assert!(evidence.iter().any(|record| {
-            record.route == crate::agents::host_bundle_v2::HostRegistrationRouteV1::Mcp
-                && record.state == crate::agents::host_bundle_v2::HostCapabilityStateV1::Supported
-        }));
-        assert!(evidence.iter().any(|record| {
-            record.route == crate::agents::host_bundle_v2::HostRegistrationRouteV1::Hook
-                && record.state
-                    == crate::agents::host_bundle_v2::HostCapabilityStateV1::Degraded(
-                        crate::agents::host_bundle_v2::HostCapabilityUnavailableReasonV1::NativeFixtureLimited,
-                    )
-        }));
     }
 
     #[test]
@@ -1077,6 +1006,7 @@ mod tests {
             .unwrap();
         assert!(plugin.contains("await dispatch(\"hook-opencode-tool-after\", { input, output })"));
         assert!(plugin.contains("await dispatch(\"hook-opencode-event\", event)"));
+        assert!(plugin.contains("event.type === \"lsp.updated\""));
     }
 
     #[test]

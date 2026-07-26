@@ -20,13 +20,11 @@ use tracedecay_tool_catalog::BindingId;
 
 pub use http::{
     HttpApplicationControls, HttpApplicationInvocationFuture, HttpApplicationOperation,
-    HttpApplicationOwnerKind, HttpApplicationOwners, HttpApplicationRequest,
-    application_problem_response, application_router,
+    HttpApplicationOwnerKind, HttpApplicationOwners, HttpApplicationRequest, HttpRouteDocumentV1,
+    application_problem_response, application_router, configuration_application_router,
+    http_route_documents,
 };
 pub use sse::sse_response;
-
-/// Initial revision for the HTTP adapter's outbound DTOs.
-pub const HTTP_API_REVISION: u32 = 1;
 
 /// A resolved canonical invocation result ready for HTTP presentation.
 pub struct CanonicalInvocationResult<T> {
@@ -253,18 +251,6 @@ mod tests {
 
     #[test]
     fn http_operations_dispatch_to_concrete_owner_families() {
-        assert_eq!(
-            HttpApplicationOperation::GitPreview.owner_kind(),
-            HttpApplicationOwnerKind::Git
-        );
-        assert_eq!(
-            HttpApplicationOperation::FeedbackDiagnostics.owner_kind(),
-            HttpApplicationOwnerKind::Feedback
-        );
-        assert_eq!(
-            HttpApplicationOperation::AffectedTests.owner_kind(),
-            HttpApplicationOwnerKind::Feedback
-        );
         assert_eq!(
             HttpApplicationOperation::DiagnosticsRead.owner_kind(),
             HttpApplicationOwnerKind::Primitive

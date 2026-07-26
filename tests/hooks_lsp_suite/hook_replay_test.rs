@@ -343,6 +343,8 @@ async fn replayed_provider_hooks_record_attributed_rows_and_bridge_to_analytics_
             session_id: None,
             event_kind: Some("hook_invoked".to_string()),
             since: None,
+            until: None,
+            before_id: None,
             limit: 1000,
         })
         .await

@@ -78,6 +78,21 @@ pub enum HostBundleAction {
         #[arg(long)]
         quarantine: bool,
     },
+    /// Snapshot one installed component's managed artifact files
+    ArtifactBackup {
+        /// Agent whose selected component owns the managed artifacts
+        #[arg(long, value_parser = agent_value_parser())]
+        agent: String,
+    },
+    /// Restore managed artifact files without changing host registration
+    ArtifactRestore {
+        /// Agent whose selected component owns the managed artifacts
+        #[arg(long, value_parser = agent_value_parser())]
+        agent: String,
+        /// Lowercase 32-character hexadecimal artifact-backup receipt id
+        #[arg(long)]
+        backup_id: String,
+    },
 }
 
 /// Code intelligence for Rust codebases.
@@ -703,7 +718,7 @@ pub enum LspAction {
         stdio: bool,
         /// Explicit project root to authorize for this session
         #[arg(long)]
-        project: String,
+        project: Option<String>,
     },
 }
 

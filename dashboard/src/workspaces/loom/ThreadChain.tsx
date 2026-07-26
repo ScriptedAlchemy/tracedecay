@@ -7,12 +7,12 @@ import { useLegacy } from '../../data/query/useLegacy.ts';
 import { formatDurationSeconds, formatMoment } from './tracks.ts';
 import { summarizeChain, type PlacedThread } from './weave.ts';
 import {
-  LoomChainPayloadSchema,
+  LcmSessionPayloadSchema,
   type LoomBranchSpan,
   type LoomCommit,
   type LoomEditedFile,
   type LoomSourceStatus,
-} from './contracts.ts';
+} from '../../contracts/wire.ts';
 
 /**
  * The selected thread's chain: prompt → turns → tools.
@@ -46,7 +46,7 @@ export function ThreadChain({
   const chain = useLegacy(
     ['loom', 'chain', thread?.id ?? 'none'],
     `/api/plugins/hermes-lcm/session/${encodeURIComponent(thread?.sessionId ?? '')}?limit=200`,
-    LoomChainPayloadSchema,
+    LcmSessionPayloadSchema,
     { enabled: thread != null },
   );
 

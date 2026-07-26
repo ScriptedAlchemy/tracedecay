@@ -3,6 +3,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ScopedBrain } from './ScopedBrain.tsx';
 import { useScope } from '../../data/scope/store.ts';
+import { resolveFixture } from '../../../stories/fixtures/data.ts';
 
 // The canvas is a WebGL renderer; this suite is about which reads compose the
 // surface and what it says when one of them is legitimately unavailable.
@@ -14,7 +15,14 @@ vi.mock('../../viz/graph/GraphCanvas.tsx', () => ({
   ),
 }));
 
-const NOW = Math.floor(Date.now() / 1000);
+/**
+ * Wire-true bodies come from the shared fixture module, which is gated against
+ * the generated contracts by `endpoint-fixtures.test.ts`. Taking them from
+ * there rather than restating them means these five reads cannot drift into
+ * shapes the daemon does not send, and each test overrides only the figures its
+ * assertions actually name.
+ */
+const wire = (path: string) => resolveFixture(path) as Record<string, unknown>;
 
 /**
  * The scoped readout renders `<dt>label</dt><dd>figure</dd>` per statistic.
@@ -28,55 +36,49 @@ function readout(label: string): string | null {
 }
 
 /** The registry backbone (src/dashboard/projects.rs `context`) — resolves for
- * every registered project whether or not its graph is mounted. */
-const CONTEXT = {
-  status: 'ok',
-  is_active: false,
-  project: {
-    project_id: 'proj_x',
-    label: 'ai-train',
-    project_root: '/fast/projects/ai-train',
-    canonical_root: '/fast/projects/ai-train',
-    kind: 'primary',
-    default_branch: 'main',
-    branches: ['main'],
-    store_count: 1,
-    graph_scope_count: 2,
-    artifact_count: 4,
-    alias_count: 3,
-    last_seen_at: NOW - 3600,
-  },
-  aliases: [
-    { alias_path: '/fast/projects/ai-train', last_seen_at: NOW - 3600 },
-    { alias_path: '/fast/projects/ai-train/.worktrees/fix', last_seen_at: NOW - 7200 },
-  ],
-  stores: [
-    {
-      store: {
-        store_id: 'store:proj_x:profile_sharded',
-        store_kind: 'code_project',
-        storage_mode: 'profile_sharded',
-      },
-      graph_scopes: [
-        { graph_scope_id: 's1', branch_name: 'main', last_synced_at: NOW - 3600 },
-        { graph_scope_id: 's2', branch_name: 'release/2.4', last_synced_at: NOW - 86_400 },
-      ],
-      artifacts: [
-        { artifact_kind: 'graph_db', relpath: 'p/tracedecay.db', size_bytes: 131_088_384 },
-        { artifact_kind: 'branch_meta', relpath: 'p/branch-meta.json', size_bytes: 14_704 },
-      ],
-    },
-  ],
-};
+ * every registered project whether or not its graph is mounted. Its store
+ * carries a `release/2.4` graph scope, which is the branch these tests read
+ * back to prove the backbone survived a failed graph read. */
+const CONTEXT = wire('/api/projects/proj_x');
 
-const SUBGRAPH = {
-  nodes: [
-    { id: 'a', kind: 'function', name: 'alpha', degree: 4 },
-    { id: 'b', kind: 'struct', name: 'Beta', degree: 2 },
-  ],
-  edges: [{ source: 'a', target: 'b', kind: 'calls' }],
-  capped: { nodes: false, edges: false },
-};
+/** Wire-true unseeded slice, cut down to two nodes and the edge between them.
+ * `graph_service.rs::subgraph_payload` writes `seed_id`, `mode`, `nodes`,
+ * `edges` and `capped` on every one of its three return paths, and each node is
+ * a full `GraphNodeV1` — a body carrying only `id`/`kind`/`name`/`degree` is
+ * one the daemon cannot produce, which is what this fixture used to be back
+ * when Brain read the scoped gateway through its own all-optional copy of the
+ * subgraph shape. */
+const SUBGRAPH = (() => {
+  const shared = wire('/api/plugins/graph/subgraph');
+  const nodes = (shared['nodes'] as Record<string, unknown>[]).slice(0, 2);
+  const [alpha, beta] = nodes;
+  return {
+    ...shared,
+    nodes,
+    edges: [
+      {
+        source: alpha!['id'],
+        target: beta!['id'],
+        kind: 'calls',
+        line: 41,
+        source_name: null,
+        target_name: null,
+      },
+    ],
+  };
+})();
+
+/** An empty slice the daemon really can send: the read succeeded and found
+ * nothing to draw. */
+const SUBGRAPH_EMPTY = { ...SUBGRAPH, nodes: [], edges: [] };
+
+const graphOverview = (totals: Record<string, number>) => ({
+  ...wire('/api/plugins/graph/overview'),
+  totals,
+});
+
+const MEMORY_STATUS = wire('/api/plugins/holographic/status');
+const ANALYTICS = wire('/api/plugins/analytics/overview');
 
 /** Routes each request to a canned body, mirroring the daemon: the scoped
  * gateway 404s with `not_found` when a project's graph is not mounted. */
@@ -121,16 +123,10 @@ describe('ScopedBrain', () => {
       '/api/projects/proj_x/plugins/graph/subgraph': { status: 200, body: SUBGRAPH },
       '/api/projects/proj_x/plugins/graph/overview': {
         status: 200,
-        body: { totals: { nodes: 12_873, edges: 41_206, files: 642 } },
+        body: graphOverview({ nodes: 12_873, edges: 41_206, files: 642 }),
       },
-      '/api/projects/proj_x/plugins/holographic/status': {
-        status: 200,
-        body: { exists: true, memory: { fact_count: 173, entity_count: 1186 } },
-      },
-      '/api/projects/proj_x/plugins/analytics/overview': {
-        status: 200,
-        body: { usage: { event_count: 42, by_category: [{ category: 'memory', events: 42 }] } },
-      },
+      '/api/projects/proj_x/plugins/holographic/status': { status: 200, body: MEMORY_STATUS },
+      '/api/projects/proj_x/plugins/analytics/overview': { status: 200, body: ANALYTICS },
       '/api/projects/proj_x': { status: 200, body: CONTEXT },
     });
     vi.stubGlobal('fetch', fetchMock);
@@ -179,10 +175,7 @@ describe('ScopedBrain', () => {
     vi.stubGlobal(
       'fetch',
       serve({
-        '/api/projects/proj_x/plugins/graph/subgraph': {
-          status: 200,
-          body: { nodes: [], edges: [], capped: { nodes: false, edges: false } },
-        },
+        '/api/projects/proj_x/plugins/graph/subgraph': { status: 200, body: SUBGRAPH_EMPTY },
         '/api/projects/proj_x': { status: 200, body: CONTEXT },
       }),
     );
@@ -201,7 +194,7 @@ describe('ScopedBrain', () => {
         '/api/projects/proj_x/plugins/graph/subgraph': { status: 200, body: SUBGRAPH },
         '/api/projects/proj_x/plugins/graph/overview': {
           status: 200,
-          body: { totals: { nodes: 0, edges: 0, files: 0 } },
+          body: graphOverview({ nodes: 0, edges: 0, files: 0 }),
         },
         '/api/projects/proj_x': { status: 200, body: CONTEXT },
       }),

@@ -914,17 +914,26 @@ async fn dispatch_agent_command(
             agent_cmd::handle_feedback_rollback_command(action).await?;
         }
         Commands::HostBundle { action } => {
-            if host_bundle.component.is_some() {
-                return Err(tracedecay::errors::TraceDecayError::Config {
-                    message: "host-bundle recovery operates on the whole component set".to_string(),
-                });
+            if matches!(
+                &action,
+                crate::cli::HostBundleAction::ArtifactBackup { .. }
+                    | crate::cli::HostBundleAction::ArtifactRestore { .. }
+            ) {
+                agent_cmd::handle_host_bundle_artifact_command(action, host_bundle).await?;
+            } else {
+                if host_bundle.component.is_some() {
+                    return Err(tracedecay::errors::TraceDecayError::Config {
+                        message: "host-bundle recovery operates on the whole component set"
+                            .to_string(),
+                    });
+                }
+                agent_cmd::handle_host_bundle_recovery_command(
+                    action,
+                    host_bundle.dry_run,
+                    host_bundle.yes,
+                )
+                .await?;
             }
-            agent_cmd::handle_host_bundle_recovery_command(
-                action,
-                host_bundle.dry_run,
-                host_bundle.yes,
-            )
-            .await?;
         }
         _ => unreachable!("non-agent command passed to agent dispatcher"),
     }

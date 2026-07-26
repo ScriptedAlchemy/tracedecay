@@ -18,13 +18,16 @@ import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { GraphCanvas } from '../../viz/graph/GraphCanvas.tsx';
 import { kindColorVars } from '../../viz/graph/kindColor.ts';
 import { ActivationField } from '../../viz/graph/activation.ts';
-import { TraceView } from './TraceView.tsx';
+import { Strata } from './Strata.tsx';
+import { TraceView, type TraceFocus } from './TraceView.tsx';
 import {
+  type GraphNode,
+  type GraphOverviewPayload,
   GraphOverviewPayloadSchema,
   GraphSearchPayloadSchema,
-  SubgraphPayloadSchema,
-  type GraphNode,
-} from './contracts.ts';
+  type GraphSubgraphPayload,
+  GraphSubgraphPayloadSchema,
+} from '../../contracts/wire.ts';
 
 const BASE = '/api/plugins/graph';
 
@@ -45,16 +48,16 @@ export function CodePage() {
     `${BASE}/search?q=${encodeURIComponent(submitted)}&limit=100`,
     GraphSearchPayloadSchema,
   );
-  const [selected, setSelected] = useState<GraphNode | null>(null);
+  const [selected, setSelected] = useState<TraceFocus | null>(null);
   // The TRACE drill-in (plan 11b). It is a state of THIS page, not a route:
   // the spine and the trace are two zoom positions on one field, and a URL
   // change between them would break the "one navigable space" model. Escape
   // and the back control return to the spine.
-  const [traced, setTraced] = useState<GraphNode | null>(null);
+  const [traced, setTraced] = useState<TraceFocus | null>(null);
   const subgraph = useLegacy(
     ['graph', 'subgraph', selected?.id ?? ''],
     `${BASE}/subgraph${selected ? `?node_id=${encodeURIComponent(selected.id)}` : ''}`,
-    SubgraphPayloadSchema,
+    GraphSubgraphPayloadSchema,
   );
   const canvasNodes = useMemo(() => {
     if (subgraph.data?.outcome !== 'ok') return [];
@@ -62,7 +65,7 @@ export function CodePage() {
       id: node.id,
       label: node.name ?? node.qualified_name ?? node.id,
       kind: node.kind,
-      degree: node.degree,
+      degree: node.degree ?? undefined,
     }));
   }, [subgraph.data]);
   const canvasEdges = useMemo(() => {
@@ -178,6 +181,11 @@ export function CodePage() {
               );
             }}
           </LegacyBoundary>
+          {/* Connectedness is the spine's subject; layering is the other
+           * structural reading of the same graph, and it belongs beside the
+           * totals rather than inside the canvas — it is a property of the
+           * whole index, not of the slice currently drawn. */}
+          <Strata />
         </div>
       }
       list={
@@ -382,16 +390,13 @@ function TopConnectedList({
   overviewPending: boolean;
   overviewResult: Parameters<typeof LegacyBoundary>[0]['result'];
   onSelect: (node: GraphNode) => void;
-  selected: GraphNode | null;
+  selected: TraceFocus | null;
 }) {
   return (
     <LegacyBoundary title="Code" pending={overviewPending} result={overviewResult}>
       {(data) => {
-        const payload = data as {
-          top_connected?: Array<Record<string, unknown>>;
-          totals?: { nodes?: number };
-        };
-        const hubs = (payload.top_connected ?? []) as GraphNode[];
+        const payload = data as GraphOverviewPayload;
+        const hubs = payload.top_connected;
         if (hubs.length === 0)
           return (
             <CenteredState
@@ -402,7 +407,7 @@ function TopConnectedList({
         return (
           <HubField
             hubs={hubs}
-            indexedNodes={payload.totals?.nodes ?? null}
+            indexedNodes={payload.totals.nodes}
             onSelect={onSelect}
             selected={selected}
           />
@@ -419,36 +424,11 @@ function SubgraphCaption({
   totalNodes,
   seedLabel,
 }: {
-  payload:
-    | {
-        mode?: string;
-        seed_id?: string | null;
-        nodes: readonly unknown[];
-        edges: readonly unknown[];
-        capped?: { nodes: boolean; edges: boolean };
-        limits?: Record<string, unknown>;
-      }
-    | undefined;
+  payload: GraphSubgraphPayload | undefined;
   totalNodes: number | null;
   seedLabel: string | null;
 }) {
-  const caption = describeSubgraph(
-    payload
-      ? {
-          mode: payload.mode,
-          seed_id: payload.seed_id,
-          nodes: payload.nodes,
-          edges: payload.edges,
-          capped: payload.capped,
-          limits: {
-            nodes: Number(payload.limits?.['nodes'] ?? Number.NaN),
-            edges: Number(payload.limits?.['edges'] ?? Number.NaN),
-          },
-        }
-      : undefined,
-    totalNodes,
-    seedLabel,
-  );
+  const caption = describeSubgraph(payload, totalNodes, seedLabel);
   if (!caption) return null;
   return (
     <figcaption className="flex flex-col gap-0.5">
@@ -493,7 +473,7 @@ function HubField({
   hubs: GraphNode[];
   indexedNodes: number | null;
   onSelect: (node: GraphNode) => void;
-  selected: GraphNode | null;
+  selected: TraceFocus | null;
 }) {
   // The endpoint already orders by degree, but the view's whole grammar is
   // rank, so it establishes rank itself rather than trusting arrival order.
@@ -669,7 +649,7 @@ function HubField({
 
 /** The hub's own name is the headline. `qualified_name` is not served by this
  * endpoint at all, so the fallback chain is honest about what exists. */
-function displayName(node: GraphNode | undefined): string {
+function displayName(node: TraceFocus | undefined): string {
   if (!node) return '—';
   return node.name ?? node.qualified_name ?? node.id;
 }

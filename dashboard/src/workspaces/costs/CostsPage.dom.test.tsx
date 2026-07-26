@@ -42,9 +42,16 @@ describe('CostsPage truth claims', () => {
     const payload = structuredClone(
       FIXTURES['/api/plugins/savings/overview'],
     ) as Record<string, unknown>;
+    // `savings_api::read_failed_block` — the block reports the failure and
+    // leaves every figure null rather than settling to zero.
     payload['turns'] = {
       available: false,
+      status: 'read_failed',
       error: 'failed to read priced turn ledger',
+      turn_count: null,
+      total_cost_usd: null,
+      total_tokens: null,
+      cost_basis: null,
     };
 
     renderCosts(payload);
@@ -60,7 +67,22 @@ describe('CostsPage truth claims', () => {
     ) as Record<string, unknown>;
     payload['sessions'] = {
       available: false,
+      db: '/fast/projects/tracedecay/.tracedecay/sessions.db',
+      status: 'read_failed',
       error: 'failed to aggregate session tokens',
+      scope: null,
+      messages: null,
+      usage_messages: null,
+      tokenized_messages: null,
+      estimated_messages: null,
+      cost_basis: null,
+      actual: null,
+      tokenized: null,
+      estimated: null,
+      session_count: null,
+      model_count: null,
+      unknown_model_messages: null,
+      token_counting: null,
     };
 
     renderCosts(payload);

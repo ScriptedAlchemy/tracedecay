@@ -48,8 +48,9 @@ pub use evidence_assembly::{
 };
 pub use external_source::{
     MAX_SOURCE_COMMIT_OBSERVATIONS_V1, SourceCommitApplyOutcomeV1, SourceCommitReceiptV1,
-    SourceCommitV1, SourceProjectionCommitV1, SourceProjectionEffectV1, SourceStoreErrorV1,
-    SourceStoreResult, SourceStoreStateV1, apply_source_commit,
+    SourceCommitV1, SourceObjectLineageV1, SourceObjectMutationV1, SourceObjectTransitionV1,
+    SourceObservationEvidenceV1, SourceProjectionCommitV1, SourceProjectionEffectV1,
+    SourceStoreErrorV1, SourceStoreResult, SourceStoreStateV1, apply_source_commit,
 };
 pub use git_index_transactions::{
     GitIndexTransactionBeginRequestV1, GitIndexTransactionBeginResultV1,
@@ -132,10 +133,9 @@ pub use retrieval_anchor::{
 };
 pub use runtime::*;
 pub use session::{
-    DerivedEvidenceMemberPageItemV1, DerivedEvidenceMemberPageV1,
-    MAX_SESSION_SUMMARY_SOURCE_ANCHORS, MAX_SESSION_TEMPORAL_MIGRATION_BATCH_ITEMS,
-    MAX_SESSION_TEMPORAL_PROJECTION_BATCH_ITEMS, MAX_SESSION_TEMPORAL_RETRIEVAL_PAGE_SIZE,
-    SessionFrozenWatermarksV1, SessionGenerationActivateOperation, SessionGenerationActivatePermit,
+    MAX_SESSION_SUMMARY_SOURCE_ANCHORS, MAX_SESSION_TEMPORAL_PROJECTION_BATCH_ITEMS,
+    MAX_SESSION_TEMPORAL_RETRIEVAL_PAGE_SIZE, SessionFrozenWatermarksV1,
+    SessionGenerationActivateOperation, SessionGenerationActivatePermit,
     SessionGenerationActivationReceiptV1, SessionGenerationActivationRequestV1,
     SessionGenerationRebuildBeginOperation, SessionGenerationRebuildBeginPermit,
     SessionGenerationRebuildDispositionV1, SessionGenerationRebuildReceiptV1,
@@ -155,16 +155,9 @@ pub use session::{
     SessionRefreshStateV1, SessionRefreshStore, SessionRefreshTerminalStateV1,
     SessionRetrievalPageV1, SessionRetrievalStore, SessionSnapshotFreezeOperation,
     SessionSnapshotFreezePermit, SessionStoreError, SessionStoreResult,
-    SessionSummaryPublicationDispositionV1, SessionSummaryPublicationReceiptV1,
-    SessionSummaryPublicationRequestV1, SessionSummaryPublishOrReplayOperation,
-    SessionSummaryPublishOrReplayPermit, SessionSummaryStore, SessionTemporalCapabilitiesV1,
+    SessionSummaryPublicationRequestV1, SessionTemporalCapabilitiesV1,
     SessionTemporalCapabilityProvider, SessionTemporalCapabilityV1,
-    SessionTemporalDigestInvalidReasonV1, SessionTemporalDigestV1,
-    SessionTemporalMigrationBatchApplyOperation, SessionTemporalMigrationBatchApplyPermit,
-    SessionTemporalMigrationBatchV1, SessionTemporalMigrationDispositionV1,
-    SessionTemporalMigrationReceiptReadOperation, SessionTemporalMigrationReceiptReadPermit,
-    SessionTemporalMigrationReceiptRequestV1, SessionTemporalMigrationReceiptV1,
-    SessionTemporalMigrationStore, SessionTemporalOperationPermit,
+    SessionTemporalDigestInvalidReasonV1, SessionTemporalDigestV1, SessionTemporalOperationPermit,
     SessionTemporalPageRetrieveOperation, SessionTemporalPageRetrievePermit,
     SessionTemporalProjectionBatchDispositionV1, SessionTemporalProjectionBatchReceiptV1,
     SessionTemporalProjectionBatchV1, SessionTemporalProjectionStore,

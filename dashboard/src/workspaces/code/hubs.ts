@@ -21,7 +21,7 @@ export interface HubRow {
   qualified_name?: string | null | undefined;
   kind?: string | undefined;
   file_path?: string | null | undefined;
-  degree?: number | undefined;
+  degree?: number | null | undefined;
 }
 
 export interface AnnotatedHub<T extends HubRow> {

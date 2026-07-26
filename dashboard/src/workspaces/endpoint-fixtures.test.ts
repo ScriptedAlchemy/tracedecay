@@ -4,10 +4,16 @@
  * Every `/api` route the 12 workspaces consume is served from
  * `stories/fixtures/data.ts` during the visual audit and MSW/DOM tests. This
  * suite asserts that each fixture payload parses against the exact zod schema
- * its consuming workspace validates it with — either an exported
- * per-workspace `contracts.ts` schema, an exported wire schema, or (for pages
- * whose schema is a module-local const) a faithful mirror of that page's schema
- * with a source citation. If a fixture drifts from a contract, this fails.
+ * its consuming workspace validates it with — either a generated wire schema
+ * from `contracts/wire.ts`, or (for the few routes Rust still answers with a
+ * bare `Value`, whose pages read them through a module-local const) a faithful
+ * mirror of that page's schema with a source citation. If a fixture drifts
+ * from a contract, this fails.
+ *
+ * A route read by two workspaces gets ONE test against ONE schema. It used to
+ * get two, because `/api/projects` was modelled twice under two export names,
+ * and two tests asserting two hand-written copies of one body is how the copies
+ * drifted apart without either test noticing.
  *
  * The per-endpoint density assertions encode the fixture spec (e.g. ≥25 facts,
  * ≥30 sessions across 3 providers, ≥250 graph search rows) so a fixture that
@@ -20,18 +26,24 @@ import type { ZodType } from 'zod';
 import { resolveFixture } from '../../stories/fixtures/data.ts';
 import { AnyObject } from '../data/query/legacy.ts';
 import {
-  EnvelopeSchema,
-  StorageTelemetryPayloadSchema,
+  AnalyticsOverviewPayloadSchema,
+  AnalyticsUsageSummarySchema,
   DoctorFindingsPayloadSchema,
-} from '../contracts/wire.ts';
-import { ObservatoryStorageFindingsPayloadSchema } from './observatory/contracts.ts';
-import {
+  DoctorStorageFindingKindSchema,
+  EnvelopeSchema,
+  GraphOverviewPayloadSchema,
+  GraphSearchPayloadSchema,
+  GraphSubgraphPayloadSchema,
+  LcmSessionPayloadSchema,
+  MemoryOverviewPayloadSchema,
+  MemoryStatusPayloadSchema,
   ProjectContextPayloadSchema,
   ProjectsPayloadSchema,
-  ScopedAnalyticsOverviewSchema,
-  ScopedMemoryStatusSchema,
-  ScopedSubgraphPayloadSchema,
-} from './brain/contracts.ts';
+  SavingsOverviewPayloadSchema,
+  SavingsSessionsPayloadSchema,
+  StorageFindingsPayloadSchema,
+  StorageTelemetryPayloadSchema,
+} from '../contracts/wire.ts';
 import {
   ANALYTICS_EVENT_LIMIT,
   describeWindow,
@@ -41,21 +53,9 @@ import {
   type FamilyRow,
 } from './agents/usage.ts';
 import { columnIndexFor, indexedMass } from './brain/field.ts';
-import { DeliveryProjectsPayloadSchema } from './delivery/contracts.ts';
 import { composeDeliveryField } from './delivery/field.ts';
-import {
-  LoomChainPayloadSchema,
-  LoomSessionsPayloadSchema,
-} from './loom/contracts.ts';
 import { composeWeave, summarizeChain } from './loom/weave.ts';
-import {
-  GraphOverviewPayloadSchema,
-  GraphSearchPayloadSchema,
-  SubgraphPayloadSchema,
-} from './code/contracts.ts';
-import { MemoryOverviewPayloadSchema, MemoryStatusSchema } from './knowledge/contracts.ts';
 import { composeTrustDistribution } from './knowledge/trust.ts';
-import { SavingsOverviewPayloadSchema } from './costs/contracts.ts';
 
 /** Parse a resolved fixture, surfacing zod issues on failure. */
 function parse<T>(schema: ZodType<T>, pathname: string, search = ''): T {
@@ -133,7 +133,7 @@ const CapabilitiesSchema = z
 
 // SessionsPage.tsx: OverviewPayload. (LoomPage no longer reads this route —
 // `/api/plugins/hermes-lcm/overview` 500s on the real profile, so the weave
-// draws from `/api/plugins/savings/sessions` instead; see loom/contracts.ts.)
+// draws from `/api/plugins/savings/sessions` instead.)
 const OverviewPayload = z
   .object({ latest_sessions: z.array(AnyObject).optional() })
   .passthrough();
@@ -159,21 +159,6 @@ const MemoryListPayload = z
     holographic: z
       .object({ facts: z.array(AnyObject).optional() })
       .passthrough()
-      .optional(),
-  })
-  .passthrough();
-
-// AgentsPage.tsx: UsagePayload.
-const UsagePayload = z
-  .object({
-    available: z.boolean(),
-    event_count: z.number().optional(),
-    by_category: z
-      .array(
-        z
-          .object({ kind: z.string(), category: z.string(), events: z.number() })
-          .passthrough(),
-      )
       .optional(),
   })
   .passthrough();
@@ -249,18 +234,43 @@ const SkillsPayloadSchema = z
   .passthrough();
 
 describe('endpoint fixtures parse against their consuming contracts', () => {
-  it('GET /api/projects — brain (ProjectsPayloadSchema)', () => {
+  // One route, one schema, one test. Brain and Delivery both read
+  // `/api/projects` and used to assert it against two hand-written copies of
+  // its body under two different export names, which is how the copies drifted
+  // apart without anything noticing. Both surfaces' density requirements now
+  // sit on the one generated `ProjectsPayloadSchema`.
+  it('GET /api/projects — brain + delivery registry (ProjectsPayloadSchema)', () => {
     const data = parse(ProjectsPayloadSchema, '/api/projects');
-    expect(data.project_tree.length).toBeGreaterThanOrEqual(2);
+    const tree = data.project_tree ?? [];
+    expect(tree.length).toBeGreaterThanOrEqual(2);
+
     // Density spec for Brain's field: the surface composes projects into five
     // recency columns against a mass axis, so a fixture that lands everything
     // in one column or at one mass renders a picture that cannot be reviewed.
-    const entries = data.project_tree.flatMap((group) => group.projects);
+    const entries = tree.flatMap((group) => group.projects);
     expect(entries.length).toBeGreaterThanOrEqual(20);
     const columns = new Set(entries.map((e) => columnIndexFor(e.last_seen_at, Date.now() / 1000)));
     expect(columns.size).toBe(5);
     const masses = entries.map(indexedMass);
     expect(Math.max(...masses) / Math.max(Math.min(...masses), 1)).toBeGreaterThan(20);
+    expect(entries.some((entry) => entry.kind === 'worktree')).toBe(true);
+
+    // The delivery field has to compose into something readable, and the
+    // bounds below encode the SHAPE of the real registry, not just its size.
+    const field = composeDeliveryField(tree);
+    expect(field.bodies.length).toBeGreaterThanOrEqual(10);
+    // Branch counts must be skewed, or the log y axis is untested.
+    expect(field.branchCeiling / Math.max(field.branchFloor, 1)).toBeGreaterThan(5);
+    // Repositories must land in more than one recency column, or the x axis
+    // renders as a single occupied stripe and proves nothing.
+    expect(field.columns.filter((column) => column.count > 0).length).toBeGreaterThanOrEqual(2);
+    // Multi-checkout repositories exercise the size channel, which the real
+    // registry currently has nothing to spend.
+    expect(field.multiCheckoutCount).toBeGreaterThan(0);
+    // No body may be pushed out of its own recency column by packing.
+    for (const body of field.bodies) {
+      expect(Math.abs(body.offset)).toBeLessThanOrEqual(0.4);
+    }
   });
 
   it('GET /api/projects/{id} — scoped brain backbone (ProjectContextPayloadSchema)', () => {
@@ -291,24 +301,24 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
     );
   });
 
-  it('GET /api/plugins/graph/subgraph — scoped brain field (ScopedSubgraphPayloadSchema)', () => {
+  it('GET /api/plugins/graph/subgraph — scoped brain field (GraphSubgraphPayloadSchema)', () => {
     const data = parse(
-      ScopedSubgraphPayloadSchema,
+      GraphSubgraphPayloadSchema,
       '/api/projects/tracedecay/plugins/graph/subgraph',
     );
     expect((data.nodes ?? []).length).toBeGreaterThanOrEqual(20);
     expect((data.edges ?? []).length).toBeGreaterThanOrEqual(20);
   });
 
-  it('GET /api/plugins/holographic/status — scoped brain (ScopedMemoryStatusSchema)', () => {
-    const data = parse(ScopedMemoryStatusSchema, '/api/plugins/holographic/status');
+  it('GET /api/plugins/holographic/status — scoped brain (MemoryStatusPayloadSchema)', () => {
+    const data = parse(MemoryStatusPayloadSchema, '/api/plugins/holographic/status');
     expect(data.exists).toBe(true);
     expect(data.memory?.fact_count).toBeGreaterThan(0);
     expect(data.memory?.entity_count).toBeGreaterThan(0);
   });
 
-  it('GET /api/plugins/holographic/status — knowledge trust fallback (MemoryStatusSchema)', () => {
-    const data = parse(MemoryStatusSchema, '/api/plugins/holographic/status');
+  it('GET /api/plugins/holographic/status — knowledge trust fallback (MemoryStatusPayloadSchema)', () => {
+    const data = parse(MemoryStatusPayloadSchema, '/api/plugins/holographic/status');
     // These four bands are the ONLY trust distribution a real store serves
     // correctly, and KnowledgePage falls back to them when the overview's
     // ten-bucket histogram comes back all-zero (which it always does live).
@@ -321,33 +331,10 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
     expect(distribution.degenerate).toBe(false);
   });
 
-  it('GET /api/plugins/analytics/overview — scoped brain (ScopedAnalyticsOverviewSchema)', () => {
-    const data = parse(ScopedAnalyticsOverviewSchema, '/api/plugins/analytics/overview');
+  it('GET /api/plugins/analytics/overview — scoped brain (AnalyticsOverviewPayloadSchema)', () => {
+    const data = parse(AnalyticsOverviewPayloadSchema, '/api/plugins/analytics/overview');
     expect(data.usage?.event_count).toBeGreaterThan(0);
     expect((data.usage?.by_category ?? []).length).toBeGreaterThanOrEqual(3);
-  });
-
-  it('GET /api/projects — delivery (DeliveryProjectsPayloadSchema)', () => {
-    const data = parse(DeliveryProjectsPayloadSchema, '/api/projects');
-    const checkouts = (data.project_tree ?? []).flatMap((g) => g.projects);
-    expect(checkouts.some((c) => c.kind === 'worktree')).toBe(true);
-
-    // The delivery field has to compose into something readable, and the
-    // bounds below encode the SHAPE of the real registry, not just its size.
-    const field = composeDeliveryField(data.project_tree ?? []);
-    expect(field.bodies.length).toBeGreaterThanOrEqual(10);
-    // Branch counts must be skewed, or the log y axis is untested.
-    expect(field.branchCeiling / Math.max(field.branchFloor, 1)).toBeGreaterThan(5);
-    // Repositories must land in more than one recency column, or the x axis
-    // renders as a single occupied stripe and proves nothing.
-    expect(field.columns.filter((column) => column.count > 0).length).toBeGreaterThanOrEqual(2);
-    // Multi-checkout repositories exercise the size channel, which the real
-    // registry currently has nothing to spend.
-    expect(field.multiCheckoutCount).toBeGreaterThan(0);
-    // No body may be pushed out of its own recency column by packing.
-    for (const body of field.bodies) {
-      expect(Math.abs(body.offset)).toBeLessThanOrEqual(0.4);
-    }
   });
 
   it('GET /api/plugins/holographic/ — knowledge (MemoryOverviewPayloadSchema)', () => {
@@ -395,8 +382,8 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
     }
   });
 
-  it('GET /api/plugins/savings/sessions — loom threads (LoomSessionsPayloadSchema)', () => {
-    const data = parse(LoomSessionsPayloadSchema, '/api/plugins/savings/sessions');
+  it('GET /api/plugins/savings/sessions — loom threads (SavingsSessionsPayloadSchema)', () => {
+    const data = parse(SavingsSessionsPayloadSchema, '/api/plugins/savings/sessions');
     const sessions = data.sessions ?? [];
     expect(sessions.length).toBeGreaterThanOrEqual(30);
     expect(new Set(sessions.map((s) => s.provider)).size).toBe(3);
@@ -435,9 +422,9 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
     expect(weave.extent).not.toBeNull();
   });
 
-  it('GET /api/plugins/hermes-lcm/session/{id} — loom chain (LoomChainPayloadSchema)', () => {
+  it('GET /api/plugins/hermes-lcm/session/{id} — loom chain (LcmSessionPayloadSchema)', () => {
     const data = parse(
-      LoomChainPayloadSchema,
+      LcmSessionPayloadSchema,
       '/api/plugins/hermes-lcm/session/035c8f3c-d4e6-4176-afea-6f52e770501e',
     );
     expect(data.exists).toBe(true);
@@ -467,22 +454,21 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
     const data = parse(GraphOverviewPayloadSchema, '/api/plugins/graph/overview');
     const hubs = (data.top_connected ?? []) as Array<Record<string, unknown>>;
     // `graph_queries::top_connected_rows` is a `LIMIT 12` subquery selecting
-    // exactly five columns, so the fixture must serve twelve rows of that
-    // shape and no more. The old bound (>= 15) locked in a fixture that
-    // emitted eighteen FULL node records — a payload the daemon cannot
-    // produce — which meant the Code workspace was being designed and audited
-    // against fields (`qualified_name`, `signature`, `start_line`) this route
-    // never returns.
+    // exactly five columns, so the fixture must serve twelve rows and no more.
+    // The route decodes those rows into `GraphNodeV1`, whose other fields are
+    // `Option` and serialize as explicit nulls — so the five selected columns
+    // must be the only ones carrying a value. Asserting that, rather than the
+    // key set, keeps the original guarantee: the Code workspace cannot be
+    // designed or audited against `qualified_name`, `signature` or
+    // `start_line`, because this route never populates them.
     expect(hubs.length).toBe(12);
+    const SELECTED = ['id', 'name', 'kind', 'file_path', 'degree'];
     for (const hub of hubs) {
       expect(typeof hub['degree']).toBe('number');
-      expect(Object.keys(hub).sort()).toEqual([
-        'degree',
-        'file_path',
-        'id',
-        'kind',
-        'name',
-      ]);
+      const populated = Object.keys(hub)
+        .filter((key) => hub[key] !== null)
+        .sort();
+      expect(populated).toEqual([...SELECTED].sort());
     }
     // Degrees arrive already ranked, highest first.
     const degrees = hubs.map((hub) => hub['degree'] as number);
@@ -500,16 +486,16 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
     expect((data.results ?? []).length).toBeGreaterThanOrEqual(250);
   });
 
-  it('GET /api/plugins/graph/subgraph — code unseeded (SubgraphPayloadSchema)', () => {
-    const data = parse(SubgraphPayloadSchema, '/api/plugins/graph/subgraph');
+  it('GET /api/plugins/graph/subgraph — code unseeded (GraphSubgraphPayloadSchema)', () => {
+    const data = parse(GraphSubgraphPayloadSchema, '/api/plugins/graph/subgraph');
     expect(data.seed_id).toBeNull();
     expect(data.mode).toBe('default');
     expect(data.nodes.length).toBeGreaterThanOrEqual(30);
     expect(data.edges.length).toBeGreaterThanOrEqual(40);
   });
 
-  it('GET /api/plugins/graph/subgraph?node_id= — code seeded (SubgraphPayloadSchema)', () => {
-    const data = parse(SubgraphPayloadSchema, '/api/plugins/graph/subgraph', '?node_id=sym-0');
+  it('GET /api/plugins/graph/subgraph?node_id= — code seeded (GraphSubgraphPayloadSchema)', () => {
+    const data = parse(GraphSubgraphPayloadSchema, '/api/plugins/graph/subgraph', '?node_id=sym-0');
     expect(data.seed_id).toBe('sym-0');
     expect(data.mode).toBe('seeded');
     expect(data.nodes.some((n) => n.id === 'sym-0')).toBe(true);
@@ -525,8 +511,8 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
     expect(data.turns.available).toBe(true);
   });
 
-  it('GET /api/plugins/analytics/usage — agents (UsagePayload)', () => {
-    const data = parse(UsagePayload, '/api/plugins/analytics/usage');
+  it('GET /api/plugins/analytics/usage — agents (AnalyticsUsageSummarySchema)', () => {
+    const data = parse(AnalyticsUsageSummarySchema, '/api/plugins/analytics/usage');
     expect(data.available).toBe(true);
     const rows = data.by_category ?? [];
     expect(rows.length).toBeGreaterThanOrEqual(3);
@@ -629,20 +615,20 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
     expect(env.payload.stores.length).toBeGreaterThan(0);
   });
 
-  // Validated against Observatory's route contract, not the generated
-  // `StorageFindingsPayloadSchema`. That generated shape describes a
-  // `{ kinds, note }` payload, but `storage_findings_api.rs` serves a Doctor
-  // findings envelope with `payload.kind_statuses` — so the old assertion held
-  // the fixture to a shape no real response has, and NavRail's health dot,
-  // which parses this route, could never resolve anything but `unknown`.
-  // The replacement is strictly stronger: the full Doctor payload plus exactly
-  // five named producers, each with a real source state and a reason.
+  // Validated against the generated `StorageFindingsPayloadSchema`, which is
+  // what `storage_findings_api.rs` serves. The producer set is read off the
+  // generated `DoctorStorageFindingKind` union rather than written down as a
+  // count: a sixth kind added in Rust must make this fixture incomplete, not
+  // make a passing assertion silently wrong about what it covered.
   it('GET /api/storage/findings — observatory envelope', () => {
     const env = parse(
-      EnvelopeSchema(ObservatoryStorageFindingsPayloadSchema),
+      EnvelopeSchema(StorageFindingsPayloadSchema),
       '/api/storage/findings',
     );
-    expect(env.payload.kind_statuses.length).toBe(5);
+    const knownKinds = DoctorStorageFindingKindSchema.options.map((option) => option.value);
+    expect(new Set(env.payload.kind_statuses.map((status) => status.kind))).toEqual(
+      new Set(knownKinds),
+    );
     // Every producer names its source state and why, so an omitted read can
     // never be presented as a clean one.
     for (const status of env.payload.kind_statuses) {

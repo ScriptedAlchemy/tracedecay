@@ -140,7 +140,17 @@ export interface SettingsValidationError {
   readonly message: string;
 }
 
-export interface ProjectSettingsPatch {
+/**
+ * The fields the editor found changed — not the request body.
+ *
+ * The contracted body is `ProjectSettingsPatch`, which also carries
+ * `expected_revision_id`; the plan holds that separately so a change set can be
+ * reviewed on its own, and `settingsMutation.ts` merges the two at the PATCH.
+ * Omission here means "not edited", which the daemon reads as no change through
+ * `#[serde(default)]`. Do not rename this back onto the generated name: they
+ * are different values and the shadow gate will reject it.
+ */
+export interface ProjectSettingsChangeSet {
   include?: string[];
   exclude?: string[];
   max_file_size?: number;
@@ -154,7 +164,8 @@ export interface ProjectSettingsPatch {
   };
 }
 
-export interface UserSettingsPatch {
+/** The user-scope counterpart of `ProjectSettingsChangeSet`. */
+export interface UserSettingsChangeSet {
   upload_enabled?: boolean;
   watcher_debounce?: string;
   extraction_timeout_secs?: number;
@@ -325,7 +336,7 @@ export function buildSettingsEditor(payload: unknown): SettingsEditor | null {
 export function planProjectSettingsChange(
   payload: unknown,
   values: ProjectSettingsValues,
-): SettingsChangePlan<ProjectSettingsPatch> {
+): SettingsChangePlan<ProjectSettingsChangeSet> {
   const current = buildSettingsEditor(payload);
   if (!current) {
     return {
@@ -341,7 +352,7 @@ export function planProjectSettingsChange(
   const errors = validateProjectValues(values);
   if (errors.length > 0) return { outcome: 'invalid', errors };
 
-  const patch: ProjectSettingsPatch = {};
+  const patch: ProjectSettingsChangeSet = {};
   if (!sameStrings(values.include, current.project.include)) {
     patch.include = [...values.include];
   }
@@ -358,7 +369,7 @@ export function planProjectSettingsChange(
   if (values.telemetry_timings !== current.project.telemetry_timings) {
     patch.telemetry = { timings: values.telemetry_timings };
   }
-  const sync: NonNullable<ProjectSettingsPatch['sync']> = {};
+  const sync: NonNullable<ProjectSettingsChangeSet['sync']> = {};
   if (values.auto_track_pr_branches !== current.project.auto_track_pr_branches) {
     sync.auto_track_pr_branches = values.auto_track_pr_branches;
   }
@@ -376,7 +387,7 @@ export function planProjectSettingsChange(
 export function planUserSettingsChange(
   payload: unknown,
   values: UserSettingsValues,
-): SettingsChangePlan<UserSettingsPatch> {
+): SettingsChangePlan<UserSettingsChangeSet> {
   const current = buildSettingsEditor(payload);
   if (!current) {
     return {
@@ -392,7 +403,7 @@ export function planUserSettingsChange(
   const errors = validateUserValues(values);
   if (errors.length > 0) return { outcome: 'invalid', errors };
 
-  const patch: UserSettingsPatch = {};
+  const patch: UserSettingsChangeSet = {};
   if (values.upload_enabled !== current.user.upload_enabled) {
     patch.upload_enabled = values.upload_enabled;
   }

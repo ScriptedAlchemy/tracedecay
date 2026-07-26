@@ -2,8 +2,8 @@
 //!
 //! Per-project semantic runtimes submit immutable source-generation batches
 //! through [`SemanticProjectionSchedulingPortV1`]. The daemon drains one batch
-//! per exact worktree in round-robin order. Interactive queries use a separate
-//! fail-fast reservation path and never become projection waiters.
+//! per exact worktree in round-robin order. Interactive queries use the
+//! zero-waiter semantic session pool rather than this projection scheduler.
 
 #![forbid(unsafe_code)]
 
@@ -129,7 +129,6 @@ pub struct SemanticProjectionSchedulerStatsV1 {
     pub running_batches: usize,
     pub reserved_session_memory_bytes: u64,
     pub active_publications: usize,
-    pub active_interactive_queries: usize,
 }
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -144,10 +143,6 @@ pub enum SemanticProjectionScheduleErrorV1 {
     QueueBatchCapacity { requested: usize, available: usize },
     #[error("semantic session-memory reservation {requested} exceeds the global maximum {maximum}")]
     SessionMemoryReservationTooLarge { requested: u64, maximum: u64 },
-    #[error(
-        "semantic session-memory capacity exhausted: requested {requested}, available {available}"
-    )]
-    SessionMemoryCapacity { requested: u64, available: u64 },
     #[error("semantic publication capacity exhausted: active {active}, maximum {maximum}")]
     PublicationCapacity { active: usize, maximum: usize },
     #[error("semantic projection batch has already claimed its publication slot")]
@@ -175,11 +170,6 @@ pub trait SemanticProjectionSchedulingPortV1: Send + Sync {
         worktree_id: &WorktreeId,
         source_generation: &CodeGenerationId,
     ) -> SemanticProjectionCancellationOutcomeV1;
-
-    fn try_admit_interactive_query(
-        &self,
-        session_memory_bytes: u64,
-    ) -> Result<SemanticInteractiveQueryLeaseV1, SemanticProjectionScheduleErrorV1>;
 
     fn stats(&self) -> SemanticProjectionSchedulerStatsV1;
 }
@@ -211,7 +201,6 @@ struct SemanticProjectionSchedulerStateV1 {
     queued_bytes: u64,
     reserved_session_memory_bytes: u64,
     active_publications: usize,
-    active_interactive_queries: usize,
     draining_work: bool,
     work_drain_requested: bool,
 }
@@ -528,39 +517,6 @@ impl DaemonGlobalSemanticProjectionSchedulerV1 {
         }
     }
 
-    pub fn try_admit_interactive_query(
-        &self,
-        session_memory_bytes: u64,
-    ) -> Result<SemanticInteractiveQueryLeaseV1, SemanticProjectionScheduleErrorV1> {
-        if session_memory_bytes > self.limits.max_session_memory_bytes {
-            return Err(
-                SemanticProjectionScheduleErrorV1::SessionMemoryReservationTooLarge {
-                    requested: session_memory_bytes,
-                    maximum: self.limits.max_session_memory_bytes,
-                },
-            );
-        }
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        let available = self
-            .limits
-            .max_session_memory_bytes
-            .saturating_sub(state.reserved_session_memory_bytes);
-        if session_memory_bytes > available {
-            return Err(SemanticProjectionScheduleErrorV1::SessionMemoryCapacity {
-                requested: session_memory_bytes,
-                available,
-            });
-        }
-        state.reserved_session_memory_bytes = state
-            .reserved_session_memory_bytes
-            .saturating_add(session_memory_bytes);
-        state.active_interactive_queries += 1;
-        Ok(SemanticInteractiveQueryLeaseV1 {
-            session_memory_bytes,
-            scheduler: self.clone(),
-        })
-    }
-
     pub fn stats(&self) -> SemanticProjectionSchedulerStatsV1 {
         let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         SemanticProjectionSchedulerStatsV1 {
@@ -569,7 +525,6 @@ impl DaemonGlobalSemanticProjectionSchedulerV1 {
             running_batches: state.active.len(),
             reserved_session_memory_bytes: state.reserved_session_memory_bytes,
             active_publications: state.active_publications,
-            active_interactive_queries: state.active_interactive_queries,
         }
     }
 
@@ -598,18 +553,6 @@ impl DaemonGlobalSemanticProjectionSchedulerV1 {
     fn release_publication(&self) {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         state.active_publications = state.active_publications.saturating_sub(1);
-    }
-
-    fn release_interactive_query(&self, session_memory_bytes: u64) {
-        {
-            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-            state.reserved_session_memory_bytes = state
-                .reserved_session_memory_bytes
-                .saturating_sub(session_memory_bytes);
-            state.active_interactive_queries = state.active_interactive_queries.saturating_sub(1);
-            state.work_drain_requested = true;
-        }
-        self.drain_ready_work();
     }
 
     fn drain_ready_work(&self) {
@@ -665,13 +608,6 @@ impl SemanticProjectionSchedulingPortV1 for DaemonGlobalSemanticProjectionSchedu
         source_generation: &CodeGenerationId,
     ) -> SemanticProjectionCancellationOutcomeV1 {
         Self::cancel_generation(self, worktree_id, source_generation)
-    }
-
-    fn try_admit_interactive_query(
-        &self,
-        session_memory_bytes: u64,
-    ) -> Result<SemanticInteractiveQueryLeaseV1, SemanticProjectionScheduleErrorV1> {
-        Self::try_admit_interactive_query(self, session_memory_bytes)
     }
 
     fn stats(&self) -> SemanticProjectionSchedulerStatsV1 {
@@ -756,24 +692,6 @@ impl SemanticProjectionPublicationLeaseV1 {
 impl Drop for SemanticProjectionPublicationLeaseV1 {
     fn drop(&mut self) {
         self.scheduler.release_publication();
-    }
-}
-
-pub struct SemanticInteractiveQueryLeaseV1 {
-    session_memory_bytes: u64,
-    scheduler: DaemonGlobalSemanticProjectionSchedulerV1,
-}
-
-impl SemanticInteractiveQueryLeaseV1 {
-    pub fn reserved_session_memory_bytes(&self) -> u64 {
-        self.session_memory_bytes
-    }
-}
-
-impl Drop for SemanticInteractiveQueryLeaseV1 {
-    fn drop(&mut self) {
-        self.scheduler
-            .release_interactive_query(self.session_memory_bytes);
     }
 }
 
@@ -930,28 +848,6 @@ mod tests {
     }
 
     #[test]
-    fn interactive_queries_are_fail_fast_and_never_enter_projection_queue() {
-        let scheduler = scheduler();
-        scheduler.enqueue(batch("a", "one", 10, 70)).unwrap();
-        let before = scheduler.stats();
-        let query = scheduler
-            .try_admit_interactive_query(40)
-            .expect("interactive query admitted immediately");
-
-        assert_eq!(scheduler.stats().queued_batches, before.queued_batches);
-        assert!(scheduler.try_dispatch().is_none());
-        assert!(matches!(
-            scheduler.try_admit_interactive_query(61),
-            Err(SemanticProjectionScheduleErrorV1::SessionMemoryCapacity {
-                requested: 61,
-                available: 60,
-            })
-        ));
-        drop(query);
-        assert!(scheduler.try_dispatch().is_some());
-    }
-
-    #[test]
     fn cancellation_removes_only_the_exact_worktree_generation() {
         let scheduler = scheduler();
         scheduler.enqueue(batch("a", "old", 10, 1)).unwrap();
@@ -981,7 +877,8 @@ mod tests {
     #[test]
     fn scheduled_work_self_drains_in_worktree_fair_order_after_capacity_returns() {
         let scheduler = scheduler();
-        let blocker = scheduler.try_admit_interactive_query(100).unwrap();
+        scheduler.enqueue(batch("blocker", "one", 1, 100)).unwrap();
+        let blocker = scheduler.try_dispatch().expect("capacity blocker");
         let order = Arc::new(Mutex::new(Vec::new()));
         for (worktree, label) in [("a", "a1"), ("a", "a2"), ("b", "b1")] {
             let order = Arc::clone(&order);

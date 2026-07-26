@@ -93,7 +93,7 @@ pub fn callable_code_handler_descriptors()
 pub fn callable_code_catalog_contribution()
 -> Result<CatalogContributionV1, ApplicationContractError> {
     let mut capabilities = Vec::with_capacity(CALLABLE_CODE_OPERATION_COUNT);
-    let mut bindings = Vec::with_capacity(9);
+    let mut bindings = Vec::with_capacity(27);
     for kind in CallableCodeOperationKind::ALL
         .into_iter()
         .filter(|kind| canonical_surface_equivalent(*kind).is_none())
@@ -119,6 +119,21 @@ pub fn callable_code_catalog_contribution()
                 capability_id: code_query_capability_id(kind)?,
                 surface,
                 operation: SurfaceOperationName::new(operation)?,
+                protocol_revisions: ProtocolRevisionRange::new(1, 1)?,
+                required_features: Vec::new(),
+                status: BindingStatus::Current,
+                alias_of: None,
+            })?);
+            binding_ids.push(binding_id);
+        }
+        for method in lsp_methods(kind) {
+            let method_id = method.to_ascii_lowercase().replace('/', "-");
+            let binding_id = BindingId::new(format!("binding.lsp.{operation}.{method_id}.v1"))?;
+            bindings.push(SurfaceBindingV1::new(SurfaceBindingInputV1 {
+                binding_id: binding_id.clone(),
+                capability_id: code_query_capability_id(kind)?,
+                surface: BindingSurface::Lsp,
+                operation: SurfaceOperationName::new(*method)?,
                 protocol_revisions: ProtocolRevisionRange::new(1, 1)?,
                 required_features: Vec::new(),
                 status: BindingStatus::Current,
@@ -159,7 +174,13 @@ fn canonical_surface_equivalent(kind: CallableCodeOperationKind) -> Option<&'sta
         CallableCodeOperationKind::SourceMetadata => Some("file_metadata"),
         CallableCodeOperationKind::ExactOccurrence
         | CallableCodeOperationKind::PhraseSearch
-        | CallableCodeOperationKind::Callees => None,
+        | CallableCodeOperationKind::Callees
+        | CallableCodeOperationKind::Facets
+        | CallableCodeOperationKind::Timeline
+        | CallableCodeOperationKind::Declaration
+        | CallableCodeOperationKind::Definition
+        | CallableCodeOperationKind::TypeDefinition
+        | CallableCodeOperationKind::References => None,
     }
 }
 
@@ -168,6 +189,12 @@ fn reachable_surface_operation(kind: CallableCodeOperationKind) -> Option<&'stat
         CallableCodeOperationKind::ExactOccurrence => Some("code_exact_occurrence"),
         CallableCodeOperationKind::PhraseSearch => Some("code_phrase_search"),
         CallableCodeOperationKind::Callees => Some("code_callees"),
+        CallableCodeOperationKind::Facets => Some("code_facets"),
+        CallableCodeOperationKind::Timeline => Some("code_timeline"),
+        CallableCodeOperationKind::Declaration => Some("code_declaration"),
+        CallableCodeOperationKind::Definition => Some("code_definition"),
+        CallableCodeOperationKind::TypeDefinition => Some("code_type_definition"),
+        CallableCodeOperationKind::References => Some("code_references"),
         CallableCodeOperationKind::SymbolSearch
         | CallableCodeOperationKind::QualifiedName
         | CallableCodeOperationKind::SignatureSearch
@@ -177,6 +204,16 @@ fn reachable_surface_operation(kind: CallableCodeOperationKind) -> Option<&'stat
         | CallableCodeOperationKind::Impact
         | CallableCodeOperationKind::ModuleApi
         | CallableCodeOperationKind::SourceMetadata => None,
+    }
+}
+
+fn lsp_methods(kind: CallableCodeOperationKind) -> &'static [&'static str] {
+    match kind {
+        CallableCodeOperationKind::ExactOccurrence => {
+            &["textDocument/definition", "textDocument/references"]
+        }
+        CallableCodeOperationKind::Callees => &["callHierarchy/outgoingCalls"],
+        _ => &[],
     }
 }
 

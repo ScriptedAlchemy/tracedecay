@@ -5,16 +5,14 @@ use axum::Router;
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::StatusCode;
 use axum::response::Json;
-use serde::Deserialize;
-use serde_json::{Value, json};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 use super::{DashboardState, build_selected_project_state, config_error};
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::ProjectRegistryContext;
-use crate::project_registry::{
-    PublicCodeProject, PublicProjectRegistryContext, build_project_registry_view,
-};
+use crate::project_registry::{PublicCodeProject, build_project_registry_view};
 
 #[derive(Clone)]
 pub(crate) struct DashboardRuntime {
@@ -126,24 +124,51 @@ pub(crate) struct ProjectsParams {
     limit: Option<usize>,
 }
 
+#[derive(Debug, Serialize, JsonSchema)]
+pub(super) struct ProjectsPayloadV1 {
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    limit: usize,
+    truncated: Option<bool>,
+    projects: Option<Vec<PublicCodeProject>>,
+    active_project_id: Option<String>,
+    active_project_root: String,
+    summary: Option<crate::project_registry::ProjectRegistrySummary>,
+    project_tree: Option<Vec<crate::project_registry::ProjectRepoGroup>>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub(super) struct ProjectContextPayloadV1 {
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    is_active: Option<bool>,
+    project: Option<PublicCodeProject>,
+    aliases: Vec<crate::global_db::ProjectAliasRecord>,
+    stores: Vec<crate::global_db::ProjectStoreContext>,
+}
+
 pub(crate) async fn list(
     State(runtime): State<DashboardRuntime>,
     Query(params): Query<ProjectsParams>,
-) -> (StatusCode, Json<Value>) {
+) -> (StatusCode, Json<ProjectsPayloadV1>) {
     let limit = params.limit.unwrap_or(100).clamp(1, 250);
     let Some(db) = runtime.active.savings_db.as_ref() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({
-                "status": "missing_registry",
-                "limit": limit,
-                "truncated": null,
-                "projects": null,
-                "active_project_id": runtime.active_project_id(),
-                "active_project_root": runtime.active_project_root(),
-                "summary": null,
-                "project_tree": null,
-            })),
+            Json(ProjectsPayloadV1 {
+                status: "missing_registry".to_owned(),
+                error: None,
+                limit,
+                truncated: None,
+                projects: None,
+                active_project_id: runtime.active_project_id().map(str::to_owned),
+                active_project_root: runtime.active_project_root(),
+                summary: None,
+                project_tree: None,
+            }),
         );
     };
 
@@ -152,17 +177,17 @@ pub(crate) async fn list(
         Err(error) => {
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({
-                    "status": "registry_unavailable",
-                    "error": error.to_string(),
-                    "limit": limit,
-                    "truncated": null,
-                    "projects": null,
-                    "active_project_id": runtime.active_project_id(),
-                    "active_project_root": runtime.active_project_root(),
-                    "summary": null,
-                    "project_tree": null,
-                })),
+                Json(ProjectsPayloadV1 {
+                    status: "registry_unavailable".to_owned(),
+                    error: Some(error.to_string()),
+                    limit,
+                    truncated: None,
+                    projects: None,
+                    active_project_id: runtime.active_project_id().map(str::to_owned),
+                    active_project_root: runtime.active_project_root(),
+                    summary: None,
+                    project_tree: None,
+                }),
             );
         }
     };
@@ -174,17 +199,17 @@ pub(crate) async fn list(
         Err(error) => {
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({
-                    "status": "registry_unavailable",
-                    "error": error.to_string(),
-                    "limit": limit,
-                    "truncated": null,
-                    "projects": null,
-                    "active_project_id": active_project_id,
-                    "active_project_root": runtime.active_project_root(),
-                    "summary": null,
-                    "project_tree": null,
-                })),
+                Json(ProjectsPayloadV1 {
+                    status: "registry_unavailable".to_owned(),
+                    error: Some(error.to_string()),
+                    limit,
+                    truncated: None,
+                    projects: None,
+                    active_project_id,
+                    active_project_root: runtime.active_project_root(),
+                    summary: None,
+                    project_tree: None,
+                }),
             );
         }
     };
@@ -196,16 +221,17 @@ pub(crate) async fn list(
 
     (
         StatusCode::OK,
-        Json(json!({
-            "status": "ok",
-            "limit": limit,
-            "truncated": truncated,
-            "active_project_id": active_project_id,
-            "active_project_root": runtime.active_project_root(),
-            "summary": view.summary,
-            "project_tree": view.project_tree,
-            "projects": rows,
-        })),
+        Json(ProjectsPayloadV1 {
+            status: "ok".to_owned(),
+            error: None,
+            limit,
+            truncated: Some(truncated),
+            projects: Some(rows),
+            active_project_id,
+            active_project_root: runtime.active_project_root(),
+            summary: Some(view.summary),
+            project_tree: Some(view.project_tree),
+        }),
     )
 }
 
@@ -220,32 +246,37 @@ pub(crate) fn is_registry_unavailable_error(error: &TraceDecayError) -> bool {
     )
 }
 
-pub(crate) fn registry_unavailable_response(error: &TraceDecayError) -> (StatusCode, Json<Value>) {
+pub(crate) fn registry_unavailable_response(
+    error: &TraceDecayError,
+) -> (StatusCode, Json<ProjectContextPayloadV1>) {
     (
         StatusCode::SERVICE_UNAVAILABLE,
-        Json(json!({
-            "status": "registry_unavailable",
-            "error": error.to_string(),
-            "project": null,
-            "aliases": [],
-            "stores": [],
-        })),
+        Json(ProjectContextPayloadV1 {
+            status: "registry_unavailable".to_owned(),
+            error: Some(error.to_string()),
+            is_active: None,
+            project: None,
+            aliases: Vec::new(),
+            stores: Vec::new(),
+        }),
     )
 }
 
 pub(crate) async fn context(
     State(runtime): State<DashboardRuntime>,
     AxumPath(project_id): AxumPath<String>,
-) -> (StatusCode, Json<Value>) {
+) -> (StatusCode, Json<ProjectContextPayloadV1>) {
     let Some(db) = runtime.active.savings_db.as_ref() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({
-                "status": "missing_registry",
-                "project": null,
-                "aliases": [],
-                "stores": [],
-            })),
+            Json(ProjectContextPayloadV1 {
+                status: "missing_registry".to_owned(),
+                error: None,
+                is_active: None,
+                project: None,
+                aliases: Vec::new(),
+                stores: Vec::new(),
+            }),
         );
     };
     let context = match db.project_registry_context_by_id(&project_id).await {
@@ -255,24 +286,30 @@ pub(crate) async fn context(
     let Some(context) = context else {
         return (
             StatusCode::NOT_FOUND,
-            Json(json!({
-                "status": "not_found",
-                "project": null,
-                "aliases": [],
-                "stores": [],
-            })),
+            Json(ProjectContextPayloadV1 {
+                status: "not_found".to_owned(),
+                error: None,
+                is_active: None,
+                project: None,
+                aliases: Vec::new(),
+                stores: Vec::new(),
+            }),
         );
     };
     let is_active = Some(project_id.as_str()) == runtime.active_project_id();
     (
         StatusCode::OK,
-        Json(json!({
-            "status": "ok",
-            "is_active": is_active,
-            "project": PublicProjectRegistryContext::new(&context, runtime.active_project_id()).project,
-            "aliases": context.aliases,
-            "stores": context.stores,
-        })),
+        Json(ProjectContextPayloadV1 {
+            status: "ok".to_owned(),
+            error: None,
+            is_active: Some(is_active),
+            project: Some(PublicCodeProject::from_record(
+                &context.project,
+                runtime.active_project_id(),
+            )),
+            aliases: context.aliases,
+            stores: context.stores,
+        }),
     )
 }
 

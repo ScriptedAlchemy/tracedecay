@@ -16,7 +16,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracedecay_domain::{
-    LogicalCopyRecordV1, RetrievalGrainV1, SessionContractError, SessionId,
+    LogicalCopyRecordV1, RetrievalGrainV1, SESSION_TEMPORAL_CURSOR_MAX_CANONICAL_BYTES,
+    SESSION_TEMPORAL_CURSOR_MAX_PARTICIPANTS, SessionContractError, SessionId,
     SessionSourceCoverageReasonV1, SessionSourceCoverageReceiptV1, SessionSourceCoverageStateV1,
     SessionSourceCoverageV1, SessionSourceFrontierV1, SessionSourceIdV1, SessionSummaryRecordV1,
     SessionTemporalCoverageRequestV1, SignedCursorKeyRefV1, TemporalModeV1,
@@ -40,8 +41,9 @@ const MAX_CONTINUATION_KEY_BYTES: usize = 4_096;
 const MAX_BOUNDED_PAGE_PREALLOC: usize = 64;
 const MAX_CURSOR_SECRET_BYTES: usize = 256;
 const PROFILE_ROOT_PROJECT_KEY: &str = "user";
-pub const MAX_TEMPORAL_PARTICIPANTS: usize = 256;
-pub const MAX_TEMPORAL_PARTICIPANT_MANIFEST_BYTES: usize = 65_536;
+pub const MAX_TEMPORAL_PARTICIPANTS: usize = SESSION_TEMPORAL_CURSOR_MAX_PARTICIPANTS;
+pub const MAX_TEMPORAL_PARTICIPANT_MANIFEST_BYTES: usize =
+    SESSION_TEMPORAL_CURSOR_MAX_CANONICAL_BYTES;
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum TemporalPortError {
@@ -513,6 +515,8 @@ impl Default for TemporalMessageTypeFilterV1 {
 pub(crate) struct TemporalCandidateFilterV1 {
     pub(crate) project_key: Option<String>,
     pub(crate) parent_session_id: Option<String>,
+    pub(crate) source: Option<String>,
+    pub(crate) include_summaries: bool,
     pub(crate) session_scope: TemporalSessionScopeFilterV1,
     pub(crate) message_type: TemporalMessageTypeFilterV1,
     pub(crate) roles: Vec<String>,
@@ -545,6 +549,7 @@ impl TemporalCandidateFilterV1 {
         for (field, value) in [
             ("project_key", self.project_key.as_deref()),
             ("parent_session_id", self.parent_session_id.as_deref()),
+            ("source", self.source.as_deref()),
             ("git_branch", self.git_branch.as_deref()),
             ("git_worktree", self.git_worktree.as_deref()),
             ("git_commit", self.git_commit.as_deref()),
@@ -762,9 +767,23 @@ pub struct KernelVersions {
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
-pub enum TemporalSourceAccess {
+pub enum TemporalParticipantAuthorization {
     #[serde(rename = "a")]
     Authorized,
+    #[serde(rename = "n")]
+    Denied,
+}
+
+impl Default for TemporalParticipantAuthorization {
+    fn default() -> Self {
+        Self::Denied
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+pub enum TemporalSourceAccess {
+    #[serde(rename = "a")]
+    Available,
     #[serde(rename = "u")]
     Unavailable,
     #[serde(rename = "l")]
@@ -776,7 +795,7 @@ pub enum TemporalSourceAccess {
     #[serde(rename = "x")]
     Redacted,
     #[serde(rename = "n")]
-    Unauthorized,
+    LegacyUnauthorized,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -802,6 +821,8 @@ pub struct TemporalParticipantGeneration {
     configuration_digest: String,
     #[serde(rename = "a")]
     authorization_digest: String,
+    #[serde(default, rename = "q")]
+    authorization: TemporalParticipantAuthorization,
     #[serde(rename = "z")]
     access: TemporalSourceAccess,
 }
@@ -815,6 +836,7 @@ impl TemporalParticipantGeneration {
         graph_watermark: u64,
         configuration_digest: &BindingDigest,
         authorization_digest: &BindingDigest,
+        authorization: TemporalParticipantAuthorization,
         access: TemporalSourceAccess,
     ) -> Result<Self, TemporalPortError> {
         let source_id = source_id.into();
@@ -833,6 +855,7 @@ impl TemporalParticipantGeneration {
             summary_watermark: watermarks.summary,
             configuration_digest: configuration_digest.as_str().to_string(),
             authorization_digest: authorization_digest.as_str().to_string(),
+            authorization,
             access,
         })
     }
@@ -869,6 +892,22 @@ impl TemporalParticipantGeneration {
 
     pub fn authorization_digest(&self) -> &str {
         &self.authorization_digest
+    }
+
+    pub const fn authorization(&self) -> TemporalParticipantAuthorization {
+        self.authorization
+    }
+
+    /// Snapshot authority is independent from per-source lifecycle state.
+    ///
+    /// The legacy unauthorized source wire state remains denied for old signed
+    /// manifests, while every newly built manifest uses the dedicated,
+    /// fail-closed authorization field.
+    pub const fn is_authorized_for_snapshot(&self) -> bool {
+        matches!(
+            self.authorization,
+            TemporalParticipantAuthorization::Authorized
+        ) && !matches!(self.access, TemporalSourceAccess::LegacyUnauthorized)
     }
 
     pub const fn access(&self) -> TemporalSourceAccess {
@@ -947,7 +986,9 @@ impl TemporalParticipantManifest {
                 ))?;
                 let observed = SessionSourceFrontierV1::new(entry.source_watermark);
                 let committed = SessionSourceFrontierV1::new(entry.projection_watermark);
-                if entry.access == TemporalSourceAccess::Authorized {
+                if entry.is_authorized_for_snapshot()
+                    && entry.access == TemporalSourceAccess::Available
+                {
                     return SessionSourceCoverageV1::new(
                         source_id,
                         observed,
@@ -983,11 +1024,12 @@ impl TemporalParticipantManifest {
                         SessionSourceCoverageStateV1::Redacted,
                         SessionSourceCoverageReasonV1::Redacted,
                     ),
-                    TemporalSourceAccess::Unavailable | TemporalSourceAccess::Unauthorized => (
+                    TemporalSourceAccess::Unavailable
+                    | TemporalSourceAccess::LegacyUnauthorized => (
                         SessionSourceCoverageStateV1::Unavailable,
                         SessionSourceCoverageReasonV1::Unavailable,
                     ),
-                    TemporalSourceAccess::Authorized => unreachable!(),
+                    TemporalSourceAccess::Available => unreachable!(),
                 };
                 SessionSourceCoverageV1::new(
                     source_id,
@@ -1046,7 +1088,8 @@ impl TemporalExecutionSnapshot {
                 watermarks.projection,
                 &versions.configuration_digest,
                 request.access_digest(),
-                TemporalSourceAccess::Authorized,
+                TemporalParticipantAuthorization::Denied,
+                TemporalSourceAccess::Available,
             )?])?;
         Ok(Self {
             request,
@@ -2238,7 +2281,8 @@ mod tests {
             6,
             &BindingDigest::new("configuration", digest('7')).expect("configuration"),
             &BindingDigest::new("authorization", digest('8')).expect("authorization"),
-            TemporalSourceAccess::Authorized,
+            TemporalParticipantAuthorization::Authorized,
+            TemporalSourceAccess::Available,
         )
         .expect("participant")
     }
@@ -2472,6 +2516,49 @@ mod tests {
                 maximum: MAX_TEMPORAL_PARTICIPANTS,
             }) if observed == MAX_TEMPORAL_PARTICIPANTS + 1
         ));
+    }
+
+    fn participant_entries_with_canonical_bytes(
+        target_bytes: usize,
+    ) -> Vec<TemporalParticipantGeneration> {
+        let mut entries = (0..128)
+            .map(|index| participant("session-1", &format!("s{index:03}"), 1))
+            .collect::<Vec<_>>();
+        let base_bytes = serde_json::to_vec(&entries).unwrap().len();
+        assert!(base_bytes <= target_bytes);
+        let mut remaining = target_bytes - base_bytes;
+        for entry in &mut entries {
+            let available = 512_usize.saturating_sub(entry.source_id.len());
+            let add = available.min(remaining);
+            entry.source_id.push_str(&"x".repeat(add));
+            remaining -= add;
+            if remaining == 0 {
+                break;
+            }
+        }
+        assert_eq!(remaining, 0, "test entries could not reach target size");
+        assert_eq!(serde_json::to_vec(&entries).unwrap().len(), target_bytes);
+        entries
+    }
+
+    #[test]
+    fn participant_manifest_accepts_exact_canonical_byte_limit() {
+        let entries =
+            participant_entries_with_canonical_bytes(MAX_TEMPORAL_PARTICIPANT_MANIFEST_BYTES);
+        assert!(TemporalParticipantManifest::new(entries).is_ok());
+    }
+
+    #[test]
+    fn participant_manifest_rejects_one_byte_over_canonical_limit() {
+        let entries =
+            participant_entries_with_canonical_bytes(MAX_TEMPORAL_PARTICIPANT_MANIFEST_BYTES + 1);
+        assert_eq!(
+            TemporalParticipantManifest::new(entries),
+            Err(TemporalPortError::ParticipantManifestBytesExceeded {
+                observed: MAX_TEMPORAL_PARTICIPANT_MANIFEST_BYTES + 1,
+                maximum: MAX_TEMPORAL_PARTICIPANT_MANIFEST_BYTES,
+            })
+        );
     }
 
     struct ScopeObservingPort {
@@ -4175,7 +4262,8 @@ mod tests {
                 projection_watermark,
                 &configuration,
                 &authorization,
-                TemporalSourceAccess::Authorized,
+                TemporalParticipantAuthorization::Authorized,
+                TemporalSourceAccess::Available,
             )
             .unwrap()
         };
@@ -4194,5 +4282,75 @@ mod tests {
             tracedecay_domain::SessionSourceCoverageAggregateStateV1::Partial
         );
         assert_eq!(receipt.max_frontier_lag(), 3);
+    }
+
+    #[test]
+    fn authorized_lifecycle_states_do_not_become_snapshot_denials() {
+        use tracedecay_domain::SessionSourceCoverageStateV1;
+
+        let configuration =
+            BindingDigest::new("configuration_digest", digest('3')).expect("digest");
+        let authorization =
+            BindingDigest::new("authorization_digest", digest('4')).expect("digest");
+        for (access, expected_coverage) in [
+            (
+                TemporalSourceAccess::Locked,
+                SessionSourceCoverageStateV1::Locked,
+            ),
+            (
+                TemporalSourceAccess::RetentionWithheld,
+                SessionSourceCoverageStateV1::RetentionWithheld,
+            ),
+            (
+                TemporalSourceAccess::Deleted,
+                SessionSourceCoverageStateV1::RetentionWithheld,
+            ),
+            (
+                TemporalSourceAccess::Redacted,
+                SessionSourceCoverageStateV1::Redacted,
+            ),
+            (
+                TemporalSourceAccess::Unavailable,
+                SessionSourceCoverageStateV1::Unavailable,
+            ),
+        ] {
+            let participant = TemporalParticipantGeneration::new(
+                SessionId::new("session.lifecycle").unwrap(),
+                "claude",
+                TemporalWatermarks {
+                    generation: 1,
+                    source: 10,
+                    projection: 10,
+                    index: 10,
+                    summary: 10,
+                },
+                10,
+                &configuration,
+                &authorization,
+                TemporalParticipantAuthorization::Authorized,
+                access,
+            )
+            .unwrap();
+            assert!(participant.is_authorized_for_snapshot());
+            let coverage = TemporalParticipantManifest::new(vec![participant])
+                .unwrap()
+                .source_coverage(TemporalModeV1::Current)
+                .unwrap();
+            assert_eq!(coverage.sources()[0].state(), expected_coverage);
+        }
+    }
+
+    #[test]
+    fn manifests_without_explicit_authorization_fail_closed() {
+        let participant = participant("session.stale", "claude", 1);
+        let mut wire = serde_json::to_value(participant).unwrap();
+        wire.as_object_mut().unwrap().remove("q");
+        let stale: TemporalParticipantGeneration = serde_json::from_value(wire).unwrap();
+
+        assert_eq!(
+            stale.authorization(),
+            TemporalParticipantAuthorization::Denied
+        );
+        assert!(!stale.is_authorized_for_snapshot());
     }
 }

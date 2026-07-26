@@ -32,11 +32,11 @@ import { useLegacy } from '../../data/query/useLegacy.ts';
 import { DeliveryFieldPlot } from './DeliveryField.tsx';
 import { composeDeliveryField, type DeliveryBody, type DeliveryField } from './field.ts';
 import {
-  DeliveryOverviewPayloadSchema,
-  DeliveryProjectsPayloadSchema,
-  type DeliveryOverviewPayload,
+  type DeliveryOverview,
+  DeliveryOverviewSchema,
   type ProjectRepoGroup,
-} from './contracts.ts';
+  ProjectsPayloadSchema,
+} from '../../contracts/wire.ts';
 
 /**
  * Delivery — the daemon's git surface, read as a field rather than scrolled as
@@ -57,11 +57,11 @@ export function DeliveryPage() {
   const projects = useLegacy(
     ['delivery', 'projects'],
     '/api/projects',
-    DeliveryProjectsPayloadSchema,
+    ProjectsPayloadSchema,
   );
   const overview = useQuery({
     queryKey: ['delivery', 'overview'],
-    queryFn: () => fetchEnvelope('/api/delivery/overview', DeliveryOverviewPayloadSchema),
+    queryFn: () => fetchEnvelope('/api/delivery/overview', DeliveryOverviewSchema),
   });
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
@@ -126,7 +126,7 @@ function DeliveryBody_({
   selectedId: string | null;
   onSelect: (id: string | null) => void;
   overviewPending: boolean;
-  overview: EnvelopeResult<DeliveryOverviewPayload> | undefined;
+  overview: EnvelopeResult<DeliveryOverview> | undefined;
 }) {
   // Keyed on identity: the payload is fetched once and does not churn, and the
   // field's clock only matters at recency-column boundaries.
@@ -220,7 +220,7 @@ function PipelineOverview({
   result,
 }: {
   pending: boolean;
-  result: EnvelopeResult<DeliveryOverviewPayload> | undefined;
+  result: EnvelopeResult<DeliveryOverview> | undefined;
 }) {
   if (pending) {
     return <StateChip kind="loading" detail="reading delivery projections" />;

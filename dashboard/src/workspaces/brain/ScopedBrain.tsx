@@ -9,14 +9,14 @@ import { useLegacy } from '../../data/query/useLegacy.ts';
 import { useScope } from '../../data/scope/store.ts';
 import { relativeTime } from './BrainPage.tsx';
 import {
-  ProjectContextPayloadSchema,
-  ScopedAnalyticsOverviewSchema,
-  ScopedGraphOverviewSchema,
-  ScopedMemoryStatusSchema,
-  ScopedSubgraphPayloadSchema,
+  AnalyticsOverviewPayloadSchema,
+  GraphOverviewPayloadSchema,
+  GraphSubgraphPayloadSchema,
+  MemoryStatusPayloadSchema,
   type ProjectContextPayload,
-  type ProjectStore,
-} from './contracts.ts';
+  ProjectContextPayloadSchema,
+  type ProjectStoreContext,
+} from '../../contracts/wire.ts';
 
 /**
  * The Brain, scoped to one project: "what does TraceDecay actually know about
@@ -55,22 +55,22 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
   const subgraph = useLegacy(
     ['brain', 'subgraph'],
     '/api/plugins/graph/subgraph',
-    ScopedSubgraphPayloadSchema,
+    GraphSubgraphPayloadSchema,
   );
   const overview = useLegacy(
     ['brain', 'graph-overview'],
     '/api/plugins/graph/overview',
-    ScopedGraphOverviewSchema,
+    GraphOverviewPayloadSchema,
   );
   const memory = useLegacy(
     ['brain', 'memory-status'],
     '/api/plugins/holographic/status',
-    ScopedMemoryStatusSchema,
+    MemoryStatusPayloadSchema,
   );
   const analytics = useLegacy(
     ['brain', 'analytics'],
     '/api/plugins/analytics/overview',
-    ScopedAnalyticsOverviewSchema,
+    AnalyticsOverviewPayloadSchema,
   );
 
   const activationRef = useRef(new ActivationField({ halfLifeMs: 3200 }));
@@ -336,7 +336,7 @@ function ProjectHoldings({ data }: { data: ProjectContextPayload }) {
   );
 }
 
-function StoreCard({ store }: { store: ProjectStore }) {
+function StoreCard({ store }: { store: ProjectStoreContext }) {
   const scopes = store.graph_scopes ?? [];
   const artifacts = store.artifacts ?? [];
   const bytes = artifacts.reduce((sum, a) => sum + (a.size_bytes ?? 0), 0);

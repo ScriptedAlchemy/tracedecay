@@ -9,6 +9,7 @@ use crate::db::engine::{DatabaseAttachmentExecutor, Executor, QueryExecutor, par
 use crate::errors::{Result, TraceDecayError};
 use crate::memory::store::MemoryStore;
 
+mod external_source;
 mod inspect;
 mod memory_v2;
 mod observation;
@@ -227,7 +228,13 @@ pub(in crate::migrate) async fn merge_branch_legacy_memory_snapshot(
     let token = source
         .attach_token()
         .map_err(|error| db_error("merge_branch_legacy_memory", error))?;
-    attach_snapshot_as(&transaction, &token, "source").await?;
+    let source_path = token
+        .verified_path()
+        .map_err(|error| db_error("attach_snapshot", error))?;
+    transaction
+        .attach_database(source_path, "source")
+        .await
+        .map_err(|error| db_error("attach_snapshot", error))?;
     transaction
         .execute("PRAGMA defer_foreign_keys = ON", ())
         .await
@@ -307,6 +314,7 @@ async fn verify_legacy_fact_coverage(conn: &impl Executor) -> Result<()> {
 }
 
 async fn merge_one_graph_tx(conn: &impl Executor, offset: &GraphMergeOffsets) -> Result<()> {
+    external_source::merge(conn, "main", "source").await?;
     merge_legacy_memory_tx(
         conn,
         (
@@ -644,6 +652,7 @@ pub(super) async fn merge_sessions(
         .execute("PRAGMA defer_foreign_keys = ON", ())
         .await
         .map_err(|error| db_error("merge_sessions", error))?;
+    external_source::merge(&transaction, "main", "source").await?;
     reject_session_content_collisions(&transaction, "source", "target_input").await?;
     build_consolidation_message_map(&transaction, "source", "target_input", source_project_id)
         .await?;
@@ -684,6 +693,7 @@ pub(super) async fn merge_registered_sessions(
         .execute("PRAGMA defer_foreign_keys = ON", ())
         .await
         .map_err(|error| db_error("merge_sessions", error))?;
+    external_source::merge(&transaction, "main", "source").await?;
     reject_session_content_collisions(&transaction, "source", "target_input").await?;
     build_consolidation_message_map(&transaction, "source", "target_input", source_project_id)
         .await?;
@@ -733,21 +743,6 @@ pub(super) async fn normalize_registered_sessions(db: &Database) -> Result<()> {
                 updated_at INTEGER NOT NULL DEFAULT (unixepoch())
             )",
             (),
-        )
-        .await
-        .map_err(|error| db_error("normalize_sessions", error))?;
-    transaction
-        .execute_batch(
-            "CREATE TABLE IF NOT EXISTS dashboard_token_counts (
-                store TEXT NOT NULL,
-                provider TEXT NOT NULL,
-                message_id TEXT NOT NULL,
-                text_len INTEGER NOT NULL,
-                encoder TEXT NOT NULL,
-                token_count INTEGER NOT NULL,
-                computed_at INTEGER NOT NULL,
-                PRIMARY KEY (store, provider, message_id)
-            )",
         )
         .await
         .map_err(|error| db_error("normalize_sessions", error))?;
@@ -1035,7 +1030,7 @@ pub(super) async fn build_consolidation_message_map(
     let target_session_parents = scalar_parent_rows_sql(&target, "session_messages", false);
     let source_raw_parents = scalar_parent_rows_sql(&source, "lcm_raw_messages", false);
     let target_raw_parents = scalar_parent_rows_sql(&target, "lcm_raw_messages", false);
-    let mut reserved_references_sql = format!(
+    let reserved_references_sql = format!(
         "INSERT OR IGNORE INTO consolidation_reserved_message_ids(provider, message_id)
              SELECT provider, message_id FROM {source}.session_messages;
          INSERT OR IGNORE INTO consolidation_reserved_message_ids(provider, message_id)
@@ -1067,14 +1062,6 @@ pub(super) async fn build_consolidation_message_map(
          INSERT OR IGNORE INTO consolidation_reserved_message_ids(provider, message_id)
              SELECT '', message_id FROM {target}.turns;"
     );
-    for (schema, quoted) in [(source_schema, &source), (target_schema, &target)] {
-        if table_exists(conn, schema, "dashboard_token_counts").await? {
-            reserved_references_sql.push_str(&format!(
-                "INSERT OR IGNORE INTO consolidation_reserved_message_ids(provider, message_id)
-                     SELECT provider, message_id FROM {quoted}.dashboard_token_counts;"
-            ));
-        }
-    }
     conn.execute_batch(&reserved_references_sql)
         .await
         .map_err(|error| db_error("message_reserved_references_fill", error))?;
@@ -1407,15 +1394,7 @@ async fn merge_sessions_tx(conn: &impl Executor, offsets: &SessionMergeOffsets) 
          SELECT key, value, updated_at FROM source.session_backfill_meta;
          UPDATE session_backfill_meta AS t SET
              value = MAX(t.value, COALESCE((SELECT s.value FROM source.session_backfill_meta s WHERE s.key=t.key), t.value)),
-             updated_at = MAX(t.updated_at, COALESCE((SELECT s.updated_at FROM source.session_backfill_meta s WHERE s.key=t.key), t.updated_at));
-
-         INSERT OR IGNORE INTO dashboard_token_counts(
-             store, provider, message_id, text_len, encoder, token_count, computed_at
-         ) SELECT s.store, s.provider, COALESCE(m.mapped_id, s.message_id),
-             s.text_len, s.encoder, s.token_count, s.computed_at
-         FROM source.dashboard_token_counts s
-         LEFT JOIN consolidation_message_map m
-           ON m.provider=s.provider AND m.original_id=s.message_id;",
+             updated_at = MAX(t.updated_at, COALESCE((SELECT s.updated_at FROM source.session_backfill_meta s WHERE s.key=t.key), t.updated_at));",
         raw = offsets.raw,
         span = offsets.span,
         savings = offsets.savings,

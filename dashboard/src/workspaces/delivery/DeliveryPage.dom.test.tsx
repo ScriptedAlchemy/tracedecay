@@ -34,12 +34,24 @@ function checkout(over: Record<string, unknown> = {}) {
   };
 }
 
-const PROJECTS = {
-  status: 'ok',
-  truncated: false,
-  active_project_id: 'p1',
-  summary: { project_count: 4, repo_count: 3, truncated: false },
-  project_tree: [
+/** The flat `projects` list `projects.rs::list` returns beside the grouped
+ * tree. It is a `PublicCodeProject`, a narrower record than a registry entry. */
+function publicProject(over: Record<string, unknown> = {}) {
+  return {
+    project_id: 'p1',
+    label: 'repo',
+    project_root: '/src/repo',
+    canonical_root: '/src/repo',
+    display_root: '/src/repo',
+    git_common_dir: '/src/repo/.git',
+    default_branch: 'main',
+    created_at: NOW - 90 * DAY,
+    last_seen_at: NOW - 3600,
+    ...over,
+  };
+}
+
+const PROJECT_TREE = [
     {
       label: 'tracedecay',
       git_common_dir: '/src/tracedecay/.git',
@@ -80,8 +92,42 @@ const PROJECTS = {
         }),
       ],
     },
-  ],
-};
+];
+
+/** `projects.rs::list` always answers with `limit`, `active_project_root` and
+ * both views of the registry. The three nullable fields below come back null
+ * together on the failure paths, never as empty collections. */
+function registry(over: Record<string, unknown> = {}) {
+  return {
+    status: 'ok',
+    limit: 100,
+    truncated: false,
+    active_project_id: 'p1',
+    active_project_root: '/src/tracedecay',
+    summary: { project_count: 4, repo_count: 3, truncated: false },
+    projects: [
+      publicProject({ project_id: 'p1', label: 'tracedecay', project_root: '/src/tracedecay' }),
+      publicProject({
+        project_id: 'p2',
+        label: 'tracedecay (worktree)',
+        project_root: '/src/tracedecay-wt',
+        last_seen_at: NOW - 5 * DAY,
+      }),
+      publicProject({ project_id: 'p3', label: 'lynx', project_root: '/src/lynx' }),
+      publicProject({
+        project_id: 'p4',
+        label: 'notes',
+        project_root: '/src/notes',
+        git_common_dir: null,
+        default_branch: null,
+      }),
+    ],
+    project_tree: PROJECT_TREE,
+    ...over,
+  };
+}
+
+const PROJECTS = registry();
 
 const INDEX_FRESHNESS = {
   schema_revision: 1,
@@ -147,6 +193,9 @@ const DELIVERY_OVERVIEW = {
     changes: {
       state: 'ready',
       value: {
+        schema_version: 'tracedecay.git-query.v1',
+        repository: '/src/tracedecay',
+        operation: 'none',
         head: { state: 'attached', branch: 'main', commit: 'a'.repeat(40) },
         staged: 0,
         unstaged: 1,
@@ -370,13 +419,28 @@ describe('DeliveryPage', () => {
   });
 
   it('separates a missing registry from an empty one', async () => {
-    renderDelivery({ status: 'missing_registry', project_tree: [] });
+    renderDelivery(
+      registry({
+        status: 'missing_registry',
+        summary: null,
+        projects: null,
+        project_tree: null,
+        truncated: null,
+      }),
+    );
     await screen.findByText(/registry reporting itself absent/);
     expect(screen.queryByText(/holds no repositories/)).toBeNull();
   });
 
   it('renders an empty registry as an answered question', async () => {
-    renderDelivery({ status: 'ok', project_tree: [] });
+    renderDelivery(
+      registry({
+        status: 'ok',
+        summary: { project_count: 0, repo_count: 0, truncated: false },
+        projects: [],
+        project_tree: [],
+      }),
+    );
     await screen.findByText(/answered and holds no repositories in this workspace/);
   });
 

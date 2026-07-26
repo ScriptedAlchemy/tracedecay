@@ -11,10 +11,14 @@ mod sanitize;
 mod structural_id;
 
 pub use detect::{
-    DetectionConfidenceV1, PrivacyDetectorV1, SanitizationActionV1, SanitizationFindingV1,
+    CODE_SOURCE_SANITIZER_VERSION_V1, DetectionConfidenceV1, PrivacyDetectorV1,
+    SanitizationActionV1, SanitizationDetectorOriginV1, SanitizationDetectorRevisionV1,
+    SanitizationEvidenceAnchorV1, SanitizationFindingV1, SanitizationRemediationClassV1,
+    SanitizationScanBoundaryV1, SanitizationScannedCoverageV1,
 };
 pub(crate) use detect::{
-    MemoryFactSanitizationV1, sanitize_memory_fact_payload, sanitize_provider_metadata_text,
+    CodeSourceSanitizationV1, MemoryFactSanitizationV1, sanitize_code_source_bytes,
+    sanitize_memory_fact_payload, sanitize_provider_metadata_text,
 };
 pub use parse::{
     ClaudeRecordParseErrorV1, MAX_OBSERVATION_RECORD_BYTES, ObservationRecordParseErrorV1,

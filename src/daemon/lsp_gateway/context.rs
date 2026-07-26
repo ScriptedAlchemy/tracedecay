@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tracedecay_domain::ContentDigest;
 
 use super::gateway::AdmittedRoot;
 use super::session::LspRequestId;
@@ -142,6 +143,10 @@ pub struct ContextProjectionRequest {
     pub kind: ContextProjectionKind,
     #[serde(default)]
     pub document_uri: Option<String>,
+    /// Exact session-owned overlay identity. The protocol actor binds this
+    /// after decoding; clients cannot claim a trusted content identity.
+    #[serde(skip)]
+    pub(crate) document_content_digest: Option<ContentDigest>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -226,6 +231,8 @@ pub struct ContextExpansionEnvelope {
     pub evidence: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub omission_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_retrieval_handle: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -307,6 +314,13 @@ pub trait ContextProjectionPort {
     ) -> Vec<ContextProjectionChange> {
         Vec::new()
     }
+
+    fn update_subscriptions(
+        &self,
+        _root: &AdmittedRoot,
+        _subscriptions: &BTreeSet<ContextProjectionRegistration>,
+    ) {
+    }
 }
 
 impl<T> ContextProjectionPort for Arc<T>
@@ -361,5 +375,13 @@ where
         subscriptions: &BTreeSet<ContextProjectionRegistration>,
     ) -> Vec<ContextProjectionChange> {
         (**self).poll_changes(root, subscriptions)
+    }
+
+    fn update_subscriptions(
+        &self,
+        root: &AdmittedRoot,
+        subscriptions: &BTreeSet<ContextProjectionRegistration>,
+    ) {
+        (**self).update_subscriptions(root, subscriptions);
     }
 }

@@ -9,17 +9,18 @@ use tracedecay_tool_catalog::{
     CancellationContract, CancellationPoint, CapabilityId, CapabilityManifestInputV1,
     CapabilityManifestV1, CatalogContributionInputV1, CatalogContributionV1, ContributionId,
     DeadlineBehavior, DeadlineContract, DeniedDisclosurePolicy, EffectClass, IdempotencyContract,
-    LifecycleClass, PaginationContract, PrivacyClass, ProfileId, ProtocolRevisionRange,
-    ReceiptContract, ReconciliationContract, RevalidationContract, RevalidationPoint,
-    RoutingContractV1, SchemaId, SchemaRef, ScopeDimension, ScopeRequirement, StreamingContract,
-    SurfaceBindingInputV1, SurfaceBindingV1, SurfaceOperationName, TerminalState,
-    TerminalStateContract, UseCaseId,
+    LifecycleClass, PaginationContract, PrivacyClass, ProtocolRevisionRange, ReceiptContract,
+    ReconciliationContract, RevalidationContract, RevalidationPoint, RoutingContractV1, SchemaId,
+    SchemaRef, ScopeDimension, ScopeRequirement, StreamingContract, SurfaceBindingInputV1,
+    SurfaceBindingV1, SurfaceOperationName, TerminalState, TerminalStateContract, UseCaseId,
 };
 
 use crate::error::ApplicationContractError;
 use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
 use crate::result::ResultContractRef;
-use crate::retrieval::catalog::APPLICATION_DEFAULT_PROFILE_ID;
+use crate::retrieval::catalog::{
+    APPLICATION_ADMINISTRATIVE_PROFILE_ID, APPLICATION_DEFAULT_PROFILE_ID, application_profile_ids,
+};
 
 struct ConfigurationSurfaceSpec {
     name: &'static str,
@@ -153,10 +154,11 @@ pub const CONFIGURATION_SURFACE_OPERATION_NAMES: [&str; 13] = [
     "configuration_audit",
 ];
 
-const CONFIGURATION_SURFACES: [BindingSurface; 3] = [
+const CONFIGURATION_SURFACES: [BindingSurface; 4] = [
     BindingSurface::Cli,
     BindingSurface::Mcp,
     BindingSurface::Http,
+    BindingSurface::Dashboard,
 ];
 
 pub fn configuration_surface_catalog_contribution()
@@ -231,7 +233,10 @@ fn capability(
         request_schema: schema(spec.name, "request")?,
         result_schema: schema(spec.name, "result")?,
         effect,
-        scope: ScopeRequirement::new(vec![ScopeDimension::Project])?,
+        scope: ScopeRequirement::new(vec![
+            ScopeDimension::ConfigurationLayer,
+            ScopeDimension::Project,
+        ])?,
         authority: AuthorityRequirement::CapabilityGrantWithRevalidation,
         denied_disclosure: DeniedDisclosurePolicy::Indistinguishable,
         privacy: PrivacyClass::ScopedMetadata,
@@ -306,7 +311,23 @@ fn capability(
         })?,
         availability: AvailabilityContract::Available,
         binding_ids,
-        profile_eligibility: vec![ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID)?],
+        profile_eligibility: application_profile_ids(
+            if matches!(
+                spec.name,
+                "configuration_list"
+                    | "configuration_explain"
+                    | "configuration_get"
+                    | "configuration_observed_state"
+                    | "configuration_audit"
+            ) {
+                &[
+                    APPLICATION_DEFAULT_PROFILE_ID,
+                    APPLICATION_ADMINISTRATIVE_PROFILE_ID,
+                ]
+            } else {
+                &[APPLICATION_DEFAULT_PROFILE_ID]
+            },
+        )?,
         required_features: Vec::new(),
     })?)
 }
@@ -395,7 +416,7 @@ mod tests {
     }
 
     #[test]
-    fn configuration_surface_exposes_only_pre_dashboard_transports() {
+    fn configuration_surface_exposes_the_pr14_dashboard_transport() {
         let contribution = configuration_surface_catalog_contribution().expect("contribution");
         let surfaces = contribution
             .bindings()
@@ -409,14 +430,29 @@ mod tests {
                 BindingSurface::Cli,
                 BindingSurface::Mcp,
                 BindingSurface::Http,
+                BindingSurface::Dashboard,
             ])
         );
-        assert!(
-            contribution
-                .bindings()
-                .iter()
-                .all(|binding| binding.surface() != BindingSurface::Dashboard)
-        );
+    }
+
+    #[test]
+    fn configuration_surface_requires_mounted_project_and_exact_layer_routes() {
+        let contribution = configuration_surface_catalog_contribution().expect("contribution");
+
+        for capability in contribution.capabilities() {
+            assert!(
+                capability
+                    .scope()
+                    .requires(ScopeDimension::ConfigurationLayer),
+                "{} must route through an exact configuration-layer authority",
+                capability.capability_id()
+            );
+            assert!(
+                capability.scope().requires(ScopeDimension::Project),
+                "{} must not advertise a nonexistent projectless profile route",
+                capability.capability_id()
+            );
+        }
     }
 
     #[test]
