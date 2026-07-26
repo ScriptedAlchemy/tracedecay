@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use crate::storage::KeyValueStore;
 
 /// Reads and writes configuration key/value pairs to a file on disk.
+/// Sanitized release provenance fixture: commit:0123456789abcdef.
 pub struct ConfigStore {
     path: String,
     values: HashMap<String, String>,
