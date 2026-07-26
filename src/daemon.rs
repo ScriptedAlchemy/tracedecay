@@ -4094,6 +4094,7 @@ async fn production_project_server(
         semantic_auto_download_enabled,
     );
     let semantic_database = cg.dashboard_database_guard();
+    let project_database_is_read_only = cg.db().filesystem_is_read_only();
     let semantic_lifecycle = crate::semantic_code::shared_lifecycle_owner();
     let existing = {
         let mut servers = store_administration.project_servers().lock().await;
@@ -4364,20 +4365,22 @@ async fn production_project_server(
         {
             Ok(()) | Err(DaemonSemanticRuntimeRegistrationError::AlreadyRegistered) => {}
         }
-        project_open_owners::register_project_open_production_owners(
-            invocation,
-            store_administration.git_index_transaction_services(),
-            canonical_project_path,
-            &project_id,
-            resolved.as_ref(),
-        )
-        .await?;
-        mount_http_application_router(
-            http_application_registry,
-            &project_id,
-            canonical_project_path,
-        )
-        .await?;
+        if !project_database_is_read_only {
+            project_open_owners::register_project_open_production_owners(
+                invocation,
+                store_administration.git_index_transaction_services(),
+                canonical_project_path,
+                &project_id,
+                resolved.as_ref(),
+            )
+            .await?;
+            mount_http_application_router(
+                http_application_registry,
+                &project_id,
+                canonical_project_path,
+            )
+            .await?;
+        }
     }
     Ok(ProductionProjectComposition {
         key,
@@ -5498,6 +5501,14 @@ async fn open_project_for_handshake(
                 .await?,
                 true,
             ),
+            Err(err) if is_unregistered_identity_error(&err) => {
+                return Err(TraceDecayError::Config {
+                    message: format!(
+                        "no TraceDecay index found at '{}'; run 'tracedecay init' first",
+                        project_path.display()
+                    ),
+                });
+            }
             Err(err) => return Err(err),
         };
     let project_id =
