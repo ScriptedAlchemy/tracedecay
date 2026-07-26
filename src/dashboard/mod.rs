@@ -36,6 +36,8 @@ mod automation_scheduler_api;
 mod automation_skills_api;
 mod code_diagnostics_api;
 pub(crate) mod code_index_freshness_api;
+#[doc(hidden)]
+pub mod contract_schema;
 mod delivery_api;
 mod doctor_findings_api;
 pub(crate) mod doctor_remediation_api;
@@ -1049,6 +1051,10 @@ fn project_api_router() -> Router<DashboardState> {
             "/api/plugins/graph/node/{node_id}/tests",
             get(graph_structure_api::node_tests),
         )
+        .route(
+            "/api/plugins/graph/node/{node_id}/sessions",
+            get(graph_structure_api::node_sessions),
+        )
         // Durable analytics API (hint lifecycle scaffolds + session usage rollups)
         .route(
             "/api/plugins/analytics/overview",
@@ -1292,7 +1298,7 @@ async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
     let standalone_automation = automation_mode == "standalone_backend";
     Json(json!({
         "name": "tracedecay-dashboard",
-        "version": env!("CARGO_PKG_VERSION"),
+        "version": crate::version::build_version(),
         "mode": "standalone",
         "project_id": state.project_id,
         "project_root": state.project_root.display().to_string(),

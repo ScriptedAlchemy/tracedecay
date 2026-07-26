@@ -39,7 +39,7 @@ vi.mock('echarts', () => ({
 
 /** The live theme, as the component would sample it off its own container. */
 const TOKENS: Record<string, string> = {
-  '--font-sans': "'IBM Plex Sans Variable', 'Inter Variable', system-ui, sans-serif",
+  '--font-sans': "'IBM Plex Sans Variable', system-ui, sans-serif",
   '--raw-text-secondary': '#aab0bd',
   '--raw-text-muted': '#8a90a0',
   '--raw-edge-subtle': '#333a46',
@@ -108,7 +108,9 @@ describe('Chart theming and motion', () => {
     expect(option.textStyle).toMatchObject({ fontFamily: TOKENS['--font-sans'] });
     // The specific regression: this component used to spell out the old face,
     // which silently outranked the design system on every chart in the app.
-    expect(JSON.stringify(option)).not.toContain('Inter Variable, system-ui');
+    // Inter is no longer vendored at all, so naming it here would now point at
+    // a face the bundle cannot supply.
+    expect(JSON.stringify(option)).not.toContain('Inter');
   });
 
   it('animates by default when nothing has asked for stillness', async () => {

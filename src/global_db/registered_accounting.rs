@@ -54,14 +54,28 @@ impl RegisteredGlobalDb {
         }
     }
 
-    pub(crate) async fn global_tokens_saved(&self) -> Option<u64> {
-        let snapshot = self.read_snapshot().await.ok()?;
+    pub(crate) async fn try_global_tokens_saved(&self) -> Result<u64, String> {
+        let snapshot = self
+            .read_snapshot()
+            .await
+            .map_err(|error| format!("failed to open accounting snapshot: {error}"))?;
         let mut rows = snapshot
             .query("SELECT COALESCE(SUM(tokens_saved), 0) FROM projects", ())
             .await
-            .ok()?;
-        let row = rows.next().await.ok()??;
-        Some(row.get::<i64>(0).ok()?.max(0) as u64)
+            .map_err(|error| format!("failed to query global tokens saved: {error}"))?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|error| format!("failed to read global tokens saved row: {error}"))?
+            .ok_or_else(|| "global tokens saved query returned no row".to_string())?;
+        let total = row
+            .get::<i64>(0)
+            .map_err(|error| format!("failed to decode global tokens saved: {error}"))?;
+        u64::try_from(total).map_err(|_| format!("global tokens saved cannot be negative: {total}"))
+    }
+
+    pub(crate) async fn global_tokens_saved(&self) -> Option<u64> {
+        self.try_global_tokens_saved().await.ok()
     }
 
     pub(crate) async fn record_savings(
@@ -460,8 +474,14 @@ impl RegisteredGlobalDb {
         ))
     }
 
-    pub(crate) async fn token_breakdown_since(&self, since: u64) -> Option<(u64, u64, u64)> {
-        let snapshot = self.read_snapshot().await.ok()?;
+    pub(crate) async fn try_token_breakdown_since(
+        &self,
+        since: u64,
+    ) -> Result<(u64, u64, u64), String> {
+        let snapshot = self
+            .read_snapshot()
+            .await
+            .map_err(|error| format!("failed to open accounting snapshot: {error}"))?;
         let mut rows = snapshot
             .query(
                 "SELECT COALESCE(SUM(input_tokens), 0),
@@ -471,20 +491,35 @@ impl RegisteredGlobalDb {
                 crate::db::engine::params![since as i64],
             )
             .await
-            .ok()?;
-        let row = rows.next().await.ok()??;
-        Some((
-            row.get::<i64>(0).unwrap_or(0) as u64,
-            row.get::<i64>(1).unwrap_or(0) as u64,
-            row.get::<i64>(2).unwrap_or(0) as u64,
-        ))
+            .map_err(|error| format!("failed to query token breakdown: {error}"))?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|error| format!("failed to read token breakdown row: {error}"))?
+            .ok_or_else(|| "token breakdown query returned no row".to_string())?;
+        let read = |index| {
+            let value = row
+                .get::<i64>(index)
+                .map_err(|error| format!("failed to decode token breakdown: {error}"))?;
+            u64::try_from(value)
+                .map_err(|_| format!("token breakdown cannot contain a negative value: {value}"))
+        };
+        Ok((read(0)?, read(1)?, read(2)?))
     }
 
-    pub(crate) async fn cost_by_model_since(&self, since: u64) -> Vec<(String, f64, u64)> {
-        let Ok(snapshot) = self.read_snapshot().await else {
-            return Vec::new();
-        };
-        let Ok(mut rows) = snapshot
+    pub(crate) async fn token_breakdown_since(&self, since: u64) -> Option<(u64, u64, u64)> {
+        self.try_token_breakdown_since(since).await.ok()
+    }
+
+    pub(crate) async fn try_cost_by_model_since(
+        &self,
+        since: u64,
+    ) -> Result<Vec<(String, f64, u64)>, String> {
+        let snapshot = self
+            .read_snapshot()
+            .await
+            .map_err(|error| format!("failed to open accounting snapshot: {error}"))?;
+        let mut rows = snapshot
             .query(
                 "SELECT model, SUM(cost_usd), SUM(input_tokens + output_tokens)
                  FROM turns WHERE timestamp >= ?1
@@ -492,25 +527,43 @@ impl RegisteredGlobalDb {
                 crate::db::engine::params![since as i64],
             )
             .await
-        else {
-            return Vec::new();
-        };
+            .map_err(|error| format!("failed to query model cost breakdown: {error}"))?;
         let mut out = Vec::new();
-        while let Ok(Some(row)) = rows.next().await {
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| format!("failed to read model cost breakdown row: {error}"))?
+        {
+            let tokens = row
+                .get::<i64>(2)
+                .map_err(|error| format!("failed to decode model token total: {error}"))?;
             out.push((
-                row.get::<String>(0).unwrap_or_default(),
-                row.get::<f64>(1).unwrap_or(0.0),
-                row.get::<i64>(2).unwrap_or(0) as u64,
+                row.get::<String>(0)
+                    .map_err(|error| format!("failed to decode model name: {error}"))?,
+                row.get::<f64>(1)
+                    .map_err(|error| format!("failed to decode model cost: {error}"))?,
+                u64::try_from(tokens)
+                    .map_err(|_| format!("model token total cannot be negative: {tokens}"))?,
             ));
         }
-        out
+        Ok(out)
     }
 
-    pub(crate) async fn cost_by_category_since(&self, since: u64) -> Vec<(String, f64, u64)> {
-        let Ok(snapshot) = self.read_snapshot().await else {
-            return Vec::new();
-        };
-        let Ok(mut rows) = snapshot
+    pub(crate) async fn cost_by_model_since(&self, since: u64) -> Vec<(String, f64, u64)> {
+        self.try_cost_by_model_since(since)
+            .await
+            .unwrap_or_default()
+    }
+
+    pub(crate) async fn try_cost_by_category_since(
+        &self,
+        since: u64,
+    ) -> Result<Vec<(String, f64, u64)>, String> {
+        let snapshot = self
+            .read_snapshot()
+            .await
+            .map_err(|error| format!("failed to open accounting snapshot: {error}"))?;
+        let mut rows = snapshot
             .query(
                 "SELECT category, SUM(cost_usd), COUNT(*)
                  FROM turns WHERE timestamp >= ?1
@@ -518,18 +571,32 @@ impl RegisteredGlobalDb {
                 crate::db::engine::params![since as i64],
             )
             .await
-        else {
-            return Vec::new();
-        };
+            .map_err(|error| format!("failed to query category cost breakdown: {error}"))?;
         let mut out = Vec::new();
-        while let Ok(Some(row)) = rows.next().await {
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| format!("failed to read category cost breakdown row: {error}"))?
+        {
+            let turns = row
+                .get::<i64>(2)
+                .map_err(|error| format!("failed to decode category turn count: {error}"))?;
             out.push((
-                row.get::<String>(0).unwrap_or_default(),
-                row.get::<f64>(1).unwrap_or(0.0),
-                row.get::<i64>(2).unwrap_or(0) as u64,
+                row.get::<String>(0)
+                    .map_err(|error| format!("failed to decode category name: {error}"))?,
+                row.get::<f64>(1)
+                    .map_err(|error| format!("failed to decode category cost: {error}"))?,
+                u64::try_from(turns)
+                    .map_err(|_| format!("category turn count cannot be negative: {turns}"))?,
             ));
         }
-        out
+        Ok(out)
+    }
+
+    pub(crate) async fn cost_by_category_since(&self, since: u64) -> Vec<(String, f64, u64)> {
+        self.try_cost_by_category_since(since)
+            .await
+            .unwrap_or_default()
     }
 }
 

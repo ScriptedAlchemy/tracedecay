@@ -132,17 +132,61 @@ pub(crate) async fn list(
 ) -> (StatusCode, Json<Value>) {
     let limit = params.limit.unwrap_or(100).clamp(1, 250);
     let Some(db) = runtime.active.savings_db.as_ref() else {
-        return project_list_unavailable_response("missing_registry");
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "status": "missing_registry",
+                "limit": limit,
+                "truncated": null,
+                "projects": null,
+                "active_project_id": runtime.active_project_id(),
+                "active_project_root": runtime.active_project_root(),
+                "summary": null,
+                "project_tree": null,
+            })),
+        );
     };
 
-    let Ok(mut projects) = db.list_code_projects(limit + 1).await else {
-        return project_list_unavailable_response("registry_unavailable");
+    let mut projects = match db.list_code_projects(limit + 1).await {
+        Ok(projects) => projects,
+        Err(error) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "status": "registry_unavailable",
+                    "error": error.to_string(),
+                    "limit": limit,
+                    "truncated": null,
+                    "projects": null,
+                    "active_project_id": runtime.active_project_id(),
+                    "active_project_root": runtime.active_project_root(),
+                    "summary": null,
+                    "project_tree": null,
+                })),
+            );
+        }
     };
     let truncated = projects.len() > limit;
     projects.truncate(limit);
     let active_project_id = runtime.active_project_id().map(str::to_string);
-    let Ok(contexts) = db.project_registry_contexts_for_projects(&projects).await else {
-        return project_list_unavailable_response("registry_unavailable");
+    let contexts = match db.project_registry_contexts_for_projects(&projects).await {
+        Ok(contexts) => contexts,
+        Err(error) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "status": "registry_unavailable",
+                    "error": error.to_string(),
+                    "limit": limit,
+                    "truncated": null,
+                    "projects": null,
+                    "active_project_id": active_project_id,
+                    "active_project_root": runtime.active_project_root(),
+                    "summary": null,
+                    "project_tree": null,
+                })),
+            );
+        }
     };
     let view = build_project_registry_view(&contexts, runtime.active_project_id(), truncated);
     let rows = projects
@@ -161,22 +205,6 @@ pub(crate) async fn list(
             "summary": view.summary,
             "project_tree": view.project_tree,
             "projects": rows,
-        })),
-    )
-}
-
-fn project_list_unavailable_response(status: &str) -> (StatusCode, Json<Value>) {
-    (
-        StatusCode::SERVICE_UNAVAILABLE,
-        Json(json!({
-            "status": status,
-            "limit": null,
-            "truncated": null,
-            "projects": null,
-            "active_project_id": null,
-            "active_project_root": null,
-            "summary": null,
-            "project_tree": null,
         })),
     )
 }

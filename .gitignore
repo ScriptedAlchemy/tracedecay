@@ -14,6 +14,7 @@ docs/superpowers/plans/
 .sentrux/
 cache/
 generated-illustrations/
+dashboard/app-dist/
 *.log
 __pycache__/
 *~
@@ -21,3 +22,7 @@ __pycache__/
 
 # transient fact-store eval baseline (written by eval/hermetic corpus setup_cmd)
 .factstore_baseline_count
+
+# transient Playwright/axe verification output (screenshots and findings).
+# Shipped-state baselines live in dashboard/audit-baselines/ and stay tracked.
+dashboard/.*-axe/

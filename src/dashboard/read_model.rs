@@ -29,6 +29,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use schemars::JsonSchema;
 use serde::Serialize;
 
 /// Schema revision of the envelope contract. The frontend refuses to decode a
@@ -47,7 +48,7 @@ pub const DASHBOARD_SCHEMA_REVISION_V1: u32 = 1;
 // generation source for the frontend's exhaustive switches). Most variants are
 // not yet emitted by a server-side read but must exist in the generated union.
 #[allow(dead_code)]
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DashboardDomainStateV1 {
     Loading,
@@ -74,7 +75,7 @@ pub enum DashboardDomainStateV1 {
 
 /// Exact scope the envelope was resolved for. A deep link/query never falls
 /// back to a title, path, or latest version to recover scope.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct DashboardScopeV1 {
     /// Registered project id, when the store is profile-backed.
     pub project_id: Option<String>,
@@ -87,7 +88,7 @@ pub struct DashboardScopeV1 {
 /// Entity and graph version identities pinned by the envelope. Both are
 /// optional: a read model with no versioned graph state leaves them absent
 /// rather than inventing `0`/`latest`.
-#[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct DashboardVersionV1 {
     pub entity_version: Option<String>,
     pub graph_version: Option<String>,
@@ -96,7 +97,7 @@ pub struct DashboardVersionV1 {
 /// Valid time and observation time, kept separate. `observation_time` is when
 /// the daemon observed the state; `valid_time` is when the state was true in the
 /// modelled domain (absent when a read model has no distinct valid time).
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct DashboardTimeV1 {
     /// Domain valid time in microseconds since the Unix epoch, when distinct.
     pub valid_time_micros: Option<i64>,
@@ -117,7 +118,7 @@ impl DashboardTimeV1 {
 
 /// Opaque monotone source watermark. The frontend compares watermarks for
 /// staleness but never parses their internal structure.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct DashboardWatermarkV1 {
     /// Which source the watermark belongs to.
     pub source: String,
@@ -133,7 +134,7 @@ pub struct DashboardWatermarkV1 {
 // The full authorization vocabulary is normative contract; only `Authorized` is
 // constructed by the local loopback dashboard today.
 #[allow(dead_code)]
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "outcome")]
 pub enum DashboardAuthorizationV1 {
     Authorized,
@@ -145,7 +146,7 @@ pub enum DashboardAuthorizationV1 {
 /// Coverage completeness axis. `Unsupported` distinguishes "the source that
 /// would establish coverage is not wired" from `Unknown` ("coverage could not
 /// be determined").
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DashboardCoverageCompletenessV1 {
     Complete,
@@ -157,7 +158,7 @@ pub enum DashboardCoverageCompletenessV1 {
 /// Coverage statement. Counts are optional; an unknown denominator is `None`,
 /// never a fabricated `0`/`100%`. The completeness axis is authoritative — the
 /// frontend never derives `complete` from a `matched == eligible` coincidence.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct DashboardCoverageV1 {
     pub completeness: DashboardCoverageCompletenessV1,
     pub eligible: Option<u64>,
@@ -259,7 +260,7 @@ impl DashboardCoverageV1 {
 // `Stale`/`Absent` are normative freshness states not yet emitted by the current
 // read sources.
 #[allow(dead_code)]
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DashboardFreshnessStateV1 {
     Fresh,
@@ -271,7 +272,7 @@ pub enum DashboardFreshnessStateV1 {
 
 /// Freshness statement plus the optional observation stamp/watermark it was
 /// judged against.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct DashboardFreshnessV1 {
     pub state: DashboardFreshnessStateV1,
     pub observed_at_micros: Option<i64>,
@@ -315,7 +316,7 @@ impl DashboardFreshnessV1 {
 // source for the frontend). Variants beyond `Refresh` are not yet constructed
 // server-side but must exist in the generated union.
 #[allow(dead_code)]
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DashboardLegalActionKindV1 {
     Inspect,
@@ -329,7 +330,7 @@ pub enum DashboardLegalActionKindV1 {
 /// A reference to one owner-supplied legal action. `operation` names the owning
 /// application operation; the dashboard never embeds argv, a path, or an inline
 /// effect.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct DashboardLegalActionRefV1 {
     pub kind: DashboardLegalActionKindV1,
     pub operation: String,
@@ -347,7 +348,7 @@ impl DashboardLegalActionRefV1 {
 
 /// The normative read-model envelope. Every V2 read-model route returns exactly
 /// this shape; only `payload` varies by route.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct DashboardEnvelopeV1<T> {
     pub schema_revision: u32,
     pub scope: DashboardScopeV1,
@@ -458,6 +459,23 @@ impl<T> DashboardEnvelopeV1<T> {
     pub fn with_legal_actions(mut self, actions: Vec<DashboardLegalActionRefV1>) -> Self {
         self.legal_actions = actions;
         self
+    }
+
+    #[must_use]
+    pub fn map_payload<U>(self, map: impl FnOnce(T) -> U) -> DashboardEnvelopeV1<U> {
+        DashboardEnvelopeV1 {
+            schema_revision: self.schema_revision,
+            scope: self.scope,
+            version: self.version,
+            time: self.time,
+            source_watermark: self.source_watermark,
+            authorization: self.authorization,
+            coverage: self.coverage,
+            freshness: self.freshness,
+            domain_state: self.domain_state,
+            legal_actions: self.legal_actions,
+            payload: map(self.payload),
+        }
     }
 
     #[must_use]

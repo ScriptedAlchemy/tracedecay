@@ -8,40 +8,18 @@
  * directory, and drives the surface through browse / searched / inspector so
  * the states a plain navigation never reaches are scanned too.
  *
- *   npx tsx .explorer-axe/run.ts [label]
+ *   npm run axe:explorer              # from `dashboard/`
+ *   npm run axe:explorer -- <label>   # output subdirectory under `.explorer-axe/`
  */
-import { spawn } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { chromium, type Page } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
 import { installApiFixtures } from '../stories/fixtures/route.ts';
+import { STILLNESS_INIT, startStaticServer } from './axe-harness.ts';
 import { ExplorerQueryRunSchema } from '../src/workspaces/explorer/contracts.ts';
 
 const LABEL = process.argv[2] ?? 'current';
-/**
- * Claim a port the OS confirms is free instead of pinning one.
- *
- * A fixed port made this harness collide with its own earlier runs whenever one
- * leaked a dev server (and with peer agents' servers), and rsbuild answers on a
- * taken port rather than failing — so the audit silently scanned a stale bundle
- * and timed out waiting for the app to mount. Peer processes are never killed
- * to reclaim a port; the harness moves instead.
- */
-async function freePort(): Promise<number> {
-  const explicit = process.env['EXPLORER_AXE_PORT'];
-  if (explicit !== undefined) return Number(explicit);
-  const net = await import('node:net');
-  return new Promise((resolve, reject) => {
-    const probe = net.createServer();
-    probe.on('error', reject);
-    probe.listen(0, '127.0.0.1', () => {
-      const address = probe.address();
-      const port = typeof address === 'object' && address !== null ? address.port : 0;
-      probe.close(() => (port === 0 ? reject(new Error('no free port')) : resolve(port)));
-    });
-  });
-}
 const OUT = path.join(process.cwd(), '.explorer-axe', LABEL);
 const WIDTHS = [320, 768, 1440] as const;
 const THEMES = ['light', 'dark'] as const;
@@ -386,49 +364,31 @@ async function setTheme(page: Page, theme: string): Promise<void> {
 
 async function main(): Promise<void> {
   mkdirSync(OUT, { recursive: true });
-  const port = await freePort();
-  const server = spawn('npx', ['rsbuild', 'dev', '--port', String(port)], {
-    cwd: process.cwd(),
-    stdio: 'ignore',
-    detached: true,
-    env: { ...process.env, NO_COLOR: '1' },
-  });
-  // A crash or a failed assertion must not leave a dev server behind: a leaked
-  // server is what made later runs scan a stale bundle.
+  // The built bundle over a static server, not `rsbuild dev`: lazy route
+  // compilation under the dev server can race and throw, rendering the router's
+  // accessible error boundary, which screenshots happily and passes Axe.
+  const { baseURL: base, server } = startStaticServer();
   const reap = () => {
-    if (server.pid !== undefined) {
-      try {
-        process.kill(-server.pid, 'SIGTERM');
-      } catch {
-        /* already gone */
-      }
-    }
+    server.close();
   };
   process.on('exit', reap);
   process.on('SIGINT', () => {
     reap();
     process.exit(130);
   });
-  const base = `http://127.0.0.1:${port}`;
-  console.log(`[axe] dev server on ${base}`);
-  const deadline = Date.now() + 120_000;
-  for (;;) {
-    if (Date.now() > deadline) throw new Error('dev server did not start');
-    try {
-      const res = await fetch(base, { signal: AbortSignal.timeout(4_000) });
-      if (res.ok) break;
-    } catch {
-      /* not up yet */
-    }
-    await new Promise((r) => setTimeout(r, 400));
-  }
 
   const browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({ deviceScaleFactor: 1 });
   const page = await context.newPage();
+  // A crashed route renders accessible markup and scores a clean scan, so a
+  // page error is a run failure rather than a log line.
+  const pageErrors: string[] = [];
+  page.on('pageerror', (error) => {
+    pageErrors.push(error.message);
+    console.error(`[axe] PAGEERROR ${error.message}`);
+  });
   if (process.env.EXPLORER_AXE_TRACE) {
     page.on('console', (message) => console.log(`[page:${message.type()}] ${message.text()}`));
-    page.on('pageerror', (error) => console.log(`[page:error] ${error.message}`));
   }
   await installApiFixtures(page);
   // Registered after the generic fixture route so Playwright (last match wins)
@@ -479,16 +439,9 @@ async function main(): Promise<void> {
         }),
     );
   }
-  await page.addInitScript(() => {
-    const inject = () => {
-      const style = document.createElement('style');
-      style.textContent =
-        '*,*::before,*::after{animation-duration:0s!important;animation-delay:0s!important;transition-duration:0s!important;transition-delay:0s!important;}';
-      document.head.appendChild(style);
-    };
-    if (document.head) inject();
-    else document.addEventListener('DOMContentLoaded', inject);
-  });
+  // Stillness by REMOVING animation, never by shortening it: an animation with
+  // `both` fill and zero duration pins its from-state and the capture is blank.
+  await page.addInitScript({ content: STILLNESS_INIT });
 
   let total = 0;
   for (const width of WIDTHS) {
@@ -564,17 +517,20 @@ async function main(): Promise<void> {
   }
   console.log(`\n  scans=${findings.length}  totalViolations=${total}`);
   console.log(`  byRule=${JSON.stringify(Object.fromEntries(byRule))}`);
+  console.log(`  pageErrors=${pageErrors.length}`);
   console.log(`  shots=${OUT}`);
 
   await browser.close();
-  if (server.pid) {
-    try {
-      process.kill(-server.pid, 'SIGTERM');
-    } catch {
-      /* already gone */
-    }
-  }
-  process.exit(0);
+  server.close();
+  // THE GATE. This used to be an unconditional `process.exit(0)`, so the run
+  // above could report violations and still be read as a pass by anything that
+  // checked the exit status — which is every CI runner and every reviewer who
+  // trusted a green command. Nothing about the report changed; only that it can
+  // now fail.
+  if (total > 0 || pageErrors.length > 0) process.exitCode = 1;
 }
 
-void main();
+main().catch((err: unknown) => {
+  console.error('[axe] fatal:', err);
+  process.exit(1);
+});

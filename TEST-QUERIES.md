@@ -117,7 +117,7 @@ Expected: Returns files in `src/mcp/` with symbol counts and sizes.
 
 ## tracedecay_affected
 
-> If I changed `src/mcp/tools.rs` and `src/tracedecay.rs`, what test files would be affected?
+> If I changed `src/mcp/tools/dispatch.rs` and `src/tracedecay.rs`, what test files would be affected?
 
 Expected: Returns test files that transitively depend on those source files.
 

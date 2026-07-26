@@ -27,6 +27,7 @@
 
 use axum::Json;
 use axum::extract::State;
+use schemars::JsonSchema;
 use serde::Serialize;
 use tracedecay_application::storage::identity::StoreKeyV1;
 use tracedecay_application::storage::telemetry::{
@@ -42,7 +43,7 @@ use super::read_model::{
 
 /// One store's telemetry entry. One entry per distinct store **file**, not per
 /// dashboard role.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, JsonSchema)]
 pub(crate) struct StoreTelemetryEntryV1 {
     /// Stable store key (the store's file name), or the raw file name when it is
     /// not a valid [`StoreKeyV1`].
@@ -67,7 +68,7 @@ pub(crate) struct StoreTelemetryEntryV1 {
 }
 
 /// The budget-evaluation dimension, sourced from owner configuration.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case", tag = "state")]
 pub(crate) enum StoreBudgetDimensionV1 {
     /// An owner-configured soft budget was evaluated against the live sample.
@@ -90,7 +91,7 @@ pub(crate) enum StoreBudgetDimensionV1 {
 }
 
 /// One recorded store-size watermark.
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, Serialize, JsonSchema)]
 pub(crate) struct StoreSizeWatermarkV1 {
     /// Wall-clock microseconds at which the size was measured.
     pub measured_at: i64,
@@ -100,7 +101,7 @@ pub(crate) struct StoreSizeWatermarkV1 {
 
 /// The per-store growth dimension. Growth is only ever reported over the window
 /// the server actually observed, and that window is named in `coverage`.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case", tag = "state")]
 pub(crate) enum StoreGrowthDimensionV1 {
     /// The first retained durable watermark: a real measurement with no
@@ -129,7 +130,7 @@ pub(crate) enum StoreGrowthDimensionV1 {
 }
 
 /// Telemetry payload: one entry per canonical store covered by StorageStatus.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, JsonSchema)]
 pub(crate) struct StorageTelemetryPayloadV1 {
     pub stores: Vec<StoreTelemetryEntryV1>,
     /// Where budgets come from, stated once for the whole read.

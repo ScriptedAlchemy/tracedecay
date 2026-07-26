@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::State;
+use schemars::JsonSchema;
 use serde::Serialize;
 
 use super::DashboardState;
@@ -25,7 +26,7 @@ use super::read_model::{
 };
 
 /// Freshness/generation state for one mounted worktree.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, JsonSchema)]
 pub(crate) struct CodeIndexWorktreeFreshnessV1 {
     /// Display path of the mounted worktree root.
     pub worktree_root: String,
@@ -56,7 +57,7 @@ pub(crate) type CodeIndexFreshnessReadFuture =
 pub(crate) type CodeIndexFreshnessReader =
     Arc<dyn Fn(PathBuf) -> CodeIndexFreshnessReadFuture + Send + Sync + 'static>;
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, JsonSchema)]
 pub(crate) struct CodeIndexFreshnessPayloadV1 {
     pub worktrees: Vec<CodeIndexWorktreeFreshnessV1>,
     pub note: String,

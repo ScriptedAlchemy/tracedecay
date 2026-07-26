@@ -12,6 +12,7 @@
 
 use std::fmt;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::error::ApplicationContractError;
@@ -59,7 +60,9 @@ pub mod operations {
 ///
 /// The kernel names the owner so a transport can route confirmation and dispatch
 /// to the correct surface; it never dispatches itself.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum DoctorOwningSurfaceV1 {
     /// The configuration control plane (Plan 20).
@@ -78,7 +81,9 @@ pub enum DoctorOwningSurfaceV1 {
 
 /// Whether an owning operation requires an explicit human confirmation before it
 /// may perform its admitted mutating effect.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum DoctorConfirmationRequirementV1 {
     /// An explicit confirmation is required before the action may run.
@@ -91,7 +96,7 @@ pub enum DoctorConfirmationRequirementV1 {
 ///
 /// This is a *description*, not an effect. It never carries argv, a path, or an
 /// inline action, and resolving it performs no work.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct DoctorRemediationDescriptorV1 {
     operation: DoctorOwningOperationRefV1,
     surface: DoctorOwningSurfaceV1,

@@ -2,6 +2,11 @@ use std::hash::{Hash, Hasher};
 use std::process::Command;
 use std::{collections::hash_map::DefaultHasher, fmt::Write as _, fs, path::Path};
 
+// Shared with the crate as `tracedecay::version::build_identity`, so the probe
+// that bakes the build's commit identity is the code its unit tests exercise
+// rather than a second copy that can drift.
+include!("src/version/build_identity.rs");
+
 /// Recursively collects every file under `root`, relative to `root`, using
 /// forward-slash separators. Returns sorted paths so codegen is deterministic.
 fn collect_files_relative(root: &Path) -> Vec<String> {
@@ -230,7 +235,7 @@ fn generate_plugin_bundle() {
 /// keeps a content stamp over the frontend sources; when stale (or app-dist is
 /// missing) it shells out to `npm run build` (npm ci first when node_modules
 /// is absent) and fails fast on error. In a packaged crate the frontend
-/// sources are absent, so the committed app-dist is used as-is and npm is
+/// sources are absent, so the packaged app-dist is used as-is and npm is
 /// never invoked. The dist is then embedded via a
 /// generated manifest in OUT_DIR so the installed binary serves the UI with
 /// zero filesystem dependency.
@@ -264,6 +269,9 @@ fn build_and_embed_dashboard_app() {
     }
     let source_stamp = format!("{:016x}", hasher.finish());
     let stamp_path = app_dist.join(".source-stamp");
+    println!("cargo::rerun-if-env-changed=TRACEDECAY_DASHBOARD_CONTRACT_SCHEMA_OUT");
+    let contract_schema_export =
+        std::env::var_os("TRACEDECAY_DASHBOARD_CONTRACT_SCHEMA_OUT").is_some();
     let fresh = fs::read_to_string(&stamp_path)
         .map(|current| current.trim() == source_stamp)
         .unwrap_or(false)
@@ -272,7 +280,7 @@ fn build_and_embed_dashboard_app() {
     // A packaged crate ships the prebuilt app-dist but none of the frontend
     // sources the stamp is computed from, so the stamp can never match there
     // and `fresh` is always false. Rebuilding is impossible in that tree — npm
-    // would run in a directory with no package.json — so treat the committed
+    // would run in a directory with no package.json — so treat the packaged
     // dist as authoritative whenever the sources are absent.
     let sources_present = Path::new("dashboard/package.json").exists();
     if !fresh && !sources_present {
@@ -282,7 +290,9 @@ fn build_and_embed_dashboard_app() {
              the published crate must ship a prebuilt dashboard/app-dist"
         );
     } else if !fresh {
-        if std::env::var_os("TRACEDECAY_SKIP_DASHBOARD_BUILD").is_some() {
+        if contract_schema_export {
+            println!("cargo::warning=skipping dashboard asset build for contract schema export");
+        } else if std::env::var_os("TRACEDECAY_SKIP_DASHBOARD_BUILD").is_some() {
             println!(
                 "cargo::warning=dashboard app-dist is stale but TRACEDECAY_SKIP_DASHBOARD_BUILD is set; embedding existing dist"
             );
@@ -296,7 +306,7 @@ fn build_and_embed_dashboard_app() {
         }
     }
     assert!(
-        app_dist.join("index.html").exists(),
+        contract_schema_export || app_dist.join("index.html").exists(),
         "dashboard/app-dist/index.html is missing after build; the dashboard frontend build failed"
     );
 
@@ -374,19 +384,27 @@ fn main() {
     }
     println!("cargo::rerun-if-changed=src/resources/logo.png");
 
-    // Generator provenance: baked into generated agent plugins (manifest +
-    // module header) so a stale installed plugin is distinguishable from
-    // the binary that should have generated it. Advisory only — may lag a
-    // commit until the next build-script rerun.
-    let git_sha = Command::new("git")
-        .args(["rev-parse", "--short=12", "HEAD"])
-        .output()
-        .ok()
-        .filter(|out| out.status.success())
-        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
-        .filter(|sha| !sha.is_empty())
-        .unwrap_or_else(|| "unknown".to_string());
-    println!("cargo::rustc-env=TRACEDECAY_GIT_SHA={git_sha}");
+    // Build identity: the commit this binary is compiled from and whether the
+    // worktree was clean. Feeds the generated agent plugins' provenance header
+    // (so a stale installed plugin is distinguishable from the binary that
+    // should have generated it) and the SemVer build metadata the binary
+    // reports as its own version. Watching HEAD, its reflog, and the index
+    // keeps both honest; without those the baked commit would describe
+    // whichever tree last happened to trigger this script.
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
+    let identity = resolve(Path::new(&manifest_dir));
+    for path in watch_paths(Path::new(&manifest_dir)) {
+        println!("cargo::rerun-if-changed={}", path.display());
+    }
+    println!("cargo::rerun-if-changed=src/version/build_identity.rs");
+    println!(
+        "cargo::rustc-env=TRACEDECAY_GIT_SHA={}",
+        identity.sha.as_deref().unwrap_or("unknown")
+    );
+    println!(
+        "cargo::rustc-env=TRACEDECAY_GIT_DIRTY={}",
+        u8::from(identity.dirty)
+    );
 
     // Vendored WGSL grammar — compiled only when lang-wgsl is enabled.
     // Using vendored sources avoids pulling in tree-sitter-wgsl 0.0.6 which was

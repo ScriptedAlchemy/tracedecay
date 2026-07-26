@@ -604,14 +604,26 @@ pub(super) fn record_hook_analytics(
     append_private_jsonl(&path, &line);
 }
 
+/// Chooses the analytics file for a hook invocation.
+///
+/// A hook fires in whatever directory the agent happens to be in, so it must
+/// not be the thing that decides a directory is a project. When no authority
+/// already names this checkout, analytics go to the profile-wide file rather
+/// than to a store shard minted from the path — writing here used to create
+/// `projects/proj_<path hash>/` for directories that never became projects, and
+/// those shards then outnumbered the real stores.
 fn hook_analytics_path(root: Option<&Path>) -> Option<PathBuf> {
-    match root {
-        Some(root) => crate::storage::resolve_layout_for_current_profile(root)
+    let enrolled_data_root = root.and_then(|root| {
+        crate::storage::resolve_enrolled_layout_for_current_profile(root)
             .ok()
-            .map(|layout| layout.data_root.join(HOOK_ANALYTICS_FILENAME)),
+            .flatten()
+            .map(|layout| layout.data_root)
+    });
+    match enrolled_data_root {
+        Some(data_root) => Some(data_root.join(HOOK_ANALYTICS_FILENAME)),
         None => crate::storage::default_profile_root()
             .ok()
-            .map(|root| root.join(HOOK_ANALYTICS_FILENAME)),
+            .map(|profile_root| profile_root.join(HOOK_ANALYTICS_FILENAME)),
     }
 }
 

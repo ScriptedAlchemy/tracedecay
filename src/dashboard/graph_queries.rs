@@ -2,7 +2,9 @@ use serde_json::Value;
 
 use crate::db::engine::{QueryExecutor, Value as DbValue, params, params_from_iter};
 
-use super::util::{like_pattern, qmarks, query_i64, query_rows};
+use super::util::{like_pattern, qmarks, query_i64_result, query_rows};
+
+pub(crate) type GraphReadResult<T> = std::result::Result<T, String>;
 
 pub(crate) const NODE_COLUMNS: &str = "id, kind, name, qualified_name, file_path,
        start_line, end_line, start_column, end_column, attrs_start_line,
@@ -31,22 +33,22 @@ fn filtered_degree_union_sql(placeholders: &str) -> String {
     )
 }
 
-pub(crate) async fn total_nodes(conn: &(impl QueryExecutor + ?Sized)) -> i64 {
-    query_i64(conn, "SELECT COUNT(*) FROM nodes", ()).await
+pub(crate) async fn total_nodes(conn: &(impl QueryExecutor + ?Sized)) -> GraphReadResult<i64> {
+    query_i64_result(conn, "SELECT COUNT(*) FROM nodes", ()).await
 }
 
-pub(crate) async fn total_edges(conn: &(impl QueryExecutor + ?Sized)) -> i64 {
-    query_i64(conn, "SELECT COUNT(*) FROM edges", ()).await
+pub(crate) async fn total_edges(conn: &(impl QueryExecutor + ?Sized)) -> GraphReadResult<i64> {
+    query_i64_result(conn, "SELECT COUNT(*) FROM edges", ()).await
 }
 
-pub(crate) async fn max_edge_id(conn: &(impl QueryExecutor + ?Sized)) -> i64 {
-    query_i64(conn, "SELECT COALESCE(MAX(id), 0) FROM edges", ()).await
+pub(crate) async fn max_edge_id(conn: &(impl QueryExecutor + ?Sized)) -> GraphReadResult<i64> {
+    query_i64_result(conn, "SELECT COALESCE(MAX(id), 0) FROM edges", ()).await
 }
 
 pub(crate) async fn first_node_for_query(
     conn: &(impl QueryExecutor + ?Sized),
     query: &str,
-) -> Option<String> {
+) -> GraphReadResult<Option<String>> {
     let trimmed = query.trim();
     let like = like_pattern(trimmed);
     let rows = query_rows(
@@ -61,20 +63,23 @@ pub(crate) async fn first_node_for_query(
          LIMIT 1",
         params![like, trimmed],
     )
-    .await
-    .ok()?;
-    rows.first()
+    .await?;
+    Ok(rows
+        .first()
         .and_then(|row| row.get("id"))
         .and_then(Value::as_str)
-        .map(ToOwned::to_owned)
+        .map(ToOwned::to_owned))
 }
 
-pub(crate) async fn search_total(conn: &(impl QueryExecutor + ?Sized), query: &str) -> i64 {
+pub(crate) async fn search_total(
+    conn: &(impl QueryExecutor + ?Sized),
+    query: &str,
+) -> GraphReadResult<i64> {
     if query.is_empty() {
         total_nodes(conn).await
     } else {
         let like = like_pattern(query);
-        query_i64(
+        query_i64_result(
             conn,
             "SELECT COUNT(*)
              FROM nodes
@@ -93,7 +98,7 @@ pub(crate) async fn search_rows(
     query: &str,
     limit: i64,
     offset: i64,
-) -> Vec<Value> {
+) -> GraphReadResult<Vec<Value>> {
     if query.is_empty() {
         query_rows(
             conn,
@@ -106,7 +111,6 @@ pub(crate) async fn search_rows(
             params![limit, offset],
         )
         .await
-        .unwrap_or_default()
     } else {
         let like = like_pattern(query);
         query_rows(
@@ -131,16 +135,15 @@ pub(crate) async fn search_rows(
             params![like, query, limit, offset],
         )
         .await
-        .unwrap_or_default()
     }
 }
 
 pub(crate) async fn node_rows_by_ids(
     conn: &(impl QueryExecutor + ?Sized),
     ids: &[String],
-) -> Vec<Value> {
+) -> GraphReadResult<Vec<Value>> {
     if ids.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let placeholders = qmarks(ids.len());
     let sql = format!(
@@ -149,18 +152,16 @@ pub(crate) async fn node_rows_by_ids(
          WHERE id IN ({placeholders})"
     );
     let params = ids.iter().cloned().map(DbValue::Text);
-    query_rows(conn, &sql, params_from_iter(params))
-        .await
-        .unwrap_or_default()
+    query_rows(conn, &sql, params_from_iter(params)).await
 }
 
 pub(crate) async fn edge_rows_for_ids(
     conn: &(impl QueryExecutor + ?Sized),
     ids: &[String],
     limit: i64,
-) -> Vec<Value> {
+) -> GraphReadResult<Vec<Value>> {
     if ids.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let placeholders = qmarks(ids.len());
     // One row per (source, target, kind): the edges table stores one row per
@@ -177,17 +178,15 @@ pub(crate) async fn edge_rows_for_ids(
     let mut params: Vec<DbValue> = ids.iter().cloned().map(DbValue::Text).collect();
     params.extend(ids.iter().cloned().map(DbValue::Text));
     params.push(DbValue::Integer(limit));
-    query_rows(conn, &sql, params_from_iter(params))
-        .await
-        .unwrap_or_default()
+    query_rows(conn, &sql, params_from_iter(params)).await
 }
 
 pub(crate) async fn degree_rows_for_ids(
     conn: &(impl QueryExecutor + ?Sized),
     ids: &[String],
-) -> Vec<Value> {
+) -> GraphReadResult<Vec<Value>> {
     if ids.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let placeholders = qmarks(ids.len());
     let degree_union = filtered_degree_union_sql(&placeholders);
@@ -198,15 +197,13 @@ pub(crate) async fn degree_rows_for_ids(
     );
     let mut params: Vec<DbValue> = ids.iter().cloned().map(DbValue::Text).collect();
     params.extend(ids.iter().cloned().map(DbValue::Text));
-    query_rows(conn, &sql, params_from_iter(params))
-        .await
-        .unwrap_or_default()
+    query_rows(conn, &sql, params_from_iter(params)).await
 }
 
 pub(crate) async fn degree_pool_rows(
     conn: &(impl QueryExecutor + ?Sized),
     limit: i64,
-) -> Vec<Value> {
+) -> GraphReadResult<Vec<Value>> {
     query_rows(
         conn,
         &format!(
@@ -223,10 +220,11 @@ pub(crate) async fn degree_pool_rows(
         params![limit],
     )
     .await
-    .unwrap_or_default()
 }
 
-pub(crate) async fn top_connected_rows(conn: &(impl QueryExecutor + ?Sized)) -> Vec<Value> {
+pub(crate) async fn top_connected_rows(
+    conn: &(impl QueryExecutor + ?Sized),
+) -> GraphReadResult<Vec<Value>> {
     query_rows(
         conn,
         &format!(
@@ -244,36 +242,40 @@ pub(crate) async fn top_connected_rows(conn: &(impl QueryExecutor + ?Sized)) -> 
         (),
     )
     .await
-    .unwrap_or_default()
 }
 
-pub(crate) async fn node_row(conn: &(impl QueryExecutor + ?Sized), node_id: &str) -> Option<Value> {
-    query_rows(
+pub(crate) async fn node_row(
+    conn: &(impl QueryExecutor + ?Sized),
+    node_id: &str,
+) -> GraphReadResult<Option<Value>> {
+    Ok(query_rows(
         conn,
         &format!("SELECT {NODE_COLUMNS} FROM nodes WHERE id = ?1 LIMIT 1"),
         params![node_id],
     )
-    .await
-    .unwrap_or_default()
+    .await?
     .into_iter()
-    .next()
+    .next())
 }
 
-pub(crate) async fn node_exists(conn: &(impl QueryExecutor + ?Sized), node_id: &str) -> bool {
-    query_i64(
+pub(crate) async fn node_exists(
+    conn: &(impl QueryExecutor + ?Sized),
+    node_id: &str,
+) -> GraphReadResult<bool> {
+    Ok(query_i64_result(
         conn,
         "SELECT COUNT(*) FROM nodes WHERE id = ?1",
         params![node_id],
     )
-    .await
-        > 0
+    .await?
+        > 0)
 }
 
 pub(crate) async fn caller_rows(
     conn: &(impl QueryExecutor + ?Sized),
     node_id: &str,
     limit: i64,
-) -> Vec<Value> {
+) -> GraphReadResult<Vec<Value>> {
     query_rows(
         conn,
         &format!(
@@ -287,14 +289,13 @@ pub(crate) async fn caller_rows(
         params![node_id, limit],
     )
     .await
-    .unwrap_or_default()
 }
 
 pub(crate) async fn callee_rows(
     conn: &(impl QueryExecutor + ?Sized),
     node_id: &str,
     limit: i64,
-) -> Vec<Value> {
+) -> GraphReadResult<Vec<Value>> {
     query_rows(
         conn,
         &format!(
@@ -308,14 +309,13 @@ pub(crate) async fn callee_rows(
         params![node_id, limit],
     )
     .await
-    .unwrap_or_default()
 }
 
 pub(crate) async fn neighborhood_edge_rows(
     conn: &(impl QueryExecutor + ?Sized),
     node_id: &str,
     limit: i64,
-) -> Vec<Value> {
+) -> GraphReadResult<Vec<Value>> {
     query_rows(
         conn,
         "SELECT e.source, e.target, e.kind, e.line,
@@ -330,13 +330,12 @@ pub(crate) async fn neighborhood_edge_rows(
         params![node_id, limit],
     )
     .await
-    .unwrap_or_default()
 }
 
 pub(crate) async fn neighborhood_edge_counts(
     conn: &(impl QueryExecutor + ?Sized),
     node_id: &str,
-) -> Vec<Value> {
+) -> GraphReadResult<Vec<Value>> {
     query_rows(
         conn,
         "SELECT kind, COUNT(*) AS count
@@ -347,13 +346,12 @@ pub(crate) async fn neighborhood_edge_counts(
         params![node_id],
     )
     .await
-    .unwrap_or_default()
 }
 
 pub(crate) async fn subgraph_candidate_rows(
     conn: &(impl QueryExecutor + ?Sized),
     seed_id: &str,
-) -> Vec<Value> {
+) -> GraphReadResult<Vec<Value>> {
     query_rows(
         conn,
         "SELECT id, MIN(rank) AS rank
@@ -367,15 +365,14 @@ pub(crate) async fn subgraph_candidate_rows(
         params![seed_id],
     )
     .await
-    .unwrap_or_default()
 }
 
 pub(crate) async fn frontier_edge_rows(
     conn: &(impl QueryExecutor + ?Sized),
     frontier: &[String],
-) -> Vec<Value> {
+) -> GraphReadResult<Vec<Value>> {
     if frontier.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let placeholders = qmarks(frontier.len());
     let sql = format!(
@@ -384,9 +381,7 @@ pub(crate) async fn frontier_edge_rows(
     );
     let mut bind: Vec<DbValue> = frontier.iter().cloned().map(DbValue::Text).collect();
     bind.extend(frontier.iter().cloned().map(DbValue::Text));
-    query_rows(conn, &sql, params_from_iter(bind))
-        .await
-        .unwrap_or_default()
+    query_rows(conn, &sql, params_from_iter(bind)).await
 }
 
 #[cfg(test)]
@@ -407,10 +402,7 @@ mod tests {
 
         let rows = search_rows(&conn, "missing", 10, 0).await;
 
-        assert!(
-            !rows.is_empty(),
-            "query failure was laundered into a successful empty search"
-        );
+        assert!(rows.is_err(), "query failure should remain a failed read");
     }
 
     #[tokio::test]
@@ -419,10 +411,7 @@ mod tests {
 
         let node = node_row(&conn, "missing").await;
 
-        assert!(
-            node.is_some(),
-            "query failure was laundered into confirmed node absence"
-        );
+        assert!(node.is_err(), "query failure should remain a failed read");
     }
 
     #[tokio::test]
@@ -431,9 +420,6 @@ mod tests {
 
         let total = total_nodes(&conn).await;
 
-        assert_ne!(
-            total, 0,
-            "query failure was laundered into an authoritative zero"
-        );
+        assert!(total.is_err(), "query failure should remain a failed read");
     }
 }

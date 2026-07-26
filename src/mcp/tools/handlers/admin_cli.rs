@@ -219,7 +219,7 @@ async fn dispatch_admin_cli(
     let global_db = context.global_db;
     let value = match action {
         AdminCliAction::CostSummary { range } => {
-            cost_summary(context.require_accounting_db()?, &range).await
+            cost_summary(context.require_accounting_db()?, &range).await?
         }
         AdminCliAction::SessionsIngest => {
             sessions_ingest(
@@ -373,7 +373,7 @@ async fn registry_list(
 
     let limit = limit.clamp(1, 100_000);
     let mut projects = match query {
-        Some(query) => global_db.search_code_projects(query, limit + 1).await,
+        Some(query) => global_db.try_search_code_projects(query, limit + 1).await?,
         None => global_db.list_code_projects(limit + 1).await?,
     };
     let truncated = projects.len() > limit;
@@ -462,28 +462,37 @@ async fn registry_context(
     }))
 }
 
-async fn cost_summary(global_db: &RegisteredGlobalDb, range: &str) -> Value {
+async fn cost_summary(global_db: &RegisteredGlobalDb, range: &str) -> Result<Value> {
+    let accounting_error = |message| TraceDecayError::Config { message };
     crate::accounting::pricing::refresh_if_stale();
     let ingest = crate::accounting::parser::ingest(global_db).await;
     let since = crate::accounting::metrics::parse_range(range);
-    let tokens_saved = global_db.global_tokens_saved().await.unwrap_or(0);
-    let summary = crate::accounting::metrics::cost_summary(global_db, since, tokens_saved).await;
-    let today_since = crate::accounting::metrics::parse_range("today");
-    let today_cost = global_db.total_cost_since(today_since).await.unwrap_or(0.0);
-    let today_breakdown = global_db
-        .token_breakdown_since(today_since)
+    let tokens_saved = global_db
+        .try_global_tokens_saved()
         .await
-        .unwrap_or((0, 0, 0));
+        .map_err(accounting_error)?;
+    let summary = crate::accounting::metrics::cost_summary(global_db, since, tokens_saved)
+        .await
+        .map_err(accounting_error)?;
+    let today_since = crate::accounting::metrics::parse_range("today");
+    let today_cost = global_db
+        .try_total_cost_since(today_since)
+        .await
+        .map_err(accounting_error)?;
+    let today_breakdown = global_db
+        .try_token_breakdown_since(today_since)
+        .await
+        .map_err(accounting_error)?;
     let costs =
         crate::application::observability::costs_read_model(global_db, None, since as i64).await;
-    json!({
+    Ok(json!({
         "range": range,
         "ingest": {
             "turns_inserted": ingest.turns_inserted,
             "cost_usd": ingest.cost_usd,
             "tokens_consumed": ingest.tokens_consumed,
         },
-        "summary": summary.map(|summary| json!({
+        "summary": {
             "total_cost": summary.total_cost,
             "total_input_tokens": summary.total_input_tokens,
             "total_output_tokens": summary.total_output_tokens,
@@ -492,7 +501,7 @@ async fn cost_summary(global_db: &RegisteredGlobalDb, range: &str) -> Value {
             "by_category": summary.by_category,
             "tokens_saved": summary.tokens_saved,
             "efficiency_ratio": summary.efficiency_ratio,
-        })),
+        },
         "today": {
             "cost": today_cost,
             "input_tokens": today_breakdown.0,
@@ -500,7 +509,7 @@ async fn cost_summary(global_db: &RegisteredGlobalDb, range: &str) -> Value {
             "cache_read_tokens": today_breakdown.2,
         },
         "costs": costs,
-    })
+    }))
 }
 
 async fn sessions_ingest(

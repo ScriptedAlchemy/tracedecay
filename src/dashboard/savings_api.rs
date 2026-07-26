@@ -239,11 +239,13 @@ pub(crate) async fn overview(State(state): State<DashboardState>) -> Json<Value>
         }),
     };
     let sessions = match state.lcm_db.as_deref() {
-        Some(db) => sessions_overview(db, &state).await,
+        Some(db) => sessions_overview(db, &state)
+            .await
+            .unwrap_or_else(read_failed_block),
         None => json!({ "available": false, "db": state.lcm_db_path }),
     };
     let turns = match state.savings_db.as_deref() {
-        Some(gdb) => turns_overview(gdb).await,
+        Some(gdb) => turns_overview(gdb).await.unwrap_or_else(read_failed_block),
         None => json!({ "available": false }),
     };
     let pricing_full = savings_pricing::pricing_payload();
@@ -387,7 +389,18 @@ async fn savings_overview(gdb: &RegisteredGlobalDb, db_path: &str) -> Value {
     })
 }
 
-async fn sessions_overview(db: &RegisteredGlobalDb, state: &DashboardState) -> Value {
+fn read_failed_block(error: String) -> Value {
+    json!({
+        "available": false,
+        "status": "read_failed",
+        "error": error,
+    })
+}
+
+async fn sessions_overview(
+    db: &RegisteredGlobalDb,
+    state: &DashboardState,
+) -> Result<Value, String> {
     let conn = db.read_connection();
     let sql = format!(
         "SELECT {TOKEN_AGG_COLUMNS},
@@ -396,36 +409,12 @@ async fn sessions_overview(db: &RegisteredGlobalDb, state: &DashboardState) -> V
                 SUM(CASE WHEN model = '' THEN 1 ELSE 0 END) AS unknown_model_messages
          FROM ({MESSAGE_TOKENS_CTE})"
     );
-    let rows = match query_rows(conn, &sql, ()).await {
-        Ok(rows) => rows,
-        Err(error) => {
-            return json!({
-                "available": false,
-                "db": state.lcm_db_path,
-                "scope": state.lcm_scope,
-                "error": format!("failed to aggregate session tokens: {error}"),
-            });
-        }
-    };
-    let Some(agg) = rows.first().cloned() else {
-        return json!({
-            "available": false,
-            "db": state.lcm_db_path,
-            "scope": state.lcm_scope,
-            "error": "session token aggregate returned no row",
-        });
-    };
-    let session_count = match query_i64_result(conn, "SELECT COUNT(*) FROM sessions", ()).await {
-        Ok(count) => count,
-        Err(error) => {
-            return json!({
-                "available": false,
-                "db": state.lcm_db_path,
-                "scope": state.lcm_scope,
-                "error": format!("failed to count sessions: {error}"),
-            });
-        }
-    };
+    let rows = query_rows(conn, &sql, ()).await?;
+    let agg = rows
+        .first()
+        .cloned()
+        .ok_or_else(|| "session overview query returned no row".to_string())?;
+    let session_count = query_i64_result(conn, "SELECT COUNT(*) FROM sessions", ()).await?;
 
     let overlay = token_count::non_usage_message_tokens(state).await;
     let total_tiers = overlay.as_deref().map(|messages| {
@@ -436,7 +425,7 @@ async fn sessions_overview(db: &RegisteredGlobalDb, state: &DashboardState) -> V
         sums
     });
 
-    merge(
+    Ok(merge(
         token_block(&agg, total_tiers.as_ref()),
         json!({
             "available": true,
@@ -447,45 +436,21 @@ async fn sessions_overview(db: &RegisteredGlobalDb, state: &DashboardState) -> V
             "unknown_model_messages": i64_field(&agg, "unknown_model_messages"),
             "token_counting": counting_available(),
         }),
-    )
+    ))
 }
 
-async fn turns_overview(gdb: &RegisteredGlobalDb) -> Value {
+async fn turns_overview(gdb: &RegisteredGlobalDb) -> Result<Value, String> {
     let turn_count =
-        match query_i64_result(gdb.read_connection(), "SELECT COUNT(*) FROM turns", ()).await {
-            Ok(count) => count,
-            Err(error) => {
-                return json!({
-                    "available": false,
-                    "error": format!("failed to count priced turns: {error}"),
-                });
-            }
-        };
-    let total_cost = match gdb.try_total_cost_since(0).await {
-        Ok(cost) => cost,
-        Err(error) => {
-            return json!({
-                "available": false,
-                "error": format!("failed to sum priced turn cost: {error}"),
-            });
-        }
-    };
-    let total_tokens = match gdb.try_total_tokens_since(0).await {
-        Ok(tokens) => tokens,
-        Err(error) => {
-            return json!({
-                "available": false,
-                "error": format!("failed to sum priced turn tokens: {error}"),
-            });
-        }
-    };
-    json!({
+        query_i64_result(gdb.read_connection(), "SELECT COUNT(*) FROM turns", ()).await?;
+    let total_cost = gdb.try_total_cost_since(0).await?;
+    let total_tokens = gdb.try_total_tokens_since(0).await?;
+    Ok(json!({
         "available": true,
         "turn_count": turn_count,
         "total_cost_usd": total_cost,
         "total_tokens": total_tokens,
         "cost_basis": "actual",
-    })
+    }))
 }
 
 /// GET `/api/plugins/savings/ledger?range=today|7d|30d|all`
