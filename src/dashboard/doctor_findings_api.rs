@@ -8,6 +8,7 @@
 
 use axum::Json;
 use axum::extract::{Query, State};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracedecay_application::doctor::{
     DoctorCoverageCompletenessV1, DoctorEvidenceStateV1, DoctorFamilyConsultationV1,
@@ -33,7 +34,7 @@ pub(crate) struct FindingsParams {
 /// The canonical Doctor report projection. `entries` retains the storage
 /// subclass attached by the kernel; remediation descriptors are emitted only
 /// after the kernel registry resolves the finding's owner-supplied reference.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, JsonSchema)]
 pub(crate) struct DoctorFindingsPayloadV1 {
     pub family_filter: Option<DoctorFindingFamilyV1>,
     pub entries: Vec<DoctorReportEntryV1>,

@@ -6,6 +6,7 @@
 
 use std::collections::BTreeSet;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -18,7 +19,9 @@ const OBSERVATION_CAPTURE_CAPABILITY_ID: &str = "capability.integration.observat
 /// Canonical stock host surfaces shared by catalog, packaging, delivery, and
 /// conformance consumers. A host surface is not itself evidence that the PR6
 /// observation-capture capability is fixture-backed.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum HostKindV1 {
     ClaudeCode,

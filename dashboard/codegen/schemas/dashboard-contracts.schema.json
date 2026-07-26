@@ -1,38 +1,676 @@
 {
-  "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://tracedecay.dev/schemas/dashboard-contracts.json",
-  "title": "DashboardContracts",
-  "schemaRevision": "read-model-v1",
-  "description": "Fixture mirroring the Rust serde model in src/dashboard/read_model.rs (DashboardEnvelopeV1<T> plus the closed snake_case enums). This is the generation source for the frontend wire boundary (src/contracts/generated.ts). Until the real schemars JSON Schema export is wired, this fixture is hand-kept in lockstep with read_model.rs; the generated module is hand-maintained from the same source of truth.",
   "$defs": {
-    "Authorization": {
-      "type": "object",
-      "description": "Authorization outcome (internally tagged on `outcome`). Only `authorized` is emitted by the local loopback dashboard today.",
+    "ActorId": {
+      "description": "Strongly typed canonical identity: `ActorId`.",
+      "type": "string"
+    },
+    "AuthorityRef": {
+      "description": "Authoritative scope of a source binding. A mutable path, label, or host\nprofile cannot be represented as authority.",
+      "oneOf": [
+        {
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/ProjectId"
+            },
+            "kind": {
+              "const": "project",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "id"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "kind": {
+              "const": "projectless_hermes",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "id"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "AutomaticWorktreeGcV1": {
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "disabled",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "eligible_only",
+              "type": "string"
+            },
+            "maximum_per_run": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "minimum_idle_seconds": {
+              "format": "uint64",
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "minimum_idle_seconds",
+            "maximum_per_run"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "BranchCollisionPolicyV1": {
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "reject",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "append_monotonic_ordinal",
+              "type": "string"
+            },
+            "maximum_attempts": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "kind",
+            "maximum_attempts"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "BranchNameComponentV1": {
+      "oneOf": [
+        {
+          "properties": {
+            "bytes": {
+              "format": "uint8",
+              "maximum": 255,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "kind": {
+              "const": "task_id_digest_prefix",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "bytes"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "repository_slug",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "work_class",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "monotonic_collision_ordinal",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "BranchNameSeparatorV1": {
+      "enum": [
+        "hyphen",
+        "underscore",
+        "slash"
+      ],
+      "type": "string"
+    },
+    "BranchNamingPolicyV1": {
+      "additionalProperties": false,
       "properties": {
-        "outcome": {
-          "type": "string",
-          "enum": ["authorized", "unauthorized", "denied", "redacted"]
+        "collision": {
+          "$ref": "#/$defs/BranchCollisionPolicyV1"
+        },
+        "components": {
+          "items": {
+            "$ref": "#/$defs/BranchNameComponentV1"
+          },
+          "type": "array"
+        },
+        "maximum_bytes": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "prefix": {
+          "$ref": "#/$defs/CanonicalGitRefPrefix"
+        },
+        "separator": {
+          "$ref": "#/$defs/BranchNameSeparatorV1"
         }
       },
-      "required": ["outcome"]
+      "required": [
+        "prefix",
+        "components",
+        "separator",
+        "maximum_bytes",
+        "collision"
+      ],
+      "type": "object"
     },
-    "Coverage": {
-      "type": "object",
-      "description": "Coverage statement. `completeness` is authoritative; an unknown denominator is null, never a fabricated 0/100%.",
+    "BranchTopologyKindV1": {
+      "enum": [
+        "no_branches",
+        "unbranched",
+        "independent_branches",
+        "local_stack"
+      ],
+      "type": "string"
+    },
+    "BranchTopologyPolicyV1": {
+      "additionalProperties": false,
+      "properties": {
+        "allowed": {
+          "items": {
+            "$ref": "#/$defs/BranchTopologyKindV1"
+          },
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "allowed"
+      ],
+      "type": "object"
+    },
+    "CallChainMeasurementV1": {
+      "properties": {
+        "directed": {
+          "type": "boolean"
+        },
+        "edge_kind": {
+          "type": "string"
+        },
+        "found": {
+          "type": "boolean"
+        },
+        "from_node_id": {
+          "type": "string"
+        },
+        "hop_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_depth": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "selection": {
+          "type": "string"
+        },
+        "steps": {
+          "items": {
+            "$ref": "#/$defs/CallChainStepV1"
+          },
+          "type": "array"
+        },
+        "to_node_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "from_node_id",
+        "to_node_id",
+        "max_depth",
+        "directed",
+        "edge_kind",
+        "selection",
+        "found",
+        "hop_count",
+        "steps"
+      ],
+      "type": "object"
+    },
+    "CallChainStepV1": {
+      "properties": {
+        "incoming_edge": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/IncomingCallEdgeV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "node": {
+          "$ref": "#/$defs/NodeRefV1"
+        }
+      },
+      "required": [
+        "node",
+        "incoming_edge"
+      ],
+      "type": "object"
+    },
+    "CancellationObservation": {
+      "additionalProperties": false,
+      "properties": {
+        "observed_at": {
+          "$ref": "#/$defs/UtcMicros"
+        },
+        "stage": {
+          "$ref": "#/$defs/CancellationStage"
+        }
+      },
+      "required": [
+        "stage",
+        "observed_at"
+      ],
+      "type": "object"
+    },
+    "CancellationStage": {
+      "description": "Exact stage at which cancellation or deadline state was observed.",
+      "enum": [
+        "before_admission",
+        "before_read",
+        "during_read",
+        "before_effect",
+        "effect_in_flight",
+        "reconciling",
+        "after_commit"
+      ],
+      "type": "string"
+    },
+    "CanonicalGitRefNameV1": {
+      "description": "A validated full native Git ref name, such as `refs/heads/main`.",
+      "type": "string"
+    },
+    "CanonicalGitRefPrefix": {
+      "description": "A validated ref/branch prefix. Branch naming accepts a short branch prefix\n(for example `tracedecay/`) while protected-ref selectors use full\n`refs/.../` prefixes.",
+      "type": "string"
+    },
+    "CapabilityId": {
+      "description": "Strongly typed canonical identity: `CapabilityId`.",
+      "type": "string"
+    },
+    "CodeIndexFreshnessPayloadV1": {
+      "properties": {
+        "note": {
+          "type": "string"
+        },
+        "required_source": {
+          "description": "The seam that must be closed to feed this route with live data.",
+          "type": "string"
+        },
+        "worktrees": {
+          "items": {
+            "$ref": "#/$defs/CodeIndexWorktreeFreshnessV1"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "worktrees",
+        "required_source",
+        "note"
+      ],
+      "type": "object"
+    },
+    "CodeIndexWorktreeFreshnessV1": {
+      "description": "Freshness/generation state for one mounted worktree. Unpopulated until the\nscheduler-registry read port is wired into the dashboard state.",
+      "properties": {
+        "hook_hint_count": {
+          "description": "Pending hook-hint count, when cheaply available.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "last_reconcile_micros": {
+          "description": "Last reconcile observation time (microseconds since the Unix epoch).",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "latest_generation_id": {
+          "description": "Latest sealed generation identity, when a complete generation exists.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "staleness_state": {
+          "description": "Staleness-ladder state label (e.g. `fresh`, `stale`, `reresolving`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "worktree_root": {
+          "description": "Display path of the mounted worktree root.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "worktree_root",
+        "latest_generation_id",
+        "last_reconcile_micros",
+        "staleness_state",
+        "hook_hint_count"
+      ],
+      "type": "object"
+    },
+    "ConfigurationProtectedApplySurfaceRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "expected_base_revision_id": {
+          "type": "string"
+        },
+        "idempotency_key": {
+          "type": "string"
+        },
+        "operation_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "plan_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "plan_id",
+        "expected_base_revision_id",
+        "operation_digest",
+        "idempotency_key"
+      ],
+      "type": "object"
+    },
+    "ConfigurationProtectedPreviewSurfaceRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "change": {
+          "$ref": "#/$defs/ProtectedChange"
+        },
+        "expected_revision": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "change",
+        "expected_revision"
+      ],
+      "type": "object"
+    },
+    "CoveringTestV1": {
+      "properties": {
+        "file_path": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "qualification": {
+          "type": "string"
+        },
+        "start_line": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "file_path",
+        "start_line",
+        "qualification"
+      ],
+      "type": "object"
+    },
+    "CrossMergeModeV1": {
+      "enum": [
+        "disabled",
+        "manual_receipt_only",
+        "fast_forward_only",
+        "merge_commit",
+        "cherry_pick_exact_commits"
+      ],
+      "type": "string"
+    },
+    "CrossMergePolicyV1": {
+      "additionalProperties": false,
+      "properties": {
+        "allow_cross_repository": {
+          "type": "boolean"
+        },
+        "allowed_modes": {
+          "items": {
+            "$ref": "#/$defs/CrossMergeModeV1"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "default_mode": {
+          "$ref": "#/$defs/CrossMergeModeV1"
+        }
+      },
+      "required": [
+        "allowed_modes",
+        "default_mode",
+        "allow_cross_repository"
+      ],
+      "type": "object"
+    },
+    "DashboardAuthorizationV1": {
+      "description": "Authorization outcome for the read. On the loopback single-user dashboard a\nlegal local read is [`Self::Authorized`]; the other variants are retained so\nthe contract can express `unauthorized` (identity absent/expired), `denied`\n(known identity lacks permission), and `redacted` reads without a schema\nchange.",
+      "oneOf": [
+        {
+          "properties": {
+            "outcome": {
+              "const": "authorized",
+              "type": "string"
+            }
+          },
+          "required": [
+            "outcome"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "outcome": {
+              "const": "unauthorized",
+              "type": "string"
+            }
+          },
+          "required": [
+            "outcome"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "outcome": {
+              "const": "denied",
+              "type": "string"
+            }
+          },
+          "required": [
+            "outcome"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "outcome": {
+              "const": "redacted",
+              "type": "string"
+            }
+          },
+          "required": [
+            "outcome"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DashboardCoverageCompletenessV1": {
+      "description": "Coverage completeness axis. `Unsupported` distinguishes \"the source that\nwould establish coverage is not wired\" from `Unknown` (\"coverage could not\nbe determined\").",
+      "enum": [
+        "complete",
+        "partial",
+        "unknown",
+        "unsupported"
+      ],
+      "type": "string"
+    },
+    "DashboardCoverageV1": {
+      "description": "Coverage statement. Counts are optional; an unknown denominator is `None`,\nnever a fabricated `0`/`100%`. The completeness axis is authoritative — the\nfrontend never derives `complete` from a `matched == eligible` coincidence.",
       "properties": {
         "completeness": {
-          "type": "string",
-          "enum": ["complete", "partial", "unknown", "unsupported"]
+          "$ref": "#/$defs/DashboardCoverageCompletenessV1"
         },
-        "eligible": { "type": ["integer", "null"] },
-        "examined": { "type": ["integer", "null"] },
-        "matched": { "type": ["integer", "null"] },
-        "excluded": { "type": ["integer", "null"] },
-        "omitted": { "type": ["integer", "null"] },
-        "unknown": { "type": ["integer", "null"] },
-        "denominator": { "type": ["integer", "null"] },
-        "unit": { "type": ["string", "null"] },
-        "omission_reasons": { "type": "array", "items": { "type": "string" } }
+        "denominator": {
+          "description": "Denominator for a percentage. `None` means the denominator is unknown, so\nthe frontend must not render a meter or a percentage.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "eligible": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "examined": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "excluded": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "matched": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "omission_reasons": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "omitted": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "unit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "unknown": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
       },
       "required": [
         "completeness",
@@ -45,140 +683,88 @@
         "denominator",
         "unit",
         "omission_reasons"
-      ]
+      ],
+      "type": "object"
     },
-    "DashboardDomainState": {
-      "description": "The closed 17-value domain-state union (snake_case). `unsupported` (live producer not yet wired server-side) is canonically emitted by the server and is distinct from `unsupported_schema` (an undecodable schema/variant).",
-      "type": "string",
-      "enum": [
-        "loading",
-        "complete_zero_findings",
-        "ready",
-        "partial",
-        "stale",
-        "locked",
-        "denied",
-        "unauthorized",
-        "redacted",
-        "conflicting",
-        "offline",
-        "unknown",
-        "cancelled",
-        "timed_out",
-        "error",
-        "unsupported_schema",
-        "unsupported"
-      ]
-    },
-    "Freshness": {
-      "type": "object",
-      "description": "Freshness statement. `absent` (no source produced anything) and `unsupported` (no source wired) are distinct from `stale` and `unknown`.",
-      "properties": {
-        "state": {
-          "type": "string",
-          "enum": ["fresh", "stale", "unknown", "absent", "unsupported"]
+    "DashboardDomainStateV1": {
+      "description": "The normative dashboard domain-state union.\n\nThe first sixteen variants are the plan's exact `DashboardDomainState`\ndiscriminated union. [`Self::Unsupported`] is the PR14 backend-gap binding\nstate: the read model's HTTP surface exists, but its live producer/source is\nnot yet wired server-side. It is never healthy or empty — the frontend\nrenders a distinct \"not yet available\" state — and it is deliberately\nseparate from [`Self::UnsupportedSchema`] (an undecodable schema/variant).",
+      "oneOf": [
+        {
+          "enum": [
+            "loading",
+            "complete_zero_findings",
+            "ready",
+            "partial",
+            "stale",
+            "locked",
+            "denied",
+            "unauthorized",
+            "redacted",
+            "conflicting",
+            "offline",
+            "unknown",
+            "cancelled",
+            "timed_out",
+            "error",
+            "unsupported_schema"
+          ],
+          "type": "string"
         },
-        "observed_at_micros": { "type": ["integer", "null"] },
-        "watermark": { "type": ["string", "null"] }
-      },
-      "required": ["state", "observed_at_micros", "watermark"]
-    },
-    "LegalActionKind": {
-      "type": "string",
-      "enum": [
-        "inspect",
-        "expand_evidence",
-        "refresh",
-        "request_dry_run",
-        "request_apply",
-        "request_cancel"
-      ]
-    },
-    "LegalActionRef": {
-      "type": "object",
-      "description": "Reference to one owner-supplied legal action. No command payload; `operation` names the owning application operation.",
-      "properties": {
-        "kind": { "$ref": "#/$defs/LegalActionKind" },
-        "operation": { "type": "string" }
-      },
-      "required": ["kind", "operation"]
-    },
-    "Scope": {
-      "type": "object",
-      "description": "Exact resolved scope. Never falls back to a title, path, or latest version.",
-      "properties": {
-        "project_id": { "type": ["string", "null"] },
-        "storage_mode": { "type": "string" },
-        "store_root": { "type": "string" }
-      },
-      "required": ["project_id", "storage_mode", "store_root"]
-    },
-    "Time": {
-      "type": "object",
-      "description": "Valid time and observation time, kept separate. Microseconds since the Unix epoch.",
-      "properties": {
-        "valid_time_micros": { "type": ["integer", "null"] },
-        "observation_time_micros": { "type": "integer" }
-      },
-      "required": ["valid_time_micros", "observation_time_micros"]
-    },
-    "Version": {
-      "type": "object",
-      "description": "Entity/graph version identity. Both optional; absent rather than invented 0/latest.",
-      "properties": {
-        "entity_version": { "type": ["string", "null"] },
-        "graph_version": { "type": ["string", "null"] }
-      },
-      "required": ["entity_version", "graph_version"]
-    },
-    "Watermark": {
-      "type": "object",
-      "description": "Opaque monotone source watermark. Compared for staleness, never parsed.",
-      "properties": {
-        "source": { "type": "string" },
-        "watermark": { "type": "string" }
-      },
-      "required": ["source", "watermark"]
-    },
-    "FindingPayload": {
-      "type": "object",
-      "description": "Representative domain payload (the `T` in DashboardEnvelope<T>). Severity and evidence quality are separate token axes, never one scale.",
-      "properties": {
-        "finding_id": { "type": "string" },
-        "title": { "type": "string" },
-        "summary": { "type": "string" },
-        "severity": {
-          "type": "string",
-          "enum": ["info", "low", "medium", "high", "critical"]
-        },
-        "evidence_quality": {
-          "type": "string",
-          "enum": ["unverified", "weak", "corroborated", "verified"]
+        {
+          "const": "unsupported",
+          "description": "The read model exists but its live producer/source is not yet wired\nserver-side (plan §\"Known backend gaps\"). Distinct from every \"healthy\"\nor \"empty\" state.",
+          "type": "string"
         }
-      },
-      "required": ["finding_id", "title", "summary", "severity", "evidence_quality"]
+      ]
     },
-    "DashboardEnvelope": {
-      "type": "object",
-      "x-generic": "TPayload",
-      "description": "DashboardEnvelopeV1<TPayload>. Every V2 read-model route returns exactly this shape; only `payload` varies. Carries schema revision, exact scope, entity/graph version, valid+observation time, optional source watermark, authorization, coverage, freshness, domain state, legal action references, and payload.",
+    "DashboardEnvelopeV1": {
+      "description": "The normative read-model envelope. Every V2 read-model route returns exactly\nthis shape; only `payload` varies by route.",
       "properties": {
-        "schema_revision": { "type": "integer" },
-        "scope": { "$ref": "#/$defs/Scope" },
-        "version": { "$ref": "#/$defs/Version" },
-        "time": { "$ref": "#/$defs/Time" },
-        "source_watermark": {
-          "anyOf": [{ "$ref": "#/$defs/Watermark" }, { "type": "null" }]
+        "authorization": {
+          "$ref": "#/$defs/DashboardAuthorizationV1"
         },
-        "authorization": { "$ref": "#/$defs/Authorization" },
-        "coverage": { "$ref": "#/$defs/Coverage" },
-        "freshness": { "$ref": "#/$defs/Freshness" },
-        "domain_state": { "$ref": "#/$defs/DashboardDomainState" },
+        "coverage": {
+          "$ref": "#/$defs/DashboardCoverageV1"
+        },
+        "domain_state": {
+          "$ref": "#/$defs/DashboardDomainStateV1"
+        },
+        "freshness": {
+          "$ref": "#/$defs/DashboardFreshnessV1"
+        },
         "legal_actions": {
-          "type": "array",
-          "items": { "$ref": "#/$defs/LegalActionRef" }
+          "items": {
+            "$ref": "#/$defs/DashboardLegalActionRefV1"
+          },
+          "type": "array"
         },
-        "payload": { "x-generic-ref": "TPayload" }
+        "payload": {
+          "$ref": "#/$defs/DashboardPayloadMarkerV1"
+        },
+        "schema_revision": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scope": {
+          "$ref": "#/$defs/DashboardScopeV1"
+        },
+        "source_watermark": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DashboardWatermarkV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "time": {
+          "$ref": "#/$defs/DashboardTimeV1"
+        },
+        "version": {
+          "$ref": "#/$defs/DashboardVersionV1"
+        }
       },
       "required": [
         "schema_revision",
@@ -192,7 +778,3591 @@
         "domain_state",
         "legal_actions",
         "payload"
+      ],
+      "type": "object"
+    },
+    "DashboardFreshnessStateV1": {
+      "description": "Freshness of the observed state relative to its live source watermark.\n`Absent` (no source produced anything) and `Unsupported` (no source wired)\nare distinct from `Stale` (behind the watermark) and `Unknown`.",
+      "enum": [
+        "fresh",
+        "stale",
+        "unknown",
+        "absent",
+        "unsupported"
+      ],
+      "type": "string"
+    },
+    "DashboardFreshnessV1": {
+      "description": "Freshness statement plus the optional observation stamp/watermark it was\njudged against.",
+      "properties": {
+        "observed_at_micros": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/DashboardFreshnessStateV1"
+        },
+        "watermark": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "state",
+        "observed_at_micros",
+        "watermark"
+      ],
+      "type": "object"
+    },
+    "DashboardLegalActionKindV1": {
+      "description": "The legal-action reference kinds a read model may attach. This mirrors the\nplan's action vocabulary reduced to the read surface: the dashboard only\nrenders these references and submits them through the owning application\noperation; it never constructs an effect inline.",
+      "enum": [
+        "inspect",
+        "expand_evidence",
+        "refresh",
+        "request_dry_run",
+        "request_apply",
+        "request_cancel"
+      ],
+      "type": "string"
+    },
+    "DashboardLegalActionRefV1": {
+      "description": "A reference to one owner-supplied legal action. `operation` names the owning\napplication operation; the dashboard never embeds argv, a path, or an inline\neffect.",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/DashboardLegalActionKindV1"
+        },
+        "operation": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "operation"
+      ],
+      "type": "object"
+    },
+    "DashboardPayloadMarkerV1": {
+      "type": "null"
+    },
+    "DashboardScopeV1": {
+      "description": "Exact scope the envelope was resolved for. A deep link/query never falls\nback to a title, path, or latest version to recover scope.",
+      "properties": {
+        "project_id": {
+          "description": "Registered project id, when the store is profile-backed.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "storage_mode": {
+          "description": "Resolved storage mode label (`project_local` / `profile_sharded`).",
+          "type": "string"
+        },
+        "store_root": {
+          "description": "Resolved active project store root (display path).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "project_id",
+        "storage_mode",
+        "store_root"
+      ],
+      "type": "object"
+    },
+    "DashboardTimeV1": {
+      "description": "Valid time and observation time, kept separate. `observation_time` is when\nthe daemon observed the state; `valid_time` is when the state was true in the\nmodelled domain (absent when a read model has no distinct valid time).",
+      "properties": {
+        "observation_time_micros": {
+          "description": "Observation time in microseconds since the Unix epoch. Always present.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "valid_time_micros": {
+          "description": "Domain valid time in microseconds since the Unix epoch, when distinct.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "valid_time_micros",
+        "observation_time_micros"
+      ],
+      "type": "object"
+    },
+    "DashboardVersionV1": {
+      "description": "Entity and graph version identities pinned by the envelope. Both are\noptional: a read model with no versioned graph state leaves them absent\nrather than inventing `0`/`latest`.",
+      "properties": {
+        "entity_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "graph_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "entity_version",
+        "graph_version"
+      ],
+      "type": "object"
+    },
+    "DashboardWatermarkV1": {
+      "description": "Opaque monotone source watermark. The frontend compares watermarks for\nstaleness but never parses their internal structure.",
+      "properties": {
+        "source": {
+          "description": "Which source the watermark belongs to.",
+          "type": "string"
+        },
+        "watermark": {
+          "description": "Opaque monotone token.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "watermark"
+      ],
+      "type": "object"
+    },
+    "Deadline": {
+      "additionalProperties": false,
+      "description": "One immutable deadline supplied by the caller or upstream admission layer.",
+      "properties": {
+        "expires_at": {
+          "$ref": "#/$defs/UtcMicros"
+        }
+      },
+      "required": [
+        "expires_at"
+      ],
+      "type": "object"
+    },
+    "DoctorConfirmationRequirementV1": {
+      "description": "Whether an owning operation requires an explicit human confirmation before it\nmay perform its admitted mutating effect.",
+      "oneOf": [
+        {
+          "const": "required",
+          "description": "An explicit confirmation is required before the action may run.",
+          "type": "string"
+        },
+        {
+          "const": "not_required",
+          "description": "No confirmation is required (still dispatched through the owner).",
+          "type": "string"
+        }
       ]
+    },
+    "DoctorCoverageCompletenessV1": {
+      "description": "Whether Doctor observed all of a family's evidence sources.",
+      "oneOf": [
+        {
+          "const": "complete",
+          "description": "Every relevant evidence source for the family was observed.",
+          "type": "string"
+        },
+        {
+          "const": "partial",
+          "description": "Some evidence sources were observed; others were omitted.",
+          "type": "string"
+        },
+        {
+          "const": "unknown",
+          "description": "Whether coverage is complete could not be determined.",
+          "type": "string"
+        }
+      ]
+    },
+    "DoctorCoverageStatementV1": {
+      "description": "A bounded, human-readable coverage statement plus its completeness.",
+      "properties": {
+        "completeness": {
+          "$ref": "#/$defs/DoctorCoverageCompletenessV1"
+        },
+        "statement": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "completeness",
+        "statement"
+      ],
+      "type": "object"
+    },
+    "DoctorEvidenceRefV1": {
+      "description": "A typed reference to one piece of evidence Doctor composed into a finding.\n\nThe `family` records which audited input surface produced the evidence, so\na finding may cross-cite evidence from more than one family without losing\nprovenance.",
+      "properties": {
+        "family": {
+          "$ref": "#/$defs/DoctorFindingFamilyV1"
+        },
+        "reference": {
+          "$ref": "#/$defs/DoctorEvidenceReferenceV1"
+        }
+      },
+      "required": [
+        "family",
+        "reference"
+      ],
+      "type": "object"
+    },
+    "DoctorEvidenceReferenceV1": {
+      "description": "Durable, non-disclosing reference to one owning-authority evidence\nrecord (for example a `FeedbackFindingId`, configuration revision, or\nruntime read coverage anchor). Doctor stores the reference only; the\nowning authority remains the single source of the record.",
+      "type": "string"
+    },
+    "DoctorEvidenceStateV1": {
+      "description": "Exact Doctor evidence states from Plan 09 §PR14.\n\nMissing, partial, or unknown truth never becomes healthy or clean. Only\n[`DoctorEvidenceStateV1::HealthyCompleteCoverage`] asserts a healthy result,\nand only when its finding carries complete coverage (see\n[`DoctorFindingV1::new`]).",
+      "oneOf": [
+        {
+          "const": "unsupported",
+          "description": "The owning authority does not support this evidence on this platform.",
+          "type": "string"
+        },
+        {
+          "const": "absent",
+          "description": "The evidence source is supported but produced nothing.",
+          "type": "string"
+        },
+        {
+          "const": "stale",
+          "description": "The evidence exists but is behind the current generation/watermark.",
+          "type": "string"
+        },
+        {
+          "const": "degraded",
+          "description": "The evidence proves a degraded but observed condition.",
+          "type": "string"
+        },
+        {
+          "const": "partial",
+          "description": "Only part of the evidence was observed.",
+          "type": "string"
+        },
+        {
+          "const": "unknown",
+          "description": "The evidence state could not be determined.",
+          "type": "string"
+        },
+        {
+          "const": "denied",
+          "description": "Authorization to read the evidence was denied.",
+          "type": "string"
+        },
+        {
+          "const": "healthy_complete_coverage",
+          "description": "The evidence proves a healthy condition with complete coverage.",
+          "type": "string"
+        }
+      ]
+    },
+    "DoctorFamilyConsultationV1": {
+      "description": "Whether a family was consulted from an observed source or is unavailable.",
+      "oneOf": [
+        {
+          "description": "A source produced observed evidence for this family.",
+          "properties": {
+            "status": {
+              "const": "consulted",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "No observed evidence; the family is carried as unavailable.",
+          "properties": {
+            "reason": {
+              "$ref": "#/$defs/DoctorFamilyUnavailableReasonV1"
+            },
+            "status": {
+              "const": "unavailable",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "reason"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DoctorFamilyCoverageV1": {
+      "description": "The consultation status of one finding family within a report.",
+      "properties": {
+        "consultation": {
+          "$ref": "#/$defs/DoctorFamilyConsultationV1"
+        },
+        "family": {
+          "$ref": "#/$defs/DoctorFindingFamilyV1"
+        }
+      },
+      "required": [
+        "family",
+        "consultation"
+      ],
+      "type": "object"
+    },
+    "DoctorFamilyUnavailableReasonV1": {
+      "description": "Why a finding family could not be consulted from an observed source.",
+      "oneOf": [
+        {
+          "const": "unwired",
+          "description": "No source port is wired for this family in this composition.",
+          "type": "string"
+        },
+        {
+          "const": "unsupported",
+          "description": "The source is unsupported on this build/platform.",
+          "type": "string"
+        },
+        {
+          "const": "absent",
+          "description": "The source is supported but produced nothing.",
+          "type": "string"
+        },
+        {
+          "const": "denied",
+          "description": "The source read was denied.",
+          "type": "string"
+        },
+        {
+          "const": "unknown",
+          "description": "The source state could not be determined.",
+          "type": "string"
+        }
+      ]
+    },
+    "DoctorFindingFamilyV1": {
+      "description": "Stable Doctor finding families.\n\nThe initial list is derived from Plan 14's observable classes (advisory\nfindings from Brain/Explorer/Loom/Code/Observatory) and the legacy\n`core_doctor` checks (graph quick-check, temporal/migration health,\nconfiguration compatibility drift, semantic runtime, session ingest).\nEach family maps to one audited typed input surface. The set is kept small\nand honest; new families are added through a future versioned enum rather\nthan by widening the meaning of an existing variant.",
+      "oneOf": [
+        {
+          "const": "advisory",
+          "description": "PR13 advisory/scout findings (GitHub review, CI localization,\nproximity, context scout) — `crate::advisory` / domain feedback.",
+          "type": "string"
+        },
+        {
+          "const": "configuration",
+          "description": "Desired-versus-effective configuration and compatibility drift\n(Plan 20 `ProjectConfigurationRuntime` / `ConfigurationControlPlane`).",
+          "type": "string"
+        },
+        {
+          "const": "storage_runtime",
+          "description": "Store, graph, and temporal runtime health plus migration coverage\n(`RuntimeReadOperationV1` health family, `StoreRuntimeHandle`).",
+          "type": "string"
+        },
+        {
+          "const": "storage",
+          "description": "Storage retention, size, and efficiency over Plan 26 observability read\nmodels (Plan 38 §7). Distinct from [`Self::StorageRuntime`] health: this\nfamily surfaces over-budget stores, identity-drift orphans, stale branch\nDBs, quarantined incident debris, and retention backlog. The typed\nsubclass vocabulary is [`DoctorStorageFindingKindV1`].",
+          "type": "string"
+        },
+        {
+          "const": "language_server",
+          "description": "Language-server / analyzer engine status (Plan 35 LSP gateway,\n`AnalyzerState`).",
+          "type": "string"
+        },
+        {
+          "const": "semantic_index",
+          "description": "Semantic search / index runtime state (indexing, stale, unavailable).",
+          "type": "string"
+        },
+        {
+          "const": "observability",
+          "description": "Denominator-safe measurement and telemetry health (Plan 26 analytics /\naccounting read models, session ingest).",
+          "type": "string"
+        }
+      ]
+    },
+    "DoctorFindingV1": {
+      "description": "One canonical Doctor finding.\n\nA finding pins its diagnosis `family`, its evidence `state`, the typed\nevidence it composed, a coverage statement, and an optional reference to an\nowner-supplied remediation. Construction enforces the Plan 09 §PR14\ninvariants that keep unknown/partial evidence from collapsing into a healthy\nor clean result.",
+      "properties": {
+        "coverage": {
+          "$ref": "#/$defs/DoctorCoverageStatementV1"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/DoctorEvidenceRefV1"
+          },
+          "type": "array"
+        },
+        "family": {
+          "$ref": "#/$defs/DoctorFindingFamilyV1"
+        },
+        "remediation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DoctorRemediationRefV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/DoctorEvidenceStateV1"
+        }
+      },
+      "required": [
+        "family",
+        "state",
+        "evidence",
+        "coverage",
+        "remediation"
+      ],
+      "type": "object"
+    },
+    "DoctorFindingsPayloadV1": {
+      "description": "The canonical Doctor report projection. `entries` retains the storage\nsubclass attached by the kernel; remediation descriptors are emitted only\nafter the kernel registry resolves the finding's owner-supplied reference.",
+      "properties": {
+        "entries": {
+          "items": {
+            "$ref": "#/$defs/DoctorReportEntryV1"
+          },
+          "type": "array"
+        },
+        "family_filter": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DoctorFindingFamilyV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "kind_statuses": {
+          "description": "Storage-route-only producer-source coverage. General Doctor responses\nomit this additive field; `/api/storage/findings` always supplies all\nfive Plan 38 producer statuses.",
+          "items": {
+            "$ref": "#/$defs/StorageFindingKindStatusV1"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "known_families": {
+          "items": {
+            "$ref": "#/$defs/DoctorFindingFamilyV1"
+          },
+          "type": "array"
+        },
+        "note": {
+          "type": "string"
+        },
+        "remediations": {
+          "items": {
+            "$ref": "#/$defs/DoctorRemediationDescriptorV1"
+          },
+          "type": "array"
+        },
+        "report_coverage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DoctorReportCoverageV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "family_filter",
+        "entries",
+        "report_coverage",
+        "remediations",
+        "known_families",
+        "note"
+      ],
+      "type": "object"
+    },
+    "DoctorOwningOperationRefV1": {
+      "description": "Reference to the owning application operation that would perform a\nremediation (its capability or use-case identity). Doctor names the\noperation; it never embeds argv, a path, or an inline effect.",
+      "type": "string"
+    },
+    "DoctorOwningSurfaceV1": {
+      "description": "The application surface that owns dispatch of a remediation operation.\n\nThe kernel names the owner so a transport can route confirmation and dispatch\nto the correct surface; it never dispatches itself.",
+      "oneOf": [
+        {
+          "const": "configuration_control_plane",
+          "description": "The configuration control plane (Plan 20).",
+          "type": "string"
+        },
+        {
+          "const": "storage_runtime",
+          "description": "The storage retention/lifecycle runtime (Plan 38).",
+          "type": "string"
+        },
+        {
+          "const": "daemon_runtime",
+          "description": "The daemon/runtime supervisor.",
+          "type": "string"
+        },
+        {
+          "const": "host_integration",
+          "description": "The host/agent integration installer/repairer (Plan 27).",
+          "type": "string"
+        },
+        {
+          "const": "semantic_index_runtime",
+          "description": "The semantic/code index runtime (Plan 35 / semantic index).",
+          "type": "string"
+        },
+        {
+          "const": "feedback_read",
+          "description": "The canonical advisory feedback read owner (PR11–PR13).",
+          "type": "string"
+        }
+      ]
+    },
+    "DoctorRemediationApplyRequestV1": {
+      "additionalProperties": false,
+      "properties": {
+        "confirmed": {
+          "type": "boolean"
+        },
+        "idempotency_key": {
+          "type": "string"
+        },
+        "operation": {
+          "$ref": "#/$defs/DoctorOwningOperationRefV1"
+        },
+        "preview_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "target": {
+          "$ref": "#/$defs/DoctorRemediationTargetV1"
+        }
+      },
+      "required": [
+        "operation",
+        "target",
+        "preview_id",
+        "idempotency_key",
+        "confirmed"
+      ],
+      "type": "object"
+    },
+    "DoctorRemediationDescriptorV1": {
+      "description": "A typed description of what an owner-supplied remediation operation would do.\n\nThis is a *description*, not an effect. It never carries argv, a path, or an\ninline action, and resolving it performs no work.",
+      "properties": {
+        "action_confirmation": {
+          "$ref": "#/$defs/DoctorConfirmationRequirementV1"
+        },
+        "operation": {
+          "$ref": "#/$defs/DoctorOwningOperationRefV1"
+        },
+        "preview_available": {
+          "type": "boolean"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "surface": {
+          "$ref": "#/$defs/DoctorOwningSurfaceV1"
+        }
+      },
+      "required": [
+        "operation",
+        "surface",
+        "preview_available",
+        "action_confirmation",
+        "summary"
+      ],
+      "type": "object"
+    },
+    "DoctorRemediationDispatchErrorV1": {
+      "enum": [
+        "unsupported",
+        "denied",
+        "invalid_reference",
+        "confirmation_required",
+        "owner_unavailable"
+      ],
+      "type": "string"
+    },
+    "DoctorRemediationKindV1": {
+      "description": "Preview-versus-action distinction for an owner-supplied remediation.\n\nDoctor never repairs; it references an owning application operation. A\npreview pins expected state without mutating; an action is the owning\noperation's admitted effect. Both are invoked through the owning operation,\nnever inline.",
+      "oneOf": [
+        {
+          "const": "preview",
+          "description": "A non-mutating preview owned by the responsible operation.",
+          "type": "string"
+        },
+        {
+          "const": "action",
+          "description": "An admitted mutating action owned by the responsible operation.",
+          "type": "string"
+        }
+      ]
+    },
+    "DoctorRemediationOperationPhaseV1": {
+      "enum": [
+        "previewed",
+        "running",
+        "completed",
+        "cancelled",
+        "timed_out",
+        "failed",
+        "partial",
+        "effect_unknown"
+      ],
+      "type": "string"
+    },
+    "DoctorRemediationOperationV1": {
+      "properties": {
+        "effect_receipt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EffectReceipt"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "execution": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OperationReceipt"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "operation_id": {
+          "$ref": "#/$defs/OperationId"
+        },
+        "owner_effect_receipt": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EffectReceipt"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "owner_result_digest": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ManifestDigest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "owning_operation": {
+          "$ref": "#/$defs/DoctorOwningOperationRefV1"
+        },
+        "phase": {
+          "$ref": "#/$defs/DoctorRemediationOperationPhaseV1"
+        },
+        "preview_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "operation_id",
+        "owning_operation",
+        "phase",
+        "preview_id",
+        "execution",
+        "effect_receipt"
+      ],
+      "type": "object"
+    },
+    "DoctorRemediationPayloadV1": {
+      "oneOf": [
+        {
+          "properties": {
+            "operation": {
+              "$ref": "#/$defs/DoctorRemediationOperationV1"
+            },
+            "status": {
+              "const": "operation",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "operation"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "reason": {
+              "$ref": "#/$defs/DoctorRemediationDispatchErrorV1"
+            },
+            "status": {
+              "const": "unavailable",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "reason"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DoctorRemediationPreviewRequestV1": {
+      "additionalProperties": false,
+      "properties": {
+        "operation": {
+          "$ref": "#/$defs/DoctorOwningOperationRefV1"
+        },
+        "target": {
+          "$ref": "#/$defs/DoctorRemediationTargetV1"
+        }
+      },
+      "required": [
+        "operation",
+        "target"
+      ],
+      "type": "object"
+    },
+    "DoctorRemediationRefV1": {
+      "description": "A reference to an owner-supplied remediation.\n\nDoctor never repairs directly; it names the owning application operation\nand whether a preview or action is offered. The caller invokes that owning\noperation through its normal admitted path.",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/DoctorRemediationKindV1"
+        },
+        "owning_operation": {
+          "$ref": "#/$defs/DoctorOwningOperationRefV1"
+        }
+      },
+      "required": [
+        "owning_operation",
+        "kind"
+      ],
+      "type": "object"
+    },
+    "DoctorRemediationTargetV1": {
+      "oneOf": [
+        {
+          "properties": {
+            "owner_operation": {
+              "const": "storage_retention_collect",
+              "type": "string"
+            }
+          },
+          "required": [
+            "owner_operation"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "owner_operation": {
+              "const": "storage_collect_orphan_store",
+              "type": "string"
+            }
+          },
+          "required": [
+            "owner_operation"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "owner_operation": {
+              "const": "storage_branch_gc",
+              "type": "string"
+            }
+          },
+          "required": [
+            "owner_operation"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "owner_operation": {
+              "const": "storage_quarantine_and_collect_debris",
+              "type": "string"
+            }
+          },
+          "required": [
+            "owner_operation"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "owner_operation": {
+              "const": "configuration_protected_preview",
+              "type": "string"
+            },
+            "target": {
+              "$ref": "#/$defs/ConfigurationProtectedPreviewSurfaceRequest"
+            }
+          },
+          "required": [
+            "owner_operation",
+            "target"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "owner_operation": {
+              "const": "configuration_protected_apply",
+              "type": "string"
+            },
+            "target": {
+              "$ref": "#/$defs/ConfigurationProtectedApplySurfaceRequest"
+            }
+          },
+          "required": [
+            "owner_operation",
+            "target"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "owner_operation": {
+              "const": "configuration_pin_authority",
+              "type": "string"
+            }
+          },
+          "required": [
+            "owner_operation"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "owner_operation": {
+              "const": "runtime_recover_daemon",
+              "type": "string"
+            }
+          },
+          "required": [
+            "owner_operation"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "owner_operation": {
+              "const": "host_repair_integration",
+              "type": "string"
+            },
+            "target": {
+              "properties": {
+                "components": {
+                  "items": {
+                    "$ref": "#/$defs/HostBundleComponentV1"
+                  },
+                  "type": "array"
+                },
+                "host": {
+                  "$ref": "#/$defs/HostKindV1"
+                }
+              },
+              "required": [
+                "host",
+                "components"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "owner_operation",
+            "target"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "owner_operation": {
+              "const": "code_index_remount",
+              "type": "string"
+            }
+          },
+          "required": [
+            "owner_operation"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DoctorReportCoverageV1": {
+      "description": "The report-wide coverage statement: which families were consulted versus\nunavailable, plus an overall completeness and a bounded human statement.",
+      "properties": {
+        "completeness": {
+          "$ref": "#/$defs/DoctorCoverageCompletenessV1"
+        },
+        "families": {
+          "items": {
+            "$ref": "#/$defs/DoctorFamilyCoverageV1"
+          },
+          "type": "array"
+        },
+        "statement": {
+          "$ref": "#/$defs/DoctorCoverageStatementV1"
+        }
+      },
+      "required": [
+        "families",
+        "completeness",
+        "statement"
+      ],
+      "type": "object"
+    },
+    "DoctorReportEntryV1": {
+      "description": "One entry in a Doctor report: a canonical finding plus, for the storage\nfamily, its typed subclass. The subclass is present only for storage findings\n(a non-storage entry never carries one).",
+      "properties": {
+        "finding": {
+          "$ref": "#/$defs/DoctorFindingV1"
+        },
+        "storage_kind": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DoctorStorageFindingKindV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "finding",
+        "storage_kind"
+      ],
+      "type": "object"
+    },
+    "DoctorStorageFindingKindV1": {
+      "description": "Typed subclasses of the [`DoctorFindingFamilyV1::Storage`] finding family\n(Plan 38 §7).\n\nThe storage family never reports a silent overage: each subclass names one\nobservable retention/size condition Doctor surfaces over the Plan 26 size\nobservability read models. The set is closed and grows only through a future\nversioned enum, never by widening an existing subclass.",
+      "oneOf": [
+        {
+          "const": "over_budget_store",
+          "description": "A store exceeds its owner-configured soft size budget.",
+          "type": "string"
+        },
+        {
+          "const": "orphan_store",
+          "description": "A store whose project identity no longer resolves to a live repository\nroot (identity-drift orphan), reported with age and size.",
+          "type": "string"
+        },
+        {
+          "const": "stale_branch_dbs",
+          "description": "Branch-scoped databases whose git refs are gone and are awaiting\nlifecycle removal.",
+          "type": "string"
+        },
+        {
+          "const": "incident_debris_present",
+          "description": "Quarantined recovery/corruption artifacts are present and awaiting\ncollection.",
+          "type": "string"
+        },
+        {
+          "const": "retention_backlog",
+          "description": "Retention-eligible rows or stores are past their window and awaiting\noffload/collection.",
+          "type": "string"
+        }
+      ]
+    },
+    "EffectClass": {
+      "description": "The stable effect classification of one application operation.\n\nGit index writes remain separate classes so policy cannot accidentally\nsubstitute one index mutation for another.",
+      "enum": [
+        "read",
+        "preview",
+        "source_edit",
+        "git_index_stage",
+        "git_index_unstage",
+        "git_index_commit",
+        "configuration_write",
+        "administrative"
+      ],
+      "type": "string"
+    },
+    "EffectReceipt": {
+      "additionalProperties": false,
+      "description": "Durable effect proof. It records identities and receipts, never credentials\nor arbitrary command text.",
+      "properties": {
+        "actor": {
+          "$ref": "#/$defs/ActorId"
+        },
+        "catalog_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "committed_state": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ManifestDigest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "configuration_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "effect_class": {
+          "$ref": "#/$defs/EffectClass"
+        },
+        "expected_state": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "external_proof": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RetrievalAnchorId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "idempotency_key": {
+          "type": "string"
+        },
+        "input_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "operation": {
+          "$ref": "#/$defs/UseCaseId"
+        },
+        "outcome": {
+          "$ref": "#/$defs/EffectTermination"
+        },
+        "policy_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "privacy_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "request_id": {
+          "type": "string"
+        },
+        "scope": {
+          "$ref": "#/$defs/ResolvedScope"
+        }
+      },
+      "required": [
+        "operation",
+        "request_id",
+        "actor",
+        "scope",
+        "effect_class",
+        "idempotency_key",
+        "input_digest",
+        "expected_state",
+        "policy_digest",
+        "configuration_digest",
+        "catalog_digest",
+        "privacy_digest",
+        "outcome",
+        "committed_state",
+        "external_proof"
+      ],
+      "type": "object"
+    },
+    "EffectTermination": {
+      "description": "Durable effect receipt terminal state.",
+      "enum": [
+        "completed",
+        "cancelled",
+        "timed_out",
+        "failed",
+        "partial",
+        "effect_unknown"
+      ],
+      "type": "string"
+    },
+    "ExplorerFinalityV1": {
+      "enum": [
+        "pending",
+        "complete",
+        "partial",
+        "cancelled",
+        "error"
+      ],
+      "type": "string"
+    },
+    "ExplorerQueryRequestV1": {
+      "additionalProperties": false,
+      "properties": {
+        "limit": {
+          "default": 25,
+          "format": "int64",
+          "type": "integer"
+        },
+        "offset": {
+          "default": 0,
+          "format": "int64",
+          "type": "integer"
+        },
+        "query": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "query",
+        "limit",
+        "offset"
+      ],
+      "type": "object"
+    },
+    "ExplorerQueryRunV1": {
+      "properties": {
+        "completed_at_micros": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "elapsed_micros": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "explanation": {
+          "type": "string"
+        },
+        "finality": {
+          "$ref": "#/$defs/ExplorerFinalityV1"
+        },
+        "merge_revision": {
+          "type": "string"
+        },
+        "ordering_policy": {
+          "type": "string"
+        },
+        "plan_revision": {
+          "type": "string"
+        },
+        "request": {
+          "$ref": "#/$defs/ExplorerQueryRequestV1"
+        },
+        "request_revision": {
+          "type": "string"
+        },
+        "required_source_ids": {
+          "items": {
+            "$ref": "#/$defs/ExplorerSourceIdV1"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        },
+        "run_id": {
+          "type": "string"
+        },
+        "sources": {
+          "items": {
+            "$ref": "#/$defs/ExplorerSourceProgressV1"
+          },
+          "type": "array"
+        },
+        "state": {
+          "$ref": "#/$defs/ExplorerRunStateV1"
+        },
+        "submitted_at_micros": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "run_id",
+        "request",
+        "request_revision",
+        "plan_revision",
+        "merge_revision",
+        "required_source_ids",
+        "ordering_policy",
+        "explanation",
+        "submitted_at_micros",
+        "completed_at_micros",
+        "elapsed_micros",
+        "state",
+        "finality",
+        "sources"
+      ],
+      "type": "object"
+    },
+    "ExplorerResultPageV1": {
+      "properties": {
+        "limit": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "metadata": true,
+        "next_offset": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "offset": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "rows": {
+          "items": true,
+          "type": "array"
+        },
+        "total": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "offset",
+        "limit",
+        "total",
+        "next_offset",
+        "rows",
+        "metadata"
+      ],
+      "type": "object"
+    },
+    "ExplorerRunStateV1": {
+      "enum": [
+        "pending",
+        "completed",
+        "partial",
+        "cancelled",
+        "error"
+      ],
+      "type": "string"
+    },
+    "ExplorerSourceIdV1": {
+      "enum": [
+        "code_graph",
+        "sessions",
+        "knowledge"
+      ],
+      "type": "string"
+    },
+    "ExplorerSourceOutcomeV1": {
+      "enum": [
+        "pending",
+        "ready",
+        "unavailable",
+        "error",
+        "cancelled"
+      ],
+      "type": "string"
+    },
+    "ExplorerSourcePhaseV1": {
+      "enum": [
+        "queued",
+        "reading",
+        "completed",
+        "cancelled"
+      ],
+      "type": "string"
+    },
+    "ExplorerSourceProgressV1": {
+      "properties": {
+        "completed_units": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "coverage": {
+          "$ref": "#/$defs/DashboardCoverageV1"
+        },
+        "error_code": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "freshness": {
+          "type": "string"
+        },
+        "message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "outcome": {
+          "$ref": "#/$defs/ExplorerSourceOutcomeV1"
+        },
+        "page": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ExplorerResultPageV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "phase": {
+          "$ref": "#/$defs/ExplorerSourcePhaseV1"
+        },
+        "source_id": {
+          "$ref": "#/$defs/ExplorerSourceIdV1"
+        },
+        "source_label": {
+          "type": "string"
+        },
+        "total_units": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "watermark": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "source_id",
+        "source_label",
+        "phase",
+        "outcome",
+        "completed_units",
+        "total_units",
+        "coverage",
+        "freshness",
+        "watermark",
+        "error_code",
+        "message",
+        "page"
+      ],
+      "type": "object"
+    },
+    "FactArmCoverageV1": {
+      "properties": {
+        "completeness": {
+          "type": "string"
+        },
+        "limit": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "returned": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "completeness",
+        "returned",
+        "truncated",
+        "limit"
+      ],
+      "type": "object"
+    },
+    "FactMatchArmV1": {
+      "properties": {
+        "collision_warning": {
+          "type": "string"
+        },
+        "coverage": {
+          "$ref": "#/$defs/FactArmCoverageV1"
+        },
+        "facts": {
+          "items": true,
+          "type": "array"
+        },
+        "match_basis": {
+          "type": "string"
+        },
+        "strength": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "match_basis",
+        "strength",
+        "collision_warning",
+        "coverage",
+        "facts"
+      ],
+      "type": "object"
+    },
+    "FactMatchesMeasurementV1": {
+      "properties": {
+        "arms": {
+          "items": {
+            "$ref": "#/$defs/FactMatchArmV1"
+          },
+          "type": "array"
+        },
+        "caption": {
+          "type": "string"
+        },
+        "entity_matches": {
+          "items": true,
+          "type": "array"
+        },
+        "granularity": {
+          "type": "string"
+        },
+        "identity_semantics": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "node": {
+          "$ref": "#/$defs/NodeRefV1"
+        },
+        "normalized_name": {
+          "type": "string"
+        },
+        "payload_fts_matches": {
+          "items": true,
+          "type": "array"
+        },
+        "same_name_collision_possible": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "node",
+        "name",
+        "normalized_name",
+        "granularity",
+        "identity_semantics",
+        "caption",
+        "same_name_collision_possible",
+        "entity_matches",
+        "payload_fts_matches",
+        "arms"
+      ],
+      "type": "object"
+    },
+    "GitHubStackedPullRequestPolicyV1": {
+      "enum": [
+        "disabled",
+        "probe_private_preview"
+      ],
+      "type": "string"
+    },
+    "HistoryRewritePolicyV1": {
+      "enum": [
+        "forbid_force_and_rebase"
+      ],
+      "type": "string"
+    },
+    "HostBundleComponentV1": {
+      "enum": [
+        "core",
+        "agent",
+        "context_mcp",
+        "operator_mcp"
+      ],
+      "type": "string"
+    },
+    "HostKindV1": {
+      "description": "Canonical stock host surfaces shared by catalog, packaging, delivery, and\nconformance consumers. A host surface is not itself evidence that the PR6\nobservation-capture capability is fixture-backed.",
+      "enum": [
+        "claude_code",
+        "cursor_desktop",
+        "cursor_cloud",
+        "codex",
+        "hermes",
+        "kiro",
+        "cline_family",
+        "cline",
+        "roo_code",
+        "kilo",
+        "kimi_code",
+        "open_code"
+      ],
+      "type": "string"
+    },
+    "IncomingCallEdgeV1": {
+      "properties": {
+        "kind": {
+          "type": "string"
+        },
+        "line": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "source": {
+          "type": "string"
+        },
+        "target": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "target",
+        "kind",
+        "line"
+      ],
+      "type": "object"
+    },
+    "LocatorDigest": {
+      "description": "Strongly typed algorithm-tagged integrity digest: `LocatorDigest`.",
+      "type": "string"
+    },
+    "ManifestDigest": {
+      "description": "Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.",
+      "type": "string"
+    },
+    "NodeRefV1": {
+      "properties": {
+        "file_path": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "qualified_name": {
+          "type": "string"
+        },
+        "start_line": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "qualified_name",
+        "kind",
+        "file_path",
+        "start_line"
+      ],
+      "type": "object"
+    },
+    "OperationBudgetUsage": {
+      "additionalProperties": false,
+      "description": "Bounded work accounting supplied by an owning port or transaction.",
+      "properties": {
+        "bytes_consumed": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "elapsed_micros": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "units_consumed": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "units_consumed",
+        "bytes_consumed",
+        "elapsed_micros"
+      ],
+      "type": "object"
+    },
+    "OperationId": {
+      "description": "Stable operation identity. The originating authorized request owns the\nidentity; paths, labels, and client-selected payloads never participate.",
+      "type": "string"
+    },
+    "OperationReceipt": {
+      "additionalProperties": false,
+      "description": "Canonical operation evidence. An admitted failure remains represented here\nrather than being replaced by a transport exception.",
+      "properties": {
+        "budget": {
+          "$ref": "#/$defs/OperationBudgetUsage"
+        },
+        "cancellation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CancellationObservation"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "effective_deadline": {
+          "$ref": "#/$defs/Deadline"
+        },
+        "ended_at": {
+          "$ref": "#/$defs/UtcMicros"
+        },
+        "started_at": {
+          "$ref": "#/$defs/UtcMicros"
+        },
+        "termination": {
+          "$ref": "#/$defs/OperationTermination"
+        }
+      },
+      "required": [
+        "started_at",
+        "ended_at",
+        "effective_deadline",
+        "cancellation",
+        "budget",
+        "termination"
+      ],
+      "type": "object"
+    },
+    "OperationTermination": {
+      "description": "Terminal state after an operation has been admitted.",
+      "enum": [
+        "completed",
+        "cancelled",
+        "timed_out",
+        "failed",
+        "partial",
+        "effect_unknown"
+      ],
+      "type": "string"
+    },
+    "ProjectId": {
+      "description": "Strongly typed canonical identity: `ProjectId`.",
+      "type": "string"
+    },
+    "ProtectedChange": {
+      "description": "The protected configuration operation set. Ordinary scalar mutations are\nintentionally absent; they activate directly after validation.",
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "bind_source",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/ScopeSourceBinding"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "rebind_source",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/ScopeSourceBinding"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "unbind_source",
+              "type": "string"
+            },
+            "value": {
+              "properties": {
+                "binding_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "binding_id"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "upsert_access_rule",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/ScopeAccessRule"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "remove_access_rule",
+              "type": "string"
+            },
+            "value": {
+              "properties": {
+                "rule_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "rule_id"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "replace_work_topology_policy",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/WorkTopologyPolicyV1"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ProtectedRefDispositionV1": {
+      "enum": [
+        "reject",
+        "require_human_approval_and_independent_review"
+      ],
+      "type": "string"
+    },
+    "ProtectedRefRuleV1": {
+      "additionalProperties": false,
+      "properties": {
+        "disposition": {
+          "$ref": "#/$defs/ProtectedRefDispositionV1"
+        },
+        "selector": {
+          "$ref": "#/$defs/ProtectedRefSelectorV1"
+        }
+      },
+      "required": [
+        "selector",
+        "disposition"
+      ],
+      "type": "object"
+    },
+    "ProtectedRefSelectorV1": {
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "native_default_branch",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "exact",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/CanonicalGitRefNameV1"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "prefix",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/CanonicalGitRefPrefix"
+            }
+          },
+          "required": [
+            "kind",
+            "value"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "RefId": {
+      "description": "Strongly typed canonical identity: `RefId`.",
+      "type": "string"
+    },
+    "RepositoryId": {
+      "description": "Strongly typed canonical identity: `RepositoryId`.",
+      "type": "string"
+    },
+    "RepositoryPlacementScopeV1": {
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "all_authorized",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "allowlist",
+              "type": "string"
+            },
+            "repositories": {
+              "items": {
+                "$ref": "#/$defs/RepositoryId"
+              },
+              "type": "array",
+              "uniqueItems": true
+            }
+          },
+          "required": [
+            "kind",
+            "repositories"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "RequiredCheckExpectationV1": {
+      "enum": [
+        "successful_terminal"
+      ],
+      "type": "string"
+    },
+    "RequiredCheckV1": {
+      "additionalProperties": false,
+      "properties": {
+        "capability_id": {
+          "$ref": "#/$defs/CapabilityId"
+        },
+        "expectation": {
+          "$ref": "#/$defs/RequiredCheckExpectationV1"
+        },
+        "maximum_age_seconds": {
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "capability_id",
+        "expectation",
+        "maximum_age_seconds"
+      ],
+      "type": "object"
+    },
+    "ResolvedScope": {
+      "additionalProperties": false,
+      "description": "The resolved PR11 scope is one exact project/repository/worktree root.\n\nPaths, CWDs, labels, and mutable branch spellings are deliberately absent.",
+      "properties": {
+        "project_id": {
+          "$ref": "#/$defs/ProjectId"
+        },
+        "reference": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RefId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "repository_id": {
+          "$ref": "#/$defs/RepositoryId"
+        },
+        "scope_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        },
+        "worktree_id": {
+          "$ref": "#/$defs/WorktreeId"
+        }
+      },
+      "required": [
+        "project_id",
+        "repository_id",
+        "worktree_id",
+        "reference",
+        "scope_digest"
+      ],
+      "type": "object"
+    },
+    "RetrievalAnchorId": {
+      "description": "Strongly typed canonical identity: `RetrievalAnchorId`.",
+      "type": "string"
+    },
+    "ReviewRequirementV1": {
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "none",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "count": {
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "kind": {
+              "const": "independent_review_count",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "count"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "code_owner_and_independent_review",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "ReviewTopologyKindV1": {
+      "enum": [
+        "no_review",
+        "independent_review",
+        "standard_pull_requests",
+        "git_hub_stacked_pull_requests"
+      ],
+      "type": "string"
+    },
+    "ReviewTopologyPolicyV1": {
+      "additionalProperties": false,
+      "properties": {
+        "allowed": {
+          "items": {
+            "$ref": "#/$defs/ReviewTopologyKindV1"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "github_stacked_prs": {
+          "$ref": "#/$defs/GitHubStackedPullRequestPolicyV1"
+        }
+      },
+      "required": [
+        "allowed",
+        "github_stacked_prs"
+      ],
+      "type": "object"
+    },
+    "RuleEffect": {
+      "enum": [
+        "allow",
+        "deny"
+      ],
+      "type": "string"
+    },
+    "ScopeAccessRule": {
+      "additionalProperties": false,
+      "description": "Restrictive policy input. An allow never grants capabilities absent from\nthe independently authorized capability set passed to the resolver.",
+      "properties": {
+        "authority": {
+          "$ref": "#/$defs/AuthorityRef"
+        },
+        "capabilities": {
+          "items": {
+            "$ref": "#/$defs/CapabilityId"
+          },
+          "type": "array",
+          "uniqueItems": true
+        },
+        "effect": {
+          "$ref": "#/$defs/RuleEffect"
+        },
+        "expires_at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UtcMicros"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "rule_id": {
+          "type": "string"
+        },
+        "subject": {
+          "$ref": "#/$defs/ScopeAccessSubjectV1"
+        }
+      },
+      "required": [
+        "rule_id",
+        "subject",
+        "authority",
+        "capabilities",
+        "effect",
+        "expires_at"
+      ],
+      "type": "object"
+    },
+    "ScopeAccessSubjectV1": {
+      "additionalProperties": false,
+      "description": "Typed rule selectors. Unset dimensions match all values at that dimension,\nbut at least one dimension must be constrained. Free-form paths, labels,\ncollection names, and branch names are deliberately absent.",
+      "properties": {
+        "actor": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ActorId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "operation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScopeControlOperationV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source_kind": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SourceKindV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "actor",
+        "operation",
+        "source_kind"
+      ],
+      "type": "object"
+    },
+    "ScopeControlOperationV1": {
+      "enum": [
+        "read",
+        "source_bind",
+        "source_rebind",
+        "source_unbind",
+        "access_rule_upsert",
+        "access_rule_remove",
+        "set_default_collection",
+        "replace_topology_policy",
+        "rollback"
+      ],
+      "type": "string"
+    },
+    "ScopeSourceBinding": {
+      "additionalProperties": false,
+      "description": "A source-to-authority binding. It stores only the source kind, a redacted\nlocator digest, and the pre-resolved authority reference.",
+      "properties": {
+        "authority": {
+          "$ref": "#/$defs/AuthorityRef"
+        },
+        "binding_id": {
+          "type": "string"
+        },
+        "source_kind": {
+          "$ref": "#/$defs/SourceKindV1"
+        },
+        "source_locator_digest": {
+          "$ref": "#/$defs/LocatorDigest"
+        }
+      },
+      "required": [
+        "binding_id",
+        "source_kind",
+        "source_locator_digest",
+        "authority"
+      ],
+      "type": "object"
+    },
+    "SensitiveFilesystemLocatorV1": {
+      "additionalProperties": false,
+      "description": "Reference-only filesystem locator. The raw path is sealed outside this\ncontract; only the privacy-bound locator digest and sealed-value digest are\nrepresentable here.",
+      "properties": {
+        "locator_digest": {
+          "$ref": "#/$defs/LocatorDigest"
+        },
+        "sealed_value_digest": {
+          "$ref": "#/$defs/ManifestDigest"
+        }
+      },
+      "required": [
+        "locator_digest",
+        "sealed_value_digest"
+      ],
+      "type": "object"
+    },
+    "SourceKindV1": {
+      "enum": [
+        "claude",
+        "codex",
+        "cursor",
+        "git_hub",
+        "hermes",
+        "kiro"
+      ],
+      "type": "string"
+    },
+    "StorageByteSizeV1": {
+      "description": "A byte size measurement. A newtype keeps sizes from being confused with\ncounts, ratios, or timestamps in the read models and producers.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "StorageFindingKindStatusV1": {
+      "description": "Source-coverage status for one typed storage finding producer.",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/DoctorStorageFindingKindV1"
+        },
+        "observed_entries": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/StorageFindingSourceStateV1"
+        }
+      },
+      "required": [
+        "kind",
+        "state",
+        "observed_entries",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "StorageFindingSourceStateV1": {
+      "description": "Whether one Plan 38 producer had enough source evidence to report a real\nresult. This is source coverage, not a health grade: `Real` can describe a\nclean observation or a problem finding.",
+      "enum": [
+        "real",
+        "unset",
+        "partial",
+        "unsupported"
+      ],
+      "type": "string"
+    },
+    "StorageTelemetryPayloadV1": {
+      "description": "Telemetry payload: one entry per distinct store the dashboard holds a\nconnection to.",
+      "properties": {
+        "budget_note": {
+          "description": "Where budgets come from, stated once for the whole read.",
+          "type": "string"
+        },
+        "growth_note": {
+          "description": "The growth window's coverage, stated once for the whole read.",
+          "type": "string"
+        },
+        "stores": {
+          "items": {
+            "$ref": "#/$defs/StoreTelemetryEntryV1"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "stores",
+        "budget_note",
+        "growth_note"
+      ],
+      "type": "object"
+    },
+    "StorageTelemetryReadV1": {
+      "description": "The typed result of one telemetry read attempt.\n\nThe port is *total*: it never fails silently into a healthy or empty result.\nA platform that cannot query `dbstat`/pragmas reports [`Self::Unsupported`];\na denied read reports [`Self::Denied`]; an undetermined read reports\n[`Self::Unknown`]. Each maps to a distinct, honest Doctor evidence state.",
+      "oneOf": [
+        {
+          "description": "A size sample was observed.",
+          "properties": {
+            "kind": {
+              "const": "observed",
+              "type": "string"
+            },
+            "sample": {
+              "$ref": "#/$defs/StoreSizeSampleV1"
+            }
+          },
+          "required": [
+            "kind",
+            "sample"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The runtime cannot expose page-count telemetry on this build/platform.",
+          "properties": {
+            "kind": {
+              "const": "unsupported",
+              "type": "string"
+            },
+            "store": {
+              "$ref": "#/$defs/StoreKeyV1"
+            }
+          },
+          "required": [
+            "kind",
+            "store"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Authorization to read the store's telemetry was denied.",
+          "properties": {
+            "kind": {
+              "const": "denied",
+              "type": "string"
+            },
+            "store": {
+              "$ref": "#/$defs/StoreKeyV1"
+            }
+          },
+          "required": [
+            "kind",
+            "store"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The telemetry state could not be determined.",
+          "properties": {
+            "kind": {
+              "const": "unknown",
+              "type": "string"
+            },
+            "store": {
+              "$ref": "#/$defs/StoreKeyV1"
+            }
+          },
+          "required": [
+            "kind",
+            "store"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "StoreBudgetDimensionV1": {
+      "description": "The budget-evaluation dimension, sourced from owner configuration.",
+      "oneOf": [
+        {
+          "description": "An owner-configured soft budget was evaluated against the live sample.",
+          "properties": {
+            "evaluation": {
+              "$ref": "#/$defs/StoreBudgetEvaluationV1"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "setting_key": {
+              "description": "The owner setting this budget came from.",
+              "type": "string"
+            },
+            "state": {
+              "const": "evaluated",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "evaluation",
+            "setting_key",
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The budget source is wired and readable, but this owner configured no\nbudget for this store. A missing *setting*, not a missing *feature*.",
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "setting_key": {
+              "description": "The setting an owner would set to configure a budget here.",
+              "type": "string"
+            },
+            "state": {
+              "const": "unset",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "reason",
+            "setting_key"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The budget could not be determined: the resolved configuration was\nunreadable, or no size sample was observed to evaluate against.",
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "state": {
+              "const": "unknown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "reason"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "StoreBudgetEvaluationV1": {
+      "description": "The outcome of evaluating a store size against its soft budget.",
+      "oneOf": [
+        {
+          "properties": {
+            "observed": {
+              "$ref": "#/$defs/StorageByteSizeV1"
+            },
+            "soft_limit": {
+              "$ref": "#/$defs/StorageByteSizeV1"
+            },
+            "state": {
+              "const": "within_budget",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "observed",
+            "soft_limit"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "observed": {
+              "$ref": "#/$defs/StorageByteSizeV1"
+            },
+            "overage": {
+              "$ref": "#/$defs/StorageByteSizeV1"
+            },
+            "soft_limit": {
+              "$ref": "#/$defs/StorageByteSizeV1"
+            },
+            "state": {
+              "const": "over_budget",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "observed",
+            "soft_limit",
+            "overage"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "StoreGrowthDimensionV1": {
+      "description": "The per-store growth dimension. Growth is only ever reported over the window\nthe server actually observed, and that window is named in `coverage`.",
+      "oneOf": [
+        {
+          "description": "The first watermark of this daemon lifetime: a real measurement with no\nearlier point to compare against. Not \"zero growth\".",
+          "properties": {
+            "coverage": {
+              "type": "string"
+            },
+            "measured_at": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "state": {
+              "const": "baseline",
+              "type": "string"
+            },
+            "total_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "state",
+            "coverage",
+            "measured_at",
+            "total_bytes",
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Growth observed across at least two watermarks in the window.",
+          "properties": {
+            "coverage": {
+              "type": "string"
+            },
+            "current_total_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "first_measured_at": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "first_total_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "growth_bytes": {
+              "description": "Signed delta over the window; a shrinking store reports a negative\nnumber rather than saturating to zero.",
+              "format": "int64",
+              "type": "integer"
+            },
+            "last_measured_at": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "sample_count": {
+              "format": "uint",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "samples": {
+              "items": {
+                "$ref": "#/$defs/StoreSizeWatermarkV1"
+              },
+              "type": "array"
+            },
+            "state": {
+              "const": "observed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "coverage",
+            "first_measured_at",
+            "last_measured_at",
+            "sample_count",
+            "first_total_bytes",
+            "current_total_bytes",
+            "growth_bytes",
+            "samples"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "No watermark could be recorded because the size read failed.",
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "state": {
+              "const": "unknown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "reason"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "StoreKeyV1": {
+      "description": "Logical name of one owner-profile store (for example `sessions.db`,\n`graph.db`, or `branches/feature-x`). Never an absolute on-disk path.",
+      "type": "string"
+    },
+    "StoreSizeSampleV1": {
+      "additionalProperties": false,
+      "description": "One cheap size sample for a single store, derived from page-count pragmas.\n\n`total_bytes` is `page_count * page_size`; `free_bytes` is\n`freelist_pages * page_size`. Both are recorded so the free-page ratio and\nthe reclaimable-bytes estimate (Plan 38 §6 compaction) can be computed\nwithout re-reading the store.",
+      "properties": {
+        "freelist_pages": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "observed_at": {
+          "$ref": "#/$defs/UtcMicros"
+        },
+        "page_count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "page_size_bytes": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "store": {
+          "$ref": "#/$defs/StoreKeyV1"
+        }
+      },
+      "required": [
+        "store",
+        "page_size_bytes",
+        "page_count",
+        "freelist_pages",
+        "observed_at"
+      ],
+      "type": "object"
+    },
+    "StoreSizeWatermarkV1": {
+      "description": "One recorded store-size watermark.",
+      "properties": {
+        "free_bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "measured_at": {
+          "description": "Wall-clock microseconds at which the size was measured.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "total_bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "measured_at",
+        "total_bytes",
+        "free_bytes"
+      ],
+      "type": "object"
+    },
+    "StoreTelemetryEntryV1": {
+      "description": "One store's telemetry entry. One entry per distinct store **file**, not per\ndashboard role.",
+      "properties": {
+        "budget": {
+          "$ref": "#/$defs/StoreBudgetDimensionV1"
+        },
+        "free_bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "free_page_ratio": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "growth": {
+          "$ref": "#/$defs/StoreGrowthDimensionV1"
+        },
+        "path": {
+          "description": "Display path of the store file.",
+          "type": "string"
+        },
+        "read": {
+          "$ref": "#/$defs/StorageTelemetryReadV1",
+          "description": "The typed telemetry read: `observed` with a sample, or `unknown` when the\npragma read failed. Never silently healthy."
+        },
+        "role": {
+          "description": "The dashboard's primary role label for the store (`graph` / `memory` /\n`lcm` / `savings`). Retained for compatibility; see `roles` for the\ncomplete set.",
+          "type": "string"
+        },
+        "roles": {
+          "description": "Every dashboard role served by this one store file. More than one role\nhere means the roles share a database, not that a store was duplicated.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "store": {
+          "description": "Stable store key (the store's file name), or the raw file name when it is\nnot a valid [`StoreKeyV1`].",
+          "type": "string"
+        },
+        "total_bytes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "store",
+        "role",
+        "roles",
+        "path",
+        "read",
+        "total_bytes",
+        "free_bytes",
+        "free_page_ratio",
+        "budget",
+        "growth"
+      ],
+      "type": "object"
+    },
+    "StrataClusterV1": {
+      "properties": {
+        "boundary_edges": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "directory": {
+          "type": "string"
+        },
+        "file_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "incoming_edges": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "internal_edges": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "order": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "outgoing_edges": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "order",
+        "directory",
+        "file_count",
+        "internal_edges",
+        "outgoing_edges",
+        "incoming_edges",
+        "boundary_edges"
+      ],
+      "type": "object"
+    },
+    "StrataFileV1": {
+      "properties": {
+        "chain": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "depth": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "type": "string"
+        },
+        "scc_size": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "path",
+        "depth",
+        "scc_size",
+        "chain"
+      ],
+      "type": "object"
+    },
+    "StrataMeasurementV1": {
+      "properties": {
+        "algorithm": {
+          "type": "string"
+        },
+        "cluster_ordering": {
+          "type": "string"
+        },
+        "clusters": {
+          "items": {
+            "$ref": "#/$defs/StrataClusterV1"
+          },
+          "type": "array"
+        },
+        "dependency_edge_kinds": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": "array"
+        },
+        "files": {
+          "items": {
+            "$ref": "#/$defs/StrataFileV1"
+          },
+          "type": "array"
+        },
+        "granularity": {
+          "type": "string"
+        },
+        "graph_generation": {
+          "type": "string"
+        },
+        "ideal_depth": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_depth": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scan": {
+          "$ref": "#/$defs/StrataScanV1"
+        }
+      },
+      "required": [
+        "graph_generation",
+        "granularity",
+        "dependency_edge_kinds",
+        "algorithm",
+        "cluster_ordering",
+        "max_depth",
+        "ideal_depth",
+        "files",
+        "clusters",
+        "scan"
+      ],
+      "type": "object"
+    },
+    "StrataScanV1": {
+      "properties": {
+        "budget_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "cache_scope": {
+          "type": "string"
+        },
+        "cache_state": {
+          "type": "string"
+        },
+        "dependency_edges_examined": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "files_examined": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_dependency_edges": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_files": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "cache_scope",
+        "cache_state",
+        "budget_ms",
+        "max_files",
+        "max_dependency_edges",
+        "files_examined",
+        "dependency_edges_examined"
+      ],
+      "type": "object"
+    },
+    "StructureReadV1": {
+      "oneOf": [
+        {
+          "properties": {
+            "measurement": {
+              "$ref": "#/$defs/CallChainMeasurementV1"
+            },
+            "status": {
+              "const": "measured",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "measurement"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "detail": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "status": {
+              "const": "unmeasured",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "reason",
+            "detail"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "detail": {
+              "type": "string"
+            },
+            "retryable": {
+              "type": "boolean"
+            },
+            "status": {
+              "const": "failed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "code",
+            "detail",
+            "retryable"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "StructureReadV12": {
+      "oneOf": [
+        {
+          "properties": {
+            "measurement": {
+              "$ref": "#/$defs/StrataMeasurementV1"
+            },
+            "status": {
+              "const": "measured",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "measurement"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "detail": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "status": {
+              "const": "unmeasured",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "reason",
+            "detail"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "detail": {
+              "type": "string"
+            },
+            "retryable": {
+              "type": "boolean"
+            },
+            "status": {
+              "const": "failed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "code",
+            "detail",
+            "retryable"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "StructureReadV13": {
+      "oneOf": [
+        {
+          "properties": {
+            "measurement": {
+              "$ref": "#/$defs/FactMatchesMeasurementV1"
+            },
+            "status": {
+              "const": "measured",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "measurement"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "detail": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "status": {
+              "const": "unmeasured",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "reason",
+            "detail"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "detail": {
+              "type": "string"
+            },
+            "retryable": {
+              "type": "boolean"
+            },
+            "status": {
+              "const": "failed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "code",
+            "detail",
+            "retryable"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "StructureReadV14": {
+      "oneOf": [
+        {
+          "properties": {
+            "measurement": {
+              "$ref": "#/$defs/TestMapMeasurementV1"
+            },
+            "status": {
+              "const": "measured",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "measurement"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "detail": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "status": {
+              "const": "unmeasured",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "reason",
+            "detail"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "detail": {
+              "type": "string"
+            },
+            "retryable": {
+              "type": "boolean"
+            },
+            "status": {
+              "const": "failed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "code",
+            "detail",
+            "retryable"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "TestMapMeasurementV1": {
+      "properties": {
+        "algorithm": {
+          "type": "string"
+        },
+        "applicable": {
+          "type": "boolean"
+        },
+        "caller_depth": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "granularity": {
+          "type": "string"
+        },
+        "node": {
+          "$ref": "#/$defs/NodeRefV1"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "test_files": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "tests": {
+          "items": {
+            "$ref": "#/$defs/CoveringTestV1"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "node",
+        "granularity",
+        "algorithm",
+        "caller_depth",
+        "applicable",
+        "reason",
+        "tests",
+        "test_files"
+      ],
+      "type": "object"
+    },
+    "TopologyConcurrencyPolicyV1": {
+      "additionalProperties": false,
+      "properties": {
+        "maximum_active_per_repository": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "maximum_global_active": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "maximum_parallel_per_task": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "maximum_stack_depth": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "maximum_active_per_repository",
+        "maximum_parallel_per_task",
+        "maximum_global_active",
+        "maximum_stack_depth"
+      ],
+      "type": "object"
+    },
+    "TopologyEscalationPolicyV1": {
+      "enum": [
+        "reject",
+        "require_explicit_human_approval",
+        "require_human_approval_and_independent_review"
+      ],
+      "type": "string"
+    },
+    "TopologyGatePolicyV1": {
+      "additionalProperties": false,
+      "properties": {
+        "cleanliness": {
+          "$ref": "#/$defs/WorktreeCleanlinessRequirementV1"
+        },
+        "maximum_preflight_age_seconds": {
+          "format": "uint32",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "require_fresh_preflight": {
+          "type": "boolean"
+        },
+        "review": {
+          "$ref": "#/$defs/ReviewRequirementV1"
+        },
+        "tests": {
+          "items": {
+            "$ref": "#/$defs/RequiredCheckV1"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "cleanliness",
+        "tests",
+        "review",
+        "require_fresh_preflight",
+        "maximum_preflight_age_seconds"
+      ],
+      "type": "object"
+    },
+    "TopologyNotificationLevelV1": {
+      "enum": [
+        "critical_only",
+        "lifecycle",
+        "verbose"
+      ],
+      "type": "string"
+    },
+    "UseCaseId": {
+      "description": "Stable, canonical catalog identity for `UseCaseId`.",
+      "type": "string"
+    },
+    "UtcMicros": {
+      "description": "UTC timestamp represented as microseconds from the Unix epoch.",
+      "format": "int64",
+      "type": "integer"
+    },
+    "WorkTopologyPolicyV1": {
+      "additionalProperties": false,
+      "description": "Complete V1 policy. Partial values are intentionally impossible: callers\nmust provide the entire policy and validation rejects adapter-local defaults.",
+      "properties": {
+        "branch_naming": {
+          "$ref": "#/$defs/BranchNamingPolicyV1"
+        },
+        "branch_topology": {
+          "$ref": "#/$defs/BranchTopologyPolicyV1"
+        },
+        "concurrency": {
+          "$ref": "#/$defs/TopologyConcurrencyPolicyV1"
+        },
+        "cross_merge": {
+          "$ref": "#/$defs/CrossMergePolicyV1"
+        },
+        "escalation": {
+          "$ref": "#/$defs/TopologyEscalationPolicyV1"
+        },
+        "gates": {
+          "$ref": "#/$defs/TopologyGatePolicyV1"
+        },
+        "history_rewrite": {
+          "$ref": "#/$defs/HistoryRewritePolicyV1"
+        },
+        "notifications": {
+          "$ref": "#/$defs/TopologyNotificationLevelV1"
+        },
+        "placement": {
+          "$ref": "#/$defs/WorktreePlacementModeV1"
+        },
+        "protected_refs": {
+          "items": {
+            "$ref": "#/$defs/ProtectedRefRuleV1"
+          },
+          "type": "array"
+        },
+        "retention": {
+          "$ref": "#/$defs/WorktreeRetentionPolicyV1"
+        },
+        "review_topology": {
+          "$ref": "#/$defs/ReviewTopologyPolicyV1"
+        },
+        "roots": {
+          "items": {
+            "$ref": "#/$defs/WorktreeRootPolicyV1"
+          },
+          "type": "array"
+        },
+        "schema_version": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "schema_version",
+        "placement",
+        "roots",
+        "branch_topology",
+        "review_topology",
+        "branch_naming",
+        "concurrency",
+        "cross_merge",
+        "gates",
+        "protected_refs",
+        "history_rewrite",
+        "escalation",
+        "retention",
+        "notifications"
+      ],
+      "type": "object"
+    },
+    "WorktreeCleanlinessRequirementV1": {
+      "enum": [
+        "require_clean",
+        "allow_untracked_only_for_preflight",
+        "read_only_preflight_only"
+      ],
+      "type": "string"
+    },
+    "WorktreeId": {
+      "description": "Strongly typed canonical identity: `WorktreeId`.",
+      "type": "string"
+    },
+    "WorktreePlacementModeV1": {
+      "oneOf": [
+        {
+          "properties": {
+            "kind": {
+              "const": "existing_worktree_only",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "sibling_of_primary_checkout",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "repository_local_root",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "kind": {
+              "const": "configured_root",
+              "type": "string"
+            },
+            "root_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "root_id"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "WorktreeRetentionPolicyV1": {
+      "additionalProperties": false,
+      "properties": {
+        "abandoned_retention_seconds": {
+          "format": "uint64",
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "automatic_gc": {
+          "$ref": "#/$defs/AutomaticWorktreeGcV1"
+        },
+        "maximum_retained_per_repository": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "terminal_retention_seconds": {
+          "format": "uint64",
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "terminal_retention_seconds",
+        "abandoned_retention_seconds",
+        "maximum_retained_per_repository",
+        "automatic_gc"
+      ],
+      "type": "object"
+    },
+    "WorktreeRootPolicyV1": {
+      "additionalProperties": false,
+      "properties": {
+        "locator": {
+          "$ref": "#/$defs/SensitiveFilesystemLocatorV1"
+        },
+        "maximum_active_worktrees": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "repository_scope": {
+          "$ref": "#/$defs/RepositoryPlacementScopeV1"
+        },
+        "root_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "root_id",
+        "locator",
+        "repository_scope",
+        "maximum_active_worktrees"
+      ],
+      "type": "object"
     }
-  }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "code_index_freshness": {
+      "$ref": "#/$defs/CodeIndexFreshnessPayloadV1"
+    },
+    "doctor_findings": {
+      "$ref": "#/$defs/DoctorFindingsPayloadV1"
+    },
+    "doctor_remediation": {
+      "$ref": "#/$defs/DoctorRemediationPayloadV1"
+    },
+    "doctor_remediation_apply_request": {
+      "$ref": "#/$defs/DoctorRemediationApplyRequestV1"
+    },
+    "doctor_remediation_preview_request": {
+      "$ref": "#/$defs/DoctorRemediationPreviewRequestV1"
+    },
+    "envelope": {
+      "$ref": "#/$defs/DashboardEnvelopeV1"
+    },
+    "explorer_query_run": {
+      "$ref": "#/$defs/ExplorerQueryRunV1"
+    },
+    "graph_call_chain": {
+      "$ref": "#/$defs/StructureReadV1"
+    },
+    "graph_fact_matches": {
+      "$ref": "#/$defs/StructureReadV13"
+    },
+    "graph_strata": {
+      "$ref": "#/$defs/StructureReadV12"
+    },
+    "graph_test_map": {
+      "$ref": "#/$defs/StructureReadV14"
+    },
+    "storage_telemetry": {
+      "$ref": "#/$defs/StorageTelemetryPayloadV1"
+    }
+  },
+  "required": [
+    "envelope",
+    "storage_telemetry",
+    "doctor_findings",
+    "doctor_remediation_preview_request",
+    "doctor_remediation_apply_request",
+    "doctor_remediation",
+    "explorer_query_run",
+    "code_index_freshness",
+    "graph_call_chain",
+    "graph_strata",
+    "graph_fact_matches",
+    "graph_test_map"
+  ],
+  "schemaRevision": 1,
+  "title": "DashboardContractCatalogV1",
+  "type": "object"
 }
