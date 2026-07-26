@@ -43,8 +43,9 @@ mod doctor_findings_api;
 pub(crate) mod doctor_remediation_api;
 pub(crate) use doctor_remediation_api::{
     DoctorRemediationDispatchCommandV1, DoctorRemediationDispatchErrorV1,
-    DoctorRemediationDispatcherV1, DoctorRemediationOperationPhaseV1, DoctorRemediationOperationV1,
-    DoctorRemediationTargetV1,
+    DoctorRemediationDispatcherV1, DoctorRemediationLegalActionV1,
+    DoctorRemediationOperationPhaseV1, DoctorRemediationOperationV1, DoctorRemediationTargetV1,
+    DoctorRemediationVerificationV1,
 };
 mod events_api;
 mod explorer_api;
@@ -1402,6 +1403,7 @@ mod authority_tests {
             Arc::new(|_| {
                 Box::pin(async { Err(DoctorRemediationDispatchErrorV1::OwnerUnavailable) })
             }),
+            Arc::new(|_| panic!("dashboard construction does not observe remediation")),
         );
         let diagnostic_broker = Arc::new(tokio::sync::Mutex::new(
             crate::application::dashboard_diagnostics::diagnostic_broker(
