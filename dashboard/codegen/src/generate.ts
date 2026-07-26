@@ -401,11 +401,6 @@ function emitCompatibilityAliases(defs: Array<[string, JsonSchema]>): string {
     aliases.push(`export type ${alias} = ${source};`);
   }
 
-  // `/api/storage/findings` returns the same Doctor payload with the additive
-  // `kind_statuses` field populated; there is no independent Rust payload.
-  aliases.push("export const StorageFindingsPayloadSchema = DoctorFindingsPayloadV1Schema;");
-  aliases.push("export type StorageFindingsPayload = DoctorFindingsPayloadV1;");
-
   return aliases.join("\n");
 }
 
