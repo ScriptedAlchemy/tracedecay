@@ -1,0 +1,13 @@
+{
+  "hook_event_name": "PostToolUse",
+  "session_id": "<SESSION_ID>",
+  "cwd": "<PROJECT_ROOT>",
+  "tool_name": "Edit",
+  "tool_input": {
+    "path": "<SAVED_PATH>",
+    "old_string": "<REDACTED_OLD_TEXT>",
+    "new_string": "<REDACTED_NEW_TEXT>"
+  },
+  "tool_call_id": "<TOOL_CALL_ID>",
+  "tool_output": "<REDACTED_RESULT>"
+}

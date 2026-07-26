@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "provider": "kiro",
+  "sources": [
+    {
+      "kind": "checked_in_provider_capture",
+      "path": "tests/fixtures/host_events/kiro/baseline.json"
+    },
+    {
+      "kind": "official_documentation_example",
+      "url": "https://kiro.dev/docs/cli/hooks/",
+      "sections": ["Hook event", "PostToolUse", "Stop"],
+      "retrieved_at": "2026-07-21"
+    },
+    {
+      "kind": "official_trigger_reference",
+      "url": "https://kiro.dev/docs/cli/v3/hooks/",
+      "sections": ["Trigger reference", "Trigger name mapping"],
+      "retrieved_at": "2026-07-21"
+    }
+  ],
+  "events": [
+    {
+      "identity": "prompt_boundary",
+      "family": "prompt_boundary",
+      "support": "native",
+      "request": {
+        "hook_event_name": "userPromptSubmit",
+        "cwd": "<PROJECT_ROOT>",
+        "session_id": "<SESSION_ID>",
+        "prompt": "<REDACTED_PROMPT>"
+      }
+    },
+    {
+      "identity": "saved_edit",
+      "family": "saved_edit",
+      "support": "documented_unverified",
+      "request": {
+        "hook_event_name": "postToolUse",
+        "cwd": "<PROJECT_ROOT>",
+        "session_id": "<SESSION_ID>",
+        "tool_name": "fs_write",
+        "tool_input": "<REDACTED_TOOL_INPUT>",
+        "tool_response": "<REDACTED_RESULT>"
+      }
+    },
+    {
+      "identity": "stop",
+      "family": "session_boundary",
+      "support": "documented_unverified",
+      "request": {
+        "hook_event_name": "stop",
+        "cwd": "<PROJECT_ROOT>",
+        "session_id": "<SESSION_ID>",
+        "assistant_response": "<REDACTED_RESPONSE>"
+      }
+    }
+  ]
+}
