@@ -5,6 +5,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type {
   DashboardDoctorRemediationDescriptorV1,
   DoctorFindingsPayload,
+  DoctorOwningSurface,
   DoctorRemediationOperation,
   DoctorRemediationPayload,
   DoctorRemediationTarget,
@@ -32,19 +33,28 @@ import {
   availableRemediationActions,
   doctorEvidencePresentation,
   doctorFamilyLabel,
+  doctorOwningSurfaceLabel,
   isTerminalDoctorOperation,
   readActiveDoctorOperation,
   remediationForEntry,
   saveActiveDoctorOperation,
   sameDoctorScope,
+  type RemediationActionAvailability,
 } from './doctorModel.ts';
 
 type SelectedRemediation = {
   entry: DoctorReportEntry;
   descriptor: DashboardDoctorRemediationDescriptorV1;
   target: DoctorRemediationTarget;
-  actions: { canPreview: boolean; canApply: boolean };
+  actions: RemediationActionAvailability;
   idempotencyKey: string;
+};
+
+/** A finding the canonical report attached no remediation reference to. */
+const NO_REMEDIATION_ACTIONS: RemediationActionAvailability = {
+  canPreview: false,
+  canApply: false,
+  dispatchable: false,
 };
 
 /** Canonical Doctor finding inspector and owner-operation handoff. The component
@@ -277,9 +287,9 @@ function DoctorFindings({
         {envelope.payload.entries.map((entry, index) => {
           const descriptor = remediationForEntry(entry, envelope.payload.remediations);
           const target = descriptor?.target ?? null;
-          const actions = descriptor && target
+          const actions = descriptor
             ? availableRemediationActions(descriptor, envelope.legal_actions)
-            : { canPreview: false, canApply: false };
+            : NO_REMEDIATION_ACTIONS;
           return (
             <FindingCard
               key={`${entry.finding.family}:${entry.storage_kind ?? 'general'}:${index}`}
@@ -359,13 +369,14 @@ function FindingCard({
   entry: DoctorReportEntry;
   descriptor: DashboardDoctorRemediationDescriptorV1 | undefined;
   target: DoctorRemediationTarget | null;
-  actions: { canPreview: boolean; canApply: boolean };
+  actions: RemediationActionAvailability;
   previewing: boolean;
   onPreview: (request: { operation: string; target: DoctorRemediationTarget }) => void;
   onInspect: () => void;
 }) {
   const { finding } = entry;
   const evidence = doctorEvidencePresentation(finding.state);
+  const authorized = actions.canPreview || actions.canApply;
   return (
     <OverviewCard title={doctorFamilyLabel(finding.family)}>
       <div className="flex flex-col gap-2">
@@ -386,34 +397,64 @@ function FindingCard({
             <p className="mt-1 truncate font-mono text-2xs text-text-muted">
               {descriptor.operation}
             </p>
-            <div className="mt-2 flex flex-wrap gap-2">
-              {actions.canPreview ? (
-                <button
-                  type="button"
-                  className={secondaryButtonClass}
-                  onClick={() => {
-                    if (target) onPreview({ operation: descriptor.operation, target });
-                  }}
-                  disabled={previewing}
-                >
-                  {previewing ? 'Previewing' : 'Preview'}
-                </button>
-              ) : null}
-              {actions.canApply ? (
-                <button type="button" className={primaryButtonClass} onClick={onInspect}>
-                  Review remediation
-                </button>
-              ) : null}
-            </div>
-            {!actions.canPreview && !actions.canApply ? (
-              <p className="mt-2 text-2xs text-text-muted">
-                No authorized remediation action is currently available.
-              </p>
+            {actions.dispatchable && target ? (
+              <div className="mt-2 flex flex-wrap gap-2">
+                {actions.canPreview ? (
+                  <button
+                    type="button"
+                    className={secondaryButtonClass}
+                    onClick={() => onPreview({ operation: descriptor.operation, target })}
+                    disabled={previewing}
+                  >
+                    {previewing ? 'Previewing' : 'Preview'}
+                  </button>
+                ) : null}
+                {actions.canApply ? (
+                  <button type="button" className={primaryButtonClass} onClick={onInspect}>
+                    Review remediation
+                  </button>
+                ) : null}
+              </div>
             ) : null}
+            <RemediationAvailabilityNote
+              authorized={authorized}
+              dispatchable={actions.dispatchable}
+              surface={descriptor.surface}
+            />
           </div>
         ) : null}
       </div>
     </OverviewCard>
+  );
+}
+
+/** Why a finding shows no remediation button, told apart from each other.
+ *
+ * An owner that authorizes an action it must be handed a change for is not the
+ * same thing as an owner that authorizes nothing, and reporting the first as
+ * the second would deny an available repair. */
+function RemediationAvailabilityNote({
+  authorized,
+  dispatchable,
+  surface,
+}: {
+  authorized: boolean;
+  dispatchable: boolean;
+  surface: DoctorOwningSurface;
+}) {
+  if (!authorized) {
+    return (
+      <p className="mt-2 text-2xs text-text-muted">
+        No authorized remediation action is currently available.
+      </p>
+    );
+  }
+  if (dispatchable) return null;
+  return (
+    <p className="mt-2 text-2xs text-text-secondary">
+      Authorized by {doctorOwningSurfaceLabel(surface)}, which also supplies the exact
+      change to apply. Doctor reports the finding; run the remediation there.
+    </p>
   );
 }
 
