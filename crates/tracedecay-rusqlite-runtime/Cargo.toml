@@ -6,12 +6,6 @@ description = "Bundled SQLite runtime for TraceDecay storage adapters"
 license = "MIT"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
-[[bin]]
-name = "storage-runtime-evidence"
-path = "src/bin/storage_runtime_evidence.rs"
-test = false
-bench = false
-
 [dependencies]
 rusqlite = { version = "0.40.1", default-features = false, features = ["backup", "bundled", "hooks", "limits", "trace"] }
 serde = { version = "1", features = ["derive"] }

@@ -1358,9 +1358,10 @@ impl Database {
             });
         }
         let _writer = self.writer().await;
-        let mut rows = self
-            .inner
-            .conn
+        let connection = self
+            .open_writer_connection_unguarded("truncate WAL for offline maintenance")
+            .await?;
+        let mut rows = connection
             .checkpoint_wal_truncate()
             .await
             .map_err(|error| TraceDecayError::Database {

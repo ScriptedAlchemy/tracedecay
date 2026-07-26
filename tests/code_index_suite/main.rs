@@ -16,4 +16,3 @@ mod sanitized_intake;
 mod search_chunks;
 mod support;
 mod test_attribution;
-mod v1_migration;

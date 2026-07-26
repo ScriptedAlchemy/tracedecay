@@ -29,17 +29,18 @@ use tracedecay_application::handlers::CanonicalApplicationDispatcher;
 use tracedecay_application::retrieval::{
     CodeFacetDimension, CodeFacetRequest, CodeLexicalFieldFilter, CodeNavigationRequest,
     CodeQueryScope, CodeRelationRequest, CodeTimelineRequest, ExactOccurrenceRequest,
-    GraphRelationRequest, ImplementationSelector, ImplementationsRequest, PhraseSearchRequest,
-    SignatureSearchRequest, SymbolGraphScope, SymbolSearchPrimitiveRequest, TypeHierarchyRequest,
+    GraphRelationRequest, HealthDeltaRequest, ImplementationSelector, ImplementationsRequest,
+    PhraseSearchRequest, SignatureSearchRequest, SymbolGraphScope, SymbolSearchPrimitiveRequest,
+    TypeHierarchyRequest,
 };
 use tracedecay_application::{
     APPLICATION_DEFAULT_PROFILE_ID, ApplicationContractError, ApplicationEnvelope,
     ApplicationOperation, ApplicationProblem, ApplicationProblemEnvelope, ApplicationProblemKind,
-    ApplicationResult, CancellationContext, CancellationSignal, Deadline, HealthDeltaRequest,
-    HealthReadRequest, IdempotencyKey, LegalAction, OperationTermination, PageRequest,
-    ProblemOwningLayer, RequestContext, RequestId, ResultContractRef, ResultProjection,
-    ResumeToken, RetrievalOrder, RetrievalRequestMeta, RetryDirective, SafeDiagnostic,
-    SessionLookupRequest, SourceLinesRequest, StreamEvent, StreamEventKind,
+    ApplicationResult, CancellationContext, CancellationSignal, Deadline, HealthReadRequest,
+    IdempotencyKey, LegalAction, OperationTermination, PageRequest, ProblemOwningLayer,
+    RequestContext, RequestId, ResultContractRef, ResultProjection, ResumeToken, RetrievalOrder,
+    RetrievalRequestMeta, RetryDirective, SafeDiagnostic, SessionLookupRequest, SourceLinesRequest,
+    StreamEvent, StreamEventKind,
 };
 use tracedecay_domain::configuration::{
     ChangePlanId, ConfigurationAuditEventId, ConfigurationIdempotencyKey, ConfigurationLayerIdV1,
@@ -160,7 +161,7 @@ pub enum ApplicationSurfaceOperation {
     ContextScoutFeedback,
 }
 
-pub const APPLICATION_SURFACE_OPERATIONS: [ApplicationSurfaceOperation; 59] = [
+pub const APPLICATION_SURFACE_OPERATIONS: [ApplicationSurfaceOperation; 66] = [
     ApplicationSurfaceOperation::GitStatus,
     ApplicationSurfaceOperation::GitDiff,
     ApplicationSurfaceOperation::GitHistory,
@@ -168,6 +169,13 @@ pub const APPLICATION_SURFACE_OPERATIONS: [ApplicationSurfaceOperation; 59] = [
     ApplicationSurfaceOperation::GitHunks,
     ApplicationSurfaceOperation::GitPreview,
     ApplicationSurfaceOperation::GitApply,
+    ApplicationSurfaceOperation::FeedbackDiagnostics,
+    ApplicationSurfaceOperation::FeedbackGet,
+    ApplicationSurfaceOperation::FeedbackExpand,
+    ApplicationSurfaceOperation::FeedbackList,
+    ApplicationSurfaceOperation::FeedbackAdvisoryCycle,
+    ApplicationSurfaceOperation::FeedbackImpact,
+    ApplicationSurfaceOperation::AffectedTests,
     ApplicationSurfaceOperation::TestResults,
     ApplicationSurfaceOperation::CodeExactOccurrence,
     ApplicationSurfaceOperation::CodePhraseSearch,
@@ -1039,9 +1047,18 @@ fn application_invoker_for_surface(
         }
     })?);
     let resolver = CatalogBindingResolver::new(composition.snapshot());
-    for operation in required_operations {
-        if resolve_application_binding(&resolver, surface, *operation).is_none() {
-            return Err(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized);
+    if surface == BindingSurface::Http {
+        for http_operation in HttpApplicationOperation::ALL {
+            let operation = application_operation_for_http(http_operation);
+            if resolve_application_binding(&resolver, surface, operation).is_none() {
+                return Err(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized);
+            }
+        }
+    } else {
+        for operation in required_operations {
+            if resolve_application_binding(&resolver, surface, *operation).is_none() {
+                return Err(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized);
+            }
         }
     }
     Ok(move |request| invoke_catalog_bound_application_request(request, surface, &composition))
@@ -3293,8 +3310,17 @@ fn application_operation_for_http(
         HttpApplicationOperation::GitHistory => ApplicationSurfaceOperation::GitHistory,
         HttpApplicationOperation::GitBlame => ApplicationSurfaceOperation::GitBlame,
         HttpApplicationOperation::GitHunks => ApplicationSurfaceOperation::GitHunks,
-        HttpApplicationOperation::GitPreview => ApplicationSurfaceOperation::GitPreview,
-        HttpApplicationOperation::GitApply => ApplicationSurfaceOperation::GitApply,
+        HttpApplicationOperation::FeedbackDiagnostics => {
+            ApplicationSurfaceOperation::FeedbackDiagnostics
+        }
+        HttpApplicationOperation::FeedbackGet => ApplicationSurfaceOperation::FeedbackGet,
+        HttpApplicationOperation::FeedbackExpand => ApplicationSurfaceOperation::FeedbackExpand,
+        HttpApplicationOperation::FeedbackList => ApplicationSurfaceOperation::FeedbackList,
+        HttpApplicationOperation::FeedbackImpact => ApplicationSurfaceOperation::FeedbackImpact,
+        HttpApplicationOperation::FeedbackAdvisoryCycle => {
+            ApplicationSurfaceOperation::FeedbackAdvisoryCycle
+        }
+        HttpApplicationOperation::AffectedTests => ApplicationSurfaceOperation::AffectedTests,
         HttpApplicationOperation::TestResults => ApplicationSurfaceOperation::TestResults,
         HttpApplicationOperation::CodeExactOccurrence => {
             ApplicationSurfaceOperation::CodeExactOccurrence

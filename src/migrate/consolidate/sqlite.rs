@@ -9,6 +9,7 @@ use crate::db::engine::{DatabaseAttachmentExecutor, Executor, QueryExecutor, par
 use crate::errors::{Result, TraceDecayError};
 use crate::memory::store::MemoryStore;
 
+mod external_source;
 mod inspect;
 mod memory_v2;
 mod observation;
@@ -227,7 +228,13 @@ pub(in crate::migrate) async fn merge_branch_legacy_memory_snapshot(
     let token = source
         .attach_token()
         .map_err(|error| db_error("merge_branch_legacy_memory", error))?;
-    attach_snapshot_as(&transaction, &token, "source").await?;
+    let source_path = token
+        .verified_path()
+        .map_err(|error| db_error("attach_snapshot", error))?;
+    transaction
+        .attach_database(source_path, "source")
+        .await
+        .map_err(|error| db_error("attach_snapshot", error))?;
     transaction
         .execute("PRAGMA defer_foreign_keys = ON", ())
         .await
@@ -307,6 +314,7 @@ async fn verify_legacy_fact_coverage(conn: &impl Executor) -> Result<()> {
 }
 
 async fn merge_one_graph_tx(conn: &impl Executor, offset: &GraphMergeOffsets) -> Result<()> {
+    external_source::merge(conn, "main", "source").await?;
     merge_legacy_memory_tx(
         conn,
         (
@@ -644,6 +652,7 @@ pub(super) async fn merge_sessions(
         .execute("PRAGMA defer_foreign_keys = ON", ())
         .await
         .map_err(|error| db_error("merge_sessions", error))?;
+    external_source::merge(&transaction, "main", "source").await?;
     reject_session_content_collisions(&transaction, "source", "target_input").await?;
     build_consolidation_message_map(&transaction, "source", "target_input", source_project_id)
         .await?;
@@ -684,6 +693,7 @@ pub(super) async fn merge_registered_sessions(
         .execute("PRAGMA defer_foreign_keys = ON", ())
         .await
         .map_err(|error| db_error("merge_sessions", error))?;
+    external_source::merge(&transaction, "main", "source").await?;
     reject_session_content_collisions(&transaction, "source", "target_input").await?;
     build_consolidation_message_map(&transaction, "source", "target_input", source_project_id)
         .await?;

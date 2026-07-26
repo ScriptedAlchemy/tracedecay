@@ -21,6 +21,18 @@ async fn test_store() -> Result<(tempfile::TempDir, TestConnection), String> {
     super::super::ensure_observation_schema(&conn)
         .await
         .map_err(|err| format!("ensure observation schema: {err}"))?;
+    conn.execute_batch(
+        "CREATE TRIGGER IF NOT EXISTS observations_immutable_update
+         BEFORE UPDATE ON observations BEGIN
+             SELECT RAISE(ABORT, 'observations are immutable');
+         END;
+         CREATE TRIGGER IF NOT EXISTS observations_immutable_delete
+         BEFORE DELETE ON observations BEGIN
+             SELECT RAISE(ABORT, 'observations are immutable');
+         END;",
+    )
+    .await
+    .map_err(|err| format!("install observation immutability: {err}"))?;
     Ok((temp, conn))
 }
 
@@ -147,6 +159,48 @@ async fn fetch_str(conn: &Connection, sql: &str) -> Result<String, String> {
         .ok_or_else(|| "no row".to_string())?
         .get::<String>(0)
         .map_err(|e| e.to_string())
+}
+
+async fn seed_cursor_advance_history(conn: &Connection) -> Result<(), String> {
+    let source = r#"{"session_id":"retention-session"}"#;
+    let scope = r#""profile""#;
+    conn.execute_batch(
+        "CREATE TRIGGER IF NOT EXISTS source_cursor_advances_immutable_update_v1
+         BEFORE UPDATE ON source_cursor_advances BEGIN
+             SELECT RAISE(ABORT, 'source cursor advances are immutable');
+         END;
+         CREATE TRIGGER IF NOT EXISTS source_cursor_advances_immutable_delete_v1
+         BEFORE DELETE ON source_cursor_advances BEGIN
+             SELECT RAISE(ABORT, 'source cursor advances are immutable');
+         END;",
+    )
+    .await
+    .map_err(|error| format!("install cursor immutability: {error}"))?;
+    conn.execute(
+        "INSERT INTO source_cursors(source_json, scope_json, cursor_json)
+         VALUES (?1, ?2, ?3)",
+        params![
+            source,
+            scope,
+            r#"{"source":{"session_id":"retention-session"},"scope":"profile","generation":2,"byte_offset":30}"#
+        ],
+    )
+    .await
+    .map_err(|error| format!("insert current cursor: {error}"))?;
+    for (generation, start, end) in [(1, 0, 10), (2, 10, 20), (2, 20, 30)] {
+        let coverage = format!(
+            r#"{{"generation":{generation},"ordering_domain":"file_bytes","range":{{"start":{start},"end":{end}}}}}"#
+        );
+        conn.execute(
+            "INSERT INTO source_cursor_advances(
+                source_json, scope_json, coverage_json, reason, receipt_id
+             ) VALUES (?1, ?2, ?3, 'blank_frame', NULL)",
+            params![source, scope, coverage],
+        )
+        .await
+        .map_err(|error| format!("insert cursor advance: {error}"))?;
+    }
+    Ok(())
 }
 
 fn released_config() -> ObservationRetentionConfig {
@@ -691,6 +745,86 @@ async fn immutability_and_ledger_are_preserved() -> Result<(), String> {
         .await
         .is_err(),
         "ledger remains append-only"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn superseded_cursor_advances_are_reclaimed_but_current_receipt_survives()
+-> Result<(), String> {
+    let (_temp, conn) = test_store().await?;
+    seed_cursor_advance_history(&conn).await?;
+
+    let dry_run = run_observation_retention(
+        &conn,
+        None,
+        &ObservationRetentionConfig::default(),
+        RetentionMode::DryRun,
+        NOW,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    assert_eq!(dry_run.cursor_advances_reclaimed.eligible, 2);
+    assert_eq!(dry_run.cursor_advances_reclaimed.acted, 0);
+    assert_eq!(dry_run.cursor_advances_before, 3);
+    assert_eq!(dry_run.cursor_advances_after, 3);
+
+    let applied = run_apply(&conn, None, &ObservationRetentionConfig::default()).await?;
+    assert_eq!(applied.cursor_advances_reclaimed.eligible, 2);
+    assert_eq!(applied.cursor_advances_reclaimed.acted, 2);
+    assert_eq!(applied.cursor_advances_before, 3);
+    assert_eq!(applied.cursor_advances_after, 1);
+    assert_eq!(
+        fetch_i64(
+            &conn,
+            "SELECT CAST(json_extract(coverage_json, '$.range.end') AS INTEGER)
+             FROM source_cursor_advances"
+        )
+        .await?,
+        30,
+        "the exact receipt supporting the current frontier remains"
+    );
+    assert!(
+        conn.execute("DELETE FROM source_cursor_advances", ())
+            .await
+            .is_err(),
+        "ordinary callers still cannot delete cursor-advance evidence"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn cursor_advance_authority_loss_rolls_back_and_restores_trigger() -> Result<(), String> {
+    let (_temp, conn) = test_store().await?;
+    seed_cursor_advance_history(&conn).await?;
+    let error = run_observation_retention_authorized(
+        &conn,
+        None,
+        &ObservationRetentionConfig::default(),
+        RetentionMode::Apply,
+        NOW,
+        &|intent| {
+            if intent == "commit source cursor advance retention pass" {
+                return Err(TraceDecayError::Database {
+                    operation: OPERATION.to_string(),
+                    message: "test authority revoked".to_string(),
+                });
+            }
+            Ok(())
+        },
+    )
+    .await
+    .expect_err("revocation before commit must roll back cursor reclamation");
+    assert!(error.to_string().contains("test authority revoked"));
+    assert_eq!(
+        fetch_i64(&conn, "SELECT COUNT(*) FROM source_cursor_advances").await?,
+        3
+    );
+    assert!(
+        conn.execute("DELETE FROM source_cursor_advances", ())
+            .await
+            .is_err(),
+        "rollback restores the immutable delete trigger"
     );
     Ok(())
 }

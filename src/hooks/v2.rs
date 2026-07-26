@@ -16,13 +16,32 @@ use tracedecay_hooks::{
     decode_bound_native_hook_event, finish_synchronous_hook,
 };
 
+use super::analytics::HookTimingSpan;
+
 pub(crate) enum HookV2Dispatch {
     NotApplicable,
     Handled {
         guidance: Option<String>,
-        #[allow(dead_code)] // Plan 07 hook transport disposition — reserved
         disposition: HookTransportDispositionV1,
     },
+}
+
+impl HookV2Dispatch {
+    pub(crate) fn into_recorded_guidance(
+        self,
+        telemetry: &HookTimingSpan,
+    ) -> Option<Option<String>> {
+        match self {
+            Self::NotApplicable => None,
+            Self::Handled {
+                guidance,
+                disposition,
+            } => {
+                telemetry.note_hook_v2_disposition(disposition);
+                Some(guidance)
+            }
+        }
+    }
 }
 
 pub(crate) const HOOK_V2_BOUND_HOSTS: &[HookHostV1] = &[
@@ -546,6 +565,44 @@ pub(crate) async fn dispatch_opencode_tool_after(
         started,
     )
     .await
+}
+
+pub(crate) async fn dispatch_opencode_lsp_updated(
+    event_json: &str,
+    project_root: &Path,
+) -> HookV2Dispatch {
+    if tracedecay_hooks::decode_opencode_lsp_event(event_json.as_bytes()).is_err() {
+        return unavailable();
+    }
+    let Ok(event) = serde_json::from_str::<serde_json::Value>(event_json) else {
+        return unavailable();
+    };
+    let response = super::daemon_hook_action(
+        Some(project_root),
+        serde_json::json!({
+            "action": "opencode_lsp_updated",
+            "event": event,
+        }),
+        None,
+    )
+    .await;
+    let accepted = response
+        .ok()
+        .and_then(|value| {
+            value
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        })
+        .is_some_and(|status| status == "accepted");
+    if accepted {
+        HookV2Dispatch::Handled {
+            guidance: None,
+            disposition: HookTransportDispositionV1::Accepted,
+        }
+    } else {
+        unavailable()
+    }
 }
 
 async fn dispatch_decoded(
@@ -1167,6 +1224,42 @@ mod tests {
         assert_eq!(material.event_id, hash16(b"event-17"));
         assert_eq!(material.protected_session_id, hash32(b"session-23"));
         assert_eq!(material.file_id, Some(hash16(b"event-17")));
+    }
+
+    #[tokio::test]
+    async fn opencode_lsp_updated_uses_project_scoped_daemon_action() {
+        let project = tempfile::tempdir().unwrap();
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../crates/tracedecay-hooks/fixtures/host_events/opencode/baseline.json"
+        ))
+        .unwrap();
+        let event = fixture["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|event| event["identity"] == "lsp_updated")
+            .unwrap()["request"]
+            .clone();
+        let event_json = serde_json::to_string(&event).unwrap();
+        let guard = crate::hooks::TestDaemonHookActionGuard::install([serde_json::json!({
+            "action": "opencode_lsp_updated",
+            "status": "accepted",
+        })]);
+
+        let dispatch = dispatch_opencode_lsp_updated(&event_json, project.path()).await;
+
+        assert!(matches!(
+            dispatch,
+            HookV2Dispatch::Handled {
+                guidance: None,
+                disposition: HookTransportDispositionV1::Accepted,
+            }
+        ));
+        let calls = guard.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0.as_deref(), Some(project.path()));
+        assert_eq!(calls[0].1["action"], "opencode_lsp_updated");
+        assert_eq!(calls[0].1["event"], event);
     }
 
     #[test]

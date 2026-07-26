@@ -1,5 +1,7 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
+
+use sha2::{Digest, Sha256};
 
 use super::{
     LCM_RAW_MESSAGE_DIVERGENCE_PREDICATE, attach_snapshot_as, db_error, db_message, query_i64,
@@ -34,6 +36,7 @@ struct LcmMessageCollisionCounts {
 pub(in crate::migrate::consolidate) struct GraphLogicalIdentities {
     facts: HashSet<Vec<u8>>,
     feedback: HashSet<Vec<u8>>,
+    external_source_states: HashMap<String, [u8; 32]>,
 }
 
 impl GraphLogicalIdentities {
@@ -72,6 +75,24 @@ impl GraphLogicalIdentities {
                 .iter()
                 .all(|key| self.feedback.contains(key) || other.feedback.contains(key))
     }
+
+    pub(in crate::migrate::consolidate) fn external_source_union_matches(
+        &self,
+        other: &Self,
+        destination: &Self,
+    ) -> bool {
+        let mut expected = self.external_source_states.clone();
+        for (binding_id, state) in &other.external_source_states {
+            match expected.get(binding_id) {
+                Some(existing) if existing != state => return false,
+                Some(_) => {}
+                None => {
+                    expected.insert(binding_id.clone(), *state);
+                }
+            }
+        }
+        destination.external_source_states == expected
+    }
 }
 
 pub(in crate::migrate::consolidate) async fn extend_graph_identities(
@@ -83,6 +104,9 @@ pub(in crate::migrate::consolidate) async fn extend_graph_identities(
     }
     if table_exists(conn, "main", "memory_feedback_events").await? {
         read_feedback_keys(conn, &mut identities.feedback).await?;
+    }
+    if table_exists(conn, "main", "external_source_states_v1").await? {
+        read_external_source_states(conn, &mut identities.external_source_states).await?;
     }
     Ok(())
 }
@@ -146,6 +170,47 @@ async fn read_feedback_keys(
             None => key.push(0),
         }
         identities.insert(key);
+    }
+    Ok(())
+}
+
+async fn read_external_source_states(
+    conn: &impl QueryExecutor,
+    identities: &mut HashMap<String, [u8; 32]>,
+) -> Result<()> {
+    let mut rows = conn
+        .query(
+            "SELECT binding_id, source_id, owner_kind, owner_id,
+                    definition_digest, binding_digest, frontier_digest,
+                    receipt_idempotency_key, receipt_request_digest, state_json
+             FROM external_source_states_v1",
+            (),
+        )
+        .await
+        .map_err(|error| db_error("logical_identities", error))?;
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| db_error("logical_identities", error))?
+    {
+        let binding_id = row_text(&row, 0)?;
+        let mut state = Vec::new();
+        for index in 1..10 {
+            push_text(&mut state, &row_text(&row, index)?);
+        }
+        let state_digest: [u8; 32] = Sha256::digest(&state).into();
+        match identities.get(&binding_id) {
+            Some(existing) if existing != &state_digest => {
+                return Err(db_message(
+                    "logical_identities",
+                    format!("divergent external source state collision for binding '{binding_id}'"),
+                ));
+            }
+            Some(_) => {}
+            None => {
+                identities.insert(binding_id, state_digest);
+            }
+        }
     }
     Ok(())
 }
