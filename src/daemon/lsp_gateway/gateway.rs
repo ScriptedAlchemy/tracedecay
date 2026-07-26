@@ -520,7 +520,7 @@ impl SemanticRequest {
         }
     }
 
-    fn document_uri(&self) -> Option<&str> {
+    pub(crate) fn document_uri(&self) -> Option<&str> {
         match self {
             Self::Declaration { document_uri, .. }
             | Self::Definition { document_uri, .. }
