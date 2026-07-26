@@ -128,8 +128,7 @@ async fn insert_union_fixture(
     .await;
 }
 
-#[tokio::test]
-async fn consolidation_unions_external_source_states_in_graph_and_session_stores() {
+pub(super) async fn assert_executable_union_witness() {
     let fixture = fixture().await;
     let source = layout_for_id(&fixture.project, &fixture.profile, &fixture.source_id).unwrap();
     let target = layout_for_id(&fixture.project, &fixture.profile, &fixture.target_id).unwrap();
@@ -187,6 +186,11 @@ async fn consolidation_unions_external_source_states_in_graph_and_session_stores
             format!(r#"{{"marker":"{prefix}.shared"}}"#)
         );
     }
+}
+
+#[tokio::test]
+async fn consolidation_unions_external_source_states_in_graph_and_session_stores() {
+    assert_executable_union_witness().await;
 }
 
 #[tokio::test]
