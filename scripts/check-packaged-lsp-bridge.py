@@ -106,6 +106,8 @@ def main() -> None:
     (project / "src/lib.rs").write_text("pub fn answer() -> u8 { 42 }\n", encoding="utf-8")
 
     environment = os.environ.copy()
+    environment.pop("TRACEDECAY_DATA_DIR", None)
+    environment.pop("NEXTEST_TEST_NAME", None)
     environment["HOME"] = str(home)
     environment["USERPROFILE"] = str(home)
     environment["TRACEDECAY_DAEMON_SOCKET"] = str(socket_path)
