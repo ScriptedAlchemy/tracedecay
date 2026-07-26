@@ -147,19 +147,11 @@ fn handler_descriptor(
 }
 
 fn request_schema(spec: &GitIndexCatalogSpec) -> Result<SchemaRef, ApplicationContractError> {
-    Ok(SchemaRef::new(
-        SchemaId::new(spec.request_schema)?,
-        1,
-        8_192,
-    )?)
+    Ok(SchemaRef::new(SchemaId::new(spec.request_schema)?, 1)?)
 }
 
 fn result_schema(spec: &GitIndexCatalogSpec) -> Result<SchemaRef, ApplicationContractError> {
-    Ok(SchemaRef::new(
-        SchemaId::new(spec.result_schema)?,
-        1,
-        8_192,
-    )?)
+    Ok(SchemaRef::new(SchemaId::new(spec.result_schema)?, 1)?)
 }
 
 fn git_index_scope() -> Result<ScopeRequirement, ApplicationContractError> {
