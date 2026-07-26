@@ -46,7 +46,7 @@ impl SourceReadPrimitivePort for Pr12SourceReadAdapter {
         request: &'a SourceReadPrimitiveRequest,
     ) -> SourceReadPortFuture<'a> {
         Box::pin(async move {
-            if context.request.scope() != &self.scope {
+            if context.request.scope() != &self.scope || request.validate().is_err() {
                 return source_read_failed(context.observed_at);
             }
             match self.read(request).await {
@@ -433,6 +433,26 @@ mod tests {
         assert!(second.unchanged);
         assert!(second.body.is_none());
         assert_eq!(second.digest, first.digest);
+
+        let invalid = SourceReadPrimitiveRequest {
+            mode: SourceReadModeV1::Full,
+            lines: Some("1-1".to_owned()),
+            ..request
+        };
+        let outcome = adapter
+            .source_read(
+                SourceReadPortContext {
+                    request: &context,
+                    operation: &operation,
+                    observed_at: NOW,
+                },
+                &invalid,
+            )
+            .await;
+        assert!(
+            matches!(outcome, SourceReadPortOutcome::Failed { .. }),
+            "production source reads must reject mode/range mismatches"
+        );
     }
 
     #[test]

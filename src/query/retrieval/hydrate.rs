@@ -169,9 +169,17 @@ pub trait LateHydrationSource<P> {
     ) -> HydrationReadOutcomeV1<P>;
 }
 
-pub struct DeterministicLateHydration<'a, S> {
+/// Canonical production rank-before-hydrate executor.
+///
+/// Determinism describes ordering and receipt formation; payloads still come
+/// from the authorized owning source for each selected candidate.
+pub struct CanonicalLateHydration<'a, S> {
     source: &'a mut S,
 }
+
+/// Compatibility name retained for callers that predate the production
+/// authority naming. It is the same canonical executor, not a test double.
+pub type DeterministicLateHydration<'a, S> = CanonicalLateHydration<'a, S>;
 
 struct SystemHydrationExecutionControl {
     started: Instant,
@@ -187,7 +195,7 @@ impl HydrationExecutionControlV1 for SystemHydrationExecutionControl {
     }
 }
 
-impl<'a, S> DeterministicLateHydration<'a, S> {
+impl<'a, S> CanonicalLateHydration<'a, S> {
     pub fn new(source: &'a mut S) -> Self {
         Self { source }
     }

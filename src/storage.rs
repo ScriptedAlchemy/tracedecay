@@ -1818,6 +1818,45 @@ mod tests {
     use std::sync::{Arc, Barrier};
 
     #[test]
+    fn repository_marker_keeps_the_existing_store_when_fallback_identity_differs() {
+        let dir = tempfile::tempdir().unwrap();
+        let project_root = dir.path().join("repo");
+        let profile_root = dir.path().join("profile");
+        fs::create_dir_all(&project_root).unwrap();
+        let init = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&project_root)
+            .status()
+            .unwrap();
+        assert!(init.success(), "the fixture repository must initialize");
+
+        let fallback_id = default_profile_project_id(&project_root);
+        let existing_id = "proj_existing_marker_store";
+        assert_ne!(
+            fallback_id, existing_id,
+            "the fixture must model a changed fallback derivation"
+        );
+        let existing_store = profile_root.join("projects").join(existing_id);
+        fs::create_dir_all(&existing_store).unwrap();
+        let sentinel = existing_store.join("existing-store-sentinel");
+        fs::write(&sentinel, "do not orphan").unwrap();
+        assert!(write_repository_identity_marker(&project_root, existing_id).unwrap());
+
+        let resolved = resolve_layout(&project_root, &profile_root).unwrap();
+
+        assert_eq!(
+            resolved.identity.project_id.as_deref(),
+            Some(existing_id),
+            "persisted repository identity must outrank a newly-derived fallback id"
+        );
+        assert_eq!(resolved.data_root, existing_store);
+        assert!(
+            sentinel.is_file(),
+            "the selected existing store must stay intact"
+        );
+    }
+
+    #[test]
     fn exact_root_authority_controls_shared_git_discovery() {
         fn write_manifest(profile_root: &Path, project_id: &str, project_root: &Path) {
             let data_root = profile_root.join("projects").join(project_id);

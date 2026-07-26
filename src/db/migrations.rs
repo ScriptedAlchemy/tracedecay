@@ -126,7 +126,8 @@ pub(crate) async fn configure_fresh_auto_vacuum(conn: &Connection, operation: &s
 /// Creates the complete latest schema from scratch for a brand-new database.
 /// This avoids running v0→v1→…→v6 migrations sequentially.
 pub async fn create_schema(database: &crate::db::Database) -> Result<()> {
-    create_schema_connection(database.conn()).await
+    let writer = database.writer_connection("create schema").await?;
+    create_schema_connection(writer.engine_connection()).await
 }
 
 pub(crate) async fn create_schema_connection(conn: &Connection) -> Result<()> {
@@ -334,7 +335,8 @@ async fn create_schema_transaction(conn: &Transaction) -> Result<()> {
 /// transaction.
 /// Returns `true` if any migrations were applied, `false` if already up-to-date.
 pub async fn migrate(database: &crate::db::Database) -> Result<bool> {
-    migrate_connection(database.conn()).await
+    let writer = database.writer_connection("migrate schema").await?;
+    migrate_connection(writer.engine_connection()).await
 }
 
 /// Internal registered-runtime entry point. Public callers migrate the

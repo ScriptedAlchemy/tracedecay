@@ -6,8 +6,7 @@
 
 use std::fs;
 use tempfile::TempDir;
-use tracedecay::storage::resolve_layout_for_current_profile;
-use tracedecay::tracedecay::TraceDecay;
+use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
 /// Finds the node ID for a symbol by name, panicking if not found.
 async fn find_node_id(cg: &TraceDecay, name: &str) -> String {
@@ -306,7 +305,22 @@ async fn add_branch_tracking_refuses_empty_sanitized_name() {
     cg.index_all().await.unwrap();
 
     // ".." sanitizes to "" — must be refused, never mapped to branches/.db.
-    let result = TraceDecay::add_branch_tracking(project, "..").await;
+    let profile_root = cg
+        .store_layout()
+        .data_root
+        .parent()
+        .and_then(std::path::Path::parent)
+        .unwrap()
+        .to_path_buf();
+    let result = TraceDecay::add_branch_tracking_with_options(
+        project,
+        "..",
+        TraceDecayOpenOptions {
+            profile_root: Some(profile_root),
+            global_db_path: None,
+        },
+    )
+    .await;
     assert!(
         result.is_err(),
         "a branch name that sanitizes to empty must be refused, got: {result:?}"
@@ -374,14 +388,13 @@ async fn repeated_target_edits_keep_unresolved_refs_bounded() {
 async fn persistent_sync_lock_reuses_an_unlocked_legacy_file() {
     let dir = TempDir::new().unwrap();
     let project = dir.path();
-    TraceDecay::init(project).await.unwrap();
-    let lock_path = resolve_layout_for_current_profile(project)
-        .unwrap()
-        .sync_lock_path;
+    let initialized = TraceDecay::init(project).await.unwrap();
+    let lock_path = initialized.store_layout().sync_lock_path.clone();
+    drop(initialized);
     // A dead legacy owner does not require unlinking the canonical path.
     fs::write(&lock_path, "4294967294").unwrap();
 
-    let guard = tracedecay::tracedecay::try_acquire_sync_lock(project)
+    let guard = tracedecay::tracedecay::try_acquire_sync_lock_at(&lock_path)
         .expect("an unlocked legacy file must be reusable");
     #[cfg(unix)]
     assert_eq!(
@@ -407,7 +420,7 @@ async fn persistent_sync_lock_reuses_an_unlocked_legacy_file() {
         "dropping the exact owner clears its sidecar"
     );
     drop(
-        tracedecay::tracedecay::try_acquire_sync_lock(project)
+        tracedecay::tracedecay::try_acquire_sync_lock_at(&lock_path)
             .expect("kernel lease must be reusable after Drop"),
     );
 }

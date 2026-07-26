@@ -156,7 +156,7 @@ impl HostComponentRegistrationDelegate {
                 }))
         {
             CompatibilityRegistrationMode::DeployedActivation
-        } else if matches!(self.integration.id(), "opencode" | "cursor") || !includes_core {
+        } else if self.integration.id() == "opencode" || !includes_core {
             CompatibilityRegistrationMode::ArtifactOnly
         } else {
             CompatibilityRegistrationMode::LegacyIntegration

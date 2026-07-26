@@ -139,6 +139,7 @@ impl ObservationStore for GlobalDbObservationStore<'_> {
         match outcome {
             RuntimeSubmitOutcomeV1::Committed { .. }
             | RuntimeSubmitOutcomeV1::CommittedAfterCancellation { .. }
+            | RuntimeSubmitOutcomeV1::ExactReplay { .. }
                 if stored.observation().identity() != candidate.identity()
                     && classify_observation_collision(stored.observation(), &candidate)
                         == ObservationCollisionOutcomeV1::ExactDuplicate =>

@@ -227,11 +227,13 @@ impl ContextProjectionPort for PendingContext {
                 revision: TRACEDECAY_CONTEXT_REVISION,
                 evidence: None,
                 omission_reason: Some("stale-generation".to_owned()),
+                next_retrieval_handle: None,
             });
         }
-        if request.retrieval_handle != "rh_current" {
+        if !matches!(request.retrieval_handle.as_str(), "rh_current" | "rh_paged") {
             return ContextExpansionOutcome::Denied;
         }
+        let paged = request.retrieval_handle == "rh_paged";
         ContextExpansionOutcome::Ready(ContextExpansionEnvelope {
             root_uri: root.uri().to_owned(),
             document_uri: None,
@@ -243,10 +245,15 @@ impl ContextProjectionPort for PendingContext {
                 identity: fixture_projection_identity(),
             },
             expires_at: 10_000,
-            coverage: ContextCoverage::Complete,
+            coverage: if paged {
+                ContextCoverage::Partial
+            } else {
+                ContextCoverage::Complete
+            },
             revision: TRACEDECAY_CONTEXT_REVISION,
             evidence: Some(json!({ "canonical": "feedback-expand" })),
-            omission_reason: None,
+            omission_reason: paged.then(|| "bounded-projection-items".to_owned()),
+            next_retrieval_handle: paged.then(|| "rh_next_page".to_owned()),
         })
     }
 
@@ -484,7 +491,7 @@ fn lsp_context_expansion_is_namespaced_and_returns_canonical_evidence() {
     assert_eq!(projection["id"], 10);
 
     session.handle_payload(
-        br#"{"jsonrpc":"2.0","id":2,"method":"tracedecay/context/expand","params":{"retrievalHandle":"rh_current"}}"#,
+        br#"{"jsonrpc":"2.0","id":2,"method":"tracedecay/context/expand","params":{"retrievalHandle":"rh_paged"}}"#,
         4,
     );
     let response: Value = serde_json::from_slice(&session.drain_outbound()[0]).unwrap();
@@ -494,6 +501,7 @@ fn lsp_context_expansion_is_namespaced_and_returns_canonical_evidence() {
         response["result"]["evidence"]["canonical"],
         "feedback-expand"
     );
+    assert_eq!(response["result"]["nextRetrievalHandle"], "rh_next_page");
 
     session.handle_payload(
         br#"{"jsonrpc":"2.0","id":3,"method":"tracedecay/context/expand","params":{"retrievalHandle":"rh_stale"}}"#,
@@ -573,6 +581,26 @@ fn cancelling_pending_context_request_cancels_owner_and_completes_correlation() 
     let cancelled: Value = serde_json::from_slice(&session.drain_outbound()[0]).unwrap();
     assert_eq!(cancelled["id"], 2);
     assert_eq!(cancelled["error"]["code"], -32800);
+    assert_eq!(context.cancellations.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn context_deadline_cancels_owner_and_returns_retriable_timeout() {
+    let context = Arc::new(PendingContext::default());
+    let mut session = session_with_context(context.clone());
+    initialize_context(&mut session, TRACEDECAY_CONTEXT_REVISION);
+    session.set_request_deadline_ms(1);
+    session.handle_payload(
+        br#"{"jsonrpc":"2.0","id":2,"method":"tracedecay/context","params":{"kind":"diagnostics"}}"#,
+        2,
+    );
+    assert!(session.drain_outbound().is_empty());
+
+    session.flush_due(3);
+    let timed_out: Value = serde_json::from_slice(&session.drain_outbound()[0]).unwrap();
+    assert_eq!(timed_out["id"], 2);
+    assert_eq!(timed_out["error"]["code"], -32802);
+    assert_eq!(timed_out["error"]["data"]["retriggerRequest"], true);
     assert_eq!(context.cancellations.load(Ordering::SeqCst), 1);
 }
 
@@ -829,4 +857,90 @@ fn equal_generation_identity_change_clears_subscription_currentness() {
     );
     assert_eq!(change["params"]["coverage"], "unavailable");
     assert_eq!(change["params"]["producerState"], "unavailable");
+}
+
+struct SameGenerationFeedbackChangeContext {
+    emitted: AtomicUsize,
+}
+
+impl ContextProjectionPort for SameGenerationFeedbackChangeContext {
+    fn registrations(&self) -> Vec<ContextProjectionRegistration> {
+        vec![ContextProjectionRegistration {
+            kind: ContextProjectionKind::diagnostics(),
+            revision: TRACEDECAY_CONTEXT_REVISION,
+        }]
+    }
+
+    fn snapshot(
+        &self,
+        root: &AdmittedRoot,
+        _request_id: &LspRequestId,
+        _request: &ContextProjectionRequest,
+    ) -> ContextProjectionOutcome {
+        ContextProjectionOutcome::Ready(ContextProjectionEnvelope {
+            root_uri: root.uri().to_owned(),
+            document_uri: None,
+            kind: ContextProjectionKind::diagnostics(),
+            generation: 1,
+            identity: fixture_projection_identity(),
+            freshness: ContextFreshness::Current,
+            producer_state: ContextProducerState::Complete,
+            coverage: ContextCoverage::Complete,
+            revision: TRACEDECAY_CONTEXT_REVISION,
+            items: Vec::new(),
+            omitted_count: 0,
+            omission_reasons: Vec::new(),
+            retrieval_handle: None,
+        })
+    }
+
+    fn poll_changes(
+        &self,
+        root: &AdmittedRoot,
+        _subscriptions: &std::collections::BTreeSet<ContextProjectionRegistration>,
+    ) -> Vec<ContextProjectionChange> {
+        if self.emitted.fetch_add(1, Ordering::SeqCst) != 0 {
+            return Vec::new();
+        }
+        vec![ContextProjectionChange {
+            root_uri: root.uri().to_owned(),
+            document_uri: None,
+            kind: ContextProjectionKind::diagnostics(),
+            generation: 1,
+            identity: fixture_projection_identity(),
+            freshness: ContextFreshness::Current,
+            producer_state: ContextProducerState::Complete,
+            coverage: ContextCoverage::Complete,
+            revision: TRACEDECAY_CONTEXT_REVISION,
+            retrieval_handle: Some("rh_feedback_2".to_owned()),
+        }]
+    }
+}
+
+#[test]
+fn same_generation_feedback_revision_notifies_subscribers() {
+    let mut session = session_with_context(SameGenerationFeedbackChangeContext {
+        emitted: AtomicUsize::new(0),
+    });
+    initialize_context(&mut session, TRACEDECAY_CONTEXT_REVISION);
+    session.handle_payload(
+        br#"{"jsonrpc":"2.0","id":2,"method":"tracedecay/context","params":{"kind":"diagnostics"}}"#,
+        2,
+    );
+    session.drain_outbound();
+
+    session.handle_payload(
+        br#"{"jsonrpc":"2.0","id":3,"method":"tracedecay/subscribe","params":{"projections":[{"kind":"diagnostics","revision":1}]}}"#,
+        3,
+    );
+    let messages = session
+        .drain_outbound()
+        .into_iter()
+        .map(|message| serde_json::from_slice::<Value>(&message).unwrap())
+        .collect::<Vec<_>>();
+    let change = messages
+        .iter()
+        .find(|message| message["method"] == "tracedecay/contextChanged")
+        .expect("new feedback result in the same code generation must notify");
+    assert_eq!(change["params"]["retrievalHandle"], "rh_feedback_2");
 }
