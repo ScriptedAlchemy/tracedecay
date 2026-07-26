@@ -45,18 +45,23 @@ import { scopeKey, scopedUrl, useScope } from '../../data/scope/store.ts';
 import { kindColorVars } from '../../viz/graph/kindColor.ts';
 import {
   TRACE_BUDGET,
-  TRACE_ENCODINGS,
   buildSimSpec,
   buildTraceModel,
-  coverageCaption,
   fieldDescription,
+  sensoryChannels,
   type NeighborsPayload,
 } from '../../viz/trace/model.ts';
-import { createRenderer, type TraceRenderer } from '../../viz/trace/render.ts';
+import {
+  legendPanels,
+  readoutCells,
+  type LegendSample,
+  type ReadoutValue,
+} from '../../viz/trace/readout.ts';
+import { createRenderer, taperAt, type TraceRenderer } from '../../viz/trace/render.ts';
 import { bloomStep, createSimulation, type Simulation } from '../../viz/trace/sim.ts';
 import { resolveTracePalette } from '../../viz/trace/palette.ts';
 import { useReducedMotion, type MotionPreference } from '../../viz/trace/reducedMotion.ts';
-import type { TraceModel, TraceNode } from '../../viz/trace/types.ts';
+import type { SensoryChannelState, TraceModel, TraceNode } from '../../viz/trace/types.ts';
 import { GraphNeighborsPayloadSchema, type GraphNode } from './contracts.ts';
 
 const BASE = '/api/plugins/graph';
@@ -250,6 +255,10 @@ function TraceField({
 
   return (
     <div className="flex flex-col">
+      {/* The plate above the field. Every figure on it is counted from `model`
+       * by `readoutCells`, which is the same record `TraceCanvas` draws. */}
+      <ReadoutStrip model={model} expanding={expanding} />
+
       <figure className="flex flex-col gap-1.5 border-b border-edge-subtle px-3 pb-2 pt-2">
         <TraceCanvas
           model={model}
@@ -257,16 +266,12 @@ function TraceField({
           onHoverChange={setHovered}
           onDragChange={setDragging}
         />
-        <figcaption className="flex flex-col gap-1 leading-tight">
-          <span className="text-3xs text-text-muted">{TRACE_ENCODINGS}</span>
-          {/* The coverage sentence is generated from the same counts the field
-           * was built from, so the caption and the picture cannot drift. */}
-          <span className="text-3xs text-text-secondary">{coverageCaption(model)}</span>
-          {expanding ? (
-            <span className="text-3xs text-state-loading">
-              still expanding hop 2 — the counts above are for what has arrived so far
-            </span>
-          ) : null}
+        {/* The key below the field. A single run-on `TRACE_ENCODINGS` line
+         * used to carry all of this; the legend says it as layout, and says
+         * what each channel is carrying right now, which prose could not. */}
+        <figcaption className="flex flex-col gap-2" data-testid="trace-key">
+          <LegendRow model={model} />
+          <FeltChannels model={model} />
         </figcaption>
       </figure>
 
@@ -286,6 +291,321 @@ function TraceField({
       </div>
 
       <TraceList model={model} focusId={focus.id} {...(onFocusChange ? { onFocusChange } : {})} />
+    </div>
+  );
+}
+
+/* ---- the instrument plate ------------------------------------------------ */
+
+/**
+ * One reading. Absence is printed as the word `absent` plus the reason, never
+ * as a blank cell and never as a zero — a blank reads as "nothing to report"
+ * and a zero reads as "none", and on this surface the truth is usually
+ * "the wire did not carry it".
+ */
+function Reading({ value, size }: { value: ReadoutValue; size: string }) {
+  if (value.kind === 'absent') {
+    return (
+      <span className="flex min-w-0 flex-wrap items-baseline gap-x-1.5">
+        <span className={cn('td-value text-state-unknown', size)}>absent</span>
+        <span className="td-unit normal-case tracking-normal">{value.why}</span>
+      </span>
+    );
+  }
+  return (
+    <span className="flex min-w-0 flex-wrap items-baseline gap-x-1.5">
+      <span className={cn('td-value break-words', size)}>{value.value}</span>
+      {value.unit === null ? null : <span className="td-unit">{value.unit}</span>}
+    </span>
+  );
+}
+
+/**
+ * The seven-cell plate above the field.
+ *
+ * Laid out as a description list because that is what it is: seven measured
+ * terms and their readings. The hairline grid is drawn with a one-pixel gap
+ * over the edge colour rather than per-cell borders, so cells that wrap onto a
+ * second row at a narrow width still meet on a single rule.
+ */
+function ReadoutStrip({ model, expanding }: { model: TraceModel; expanding: boolean }) {
+  return (
+    <div className="border-b border-edge-subtle" data-testid="trace-readout">
+      {/* Seven cells divide evenly into none of these column counts, and the
+        * leftover space over a lit container renders as an eighth cell with
+        * nothing in it — which on a plate whose whole subject is absence reads
+        * as a reading that failed to arrive. The last cell is widened at each
+        * breakpoint by exactly the shortfall, so every row is full and the
+        * hairline grid stays a grid. */}
+      <dl className="grid grid-cols-2 gap-px bg-edge-subtle sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-7">
+        {readoutCells(model).map((cell) => (
+          <div
+            key={cell.label}
+            className="flex min-w-0 flex-col gap-1 bg-surface-0 px-2.5 py-1.5 last:col-span-2 sm:last:col-span-3 lg:last:col-span-2 xl:last:col-span-1"
+          >
+            {/* `td-legend` is `nowrap` by default, which is right for a chip
+              * and wrong for a plate: at seven columns it clipped `Callers ≤ 2
+              * hops` to an ellipsis. A label that wraps to two lines is still
+              * the label; one that truncates is a different word. */}
+            <dt className="flex items-center gap-1.5">
+              <span className="td-legend whitespace-normal">{cell.label}</span>
+              <span aria-hidden className="td-rule" />
+            </dt>
+            <dd className="flex min-w-0 flex-col gap-0.5">
+              <Reading value={cell.value} size="text-xs" />
+              {cell.qualifier === null ? null : (
+                <span className="text-3xs leading-snug text-text-secondary">{cell.qualifier}</span>
+              )}
+            </dd>
+          </div>
+        ))}
+      </dl>
+      {expanding ? (
+        <p className="border-t border-edge-subtle px-2.5 py-1 text-3xs text-state-loading">
+          still expanding hop 2 — every reading above is for what has arrived so far
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+/** Points along the sample ribbon. Enough to read the curve, not a mesh. */
+const SAMPLE_STEPS = 24;
+
+/** The legend's ribbon, drawn from the renderer's own taper profile. */
+function sampleRibbon(width: number, height: number): string {
+  const mid = height / 2;
+  const maxHalf = height / 2 - 0.5;
+  const upper: string[] = [];
+  const lower: string[] = [];
+  for (let i = 0; i < SAMPLE_STEPS; i += 1) {
+    const t = i / (SAMPLE_STEPS - 1);
+    const x = (t * width).toFixed(2);
+    const half = maxHalf * taperAt(t);
+    upper.push(`${x},${(mid - half).toFixed(2)}`);
+    lower.push(`${x},${(mid + half).toFixed(2)}`);
+  }
+  return `M${upper.join('L')}L${lower.reverse().join('L')}Z`;
+}
+
+/**
+ * The mark beside a legend panel.
+ *
+ * Every one of these is the renderer's own geometry rather than a drawing of
+ * it: the ribbon runs through `taperAt`, the sills through `sillWidth`, and
+ * the hue chips carry the kinds actually on the field through the same
+ * `kindColorVars` the list rows use. A sample that were merely *similar* to
+ * the field would be one more thing that can drift.
+ */
+function SampleMark({ sample, model }: { sample: LegendSample; model: TraceModel }) {
+  switch (sample) {
+    case 'channel':
+      return (
+        <svg
+          aria-hidden
+          width={68}
+          height={14}
+          viewBox="0 0 68 14"
+          className="shrink-0 text-text-secondary"
+        >
+          <path d={sampleRibbon(68, 14)} fill="currentColor" fillOpacity={0.32} />
+          <path d={sampleRibbon(68, 14)} fill="none" stroke="currentColor" strokeWidth={0.7} />
+        </svg>
+      );
+    case 'sill':
+      return (
+        <svg
+          aria-hidden
+          width={68}
+          height={14}
+          viewBox="0 0 68 14"
+          className="shrink-0 text-text-secondary"
+        >
+          <rect x={2} y={4.5} width={18} height={5} rx={2.5} fill="currentColor" opacity={0.75} />
+          <rect x={26} y={4.5} width={40} height={5} rx={2.5} fill="currentColor" opacity={0.75} />
+        </svg>
+      );
+    case 'rows':
+      return (
+        <svg
+          aria-hidden
+          width={68}
+          height={14}
+          viewBox="0 0 68 14"
+          className="shrink-0 text-text-secondary"
+        >
+          {[1.5, 7, 12.5].map((y) => (
+            <line
+              key={y}
+              x1={2}
+              y1={y}
+              x2={66}
+              y2={y}
+              stroke="currentColor"
+              strokeWidth={0.7}
+              opacity={y === 7 ? 0.85 : 0.4}
+            />
+          ))}
+          <circle cx={34} cy={7} r={2.6} fill="currentColor" />
+        </svg>
+      );
+    case 'hue': {
+      // The kinds actually drawn, in first-seen order. If the payload brings a
+      // kind this app has never seen, it appears here automatically.
+      const kinds = [...new Set(model.nodes.map((node) => node.kind))].slice(0, 5);
+      return (
+        <span aria-hidden className="flex h-3.5 shrink-0 items-center gap-1">
+          {kinds.map((kind) => (
+            <span
+              key={kind}
+              className="h-2.5 w-3 rounded-[2px] bg-[var(--kind-dark)] [[data-theme=light]_&]:bg-[var(--kind-light)]"
+              style={kindColorVars(kind)}
+            />
+          ))}
+        </span>
+      );
+    }
+    case 'membrane':
+      return (
+        <svg
+          aria-hidden
+          width={68}
+          height={14}
+          viewBox="0 0 68 14"
+          className="shrink-0 text-text-secondary"
+        >
+          <rect
+            x={1}
+            y={1}
+            width={66}
+            height={12}
+            rx={5}
+            fill="currentColor"
+            fillOpacity={0.09}
+            stroke="currentColor"
+            strokeWidth={0.7}
+            strokeOpacity={0.7}
+          />
+          <rect x={9} y={5} width={16} height={4} rx={2} fill="currentColor" opacity={0.7} />
+          <rect x={37} y={5} width={22} height={4} rx={2} fill="currentColor" opacity={0.7} />
+        </svg>
+      );
+    case 'mouth':
+      return (
+        <svg
+          aria-hidden
+          width={68}
+          height={14}
+          viewBox="0 0 68 14"
+          className="shrink-0 text-text-secondary"
+        >
+          {/* Full width to the mouth, then it stops — the absence beat the
+            * design note asks every sheet to carry exactly once. */}
+          <path d="M2 4.6 H40 V9.4 H2 Z" fill="currentColor" fillOpacity={0.32} />
+          <path d="M2 4.6 H40 M2 9.4 H40" stroke="currentColor" strokeWidth={0.7} />
+          <path
+            d="M40 4.6 H64 M40 9.4 H64"
+            stroke="currentColor"
+            strokeWidth={0.7}
+            strokeDasharray="3 3"
+            strokeOpacity={0.75}
+          />
+        </svg>
+      );
+    default: {
+      const exhaustive: never = sample;
+      return exhaustive;
+    }
+  }
+}
+
+/**
+ * The six-panel key below the field.
+ *
+ * The sheet's own sixth panel is sheet 01's module relief, dimmed behind the
+ * flow. This surface draws no relief, so that slot goes to the sill — a
+ * channel it does draw. See `legendPanels` for why that substitution is a
+ * correctness requirement and not a preference.
+ */
+function LegendRow({ model }: { model: TraceModel }) {
+  return (
+    <dl className="grid grid-cols-1 gap-x-3 gap-y-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
+      {legendPanels(model).map((panel) => (
+        <div key={panel.label} className="flex min-w-0 flex-col gap-1">
+          <dt className="flex items-center gap-1.5">
+            <span className="td-legend whitespace-normal">{panel.label}</span>
+            <span aria-hidden className="td-rule" />
+          </dt>
+          <dd className="flex min-w-0 flex-col gap-1">
+            <SampleMark sample={panel.sample} model={model} />
+            <Reading value={panel.reading} size="text-2xs" />
+            <span className="text-3xs leading-snug text-text-muted">{panel.teach}</span>
+            {panel.qualifier === null ? null : (
+              <span className="text-3xs leading-snug text-text-secondary">{panel.qualifier}</span>
+            )}
+          </dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+/** How a sensory channel's state prints, and in which ink. */
+function channelState(state: SensoryChannelState): { label: string; tone: string } {
+  switch (state) {
+    case 'measured':
+      return { label: 'measured', tone: 'text-text-secondary' };
+    case 'not-on-this-wire':
+      return { label: 'not on this wire', tone: 'text-state-unknown' };
+    case 'coarser-scope':
+      return { label: 'coarser scope', tone: 'text-state-unknown' };
+    default: {
+      const exhaustive: never = state;
+      return exhaustive;
+    }
+  }
+}
+
+/**
+ * The felt half of the sensory contract.
+ *
+ * The legend above covers what the field DRAWS. This covers what it does to
+ * the hand: weight, tension, texture, warmth, pulse. Two of the five are
+ * driven on this route and three are inert, and a surface that animates two
+ * channels while saying nothing about the other three is quietly claiming five
+ * measurements it does not have. Each row therefore prints its state and its
+ * static equivalent — the reading that survives when motion is reduced.
+ *
+ * `sensoryChannels` derives all of it from the payload's own field names, so a
+ * producer that starts sending complexity or churn lights the corresponding
+ * row up without an edit here.
+ */
+function FeltChannels({ model }: { model: TraceModel }) {
+  return (
+    <div className="flex flex-col gap-1 border-t border-edge-subtle pt-2">
+      <div className="flex items-center gap-1.5">
+        <h3 className="td-legend">Felt channels</h3>
+        <span aria-hidden className="td-rule" />
+      </div>
+      <dl className="grid grid-cols-1 gap-x-3 gap-y-1.5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+        {sensoryChannels(model).map((channel) => {
+          const state = channelState(channel.state);
+          return (
+            <div key={channel.feel} className="flex min-w-0 flex-col gap-0.5">
+              <dt className="td-legend whitespace-normal normal-case tracking-normal text-text-primary">
+                {channel.feel}
+              </dt>
+              <dd className="flex min-w-0 flex-col gap-0.5">
+                <span className={cn('td-value text-2xs', state.tone)}>{state.label}</span>
+                <span className="text-3xs leading-snug text-text-muted">
+                  {channel.measurement} · still: {channel.staticEquivalent}
+                </span>
+                <span className="text-3xs leading-snug text-text-secondary">{channel.note}</span>
+              </dd>
+            </div>
+          );
+        })}
+      </dl>
     </div>
   );
 }

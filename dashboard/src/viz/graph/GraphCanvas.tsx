@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import Graph from 'graphology';
 import forceAtlas2 from 'graphology-layout-forceatlas2';
 import Sigma from 'sigma';
@@ -205,7 +205,68 @@ export function GraphCanvas({
   const unknownDegreeCount = nodes.filter((node) => node.degree == null).length;
   const containerRef = useRef<HTMLDivElement | null>(null);
   const sigmaRef = useRef<Sigma | null>(null);
-  const [, setRetryTick] = useState(0);
+  /**
+   * Tears the live renderer down. Held in a ref so the size observer can call
+   * it synchronously, ahead of any frame Sigma has scheduled for itself.
+   */
+  const teardownRef = useRef<(() => void) | null>(null);
+  const resizeObserverRef = useRef<ResizeObserver | null>(null);
+  /**
+   * The container's last measured box.
+   *
+   * Sigma's render path calls `resize()`, which THROWS on a zero-width
+   * container, and one of the callers of that path is a `window` resize
+   * listener installed inside Sigma that no guard on our side can reach. So
+   * the renderer's lifetime is bound to a real measured box rather than
+   * merely started once one appears: it is built when the container has been
+   * measured non-zero, and torn down the moment the measurement says it has
+   * none. That is why this is observed state and not a mount-time retry — a
+   * retry answers "has it arrived yet", and the error we were getting came
+   * from the other direction, a container that had a box and then lost it as
+   * its workspace was navigated away from.
+   */
+  const [box, setBox] = useState<{ width: number; height: number }>({ width: 0, height: 0 });
+
+  /**
+   * Attach the observer as the container mounts rather than in an effect: an
+   * effect would need the container in its own dependency list to notice it
+   * appearing, and the element is behind three early returns.
+   */
+  const attachContainer = useCallback((node: HTMLDivElement | null) => {
+    containerRef.current = node;
+    resizeObserverRef.current?.disconnect();
+    resizeObserverRef.current = null;
+    if (!node) {
+      setBox({ width: 0, height: 0 });
+      return;
+    }
+    const measure = (): void => {
+      // `offsetWidth`, matching what Sigma itself reads in `resize()`. A
+      // display:none ancestor and a detached node both report 0 here, which
+      // are exactly the two states that make Sigma throw.
+      const width = node.offsetWidth;
+      const height = node.offsetHeight;
+      if (width === 0 || height === 0) {
+        // Synchronous, before React re-renders: a scheduled Sigma frame would
+        // otherwise reach `resize()` first and throw. Killing here also
+        // removes Sigma's own window-resize listener.
+        teardownRef.current?.();
+      }
+      setBox((previous) =>
+        previous.width === width && previous.height === height
+          ? previous
+          : { width, height },
+      );
+    };
+    measure();
+    // Same guard the other observing surfaces use. Without a ResizeObserver
+    // the one measurement above still lets a sized container mount; what is
+    // lost is the teardown on collapse, which is the honest degradation.
+    if (typeof ResizeObserver !== 'function') return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(node);
+    resizeObserverRef.current = observer;
+  }, []);
   const webglRef = useRef<boolean | null>(null);
   if (webglRef.current === null) webglRef.current = hasWebGl();
   const fieldRef = useRef<ActivationField | null>(null);
@@ -235,7 +296,8 @@ export function GraphCanvas({
   const settleRef = useRef<(() => void) | null>(null);
 
   // Selection is a static repaint, not an animation: recolour once and leave
-  // the loop asleep.
+  // the loop asleep. `sigmaRef` is cleared the moment the container loses its
+  // box, so this cannot repaint into a renderer that has nothing to measure.
   useEffect(() => {
     sigmaRef.current?.refresh();
   }, [selectedId]);
@@ -243,12 +305,9 @@ export function GraphCanvas({
   useEffect(() => {
     const container = containerRef.current;
     if (!container || nodes.length === 0 || !webglRef.current) return;
-    // Mount race: Sigma throws on zero-width containers (narrow layouts,
-    // pre-layout flex). Defer one frame until the container has size.
-    if (container.clientWidth === 0 || container.clientHeight === 0) {
-      const retry = requestAnimationFrame(() => setRetryTick((tick) => tick + 1));
-      return () => cancelAnimationFrame(retry);
-    }
+    // Not a retry: `box` is the observed measurement, so this effect re-runs
+    // by itself once the container has one, and unwinds again if it loses it.
+    if (box.width === 0 || box.height === 0) return;
 
     const graph = new Graph({ multi: true, type: 'directed' });
     const knownDegrees = nodes.flatMap((node) =>
@@ -666,6 +725,16 @@ export function GraphCanvas({
       },
     });
     sigmaRef.current = renderer;
+    /**
+     * One-way latch guarding every repaint below. Once the container has lost
+     * its box there is no such thing as a correct frame, so the loop is not
+     * slowed or deferred — it stops, and `paint` becomes a no-op for whatever
+     * is still holding a closure over this renderer.
+     */
+    let alive = true;
+    const paint = (): void => {
+      if (alive) renderer.refresh();
+    };
     if (placed && extent) {
       // A measured field is framed by its AXIS, not by its occupants. Framing
       // the occupants would rescale the picture every time a body enters or
@@ -852,8 +921,8 @@ export function GraphCanvas({
           if (node.startsWith(PULSE)) graph.dropNode(node);
         }
       }
-      renderer.refresh();
-      const keepGoing = warm || !focusSettled;
+      paint();
+      const keepGoing = alive && (warm || !focusSettled);
       raf = keepGoing && !isReduced() ? requestAnimationFrame(step) : 0;
       if (!keepGoing) lastFrame = 0;
     };
@@ -875,7 +944,7 @@ export function GraphCanvas({
         if (node.startsWith(PULSE)) graph.dropNode(node);
       }
       syncGlow();
-      renderer.refresh();
+      paint();
     };
     settleRef.current = settle;
     const wake = () => {
@@ -899,7 +968,7 @@ export function GraphCanvas({
     // One static composition of the resting field, so the graph is fully
     // rendered before anything ever fires.
     syncGlow();
-    renderer.refresh();
+    paint();
     if (field.warm) wake();
 
     const themeObserver = new MutationObserver(() => {
@@ -924,22 +993,33 @@ export function GraphCanvas({
         }
       }
       syncGlow();
-      renderer.refresh();
+      paint();
     });
     themeObserver.observe(document.documentElement, {
       attributes: true,
       attributeFilter: ['data-theme'],
     });
 
-    return () => {
-      if (raf) cancelAnimationFrame(raf);
+    /** Idempotent: React's cleanup and the size observer both call it, and on
+     * an ordinary unmount they both fire. */
+    const teardown = (): void => {
+      if (!alive) return;
+      alive = false;
+      if (raf) {
+        cancelAnimationFrame(raf);
+        raf = 0;
+      }
       settleRef.current = null;
+      teardownRef.current = null;
       unsubscribeField();
       themeObserver.disconnect();
       renderer.kill();
-      sigmaRef.current = null;
+      if (sigmaRef.current === renderer) sigmaRef.current = null;
     };
-  }, [nodes, edges, extent]);
+    teardownRef.current = teardown;
+
+    return teardown;
+  }, [nodes, edges, extent, box.width, box.height]);
 
   // Turning motion off has to take effect on the field the reader is looking at,
   // not merely on the next one they open: a loop already running keeps running
@@ -984,7 +1064,7 @@ export function GraphCanvas({
   return (
     <figure className={cn('flex flex-col gap-1.5', fill && 'h-full min-h-0')}>
       <div
-        ref={containerRef}
+        ref={attachContainer}
         style={fill ? undefined : { height }}
         className={cn(
           'relative overflow-hidden rounded-[var(--radius-card)] border border-edge-subtle/60',
