@@ -58,6 +58,13 @@ for job in [
     if "actions/download-artifact@" not in block:
         raise SystemExit(f"CI Rust job {job!r} must download dashboard-app-dist")
 
+dashboard_job = job_block(ci, "dashboard")
+for required in ["npm run typecheck", "npm run contracts:check", "npm test"]:
+    if required not in dashboard_job:
+        raise SystemExit(
+            f"CI dashboard integration job must preserve frontend check {required!r}"
+        )
+
 for name, workflow, jobs in [
     ("stable release", stable, ["build", "package-workspace"]),
     ("beta release", beta, ["build", "package-workspace"]),
