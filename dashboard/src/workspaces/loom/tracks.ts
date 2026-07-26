@@ -443,7 +443,16 @@ export function peakConcurrency(track: LoomTrack): number {
  * Formatting
  * ---------------------------------------------------------------------- */
 
-export function formatDuration(seconds: number): string {
+/**
+ * A span length in Loom's short vocabulary. The unit is in the name on
+ * purpose: Brain's `activitySummary.ts` exports `formatDurationMs`, and both
+ * take a bare `number`, so a bare `formatDuration` would let either module's
+ * formatter be imported into the other's call sites and print a duration off
+ * by 1000x with no type error — a wrong number on screen rather than a build
+ * failure. Loom's clock is epoch seconds throughout (`formatMoment` multiplies
+ * by 1000 to build a `Date`, and `weave.ts` clamps spans against 3600).
+ */
+export function formatDurationSeconds(seconds: number): string {
   if (!Number.isFinite(seconds) || seconds < 0) return '—';
   if (seconds < 90) return `${Math.round(seconds)}s`;
   if (seconds < 5400) return `${Math.floor(seconds / 60)}m`;
@@ -466,5 +475,5 @@ export function formatMoment(epochSeconds: number): string {
 
 /** Span of the viewport in words — the zoom readout. */
 export function formatWindowSpan(view: LoomWindow): string {
-  return formatDuration(view.end - view.start);
+  return formatDurationSeconds(view.end - view.start);
 }

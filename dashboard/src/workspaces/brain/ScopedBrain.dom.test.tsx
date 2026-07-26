@@ -16,6 +16,17 @@ vi.mock('../../viz/graph/GraphCanvas.tsx', () => ({
 
 const NOW = Math.floor(Date.now() / 1000);
 
+/**
+ * The scoped readout renders `<dt>label</dt><dd>figure</dd>` per statistic.
+ * Read the figure through its term: counting em dashes anywhere on the page
+ * says only that something was withheld, not that the *right* figure was, so
+ * it passes just as happily when a failed read is printed as a measured zero
+ * and three unrelated readouts supply the dashes.
+ */
+function readout(label: string): string | null {
+  return screen.getByText(label, { selector: 'dt' }).nextElementSibling?.textContent ?? null;
+}
+
 /** The registry backbone (src/dashboard/projects.rs `context`) — resolves for
  * every registered project whether or not its graph is mounted. */
 const CONTEXT = {
@@ -199,7 +210,10 @@ describe('ScopedBrain', () => {
 
     await waitFor(() => expect(screen.getByTestId('graph-canvas')).toBeTruthy());
     expect(screen.getByText(/graph totals are unverified/i)).toBeTruthy();
-    expect(screen.getAllByText('—').length).toBeGreaterThanOrEqual(3);
+    // The three figures the collapsed overview reported as zero are the claim.
+    expect(readout('nodes')).toBe('—');
+    expect(readout('edges')).toBe('—');
+    expect(readout('files')).toBe('—');
   });
 
   it('prints an em dash rather than a number it was never given', async () => {
@@ -216,7 +230,8 @@ describe('ScopedBrain', () => {
     renderScoped();
 
     await waitFor(() => expect(screen.getByText(/the read failed/i)).toBeTruthy());
-    // nodes / edges / files / facts / entities / events all unresolved.
-    expect(screen.getAllByText('—').length).toBeGreaterThanOrEqual(6);
+    for (const label of ['nodes', 'edges', 'files', 'facts', 'entities', 'events']) {
+      expect(readout(label), `${label} was resolved from a failed read`).toBe('—');
+    }
   });
 });

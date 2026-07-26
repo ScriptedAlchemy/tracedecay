@@ -2,10 +2,16 @@
 
 ## Status / role
 
-Required safe workspace-edit capability delivered through the canonical graph,
-edit, diagnostics, formatting, verification, catalog, and Git transaction
-owners. PR19 uses the API-migration journey for complete forward source/API
-convergence while retaining deliberate stable compatibility surfaces.
+**Status split (2026-07-26).** The published read-only
+`tracedecay_rename_preview` is implemented and reachable through the canonical
+graph handler. That active rename-preview capability must not be replanned.
+The apply-grade rename journey below is not certified by preview reachability,
+and the compatibility-aware API-migration planner/apply journey is **not
+implemented** (`ApiMigration` has no source implementation). The plan index
+places Plan 34 in the PR11–PR12 band: the planner/apply journey is an
+active-band deliverable that PR19 consumes, not a defect-driven exception or a
+wholly later plan. Only PR19's temporary-alias deletion slices are SCOPE-OUT
+for PR8–PR14 audits.
 
 The canonical apply mechanism is Plan 09's journaled application edit
 transaction, fed by graph-backed preview evidence and followed by the owning

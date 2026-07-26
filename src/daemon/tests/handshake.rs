@@ -139,7 +139,7 @@ fn daemon_handshake_advertises_binary_version() {
 
     assert_eq!(
         value["client_version"],
-        serde_json::json!(env!("CARGO_PKG_VERSION"))
+        serde_json::json!(crate::version::build_version())
     );
     assert_eq!(
         value["client_instance_id"],

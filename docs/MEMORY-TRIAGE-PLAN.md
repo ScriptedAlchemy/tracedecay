@@ -80,7 +80,7 @@ Ship the read surfaces (T1/T2) **before** exposing any destructive action, so
 operators can see what a retention sweep would delete before they click it.
 
 ### X3 — Retrieval tuning is gated by an eval harness that does not exist
-`tests/memory_eval_test.rs` + `eval/scenarios/*` cover **hygiene contracts only**
+`tests/memory_suite/memory_eval_test.rs` + `eval/scenarios/*` cover **hygiene contracts only**
 (secrets, transient, supersession, dedup). There are **no ranking-quality
 scenarios**. Fusing re-balance (F2) and holographic-weight changes (F4) both
 re-rank every existing query; without a regression guard they are tuning blind.
@@ -191,7 +191,7 @@ subsystem).
 ### Tier 1 — Medium follow-ups (after the relevant Tier-0 prerequisites)
 
 #### M1 — Ranking-quality eval scenario family (F1)
-- **What:** Extend `tests/memory_eval_test.rs` + `eval/scenarios/*` with ranking
+- **What:** Extend `tests/memory_suite/memory_eval_test.rs` + `eval/scenarios/*` with ranking
   assertions (`SearchRank { query, top_fact_source, min_rank_gap }`) using the
   same subprocess path the harness already drives. Pin the trust-bias case
   (retrieval Risk C), the supersession case (Risk F), and the morphology case

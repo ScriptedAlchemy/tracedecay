@@ -290,7 +290,7 @@ fn shuffle_flags(flags: &[String]) -> Vec<String> {
 }
 
 fn print_version_flags_row(country_flags: &[String], inner_width: usize) {
-    let version = env!("CARGO_PKG_VERSION");
+    let version = crate::version::build_version();
     let title = format!("   TraceDecay v{version}");
     let title_display_width = title.len();
     let available = inner_width.saturating_sub(2);

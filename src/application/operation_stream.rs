@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::{Mutex, broadcast, watch};
@@ -43,7 +44,9 @@ const RESUME_KEY_MATERIAL_BYTES: usize = 32;
 
 /// Stable operation identity. The originating authorized request owns the
 /// identity; paths, labels, and client-selected payloads never participate.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(transparent)]
 pub struct OperationId(RequestId);
 

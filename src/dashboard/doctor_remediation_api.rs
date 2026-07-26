@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{Path, State};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracedecay_application::doctor::{
     DoctorOwningOperationRefV1, DoctorRemediationKindV1, DoctorRemediationRefV1,
@@ -55,7 +56,7 @@ pub(crate) enum DoctorRemediationDispatchCommandV1 {
     },
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "owner_operation", content = "target", rename_all = "snake_case")]
 pub(crate) enum DoctorRemediationTargetV1 {
     StorageRetentionCollect,
@@ -74,6 +75,23 @@ pub(crate) enum DoctorRemediationTargetV1 {
 }
 
 impl DoctorRemediationTargetV1 {
+    pub(crate) fn for_operation(operation: &DoctorOwningOperationRefV1) -> Option<Self> {
+        use tracedecay_application::doctor::operations;
+        match operation.as_str() {
+            operations::STORAGE_RETENTION_COLLECT => Some(Self::StorageRetentionCollect),
+            operations::STORAGE_COLLECT_ORPHAN_STORE => Some(Self::StorageCollectOrphanStore),
+            operations::STORAGE_BRANCH_GC => Some(Self::StorageBranchGc),
+            operations::STORAGE_QUARANTINE_AND_COLLECT_DEBRIS => {
+                Some(Self::StorageQuarantineAndCollectDebris)
+            }
+            operations::CONFIGURATION_PIN_AUTHORITY => Some(Self::ConfigurationPinAuthority),
+            operations::RUNTIME_RECOVER_DAEMON => Some(Self::RuntimeRecoverDaemon),
+            operations::CODE_INDEX_REMOUNT => Some(Self::CodeIndexRemount),
+            operations::CONFIGURATION_PROTECTED_APPLY | operations::HOST_REPAIR_INTEGRATION => None,
+            _ => None,
+        }
+    }
+
     fn operation(&self) -> &'static str {
         use tracedecay_application::doctor::operations;
         match self {
@@ -126,7 +144,7 @@ impl DoctorRemediationTargetV1 {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum DoctorRemediationOperationPhaseV1 {
     Previewed,
@@ -139,7 +157,7 @@ pub(crate) enum DoctorRemediationOperationPhaseV1 {
     EffectUnknown,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 pub(crate) struct DoctorRemediationOperationV1 {
     pub operation_id: OperationId,
     pub owning_operation: DoctorOwningOperationRefV1,
@@ -164,7 +182,7 @@ struct DurableDoctorRemediationRecordV1 {
     operation: DoctorRemediationOperationV1,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum DoctorRemediationDispatchErrorV1 {
     Unsupported,
@@ -585,14 +603,14 @@ fn write_record_path(
         .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct DoctorRemediationPreviewRequestV1 {
     operation: DoctorOwningOperationRefV1,
     target: DoctorRemediationTargetV1,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct DoctorRemediationApplyRequestV1 {
     operation: DoctorOwningOperationRefV1,
@@ -602,7 +620,7 @@ pub(crate) struct DoctorRemediationApplyRequestV1 {
     confirmed: bool,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub(crate) enum DoctorRemediationPayloadV1 {
     Operation {
@@ -945,6 +963,18 @@ mod tests {
             tracedecay_application::doctor::operations::RUNTIME_RECOVER_DAEMON,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn doctor_surface_only_exports_targets_it_can_bind_exactly() {
+        assert_eq!(
+            DoctorRemediationTargetV1::for_operation(&runtime_recovery_operation()),
+            Some(DoctorRemediationTargetV1::RuntimeRecoverDaemon)
+        );
+        assert_eq!(
+            DoctorRemediationTargetV1::for_operation(&configuration_operation()),
+            None
+        );
     }
 
     fn configuration_preview_target() -> DoctorRemediationTargetV1 {
