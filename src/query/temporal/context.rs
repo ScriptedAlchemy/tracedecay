@@ -88,6 +88,72 @@ pub struct TemporalContextFrames {
     pub summary_omissions: Vec<SummaryOmission>,
 }
 
+/// Canonical ordered text admission for compatibility bindings that must
+/// preserve richer transport metadata around each context block.
+///
+/// The temporal context module owns the budget and UTF-8-safe slicing policy;
+/// callers only translate the admitted slice into their legacy response type.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct OrderedTextContextAdmission {
+    pub content: Option<String>,
+    pub limit: u64,
+    pub returned_chars: u64,
+    pub total_chars: u64,
+    pub truncated: bool,
+    pub next_content_offset: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct OrderedTextContextAssembler {
+    max_chars: usize,
+    used_chars: usize,
+}
+
+impl OrderedTextContextAssembler {
+    pub(crate) const fn new(max_chars: usize) -> Self {
+        Self {
+            max_chars,
+            used_chars: 0,
+        }
+    }
+
+    pub(crate) const fn used_chars(&self) -> usize {
+        self.used_chars
+    }
+
+    pub(crate) fn admit(&mut self, content: &str) -> OrderedTextContextAdmission {
+        let remaining = self.max_chars.saturating_sub(self.used_chars);
+        let total_chars = content.chars().count();
+        if remaining == 0 {
+            return OrderedTextContextAdmission {
+                content: None,
+                limit: 0,
+                returned_chars: 0,
+                total_chars: u64::try_from(total_chars).unwrap_or(u64::MAX),
+                truncated: total_chars != 0,
+                next_content_offset: (total_chars != 0).then_some(0),
+            };
+        }
+
+        let admitted = content.chars().take(remaining).collect::<String>();
+        let returned_chars = admitted.chars().count();
+        self.used_chars = self
+            .used_chars
+            .saturating_add(returned_chars)
+            .min(self.max_chars);
+        let truncated = returned_chars < total_chars;
+        let returned_chars = u64::try_from(returned_chars).unwrap_or(u64::MAX);
+        OrderedTextContextAdmission {
+            content: Some(admitted),
+            limit: u64::try_from(remaining).unwrap_or(u64::MAX),
+            returned_chars,
+            total_chars: u64::try_from(total_chars).unwrap_or(u64::MAX),
+            truncated,
+            next_content_offset: truncated.then_some(returned_chars),
+        }
+    }
+}
+
 pub(crate) trait ContextPayload {
     fn anchor_id(&self) -> &RetrievalAnchorId;
     fn bytes(&self) -> &[u8];
