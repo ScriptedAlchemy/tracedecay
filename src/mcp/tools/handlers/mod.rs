@@ -68,7 +68,6 @@ use crate::global_db::RegisteredGlobalDb;
 use crate::mcp::response_handles::{ResponseHandleLookup, retrieve_response_handle};
 use crate::tracedecay::TraceDecay;
 use crate::tracedecay::current_timestamp;
-use tracedecay_tool_catalog::BindingSurface;
 
 pub async fn handle_user_lcm_tool(
     tool_name: &str,
@@ -1495,13 +1494,12 @@ async fn dispatch_session_workflow_tools(
     clippy::uninlined_format_args
 )]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::ffi::{OsStr, OsString};
     use std::fmt::Write as _;
     use std::fs;
     use std::path::Path;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicU64, Ordering};
 
     use serde_json::json;
     use tempfile::TempDir;
@@ -1510,8 +1508,6 @@ mod tests {
     use super::*;
     use crate::config::{USER_DATA_DIR_ENV, lock_user_data_dir_test_env};
     use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
-
-    static SELECTOR_RUNTIME_NONCE: AtomicU64 = AtomicU64::new(1);
 
     struct SelectorRegistry {
         database: Arc<RegisteredGlobalDb>,
@@ -1524,11 +1520,10 @@ mod tests {
             let profile_root = crate::config::user_data_dir().expect("selector profile root");
             let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
                 .expect("selector profile identity");
-            let nonce = SELECTOR_RUNTIME_NONCE.fetch_add(1, Ordering::Relaxed);
             let scope = crate::db::enter_daemon_database_scope(
                 identity.profile_root(),
-                nonce,
-                "mcp-selector-test",
+                1,
+                "host-admission-test-runtime",
             )
             .expect("selector daemon database scope");
             let registry = DaemonSessionRuntimeRegistryV1::open(identity)
@@ -1543,6 +1538,28 @@ mod tests {
                 _registry: registry,
                 _scope: scope,
             }
+        }
+    }
+
+    fn selector_options<'a>(
+        registry: &'a SelectorRegistry,
+        graphs: Vec<Arc<TraceDecay>>,
+    ) -> ToolCallRegistryOptions<'a> {
+        let graphs = Arc::new(
+            graphs
+                .into_iter()
+                .map(|graph| (graph.project_root().to_path_buf(), graph))
+                .collect::<BTreeMap<_, _>>(),
+        );
+        let resolver: crate::mcp::server::RetainedProjectGraphResolver = Arc::new(move |root| {
+            let graph = graphs.get(&root).cloned();
+            Box::pin(async move { graph })
+        });
+        ToolCallRegistryOptions {
+            global_db: Some(registry.database.as_ref()),
+            allow_default_registry_fallback: false,
+            retained_project_graph_resolver: Some(resolver),
+            ..Default::default()
         }
     }
 
@@ -1768,8 +1785,19 @@ mod tests {
         fs::write(active_project.join("src/active.rs"), "pub fn active() {}\n").unwrap();
         fs::write(target_project.join("src/target.rs"), "pub fn target() {}\n").unwrap();
 
-        let active = TraceDecay::init(&active_project).await.unwrap();
-        let target = TraceDecay::init(&target_project).await.unwrap();
+        let (active, _active_runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+            &active_project,
+            "project.mcp-active-selector",
+        )
+        .await
+        .unwrap();
+        let (target, _target_runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+            &target_project,
+            "project.mcp-target-selector",
+        )
+        .await
+        .unwrap();
+        let target = Arc::new(target);
         let target_still_stale = target
             .sync_if_stale(&["src/target.rs".to_string()])
             .await
@@ -1787,7 +1815,7 @@ mod tests {
             .expect("target project should be registered")
             .to_string();
 
-        let result = handle_tool_call_with_registry(
+        let result = handle_tool_call_with_registry_and_implicit_project(
             &active,
             "tracedecay_files",
             json!({
@@ -1796,8 +1824,7 @@ mod tests {
             }),
             None,
             Some("tests"),
-            Some(registry.database.as_ref()),
-            false,
+            selector_options(&registry, vec![Arc::clone(&target)]),
         )
         .await
         .unwrap();
@@ -1815,7 +1842,9 @@ mod tests {
         active.checkpoint().await.unwrap();
         target.checkpoint().await.unwrap();
         active.close();
-        target.close();
+        Arc::into_inner(target)
+            .expect("selector target graph should no longer be retained")
+            .close();
     }
 
     #[tokio::test]
@@ -1830,12 +1859,23 @@ mod tests {
         fs::write(active_project.join("src/active.rs"), "pub fn active() {}\n").unwrap();
         fs::write(target_project.join("src/target.rs"), "pub fn target() {}\n").unwrap();
 
-        let active = TraceDecay::init(&active_project).await.unwrap();
-        let target = TraceDecay::init(&target_project).await.unwrap();
+        let (active, _active_runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+            &active_project,
+            "project.mcp-active-basename",
+        )
+        .await
+        .unwrap();
+        let (target, _target_runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+            &target_project,
+            "project.mcp-target-basename",
+        )
+        .await
+        .unwrap();
+        let target = Arc::new(target);
         target.index_all().await.unwrap();
         let registry = SelectorRegistry::open().await;
 
-        let result = handle_tool_call_with_registry(
+        let result = handle_tool_call_with_registry_and_implicit_project(
             &active,
             "tracedecay_grep",
             json!({
@@ -1845,8 +1885,7 @@ mod tests {
             }),
             None,
             None,
-            Some(registry.database.as_ref()),
-            false,
+            selector_options(&registry, vec![Arc::clone(&target)]),
         )
         .await
         .unwrap();
@@ -1864,7 +1903,9 @@ mod tests {
         active.checkpoint().await.unwrap();
         target.checkpoint().await.unwrap();
         active.close();
-        target.close();
+        Arc::into_inner(target)
+            .expect("basename target graph should no longer be retained")
+            .close();
     }
 
     #[tokio::test]
@@ -1879,9 +1920,24 @@ mod tests {
         fs::create_dir_all(&first_target).unwrap();
         fs::create_dir_all(&second_target).unwrap();
 
-        let active = TraceDecay::init(&active_project).await.unwrap();
-        let first = TraceDecay::init(&first_target).await.unwrap();
-        let second = TraceDecay::init(&second_target).await.unwrap();
+        let (active, _active_runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+            &active_project,
+            "project.mcp-active-ambiguous",
+        )
+        .await
+        .unwrap();
+        let (first, _first_runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+            &first_target,
+            "project.mcp-first-ambiguous",
+        )
+        .await
+        .unwrap();
+        let (second, _second_runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+            &second_target,
+            "project.mcp-second-ambiguous",
+        )
+        .await
+        .unwrap();
         let registry = SelectorRegistry::open().await;
 
         let err = handle_tool_call_with_registry(
@@ -1919,7 +1975,12 @@ mod tests {
         let project = dir.path().join("active");
         fs::create_dir_all(project.join("src")).unwrap();
         fs::write(project.join("src/lib.rs"), "pub fn active_symbol() {}\n").unwrap();
-        let cg = TraceDecay::init(&project).await.unwrap();
+        let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+            &project,
+            "project.mcp-unsupported-selector",
+        )
+        .await
+        .unwrap();
         cg.index_all().await.unwrap();
 
         let err = handle_tool_call(
@@ -1951,7 +2012,12 @@ mod tests {
         let project = dir.path().join("active");
         fs::create_dir_all(project.join("src")).unwrap();
         fs::write(project.join("src/lib.rs"), "pub fn active_symbol() {}\n").unwrap();
-        let cg = TraceDecay::init(&project).await.unwrap();
+        let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+            &project,
+            "project.mcp-cross-selector",
+        )
+        .await
+        .unwrap();
 
         let err = handle_tool_call(
             &cg,
@@ -1976,7 +2042,7 @@ mod tests {
     #[tokio::test]
     async fn selected_project_retrieve_finds_selected_project_response_handle() {
         const LARGE_RESPONSE_MARKER_COUNT: usize = 200;
-        const LAST_LARGE_RESPONSE_MARKER: usize = LARGE_RESPONSE_MARKER_COUNT - 1;
+        const LAST_RETURNED_RESPONSE_MARKER: usize = 19;
 
         let _env_lock = lock_user_data_dir_test_env();
         let dir = TempDir::new().unwrap();
@@ -1992,16 +2058,28 @@ mod tests {
         .unwrap();
 
         let mut target_source = String::new();
+        let response_padding = "x".repeat(256);
         for i in 0..LARGE_RESPONSE_MARKER_COUNT {
             let _ = writeln!(
                 target_source,
-                "pub fn selected_project_handle_marker_{i:03}() -> &'static str {{ \"marker-{i:03}\" }}"
+                "pub fn selected_project_handle_marker_{i:03}() -> &'static str {{ \"marker-{i:03}-{response_padding}\" }}"
             );
         }
         fs::write(target_project.join("src/lib.rs"), target_source).unwrap();
 
-        let active = TraceDecay::init(&active_project).await.unwrap();
-        let target = TraceDecay::init(&target_project).await.unwrap();
+        let (active, _active_runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+            &active_project,
+            "project.mcp-active-retrieval",
+        )
+        .await
+        .unwrap();
+        let (target, _target_runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+            &target_project,
+            "project.mcp-target-retrieval",
+        )
+        .await
+        .unwrap();
+        let target = Arc::new(target);
         active.index_all().await.unwrap();
         target.index_all().await.unwrap();
         let target_project_id = target
@@ -2012,17 +2090,20 @@ mod tests {
             .expect("target project should be registered")
             .to_string();
 
-        let result = handle_tool_call(
+        let registry = SelectorRegistry::open().await;
+        let result = handle_tool_call_with_registry_and_implicit_project(
             &active,
             "tracedecay_grep",
             json!({
                 "pattern": "selected_project_handle_marker",
                 "project_id": target_project_id,
                 "max_results": LARGE_RESPONSE_MARKER_COUNT,
+                "context_lines": 3,
                 "format": "json"
             }),
             None,
             None,
+            selector_options(&registry, vec![Arc::clone(&target)]),
         )
         .await
         .unwrap();
@@ -2044,7 +2125,7 @@ mod tests {
             "selected-project envelopes should tell clients to retrieve from the same project: {retrieve_instruction}"
         );
 
-        let retrieved = handle_tool_call(
+        let retrieved = handle_tool_call_with_registry_and_implicit_project(
             &active,
             "tracedecay_retrieve",
             json!({
@@ -2054,6 +2135,7 @@ mod tests {
             }),
             None,
             None,
+            selector_options(&registry, vec![Arc::clone(&target)]),
         )
         .await
         .unwrap();
@@ -2069,7 +2151,7 @@ mod tests {
             payload["content"]
                 .as_str()
                 .is_some_and(|content| content.contains(&format!(
-                    "selected_project_handle_marker_{LAST_LARGE_RESPONSE_MARKER:03}"
+                    "selected_project_handle_marker_{LAST_RETURNED_RESPONSE_MARKER:03}"
                 ))),
             "selected project retrieve should return the full selected-project response: {payload}"
         );
