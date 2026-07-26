@@ -1088,7 +1088,7 @@ impl TemporalExecutionSnapshot {
                 watermarks.projection,
                 &versions.configuration_digest,
                 request.access_digest(),
-                TemporalParticipantAuthorization::Denied,
+                TemporalParticipantAuthorization::Authorized,
                 TemporalSourceAccess::Available,
             )?])?;
         Ok(Self {

@@ -14,8 +14,7 @@ use crate::error::ApplicationContractError;
 use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
 use crate::result::ResultContractRef;
 use crate::retrieval::catalog::{
-    APPLICATION_COMPACT_PROFILE_ID, APPLICATION_DEFAULT_PROFILE_ID,
-    APPLICATION_HOST_LIMITED_PROFILE_ID, application_profile_ids,
+    APPLICATION_COMPACT_PROFILE_ID, APPLICATION_HOST_LIMITED_PROFILE_ID, application_profile_ids,
 };
 
 const CONTEXT_FEATURE: &str = "feature.lsp.tracedecay-context.v1";
@@ -36,7 +35,6 @@ const LSP_CONTEXT_SPECS: [LspContextSpec; 2] = [
         summary: "Read TraceDecay LSP context",
         description: "Read the negotiated bounded diagnostics, impact, affected-test, and test-result projection.",
         profiles: &[
-            APPLICATION_DEFAULT_PROFILE_ID,
             APPLICATION_COMPACT_PROFILE_ID,
             APPLICATION_HOST_LIMITED_PROFILE_ID,
         ],
@@ -47,10 +45,7 @@ const LSP_CONTEXT_SPECS: [LspContextSpec; 2] = [
         method: "tracedecay/context/expand",
         summary: "Expand TraceDecay LSP context",
         description: "Reauthorize and expand one opaque omission handle from the negotiated TraceDecay context projection.",
-        profiles: &[
-            APPLICATION_DEFAULT_PROFILE_ID,
-            APPLICATION_COMPACT_PROFILE_ID,
-        ],
+        profiles: &[APPLICATION_COMPACT_PROFILE_ID],
         paginated: true,
     },
 ];
