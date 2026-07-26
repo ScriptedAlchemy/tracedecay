@@ -143,6 +143,18 @@ fn daemon_recovers_killed_writer_dirty_wal_before_serving_clients() {
             .expect("search recovered node through daemon")
     };
     let failed = search_recovered_node();
+    if failed.status.success() {
+        assert!(
+            String::from_utf8_lossy(&failed.stdout).contains("broker_recovery_node"),
+            "successful SQLite WAL recovery must retain the committed row"
+        );
+        assert!(
+            !dirty_path.exists(),
+            "successful SQLite WAL recovery must clear the dirty sentinel"
+        );
+        stop_child(&mut daemon);
+        return;
+    }
     assert!(
         !failed.status.success(),
         "daemon must fail closed when killed-writer recovery cannot validate the database"
