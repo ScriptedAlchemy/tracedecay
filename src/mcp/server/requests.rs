@@ -377,9 +377,10 @@ impl McpServer {
         // this project, so publish it at the observation point carrying this
         // project's own registered id. The application lane retains it even
         // without a connected dashboard; the SSE adapter coalesces the burst.
-        let activity_project_id = crate::application::event_lane::enabled(self.session_db.as_deref())
-            .then(|| cg.store_layout().identity.project_id.clone())
-            .flatten();
+        let activity_project_id =
+            crate::application::event_lane::enabled(self.session_db.as_deref())
+                .then(|| cg.store_layout().identity.project_id.clone())
+                .flatten();
         if let Some(activity_db) = self.session_db.as_deref() {
             crate::application::event_lane::publish(
                 activity_db,
