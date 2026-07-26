@@ -194,6 +194,40 @@ impl TraceDecay {
         .await
     }
 
+    #[cfg(test)]
+    pub(crate) async fn init_test_fixture_with_registered_runtime(
+        project_root: &Path,
+        project_id: &str,
+    ) -> Result<(
+        Self,
+        Arc<crate::application::host_admission::HostAdmissionTestRuntimeV1>,
+    )> {
+        let profile_root = crate::storage::default_profile_root()?;
+        let project_id = tracedecay_domain::ProjectId::new(project_id).map_err(|error| {
+            TraceDecayError::Config {
+                message: format!("invalid test fixture project identity: {error}"),
+            }
+        })?;
+        let runtime = Arc::new(
+            crate::application::host_admission::HostAdmissionTestRuntimeV1::project(
+                &profile_root,
+                project_root,
+                project_id,
+            )
+            .await?,
+        );
+        let graph = runtime
+            .initialize_project_graph_for_test(
+                project_root,
+                TraceDecayOpenOptions {
+                    profile_root: Some(profile_root),
+                    global_db_path: None,
+                },
+            )
+            .await?;
+        Ok((graph, runtime))
+    }
+
     pub(crate) async fn init_with_registered_configuration(
         project_root: &Path,
         open_options: TraceDecayOpenOptions,
@@ -2174,6 +2208,7 @@ fn count_tree_files(root: &Path) -> u64 {
 pub(crate) fn is_fts_only_corruption(problem: &str) -> bool {
     problem.contains("malformed inverted index for FTS5 table main.nodes_fts")
         || problem.contains("malformed inverted index for FTS5 table nodes_fts")
+        || (problem.contains("fts5: corruption found") && problem.contains("nodes_fts"))
 }
 
 /// Whether a read-only preflight failure means the store needs ordinary

@@ -55,8 +55,25 @@ async fn project_memory_cutover_unions_all_branches_and_accepts_v18() {
         .unwrap();
     let data_root = initialized.store_layout().data_root.clone();
     let project_graph = initialized.store_layout().graph_db_path.clone();
-    initialized.checkpoint().await.unwrap();
+    let lifecycle = tracedecay::lifecycle_lease::acquire_exclusive_for_profile(
+        &profile_root,
+        "checkpoint project memory cutover fixture",
+    )
+    .unwrap();
+    let _database_scope = tracedecay::db::enter_maintenance_database_scope(
+        &lifecycle,
+        &profile_root,
+        "checkpoint project memory cutover fixture",
+    )
+    .unwrap();
+    initialized
+        .db()
+        .truncate_wal_for_test_artifact()
+        .await
+        .unwrap();
     initialized.close();
+    drop(_database_scope);
+    drop(lifecycle);
 
     let branches = data_root.join("branches");
     fs::create_dir_all(&branches).unwrap();
