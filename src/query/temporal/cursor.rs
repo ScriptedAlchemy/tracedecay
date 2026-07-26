@@ -424,8 +424,9 @@ mod tests {
     use super::*;
     use crate::query::temporal::ports::{
         BindingDigest, CursorKeyError, CursorSignature, KernelVersions, SessionCursorAuthenticator,
-        TemporalExecutionSnapshot, TemporalParticipantGeneration, TemporalParticipantManifest,
-        TemporalSnapshotRequest, TemporalSourceAccess, TemporalWatermarks,
+        TemporalExecutionSnapshot, TemporalParticipantAuthorization, TemporalParticipantGeneration,
+        TemporalParticipantManifest, TemporalSnapshotRequest, TemporalSourceAccess,
+        TemporalWatermarks,
     };
 
     const TEST_NOW_MICROS: i64 = 1_800_000_000_000_000;
@@ -562,7 +563,8 @@ mod tests {
                 23,
                 &BindingDigest::new("configuration", digest('3')).expect("configuration"),
                 &BindingDigest::new("authorization", digest('2')).expect("authorization"),
-                TemporalSourceAccess::Authorized,
+                TemporalParticipantAuthorization::Authorized,
+                TemporalSourceAccess::Available,
             )
             .expect("participant"),
         ])
