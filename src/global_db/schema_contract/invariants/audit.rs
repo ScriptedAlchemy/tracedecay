@@ -17,7 +17,7 @@ const AUDIT_NAME: &str = "observation-authority";
 const AUDIT_VERSION: i64 = 2;
 pub(super) const MAX_BOUNDED_AUDIT_PASSES: i64 = 64;
 const DETAILED_AUDIT_CONCURRENCY: usize = 32;
-const DETAILED_TAIL_CONCURRENCY: usize = 4;
+const DETAILED_TAIL_CONCURRENCY: usize = 1;
 // Amortize the page query across several bounded validation chunks while
 // checkpointing often enough to stay below one ordinary statement deadline.
 const DETAILED_AUDIT_CHUNKS_PER_PAGE: usize = 3;
