@@ -425,9 +425,40 @@ async function main(): Promise<void> {
     await page.goto(baseURL, { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('nav[aria-label="Workspaces"]', { timeout: 30_000 });
 
-    const capture = async (state: string, theme: Theme, width: number): Promise<void> => {
+    const capture = async (
+      state: string,
+      theme: Theme,
+      width: number,
+      /**
+       * Selector to bring into view instead of resetting to the top. The field
+       * is tall enough at 1440 that the legend below it never shares a frame
+       * with the readout strip above it, so the two plates are captured as two
+       * states rather than one of them going unphotographed.
+       */
+      reveal?: string,
+    ): Promise<void> => {
       const file = `${state}__${theme}__${width}.png`;
       try {
+        // A screenshot of a surface that has been scrolled is evidence of the
+        // scroll, not of the surface. Opening TRACE means clicking a row inside
+        // a scrolling panel, and the browser keeps that row in view — which had
+        // been carrying the whole header plate out of frame and quietly turning
+        // every `trace__*` capture into a picture of the middle of the page.
+        // Reset every scroller so each capture starts where a reader does.
+        await page.evaluate(
+          reveal
+            ? `(function () {
+                var target = document.querySelector(${JSON.stringify(reveal)});
+                if (target) target.scrollIntoView({ block: 'end' });
+              })()`
+            : `(function () {
+                document.querySelectorAll('*').forEach(function (node) {
+                  if (node.scrollTop) node.scrollTop = 0;
+                });
+                window.scrollTo(0, 0);
+              })()`,
+        );
+        await page.waitForTimeout(60);
         const buf = await page.screenshot({ path: path.join(OUT_DIR, file), fullPage: true });
         const axe = await runAxe(page);
         axeTotals.violations += axe.violations;
@@ -459,6 +490,7 @@ async function main(): Promise<void> {
         }
         await setMotion(page, 'full');
         await capture('trace', theme, width);
+        await capture('trace-key', theme, width, '[data-testid="trace-key"]');
 
         if (await hoverField(page)) await capture('trace-hover', theme, width);
 

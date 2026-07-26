@@ -70,6 +70,67 @@ function parse<T>(schema: ZodType<T>, pathname: string, search = ''): T {
 
 /* --- Faithful mirrors of module-local page schemas (not exported) ---------- */
 
+// `capabilities` (src/dashboard/mod.rs:1231-1274). No workspace decodes this
+// route, so this suite is the only thing pinning its shape — which is how the
+// fixture drifted without anyone noticing. `strict()` throughout, so a field
+// added or renamed on either side fails here rather than silently diverging.
+//
+// `AutomationBackend`/`AutomationHostMode` are snake_case serde enums
+// (src/automation/config.rs:11-18, :30-37), and `AgentBackendAvailability`
+// marks `executable`/`reason` `skip_serializing_if = "Option::is_none"`
+// (src/automation/backend.rs:434-442), so those keys are absent, never null.
+const AutomationBackendSchema = z.enum(['disabled', 'codex_app_server', 'external_command']);
+const CapabilitiesSchema = z
+  .object({
+    name: z.literal('tracedecay-dashboard'),
+    version: z.string().min(1),
+    mode: z.literal('standalone'),
+    project_id: z.string().nullable(),
+    project_root: z.string(),
+    storage_mode: z.string(),
+    store_root: z.string(),
+    dashboard_root: z.string(),
+    memory_db: z.string().nullable(),
+    graph_db: z.string().nullable(),
+    lcm_db: z.string().nullable(),
+    lcm_scope: z.string().nullable(),
+    features: z
+      .object({
+        memory: z.boolean(),
+        lcm: z.boolean(),
+        lcm_gc: z.boolean(),
+        lcm_payload_health: z.boolean(),
+        graph: z.boolean(),
+        analytics: z.boolean(),
+        code_diagnostics: z.boolean(),
+        curation: z.boolean(),
+        automation: z.boolean(),
+        llm_curation: z.boolean(),
+        managed_skills: z.boolean(),
+        savings: z.boolean(),
+        settings: z.boolean(),
+      })
+      .strict(),
+    automation: z
+      .object({
+        enabled: z.boolean(),
+        mode: z.enum(['disabled', 'delegated_host', 'standalone_backend']),
+        backend: AutomationBackendSchema,
+        host_mode: z.enum(['standalone', 'delegated_host']),
+        availability: z
+          .object({
+            backend: AutomationBackendSchema,
+            available: z.boolean(),
+            executable: z.string().optional(),
+            reason: z.string().optional(),
+          })
+          .strict(),
+      })
+      .strict(),
+    dashboards: z.array(z.string()),
+  })
+  .strict();
+
 // SessionsPage.tsx: OverviewPayload. (LoomPage no longer reads this route —
 // `/api/plugins/hermes-lcm/overview` 500s on the real profile, so the weave
 // draws from `/api/plugins/savings/sessions` instead; see loom/contracts.ts.)
@@ -554,9 +615,13 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
     expect(data['storage']).toBeDefined();
   });
 
-  it('GET /api/capabilities — capabilities gateway (AnyObject)', () => {
-    const data = parse(AnyObject, '/api/capabilities');
-    expect(data['features']).toBeDefined();
+  it('GET /api/capabilities — capabilities gateway', () => {
+    const data = parse(CapabilitiesSchema, '/api/capabilities');
+    // The route hard-codes the single canonical bundle. The previous
+    // `expect(data['features']).toBeDefined()` accepted any object at all, and
+    // under it the fixture went on advertising the five plugin dashboards that
+    // were replaced by one embedded app.
+    expect(data.dashboards).toEqual(['tracedecay']);
   });
 
   it('GET /api/storage/telemetry — observatory envelope', () => {

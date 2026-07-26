@@ -69,7 +69,7 @@ ls -t ~/.hermes/profiles/*/logs/*.log 2>/dev/null | head -1 | xargs -r tail -n 5
 > ⚠️ Never run `[mutating]` recovery against a DB the MCP server still has open
 > with an active WAL. Copying or deleting a `.db` without its `.db-wal`/`.db-shm`
 > sidecars can lose or roll back committed index pages. Stop the server first
-> (restart the agent / kill `tracedecay mcp`), or rely on the CLI commands which
+> (restart the agent / kill the `tracedecay serve` process), or rely on the CLI commands which
 > open short-lived instances.
 
 ---
@@ -337,7 +337,7 @@ branch differs from the *open-time active* branch (`branch_drifted()`,
 ```bash
 # [mutating-ish] restart the agent / MCP server so it re-resolves serving_branch.
 # How depends on the host; e.g. for Hermes:
-#   restart the agent, or re-run  tracedecay mcp   (the watcher picks up meta changes
+#   restart the agent, or re-run  tracedecay serve  (the watcher picks up meta changes
 #   on its next cycle, but a tracked-while-live branch needs the full restart above).
 ```
 

@@ -1124,7 +1124,7 @@ The dashboard frontend source lives in `dashboard/`:
 | `dashboard/src/viz/` | Shared chart and graph renderers |
 | `dashboard/stories/` | Fixture-backed visual and accessibility audits |
 | `dashboard/codegen/` | Rust-contract-to-TypeScript generation and checks |
-| `dashboard/app-dist/` | Rsbuild output embedded and served at `/` |
+| `dashboard/app-dist/` | Rsbuild output embedded and served at `/` — generated, git-ignored, never committed |
 
 ### Building
 
@@ -1132,9 +1132,28 @@ The dashboard frontend source lives in `dashboard/`:
 cd dashboard
 npm ci
 npm run typecheck
+npm run contracts:check
 npm test
 npm run build
 ```
+
+`dashboard/app-dist/` is listed in the repository `.gitignore` and is not
+tracked. CI builds it once in the `dashboard-assets` job and every Rust job
+downloads it as an artifact; `Cargo.toml`'s `package.include` whitelist still
+ships `dashboard/app-dist/**` in the published crate, so the release workflow
+must build the bundle before `cargo package`. Do not commit build output.
+
+### Wire contracts
+
+`dashboard/src/contracts/generated.ts`, `dashboard/src/contracts/index.ts`, and
+`dashboard/codegen/schemas/dashboard-contracts.schema.json` are generated from
+Rust `schemars` output and are the only Rust-to-dashboard wire boundary.
+`npm run contracts:check` re-exports the schema through `cargo test --test
+dashboard_contract_schema_export -- --ignored writes_dashboard_contract_schema`,
+regenerates all three files, and exits non-zero if any committed file differs.
+It is a blocking step of the `Dashboard integration` CI job, not an advisory
+comparison against a preview artifact. Regenerate with `npm run
+contracts:generate` and commit the result; never hand-edit the outputs.
 
 `npm run build` invokes Rsbuild using `dashboard/rsbuild.config.ts`, with
 `dashboard/src/app/main.tsx` as the entry point and `dashboard/app-dist/` as
@@ -1146,13 +1165,23 @@ not the production `/` application.
 
 Vitest covers workspace models and DOM behavior. The Playwright visual audit
 walks the story registry at 320, 768, and 1440 pixel widths in both themes and
-records axe results:
+records axe results. A separate accessibility gate drives the built bundle
+through the states a plain navigation never reaches and fails the process on
+any violation, page error, or failed assertion:
 
 ```bash
 cd dashboard
 npm test
-npm run visual:audit
+npm run visual:audit      # screenshots + per-surface axe, gallery output
+npm run axe:audit         # the accessibility gate; non-zero exit on violations
+npm run axe:explorer      # explorer-only scan on its own port and output dir
 ```
+
+The axe engine is one file, `dashboard/e2e/axe-harness.ts`; scenarios live in
+`dashboard/e2e/axe-audit.ts`. The earlier per-lane copies (including
+`e2e/axe-governance.ts` and the `.explorer-axe/` and `.governance-axe/`
+dot-directory forks) were deleted after two of them ended in an unconditional
+`process.exit(0)` and reported violations while still exiting clean.
 
 These frontend checks do not verify the Rust routes. The aggregate Rust
 `dashboard_api_test` suite is currently unverified as noted at the top of this
@@ -1305,13 +1334,18 @@ cd .. && cargo build --bin tracedecay
 ### Build Errors: Dashboard Assets Missing
 
 ```bash
-# Error: dashboard app-dist is missing or stale and npm was not found
+# Error: failed to run npm run build: No such file or directory (os error 2)
 
-# build.rs builds app-dist automatically when npm is available.
-# This error means npm is not installed; install Node.js 22+, or build
-# the frontend manually before the Rust binary:
+# app-dist is git-ignored, so a fresh clone has none and build.rs must build
+# it. That panic means npm is not on PATH; install Node.js 22+, then either
+# rebuild or build the frontend manually first:
 cd dashboard && npm ci && npm run build
 cd .. && cargo build --bin tracedecay
+
+# Error: dashboard/app-dist/index.html is missing after build
+# TRACEDECAY_SKIP_DASHBOARD_BUILD only skips a *rebuild*. In a checkout with
+# no app-dist at all it skips the build and then trips this assertion. Unset
+# it and let build.rs run npm, or build the frontend manually as above.
 ```
 
 ### Hermes Wrapper Connection Failed
