@@ -1752,6 +1752,27 @@ fn temporal_fts_classifier_rejects_whole_database_corruption() {
         )
     );
     assert!(
+        crate::global_db::SessionTemporalHealthReport::is_allowed_fts_quick_check_for_test(
+            "fts5: corruption found reading blob 137438953473 from table \"session_occurrences_fts\"",
+            true,
+            false,
+        )
+    );
+    assert!(
+        !crate::global_db::SessionTemporalHealthReport::is_allowed_fts_quick_check_for_test(
+            "fts5: corruption found reading blob 137438953473 from table \"session_summary_nodes_fts\"",
+            true,
+            false,
+        )
+    );
+    assert!(
+        !crate::global_db::SessionTemporalHealthReport::is_allowed_fts_quick_check_for_test(
+            "fts5: corruption found reading blob unknown from table \"session_occurrences_fts\"",
+            true,
+            false,
+        )
+    );
+    assert!(
         !crate::global_db::SessionTemporalHealthReport::is_allowed_fts_quick_check_for_test(
             "database disk image is malformed",
             true,
