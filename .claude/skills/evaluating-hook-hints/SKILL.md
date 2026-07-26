@@ -9,7 +9,7 @@ Use this skill for TraceDecay repo development only. These are repo-local dev in
 
 ## Workflow
 
-1. Start with TraceDecay context for `src/hooks/tool_hints.rs`, `src/hooks/tool_hints/classifiers.rs`, `src/hooks/tool_hints/evals.rs`, host adapters in `src/hooks/{codex,claude,cursor}.rs`, and recent transcript evidence.
+1. Start with TraceDecay context for `src/hooks/tool_hints.rs`, `src/hooks/tool_hints/classifiers.rs`, the `src/hooks/tool_hints/evals/` module (`mod.rs` plus `host_cases.rs`), host adapters in `src/hooks/{codex,claude,cursor}.rs`, and recent transcript evidence.
 2. Render model-visible hook input when judging verbosity:
    `scripts/render-codex-hook-inputs.py --glob '/home/zack/.codex/sessions/**/*.jsonl' --all --limit 5 --max-chars 800`.
 3. Run deterministic evals before behavior edits:
@@ -22,7 +22,7 @@ Use this skill for TraceDecay repo development only. These are repo-local dev in
 ## Acceptance Rules
 
 - Hints should be contextual and short; avoid generic TraceDecay availability boilerplate.
-- Real-world transcript cases and synthetic cases should both be represented in `src/hooks/tool_hints/evals.rs`.
+- Real-world transcript cases and synthetic cases should both be represented in `src/hooks/tool_hints/evals/` (`host_cases.rs` holds the per-host scenarios). The module is `#[cfg(test)]`, so it only compiles under a test profile.
 - A normal user prompt should not be wrapped into a noisy `UserPromptSubmit hook (completed)` model-visible user message.
 - No hint is a valid outcome when the request does not need TraceDecay guidance.
 - Repeated native behavior should get at most one initial hint plus one later escalation per category, bounded by the session budget.

@@ -188,7 +188,10 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
                 .is_empty()
         );
 
-        assert_eq!(settings["version"]["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(
+            settings["version"]["version"],
+            tracedecay::version::build_version()
+        );
         let channel = settings["version"]["channel"].as_str().unwrap_or_default();
         assert!(
             channel == "stable" || channel == "beta",
