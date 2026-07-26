@@ -40,6 +40,5 @@ pub mod projection;
 pub mod provider;
 pub mod receipts;
 pub mod test_attribution;
-pub mod v1_import;
 
 pub use self::intake::CodeIndexIntake;
