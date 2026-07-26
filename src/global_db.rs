@@ -200,7 +200,7 @@ pub struct CodeProjectRecord {
     pub last_seen_at: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub struct ProjectAliasRecord {
     pub alias_path: String,
     pub project_id: String,
@@ -219,7 +219,7 @@ pub struct StoreInstanceUpsert {
     pub last_write_at: Option<i64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub struct StoreInstanceRecord {
     pub store_id: String,
     pub project_id: String,
@@ -244,7 +244,7 @@ pub struct GraphScopeUpsert {
     pub writable: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub struct GraphScopeRecord {
     pub graph_scope_id: String,
     pub project_id: String,
@@ -266,7 +266,7 @@ pub struct StoreArtifactUpsert {
     pub updated_at: Option<i64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub struct StoreArtifactRecord {
     pub store_id: String,
     pub artifact_kind: String,
@@ -284,7 +284,7 @@ pub struct ProjectStoreResolution {
     pub artifacts: Vec<StoreArtifactRecord>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub struct ProjectStoreContext {
     pub store: StoreInstanceRecord,
     pub graph_scopes: Vec<GraphScopeRecord>,

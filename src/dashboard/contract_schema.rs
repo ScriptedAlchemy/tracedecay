@@ -4,18 +4,31 @@ use schemars::JsonSchema;
 use schemars::generate::SchemaSettings;
 use tracedecay_application::{CostsReadModelV1, ObservatoryReadModelV1};
 
+use super::analytics_api::AnalyticsOverviewPayloadV1;
 use super::automation_scheduler_api::AutomationSchedulerStatusV1;
 use super::code_index_freshness_api::CodeIndexFreshnessPayloadV1;
+use super::delivery_api::DeliveryOverviewV1;
 use super::doctor_findings_api::DoctorFindingsPayloadV1;
 use super::doctor_remediation_api::{
     DoctorRemediationApplyRequestV1, DoctorRemediationPayloadV1, DoctorRemediationPreviewRequestV1,
 };
-use super::explorer_api::ExplorerQueryRunV1;
+use super::explorer_api::{ExplorerQueryRunV1, ExplorerReadContextV1, ExplorerSessionSizeV1};
+use super::graph_service::{
+    GraphNeighborsPayloadV1, GraphNodePayloadV1, GraphOverviewPayloadV1, GraphPathPayloadV1,
+    GraphSearchPayloadV1, GraphSubgraphPayloadV1,
+};
 use super::graph_structure_api::{
     CallChainMeasurementV1, FactMatchesMeasurementV1, NodeSessionsMeasurementV1,
     StrataMeasurementV1, StructureReadV1, TestMapMeasurementV1, registered_route_contracts,
 };
+use super::lcm_api::{LcmSessionPayloadV1, LcmTimelinePayloadV1};
+use super::loom_api::LoomTemporalPayloadV1;
+use super::memory_api::{
+    MemoryFactDetailPayloadV1, MemoryOverviewPayloadV1, MemoryStatusPayloadV1,
+};
+use super::projects::{ProjectContextPayloadV1, ProjectsPayloadV1};
 use super::read_model::{DASHBOARD_SCHEMA_REVISION_V1, DashboardEnvelopeV1};
+use super::savings_api::{SavingsOverviewPayloadV1, SavingsSessionsPayloadV1};
 use super::settings_api::{ProjectSettingsPatch, SettingsPayloadV1, UserSettingsPatch};
 use super::storage_findings_api::StorageFindingsPayloadV1;
 use super::storage_telemetry_api::StorageTelemetryPayloadV1;
@@ -31,6 +44,26 @@ struct DashboardContractCatalogV1 {
     doctor_remediation_apply_request: DoctorRemediationApplyRequestV1,
     doctor_remediation: DoctorRemediationPayloadV1,
     explorer_query_run: ExplorerQueryRunV1,
+    explorer_session_size: ExplorerSessionSizeV1,
+    explorer_read_context: ExplorerReadContextV1,
+    projects: ProjectsPayloadV1,
+    project_context: ProjectContextPayloadV1,
+    graph_overview: GraphOverviewPayloadV1,
+    graph_search: GraphSearchPayloadV1,
+    graph_node: GraphNodePayloadV1,
+    graph_neighbors: GraphNeighborsPayloadV1,
+    graph_subgraph: GraphSubgraphPayloadV1,
+    graph_path: GraphPathPayloadV1,
+    memory_overview: MemoryOverviewPayloadV1,
+    memory_status: MemoryStatusPayloadV1,
+    memory_fact_detail: MemoryFactDetailPayloadV1,
+    analytics_overview: AnalyticsOverviewPayloadV1,
+    savings_overview: SavingsOverviewPayloadV1,
+    savings_sessions: SavingsSessionsPayloadV1,
+    lcm_session: LcmSessionPayloadV1,
+    lcm_timeline: LcmTimelinePayloadV1,
+    loom_temporal: LoomTemporalPayloadV1,
+    delivery_overview: DeliveryOverviewV1,
     code_index_freshness: CodeIndexFreshnessPayloadV1,
     settings: SettingsPayloadV1,
     settings_project_patch: ProjectSettingsPatch,
@@ -83,5 +116,44 @@ mod tests {
     #[test]
     fn registered_dashboard_route_responses_are_contracted() {
         render_dashboard_contract_schema().expect("render validated dashboard contracts");
+    }
+
+    #[test]
+    fn legacy_dashboard_route_families_are_contracted() {
+        let schema: serde_json::Value = serde_json::from_str(
+            &render_dashboard_contract_schema().expect("render validated dashboard contracts"),
+        )
+        .expect("parse dashboard contract schema");
+        let definitions = schema["$defs"]
+            .as_object()
+            .expect("dashboard contracts expose schema definitions");
+
+        for response in [
+            "ProjectsPayloadV1",
+            "ProjectContextPayloadV1",
+            "GraphOverviewPayloadV1",
+            "GraphSearchPayloadV1",
+            "GraphNodePayloadV1",
+            "GraphNeighborsPayloadV1",
+            "GraphSubgraphPayloadV1",
+            "GraphPathPayloadV1",
+            "MemoryOverviewPayloadV1",
+            "MemoryStatusPayloadV1",
+            "MemoryFactDetailPayloadV1",
+            "AnalyticsOverviewPayloadV1",
+            "SavingsOverviewPayloadV1",
+            "SavingsSessionsPayloadV1",
+            "LcmSessionPayloadV1",
+            "LcmTimelinePayloadV1",
+            "LoomTemporalPayloadV1",
+            "DeliveryOverviewV1",
+            "ExplorerSessionSizeV1",
+            "ExplorerReadContextV1",
+        ] {
+            assert!(
+                definitions.contains_key(response),
+                "dashboard response {response} is absent from the contract catalog"
+            );
+        }
     }
 }

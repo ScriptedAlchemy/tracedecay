@@ -5,7 +5,7 @@
 //! cross-source rank. Query cancellation is bound to the opaque run identity
 //! stored here and reaches the live Tokio work through `CancellationToken`.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use axum::extract::{Path, Query, State};
@@ -583,19 +583,27 @@ async fn code_source(
                 );
             }
         };
-    let Some(total) = payload.get("total").and_then(Value::as_u64) else {
+    let Ok(total) = u64::try_from(payload.total) else {
         return ExplorerSourceProgressV1::error(
             ExplorerSourceIdV1::CodeGraph,
             "code_graph_contract_invalid",
-            "code graph search omitted total",
+            "code graph search returned a negative total",
         );
     };
-    let Some(rows) = payload.get("results").and_then(Value::as_array).cloned() else {
-        return ExplorerSourceProgressV1::error(
-            ExplorerSourceIdV1::CodeGraph,
-            "code_graph_contract_invalid",
-            "code graph search omitted results",
-        );
+    let rows = match payload
+        .results
+        .into_iter()
+        .map(serde_json::to_value)
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            return ExplorerSourceProgressV1::error(
+                ExplorerSourceIdV1::CodeGraph,
+                "code_graph_contract_invalid",
+                error.to_string(),
+            );
+        }
     };
     ready_source(
         ExplorerSourceIdV1::CodeGraph,
@@ -810,23 +818,32 @@ pub(crate) struct ReadContextParams {
     order: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
-struct ExplorerSessionSizeV1 {
-    session_id: String,
-    storage_scope: String,
-    counts: Value,
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub(super) struct ExplorerSessionCountsV1 {
+    message_count: i64,
+    summary_node_count: i64,
+    token_estimate_total: i64,
+    summary_token_count: i64,
+    source_token_count: i64,
 }
 
-#[derive(Clone, Debug, Serialize)]
-struct ExplorerReadContextV1 {
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub(super) struct ExplorerSessionSizeV1 {
+    session_id: String,
+    storage_scope: String,
+    counts: ExplorerSessionCountsV1,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub(super) struct ExplorerReadContextV1 {
     session_id: String,
     storage_scope: String,
     limit: i64,
     offset: i64,
     order: String,
-    counts: Value,
-    messages: Vec<Value>,
-    summary_nodes: Vec<Value>,
+    counts: ExplorerSessionCountsV1,
+    messages: Vec<BTreeMap<String, Value>>,
+    summary_nodes: Vec<BTreeMap<String, Value>>,
     has_more: bool,
     has_more_messages: bool,
     has_more_summary_nodes: bool,
@@ -847,7 +864,11 @@ pub(crate) async fn session_size(
         )
             .into_response();
     }
-    let Some(counts) = payload.get("counts").cloned() else {
+    let Some(counts) = payload
+        .get("counts")
+        .cloned()
+        .and_then(|counts| serde_json::from_value(counts).ok())
+    else {
         return internal_error("LCM session payload omitted counts");
     };
     let storage_scope = payload
@@ -904,16 +925,9 @@ pub(crate) async fn read_context(
     else {
         return internal_error("LCM session payload omitted read-context fields");
     };
-    let eligible = read_context
-        .counts
-        .get("message_count")
-        .and_then(Value::as_u64)
-        .zip(
-            read_context
-                .counts
-                .get("summary_node_count")
-                .and_then(Value::as_u64),
-        )
+    let eligible = u64::try_from(read_context.counts.message_count)
+        .ok()
+        .zip(u64::try_from(read_context.counts.summary_node_count).ok())
         .map(|(messages, nodes)| messages.saturating_add(nodes));
     let examined = (read_context.messages.len() + read_context.summary_nodes.len()) as u64;
     let coverage = eligible.map_or_else(DashboardCoverageV1::unknown, |eligible| {
@@ -956,9 +970,9 @@ fn read_context_from_payload(
         limit,
         offset,
         order,
-        counts: payload.get("counts")?.clone(),
-        messages: payload.get("messages")?.as_array()?.clone(),
-        summary_nodes: payload.get("summary_nodes")?.as_array()?.clone(),
+        counts: serde_json::from_value(payload.get("counts")?.clone()).ok()?,
+        messages: serde_json::from_value(payload.get("messages")?.clone()).ok()?,
+        summary_nodes: serde_json::from_value(payload.get("summary_nodes")?.clone()).ok()?,
         has_more: payload.get("has_more")?.as_bool()?,
         has_more_messages: payload.get("has_more_messages")?.as_bool()?,
         has_more_summary_nodes: payload.get("has_more_summary_nodes")?.as_bool()?,

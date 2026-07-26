@@ -11,10 +11,13 @@
 //!   `holographic_plus` soft-archived facts; tracedecay does not).
 //! - Banks are named after their category directly (no `cat:` prefix).
 
+use std::collections::BTreeMap;
+
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
-use axum::response::Json;
-use serde::Deserialize;
+use axum::response::{IntoResponse, Json, Response};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use super::DashboardState;
@@ -72,6 +75,126 @@ pub(crate) struct CurateApplyBody {
     ops: Vec<Value>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct MemoryCategoryCountV1 {
+    category: String,
+    count: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct MemoryEntityTypeCountV1 {
+    entity_type: String,
+    count: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct MemoryHrrCoverageV1 {
+    category: String,
+    facts: i64,
+    hrr_vectors: i64,
+    coverage: f64,
+    bank_name: Option<String>,
+    bank_fact_count: Option<i64>,
+    dim: Option<i64>,
+    updated_at: Option<i64>,
+    status: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct MemoryBankV1 {
+    bank_name: String,
+    dim: i64,
+    fact_count: i64,
+    bundled_fact_count: i64,
+    updated_at: Option<i64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct MemoryTrustBucketV1 {
+    bucket: i64,
+    label: String,
+    count: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct MemoryGrowthPointV1 {
+    date: String,
+    facts: i64,
+    cumulative_facts: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct MemoryOverviewSummaryV1 {
+    facts: i64,
+    entities: i64,
+    banks: i64,
+    categories: Vec<MemoryCategoryCountV1>,
+    entity_types: Vec<MemoryEntityTypeCountV1>,
+    hrr_coverage: Vec<MemoryHrrCoverageV1>,
+    memory_banks: Vec<MemoryBankV1>,
+    trust_histogram: Vec<MemoryTrustBucketV1>,
+    growth: Vec<MemoryGrowthPointV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct MemoryReadStatusV1 {
+    state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct MemoryFactsCoverageV1 {
+    completeness: String,
+    limit: i64,
+    query_applied_after_limit: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct MemoryHolographicPayloadV1 {
+    path: String,
+    exists: bool,
+    overview: Option<MemoryOverviewSummaryV1>,
+    facts: Vec<BTreeMap<String, Value>>,
+    entities: Vec<BTreeMap<String, Value>>,
+    graph: BTreeMap<String, Value>,
+    error: String,
+    reads: BTreeMap<String, MemoryReadStatusV1>,
+    facts_coverage: MemoryFactsCoverageV1,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub(super) struct MemoryOverviewPayloadV1 {
+    providers: BTreeMap<String, Value>,
+    query: String,
+    limit: i64,
+    holographic: MemoryHolographicPayloadV1,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+struct MemoryFeedbackHistoryRepairV1 {
+    state: String,
+    processed: u64,
+    remaining: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub(super) struct MemoryStatusPayloadV1 {
+    path: String,
+    exists: bool,
+    memory: MemoryStatus,
+    largest_bank_fact_count: i64,
+    largest_bank_utilization_pct: f64,
+    feedback_history_repair: MemoryFeedbackHistoryRepairV1,
+    error: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub(super) struct MemoryFactDetailPayloadV1 {
+    fact: Option<BTreeMap<String, Value>>,
+    error: String,
+}
+
 pub(crate) fn default_agent_plan_max_clusters() -> usize {
     crate::dashboard::memory_curate::CURATION_DEFAULT_MAX_CLUSTERS
 }
@@ -91,7 +214,7 @@ async fn largest_bank_fact_count(state: &DashboardState) -> Result<i64, String> 
         .unwrap_or_default())
 }
 
-async fn memory_status_payload(state: &DashboardState) -> Result<Value, String> {
+async fn memory_status_payload(state: &DashboardState) -> Result<MemoryStatusPayloadV1, String> {
     let application = memory_application_for_db(state.memory_owner.clone(), &state.mem_db)
         .map_err(|error| error.to_string())?;
     let typed_status = application
@@ -138,24 +261,31 @@ async fn memory_status_payload(state: &DashboardState) -> Result<Value, String> 
     } else {
         0.0
     };
-    Ok(json!({
-        "path": state.mem_db_path,
-        "exists": true,
-        "memory": status,
-        "largest_bank_fact_count": largest_bank_fact_count,
-        "largest_bank_utilization_pct": largest_bank_utilization_pct,
-        "feedback_history_repair": {
-            "state": match typed_status.feedback_history_repair() {
+    Ok(MemoryStatusPayloadV1 {
+        path: state.mem_db_path.clone(),
+        exists: true,
+        memory: status,
+        largest_bank_fact_count,
+        largest_bank_utilization_pct,
+        feedback_history_repair: MemoryFeedbackHistoryRepairV1 {
+            state: match typed_status.feedback_history_repair() {
                 tracedecay_store::CompatibilityFeedbackRepairProgressV1::Unknown => "unknown",
-                tracedecay_store::CompatibilityFeedbackRepairProgressV1::NotRequired => "not_required",
-                tracedecay_store::CompatibilityFeedbackRepairProgressV1::Complete { .. } => "complete",
-                tracedecay_store::CompatibilityFeedbackRepairProgressV1::Incomplete { .. } => "incomplete",
-            },
-            "processed": typed_status.feedback_history_repair().processed(),
-            "remaining": typed_status.feedback_history_repair().remaining(),
+                tracedecay_store::CompatibilityFeedbackRepairProgressV1::NotRequired => {
+                    "not_required"
+                }
+                tracedecay_store::CompatibilityFeedbackRepairProgressV1::Complete { .. } => {
+                    "complete"
+                }
+                tracedecay_store::CompatibilityFeedbackRepairProgressV1::Incomplete { .. } => {
+                    "incomplete"
+                }
+            }
+            .to_owned(),
+            processed: typed_status.feedback_history_repair().processed(),
+            remaining: typed_status.feedback_history_repair().remaining(),
         },
-        "error": "",
-    }))
+        error: String::new(),
+    })
 }
 
 async fn fact_trust_history_payload(
@@ -236,7 +366,7 @@ async fn fact_trust_history_payload(
 pub(crate) async fn overview(
     State(state): State<DashboardState>,
     JsonQuery(params): JsonQuery<OverviewParams>,
-) -> Json<Value> {
+) -> Response {
     let limit = coerce_limit(params.limit, 25, 100);
     let graph_limit = coerce_limit(params.graph_limit, limit, 1000);
 
@@ -301,26 +431,37 @@ pub(crate) async fn overview(
     }
     let holographic = Value::Object(obj);
 
-    Json(json!({
+    let payload = json!({
         "providers": memory_service::providers_payload(),
         "query": params.q,
         "limit": limit,
         "holographic": holographic,
-    }))
+    });
+    match serde_json::from_value::<MemoryOverviewPayloadV1>(payload) {
+        Ok(payload) => Json(payload).into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(http_detail(&format!(
+                "Failed to encode memory overview contract: {error}"
+            ))),
+        )
+            .into_response(),
+    }
 }
 
 /// `GET /api/plugins/holographic/status` — rich holographic-memory health
 /// derived from the memory application authority plus the largest-bank
 /// utilization that operators need for the dashboard health card.
-pub(crate) async fn status(State(state): State<DashboardState>) -> (StatusCode, Json<Value>) {
+pub(crate) async fn status(State(state): State<DashboardState>) -> Response {
     match memory_status_payload(&state).await {
-        Ok(payload) => (StatusCode::OK, Json(payload)),
+        Ok(payload) => (StatusCode::OK, Json(payload)).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(http_detail(&format!(
                 "Failed to compute memory status: {e}"
             ))),
-        ),
+        )
+            .into_response(),
     }
 }
 
@@ -332,14 +473,24 @@ pub(crate) async fn status(State(state): State<DashboardState>) -> (StatusCode, 
 pub(crate) async fn fact_detail(
     State(state): State<DashboardState>,
     JsonPath(fact_id): JsonPath<i64>,
-) -> (StatusCode, Json<Value>) {
+) -> Response {
     match memory_service::fact_detail_payload(&state, fact_id).await {
-        Ok(Some(payload)) => (StatusCode::OK, Json(payload)),
+        Ok(Some(payload)) => match serde_json::from_value::<MemoryFactDetailPayloadV1>(payload) {
+            Ok(payload) => (StatusCode::OK, Json(payload)).into_response(),
+            Err(error) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(http_detail(&format!(
+                    "Failed to encode memory fact detail contract: {error}"
+                ))),
+            )
+                .into_response(),
+        },
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(http_detail(&format!("fact not found: {fact_id}"))),
-        ),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(http_detail(&e))),
+        )
+            .into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(http_detail(&e))).into_response(),
     }
 }
 

@@ -14,6 +14,7 @@
 //! - `summary_nodes.source_ids` JSON → `lcm_summary_sources` rows
 //! - FTS mirrors → `lcm_raw_messages_fts` / `lcm_summary_nodes_fts`
 
+use std::collections::BTreeMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -21,8 +22,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use axum::response::{IntoResponse, Response};
 use axum::{Json, extract::State, http::StatusCode};
-use serde::Deserialize;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use super::DashboardState;
@@ -41,6 +44,71 @@ struct PayloadGcPreview {
     provider: String,
     session_id: Option<String>,
     created_at: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct LcmSessionCountsV1 {
+    message_count: i64,
+    summary_node_count: i64,
+    token_estimate_total: i64,
+    summary_token_count: i64,
+    source_token_count: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub(super) struct LcmSessionPayloadV1 {
+    path: String,
+    storage_scope: String,
+    exists: bool,
+    session_id: String,
+    limit: i64,
+    offset: i64,
+    order: String,
+    counts: LcmSessionCountsV1,
+    messages: Vec<BTreeMap<String, Value>>,
+    summary_nodes: Vec<BTreeMap<String, Value>>,
+    has_more: bool,
+    has_more_messages: bool,
+    has_more_summary_nodes: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct LcmTimelineBucketV1 {
+    bucket: String,
+    count: i64,
+    token_estimate: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct LcmTimelineCoverageV1 {
+    limit: i64,
+    returned_buckets: i64,
+    total_dated_buckets: i64,
+    truncated: bool,
+    ordering: String,
+    next_before_bucket: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub(super) struct LcmTimelinePayloadV1 {
+    path: String,
+    storage_scope: String,
+    exists: bool,
+    bucket: String,
+    session_id: Option<String>,
+    buckets: Vec<LcmTimelineBucketV1>,
+    node_buckets: Vec<BTreeMap<String, Value>>,
+    undated: BTreeMap<String, Value>,
+    #[serde(default)]
+    coverage: Option<LcmTimelineCoverageV1>,
+}
+
+fn decode_lcm_contract<T: serde::de::DeserializeOwned>(
+    payload: Map<String, Value>,
+    label: &str,
+) -> Result<T, String> {
+    serde_json::from_value(Value::Object(payload))
+        .map_err(|error| format!("{label} did not match its response contract: {error}"))
 }
 
 static PAYLOAD_GC_PREVIEW: LazyLock<Mutex<Option<PayloadGcPreview>>> =
@@ -191,13 +259,19 @@ pub(crate) async fn session(
     State(state): State<DashboardState>,
     JsonPath(session_id): JsonPath<String>,
     JsonQuery(params): JsonQuery<SessionParams>,
-) -> LcmResult {
+) -> Response {
     let limit = coerce_limit(params.limit, 200, 1000);
     let offset = params.offset.unwrap_or(0).max(0);
     let descending = params.order.eq_ignore_ascii_case("desc");
     let payload =
-        lcm_service::session_payload(&state, &session_id, limit, offset, descending).await?;
-    Ok(ok(payload))
+        match lcm_service::session_payload(&state, &session_id, limit, offset, descending).await {
+            Ok(payload) => payload,
+            Err(error) => return error.into_response(),
+        };
+    match decode_lcm_contract::<LcmSessionPayloadV1>(payload, "LCM session") {
+        Ok(payload) => Json(payload).into_response(),
+        Err(error) => err(StatusCode::INTERNAL_SERVER_ERROR, error).into_response(),
+    }
 }
 
 /// `GET /api/plugins/hermes-lcm/node/{node_id}` — a summary node plus the
@@ -223,11 +297,18 @@ pub(crate) struct TimelineParams {
 pub(crate) async fn timeline(
     State(state): State<DashboardState>,
     JsonQuery(params): JsonQuery<TimelineParams>,
-) -> LcmResult {
+) -> Response {
     let limit = coerce_limit(params.limit, 400, 2000);
     let by_hour = params.bucket.eq_ignore_ascii_case("hour");
-    let payload = lcm_service::timeline_payload(&state, by_hour, &params.session_id, limit).await?;
-    Ok(ok(payload))
+    let payload =
+        match lcm_service::timeline_payload(&state, by_hour, &params.session_id, limit).await {
+            Ok(payload) => payload,
+            Err(error) => return error.into_response(),
+        };
+    match decode_lcm_contract::<LcmTimelinePayloadV1>(payload, "LCM timeline") {
+        Ok(payload) => Json(payload).into_response(),
+        Err(error) => err(StatusCode::INTERNAL_SERVER_ERROR, error).into_response(),
+    }
 }
 
 #[derive(Deserialize)]
