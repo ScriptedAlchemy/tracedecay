@@ -462,10 +462,7 @@ pub(crate) async fn open_in(path: &Path, root: &Path) -> io::Result<SnapshotData
 /// Inspects a checkpointed, offline database through the canonical immutable
 /// snapshot boundary. This is intentionally purpose-bound: callers cannot
 /// obtain a connection or issue arbitrary SQL.
-pub(crate) fn checkpointed_database_has_any_rows(
-    path: &Path,
-    tables: &[&str],
-) -> io::Result<bool> {
+pub(crate) fn checkpointed_database_has_any_rows(path: &Path, tables: &[&str]) -> io::Result<bool> {
     let mut has_rows = false;
     for table in tables {
         if table.is_empty()
@@ -1085,9 +1082,7 @@ mod tests {
             .unwrap();
         drop(connection);
 
-        assert!(
-            checkpointed_database_has_any_rows(&path, &["empty", "durable"]).unwrap()
-        );
+        assert!(checkpointed_database_has_any_rows(&path, &["empty", "durable"]).unwrap());
         assert!(!checkpointed_database_has_any_rows(&path, &["empty"]).unwrap());
         assert!(checkpointed_database_has_any_rows(&path, &["bad-name"]).is_err());
 

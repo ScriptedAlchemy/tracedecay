@@ -24,8 +24,8 @@ implemented across `crates/tracedecay-domain/src/research/`,
 `crates/tracedecay-store/src/{evidence_assembly,retrieval_anchor}.rs`,
 `crates/tracedecay-rusqlite-runtime/src/repository/evidence_assembly.rs`,
 `src/application/evidence_assembly.rs`, and `src/db/retrieval_anchor_authority.rs`.
-Per-section verdicts follow. Dedicated GitHub-stack capability and snapshot
-anchors now complete Required behavior 19.
+Per-section verdicts follow. Known pending: dedicated GitHub-stack anchor targets
+(Required behavior 19).
 
 **Status split (2026-07-26).** The core above is delivered PR7 behavior.
 Dedicated `GitHubStackCapabilitySnapshotV1`/`GitHubStackSnapshotV1` anchor
@@ -77,15 +77,17 @@ coverage (`crates/tracedecay-domain/src/research/{anchor,resolution}.rs`,
   sources contributed to an assembled result without making rank, score, query text,
   summaries, or embeddings source authority.
 
-**Status (2026-07-25):** Implemented. `RetrievalAnchorId`
+**Status (2026-07-23):** Implemented, one item pending. `RetrievalAnchorId`
 identity/resolution, provenance relations, evidence-time/generation/watermark/
 coverage/drift state, immutable Git-object and repository/worktree/ref/PR/check/
 conflict/preflight/integration-receipt bindings, safe tombstones, derived
 evidence-span identity, and payload-free retriever-contribution anchors all exist
 (`crates/tracedecay-domain/src/research/{anchor,git_topology,resolution,coverage}.rs`,
-`crates/tracedecay-store/src/{evidence_assembly,retrieval_anchor}.rs`).
-`GitTopologyAnchorTargetV1` also covers exact `GitHubStackCapability` and
-`GitHubStackSnapshot` targets with generation/content identity and source lineage.
+`crates/tracedecay-store/src/{evidence_assembly,retrieval_anchor}.rs`). Pending:
+dedicated GitHub-stack capability/snapshot anchor targets — the shipped
+`GitTopologyAnchorTargetV1` covers `RepositoryCapture`/`WorktreeCapture`/`RefSnapshot`/
+`NativeObject`/`PullRequestSnapshot`/`ReviewSnapshot`/`CheckSnapshot`/`ConflictEvidence`/
+`PreflightPreview`/`ApplyReceipt`/`IntegrationReceipt` but no `GitHubStack*` variant.
 
 ## Does not own
 
@@ -197,7 +199,8 @@ evidence-span identity, and payload-free retriever-contribution anchors all exis
     task projection may abbreviate presentation, but its prose, score, status, branch
     label, or aggregate cannot become replacement evidence.
 
-**Status (2026-07-25):** Items 1–22 implemented. Shipped reality:
+**Status (2026-07-23):** Items 1–18 and 20–22 implemented; item 19 (GitHub-stack
+targets) pending. Shipped reality:
 
 - Item 1: the opaque `RetrievalAnchorId` is realized as a derived, digest-tagged
   string — `retrieval.v2.sha256:<hex>` for observation/repository/entity targets and
@@ -212,9 +215,8 @@ evidence-span identity, and payload-free retriever-contribution anchors all exis
 - Coverage: derived-group (Span/Burst) candidate anchors are excluded from the coverage
   denominator so grouped members are not double-counted as hidden omissions
   (`src/query/temporal/mod.rs`; landed as commit `67a7f253`).
-- Items 11–21: native repository/worktree/ref/object/PR/check/conflict/preflight/
-  integration and GitHub-stack anchors ship in
-  `crates/tracedecay-domain/src/research/git_topology.rs`.
+- Items 11–18, 20–21: native repository/worktree/ref/object/PR/check/conflict/preflight/
+  integration anchors ship in `crates/tracedecay-domain/src/research/git_topology.rs`.
 
 ## Native Git, worktree, and integration-receipt anchors
 
@@ -275,13 +277,13 @@ escape, ambiguous native admin identity, or missing proof returns
 `ambiguous`/`unavailable`; it never rekeys the old anchor or reveals the prior
 raw path.
 
-**Status (2026-07-25):** Implemented. `GitTopologyAnchorTargetV1` exposes
+**Status (2026-07-23):** Implemented. `GitTopologyAnchorTargetV1` exposes
 `RepositoryCapture`, `WorktreeCapture`, `RefSnapshot`, `NativeObject`,
 `PullRequestSnapshot`, `ReviewSnapshot`, `CheckSnapshot`, `ConflictEvidence`,
-`PreflightPreview`, `ApplyReceipt`, `IntegrationReceipt`, `GitHubStackCapability`,
-and `GitHubStackSnapshot` variants with capture/object-format/receipt/generation/
-content bindings; SHA-1/SHA-256 IDs carry object-format and repository-capture
-bindings (`crates/tracedecay-domain/src/research/git_topology.rs`).
+`PreflightPreview`, `ApplyReceipt`, and `IntegrationReceipt` variants with
+capture/object-format/receipt bindings; SHA-1/SHA-256 IDs carry object-format and
+repository-capture bindings (`crates/tracedecay-domain/src/research/git_topology.rs`).
+GitHub-stack capability/snapshot targets remain pending.
 
 ### Lossless `TaskId` and integration drilldown
 
@@ -799,11 +801,9 @@ through without defining another reference type (Required behavior 10).
 - Repository search finds no research-ledger, plan-parser, compatibility-inventory, or
   plan-execution requirement in this contract.
 
-**Status (2026-07-25):** Implemented. Acceptance coverage lives in
+**Status (2026-07-23):** Largely implemented. Acceptance coverage lives in
 `tests/session_suite/{anchor_resolution,anchor_tombstone_expiry,fact_anchor_authority,temporal_derived_evidence,temporal_privacy}.rs`,
 `tests/session_suite/temporal_projection/lineage.rs`,
 `crates/tracedecay-store/tests/session_contract/`, and
-`crates/tracedecay-domain/src/research/{anchor_test,resolution}.rs`, with direct
-GitHub-stack identity/currentness coverage in
-`crates/tracedecay-domain/tests/git_topology_anchor_contract.rs` and
-`src/application/anchor_resolution.rs`.
+`crates/tracedecay-domain/src/research/{anchor_test,resolution}.rs`. The one criterion
+still pending is GitHub-stack target evidence (Required behavior 19).

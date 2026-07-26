@@ -1336,6 +1336,7 @@ impl OperationEventTestRunProjection {
                     "results": results,
                     "result_offset": result_offset,
                     "available_results": snapshot.results.len(),
+                    "next_retrieval_handle": next_retrieval_handle,
                 })),
                 omission_reason,
                 next_retrieval_handle,

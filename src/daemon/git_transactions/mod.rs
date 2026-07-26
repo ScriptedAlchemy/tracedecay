@@ -22,7 +22,7 @@ use tracedecay_policy::GitEffectClassifier;
 use tracedecay_store::GitIndexTransactionStore;
 
 pub(crate) use journal::{DurableGitIndexJournal, GitIndexJournalError};
-#[cfg(all(test, unix))]
+#[cfg(all(unix, any(test, feature = "test-transport")))]
 pub(crate) use native::capture_exact_snapshot_for_test;
 pub(crate) use native::{DaemonProjectGitIndexPreviewAssembler, FixedDaemonGitIndexExecutor};
 pub(crate) use owner::{

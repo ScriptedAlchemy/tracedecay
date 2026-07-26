@@ -40,6 +40,26 @@ use scheduler::{
 };
 use transport::{BrokerListener, BrokerStream, DaemonAuthPreface, DaemonEndpoint};
 
+/// Captures the daemon's exact native Git transaction precondition for
+/// transport-parity tests. This is not compiled into production builds.
+#[cfg(all(unix, feature = "test-transport"))]
+#[doc(hidden)]
+pub fn capture_exact_git_snapshot_for_test(
+    repository_root: &Path,
+    project_id: tracedecay_domain::ProjectId,
+    repository_id: tracedecay_domain::RepositoryId,
+    worktree_id: tracedecay_domain::WorktreeId,
+    captured_at: tracedecay_domain::UtcMicros,
+) -> tracedecay_domain::RepositoryStateSnapshotV1 {
+    git_transactions::capture_exact_snapshot_for_test(
+        repository_root,
+        project_id,
+        repository_id,
+        worktree_id,
+        captured_at,
+    )
+}
+
 pub const SERVICE_NAME: &str = "tracedecay.service";
 pub const SOCKET_ENV: &str = "TRACEDECAY_DAEMON_SOCKET";
 pub(crate) const PROJECT_WARMING_RETRY_HINT: &str =
@@ -1132,10 +1152,9 @@ pub(crate) use service::invocation::{
     DaemonPrimitiveRuntimeRegistrationError, DaemonSemanticRuntimeRegistrar,
     DaemonSemanticRuntimeRegistrationError, Pr13AdvisoryCycleInvocationFutureV1,
     Pr13AdvisoryCycleInvocationPortV1, Pr13AdvisoryCycleInvocationRequestV1,
-    Pr13AdvisoryRegistrationIdentityV1, Pr13HookOrchestrationAdmissionV1,
-    Pr13HookOrchestrationRequestV1, Pr13HookOrchestrationTriggerV1,
-    admit_registered_pr13_hook_orchestration, daemon_operation_event_authority,
-    parse_daemon_invocation_request,
+    Pr13HookOrchestrationAdmissionV1, Pr13HookOrchestrationRequestV1,
+    Pr13HookOrchestrationTriggerV1, admit_registered_pr13_hook_orchestration,
+    daemon_operation_event_authority, parse_daemon_invocation_request,
 };
 pub use service::{
     DaemonServiceSpec, DaemonServiceState, QuiescedDaemonLifecycle, daemon_reachable,
@@ -2275,16 +2294,15 @@ impl<Server> DatabaseOwnerRegistry<Server> {
         candidate: Server,
         capacity: usize,
         mut is_leased: F,
-    ) -> Option<(Server, bool, Vec<PathBuf>)>
+    ) -> Option<(Server, bool)>
     where
         Server: Clone,
         F: FnMut(&Server) -> bool,
     {
         if let Some(existing) = self.get(&key).cloned() {
             self.bind_route(route, key);
-            return Some((existing, false, Vec::new()));
+            return Some((existing, false));
         }
-        let mut evicted_roots = Vec::new();
         while self.servers.len() >= capacity {
             let evict = self
                 .servers
@@ -2293,18 +2311,10 @@ impl<Server> DatabaseOwnerRegistry<Server> {
                 .min_by_key(|(_, entry)| entry.last_used)
                 .map(|(key, _)| key.clone())?;
             self.servers.remove(&evict);
-            evicted_roots.extend(
-                self.aliases
-                    .iter()
-                    .filter(|(_, key)| *key == &evict)
-                    .map(|(route, _)| route.project_path.clone()),
-            );
             self.aliases.retain(|_, key| key != &evict);
         }
         self.insert_route(route, key, candidate.clone());
-        evicted_roots.sort();
-        evicted_roots.dedup();
-        Some((candidate, true, evicted_roots))
+        Some((candidate, true))
     }
 
     fn rekey(&mut self, old: &ProjectServerKey, new: &ProjectServerKey) -> bool {
@@ -2410,27 +2420,25 @@ fn project_route_for_handshake(handshake: &DaemonHandshake) -> Result<(PathBuf, 
 async fn bind_authenticated_profile_identity(
     handshake: &mut DaemonHandshake,
     store_administration: &StoreAdministration,
-) -> Result<StoreAdministration> {
-    let profile_root = authority::canonical_identity_path(&handshake.client_identity.profile_root)?;
-    let profile_identity = profile_identity::load_or_create(&profile_root)?;
-    let scoped_administration = store_administration
-        .clone()
-        .with_profile_identity(profile_identity);
-    let profile_database = scoped_administration.registered_profile_database().await?;
+) -> Result<()> {
+    let profile_identity = store_administration.profile_identity()?;
+    let profile_root = authority::canonical_identity_path(profile_identity.profile_root())?;
+    let profile_database = store_administration.registered_profile_database().await?;
     let global_db_path = authority::canonical_identity_path(profile_database.db_path())?;
-    let supplied_global_db_path =
-        authority::canonical_identity_path(&handshake.client_identity.global_db_path)?;
-    if supplied_global_db_path != global_db_path {
+    let supplied_profile_root =
+        authority::canonical_identity_path(&handshake.client_identity.profile_root)?;
+    if supplied_profile_root != profile_root {
         return Err(TraceDecayError::Config {
-            message: "daemon client global database does not match its registered profile runtime"
-                .to_owned(),
+            message:
+                "daemon client profile identity does not match the authenticated daemon profile"
+                    .to_owned(),
         });
     }
     handshake.client_identity = DaemonClientIdentity {
         profile_root,
         global_db_path,
     };
-    Ok(scoped_administration)
+    Ok(())
 }
 
 async fn project_open_gate(
@@ -2821,30 +2829,10 @@ impl DaemonEngine {
                 .get_route_and_touch(&route)
                 .map(|(_, server)| Arc::clone(server))
         };
-        let Some(server) = cached else {
-            return Ok(None);
-        };
-        let graph = server.cg().await;
-        let project_id = graph
-            .store_layout()
-            .identity
-            .project_id
-            .as_deref()
-            .ok_or_else(|| TraceDecayError::Config {
-                message: "cached project owners require an authoritative project identity"
-                    .to_owned(),
-            })?;
-        project_open_owners::register_project_open_production_owners(
-            &self.invocation,
-            self.store_administration.git_index_transaction_services(),
-            &project_path,
-            project_id,
-            server.as_ref(),
-        )
-        .await?;
-        Ok(Some(
-            self.activate_project_server(project_path, server).await,
-        ))
+        Ok(match cached {
+            Some(server) => Some(self.activate_project_server(project_path, server).await),
+            None => None,
+        })
     }
 
     async fn begin_project_open(
@@ -3139,7 +3127,7 @@ impl DaemonEngine {
                 .await
                 .unwrap_or_default();
         let diagnostic_broker = Arc::new(tokio::sync::Mutex::new(
-            crate::dashboard::code_diagnostics_broker(
+            crate::application::dashboard_diagnostics::diagnostic_broker(
                 canonical_project_path.clone(),
                 diagnostic_settings,
             ),
@@ -3240,16 +3228,10 @@ impl DaemonEngine {
                 MAX_CACHED_PROJECT_SERVERS,
                 |server| Arc::strong_count(server) > 1,
             );
-        let Some((server, inserted, evicted_roots)) = resolved else {
+        let Some((server, inserted)) = resolved else {
             route_registered.store(false, Ordering::Release);
             return Err(project_server_capacity_error());
         };
-        for evicted_root in evicted_roots {
-            self.invocation
-                .advisory_runtime_registrar()
-                .unmount_project(&evicted_root)
-                .await;
-        }
         if inserted {
             self.invocation
                 .mount_code_index(
@@ -4217,7 +4199,7 @@ async fn portable_project_server(
             .await
             .unwrap_or_default();
     let diagnostic_broker = Arc::new(tokio::sync::Mutex::new(
-        crate::dashboard::code_diagnostics_broker(
+        crate::application::dashboard_diagnostics::diagnostic_broker(
             canonical_project_path.to_path_buf(),
             diagnostic_settings,
         ),
@@ -4323,16 +4305,10 @@ async fn portable_project_server(
             MAX_CACHED_PROJECT_SERVERS,
             |server| Arc::strong_count(server) > 1,
         );
-    let Some((resolved, inserted, evicted_roots)) = resolution else {
+    let Some((resolved, inserted)) = resolution else {
         route_registered.store(false, Ordering::Release);
         return Err(project_server_capacity_error());
     };
-    for evicted_root in evicted_roots {
-        invocation
-            .advisory_runtime_registrar()
-            .unmount_project(&evicted_root)
-            .await;
-    }
     if !inserted {
         route_registered.store(false, Ordering::Release);
     } else {
@@ -4431,10 +4407,7 @@ async fn serve_broker_socket_client(
         return Ok(());
     };
     let mut handshake = DaemonHandshake::from_line(&line)?;
-    let store_administration =
-        bind_authenticated_profile_identity(&mut handshake, &engine.store_administration).await?;
-    let mut engine = engine;
-    engine.store_administration = store_administration;
+    bind_authenticated_profile_identity(&mut handshake, &engine.store_administration).await?;
     let first_request_line = tokio::select! {
         result = read_line_handling_wire_oversized(&mut transport) => result?,
         () = engine.lifecycle.wait_for_draining() => return Ok(()),
@@ -4503,16 +4476,8 @@ async fn serve_broker_socket_client(
         return Ok(());
     }
     if let Some(request) = parse_branch_add_request(&first_request_line) {
-        let response = match Box::pin(engine.project_server_for_request(&handshake)).await {
-            Ok(_) => {
-                branch_add_response(&engine.store_administration, &handshake, &request).await
-            }
-            Err(error) => JsonRpcResponse::error(
-                request.id.clone(),
-                ErrorCode::InternalError,
-                error.to_string(),
-            ),
-        };
+        let response =
+            branch_add_response(&engine.store_administration, &handshake, &request).await;
         drop(setup_activity);
         write_json_rpc_response(&mut transport, &response).await?;
         return Ok(());
@@ -4766,8 +4731,7 @@ async fn serve_windows_broker_client_with_class_and_invocation(
         return Ok(());
     };
     let mut handshake = DaemonHandshake::from_line(&handshake_line)?;
-    let store_administration =
-        bind_authenticated_profile_identity(&mut handshake, &store_administration).await?;
+    bind_authenticated_profile_identity(&mut handshake, &store_administration).await?;
     let Some(first_request_line) = read_line_handling_wire_oversized(&mut transport).await? else {
         return Ok(());
     };
@@ -4822,25 +4786,7 @@ async fn serve_windows_broker_client_with_class_and_invocation(
         return Ok(());
     }
     if let Some(request) = parse_branch_add_request(&first_request_line) {
-        let response = match Box::pin(portable_project_server_for_request(
-            lifecycle.clone(),
-            store_administration.clone(),
-            Arc::clone(&project_open_gates),
-            invocation.clone(),
-            http_application_registry.clone(),
-            &handshake,
-            #[cfg(test)]
-            project_open_attempts.clone(),
-        ))
-        .await
-        {
-            Ok(_) => branch_add_response(&store_administration, &handshake, &request).await,
-            Err(error) => JsonRpcResponse::error(
-                request.id.clone(),
-                ErrorCode::InternalError,
-                error.to_string(),
-            ),
-        };
+        let response = branch_add_response(&store_administration, &handshake, &request).await;
         drop(setup_activity);
         write_json_rpc_response(&mut transport, &response).await?;
         return Ok(());
@@ -5151,14 +5097,6 @@ async fn open_project_for_handshake(
                 .await?,
                 true,
             ),
-            Err(err) if is_unregistered_identity_error(&err) => {
-                return Err(TraceDecayError::Config {
-                    message: format!(
-                        "no TraceDecay index found at '{}'; run 'tracedecay init' first",
-                        project_path.display()
-                    ),
-                });
-            }
             Err(err) => return Err(err),
         };
     let project_id =
@@ -5170,19 +5108,6 @@ async fn open_project_for_handshake(
                 message: "registered project open requires an authoritative project identity"
                     .to_owned(),
             })?;
-    let typed_project_id =
-        tracedecay_store::ProjectId::new(project_id.to_owned()).map_err(|error| {
-            TraceDecayError::Config {
-                message: format!("registered project identity is invalid: {error}"),
-            }
-        })?;
-    // An explicit first-touch-capable route must not turn an existing malformed
-    // legacy input into a successful open merely because durable configuration
-    // was already migrated. Validate the compatibility file without applying
-    // it; the registered configuration database remains the sole authority.
-    if handshake.allow_init && store_layout.config_path.exists() {
-        crate::config::load_config_from_path(project_path, &store_layout.config_path)?;
-    }
     // First-touch enrollment: the daemon's registered session runtime resolves
     // a project's store through its on-disk enrollment marker, which a
     // never-seen project does not yet have. Persist it now — under the same
@@ -5199,15 +5124,8 @@ async fn open_project_for_handshake(
             },
         )?;
     }
-    let enrollment_roots = crate::tracedecay::TraceDecay::registered_enrollment_roots(
-        project_path,
-        &store_layout,
-        &typed_project_id,
-        registry_database.as_ref(),
-    )
-    .await?;
     let configuration_database = store_administration
-        .registered_project_session_database(project_id, enrollment_roots)
+        .registered_project_session_database(project_id, [store_layout.project_root.clone()])
         .await?;
     let runtime_registry = store_administration.registered_runtime_registry().await?;
     match crate::tracedecay::TraceDecay::open_with_registered_configuration(
@@ -5255,12 +5173,6 @@ async fn open_project_for_handshake(
             )
             .await
         }
-        Err(open_err) if is_missing_index_error(&open_err) => Err(TraceDecayError::Config {
-            message: format!(
-                "no TraceDecay index found at '{}'; run 'tracedecay init' first ({open_err})",
-                project_path.display()
-            ),
-        }),
         Err(open_err) => Err(open_err),
     }
 }

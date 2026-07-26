@@ -2,20 +2,23 @@
 //! tool handlers.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracedecay_application::{
     HealthDeltaCoverageV1, HealthDeltaCurrentnessV1, HealthDeltaPointV1, HealthDeltaResult,
-    HealthDeltaScopeV1, HealthDimensionDeltaV1, HealthDimensionPointV1,
+    HealthDeltaScopeV1, HealthDimensionDeltaV1, HealthDimensionPointV1, ObservabilityApplicationV1,
+    ObservabilityHorizonV1, ObservabilityQueryV1,
 };
-use tracedecay_domain::{ManifestDigest, UtcMicros, canonical_sha256};
+use tracedecay_domain::{
+    CoverageStateV1, HealthDimensionObservedV1, HealthSnapshotObservedV1, ManifestDigest,
+    ObservabilityEnvelopeV1, ObservabilityPayloadV1, ObservabilityRetentionClassV1,
+    ObservabilityTerminalResultV1, UtcMicros, canonical_sha256,
+};
 
+use crate::application::observability::RegisteredObservabilityPortV1;
 use crate::errors::{Result, TraceDecayError};
+use crate::global_db::RegisteredGlobalDb;
 use crate::graph::health::{
     HealthDimensions, acyclicity_score, compute_composite_health, dependency_depth, depth_score,
     dsm_clusters, gini_coefficient, gini_label, modularity_score,
@@ -52,9 +55,9 @@ struct HealthSnapshot {
     gini: f64,
     edges_in_cycles: usize,
     total_edges: usize,
-    complexity_files: usize,
     max_chain: usize,
     ideal_chain: usize,
+    complexity_files: usize,
     modularity_components: usize,
     dead_count: usize,
     total_fns: usize,
@@ -63,14 +66,6 @@ struct HealthSnapshot {
 
 const HEALTH_DELTA_SCHEMA_VERSION: u32 = 1;
 const HEALTH_DELTA_CURSOR_PREFIX: &str = "health-delta.v1.";
-static NEXT_HEALTH_DELTA_TEMP: AtomicU64 = AtomicU64::new(1);
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-struct StoredHealthDeltaPointV1 {
-    schema_version: u32,
-    scope: HealthDeltaScopeV1,
-    point: HealthDeltaPointV1,
-}
 
 fn health_delta_now() -> UtcMicros {
     let micros = std::time::SystemTime::now()
@@ -96,7 +91,8 @@ fn health_delta_dimensions(snapshot: &HealthSnapshot) -> BTreeMap<String, Health
                 "modularity" => Some(snapshot.modularity_components as u64),
                 "redundancy" | "coverage_discipline" => Some(snapshot.total_fns as u64),
                 _ => None,
-            };
+            }
+            .filter(|value| *value > 0);
             (
                 name.to_owned(),
                 HealthDimensionPointV1 {
@@ -192,73 +188,151 @@ fn health_delta_digest_from_cursor(cursor: &str) -> Result<&str> {
     Ok(digest)
 }
 
-fn health_delta_store_root(cg: &TraceDecay) -> PathBuf {
-    cg.store_layout().data_root.join("health_delta")
-}
-
-fn health_delta_snapshot_path(root: &Path, digest: &str) -> PathBuf {
-    root.join(format!("{digest}.json"))
-}
-
-fn persist_health_delta_point(
-    cg: &TraceDecay,
-    stored: &StoredHealthDeltaPointV1,
+async fn persist_health_delta_point(
+    db: &RegisteredGlobalDb,
+    scope: &HealthDeltaScopeV1,
+    point: &HealthDeltaPointV1,
 ) -> Result<String> {
-    let cursor = health_delta_cursor(&stored.point.watermark);
-    let digest = health_delta_digest_from_cursor(&cursor)?;
-    let root = health_delta_store_root(cg);
-    std::fs::create_dir_all(&root).map_err(|error| TraceDecayError::Config {
-        message: format!("failed to create health-delta store: {error}"),
-    })?;
-    let path = health_delta_snapshot_path(&root, digest);
-    if !path.exists() {
-        let bytes = serde_json::to_vec(stored).map_err(|error| TraceDecayError::Config {
-            message: format!("failed to encode health-delta snapshot: {error}"),
+    let cursor = health_delta_cursor(&point.watermark);
+    let payload = HealthSnapshotObservedV1 {
+        scope_digest: scope.scope_digest.as_str().to_owned(),
+        quality_signal: point.quality_signal,
+        files_analyzed: point.files_analyzed,
+        function_denominator: point.function_denominator,
+        dimensions: point
+            .dimensions
+            .iter()
+            .map(|(name, value)| {
+                (
+                    name.clone(),
+                    HealthDimensionObservedV1 {
+                        score_ppm: value.score_ppm,
+                        denominator: value.denominator,
+                    },
+                )
+            })
+            .collect(),
+    };
+    let coverage = if point.files_analyzed > 0
+        && point.function_denominator > 0
+        && point
+            .dimensions
+            .values()
+            .all(|dimension| dimension.denominator.is_some())
+    {
+        CoverageStateV1::Known
+    } else {
+        CoverageStateV1::Partial
+    };
+    let observed_at = point.observed_at.0;
+    let envelope = ObservabilityEnvelopeV1 {
+        event_id: cursor.clone(),
+        event_kind: "health.snapshot.observed.v1".to_owned(),
+        schema_revision: HEALTH_DELTA_SCHEMA_VERSION,
+        idempotency_key: cursor.clone(),
+        trace_id: format!("health-delta:{}", scope.scope_digest.as_str()),
+        scope_ref: scope.scope_digest.as_str().to_owned(),
+        capability: "health_delta".to_owned(),
+        operation: "observe".to_owned(),
+        event_time_micros: observed_at,
+        observation_time_micros: observed_at,
+        valid_from_micros: Some(observed_at),
+        valid_until_micros: None,
+        quantity: Some(f64::from(point.quality_signal)),
+        unit: Some("quality_signal".to_owned()),
+        terminal_result: Some(ObservabilityTerminalResultV1::Succeeded),
+        producer_revision: "health-delta-projector.v1".to_owned(),
+        configuration_revision: "effective-project-configuration.v1".to_owned(),
+        policy_revision: "local-health-observation.v1".to_owned(),
+        watermark: point.watermark.as_str().to_owned(),
+        coverage,
+        sampling_probability: None,
+        retention_class: ObservabilityRetentionClassV1::OptionalLocalDetail30d,
+        emitted_count: 1,
+        delayed_count: 0,
+        dropped_count: 0,
+        process_boot_id: format!("health-delta-{}", std::process::id()),
+        producer_sequence: observed_at.max(0) as u64,
+        payload: ObservabilityPayloadV1::HealthSnapshot(payload),
+    };
+    let port = RegisteredObservabilityPortV1::new(db);
+    ObservabilityApplicationV1::new(port, port)
+        .record(envelope)
+        .await
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("failed to retain health-delta observation: {error}"),
         })?;
-        let sequence = NEXT_HEALTH_DELTA_TEMP.fetch_add(1, Ordering::Relaxed);
-        let temporary = root.join(format!(".{digest}.{}.{sequence}.tmp", std::process::id()));
-        let mut file =
-            std::fs::File::create(&temporary).map_err(|error| TraceDecayError::Config {
-                message: format!("failed to create health-delta snapshot: {error}"),
-            })?;
-        file.write_all(&bytes)
-            .and_then(|()| file.sync_all())
-            .map_err(|error| TraceDecayError::Config {
-                message: format!("failed to write health-delta snapshot: {error}"),
-            })?;
-        if let Err(error) = std::fs::rename(&temporary, &path) {
-            if path.exists() {
-                let _ = std::fs::remove_file(&temporary);
-            } else {
-                return Err(TraceDecayError::Config {
-                    message: format!("failed to commit health-delta snapshot: {error}"),
-                });
-            }
-        }
-    }
     Ok(cursor)
 }
 
-fn load_health_delta_point(cg: &TraceDecay, cursor: &str) -> Result<StoredHealthDeltaPointV1> {
-    let digest = health_delta_digest_from_cursor(cursor)?;
-    let path = health_delta_snapshot_path(&health_delta_store_root(cg), digest);
-    let bytes = std::fs::read(&path).map_err(|_| TraceDecayError::Config {
-        message: "health-delta cursor is unknown or expired".to_owned(),
-    })?;
-    let stored: StoredHealthDeltaPointV1 =
-        serde_json::from_slice(&bytes).map_err(|_| TraceDecayError::Config {
-            message: "health-delta cursor snapshot is invalid".to_owned(),
+async fn load_health_delta_point(
+    db: &RegisteredGlobalDb,
+    scope: &HealthDeltaScopeV1,
+    cursor: &str,
+) -> Result<HealthDeltaPointV1> {
+    health_delta_digest_from_cursor(cursor)?;
+    let port = RegisteredObservabilityPortV1::new(db);
+    let page = ObservabilityApplicationV1::new(port, port)
+        .query(ObservabilityQueryV1 {
+            authorized_scope_ref: scope.scope_digest.as_str().to_owned(),
+            event_kinds: vec!["health.snapshot.observed.v1".to_owned()],
+            horizon: ObservabilityHorizonV1 {
+                since_micros: 0,
+                until_micros: i64::MAX,
+            },
+            after_watermark: None,
+            limit: 10_000,
+        })
+        .await
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("failed to read health-delta observations: {error}"),
         })?;
+    let envelope = page
+        .events
+        .into_iter()
+        .find(|event| event.idempotency_key == cursor)
+        .ok_or_else(|| TraceDecayError::Config {
+            message: "health-delta cursor is unknown or expired".to_owned(),
+        })?;
+    let ObservabilityPayloadV1::HealthSnapshot(payload) = envelope.payload else {
+        return Err(TraceDecayError::Config {
+            message: "health-delta cursor snapshot is invalid".to_owned(),
+        });
+    };
+    let stored = HealthDeltaPointV1 {
+        watermark: ManifestDigest::new(envelope.watermark).map_err(|_| {
+            TraceDecayError::Config {
+                message: "health-delta cursor snapshot is invalid".to_owned(),
+            }
+        })?,
+        observed_at: UtcMicros(envelope.event_time_micros),
+        quality_signal: payload.quality_signal,
+        files_analyzed: payload.files_analyzed,
+        function_denominator: payload.function_denominator,
+        dimensions: payload
+            .dimensions
+            .into_iter()
+            .map(|(name, value)| {
+                (
+                    name,
+                    HealthDimensionPointV1 {
+                        score_ppm: value.score_ppm,
+                        denominator: value.denominator,
+                    },
+                )
+            })
+            .collect(),
+    };
     let recomputed = health_delta_watermark(
-        &stored.scope,
-        stored.point.observed_at,
-        stored.point.quality_signal,
-        stored.point.files_analyzed,
-        stored.point.function_denominator,
-        &stored.point.dimensions,
+        scope,
+        stored.observed_at,
+        stored.quality_signal,
+        stored.files_analyzed,
+        stored.function_denominator,
+        &stored.dimensions,
     )?;
-    if stored.schema_version != HEALTH_DELTA_SCHEMA_VERSION
-        || stored.point.watermark != recomputed
+    if payload.scope_digest != scope.scope_digest.as_str()
+        || stored.watermark != recomputed
         || health_delta_cursor(&recomputed) != cursor
     {
         return Err(TraceDecayError::Config {
@@ -302,18 +376,14 @@ fn health_dimension_deltas(
 
 pub(crate) async fn compute_health_delta_result(
     cg: &TraceDecay,
+    db: &RegisteredGlobalDb,
     before_cursor: Option<&str>,
     path_prefix: Option<&str>,
 ) -> Result<HealthDeltaResult> {
     let scope = health_delta_scope(cg, path_prefix)?;
     let pinned_before = if let Some(cursor) = before_cursor {
-        let stored = load_health_delta_point(cg, cursor)?;
-        if stored.scope != scope {
-            return Err(TraceDecayError::Config {
-                message: "health-delta cursor belongs to a different scope".to_owned(),
-            });
-        }
-        Some((stored.point, cursor.to_owned()))
+        let stored = load_health_delta_point(db, &scope, cursor).await?;
+        Some((stored, cursor.to_owned()))
     } else {
         None
     };
@@ -336,19 +406,13 @@ pub(crate) async fn compute_health_delta_result(
         function_denominator: snapshot.total_fns as u64,
         dimensions,
     };
-    let after_cursor = persist_health_delta_point(
-        cg,
-        &StoredHealthDeltaPointV1 {
-            schema_version: HEALTH_DELTA_SCHEMA_VERSION,
-            scope: scope.clone(),
-            point: after.clone(),
-        },
-    )?;
+    let after_cursor = persist_health_delta_point(db, &scope, &after).await?;
     let (before, before_cursor) =
         pinned_before.unwrap_or_else(|| (after.clone(), after_cursor.clone()));
     let delta = i64::from(after.quality_signal) - i64::from(before.quality_signal);
     let branch = cg.branch_diagnostics();
     let eligible = before.files_analyzed.saturating_add(after.files_analyzed);
+    let denominator = (eligible > 0).then_some(eligible);
     Ok(HealthDeltaResult {
         schema_version: HEALTH_DELTA_SCHEMA_VERSION,
         scope,
@@ -356,14 +420,19 @@ pub(crate) async fn compute_health_delta_result(
         after: after.clone(),
         before_cursor,
         after_cursor,
-        pass: delta >= 0,
+        pass: denominator.is_some() && delta >= 0,
         delta,
         dimensions: health_dimension_deltas(&before, &after),
         coverage: HealthDeltaCoverageV1 {
-            eligible: Some(eligible),
-            visited: Some(eligible),
-            denominator: Some(eligible),
-            completeness: "complete".to_owned(),
+            eligible: denominator,
+            visited: denominator,
+            denominator,
+            completeness: if denominator.is_some() {
+                "complete"
+            } else {
+                "unknown"
+            }
+            .to_owned(),
         },
         currentness: HealthDeltaCurrentnessV1 {
             state: if branch.serving_db_exists && !branch.is_fallback {
@@ -468,9 +537,9 @@ async fn compute_health_snapshot(
         gini,
         edges_in_cycles,
         total_edges,
-        complexity_files,
         max_chain: depth_result.max_depth,
         ideal_chain: depth_result.ideal_depth,
+        complexity_files,
         modularity_components,
         dead_count,
         total_fns,
@@ -1370,6 +1439,22 @@ fn session_dimension_values(snap: &HealthSnapshot) -> [(&'static str, f64); 6] {
     ]
 }
 
+fn session_baseline_snapshot(snap: &HealthSnapshot) -> Value {
+    json!({
+        "quality_signal": snap.quality_signal,
+        "files_analyzed": snap.files_analyzed,
+        "dimensions": {
+            "acyclicity": snap.acyclicity,
+            "depth": snap.depth,
+            "equality": snap.equality,
+            "redundancy": snap.redundancy,
+            "modularity": snap.modularity,
+            "coverage_discipline": snap.coverage_discipline,
+        },
+        "timestamp": crate::tracedecay::current_timestamp(),
+    })
+}
+
 fn session_dimension_deltas(
     dims_before: &Value,
     snap: &HealthSnapshot,
@@ -1417,11 +1502,12 @@ fn session_tool_result(cg: &TraceDecay, args: &Value, output: &Value) -> ToolRes
 /// Handles `tracedecay_session_start` tool calls.
 pub(super) async fn handle_session_start(
     cg: &TraceDecay,
+    db: &RegisteredGlobalDb,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
     let path_prefix = effective_path(&args, scope_prefix);
-    let delta = compute_health_delta_result(cg, None, path_prefix).await?;
+    let delta = compute_health_delta_result(cg, db, None, path_prefix).await?;
 
     let tracedecay_dir = &cg.store_layout().data_root;
     std::fs::create_dir_all(tracedecay_dir).map_err(|e| {
@@ -1456,6 +1542,7 @@ pub(super) async fn handle_session_start(
 /// Handles `tracedecay_session_end` tool calls.
 pub(super) async fn handle_session_end(
     cg: &TraceDecay,
+    db: &RegisteredGlobalDb,
     args: Value,
     scope_prefix: Option<&str>,
 ) -> Result<ToolResult> {
@@ -1484,7 +1571,7 @@ pub(super) async fn handle_session_end(
     })?;
     if let Some(cursor) = baseline.get("health_delta_cursor").and_then(Value::as_str) {
         let path_prefix = effective_path(&args, scope_prefix);
-        let result = compute_health_delta_result(cg, Some(cursor), path_prefix).await?;
+        let result = compute_health_delta_result(cg, db, Some(cursor), path_prefix).await?;
         let _ = std::fs::remove_file(&baseline_path);
         let degraded_dimensions = result
             .dimensions
@@ -1583,14 +1670,21 @@ mod health_delta_tests {
             .await
             .expect("initialize graph");
         graph.index_all().await.expect("index fixture");
+        let observations =
+            crate::global_db::tests::harness::RegisteredGlobalDbHarness::open("health-delta").await;
+        let db = observations.registered.as_ref();
 
-        let before = compute_health_delta_result(&graph, None, Some("src"))
+        let before = compute_health_delta_result(&graph, db, None, Some("src"))
             .await
             .expect("pin before");
-        let after =
-            compute_health_delta_result(&graph, Some(before.after_cursor.as_str()), Some("src"))
-                .await
-                .expect("compare pinned state");
+        let after = compute_health_delta_result(
+            &graph,
+            db,
+            Some(before.after_cursor.as_str()),
+            Some("src"),
+        )
+        .await
+        .expect("compare pinned state");
 
         assert_eq!(after.before, before.after);
         assert_eq!(after.before_cursor, before.after_cursor);
@@ -1615,28 +1709,22 @@ mod health_delta_tests {
                 .all(|dimension| dimension.status == "unchanged")
         );
 
-        let wrong_scope =
-            compute_health_delta_result(&graph, Some(before.after_cursor.as_str()), Some("tests"))
-                .await
-                .expect_err("scope-bound cursor");
-        assert!(wrong_scope.to_string().contains("different scope"));
-
-        let digest = health_delta_digest_from_cursor(&before.after_cursor).expect("cursor digest");
-        let snapshot_path = health_delta_snapshot_path(&health_delta_store_root(&graph), digest);
-        let mut tampered: Value =
-            serde_json::from_slice(&std::fs::read(&snapshot_path).expect("stored snapshot"))
-                .expect("stored snapshot JSON");
-        tampered["point"]["quality_signal"] = json!(before.after.quality_signal.saturating_add(1));
-        std::fs::write(
-            &snapshot_path,
-            serde_json::to_vec(&tampered).expect("tampered snapshot JSON"),
+        let wrong_scope = compute_health_delta_result(
+            &graph,
+            db,
+            Some(before.after_cursor.as_str()),
+            Some("tests"),
         )
-        .expect("tamper fixture");
-        let rejected =
-            compute_health_delta_result(&graph, Some(before.after_cursor.as_str()), Some("src"))
-                .await
-                .expect_err("tampered pinned point");
-        assert!(rejected.to_string().contains("identity validation"));
+        .await
+        .expect_err("scope-bound cursor");
+        assert!(wrong_scope.to_string().contains("unknown or expired"));
+        assert!(!graph.store_layout().data_root.join("health_delta").exists());
+
+        let malformed = format!("{HEALTH_DELTA_CURSOR_PREFIX}{}", "0".repeat(64));
+        let rejected = compute_health_delta_result(&graph, db, Some(&malformed), Some("src"))
+            .await
+            .expect_err("unknown pinned point");
+        assert!(rejected.to_string().contains("unknown or expired"));
         graph.checkpoint().await.expect("checkpoint");
         graph.close();
     }

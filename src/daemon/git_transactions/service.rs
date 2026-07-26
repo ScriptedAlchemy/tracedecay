@@ -305,13 +305,6 @@ where
             journal,
         };
         let durable = DurableGitIndexJournal::new(&self.store);
-        let current_policy = match self.recheck_current_authority(request, preview) {
-            Ok(current) => current,
-            Err(error) => {
-                self.native.discard_preview(&preview.preview_id);
-                return Err(error);
-            }
-        };
         let begin = match durable.begin_or_replay(begin) {
             Ok(begin) => begin,
             Err(error) => {
@@ -350,9 +343,7 @@ where
         // have admitted a new durable record and therefore must end in an
         // atomic terminal receipt or a durable quarantine.
         if request.validate_for_preview(preview).is_err()
-            || self
-                .classify_current_policy(request, preview, current_policy)
-                .is_err()
+            || self.recheck_policy(request, preview).is_err()
         {
             self.native.discard_preview(&preview.preview_id);
             return finish_aborted_no_change(
@@ -477,11 +468,16 @@ where
         }
     }
 
-    fn recheck_current_authority(
+    fn recheck_policy(
         &self,
         request: &GitIndexApplyRequestV1,
         preview: &GitIndexPreviewV1,
-    ) -> Result<CurrentGitIndexPolicyStateV1, GitIndexTransactionPortError> {
+    ) -> Result<(), GitIndexTransactionPortError> {
+        let effect = match request.binding.operation {
+            GitIndexTransactionOperationV1::StageHunks => GitIndexEffectV1::StageHunks,
+            GitIndexTransactionOperationV1::UnstageHunks => GitIndexEffectV1::UnstageHunks,
+            GitIndexTransactionOperationV1::CommitIndex => GitIndexEffectV1::CommitIndex,
+        };
         let current = self.authorization.recheck(request, preview)?;
         if request.context.admission_at(current.evaluated_at) != RequestAdmission::Admitted
             || current.policy_digest != request.proof.policy_digest
@@ -490,20 +486,6 @@ where
         {
             return Err(GitIndexTransactionPortError::PolicyDenied);
         }
-        Ok(current)
-    }
-
-    fn classify_current_policy(
-        &self,
-        request: &GitIndexApplyRequestV1,
-        preview: &GitIndexPreviewV1,
-        current: CurrentGitIndexPolicyStateV1,
-    ) -> Result<(), GitIndexTransactionPortError> {
-        let effect = match request.binding.operation {
-            GitIndexTransactionOperationV1::StageHunks => GitIndexEffectV1::StageHunks,
-            GitIndexTransactionOperationV1::UnstageHunks => GitIndexEffectV1::UnstageHunks,
-            GitIndexTransactionOperationV1::CommitIndex => GitIndexEffectV1::CommitIndex,
-        };
         let decision = self.classifier.evaluate(&GitEffectClassificationInputV1 {
             effect,
             authorization: current.authorization,

@@ -529,16 +529,20 @@ pub(crate) async fn persist_parsed_transcript<S: TranscriptIngestStore>(
     // Live-activity tap: this is the one chokepoint every provider's transcript
     // ingest funnels through, so it is where "an agent said something in this
     // project" becomes observable. Published only after the durable batch
-    // commits, so consumers never report work that did not land. The project id
-    // is left for the adapter to resolve from the registry — ingest holds a
+    // commits, so the dashboard never lights work that did not land. The project
+    // id is left for the dashboard to resolve from the registry — ingest holds a
     // project root, not a registered identity, and must not pay a lookup here.
-    crate::application::event_lane::publish(
-        crate::application::event_lane::ActivityFamilyV1::SessionIngest,
-        project_root,
-        None,
-        messages_upserted,
-        Some(provider),
-    );
+    if let Some(observation_database) = store.registered_observation_database() {
+        crate::application::event_lane::publish(
+            observation_database,
+            crate::application::event_lane::ActivityFamilyV1::SessionIngest,
+            project_root,
+            None,
+            messages_upserted,
+            Some(provider),
+        )
+        .await;
+    }
     Ok(TranscriptIngestStats {
         sessions_upserted: 1,
         messages_upserted,

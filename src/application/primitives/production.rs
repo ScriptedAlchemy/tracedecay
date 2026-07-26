@@ -882,15 +882,17 @@ fn public_module_symbols(nodes: Vec<Node>, path: &str) -> Vec<SymbolPrimitiveRec
 pub struct TraceDecayExtendedPrimitivePortV1 {
     graph: Arc<TraceDecay>,
     database: Database,
+    observation_database: Arc<RegisteredGlobalDb>,
     code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
     diagnostic_identity: Arc<dyn CodeIndexPublicationIdentityPortV1>,
     diagnostic_cursors: AuthenticatedDiagnosticCursorAuthorityV1,
 }
 
 impl TraceDecayExtendedPrimitivePortV1 {
-    fn new(
+    pub(crate) fn new(
         graph: Arc<TraceDecay>,
         database: Database,
+        observation_database: Arc<RegisteredGlobalDb>,
         code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
         diagnostic_identity: Arc<dyn CodeIndexPublicationIdentityPortV1>,
         diagnostic_cursors: AuthenticatedDiagnosticCursorAuthorityV1,
@@ -898,6 +900,7 @@ impl TraceDecayExtendedPrimitivePortV1 {
         Self {
             graph,
             database,
+            observation_database,
             code_index,
             diagnostic_identity,
             diagnostic_cursors,
@@ -1038,7 +1041,6 @@ pub(crate) async fn canonical_storage_status(
         if let Some(warning) = branch.fallback_warning {
             details.push(warning);
         }
-        details.extend(largest_table_details(graph.storage_table_bytes().await));
     }
     let history_path = storage_status_history_path(
         &graph.store_layout().data_root,
@@ -1270,6 +1272,7 @@ impl Pr12ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
         Box::pin(async move {
             match crate::mcp::tools::handlers::health::compute_health_delta_result(
                 &self.graph,
+                self.observation_database.as_ref(),
                 request.before_cursor.as_deref(),
                 request.path_prefix.as_deref(),
             )
@@ -2122,6 +2125,7 @@ pub(crate) async fn open_pr12_production_primitive_runtime(
     let extended = Arc::new(TraceDecayExtendedPrimitivePortV1::new(
         Arc::clone(&graph),
         database.clone(),
+        Arc::clone(&session_db),
         code_index,
         diagnostic_identity,
         AuthenticatedDiagnosticCursorAuthorityV1 {

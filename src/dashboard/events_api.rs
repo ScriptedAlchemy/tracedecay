@@ -508,9 +508,19 @@ pub(crate) async fn events(
     // producer sequence.
     let mut activity = crate::application::event_lane::subscribe();
     let requested = parse_last_event_id(&headers);
-    let initial_replay = crate::application::event_lane::replay_after(
-        requested.as_ref().map(|resume| resume.sequence),
-    );
+    let activity_db = state.lcm_db.clone();
+    let activity_project_id = state.project_id.clone();
+    let initial_replay = match (activity_db.as_deref(), activity_project_id.as_deref()) {
+        (Some(db), Some(project_id)) => {
+            crate::application::event_lane::replay_after(
+                db,
+                project_id,
+                requested.as_ref().map(|resume| resume.sequence),
+            )
+            .await
+        }
+        _ => None,
+    };
 
     tokio::spawn(async move {
         let mut stream_state = EventStreamState::new(run_id);
@@ -531,7 +541,10 @@ pub(crate) async fn events(
                 .as_ref()
                 .is_some_and(|resume| resume.sequence >= replay.frontier.next_sequence);
             if (run_mismatch || invalid_frontier)
-                && let Some(from_start) = crate::application::event_lane::replay_after(None)
+                && let (Some(db), Some(project_id)) =
+                    (activity_db.as_deref(), activity_project_id.as_deref())
+                && let Some(from_start) =
+                    crate::application::event_lane::replay_after(db, project_id, None).await
             {
                 replay = from_start;
             }
@@ -591,7 +604,14 @@ pub(crate) async fn events(
                             }
                         }
                         Some(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
-                            if let Some(replay) = crate::application::event_lane::replay_after(Some(producer_cursor)) {
+                            if let (Some(db), Some(project_id)) =
+                                (activity_db.as_deref(), activity_project_id.as_deref())
+                                && let Some(replay) = crate::application::event_lane::replay_after(
+                                    db,
+                                    project_id,
+                                    Some(producer_cursor),
+                                ).await
+                            {
                                 if replay.resume_gap {
                                     let event = resume_gap_event(producer_cursor, &replay.frontier, &scope);
                                     let Ok(frame) = encode_event(&event) else {

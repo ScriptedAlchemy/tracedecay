@@ -466,7 +466,7 @@ pub struct ToolCallRegistryOptions<'a> {
         Option<crate::dashboard::code_index_freshness_api::CodeIndexFreshnessReader>,
     pub diagnostics_cache: Option<&'a crate::diagnostics::DiagnosticsCache>,
     pub diagnostics_lsp:
-        Option<&'a tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>>,
+        Option<Arc<tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>>>,
     pub application_invocation_client: Option<&'a crate::daemon_client::DaemonInvocationClient>,
     pub application_request_id: Option<tracedecay_application::RequestId>,
     pub application_deadline: Option<tracedecay_application::Deadline>,
@@ -494,7 +494,7 @@ impl Default for ToolCallRegistryOptions<'_> {
             allow_default_registry_fallback: true,
             implicit_project_path: None,
             automation_scheduler_reconciler: None,
-            automation_writer: crate::dashboard::direct_dashboard_automation_writer(),
+            automation_writer: crate::dashboard::standalone_dashboard_automation_writer(),
             doctor_report_reader: None,
             doctor_remediation_dispatcher: None,
             code_index_freshness_reader: None,
@@ -1396,10 +1396,16 @@ async fn execute_project_retained_application_tool(
             dispatch_lcm_tool(tool_name, request.arguments, active_lcm_context).await
         }
         RetainedSurfaceOperation::SessionStart => {
-            health::handle_session_start(cg, request.arguments, scope_prefix).await
+            let db = active_project_session_db.ok_or_else(|| TraceDecayError::Config {
+                message: "health-delta observation authority is unavailable".to_owned(),
+            })?;
+            health::handle_session_start(cg, db.as_ref(), request.arguments, scope_prefix).await
         }
         RetainedSurfaceOperation::SessionEnd => {
-            health::handle_session_end(cg, request.arguments, scope_prefix).await
+            let db = active_project_session_db.ok_or_else(|| TraceDecayError::Config {
+                message: "health-delta observation authority is unavailable".to_owned(),
+            })?;
+            health::handle_session_end(cg, db.as_ref(), request.arguments, scope_prefix).await
         }
     }
 }
@@ -1475,6 +1481,7 @@ async fn dispatch_session_workflow_tools(
                 options.doctor_report_reader.clone(),
                 options.doctor_remediation_dispatcher.clone(),
                 options.code_index_freshness_reader.clone(),
+                options.diagnostics_lsp.clone(),
             )
             .await
         }

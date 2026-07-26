@@ -1568,11 +1568,6 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
-    pub async fn ensure_token_count_cache_for_test(&self) -> bool {
-        self.profile_database.ensure_token_count_cache().await
-    }
-
-    #[doc(hidden)]
     pub async fn delete_project(&self, project_path: &Path) {
         self.profile_database.delete_project(project_path).await;
     }
@@ -2180,6 +2175,13 @@ impl HostAdmissionTestRuntimeV1 {
             })
     }
 
+    #[doc(hidden)]
+    pub(crate) fn project_observation_database_for_test(
+        &self,
+    ) -> crate::errors::Result<&RegisteredGlobalDb> {
+        self.project_database_for_test()
+    }
+
     fn session_database_for_test(
         &self,
         scope: HostAdmissionScope,
@@ -2374,6 +2376,7 @@ impl HostAdmissionTestRuntimeV1 {
         })?;
         let profile_database = Arc::clone(&self.profile_database);
         let profile_sessions = Arc::clone(&self.profile_registered);
+        let profile_identity = crate::daemon::profile_identity::load_or_create(&profile_root)?;
         let mut context =
             crate::mcp::server::McpServerConstructionContext::direct(cg, scope_prefix)
                 .with_direct_databases(

@@ -57,7 +57,7 @@ const FEEDBACK_READ_SURFACES: [BindingSurface; 4] = [
 /// Hook delivery is host-registration metadata rather than a callable catalog
 /// surface. Dashboard consumes their results through the canonical feedback
 /// readers above rather than advertising producer operations it cannot invoke.
-const ADVISORY_READ_SURFACES: [BindingSurface; 4] = [
+const PR13_ADVISORY_SURFACES: [BindingSurface; 4] = [
     BindingSurface::Cli,
     BindingSurface::Mcp,
     BindingSurface::Http,
@@ -164,7 +164,7 @@ const FEEDBACK_SPECS: [FeedbackSurfaceSpec; 11] = [
         description: "Run one authorized four-pillar feedback cycle and return a daemon-minted canonical read handle.",
         example: "Run the complete advisory cycle for this saved document",
         paginated: false,
-        surfaces: &ADVISORY_READ_SURFACES,
+        surfaces: &PR13_ADVISORY_SURFACES,
     },
     FeedbackSurfaceSpec {
         capability: GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,

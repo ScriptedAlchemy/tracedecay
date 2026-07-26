@@ -377,16 +377,21 @@ impl McpServer {
         // this project, so publish it at the observation point carrying this
         // project's own registered id. The application lane retains it even
         // without a connected dashboard; the SSE adapter coalesces the burst.
-        let activity_project_id = crate::application::event_lane::enabled()
-            .then(|| cg.store_layout().identity.project_id.clone())
-            .flatten();
-        crate::application::event_lane::publish(
-            crate::application::event_lane::ActivityFamilyV1::Hook,
-            &root,
-            activity_project_id.as_deref(),
-            1,
-            Some(event.kind.as_key()),
-        );
+        let activity_project_id =
+            crate::application::event_lane::enabled(self.session_db.as_deref())
+                .then(|| cg.store_layout().identity.project_id.clone())
+                .flatten();
+        if let Some(activity_db) = self.session_db.as_deref() {
+            crate::application::event_lane::publish(
+                activity_db,
+                crate::application::event_lane::ActivityFamilyV1::Hook,
+                &root,
+                activity_project_id.as_deref(),
+                1,
+                Some(event.kind.as_key()),
+            )
+            .await;
+        }
         // Primary incremental-index hint: deliver the exact touched paths into
         // the daemon-owned code-index scheduler queue as soon as the routing
         // event is observed. Independent of host-admission durability so an
@@ -399,13 +404,17 @@ impl McpServer {
             // worktree's incremental queue — the exact moment indexing work is
             // created for this project, and the only condition worth lighting.
             if sink(root.clone(), event.rel_paths.clone()).await {
-                crate::application::event_lane::publish(
-                    crate::application::event_lane::ActivityFamilyV1::CodeIndex,
-                    &root,
-                    activity_project_id.as_deref(),
-                    event.rel_paths.len() as u64,
-                    Some(event.kind.as_key()),
-                );
+                if let Some(activity_db) = self.session_db.as_deref() {
+                    crate::application::event_lane::publish(
+                        activity_db,
+                        crate::application::event_lane::ActivityFamilyV1::CodeIndex,
+                        &root,
+                        activity_project_id.as_deref(),
+                        event.rel_paths.len() as u64,
+                        Some(event.kind.as_key()),
+                    )
+                    .await;
+                }
             }
         }
         let current_branch = crate::branch::current_branch(&root);
@@ -842,7 +851,7 @@ impl McpServer {
                 doctor_remediation_dispatcher: self.dashboard_doctor_remediation_dispatcher.clone(),
                 code_index_freshness_reader: self.dashboard_code_index_freshness_reader.clone(),
                 diagnostics_cache: Some(&self.diagnostics_cache),
-                diagnostics_lsp: Some(self.diagnostics_lsp.as_ref()),
+                diagnostics_lsp: Some(Arc::clone(&self.diagnostics_lsp)),
                 application_invocation_client,
                 application_request_id,
                 application_deadline,
@@ -1542,15 +1551,19 @@ impl McpServer {
         // Durable activity record: one per dispatched tool call, scoped to the
         // project this server serves. Gate the snapshot read when no profile
         // event authority can be mounted.
-        if crate::application::event_lane::enabled() {
+        if crate::application::event_lane::enabled(self.session_db.as_deref())
+            && let Some(activity_db) = self.session_db.as_deref()
+        {
             let cg = self.cg_snapshot().await;
             crate::application::event_lane::publish(
+                activity_db,
                 crate::application::event_lane::ActivityFamilyV1::ToolCall,
                 cg.project_root(),
                 cg.store_layout().identity.project_id.as_deref(),
                 1,
                 Some(&tool_name),
-            );
+            )
+            .await;
         }
 
         let dispatch = self

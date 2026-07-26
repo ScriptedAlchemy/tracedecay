@@ -1212,9 +1212,7 @@ async fn status_json_reads_readonly_project_database() {
     let db_path = profile_sharded_layout(&project_root, &profile_root(home.path()), &marker)
         .unwrap()
         .graph_db_path;
-    let (db, _) = crate::common::open_test_database(&db_path)
-        .await
-        .unwrap();
+    let (db, _) = crate::common::open_test_database(&db_path).await.unwrap();
     db.insert_node(&sample_node("node-1", "process_data", "src/lib.rs"))
         .await
         .unwrap();
@@ -1921,10 +1919,9 @@ fn migrate_registry_gc_cleans_stale_storage_metadata_and_preserves_live_and_bloc
     let stale_project = canonical_temp_path(stale_fixture.path()).join("gone-project");
     std::fs::create_dir_all(&stale_project).expect("stale project fixture");
     create_runtime().block_on(async {
-        let runtime =
-            HostAdmissionTestRuntimeV1::profile(&profile_root_path)
-                .await
-                .expect("open registered global runtime");
+        let runtime = HostAdmissionTestRuntimeV1::profile(&profile_root_path)
+            .await
+            .expect("open registered global runtime");
         runtime.upsert(&live_project, 1).await;
         runtime.upsert(&stale_project, 1).await;
         runtime

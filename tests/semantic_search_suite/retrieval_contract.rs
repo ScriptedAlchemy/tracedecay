@@ -6,9 +6,7 @@ use tracedecay::query::retrieval::RetrievalPortError;
 use tracedecay::query::retrieval::semantic::{
     CalibratedSemanticQueryService, CodeSemanticEvidenceV1, SemanticAbstentionV1,
     SemanticIndexStateV1, SemanticLaneReadinessV1, SemanticLaneRetriever, SemanticQueryModeV1,
-    SemanticQueryServiceError, SemanticQueryServiceOutcomeV1, SemanticRetrievalAvailabilityV1,
-    SemanticRetrievalRequirementV1, SemanticRetrievalSelectionPolicyV1,
-    SemanticRetrievalSelectionV1,
+    SemanticQueryServiceError, SemanticQueryServiceOutcomeV1,
 };
 use tracedecay_domain::{
     Pr9FallbackSubpayload, PublicRetrieverStatus, RetrieverBatch, RetrieverKind, RetrieverOutcome,
@@ -41,24 +39,6 @@ fn fallback() -> Arc<Pr9FallbackSubpayload> {
 
 struct NeverCalledSemanticLane;
 
-struct TestSemanticRetrievalSelectionPolicyV1;
-
-impl SemanticRetrievalSelectionPolicyV1 for TestSemanticRetrievalSelectionPolicyV1 {
-    fn select(
-        &self,
-        availability: SemanticRetrievalAvailabilityV1,
-        requirement: SemanticRetrievalRequirementV1,
-    ) -> SemanticRetrievalSelectionV1 {
-        if availability == SemanticRetrievalAvailabilityV1::Ready {
-            SemanticRetrievalSelectionV1::Semantic
-        } else if requirement == SemanticRetrievalRequirementV1::FallbackAllowed {
-            SemanticRetrievalSelectionV1::FrozenFallback
-        } else {
-            SemanticRetrievalSelectionV1::Unavailable
-        }
-    }
-}
-
 impl SemanticLaneRetriever for NeverCalledSemanticLane {
     fn retrieve_semantic(
         &self,
@@ -72,10 +52,7 @@ impl SemanticLaneRetriever for NeverCalledSemanticLane {
 fn asynchronous_non_ready_states_preserve_pr9_fallback_bytes() {
     let fallback = fallback();
     let fallback_bytes = serde_json::to_vec(fallback.as_ref()).expect("serialize fallback");
-    let service = CalibratedSemanticQueryService::new(
-        &NeverCalledSemanticLane,
-        &TestSemanticRetrievalSelectionPolicyV1,
-    );
+    let service = CalibratedSemanticQueryService::new(&NeverCalledSemanticLane);
 
     for (state, expected) in [
         (

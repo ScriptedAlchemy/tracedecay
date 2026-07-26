@@ -16,11 +16,6 @@ use tracedecay_policy::routing::{
     CapabilityAvailabilityV1, CapabilityEffectClassV1, CapabilityRoutingDispositionV1,
     CapabilityRoutingReasonV1, ScopeMatchV1, TruthFreshnessRequirementV1, TruthSourceStateV1,
 };
-use tracedecay_policy::{
-    PolicyEvidenceAgreementV1 as RetainedEvidenceAgreementV1, PolicyEvidenceCoverageV1,
-    PolicyEvidenceSnapshotV1, PolicyEvidenceStateV1, RetainedPolicyInputV1,
-    RetainedPolicySnapshotStateV1,
-};
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 fn id<T>(value: &str) -> T
@@ -266,7 +261,7 @@ fn callable_route_returns_typed_denial_for_a_missing_operation_grant() {
 }
 
 #[test]
-fn local_live_correlation_cannot_fall_back_to_generic_capability_routing() {
+fn local_live_disagreement_preserves_both_independent_watermarks() {
     let composition = PolicyEvaluatorCompositionV1::from_application_catalog().unwrap();
     let context = evaluation_context();
     let candidate = composition
@@ -309,6 +304,8 @@ fn local_live_correlation_cannot_fall_back_to_generic_capability_routing() {
         evaluation.decision.disposition,
         CapabilityRoutingDispositionV1::Allow
     );
+    assert_eq!(evaluation.evidence_horizon, Some(horizon));
+    assert_eq!(evaluation.context.scope(), context.scope());
 }
 
 #[test]

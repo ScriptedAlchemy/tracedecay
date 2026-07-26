@@ -1478,7 +1478,7 @@ fn classify_native_failure(error: &NativeGitIndexError) -> NativeGitIndexApplyOu
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-transport"))]
 #[cfg_attr(not(unix), allow(dead_code))] // exercised only by unix-only daemon tests
 pub(crate) fn capture_exact_snapshot_for_test(
     repository_root: &std::path::Path,

@@ -79,10 +79,14 @@ impl DaemonGitAuthoritySource for ProductionDaemonGitAuthoritySource {
         if evaluated_at >= self.access.grant_expires_at {
             return Err(GitIndexTransactionPortError::PolicyDenied);
         }
-        let current = self
-            .runtime
-            .block_on(self.configuration.current())
-            .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
+        // The Git transaction port is intentionally synchronous while the
+        // configuration authority is asynchronous. Production calls arrive
+        // on Tokio workers, so yield this worker before waiting on the same
+        // runtime; calling `Handle::block_on` directly here panics because it
+        // attempts to enter a runtime that is already driving this task.
+        let current =
+            tokio::task::block_in_place(|| self.runtime.block_on(self.configuration.current()))
+                .map_err(|_| GitIndexTransactionPortError::DaemonUnavailable)?;
         if current.snapshot.validate().is_err() {
             return Err(GitIndexTransactionPortError::PolicyDenied);
         }

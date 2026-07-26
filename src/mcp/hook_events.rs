@@ -985,20 +985,17 @@ mod tests {
     }
 
     #[test]
-    fn shell_emitters_preserve_only_provider_contract_evidence() {
-        let cursor = crate::daemon::DaemonHookEvent::cursor_after_shell_execution(
-            "git status".to_owned(),
-            PathBuf::from("/project"),
-        );
-        let wire = serde_json::to_value(cursor).unwrap();
-        assert_eq!(wire["command"], "git status");
-
-        let post_tool = crate::daemon::DaemonHookEvent::post_tool_use_shell(
-            HookAgent::Codex,
-            PathBuf::from("/project"),
-        );
-        let wire = serde_json::to_value(post_tool).unwrap();
-        assert!(wire.get("command").is_none());
+    fn shell_emitters_do_not_put_command_text_on_the_wire() {
+        for event in [
+            crate::daemon::DaemonHookEvent::cursor_after_shell_execution(PathBuf::from("/project")),
+            crate::daemon::DaemonHookEvent::post_tool_use_shell(
+                HookAgent::Codex,
+                PathBuf::from("/project"),
+            ),
+        ] {
+            let wire = serde_json::to_value(event).unwrap();
+            assert!(wire.get("command").is_none());
+        }
     }
 
     #[test]

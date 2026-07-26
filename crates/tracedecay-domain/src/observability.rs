@@ -1,5 +1,7 @@
 //! Canonical, payload-safe Plan 26 observability contracts.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -82,6 +84,8 @@ pub enum ObservabilityPayloadV1 {
     AnalyticsConsent(AnalyticsConsentChangedV1),
     OperationResource(OperationResourceObservedV1),
     TelemetryDrop(TelemetryDropObservedV1),
+    HealthSnapshot(HealthSnapshotObservedV1),
+    Activity(ActivityObservedV1),
 }
 
 impl ObservabilityPayloadV1 {
@@ -99,6 +103,8 @@ impl ObservabilityPayloadV1 {
             Self::AnalyticsConsent(_) => "analytics.consent.changed.v1",
             Self::OperationResource(_) => "operation.resource.observed.v1",
             Self::TelemetryDrop(_) => "telemetry.drop.observed.v1",
+            Self::HealthSnapshot(_) => "health.snapshot.observed.v1",
+            Self::Activity(_) => "activity.observed.v1",
         }
     }
 }
@@ -148,6 +154,44 @@ impl ObservabilityEnvelopeV1 {
         }
         if self.quantity.is_some_and(|value| !value.is_finite()) {
             return Err("quantity");
+        }
+        match &self.payload {
+            ObservabilityPayloadV1::Activity(activity) => {
+                if activity.units == 0
+                    || !matches!(
+                        activity.family.as_str(),
+                        "hook" | "session_ingest" | "code_index" | "tool_call"
+                    )
+                    || activity.detail.as_deref().is_some_and(|detail| {
+                        detail.is_empty()
+                            || detail.len() > 128
+                            || detail.trim() != detail
+                            || detail.chars().any(char::is_control)
+                    })
+                {
+                    return Err("activity");
+                }
+            }
+            ObservabilityPayloadV1::HealthSnapshot(snapshot) => {
+                if snapshot.scope_digest != self.scope_ref
+                    || snapshot.dimensions.is_empty()
+                    || snapshot.dimensions.len() > 16
+                    || snapshot.dimensions.iter().any(|(name, dimension)| {
+                        !matches!(
+                            name.as_str(),
+                            "acyclicity"
+                                | "depth"
+                                | "equality"
+                                | "redundancy"
+                                | "modularity"
+                                | "coverage_discipline"
+                        ) || dimension.score_ppm > 1_000_000
+                    })
+                {
+                    return Err("health_snapshot");
+                }
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -273,6 +317,32 @@ pub struct TelemetryDropObservedV1 {
     pub last_missing_sequence: u64,
     pub proved_drop_lower_bound: u64,
     pub clean_shutdown_observed: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct HealthDimensionObservedV1 {
+    pub score_ppm: u64,
+    pub denominator: Option<u64>,
+}
+
+/// Payload-safe health observation retained by the registered observability
+/// authority. Project paths and source content never enter this record.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct HealthSnapshotObservedV1 {
+    pub scope_digest: String,
+    pub quality_signal: u32,
+    pub files_analyzed: u64,
+    pub function_denominator: u64,
+    pub dimensions: BTreeMap<String, HealthDimensionObservedV1>,
+}
+
+/// One bounded project activity observation. `family` and `detail` are
+/// producer-controlled finite labels; paths, source, and messages are excluded.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ActivityObservedV1 {
+    pub family: String,
+    pub units: u64,
+    pub detail: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]

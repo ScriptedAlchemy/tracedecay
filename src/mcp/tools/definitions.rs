@@ -628,6 +628,8 @@ const FORMAT_CAPABLE_TOOL_NAMES: &[&str] = &[
     "tracedecay_feedback_expand",
     "tracedecay_feedback_list",
     "tracedecay_feedback_advisory_cycle",
+    "tracedecay_feedback_impact",
+    "tracedecay_affected_tests",
     "tracedecay_test_results",
     "tracedecay_code_exact_occurrence",
     "tracedecay_code_phrase_search",
