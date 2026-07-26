@@ -61,10 +61,10 @@ fn root_snapshot_validates_every_application_contribution_against_declared_descr
             assert_eq!(handler.operation().use_case_id(), capability.use_case_id());
             assert_eq!(handler.request_schema(), capability.request_schema());
             assert_eq!(handler.result_schema(), capability.result_schema());
-            assert_eq!(
-                capability.availability().is_callable(),
-                !capability.profile_eligibility().is_empty(),
-                "{} availability and profile eligibility disagree",
+            assert!(
+                capability.profile_eligibility().is_empty()
+                    || capability.availability().is_callable(),
+                "{} is profile-eligible but unavailable",
                 capability.capability_id()
             );
         }
@@ -83,8 +83,14 @@ fn root_snapshot_validates_every_application_contribution_against_declared_descr
             .collect::<Vec<_>>(),
         vec![
             "capability.application.code-query.callees",
+            "capability.application.code-query.declaration",
+            "capability.application.code-query.definition",
             "capability.application.code-query.exact-occurrence",
+            "capability.application.code-query.facets",
             "capability.application.code-query.phrase-search",
+            "capability.application.code-query.references",
+            "capability.application.code-query.timeline",
+            "capability.application.code-query.type-definition",
             "capability.application.configuration.audit",
             "capability.application.configuration.batch",
             "capability.application.configuration.explain",
@@ -109,15 +115,13 @@ fn root_snapshot_validates_every_application_contribution_against_declared_descr
             "capability.application.context-scout-recent",
             "capability.application.context-scout-resume",
             "capability.application.context-scout-status",
+            "capability.application.feedback.advisory-cycle",
             "capability.application.feedback.affected-tests",
-            "capability.application.feedback.ci-failure-localize",
             "capability.application.feedback.diagnostics",
             "capability.application.feedback.expand",
             "capability.application.feedback.get",
-            "capability.application.feedback.github-review-ingest",
             "capability.application.feedback.impact",
             "capability.application.feedback.list",
-            "capability.application.feedback.proximity",
             "capability.application.feedback.test-results",
             "capability.application.git.apply",
             "capability.application.git.blame",
@@ -134,6 +138,7 @@ fn root_snapshot_validates_every_application_contribution_against_declared_descr
             "capability.application.primitive.diagnostics-read",
             "capability.application.primitive.file-dependents",
             "capability.application.primitive.file-metadata",
+            "capability.application.primitive.health-delta",
             "capability.application.primitive.health-read",
             "capability.application.primitive.module-api",
             "capability.application.primitive.qualified-name",
@@ -172,6 +177,19 @@ fn root_snapshot_validates_every_application_contribution_against_declared_descr
             "capability.retrieval.symbol-search",
         ]
     );
+
+    for capability_id in [
+        "capability.application.feedback.github-review-ingest",
+        "capability.application.feedback.ci-failure-localize",
+        "capability.application.feedback.proximity",
+    ] {
+        let capability = snapshot
+            .capability(&CapabilityId::new(capability_id).unwrap())
+            .expect("PR13 provider contribution");
+        assert!(capability.availability().is_callable());
+        assert!(capability.profile_eligibility().is_empty());
+        assert!(capability.binding_ids().is_empty());
+    }
 }
 
 #[test]
@@ -181,7 +199,7 @@ fn root_snapshot_composes_every_explicit_profile_without_widening_eligibility() 
         (
             "profile.default",
             ProfileKind::Default,
-            ProfileBudget::new(256, 80_000_000, 18_000).unwrap(),
+            ProfileBudget::new(288, 84_000_000, 18_000).unwrap(),
         ),
         (
             "profile.compact",

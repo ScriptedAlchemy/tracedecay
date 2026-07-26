@@ -521,6 +521,21 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
     definitions
 }
 
+/// Resolve a daemon-internal host surface for the CLI fallback without
+/// advertising it through MCP discovery.
+#[doc(hidden)]
+pub fn internal_daemon_tool_definition(name: &str) -> Option<ToolDefinition> {
+    match name {
+        "tracedecay_hook_runtime" => Some(def_rw(
+            "tracedecay_hook_runtime",
+            "Internal Host Ingest",
+            "Forward one exact host-ingest envelope to the daemon. The handler validates the action-specific payload.",
+            json!({ "type": "object" }),
+        )),
+        _ => None,
+    }
+}
+
 fn add_lcm_storage_scope_property(definitions: &mut [ToolDefinition]) {
     for definition in definitions.iter_mut().filter(|definition| {
         definition.name.starts_with("tracedecay_lcm_")
@@ -767,6 +782,20 @@ fn add_format_property(definitions: &mut [ToolDefinition]) {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::unreadable_literal)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn internal_host_ingest_is_cli_resolvable_but_not_advertised() {
+        assert!(
+            get_tool_definitions()
+                .iter()
+                .all(|definition| definition.name != "tracedecay_hook_runtime")
+        );
+        let definition = internal_daemon_tool_definition("tracedecay_hook_runtime")
+            .expect("internal host-ingest definition");
+        assert_eq!(definition.name, "tracedecay_hook_runtime");
+        assert_eq!(definition.input_schema, json!({ "type": "object" }));
+        assert!(internal_daemon_tool_definition("tracedecay_unknown").is_none());
+    }
 
     #[test]
     fn test_explore_call_budget_tiers() {
