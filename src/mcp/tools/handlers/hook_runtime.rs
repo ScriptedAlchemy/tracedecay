@@ -62,6 +62,9 @@ pub async fn handle_hook_runtime(
         "hook_v2_feedback" => hook_v2_feedback(cg, &args).await?,
         "hook_v2_cancel" => hook_v2_cancel(cg, &args).await?,
         "hook_v2_status" => hook_v2_status(cg, &args).await?,
+        "opencode_lsp_updated" => {
+            opencode_lsp_updated(cg, &args, required_project_db(session_authorities)?).await?
+        }
         action if ContextScoutReadSurfaceV1::from_action(action).is_some() => {
             hook_v2_scout_read(cg, &args, action).await?
         }
@@ -87,6 +90,33 @@ pub async fn handle_hook_runtime(
         }
     };
     Ok(rendered_tool_json(Some(cg.project_root()), &args, &output))
+}
+
+async fn opencode_lsp_updated(
+    cg: &TraceDecay,
+    args: &Value,
+    project_sessions: &RegisteredGlobalDb,
+) -> Result<Value> {
+    let event = args
+        .get("event")
+        .ok_or_else(|| config_error("missing required parameter `event`"))?;
+    let payload = serde_json::to_vec(event)
+        .map_err(|error| config_error(format!("invalid OpenCode LSP event: {error}")))?;
+    tracedecay_hooks::decode_opencode_lsp_event(&payload)
+        .map_err(|error| config_error(format!("invalid OpenCode LSP event: {error}")))?;
+    crate::application::event_lane::publish(
+        project_sessions,
+        crate::application::event_lane::ActivityFamilyV1::Hook,
+        cg.project_root(),
+        None,
+        1,
+        Some("opencode_lsp_updated"),
+    )
+    .await;
+    Ok(json!({
+        "action": "opencode_lsp_updated",
+        "status": "accepted",
+    }))
 }
 
 pub(crate) async fn handle_projectless_hook_runtime(
