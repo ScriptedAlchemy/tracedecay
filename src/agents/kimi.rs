@@ -1,13 +1,13 @@
 // Rust guideline compliant 2025-10-17
 //! Kimi Code CLI agent integration.
 //!
-//! The global install is the Kimi Code CLI native plugin: the tracedecay
-//! plugin bundle deploys to `<kimi-code-home>/plugins/managed/tracedecay/`
-//! and registers in `<kimi-code-home>/plugins/installed.json`, where
-//! `<kimi-code-home>` is `$KIMI_CODE_HOME` when set, else `~/.kimi-code`. The
-//! plugin manifest owns the MCP server, skills, and commands, so a stale
-//! direct registration in `<kimi-code-home>/mcp.json` is migrated away on
-//! install. Project-local `--local` installs write
+//! Kimi Code currently exposes plugin lifecycle only through its interactive
+//! `/plugins` host API. TraceDecay stages the verified native plugin bundle
+//! for that official flow, but never writes the host's managed directory or
+//! `plugins/installed.json` registry itself. Until Kimi ships a documented
+//! non-interactive mutation API, global install/update/uninstall return an
+//! explicit remediation without changing host state. Project-local `--local`
+//! installs write
 //! `<project>/.kimi-code/mcp.json` plus prompt rules in `<project>/AGENTS.md`.
 //!
 //! The pre-plugin Kimi CLI surface (`~/.kimi/mcp.json` + `~/.kimi/AGENTS.md`)
@@ -16,7 +16,6 @@
 //! still cleaned up and noticed by upgrade tracking.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use serde_json::json;
 
@@ -34,8 +33,7 @@ use super::prompt_rules::{PROMPT_RULE_MARKER, PromptRulesOptions};
 /// When unset, the home resolves to `~/.kimi-code`.
 pub const KIMI_CODE_HOME_ENV: &str = "KIMI_CODE_HOME";
 
-/// Plugin id the tracedecay bundle registers under in Kimi Code CLI's
-/// `plugins/installed.json` and the name of its managed deploy directory.
+/// Plugin id read from Kimi Code CLI's official installed-plugin state.
 const KIMI_PLUGIN_ID: &str = "tracedecay";
 
 /// Deploy-relative path of the Kimi Code CLI plugin manifest inside the
@@ -55,23 +53,14 @@ impl AgentIntegration for KimiIntegration {
     }
 
     fn install(&self, ctx: &InstallContext) -> Result<()> {
-        let code_home = kimi_code_home(&ctx.home);
         let staged_dir = ctx
             .home
             .join(".tracedecay/host-bundle-stage/kimi/tracedecay");
         deploy_kimi_plugin_to(&staged_dir, &ctx.tracedecay_bin)?;
-        install_kimi_plugin_with_manager_fallback(&code_home, &staged_dir, &ctx.tracedecay_bin)?;
-        let managed_dir = kimi_plugin_managed_dir(&code_home);
-        migrate_kimi_code_mcp_json(&code_home);
-
-        eprintln!();
-        eprintln!("Setup complete. Next steps:");
-        eprintln!("  1. cd into your project and run: tracedecay init");
-        eprintln!(
-            "  2. Start a new Kimi Code session — the tracedecay plugin loads from {}",
-            managed_dir.display()
-        );
-        Ok(())
+        Err(kimi_official_lifecycle_unavailable(
+            "install",
+            Some(&staged_dir),
+        ))
     }
 
     fn supports_local_install(&self) -> bool {
@@ -122,12 +111,18 @@ impl AgentIntegration for KimiIntegration {
             .home
             .join(".tracedecay/host-bundle-stage/kimi/tracedecay");
         deploy_kimi_plugin_to(&staged_dir, &ctx.tracedecay_bin)?;
-        install_kimi_plugin_with_manager_fallback(&code_home, &staged_dir, &ctx.tracedecay_bin)?;
-        let managed_dir = kimi_plugin_managed_dir(&code_home);
-        Ok(UpdatePluginOutcome::Refreshed(vec![managed_dir]))
+        Err(kimi_official_lifecycle_unavailable(
+            "install",
+            Some(&staged_dir),
+        ))
     }
 
     fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
+        let code_home = kimi_code_home(&ctx.home);
+        if installed_json_has_tracedecay(&code_home) {
+            return Err(kimi_official_lifecycle_unavailable("remove", None));
+        }
+
         // Migration shim: pre-plugin tracedecay versions wrote a legacy global
         // install under `~/.kimi` (mcp.json registration, AGENTS.md prompt
         // rules, and the managed skill prompt index). Current installs never
@@ -145,19 +140,8 @@ impl AgentIntegration for KimiIntegration {
         )?;
         uninstall_prompt_rules(&agents_md);
 
-        let code_home = kimi_code_home(&ctx.home);
-        if let Err(error) = run_kimi_plugin_manager(["plugin", "remove", KIMI_PLUGIN_ID]) {
-            eprintln!(
-                "  Official Kimi plugin manager unavailable ({error}); \
-                 removing the managed plugin registration directly."
-            );
-            remove_kimi_installed_entry(&code_home);
-        }
-        remove_kimi_plugin_dir(&code_home)?;
-
         eprintln!();
-        eprintln!("Uninstall complete. Tracedecay has been removed from Kimi Code CLI.");
-        eprintln!("Start a new Kimi Code session for changes to take effect.");
+        eprintln!("Uninstall complete. No Kimi Code plugin registration was present.");
         Ok(())
     }
 
@@ -242,36 +226,21 @@ impl AgentIntegration for KimiIntegration {
     }
 
     fn activate_deployed_host_registration(&self, ctx: &InstallContext) -> Result<()> {
-        // Same contract as `install_kimi_plugin_with_manager_fallback`:
-        // activation must not hard-depend on the optional external `kimi`
-        // binary. Without this fallback, a kimi CLI lacking the `plugin`
-        // subcommand (exit 1: "unknown command 'plugin'") failed the v2
-        // lifecycle between apply and commit on every run, leaving the shared
-        // component-set journal wedged — which then blocked EVERY host's
-        // bundle lifecycle until the journal was manually cleared, and the
-        // receiptless artifacts re-failed the next run as ownership conflicts.
         let code_home = kimi_code_home(&ctx.home);
-        let managed_dir = kimi_plugin_managed_dir(&code_home);
-        match run_kimi_plugin_manager(["plugin", "install", managed_dir.to_string_lossy().as_ref()])
-        {
-            Ok(()) => Ok(()),
-            Err(error) => {
-                eprintln!(
-                    "  Official Kimi plugin manager unavailable ({error}); \
-                     registering the managed plugin directly."
-                );
-                // The v2 artifact writer has already deployed the managed dir;
-                // only the registry entry is missing.
-                upsert_kimi_installed_entry(&code_home)
-            }
+        if installed_json_has_tracedecay(&code_home) {
+            Ok(())
+        } else {
+            Err(kimi_official_lifecycle_unavailable("install", None))
         }
     }
 
     fn deactivate_deployed_host_registration(&self, ctx: &InstallContext) -> Result<()> {
         let code_home = kimi_code_home(&ctx.home);
-        remove_kimi_installed_entry(&code_home);
-        prune_empty_kimi_plugin_dirs(&code_home, &ctx.tracedecay_bin)?;
-        Ok(())
+        if installed_json_has_tracedecay(&code_home) {
+            Err(kimi_official_lifecycle_unavailable("remove", None))
+        } else {
+            Ok(())
+        }
     }
 
     fn has_tracedecay(&self, home: &Path) -> bool {
@@ -359,14 +328,6 @@ fn installed_json_has_tracedecay(kimi_code_home: &Path) -> bool {
     installed_path.exists() && kimi_installed_entry(&load_json_file(&installed_path)).is_some()
 }
 
-/// Deploy the embedded plugin bundle into the managed plugin dir, rendering
-/// the manifest with the crate version and the resolved tracedecay binary.
-/// Every file is written atomically; existing bundle files are overwritten.
-fn deploy_kimi_plugin(kimi_code_home: &Path, tracedecay_bin: &str) -> Result<PathBuf> {
-    let managed_dir = kimi_plugin_managed_dir(kimi_code_home);
-    deploy_kimi_plugin_to(&managed_dir, tracedecay_bin)
-}
-
 /// Canonical rendered Kimi Code plugin inventory. The legacy installer and the
 /// receipt-backed first-party host-bundle catalog must produce byte-identical
 /// files: the component-set transaction verifies installed artifact digests
@@ -400,43 +361,17 @@ fn deploy_kimi_plugin_to(managed_dir: &Path, tracedecay_bin: &str) -> Result<Pat
     Ok(managed_dir.to_path_buf())
 }
 
-/// Install the staged plugin through the official Kimi plugin manager when it
-/// is available; otherwise fall back to the direct managed-dir deploy and
-/// registry upsert the pre-manager installer used. Installs must not
-/// hard-depend on the optional external `kimi` binary — offline machines and
-/// CI environments without it still get a working managed plugin.
-fn install_kimi_plugin_with_manager_fallback(
-    code_home: &Path,
-    staged_dir: &Path,
-    tracedecay_bin: &str,
-) -> Result<()> {
-    match run_kimi_plugin_manager(["plugin", "install", staged_dir.to_string_lossy().as_ref()]) {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            eprintln!(
-                "  Official Kimi plugin manager unavailable ({error}); \
-                 deploying the managed plugin directly."
-            );
-            deploy_kimi_plugin(code_home, tracedecay_bin)?;
-            upsert_kimi_installed_entry(code_home)
-        }
-    }
-}
-
-fn run_kimi_plugin_manager<'a>(args: impl IntoIterator<Item = &'a str>) -> Result<()> {
-    let status =
-        Command::new("kimi")
-            .args(args)
-            .status()
-            .map_err(|error| TraceDecayError::Config {
-                message: format!("failed to run official Kimi plugin manager: {error}"),
-            })?;
-    if status.success() {
-        Ok(())
-    } else {
-        Err(TraceDecayError::Config {
-            message: format!("official Kimi plugin manager exited with {status}"),
-        })
+fn kimi_official_lifecycle_unavailable(action: &str, staged_dir: Option<&Path>) -> TraceDecayError {
+    let command = staged_dir.map_or_else(
+        || format!("/plugins {action} {KIMI_PLUGIN_ID}"),
+        |path| format!("/plugins {action} {}", path.display()),
+    );
+    TraceDecayError::Config {
+        message: format!(
+            "Kimi Code exposes plugin {action} only through the interactive `/plugins` host API; \
+             TraceDecay made no Kimi host-state changes. Open Kimi Code and run \
+             `{command}`, then re-run repair to verify registration"
+        ),
     }
 }
 
@@ -486,206 +421,6 @@ fn render_kimi_hook_commands(raw: &str, tracedecay_bin: &str) -> Result<String> 
         });
     }
     Ok(rendered)
-}
-
-/// Upsert the tracedecay entry in `<kimi-code-home>/plugins/installed.json`,
-/// creating the registry (`{"version":1,"plugins":[]}`) when missing. An
-/// existing entry keeps its `enabled` and `installedAt` values; `updatedAt`
-/// always moves to now. Written atomically with a `.bak` backup.
-fn upsert_kimi_installed_entry(kimi_code_home: &Path) -> Result<()> {
-    let installed_path = kimi_installed_json_path(kimi_code_home);
-    let backup = backup_config_file(&installed_path)?;
-    let mut installed = if installed_path.exists() {
-        let value = load_json_file_strict(&installed_path)?;
-        if value.is_object() {
-            value
-        } else {
-            return Err(TraceDecayError::Config {
-                message: format!(
-                    "{} is not a JSON object; fix or delete it manually",
-                    installed_path.display()
-                ),
-            });
-        }
-    } else {
-        json!({"version": 1, "plugins": []})
-    };
-    if installed.get("version").is_none() {
-        installed["version"] = json!(1);
-    }
-    if installed.get("plugins").is_none() {
-        installed["plugins"] = json!([]);
-    }
-    let Some(plugins) = installed
-        .get_mut("plugins")
-        .and_then(|value| value.as_array_mut())
-    else {
-        return Err(TraceDecayError::Config {
-            message: format!(
-                "{} has a non-array \"plugins\" field; fix or delete it manually",
-                installed_path.display()
-            ),
-        });
-    };
-
-    let now = crate::timeutil::now_iso_utc();
-    let managed_dir = kimi_plugin_managed_dir(kimi_code_home);
-    let root = managed_dir
-        .canonicalize()
-        .unwrap_or_else(|_| managed_dir.clone());
-    let existing = plugins
-        .iter()
-        .position(|entry| entry.get("id").and_then(|value| value.as_str()) == Some(KIMI_PLUGIN_ID));
-    let (enabled, installed_at) = existing.map(|index| &plugins[index]).map_or_else(
-        || (true, now.clone()),
-        |entry| {
-            (
-                entry
-                    .get("enabled")
-                    .and_then(serde_json::Value::as_bool)
-                    .unwrap_or(true),
-                entry
-                    .get("installedAt")
-                    .and_then(|value| value.as_str())
-                    .map_or_else(|| now.clone(), str::to_string),
-            )
-        },
-    );
-    let entry = json!({
-        "id": KIMI_PLUGIN_ID,
-        "root": root,
-        "source": "local-path",
-        "enabled": enabled,
-        "installedAt": installed_at,
-        "updatedAt": now,
-    });
-    match existing {
-        Some(index) => plugins[index] = entry,
-        None => plugins.push(entry),
-    }
-
-    safe_write_json_file(&installed_path, &installed, backup.as_deref())?;
-    eprintln!(
-        "\x1b[32m✔\x1b[0m Registered Kimi Code CLI plugin in {}",
-        installed_path.display()
-    );
-    Ok(())
-}
-
-/// Remove the tracedecay entry from `installed.json`, leaving the file (and
-/// any other entries) in place with an empty `plugins` array when tracedecay
-/// was the only one. Best-effort, mirroring the other uninstall helpers.
-fn remove_kimi_installed_entry(kimi_code_home: &Path) {
-    let installed_path = kimi_installed_json_path(kimi_code_home);
-    if !installed_path.exists() {
-        eprintln!("  {} not found, skipping", installed_path.display());
-        return;
-    }
-    let Ok(mut installed) = load_json_file_strict(&installed_path) else {
-        return;
-    };
-    let Some(plugins) = installed
-        .get_mut("plugins")
-        .and_then(|value| value.as_array_mut())
-    else {
-        eprintln!(
-            "  No tracedecay plugin entry in {}, skipping",
-            installed_path.display()
-        );
-        return;
-    };
-    let before = plugins.len();
-    plugins
-        .retain(|entry| entry.get("id").and_then(|value| value.as_str()) != Some(KIMI_PLUGIN_ID));
-    if plugins.len() == before {
-        eprintln!(
-            "  No tracedecay plugin entry in {}, skipping",
-            installed_path.display()
-        );
-        return;
-    }
-    if backup_and_write_json(&installed_path, &installed) {
-        eprintln!(
-            "\x1b[32m✔\x1b[0m Removed tracedecay plugin entry from {}",
-            installed_path.display()
-        );
-    }
-}
-
-/// Delete the managed plugin dir recursively. A symlink or file at that path
-/// is unlinked instead of followed.
-fn remove_kimi_plugin_dir(kimi_code_home: &Path) -> Result<()> {
-    let managed_dir = kimi_plugin_managed_dir(kimi_code_home);
-    let Ok(metadata) = std::fs::symlink_metadata(&managed_dir) else {
-        eprintln!("  {} not found, skipping", managed_dir.display());
-        return Ok(());
-    };
-    if metadata.file_type().is_symlink() || metadata.is_file() {
-        std::fs::remove_file(&managed_dir).map_err(|e| TraceDecayError::Config {
-            message: format!("failed to remove {}: {e}", managed_dir.display()),
-        })?;
-    } else {
-        std::fs::remove_dir_all(&managed_dir).map_err(|e| TraceDecayError::Config {
-            message: format!("failed to remove {}: {e}", managed_dir.display()),
-        })?;
-    }
-    eprintln!(
-        "\x1b[32m✔\x1b[0m Removed Kimi Code CLI plugin at {}",
-        managed_dir.display()
-    );
-    Ok(())
-}
-
-/// Remove only empty directories from the receipt-backed managed inventory.
-/// Artifact files are owned and removed by the component transaction; this
-/// cleanup never recursively deletes an unexpected file.
-fn prune_empty_kimi_plugin_dirs(kimi_code_home: &Path, tracedecay_bin: &str) -> Result<()> {
-    let managed_dir = kimi_plugin_managed_dir(kimi_code_home);
-    let mut directories = std::collections::BTreeSet::new();
-    directories.insert(managed_dir.clone());
-    for (relative, _) in rendered_plugin_files(tracedecay_bin)? {
-        let mut parent = Path::new(relative).parent();
-        while let Some(relative_dir) = parent.filter(|path| !path.as_os_str().is_empty()) {
-            directories.insert(managed_dir.join(relative_dir));
-            parent = relative_dir.parent();
-        }
-    }
-    let mut directories = directories.into_iter().collect::<Vec<_>>();
-    directories.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
-    for directory in directories {
-        match std::fs::remove_dir(&directory) {
-            Ok(()) => {}
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
-                ) => {}
-            Err(error) => {
-                return Err(TraceDecayError::Config {
-                    message: format!(
-                        "failed to prune managed Kimi plugin directory {}: {error}",
-                        directory.display()
-                    ),
-                });
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Migration: the plugin manifest now provides the tracedecay MCP server, so
-/// drop a stale direct registration from `<kimi-code-home>/mcp.json` (backup
-/// first; the file is deleted when nothing else remains).
-fn migrate_kimi_code_mcp_json(kimi_code_home: &Path) {
-    let mcp_path = kimi_code_home.join("mcp.json");
-    let has_tracedecay = mcp_path.exists()
-        && load_json_file(&mcp_path)
-            .get("mcpServers")
-            .and_then(|servers| servers.get("tracedecay"))
-            .is_some();
-    if has_tracedecay {
-        uninstall_mcp_server(&mcp_path);
-    }
 }
 
 // ---------------------------------------------------------------------------
