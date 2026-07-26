@@ -1111,6 +1111,43 @@ pub struct HostBundleInstallReceiptV1 {
     pub rollback_history: Vec<[u8; 16]>,
 }
 
+/// Durable, content-free inventory for an operator-requested host-component
+/// backup. Artifact bytes live in the capability-rooted lifecycle directory;
+/// the receipt binds their exact digests and the manifest needed to restore
+/// them through the normal confirmed lifecycle transaction.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostBundleBackupReceiptV1 {
+    pub schema_version: u16,
+    pub operation_id: [u8; 16],
+    pub host: HostKindV1,
+    pub component: HostBundleComponentV1,
+    pub manifest: HostBundleManifestV1,
+    pub source_receipt_digest: [u8; 32],
+    pub artifacts: Vec<HostBundleBackupArtifactV1>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostBundleBackupArtifactV1 {
+    pub relative_path: String,
+    pub artifact_digest: [u8; 32],
+    pub ownership_marker: String,
+    pub snapshot_name: String,
+}
+
+/// Durable proof that a named backup was restored through the rollback-safe
+/// lifecycle writer. The embedded install receipt remains the ownership
+/// authority for the restored component.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostBundleRestoreReceiptV1 {
+    pub schema_version: u16,
+    pub operation_id: [u8; 16],
+    pub backup_operation_id: [u8; 16],
+    pub restored_receipt: HostBundleInstallReceiptV1,
+}
+
 /// Durable aggregate commit marker for a complete host component set. The
 /// individual component receipts remain the Doctor API; this receipt only
 /// binds them to their common atomic operation.
@@ -4007,6 +4044,140 @@ impl HostBundleWriterV1 {
         Ok(())
     }
 
+    /// Snapshot one installed component without mutating host state. Replaying
+    /// the same operation id returns the existing receipt after revalidation.
+    /// A missing, edited, or foreign artifact fails before receipt publication.
+    pub fn backup_component<V: HostBundleVerificationAdapterV1>(
+        &self,
+        manifest: &HostBundleManifestV1,
+        operation_id: [u8; 16],
+        explicit_confirmation: bool,
+        verifier: &V,
+    ) -> Result<HostBundleBackupReceiptV1, HostBundleError> {
+        if operation_id == [0; 16] {
+            return Err(HostBundleError::InvalidManifest);
+        }
+        if !explicit_confirmation {
+            return Err(HostBundleError::ConfirmationRequired);
+        }
+        manifest.validate_structure()?;
+        verifier.verify_manifest(manifest)?;
+        if let Some(receipt) = self.load_backup_receipt(operation_id)? {
+            validate_backup_receipt(&receipt)?;
+            self.read_backup_contents(&receipt)?;
+            return (receipt.manifest == *manifest)
+                .then_some(receipt)
+                .ok_or(HostBundleError::ReceiptCorrupted);
+        }
+
+        let source_receipt = self
+            .load_receipt(manifest.host, manifest.component)?
+            .filter(|receipt| receipt.operation != HostBundleLifecycleOpV1::Uninstall)
+            .ok_or(HostBundleError::InvalidObservedState)?;
+        if source_receipt.manifest_digest != manifest.canonical_digest()?
+            || source_receipt.artifacts.len() != manifest.artifacts.len()
+        {
+            return Err(HostBundleError::InvalidObservedState);
+        }
+        let source_receipt_digest: [u8; 32] = Sha256::digest(
+            canonical_json_bytes(&source_receipt)
+                .map_err(|_| HostBundleError::CanonicalizationFailed)?,
+        )
+        .into();
+        let snapshot_dir = self.open_or_create_snapshot_dir(operation_id)?;
+        let mut artifacts = Vec::with_capacity(source_receipt.artifacts.len());
+        for (index, owned) in source_receipt.artifacts.iter().enumerate() {
+            let expected = manifest
+                .artifacts
+                .iter()
+                .find(|artifact| artifact.relative_path == owned.relative_path)
+                .filter(|artifact| {
+                    artifact.artifact_digest == owned.artifact_digest
+                        && artifact.ownership_marker == owned.ownership_marker
+                })
+                .ok_or(HostBundleError::InvalidObservedState)?;
+            let (parent, name) = self.open_parent_nofollow(Path::new(&expected.relative_path))?;
+            let bytes = read_regular_nofollow(&parent, &name)?
+                .ok_or(HostBundleError::InvalidObservedState)?;
+            if <[u8; 32]>::from(Sha256::digest(&bytes)) != expected.artifact_digest {
+                return Err(HostBundleError::OwnershipConflict);
+            }
+            let snapshot_name = host_bundle_snapshot_name(index, &expected.relative_path);
+            match read_regular_nofollow(&snapshot_dir, &snapshot_name)? {
+                Some(existing) if existing == bytes => {}
+                Some(_) => return Err(HostBundleError::ReceiptCorrupted),
+                None => atomic_write_nofollow(&snapshot_dir, &snapshot_name, &bytes, false)?,
+            }
+            artifacts.push(HostBundleBackupArtifactV1 {
+                relative_path: expected.relative_path.clone(),
+                artifact_digest: expected.artifact_digest,
+                ownership_marker: expected.ownership_marker.clone(),
+                snapshot_name,
+            });
+        }
+        sync_cap_dir(&snapshot_dir)?;
+        let receipt = HostBundleBackupReceiptV1 {
+            schema_version: HOST_BUNDLE_RECEIPT_SCHEMA_VERSION,
+            operation_id,
+            host: manifest.host,
+            component: manifest.component,
+            manifest: manifest.clone(),
+            source_receipt_digest,
+            artifacts,
+        };
+        self.write_backup_receipt(&receipt)?;
+        Ok(receipt)
+    }
+
+    /// Restore a named component backup through the ordinary Repair
+    /// transaction. Any failure rolls the host files back to their pre-restore
+    /// bytes; replaying `operation_id` returns the durable terminal receipt.
+    pub fn restore_component_backup<V: HostBundleVerificationAdapterV1>(
+        &mut self,
+        backup_operation_id: [u8; 16],
+        operation_id: [u8; 16],
+        explicit_confirmation: bool,
+        verifier: &V,
+    ) -> Result<HostBundleRestoreReceiptV1, HostBundleError> {
+        if backup_operation_id == [0; 16] || operation_id == [0; 16] {
+            return Err(HostBundleError::InvalidManifest);
+        }
+        if !explicit_confirmation {
+            return Err(HostBundleError::ConfirmationRequired);
+        }
+        if let Some(receipt) = self.load_restore_receipt(operation_id)? {
+            validate_restore_receipt(&receipt)?;
+            return (receipt.backup_operation_id == backup_operation_id)
+                .then_some(receipt)
+                .ok_or(HostBundleError::ReceiptCorrupted);
+        }
+        let backup = self
+            .load_backup_receipt(backup_operation_id)?
+            .ok_or(HostBundleError::InvalidObservedState)?;
+        validate_backup_receipt(&backup)?;
+        verifier.verify_manifest(&backup.manifest)?;
+        let contents = self.read_backup_contents(&backup)?;
+        let request = HostBundleExecutionRequestV1 {
+            lifecycle: HostBundleLifecycleRequestV1 {
+                operation: HostBundleLifecycleOpV1::Repair,
+                expected_host: backup.host,
+                expected_component: backup.component,
+                explicit_confirmation: true,
+                hermes_profile_bindings: u8::from(backup.host == HostKindV1::Hermes),
+            },
+            operation_id,
+        };
+        let restored_receipt = self.execute(&backup.manifest, &request, &contents, verifier)?;
+        let receipt = HostBundleRestoreReceiptV1 {
+            schema_version: HOST_BUNDLE_RECEIPT_SCHEMA_VERSION,
+            operation_id,
+            backup_operation_id,
+            restored_receipt,
+        };
+        self.write_restore_receipt(&receipt)?;
+        Ok(receipt)
+    }
+
     pub fn publish_feedback_component_set_receipt(
         &self,
         manifest: &HostBundleManifestV1,
@@ -4040,6 +4211,104 @@ impl HostBundleWriterV1 {
 
     pub fn lifecycle_root_path(&self) -> &Path {
         &self.lifecycle_root_path
+    }
+
+    fn open_or_create_snapshot_dir(&self, operation_id: [u8; 16]) -> Result<Dir, HostBundleError> {
+        let snapshots = open_or_create_nofollow_dir(&self.control, "snapshots")?;
+        open_or_create_nofollow_dir(&snapshots, &hex::encode(operation_id))
+    }
+
+    fn open_existing_snapshot_dir(
+        &self,
+        operation_id: [u8; 16],
+    ) -> Result<Option<Dir>, HostBundleError> {
+        let snapshots = match self.control.open_dir_nofollow("snapshots") {
+            Ok(directory) => directory,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(HostBundleError::UnsafeInstallPath),
+        };
+        match snapshots.open_dir_nofollow(hex::encode(operation_id)) {
+            Ok(directory) => Ok(Some(directory)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(_) => Err(HostBundleError::UnsafeInstallPath),
+        }
+    }
+
+    fn read_backup_contents(
+        &self,
+        receipt: &HostBundleBackupReceiptV1,
+    ) -> Result<Vec<HostBundleArtifactContentV1>, HostBundleError> {
+        validate_backup_receipt(receipt)?;
+        let snapshot_dir = self
+            .open_existing_snapshot_dir(receipt.operation_id)?
+            .ok_or(HostBundleError::ReceiptCorrupted)?;
+        receipt
+            .artifacts
+            .iter()
+            .map(|artifact| {
+                let bytes = read_regular_nofollow(&snapshot_dir, &artifact.snapshot_name)?
+                    .ok_or(HostBundleError::ReceiptCorrupted)?;
+                if <[u8; 32]>::from(Sha256::digest(&bytes)) != artifact.artifact_digest {
+                    return Err(HostBundleError::ReceiptCorrupted);
+                }
+                Ok(HostBundleArtifactContentV1 {
+                    relative_path: artifact.relative_path.clone(),
+                    bytes,
+                })
+            })
+            .collect()
+    }
+
+    fn load_backup_receipt(
+        &self,
+        operation_id: [u8; 16],
+    ) -> Result<Option<HostBundleBackupReceiptV1>, HostBundleError> {
+        read_control_json(
+            &self.control,
+            &host_bundle_backup_receipt_file(operation_id),
+        )?
+        .map(|bytes| serde_json::from_slice(&bytes).map_err(|_| HostBundleError::ReceiptCorrupted))
+        .transpose()
+    }
+
+    fn write_backup_receipt(
+        &self,
+        receipt: &HostBundleBackupReceiptV1,
+    ) -> Result<(), HostBundleError> {
+        validate_backup_receipt(receipt)?;
+        let bytes = serde_json::to_vec(receipt).map_err(|_| HostBundleError::ReceiptCorrupted)?;
+        atomic_write_nofollow(
+            &self.control,
+            &host_bundle_backup_receipt_file(receipt.operation_id),
+            &bytes,
+            false,
+        )
+    }
+
+    fn load_restore_receipt(
+        &self,
+        operation_id: [u8; 16],
+    ) -> Result<Option<HostBundleRestoreReceiptV1>, HostBundleError> {
+        read_control_json(
+            &self.control,
+            &host_bundle_restore_receipt_file(operation_id),
+        )?
+        .map(|bytes| serde_json::from_slice(&bytes).map_err(|_| HostBundleError::ReceiptCorrupted))
+        .transpose()
+    }
+
+    fn write_restore_receipt(
+        &self,
+        receipt: &HostBundleRestoreReceiptV1,
+    ) -> Result<(), HostBundleError> {
+        validate_restore_receipt(receipt)?;
+        let bytes = serde_json::to_vec(receipt).map_err(|_| HostBundleError::ReceiptCorrupted)?;
+        atomic_write_nofollow(
+            &self.control,
+            &host_bundle_restore_receipt_file(receipt.operation_id),
+            &bytes,
+            false,
+        )
     }
 }
 
@@ -4366,6 +4635,54 @@ fn validate_receipt(receipt: &HostBundleInstallReceiptV1) -> Result<(), HostBund
     Ok(())
 }
 
+fn validate_backup_receipt(receipt: &HostBundleBackupReceiptV1) -> Result<(), HostBundleError> {
+    if receipt.schema_version != HOST_BUNDLE_RECEIPT_SCHEMA_VERSION
+        || receipt.operation_id == [0; 16]
+        || receipt.source_receipt_digest == [0; 32]
+        || receipt.host != receipt.manifest.host
+        || receipt.component != receipt.manifest.component
+        || receipt.artifacts.len() != receipt.manifest.artifacts.len()
+    {
+        return Err(HostBundleError::ReceiptCorrupted);
+    }
+    receipt
+        .manifest
+        .validate_structure()
+        .map_err(|_| HostBundleError::ReceiptCorrupted)?;
+    for (index, artifact) in receipt.artifacts.iter().enumerate() {
+        validate_relative_install_path(Path::new(&artifact.relative_path))?;
+        validate_identifier(&artifact.ownership_marker)?;
+        if artifact.artifact_digest == [0; 32]
+            || !is_safe_component(&artifact.snapshot_name)
+            || receipt.artifacts[..index]
+                .iter()
+                .any(|existing| existing.relative_path == artifact.relative_path)
+            || !receipt.manifest.artifacts.iter().any(|expected| {
+                expected.relative_path == artifact.relative_path
+                    && expected.artifact_digest == artifact.artifact_digest
+                    && expected.ownership_marker == artifact.ownership_marker
+            })
+        {
+            return Err(HostBundleError::ReceiptCorrupted);
+        }
+    }
+    Ok(())
+}
+
+fn validate_restore_receipt(receipt: &HostBundleRestoreReceiptV1) -> Result<(), HostBundleError> {
+    validate_receipt(&receipt.restored_receipt)?;
+    if receipt.schema_version != HOST_BUNDLE_RECEIPT_SCHEMA_VERSION
+        || receipt.operation_id == [0; 16]
+        || receipt.backup_operation_id == [0; 16]
+        || receipt.restored_receipt.operation_id != receipt.operation_id
+        || receipt.restored_receipt.operation != HostBundleLifecycleOpV1::Repair
+        || receipt.restored_receipt.rollback_boundary != HostBundleRollbackBoundaryV1::Passed
+    {
+        return Err(HostBundleError::ReceiptCorrupted);
+    }
+    Ok(())
+}
+
 fn validate_journal(journal: &HostBundleJournalV1) -> Result<(), HostBundleError> {
     if journal.schema_version != HOST_BUNDLE_RECEIPT_SCHEMA_VERSION
         || journal.operation_id == [0; 16]
@@ -4677,6 +4994,19 @@ fn backup_name(operation_id: [u8; 16], relative_path: &str) -> String {
     hasher.update(operation_id);
     hasher.update(relative_path.as_bytes());
     format!("artifact-{}", hex::encode(hasher.finalize()))
+}
+
+fn host_bundle_snapshot_name(index: usize, relative_path: &str) -> String {
+    let digest = Sha256::digest(relative_path.as_bytes());
+    format!("{index:03}-{}", hex::encode(&digest[..16]))
+}
+
+fn host_bundle_backup_receipt_file(operation_id: [u8; 16]) -> String {
+    format!("backup-receipt.{}.v1.json", hex::encode(operation_id))
+}
+
+fn host_bundle_restore_receipt_file(operation_id: [u8; 16]) -> String {
+    format!("restore-receipt.{}.v1.json", hex::encode(operation_id))
 }
 
 fn component_set_stage_name(component: HostBundleComponentV1, relative_path: &str) -> String {
@@ -5002,6 +5332,89 @@ mod tests {
             self.rolled_back = true;
             Ok(())
         }
+    }
+
+    #[test]
+    fn component_backup_restore_is_durable_idempotent_and_rollback_safe() {
+        let root = tempfile::tempdir().unwrap();
+        let mut writer = HostBundleWriterV1::open(root.path()).unwrap();
+        let original = manifest(HostKindV1::Codex, b"original");
+        let original_verifier = verifier(&original);
+        writer
+            .execute(
+                &original,
+                &execution(
+                    HostKindV1::Codex,
+                    HostBundleLifecycleOpV1::Install,
+                    71,
+                    true,
+                ),
+                &content(b"original"),
+                &original_verifier,
+            )
+            .unwrap();
+        assert_eq!(
+            writer.backup_component(&original, [72; 16], false, &original_verifier),
+            Err(HostBundleError::ConfirmationRequired)
+        );
+
+        let backup = writer
+            .backup_component(&original, [72; 16], true, &original_verifier)
+            .unwrap();
+        assert_eq!(
+            writer
+                .backup_component(&original, [72; 16], true, &original_verifier)
+                .unwrap(),
+            backup
+        );
+
+        let updated = manifest(HostKindV1::Codex, b"updated");
+        writer
+            .execute(
+                &updated,
+                &execution(HostKindV1::Codex, HostBundleLifecycleOpV1::Update, 73, true),
+                &content(b"updated"),
+                &verifier(&updated),
+            )
+            .unwrap();
+        assert_eq!(
+            std::fs::read(root.path().join("plugins/tracedecay.json")).unwrap(),
+            b"updated"
+        );
+        assert_eq!(
+            writer.restore_component_backup([72; 16], [74; 16], false, &original_verifier),
+            Err(HostBundleError::ConfirmationRequired)
+        );
+
+        let restored = writer
+            .restore_component_backup([72; 16], [74; 16], true, &original_verifier)
+            .unwrap();
+        assert_eq!(
+            writer
+                .restore_component_backup([72; 16], [74; 16], true, &original_verifier)
+                .unwrap(),
+            restored
+        );
+        assert_eq!(
+            std::fs::read(root.path().join("plugins/tracedecay.json")).unwrap(),
+            b"original"
+        );
+        assert_eq!(
+            restored.restored_receipt.rollback_boundary,
+            HostBundleRollbackBoundaryV1::Passed
+        );
+        assert!(
+            root.path()
+                .join(HOST_BUNDLE_CONTROL_DIR)
+                .join(host_bundle_backup_receipt_file([72; 16]))
+                .is_file()
+        );
+        assert!(
+            root.path()
+                .join(HOST_BUNDLE_CONTROL_DIR)
+                .join(host_bundle_restore_receipt_file([74; 16]))
+                .is_file()
+        );
     }
 
     #[test]
