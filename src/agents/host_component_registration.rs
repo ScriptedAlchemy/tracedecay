@@ -500,13 +500,14 @@ impl crate::agents::host_bundle_v2::HostComponentSetRegistrationV1
             crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Update
             | crate::agents::host_bundle_v2::HostBundleLifecycleOpV1::Repair => true,
         };
-        if component_set.host == crate::agents::host_bundle_v2::HostKindV1::KimiCode
+        if self.project_path.is_none()
+            && component_set.host == crate::agents::host_bundle_v2::HostKindV1::KimiCode
             && self.should_apply
         {
-            // Kimi's documented plugin lifecycle is currently interactive
-            // (`/plugins`) only. Refuse before staging artifacts or registration
-            // backups rather than inventing a `kimi plugin` subcommand or
-            // editing managed/installed.json state behind the host's back.
+            // Kimi's global plugin lifecycle is interactive (`/plugins`) only.
+            // Project-local registration is a separate MCP/prompt integration
+            // implemented by `install_local`, so it remains eligible for this
+            // transaction's legacy-integration path.
             return Err(crate::agents::host_bundle_v2::HostBundleError::UnsupportedCapability);
         }
         Ok(())
