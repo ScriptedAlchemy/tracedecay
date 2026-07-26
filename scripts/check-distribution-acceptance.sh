@@ -107,6 +107,8 @@ assert_required_assets() {
     "tests/fixtures/packaged_host_events/codex.json"
     "tests/fixtures/packaged_host_events/cursor.json"
     "tests/fixtures/packaged_host_events/hermes.json"
+    "tests/fixtures/packaged_host_events/hermes/saved-edit.json"
+    "tests/fixtures/packaged_host_events/hermes/terminal-receipt.json"
     "tests/fixtures/packaged_host_events/kiro.json"
     "tests/fixtures/packaged_host_events/kimi-code.json"
     "tests/fixtures/packaged_host_events/kimi/post-tool-use-edit.json"
@@ -328,6 +330,8 @@ run_self_test() {
     tests/fixtures/packaged_host_events/codex.json \
     tests/fixtures/packaged_host_events/cursor.json \
     tests/fixtures/packaged_host_events/hermes.json \
+    tests/fixtures/packaged_host_events/hermes/saved-edit.json \
+    tests/fixtures/packaged_host_events/hermes/terminal-receipt.json \
     tests/fixtures/packaged_host_events/kiro.json \
     tests/fixtures/packaged_host_events/kimi-code.json \
     tests/fixtures/packaged_host_events/kimi/post-tool-use-edit.json \
@@ -535,6 +539,8 @@ for fixture in \
   codex.json \
   cursor.json \
   hermes.json \
+  hermes/saved-edit.json \
+  hermes/terminal-receipt.json \
   kiro.json \
   kimi-code.json \
   kimi/post-tool-use-edit.json \
