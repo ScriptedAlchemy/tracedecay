@@ -7,12 +7,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tracedecay_application::{
-    ApplicationOperation, CancellationObservation, CancellationSignal, CancellationStage, Deadline,
-    DirectorySyncPolicy, EffectId, EffectReceipt, EffectResult, EffectTermination,
-    OperationBudgetUsage, OperationReceipt, OperationTermination, ReconciliationState,
-    SourceEditAuthorizationPort, SourceEditDiagnosticV1, SourceEditEffectRequestV1,
-    SourceEditReconciliationDispositionV1, SourceEditReconciliationRequestV1, SourceEditRequest,
-    SourceEditVerificationStateV1, SourceEditVerificationV1, read_bounded, source_edit_operation,
+    ApiMigrationApplyResultV1, ApiMigrationPlanRequestV1, ApiMigrationPlanV1, ApplicationOperation,
+    CancellationObservation, CancellationSignal, CancellationStage, Deadline, DirectorySyncPolicy,
+    EffectId, EffectReceipt, EffectResult, EffectTermination, OperationBudgetUsage,
+    OperationReceipt, OperationTermination, ReconciliationState, SourceEditAuthorizationPort,
+    SourceEditDiagnosticV1, SourceEditEffectRequestV1, SourceEditReconciliationDispositionV1,
+    SourceEditReconciliationRequestV1, SourceEditRequest, SourceEditVerificationStateV1,
+    SourceEditVerificationV1, read_bounded, source_edit_operation,
     source_edit_reconciliation_operation, sync_parent_directory, with_owned_temp_publish,
 };
 use tracedecay_domain::{ManifestDigest, UtcMicros, canonical_sha256};
@@ -109,6 +110,9 @@ impl SourceEditDurableOutcomeV1 {
                 Some(result.applied_imports.len()),
                 Some(result.impact.len()),
             ),
+            SourceEditOutcome::ApiMigration(result) => {
+                (Some(result.changed_sites), None, None, None, None)
+            }
             _ => (None, None, None, None, None),
         };
         Self {
@@ -163,6 +167,7 @@ pub enum SourceEditOutcome {
     Insert(InsertResult),
     AstGrep(AstGrepResult),
     Move(MoveResult),
+    ApiMigration(ApiMigrationApplyResultV1),
     Failed { message: String },
     Cancelled { message: String },
     TimedOut { message: String },
@@ -179,6 +184,7 @@ impl SourceEditOutcome {
             Self::Insert(result) => result.success,
             Self::AstGrep(result) => result.success,
             Self::Move(result) => result.success,
+            Self::ApiMigration(result) => result.success,
             Self::Failed { .. }
             | Self::Cancelled { .. }
             | Self::TimedOut { .. }
@@ -195,6 +201,7 @@ impl SourceEditOutcome {
             Self::Insert(result) => &result.message,
             Self::AstGrep(result) => &result.message,
             Self::Move(result) => &result.message,
+            Self::ApiMigration(result) => &result.message,
             Self::Failed { message } | Self::Cancelled { message } | Self::TimedOut { message } => {
                 message
             }
@@ -227,6 +234,7 @@ impl SourceEditOutcome {
             Self::Insert(result) => vec![result.file_path.clone()],
             Self::AstGrep(result) => vec![result.file_path.clone()],
             Self::Move(result) => vec![result.source_file.clone(), result.dest_file.clone()],
+            Self::ApiMigration(result) => result.changed_files.clone(),
             Self::Failed { .. }
             | Self::Cancelled { .. }
             | Self::TimedOut { .. }
@@ -243,6 +251,7 @@ impl SourceEditOutcome {
             Self::Insert(result) => vec![result.file_path.clone()],
             Self::AstGrep(result) => vec![result.file_path.clone()],
             Self::Move(result) => vec![result.source_file.clone(), result.dest_file.clone()],
+            Self::ApiMigration(result) => result.changed_files.clone(),
             Self::Failed { .. }
             | Self::Cancelled { .. }
             | Self::TimedOut { .. }
@@ -259,6 +268,7 @@ impl SourceEditOutcome {
             Self::Insert(result) => Some(&result.file_path),
             Self::AstGrep(result) => Some(&result.file_path),
             Self::Move(_)
+            | Self::ApiMigration(_)
             | Self::Failed { .. }
             | Self::Cancelled { .. }
             | Self::TimedOut { .. }
@@ -285,6 +295,7 @@ impl SourceEditOutcome {
             Self::Insert(result) => serde_json::to_value(result),
             Self::AstGrep(result) => serde_json::to_value(result),
             Self::Move(result) => serde_json::to_value(result),
+            Self::ApiMigration(result) => serde_json::to_value(result),
             Self::Failed { message } => Ok(json!({
                 "success": false,
                 "failed": true,
@@ -1035,10 +1046,10 @@ where
 
     let (effect_result, plan_complete) = crate::tracedecay::apply_source_edit_plan(
         planned_files,
-        run_source_edit(graph, request.edit.clone().with_dry_run(false)),
+        run_source_edit(graph, request.edit.clone().with_dry_run(false), control),
     )
     .await;
-    let outcome = match effect_result {
+    let mut outcome = match effect_result {
         Ok(outcome) => outcome,
         Err(error) => {
             // The edit primitive may have crossed its atomic rename boundary.
@@ -1057,7 +1068,8 @@ where
     let mut control_observation = control
         .and_then(|control| control.checkpoint(CancellationStage::EffectInFlight))
         .map(|stop| stop.observation);
-    let committed_state = source_edit_state_digest(graph.project_root(), &journal.candidate_files)?;
+    let mut committed_state =
+        source_edit_state_digest(graph.project_root(), &journal.candidate_files)?;
     if outcome.success() && (!plan_complete || committed_state != predicted_state) {
         let live_outcome = SourceEditOutcome::EffectUnknown {
             message: "source edit effect is unknown and requires reconciliation: the observed committed state did not match the exact preview".to_owned(),
@@ -1074,6 +1086,42 @@ where
         durability.persist_receipt(&record)?;
         return Ok(record.into_live_application_result(live_outcome, None));
     }
+    let verification = if request.edit.verify() && outcome.success() {
+        let files = outcome.candidate_files();
+        if files.is_empty() {
+            None
+        } else {
+            Some(run_edit_verifications(graph, &files).await)
+        }
+    } else {
+        None
+    };
+    if verification
+        .as_ref()
+        .is_some_and(|result| !matches!(result.state, SourceEditVerificationStateV1::Clean))
+        && let (
+            SourceEditRequest::ApiMigrationApply { plan, .. },
+            SourceEditOutcome::ApiMigration(result),
+        ) = (&request.edit, &mut outcome)
+    {
+        graph.rollback_api_migration_plan(plan).await?;
+        result.success = false;
+        result.rolled_back = true;
+        result.changed_files.clear();
+        result.message =
+            "API migration verification did not pass; every changed file was restored".to_owned();
+        committed_state = source_edit_state_digest(graph.project_root(), &journal.candidate_files)?;
+        if committed_state != journal.expected_state {
+            let live_outcome = SourceEditOutcome::EffectUnknown {
+                message: "API migration verification rollback did not restore the previewed state"
+                    .to_owned(),
+            };
+            let record = unknown_record(&journal)?;
+            durability.persist_receipt(&record)?;
+            return Ok(record.into_live_application_result(live_outcome, verification));
+        }
+    }
+
     let ended_at = now_micros();
     journal.state = SourceEditJournalStateV1::Applied {
         outcome: SourceEditDurableOutcomeV1::from_live(&journal.request.operation, &outcome),
@@ -1084,14 +1132,6 @@ where
     };
     durability.persist_journal(&journal)?;
 
-    let verification = if request.edit.verify() && outcome.success() {
-        match outcome.file_path() {
-            Some(file_path) => Some(run_edit_verification(graph, file_path).await),
-            None => None,
-        }
-    } else {
-        None
-    };
     if let SourceEditJournalStateV1::Applied {
         verification_state, ..
     } = &mut journal.state
@@ -1135,6 +1175,7 @@ async fn resolve_source_edit_preview(
     let (outcome, planned_files) = crate::tracedecay::capture_source_edit_plan(run_source_edit(
         graph,
         edit.with_dry_run(true),
+        None,
     ))
     .await;
     let outcome = outcome?;
@@ -1963,6 +2004,7 @@ fn durable_record(
 async fn run_source_edit(
     graph: &TraceDecay,
     request: SourceEditRequest,
+    control: Option<&SourceEditEffectControlV1>,
 ) -> Result<SourceEditOutcome> {
     Ok(match request {
         SourceEditRequest::StrReplace {
@@ -2042,7 +2084,51 @@ async fn run_source_edit(
                 .move_symbol(&symbol, &dest_file, dry_run, update_references)
                 .await?,
         ),
+        SourceEditRequest::ApiMigrationApply {
+            plan,
+            plan_digest,
+            dry_run,
+            ..
+        } => {
+            if plan.plan_digest != plan_digest {
+                return Err(config_error(
+                    "API migration apply digest does not match its immutable plan",
+                ));
+            }
+            let replanned = crate::application::api_migration::plan_api_migration(
+                graph,
+                ApiMigrationPlanRequestV1 {
+                    family_id: plan.family_id.clone(),
+                    operations: plan.operations.clone(),
+                },
+            )
+            .await?;
+            validate_replanned_api_migration(&plan, &replanned)?;
+            SourceEditOutcome::ApiMigration(
+                graph
+                    .apply_api_migration_plan(&replanned, dry_run, || {
+                        control
+                            .and_then(|control| {
+                                control.checkpoint(CancellationStage::EffectInFlight)
+                            })
+                            .is_some()
+                    })
+                    .await?,
+            )
+        }
     })
+}
+
+fn validate_replanned_api_migration(
+    supplied: &ApiMigrationPlanV1,
+    replanned: &ApiMigrationPlanV1,
+) -> Result<()> {
+    if supplied != replanned {
+        return Err(config_error(
+            "API migration plan does not match current graph-backed evidence; replan before apply",
+        ));
+    }
+    Ok(())
 }
 
 fn normalize_candidate_files(root: &Path, files: Vec<String>) -> Result<Vec<String>> {
@@ -2245,6 +2331,46 @@ async fn run_edit_verification(graph: &TraceDecay, file_path: &str) -> SourceEdi
         warning_count,
         first_errors,
         message: None,
+    }
+}
+
+async fn run_edit_verifications(
+    graph: &TraceDecay,
+    file_paths: &[String],
+) -> SourceEditVerificationV1 {
+    let mut aggregate = SourceEditVerificationV1 {
+        state: SourceEditVerificationStateV1::Clean,
+        verdict: "clean".to_owned(),
+        error_count: 0,
+        warning_count: 0,
+        first_errors: Vec::new(),
+        message: None,
+    };
+    for file_path in file_paths {
+        let result = run_edit_verification(graph, file_path).await;
+        aggregate.error_count += result.error_count;
+        aggregate.warning_count += result.warning_count;
+        for error in result.first_errors {
+            if aggregate.first_errors.len() < 3 {
+                aggregate.first_errors.push(error);
+            }
+        }
+        if verification_priority(result.state) > verification_priority(aggregate.state) {
+            aggregate.state = result.state;
+            aggregate.verdict = result.verdict;
+            aggregate.message = result.message;
+        }
+    }
+    aggregate
+}
+
+const fn verification_priority(state: SourceEditVerificationStateV1) -> u8 {
+    match state {
+        SourceEditVerificationStateV1::Clean => 0,
+        SourceEditVerificationStateV1::Unavailable => 1,
+        SourceEditVerificationStateV1::Errors => 2,
+        SourceEditVerificationStateV1::Cancelled => 3,
+        SourceEditVerificationStateV1::Failed => 4,
     }
 }
 
@@ -3521,6 +3647,24 @@ mod tests {
         let after = source_edit_state_digest(directory.path(), &files).unwrap();
 
         assert_ne!(before, after);
+    }
+
+    #[test]
+    fn api_migration_apply_requires_the_current_graph_backed_plan() {
+        let supplied = ApiMigrationPlanV1 {
+            family_id: "family".to_owned(),
+            repository_revision: "revision".to_owned(),
+            graph_revision: digest(SHA256_A),
+            operations: Vec::new(),
+            sites: Vec::new(),
+            files: Vec::new(),
+            blocked: false,
+            plan_digest: digest(SHA256_B),
+        };
+        let mut replanned = supplied.clone();
+        assert!(validate_replanned_api_migration(&supplied, &replanned).is_ok());
+        replanned.graph_revision = digest(SHA256_B);
+        assert!(validate_replanned_api_migration(&supplied, &replanned).is_err());
     }
 
     #[cfg(unix)]
