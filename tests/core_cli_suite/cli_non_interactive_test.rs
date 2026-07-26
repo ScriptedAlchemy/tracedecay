@@ -23,7 +23,6 @@ use tracedecay::storage::{
     profile_sharded_layout, read_enrollment_marker, write_enrollment_marker,
     write_repository_identity_marker, write_store_manifest,
 };
-use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_domain::ProjectId;
 
 fn canonical_temp_path(path: &Path) -> PathBuf {
@@ -119,27 +118,21 @@ fn add_tracedecay_path_shim(command: &mut Command, home: &Path) -> PathBuf {
     shim
 }
 
-/// Initializes the profile-sharded project store in-process, producing the
-/// same artifacts as a `tracedecay init` subprocess (config, graph DB, store
-/// manifest, branch meta, registry row) without paying a process spawn plus
-/// schema-creation subprocess per test. Only for tests where init is setup,
-/// not the behaviour under test.
-fn init_project_in_process(home: &Path, project: &Path) {
+/// Initializes the profile-sharded project store through the daemon-owned
+/// runtime. Only for tests where init is setup, not the behaviour under test.
+fn init_project_fixture(home: &Path, project: &Path) {
     let project = canonical_temp_path(project);
-    let profile_root = profile_root(home);
-    create_runtime().block_on(async {
-        let cg = TraceDecay::init_with_options(
-            &project,
-            TraceDecayOpenOptions {
-                global_db_path: Some(profile_root.join("global.db")),
-                profile_root: Some(profile_root),
-            },
-        )
-        .await
-        .expect("fixture init should run");
-        cg.checkpoint().await.expect("fixture checkpoint");
-        cg.close();
-    });
+    let daemon = crate::common::spawn_tracedecay_daemon(home);
+    let mut command = tracedecay_command_without_daemon(home, &project);
+    command.args(["init", "."]);
+    let output = run_with_timeout(command, cli_timeout());
+    assert!(
+        output.status.success(),
+        "fixture init should run\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    drop(daemon);
 }
 
 fn git(project: &Path, args: &[&str]) {
@@ -173,6 +166,12 @@ fn commit_all(project: &Path, message: &str) {
     );
 }
 
+fn write_git_fixture(project: &Path) {
+    git(project, &["init", "-b", "main"]);
+    std::fs::write(project.join("lib.rs"), "pub fn indexed() {}\n").unwrap();
+    commit_all(project, "fixture repository");
+}
+
 #[test]
 fn init_accepts_relative_current_directory() {
     let home = TempDir::new().unwrap();
@@ -202,7 +201,7 @@ fn sessions_unfinished_lists_workflow_state_evidence() {
     let project = TempDir::new().unwrap();
     let project_root = canonical_temp_path(project.path());
     std::fs::write(project_root.join("lib.rs"), "pub fn indexed() {}\n").unwrap();
-    init_project_in_process(home.path(), &project_root);
+    init_project_fixture(home.path(), &project_root);
     let project_id = default_profile_project_id(&project_root);
 
     create_runtime().block_on(async {
@@ -590,7 +589,7 @@ fn automation_config_enable_writes_project_sidecar_noninteractively() {
     std::fs::create_dir_all(project.path().join("src")).unwrap();
     std::fs::write(project.path().join("src/lib.rs"), "pub fn marker() {}\n").unwrap();
 
-    init_project_in_process(home.path(), project.path());
+    init_project_fixture(home.path(), project.path());
     let mut enable = tracedecay_command(home.path(), project.path());
     enable.args(["automation", "config", "enable"]);
     let enable_output = run_with_timeout(enable, cli_timeout());
@@ -751,7 +750,7 @@ fn automation_config_set_writes_complete_project_sidecar_noninteractively() {
     std::fs::create_dir_all(project.path().join("src")).unwrap();
     std::fs::write(project.path().join("src/lib.rs"), "pub fn marker() {}\n").unwrap();
 
-    init_project_in_process(home.path(), project.path());
+    init_project_fixture(home.path(), project.path());
 
     let mut set = tracedecay_command(home.path(), project.path());
     set.args([
@@ -858,7 +857,7 @@ fn automation_run_memory_curation_skips_without_backend_when_disabled() {
     std::fs::create_dir_all(project.path().join("src")).unwrap();
     std::fs::write(project.path().join("src/lib.rs"), "pub fn marker() {}\n").unwrap();
 
-    init_project_in_process(home.path(), project.path());
+    init_project_fixture(home.path(), project.path());
 
     let mut run = tracedecay_command(home.path(), project.path());
     run.args(["automation", "run", "memory-curation"]);
@@ -991,7 +990,7 @@ fn automation_run_session_reflection_skips_without_backend_when_disabled() {
     std::fs::create_dir_all(project.path().join("src")).unwrap();
     std::fs::write(project.path().join("src/lib.rs"), "pub fn marker() {}\n").unwrap();
 
-    init_project_in_process(home.path(), project.path());
+    init_project_fixture(home.path(), project.path());
 
     let mut run = tracedecay_command(home.path(), project.path());
     run.args(["automation", "run", "session-reflection"]);
@@ -1019,7 +1018,7 @@ fn automation_run_skill_writing_skips_without_backend_when_disabled() {
     std::fs::create_dir_all(project.path().join("src")).unwrap();
     std::fs::write(project.path().join("src/lib.rs"), "pub fn marker() {}\n").unwrap();
 
-    init_project_in_process(home.path(), project.path());
+    init_project_fixture(home.path(), project.path());
 
     let mut run = tracedecay_command(home.path(), project.path());
     run.args(["automation", "run", "skill-writing"]);
@@ -1239,6 +1238,7 @@ async fn status_json_reads_readonly_project_database() {
 async fn list_all_reports_profile_sharded_store_without_stale_label() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
+    write_git_fixture(project.path());
     write_profile_sharded_fixture(home.path(), project.path());
     let runtime = HostAdmissionTestRuntimeV1::profile(profile_root(home.path()))
         .await
@@ -1610,6 +1610,7 @@ async fn wipe_all_removes_registry_backed_profile_shard_without_enrollment_marke
 fn branch_list_reads_profile_sharded_branch_meta() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
+    write_git_fixture(project.path());
     write_profile_sharded_fixture(home.path(), project.path());
     let shard_root = profile_shard_root(home.path());
     write_branch_meta(&shard_root, &[], false);
@@ -1643,7 +1644,7 @@ fn branch_add_writes_new_branch_db_into_profile_shard() {
     git(&project_root, &["init", "-b", "main"]);
     std::fs::write(project_root.join("lib.rs"), "pub fn indexed() {}\n").unwrap();
     commit_all(&project_root, "initial commit");
-    init_project_in_process(home.path(), &project_root);
+    init_project_fixture(home.path(), &project_root);
     git(&project_root, &["checkout", "-b", "feature/new"]);
     let project_id = default_profile_project_id(&project_root);
     let shard_root = profile_sharded_data_root(&profile_root(home.path()), &project_id);
@@ -1674,6 +1675,7 @@ fn branch_add_writes_new_branch_db_into_profile_shard() {
 fn branch_remove_deletes_branch_db_from_profile_shard() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
+    write_git_fixture(project.path());
     write_profile_sharded_fixture(home.path(), project.path());
     let shard_root = profile_shard_root(home.path());
     write_branch_meta(
@@ -1702,6 +1704,7 @@ fn branch_remove_deletes_branch_db_from_profile_shard() {
 fn branch_removeall_deletes_profile_shard_branch_dbs() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
+    write_git_fixture(project.path());
     write_profile_sharded_fixture(home.path(), project.path());
     let shard_root = profile_shard_root(home.path());
     write_branch_meta(
@@ -1860,7 +1863,8 @@ fn migrate_registry_gc_cleans_stale_storage_metadata_and_preserves_live_and_bloc
     );
     drop(daemon);
 
-    let stale_project = canonical_temp_path(home.path()).join("gone-project");
+    let stale_fixture = TempDir::new_in(ephemeral_safe_fixture_base()).expect("stale fixture root");
+    let stale_project = canonical_temp_path(stale_fixture.path()).join("gone-project");
     create_runtime().block_on(async {
         let runtime =
             HostAdmissionTestRuntimeV1::profile(global_db_path.parent().expect("global db parent"))
@@ -1970,7 +1974,7 @@ fn migrate_plan_reads_inventory_through_running_daemon() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     let project_root = canonical_temp_path(project.path());
-    init_project_in_process(home.path(), &project_root);
+    init_project_fixture(home.path(), &project_root);
     let _daemon = crate::common::spawn_tracedecay_daemon(home.path());
 
     let mut command = tracedecay_command_without_daemon(home.path(), &project_root);
