@@ -826,24 +826,6 @@ fn validate_probe(
     Ok(())
 }
 
-fn submit_interruption(
-    request: &RuntimeSubmitRequestV1,
-    probe: &dyn RuntimeRequestProbeV1,
-    stage: RuntimeCancellationStageV1,
-) -> Option<RuntimeSubmitOutcomeV1> {
-    match probe.interruption()? {
-        RuntimeInterruptionV1::Cancelled => Some(RuntimeSubmitOutcomeV1::CancelledBeforeCommit {
-            cancellation: request.control().cancellation.clone(),
-            stage,
-        }),
-        RuntimeInterruptionV1::DeadlineExceeded => {
-            Some(RuntimeSubmitOutcomeV1::DeadlineExceededBeforeCommit {
-                deadline: request.control().deadline.clone(),
-            })
-        }
-    }
-}
-
 fn read_interruption(
     probe: &dyn RuntimeRequestProbeV1,
 ) -> Result<Option<RuntimeReadOutcomeV1>, StorageRuntimeContractErrorV1> {
@@ -881,38 +863,6 @@ impl From<StorageRuntimeErrorV1> for StorageRuntimePortErrorV1 {
 pub type StorageRuntimePortResultV1<T> = Result<T, StorageRuntimePortErrorV1>;
 pub type StorageRuntimePortFutureV1<'a, T> =
     Pin<Box<dyn Future<Output = StorageRuntimePortResultV1<T>> + Send + 'a>>;
-
-/// Object-safe std-only asynchronous write boundary.
-pub trait StorageRuntimeSubmitPort: Send + Sync {
-    fn dispatch_submit<'a>(
-        &'a self,
-        request: RuntimeSubmitRequestV1,
-        probe: &'a dyn RuntimeRequestProbeV1,
-    ) -> StorageRuntimePortFutureV1<'a, RuntimeSubmitOutcomeV1>;
-
-    fn submit<'a>(
-        &'a self,
-        request: RuntimeSubmitRequestV1,
-        probe: &'a dyn RuntimeRequestProbeV1,
-    ) -> StorageRuntimePortFutureV1<'a, RuntimeSubmitOutcomeV1> {
-        Box::pin(async move {
-            request
-                .validate()
-                .and_then(|()| validate_probe(request.control(), probe))
-                .map_err(StorageRuntimePortErrorV1::InvalidRequest)?;
-            if let Some(outcome) =
-                submit_interruption(&request, probe, RuntimeCancellationStageV1::BeforeAdmission)
-            {
-                return Ok(outcome);
-            }
-            let outcome = self.dispatch_submit(request.clone(), probe).await?;
-            outcome
-                .validate_for(&request)
-                .map_err(StorageRuntimePortErrorV1::InvalidResponse)?;
-            Ok(outcome)
-        })
-    }
-}
 
 /// Object-safe std-only asynchronous read boundary.
 pub trait StorageRuntimeReadPort: Send + Sync {

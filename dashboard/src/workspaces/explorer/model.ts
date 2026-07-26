@@ -285,6 +285,14 @@ export interface PlannerLaneState {
   readonly reportedTotal?: number;
 }
 
+/** The generated page types rows as `unknown`, so a row is only usable here
+ * once it is known to be a keyed object — matching this module's standing rule
+ * that a row without any usable returned identifier is omitted rather than
+ * rendered as a blank. */
+function isRecord(row: unknown): row is Record<string, unknown> {
+  return typeof row === 'object' && row !== null && !Array.isArray(row);
+}
+
 /** Converts one coordinator-owned source state without manufacturing rows,
  * totals, or cross-source rank. */
 export function plannerLaneState(
@@ -297,21 +305,32 @@ export function plannerLaneState(
   switch (source.outcome) {
     case 'pending':
       return { pending: true, outcome: 'pending', rows: [] };
-    case 'ready':
+    case 'ready': {
+      // `page` is nullable on every outcome in the Rust type. The hand-written
+      // copy of this contract used to pin it non-null for `ready`, which is an
+      // invariant the server never agreed to, so it is checked here instead of
+      // assumed: a `ready` source that arrived without a page has genuinely
+      // returned nothing to show, and that is not the same as an error.
+      const page = source.page;
+      if (page === null) {
+        return { pending: false, outcome: 'ok', rows: [] };
+      }
       return {
         pending: false,
         outcome: 'ok',
-        rows: source.page.rows,
-        ...(source.page.total !== null ? { reportedTotal: source.page.total } : {}),
+        rows: page.rows.filter(isRecord),
+        ...(page.total !== null ? { reportedTotal: page.total } : {}),
       };
+    }
     case 'unavailable':
       return { pending: false, outcome: 'offline', rows: [] };
     case 'error':
     case 'cancelled':
       return { pending: false, outcome: 'error', rows: [] };
     default: {
-      const exhaustive: never = source;
-      return exhaustive;
+      const exhaustive: never = source.outcome;
+      void exhaustive;
+      return { pending: false, outcome: 'error', rows: [] };
     }
   }
 }
