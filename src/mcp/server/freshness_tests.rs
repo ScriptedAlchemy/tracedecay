@@ -20,7 +20,6 @@ struct FreshnessRuntime {
 
 impl FreshnessRuntime {
     async fn open(profile_root: &std::path::Path) -> Self {
-        std::fs::create_dir_all(profile_root).expect("freshness profile root");
         let identity = crate::daemon::profile_identity::load_or_create(profile_root)
             .expect("freshness profile identity");
         let nonce = FRESHNESS_RUNTIME_NONCE.fetch_add(1, Ordering::Relaxed);
