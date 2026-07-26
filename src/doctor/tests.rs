@@ -45,6 +45,39 @@ fn ephemeral_safe_fixture_base() -> PathBuf {
 }
 
 #[test]
+fn domain_symbol_rules_warning_is_silent_without_the_file() {
+    let project = tempfile::tempdir().expect("temp project root");
+    assert_eq!(domain_symbol_rules_warning(project.path()), None);
+
+    std::fs::create_dir_all(crate::config::get_tracedecay_dir(project.path()))
+        .expect("create project marker dir");
+    assert_eq!(
+        domain_symbol_rules_warning(project.path()),
+        None,
+        "an empty marker dir is not a rules file"
+    );
+}
+
+#[test]
+fn domain_symbol_rules_warning_names_the_unread_file() {
+    let project = tempfile::tempdir().expect("temp project root");
+    let marker_dir = crate::config::get_tracedecay_dir(project.path());
+    std::fs::create_dir_all(&marker_dir).expect("create project marker dir");
+    let rules = marker_dir.join(DOMAIN_SYMBOL_RULES_FILENAME);
+    std::fs::write(&rules, "[[rule]]\nname = \"elisp\"\n").expect("write rules file");
+
+    let warning = domain_symbol_rules_warning(project.path()).expect("rules file must be reported");
+    assert!(
+        warning.contains(&rules.display().to_string()),
+        "warning must name the file: {warning}"
+    );
+    assert!(
+        warning.contains("docs/DOMAIN-EXTRACTORS.md"),
+        "warning must point at the doc: {warning}"
+    );
+}
+
+#[test]
 fn format_bytes_boundaries() {
     assert_eq!(format_bytes(0), "0 B");
     assert_eq!(format_bytes(1023), "1023 B");

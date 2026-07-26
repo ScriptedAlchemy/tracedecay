@@ -2191,12 +2191,14 @@ pub fn save_config_to_path(config_path: &Path, config: &TraceDecayConfig) -> Res
                 config_path.display()
             ),
         })?;
-    fs::create_dir_all(data_dir).map_err(|e| TraceDecayError::Config {
-        message: format!(
-            "failed to create tracedecay directory '{}': {}",
-            data_dir.display(),
-            e
-        ),
+    crate::storage::PrivateStoreIo::create_dir_all(data_dir).map_err(|e| {
+        TraceDecayError::Config {
+            message: format!(
+                "failed to create tracedecay directory '{}': {}",
+                data_dir.display(),
+                e
+            ),
+        }
     })?;
 
     let tmp_path = config_path.with_extension("tmp");
@@ -2401,10 +2403,7 @@ pub fn discover_project_root(start: &Path) -> Option<PathBuf> {
     loop {
         if has_project_database(&dir)
             || crate::storage::has_enrollment_marker(&dir)
-            || crate::storage::resolve_layout_for_current_profile(&dir).is_ok_and(|layout| {
-                layout.storage_mode == crate::storage::StorageMode::ProfileSharded
-                    && layout.graph_db_path.exists()
-            })
+            || crate::storage::has_path_local_profile_store(&dir)
         {
             return Some(dir);
         }
@@ -2580,7 +2579,7 @@ impl PinnedUserDataDir {
         let root = tempfile::TempDir::new()
             .unwrap_or_else(|err| panic!("failed to create temp profile dir: {err}"));
         let profile = root.path().join(TRACEDECAY_DIR);
-        fs::create_dir_all(&profile)
+        crate::storage::PrivateStoreIo::create_dir_all(&profile)
             .unwrap_or_else(|err| panic!("failed to create isolated profile root: {err}"));
         let previous = std::env::var_os(USER_DATA_DIR_ENV);
         let previous_home = std::env::var_os("HOME");

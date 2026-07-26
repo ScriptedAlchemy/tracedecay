@@ -30,42 +30,6 @@ pub(crate) fn home_dir() -> Option<PathBuf> {
         .or_else(dirs::home_dir)
 }
 
-/// Reconciles project-scoped provider evidence into the active project store.
-/// Observation providers use daemon-owned admission; Vibe writes through the
-/// same exact registered ProjectSessions mount. Failures are isolated per provider.
-pub async fn ingest_global_sources(
-    db: &RegisteredGlobalDb,
-    project_root: &Path,
-) -> TranscriptIngestStats {
-    ingest_global_sources_for_provider(db, project_root, None).await
-}
-
-pub async fn ingest_global_sources_for_provider(
-    db: &RegisteredGlobalDb,
-    project_root: &Path,
-    provider: Option<SessionProvider>,
-) -> TranscriptIngestStats {
-    let Ok(Some(marker)) = crate::storage::read_repository_identity_marker(project_root) else {
-        return TranscriptIngestStats::default();
-    };
-    let Ok(project_id) = ProjectId::new(marker.project_id) else {
-        return TranscriptIngestStats::default();
-    };
-    let brain_id = db.binding().shard_id.brain_id.clone();
-    let profile_id = db.binding().shard_id.profile_id.clone();
-    ingest_project_sources_for_provider(
-        &brain_id,
-        &profile_id,
-        db,
-        project_root,
-        Some(project_id),
-        provider,
-        true,
-    )
-    .await
-    .stats
-}
-
 /// Project-store half of catch-up. Cross-project search runs user ingestion
 /// once, then calls this per destination; Hermes can be excluded because its
 /// dedicated multi-destination driver scans each source database only once.

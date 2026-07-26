@@ -20,8 +20,10 @@ pub(in crate::db::memory_v2) use lineage::{
     insert_legacy_feedback_event_mapping, insert_mapping, legacy_feedback_mapping_can_be_recorded,
     update_current,
 };
-pub(in crate::db::memory_v2) use purge::{
-    insert_quarantine, purge_memory_v2_fact_inner, quarantine_fact,
-};
+pub(crate) use purge::MemoryV2LegacyPurgeReceipt;
+pub(in crate::db) use purge::purge_memory_v2_fact;
 #[cfg(test)]
-pub(in crate::db::memory_v2) use purge::{purge_memory_v2_fact, purge_payload_rows};
+pub(in crate::db::memory_v2) use purge::purge_payload_rows;
+pub(in crate::db::memory_v2) use purge::{
+    PurgeIntent, insert_quarantine, purge_memory_v2_fact_inner, quarantine_fact,
+};

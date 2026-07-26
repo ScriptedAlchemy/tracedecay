@@ -38,6 +38,8 @@ pub(crate) use types::{
     MemoryV2FeedbackHistoryRepairProgress,
 };
 use types::{CurrentFactState, OwnerKey, Progress};
+pub(crate) use writers::MemoryV2LegacyPurgeReceipt;
+pub(super) use writers::purge_memory_v2_fact;
 pub(super) use writers::{
     clear_memory_v2_compatibility_bank_dirty_in_transaction,
     delete_memory_v2_compatibility_bank_in_transaction,

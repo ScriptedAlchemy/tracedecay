@@ -43,6 +43,41 @@ impl TraceDecay {
         })
     }
 
+    #[cfg(any(test, feature = "test-transport"))]
+    fn standalone_test_open_options(
+        project_root: &Path,
+        mut open_options: TraceDecayOpenOptions,
+    ) -> TraceDecayOpenOptions {
+        if open_options.profile_root.is_none() && open_options.global_db_path.is_none() {
+            let project_id = storage::default_profile_project_id(project_root);
+            let parent = project_root.parent().unwrap_or(project_root);
+            open_options.profile_root =
+                Some(parent.join(format!(".tracedecay-test-profile-{project_id}")));
+        }
+        open_options
+    }
+
+    #[cfg(any(test, feature = "test-transport"))]
+    async fn standalone_test_runtime(
+        project_root: &Path,
+        open_options: &TraceDecayOpenOptions,
+    ) -> Result<Arc<crate::application::host_admission::HostAdmissionTestRuntimeV1>> {
+        let profile_root = open_options.resolved_profile_root()?;
+        let project_id = storage::read_enrollment_marker(project_root)?
+            .map(|marker| marker.project_id)
+            .unwrap_or_else(|| storage::default_profile_project_id(project_root));
+        let project_id = ProjectId::new(project_id).map_err(|error| TraceDecayError::Config {
+            message: format!("invalid standalone test project identity: {error}"),
+        })?;
+        crate::application::host_admission::HostAdmissionTestRuntimeV1::project(
+            profile_root,
+            project_root,
+            project_id,
+        )
+        .await
+        .map(Arc::new)
+    }
+
     async fn mount_worktree_graph(
         runtime_registry: &DaemonSessionRuntimeRegistryV1,
         project_root: &Path,
@@ -87,10 +122,24 @@ impl TraceDecay {
     }
 
     pub async fn init_with_options(
-        _project_root: &Path,
-        _open_options: TraceDecayOpenOptions,
+        project_root: &Path,
+        open_options: TraceDecayOpenOptions,
     ) -> Result<Self> {
-        Err(configuration_runtime_unavailable())
+        #[cfg(any(test, feature = "test-transport"))]
+        {
+            let open_options = Self::standalone_test_open_options(project_root, open_options);
+            let runtime = Self::standalone_test_runtime(project_root, &open_options).await?;
+            let mut graph = runtime
+                .initialize_project_graph_for_test(project_root, open_options)
+                .await?;
+            graph.test_runtime_guard = Some(runtime);
+            return Ok(graph);
+        }
+        #[cfg(not(any(test, feature = "test-transport")))]
+        {
+            let _ = (project_root, open_options);
+            Err(configuration_runtime_unavailable())
+        }
     }
 
     /// Initializes a first-touch project while the caller holds the exact
@@ -209,6 +258,8 @@ impl TraceDecay {
             read_only: false,
             context_scout_owner: None,
             context_scout_claim_authorities: Default::default(),
+            #[cfg(any(test, feature = "test-transport"))]
+            test_runtime_guard: None,
         };
         // First-touch parity with the registered open path: daemon warm-up
         // refuses to advertise an identity-bearing project whose Context
@@ -464,9 +515,10 @@ impl TraceDecay {
         }
 
         let mut selected = storage::resolve_persisted_layout(project_root, &profile_root)?;
-        let git_common_dir = (!crate::worktree::is_detached_linked_worktree(project_root))
-            .then(|| crate::worktree::git_common_dir(project_root))
-            .flatten();
+        // Every linked worktree resolves through its repository, attached or
+        // not; suppressing this for detached worktrees dropped them onto the
+        // path-hashed identity fallback and minted a duplicate store.
+        let git_common_dir = crate::worktree::git_common_dir(project_root);
         if selected.is_none()
             && let Some(registry_database) = registry_database
             && let Some(resolution) = registry_database
@@ -630,10 +682,24 @@ impl TraceDecay {
     }
 
     pub async fn open_with_options(
-        _project_root: &Path,
-        _open_options: TraceDecayOpenOptions,
+        project_root: &Path,
+        open_options: TraceDecayOpenOptions,
     ) -> Result<Self> {
-        Err(configuration_runtime_unavailable())
+        #[cfg(any(test, feature = "test-transport"))]
+        {
+            let open_options = Self::standalone_test_open_options(project_root, open_options);
+            let runtime = Self::standalone_test_runtime(project_root, &open_options).await?;
+            let mut graph = runtime
+                .open_project_graph_for_test(project_root, open_options)
+                .await?;
+            graph.test_runtime_guard = Some(runtime);
+            return Ok(graph);
+        }
+        #[cfg(not(any(test, feature = "test-transport")))]
+        {
+            let _ = (project_root, open_options);
+            Err(configuration_runtime_unavailable())
+        }
     }
 
     /// Opens an initialized project through the canonical registered runtime
@@ -940,6 +1006,8 @@ impl TraceDecay {
             read_only: false,
             context_scout_owner: None,
             context_scout_claim_authorities: Default::default(),
+            #[cfg(any(test, feature = "test-transport"))]
+            test_runtime_guard: None,
         };
 
         crate::hooks::publish_hook_v2_bindings(&ts.store_layout)?;
@@ -984,10 +1052,24 @@ impl TraceDecay {
     }
 
     pub async fn open_read_only_with_options(
-        _project_root: &Path,
-        _open_options: TraceDecayOpenOptions,
+        project_root: &Path,
+        open_options: TraceDecayOpenOptions,
     ) -> Result<Self> {
-        Err(configuration_runtime_unavailable())
+        #[cfg(any(test, feature = "test-transport"))]
+        {
+            let open_options = Self::standalone_test_open_options(project_root, open_options);
+            let runtime = Self::standalone_test_runtime(project_root, &open_options).await?;
+            let mut graph = runtime
+                .open_project_graph_read_only_for_test(project_root, open_options)
+                .await?;
+            graph.test_runtime_guard = Some(runtime);
+            return Ok(graph);
+        }
+        #[cfg(not(any(test, feature = "test-transport")))]
+        {
+            let _ = (project_root, open_options);
+            Err(configuration_runtime_unavailable())
+        }
     }
 
     pub(crate) async fn open_read_only_with_registered_configuration(
@@ -1057,6 +1139,8 @@ impl TraceDecay {
             read_only: true,
             context_scout_owner: None,
             context_scout_claim_authorities: Default::default(),
+            #[cfg(any(test, feature = "test-transport"))]
+            test_runtime_guard: None,
         })
     }
 
@@ -1192,6 +1276,8 @@ impl TraceDecay {
             read_only: false,
             context_scout_owner: None,
             context_scout_claim_authorities: Default::default(),
+            #[cfg(any(test, feature = "test-transport"))]
+            test_runtime_guard: self.test_runtime_guard.clone(),
         };
 
         let mut attempts = 0;
@@ -1425,11 +1511,25 @@ impl TraceDecay {
     }
 
     pub async fn open_branch_with_options(
-        _project_root: &Path,
-        _branch_name: &str,
-        _open_options: TraceDecayOpenOptions,
+        project_root: &Path,
+        branch_name: &str,
+        open_options: TraceDecayOpenOptions,
     ) -> Result<Self> {
-        Err(configuration_runtime_unavailable())
+        #[cfg(any(test, feature = "test-transport"))]
+        {
+            let open_options = Self::standalone_test_open_options(project_root, open_options);
+            let runtime = Self::standalone_test_runtime(project_root, &open_options).await?;
+            let mut graph = runtime
+                .open_project_branch_for_test(project_root, branch_name, open_options)
+                .await?;
+            graph.test_runtime_guard = Some(runtime);
+            return Ok(graph);
+        }
+        #[cfg(not(any(test, feature = "test-transport")))]
+        {
+            let _ = (project_root, branch_name, open_options);
+            Err(configuration_runtime_unavailable())
+        }
     }
 
     /// Opens a tracked branch through the canonical registered runtime while
@@ -1579,6 +1679,8 @@ impl TraceDecay {
             read_only,
             context_scout_owner: None,
             context_scout_claim_authorities: Default::default(),
+            #[cfg(any(test, feature = "test-transport"))]
+            test_runtime_guard: None,
         })
     }
 
@@ -1615,13 +1717,12 @@ impl TraceDecay {
 
         let meta = branch_meta::load_branch_meta(&self.store_layout.data_root);
         let default_branch = meta.as_ref().map(|meta| meta.default_branch.as_str());
-        let isolated_detached = crate::worktree::is_detached_linked_worktree(&self.project_root);
-        let git_common_dir = (!isolated_detached)
-            .then(|| crate::worktree::git_common_dir(&self.project_root))
-            .flatten();
-        let git_remote_url = (!isolated_detached)
-            .then(|| git_remote_url(&self.project_root))
-            .flatten();
+        // Registering without the git common dir leaves the row unreachable
+        // by repository identity, so the next first touch from a sibling
+        // checkout mints a fresh store. Detached worktrees are no exception:
+        // they belong to the same repository as every other checkout.
+        let git_common_dir = crate::worktree::git_common_dir(&self.project_root);
+        let git_remote_url = git_remote_url(&self.project_root);
 
         // A shared project id can be reached from any linked worktree (see
         // the git-common-dir alias registered below), so registering
@@ -1629,14 +1730,10 @@ impl TraceDecay {
         // happens to touch the project last pin its canonical_root /
         // display_root to a transient worktree path. Redirect registration
         // to the primary checkout when one is detected and still exists.
-        let primary_root = (!isolated_detached)
-            .then(|| {
-                crate::project_registry::primary_checkout_root(
-                    &self.project_root,
-                    git_common_dir.as_deref(),
-                )
-            })
-            .flatten();
+        let primary_root = crate::project_registry::primary_checkout_root(
+            &self.project_root,
+            git_common_dir.as_deref(),
+        );
         let previous_canonical_root = if primary_root.is_some() {
             global_db
                 .get_code_project(project_id)
