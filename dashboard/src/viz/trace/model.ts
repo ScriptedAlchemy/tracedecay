@@ -511,19 +511,6 @@ function directionOf(ringA: number, ringB: number): TraceChannelDirection {
 }
 
 /**
- * What the field encodes, in one sentence per channel.
- *
- * This lives beside the builder rather than in the component, because the
- * caption and the picture are the same claim and a caption that can be edited
- * without touching the model is a caption that will eventually lie.
- */
-export const TRACE_ENCODINGS =
-  'row = hop distance from the focus, above for callers and below for callees — not elevation and not importance · ' +
-  'channel width = call sites on that one edge · sill width = the symbol’s degree · hue = symbol kind · ' +
-  'hover latency, settle time and bloom depth = degree · deformation under drag = call sites · ' +
-  'dashed stub = edges this frame does not draw';
-
-/**
  * Field names that would carry each unbound sensory measurement.
  *
  * These are candidate names, matched against `coverage.rowFields` — the fields

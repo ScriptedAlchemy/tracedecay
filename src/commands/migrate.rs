@@ -943,6 +943,8 @@ struct RegistryGcDisplay {
     deleted_count: usize,
     deleted_code_project_count: usize,
     deleted_storage_project_count: usize,
+    #[serde(default)]
+    protected_code_project_count: usize,
     candidate_paths: Vec<String>,
 }
 
@@ -969,6 +971,12 @@ fn print_registry_gc_report(
         );
     } else {
         println!("dry run: re-run with --apply to delete registry metadata");
+    }
+    if display.protected_code_project_count > 0 {
+        println!(
+            "retained-store authorities protected: {}",
+            display.protected_code_project_count
+        );
     }
     for project_path in display.candidate_paths.iter().take(20) {
         println!("{project_path}");
