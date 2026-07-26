@@ -85,6 +85,78 @@ async fn linked_worktree_uses_initialized_git_common_dir_store_without_init() {
 }
 
 #[tokio::test]
+async fn detached_linked_worktree_uses_repository_identity_and_isolated_graph_scope() {
+    let _guard = HOME_ENV_LOCK.lock().await;
+    let dir = TempDir::new().unwrap();
+    let project = dir.path().join("repo");
+    let worktree = dir.path().join("repo-detached");
+    let home = test_home(&dir);
+    let profile_root = home.join(".tracedecay");
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn main_only() {}\n").unwrap();
+    let _home_guard = HomeGuard::set(&home);
+
+    init_repo_with_commit(&project);
+
+    let main = init_with_maintenance(&project).await.unwrap();
+    let lifecycle = acquire_fixture_maintenance();
+    let database_scope = tracedecay::db::enter_maintenance_database_scope(
+        &lifecycle,
+        &profile_root,
+        "seed detached worktree store",
+    )
+    .unwrap();
+    main.index_all().await.unwrap();
+    let main_project_id = main
+        .store_layout()
+        .identity
+        .project_id
+        .clone()
+        .expect("main checkout has a project identity");
+    let main_store = main.store_layout().data_root.clone();
+    main.close();
+    drop(database_scope);
+    drop(lifecycle);
+
+    git(
+        &project,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            worktree.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    fs::write(
+        worktree.join("src/worktree_only.rs"),
+        "pub fn detached_only() {}\n",
+    )
+    .unwrap();
+
+    assert!(
+        TraceDecay::has_initialized_store(&worktree).await,
+        "detached worktree should resolve the repository's initialized store"
+    );
+    let detached = open_with_maintenance(&worktree).await.unwrap();
+    assert_eq!(
+        detached.store_layout().identity.project_id.as_deref(),
+        Some(main_project_id.as_str())
+    );
+    assert_eq!(detached.store_layout().data_root, main_store);
+    assert_eq!(detached.active_branch(), None);
+    assert_eq!(detached.serving_branch(), None);
+    assert!(
+        !detached
+            .search("detached_only", 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "detached worktree should read its isolated graph scope"
+    );
+}
+
+#[tokio::test]
 async fn worktree_profile_stores_prefer_the_exact_manifest_root() {
     let _guard = HOME_ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
