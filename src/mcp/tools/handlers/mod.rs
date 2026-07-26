@@ -494,7 +494,7 @@ impl Default for ToolCallRegistryOptions<'_> {
             allow_default_registry_fallback: true,
             implicit_project_path: None,
             automation_scheduler_reconciler: None,
-            automation_writer: crate::dashboard::direct_dashboard_automation_writer(),
+            automation_writer: crate::dashboard::standalone_dashboard_automation_writer(),
             doctor_report_reader: None,
             doctor_remediation_dispatcher: None,
             code_index_freshness_reader: None,

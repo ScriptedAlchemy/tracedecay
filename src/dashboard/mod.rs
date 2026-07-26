@@ -30,7 +30,7 @@ mod automation_outcomes_api;
 mod automation_run_api;
 mod automation_run_service;
 pub(crate) use automation_run_service::{
-    DashboardAutomationWriter, direct_dashboard_automation_writer,
+    DashboardAutomationWriter, standalone_dashboard_automation_writer,
 };
 mod automation_scheduler_api;
 mod automation_skills_api;
@@ -465,7 +465,7 @@ pub(crate) async fn build_state(cg: &TraceDecay) -> Result<DashboardState> {
         None,
         true,
         None,
-        direct_dashboard_automation_writer(),
+        standalone_dashboard_automation_writer(),
         None,
         None,
         None,
@@ -654,7 +654,7 @@ where
         test_authority.map(|authority| Arc::clone(&authority.profile_database)),
         options.warm_token_counts,
         None,
-        direct_dashboard_automation_writer(),
+        standalone_dashboard_automation_writer(),
         None,
         None,
         None,
@@ -1374,7 +1374,7 @@ mod authority_tests {
             None,
             None,
             None,
-            direct_dashboard_automation_writer(),
+            standalone_dashboard_automation_writer(),
             Some(Arc::clone(&doctor_reader)),
             Some(doctor_dispatcher),
             None,

@@ -543,7 +543,7 @@ mod tests {
             None,
             None,
             None,
-            crate::dashboard::direct_dashboard_automation_writer(),
+            crate::dashboard::standalone_dashboard_automation_writer(),
             None,
             None,
             None,

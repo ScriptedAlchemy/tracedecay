@@ -105,7 +105,7 @@ impl DashboardFixture {
             ))),
             code_diagnostics_backfill_started: Arc::new(AtomicBool::new(false)),
             automation_scheduler_reconciler: None,
-            automation_writer: direct_dashboard_automation_writer(),
+            automation_writer: standalone_dashboard_automation_writer(),
             doctor_report_reader: None,
             doctor_remediation_dispatcher: None,
         };
