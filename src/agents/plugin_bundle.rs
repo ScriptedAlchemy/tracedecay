@@ -365,16 +365,6 @@ pub fn kimi_files() -> Vec<(&'static str, &'static str)> {
     )
 }
 
-/// Kimi's independently addressable MCP companion is declared by its plugin
-/// manifest; the official plugin manager owns registration of that manifest.
-pub fn kimi_mcp_companion_files() -> Vec<(&'static str, &'static str)> {
-    KIMI_MANIFEST_FILES
-        .iter()
-        .filter(|file| file.relative == ".kimi-plugin/plugin.json")
-        .map(|file| (file.relative, file.contents))
-        .collect()
-}
-
 /// `OpenCode` Agent component: host-loadable skills, agent definitions, and
 /// command prompt templates. `AGENTS.md` remains Core instruction content.
 pub fn opencode_agent_files() -> Vec<(&'static str, &'static str)> {
