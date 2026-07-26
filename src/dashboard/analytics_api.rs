@@ -7,8 +7,11 @@
 use std::collections::BTreeMap;
 
 use axum::extract::State;
-use axum::response::Json;
+use axum::http::{HeaderValue, StatusCode, header};
+use axum::response::{IntoResponse, Json, Response};
 use serde_json::{Value, json};
+use tracedecay_application::ObservatoryReadModelV1;
+use tracedecay_domain::CoverageStateV1;
 
 use crate::analytics::{
     ToolUsageObservation, UsageKind, categorize_skill, infer_usage_events,
@@ -20,6 +23,7 @@ use crate::global_db::{
 };
 
 use super::DashboardState;
+use super::read_model::{DashboardCoverageV1, DashboardEnvelopeV1, scope_from_state};
 use super::util::{i64_field, query_i64, query_rows, str_field};
 
 const HINT_CATEGORIES: &[&str] = &[
@@ -47,9 +51,7 @@ struct HintCounts {
 /// `GET /api/plugins/analytics/overview`
 pub(crate) async fn overview(State(state): State<DashboardState>) -> Json<Value> {
     let durable_events = durable_analytics_rows_for_state(&state).await;
-    let scope_ref = RegisteredGlobalDb::canonical_project_key(&state.project_root);
-    let since = crate::tracedecay::current_timestamp().saturating_sub(30 * 86_400);
-    let observatory = Some(observatory_read_model_for_state(&state, &scope_ref, since).await);
+    let observatory = Some(observatory_model(&state).await);
     let hints = hint_summary(state.lcm_db.as_deref(), durable_events.as_deref()).await;
     let usage = usage_summary(state.lcm_db.as_deref(), durable_events.as_deref()).await;
     let agents = agent_usage_summary(state.lcm_db.as_deref()).await;
@@ -71,27 +73,78 @@ pub(crate) async fn overview(State(state): State<DashboardState>) -> Json<Value>
 
 /// Canonical Plan 26 Observatory read model. CLI/MCP call the same application
 /// composer instead of re-deriving these values in their adapters.
-pub(crate) async fn observatory(State(state): State<DashboardState>) -> Json<Value> {
-    let scope_ref = RegisteredGlobalDb::canonical_project_key(&state.project_root);
-    let since = crate::tracedecay::current_timestamp().saturating_sub(30 * 86_400);
-    let value =
-        serde_json::to_value(observatory_read_model_for_state(&state, &scope_ref, since).await)
-            .unwrap_or(Value::Null);
-    Json(value)
+pub(crate) async fn observatory(
+    State(state): State<DashboardState>,
+) -> Json<DashboardEnvelopeV1<ObservatoryReadModelV1>> {
+    let model = observatory_model(&state).await;
+    let known = model
+        .metrics
+        .iter()
+        .filter(|metric| metric.coverage.state == CoverageStateV1::Known)
+        .count() as u64;
+    let eligible = model.metrics.len() as u64;
+    let envelope = if model.current && known == eligible {
+        DashboardEnvelopeV1::ready(
+            scope_from_state(&state),
+            DashboardCoverageV1::complete(eligible, "metrics"),
+            model,
+        )
+    } else {
+        DashboardEnvelopeV1::partial(
+            scope_from_state(&state),
+            eligible,
+            known,
+            "metrics",
+            vec!["incomplete_metric_coverage".to_owned()],
+            model,
+        )
+    };
+    Json(envelope)
 }
 
-async fn observatory_read_model_for_state(
-    state: &DashboardState,
-    scope_ref: &str,
-    since: i64,
-) -> tracedecay_application::ObservatoryReadModelV1 {
+/// Transport-neutral HTTP representation over the same application model.
+pub(crate) async fn observatory_http(State(state): State<DashboardState>) -> Response {
+    let model = observatory_model(&state).await;
+    match crate::application::observability::observatory_http_value(&model) {
+        Ok(value) => Json(value).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+/// Public JSON export. No dashboard projection or formula is applied.
+pub(crate) async fn observatory_export(State(state): State<DashboardState>) -> Response {
+    let model = observatory_model(&state).await;
+    match crate::application::observability::observatory_export_bytes(&model) {
+        Ok(bytes) => (
+            [
+                (
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/json"),
+                ),
+                (
+                    header::CONTENT_DISPOSITION,
+                    HeaderValue::from_static(
+                        "attachment; filename=\"tracedecay-observatory-v1.json\"",
+                    ),
+                ),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn observatory_model(state: &DashboardState) -> ObservatoryReadModelV1 {
+    let scope_ref = RegisteredGlobalDb::canonical_project_key(&state.project_root);
+    let since = crate::tracedecay::current_timestamp().saturating_sub(30 * 86_400);
     let mut read_model = match state.savings_db.as_deref() {
         Some(db) => {
-            crate::application::observability::observatory_read_model(db, Some(scope_ref), since)
+            crate::application::observability::observatory_read_model(db, Some(&scope_ref), since)
                 .await
         }
         None => crate::application::observability::observatory_unavailable_read_model(
-            Some(scope_ref),
+            Some(&scope_ref),
             since,
             "observability_store_unavailable",
         ),

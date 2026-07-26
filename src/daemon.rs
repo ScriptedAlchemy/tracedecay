@@ -644,16 +644,14 @@ fn code_index_search_executor(
                         error = %error,
                         "code_index_search_failed"
                     );
-                    if let Pr9SemanticSearchExecutionErrorV1::Semantic(
-                        crate::query::retrieval::semantic::SemanticQueryServiceError::StrictUnavailable(
-                            abstention,
-                        ),
-                    ) = &error
+                    if let Pr9SemanticSearchExecutionErrorV1::StrictSemanticUnavailable {
+                        generation,
+                        abstention,
+                    } = &error
                     {
-                        let status = schedulers.semantic_mcp_abstention(&project_root).await;
                         return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
                             crate::mcp::server::CodeIndexSearchUnavailableV1 {
-                                code_generation: status.code_generation,
+                                code_generation: Some(generation.as_str().to_owned()),
                                 reason: crate::mcp::server::CodeIndexSearchUnavailableReasonV1::SemanticUnavailable,
                                 semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
                                     reason: code_index_scheduler::semantic_query_runtime::semantic_abstention_reason(abstention),
@@ -681,6 +679,9 @@ fn code_index_search_executor(
                         },
                         Pr9SemanticSearchExecutionErrorV1::Semantic(_) => {
                             crate::mcp::server::CodeIndexSearchUnavailableReasonV1::Internal
+                        }
+                        Pr9SemanticSearchExecutionErrorV1::StrictSemanticUnavailable { .. } => {
+                            crate::mcp::server::CodeIndexSearchUnavailableReasonV1::SemanticUnavailable
                         }
                     };
                     return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
@@ -4484,8 +4485,14 @@ async fn serve_broker_socket_client(
         return Ok(());
     }
     if let Some(request) = parse_branch_add_request(&first_request_line) {
-        let response =
-            branch_add_response(&engine.store_administration, &handshake, &request).await;
+        let response = match Box::pin(engine.project_server_for_request(&handshake)).await {
+            Ok(_) => branch_add_response(&engine.store_administration, &handshake, &request).await,
+            Err(error) => JsonRpcResponse::error(
+                request.id.clone(),
+                ErrorCode::InternalError,
+                error.to_string(),
+            ),
+        };
         drop(setup_activity);
         write_json_rpc_response(&mut transport, &response).await?;
         return Ok(());
@@ -4794,7 +4801,25 @@ async fn serve_windows_broker_client_with_class_and_invocation(
         return Ok(());
     }
     if let Some(request) = parse_branch_add_request(&first_request_line) {
-        let response = branch_add_response(&store_administration, &handshake, &request).await;
+        let response = match Box::pin(portable_project_server_for_request(
+            lifecycle.clone(),
+            store_administration.clone(),
+            Arc::clone(&project_open_gates),
+            invocation.clone(),
+            http_application_registry.clone(),
+            &handshake,
+            #[cfg(test)]
+            project_open_attempts.clone(),
+        ))
+        .await
+        {
+            Ok(_) => branch_add_response(&store_administration, &handshake, &request).await,
+            Err(error) => JsonRpcResponse::error(
+                request.id.clone(),
+                ErrorCode::InternalError,
+                error.to_string(),
+            ),
+        };
         drop(setup_activity);
         write_json_rpc_response(&mut transport, &response).await?;
         return Ok(());
