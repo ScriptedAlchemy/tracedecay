@@ -152,7 +152,6 @@ fn session_table_disposition(table: &str) -> Option<&'static str> {
         | "configuration_topology_policies"
         | "configuration_topology_protected_refs"
         | "configuration_topology_roots"
-        | "dashboard_token_counts"
         | "external_source_states_v1"
         | "git_correlation_meta"
         | "git_index_preview_commitments"
@@ -223,6 +222,10 @@ fn session_table_disposition(table: &str) -> Option<&'static str> {
         | "session_thread_hierarchy_edges"
         | "session_turn_members"
         | "session_turns" => Some("merged"),
+        // Legacy dashboard token counts are a disposable derived cache. The
+        // runtime no longer owns this table, so consolidation accepts old
+        // inputs but deliberately does not materialize it in the destination.
+        "dashboard_token_counts" => Some("legacy derived cache discarded"),
         "authority_audit_checkpoints"
         | "global_schema_migrations"
         // Resumable-backfill watermarks scoped to one store's own sequences; a
