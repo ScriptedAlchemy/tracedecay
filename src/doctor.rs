@@ -84,20 +84,21 @@ pub async fn run_doctor(agent_filter: Option<&str>) -> crate::errors::Result<()>
         }
     };
     debug_assert!(
-        !env!("CARGO_PKG_VERSION").is_empty(),
-        "CARGO_PKG_VERSION must not be empty"
+        !crate::version::build_version().is_empty(),
+        "the reported build version must not be empty"
     );
     let mut dc = DoctorCounters::new();
 
     eprintln!(
         "\n\x1b[1mtracedecay doctor v{}\x1b[0m\n",
-        env!("CARGO_PKG_VERSION")
+        crate::version::build_version()
     );
 
     check_binary(&mut dc);
 
     eprintln!("\n\x1b[1mCurrent project\x1b[0m");
     let project_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    check_inert_project_config(&mut dc, &project_path);
     let daemon_status = daemon_project_status(&project_path).await;
     let storage_healthy = match daemon_status.as_ref() {
         Ok(status) => check_database(&mut dc, status),
@@ -834,7 +835,7 @@ fn check_binary(dc: &mut DoctorCounters) {
     } else {
         dc.fail("Could not determine binary path");
     }
-    dc.pass(&format!("Version: {}", env!("CARGO_PKG_VERSION")));
+    dc.pass(&format!("Version: {}", crate::version::build_version()));
 }
 
 /// Check global database exists.
@@ -1136,6 +1137,36 @@ fn check_watcher(dc: &mut DoctorCounters) {
 
     #[cfg(not(unix))]
     dc.info("Git-metadata watcher is only available on Unix daemons");
+}
+
+/// Project-local domain symbol rules file described by
+/// `docs/DOMAIN-EXTRACTORS.md`.
+const DOMAIN_SYMBOL_RULES_FILENAME: &str = "domain-symbols.toml";
+
+/// Builds the warning for a domain symbol rules file that nothing reads.
+///
+/// `docs/DOMAIN-EXTRACTORS.md` documents `.tracedecay/domain-symbols.toml` as a
+/// design rather than a shipped feature: no extractor parses it. Without this
+/// check, authoring one is a silent no-op — no error, no warning, and no domain
+/// nodes — so Doctor is where the author finds out. `None` (the normal case)
+/// keeps Doctor silent about a file that is not there.
+fn domain_symbol_rules_warning(project_path: &Path) -> Option<String> {
+    let rules = crate::config::get_tracedecay_dir(project_path).join(DOMAIN_SYMBOL_RULES_FILENAME);
+    rules.is_file().then(|| {
+        format!(
+            "Domain symbol rules at {} are not read: domain symbol extraction is \
+             unimplemented, so this file contributes no graph nodes. \
+             See docs/DOMAIN-EXTRACTORS.md, which describes the design only.",
+            rules.display()
+        )
+    })
+}
+
+/// Check for project configuration that TraceDecay does not act on.
+fn check_inert_project_config(dc: &mut DoctorCounters, project_path: &Path) {
+    if let Some(warning) = domain_symbol_rules_warning(project_path) {
+        dc.warn(&warning);
+    }
 }
 
 /// Check user config file.

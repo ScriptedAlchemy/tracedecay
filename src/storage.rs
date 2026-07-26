@@ -740,18 +740,21 @@ pub(crate) fn matching_legacy_profile_layouts(
         profile_root,
         excluded_project_id,
         selected_layout_is_authoritative,
+        crate::worktree::is_detached_linked_worktree,
         crate::worktree::git_common_dir,
     )
 }
 
-fn matching_legacy_profile_layouts_with_git_resolver<G>(
+fn matching_legacy_profile_layouts_with_git_resolver<D, G>(
     project_root: &Path,
     profile_root: &Path,
     excluded_project_id: Option<&str>,
     selected_layout_is_authoritative: bool,
+    mut is_detached_linked_worktree: D,
     mut git_common_dir: G,
 ) -> Result<(Vec<StoreLayout>, bool)>
 where
+    D: FnMut(&Path) -> bool,
     G: FnMut(&Path) -> Option<PathBuf>,
 {
     let projects_root = profile_root.join("projects");
@@ -797,7 +800,9 @@ where
     {
         exact_manifests
     } else {
-        let project_git_common_dir = git_common_dir(project_root);
+        let project_git_common_dir = (!is_detached_linked_worktree(project_root))
+            .then(|| git_common_dir(project_root))
+            .flatten();
         let mut legacy_git_common_dirs = HashMap::<PathBuf, Option<PathBuf>>::new();
         non_exact_manifests
             .into_iter()
@@ -1850,6 +1855,7 @@ mod tests {
                 &profile_root,
                 None,
                 false,
+                |_| false,
                 |root| {
                     resolver_calls.borrow_mut().push(root.to_path_buf());
                     Some(dir.path().join("shared.git"))
@@ -1874,6 +1880,7 @@ mod tests {
                 &profile_root,
                 Some("proj_exact"),
                 true,
+                |_| false,
                 |root| {
                     resolver_calls.borrow_mut().push(root.to_path_buf());
                     Some(dir.path().join("shared.git"))
@@ -1894,6 +1901,7 @@ mod tests {
                 &profile_root,
                 Some("proj_exact"),
                 false,
+                |_| false,
                 |root| {
                     resolver_calls.borrow_mut().push(root.to_path_buf());
                     Some(dir.path().join("shared.git"))
@@ -1942,6 +1950,7 @@ mod tests {
             &profile_root,
             None,
             false,
+            |_| false,
             |_| None,
         )
         .expect_err("missing project_id must fail closed");
@@ -1988,6 +1997,7 @@ mod tests {
                 &profile_root,
                 Some("proj_selected"),
                 true,
+                |_| false,
                 |root| {
                     resolver_calls.borrow_mut().push(root.to_path_buf());
                     Some(dir.path().join("shared.git"))
@@ -2009,6 +2019,7 @@ mod tests {
             &profile_root,
             Some("proj_selected"),
             false,
+            |_| false,
             |root| {
                 resolver_calls.borrow_mut().push(root.to_path_buf());
                 Some(dir.path().join("shared.git"))

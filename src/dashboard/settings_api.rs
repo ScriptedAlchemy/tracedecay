@@ -283,7 +283,7 @@ async fn settings_payload(state: &DashboardState) -> std::result::Result<Value, 
             "savings_db": state.savings_db_path,
         },
         "version": {
-            "version": env!("CARGO_PKG_VERSION"),
+            "version": crate::version::build_version(),
             "channel": if crate::cloud::is_beta() { "beta" } else { "stable" },
             "cached_latest_version": non_empty(&user.cached_latest_version),
         },
