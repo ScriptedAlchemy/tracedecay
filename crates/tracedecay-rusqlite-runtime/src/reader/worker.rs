@@ -454,10 +454,13 @@ fn run_snapshot<E: ReaderQueryExecutor>(
             SnapshotCommand::TableSizes { reply } => {
                 let read = || -> Result<Vec<TableSizeTelemetrySample>, rusqlite::Error> {
                     let mut statement = transaction.prepare(
-                        "SELECT name, SUM(pgsize) \
-                         FROM dbstat \
-                         GROUP BY name \
-                         ORDER BY name",
+                        "SELECT schema_entry.name, COALESCE(SUM(dbstat.payload), 0) \
+                         FROM sqlite_schema AS schema_entry \
+                         LEFT JOIN dbstat ON dbstat.name = schema_entry.name \
+                         WHERE schema_entry.type = 'table' \
+                           AND schema_entry.name NOT LIKE 'sqlite_%' \
+                         GROUP BY schema_entry.name \
+                         ORDER BY schema_entry.name",
                     )?;
                     statement
                         .query_map([], |row| {

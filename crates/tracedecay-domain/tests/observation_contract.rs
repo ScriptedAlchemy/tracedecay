@@ -1,4 +1,5 @@
 use std::cmp::Ordering;
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
 use serde_json::{Value, json};
@@ -985,14 +986,7 @@ fn durable_observations_written_before_native_identity_still_decode() {
 
     // The derivation this row was written with: the whole material under the
     // Claude domain, with no separate native-record-id structure.
-    let mut hasher = Sha256::new();
-    hasher.update(b"tracedecay.claude.observation.v1\0");
-    hasher.update(tracedecay_domain::canonical_json_bytes(&material).unwrap());
-    let mut digest = String::with_capacity(64);
-    for byte in hasher.finalize() {
-        write!(&mut digest, "{byte:02x}").unwrap();
-    }
-    let legacy_observation_id = format!("sha256:{digest}");
+    let legacy_observation_id = domain_digest_id(b"tracedecay.claude.observation.v1\0", &material);
 
     assert_ne!(
         legacy_observation_id,
@@ -1000,9 +994,14 @@ fn durable_observations_written_before_native_identity_still_decode() {
         "fixture must exercise the derivation change, not agree with it"
     );
 
+    // A real pre-change row carries the same digest in both fields, because the
+    // writer serialized one value under two names. Rewriting only
+    // `observation_id` here is what let the first fix look complete while the
+    // daemon still failed on `idempotency_key`.
     let mut wire: Value = serde_json::from_slice(&serde_json::to_vec(&observation).unwrap())
         .expect("durable observation serializes to an object");
     wire["observation_id"] = json!(legacy_observation_id);
+    wire["idempotency_key"] = json!(legacy_observation_id);
 
     let decoded: DurableClaudeObservationV1 =
         serde_json::from_value(wire.clone()).expect("a pre-change row must still decode");
@@ -1010,10 +1009,90 @@ fn durable_observations_written_before_native_identity_still_decode() {
     assert_eq!(decoded.payload(), &payload);
 
     // Accepting the previous derivation must not accept an arbitrary id.
-    wire["observation_id"] = json!(format!("sha256:{}", "0".repeat(64)));
-    let rejected = serde_json::from_value::<DurableClaudeObservationV1>(wire);
-    assert!(
-        rejected.is_err(),
-        "an id matching neither derivation must still be rejected"
+    let arbitrary = json!(format!("sha256:{}", "0".repeat(64)));
+    for field in ["observation_id", "idempotency_key"] {
+        let mut forged = wire.clone();
+        forged[field] = arbitrary.clone();
+        assert!(
+            serde_json::from_value::<DurableClaudeObservationV1>(forged).is_err(),
+            "an id matching no derivation must still be rejected in {field}"
+        );
+    }
+}
+
+/// Rows committed before `idempotency_key` became an alias of `observation_id`
+/// carry their own domain-separated digest in that field, and rows committed
+/// between that change and the native-identity change carry the whole-material
+/// digest. Both predate the current derivation and both must still decode.
+#[test]
+fn durable_observations_decode_under_every_historical_derivation() {
+    let material = native_identity_fixture();
+    let observation = durable(material.clone(), json!({"text": "sanitized"}));
+    let wire: Value = serde_json::from_slice(&serde_json::to_vec(&observation).unwrap())
+        .expect("durable observation serializes to an object");
+
+    let historical = [
+        observation.observation_id().as_str().to_string(),
+        domain_digest_id(b"tracedecay.claude.observation.v1\0", &material),
+        domain_digest_id(b"tracedecay.claude.idempotency.v1\0", &material),
+    ];
+    assert_eq!(
+        historical.iter().collect::<BTreeSet<_>>().len(),
+        historical.len(),
+        "each historical derivation must produce a distinct digest for this fixture"
     );
+
+    for id in &historical {
+        let mut row = wire.clone();
+        row["observation_id"] = json!(id);
+        row["idempotency_key"] = json!(id);
+        let decoded: DurableClaudeObservationV1 = serde_json::from_value(row)
+            .unwrap_or_else(|error| panic!("a row derived as {id} must decode: {error}"));
+        assert_eq!(decoded.identity(), observation.identity());
+    }
+}
+
+/// A change to the live derivation must not be able to land quietly.
+///
+/// Adding a derivation is legitimate; silently dropping the previous one from
+/// the accepted set is what took the daemon down twice, once per field. This
+/// pins the digest today's derivation produces for a fixed fixture, so any
+/// change to it fails here rather than in warm-up against a live profile. The
+/// fix when it fails is to add the new derivation to the front of the accepted
+/// list, keep this value in that list, and pin the new one here.
+#[test]
+fn the_live_observation_derivation_is_pinned() {
+    let observation = durable(native_identity_fixture(), json!({"text": "sanitized"}));
+    assert_eq!(
+        observation.observation_id().as_str(),
+        "sha256:efd99c7fd87f4ad156b40f16d982d18511ebfb708afc140f9f67e63e0c73f5ba",
+        "the live derivation changed; extend the accepted set before repinning"
+    );
+}
+
+fn native_identity_fixture() -> ClaudeObservationIdentityMaterialV1 {
+    ClaudeObservationIdentityMaterialV1::for_native_record(
+        ObservationSourceIdentityV1::for_source(
+            SessionId::new("session.fixture").unwrap(),
+            SessionId::new("source.fixture").unwrap(),
+        )
+        .unwrap(),
+        ObservationScopeV1::Profile,
+        ClaudeFileGenerationV1::new(3).unwrap(),
+        ClaudeByteRangeV1::new(10, 11).unwrap(),
+        ObservationOrderingDomainV1::FileBytes,
+        ObservationId::new("message.fixture").unwrap(),
+    )
+    .unwrap()
+}
+
+fn domain_digest_id(domain: &[u8], material: &ClaudeObservationIdentityMaterialV1) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(domain);
+    hasher.update(tracedecay_domain::canonical_json_bytes(material).unwrap());
+    let mut digest = String::with_capacity(64);
+    for byte in hasher.finalize() {
+        write!(&mut digest, "{byte:02x}").unwrap();
+    }
+    format!("sha256:{digest}")
 }
