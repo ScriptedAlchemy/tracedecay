@@ -102,7 +102,13 @@ assert_required_assets() {
     "src/query/retrieval/semantic/tests.rs"
     "src/semantic_code/fastembed_adapter.rs"
     "src/semantic_code/model_lifecycle.rs"
+    "tests/fixtures/packaged_host_events/claude.json"
     "tests/fixtures/packaged_host_events/claude/post_tool_use_write.json"
+    "tests/fixtures/packaged_host_events/codex.json"
+    "tests/fixtures/packaged_host_events/cursor.json"
+    "tests/fixtures/packaged_host_events/hermes.json"
+    "tests/fixtures/packaged_host_events/kiro.json"
+    "tests/fixtures/packaged_host_events/kimi-code.json"
     "tests/fixtures/packaged_host_events/kimi/post-tool-use-edit.json"
     "tests/fixtures/packaged_host_events/opencode/baseline.json"
     # Packaged fixture/workload pins (PR5 harness embeds its workload via
@@ -317,7 +323,13 @@ run_self_test() {
     src/query/retrieval/semantic/tests.rs \
     src/semantic_code/fastembed_adapter.rs \
     src/semantic_code/model_lifecycle.rs \
+    tests/fixtures/packaged_host_events/claude.json \
     tests/fixtures/packaged_host_events/claude/post_tool_use_write.json \
+    tests/fixtures/packaged_host_events/codex.json \
+    tests/fixtures/packaged_host_events/cursor.json \
+    tests/fixtures/packaged_host_events/hermes.json \
+    tests/fixtures/packaged_host_events/kiro.json \
+    tests/fixtures/packaged_host_events/kimi-code.json \
     tests/fixtures/packaged_host_events/kimi/post-tool-use-edit.json \
     tests/fixtures/packaged_host_events/opencode/baseline.json \
     tests/fixtures/provider_normalization/codex/session_meta.input.json \
@@ -518,7 +530,13 @@ require_command tar
 repo=$(cd -- "$repo" && pwd -P)
 [[ -f "$repo/Cargo.toml" ]] || die "Cargo.toml not found under $repo"
 for fixture in \
+  claude.json \
   claude/post_tool_use_write.json \
+  codex.json \
+  cursor.json \
+  hermes.json \
+  kiro.json \
+  kimi-code.json \
   kimi/post-tool-use-edit.json \
   opencode/baseline.json; do
   cmp -s \
