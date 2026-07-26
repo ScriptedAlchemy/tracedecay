@@ -322,7 +322,6 @@ fn schema(
             operation.as_str().replace('_', "-")
         ))?,
         1,
-        262_144,
     )?)
 }
 

@@ -24,8 +24,8 @@ pub fn profile_id(value: &str) -> ProfileId {
     ProfileId::new(value).unwrap()
 }
 
-pub fn schema(name: &str, bytes: u32) -> SchemaRef {
-    SchemaRef::new(SchemaId::new(name).unwrap(), 1, bytes).unwrap()
+pub fn schema(name: &str) -> SchemaRef {
+    SchemaRef::new(SchemaId::new(name).unwrap(), 1).unwrap()
 }
 
 pub fn read_manifest(
