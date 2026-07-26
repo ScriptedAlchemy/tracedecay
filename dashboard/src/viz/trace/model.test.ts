@@ -10,7 +10,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { resolveFixture } from '../../../stories/fixtures/data.ts';
-import { GraphNeighborsPayloadSchema } from '../../workspaces/code/contracts.ts';
+import { GraphNeighborsPayloadSchema } from '../../contracts/uncontracted/graph.ts';
 import { TRACE_BUDGET, buildSimSpec, buildTraceModel, type NeighborsPayload } from './model.ts';
 import { ringLabel } from './render.ts';
 

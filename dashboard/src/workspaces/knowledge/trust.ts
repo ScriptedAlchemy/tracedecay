@@ -22,7 +22,7 @@
  *      one fact. The uniformity is stated once and only the banks that deviate
  *      are drawn.
  */
-import type { FactRow, HrrCoverageRow } from './contracts.ts';
+import type { FactRow, HrrCoverageRow } from '../../contracts/uncontracted/memory.ts';
 
 export interface TrustBand {
   /** Printed label, e.g. `0.75–1.00`. */

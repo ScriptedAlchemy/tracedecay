@@ -26,14 +26,16 @@ import { fetchEnvelope, type EnvelopeResult } from '../../data/query/envelope.ts
 import { useLegacy } from '../../data/query/useLegacy.ts';
 import {
   ExplorerQueryRunSchema,
-  ExplorerReadContextSchema,
-  ExplorerSessionSizeSchema,
   type ExplorerQueryRun,
-  type ExplorerReadContext,
-  type ExplorerSessionSize,
   type ExplorerSourceId,
   type ExplorerSourceProgress,
-} from './contracts.ts';
+} from '../../contracts/wire.ts';
+import {
+  ExplorerReadContextSchema,
+  ExplorerSessionSizeSchema,
+  type ExplorerReadContext,
+  type ExplorerSessionSize,
+} from '../../contracts/uncontracted/explorer.ts';
 import {
   LANES,
   codeHits,
