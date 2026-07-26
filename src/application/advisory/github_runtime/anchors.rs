@@ -87,6 +87,18 @@ pub enum GitHubReviewBodyReadOutcomeV1 {
     Unavailable,
 }
 
+/// Authorized expansion boundary for retained GitHub review prose. The
+/// provider source is re-authorized by the concrete authority for every read.
+pub trait GitHubReviewBodyEvidenceAuthorityV1: Send + Sync {
+    fn read_retained_body<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        request: &'a GitHubReviewReadRequestV1,
+        body_anchor: &'a RetrievalAnchorId,
+        source_access: &'a dyn GitHubSourceAccessAuthorityV1,
+    ) -> FeedbackPortFuture<'a, GitHubReviewBodyReadOutcomeV1>;
+}
+
 impl ProjectGitHubAnchorAuthorityV1 {
     pub fn new(
         database: Database,
@@ -368,7 +380,7 @@ impl ProjectGitHubAnchorAuthorityV1 {
         source_access: &'a A,
     ) -> FeedbackPortFuture<'a, GitHubReviewBodyReadOutcomeV1>
     where
-        A: GitHubSourceAccessAuthorityV1 + Sync,
+        A: GitHubSourceAccessAuthorityV1 + Sync + ?Sized,
     {
         Box::pin(async move {
             if request.validate().is_err()
@@ -429,6 +441,31 @@ impl ProjectGitHubAnchorAuthorityV1 {
                 retained_body: body.retained_body,
             }))
         })
+    }
+}
+
+impl GitHubReviewBodyEvidenceAuthorityV1 for ProjectGitHubAnchorAuthorityV1 {
+    fn read_retained_body<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        request: &'a GitHubReviewReadRequestV1,
+        body_anchor: &'a RetrievalAnchorId,
+        source_access: &'a dyn GitHubSourceAccessAuthorityV1,
+    ) -> FeedbackPortFuture<'a, GitHubReviewBodyReadOutcomeV1> {
+        self.read_body(context, request, body_anchor, source_access)
+    }
+}
+
+impl GitHubReviewBodyEvidenceAuthorityV1 for Arc<ProjectGitHubAnchorAuthorityV1> {
+    fn read_retained_body<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        request: &'a GitHubReviewReadRequestV1,
+        body_anchor: &'a RetrievalAnchorId,
+        source_access: &'a dyn GitHubSourceAccessAuthorityV1,
+    ) -> FeedbackPortFuture<'a, GitHubReviewBodyReadOutcomeV1> {
+        self.as_ref()
+            .read_body(context, request, body_anchor, source_access)
     }
 }
 
