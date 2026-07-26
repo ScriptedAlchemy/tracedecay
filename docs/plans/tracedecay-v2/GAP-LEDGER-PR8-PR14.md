@@ -88,7 +88,7 @@ backend:
   `index.ts`, `wire.ts`) and **no occurrence of `AuthorityScope`** in any of
   them.
 - The Rust `DoctorRemediationOperationV1`
-  (`src/dashboard/doctor_remediation_api.rs:144-155`) has ten fields and no
+  (`src/dashboard/doctor_remediation_api.rs:144-155`) has eight fields and no
   `authority_scope`.
 - The frontend nonetheless imports the type and its schema from the contracts
   barrel: `dashboard/src/workspaces/observatory/doctorModel.ts:4` and `:12`,
@@ -248,10 +248,10 @@ an oversight. If deliberate it belongs in the plan as a named deferral with the
 condition that will flip it; a bare `false` in a match arm is not a status
 anyone can audit.
 
-### P0-7 · Two retention engines run on defaults that disable them
+### P0-7 · Observation release and LCM offload/drop are disabled by default
 
-**Status.** `IMPLEMENTED BUT UNREACHABLE` in effect — scheduled, called, and
-configured to do nothing.
+**Status.** `PARTIALLY IMPLEMENTED` in effect — scheduled and called, but the
+release, offload, and drop policies are disabled by default.
 
 **Evidence.**
 
@@ -265,9 +265,11 @@ configured to do nothing.
   (`src/sessions/lcm/retention.rs:128-139`). Deduplication runs; offload and
   drop never do.
 
-Combined with P1-a below, all three retention mechanisms that Plan 38 §3–§4
-relies on are inert or near-inert by default. Plan 38's storage-size problem is
-not addressed by any current default.
+Combined with P1-a below, observation release, LCM offload/drop, and lossless
+session-row pruning are disabled by default. LCM deduplication and analytics
+event pruning still run, so the mechanisms are not wholly inert; the open
+question is whether those defaults materially address Plan 38's storage-size
+driver.
 
 ---
 
@@ -516,8 +518,8 @@ Across the ~60 discrete requirements classified above and in P0–P2:
 | Status | Count |
 |---|---|
 | `IMPLEMENTED BUT UNVERIFIED` | ~34 |
-| `PARTIALLY IMPLEMENTED` | ~11 |
-| `IMPLEMENTED BUT UNREACHABLE` | 7 |
+| `PARTIALLY IMPLEMENTED` | ~12 |
+| `IMPLEMENTED BUT UNREACHABLE` | 6 |
 | `NOT IMPLEMENTED` | 5 |
 | `IMPLEMENTED AND VERIFIED` | **0** |
 
@@ -536,10 +538,10 @@ rather than *probably fine*.
    Automations as read-only for PR14 and name the slice that wires them?
 2. **Plan 11b Surfaces 1–2 (P0-2).** Build the consumers now, or unregister the
    five endpoints until a surface exists?
-3. **Session retention default (P1-a, P0-7).** Three retention engines are
-   built, scheduled, and configured off. Is lossless-by-default still correct
-   given the storage-size driver Plan 38 cites, and if so, what *does* address
-   that driver?
+3. **Session retention default (P1-a, P0-7).** Observation release, LCM
+   offload/drop, and lossless session-row pruning are built and scheduled but
+   configured off. Is lossless-by-default still correct given the storage-size
+   driver Plan 38 cites, and if so, what *does* address that driver?
 4. **`authority_scope` (P0-1).** Should the backend serve it on
    `DoctorRemediationOperationV1`, or should the frontend stop modelling it?
    The Doctor UI cannot compile either way until this is decided.

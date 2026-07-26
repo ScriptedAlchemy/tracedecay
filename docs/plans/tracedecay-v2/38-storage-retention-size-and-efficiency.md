@@ -18,7 +18,7 @@ behavior as absent and do not report it as verified.
 **Audit correction (2026-07-26; see
 [`GAP-LEDGER-PR8-PR14.md`](GAP-LEDGER-PR8-PR14.md) P0-7 and P1-a.)** "All seven
 sections are implemented" is true of the mechanisms and misleading about
-effect. Three retention engines ship configured to do nothing by default:
+effect. Three lossless-data cleanup policies ship disabled by default:
 
 - Observation evidence retention defaults `enabled: false` with every release
   window `None` (`src/global_db/observation/retention.rs:174-182`), even though
@@ -32,9 +32,10 @@ effect. Three retention engines ship configured to do nothing by default:
   because those rows are the lossless session record. Only `analytics_events`
   prunes by default, at 180 days.
 
-None of the five measured failure classes below is addressed by a default
-configuration. Whether lossless-by-default remains correct given those
-measurements is an open owner question, not an implementation gap.
+LCM deduplication and analytics-event pruning still run by default, and the
+other product-contract sections add cleanup paths for the measured failure
+classes below. Whether lossless payload retention remains the right default
+given those measurements is an open owner question, not an implementation gap.
 
 ## Measured failure classes (evidence, one dogfood profile)
 
