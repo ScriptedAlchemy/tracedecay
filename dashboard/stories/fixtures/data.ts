@@ -168,8 +168,7 @@ function syntheticGroup(repo: {
   };
 }
 
-/** GET /api/projects — brain/delivery registry (one shared
- * `contracts/uncontracted/projects.ts` ProjectsPayloadSchema;
+/** GET /api/projects — brain/delivery registry (ProjectsPayloadSchema;
  * src/dashboard/projects.rs `list`). */
 const projectTree: ReadonlyArray<Record<string, unknown>> = [
     {

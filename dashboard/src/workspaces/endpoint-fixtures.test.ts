@@ -5,10 +5,10 @@
  * `stories/fixtures/data.ts` during the visual audit and MSW/DOM tests. This
  * suite asserts that each fixture payload parses against the exact zod schema
  * its consuming workspace validates it with — either a generated wire schema
- * from `contracts/wire.ts`, the single shared declaration for an uncontracted
- * route under `contracts/uncontracted/`, or (for pages whose schema is a
- * module-local const) a faithful mirror of that page's schema with a source
- * citation. If a fixture drifts from a contract, this fails.
+ * from `contracts/wire.ts`, or (for the few routes Rust still answers with a
+ * bare `Value`, whose pages read them through a module-local const) a faithful
+ * mirror of that page's schema with a source citation. If a fixture drifts
+ * from a contract, this fails.
  *
  * A route read by two workspaces gets ONE test against ONE schema. It used to
  * get two, because `/api/projects` was modelled twice under two export names,
@@ -133,8 +133,7 @@ const CapabilitiesSchema = z
 
 // SessionsPage.tsx: OverviewPayload. (LoomPage no longer reads this route —
 // `/api/plugins/hermes-lcm/overview` 500s on the real profile, so the weave
-// draws from `/api/plugins/savings/sessions` instead; see
-// `contracts/uncontracted/sessions.ts`.)
+// draws from `/api/plugins/savings/sessions` instead.)
 const OverviewPayload = z
   .object({ latest_sessions: z.array(AnyObject).optional() })
   .passthrough();
@@ -239,7 +238,7 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
   // `/api/projects` and used to assert it against two hand-written copies of
   // its body under two different export names, which is how the copies drifted
   // apart without anything noticing. Both surfaces' density requirements now
-  // sit on the single `contracts/uncontracted/projects.ts` contract.
+  // sit on the one generated `ProjectsPayloadSchema`.
   it('GET /api/projects — brain + delivery registry (ProjectsPayloadSchema)', () => {
     const data = parse(ProjectsPayloadSchema, '/api/projects');
     const tree = data.project_tree ?? [];
