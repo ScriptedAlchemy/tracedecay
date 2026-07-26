@@ -231,6 +231,8 @@ pub struct ContextExpansionEnvelope {
     pub evidence: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub omission_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_retrieval_handle: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
