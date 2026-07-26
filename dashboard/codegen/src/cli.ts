@@ -17,8 +17,9 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const DASHBOARD_ROOT = resolve(HERE, "..", "..");
 const REPOSITORY_ROOT = resolve(DASHBOARD_ROOT, "..");
 const SCHEMA_OUTPUT_ENV = "TRACEDECAY_DASHBOARD_CONTRACT_SCHEMA_OUT";
+const RUST_SCHEMA_FILE = "codegen/schemas/dashboard-contracts.schema.json";
 
-function exportRustBundle(): JsonSchema {
+function exportRustBundle(): { bundle: JsonSchema; source: string } {
   const temporaryDirectory = mkdtempSync(join(tmpdir(), "tracedecay-dashboard-contracts-"));
   const output = join(temporaryDirectory, "dashboard.schema.json");
   try {
@@ -48,7 +49,8 @@ function exportRustBundle(): JsonSchema {
     if (result.status !== 0) {
       throw new Error(`Rust contract schema export failed with status ${result.status ?? "unknown"}`);
     }
-    return JSON.parse(readFileSync(output, "utf8")) as JsonSchema;
+    const source = readFileSync(output, "utf8");
+    return { bundle: JSON.parse(source) as JsonSchema, source };
   } finally {
     rmSync(temporaryDirectory, { recursive: true, force: true });
   }
@@ -56,7 +58,9 @@ function exportRustBundle(): JsonSchema {
 
 function run(): number {
   const mode = process.argv.includes("--check") ? "check" : "generate";
-  const { files } = generateContracts([exportRustBundle()]);
+  const exported = exportRustBundle();
+  const { files } = generateContracts([exported.bundle]);
+  files[RUST_SCHEMA_FILE] = exported.source;
 
   if (mode === "check") {
     let stale = false;

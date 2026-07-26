@@ -41,18 +41,20 @@ describe("contracts generator", () => {
     const { files } = generateContracts(bundles);
     const generated = files[OUTPUT_FILES.GENERATED_FILE]!;
     const order = [
-      "const AuthorizationSchema",
-      "const CoverageSchema",
-      "const DashboardDomainStateSchema",
-      "interface DashboardEnvelope",
-      "const FindingPayloadSchema",
-      "const FreshnessSchema",
-      "const LegalActionKindSchema",
-      "const LegalActionRefSchema",
-      "const ScopeSchema",
-      "const TimeSchema",
-      "const VersionSchema",
-      "const WatermarkSchema",
+      "const ActorIdSchema",
+      "const CancellationObservationSchema",
+      "const DashboardAuthorizationV1Schema",
+      "const DashboardCoverageV1Schema",
+      "const DashboardDomainStateV1Schema",
+      "interface DashboardEnvelopeV1",
+      "const DashboardFreshnessV1Schema",
+      "const DashboardLegalActionKindV1Schema",
+      "const DashboardLegalActionRefV1Schema",
+      "const DashboardScopeV1Schema",
+      "const DashboardTimeV1Schema",
+      "const DashboardVersionV1Schema",
+      "const DashboardWatermarkV1Schema",
+      "const DeadlineSchema",
     ].map((needle) => generated.indexOf(needle));
     expect(order.every((i) => i >= 0)).toBe(true);
     const sorted = [...order].sort((a, b) => a - b);
@@ -70,14 +72,17 @@ describe("contracts generator", () => {
     const { files } = generateContracts(bundles);
     const generated = files[OUTPUT_FILES.GENERATED_FILE]!;
     // Flat string enum, not a `{ kind }` tagged union.
-    expect(generated).toContain("export type DashboardDomainState =");
-    expect(generated).toContain("export const DashboardDomainStateSchema");
+    expect(generated).toContain("export type DashboardDomainStateV1 =");
+    expect(generated).toContain("export const DashboardDomainStateV1Schema");
     // `unsupported` (server-emitted backend-gap state) and `unsupported_schema`
     // (undecodable schema) are BOTH present and distinct.
     expect(generated).toMatch(/"unsupported"/);
     expect(generated).toMatch(/"unsupported_schema"/);
-    const schema = bundles.find((b) => (b.$defs ?? {}).DashboardDomainState)!;
-    const values = schema.$defs?.DashboardDomainState?.enum ?? [];
+    const schema = bundles[0]?.$defs?.DashboardDomainStateV1;
+    const values = (schema?.oneOf ?? []).flatMap((part) => [
+      ...(part.enum ?? []),
+      ...(part.const === undefined ? [] : [part.const]),
+    ]);
     expect(values).toHaveLength(17);
     expect(values).toContain("unsupported");
     expect(values).toContain("unsupported_schema");
@@ -86,8 +91,8 @@ describe("contracts generator", () => {
   it("emits a decoder factory for the generic DashboardEnvelope<T>", () => {
     const { files } = generateContracts(bundles);
     const generated = files[OUTPUT_FILES.GENERATED_FILE]!;
-    expect(generated).toContain("export interface DashboardEnvelope<TPayload>");
-    expect(generated).toContain("export function DashboardEnvelopeSchema<TPayload>(");
+    expect(generated).toContain("export interface DashboardEnvelopeV1<TPayload>");
+    expect(generated).toContain("export function DashboardEnvelopeV1Schema<TPayload>(");
     expect(generated).toContain("payload: payloadSchema,");
     // The exact scope + authorization shapes from read_model.rs are carried.
     expect(generated).toContain("store_root");
