@@ -93,6 +93,10 @@ describe('GraphCanvas travelling activation', () => {
     Object.defineProperties(HTMLElement.prototype, {
       clientWidth: { configurable: true, get: () => 640 },
       clientHeight: { configurable: true, get: () => 320 },
+      // Sigma measures `offsetWidth`, and so does the guard that decides
+      // whether a renderer may exist, so the fixture has to answer that name.
+      offsetWidth: { configurable: true, get: () => 640 },
+      offsetHeight: { configurable: true, get: () => 320 },
     });
     Object.defineProperty(window, 'matchMedia', {
       configurable: true,
