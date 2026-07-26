@@ -93,6 +93,18 @@ pub struct TableGrowthSampleV1 {
     pub current_observed_at: UtcMicros,
 }
 
+/// One current table that has no prior watermark and therefore cannot produce
+/// a growth delta yet. `current_bytes` is a real current measurement; no
+/// previous or growth byte value is fabricated.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TableGrowthBaselinePendingV1 {
+    pub store: StoreKeyV1,
+    pub table: TableNameV1,
+    pub current_bytes: StorageByteSizeV1,
+    pub observed_at: UtcMicros,
+}
+
 impl TableGrowthSampleV1 {
     /// Validate ordering: the current watermark must not precede the previous.
     pub fn validate(&self) -> Result<(), ApplicationContractError> {
@@ -242,6 +254,7 @@ pub enum TableGrowthTelemetryReadV1 {
     Observed {
         store: StoreKeyV1,
         samples: Vec<TableGrowthSampleV1>,
+        baseline_pending: Vec<TableGrowthBaselinePendingV1>,
     },
     /// The first successful read established watermarks; no growth exists yet.
     BaselineEstablished {
@@ -307,6 +320,12 @@ pub enum TableGrowthDoctorEvidenceV1 {
         observed_at: UtcMicros,
         tables_observed: u64,
     },
+    TableBaselinePending {
+        store: StoreKeyV1,
+        table: TableNameV1,
+        current_bytes: StorageByteSizeV1,
+        observed_at: UtcMicros,
+    },
     Unsupported {
         store: StoreKeyV1,
     },
@@ -325,7 +344,9 @@ impl TableGrowthDoctorEvidenceV1 {
     pub const fn state(&self) -> DoctorEvidenceStateV1 {
         match self {
             Self::SignificantGrowth { .. } => DoctorEvidenceStateV1::HealthyCompleteCoverage,
-            Self::BaselineEstablished { .. } => DoctorEvidenceStateV1::Partial,
+            Self::BaselineEstablished { .. } | Self::TableBaselinePending { .. } => {
+                DoctorEvidenceStateV1::Partial
+            }
             Self::Unsupported { .. } => DoctorEvidenceStateV1::Unsupported,
             Self::Denied { .. } => DoctorEvidenceStateV1::Denied,
             Self::Unknown { .. } => DoctorEvidenceStateV1::Unknown,
@@ -342,19 +363,34 @@ pub fn table_growth_doctor_evidence(
     read: &TableGrowthTelemetryReadV1,
 ) -> Vec<TableGrowthDoctorEvidenceV1> {
     match read {
-        TableGrowthTelemetryReadV1::Observed { samples, .. } => samples
-            .iter()
-            .filter(|sample| is_significant_table_growth(sample))
-            .map(|sample| TableGrowthDoctorEvidenceV1::SignificantGrowth {
-                store: sample.store.clone(),
-                table: sample.table.clone(),
-                previous_bytes: sample.previous_bytes,
-                current_bytes: sample.current_bytes,
-                growth_bytes: sample.growth_bytes(),
-                previous_observed_at: sample.previous_observed_at,
-                current_observed_at: sample.current_observed_at,
-            })
-            .collect(),
+        TableGrowthTelemetryReadV1::Observed {
+            samples,
+            baseline_pending,
+            ..
+        } => {
+            let mut evidence = samples
+                .iter()
+                .filter(|sample| is_significant_table_growth(sample))
+                .map(|sample| TableGrowthDoctorEvidenceV1::SignificantGrowth {
+                    store: sample.store.clone(),
+                    table: sample.table.clone(),
+                    previous_bytes: sample.previous_bytes,
+                    current_bytes: sample.current_bytes,
+                    growth_bytes: sample.growth_bytes(),
+                    previous_observed_at: sample.previous_observed_at,
+                    current_observed_at: sample.current_observed_at,
+                })
+                .collect::<Vec<_>>();
+            evidence.extend(baseline_pending.iter().map(|pending| {
+                TableGrowthDoctorEvidenceV1::TableBaselinePending {
+                    store: pending.store.clone(),
+                    table: pending.table.clone(),
+                    current_bytes: pending.current_bytes,
+                    observed_at: pending.observed_at,
+                }
+            }));
+            evidence
+        }
         TableGrowthTelemetryReadV1::BaselineEstablished {
             store,
             observed_at,
@@ -611,6 +647,7 @@ mod tests {
         let evidence = table_growth_doctor_evidence(&TableGrowthTelemetryReadV1::Observed {
             store: store(),
             samples: vec![significant],
+            baseline_pending: Vec::new(),
         });
         assert_eq!(evidence.len(), 1);
         assert_eq!(
@@ -655,6 +692,7 @@ mod tests {
             table_growth_doctor_evidence(&TableGrowthTelemetryReadV1::Observed {
                 store: store(),
                 samples: vec![insignificant],
+                baseline_pending: Vec::new(),
             })
             .is_empty()
         );

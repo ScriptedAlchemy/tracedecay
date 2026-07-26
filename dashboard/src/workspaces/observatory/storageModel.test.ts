@@ -14,6 +14,7 @@ import {
   refreshOperation,
   storageFindingLabel,
   storeRolesLabel,
+  tableGrowthPresentation,
 } from './storageModel.ts';
 
 const SETTING_KEY = 'sync.retention.v1 store_soft_budgets_bytes';
@@ -222,6 +223,41 @@ describe('Observatory storage read models', () => {
     expect(store.growth.state).toBe('baseline');
     expect(store.roles).toEqual(['graph', 'memory']);
     expect(store.read.kind).toBe('observed');
+  });
+});
+
+describe('table growth presentation', () => {
+  it('preserves observed omission reasons for partial coverage', () => {
+    const reason = 'new_messages: no previous table watermark exists; baseline pending';
+    const presentation = tableGrowthPresentation({
+      state: 'observed',
+      coverage: {
+        completeness: 'partial',
+        eligible: 1,
+        examined: 0,
+        matched: null,
+        excluded: null,
+        omitted: 1,
+        unknown: null,
+        denominator: 1,
+        unit: 'current_tables',
+        omission_reasons: [reason],
+      },
+      significant_samples: [],
+      omissions: [
+        {
+          kind: 'baseline_pending',
+          table: 'new_messages',
+          current_bytes: 4096,
+          observed_at: 20,
+          reason,
+        },
+      ],
+      omission_reasons: [reason],
+    });
+
+    expect(presentation.notes).toEqual([reason]);
+    expect(presentation.summary).not.toMatch(/zero|no growth/i);
   });
 });
 

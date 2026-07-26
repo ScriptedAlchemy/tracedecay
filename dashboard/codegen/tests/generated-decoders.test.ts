@@ -194,6 +194,7 @@ describe("wire storage payload decoders", () => {
             coverage: tableGrowthCoverage,
             significant_samples: [],
             omissions: [],
+            omission_reasons: [],
           },
         },
       ],

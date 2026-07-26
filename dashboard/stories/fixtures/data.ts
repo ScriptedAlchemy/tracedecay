@@ -1633,10 +1633,18 @@ const TABLE_GROWTH_STATES = [
     ],
     omissions: [
       {
+        kind: 'below_threshold',
         table: 'metadata',
-        reason:
-          'observed growth of 524288 bytes was below the informational threshold (at least 67108864 bytes, or at least 1048576 bytes and 10% of the previous size)',
+        previous_bytes: 104_857_600,
+        current_bytes: 105_381_888,
+        growth_bytes: 524_288,
+        previous_observed_at: nowMicros - 3_600_000_000,
+        current_observed_at: nowMicros,
+        reason: 'observed growth was below the informational significance threshold',
       },
+    ],
+    omission_reasons: [
+      'metadata: observed growth was below the informational significance threshold',
     ],
   },
   {

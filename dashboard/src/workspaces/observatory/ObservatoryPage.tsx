@@ -412,7 +412,7 @@ function TableGrowthPanel({
         </div>
       ) : null}
 
-      {presentation.notes.length > 0 ? (
+      {growth.state !== 'observed' && presentation.notes.length > 0 ? (
         <ul className="mt-2 space-y-1 text-2xs text-text-muted">
           {presentation.notes.map((note) => (
             <li key={note}>{note}</li>
