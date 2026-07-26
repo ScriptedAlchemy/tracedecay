@@ -161,10 +161,6 @@ impl CheckpointHandle {
         })?;
         Ok(CheckpointTicket { response })
     }
-
-    pub(crate) fn close(&mut self) {
-        self.sender.take();
-    }
 }
 
 pub struct CheckpointRequest {
