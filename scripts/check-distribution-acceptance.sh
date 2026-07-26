@@ -141,27 +141,23 @@ assert_required_assets() {
   python3 "$repo/scripts/check-dashboard-bundle.py" \
     "$root_package/dashboard/app-dist"
 
-  python3 - \
-    "$root_package/plugin/.lsp.json" \
-    "$root_package/plugin/.claude-plugin/plugin.json" \
-    "$root_package/plugin/.codex-plugin/plugin.json" \
-    "$root_package/plugin/.cursor-plugin/plugin.json" \
-    "$root_package/plugin/.kimi-plugin/plugin.json" <<'PY'
+  python3 - "$root_package/plugin/.lsp.json" <<'PY'
 import json
 import pathlib
 import sys
 
-for raw_path in sys.argv[1:]:
-    path = pathlib.Path(raw_path)
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise SystemExit(f"distribution acceptance: invalid packaged JSON {path}: {error}")
-    if not isinstance(value, dict) or not value:
-        raise SystemExit(
-            f"distribution acceptance: packaged JSON must be a non-empty object: {path}"
-        )
+path = pathlib.Path(sys.argv[1])
+try:
+    value = json.loads(path.read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError) as error:
+    raise SystemExit(f"distribution acceptance: invalid packaged JSON {path}: {error}")
+if not isinstance(value, dict) or not value:
+    raise SystemExit(
+        f"distribution acceptance: packaged JSON must be a non-empty object: {path}"
+    )
 PY
+  python3 "$repo/scripts/check-packaged-plugin-manifests.py" \
+    "$root_package/plugin"
 }
 
 verify_feature_wiring() {
@@ -295,14 +291,17 @@ run_self_test() {
   local application="$fixture/application"
   local api="$fixture/api"
   local path
+  for path in plugin/.lsp.json; do
+    mkdir -p -- "$root/$(dirname -- "$path")"
+    printf '{"fixture":true}\n' >"$root/$path"
+  done
   for path in \
-    plugin/.lsp.json \
     plugin/.claude-plugin/plugin.json \
     plugin/.codex-plugin/plugin.json \
     plugin/.cursor-plugin/plugin.json \
     plugin/.kimi-plugin/plugin.json; do
     mkdir -p -- "$root/$(dirname -- "$path")"
-    printf '{"fixture":true}\n' >"$root/$path"
+    cp -- "$repo/$path" "$root/$path"
   done
   for path in \
     plugin/cursor-native-extension/dist/extension.js \
@@ -914,6 +913,8 @@ if missing:
         + ", ".join(missing)
     )
 PY
-"$binary" lsp bridge --help >/dev/null
+python3 "$repo/scripts/check-packaged-lsp-bridge.py" \
+  "$binary" \
+  "$work/lsp-bridge"
 
 echo "distribution acceptance passed"
