@@ -5,8 +5,8 @@ use std::pin::Pin;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{
-    CompactContextLineageEdgeV1, HydrationStateV1, RetrievalAnchorId, RetrievalGrainV1, SessionId,
-    SessionSourceCoverageV1, TemporalCoverageCountsV1, TemporalModeV1,
+    CompactContextLineageEdgeV1, CursorManifestLimitKindV1, HydrationStateV1, RetrievalAnchorId,
+    RetrievalGrainV1, SessionId, SessionSourceCoverageV1, TemporalCoverageCountsV1, TemporalModeV1,
 };
 
 use super::lcm_args::{
@@ -649,6 +649,11 @@ pub(crate) enum SessionRetrievalServiceOutcome {
     Deleted,
     Denied,
     Unavailable(SessionRetrievalUnavailable),
+    CursorManifestLimitExceeded {
+        kind: CursorManifestLimitKindV1,
+        observed: usize,
+        maximum: usize,
+    },
     BudgetExhausted,
     Cancelled,
 }
@@ -907,6 +912,21 @@ fn render_service_outcome(
         ),
         SessionRetrievalServiceOutcome::Unavailable(unavailable) => {
             apply_unavailable(&mut payload, unavailable);
+        }
+        SessionRetrievalServiceOutcome::CursorManifestLimitExceeded {
+            kind,
+            observed,
+            maximum,
+        } => {
+            apply_typed_error(
+                &mut payload,
+                "cursor_manifest_limit_exceeded",
+                "session_cursor_manifest_limit_exceeded",
+                "session retrieval cursor manifest exceeded its canonical bound",
+            );
+            payload["error"]["kind"] = json!(kind);
+            payload["error"]["observed"] = json!(observed);
+            payload["error"]["maximum"] = json!(maximum);
         }
         SessionRetrievalServiceOutcome::BudgetExhausted => apply_typed_error(
             &mut payload,

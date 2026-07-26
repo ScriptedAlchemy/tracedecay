@@ -16,7 +16,7 @@ use tracedecay_domain::configuration::{
 use tracedecay_domain::{
     ActorId, AdmittedEmbeddingProjectionKeyV1, ComponentRevision, DiversityPolicy, FusionProfile,
     FusionProfileId, ManifestDigest, RerankPolicy, RetrievalAnchorId, RetrievalBudget,
-    RetrieverKind, UtcMicros, VectorGenerationIdV1, canonical_sha256,
+    RetrieverKind, SemanticSearchIndexKeyV1, UtcMicros, VectorGenerationIdV1, canonical_sha256,
 };
 
 use crate::application::configuration::{
@@ -192,6 +192,7 @@ pub struct SemanticCompatibilityPinsV1 {
     pub artifact_manifest_digest: ManifestDigest,
     pub runtime_compatibility_digest: ManifestDigest,
     pub projection: AdmittedEmbeddingProjectionKeyV1,
+    pub search_index_key: SemanticSearchIndexKeyV1,
     pub vector_generation_id: VectorGenerationIdV1,
     pub calibration: SemanticCalibrationProfileV1,
     pub resources: SemanticResourceRequirementV1,
@@ -204,6 +205,7 @@ impl SemanticCompatibilityPinsV1 {
             && self.artifact_manifest_digest.validate().is_ok()
             && self.runtime_compatibility_digest.validate().is_ok()
             && self.projection.embedding_key().validate().is_ok()
+            && self.search_index_key.validate().is_ok()
             && self.projection.embedding_key().model_artifact_digest
                 == self.artifact_manifest_digest
             && self.vector_generation_id.as_digest().validate().is_ok()
