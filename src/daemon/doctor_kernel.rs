@@ -447,7 +447,10 @@ pub fn advisory_feedback_read_from_publication(
             }
         })
         .collect();
-    AdvisoryFeedbackReadV1::Observed { summary, findings }
+    AdvisoryFeedbackReadV1::Observed {
+        summary: Box::new(summary),
+        findings,
+    }
 }
 
 /// Adapter over the mounted feedback owner's canonical read store.
