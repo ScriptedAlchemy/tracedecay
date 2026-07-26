@@ -28,13 +28,13 @@ truthful rather than merely diagrammatically correct.
 | Relation | Granularity | Where | Status |
 | --- | --- | --- | --- |
 | callers/callees one hop | symbol | `graph_queries.rs` `caller_rows`/`callee_rows`, `/api/plugins/graph/node/{id}/neighbors` | servable today |
-| sessions that edited code | **file only**, Claude-provider rollup (`sessions.metadata_json.$.edited_files[]`); Codex per-message `$.files[]`, no rollup; other hosts none | `src/sessions/claude/record_metadata.rs:463` | needs thin endpoint; JSON-scan, unindexed |
+| sessions that edited code | **file only**, Claude-provider rollup (`sessions.metadata_json.$.edited_files[]`); Codex per-message `$.files[]`, no rollup; other hosts none | `src/sessions/claude/record_metadata.rs:463`, `/api/plugins/graph/node/{id}/sessions` | backend endpoint registered; frontend consumer missing; JSON-scan, unindexed |
 | "discussed" | free-text FTS on the name (`session_messages_fts`) | global db | noisy for common names; secondary arm only |
-| facts citing a symbol | **name match** (memory_entities.normalized_name, v2 payload FTS) — not symbol identity | `src/db/memory_v2/…` | needs thin endpoint; same-name collision caveat |
-| covering tests | symbol (pure graph computation, callers depth-3 ∩ test files) | `handlers/health.rs:987` `handle_test_map` | servable today via in-process `project_graph` |
+| facts citing a symbol | **name match** (memory_entities.normalized_name, v2 payload FTS) — not symbol identity | `src/db/memory_v2/…`, `/api/plugins/graph/node/{id}/facts` | backend endpoint registered; frontend consumer missing; same-name collision caveat |
+| covering tests | symbol (pure graph computation, callers depth-3 ∩ test files) | `handlers/health.rs:987` `handle_test_map`, `/api/plugins/graph/node/{id}/tests` | backend endpoint registered; frontend consumer missing |
 | live activity | **project only** (`ActivityPulseV1` has no path/symbol) | `src/dashboard/activity_bus.rs:83` | per-symbol strike needs a wire-contract change (stability tests exist) |
-| call chain | symbol, directed, calls-only, single shortest path, depth ≤20 | `queries.rs:133` `get_call_chain` (handler exists, never registered) | needs thin endpoint |
-| stratification | **file-level** dependency depth (Tarjan SCC → longest path), DSM clusters | `src/graph/health.rs:218/:733` | needs thin endpoint; adjacency scan unpaginated/uncached |
+| call chain | symbol, directed, calls-only, single shortest path, depth ≤20 | `queries.rs:133` `get_call_chain`, `/api/plugins/graph/call-chain` | backend endpoint registered; frontend consumer missing |
+| stratification | **file-level** dependency depth (Tarjan SCC → longest path), DSM clusters | `src/graph/health.rs:218/:733`, `/api/plugins/graph/strata` | backend endpoint registered; frontend consumer missing; adjacency scan unpaginated/uncached |
 | co-change | **file pairs**, Claude sessions only, one `json_each` self-join | derivable; SQL in recon report | needs thin endpoint; provider-complete or symbol-level needs new extraction |
 
 Note: the existing `/api/plugins/graph/path` route is UNDIRECTED and
@@ -63,6 +63,12 @@ Endpoints: `/api/plugins/graph/node/{id}/sessions` (edited_files json_each +
 FTS arm), `/api/plugins/graph/node/{id}/facts`, `/api/plugins/graph/node/{id}/tests`
 (in-process `project_graph` test-map). Neighbors endpoint exists.
 
+**Backend status (2026-07-26; not acceptance).** All three endpoints above are
+implemented and registered. Their generated wire contracts and declared
+backend tests exist, but no frontend file fetches them. Surface 1 is therefore
+backend-only; the open work is the truthful frontend drill-in, not endpoint
+registration.
+
 ## Surface 2 — Call-chain transit map (historical standalone proposal)
 
 Two symbols → the shortest directed calls-only route drawn as a transit line
@@ -74,11 +80,17 @@ per-hop depth delta, upward hops drawn at true steepness in the error hue with
 the caption stating a climb is a boundary-crossing observation, not proof of a
 bug.
 
-Endpoints: `/api/plugins/graph/call-chain` (register the existing
-`get_call_chain`), `/api/plugins/graph/strata` (dependency_depth + DSM
-ordering; budget the unpaginated adjacency scan — cache per graph generation).
-Chain selection rule: user-picked endpoints, shortest route, captioned as
-exactly that (single path; k-shortest is a later question).
+Endpoints: `/api/plugins/graph/call-chain`, `/api/plugins/graph/strata`
+(dependency_depth + DSM ordering; budget the unpaginated adjacency scan —
+cache per graph generation). Chain selection rule: user-picked endpoints,
+shortest route, captioned as exactly that (single path; k-shortest is a later
+question).
+
+**Backend status (2026-07-26; not acceptance).** Both endpoints are
+implemented and registered at `src/dashboard/mod.rs:1013-1018`; the earlier
+instruction to register `get_call_chain` is complete. No frontend file fetches
+either endpoint. Surface 2 is therefore backend-only; the open work is the
+frontend surface.
 
 ## Surface 3 — Disagreement field (build last; premise gated)
 
