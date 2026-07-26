@@ -213,6 +213,20 @@ export const DashboardCoverageV1Schema = z.object({
 });
 export type DashboardCoverageV1 = z.infer<typeof DashboardCoverageV1Schema>;
 
+/** A typed description of what an owner-supplied remediation operation would do.
+
+This is a *description*, not an effect. It never carries argv, a path, or an
+inline action, and resolving it performs no work. */
+export const DashboardDoctorRemediationDescriptorV1Schema = z.object({
+  action_confirmation: z.lazy(() => DoctorConfirmationRequirementV1Schema),
+  operation: z.lazy(() => DoctorOwningOperationRefV1Schema),
+  preview_available: z.boolean(),
+  summary: z.string(),
+  surface: z.lazy(() => DoctorOwningSurfaceV1Schema),
+  target: z.union([z.lazy(() => DoctorRemediationTargetV1Schema), z.null()]),
+});
+export type DashboardDoctorRemediationDescriptorV1 = z.infer<typeof DashboardDoctorRemediationDescriptorV1Schema>;
+
 /** The normative dashboard domain-state union.
 
 The first sixteen variants are the plan's exact `DashboardDomainState`
@@ -411,10 +425,9 @@ after the kernel registry resolves the finding's owner-supplied reference. */
 export const DoctorFindingsPayloadV1Schema = z.object({
   entries: z.array(z.lazy(() => DoctorReportEntryV1Schema)),
   family_filter: z.union([z.lazy(() => DoctorFindingFamilyV1Schema), z.null()]),
-  kind_statuses: z.array(z.lazy(() => StorageFindingKindStatusV1Schema)).nullable().optional(),
   known_families: z.array(z.lazy(() => DoctorFindingFamilyV1Schema)),
   note: z.string(),
-  remediations: z.array(z.lazy(() => DoctorRemediationDescriptorV1Schema)),
+  remediations: z.array(z.lazy(() => DashboardDoctorRemediationDescriptorV1Schema)),
   report_coverage: z.union([z.lazy(() => DoctorReportCoverageV1Schema), z.null()]),
 });
 export type DoctorFindingsPayloadV1 = z.infer<typeof DoctorFindingsPayloadV1Schema>;
@@ -456,19 +469,6 @@ export const DoctorRemediationApplyRequestV1Schema = z.object({
   target: z.lazy(() => DoctorRemediationTargetV1Schema),
 });
 export type DoctorRemediationApplyRequestV1 = z.infer<typeof DoctorRemediationApplyRequestV1Schema>;
-
-/** A typed description of what an owner-supplied remediation operation would do.
-
-This is a *description*, not an effect. It never carries argv, a path, or an
-inline action, and resolving it performs no work. */
-export const DoctorRemediationDescriptorV1Schema = z.object({
-  action_confirmation: z.lazy(() => DoctorConfirmationRequirementV1Schema),
-  operation: z.lazy(() => DoctorOwningOperationRefV1Schema),
-  preview_available: z.boolean(),
-  summary: z.string(),
-  surface: z.lazy(() => DoctorOwningSurfaceV1Schema),
-});
-export type DoctorRemediationDescriptorV1 = z.infer<typeof DoctorRemediationDescriptorV1Schema>;
 
 export const DoctorRemediationDispatchErrorV1Schema = z.enum(["confirmation_required", "denied", "invalid_reference", "owner_unavailable", "unsupported"]);
 export type DoctorRemediationDispatchErrorV1 = z.infer<typeof DoctorRemediationDispatchErrorV1Schema>;
@@ -961,6 +961,22 @@ clean observation or a problem finding. */
 export const StorageFindingSourceStateV1Schema = z.enum(["partial", "real", "unset", "unsupported"]);
 export type StorageFindingSourceStateV1 = z.infer<typeof StorageFindingSourceStateV1Schema>;
 
+/** Route-specific payload for `/api/storage/findings`.
+
+Storage producer coverage is required here rather than an optional field on
+the general Doctor payload, so generated consumers cannot mistake one route
+for the other. */
+export const StorageFindingsPayloadV1Schema = z.object({
+  entries: z.array(z.lazy(() => DoctorReportEntryV1Schema)),
+  family_filter: z.union([z.lazy(() => DoctorFindingFamilyV1Schema), z.null()]),
+  kind_statuses: z.array(z.lazy(() => StorageFindingKindStatusV1Schema)),
+  known_families: z.array(z.lazy(() => DoctorFindingFamilyV1Schema)),
+  note: z.string(),
+  remediations: z.array(z.lazy(() => DashboardDoctorRemediationDescriptorV1Schema)),
+  report_coverage: z.union([z.lazy(() => DoctorReportCoverageV1Schema), z.null()]),
+});
+export type StorageFindingsPayloadV1 = z.infer<typeof StorageFindingsPayloadV1Schema>;
+
 /** Telemetry payload: one entry per distinct store the dashboard holds a
 connection to. */
 export const StorageTelemetryPayloadV1Schema = z.object({
@@ -1372,8 +1388,6 @@ export const DoctorOwningSurfaceSchema = DoctorOwningSurfaceV1Schema;
 export type DoctorOwningSurface = DoctorOwningSurfaceV1;
 export const DoctorRemediationApplyRequestSchema = DoctorRemediationApplyRequestV1Schema;
 export type DoctorRemediationApplyRequest = DoctorRemediationApplyRequestV1;
-export const DoctorRemediationDescriptorSchema = DoctorRemediationDescriptorV1Schema;
-export type DoctorRemediationDescriptor = DoctorRemediationDescriptorV1;
 export const DoctorRemediationDispatchErrorSchema = DoctorRemediationDispatchErrorV1Schema;
 export type DoctorRemediationDispatchError = DoctorRemediationDispatchErrorV1;
 export const DoctorRemediationKindSchema = DoctorRemediationKindV1Schema;
@@ -1464,6 +1478,8 @@ export const StorageFindingKindStatusSchema = StorageFindingKindStatusV1Schema;
 export type StorageFindingKindStatus = StorageFindingKindStatusV1;
 export const StorageFindingSourceStateSchema = StorageFindingSourceStateV1Schema;
 export type StorageFindingSourceState = StorageFindingSourceStateV1;
+export const StorageFindingsPayloadSchema = StorageFindingsPayloadV1Schema;
+export type StorageFindingsPayload = StorageFindingsPayloadV1;
 export const StorageTelemetryPayloadSchema = StorageTelemetryPayloadV1Schema;
 export type StorageTelemetryPayload = StorageTelemetryPayloadV1;
 export const StorageTelemetryReadSchema = StorageTelemetryReadV1Schema;
@@ -1520,5 +1536,3 @@ export const DoctorOperationReceiptSchema = OperationReceiptSchema;
 export type DoctorOperationReceipt = OperationReceipt;
 export const DoctorEffectReceiptSchema = EffectReceiptSchema;
 export type DoctorEffectReceipt = EffectReceipt;
-export const StorageFindingsPayloadSchema = DoctorFindingsPayloadV1Schema;
-export type StorageFindingsPayload = DoctorFindingsPayloadV1;
