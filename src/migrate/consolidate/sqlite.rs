@@ -227,7 +227,13 @@ pub(in crate::migrate) async fn merge_branch_legacy_memory_snapshot(
     let token = source
         .attach_token()
         .map_err(|error| db_error("merge_branch_legacy_memory", error))?;
-    attach_snapshot_as(&transaction, &token, "source").await?;
+    let source_path = token
+        .verified_path()
+        .map_err(|error| db_error("attach_snapshot", error))?;
+    transaction
+        .attach_database(source_path, "source")
+        .await
+        .map_err(|error| db_error("attach_snapshot", error))?;
     transaction
         .execute("PRAGMA defer_foreign_keys = ON", ())
         .await

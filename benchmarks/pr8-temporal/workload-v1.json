@@ -81,10 +81,6 @@
       {
         "phase": "late_hydrate",
         "path": "SessionRetrievalService::retrieve Occurrence"
-      },
-      {
-        "phase": "member_expand",
-        "path": "SessionRetrievalService::retrieve EvidenceSpan then EvidenceBurst"
       }
     ]
   },
@@ -95,11 +91,11 @@
     },
     {
       "path": "src/sessions/session_temporal_benchmark.rs",
-      "sha256": "243a6f7414c08560e959b6c5cd427798feb65bcd1abb8b48b7e73ad49b8b02b9"
+      "sha256": "ac555607b85350081d530fe1e76c2c62b3213d272c334d5634b5d14f7232aa74"
     },
     {
       "path": "scripts/run-pr8-temporal-benchmark.sh",
-      "sha256": "c05eaf2812f895f8b385a6f18bade7c5f9952719415f30a21f954c77a1d3907e"
+      "sha256": "619054159ed91e8590a08570024586c0f3a0ff86f724bed66f645f2c607bcbb9"
     },
     {
       "path": "Cargo.toml",
@@ -127,7 +123,7 @@
     },
     {
       "path": "benchmarks/pr8-temporal/README.md",
-      "sha256": "d61349a80dc52cc65fb6a3dcc83a8e1ba882ba918e89f41b25c5118f0d31c6c5"
+      "sha256": "ac83844b6385bdcea0eecc1ecabe70dd5a69270328d2d343db92766333b0352e"
     }
   ],
   "command": "scripts/run-pr8-temporal-benchmark.sh --run"
