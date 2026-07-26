@@ -119,7 +119,7 @@ changes on the next sync cycle.
 
 ## How the MCP server selects a database
 
-When the MCP server starts (via `tracedecay mcp` or `tracedecay serve`), it reads `.git/HEAD`
+When the MCP server starts (via `tracedecay serve`), it reads `.git/HEAD`
 to determine the current branch and opens the corresponding database.
 
 If the current branch is tracked, queries run against its own database with full accuracy.
