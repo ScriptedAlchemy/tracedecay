@@ -511,12 +511,14 @@ pub(crate) async fn events(
     let activity_db = state.lcm_db.clone();
     let activity_project_id = state.project_id.clone();
     let initial_replay = match (activity_db.as_deref(), activity_project_id.as_deref()) {
-        (Some(db), Some(project_id)) => crate::application::event_lane::replay_after(
-            db,
-            project_id,
-            requested.as_ref().map(|resume| resume.sequence),
-        )
-        .await,
+        (Some(db), Some(project_id)) => {
+            crate::application::event_lane::replay_after(
+                db,
+                project_id,
+                requested.as_ref().map(|resume| resume.sequence),
+            )
+            .await
+        }
         _ => None,
     };
 

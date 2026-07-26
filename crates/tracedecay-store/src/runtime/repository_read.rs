@@ -198,7 +198,7 @@ fn external_source_read_matches_shard(
                 StoreShardScopeV1::Profile | StoreShardScopeV1::ProfileSessions,
             ) => profile_id == &shard.profile_id,
             _ => false,
-    }
+        }
 }
 
 fn retrieval_read_owner(operation: &RetrievalAnchorReadOperationV1) -> &RetrievalAnchorOwnerV1 {

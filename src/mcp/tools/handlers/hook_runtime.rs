@@ -874,9 +874,7 @@ async fn admit_hook_v2_envelope_with_lifecycle(
     // working in this project — the primary live hook path for every v2-bound
     // host. Publish it here, where the project scope is already resolved; the
     // application lane retains it across dashboard disconnects and restarts.
-    if first_admission
-        && let Some(project_sessions) = project_sessions
-    {
+    if first_admission && let Some(project_sessions) = project_sessions {
         crate::application::event_lane::publish(
             project_sessions,
             crate::application::event_lane::ActivityFamilyV1::Hook,

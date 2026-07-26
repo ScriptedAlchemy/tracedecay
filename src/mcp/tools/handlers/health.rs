@@ -7,8 +7,8 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use tracedecay_application::{
     HealthDeltaCoverageV1, HealthDeltaCurrentnessV1, HealthDeltaPointV1, HealthDeltaResult,
-    HealthDeltaScopeV1, HealthDimensionDeltaV1, HealthDimensionPointV1,
-    ObservabilityApplicationV1, ObservabilityHorizonV1, ObservabilityQueryV1,
+    HealthDeltaScopeV1, HealthDimensionDeltaV1, HealthDimensionPointV1, ObservabilityApplicationV1,
+    ObservabilityHorizonV1, ObservabilityQueryV1,
 };
 use tracedecay_domain::{
     CoverageStateV1, HealthDimensionObservedV1, HealthSnapshotObservedV1, ManifestDigest,
@@ -298,8 +298,10 @@ async fn load_health_delta_point(
         });
     };
     let stored = HealthDeltaPointV1 {
-        watermark: ManifestDigest::new(envelope.watermark).map_err(|_| TraceDecayError::Config {
-            message: "health-delta cursor snapshot is invalid".to_owned(),
+        watermark: ManifestDigest::new(envelope.watermark).map_err(|_| {
+            TraceDecayError::Config {
+                message: "health-delta cursor snapshot is invalid".to_owned(),
+            }
         })?,
         observed_at: UtcMicros(envelope.event_time_micros),
         quality_signal: payload.quality_signal,
@@ -1705,8 +1707,7 @@ mod health_delta_tests {
             .expect("initialize graph");
         graph.index_all().await.expect("index fixture");
         let observations =
-            crate::global_db::tests::harness::RegisteredGlobalDbHarness::open("health-delta")
-                .await;
+            crate::global_db::tests::harness::RegisteredGlobalDbHarness::open("health-delta").await;
         let db = observations.registered.as_ref();
 
         let before = compute_health_delta_result(&graph, db, None, Some("src"))
@@ -1755,10 +1756,7 @@ mod health_delta_tests {
         assert!(wrong_scope.to_string().contains("unknown or expired"));
         assert!(!graph.store_layout().data_root.join("health_delta").exists());
 
-        let malformed = format!(
-            "{HEALTH_DELTA_CURSOR_PREFIX}{}",
-            "0".repeat(64)
-        );
+        let malformed = format!("{HEALTH_DELTA_CURSOR_PREFIX}{}", "0".repeat(64));
         let rejected = compute_health_delta_result(&graph, db, Some(&malformed), Some("src"))
             .await
             .expect_err("unknown pinned point");

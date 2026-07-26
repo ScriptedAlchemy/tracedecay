@@ -23,8 +23,7 @@ use super::context_scout_v2::{
     ContextScoutModelFuture, ContextScoutModelRequestV1, ContextScoutModelRunOutcomeV1,
     ContextScoutRecentReadOutcomeV1, ContextScoutRecentStateV1, ContextScoutRuntimeOutcomeV1,
     ContextScoutSelectionInputV1, ContextScoutServiceStateV1, ContextScoutStatusV1,
-    ContextScoutWorkV1,
-    ProjectContextScoutDurableStoreV1,
+    ContextScoutWorkV1, ProjectContextScoutDurableStoreV1,
 };
 use crate::application::context::{CancellationToken, MonotonicDeadline};
 use crate::automation::config::AutomationConfig;

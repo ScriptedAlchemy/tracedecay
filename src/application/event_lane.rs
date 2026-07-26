@@ -146,10 +146,7 @@ fn bounded_detail(detail: Option<&str>) -> Option<String> {
         .map(str::to_owned)
 }
 
-fn authoritative_project_id(
-    db: &RegisteredGlobalDb,
-    supplied: Option<&str>,
-) -> Option<String> {
+fn authoritative_project_id(db: &RegisteredGlobalDb, supplied: Option<&str>) -> Option<String> {
     let bound = db.binding().shard_id.scope.project_id()?.as_str();
     match supplied {
         Some(supplied) if supplied != bound => None,
@@ -233,8 +230,7 @@ pub(crate) async fn publish(
         return;
     };
     let units = units.max(1);
-    let Some(envelope) =
-        activity_envelope(&project_id, family, units, bounded_detail(detail))
+    let Some(envelope) = activity_envelope(&project_id, family, units, bounded_detail(detail))
     else {
         return;
     };
@@ -292,8 +288,8 @@ pub(crate) async fn replay_after(
         })
         .await
         .ok()?;
-    let capped = page.events.len() > RETAINED_ACTIVITY_CAPACITY
-        || page.coverage == CoverageStateV1::Capped;
+    let capped =
+        page.events.len() > RETAINED_ACTIVITY_CAPACITY || page.coverage == CoverageStateV1::Capped;
     let mut records = page
         .events
         .into_iter()
