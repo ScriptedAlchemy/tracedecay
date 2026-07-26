@@ -5,6 +5,7 @@ mod coverage;
 mod edges;
 pub(crate) mod engine;
 mod evidence_assembly;
+mod external_source;
 mod files;
 mod fingerprints;
 mod maintenance;
@@ -40,6 +41,7 @@ pub(crate) use connection::{
     DatabaseAccessMode, DatabaseEngineConnection, DatabaseMemoryTransaction,
     DatabaseWriteTransaction,
 };
+pub(crate) use external_source::install_external_source_schema;
 pub use fingerprints::StoredFingerprint;
 pub(crate) use memory_connection::MemoryConnection;
 pub use memory_connection::SqliteDriverError;

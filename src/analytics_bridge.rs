@@ -370,10 +370,18 @@ pub(crate) async fn analytics_diagnostics_with_db(
             session_id: None,
             event_kind: None,
             since: None,
+            until: None,
+            before_id: None,
             limit: EVENT_SAMPLE_LIMIT,
         })
         .await
         .map_err(cli_error)?;
+    let observatory = crate::application::observability::observatory_read_model(
+        gdb,
+        project_filter.as_deref(),
+        0,
+    )
+    .await;
     let event_rows: Vec<Value> = events
         .iter()
         .map(crate::dashboard::analytics_api::durable_analytics_event_row)
@@ -406,8 +414,9 @@ pub(crate) async fn analytics_diagnostics_with_db(
     if let Some(summary) = summary.as_object_mut() {
         summary.insert(
             "project_id".to_string(),
-            project_filter.map_or(Value::Null, Value::String),
+            project_filter.clone().map_or(Value::Null, Value::String),
         );
+        summary.insert("observatory".to_string(), json!(observatory));
         summary.insert("import".to_string(), import);
         summary.insert(
             "global_db".to_string(),
