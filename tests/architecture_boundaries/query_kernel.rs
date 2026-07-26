@@ -31,6 +31,7 @@ const QUERY_ALLOWED_ROOTS: &[&str] = &[
     "std",
     "thiserror",
     "tracedecay_domain",
+    "tracedecay_policy",
     "tracedecay_store",
     "zeroize",
 ];
@@ -968,11 +969,19 @@ fn validate_query_attributes(
                         [
                             Token::Ident(_),
                             Token::Punct('('),
+                            Token::Ident(argument),
+                            Token::Punct(')')
+                        ] if argument == "default"
+                    ) || matches!(
+                        body,
+                        [
+                            Token::Ident(_),
+                            Token::Punct('('),
                             Token::Ident(key),
                             Token::Punct('='),
                             Token::StringLiteral(_),
                             Token::Punct(')')
-                        ] if key == "rename"
+                        ] if key == "rename" || key == "skip_serializing_if"
                     ) || matches!(
                         body,
                         [
@@ -980,11 +989,12 @@ fn validate_query_attributes(
                             Token::Punct('('),
                             Token::Ident(default),
                             Token::Punct(','),
-                            Token::Ident(skip),
+                            Token::Ident(key),
                             Token::Punct('='),
                             Token::StringLiteral(_),
                             Token::Punct(')')
-                        ] if default == "default" && skip == "skip_serializing_if"
+                        ] if default == "default"
+                            && (key == "rename" || key == "skip_serializing_if")
                     )
                 }
                 "error" => match body {

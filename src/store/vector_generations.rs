@@ -2217,7 +2217,6 @@ fn validate_published_receipts(
     for batch in generation.receipts() {
         if batch.target_projection_key != *generation.projection_key()
             || batch.source_generation != *generation.source_generation()
-            || batch.source_manifest_digest != *generation.source_manifest_digest()
             || expected_publication_digest(batch).map_err(storage_error)?
                 != batch.publication_digest
             || batch.reused_count
@@ -2236,7 +2235,7 @@ fn validate_published_receipts(
                 || receipt.projection_key != *generation.projection_key()
                 || receipt.request_digest != batch.request_digest
                 || receipt.source_generation != *generation.source_generation()
-                || receipt.source_manifest_digest != *generation.source_manifest_digest()
+                || receipt.source_manifest_digest != batch.source_manifest_digest
             {
                 return Err(VectorGenerationStoreErrorV1::Storage(
                     "published chunk receipt is duplicated or incompatible".to_owned(),
@@ -2378,8 +2377,6 @@ fn validate_batch_identity(
         || prepared.receipt.target_projection_key != plan.target_projection_key
         || prepared.request.changes.to_generation != plan.source_generation
         || prepared.receipt.source_generation != plan.source_generation
-        || prepared.request.changes.manifest_digest != plan.source_manifest_digest
-        || prepared.receipt.source_manifest_digest != plan.source_manifest_digest
     {
         return Err(VectorGenerationStoreErrorV1::BatchIdentityMismatch);
     }
