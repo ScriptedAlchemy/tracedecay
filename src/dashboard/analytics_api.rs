@@ -100,11 +100,11 @@ pub(crate) async fn overview(State(state): State<DashboardState>) -> Response {
         ),
     };
     let hints = hint_summary(state.lcm_db.as_deref(), durable_events.as_deref()).await;
-    let usage =
-        match typed_usage_summary(state.lcm_db.as_deref(), durable_events.as_deref()).await {
-            Ok(usage) => usage,
-            Err(response) => return response,
-        };
+    let usage = match typed_usage_summary(state.lcm_db.as_deref(), durable_events.as_deref()).await
+    {
+        Ok(usage) => usage,
+        Err(response) => return response,
+    };
     let agents = agent_usage_summary(state.lcm_db.as_deref()).await;
     let diagnostics = diagnostics_summary(&state, durable_events.as_deref()).await;
     let underused = underused_tool_families(state.lcm_db.as_deref()).await;
