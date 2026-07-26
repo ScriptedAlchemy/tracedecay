@@ -1434,9 +1434,7 @@ fn verify_doctor_remediation_observation(
             DoctorFindingFamilyV1::Configuration
         }
         operations::RUNTIME_RECOVER_DAEMON => DoctorFindingFamilyV1::StorageRuntime,
-        operations::HOST_REPAIR_INTEGRATION
-        | operations::FEEDBACK_GET_FINDING
-        | operations::FEEDBACK_LIST_FINDINGS => DoctorFindingFamilyV1::Advisory,
+        operations::HOST_REPAIR_INTEGRATION => DoctorFindingFamilyV1::Advisory,
         operations::CODE_INDEX_REMOUNT => DoctorFindingFamilyV1::SemanticIndex,
         operations::STORAGE_RETENTION_COLLECT
         | operations::STORAGE_COLLECT_ORPHAN_STORE
