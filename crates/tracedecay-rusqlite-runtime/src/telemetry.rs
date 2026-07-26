@@ -1,12 +1,14 @@
 //! Bounded snapshots recorded by one shared writer telemetry authority.
 
 mod recorder;
+mod store_size;
 #[cfg(test)]
 mod tests;
 
 use tracedecay_store::{CommitSequenceV1, DurabilityClassV1, OperationPriorityV1, StoreClientIdV1};
 
 pub(crate) use recorder::WriterTelemetry;
+pub use store_size::SqliteStoreSizeTelemetryPort;
 
 pub(crate) const MAX_TRACKED_WRITER_CLIENTS: usize = 64;
 
