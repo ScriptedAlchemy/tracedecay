@@ -174,8 +174,30 @@ impl SemanticAugmentationOutcomeV1 {
 pub(in crate::daemon) enum Pr9SemanticSearchExecutionErrorV1 {
     #[error(transparent)]
     Pr9(#[from] Pr9SearchExecutionErrorV1),
+    #[error(
+        "strict semantic retrieval is unavailable for code generation {generation}: {abstention:?}"
+    )]
+    StrictSemanticUnavailable {
+        generation: tracedecay_domain::CodeGenerationId,
+        abstention: SemanticAbstentionV1,
+    },
     #[error(transparent)]
     Semantic(#[from] SemanticQueryServiceError),
+}
+
+fn bind_semantic_execution_error(
+    generation: &tracedecay_domain::CodeGenerationId,
+    error: SemanticQueryServiceError,
+) -> Pr9SemanticSearchExecutionErrorV1 {
+    match error {
+        SemanticQueryServiceError::StrictUnavailable(abstention) => {
+            Pr9SemanticSearchExecutionErrorV1::StrictSemanticUnavailable {
+                generation: generation.clone(),
+                abstention,
+            }
+        }
+        error => Pr9SemanticSearchExecutionErrorV1::Semantic(error),
+    }
 }
 
 pub(crate) const fn semantic_abstention_reason(abstention: &SemanticAbstentionV1) -> &'static str {
@@ -319,7 +341,8 @@ impl CodeIndexSchedulerRegistryV1 {
                 mode,
                 SemanticAbstentionV1::IndexStale,
                 Arc::clone(&pr9.authorized.fallback),
-            )?;
+            )
+            .map_err(|error| bind_semantic_execution_error(&pr9.generation, error))?;
             return Ok(ExecutedPr9SemanticSearchV1 { pr9, semantic });
         };
         let semantic = self
@@ -333,7 +356,8 @@ impl CodeIndexSchedulerRegistryV1 {
                 control,
                 mode,
             )
-            .await?;
+            .await
+            .map_err(|error| bind_semantic_execution_error(&pr9.generation, error))?;
         Ok(ExecutedPr9SemanticSearchV1 { pr9, semantic })
     }
 
@@ -1497,6 +1521,25 @@ mod tests {
             Err(SemanticQueryServiceError::StrictUnavailable(
                 SemanticAbstentionV1::CalibrationUnavailable
             ))
+        ));
+    }
+
+    #[test]
+    fn strict_semantic_execution_error_preserves_the_pr9_generation() {
+        let generation = id::<CodeGenerationId>("code-generation.strict-semantic-selected.v1");
+        let error = bind_semantic_execution_error(
+            &generation,
+            SemanticQueryServiceError::StrictUnavailable(
+                SemanticAbstentionV1::CalibrationUnavailable,
+            ),
+        );
+
+        assert!(matches!(
+            error,
+            Pr9SemanticSearchExecutionErrorV1::StrictSemanticUnavailable {
+                generation: selected,
+                abstention: SemanticAbstentionV1::CalibrationUnavailable,
+            } if selected == generation
         ));
     }
 
