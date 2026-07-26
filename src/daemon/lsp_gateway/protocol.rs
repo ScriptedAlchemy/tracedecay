@@ -895,7 +895,7 @@ where
                 return;
             }
         };
-        if root_uri != self.gateway.root().uri() {
+        if !self.gateway.root().matches_root_uri(&root_uri) {
             self.enqueue_value(error_response(
                 id,
                 RpcFailure {
