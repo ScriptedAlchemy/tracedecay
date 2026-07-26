@@ -133,20 +133,42 @@ pub async fn proxy_transport_to_daemon(
     transport: &mut impl McpTransport,
 ) -> Result<()> {
     let mut routed_handshake = handshake.clone();
-    if let Some(line) = replay_line {
+    let mut next_line = replay_line;
+    loop {
+        let (line, observe_host_eof) = if let Some(line) = next_line.take() {
+            // A replayed or pipelined line was already accepted before the
+            // preceding request completed. Finish it before observing EOF.
+            (line, false)
+        } else {
+            let Some(line) = transport.read_line().await? else {
+                return Ok(());
+            };
+            (line, true)
+        };
         reset_proxy_handshake_for_initialize(handshake, &mut routed_handshake, &line);
-        let metadata =
-            proxy_request_line_to_daemon(socket_path, &routed_handshake, &line, transport).await?;
+        let (outcome, buffered_line) = {
+            let daemon_request =
+                proxy_request_line_from_daemon(socket_path, &routed_handshake, &line);
+            tokio::pin!(daemon_request);
+            if observe_host_eof {
+                tokio::select! {
+                    biased;
+                    outcome = &mut daemon_request => (outcome, None),
+                    input = transport.read_line() => {
+                        let Some(buffered_line) = input? else {
+                            return Ok(());
+                        };
+                        (daemon_request.await, Some(buffered_line))
+                    }
+                }
+            } else {
+                (daemon_request.await, None)
+            }
+        };
+        let metadata = write_proxy_request_outcome(&line, outcome, transport).await?;
         apply_proxy_initialize_metadata(&mut routed_handshake, metadata);
+        next_line = buffered_line;
     }
-
-    while let Some(line) = transport.read_line().await? {
-        reset_proxy_handshake_for_initialize(handshake, &mut routed_handshake, &line);
-        let metadata =
-            proxy_request_line_to_daemon(socket_path, &routed_handshake, &line, transport).await?;
-        apply_proxy_initialize_metadata(&mut routed_handshake, metadata);
-    }
-    Ok(())
 }
 
 #[cfg(unix)]
@@ -265,8 +287,26 @@ pub(crate) async fn proxy_request_line_to_daemon(
     line: &str,
     transport: &mut impl McpTransport,
 ) -> Result<ProxyInitializeMetadata> {
+    let outcome = proxy_request_line_from_daemon(socket_path, handshake, line).await;
+    write_proxy_request_outcome(line, outcome, transport).await
+}
+
+enum ProxyRequestOutcome {
+    Empty,
+    Responses {
+        responses: Vec<String>,
+        metadata: ProxyInitializeMetadata,
+    },
+    Failed(TraceDecayError),
+}
+
+async fn proxy_request_line_from_daemon(
+    socket_path: &Path,
+    handshake: &DaemonHandshake,
+    line: &str,
+) -> ProxyRequestOutcome {
     if line.trim().is_empty() {
-        return Ok(ProxyInitializeMetadata::default());
+        return ProxyRequestOutcome::Empty;
     }
 
     match send_daemon_request_line_with_project_warming_retry(socket_path, handshake, line).await {
@@ -275,6 +315,26 @@ pub(crate) async fn proxy_request_line_to_daemon(
             if let Some(warning) = daemon_version_skew_warning(line, &responses, binary_version()) {
                 eprintln!("[tracedecay] warning: {warning}");
             }
+            ProxyRequestOutcome::Responses {
+                responses,
+                metadata,
+            }
+        }
+        Err(err) => ProxyRequestOutcome::Failed(err),
+    }
+}
+
+async fn write_proxy_request_outcome(
+    line: &str,
+    outcome: ProxyRequestOutcome,
+    transport: &mut impl McpTransport,
+) -> Result<ProxyInitializeMetadata> {
+    match outcome {
+        ProxyRequestOutcome::Empty => Ok(ProxyInitializeMetadata::default()),
+        ProxyRequestOutcome::Responses {
+            responses,
+            metadata,
+        } => {
             for response in responses {
                 transport.write_line(&response).await?;
                 if !response.ends_with('\n') {
@@ -284,7 +344,7 @@ pub(crate) async fn proxy_request_line_to_daemon(
             transport.flush().await?;
             Ok(metadata)
         }
-        Err(err) => {
+        ProxyRequestOutcome::Failed(err) => {
             if let Some(response) = daemon_proxy_error_response(line, &err) {
                 let json_line = serde_json::to_string(&response)?;
                 transport.write_line(&json_line).await?;
