@@ -26,7 +26,7 @@ use tracedecay_application::{
 use tracedecay_domain::{
     CodeGenerationId, CommitId, ManifestDigest, ProjectId, ProviderEvaluationStateV1,
     RetrievalAnchorId, RetrievalGrainV1, SessionId, SignedCursorKeyRefV1, TemporalModeV1,
-    UtcMicros, WorktreeId, canonical_sha256,
+    UtcMicros, canonical_sha256,
 };
 use tracedecay_tool_catalog::SortContractId;
 use url::Url;
@@ -1582,19 +1582,6 @@ pub fn locator_digest_for_project(
     })
 }
 
-pub fn worktree_id_for_project(
-    project_root: &Path,
-) -> Result<WorktreeId, ApplicationContractError> {
-    let digest = locator_digest_for_project(project_root)?;
-    WorktreeId::new(format!(
-        "worktree.{}",
-        digest.as_str().trim_start_matches("sha256:")
-    ))
-    .map_err(|_| ApplicationContractError::Inconsistent {
-        field: "PR12 primitive worktree id",
-    })
-}
-
 #[cfg(test)]
 mod affected_tests_tests {
     use std::collections::BTreeSet;
@@ -1611,7 +1598,7 @@ mod affected_tests_tests {
     use tracedecay_domain::{
         ActorId, CodeGenerationId, ComponentVersion, ContentDigest, FileOccurrenceId,
         GenerationTestAttributionV1, ProjectId, ProviderEvaluationStateV1, RefId, RepositoryId,
-        SymbolOccurrenceId, TestAttributionEvidenceClassV1,
+        SymbolOccurrenceId, TestAttributionEvidenceClassV1, WorktreeId,
     };
     use tracedecay_tool_catalog::{CapabilityId, SchemaId, UseCaseId};
 
