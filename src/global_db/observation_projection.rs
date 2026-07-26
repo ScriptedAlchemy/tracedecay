@@ -11,7 +11,7 @@ mod transition;
 pub(super) use apply::canonical_fact_text;
 pub(super) use apply::{derive_projection, derive_projection_with_alias, verify_workflow_effects};
 pub(crate) use migration::{
-    advance_projection_version_migration_with_engine,
+    advance_projection_version_migration_until_cancelled_with_engine,
     prepare_projection_version_migration_with_engine,
     projection_version_migration_complete_with_engine,
 };
