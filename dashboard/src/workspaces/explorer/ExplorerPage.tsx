@@ -19,6 +19,7 @@ import { queryTerms } from '../../ui/search/terms.ts';
 import { cn } from '../../ui/cn';
 import { Meter } from '../../ui/instrument.tsx';
 import { EvidencePattern, type EvidenceQuality } from '../../ui/EvidencePattern.tsx';
+import { absenceVerdict, type AbsenceVerdict } from './absence.ts';
 import { Reveal } from './Reveal.tsx';
 import { AnyObject, type LegacyResult } from '../../data/query/legacy.ts';
 import { fetchEnvelope, type EnvelopeResult } from '../../data/query/envelope.ts';
@@ -369,22 +370,12 @@ export function ExplorerPage() {
   );
   const answeredLanes = lanes.filter((lane) => lane.outcome === 'ok');
   // A confirmed global absence is a claim about the whole index, so the client
-  // verifies the same predicate the coordinator uses to earn it
-  // (`DashboardCoverageV1::is_complete` — complete coverage AND a real
-  // denominator) on every source, rather than reprinting the `finality` scalar
-  // as fact. A payload that declares canonical finality while one of its own
-  // sources reports unknown coverage contradicts itself, and the surface must
-  // side with the evidence it can see.
-  const everySourceFullyCovered =
-    plannerRun !== undefined &&
-    plannerRun.sources.length > 0 &&
-    plannerRun.sources.every(
-      (source) =>
-        source.outcome === 'ready' &&
-        source.coverage.completeness === 'complete' &&
-        source.coverage.denominator !== null,
-    );
-  const absenceIsConfirmed = plannerRun?.finality === 'complete' && everySourceFullyCovered;
+  // re-derives it from the coordinator's own unit accounting rather than
+  // reprinting the `finality` scalar as fact. Checking `completeness` alone was
+  // not enough: a source could declare complete coverage over a real
+  // denominator while its `unknown` and `omitted` counts on the same object said
+  // it knew the status of nothing, or had examined nothing. See `absence.ts`.
+  const absence = absenceVerdict(plannerRun);
 
   const reset = () => {
     setQuery('');
@@ -570,7 +561,7 @@ export function ExplorerPage() {
             query={submitted}
             facet={facet?.value ?? null}
             failed={failedLanes.length > 0}
-            absenceIsConfirmed={absenceIsConfirmed}
+            absence={absence}
             onClearFacet={() => setFacet(null)}
             onClearQuery={reset}
           />
@@ -1105,7 +1096,7 @@ function EmptyResults({
   query,
   facet,
   failed,
-  absenceIsConfirmed,
+  absence,
   onClearFacet,
   onClearQuery,
 }: {
@@ -1114,9 +1105,9 @@ function EmptyResults({
   query: string;
   facet: string | null;
   failed: boolean;
-  /** True only when every required source answered with complete coverage over
-   * a real denominator AND the coordinator declared canonical finality. */
-  absenceIsConfirmed: boolean;
+  /** Whether a global-absence claim has been earned, and if not, the specific
+   * thing standing in the way. */
+  absence: AbsenceVerdict;
   onClearFacet: () => void;
   onClearQuery: () => void;
 }) {
@@ -1166,13 +1157,17 @@ function EmptyResults({
     return (
       <div className="flex h-full flex-col items-center justify-center gap-3 p-8 text-center">
         <h2 className="text-sm font-semibold tracking-tight">
-          {absenceIsConfirmed ? `No source matched “${query}”` : `No rows loaded for “${query}”`}
+          {absence.confirmed ? `No source matched “${query}”` : `No rows loaded for “${query}”`}
         </h2>
         <p className="max-w-md text-2xs leading-relaxed text-text-muted">
-          {absenceIsConfirmed
-            ? 'Every required source completed with known coverage, and the coordinator declared canonical finality.'
-            : 'These bounded pages do not report complete coverage or planner finality, so they cannot establish global absence.'}
+          {absence.confirmed
+            ? 'Every required source examined its full denominator with no unknown or omitted units, and the coordinator declared canonical finality.'
+            : // The blocker in words, because "incomplete coverage" tells a
+              // reader nothing they can act on, while "examined none of its 400
+              // symbols" tells them to narrow the query.
+              `${absence.reason}, so these bounded pages cannot establish global absence.`}
         </p>
+        <EvidencePattern quality={absence.quality} />
         <button
           type="button"
           onClick={onClearQuery}
