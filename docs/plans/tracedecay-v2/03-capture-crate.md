@@ -2,9 +2,17 @@
 
 ## Status / Role
 
-PR5 sanitized Claude capture and PR6 provider expansion are complete. This
-boundary records the deterministic privacy and admission behavior retained by
-current product ingestion; it is not a crate-first framework project. Shared
+PR5 sanitized Claude capture and PR6 expansion through the shared
+session-observation admission/sanitizer/store path are complete for Claude,
+Codex, Cursor, Hermes, Kiro, Cline, Roo Code, and Kilo. That completion
+statement does not include the external-source convergence section below:
+`SourceCaptureApplicationV1` is retained contract code with no production
+caller, acquisition adapter, or backing migration. It is a future seam,
+neither delivered PR5/PR6 behavior nor PR8–PR14 work to implement or delete
+(status corrected 2026-07-26).
+
+This boundary records the deterministic privacy and admission behavior retained
+by current product ingestion; it is not a crate-first framework project. Shared
 sequence and ownership rules are in
 [the plan index](00-plan-set-index.md) and [the V2 overview](README.md).
 

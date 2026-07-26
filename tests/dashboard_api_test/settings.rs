@@ -1,109 +1,5 @@
 use crate::dashboard_api_support::*;
 use serde_json::json;
-use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-use tracedecay::application::configuration::DirectConfigurationMutation;
-use tracedecay::config::{
-    ConfigurationDaemonClient, PinnedRuntimeConfiguration, RuntimeConfigurationFuture,
-    RuntimeConfigurationTarget,
-};
-use tracedecay_domain::configuration::{
-    ConfigurationLayerIdV1, ConfigurationRevisionId, ConfigurationValueV1, SettingKey,
-};
-
-#[derive(Default)]
-struct InjectedConfigurationClient {
-    entries: Mutex<BTreeMap<String, BTreeMap<SettingKey, ConfigurationValueV1>>>,
-    sequence: AtomicU64,
-}
-
-impl ConfigurationDaemonClient for InjectedConfigurationClient {
-    fn mutate_direct(
-        &self,
-        target: RuntimeConfigurationTarget,
-        mutation: DirectConfigurationMutation,
-        _expected_revision: ConfigurationRevisionId,
-    ) -> RuntimeConfigurationFuture<'_, PinnedRuntimeConfiguration> {
-        let result =
-            (|| {
-                let mut by_project = self
-                    .entries
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let entries = by_project
-                    .entry(target.project_id.as_str().to_owned())
-                    .or_default();
-
-                fn apply(
-                    entries: &mut BTreeMap<SettingKey, ConfigurationValueV1>,
-                    project_id: &tracedecay_domain::ProjectId,
-                    mutation: DirectConfigurationMutation,
-                ) -> tracedecay::errors::Result<()> {
-                    match mutation {
-                        DirectConfigurationMutation::Set { layer, key, value } => {
-                            if layer
-                                != (ConfigurationLayerIdV1::Project {
-                                    project_id: project_id.clone(),
-                                })
-                            {
-                                return Err(tracedecay::errors::TraceDecayError::Config {
-                                    message: "injected configuration target mismatch".to_owned(),
-                                });
-                            }
-                            entries.insert(key, value);
-                        }
-                        DirectConfigurationMutation::Unset { layer, key } => {
-                            if layer
-                                != (ConfigurationLayerIdV1::Project {
-                                    project_id: project_id.clone(),
-                                })
-                            {
-                                return Err(tracedecay::errors::TraceDecayError::Config {
-                                    message: "injected configuration target mismatch".to_owned(),
-                                });
-                            }
-                            entries.remove(&key);
-                        }
-                        DirectConfigurationMutation::Batch { mutations } => {
-                            for mutation in mutations {
-                                apply(entries, project_id, mutation)?;
-                            }
-                        }
-                    }
-                    Ok(())
-                }
-
-                apply(entries, &target.project_id, mutation)?;
-                let sequence = self.sequence.fetch_add(1, Ordering::Relaxed) + 1;
-                let revision_id = ConfigurationRevisionId::new(format!(
-                    "configuration.revision.dashboard-test-{sequence}"
-                ))
-                .map_err(|error| tracedecay::errors::TraceDecayError::Config {
-                    message: error.to_string(),
-                })?;
-                let registry = tracedecay::config::registry::ConfigurationRegistry::core()
-                    .map_err(|error| tracedecay::errors::TraceDecayError::Config {
-                        message: error.to_string(),
-                    })?;
-                let resolution = tracedecay::config::resolver::resolve_configuration(
-                    &registry,
-                    &[tracedecay::config::resolver::ConfigurationLayerV1 {
-                        layer: ConfigurationLayerIdV1::Project {
-                            project_id: target.project_id.clone(),
-                        },
-                        revision_id: revision_id.clone(),
-                        entries: entries.clone(),
-                    }],
-                )
-                .map_err(|error| tracedecay::errors::TraceDecayError::Config {
-                    message: error.to_string(),
-                })?;
-                PinnedRuntimeConfiguration::new(target, revision_id, resolution.snapshot)
-            })();
-        Box::pin(async move { result })
-    }
-}
 
 #[test]
 fn settings_dashboard_api_aggregates_and_updates_config() {
@@ -112,9 +8,6 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runtime = create_runtime();
     runtime.block_on(async {
-        tracedecay::config::install_configuration_daemon_client(Arc::new(
-            InjectedConfigurationClient::default(),
-        ));
         let fixture = start_dashboard_fixture(false).await;
         let agent = http_agent();
         let url = format!("{}/api/settings", fixture.base_url);

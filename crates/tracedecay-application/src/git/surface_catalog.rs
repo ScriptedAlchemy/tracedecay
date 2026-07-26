@@ -34,7 +34,6 @@ struct SurfaceSpec {
     surfaces: &'static [BindingSurface],
 }
 
-const CLI_MCP_SURFACES: [BindingSurface; 2] = [BindingSurface::Cli, BindingSurface::Mcp];
 const TRANSPORT_SURFACES: [BindingSurface; 3] = [
     BindingSurface::Cli,
     BindingSurface::Mcp,
@@ -52,7 +51,7 @@ const SURFACE_SPECS: [SurfaceSpec; 7] = [
         summary: "Read typed Git status",
         description: "Read bounded typed status for one exact admitted project worktree.",
         example: "Show typed Git status for this project",
-        surfaces: &CLI_MCP_SURFACES,
+        surfaces: &TRANSPORT_SURFACES,
     },
     SurfaceSpec {
         capability: "capability.application.git.diff",
@@ -64,7 +63,7 @@ const SURFACE_SPECS: [SurfaceSpec; 7] = [
         summary: "Read a typed Git diff",
         description: "Read one bounded working-tree, staged, or exact commit-range diff.",
         example: "Show the typed staged Git diff",
-        surfaces: &CLI_MCP_SURFACES,
+        surfaces: &TRANSPORT_SURFACES,
     },
     SurfaceSpec {
         capability: "capability.application.git.history",
@@ -76,7 +75,7 @@ const SURFACE_SPECS: [SurfaceSpec; 7] = [
         summary: "Read bounded Git history",
         description: "Read bounded typed commit history for one exact admitted project worktree.",
         example: "Show recent typed Git history",
-        surfaces: &CLI_MCP_SURFACES,
+        surfaces: &TRANSPORT_SURFACES,
     },
     SurfaceSpec {
         capability: "capability.application.git.blame",
@@ -88,7 +87,7 @@ const SURFACE_SPECS: [SurfaceSpec; 7] = [
         summary: "Read typed Git blame",
         description: "Read bounded typed line provenance for one admitted path.",
         example: "Show typed Git blame for this file",
-        surfaces: &CLI_MCP_SURFACES,
+        surfaces: &TRANSPORT_SURFACES,
     },
     SurfaceSpec {
         capability: "capability.application.git.hunks",
@@ -100,7 +99,7 @@ const SURFACE_SPECS: [SurfaceSpec; 7] = [
         summary: "Read typed Git hunk references",
         description: "Mint bounded HunkRef evidence from one working-tree or staged diff.",
         example: "List typed hunk references for the staged diff",
-        surfaces: &CLI_MCP_SURFACES,
+        surfaces: &TRANSPORT_SURFACES,
     },
     SurfaceSpec {
         capability: "capability.application.git.preview",
@@ -349,5 +348,17 @@ mod tests {
                 || name.contains("unstage_hunks")
                 || name.contains("commit_index")
         }));
+        for operation in [
+            "git_status",
+            "git_diff",
+            "git_history",
+            "git_blame",
+            "git_hunks",
+        ] {
+            assert!(contribution.bindings().iter().any(|binding| {
+                binding.operation().as_str() == operation
+                    && binding.surface() == BindingSurface::Http
+            }));
+        }
     }
 }

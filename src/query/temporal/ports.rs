@@ -513,6 +513,8 @@ impl Default for TemporalMessageTypeFilterV1 {
 pub(crate) struct TemporalCandidateFilterV1 {
     pub(crate) project_key: Option<String>,
     pub(crate) parent_session_id: Option<String>,
+    pub(crate) source: Option<String>,
+    pub(crate) include_summaries: bool,
     pub(crate) session_scope: TemporalSessionScopeFilterV1,
     pub(crate) message_type: TemporalMessageTypeFilterV1,
     pub(crate) roles: Vec<String>,
@@ -545,6 +547,7 @@ impl TemporalCandidateFilterV1 {
         for (field, value) in [
             ("project_key", self.project_key.as_deref()),
             ("parent_session_id", self.parent_session_id.as_deref()),
+            ("source", self.source.as_deref()),
             ("git_branch", self.git_branch.as_deref()),
             ("git_worktree", self.git_worktree.as_deref()),
             ("git_commit", self.git_commit.as_deref()),
