@@ -9,17 +9,18 @@ use tracedecay_tool_catalog::{
     CancellationContract, CancellationPoint, CapabilityId, CapabilityManifestInputV1,
     CapabilityManifestV1, CatalogContributionInputV1, CatalogContributionV1, ContributionId,
     DeadlineBehavior, DeadlineContract, DeniedDisclosurePolicy, EffectClass, IdempotencyContract,
-    LifecycleClass, PaginationContract, PrivacyClass, ProfileId, ProtocolRevisionRange,
-    ReceiptContract, ReconciliationContract, RevalidationContract, RevalidationPoint,
-    RoutingContractV1, SchemaId, SchemaRef, ScopeDimension, ScopeRequirement, StreamingContract,
-    SurfaceBindingInputV1, SurfaceBindingV1, SurfaceOperationName, TerminalState,
-    TerminalStateContract, UseCaseId,
+    LifecycleClass, PaginationContract, PrivacyClass, ProtocolRevisionRange, ReceiptContract,
+    ReconciliationContract, RevalidationContract, RevalidationPoint, RoutingContractV1, SchemaId,
+    SchemaRef, ScopeDimension, ScopeRequirement, StreamingContract, SurfaceBindingInputV1,
+    SurfaceBindingV1, SurfaceOperationName, TerminalState, TerminalStateContract, UseCaseId,
 };
 
 use crate::error::ApplicationContractError;
 use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
 use crate::result::ResultContractRef;
-use crate::retrieval::catalog::APPLICATION_DEFAULT_PROFILE_ID;
+use crate::retrieval::catalog::{
+    APPLICATION_ADMINISTRATIVE_PROFILE_ID, APPLICATION_DEFAULT_PROFILE_ID, application_profile_ids,
+};
 
 struct ConfigurationSurfaceSpec {
     name: &'static str,
@@ -310,7 +311,23 @@ fn capability(
         })?,
         availability: AvailabilityContract::Available,
         binding_ids,
-        profile_eligibility: vec![ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID)?],
+        profile_eligibility: application_profile_ids(
+            if matches!(
+                spec.name,
+                "configuration_list"
+                    | "configuration_explain"
+                    | "configuration_get"
+                    | "configuration_observed_state"
+                    | "configuration_audit"
+            ) {
+                &[
+                    APPLICATION_DEFAULT_PROFILE_ID,
+                    APPLICATION_ADMINISTRATIVE_PROFILE_ID,
+                ]
+            } else {
+                &[APPLICATION_DEFAULT_PROFILE_ID]
+            },
+        )?,
         required_features: Vec::new(),
     })?)
 }

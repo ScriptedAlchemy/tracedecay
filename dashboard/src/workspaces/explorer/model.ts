@@ -12,10 +12,7 @@
  *  - Missing is missing: absent fields become `undefined`, not placeholders.
  */
 import { matchedFieldNames, matchWindow } from '../../ui/search/terms.ts';
-import type {
-  ExplorerSourceId,
-  ExplorerSourceProgress,
-} from './contracts.ts';
+import type { ExplorerSourceId, ExplorerSourceProgress } from '../../contracts/wire.ts';
 
 export type LaneId = 'code' | 'sessions' | 'knowledge';
 

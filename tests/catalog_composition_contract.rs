@@ -3,13 +3,15 @@ use std::collections::BTreeSet;
 use tracedecay::catalog_composition::{
     CatalogCompositionError, build_application_catalog_snapshot, validate_application_catalog,
 };
+use tracedecay_api::{HttpApplicationOperation, http_route_documents};
 use tracedecay_application::{
     ApplicationContractError, ApplicationHandlerDescriptor, ApplicationHandlerDescriptors,
     ApplicationOperation, ResultContractRef, application_catalog_contributions,
     application_handler_descriptors, retrieval::catalog::symbol_search_contribution,
 };
 use tracedecay_tool_catalog::{
-    CapabilityId, ProfileBudget, ProfileId, ProfileKind, SchemaId, SchemaRef, UseCaseId,
+    BindingSurface, CapabilityId, ProfileBudget, ProfileId, ProfileKind, SchemaId, SchemaRef,
+    ScopeDimension, SortContractId, UseCaseId,
 };
 
 #[test]
@@ -194,6 +196,106 @@ fn root_snapshot_composes_every_explicit_profile_without_widening_eligibility() 
             eligible_capability_ids,
         );
     }
+}
+
+#[test]
+fn binding_discovery_intersects_profile_surface_authority_and_scope() {
+    let snapshot = build_application_catalog_snapshot().unwrap();
+    let profile = ProfileId::new("profile.compact").unwrap();
+    let symbol_search = CapabilityId::new("capability.retrieval.symbol-search").unwrap();
+    let authorized = BTreeSet::from([symbol_search.clone()]);
+    let scope = BTreeSet::from([
+        ScopeDimension::Project,
+        ScopeDimension::Repository,
+        ScopeDimension::Worktree,
+        ScopeDimension::Resource,
+    ]);
+
+    let visible = snapshot.visible_bindings(
+        &profile,
+        BindingSurface::Mcp,
+        1,
+        &BTreeSet::new(),
+        &authorized,
+        &scope,
+    );
+    assert_eq!(visible.len(), 1);
+    assert_eq!(visible[0].0.operation().as_str(), "code_symbol_search");
+    assert_eq!(visible[0].1.capability_id(), &symbol_search);
+
+    assert!(
+        snapshot
+            .visible_bindings(
+                &profile,
+                BindingSurface::Mcp,
+                1,
+                &BTreeSet::new(),
+                &BTreeSet::new(),
+                &scope,
+            )
+            .is_empty()
+    );
+    assert!(
+        snapshot
+            .visible_bindings(
+                &profile,
+                BindingSurface::Mcp,
+                1,
+                &BTreeSet::new(),
+                &authorized,
+                &BTreeSet::from([
+                    ScopeDimension::Project,
+                    ScopeDimension::Repository,
+                    ScopeDimension::Worktree,
+                ]),
+            )
+            .is_empty()
+    );
+}
+
+#[test]
+fn http_route_documents_follow_the_catalog_and_exclude_git_mutation_facades() {
+    let snapshot = build_application_catalog_snapshot().unwrap();
+    let profile = ProfileId::new("profile.default").unwrap();
+    let authorized = snapshot
+        .capabilities()
+        .map(|capability| capability.capability_id().clone())
+        .collect();
+    let scope = BTreeSet::from([
+        ScopeDimension::Project,
+        ScopeDimension::Repository,
+        ScopeDimension::Worktree,
+        ScopeDimension::Branch,
+        ScopeDimension::Session,
+        ScopeDimension::Resource,
+    ]);
+    let documents = http_route_documents(
+        &snapshot,
+        &profile,
+        &authorized,
+        &scope,
+        &BTreeSet::new(),
+        1,
+    );
+    let visible_http_bindings = snapshot.visible_bindings(
+        &profile,
+        BindingSurface::Http,
+        1,
+        &BTreeSet::new(),
+        &authorized,
+        &scope,
+    );
+
+    assert!(!documents.is_empty());
+    assert_eq!(documents.len(), visible_http_bindings.len());
+    assert!(documents.iter().all(|document| {
+        HttpApplicationOperation::from_catalog_name(&document.operation)
+            .is_some_and(|operation| operation.route_path() == document.path)
+    }));
+    assert!(documents.iter().all(|document| {
+        !matches!(document.operation.as_str(), "git_preview" | "git_apply")
+            && !matches!(document.path.as_str(), "/git/preview" | "/git/apply")
+    }));
 }
 
 #[test]
