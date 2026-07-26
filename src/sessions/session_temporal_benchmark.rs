@@ -46,7 +46,10 @@ use crate::global_db::session_temporal::RegisteredGlobalDbSessionTemporalExecuti
 use crate::query::temporal::context::{ContextBudget, TokenPolicy, VersionedTokenEstimator};
 use crate::query::temporal::ranking::DiversityLimits;
 use crate::sessions::codex;
-use crate::storage::{read_repository_identity_marker, write_repository_identity_marker};
+use crate::storage::{
+    EnrollmentMarker, StorageMode, read_repository_identity_marker, write_enrollment_marker,
+    write_repository_identity_marker,
+};
 use crate::store::GlobalDbSessionTemporalStore;
 
 const SCHEMA_VERSION: u64 = 2;
@@ -223,6 +226,7 @@ struct PreparedRepetition {
     complete_request: SessionRefreshCompletionRequestV1,
     rebuild_activate_ns: u64,
     durable_progress: SessionRefreshProgressV1,
+    _daemon_scope: crate::db::DaemonDatabaseScope,
     _env: IsolatedBenchmarkEnv,
 }
 
@@ -580,6 +584,7 @@ async fn prepare_repetition(repetition: usize) -> BenchResult<PreparedRepetition
         complete_request,
         rebuild_activate_ns,
         durable_progress: progress,
+        _daemon_scope,
         _env: env,
     })
 }
@@ -670,6 +675,14 @@ fn enroll_benchmark_project(project: &Path) -> BenchResult<ProjectId> {
     {
         return Err("repository identity marker was not written".to_owned());
     }
+    write_enrollment_marker(
+        project,
+        &EnrollmentMarker {
+            project_id: BENCHMARK_PROJECT_ID.to_owned(),
+            storage_mode: StorageMode::ProfileSharded,
+        },
+    )
+    .map_err(|error| format!("write enrollment marker: {error}"))?;
     let marker = read_repository_identity_marker(project)
         .map_err(|error| format!("read identity marker: {error}"))?
         .ok_or_else(|| "repository identity marker missing after write".to_owned())?;

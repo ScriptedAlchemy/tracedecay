@@ -771,7 +771,12 @@ mod tests {
     async fn open_database(path: &std::path::Path) -> Database {
         let authority =
             DatabaseAuthority::acquire_test(path, "retrieval anchor authority acceptance").unwrap();
-        Database::publish_test_runtime(path, &authority, TestDatabaseRuntimeMode::Initialize)
+        let mode = if path.try_exists().unwrap() {
+            TestDatabaseRuntimeMode::Existing
+        } else {
+            TestDatabaseRuntimeMode::Initialize
+        };
+        Database::publish_test_runtime(path, &authority, mode)
             .await
             .unwrap()
             .0

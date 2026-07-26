@@ -22,6 +22,18 @@ const DAEMON_RESTART_LEASE_TIMEOUT: Duration = Duration::from_secs(90);
 pub(crate) async fn refresh_generated_plugins() -> tracedecay::errors::Result<()> {
     let home = tracedecay_home_dir()?;
     let tracedecay_bin = tracedecay_bin_for_generated_artifacts()?;
+    refresh_generated_plugins_at(
+        tracedecay::agents::all_integrations(),
+        &home,
+        &tracedecay_bin,
+    )
+}
+
+fn refresh_generated_plugins_at(
+    integrations: Vec<Box<dyn tracedecay::agents::AgentIntegration>>,
+    home: &Path,
+    tracedecay_bin: &str,
+) -> tracedecay::errors::Result<()> {
     eprintln!(
         "Refreshing tracedecay-generated plugin artifacts (supported user configs are preserved)"
     );
@@ -31,15 +43,15 @@ pub(crate) async fn refresh_generated_plugins() -> tracedecay::errors::Result<()
     // tracking state can neither skip a real install nor install anywhere new.
     let mut refreshed_any = false;
     let mut failures: Vec<String> = Vec::new();
-    for ag in tracedecay::agents::all_integrations() {
-        let hermes_was_installed = ag.id() == "hermes" && ag.has_tracedecay(&home);
+    for ag in integrations {
+        let hermes_was_installed = ag.id() == "hermes" && ag.has_tracedecay(home);
         // Generated-plugin refresh never rewrites Hermes profile config, so it
         // must not be blocked by an unresolved historical session migration.
         // Migration remains mandatory on install/uninstall paths that can
         // remove a legacy project pin.
         let ctx = tracedecay::agents::InstallContext {
-            home: home.clone(),
-            tracedecay_bin: tracedecay_bin.clone(),
+            home: home.to_path_buf(),
+            tracedecay_bin: tracedecay_bin.to_string(),
             tool_permissions: tracedecay::agents::expected_tool_perms(),
             project_root: None,
             dashboard: true,
@@ -70,6 +82,17 @@ pub(crate) async fn refresh_generated_plugins() -> tracedecay::errors::Result<()
             // the tracked-agent reinstall in `run_post_update_tasks`, so there
             // is nothing to do — and nothing to nag about — here.
             Ok(tracedecay::agents::UpdatePluginOutcome::ConfigOnly) => {}
+            Ok(tracedecay::agents::UpdatePluginOutcome::DeferredUserAction(deferred)) => {
+                refreshed_any = true;
+                eprintln!(
+                    "  \x1b[33mwarning:\x1b[0m {} plugin activation deferred: {}",
+                    ag.id(),
+                    deferred.remediation
+                );
+                for path in deferred.staged_paths {
+                    eprintln!("    staged: {}", path.display());
+                }
+            }
             Err(e) => failures.push(format!("{}: {e}", ag.id())),
         }
     }
@@ -699,16 +722,31 @@ pub(crate) enum ReinstallOutcome {
 /// helper so the outcome logic is unit-testable without touching the real
 /// filesystem or agent registry.
 pub(crate) fn partition_reinstall_results(
-    results: Vec<(String, tracedecay::errors::Result<()>)>,
+    results: Vec<(
+        String,
+        tracedecay::errors::Result<crate::agent_cmd::AgentReinstallOutcome>,
+    )>,
 ) -> ReinstallOutcome {
     // Carry the reason, not just the name: a swallowed error here left
     // `dogfood` reporting "failed for: claude, cursor, hermes, kimi" with no
     // way to learn why short of reading the installer source. Matches the
     // existing "<environment>: ..." entry format used below.
-    let failed: Vec<String> = results
-        .into_iter()
-        .filter_map(|(id, result)| result.err().map(|error| format!("{id}: {error}")))
-        .collect();
+    let mut failed = Vec::new();
+    for (id, result) in results {
+        match result {
+            Ok(crate::agent_cmd::AgentReinstallOutcome::Installed) => {}
+            Ok(crate::agent_cmd::AgentReinstallOutcome::DeferredUserAction(deferred)) => {
+                eprintln!(
+                    "  \x1b[33mwarning:\x1b[0m {id} reinstall deferred: {}",
+                    deferred.remediation
+                );
+                for path in deferred.staged_paths {
+                    eprintln!("    staged: {}", path.display());
+                }
+            }
+            Err(error) => failed.push(format!("{id}: {error}")),
+        }
+    }
     if failed.is_empty() {
         ReinstallOutcome::AllOk
     } else {
@@ -956,8 +994,8 @@ mod tests {
         RefreshPolicy, ReinstallOutcome, current_tracedecay_exe_from,
         dogfood_forward_only_target_state, health_pass_failure_result, normalize_bin_path,
         partition_reinstall_results, post_update_binary, post_update_binary_from,
-        prepare_post_update_lease, reinstall_failure_result, restart_daemon_service_with,
-        run_install_then_refresh,
+        prepare_post_update_lease, refresh_generated_plugins_at, reinstall_failure_result,
+        restart_daemon_service_with, run_install_then_refresh,
     };
     use tempfile::TempDir;
     use tracedecay::upgrade::UpgradeOutcome;
@@ -1108,12 +1146,42 @@ mod tests {
         }
     }
 
-    fn ok(id: &str) -> (String, tracedecay::errors::Result<()>) {
-        (id.to_string(), Ok(()))
+    fn ok(
+        id: &str,
+    ) -> (
+        String,
+        tracedecay::errors::Result<crate::agent_cmd::AgentReinstallOutcome>,
+    ) {
+        (
+            id.to_string(),
+            Ok(crate::agent_cmd::AgentReinstallOutcome::Installed),
+        )
     }
 
-    fn err(id: &str) -> (String, tracedecay::errors::Result<()>) {
+    fn err(
+        id: &str,
+    ) -> (
+        String,
+        tracedecay::errors::Result<crate::agent_cmd::AgentReinstallOutcome>,
+    ) {
         (id.to_string(), Err(config_err("install failed")))
+    }
+
+    fn deferred(
+        id: &str,
+    ) -> (
+        String,
+        tracedecay::errors::Result<crate::agent_cmd::AgentReinstallOutcome>,
+    ) {
+        (
+            id.to_string(),
+            Ok(crate::agent_cmd::AgentReinstallOutcome::DeferredUserAction(
+                tracedecay::agents::DeferredUserAction {
+                    remediation: "run /plugins install staged-kimi".to_string(),
+                    staged_paths: vec![PathBuf::from("staged-kimi")],
+                },
+            )),
+        )
     }
 
     #[test]
@@ -1147,6 +1215,38 @@ mod tests {
             partition_reinstall_results(vec![ok("claude"), ok("cursor")]),
             ReinstallOutcome::AllOk
         ));
+    }
+
+    #[test]
+    fn partition_deferred_user_action_is_non_blocking() {
+        assert!(matches!(
+            partition_reinstall_results(vec![ok("claude"), deferred("kimi")]),
+            ReinstallOutcome::AllOk
+        ));
+    }
+
+    #[test]
+    fn deferred_kimi_refresh_does_not_block_maintenance() {
+        let home = TempDir::new().unwrap();
+        let installed_path = home.path().join(".kimi-code/plugins/installed.json");
+        std::fs::create_dir_all(installed_path.parent().unwrap()).unwrap();
+        let original = br#"{"version":1,"plugins":[{"id":"tracedecay","enabled":false}]}
+"#;
+        std::fs::write(&installed_path, original).unwrap();
+
+        let result = refresh_generated_plugins_at(
+            vec![Box::new(tracedecay::agents::kimi::KimiIntegration)],
+            home.path(),
+            "new-tracedecay",
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(std::fs::read(installed_path).unwrap(), original);
+        assert!(
+            home.path()
+                .join(".tracedecay/host-bundle-stage/kimi/tracedecay/.kimi-plugin/plugin.json")
+                .is_file()
+        );
     }
 
     #[test]

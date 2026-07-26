@@ -2,6 +2,7 @@
 use std::path::Path;
 use std::time::Duration;
 
+use rusqlite::Connection as RusqliteConnection;
 use tempfile::TempDir;
 use tokio::sync::oneshot;
 use tokio::time::timeout;
@@ -616,13 +617,10 @@ async fn temporal_schema_version(db_path: &Path) -> i64 {
 }
 
 async fn copy_database_for_temporal_restart(source: &Path, target: &Path) {
-    let db = TestConnection::open(source);
-    let conn = (*db).clone();
-    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
-        .await
+    RusqliteConnection::open(source)
+        .unwrap()
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
         .unwrap();
-    drop(conn);
-    drop(db);
     std::fs::create_dir_all(target.parent().unwrap()).unwrap();
     std::fs::copy(source, target).unwrap();
 }
