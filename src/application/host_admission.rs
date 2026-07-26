@@ -1014,6 +1014,35 @@ impl HostAdmissionTestRuntimeV1 {
         .await
     }
 
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-transport"))]
+    pub async fn call_mcp_tool_for_test(
+        &self,
+        cg: &crate::tracedecay::TraceDecay,
+        tool_name: &str,
+        arguments: serde_json::Value,
+        server_stats: Option<serde_json::Value>,
+        scope_prefix: Option<&str>,
+    ) -> crate::errors::Result<crate::mcp::ToolResult> {
+        crate::mcp::tools::handle_tool_call_with_registry_and_implicit_project(
+            cg,
+            tool_name,
+            arguments,
+            server_stats,
+            scope_prefix,
+            crate::mcp::tools::ToolCallRegistryOptions {
+                global_db: Some(self.profile_database.as_ref()),
+                accounting_db: Some(self.profile_database.as_ref()),
+                profile_root: Some(&self.profile_root),
+                allow_default_registry_fallback: false,
+                implicit_project_path: Some(cg.project_root()),
+                session_authorities: self.mcp_session_authorities(),
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
     #[cfg(test)]
     pub(crate) async fn retire_applied_input_manifests_for_test(
         &self,
@@ -1310,6 +1339,20 @@ impl HostAdmissionTestRuntimeV1 {
         Ok(crate::store::session::GlobalDbSessionTemporalStore::new(
             self.session_database_for_test(scope)?,
         ))
+    }
+
+    #[doc(hidden)]
+    pub async fn ensure_session_cursor_key_for_test(
+        &self,
+        scope: HostAdmissionScope,
+    ) -> crate::errors::Result<tracedecay_domain::SignedCursorKeyRefV1> {
+        self.session_database_for_test(scope)?
+            .ensure_active_session_cursor_key_result()
+            .await
+            .map_err(|error| crate::errors::TraceDecayError::Database {
+                operation: "provision test session cursor authentication key".to_string(),
+                message: error.to_string(),
+            })
     }
 
     #[doc(hidden)]
@@ -2366,6 +2409,16 @@ impl HostAdmissionTestRuntimeV1 {
         cg: crate::tracedecay::TraceDecay,
         scope_prefix: Option<String>,
     ) -> crate::errors::Result<crate::mcp::server::McpServerConstructionContext> {
+        Arc::new(self).mcp_server_context_for_test(cg, scope_prefix)
+    }
+
+    #[cfg(any(test, feature = "test-transport"))]
+    #[doc(hidden)]
+    pub(crate) fn mcp_server_context_for_test(
+        self: Arc<Self>,
+        cg: crate::tracedecay::TraceDecay,
+        scope_prefix: Option<String>,
+    ) -> crate::errors::Result<crate::mcp::server::McpServerConstructionContext> {
         let profile_root = self.profile_root.clone();
         let project_sessions = self.project_registered.as_ref().cloned().ok_or_else(|| {
             crate::errors::TraceDecayError::Database {
@@ -2387,7 +2440,7 @@ impl HostAdmissionTestRuntimeV1 {
                 );
         context.profile_root = Some(profile_root);
         context.profile_identity = Some(profile_identity);
-        context.host_admission_test_runtime = Some(Arc::new(self));
+        context.host_admission_test_runtime = Some(self);
         Ok(context)
     }
 

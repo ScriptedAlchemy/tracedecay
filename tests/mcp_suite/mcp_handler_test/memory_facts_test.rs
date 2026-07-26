@@ -800,9 +800,11 @@ async fn memory_status_project_selector_reports_registered_project_memory() {
 #[tokio::test]
 async fn user_memory_scope_is_profile_level_and_isolated_from_project_memory() {
     let (active, target, _env) = setup_cross_project_memory_projects().await;
+    let active_runtime = active.test_runtime_for_test().expect("active runtime");
 
-    handle_tool_call(
+    handle_tool_call_with_runtime(
         &active,
+        &active_runtime,
         "tracedecay_fact_store",
         json!({
             "action": "add",
@@ -814,8 +816,9 @@ async fn user_memory_scope_is_profile_level_and_isolated_from_project_memory() {
     )
     .await
     .unwrap();
-    handle_tool_call(
+    handle_tool_call_with_runtime(
         &active,
+        &active_runtime,
         "tracedecay_fact_store",
         json!({
             "action": "add",
@@ -829,8 +832,9 @@ async fn user_memory_scope_is_profile_level_and_isolated_from_project_memory() {
     .await
     .unwrap();
 
-    let project_facts = handle_tool_call(
+    let project_facts = handle_tool_call_with_runtime(
         &active,
+        &active_runtime,
         "tracedecay_fact_store",
         json!({"action": "list", "format": "json", "min_trust": 0.0}),
         None,
@@ -838,8 +842,9 @@ async fn user_memory_scope_is_profile_level_and_isolated_from_project_memory() {
     )
     .await
     .unwrap();
-    let user_facts = handle_tool_call(
+    let user_facts = handle_tool_call_with_runtime(
         &active,
+        &active_runtime,
         "tracedecay_fact_store",
         json!({
             "action": "list",
