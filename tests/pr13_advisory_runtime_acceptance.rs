@@ -176,6 +176,7 @@ async fn authentic_github_and_ci_responses_use_production_decoders() {
     )
     .unwrap();
     let metadata = GitHubReadNetworkMetadataV1 {
+        retry_at: None,
         status: GitHubReadNetworkStatusV1::Ok,
         etag: None,
         next_cursor: None,
@@ -250,6 +251,7 @@ async fn corrupt_provider_identity_fails_production_decoder() {
             .decode(
                 &request,
                 &GitHubReadNetworkMetadataV1 {
+                    retry_at: None,
                     status: GitHubReadNetworkStatusV1::Ok,
                     etag: None,
                     next_cursor: None,
