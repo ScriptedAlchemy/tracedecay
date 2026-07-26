@@ -19,25 +19,21 @@ use super::callable_code::{
 };
 use super::catalog::APPLICATION_DEFAULT_PROFILE_ID;
 
-const REQUEST_MAXIMUM_BYTES: u32 = 65_536;
-const RESULT_MAXIMUM_BYTES: u32 = 1_048_576;
-
 pub fn callable_code_request_schema(
     kind: CallableCodeOperationKind,
 ) -> Result<SchemaRef, ApplicationContractError> {
-    code_query_schema(kind, "request", REQUEST_MAXIMUM_BYTES)
+    code_query_schema(kind, "request")
 }
 
 pub fn callable_code_result_schema(
     kind: CallableCodeOperationKind,
 ) -> Result<SchemaRef, ApplicationContractError> {
-    code_query_schema(kind, "result", RESULT_MAXIMUM_BYTES)
+    code_query_schema(kind, "result")
 }
 
 fn code_query_schema(
     kind: CallableCodeOperationKind,
     suffix: &str,
-    maximum_bytes: u32,
 ) -> Result<SchemaRef, ApplicationContractError> {
     Ok(SchemaRef::new(
         SchemaId::new(format!(
@@ -46,7 +42,6 @@ fn code_query_schema(
             suffix
         ))?,
         1,
-        maximum_bytes,
     )?)
 }
 

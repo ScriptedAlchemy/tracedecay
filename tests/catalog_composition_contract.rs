@@ -166,22 +166,22 @@ fn root_snapshot_composes_every_explicit_profile_without_widening_eligibility() 
         (
             "profile.default",
             ProfileKind::Default,
-            ProfileBudget::new(320, 90_000_000, 18_000).unwrap(),
+            ProfileBudget::new(320, 18_000).unwrap(),
         ),
         (
             "profile.compact",
             ProfileKind::Compact,
-            ProfileBudget::new(22, 12_000_000, 4_000).unwrap(),
+            ProfileBudget::new(22, 4_000).unwrap(),
         ),
         (
             "profile.administrative",
             ProfileKind::Administrative,
-            ProfileBudget::new(40, 16_000_000, 8_000).unwrap(),
+            ProfileBudget::new(40, 8_000).unwrap(),
         ),
         (
             "profile.host-limited",
             ProfileKind::HostLimited,
-            ProfileBudget::new(17, 8_000_000, 2_000).unwrap(),
+            ProfileBudget::new(17, 2_000).unwrap(),
         ),
     ];
 
@@ -343,7 +343,7 @@ fn mismatched_descriptor_schema_is_rejected() {
             descriptor_with_contract(
                 "capability.retrieval.symbol-search",
                 "use-case.retrieval.symbol-search",
-                schema("schema.test.drifted-request", 384),
+                schema("schema.test.drifted-request"),
                 symbol_result_schema(),
             ),
             "application capability schema mapping",
@@ -353,7 +353,7 @@ fn mismatched_descriptor_schema_is_rejected() {
                 "capability.retrieval.symbol-search",
                 "use-case.retrieval.symbol-search",
                 symbol_request_schema(),
-                schema("schema.test.drifted-result", 1_024),
+                schema("schema.test.drifted-result"),
             ),
             "application capability schema mapping",
         ),
@@ -447,15 +447,15 @@ fn descriptor_with_contract(
 }
 
 fn symbol_request_schema() -> SchemaRef {
-    schema("schema.application.symbol-search.request", 384)
+    schema("schema.application.symbol-search.request")
 }
 
 fn symbol_result_schema() -> SchemaRef {
-    schema("schema.application.symbol-search.result", 1_024)
+    schema("schema.application.symbol-search.result")
 }
 
-fn schema(id: &str, maximum_bytes: u32) -> SchemaRef {
-    SchemaRef::new(SchemaId::new(id).unwrap(), 1, maximum_bytes).unwrap()
+fn schema(id: &str) -> SchemaRef {
+    SchemaRef::new(SchemaId::new(id).unwrap(), 1).unwrap()
 }
 
 fn inconsistent(field: &'static str) -> Result<(), CatalogCompositionError> {
