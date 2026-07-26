@@ -72,7 +72,7 @@ pub(crate) fn initialize_result(instructions: &str) -> Value {
         },
         "serverInfo": {
             "name": "tracedecay",
-            "version": env!("CARGO_PKG_VERSION")
+            "version": crate::version::build_version()
         },
         "instructions": instructions,
     })
