@@ -223,6 +223,23 @@ pub fn table_growth_finding(
             ),
             "table payload baseline established; growth needs a subsequent observation",
         ),
+        TableGrowthDoctorEvidenceV1::TableBaselinePending {
+            store,
+            table,
+            current_bytes,
+            observed_at,
+        } => (
+            store,
+            DoctorEvidenceStateV1::Partial,
+            DoctorCoverageCompletenessV1::Partial,
+            format!(
+                "table-{}.baseline-pending.current-{}b.observed-at-{}us",
+                table.as_str(),
+                current_bytes.get(),
+                observed_at.0,
+            ),
+            "table has no previous payload watermark; growth remains baseline-pending",
+        ),
         TableGrowthDoctorEvidenceV1::Unsupported { store } => (
             store,
             DoctorEvidenceStateV1::Unsupported,

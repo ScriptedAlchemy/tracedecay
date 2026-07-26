@@ -10008,6 +10008,12 @@
             "coverage": {
               "$ref": "#/$defs/DashboardCoverageV1"
             },
+            "omission_reasons": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
             "omissions": {
               "items": {
                 "$ref": "#/$defs/TableGrowthOmissionV1"
@@ -10029,7 +10035,8 @@
             "state",
             "coverage",
             "significant_samples",
-            "omissions"
+            "omissions",
+            "omission_reasons"
           ],
           "type": "object"
         },
@@ -10139,20 +10146,88 @@
       ]
     },
     "TableGrowthOmissionV1": {
-      "description": "One observed table omitted from the significant-sample list, with the\nconcrete reason it was omitted.",
-      "properties": {
-        "reason": {
-          "type": "string"
+      "description": "One current table omitted from the significant-sample list. Numeric evidence\nremains structured so clients can format units consistently.",
+      "oneOf": [
+        {
+          "properties": {
+            "current_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "current_observed_at": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "growth_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "kind": {
+              "const": "below_threshold",
+              "type": "string"
+            },
+            "previous_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "previous_observed_at": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "table": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "table",
+            "previous_bytes",
+            "current_bytes",
+            "growth_bytes",
+            "previous_observed_at",
+            "current_observed_at",
+            "reason"
+          ],
+          "type": "object"
         },
-        "table": {
-          "type": "string"
+        {
+          "properties": {
+            "current_bytes": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "kind": {
+              "const": "baseline_pending",
+              "type": "string"
+            },
+            "observed_at": {
+              "format": "int64",
+              "type": "integer"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "table": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "table",
+            "current_bytes",
+            "observed_at",
+            "reason"
+          ],
+          "type": "object"
         }
-      },
-      "required": [
-        "table",
-        "reason"
-      ],
-      "type": "object"
+      ]
     },
     "TableGrowthThresholdV1": {
       "description": "Informational threshold applied to per-table payload growth samples.",

@@ -183,8 +183,8 @@ export function tableGrowthPresentation(growth: TableGrowthDimension): Dimension
         tone: 'ready',
         summary: `${growth.significant_samples.length} significant table ${
           growth.significant_samples.length === 1 ? 'change' : 'changes'
-        } · ${growth.omissions.length} below threshold`,
-        notes: [],
+        } · ${growth.omissions.length} omitted from significant list`,
+        notes: growth.omission_reasons,
       };
     case 'baseline_established':
       return {

@@ -2706,6 +2706,7 @@ export const TableGrowthDimensionV1Schema = z.discriminatedUnion("state", [z.obj
   state: z.literal("denied"),
 }), z.object({
   coverage: z.lazy(() => DashboardCoverageV1Schema),
+  omission_reasons: z.array(z.string()),
   omissions: z.array(z.lazy(() => TableGrowthOmissionV1Schema)),
   significant_samples: z.array(z.lazy(() => SignificantTableGrowthSampleV1Schema)),
   state: z.literal("observed"),
@@ -2720,12 +2721,24 @@ export const TableGrowthDimensionV1Schema = z.discriminatedUnion("state", [z.obj
 })]);
 export type TableGrowthDimensionV1 = z.infer<typeof TableGrowthDimensionV1Schema>;
 
-/** One observed table omitted from the significant-sample list, with the
-concrete reason it was omitted. */
-export const TableGrowthOmissionV1Schema = z.object({
+/** One current table omitted from the significant-sample list. Numeric evidence
+remains structured so clients can format units consistently. */
+export const TableGrowthOmissionV1Schema = z.discriminatedUnion("kind", [z.object({
+  current_bytes: z.number().int(),
+  kind: z.literal("baseline_pending"),
+  observed_at: z.number().int(),
   reason: z.string(),
   table: z.string(),
-});
+}), z.object({
+  current_bytes: z.number().int(),
+  current_observed_at: z.number().int(),
+  growth_bytes: z.number().int(),
+  kind: z.literal("below_threshold"),
+  previous_bytes: z.number().int(),
+  previous_observed_at: z.number().int(),
+  reason: z.string(),
+  table: z.string(),
+})]);
 export type TableGrowthOmissionV1 = z.infer<typeof TableGrowthOmissionV1Schema>;
 
 /** Informational threshold applied to per-table payload growth samples. */

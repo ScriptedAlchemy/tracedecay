@@ -336,6 +336,65 @@ fn application_telemetry_port_compares_table_payload_watermarks() {
 }
 
 #[test]
+fn application_telemetry_port_marks_new_table_baseline_pending() {
+    let store = TestStore::new();
+    let pool = ReaderPool::start(
+        store.locator(),
+        AdmissionConfigV1::default().readers,
+        CountExecutor,
+    )
+    .unwrap();
+    let scope = telemetry_scope();
+    let context = telemetry_context(scope.clone());
+    let port = SqliteStoreSizeTelemetryPort::new(
+        crate::migration_sql::MigrationSqlHandle::attach_read_only(&pool),
+        StoreKeyV1::new("reader.db").unwrap(),
+        scope,
+        Duration::from_millis(100),
+    );
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+
+    let baseline =
+        runtime.block_on(port.table_growth(&context, &StoreKeyV1::new("reader.db").unwrap()));
+    assert!(matches!(
+        baseline,
+        TableGrowthTelemetryReadV1::BaselineEstablished { .. }
+    ));
+
+    let connection = Connection::open(&store.path).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE created_after_baseline (id INTEGER PRIMARY KEY, payload TEXT);
+             INSERT INTO created_after_baseline(payload) VALUES ('new');",
+        )
+        .unwrap();
+
+    let read =
+        runtime.block_on(port.table_growth(&context, &StoreKeyV1::new("reader.db").unwrap()));
+    let TableGrowthTelemetryReadV1::Observed {
+        samples,
+        baseline_pending,
+        ..
+    } = read
+    else {
+        panic!("the second read must compare table watermarks");
+    };
+    assert!(
+        samples
+            .iter()
+            .all(|sample| sample.table.as_str() != "created_after_baseline"),
+        "new table must not be compared against fabricated zero bytes"
+    );
+    let pending = baseline_pending
+        .iter()
+        .find(|pending| pending.table.as_str() == "created_after_baseline")
+        .expect("new table is explicitly baseline-pending");
+    assert!(pending.current_bytes.get() > 0);
+}
+
+#[test]
 fn application_telemetry_port_reports_denied_table_growth_without_zero() {
     let store = TestStore::new();
     let pool = ReaderPool::start(
