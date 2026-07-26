@@ -117,10 +117,15 @@ impl Driver for CargoDriver {
 ///
 /// `pub(crate)` so the MCP handler can probe whether it is cold (never built)
 /// and decide whether to prewarm rather than block for minutes.
+/// This names a build cache, not a store, so it takes the path-local id rather
+/// than the repository-collapsed one. Linked worktrees of a repository share a
+/// project id but check out different sources; giving them one cargo target
+/// directory would mix their artifacts and serialize them on cargo's directory
+/// lock.
 pub(crate) fn target_dir_for(project_root: &Path) -> PathBuf {
     std::env::temp_dir()
         .join("tracedecay-target")
-        .join(crate::storage::default_profile_project_id(project_root))
+        .join(crate::storage::path_local_profile_project_id(project_root))
         .join("diagnostics")
 }
 
@@ -195,15 +200,57 @@ mod tests {
 
     #[test]
     fn target_dir_is_outside_project_tree() {
-        let p = target_dir_for(Path::new("/tmp/proj"));
-        assert_eq!(
-            p,
-            std::env::temp_dir()
-                .join("tracedecay-target")
-                .join(crate::storage::default_profile_project_id(Path::new(
-                    "/tmp/proj"
-                )))
-                .join("diagnostics")
+        let project = Path::new("/tmp/proj");
+        let target = target_dir_for(project);
+        assert!(target.starts_with(std::env::temp_dir().join("tracedecay-target")));
+        assert!(target.ends_with("diagnostics"));
+        assert!(!target.starts_with(project));
+    }
+
+    #[test]
+    fn linked_worktrees_of_one_repository_get_separate_target_dirs() {
+        fn git(dir: &Path, args: &[&str]) {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_SYSTEM", "/dev/null")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .expect("run git");
+            assert!(status.success(), "git {args:?} failed");
+        }
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let primary = temp.path().join("primary");
+        std::fs::create_dir_all(&primary).expect("create primary");
+        git(&primary, &["init", "--initial-branch=main"]);
+        git(&primary, &["config", "user.email", "test@example.com"]);
+        git(&primary, &["config", "user.name", "test"]);
+        std::fs::write(primary.join("file.txt"), "x").expect("seed file");
+        git(&primary, &["add", "file.txt"]);
+        git(&primary, &["commit", "-m", "seed"]);
+
+        let worktree = temp.path().join("linked");
+        git(
+            &primary,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "linked",
+                worktree.to_str().expect("utf-8 path"),
+            ],
         );
+
+        // The two checkouts deliberately share one store identity...
+        assert_eq!(
+            crate::storage::default_profile_project_id(&primary),
+            crate::storage::default_profile_project_id(&worktree),
+        );
+        // ...but they hold different sources, so they must not share a cargo
+        // target directory and contend for its lock.
+        assert_ne!(target_dir_for(&primary), target_dir_for(&worktree));
     }
 }
