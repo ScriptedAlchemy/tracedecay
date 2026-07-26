@@ -244,5 +244,4 @@ pub trait SessionRetrievalStore: SessionTemporalCapabilityProvider + Send + Sync
         permit: SessionTemporalPageRetrievePermit,
         request: SessionTemporalRetrievalRequestV1,
     ) -> impl Future<Output = SessionStoreResult<SessionRetrievalPageV1>> + Send;
-
 }
