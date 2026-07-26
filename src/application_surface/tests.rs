@@ -484,6 +484,62 @@ async fn http_git_read_routes_preserve_the_canonical_typed_request() {
 }
 
 #[test]
+fn catalog_bound_compatibility_tools_resolve_before_retained_dispatch() {
+    let catalog = super::application_surface_catalog().expect("application catalog");
+    let mut compatibility_operations = std::collections::BTreeSet::new();
+    let mut resolved_bindings = 0;
+
+    for capability in catalog.capabilities() {
+        if !capability.availability().is_callable() {
+            continue;
+        }
+        for binding_id in capability.binding_ids() {
+            let binding = catalog.binding(binding_id).expect("catalog binding");
+            if !matches!(
+                binding.surface(),
+                tracedecay_tool_catalog::BindingSurface::Cli
+                    | tracedecay_tool_catalog::BindingSurface::Mcp
+            ) || ApplicationSurfaceOperation::from_tool_name(binding.operation().as_str())
+                .is_some()
+            {
+                continue;
+            }
+
+            let tool_name = format!("tracedecay_{}", binding.operation().as_str());
+            let resolved = super::resolve_catalog_tool_binding(binding.surface(), &tool_name)
+                .expect("compatibility binding resolution")
+                .unwrap_or_else(|| panic!("{tool_name} must resolve before retained dispatch"));
+            assert_eq!(resolved.binding_id, *binding_id);
+            compatibility_operations.insert(binding.operation().as_str().to_owned());
+            resolved_bindings += 1;
+        }
+    }
+
+    assert_eq!(resolved_bindings, 26);
+    assert_eq!(
+        compatibility_operations,
+        [
+            "ast_grep_rewrite",
+            "git_blame",
+            "git_diff",
+            "git_history",
+            "git_hunks",
+            "git_status",
+            "insert_at",
+            "insert_at_symbol",
+            "move_symbol",
+            "multi_str_replace",
+            "replace_symbol",
+            "source_edit_reconcile",
+            "str_replace",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+    );
+}
+
+#[test]
 fn context_scout_controls_and_claims_preserve_the_exact_address() {
     let address = crate::agents::context_scout_v2::ContextScoutAddressV1 {
         profile_id: [1; 16],
