@@ -13,7 +13,25 @@ fn debris_retention_enables_maintenance_without_orphan_gc() {
     retention.incident_debris_retention_days = Some(30);
     retention.compaction = None;
 
-    assert!(retention_maintenance_enabled(&retention, false));
+    assert!(retention_maintenance_enabled(&retention));
+}
+
+#[test]
+fn soft_budget_alone_never_enables_destructive_maintenance() {
+    let mut retention = crate::config::RetentionConfig::default();
+    retention.session_lcm.enabled = false;
+    retention.observation.enabled = false;
+    retention.orphan_store_gc_days = None;
+    retention.incident_debris_retention_days = None;
+    retention.compaction = None;
+    retention
+        .store_soft_budgets_bytes
+        .insert("sessions.db".to_string(), 1);
+
+    assert!(
+        !retention_maintenance_enabled(&retention),
+        "soft budgets are Doctor findings, never a retention trigger"
+    );
 }
 
 #[test]

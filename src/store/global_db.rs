@@ -157,6 +157,10 @@ impl TranscriptStore for GlobalDbTranscriptStore<'_> {
 }
 
 impl TranscriptIngestStore for GlobalDbTranscriptStore<'_> {
+    fn registered_observation_database(&self) -> Option<&RegisteredGlobalDb> {
+        Some(self.db)
+    }
+
     async fn get_session(
         &self,
         provider: &str,
