@@ -2,38 +2,30 @@ import { describe, expect, it } from 'vitest';
 import {
   DoctorFindingsPayloadSchema,
   DoctorRemediationPayloadSchema,
-  type DoctorRemediationDescriptor,
+  type DashboardDoctorRemediationDescriptorV1,
 } from '../../contracts/wire.ts';
 import {
   availableRemediationActions,
   doctorEvidencePresentation,
   readActiveDoctorOperation,
   saveActiveDoctorOperation,
-  sameDoctorAuthorityScope,
   sameDoctorScope,
 } from './doctorModel.ts';
 
-const descriptor: DoctorRemediationDescriptor = {
-  operation: 'use-case.application.configuration.protected-apply',
+const descriptor: DashboardDoctorRemediationDescriptorV1 = {
+  operation: 'use-case.application.configuration.pin-authority',
   surface: 'configuration_control_plane',
   preview_available: true,
   action_confirmation: 'required',
   summary: 'apply the admitted configuration revision',
+  target: { owner_operation: 'configuration_pin_authority' },
 };
 const projectAuthorityScope = {
-  scope_kind: 'project' as const,
   project_id: 'project.doctor',
   repository_id: 'repository.doctor',
   worktree_id: 'worktree.doctor',
   reference: null,
   scope_digest: `sha256:${'a'.repeat(64)}`,
-};
-const profileAuthorityScope = {
-  scope_kind: 'profile' as const,
-  brain_id: 'brain.doctor',
-  profile_id: 'profile.doctor',
-  profile_sessions_binding_digest: `sha256:${'b'.repeat(64)}`,
-  scope_digest: `sha256:${'c'.repeat(64)}`,
 };
 
 describe('Doctor frontend contracts', () => {
@@ -110,7 +102,6 @@ describe('Doctor frontend contracts', () => {
       operation: {
         operation_id: 'request.doctor.preview',
         owning_operation: descriptor.operation,
-        authority_scope: projectAuthorityScope,
         phase: 'previewed',
         preview_id: 'preview.doctor.preview',
         idempotency_key: null,
@@ -136,13 +127,12 @@ describe('Doctor frontend contracts', () => {
     }
   });
 
-  it('decodes and binds a profile-scoped storage effect receipt', () => {
+  it('decodes and binds the owner effect receipt scope', () => {
     const payload = DoctorRemediationPayloadSchema.parse({
       status: 'operation',
       operation: {
         operation_id: 'request.doctor.storage-collect',
         owning_operation: 'use-case.application.storage.collect-orphan-store',
-        authority_scope: profileAuthorityScope,
         phase: 'completed',
         preview_id: 'preview.doctor.storage-collect',
         idempotency_key: 'idempotency.doctor.storage-collect',
@@ -159,17 +149,10 @@ describe('Doctor frontend contracts', () => {
           termination: 'completed',
         },
         effect_receipt: {
-          scope_kind: 'profile',
           operation: 'use-case.application.storage.collect-orphan-store',
           request_id: 'request.doctor.storage-collect',
           actor: 'actor.tracedecay-dashboard',
-          scope: {
-            brain_id: profileAuthorityScope.brain_id,
-            profile_id: profileAuthorityScope.profile_id,
-            profile_sessions_binding_digest:
-              profileAuthorityScope.profile_sessions_binding_digest,
-            scope_digest: profileAuthorityScope.scope_digest,
-          },
+          scope: projectAuthorityScope,
           effect_class: 'administrative',
           idempotency_key: 'idempotency.doctor.storage-collect',
           input_digest: `sha256:${'d'.repeat(64)}`,
@@ -187,8 +170,7 @@ describe('Doctor frontend contracts', () => {
 
     expect(payload.status).toBe('operation');
     if (payload.status === 'operation') {
-      expect(payload.operation.authority_scope.scope_kind).toBe('profile');
-      expect(payload.operation.effect_receipt?.scope_kind).toBe('profile');
+      expect(payload.operation.effect_receipt?.scope.project_id).toBe('project.doctor');
     }
   });
 
@@ -221,14 +203,13 @@ describe('Doctor frontend contracts', () => {
     };
 
     const active = {
-      schema_revision: 2 as const,
+      schema_revision: 3 as const,
       operation_id: 'request.doctor.resume',
       transport_scope: {
         project_id: 'project.doctor',
         storage_mode: 'project_local',
         store_root: '/project',
       },
-      authority_scope: profileAuthorityScope,
     };
     saveActiveDoctorOperation(active, storage);
     expect(readActiveDoctorOperation(storage)).toEqual(active);
@@ -237,17 +218,6 @@ describe('Doctor frontend contracts', () => {
       sameDoctorScope(active.transport_scope, {
         ...active.transport_scope,
         project_id: 'project.other',
-      }),
-    ).toBe(false);
-    expect(
-      sameDoctorAuthorityScope(active.authority_scope, {
-        ...active.authority_scope,
-      }),
-    ).toBe(true);
-    expect(
-      sameDoctorAuthorityScope(active.authority_scope, {
-        ...active.authority_scope,
-        profile_id: 'profile.other',
       }),
     ).toBe(false);
   });

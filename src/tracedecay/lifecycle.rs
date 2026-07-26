@@ -515,9 +515,10 @@ impl TraceDecay {
         }
 
         let mut selected = storage::resolve_persisted_layout(project_root, &profile_root)?;
-        let git_common_dir = (!crate::worktree::is_detached_linked_worktree(project_root))
-            .then(|| crate::worktree::git_common_dir(project_root))
-            .flatten();
+        // Every linked worktree resolves through its repository, attached or
+        // not; suppressing this for detached worktrees dropped them onto the
+        // path-hashed identity fallback and minted a duplicate store.
+        let git_common_dir = crate::worktree::git_common_dir(project_root);
         if selected.is_none()
             && let Some(registry_database) = registry_database
             && let Some(resolution) = registry_database
@@ -1716,13 +1717,12 @@ impl TraceDecay {
 
         let meta = branch_meta::load_branch_meta(&self.store_layout.data_root);
         let default_branch = meta.as_ref().map(|meta| meta.default_branch.as_str());
-        let isolated_detached = crate::worktree::is_detached_linked_worktree(&self.project_root);
-        let git_common_dir = (!isolated_detached)
-            .then(|| crate::worktree::git_common_dir(&self.project_root))
-            .flatten();
-        let git_remote_url = (!isolated_detached)
-            .then(|| git_remote_url(&self.project_root))
-            .flatten();
+        // Registering without the git common dir leaves the row unreachable
+        // by repository identity, so the next first touch from a sibling
+        // checkout mints a fresh store. Detached worktrees are no exception:
+        // they belong to the same repository as every other checkout.
+        let git_common_dir = crate::worktree::git_common_dir(&self.project_root);
+        let git_remote_url = git_remote_url(&self.project_root);
 
         // A shared project id can be reached from any linked worktree (see
         // the git-common-dir alias registered below), so registering
@@ -1730,14 +1730,10 @@ impl TraceDecay {
         // happens to touch the project last pin its canonical_root /
         // display_root to a transient worktree path. Redirect registration
         // to the primary checkout when one is detected and still exists.
-        let primary_root = (!isolated_detached)
-            .then(|| {
-                crate::project_registry::primary_checkout_root(
-                    &self.project_root,
-                    git_common_dir.as_deref(),
-                )
-            })
-            .flatten();
+        let primary_root = crate::project_registry::primary_checkout_root(
+            &self.project_root,
+            git_common_dir.as_deref(),
+        );
         let previous_canonical_root = if primary_root.is_some() {
             global_db
                 .get_code_project(project_id)

@@ -1,5 +1,10 @@
 # Thermo-Nuclear Code-Quality Review — `codex/tracedecay-total-redesign-plan` vs `master`
 
+> Historical review of one branch snapshot, retained as a record of what the
+> reviewers saw at the time. Individual findings have been acted on since and
+> are not a current description of the tree; superseded items are annotated
+> inline. Re-measure before treating any finding here as live.
+
 Scope: full dirty branch vs master (~780k lines, 2255 files). Reviewed by 16 parallel
 Opus reviewers over disjoint subsystem slices. Per-slice detail in
 `scratchpad/findings/*.md`. This is a structural/maintainability review, not a behavior sign-off.
@@ -193,6 +198,9 @@ master); storage `row_string/row_i64/...` = one generic `row_get<T>` split into 
   guaranteed to rot on any rename/reorder.
 - **Dead code**: `dashboard/codegen` (~1100 lines, output imported by nothing), legacy Zod
   schemas (`data/query/legacy.ts:43-66`), no-op `.replace()` chains, `void nodeRgb`.
+  *(Superseded for `dashboard/codegen`: its output is now the live
+  `dashboard/src/contracts/` wire boundary, and `npm run contracts:check` is a
+  blocking step of the `Dashboard integration` CI job. Do not delete it.)*
 - **Mechanical let-chain churn** (~1500 lines across `src/extraction/*_extractor.rs`) folded
   into the feature branch — land as its own commit to keep the diff reviewable.
 

@@ -13,6 +13,14 @@ Completion and activity status is owned solely by
 retained delivery requirements and does not infer milestone status from branch
 artifacts.
 
+**Request-context correction (2026-07-26).** Two live `RequestContext` models
+remain. `crates/tracedecay-application/src/context.rs` carries the required
+`ResolvedScope`; the legacy root model in `src/application/context.rs` carries
+session identity and digests but no scope field. That root model therefore
+cannot satisfy this plan's scope contract. Convergence on the scope-carrying
+application context remains PR11/PR12 application work, not a frontend
+`ResolvedScope` invention or a PR14-only gap.
+
 PR11 requires this boundary to be the canonical owner of typed operation
 semantics. Root composition and surface adapters may wire those operations but
 do not become alternate use-case owners. Feedback-read, retrieval,

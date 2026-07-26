@@ -8,6 +8,7 @@
 
 use axum::Json;
 use axum::extract::{Query, State};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracedecay_application::doctor::{
     DoctorCoverageCompletenessV1, DoctorEvidenceStateV1, DoctorFamilyConsultationV1,
@@ -16,10 +17,24 @@ use tracedecay_application::doctor::{
 };
 
 use super::DashboardState;
+use super::doctor_remediation_api::DoctorRemediationTargetV1;
 use super::read_model::{
     DashboardCoverageV1, DashboardDomainStateV1, DashboardEnvelopeV1, DashboardFreshnessV1,
     DashboardLegalActionKindV1, DashboardLegalActionRefV1, scope_from_state,
 };
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub(crate) struct DashboardDoctorRemediationDescriptorV1 {
+    #[serde(flatten)]
+    descriptor: DoctorRemediationDescriptorV1,
+    pub target: Option<DoctorRemediationTargetV1>,
+}
+
+impl DashboardDoctorRemediationDescriptorV1 {
+    fn operation(&self) -> &tracedecay_application::doctor::DoctorOwningOperationRefV1 {
+        self.descriptor.operation()
+    }
+}
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct FindingsParams {
@@ -33,19 +48,14 @@ pub(crate) struct FindingsParams {
 /// The canonical Doctor report projection. `entries` retains the storage
 /// subclass attached by the kernel; remediation descriptors are emitted only
 /// after the kernel registry resolves the finding's owner-supplied reference.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, JsonSchema)]
 pub(crate) struct DoctorFindingsPayloadV1 {
     pub family_filter: Option<DoctorFindingFamilyV1>,
     pub entries: Vec<DoctorReportEntryV1>,
     pub report_coverage: Option<DoctorReportCoverageV1>,
-    pub remediations: Vec<DoctorRemediationDescriptorV1>,
+    pub remediations: Vec<DashboardDoctorRemediationDescriptorV1>,
     pub known_families: Vec<DoctorFindingFamilyV1>,
     pub note: String,
-    /// Storage-route-only producer-source coverage. General Doctor responses
-    /// omit this additive field; `/api/storage/findings` always supplies all
-    /// five Plan 38 producer statuses.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub kind_statuses: Option<Vec<super::storage_findings_api::StorageFindingKindStatusV1>>,
 }
 
 const KNOWN_FAMILIES: [DoctorFindingFamilyV1; 7] = [
@@ -80,7 +90,6 @@ pub(crate) async fn findings(
                 remediations: Vec::new(),
                 known_families: KNOWN_FAMILIES.to_vec(),
                 note: format!("unknown doctor finding family: {invalid}"),
-                kind_statuses: None,
             };
             let mut envelope = DashboardEnvelopeV1::unsupported(scope, payload);
             envelope.domain_state = DashboardDomainStateV1::Error;
@@ -183,15 +192,21 @@ async fn project_report(
         let descriptor = registry.resolve(reference).map_err(|error| {
             format!("Doctor remediation reference was rejected by the canonical registry: {error}")
         })?;
+        let target = DoctorRemediationTargetV1::for_operation(descriptor.operation());
         if !remediations
             .iter()
-            .any(|current: &DoctorRemediationDescriptorV1| {
+            .any(|current: &DashboardDoctorRemediationDescriptorV1| {
                 current.operation() == descriptor.operation()
             })
         {
-            remediations.push(descriptor.clone());
+            remediations.push(DashboardDoctorRemediationDescriptorV1 {
+                descriptor: descriptor.clone(),
+                target: target.clone(),
+            });
         }
-        if let Some(dispatcher) = dispatcher {
+        if target.is_some()
+            && let Some(dispatcher) = dispatcher
+        {
             for kind in dispatcher.legal_actions(reference).await {
                 let action = DashboardLegalActionRefV1::new(
                     kind,
@@ -217,7 +232,6 @@ async fn project_report(
             remediations,
             known_families: KNOWN_FAMILIES.to_vec(),
             note,
-            kind_statuses: None,
         },
         coverage,
         freshness,
@@ -397,7 +411,6 @@ fn unavailable_payload(
         remediations: Vec::new(),
         known_families: KNOWN_FAMILIES.to_vec(),
         note: note.into(),
-        kind_statuses: None,
     }
 }
 

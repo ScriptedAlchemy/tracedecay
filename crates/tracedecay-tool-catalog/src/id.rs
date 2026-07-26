@@ -1,6 +1,7 @@
 use std::fmt;
 use std::str::FromStr;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -51,7 +52,7 @@ macro_rules! catalog_id {
     ($($name:ident),+ $(,)?) => {
         $(
             #[doc = concat!("Stable, canonical catalog identity for `", stringify!($name), "`.")]
-            #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+            #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, JsonSchema)]
             #[serde(transparent)]
             pub struct $name(String);
 

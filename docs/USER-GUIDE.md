@@ -372,41 +372,54 @@ tracedecay uninstall --agent hermes
 
 ## Exploring Your Codebase from the CLI
 
-You don't need an AI agent to use tracedecay. The CLI has several commands for direct exploration.
+You don't need an AI agent to use tracedecay. Every MCP tool is reachable from
+the shell through `tracedecay tool <name>`, which dispatches the same tool the
+agent would call. There are no separate per-tool subcommands — `tracedecay
+query`, `tracedecay context`, `tracedecay files`, and `tracedecay affected` do
+not exist and will fail with an unrecognized-subcommand error.
+
+```bash
+tracedecay tool                        # every tool, grouped
+tracedecay tool search --help          # one tool's parameters
+```
+
+Tool names work with or without the `tracedecay_` prefix, and dashes and
+underscores are interchangeable (`dead-code` == `dead_code`). `--json` prints
+the raw payload instead of the human rendering.
 
 ### Searching for symbols
 
 ```bash
-tracedecay query "authenticate"
+tracedecay tool search "authenticate"
 ```
 
-This searches the full-text index for symbols matching your query. It returns function names, class names, method names, and their file locations and signatures. Limit results with `-l`:
+This searches the index for symbols matching your query. It returns function names, class names, method names, and their file locations and signatures. Limit results with `--limit`:
 
 ```bash
-tracedecay query "authenticate" -l 5
+tracedecay tool search "authenticate" --limit 5
 ```
 
 ### Building task context
 
 ```bash
-tracedecay context "implement user authentication"
+tracedecay tool context "implement user authentication"
 ```
 
-This is the same context builder that AI agents use. Given a natural language task description, it finds the most relevant entry points, related symbols, and code structure. Output defaults to Markdown; use `--format json` for structured output.
+This is the same context builder that AI agents use. Given a natural language task description, it finds the most relevant entry points, related symbols, and code structure. Output defaults to the human text rendering; use `--json` for the raw payload.
 
 ```bash
-tracedecay context "implement user authentication" --format json -n 30
+tracedecay tool context "implement user authentication" --json --max-nodes 30
 ```
 
-The `-n` flag controls how many symbols are included (default: 20).
+The `--max-nodes` flag controls how many symbols are included (default: 20).
 
 ### Listing indexed files
 
 ```bash
-tracedecay files                           # all files
-tracedecay files --filter src/mcp          # only files under src/mcp/
-tracedecay files --pattern "**/*.rs"       # only Rust files
-tracedecay files --json                    # machine-readable output
+tracedecay tool files                           # all files
+tracedecay tool files --path src/mcp            # only files under src/mcp/
+tracedecay tool files --pattern "**/*.rs"       # only Rust files
+tracedecay tool files --json                    # machine-readable output
 ```
 
 ### Running the MCP server directly
@@ -522,29 +535,38 @@ The accepted agent values are the same values supported by `tracedecay install -
 
 ## Finding Affected Tests
 
-When you change source files, you often want to know which tests might be affected. The `affected` command traces through the file dependency graph to find them.
+When you change source files, you often want to know which tests might be affected. The `affected` tool traces through the file dependency graph to find them. `files` is an array, so pass the whole arguments object with `--args`:
 
 ```bash
-tracedecay affected src/main.rs src/db/connection.rs
+tracedecay tool affected --args '{"files":["src/main.rs","src/db/connection.rs"]}'
 ```
 
 This performs a breadth-first search from the changed files through import/dependency edges to find test files that directly or transitively depend on those files.
 
 ### Piping from git
 
-This is especially useful in CI pipelines:
+This is especially useful in CI pipelines. `--args -` reads the arguments
+object from stdin, so build it from `git diff`:
 
 ```bash
-git diff --name-only HEAD~1 | tracedecay affected --stdin
+git diff --name-only HEAD~1 \
+  | jq -R -s -c '{files: (split("\n") | map(select(length > 0)))}' \
+  | tracedecay tool affected --args -
 ```
+
+There is no `--stdin` flag; the file list travels inside the arguments object.
 
 ### Options
 
 ```bash
-tracedecay affected src/lib.rs --depth 3         # limit traversal depth (default: 5)
-tracedecay affected src/lib.rs --filter "*_test.rs"  # custom test file pattern
-tracedecay affected src/lib.rs --json             # JSON output
-tracedecay affected src/lib.rs --quiet            # just file paths, no decoration
+# limit traversal depth (default: 5)
+tracedecay tool affected --args '{"files":["src/lib.rs"],"depth":3}'
+
+# custom test file pattern
+tracedecay tool affected --args '{"files":["src/lib.rs"],"filter":"*_test.rs"}'
+
+# raw JSON payload instead of the human rendering
+tracedecay tool affected --args '{"files":["src/lib.rs"]}' --json
 ```
 
 ---
@@ -853,6 +875,33 @@ last_upload_at = 1711375200 # last successful upload timestamp
 last_worldwide_total = 1000000
 last_worldwide_fetch_at = 1711375200
 ```
+
+#### Redacting secrets in ingested transcripts
+
+Agent transcripts occasionally contain credentials the agent pasted or echoed.
+TraceDecay always applies *structural* sanitization on ingestion routes, but
+the LCM raw payloads — the lossless archive that session expansion drills back
+into — keep message text verbatim by default, because redaction is
+irreversible and would silently destroy the archive's losslessness.
+
+Opt in per profile:
+
+```toml
+lcm_sensitive_redaction_enabled = true
+```
+
+When enabled, four redactors run over raw message text and structured values
+before they are persisted: `api_key`, `bearer_token`, `password_assignment`,
+and `private_key`. Redacted messages are marked lossy in their ingest
+protection metadata and the original value is not recoverable. Restrict the
+set with:
+
+```toml
+lcm_sensitive_redaction_patterns = ["api_key", "private_key"]
+```
+
+An empty or absent list runs all four. This applies to messages ingested after
+the change; transcripts already at rest are not rewritten.
 
 ---
 

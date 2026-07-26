@@ -161,7 +161,7 @@ Beyond validating the *source* bundles, install-time output is validated.
 repo already conforms — `plugin/.cursor-plugin/plugin.json` in source,
 and `src/agents/cursor.rs` renders it to
 `~/.cursor/plugins/local/tracedecay/.cursor-plugin/plugin.json`. The layout is
-pinned by existing assertions in `tests/agent_suite/agent_test.rs` and
+pinned by existing assertions in `tests/agent_suite/agent_cursor_test.rs` and
 `tests/agent_suite/update_plugin_test.rs`. Note that plain `ls` hides the
 dot-directory; use `ls -a` before concluding a bundle has no manifest.
 
@@ -196,9 +196,12 @@ need Cursor-only `disable-model-invocation` frontmatter.
 ### 6. Checks outside the Rust test harness
 
 Most validation deliberately lives in `cargo test`, because the existing
-`ci.yml` `test` job already runs the full suite on every PR — a check that can
-be a `#[test]` needs no new YAML. CI-only additions are limited to what cargo
-can't do:
+`ci.yml` `test` job is configured to run the full suite on every PR — a check
+that can be a `#[test]` needs no new YAML. That describes what CI is wired to
+invoke, not a green baseline: the aggregate suite has not completed
+successfully on this branch, so a new `#[test]` joins a suite whose overall
+state is unverified rather than a known-passing one. CI-only additions are
+limited to what cargo can't do:
 
 - **Schema-validation workflow**
   (`.github/workflows/plugin-validation.yml`, `manifest-schema` job). Mirrors
@@ -328,7 +331,7 @@ To ship a bundle for another agent host:
 | Unified intersection skill contract (frontmatter/description/body/hygiene/layout) + Cursor commands + agent overlay | `tests/agent_suite/shared_skill_contract_test.rs` | `cargo test` |
 | Metadata budget + openai.yaml + per-host frontmatter + install byte-copy parity | `tests/agent_suite/plugin_skill_contract_test.rs` | `cargo test` |
 | Recursive-embed coverage (skill tree fully embedded) | `src/agents/{claude,codex,cursor,plugin_bundle}.rs` unit tests | `cargo test` |
-| Manifest path + rendered output | `tests/agent_suite/agent_test.rs`, `tests/agent_suite/update_plugin_test.rs` | `cargo test` |
+| Manifest path + rendered output | `tests/agent_suite/agent_cursor_test.rs`, `tests/agent_suite/update_plugin_test.rs` | `cargo test` |
 | Cursor reference-integrity + native-command lint | `tests/agent_suite/skill_lint_cursor_test.rs` | `cargo test` |
 | Claude Code portability rules | `tests/agent_suite/skill_lint_claude_test.rs` | `cargo test` |
 | Schema-validation workflow (ajv) | `.github/workflows/plugin-validation.yml` | CI only |

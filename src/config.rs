@@ -2403,10 +2403,7 @@ pub fn discover_project_root(start: &Path) -> Option<PathBuf> {
     loop {
         if has_project_database(&dir)
             || crate::storage::has_enrollment_marker(&dir)
-            || crate::storage::resolve_layout_for_current_profile(&dir).is_ok_and(|layout| {
-                layout.storage_mode == crate::storage::StorageMode::ProfileSharded
-                    && layout.graph_db_path.exists()
-            })
+            || crate::storage::has_path_local_profile_store(&dir)
         {
             return Some(dir);
         }

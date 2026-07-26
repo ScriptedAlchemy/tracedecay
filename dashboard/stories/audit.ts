@@ -15,18 +15,20 @@
  *   pixel counts (and writing diff PNGs) in the manifest.
  *
  * Env:
- *   AUDIT_BASE_URL   Use an already-running server at this URL (skips spawn).
- *   AUDIT_PORT       Dev server port to spawn on (default 5173, matches rsbuild).
+ *   AUDIT_BASE_URL   Audit an already-running server at this URL instead of
+ *                    building and serving the bundle.
+ *   AXE_PORT         Static-server port (default 5241).
  */
-import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { chromium, type Browser, type Page } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
 import pixelmatch from 'pixelmatch';
 import { PNG } from 'pngjs';
+import type { Server } from 'node:http';
 import { STORY_SURFACES } from './registry.ts';
 import { installApiFixtures } from './fixtures/route.ts';
+import { STILLNESS_INIT, startStaticServer } from '../e2e/axe-harness.ts';
 
 const ROOT = process.cwd();
 const GALLERY_DIR = path.join(ROOT, 'audit-gallery');
@@ -96,21 +98,6 @@ async function waitForServer(baseURL: string, timeoutMs = 90_000): Promise<void>
   throw new Error(`server at ${baseURL} not ready within ${timeoutMs}ms: ${String(lastErr)}`);
 }
 
-function startServer(): { child: ChildProcess; baseURL: string } {
-  // Detached so the whole process group can be signalled at the end: `npx` is a
-  // shim that does not forward SIGTERM to the rsbuild it spawns, so killing the
-  // direct child alone left the dev server alive and the audit hung after
-  // printing its summary.
-  const child = spawn('npx', ['rsbuild', 'dev', '--port', String(PORT)], {
-    cwd: ROOT,
-    env: { ...process.env, NO_COLOR: '1' },
-    stdio: ['ignore', 'pipe', 'pipe'],
-    detached: true,
-  });
-  child.stdout?.on('data', () => {});
-  child.stderr?.on('data', () => {});
-  return { child, baseURL: `http://localhost:${PORT}` };
-}
 
 async function runAxe(page: Page): Promise<AxeResult> {
   const results = await new AxeBuilder({ page })
@@ -193,14 +180,21 @@ async function main(): Promise<void> {
   rmSync(GALLERY_DIR, { recursive: true, force: true });
   mkdirSync(GALLERY_DIR, { recursive: true });
 
+  // The BUILT bundle, not `rsbuild dev`. Lazy route compilation under the dev
+  // server emits runtime errors the release build does not have (esbuild's
+  // `__name` helper reaching the page among them), and a route that throws
+  // still renders the router's accessible error boundary — which screenshots
+  // happily and scores a clean axe pass. `AUDIT_BASE_URL` still wins, for
+  // auditing an already-running server on purpose.
   const preset = process.env['AUDIT_BASE_URL'];
-  let server: { child: ChildProcess; baseURL: string } | null = null;
+  let staticServer: Server | null = null;
   let baseURL: string;
   if (preset) {
     baseURL = preset;
   } else {
-    server = startServer();
-    baseURL = server.baseURL;
+    const started = startStaticServer();
+    staticServer = started.server;
+    baseURL = started.baseURL;
   }
 
   console.log(`[audit] waiting for ${baseURL} ...`);
@@ -210,6 +204,7 @@ async function main(): Promise<void> {
   let browser: Browser | null = null;
   const surfaces: SurfaceEntry[] = [];
   const axeTotals = { violations: 0, byImpact: {} as Record<string, number> };
+  const pageErrors: string[] = [];
   let screenshotCount = 0;
 
   try {
@@ -220,23 +215,20 @@ async function main(): Promise<void> {
     browser = await chromium.launch({ headless: true });
     const context = await browser.newContext({ deviceScaleFactor: 1 });
     const page = await context.newPage();
-    await installApiFixtures(page);
-    await page.addInitScript(() => {
-      const inject = () => {
-        const style = document.createElement('style');
-        style.id = 'audit-motion-reset';
-        // `animation: none`, not a zero duration. The design system's entrance
-        // primitives fill `both`, and a 0s animation with `both` fill holds the
-        // from-state — `opacity: 0` — indefinitely, so collapsing the duration
-        // photographs blank regions that axe then passes. See the stillness
-        // block in `theme/tokens.css`.
-        style.textContent =
-          '*,*::before,*::after{animation:none!important;transition-duration:0s!important;transition-delay:0s!important;scroll-behavior:auto!important;}';
-        document.head.appendChild(style);
-      };
-      if (document.head) inject();
-      else document.addEventListener('DOMContentLoaded', inject);
+    // A crashed route renders the router's own accessible error boundary, which
+    // screenshots happily and scores a clean axe pass. A page error therefore
+    // fails the run rather than being invisible in the manifest.
+    page.on('pageerror', (error) => {
+      pageErrors.push(error.message);
+      console.error(`[audit] PAGEERROR ${error.message}`);
     });
+    await installApiFixtures(page);
+    // Passed as source text, not a function: tsx compiles callbacks with
+    // esbuild's `keepNames`, whose `__name` helper does not exist in the page.
+    // As a function this threw `__name is not defined` on every run, so the
+    // motion reset never applied and every capture was taken mid-animation —
+    // silently, because nothing failed the run on a page error.
+    await page.addInitScript({ content: STILLNESS_INIT });
 
     await page.goto(baseURL, { waitUntil: 'domcontentloaded' });
     await page.waitForSelector('nav[aria-label="Workspaces"]', { timeout: 30_000 });
@@ -283,13 +275,7 @@ async function main(): Promise<void> {
     for (const s of STORY_SURFACES) surfaces.push(surfaceMap.get(s.id)!);
   } finally {
     if (browser) await browser.close();
-    if (server?.child.pid) {
-      try {
-        process.kill(-server.child.pid, 'SIGTERM');
-      } catch {
-        /* group already gone */
-      }
-    }
+    staticServer?.close();
   }
 
   const manifest = {
@@ -328,9 +314,18 @@ async function main(): Promise<void> {
     );
   }
 
+  // THE GATE. This used to fail only on shots that could not be rendered, so a
+  // run could report accessibility violations in its own summary and still exit
+  // 0 — which is what every CI runner and every reviewer reads. Recording a
+  // violation is not the same as failing on one.
   const failed = surfaces.flatMap((s) => s.shots).filter((sh) => sh.error);
   if (failed.length > 0) {
     console.error(`[audit] ${failed.length} shot(s) failed to render`);
+  }
+  if (pageErrors.length > 0) {
+    console.error(`[audit] ${pageErrors.length} page error(s)`);
+  }
+  if (failed.length > 0 || pageErrors.length > 0 || axeTotals.violations > 0) {
     process.exitCode = 1;
   }
 }

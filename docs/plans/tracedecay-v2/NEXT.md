@@ -15,6 +15,10 @@ required to keep those surfaces fast while repositories and worktrees change.
 This file is contributor guidance only. TraceDecay never parses, imports,
 schedules, or executes roadmap documents.
 
+The authoritative PR8–PR14 plan-status adjudications and retractions live in
+[`GAP-LEDGER-PR8-PR14.md`](GAP-LEDGER-PR8-PR14.md) as a companion, not a
+replacement. This file remains the active PR12/PR13 execution slice.
+
 ## Current outcome
 
 Ship one production path in which:
@@ -143,20 +147,25 @@ unverified.
    retention with raw/projected dedup, incident-debris ownership,
    compaction policy, and Doctor storage findings (measured driver: one
    dogfood profile reached 256 GB, reduced to ~75 GB by removing data the
-   product should never have retained). *(Landed 2026-07-23: all plan 38
-   sections are delivered — §1 branch lifecycle (verified pre-existing), §2
-   registry orphan detection/collection, §3 session retention (LCM
-   raw/projected dedup plus disposition-scoped evidence-store release), §4
-   one-content-copy, §5 debris contract, §6 compaction policy types, and §7
-   telemetry read models with typed Doctor storage findings. Completed
-   2026-07-23: daemon-owned GC/retention/compaction cadence runs under writer
-   authority, retries failed passes without advancing the cadence, and
-   reauthorizes each retention transaction; exact registry relink/retirement,
-   durable incident-debris quarantine/collection, and real stale-branch and
-   retention-backlog Doctor sources are wired. The rusqlite reserved-health
-   reader supplies primitive size/table-growth telemetry and the daemon maps it
-   into the scoped application port with typed denied/unknown outcomes.
-   Owner-configured soft budgets remain inert when absent.)*
+   product should never have retained). *(Landed 2026-07-23: the Plan 38
+   mechanisms are present — §1 branch lifecycle (verified pre-existing), §2
+   registry orphan detection/collection, §3 session retention, §4
+   one-content-copy machinery, §5 debris contract, §6 compaction policy types,
+   and §7 telemetry read models with typed Doctor storage findings. Status
+   correction 2026-07-26: §3/§4 are only partially engaged by default.
+   Projected-message dedupe runs after 30 days once lineage is durable, but raw
+   LCM offload/drop default to `None`, older session/raw windows remain
+   unlimited, observation-evidence retention defaults disabled, and
+   `source_cursor_advances` cannot be reclaimed through the immutable
+   update/delete triggers. Daemon-owned GC/retention/compaction cadence runs
+   under writer authority, retries failed passes without advancing the
+   cadence, and reauthorizes each retention transaction; exact registry
+   relink/retirement, durable incident-debris quarantine/collection, and real
+   stale-branch and retention-backlog Doctor sources are wired. Existing
+   reserved-health reads supply store-level evidence used by current findings,
+   but `StoreSizeTelemetryPort` has no implementation and no product-supported
+   per-table byte measurement exists. Owner-configured soft budgets remain
+   inert when absent.)*
 7. Run focused crate tests, all-feature workspace checks, release builds,
    package/install checks, and normal Linux/macOS/Windows CI. *(Ongoing. The
    SQLite session-store parity harness proves 27 session-store tables across

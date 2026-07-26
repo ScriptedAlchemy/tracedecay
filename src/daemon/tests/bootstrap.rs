@@ -189,6 +189,63 @@ async fn project_open_task_registry_caps_distinct_inflight_routes() {
     assert_eq!(tasks.tracked_route_count().await, 0);
 }
 
+fn authority_invariant_error(message: &str) -> crate::errors::TraceDecayError {
+    crate::errors::TraceDecayError::Database {
+        message: message.to_string(),
+        operation: "ensure global database authority invariants".to_string(),
+    }
+}
+
+#[test]
+fn undecodable_authority_row_backs_off_beyond_the_transient_debounce() {
+    // The identity material of a committed observation stopped matching the
+    // derivation the running binary applies, so every reopen re-runs the whole
+    // authority audit and fails on the same row.
+    let backoff = super::super::project_open_retry_backoff(&authority_invariant_error(
+        "invalid committed observation authority JSON: serialized observation identity \
+         does not match its source evidence",
+    ));
+
+    assert_eq!(
+        backoff,
+        Some(super::super::PROJECT_OPEN_UNREPAIRABLE_RETRY_BACKOFF),
+        "an undecodable persisted row must not reopen at the transient debounce cadence"
+    );
+    assert!(
+        super::super::PROJECT_OPEN_UNREPAIRABLE_RETRY_BACKOFF
+            > super::super::PROJECT_OPEN_FAILURE_RETRY_BACKOFF
+    );
+}
+
+#[test]
+fn mutable_cursor_key_rejection_keeps_the_transient_debounce() {
+    assert_eq!(
+        super::super::project_open_retry_backoff(&authority_invariant_error(
+            "session temporal receipts or cursor keys are mutable",
+        )),
+        Some(super::super::PROJECT_OPEN_FAILURE_RETRY_BACKOFF)
+    );
+}
+
+#[test]
+fn transient_authority_failures_stay_immediately_retryable() {
+    // A locked or unreadable database surfaces under the same operation but
+    // clears without operator repair, so it must not be backed off.
+    assert_eq!(
+        super::super::project_open_retry_backoff(&authority_invariant_error("database is locked",)),
+        None
+    );
+    assert_eq!(
+        super::super::project_open_retry_backoff(&crate::errors::TraceDecayError::Database {
+            message: "invalid committed observation authority JSON: trailing characters"
+                .to_string(),
+            operation: "read observation".to_string(),
+        }),
+        None,
+        "only the authority-invariant operation classifies these messages"
+    );
+}
+
 #[tokio::test]
 async fn route_open_backoff_retries_after_deadline_without_cross_route_blocking() {
     let tasks = super::super::ProjectOpenTasks::default();
