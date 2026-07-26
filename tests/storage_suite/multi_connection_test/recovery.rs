@@ -147,11 +147,18 @@ fn daemon_recovers_killed_writer_dirty_wal_before_serving_clients() {
         !failed.status.success(),
         "daemon must fail closed when killed-writer recovery cannot validate the database"
     );
-    assert_eq!(
-        storage_snapshot(&db_path),
-        failed_family,
-        "failed recovery changed DB, WAL, or SHM"
-    );
+    let after_failed_recovery = storage_snapshot(&db_path);
+    for path in [&db_path, &wal_path] {
+        assert_eq!(
+            after_failed_recovery.get(path),
+            failed_family.get(path),
+            "failed recovery changed durable SQLite family member '{}'",
+            path.display()
+        );
+    }
+    // SQLite's SHM file contains volatile coordination state, so opening a
+    // recovery probe may change its bytes. The identity checks below still
+    // prove that failed recovery preserved rather than replaced every member.
     for (path, identity) in failed_identities {
         assert_eq!(
             file_identity(&path),
