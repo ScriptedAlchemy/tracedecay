@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "provider": "codex",
+  "sources": [
+    {
+      "kind": "live_native_hook_capture",
+      "path": "crates/tracedecay-hooks/fixtures/host_events/codex/README.md",
+      "codex_cli_version": "0.144.5",
+      "captured_on": "2026-07-21"
+    },
+    {
+      "kind": "checked_in_provider_capture",
+      "path": "tests/fixtures/host_events/codex/baseline.json"
+    },
+    {
+      "kind": "official_documented_field_schema",
+      "url": "https://developers.openai.com/codex/hooks",
+      "sections": ["Common input fields", "PostToolUse", "Stop"],
+      "retrieved_at": "2026-07-21"
+    }
+  ],
+  "events": [
+    {
+      "identity": "session_start",
+      "family": "session_boundary",
+      "support": "native",
+      "request": {
+        "hook_event_name": "SessionStart",
+        "session_id": "<SESSION_ID>",
+        "cwd": "<PROJECT_ROOT>",
+        "source": "startup"
+      }
+    },
+    {
+      "identity": "saved_edit",
+      "family": "saved_edit",
+      "support": "documented_unverified",
+      "request": {
+        "session_id": "<SESSION_ID>",
+        "transcript_path": "<TRANSCRIPT_PATH>",
+        "cwd": "<PROJECT_ROOT>",
+        "hook_event_name": "PostToolUse",
+        "model": "<MODEL>",
+        "permission_mode": "default",
+        "turn_id": "<TURN_ID>",
+        "tool_name": "apply_patch",
+        "tool_use_id": "<TOOL_USE_ID>",
+        "tool_input": {
+          "command": "<REDACTED_PATCH>"
+        },
+        "tool_response": "<REDACTED_RESULT>"
+      }
+    },
+    {
+      "identity": "stop",
+      "family": "session_boundary",
+      "support": "native",
+      "capture_path": "crates/tracedecay-hooks/fixtures/host_events/codex/stop.json",
+      "request": {
+        "session_id": "<SESSION_ID>",
+        "turn_id": "<TURN_ID>",
+        "transcript_path": null,
+        "cwd": "<PROJECT_ROOT>",
+        "hook_event_name": "Stop",
+        "model": "<MODEL>",
+        "permission_mode": "<PERMISSION_MODE>",
+        "stop_hook_active": false,
+        "last_assistant_message": "<REDACTED_RESPONSE>"
+      }
+    }
+  ]
+}
