@@ -35,7 +35,6 @@ impl SessionRetrievalStore for CapabilityDeniedSessionPorts {
     ) -> SessionStoreResult<SessionRetrievalPageV1> {
         panic!("capability guard was bypassed")
     }
-
 }
 
 impl SessionTemporalProjectionStore for CapabilityDeniedSessionPorts {
