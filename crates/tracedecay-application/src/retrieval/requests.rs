@@ -2,9 +2,9 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
-    CodeGenerationId, EphemeralSanitizedQueryViewV1, FileOccurrenceId, Pr9FallbackSubpayload,
-    RetrievalAnchorId, SessionId, SourceSpan, SymbolOccurrenceId, TemporalModeV1,
-    ManifestDigest, TestAttributionEvidenceClassV1, UtcMicros,
+    CodeGenerationId, EphemeralSanitizedQueryViewV1, FileOccurrenceId, ManifestDigest,
+    Pr9FallbackSubpayload, RetrievalAnchorId, SessionId, SourceSpan, SymbolOccurrenceId,
+    TemporalModeV1, TestAttributionEvidenceClassV1, UtcMicros,
 };
 
 use crate::error::ApplicationContractError;
