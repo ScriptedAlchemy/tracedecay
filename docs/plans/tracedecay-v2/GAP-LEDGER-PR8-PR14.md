@@ -76,18 +76,36 @@ the temporary-alias deletion slices.
 - `01-domain-crate.md`, `02-store-crate.md`, `03-capture-crate.md`: completion
   is limited to the session-observation path; the external-source block is a
   retained, unmounted seam.
+- `08-tool-catalog-crate.md`: host discovery no longer advertises
+  handle-gated feedback operations or unsupported symbol-search `AsOf`;
+  internal handlers are not mistaken for host-constructible requests.
 - `09-application-crate.md`: the legacy root `RequestContext` has no scope;
-  the crate model carries `ResolvedScope`.
+  the crate model carries `ResolvedScope`. Temporal source access now separates
+  exact-root authorization from six expressible lifecycle states, and Doctor's
+  default registry truthfully exposes nine owning operations rather than a
+  tenth handle-gated feedback read.
 - `11-dashboard-frontend.md`: twelve-workspace/embed reachability is recorded;
   abandoned projection names are removed; live Rust `EvidencePacket` is
-  protected.
+  protected. Generated graph contracts/consumers, generated Explorer query
+  schemas, and typed scheduler pause/resume controls are now recorded.
+- `11a-dashboard-design.md`: the visual audit now exits nonzero on render
+  failure, uncaught page errors, axe violations, or pixel drift.
 - `11b-structure-visualization.md`: all five endpoints are registered and now
   consumed through typed Code-workspace surfaces; the former backend-only gap
   is closed, without converting implementation into acceptance.
+- `12-root-compatibility-migration.md`: Memory V2 cutover coverage is receipted,
+  migrated-fact reclamation is production-reached, and the permanent V1-shaped
+  compatibility projection is distinguished from a superseded writer. Direct
+  init/open/read-only/branch lifecycle entry points now own production
+  maintenance authority.
 - `13-research-provenance-and-context-anchors.md`: core anchors are delivered;
   dedicated GitHub-stack targets remain a named PR13 follow-up.
 - `14-historical-failure-regression-matrix.md`: already states that it owns
   regression classes, not a numbered failure ledger or fixture inventory.
+- `16-cross-project-repository-worktree-scope.md`: linked worktrees collapse to
+  primary-checkout project/store identity while retaining exact worktree
+  snapshot authority; durable profiles refuse ephemeral roots and registry
+  reaping retains rows backed by nonempty stores.
 - `18-secret-detection-redaction-and-private-data-safety.md`: structural
   sanitization remains delivered; LCM raw sensitive-value redaction is
   conditionally delivered through `lcm_sensitive_redaction_enabled`, defaults
@@ -102,7 +120,9 @@ the temporary-alias deletion slices.
 - `25-code-intelligence-indexing-crate.md`: already states that indexing is a
   root module and crate extraction is optional and evidence-driven.
 - `26-observability-accounting-and-usage.md`: Observatory and Costs remain
-  implemented but unverified.
+  implemented but unverified; their canonical model now keeps failed/timed-out
+  outcomes distinct from known zero and withholds values under
+  unavailable/partial coverage.
 - `27-cross-host-agent-plugin-bundles.md`: four declared safety/evidence guards
   are not production-reached, and Cursor Cloud has no default component set.
 - `31-native-fastembed-semantic-code-search.md`: daemon-owned immutable
@@ -122,12 +142,14 @@ the temporary-alias deletion slices.
   message dedupe is engaged by default, but raw offload/drop, legacy
   session/raw windows, observation-evidence release, and
   `source_cursor_advances` reclamation are not. Its immutable triggers are a
-  real obstacle, but the whole `global.db` is only 0.98 GiB and no
-  `StoreSizeTelemetryPort` implementation supports a per-table byte claim.
-  Plan 38 also records that the reachable debris collector originally missed
-  bare `.corrupt` artifacts until `985cc5d4b`, that live branch stores are full
-  graph copies rather than lightweight deltas, and that code-index generation
-  publication has no retention pass.
+  real obstacle, but the whole `global.db` is only 0.98 GiB and no historical
+  per-table byte claim has been reproduced through the product.
+  `SqliteStoreSizeTelemetryPort` now implements scoped store-size and `dbstat`
+  table-growth telemetry consumed by Doctor. Plan 38 also records that the
+  reachable debris collector originally missed bare `.corrupt` artifacts
+  until `985cc5d4b`, that live branch stores are full graph copies rather than
+  lightweight deltas, and that code-index generation publication has no
+  retention pass.
 
 No numbered plan claims `.tracedecay/domain-symbols.toml` as a delivered
 capability, so the no-op `DOMAIN-EXTRACTORS.md` proposal requires no plan-side
