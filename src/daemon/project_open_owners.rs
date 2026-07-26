@@ -491,7 +491,8 @@ async fn invoke_project_open_source_edit(
         None if dry_run => {
             let preview_identity = derive_preview_identity(
                 PreviewIdentityDomain::SourceEdit,
-                &(context.request_id(), &invocation.edit),
+                context.request_id(),
+                &invocation.edit,
             )
             .map_err(|error| TraceDecayError::Config {
                 message: format!("source edit preview identity failed: {error}"),

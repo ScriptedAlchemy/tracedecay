@@ -25,6 +25,7 @@ use crate::mcp::response_handles::{cleanup_expired_response_handles, response_ha
 use crate::mcp::tool_analytics::{
     McpToolAnalyticsEvent, hook_route_analytics_event, mcp_tool_analytics_event,
 };
+use crate::request_identity::McpConnectionIdentityAuthority;
 use crate::sessions::git_correlation::{
     self as git_correlation, DEFAULT_SPAN_MERGE_GAP_SECS, DEFAULT_SPAN_OBSERVATION_DEBOUNCE_SECS,
     SpanObservation, SpanSource,
@@ -477,12 +478,9 @@ pub struct McpServer {
     /// connection that gets re-initialized by a different client picks up
     /// the new identity.
     client_name: std::sync::Mutex<Option<String>>,
-    /// Stable per-process instance id from
-    /// [`crate::runtime_identity::process_run_id`] (a random hex token minted
-    /// once per process). Recorded in every analytics event's
-    /// `metadata.mcp_instance_id`. Hoisting it to `runtime_identity` lets the
-    /// daemon later stamp the *same* id on its own events, grouping one process
-    /// lifetime across both the MCP server and the daemon.
+    /// Entropy-backed identity authority for persisted per-connection request
+    /// scopes. If OS entropy was unavailable during server construction,
+    /// connection establishment fails instead of reusing a timestamp fallback.
     ///
     /// The MCP transport negotiates only `clientInfo` (host name) at
     /// `initialize` — never a session/conversation id — and no session env var
@@ -493,13 +491,7 @@ pub struct McpServer {
     /// true session identity, but it lets every event from one server lifetime
     /// be grouped. It is deliberately kept out of the `session_id` column so it
     /// never masquerades as a real session.
-    mcp_instance_id: String,
-    /// Monotonic per-connection sequence. Combined with `mcp_instance_id` it
-    /// scopes memory replay identities so JSON-RPC envelope ids — which are
-    /// only unique within one client connection — never collide across the
-    /// connections a retained daemon server multiplexes, or across host
-    /// restarts against the same persistent receipt store.
-    connection_scope_seq: std::sync::atomic::AtomicU64,
+    connection_identity: McpConnectionIdentityAuthority,
     /// One lazy authenticated application client retained for this server.
     application_surface_client: tokio::sync::OnceCell<crate::daemon_client::DaemonInvocationClient>,
     /// Live MCP cancellation tokens keyed by canonical application request id.
@@ -936,12 +928,7 @@ impl McpServer {
                 crate::sessions::git_correlation::SpanObservationDebounce::new(),
             ),
             client_name: std::sync::Mutex::new(None),
-            // Shared process run id: the daemon should stamp this same id on its
-            // own events so one process lifetime groups across both surfaces.
-            // Field/metadata key stay `mcp_instance_id` (no analytics schema
-            // churn) even though the id now lives in `runtime_identity`.
-            mcp_instance_id: crate::runtime_identity::process_run_id().to_string(),
-            connection_scope_seq: std::sync::atomic::AtomicU64::new(0),
+            connection_identity: McpConnectionIdentityAuthority::from_os_entropy(),
             application_surface_client: tokio::sync::OnceCell::new(),
             application_surface_cancellations: std::sync::Mutex::new(HashMap::new()),
         });
@@ -1249,133 +1236,6 @@ mod application_surface_request_id_tests {
             application_surface_request_id(&json!(1), "connection").unwrap()
         );
         assert!(application_surface_request_id(&json!(null), "connection").is_none());
-    }
-}
-
-fn inject_trusted_memory_request_id(
-    tool_name: &str,
-    id: &Value,
-    memory_request_scope: &str,
-    arguments: &mut Value,
-) {
-    // The memory handler module owns the action taxonomy; the dispatcher only
-    // queries whether this call needs a daemon-issued replay identity.
-    if !super::tools::memory_needs_operation_context(tool_name, arguments) {
-        return;
-    }
-    let Some(map) = arguments.as_object_mut() else {
-        return;
-    };
-    // This private field is only trusted when the server derives it from the
-    // JSON-RPC envelope. A malformed or absent envelope ID must not preserve
-    // caller-controlled arguments for the handler fallback path.
-    map.remove("__mcp_request_id");
-    // Envelope ids are client-chosen and only unique within one connection,
-    // while operation receipts persist in the store. The connection scope
-    // widens the id into a store-unique replay identity; it is always present
-    // (every dispatch is constructed with a connection context), so there is
-    // no unscoped path that could collide with an unrelated call's receipt.
-    if let Some(request_id) = json_rpc_request_id_string(id) {
-        map.insert(
-            "__mcp_request_id".to_string(),
-            json!(format!("{memory_request_scope}:{request_id}")),
-        );
-    }
-}
-
-#[cfg(test)]
-mod trusted_memory_request_id_tests {
-    use serde_json::{Value, json};
-
-    use super::inject_trusted_memory_request_id;
-
-    #[test]
-    fn memory_stateful_actions_overwrite_call_supplied_request_id() {
-        for action in [
-            "add", "update", "remove", "search", "probe", "related", "reason", "list",
-        ] {
-            let mut arguments = json!({
-                "action": action,
-                "__mcp_request_id": "caller-controlled",
-            });
-
-            inject_trusted_memory_request_id(
-                "tracedecay_fact_store",
-                &json!("json-rpc-17"),
-                "conn-scope",
-                &mut arguments,
-            );
-
-            assert_eq!(
-                arguments["__mcp_request_id"],
-                json!("conn-scope:json-rpc-17")
-            );
-        }
-    }
-
-    #[test]
-    fn memory_retrieval_overwrites_call_supplied_request_id() {
-        let mut arguments = json!({
-            "action": "search",
-            "__mcp_request_id": "caller-controlled",
-        });
-
-        inject_trusted_memory_request_id(
-            "tracedecay_fact_store",
-            &json!(17),
-            "conn-scope",
-            &mut arguments,
-        );
-
-        assert_eq!(arguments["__mcp_request_id"], json!("conn-scope:17"));
-    }
-
-    #[test]
-    fn feedback_overwrites_call_supplied_request_id() {
-        let mut arguments = json!({ "__mcp_request_id": "caller-controlled" });
-
-        inject_trusted_memory_request_id(
-            "tracedecay_fact_feedback",
-            &json!("json-rpc-17"),
-            "conn-scope",
-            &mut arguments,
-        );
-
-        assert_eq!(
-            arguments["__mcp_request_id"],
-            json!("conn-scope:json-rpc-17")
-        );
-    }
-
-    #[test]
-    fn malformed_json_rpc_id_clears_call_supplied_memory_request_id() {
-        let mut arguments = json!({
-            "action": "add",
-            "__mcp_request_id": "caller-controlled",
-        });
-
-        inject_trusted_memory_request_id(
-            "tracedecay_fact_store",
-            &Value::Null,
-            "conn-scope",
-            &mut arguments,
-        );
-
-        assert!(arguments.get("__mcp_request_id").is_none());
-    }
-
-    #[test]
-    fn memory_read_does_not_receive_a_request_id() {
-        let mut arguments = json!({ "action": "get" });
-
-        inject_trusted_memory_request_id(
-            "tracedecay_fact_store",
-            &json!("json-rpc-17"),
-            "conn-scope",
-            &mut arguments,
-        );
-
-        assert!(arguments.get("__mcp_request_id").is_none());
     }
 }
 

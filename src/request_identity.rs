@@ -12,7 +12,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracedecay_application::RequestId;
-use tracedecay_domain::{ManifestDigest, canonical_sha256};
+use tracedecay_domain::{ManifestDigest, UtcMicros, canonical_sha256};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GlobalRequestSurface {
@@ -247,16 +247,90 @@ pub fn derive_logical_effect_idempotency<T: Serialize + ?Sized>(
         .map_err(|_| RequestIdentityError::InvalidLogicalEffectIdentity)
 }
 
+pub fn derive_feedback_observation_idempotency<Saved, Observation>(
+    saved_evaluation_digest: &Saved,
+    observation: &Observation,
+) -> Result<ManifestDigest, RequestIdentityError>
+where
+    Saved: Serialize + ?Sized,
+    Observation: Serialize + ?Sized,
+{
+    canonical_sha256(&(
+        LogicalEffectIdempotencyDomain::FeedbackObservation.domain(),
+        saved_evaluation_digest,
+        observation,
+    ))
+    .map_err(|_| RequestIdentityError::InvalidLogicalEffectIdentity)
+}
+
+pub fn derive_feedback_source_event_idempotency<Subject, Event>(
+    subject_digest: &Subject,
+    observed_at: UtcMicros,
+    source_event: &Event,
+) -> Result<ManifestDigest, RequestIdentityError>
+where
+    Subject: Serialize + ?Sized,
+    Event: Serialize + ?Sized,
+{
+    canonical_sha256(&(
+        LogicalEffectIdempotencyDomain::FeedbackSourceEvent.domain(),
+        subject_digest,
+        observed_at,
+        source_event,
+    ))
+    .map_err(|_| RequestIdentityError::InvalidLogicalEffectIdentity)
+}
+
+pub fn derive_doctor_remediation_preview_operation<Operation, Target>(
+    operation: &Operation,
+    target_digest: &Target,
+) -> Result<ManifestDigest, RequestIdentityError>
+where
+    Operation: Serialize + ?Sized,
+    Target: Serialize + ?Sized,
+{
+    canonical_sha256(&(
+        LogicalEffectIdempotencyDomain::DoctorRemediationPreviewOperation.domain(),
+        operation,
+        target_digest,
+    ))
+    .map_err(|_| RequestIdentityError::InvalidLogicalEffectIdentity)
+}
+
+pub fn derive_doctor_remediation_apply_operation<Operation, Target, Idempotency>(
+    operation: &Operation,
+    target_digest: &Target,
+    idempotency_key: &Idempotency,
+) -> Result<ManifestDigest, RequestIdentityError>
+where
+    Operation: Serialize + ?Sized,
+    Target: Serialize + ?Sized,
+    Idempotency: Serialize + ?Sized,
+{
+    canonical_sha256(&(
+        LogicalEffectIdempotencyDomain::DoctorRemediationApplyOperation.domain(),
+        operation,
+        target_digest,
+        idempotency_key,
+    ))
+    .map_err(|_| RequestIdentityError::InvalidLogicalEffectIdentity)
+}
+
 /// Derives a content-bound preview identity.
 ///
 /// A preview is not an effect replay key: its material includes the request
 /// correlation and the complete proposed edit so distinct previews cannot
 /// alias even when a transport request id is reused.
-pub fn derive_preview_identity<T: Serialize + ?Sized>(
+pub fn derive_preview_identity<Request, Edit>(
     domain: PreviewIdentityDomain,
-    material: &T,
-) -> Result<ManifestDigest, RequestIdentityError> {
-    canonical_sha256(&(domain.domain(), material))
+    request: &Request,
+    edit: &Edit,
+) -> Result<ManifestDigest, RequestIdentityError>
+where
+    Request: Serialize + ?Sized,
+    Edit: Serialize + ?Sized,
+{
+    canonical_sha256(&(domain.domain(), request, edit))
         .map_err(|_| RequestIdentityError::InvalidPreviewIdentity)
 }
 
@@ -329,6 +403,50 @@ impl ProcessLocalRequestSequence {
     pub fn next_string(&self, prefix: &str) -> Result<String, RequestIdentityError> {
         self.next_number()
             .map(|sequence| format!("{prefix}{sequence}"))
+    }
+}
+
+pub struct McpConnectionIdentityAuthority {
+    instance_id: Option<String>,
+    next_connection: AtomicU64,
+}
+
+impl McpConnectionIdentityAuthority {
+    pub fn from_os_entropy() -> Self {
+        let mut instance_nonce = [0_u8; 16];
+        let instance_id = getrandom::getrandom(&mut instance_nonce)
+            .ok()
+            .map(|()| hex::encode(instance_nonce));
+        Self {
+            instance_id,
+            next_connection: AtomicU64::new(0),
+        }
+    }
+
+    pub fn establish_connection_scope(&self) -> Result<String, RequestIdentityError> {
+        let instance_id = self
+            .instance_id
+            .as_deref()
+            .ok_or(RequestIdentityError::EntropyUnavailable)?;
+        let sequence = self
+            .next_connection
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                value.checked_add(1)
+            })
+            .map_err(|_| RequestIdentityError::SequenceExhausted)?;
+        Ok(format!("{instance_id}-c{sequence}"))
+    }
+
+    pub fn instance_id(&self) -> Option<&str> {
+        self.instance_id.as_deref()
+    }
+
+    #[cfg(test)]
+    fn without_entropy() -> Self {
+        Self {
+            instance_id: None,
+            next_connection: AtomicU64::new(0),
+        }
     }
 }
 
@@ -454,51 +572,133 @@ mod tests {
         let string = mcp_connection_request_id(&json!("1"), "connection").unwrap();
         assert_ne!(numeric, string);
         assert_eq!(
-            numeric,
-            mcp_connection_request_id(&json!(1), "connection").unwrap()
+            numeric.as_str(),
+            "request.mcp.connection.6b86b273ff34fce19d6b804eff5a3f57"
         );
         assert!(mcp_connection_request_id(&Value::Null, "connection").is_none());
     }
 
     #[test]
     fn stable_source_edit_identity_preserves_persisted_derivation() {
-        let material = ("request.fixture", "edit.fixture");
-        let legacy =
-            canonical_sha256(&("tracedecay.source-edit-preview-idempotency.v1", material)).unwrap();
+        let request = "request.fixture";
+        let edit = "edit.fixture";
+        let legacy = canonical_sha256(&(
+            "tracedecay.source-edit-preview-idempotency.v1",
+            request,
+            edit,
+        ))
+        .unwrap();
+        assert_eq!(
+            legacy.as_str(),
+            "sha256:8f0e97f401b0b4f66ca8ef2f43ed62e29c804d76db1f3d39edf882df1cb575c0"
+        );
+
         let centralized =
-            derive_preview_identity(PreviewIdentityDomain::SourceEdit, &material).unwrap();
+            derive_preview_identity(PreviewIdentityDomain::SourceEdit, &request, &edit).unwrap();
         assert_eq!(centralized, legacy);
     }
 
     #[test]
-    fn persisted_idempotency_domains_keep_byte_identical_derivations() {
-        for (domain, legacy_domain) in [
-            (
+    fn host_observation_identity_preserves_flat_persisted_derivation() {
+        let observation = "observation.fixture";
+        let legacy =
+            canonical_sha256(&("tracedecay.host-observation.idempotency.v1", observation)).unwrap();
+        assert_eq!(
+            legacy.as_str(),
+            "sha256:fc24322522dbedaa19d0135034a190db386d40498b4f3dcae55b00388a837ea3"
+        );
+        assert_eq!(
+            derive_logical_effect_idempotency(
                 LogicalEffectIdempotencyDomain::HostObservation,
-                "tracedecay.host-observation.idempotency.v1",
-            ),
-            (
-                LogicalEffectIdempotencyDomain::FeedbackObservation,
-                "tracedecay.feedback.observation.plan26.v1",
-            ),
-            (
-                LogicalEffectIdempotencyDomain::FeedbackSourceEvent,
-                "tracedecay.feedback.source-event.plan26.v1",
-            ),
-            (
-                LogicalEffectIdempotencyDomain::DoctorRemediationPreviewOperation,
-                "tracedecay.doctor-remediation-preview-operation.v1",
-            ),
-            (
-                LogicalEffectIdempotencyDomain::DoctorRemediationApplyOperation,
-                "tracedecay.doctor-remediation-apply-operation.v1",
-            ),
-        ] {
-            let material = ("logical", "effect", 7_u64);
-            let legacy = canonical_sha256(&(legacy_domain, &material)).unwrap();
-            let centralized = derive_logical_effect_idempotency(domain, &material).unwrap();
-            assert_eq!(centralized, legacy, "{domain:?} changed persisted bytes");
-        }
+                &observation,
+            )
+            .unwrap(),
+            legacy
+        );
+    }
+
+    #[test]
+    fn feedback_observation_identity_preserves_flat_persisted_derivation() {
+        let saved = "saved.fixture";
+        let observation = "observation.fixture";
+        let legacy = canonical_sha256(&(
+            "tracedecay.feedback.observation.plan26.v1",
+            saved,
+            observation,
+        ))
+        .unwrap();
+        assert_eq!(
+            legacy.as_str(),
+            "sha256:51e60d23798c7de9bd9df7893665b0e874eac9950aaa20c71350744a632b4adc"
+        );
+        assert_eq!(
+            derive_feedback_observation_idempotency(&saved, &observation).unwrap(),
+            legacy
+        );
+    }
+
+    #[test]
+    fn feedback_source_event_identity_preserves_flat_persisted_derivation() {
+        let subject = "subject.fixture";
+        let source_event = "source.fixture";
+        let legacy = canonical_sha256(&(
+            "tracedecay.feedback.source-event.plan26.v1",
+            subject,
+            UtcMicros(7),
+            source_event,
+        ))
+        .unwrap();
+        assert_eq!(
+            legacy.as_str(),
+            "sha256:a764dcbd883833df5e457e7c030986ae1c339fd664791cc2414e40c92c43cd9a"
+        );
+        assert_eq!(
+            derive_feedback_source_event_idempotency(&subject, UtcMicros(7), &source_event,)
+                .unwrap(),
+            legacy
+        );
+    }
+
+    #[test]
+    fn doctor_preview_identity_preserves_flat_persisted_derivation() {
+        let operation = "operation.fixture";
+        let target = "target.fixture";
+        let legacy = canonical_sha256(&(
+            "tracedecay.doctor-remediation-preview-operation.v1",
+            operation,
+            target,
+        ))
+        .unwrap();
+        assert_eq!(
+            legacy.as_str(),
+            "sha256:524d23ebc43a3f8709fe3f7d9084f7760981d9030d4d54975a8272c392cfca7d"
+        );
+        assert_eq!(
+            derive_doctor_remediation_preview_operation(&operation, &target).unwrap(),
+            legacy
+        );
+    }
+
+    #[test]
+    fn doctor_apply_identity_preserves_flat_persisted_derivation() {
+        let operation = "operation.fixture";
+        let target = "target.fixture";
+        let idempotency = "idempotency.fixture";
+        let legacy = canonical_sha256(&(
+            "tracedecay.doctor-remediation-apply-operation.v1",
+            operation,
+            target,
+            idempotency,
+        ))
+        .unwrap();
+        assert_eq!(
+            legacy.as_str(),
+            "sha256:b246429413e9f005bec08fe146d8678936875ab73c77fc698205d3a6841445aa"
+        );
+        assert_eq!(
+            derive_doctor_remediation_apply_operation(&operation, &target, &idempotency).unwrap(),
+            legacy
+        );
     }
 
     #[test]
@@ -532,5 +732,14 @@ mod tests {
     fn process_local_sequence_never_wraps_to_a_duplicate() {
         let sequence = ProcessLocalRequestSequence::starting_at(u64::MAX);
         assert!(sequence.next_number().is_err());
+    }
+
+    #[test]
+    fn mcp_connection_establishment_fails_when_entropy_is_unavailable() {
+        let authority = McpConnectionIdentityAuthority::without_entropy();
+        assert!(matches!(
+            authority.establish_connection_scope(),
+            Err(RequestIdentityError::EntropyUnavailable)
+        ));
     }
 }
