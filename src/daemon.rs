@@ -3178,6 +3178,10 @@ impl DaemonEngine {
                 let schedulers = dashboard_code_index_schedulers.clone();
                 Box::pin(async move { schedulers.dashboard_freshness(&project_root).await })
             });
+        let dashboard_feedback_status_reader =
+            crate::dashboard::feedback_api::feedback_status_reader(
+                self.invocation.feedback_runtime_registrar(),
+            );
         let context = crate::mcp::server::McpServerConstructionContext::daemon_owned(
             cg,
             handshake.scope_prefix.clone(),
@@ -3206,6 +3210,7 @@ impl DaemonEngine {
         .with_dashboard_doctor_report_reader(doctor_report_reader)
         .with_dashboard_doctor_remediation_dispatcher(doctor_remediation_dispatcher)
         .with_dashboard_code_index_freshness_reader(dashboard_code_index_freshness_reader)
+        .with_dashboard_feedback_status_reader(dashboard_feedback_status_reader)
         .with_diagnostics_lsp(diagnostic_broker)
         .with_code_index_hook_sink(code_index_hook_sink)
         .with_code_index_publication_identity(code_index_publication_identity)
@@ -4250,6 +4255,9 @@ async fn portable_project_server(
             let schedulers = dashboard_code_index_schedulers.clone();
             Box::pin(async move { schedulers.dashboard_freshness(&project_root).await })
         });
+    let dashboard_feedback_status_reader = crate::dashboard::feedback_api::feedback_status_reader(
+        invocation.feedback_runtime_registrar(),
+    );
     let context = crate::mcp::server::McpServerConstructionContext::daemon_owned(
         cg,
         handshake.scope_prefix.clone(),
@@ -4277,6 +4285,7 @@ async fn portable_project_server(
     .with_dashboard_doctor_report_reader(doctor_report_reader)
     .with_dashboard_doctor_remediation_dispatcher(doctor_remediation_dispatcher)
     .with_dashboard_code_index_freshness_reader(dashboard_code_index_freshness_reader)
+    .with_dashboard_feedback_status_reader(dashboard_feedback_status_reader)
     .with_diagnostics_lsp(diagnostic_broker)
     .with_code_index_hook_sink(code_index_hook_sink)
     .with_code_index_publication_identity(code_index_publication_identity)

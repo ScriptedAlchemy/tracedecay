@@ -464,6 +464,7 @@ pub struct ToolCallRegistryOptions<'a> {
     pub doctor_remediation_dispatcher: Option<crate::dashboard::DoctorRemediationDispatcherV1>,
     pub code_index_freshness_reader:
         Option<crate::dashboard::code_index_freshness_api::CodeIndexFreshnessReader>,
+    pub feedback_status_reader: Option<crate::dashboard::feedback_api::FeedbackStatusReader>,
     pub diagnostics_cache: Option<&'a crate::diagnostics::DiagnosticsCache>,
     pub diagnostics_lsp:
         Option<Arc<tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>>>,
@@ -498,6 +499,7 @@ impl Default for ToolCallRegistryOptions<'_> {
             doctor_report_reader: None,
             doctor_remediation_dispatcher: None,
             code_index_freshness_reader: None,
+            feedback_status_reader: None,
             diagnostics_cache: None,
             diagnostics_lsp: None,
             application_invocation_client: None,
@@ -1481,6 +1483,7 @@ async fn dispatch_session_workflow_tools(
                 options.doctor_report_reader.clone(),
                 options.doctor_remediation_dispatcher.clone(),
                 options.code_index_freshness_reader.clone(),
+                options.feedback_status_reader.clone(),
                 options.diagnostics_lsp.clone(),
             )
             .await

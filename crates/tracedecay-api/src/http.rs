@@ -471,6 +471,23 @@ where
         .with_state(owners)
 }
 
+/// Build the PR14 dashboard bindings for canonical feedback reads.
+///
+/// This is a route subset only. It uses the same handlers, request envelopes,
+/// dispatcher, and application owner as the complete HTTP application router;
+/// the dashboard does not deserialize or reconstruct feedback results.
+pub fn feedback_application_router<O>(owners: O) -> Router
+where
+    O: HttpApplicationOwners,
+{
+    Router::new()
+        .route("/get", post(feedback_get::<O>))
+        .route("/expand", post(feedback_expand::<O>))
+        .route("/list", post(feedback_list::<O>))
+        .layer(DefaultBodyLimit::max(MAX_HTTP_APPLICATION_BODY_BYTES))
+        .with_state(owners)
+}
+
 /// Build only the canonical configuration routes for an adapter that does not
 /// advertise the complete HTTP application surface.
 ///

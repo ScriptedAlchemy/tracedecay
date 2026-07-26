@@ -16,6 +16,7 @@ use super::graph_structure_api::{
 use super::read_model::{DASHBOARD_SCHEMA_REVISION_V1, DashboardEnvelopeV1};
 use super::storage_findings_api::StorageFindingsPayloadV1;
 use super::storage_telemetry_api::StorageTelemetryPayloadV1;
+use crate::application::feedback::observations::FeedbackObservationReadModelV1;
 
 #[derive(JsonSchema)]
 #[allow(dead_code)]
@@ -28,6 +29,7 @@ struct DashboardContractCatalogV1 {
     doctor_remediation_apply_request: DoctorRemediationApplyRequestV1,
     doctor_remediation: DoctorRemediationPayloadV1,
     explorer_query_run: ExplorerQueryRunV1,
+    feedback_status: DashboardEnvelopeV1<FeedbackObservationReadModelV1>,
     code_index_freshness: CodeIndexFreshnessPayloadV1,
     graph_call_chain: StructureReadV1<CallChainMeasurementV1>,
     graph_strata: StructureReadV1<StrataMeasurementV1>,

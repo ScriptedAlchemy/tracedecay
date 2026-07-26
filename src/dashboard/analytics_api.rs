@@ -49,19 +49,7 @@ pub(crate) async fn overview(State(state): State<DashboardState>) -> Json<Value>
     let durable_events = durable_analytics_rows_for_state(&state).await;
     let scope_ref = RegisteredGlobalDb::canonical_project_key(&state.project_root);
     let since = crate::tracedecay::current_timestamp().saturating_sub(30 * 86_400);
-    let observatory = match state.savings_db.as_deref() {
-        Some(db) => Some(
-            crate::application::observability::observatory_read_model(db, Some(&scope_ref), since)
-                .await,
-        ),
-        None => Some(
-            crate::application::observability::observatory_unavailable_read_model(
-                Some(&scope_ref),
-                since,
-                "observability_store_unavailable",
-            ),
-        ),
-    };
+    let observatory = Some(observatory_read_model_for_state(&state, &scope_ref, since).await);
     let hints = hint_summary(state.lcm_db.as_deref(), durable_events.as_deref()).await;
     let usage = usage_summary(state.lcm_db.as_deref(), durable_events.as_deref()).await;
     let agents = agent_usage_summary(state.lcm_db.as_deref()).await;
@@ -86,22 +74,38 @@ pub(crate) async fn overview(State(state): State<DashboardState>) -> Json<Value>
 pub(crate) async fn observatory(State(state): State<DashboardState>) -> Json<Value> {
     let scope_ref = RegisteredGlobalDb::canonical_project_key(&state.project_root);
     let since = crate::tracedecay::current_timestamp().saturating_sub(30 * 86_400);
-    let value = match state.savings_db.as_deref() {
-        Some(db) => serde_json::to_value(
-            crate::application::observability::observatory_read_model(db, Some(&scope_ref), since)
-                .await,
-        )
-        .unwrap_or(Value::Null),
-        None => serde_json::to_value(
-            crate::application::observability::observatory_unavailable_read_model(
-                Some(&scope_ref),
-                since,
-                "observability_store_unavailable",
-            ),
-        )
-        .unwrap_or(Value::Null),
-    };
+    let value =
+        serde_json::to_value(observatory_read_model_for_state(&state, &scope_ref, since).await)
+            .unwrap_or(Value::Null);
     Json(value)
+}
+
+async fn observatory_read_model_for_state(
+    state: &DashboardState,
+    scope_ref: &str,
+    since: i64,
+) -> tracedecay_application::ObservatoryReadModelV1 {
+    let mut read_model = match state.savings_db.as_deref() {
+        Some(db) => {
+            crate::application::observability::observatory_read_model(db, Some(scope_ref), since)
+                .await
+        }
+        None => crate::application::observability::observatory_unavailable_read_model(
+            Some(scope_ref),
+            since,
+            "observability_store_unavailable",
+        ),
+    };
+    let feedback = match state.feedback_status_reader.as_ref() {
+        Some(reader) => reader(state.project_root.clone()).await.ok(),
+        None => None,
+    };
+    crate::application::observability::attach_feedback_system_quality(
+        &mut read_model,
+        feedback.as_ref(),
+        Some("feedback_observations_unavailable"),
+    );
+    read_model
 }
 
 async fn agent_usage_summary(db: Option<&RegisteredGlobalDb>) -> Value {
