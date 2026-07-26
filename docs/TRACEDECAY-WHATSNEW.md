@@ -165,6 +165,12 @@ Version 3.4.0 added decorator and annotation extraction across 12 languages. Rus
 
 ## The Visualizer
 
+> **Removed.** `tracedecay visualize`, `src/visualizer.rs`, and the embedded
+> HTML file were deleted; the command no longer exists on any current build.
+> Browser-based graph exploration now lives in the dashboard's Explorer
+> workspace (`tracedecay dashboard`). The paragraph below describes the
+> feature as it stood at the time.
+
 `tracedecay visualize` serves an interactive code graph in the browser via Cytoscape.js. Right-clicking any node opens a context menu with callers, callees, call graph, and impact analysis actions. It's useful for getting a spatial sense of how a codebase is structured, especially for onboarding or architecture reviews. The implementation is a single embedded HTML file served by a lightweight HTTP handler in the tracedecay binary -- no external dependencies.
 
 ## Self-Upgrade

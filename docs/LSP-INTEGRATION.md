@@ -1,5 +1,18 @@
 # LSP Integration Design
 
+> **Status: proposal, not implemented.** Nothing in this document is wired
+> into the product. There is no `src/lsp/` module, no LSP pass in `src/sync.rs`,
+> no `--no-lsp` flag, no `TRACEDECAY_LSP` or `TRACEDECAY_LSP_TIMEOUT`
+> environment variable, and no `[lsp]` section in `tracedecay.toml`; trying any
+> of them fails. `ReferenceResolver` still resolves cross-file edges by name
+> matching, exactly as the Motivation section describes.
+>
+> TraceDecay's shipped LSP surface is a different design: a daemon-side
+> gateway/broker (`src/lsp_bridge.rs`, `src/diagnostics/lsp/`) reached through
+> `tracedecay lsp servers` and `tracedecay lsp bridge`, serving diagnostics and
+> context projection to hosts rather than enriching the sync-time graph. Read
+> this file as a proposal for the sync-time path only.
+
 Optional LSP (Language Server Protocol) pass during sync to upgrade cross-file edge accuracy. Tree-sitter remains the primary extraction engine; LSP servers, when available, replace heuristic name-matching with semantically exact definition resolution.
 
 ## Motivation
