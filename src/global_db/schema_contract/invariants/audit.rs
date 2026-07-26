@@ -16,10 +16,11 @@ const AUDIT_NAME: &str = "observation-authority";
 
 const AUDIT_VERSION: i64 = 2;
 pub(super) const MAX_BOUNDED_AUDIT_PASSES: i64 = 64;
-const DETAILED_AUDIT_CONCURRENCY: usize = 4;
+const DETAILED_AUDIT_CONCURRENCY: usize = 32;
+const DETAILED_TAIL_CONCURRENCY: usize = 4;
 // Amortize the page query across several bounded validation chunks while
 // checkpointing often enough to stay below one ordinary statement deadline.
-const DETAILED_AUDIT_CHUNKS_PER_PAGE: usize = 24;
+const DETAILED_AUDIT_CHUNKS_PER_PAGE: usize = 3;
 const MAX_DETAILED_OBSERVATIONS_PER_PAGE: usize =
     DETAILED_AUDIT_CONCURRENCY * DETAILED_AUDIT_CHUNKS_PER_PAGE;
 const PROJECTION_PROGRESS_PAGE_INTERVAL: i64 = 1;
@@ -1135,7 +1136,15 @@ async fn validate_projection_authority_suffix_pages(
             }
         }
         drop(rows);
-        for chunk in detailed_observations.chunks(DETAILED_AUDIT_CONCURRENCY) {
+        let validation_concurrency = if detailed_limit_reached {
+            DETAILED_AUDIT_CONCURRENCY
+        } else {
+            // The final partial page can contain unusually expensive composite
+            // outputs. Checkpoint smaller chunks so interruption never restarts
+            // the whole tail.
+            DETAILED_TAIL_CONCURRENCY
+        };
+        for chunk in detailed_observations.chunks(validation_concurrency) {
             try_join_all(
                 chunk
                     .iter()
@@ -1320,9 +1329,10 @@ mod tests {
 
     use super::{
         AuditCheckpoint, DETAILED_AUDIT_CHUNKS_PER_PAGE, DETAILED_AUDIT_CONCURRENCY,
-        MAX_DETAILED_OBSERVATIONS_PER_PAGE, PROJECTION_PROGRESS_PAGE_INTERVAL,
-        ensure_audit_checkpoint_schema, historical_projection_delta_required,
-        projection_audit_checkpoint_through_sequence, validate_projection_authority_suffix,
+        DETAILED_TAIL_CONCURRENCY, MAX_DETAILED_OBSERVATIONS_PER_PAGE,
+        PROJECTION_PROGRESS_PAGE_INTERVAL, ensure_audit_checkpoint_schema,
+        historical_projection_delta_required, projection_audit_checkpoint_through_sequence,
+        validate_projection_authority_suffix,
     };
     use crate::db::engine::{
         Executor, IntoParams, QueryExecutor, Result as EngineResult, Rows, TestConnection, params,
@@ -1363,6 +1373,7 @@ mod tests {
             MAX_DETAILED_OBSERVATIONS_PER_PAGE,
             DETAILED_AUDIT_CONCURRENCY * DETAILED_AUDIT_CHUNKS_PER_PAGE
         );
+        assert!(DETAILED_TAIL_CONCURRENCY < DETAILED_AUDIT_CONCURRENCY);
         assert_eq!(PROJECTION_PROGRESS_PAGE_INTERVAL, 1);
     }
 
