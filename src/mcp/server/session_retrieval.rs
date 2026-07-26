@@ -143,7 +143,7 @@ impl DaemonSessionRetrievalRoot {
         })
     }
 
-    #[cfg(feature = "test-transport")]
+    #[cfg(any(test, feature = "test-transport"))]
     pub(crate) fn project_for_test(cg: &TraceDecay) -> Self {
         let project_root = cg.project_root().to_path_buf();
         let project_id = cg.store_layout().identity.project_id.clone();
@@ -576,6 +576,15 @@ impl DaemonSessionRetrievalService {
                     SessionRetrievalUnavailableReason::TemporalStoreUnavailable,
                 ),
             ),
+            SessionRetrievalOutcome::CursorManifestLimitExceeded {
+                kind,
+                observed,
+                maximum,
+            } => SessionRetrievalServiceOutcome::CursorManifestLimitExceeded {
+                kind,
+                observed,
+                maximum,
+            },
             SessionRetrievalOutcome::BudgetExhausted => {
                 SessionRetrievalServiceOutcome::BudgetExhausted
             }
@@ -1181,6 +1190,9 @@ fn describe_retrieval_outcome(
         SessionRetrievalOutcome::Deleted => LcmDescribeServiceOutcome::Deleted,
         SessionRetrievalOutcome::Denied => LcmDescribeServiceOutcome::Denied,
         SessionRetrievalOutcome::BudgetExhausted => LcmDescribeServiceOutcome::BudgetExhausted,
+        SessionRetrievalOutcome::CursorManifestLimitExceeded { .. } => {
+            LcmDescribeServiceOutcome::BudgetExhausted
+        }
         SessionRetrievalOutcome::Cancelled => LcmDescribeServiceOutcome::Cancelled,
         SessionRetrievalOutcome::Stale { .. }
         | SessionRetrievalOutcome::Unavailable
@@ -1204,6 +1216,9 @@ fn expand_retrieval_outcome(
         SessionRetrievalOutcome::Deleted => LcmExpandServiceOutcome::Deleted,
         SessionRetrievalOutcome::Denied => LcmExpandServiceOutcome::Denied,
         SessionRetrievalOutcome::BudgetExhausted => LcmExpandServiceOutcome::BudgetExhausted,
+        SessionRetrievalOutcome::CursorManifestLimitExceeded { .. } => {
+            LcmExpandServiceOutcome::BudgetExhausted
+        }
         SessionRetrievalOutcome::Cancelled => LcmExpandServiceOutcome::Cancelled,
         SessionRetrievalOutcome::Stale { .. }
         | SessionRetrievalOutcome::Unavailable
