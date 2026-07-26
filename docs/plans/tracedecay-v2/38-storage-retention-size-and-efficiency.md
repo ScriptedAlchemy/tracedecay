@@ -22,12 +22,15 @@ preservation, current-frontier preservation, authority-loss rollback, and
 trigger restoration.
 
 Size evidence published in this plan remains file- and directory-level only.
-`SqliteStoreSizeTelemetryPort` now implements `StoreSizeTelemetryPort` over the
-runtime's read-only SQLite health reader, including `dbstat` table-payload
-samples, and Doctor calls its store-size and table-growth reads. That capability
-does not retroactively validate any ad hoc table-size estimate: no plan status
-may publish a per-table byte figure until the product path reproduces it. In
-particular, `source_cursor_advances` lives inside the single profile
+`SqliteStoreSizeTelemetryPort` in
+`crates/tracedecay-rusqlite-runtime/src/telemetry/store_size.rs` implements
+`StoreSizeTelemetryPort` over the runtime's read-only SQLite health reader,
+including `dbstat` table-payload samples. The daemon Doctor kernel emits those
+per-table samples only as tracing; they are not Doctor findings, dashboard
+payloads, or output from the separate CLI Doctor implementation. The dashboard
+serves per-store size and free ratio plus whole-store history. No plan status
+may publish a per-table byte figure until a user-visible product path reproduces
+it. In particular, `source_cursor_advances` lives inside the single profile
 `global.db`, whose entire measured size is 0.98 GiB; its retention obstacle is
 qualitative, not a table-size claim.
 
@@ -109,10 +112,11 @@ measurements, not inferred table sizes.
    sibling files.
 6. **Compaction policy.** The daemon schedules incremental vacuum/compaction
    for stores whose free-page ratio crosses a threshold, off the hot path.
-7. **Size observability and budgets.** Per-store size, per-table growth, and
-   free-page ratio are first-class telemetry, cheap to query. Doctor exposes
-   a storage finding family (over-budget store, orphan store, stale branch
-   DBs, debris present, retention backlog). Owners can set soft budgets;
+7. **Size observability and budgets.** Per-store size and free-page ratio are
+   first-class user-visible telemetry, cheap to query. Per-table growth remains
+   daemon tracing until it has a typed finding or dashboard/CLI payload. Doctor
+   exposes a storage finding family (over-budget store, orphan store, stale
+   branch DBs, debris present, retention backlog). Owners can set soft budgets;
    exceeding one is a finding, never silent.
 
 ## Delivery
@@ -132,12 +136,13 @@ measurements, not inferred table sizes.
   daemon-authorized retention owner. The exact receipt supporting the current
   source frontier is retained; the delete trigger is suspended and restored
   inside one immediate transaction, with rollback on authority loss.
-- `StoreSizeTelemetryPort` is implemented by
-  `SqliteStoreSizeTelemetryPort`. Its first table read establishes scoped
-  watermarks, later reads return `dbstat` payload-growth samples, and Doctor
-  consumes those reads without converting failures to zero. This delivers the
-  §7 measurement source, not acceptance of historical ad hoc per-table
-  figures.
+- `StoreSizeTelemetryPort` is implemented by `SqliteStoreSizeTelemetryPort` at
+  `crates/tracedecay-rusqlite-runtime/src/telemetry/store_size.rs`. Its first
+  table read establishes scoped watermarks and later reads return `dbstat`
+  payload-growth samples. The daemon Doctor kernel emits those samples as
+  tracing only; the dashboard exposes per-store size/free ratio and whole-store
+  history, while CLI Doctor uses a separate path. This is not a user-visible
+  per-table reporting surface or acceptance of historical ad hoc figures.
 - Direct tests only: seeded stores with stale branches/orphans/debris must
   produce the findings and the collections; retention windows must be
   provable with ordinary tests. They create no locked gate or PR acceptance

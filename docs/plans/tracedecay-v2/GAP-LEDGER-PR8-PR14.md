@@ -151,10 +151,14 @@ the temporary-alias deletion slices.
   `source_cursor_advances` are reclaimed by the daemon-authorized retention
   transaction while preserving the current-frontier receipt and restoring the
   immutable delete trigger before commit. No historical per-table byte claim
-  has been reproduced through the product, but
-  `SqliteStoreSizeTelemetryPort` now implements scoped store-size and `dbstat`
-  table-growth telemetry consumed by Doctor. Plan 38 also records that the
-  reachable debris collector originally missed bare `.corrupt` artifacts
+  has been reproduced through the product. `SqliteStoreSizeTelemetryPort` at
+  `crates/tracedecay-rusqlite-runtime/src/telemetry/store_size.rs` implements
+  scoped store-size and `dbstat` table-growth reads, but the daemon Doctor
+  kernel emits per-table samples only as tracing. The dashboard exposes
+  per-store size/free ratio and whole-store history; no Doctor finding,
+  dashboard payload, or CLI Doctor output exposes per-table samples. Plan 38
+  also records that the reachable debris collector originally missed bare
+  `.corrupt` artifacts
   until `985cc5d4b`, that live branch stores are full graph copies rather than
   lightweight deltas, and that code-index generation publication has no
   retention pass.
