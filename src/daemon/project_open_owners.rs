@@ -731,6 +731,17 @@ fn unavailable_advisory_hook_sink() -> Arc<Pr13AdvisoryHookNoticeSinkV1> {
     Arc::new(unavailable_advisory_hook_notice)
 }
 
+fn production_advisory_hook_notice_sink(
+    scope: FeedbackScopeV1,
+) -> (
+    Arc<Pr13AdvisoryHookNoticeQueueV1>,
+    Arc<Pr13AdvisoryHookNoticeSinkV1>,
+) {
+    let queue = Pr13AdvisoryHookNoticeQueueV1::new(scope);
+    let sink = queue.sink();
+    (queue, sink)
+}
+
 async fn load_project_open_context_scout_model_config(
     profile_root: &Path,
     dashboard_root: &Path,
@@ -1445,8 +1456,7 @@ async fn register_production_advisory_owner(
             message: "project-open CI anchor store failed: invalid feedback scope".to_string(),
         })?,
     ) as _;
-    let hook_notices = Pr13AdvisoryHookNoticeQueueV1::new(feedback_scope.clone());
-    let hook_v2 = hook_notices.sink();
+    let (hook_notices, hook_v2) = production_advisory_hook_notice_sink(feedback_scope.clone());
     let legacy_hook = unavailable_advisory_hook_sink();
     let (hook_project_id, hook_worktree_id) = crate::hooks::hook_v2_scope_locators(&resolved_scope);
     let feedback_runtime = feedback_cycle.feedback_runtime();
