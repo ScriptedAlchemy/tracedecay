@@ -194,15 +194,8 @@ fn capability(
             spec.description,
             vec![spec.example.to_owned()],
         )?,
-        request_schema: schema(spec.request_schema, 65_536)?,
-        result_schema: schema(
-            spec.result_schema,
-            if spec.effect == EffectClass::Read {
-                4_194_304
-            } else {
-                8_192
-            },
-        )?,
+        request_schema: schema(spec.request_schema)?,
+        result_schema: schema(spec.result_schema)?,
         effect: spec.effect,
         scope: ScopeRequirement::new(vec![
             ScopeDimension::Project,
@@ -296,14 +289,7 @@ fn terminal_states(effect: EffectClass) -> Vec<TerminalState> {
 fn handler_descriptor(
     spec: &SurfaceSpec,
 ) -> Result<ApplicationHandlerDescriptor, ApplicationContractError> {
-    let result_schema = schema(
-        spec.result_schema,
-        if spec.effect == EffectClass::Read {
-            4_194_304
-        } else {
-            8_192
-        },
-    )?;
+    let result_schema = schema(spec.result_schema)?;
     ApplicationHandlerDescriptor::new(
         ApplicationOperation::new(
             CapabilityId::new(spec.capability)?,
@@ -311,13 +297,13 @@ fn handler_descriptor(
             ResultContractRef::from_schema(&result_schema),
             true,
         ),
-        schema(spec.request_schema, 65_536)?,
+        schema(spec.request_schema)?,
         result_schema,
     )
 }
 
-fn schema(id: &str, maximum_bytes: u32) -> Result<SchemaRef, ApplicationContractError> {
-    Ok(SchemaRef::new(SchemaId::new(id)?, 1, maximum_bytes)?)
+fn schema(id: &str) -> Result<SchemaRef, ApplicationContractError> {
+    Ok(SchemaRef::new(SchemaId::new(id)?, 1)?)
 }
 
 #[cfg(test)]

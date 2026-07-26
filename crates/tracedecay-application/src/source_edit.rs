@@ -474,7 +474,7 @@ const SOURCE_EDIT_SURFACES: [BindingSurface; 2] = [BindingSurface::Cli, BindingS
 pub fn source_edit_operation(
     kind: SourceEditKind,
 ) -> Result<ApplicationOperation, ApplicationContractError> {
-    let result_schema = source_edit_schema(kind, "result", 1_048_576)?;
+    let result_schema = source_edit_schema(kind, "result")?;
     Ok(ApplicationOperation::new(
         CapabilityId::new(format!(
             "capability.application.source-edit.{}",
@@ -496,8 +496,8 @@ pub fn source_edit_handler_descriptors()
         .map(|kind| {
             ApplicationHandlerDescriptor::new(
                 source_edit_operation(kind)?,
-                source_edit_schema(kind, "request", 1_048_576)?,
-                source_edit_schema(kind, "result", 1_048_576)?,
+                source_edit_schema(kind, "request")?,
+                source_edit_schema(kind, "result")?,
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -550,8 +550,8 @@ pub fn source_edit_catalog_contribution() -> Result<CatalogContributionV1, Appli
                 "Preview or apply one project-scoped source edit and optionally verify diagnostics.",
                 vec![format!("Use {operation_name} on this project")],
             )?,
-            request_schema: source_edit_schema(kind, "request", 1_048_576)?,
-            result_schema: source_edit_schema(kind, "result", 1_048_576)?,
+            request_schema: source_edit_schema(kind, "request")?,
+            result_schema: source_edit_schema(kind, "result")?,
             effect: EffectClass::SourceEdit,
             scope: ScopeRequirement::new(vec![
                 ScopeDimension::Project,
@@ -699,14 +699,12 @@ fn source_edit_reconciliation_schema(suffix: &str) -> Result<SchemaRef, Applicat
     Ok(SchemaRef::new(
         SchemaId::new(format!("schema.application.source-edit.reconcile.{suffix}"))?,
         1,
-        1_048_576,
     )?)
 }
 
 fn source_edit_schema(
     kind: SourceEditKind,
     suffix: &str,
-    maximum_bytes: u32,
 ) -> Result<SchemaRef, ApplicationContractError> {
     Ok(SchemaRef::new(
         SchemaId::new(format!(
@@ -715,7 +713,6 @@ fn source_edit_schema(
             suffix
         ))?,
         1,
-        maximum_bytes,
     )?)
 }
 
