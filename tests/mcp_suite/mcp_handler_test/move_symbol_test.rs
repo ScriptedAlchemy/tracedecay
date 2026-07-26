@@ -201,11 +201,11 @@ async fn test_move_symbol_only_prefers_callable_for_bare_names() {
         None,
     )
     .await
-    .expect_err("qualified function/struct collision must refuse the move");
-    assert!(
-        qualified.to_string().contains("is ambiguous"),
-        "qualified error: {qualified}"
-    );
+    .expect("qualified collision returns a durable failed effect");
+    let qualified_payload = move_payload(&qualified);
+    assert_eq!(qualified_payload["success"], false);
+    assert_eq!(qualified_payload["failed"], true);
+    assert_eq!(qualified_payload["replayed"], false);
 
     let wrong_module = handle_tool_call(
         &cg,
@@ -215,11 +215,11 @@ async fn test_move_symbol_only_prefers_callable_for_bare_names() {
         None,
     )
     .await
-    .expect_err("wrong module must not fall back to the bare callable");
-    assert!(
-        wrong_module.to_string().contains("not found"),
-        "wrong-module error: {wrong_module}"
-    );
+    .expect("wrong module returns a durable failed effect");
+    let wrong_module_payload = move_payload(&wrong_module);
+    assert_eq!(wrong_module_payload["success"], false);
+    assert_eq!(wrong_module_payload["failed"], true);
+    assert_eq!(wrong_module_payload["replayed"], false);
 
     assert_eq!(
         fs::read_to_string(project.join("src/a.rs")).unwrap(),
