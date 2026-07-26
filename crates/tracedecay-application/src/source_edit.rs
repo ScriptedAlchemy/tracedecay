@@ -698,44 +698,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn source_edit_catalog_binds_every_typed_request_to_cli_and_mcp() {
+    fn source_edit_catalog_does_not_advertise_unresolved_bindings() {
         let contribution = source_edit_catalog_contribution().unwrap();
         assert_eq!(
             contribution.capabilities().len(),
             SOURCE_EDIT_KINDS.len() + 1
         );
-        assert_eq!(
-            contribution.bindings().len(),
-            (SOURCE_EDIT_KINDS.len() + 1) * SOURCE_EDIT_SURFACES.len()
-        );
-        for kind in SOURCE_EDIT_KINDS {
-            let operation = source_edit_operation(kind).unwrap();
-            assert_eq!(
-                operation.capability_id().as_str(),
-                format!(
-                    "capability.application.source-edit.{}",
-                    kind.operation_name().replace('_', "-")
-                )
-            );
-            for surface in SOURCE_EDIT_SURFACES {
-                assert!(contribution.bindings().iter().any(|binding| {
-                    binding.surface() == surface
-                        && binding.operation().as_str() == kind.operation_name()
-                }));
-            }
-        }
-        let reconciliation = source_edit_reconciliation_operation().unwrap();
-        assert!(
-            contribution
-                .capabilities()
-                .iter()
-                .any(|capability| { capability.capability_id() == reconciliation.capability_id() })
-        );
-        for surface in SOURCE_EDIT_SURFACES {
-            assert!(contribution.bindings().iter().any(|binding| {
-                binding.surface() == surface
-                    && binding.operation().as_str() == "source_edit_reconcile"
-            }));
+        assert!(contribution.bindings().is_empty());
+        for capability in contribution.capabilities() {
+            assert!(!capability.availability().is_callable());
+            assert!(capability.binding_ids().is_empty());
+            assert!(capability.profile_eligibility().is_empty());
         }
     }
 }

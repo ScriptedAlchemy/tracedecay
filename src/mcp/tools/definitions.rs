@@ -806,6 +806,26 @@ mod tests {
     }
 
     #[test]
+    fn feedback_tools_without_client_constructible_requests_are_not_advertised() {
+        let definitions = get_tool_definitions();
+        for name in [
+            "tracedecay_feedback_diagnostics",
+            "tracedecay_feedback_get",
+            "tracedecay_feedback_expand",
+            "tracedecay_feedback_list",
+            "tracedecay_feedback_impact",
+            "tracedecay_affected_tests",
+        ] {
+            assert!(
+                definitions
+                    .iter()
+                    .all(|definition| definition.name != name),
+                "{name} must not be advertised until its request authority is reachable"
+            );
+        }
+    }
+
+    #[test]
     fn test_context_description_scopes_budget_and_frees_narrow_tools() {
         let desc = context_description(5000, 4);
         assert!(

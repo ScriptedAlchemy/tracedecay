@@ -1575,6 +1575,16 @@ mod tests {
     }
 
     #[test]
+    fn retriever_contract_rejects_lanes_without_runtime_adapters() {
+        for unsupported in ["temporal", "task_session", "diagnostic"] {
+            assert!(
+                serde_json::from_str::<RetrieverKind>(&format!("\"{unsupported}\"")).is_err(),
+                "{unsupported} must not be advertised without a runtime adapter"
+            );
+        }
+    }
+
+    #[test]
     fn fallback_subpayload_requires_all_pr9_lanes_and_a_matching_digest() {
         let incomplete = subpayload(&[RetrieverKind::ExactLiteral, RetrieverKind::Lexical]);
         assert!(incomplete.validate().is_err());

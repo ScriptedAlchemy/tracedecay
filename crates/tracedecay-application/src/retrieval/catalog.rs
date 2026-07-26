@@ -395,3 +395,19 @@ fn symbol_search_scope() -> Result<ScopeRequirement, ApplicationContractError> {
         ScopeDimension::Resource,
     ])?)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn symbol_search_advertises_only_supported_temporal_modes() {
+        let contribution = symbol_search_contribution().expect("symbol-search contribution");
+        let primitive = contribution
+            .retrieval_primitives()
+            .first()
+            .expect("symbol-search retrieval primitive");
+
+        assert_eq!(primitive.temporal_modes(), &[TemporalMode::Current]);
+    }
+}
