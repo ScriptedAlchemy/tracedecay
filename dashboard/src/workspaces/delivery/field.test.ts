@@ -4,7 +4,10 @@ import {
   composeDeliveryField,
   latestSeen,
 } from './field.ts';
-import type { ProjectRegistryEntry, ProjectRepoGroup } from './contracts.ts';
+import type {
+  ProjectRegistryEntry,
+  ProjectRepoGroup,
+} from '../../contracts/uncontracted/projects.ts';
 
 const NOW = 1_784_958_000;
 const DAY = 86_400;

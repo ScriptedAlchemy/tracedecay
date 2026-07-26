@@ -36,7 +36,10 @@
  * something real: these working copies share one git directory. The hub sits at
  * its checkouts' centroid, which is the honest position for "these ones".
  */
-import type { ProjectRegistryEntry, ProjectRepoGroup } from './contracts.ts';
+import type {
+  ProjectRegistryEntry,
+  ProjectRepoGroup,
+} from '../../contracts/uncontracted/projects.ts';
 
 const DAY_SECONDS = 86_400;
 

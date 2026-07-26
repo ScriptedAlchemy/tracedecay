@@ -33,10 +33,12 @@ import { DeliveryFieldPlot } from './DeliveryField.tsx';
 import { composeDeliveryField, type DeliveryBody, type DeliveryField } from './field.ts';
 import {
   DeliveryOverviewPayloadSchema,
-  DeliveryProjectsPayloadSchema,
   type DeliveryOverviewPayload,
+} from '../../contracts/uncontracted/delivery.ts';
+import {
+  ProjectsPayloadSchema,
   type ProjectRepoGroup,
-} from './contracts.ts';
+} from '../../contracts/uncontracted/projects.ts';
 
 /**
  * Delivery — the daemon's git surface, read as a field rather than scrolled as
@@ -57,7 +59,7 @@ export function DeliveryPage() {
   const projects = useLegacy(
     ['delivery', 'projects'],
     '/api/projects',
-    DeliveryProjectsPayloadSchema,
+    ProjectsPayloadSchema,
   );
   const overview = useQuery({
     queryKey: ['delivery', 'overview'],
