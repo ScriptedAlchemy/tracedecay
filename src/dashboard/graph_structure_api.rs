@@ -232,8 +232,8 @@ pub(super) struct TestMapMeasurementV1 {
     test_files: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
-struct NodeSessionsMeasurementV1 {
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub(super) struct NodeSessionsMeasurementV1 {
     node: NodeRefV1,
     linkage: super::loom_api::LoomFileSessionProjectionV1,
     available_granularities: Vec<&'static str>,
