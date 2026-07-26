@@ -81,8 +81,9 @@ the temporary-alias deletion slices.
 - `11-dashboard-frontend.md`: twelve-workspace/embed reachability is recorded;
   abandoned projection names are removed; live Rust `EvidencePacket` is
   protected.
-- `11b-structure-visualization.md`: five backend endpoints are registered;
-  their missing frontend consumers are the open work.
+- `11b-structure-visualization.md`: all five endpoints are registered and now
+  consumed through typed Code-workspace surfaces; the former backend-only gap
+  is closed, without converting implementation into acceptance.
 - `13-research-provenance-and-context-anchors.md`: core anchors are delivered;
   dedicated GitHub-stack targets remain a named PR13 follow-up.
 - `14-historical-failure-regression-matrix.md`: already states that it owns
