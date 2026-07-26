@@ -3,7 +3,9 @@
 use crate::support::*;
 use serde_json::{Value, json};
 use std::fs;
-use tracedecay::types::{Edge, EdgeKind, Node, NodeKind, Visibility};
+use std::process::Command;
+use tempfile::TempDir;
+use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 
 // 1. tracedecay_search
 // ---------------------------------------------------------------------------
@@ -891,100 +893,90 @@ async fn test_affected() {
     assert!(text.contains("count"), "should have count key");
 }
 
-fn affected_fixture_node(id: &str, name: &str, file_path: &str) -> Node {
-    Node {
-        id: id.to_string(),
-        kind: NodeKind::Function,
-        name: name.to_string(),
-        qualified_name: format!("fixture::{name}"),
-        file_path: file_path.to_string(),
-        start_line: 1,
-        attrs_start_line: 1,
-        end_line: 5,
-        start_column: 0,
-        end_column: 1,
-        signature: Some(format!("fn {name}()")),
-        docstring: None,
-        visibility: Visibility::Pub,
-        is_async: false,
-        branches: 0,
-        loops: 0,
-        returns: 0,
-        max_nesting: 0,
-        unsafe_blocks: 0,
-        unchecked_calls: 0,
-        assertions: 0,
-        updated_at: 1,
-        parent_id: None,
-    }
-}
-
 #[tokio::test]
 async fn affected_central_daemon_fixture_preserves_set_and_ranks_near_tests_over_mcp() {
-    let (cg, _env, _dir) = setup_empty_project().await;
-    let nodes = [
-        affected_fixture_node("daemon", "daemon", "src/daemon.rs"),
-        affected_fixture_node("mcp", "mcp_server", "src/mcp/server.rs"),
-        affected_fixture_node("serve", "serve", "src/serve.rs"),
-        affected_fixture_node(
-            "direct-test",
-            "daemon_direct",
+    let isolation = TempDir::new().unwrap();
+    let project = isolation.path().join("project");
+    for directory in ["src/mcp", "tests"] {
+        fs::create_dir_all(project.join(directory)).unwrap();
+    }
+    for (path, source) in [
+        (
+            "Cargo.toml",
+            "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+        ),
+        (
+            "src/lib.rs",
+            "pub mod daemon;\npub mod mcp;\npub mod serve;\n",
+        ),
+        ("src/daemon.rs", "pub fn daemon() {}\n"),
+        ("src/mcp/mod.rs", "pub mod server;\n"),
+        (
+            "src/mcp/server.rs",
+            "use crate::daemon::daemon;\npub fn mcp_server() { daemon(); }\n",
+        ),
+        (
+            "src/serve.rs",
+            "use crate::mcp::server::mcp_server;\npub fn serve() { mcp_server(); }\n",
+        ),
+        (
             "tests/daemon_direct_test.rs",
+            "use fixture::daemon::daemon;\n#[test]\nfn daemon_direct() { daemon(); }\n",
         ),
-        affected_fixture_node("near-test", "mcp_near", "tests/mcp_near_test.rs"),
-        affected_fixture_node(
-            "transitive-test",
-            "serve_transitive",
+        (
+            "tests/mcp_near_test.rs",
+            "use fixture::mcp::server::mcp_server;\n#[test]\nfn mcp_near() { mcp_server(); }\n",
+        ),
+        (
             "tests/serve_transitive_test.rs",
+            "use fixture::serve::serve;\n#[test]\nfn serve_transitive() { serve(); }\n",
         ),
-        affected_fixture_node("unrelated-test", "unrelated", "tests/unrelated_test.rs"),
-    ];
-    cg.db().insert_nodes(&nodes).await.unwrap();
-    cg.db()
-        .insert_edges(&[
-            Edge {
-                source: "direct-test".to_string(),
-                target: "daemon".to_string(),
-                kind: EdgeKind::Calls,
-                line: Some(1),
-            },
-            Edge {
-                source: "mcp".to_string(),
-                target: "daemon".to_string(),
-                kind: EdgeKind::Uses,
-                line: Some(1),
-            },
-            Edge {
-                source: "near-test".to_string(),
-                target: "mcp".to_string(),
-                kind: EdgeKind::Calls,
-                line: Some(1),
-            },
-            Edge {
-                source: "serve".to_string(),
-                target: "mcp".to_string(),
-                kind: EdgeKind::Uses,
-                line: Some(1),
-            },
-            Edge {
-                source: "transitive-test".to_string(),
-                target: "serve".to_string(),
-                kind: EdgeKind::Calls,
-                line: Some(1),
-            },
-        ])
+        (
+            "tests/unrelated_test.rs",
+            "#[test]\nfn unrelated() { assert!(true); }\n",
+        ),
+    ] {
+        fs::write(project.join(path), source).unwrap();
+    }
+    for args in [
+        &["init", "--quiet"][..],
+        &["add", "."][..],
+        &[
+            "-c",
+            "user.name=TraceDecay Tests",
+            "-c",
+            "user.email=tests@tracedecay.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "fixture",
+        ][..],
+    ] {
+        assert!(
+            Command::new("git")
+                .args(args)
+                .current_dir(&project)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    let harness = ProductionProjectCompositionHarnessV1::open(isolation.path(), [project.clone()])
         .await
         .unwrap();
-
-    let server = real_mcp_server(cg).await;
-    let result = handle_real_server_tool_call(
-        &server,
-        "tracedecay_affected",
-        json!({"files": ["src/daemon.rs"], "depth": 5}),
-    )
-    .await;
-    let payload: Value =
-        serde_json::from_str(extract_real_server_text(&result)).expect("affected JSON payload");
+    let response = harness
+        .call_tool(
+            &project,
+            "tracedecay_affected",
+            json!({"files": ["src/daemon.rs"], "depth": 5, "format": "json"}),
+        )
+        .await;
+    let result = response
+        .expect("production invocation succeeds")
+        .result
+        .unwrap();
+    let text = result["content"][0]["text"].as_str().unwrap();
+    let payload: Value = serde_json::from_str(text).expect("affected JSON payload");
 
     assert_eq!(
         payload["affected_tests"],
