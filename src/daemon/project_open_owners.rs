@@ -485,11 +485,18 @@ async fn invoke_project_open_source_edit(
     let dry_run = invocation.edit.dry_run();
     let idempotency_key = match invocation.idempotency_key {
         Some(key) => key,
-        None if dry_run => tracedecay_application::IdempotencyKey::new(format!(
-            "preview.{}",
-            context.request_id().as_str()
-        ))
-        .map_err(source_edit_contract_error)?,
+        None if dry_run => {
+            let preview_identity = canonical_sha256(&(
+                "tracedecay.source-edit-preview-idempotency.v1",
+                context.request_id(),
+                &invocation.edit,
+            ))
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("source edit preview identity failed: {error}"),
+            })?;
+            tracedecay_application::IdempotencyKey::new(format!("preview.{preview_identity}"))
+                .map_err(source_edit_contract_error)?
+        }
         None => {
             return Err(TraceDecayError::Config {
                 message: "source edit apply requires an idempotency key".to_owned(),

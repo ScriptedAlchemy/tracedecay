@@ -207,6 +207,30 @@ impl RuntimeExternalSourceStore {
             observation.observation_id(),
         ))
         .map_err(invalid)?;
+        let native_object = SourceNativeObjectIdV1::new(
+            canonical_sha256(&(
+                "tracedecay.host-observation.native-object.v1",
+                observation.observation_id(),
+            ))
+            .map_err(invalid)?,
+        );
+        let sanitized_digest =
+            ManifestDigest::new(observation.payload_reference().digest().as_str())
+                .map_err(invalid)?;
+        let source_observation = SourceObjectObservationV1::new(
+            native_object.clone(),
+            SourceObjectRevisionV1::new(
+                canonical_sha256(&(
+                    "tracedecay.host-observation.revision.v1",
+                    observation.observation_id(),
+                    observation.payload_reference(),
+                ))
+                .map_err(invalid)?,
+            ),
+            sanitized_digest.clone(),
+            SourceContentStateV1::Live,
+        )
+        .map_err(invalid)?;
         let request_digest = canonical_sha256(&(
             "tracedecay.host-observation.request.v1",
             observation.observation_id(),
@@ -226,7 +250,7 @@ impl RuntimeExternalSourceStore {
                         .to_owned(),
                 ));
             }
-            return if existing.request_digest() == &request_digest {
+            return if state.projected_objects().get(&native_object) == Some(&source_observation) {
                 Ok(existing.clone())
             } else {
                 Err(RuntimeExternalSourceErrorV1::IdempotencyConflict)
@@ -260,9 +284,6 @@ impl RuntimeExternalSourceStore {
             ))
             .map_err(invalid)?,
         );
-        let sanitized_digest =
-            ManifestDigest::new(observation.payload_reference().digest().as_str())
-                .map_err(invalid)?;
         let refresh = SourceRefreshReceiptV1::new(
             binding_identity.clone(),
             provider.clone(),
@@ -299,26 +320,6 @@ impl RuntimeExternalSourceStore {
             sequence,
             previous_partition.and_then(SourcePartitionFrontierV1::last_complete_snapshot),
             envelope.envelope_digest().clone(),
-        )
-        .map_err(invalid)?;
-        let source_observation = SourceObjectObservationV1::new(
-            SourceNativeObjectIdV1::new(
-                canonical_sha256(&(
-                    "tracedecay.host-observation.native-object.v1",
-                    observation.observation_id(),
-                ))
-                .map_err(invalid)?,
-            ),
-            SourceObjectRevisionV1::new(
-                canonical_sha256(&(
-                    "tracedecay.host-observation.revision.v1",
-                    observation.observation_id(),
-                    observation.payload_reference(),
-                ))
-                .map_err(invalid)?,
-            ),
-            sanitized_digest,
-            SourceContentStateV1::Live,
         )
         .map_err(invalid)?;
         let evidence = SourceObservationEvidenceV1::new(
