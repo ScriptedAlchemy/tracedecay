@@ -5,10 +5,10 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-#[cfg(unix)]
-use std::os::unix::fs::MetadataExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use tracedecay_domain::{FactOwnerV1, ProjectId, SourceStoreId};
 use tracedecay_store::CompatibilityLegacyMemoryCutoverProgressV1;
 
