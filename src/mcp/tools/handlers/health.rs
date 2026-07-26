@@ -5,10 +5,12 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use tracedecay_application::{
+use tracedecay_application::retrieval::{
     HealthDeltaCoverageV1, HealthDeltaCurrentnessV1, HealthDeltaPointV1, HealthDeltaResult,
-    HealthDeltaScopeV1, HealthDimensionDeltaV1, HealthDimensionPointV1, ObservabilityApplicationV1,
-    ObservabilityHorizonV1, ObservabilityQueryV1,
+    HealthDeltaScopeV1, HealthDimensionDeltaV1, HealthDimensionPointV1,
+};
+use tracedecay_application::{
+    ObservabilityApplicationV1, ObservabilityHorizonV1, ObservabilityQueryV1,
 };
 use tracedecay_domain::{
     CoverageStateV1, HealthDimensionObservedV1, HealthSnapshotObservedV1, ManifestDigest,
