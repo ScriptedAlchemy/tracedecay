@@ -23,6 +23,7 @@ mod stats;
 mod tx;
 mod unresolved;
 
+pub(crate) use access::OwnedMaintenanceDatabaseScope;
 #[doc(hidden)]
 pub use access::enter_maintenance_database_scope;
 #[cfg(windows)]
@@ -31,7 +32,8 @@ pub(crate) use access::{DaemonDatabaseScope, MaintenanceDatabaseScope};
 pub use access::{DatabaseAuthority, DatabaseAuthorityRole};
 pub(crate) use access::{
     DatabaseDeletionFence, DatabaseDeletionStates, WriterOwnership, database_path_is_tombstoned,
-    enter_daemon_database_scope, is_lock_contended, probe_writer_owner,
+    enter_daemon_database_scope, enter_owned_maintenance_database_scope, is_lock_contended,
+    probe_writer_owner,
 };
 #[cfg(any(test, feature = "test-transport"))]
 pub use connection::TestDatabaseRuntimeMode;
