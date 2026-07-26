@@ -34,6 +34,7 @@ pub fn application_catalog_contributions()
         crate::configuration::configuration_surface_catalog_contribution()?,
         crate::context_scout::context_scout_surface_catalog_contribution()?,
         crate::feedback::feedback_surface_catalog_contribution()?,
+        crate::retained_surfaces::retained_surface_catalog_contribution()?,
         crate::source_edit::source_edit_catalog_contribution()?,
     ])
 }
@@ -44,7 +45,7 @@ struct PrimitiveReadSpec {
     use_case: &'static str,
 }
 
-const PRIMITIVE_READ_SPECS: [PrimitiveReadSpec; 16] = [
+const PRIMITIVE_READ_SPECS: [PrimitiveReadSpec; 17] = [
     primitive_spec("code_signature_search"),
     primitive_spec("code_implementations"),
     primitive_spec("code_type_hierarchy"),
@@ -59,9 +60,30 @@ const PRIMITIVE_READ_SPECS: [PrimitiveReadSpec; 16] = [
     primitive_spec("module_api"),
     primitive_spec("file_metadata"),
     primitive_spec("health_read"),
+    primitive_spec("health_delta"),
     primitive_spec("storage_status"),
     primitive_spec("diagnostics_read"),
 ];
+
+const PRE_DASHBOARD_PRIMITIVE_SURFACES: [BindingSurface; 3] = [
+    BindingSurface::Cli,
+    BindingSurface::Mcp,
+    BindingSurface::Http,
+];
+
+const PR14_DASHBOARD_PRIMITIVE_SURFACES: [BindingSurface; 4] = [
+    BindingSurface::Cli,
+    BindingSurface::Mcp,
+    BindingSurface::Http,
+    BindingSurface::Dashboard,
+];
+
+fn primitive_read_surfaces(spec: &PrimitiveReadSpec) -> &'static [BindingSurface] {
+    match spec.operation {
+        "health_read" | "storage_status" | "diagnostics_read" => &PR14_DASHBOARD_PRIMITIVE_SURFACES,
+        _ => &PRE_DASHBOARD_PRIMITIVE_SURFACES,
+    }
+}
 
 const fn primitive_spec(operation: &'static str) -> PrimitiveReadSpec {
     PrimitiveReadSpec {
@@ -130,18 +152,20 @@ pub fn primitive_read_handler_descriptors()
 
 pub fn primitive_read_contribution() -> Result<CatalogContributionV1, ApplicationContractError> {
     let mut capabilities = Vec::with_capacity(PRIMITIVE_READ_SPECS.len());
-    let mut bindings = Vec::with_capacity(PRIMITIVE_READ_SPECS.len() * 3);
+    let mut bindings = Vec::with_capacity(
+        PRIMITIVE_READ_SPECS
+            .iter()
+            .map(|spec| primitive_read_surfaces(spec).len())
+            .sum(),
+    );
     for spec in &PRIMITIVE_READ_SPECS {
         let capability_id = CapabilityId::new(format!(
             "capability.application.primitive.{}",
             spec.capability.replace('_', "-")
         ))?;
-        let mut binding_ids = Vec::with_capacity(3);
-        for surface in [
-            BindingSurface::Cli,
-            BindingSurface::Mcp,
-            BindingSurface::Http,
-        ] {
+        let surfaces = primitive_read_surfaces(spec);
+        let mut binding_ids = Vec::with_capacity(surfaces.len());
+        for &surface in surfaces {
             let surface_name = match surface {
                 BindingSurface::Cli => "cli",
                 BindingSurface::Mcp => "mcp",
