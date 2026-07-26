@@ -351,10 +351,7 @@ fn write_branch_meta(
         meta.add_branch(name, rel_db_path, "main");
         if create_branch_dbs {
             let db_path = shard_root.join(rel_db_path);
-            if let Some(parent) = db_path.parent() {
-                std::fs::create_dir_all(parent).unwrap();
-            }
-            std::fs::write(db_path, format!("branch db for {name}")).unwrap();
+            write_sqlite_placeholder(&db_path);
         }
     }
     std::fs::write(
