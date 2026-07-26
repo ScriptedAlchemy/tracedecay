@@ -3165,6 +3165,7 @@ impl DaemonEngine {
                 semantic_resources: *semantic_resources,
                 route_registered: Arc::clone(&route_registered),
             },
+            Arc::clone(&doctor_report_reader),
         );
         let code_index_search_executor = code_index_search_executor(
             self.invocation.code_index_schedulers.clone(),
@@ -4237,6 +4238,7 @@ async fn portable_project_server(
             semantic_resources: *semantic_resources,
             route_registered: Arc::clone(&route_registered),
         },
+        Arc::clone(&doctor_report_reader),
     );
     let code_index_search_executor = code_index_search_executor(
         invocation.code_index_schedulers.clone(),

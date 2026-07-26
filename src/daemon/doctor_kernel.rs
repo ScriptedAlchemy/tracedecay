@@ -1267,9 +1267,11 @@ pub(in crate::daemon) fn production_doctor_report_reader(
 
 pub(in crate::daemon) fn production_doctor_remediation_dispatcher(
     owners: ProductionDoctorRemediationOwnersV1,
+    report_reader: crate::dashboard::DoctorReportReader,
 ) -> crate::dashboard::DoctorRemediationDispatcherV1 {
     use crate::dashboard::{
-        DashboardLegalActionKindV1, DoctorRemediationDispatchErrorV1, DoctorRemediationDispatcherV1,
+        DoctorRemediationDispatchErrorV1, DoctorRemediationDispatcherV1,
+        DoctorRemediationLegalActionV1,
     };
     use tracedecay_application::doctor::{DoctorRemediationKindV1, DoctorRemediationRegistryV1};
 
@@ -1320,12 +1322,12 @@ pub(in crate::daemon) fn production_doctor_remediation_dispatcher(
                 }
                 match reference.kind() {
                     DoctorRemediationKindV1::Preview if descriptor.preview_available() => {
-                        vec![DashboardLegalActionKindV1::RequestDryRun]
+                        vec![DoctorRemediationLegalActionV1::RequestPreview]
                     }
                     DoctorRemediationKindV1::Action => {
-                        let mut actions = vec![DashboardLegalActionKindV1::RequestApply];
+                        let mut actions = vec![DoctorRemediationLegalActionV1::RequestApply];
                         if descriptor.preview_available() {
-                            actions.push(DashboardLegalActionKindV1::RequestDryRun);
+                            actions.push(DoctorRemediationLegalActionV1::RequestPreview);
                         }
                         actions
                     }
@@ -1349,6 +1351,16 @@ pub(in crate::daemon) fn production_doctor_remediation_dispatcher(
             dispatch_doctor_owner_operation(&owners, scope, command).await
         })
     });
+    let observation: crate::dashboard::doctor_remediation_api::Observation =
+        Arc::new(move |operation| {
+            let report_reader = Arc::clone(&report_reader);
+            Box::pin(async move {
+                let report = report_reader()
+                    .await
+                    .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)?;
+                verify_doctor_remediation_observation(&report.report, &operation)
+            })
+        });
     DoctorRemediationDispatcherV1::new_durable(
         owners
             .layout
@@ -1356,7 +1368,94 @@ pub(in crate::daemon) fn production_doctor_remediation_dispatcher(
             .join("doctor-remediation-operations"),
         legal_actions,
         dispatch,
+        observation,
     )
+}
+
+fn verify_doctor_remediation_observation(
+    report: &DoctorReportV1,
+    operation: &crate::dashboard::DoctorRemediationOperationV1,
+) -> Result<
+    crate::dashboard::DoctorRemediationVerificationV1,
+    crate::dashboard::DoctorRemediationDispatchErrorV1,
+> {
+    use crate::dashboard::{DoctorRemediationDispatchErrorV1, DoctorRemediationVerificationV1};
+    use tracedecay_application::doctor::{
+        DoctorCoverageCompletenessV1, DoctorEvidenceStateV1, DoctorFamilyConsultationV1,
+        DoctorFindingFamilyV1, operations,
+    };
+
+    let family = match operation.owning_operation.as_str() {
+        operations::CONFIGURATION_PROTECTED_APPLY | operations::CONFIGURATION_PIN_AUTHORITY => {
+            DoctorFindingFamilyV1::Configuration
+        }
+        operations::RUNTIME_RECOVER_DAEMON => DoctorFindingFamilyV1::StorageRuntime,
+        operations::HOST_REPAIR_INTEGRATION
+        | operations::FEEDBACK_GET_FINDING
+        | operations::FEEDBACK_LIST_FINDINGS => DoctorFindingFamilyV1::Advisory,
+        operations::CODE_INDEX_REMOUNT => DoctorFindingFamilyV1::SemanticIndex,
+        operations::STORAGE_RETENTION_COLLECT
+        | operations::STORAGE_COLLECT_ORPHAN_STORE
+        | operations::STORAGE_BRANCH_GC
+        | operations::STORAGE_QUARANTINE_AND_COLLECT_DEBRIS => DoctorFindingFamilyV1::Storage,
+        _ => return Err(DoctorRemediationDispatchErrorV1::InvalidReference),
+    };
+    let observation_digest = tracedecay_domain::canonical_sha256(&(
+        "tracedecay.doctor-remediation-reobservation.v1",
+        &operation.operation_id,
+        &operation.owning_operation,
+        report,
+    ))
+    .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)?;
+    let family_coverage = report
+        .coverage()
+        .families()
+        .iter()
+        .find(|coverage| coverage.family() == family)
+        .ok_or(DoctorRemediationDispatchErrorV1::OwnerUnavailable)?;
+    if let DoctorFamilyConsultationV1::Unavailable { reason } = family_coverage.consultation() {
+        return Ok(match reason {
+            tracedecay_application::doctor::DoctorFamilyUnavailableReasonV1::Denied => {
+                DoctorRemediationVerificationV1::Denied
+            }
+            _ => DoctorRemediationVerificationV1::Unavailable,
+        });
+    }
+    let findings = report
+        .entries()
+        .iter()
+        .filter(|entry| entry.finding().family() == family)
+        .map(|entry| entry.finding())
+        .collect::<Vec<_>>();
+    if findings.is_empty() {
+        return Ok(DoctorRemediationVerificationV1::Unavailable);
+    }
+    if findings
+        .iter()
+        .any(|finding| finding.state() == DoctorEvidenceStateV1::Denied)
+    {
+        return Ok(DoctorRemediationVerificationV1::Denied);
+    }
+    if findings.iter().any(|finding| {
+        finding
+            .remediation()
+            .is_some_and(|reference| reference.owning_operation() == &operation.owning_operation)
+    }) {
+        return Ok(DoctorRemediationVerificationV1::Failed {
+            observation_digest: Some(observation_digest),
+        });
+    }
+    let complete = findings.iter().all(|finding| {
+        finding.state() == DoctorEvidenceStateV1::HealthyCompleteCoverage
+            && finding.coverage().completeness() == DoctorCoverageCompletenessV1::Complete
+    });
+    Ok(if complete {
+        DoctorRemediationVerificationV1::Verified { observation_digest }
+    } else {
+        DoctorRemediationVerificationV1::Partial {
+            observation_digest: Some(observation_digest),
+        }
+    })
 }
 
 async fn dispatch_doctor_owner_operation(
@@ -1371,6 +1470,7 @@ async fn dispatch_doctor_owner_operation(
     use crate::dashboard::{
         DoctorRemediationDispatchCommandV1, DoctorRemediationDispatchErrorV1,
         DoctorRemediationOperationPhaseV1, DoctorRemediationOperationV1, DoctorRemediationTargetV1,
+        DoctorRemediationVerificationV1,
     };
 
     let operation_id =
@@ -1743,6 +1843,7 @@ async fn dispatch_doctor_owner_operation(
             effect_receipt: None,
             owner_effect_receipt: None,
             owner_result_digest: owner_observation,
+            verification: DoctorRemediationVerificationV1::NotRequired,
         });
     }
     let idempotency_key =
@@ -1782,6 +1883,7 @@ async fn dispatch_doctor_owner_operation(
         effect_receipt: Some(effect_receipt),
         owner_effect_receipt: owner_effect,
         owner_result_digest: Some(owner_result_digest),
+        verification: DoctorRemediationVerificationV1::Pending,
     })
 }
 
