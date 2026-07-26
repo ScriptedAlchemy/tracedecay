@@ -76,7 +76,9 @@ async fn registered_schema_validation_rejects_incomplete_authority_schema() {
         .await
         .expect_err("incomplete registered authority schema unexpectedly validated");
     assert!(
-        error.to_string().contains("idx_project_aliases_project_id"),
+        error
+            .to_string()
+            .contains("table 'project_aliases' is missing required index on (project_id)"),
         "{error}"
     );
 }

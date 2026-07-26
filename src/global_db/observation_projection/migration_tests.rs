@@ -9,7 +9,7 @@ use tracedecay_domain::{
     CanonicalObservationEnvelopeV1, ComponentVersion, DurableObservationV1, ObservationId,
     ObservationIdentityMaterialV1, ObservationOrderingDomainV1, ObservationScopeV1,
     ObservationSourceCursorV1, ObservationSourceGenerationV1, ObservationSourceIdentityV1,
-    ObservationSourceRangeV1, PayloadReferenceV1, ProjectId, ProjectionGenerationId, ProviderId,
+    ObservationSourceRangeV1, PayloadReferenceV1, ProjectionGenerationId, ProviderId,
     RetentionClass, SanitizationReceiptId, SanitizationReceiptRefV1, SanitizationReceiptV1,
     SanitizerDispositionV1, SensitivityV1, SessionId, UtcMicros,
 };
@@ -305,9 +305,7 @@ fn legacy_claude_source_key_observation() -> DurableObservationV1 {
     .unwrap();
     let identity = ObservationIdentityMaterialV1::new(
         source,
-        ObservationScopeV1::Project {
-            project_id: ProjectId::new("project.synthetic-legacy-upgrade").unwrap(),
-        },
+        ObservationScopeV1::Profile,
         ObservationSourceGenerationV1::new(23).unwrap(),
         ObservationSourceRangeV1::new(41, 42).unwrap(),
     )
@@ -889,9 +887,7 @@ async fn duplicate_output_identity_converges_as_a_durable_collision_skip() {
         .unwrap();
         let identity = ObservationIdentityMaterialV1::new(
             source,
-            ObservationScopeV1::Project {
-                project_id: ProjectId::new("project.collision-skip").unwrap(),
-            },
+            ObservationScopeV1::Profile,
             ObservationSourceGenerationV1::new(1).unwrap(),
             ObservationSourceRangeV1::new(range.0, range.1).unwrap(),
         )
@@ -1036,14 +1032,18 @@ async fn v2_upgrade_with_broken_predecessor_lineage_falls_back_to_rebuild() {
     drop(writer);
     drop(runtime);
 
-    // Every reopen must succeed (never fail closed) and the staged rebuild
-    // must converge to a superseded incremental migration.
+    // Every reopen must succeed (never fail closed) and the daemon-owned
+    // background advancement path must converge the staged rebuild.
     let mut superseded = false;
     for attempt in 0..16 {
         let open = match registered_runtime(&profile_root).await {
             Ok(open) => open,
             Err(error) => panic!("open attempt {attempt} failed: {error}"),
         };
+        registered_database(&open)
+            .advance_projection_version_migration()
+            .await
+            .expect("advance staged observation rebuild");
         let writer = registered_database(&open).writer_connection().unwrap();
         let mut rows = writer
             .query(
@@ -1493,23 +1493,16 @@ async fn v3_upgrade_backfills_v4_anchor_provenance_without_rekeying() {
 }
 
 async fn initialize_engine_migration_state(connection: &TestConnection) {
+    crate::global_db::ensure_registered_schema(connection)
+        .await
+        .expect("initialize observation migration fixture through production migrations");
     connection
         .execute_batch(
-            "CREATE TABLE observation_projection_checkpoints (
-                projector_version TEXT PRIMARY KEY NOT NULL,
-                last_sequence INTEGER NOT NULL
-             );
-             CREATE TABLE observation_projection_migrations (
-                source_projector_version TEXT NOT NULL,
-                target_projector_version TEXT NOT NULL,
-                source_frontier INTEGER NOT NULL,
-                migrated_through INTEGER NOT NULL,
-                completed INTEGER NOT NULL,
-                PRIMARY KEY(source_projector_version, target_projector_version)
-             );",
+            "DELETE FROM observation_projection_migrations;
+             DELETE FROM observation_projection_checkpoints;",
         )
         .await
-        .unwrap();
+        .expect("reset migrated observation progress rows for the focused fixture");
 }
 
 #[tokio::test]
@@ -1562,7 +1555,7 @@ async fn registered_engine_migration_replay_preserves_completed_version_receipt(
 }
 
 #[tokio::test]
-async fn registered_engine_migration_rejects_inconsistent_resume_receipt() {
+async fn registered_schema_rejects_inconsistent_resume_receipt() {
     let temporary = TempDir::new().unwrap();
     let connection = TestConnection::open(&temporary.path().join("projection.db"));
     initialize_engine_migration_state(&connection).await;
@@ -1573,7 +1566,7 @@ async fn registered_engine_migration_rejects_inconsistent_resume_receipt() {
         )
         .await
         .unwrap();
-    connection
+    let error = connection
         .execute(
             "INSERT INTO observation_projection_migrations VALUES (?1, ?2, 7, 6, 1)",
             crate::db::engine::params![
@@ -1582,15 +1575,11 @@ async fn registered_engine_migration_rejects_inconsistent_resume_receipt() {
             ],
         )
         .await
-        .unwrap();
-
-    let error = prepare_projection_version_migration_with_engine(&connection)
-        .await
         .expect_err("completed migration must cover its exact source frontier");
     assert!(
         error
             .to_string()
-            .contains("progress is inconsistent with its source frontier")
+            .contains("completed = 0 OR migrated_through = source_frontier")
     );
 }
 
@@ -1643,7 +1632,11 @@ async fn registered_engine_migration_rechecks_actor_time_authority_before_progre
     let error = prepare_projection_version_migration_with_engine(&connection)
         .await
         .expect_err("revoked actor-time authority must deny migration");
-    assert!(error.to_string().contains("authority revoked"));
+    let tracedecay_store::ProjectionStoreError::Storage { operation, source } = error else {
+        panic!("revoked migration returned the wrong error kind");
+    };
+    assert_eq!(operation, "begin projection version migration page");
+    assert!(source.to_string().contains("authority revoked"), "{source}");
     let mut rows = connection
         .query("SELECT COUNT(*) FROM observation_projection_migrations", ())
         .await

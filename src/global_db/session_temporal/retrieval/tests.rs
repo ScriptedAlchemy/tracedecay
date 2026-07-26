@@ -370,12 +370,14 @@ impl HostAdmissionTestRuntimeV1 {
             &database
                 .writer_connection()
                 .expect("registered profile writer"),
-            "PRAGMA foreign_keys = OFF;
-             INSERT INTO sessions (
+            "INSERT INTO sessions (
                 provider, session_id, project_key, project_path
              ) VALUES
                 ('claude', 'session-a', 'user', '/root-record-test'),
                 ('claude', 'session-b', 'user', '/root-record-test');
+             INSERT INTO sanitization_receipts (
+                receipt_id, sanitizer_version, payload_digest, receipt_json
+             ) VALUES ('receipt-1', 'fixture', 'sha256:fixture', '{}');
              INSERT INTO observations (
                 observation_id, payload_digest, receipt_id, observation_json,
                 committed_cursor_json
@@ -383,6 +385,12 @@ impl HostAdmissionTestRuntimeV1 {
                 'observation-shared', 'sha256:fixture', 'receipt-1',
                 '{\"identity\":{\"source\":{\"provider\":\"claude\"}}}', '{}'
              );
+             INSERT INTO retrieval_anchors (
+                anchor_id, anchor_json, owner_json, projection_generation
+             ) VALUES
+                ('same-anchor', '{}', '{}', 'fixture'),
+                ('source-anchor-b', '{}', '{}', 'fixture'),
+                ('other-anchor', '{}', '{}', 'fixture');
              INSERT INTO session_occurrences (
                 session_id, generation, occurrence_id, source_observation_id,
                 projection_output_ordinal, retrieval_anchor_id, role, knowledge_at,
@@ -440,10 +448,12 @@ impl HostAdmissionTestRuntimeV1 {
             &database
                 .writer_connection()
                 .expect("registered profile writer"),
-            "PRAGMA foreign_keys = OFF;
-             INSERT INTO sessions (
+            "INSERT INTO sessions (
                 provider, session_id, project_key, project_path
              ) VALUES ('claude', 'session-snapshot', 'user', '/derived-record-test');
+             INSERT INTO sanitization_receipts (
+                receipt_id, sanitizer_version, payload_digest, receipt_json
+             ) VALUES ('derived-receipt', 'fixture', 'sha256:derived', '{}');
              INSERT INTO observations (
                 observation_id, payload_digest, receipt_id, observation_json,
                 committed_cursor_json
@@ -451,12 +461,19 @@ impl HostAdmissionTestRuntimeV1 {
                 'derived-observation', 'sha256:derived', 'derived-receipt',
                 '{\"identity\":{\"source\":{\"provider\":\"claude\"}}}', '{}'
              );
+             INSERT INTO retrieval_anchors (
+                anchor_id, anchor_json, owner_json, projection_generation
+             ) VALUES
+                ('source-occurrence-anchor', '{}', '{}', 'fixture'),
+                ('derived-span-anchor', '{}', '{}', 'fixture');
              INSERT INTO session_occurrences (
                 session_id, generation, occurrence_id, source_observation_id,
                 projection_output_ordinal, retrieval_anchor_id, role, knowledge_at,
                 valid_time_json, evidence_json, snippet_text, index_text
              ) VALUES (
-                'session-snapshot', 1, 'derived-member', 'derived-observation', 0,
+                'session-snapshot', 1,
+                'sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
+                'derived-observation', 0,
                 'source-occurrence-anchor', 'user', 5, '{\"kind\":\"unknown\"}',
                 '{
                     \"authority\":\"provider_native\",
@@ -476,7 +493,9 @@ impl HostAdmissionTestRuntimeV1 {
                 evidence_json
              ) VALUES (
                 'session-snapshot', 1, 'span', 'span-evidence-id',
-                'derived-span-anchor', NULL, 'derived-member', 'derived-member',
+                'derived-span-anchor', NULL,
+                'sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
+                'sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
                 'span-v1', 'sha256:configuration', 1, 'sha256:members', '{}'
              );
              INSERT INTO session_derived_evidence_members (
@@ -484,7 +503,9 @@ impl HostAdmissionTestRuntimeV1 {
                 ordinal, occurrence_id, member_role
              ) VALUES (
                 'session-snapshot', 1, 'span', 'span-evidence-id',
-                0, 'derived-member', 'first'
+                0,
+                'sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
+                'first'
              );",
         )
         .await
@@ -492,6 +513,8 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     async fn seed_oversized_record_fixture_for_test(&self) {
+        self.activate_temporal_generation_for_retrieval_test("session-snapshot", 1)
+            .await;
         let database = self
             .registered_database(HostAdmissionScope::Profile)
             .expect("registered profile database");
@@ -500,14 +523,23 @@ impl HostAdmissionTestRuntimeV1 {
             .expect("registered profile writer");
         Executor::execute_batch(
             &writer,
-            "PRAGMA foreign_keys = OFF;
+            "INSERT INTO sanitization_receipts (
+                receipt_id, sanitizer_version, payload_digest, receipt_json
+             ) VALUES ('receipt-1', 'fixture', 'sha256:fixture', '{}');
              INSERT INTO observations (
                 observation_id, payload_digest, receipt_id, observation_json,
                 committed_cursor_json
              ) VALUES (
                 'observation-1', 'sha256:fixture', 'receipt-1',
                 '{\"identity\":{\"source\":{\"provider\":\"claude\"}}}', '{}'
-             );",
+             );
+             INSERT INTO retrieval_anchors (
+                anchor_id, anchor_json, owner_json, projection_generation
+             ) VALUES
+                ('anchor-evidence', '{}', '{}', 'fixture'),
+                ('anchor-publication', '{}', '{}', 'fixture'),
+                ('source-short', '{}', '{}', 'fixture'),
+                ('anchor-source', '{}', '{}', 'fixture');",
         )
         .await
         .expect("oversized observation fixture");
@@ -562,12 +594,22 @@ impl HostAdmissionTestRuntimeV1 {
         )
         .await
         .expect("oversized summary fixtures");
+        let oversized_source = format!("source-{}", "y".repeat(512));
+        Executor::execute(
+            &writer,
+            "INSERT INTO retrieval_anchors (
+                anchor_id, anchor_json, owner_json, projection_generation
+             ) VALUES (?1, '{}', '{}', 'fixture')",
+            [oversized_source.as_str()],
+        )
+        .await
+        .expect("oversized source anchor fixture");
         Executor::execute(
             &writer,
             "INSERT INTO session_summary_sources (
                 summary_id, source_ordinal, source_kind, source_anchor_id, source_summary_id
              ) VALUES ('summary-source', 0, 'anchor', ?1, NULL)",
-            [format!("source-{}", "y".repeat(512))],
+            [oversized_source],
         )
         .await
         .expect("oversized source fixture");
@@ -586,6 +628,8 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     async fn seed_summary_source_cap_fixture_for_test(&self) {
+        self.activate_temporal_generation_for_retrieval_test("session-snapshot", 1)
+            .await;
         let database = self
             .registered_database(HostAdmissionScope::Profile)
             .expect("registered profile database");
@@ -594,7 +638,9 @@ impl HostAdmissionTestRuntimeV1 {
             .expect("registered profile writer");
         Executor::execute_batch(
             &writer,
-            "PRAGMA foreign_keys = OFF;
+            "INSERT INTO retrieval_anchors (
+                anchor_id, anchor_json, owner_json, projection_generation
+             ) VALUES ('anchor-many-sources', '{}', '{}', 'fixture');
              INSERT INTO session_summary_nodes (
                 summary_id, session_id, summary_anchor_id, summary_text, index_text,
                 source_horizon_json, publication_json, created_at
@@ -613,16 +659,23 @@ impl HostAdmissionTestRuntimeV1 {
         .await
         .expect("many-source summary fixture");
         for ordinal in 0..=MAX_SUMMARY_SOURCES_PER_RECORD {
+            let source_anchor = format!("source-{ordinal:03}");
+            Executor::execute(
+                &writer,
+                "INSERT INTO retrieval_anchors (
+                    anchor_id, anchor_json, owner_json, projection_generation
+                 ) VALUES (?1, '{}', '{}', 'fixture')",
+                [source_anchor.as_str()],
+            )
+            .await
+            .expect("many-source anchor fixture");
             Executor::execute(
                 &writer,
                 "INSERT INTO session_summary_sources (
                     summary_id, source_ordinal, source_kind,
                     source_anchor_id, source_summary_id
                  ) VALUES ('summary-many-sources', ?1, 'anchor', ?2, NULL)",
-                (
-                    i64::try_from(ordinal).unwrap(),
-                    format!("source-{ordinal:03}"),
-                ),
+                (i64::try_from(ordinal).unwrap(), source_anchor),
             )
             .await
             .expect("many-source edge fixture");
@@ -630,6 +683,8 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     async fn seed_provider_summary_fixture_for_test(&self) {
+        self.activate_temporal_generation_for_retrieval_test("session-snapshot", 1)
+            .await;
         let database = self
             .registered_database(HostAdmissionScope::Profile)
             .expect("registered profile database");
@@ -637,7 +692,9 @@ impl HostAdmissionTestRuntimeV1 {
             &database
                 .writer_connection()
                 .expect("registered profile writer"),
-            "PRAGMA foreign_keys = OFF;
+            "INSERT INTO sanitization_receipts (
+                receipt_id, sanitizer_version, payload_digest, receipt_json
+             ) VALUES ('receipt-1', 'fixture', 'sha256:fixture', '{}');
              INSERT INTO observations (
                 observation_id, payload_digest, receipt_id, observation_json,
                 committed_cursor_json
@@ -645,6 +702,11 @@ impl HostAdmissionTestRuntimeV1 {
                 'observation-claude', 'sha256:fixture', 'receipt-1',
                 '{\"identity\":{\"source\":{\"provider\":\"claude\"}}}', '{}'
              );
+             INSERT INTO retrieval_anchors (
+                anchor_id, anchor_json, owner_json, projection_generation
+             ) VALUES
+                ('source-claude', '{}', '{}', 'fixture'),
+                ('anchor-summary-provider', '{}', '{}', 'fixture');
              INSERT INTO session_occurrences (
                 session_id, generation, occurrence_id, source_observation_id,
                 projection_output_ordinal, retrieval_anchor_id, role, knowledge_at,
@@ -680,6 +742,8 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     async fn seed_historical_summary_successor_fixture_for_test(&self) {
+        self.activate_temporal_generation_for_retrieval_test("session-snapshot", 1)
+            .await;
         let database = self
             .registered_database(HostAdmissionScope::Profile)
             .expect("registered profile database");
@@ -687,7 +751,9 @@ impl HostAdmissionTestRuntimeV1 {
             &database
                 .writer_connection()
                 .expect("registered profile writer"),
-            "PRAGMA foreign_keys = OFF;
+            "INSERT INTO sanitization_receipts (
+                receipt_id, sanitizer_version, payload_digest, receipt_json
+             ) VALUES ('history-receipt', 'fixture', 'sha256:history', '{}');
              INSERT INTO observations (
                 observation_id, payload_digest, receipt_id, observation_json,
                 committed_cursor_json
@@ -695,6 +761,12 @@ impl HostAdmissionTestRuntimeV1 {
                 'summary-history-observation', 'sha256:history', 'history-receipt',
                 '{\"identity\":{\"source\":{\"provider\":\"claude\"}}}', '{}'
              );
+             INSERT INTO retrieval_anchors (
+                anchor_id, anchor_json, owner_json, projection_generation
+             ) VALUES
+                ('shared-summary-source', '{}', '{}', 'fixture'),
+                ('historical-summary-anchor', '{}', '{}', 'fixture'),
+                ('successor-summary-anchor', '{}', '{}', 'fixture');
              INSERT INTO session_occurrences (
                 session_id, generation, occurrence_id, source_observation_id,
                 projection_output_ordinal, retrieval_anchor_id, role, knowledge_at,

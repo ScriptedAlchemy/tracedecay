@@ -1158,10 +1158,6 @@ mod tests {
     async fn cursor_root_uses_identity_resolver_for_global_only_store() {
         let _profile = crate::config::PinnedUserDataDir::new();
         let profile_root = crate::storage::default_profile_root().unwrap();
-        let gdb =
-            crate::application::host_admission::HostAdmissionTestRuntimeV1::profile(&profile_root)
-                .await
-                .unwrap();
 
         let project = tempfile::tempdir().unwrap();
         let project_root = project.path().canonicalize().unwrap();
@@ -1173,39 +1169,19 @@ mod tests {
         assert!(status.success(), "git init failed");
 
         let project_id = "proj_cursor_identity";
-        let git_common_dir = crate::worktree::git_common_dir(&project_root);
-        gdb.upsert_code_project(
-            project_id,
-            &project_root,
-            git_common_dir.as_deref(),
-            None,
-            None,
-        )
-        .await
-        .unwrap();
-        gdb.upsert_store_instance(crate::global_db::StoreInstanceUpsert {
-            store_id: "store_cursor_identity".to_string(),
-            project_id: project_id.to_string(),
-            store_kind: "code_project".to_string(),
-            storage_mode: "profile_sharded".to_string(),
-            store_relpath: format!("projects/{project_id}"),
-            manifest_relpath: Some(format!("projects/{project_id}/store_manifest.json")),
-            last_verified_at: Some(100),
-            last_write_at: Some(101),
-        })
-        .await
-        .unwrap();
-        let layout = crate::storage::profile_sharded_layout(
-            &project_root,
+        let gdb = crate::application::host_admission::HostAdmissionTestRuntimeV1::project(
             &profile_root,
-            &crate::storage::EnrollmentMarker {
-                project_id: project_id.to_string(),
-                storage_mode: crate::storage::StorageMode::ProfileSharded,
-            },
+            &project_root,
+            tracedecay_domain::ProjectId::new(project_id).unwrap(),
         )
+        .await
         .unwrap();
-        std::fs::create_dir_all(layout.graph_db_path.parent().unwrap()).unwrap();
-        std::fs::write(&layout.graph_db_path, b"").unwrap();
+        let graph = gdb
+            .initialize_project_graph_for_test(&project_root, Default::default())
+            .await
+            .unwrap();
+        drop(graph);
+        crate::storage::remove_enrollment_marker(&project_root, project_id).unwrap();
 
         let nested = project_root.join("src/deep");
         std::fs::create_dir_all(&nested).unwrap();

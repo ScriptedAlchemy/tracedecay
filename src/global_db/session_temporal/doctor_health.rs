@@ -1260,9 +1260,9 @@ async fn require_quick_check(
         if message != "ok"
             && !is_allowed_fts_quick_check(&message, repair_occurrences, repair_summaries)
         {
-            return Err(repair_refused(
-                "whole-database quick check failed; FTS repair is unsafe",
-            ));
+            return Err(repair_refused(&format!(
+                "whole-database quick check failed; FTS repair is unsafe: {message}"
+            )));
         }
     }
     if saw_result {
@@ -1278,9 +1278,22 @@ fn is_allowed_fts_quick_check(
     repair_summaries: bool,
 ) -> bool {
     (repair_occurrences
-        && message == "malformed inverted index for FTS5 table main.session_occurrences_fts")
+        && (message == "malformed inverted index for FTS5 table main.session_occurrences_fts"
+            || is_exact_fts_blob_corruption(message, "session_occurrences_fts")))
         || (repair_summaries
-            && message == "malformed inverted index for FTS5 table main.session_summary_nodes_fts")
+            && (message
+                == "malformed inverted index for FTS5 table main.session_summary_nodes_fts"
+                || is_exact_fts_blob_corruption(message, "session_summary_nodes_fts")))
+}
+
+fn is_exact_fts_blob_corruption(message: &str, expected_table: &str) -> bool {
+    let Some(message) = message.strip_prefix("fts5: corruption found reading blob ") else {
+        return false;
+    };
+    let Some((blob, table)) = message.split_once(" from table \"") else {
+        return false;
+    };
+    blob.parse::<u64>().is_ok() && table.strip_suffix('"') == Some(expected_table)
 }
 
 async fn connection_count(conn: &impl Executor, table: &str) -> crate::db::engine::Result<i64> {

@@ -166,6 +166,17 @@ impl tracedecay_rusqlite_runtime::migration_sql::MigrationSqlWriteAuthority
             tracedecay_rusqlite_runtime::migration_sql::MigrationSqlWriteIntent::ExecuteBatch => {
                 "execute registered migration SQL statement batch"
             }
+            tracedecay_rusqlite_runtime::migration_sql::MigrationSqlWriteIntent::Vacuum => {
+                if self.authority.role() != crate::db::DatabaseAuthorityRole::Maintenance {
+                    return Err(
+                        tracedecay_rusqlite_runtime::migration_sql::MigrationSqlError::AuthorityDenied(
+                            "whole-database vacuum requires exclusive maintenance authority"
+                                .to_owned(),
+                        ),
+                    );
+                }
+                "vacuum registered database under exclusive maintenance"
+            }
             tracedecay_rusqlite_runtime::migration_sql::MigrationSqlWriteIntent::BeginTransaction => {
                 "begin registered migration SQL transaction"
             }

@@ -1845,25 +1845,6 @@ pub(crate) async fn lcm_raw_message_count_at_path(db_path: &Path, session_id: &s
     .unwrap()
 }
 
-pub(crate) async fn lcm_summary_node_count(cg: &TraceDecay, session_id: &str) -> i64 {
-    project_lcm_conn(cg)
-        .await
-        .lcm_summary_node_count_for_test(HostAdmissionScope::Project, session_id)
-        .await
-        .unwrap()
-}
-
-pub(crate) async fn lcm_schema_migration_count(cg: &TraceDecay) -> i64 {
-    i64::from(
-        project_lcm_conn(cg)
-            .await
-            .lcm_schema_migration_version_for_test(HostAdmissionScope::Project)
-            .await
-            .unwrap()
-            .is_some(),
-    )
-}
-
 pub(crate) async fn wipe_lcm_raw_fts(cg: &TraceDecay) {
     project_lcm_conn(cg)
         .await

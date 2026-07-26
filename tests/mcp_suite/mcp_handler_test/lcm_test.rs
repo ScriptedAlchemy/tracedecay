@@ -245,7 +245,15 @@ async fn lcm_doctor_clean_apply_backs_up_and_deletes_only_safe_candidates() {
     )
     .await;
     let db = open_active_project_session_db(&cg).await;
-    let cron_store_id = lcm_raw_store_id(&cg, "cron-20260414-message").await;
+    let cron_store_id = rusqlite::Connection::open(project_session_db_path(&cg))
+        .unwrap()
+        .query_row(
+            "SELECT store_id FROM lcm_raw_messages
+             WHERE provider = 'cursor' AND message_id = 'cron-20260414-message'",
+            (),
+            |row| row.get(0),
+        )
+        .unwrap();
     db.lcm_insert_summary_node_for_test(
         HostAdmissionScope::Project,
         LcmSummaryNodeDraft {
@@ -284,8 +292,9 @@ async fn lcm_doctor_clean_apply_backs_up_and_deletes_only_safe_candidates() {
     )
     .await;
 
-    let result = handle_tool_call(
-        &cg,
+    let server = real_mcp_server(cg).await;
+    let result = handle_real_server_tool_call(
+        &server,
         "tracedecay_lcm_doctor",
         json!({
             "provider": "cursor",
@@ -293,12 +302,9 @@ async fn lcm_doctor_clean_apply_backs_up_and_deletes_only_safe_candidates() {
             "apply": true,
             "ignore_session_patterns": ["cron-*"]
         }),
-        None,
-        None,
     )
-    .await
-    .unwrap();
-    let text = extract_text(&result.value);
+    .await;
+    let text = extract_real_server_text(&result);
     let payload: Value = serde_json::from_str(text).unwrap();
     let backup_path = payload["repairs"]["backup"]["path"]
         .as_str()
@@ -316,9 +322,24 @@ async fn lcm_doctor_clean_apply_backs_up_and_deletes_only_safe_candidates() {
         lcm_raw_message_count_at_path(Path::new(backup_path), "cron-20260414").await,
         1
     );
-    assert_eq!(lcm_raw_message_count(&cg, "cron-20260414").await, 0);
-    assert_eq!(lcm_summary_node_count(&cg, "cron-20260414").await, 0);
-    assert_eq!(lcm_raw_message_count(&cg, "normal-session").await, 2);
+    assert_eq!(
+        db.lcm_raw_message_count_for_test(HostAdmissionScope::Project, "cron-20260414")
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        db.lcm_summary_node_count_for_test(HostAdmissionScope::Project, "cron-20260414")
+            .await
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        db.lcm_raw_message_count_for_test(HostAdmissionScope::Project, "normal-session")
+            .await
+            .unwrap(),
+        2
+    );
     assert!(!text.contains("scheduled report body that must be deleted only after backup"));
     assert!(!text.contains("Still working"));
     assert!(!text.contains("valuable payload to preserve"));
@@ -350,8 +371,9 @@ async fn lcm_doctor_clean_apply_deletes_all_matching_noise_beyond_diagnostic_sam
     )
     .await;
 
-    let result = handle_tool_call(
-        &cg,
+    let server = real_mcp_server(cg).await;
+    let result = handle_real_server_tool_call(
+        &server,
         "tracedecay_lcm_doctor",
         json!({
             "provider": "cursor",
@@ -359,12 +381,9 @@ async fn lcm_doctor_clean_apply_deletes_all_matching_noise_beyond_diagnostic_sam
             "apply": true,
             "ignore_message_patterns": ["^Cronjob Response:"]
         }),
-        None,
-        None,
     )
-    .await
-    .unwrap();
-    let text = extract_text(&result.value);
+    .await;
+    let text = extract_real_server_text(&result);
     let payload: Value = serde_json::from_str(text).unwrap();
 
     assert_eq!(
@@ -382,7 +401,12 @@ async fn lcm_doctor_clean_apply_deletes_all_matching_noise_beyond_diagnostic_sam
         payload["repairs"]["applied_actions"][0]["deleted"]["raw_messages"],
         21
     );
-    assert_eq!(lcm_raw_message_count(&cg, "normal-session").await, 1);
+    assert_eq!(
+        db.lcm_raw_message_count_for_test(HostAdmissionScope::Project, "normal-session")
+            .await
+            .unwrap(),
+        1
+    );
     assert!(!text.contains("Cronjob Response: noisy heartbeat"));
     assert!(!text.contains("valuable payload to preserve"));
 }
@@ -533,16 +557,14 @@ async fn lcm_doctor_gc_mode_preview_and_apply_reports_without_body_leaks() {
         )
         .unwrap();
 
-    let preview = handle_tool_call(
-        &cg,
+    let server = real_mcp_server(cg).await;
+    let preview = handle_real_server_tool_call(
+        &server,
         "tracedecay_lcm_doctor",
         json!({"provider": "cursor", "mode": "gc", "apply": false}),
-        None,
-        None,
     )
-    .await
-    .unwrap();
-    let preview_text = extract_text(&preview.value);
+    .await;
+    let preview_text = extract_real_server_text(&preview);
     let preview_payload: Value = serde_json::from_str(preview_text).unwrap();
     assert_eq!(preview_payload["mode"], "gc");
     assert_eq!(preview_payload["dry_run"], true);
@@ -553,20 +575,17 @@ async fn lcm_doctor_gc_mode_preview_and_apply_reports_without_body_leaks() {
     assert!(payload_path.is_file());
     assert!(!preview_text.contains("gc mode secret body that must not leak"));
 
-    let apply = handle_tool_call(
-        &cg,
+    let apply = handle_real_server_tool_call(
+        &server,
         "tracedecay_lcm_doctor",
         json!({
             "provider": "cursor",
             "mode": "gc",
             "apply": true
         }),
-        None,
-        None,
     )
-    .await
-    .unwrap();
-    let apply_text = extract_text(&apply.value);
+    .await;
+    let apply_text = extract_real_server_text(&apply);
     let apply_payload: Value = serde_json::from_str(apply_text).unwrap();
     assert_eq!(apply_payload["mode"], "gc");
     assert_eq!(apply_payload["dry_run"], false);
@@ -908,23 +927,25 @@ async fn lcm_doctor_repair_dry_run_does_not_run_schema_migration() {
         1,
     )
     .await;
-    project_lcm_conn(&cg)
-        .await
-        .clear_lcm_schema_migration_for_test(HostAdmissionScope::Project)
+    let db = project_lcm_conn(&cg).await;
+    let server = real_mcp_server(cg).await;
+    db.clear_lcm_schema_migration_for_test(HostAdmissionScope::Project)
         .await
         .unwrap();
-    assert_eq!(lcm_schema_migration_count(&cg).await, 0);
+    assert_eq!(
+        db.lcm_schema_migration_version_for_test(HostAdmissionScope::Project)
+            .await
+            .unwrap(),
+        None
+    );
 
-    let result = handle_tool_call(
-        &cg,
+    let result = handle_real_server_tool_call(
+        &server,
         "tracedecay_lcm_doctor",
         json!({"provider": "cursor", "mode": "repair", "apply": false}),
-        None,
-        None,
     )
-    .await
-    .unwrap();
-    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+    .await;
+    let payload: Value = serde_json::from_str(extract_real_server_text(&result)).unwrap();
 
     assert_eq!(payload["mode"], "repair");
     assert_eq!(payload["dry_run"], true);
@@ -941,7 +962,12 @@ async fn lcm_doctor_repair_dry_run_does_not_run_schema_migration() {
         payload["diagnostics"]["ast_grep"]["message"].is_string(),
         "doctor should include ast-grep install/update guidance"
     );
-    assert_eq!(lcm_schema_migration_count(&cg).await, 0);
+    assert_eq!(
+        db.lcm_schema_migration_version_for_test(HostAdmissionScope::Project)
+            .await
+            .unwrap(),
+        None
+    );
 }
 
 #[tokio::test]
@@ -997,17 +1023,16 @@ async fn lcm_doctor_repair_apply_rebuilds_damaged_fts() {
     .await;
     wipe_lcm_raw_fts(&cg).await;
     assert_eq!(lcm_fts_match_count(&cg, "needle").await, 0);
+    let db = project_lcm_conn(&cg).await;
 
-    let result = handle_tool_call(
-        &cg,
+    let server = real_mcp_server(cg).await;
+    let result = handle_real_server_tool_call(
+        &server,
         "tracedecay_lcm_doctor",
         json!({"provider": "cursor", "mode": "repair", "apply": true}),
-        None,
-        None,
     )
-    .await
-    .unwrap();
-    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+    .await;
+    let payload: Value = serde_json::from_str(extract_real_server_text(&result)).unwrap();
 
     assert_eq!(payload["status"], "repaired");
     assert_eq!(payload["dry_run"], false);
@@ -1023,7 +1048,12 @@ async fn lcm_doctor_repair_apply_rebuilds_damaged_fts() {
             .iter()
             .any(|action| action["kind"] == "rebuild_raw_fts")
     );
-    assert_eq!(lcm_fts_match_count(&cg, "needle").await, 1);
+    assert_eq!(
+        db.lcm_raw_message_fts_count_for_test("needle")
+            .await
+            .unwrap(),
+        1
+    );
 }
 
 #[tokio::test]
