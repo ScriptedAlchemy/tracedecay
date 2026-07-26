@@ -18,7 +18,6 @@ pub use grep_analysis::{
 pub(crate) use production::open_pr12_production_primitive_runtime;
 pub use production::{
     TraceDecayAffectedTestsPortV1, admitted_root_uri_for_project, locator_digest_for_project,
-    worktree_id_for_project,
 };
 pub use runtime::{
     CallChainPrimitiveRequest, CallChainPrimitiveResult, DiagnosticPrimitiveRecord,
