@@ -46,6 +46,9 @@ use crate::{
             build_batch_receipt,
         },
     },
+    privacy::{
+        CODE_SOURCE_SANITIZER_VERSION_V1, CodeSourceSanitizationV1, sanitize_code_source_bytes,
+    },
     query::retrieval::{
         exact::{CentralExactAdmissionAuthorityV1, ExactLane},
         graph::{CodeGraphEvidenceAdapterV1, GraphLane, production_code_index_freshness},
@@ -54,9 +57,6 @@ use crate::{
             CodeLexicalProjectionMetadataV1, LexicalLane,
         },
         ports::RetrievalPortError,
-    },
-    privacy::{
-        CODE_SOURCE_SANITIZER_VERSION_V1, CodeSourceSanitizationV1, sanitize_code_source_bytes,
     },
 };
 
@@ -753,8 +753,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         let repository_id = identity.repository_id().clone();
         let worktree_id = identity.worktree_id().clone();
         let git_metadata = identity::GitMetadataFingerprintV1::capture(&project_root);
-        let sanitizer_revision =
-            id::<SanitizerRevision>(CODE_SOURCE_SANITIZER_VERSION_V1)?;
+        let sanitizer_revision = id::<SanitizerRevision>(CODE_SOURCE_SANITIZER_VERSION_V1)?;
         let publication =
             DaemonCodeIndexPublicationStoreV1::new(&store_root, sanitizer_revision.clone())?;
         let owner = open_production_code_index_owner_v1(
@@ -1207,9 +1206,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                 worktree: Some(self.worktree_id.clone()),
                 reference: self.identity.head_ref().cloned(),
                 source_revision: self.identity.head_commit().cloned(),
-                sanitizer_revision: id::<SanitizerRevision>(
-                    CODE_SOURCE_SANITIZER_VERSION_V1,
-                )?,
+                sanitizer_revision: id::<SanitizerRevision>(CODE_SOURCE_SANITIZER_VERSION_V1)?,
                 sanitization_receipts,
                 content_identity,
                 captured_at: now_micros(),

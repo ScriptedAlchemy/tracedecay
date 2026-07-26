@@ -1826,7 +1826,7 @@ impl<'de> Deserialize<'de> for DurableObservationV1 {
         let wire = Wire::deserialize(deserializer)?;
         let expected_observation_id = wire.observation_id.clone();
         let expected_idempotency_key = wire.idempotency_key.clone();
-        let observation = Self::new(
+        let mut observation = Self::new(
             wire.identity,
             wire.receipt,
             wire.retention_class,
@@ -1846,6 +1846,19 @@ impl<'de> Deserialize<'de> for DurableObservationV1 {
                 ObservationContractError::IdempotencyKeyMismatch,
             ));
         }
+        // Carry the id the row actually stores, not the one just re-derived.
+        //
+        // `new` derives the current form, which is right for a fresh
+        // observation and wrong for a decoded one: a row written under an
+        // earlier derivation is keyed by that earlier digest, in its own
+        // `observation_id` column and in every row that joins to it. Handing
+        // callers a different id than the row is keyed by makes each of them
+        // responsible for knowing the derivation history, and the storage
+        // audit's column-versus-JSON comparison failed for exactly that
+        // reason. Keeping the accepted digest here also makes decode/encode
+        // round-trip, so re-serializing a legacy row cannot silently restate
+        // its identity.
+        observation.observation_id = expected_observation_id;
         Ok(observation)
     }
 }

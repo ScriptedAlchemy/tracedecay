@@ -141,6 +141,160 @@ fn canonical_host_component_set(
     })
 }
 
+fn ensure_artifact_only_restore_boundary(
+    agent_id: &str,
+    component_set: &tracedecay::agents::host_bundle_registry::VerifiedEmbeddedHostComponentSetV1,
+    home: &Path,
+    lifecycle_root: &Path,
+) -> tracedecay::errors::Result<()> {
+    let registration = CompatibilityAgentRegistrationDelegate::new(
+        agent_id,
+        home,
+        lifecycle_root,
+        tracedecay::agents::host_bundle_v2::HostBundleLifecycleOpV1::Repair,
+    )?;
+    if registration.supports_artifact_only_backup_restore(&component_set.component_set) {
+        return Ok(());
+    }
+    Err(tracedecay::errors::TraceDecayError::Config {
+        message: format!(
+            "artifact backup/restore for agent {agent_id:?} is unavailable because this component \
+             uses host registration state; this command does not manage registration state"
+        ),
+    })
+}
+
+fn apply_host_bundle_artifact_action_at(
+    action: crate::cli::HostBundleAction,
+    options: crate::cli::HostBundleCliOptions,
+    home: &Path,
+    lifecycle_root: &Path,
+    now_unix: u64,
+) -> tracedecay::errors::Result<[u8; 16]> {
+    if options.dry_run {
+        return Err(tracedecay::errors::TraceDecayError::Config {
+            message: "artifact backup/restore has no dry-run mode; it requires --yes".to_string(),
+        });
+    }
+    if !options.yes {
+        return Err(tracedecay::errors::TraceDecayError::Config {
+            message: "artifact backup/restore requires --yes".to_string(),
+        });
+    }
+    let component =
+        options
+            .component
+            .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+                message: "artifact backup/restore requires --component".to_string(),
+            })?;
+    let (agent_id, backup_operation_id) = match &action {
+        crate::cli::HostBundleAction::ArtifactBackup { agent } => (agent.as_str(), None),
+        crate::cli::HostBundleAction::ArtifactRestore { agent, backup_id } => {
+            let mut decoded = [0_u8; 16];
+            hex::decode_to_slice(backup_id, &mut decoded).map_err(|_| {
+                tracedecay::errors::TraceDecayError::Config {
+                    message:
+                        "artifact restore --backup-id must be 32 lowercase hexadecimal characters"
+                            .to_string(),
+                }
+            })?;
+            if hex::encode(decoded) != *backup_id {
+                return Err(tracedecay::errors::TraceDecayError::Config {
+                    message:
+                        "artifact restore --backup-id must be 32 lowercase hexadecimal characters"
+                            .to_string(),
+                });
+            }
+            (agent.as_str(), Some(decoded))
+        }
+        crate::cli::HostBundleAction::Status | crate::cli::HostBundleAction::Recover { .. } => {
+            return Err(tracedecay::errors::TraceDecayError::Config {
+                message: "status and recovery are not artifact backup/restore operations"
+                    .to_string(),
+            });
+        }
+    };
+    let component_set = canonical_host_component_set(agent_id, Some(component), now_unix)?
+        .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
+            message: format!("agent {agent_id:?} has no canonical first-party host component set"),
+        })?;
+    ensure_artifact_only_restore_boundary(agent_id, &component_set, home, lifecycle_root)?;
+    let [entry] = component_set.component_set.components.as_slice() else {
+        return Err(tracedecay::errors::TraceDecayError::Config {
+            message: "artifact backup/restore requires exactly one canonical component".to_string(),
+        });
+    };
+    let mut operation_id = [0_u8; 16];
+    getrandom::getrandom(&mut operation_id).map_err(|error| {
+        tracedecay::errors::TraceDecayError::Config {
+            message: format!("could not generate host artifact operation id: {error}"),
+        }
+    })?;
+    let mut writer =
+        tracedecay::agents::host_bundle_v2::HostBundleWriterV1::open_with_lifecycle_root(
+            home,
+            lifecycle_root,
+        )
+        .map_err(host_bundle_error)?;
+    match backup_operation_id {
+        None => {
+            writer
+                .backup_component(&entry.manifest, operation_id, options.yes, &component_set)
+                .map_err(host_bundle_error)?;
+        }
+        Some(backup_operation_id) => {
+            writer
+                .restore_component_backup(
+                    backup_operation_id,
+                    operation_id,
+                    options.yes,
+                    &component_set,
+                )
+                .map_err(host_bundle_error)?;
+        }
+    }
+    Ok(operation_id)
+}
+
+pub(crate) async fn handle_host_bundle_artifact_command(
+    action: crate::cli::HostBundleAction,
+    options: crate::cli::HostBundleCliOptions,
+) -> tracedecay::errors::Result<()> {
+    let home = tracedecay::agents::home_dir().ok_or_else(|| {
+        tracedecay::errors::TraceDecayError::Config {
+            message: "could not determine home directory".to_string(),
+        }
+    })?;
+    let lifecycle_root = tracedecay::agents::host_bundle_v2::resolved_host_bundle_lifecycle_root()
+        .map_err(|error| tracedecay::errors::TraceDecayError::Config {
+            message: format!("could not resolve host lifecycle root: {error}"),
+        })?;
+    let now_unix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| tracedecay::errors::TraceDecayError::Config {
+            message: "system clock is before the Unix epoch".to_string(),
+        })?
+        .as_secs();
+    let is_restore = matches!(
+        &action,
+        crate::cli::HostBundleAction::ArtifactRestore { .. }
+    );
+    let operation_id =
+        apply_host_bundle_artifact_action_at(action, options, &home, &lifecycle_root, now_unix)?;
+    if is_restore {
+        eprintln!(
+            "\x1b[32m✔\x1b[0m managed artifact files restored; host registration was not changed; receipt {}",
+            hex::encode(operation_id)
+        );
+    } else {
+        eprintln!(
+            "\x1b[32m✔\x1b[0m managed artifact files backed up; host registration was not captured; backup id {}",
+            hex::encode(operation_id)
+        );
+    }
+    Ok(())
+}
+
 fn lifecycle_operation(
     operation: HostBundleCliOperation,
 ) -> tracedecay::agents::host_bundle_v2::HostBundleLifecycleOpV1 {
@@ -1075,6 +1229,12 @@ pub(crate) async fn handle_host_bundle_recovery_command(
     let (selected_agent, quarantine, status_only) = match action {
         crate::cli::HostBundleAction::Status => (None, false, true),
         crate::cli::HostBundleAction::Recover { agent, quarantine } => (agent, quarantine, dry_run),
+        crate::cli::HostBundleAction::ArtifactBackup { .. }
+        | crate::cli::HostBundleAction::ArtifactRestore { .. } => {
+            return Err(tracedecay::errors::TraceDecayError::Config {
+                message: "artifact backup and restore are not recovery operations".to_string(),
+            });
+        }
     };
 
     let mut pending = writer
@@ -2047,6 +2207,105 @@ mod tests {
         assert!(
             kiro.is_none(),
             "a degraded hook route must not become a supported component set"
+        );
+    }
+
+    #[test]
+    fn artifact_restore_refuses_components_with_registration_state() {
+        let home = tempfile::tempdir().unwrap();
+        let lifecycle = tempfile::tempdir().unwrap();
+        let core = canonical_host_component_set(
+            "codex",
+            Some(crate::cli::HostBundleComponentArg::Core),
+            0,
+        )
+        .unwrap()
+        .unwrap();
+        let error = super::ensure_artifact_only_restore_boundary(
+            "codex",
+            &core,
+            home.path(),
+            lifecycle.path(),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("does not manage registration state")
+        );
+
+        let artifact_only = canonical_host_component_set(
+            "opencode",
+            Some(crate::cli::HostBundleComponentArg::Agent),
+            0,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(
+            super::ensure_artifact_only_restore_boundary(
+                "opencode",
+                &artifact_only,
+                home.path(),
+                lifecycle.path(),
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn artifact_command_route_backs_up_and_restores_managed_files() {
+        let home = tempfile::tempdir().unwrap();
+        let lifecycle = tempfile::tempdir().unwrap();
+        let component_set = canonical_host_component_set(
+            "opencode",
+            Some(crate::cli::HostBundleComponentArg::Agent),
+            0,
+        )
+        .unwrap()
+        .unwrap();
+        let options = crate::cli::HostBundleCliOptions {
+            component: Some(crate::cli::HostBundleComponentArg::Agent),
+            dry_run: false,
+            yes: true,
+        };
+        apply_canonical_component_set(
+            "opencode",
+            HostBundleCliOperation::Install,
+            &component_set,
+            &options,
+            home.path(),
+            lifecycle.path(),
+        )
+        .unwrap();
+
+        let backup_id = super::apply_host_bundle_artifact_action_at(
+            crate::cli::HostBundleAction::ArtifactBackup {
+                agent: "opencode".to_string(),
+            },
+            options,
+            home.path(),
+            lifecycle.path(),
+            0,
+        )
+        .unwrap();
+        let content = &component_set.component_set.components[0].contents[0];
+        std::fs::write(home.path().join(&content.relative_path), b"diverged").unwrap();
+
+        let restore_id = super::apply_host_bundle_artifact_action_at(
+            crate::cli::HostBundleAction::ArtifactRestore {
+                agent: "opencode".to_string(),
+                backup_id: hex::encode(backup_id),
+            },
+            options,
+            home.path(),
+            lifecycle.path(),
+            0,
+        )
+        .unwrap();
+        assert_ne!(restore_id, backup_id);
+        assert_eq!(
+            std::fs::read(home.path().join(&content.relative_path)).unwrap(),
+            content.bytes
         );
     }
 
