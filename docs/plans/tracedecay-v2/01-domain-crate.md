@@ -2,12 +2,16 @@
 
 ## Status / Role
 
-PR5 **session-observation** contracts are complete. That completion statement
-does not certify the external-source semantic contract below as delivered:
-the retained external-source values have no production capture/authorization
-composition, adapter, or backing migration. They are an intentionally retained
-future seam, neither PR5/PR6 completion nor PR8–PR14 work to implement or
-delete (status corrected 2026-07-26).
+PR5 **session-observation** contracts are complete. External-source delivery is
+split (status corrected again 2026-07-26): the host-observation specialization
+is live. Hook V2 host admission constructs the retained external-source
+definition, binding, authorization, refresh, envelope, frontier, object, and
+evidence values and commits them through `SourceCaptureApplicationV1` to the
+canonical store. The earlier blanket characterization of this contract as
+having no production capture/authorization composition, adapter, or migration
+was wrong for that path. Broader provider acquisition and canonical-refetch
+composition remains dormant and is still a retained future seam rather than a
+delivered PR5/PR6 capability or PR8–PR14 work to rebuild.
 
 `tracedecay-domain` is the pure value-and-validation boundary used by vertical
 product PRs. It is not a standalone framework roadmap.
