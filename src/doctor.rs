@@ -84,14 +84,14 @@ pub async fn run_doctor(agent_filter: Option<&str>) -> crate::errors::Result<()>
         }
     };
     debug_assert!(
-        !env!("CARGO_PKG_VERSION").is_empty(),
-        "CARGO_PKG_VERSION must not be empty"
+        !crate::version::build_version().is_empty(),
+        "the reported build version must not be empty"
     );
     let mut dc = DoctorCounters::new();
 
     eprintln!(
         "\n\x1b[1mtracedecay doctor v{}\x1b[0m\n",
-        env!("CARGO_PKG_VERSION")
+        crate::version::build_version()
     );
 
     check_binary(&mut dc);
@@ -835,7 +835,7 @@ fn check_binary(dc: &mut DoctorCounters) {
     } else {
         dc.fail("Could not determine binary path");
     }
-    dc.pass(&format!("Version: {}", env!("CARGO_PKG_VERSION")));
+    dc.pass(&format!("Version: {}", crate::version::build_version()));
 }
 
 /// Check global database exists.

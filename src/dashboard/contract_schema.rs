@@ -14,6 +14,7 @@ use super::graph_structure_api::{
     TestMapMeasurementV1,
 };
 use super::read_model::{DASHBOARD_SCHEMA_REVISION_V1, DashboardEnvelopeV1};
+use super::storage_findings_api::StorageFindingsPayloadV1;
 use super::storage_telemetry_api::StorageTelemetryPayloadV1;
 
 #[derive(JsonSchema)]
@@ -21,6 +22,7 @@ use super::storage_telemetry_api::StorageTelemetryPayloadV1;
 struct DashboardContractCatalogV1 {
     envelope: DashboardEnvelopeV1<DashboardPayloadMarkerV1>,
     storage_telemetry: StorageTelemetryPayloadV1,
+    storage_findings: StorageFindingsPayloadV1,
     doctor_findings: DoctorFindingsPayloadV1,
     doctor_remediation_preview_request: DoctorRemediationPreviewRequestV1,
     doctor_remediation_apply_request: DoctorRemediationApplyRequestV1,
