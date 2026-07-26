@@ -803,7 +803,7 @@ async fn collect_over_budget_store_findings(
     use std::collections::BTreeMap;
     use tracedecay_application::storage::{
         StorageTelemetryReadV1, StoreSizeTelemetryPort, TableGrowthTelemetryReadV1,
-        over_budget_finding, table_growth_doctor_evidence,
+        over_budget_finding, table_growth_doctor_evidence, table_growth_finding,
     };
 
     let mut reads = BTreeMap::new();
@@ -831,6 +831,15 @@ async fn collect_over_budget_store_findings(
     }
 
     let mut findings = Vec::new();
+    for evidence in &table_growth_evidence {
+        let Ok(finding) = table_growth_finding(evidence) else {
+            return CollectedStoreTelemetryV1 {
+                findings: DoctorStorageFamilyReadV1::Unknown,
+                table_growth_evidence,
+            };
+        };
+        findings.push(finding);
+    }
     for configured_store in retention.store_soft_budgets_bytes.keys() {
         let Ok(Some(budget)) = retention.store_soft_budget(configured_store) else {
             return CollectedStoreTelemetryV1 {
