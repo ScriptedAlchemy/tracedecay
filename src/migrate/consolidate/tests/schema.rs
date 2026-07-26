@@ -54,7 +54,8 @@ async fn unknown_tables(path: &Path, classify: fn(&str) -> Option<&'static str>)
 
 fn graph_table_disposition(table: &str) -> Option<&'static str> {
     match table {
-        "memory_entities"
+        "external_source_states_v1"
+        | "memory_entities"
         | "memory_fact_entities"
         | "memory_fact_relations"
         | "memory_facts"
@@ -152,6 +153,7 @@ fn session_table_disposition(table: &str) -> Option<&'static str> {
         | "configuration_topology_protected_refs"
         | "configuration_topology_roots"
         | "dashboard_token_counts"
+        | "external_source_states_v1"
         | "git_correlation_meta"
         | "git_index_preview_commitments"
         | "git_index_repository_quarantines"

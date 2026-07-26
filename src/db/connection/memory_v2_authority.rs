@@ -178,7 +178,7 @@ impl Database {
         let writer = self
             .writer_connection("purge memory v2 legacy fact payload")
             .await?;
-        let receipt = memory_v2::purge_memory_v2_fact(
+        memory_v2::purge_memory_v2_fact(
             &writer.conn,
             owner,
             source_store_id,
@@ -186,12 +186,7 @@ impl Database {
             expected_last_event_id,
             occurred_at,
         )
-        .await?;
-        drop(writer);
-        if receipt.payload_purged() {
-            self.run_incremental_vacuum(64).await?;
-        }
-        Ok(receipt)
+        .await
     }
 
     /// Applies the guarded migrated-V1 deletion path inside the compatibility
