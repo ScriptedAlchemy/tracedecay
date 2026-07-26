@@ -748,7 +748,7 @@ fn invalid_fake_vectors_and_key_only_reuse_fail_closed() {
     .expect("model-key replay explicitly projects every retained chunk");
     assert_eq!(encoder.seen, vec![alpha.id.clone()]);
     assert_eq!(prepared.vectors.len(), 1);
-    assert!(prepared.receipt.reused_chunk_ids.is_empty());
+    assert_eq!(prepared.receipt.reused_count, 0);
 }
 
 #[test]
