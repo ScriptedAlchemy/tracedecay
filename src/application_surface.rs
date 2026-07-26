@@ -3068,6 +3068,27 @@ pub async fn resolve_http_application_surface(
     execute_application_surface(operation, dispatched, client).await
 }
 
+/// Resolve a dashboard action through the same catalog entry and daemon-owned
+/// application handler as CLI, MCP, and HTTP. Dashboard adapters may shape
+/// presentation responses around this result, but they do not own mutation
+/// validation, authorization, CAS, receipts, or rollback semantics.
+pub async fn resolve_dashboard_application_surface(
+    operation: ApplicationSurfaceOperation,
+    request_id: RequestId,
+    request: ApplicationSurfaceRequest,
+    requested_format: RequestedOutputFormat,
+    client: Option<&crate::daemon_client::DaemonInvocationClient>,
+) -> Result<ApplicationSurfaceInvocationResult, ApplicationSurfaceAdapterError> {
+    let dispatched = resolve_application_surface_dispatch(
+        BindingSurface::Dashboard,
+        operation,
+        request_id,
+        request,
+        requested_format,
+    )?;
+    execute_application_surface(operation, dispatched, client).await
+}
+
 pub fn resolve_http_application_surface_dispatch(
     operation: ApplicationSurfaceOperation,
     request_id: RequestId,

@@ -905,9 +905,9 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
     use tracedecay_application::{Deadline, OperationBudgetUsage, OperationTermination};
     use tracedecay_domain::UtcMicros;
-    use tower::ServiceExt;
 
     use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 

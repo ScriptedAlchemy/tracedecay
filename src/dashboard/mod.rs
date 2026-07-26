@@ -252,6 +252,10 @@ pub(crate) struct DashboardState {
     /// references descriptive and non-actionable.
     pub(crate) doctor_remediation_dispatcher:
         Option<doctor_remediation_api::DoctorRemediationDispatcherV1>,
+    /// Active-project daemon application transport. Mutating dashboard routes
+    /// use this catalog-bound client instead of opening stores or applying
+    /// configuration inside HTTP adapters.
+    pub(crate) application_client: Option<DaemonInvocationClient>,
 }
 
 /// Test-only lifetime owner for the same registered authorities retained by a
@@ -447,6 +451,7 @@ async fn build_state_inner(
         automation_writer,
         doctor_report_reader,
         doctor_remediation_dispatcher,
+        application_client: None,
     };
     // Pre-count non-usage messages in the background so the first Savings
     // tab paint doesn't pay the initial BPE pass over the session store.
@@ -778,7 +783,7 @@ impl ActiveProjectApplicationRoutes {
 
 /// Builds the complete dashboard router shared by direct and daemon-managed
 /// startup. The supplied state is the active writable project authority.
-pub(crate) async fn router(cg: &TraceDecay, state: DashboardState) -> Result<Router> {
+pub(crate) async fn router(cg: &TraceDecay, mut state: DashboardState) -> Result<Router> {
     // Fact writes defer derived memory rebuilds. Invoke the canonical bounded
     // convergence policy exactly once for the active writable project before
     // serving either startup path. Selected-project states are opened later
@@ -804,7 +809,10 @@ pub(crate) async fn router(cg: &TraceDecay, state: DashboardState) -> Result<Rou
     // dashboard and skip the `/api/application` surface, mirroring the
     // best-effort derived-memory repair above.
     let application = match ActiveProjectApplicationRoutes::for_active_project(cg) {
-        Ok(application) => Some(application),
+        Ok(application) => {
+            state.application_client = application.client.clone();
+            Some(application)
+        }
         Err(error) => {
             tracing::warn!("Active-project application routes skipped: {error}");
             None
