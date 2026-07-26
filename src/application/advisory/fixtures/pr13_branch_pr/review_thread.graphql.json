@@ -4,7 +4,7 @@
     "method": "POST",
     "url": "https://api.github.com/graphql",
     "operation_kind": "query",
-    "operation_name": "PR13ReviewFixture",
+    "operation_name": "TraceDecayPR13ReviewThreads",
     "documentation": "https://docs.github.com/en/graphql/reference/objects#pullrequestreviewthread"
   },
   "response": {
@@ -68,5 +68,8 @@
         }
       }
     }
+  },
+  "integrity": {
+    "body_text_sha256": "sha256:81b743cede9ff0d124beb58731d91c556343545f71c0ba51eb2b5378fdb95652"
   }
 }
