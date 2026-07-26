@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use schemars::{JsonSchema, generate::SchemaSettings};
+use schemars::JsonSchema;
+#[cfg(test)]
+use schemars::generate::SchemaSettings;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{ManifestDigest, canonical_sha256};
 use tracedecay_tool_catalog::{
@@ -540,7 +542,7 @@ fn validate_indexes(indexes: &[u32]) -> Result<(), ApplicationContractError> {
 }
 
 pub fn api_migration_plan_operation() -> Result<ApplicationOperation, ApplicationContractError> {
-    let result_schema = api_migration_schema::<ApiMigrationPlanV1>("result")?;
+    let result_schema = api_migration_schema("result")?;
     Ok(ApplicationOperation::new(
         CapabilityId::new("capability.application.api-migration.plan")?,
         UseCaseId::new("use-case.application.api-migration.plan")?,
@@ -553,8 +555,8 @@ pub fn api_migration_handler_descriptors()
 -> Result<Vec<ApplicationHandlerDescriptor>, ApplicationContractError> {
     Ok(vec![ApplicationHandlerDescriptor::new(
         api_migration_plan_operation()?,
-        api_migration_schema::<ApiMigrationPlanRequestV1>("request")?,
-        api_migration_schema::<ApiMigrationPlanV1>("result")?,
+        api_migration_schema("request")?,
+        api_migration_schema("result")?,
     )?])
 }
 
@@ -586,8 +588,8 @@ pub fn api_migration_catalog_contribution()
             "Resolve one dependency-ordered API migration family through graph and AST authorities.",
             vec!["Plan this API migration before applying any source edit".to_owned()],
         )?,
-        request_schema: api_migration_schema::<ApiMigrationPlanRequestV1>("request")?,
-        result_schema: api_migration_schema::<ApiMigrationPlanV1>("result")?,
+        request_schema: api_migration_schema("request")?,
+        result_schema: api_migration_schema("result")?,
         effect: EffectClass::Preview,
         scope: ScopeRequirement::new(vec![
             ScopeDimension::Project,
@@ -637,22 +639,14 @@ pub fn api_migration_catalog_contribution()
     })?)
 }
 
-fn api_migration_schema<T: JsonSchema>(
-    suffix: &str,
-) -> Result<SchemaRef, ApplicationContractError> {
-    let canonical_size_bytes =
-        u32::try_from(canonical_json_schema_bytes::<T>()?.len()).map_err(|_| {
-            ApplicationContractError::InvalidRange {
-                field: "API migration canonical schema size",
-            }
-        })?;
+fn api_migration_schema(suffix: &str) -> Result<SchemaRef, ApplicationContractError> {
     Ok(SchemaRef::new(
         SchemaId::new(format!("schema.application.api-migration.{suffix}"))?,
         1,
-        canonical_size_bytes,
     )?)
 }
 
+#[cfg(test)]
 fn canonical_json_schema_bytes<T: JsonSchema>() -> Result<Vec<u8>, ApplicationContractError> {
     let generator = SchemaSettings::default().for_serialize().into_generator();
     serde_json::to_vec(&generator.into_root_schema_for::<T>()).map_err(|error| {
@@ -733,23 +727,9 @@ mod tests {
     }
 
     #[test]
-    fn catalog_schema_sizes_match_minified_generated_schemas() {
+    fn api_migration_types_generate_minified_schema_with_shared_definitions() {
         let request_bytes =
             canonical_json_schema_bytes::<ApiMigrationPlanRequestV1>().expect("request schema");
-        let result_bytes =
-            canonical_json_schema_bytes::<ApiMigrationPlanV1>().expect("result schema");
-        assert_eq!(
-            api_migration_schema::<ApiMigrationPlanRequestV1>("request")
-                .unwrap()
-                .canonical_size_bytes(),
-            request_bytes.len() as u32,
-        );
-        assert_eq!(
-            api_migration_schema::<ApiMigrationPlanV1>("result")
-                .unwrap()
-                .canonical_size_bytes(),
-            result_bytes.len() as u32,
-        );
         let request_schema: serde_json::Value =
             serde_json::from_slice(&request_bytes).expect("request schema JSON");
         assert!(

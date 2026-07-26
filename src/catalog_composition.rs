@@ -140,25 +140,25 @@ fn application_profiles(
         (
             APPLICATION_DEFAULT_PROFILE_ID,
             ProfileKind::Default,
-            ProfileBudget::new(320, 90_000_000, 18_000)?,
+            ProfileBudget::new(320, 18_000)?,
             true,
         ),
         (
             APPLICATION_COMPACT_PROFILE_ID,
             ProfileKind::Compact,
-            ProfileBudget::new(22, 12_000_000, 4_000)?,
+            ProfileBudget::new(22, 4_000)?,
             false,
         ),
         (
             APPLICATION_ADMINISTRATIVE_PROFILE_ID,
             ProfileKind::Administrative,
-            ProfileBudget::new(40, 16_000_000, 8_000)?,
+            ProfileBudget::new(40, 8_000)?,
             false,
         ),
         (
             APPLICATION_HOST_LIMITED_PROFILE_ID,
             ProfileKind::HostLimited,
-            ProfileBudget::new(17, 8_000_000, 2_000)?,
+            ProfileBudget::new(17, 2_000)?,
             false,
         ),
     ]
@@ -332,11 +332,22 @@ fn unique_routing_fixture_utterance(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mcp::tools::{
+        ToolRegistryMode, default_catalog_discovery_authority,
+        get_catalog_filtered_tool_definitions_with_budget, project_catalog_discovery_scope,
+    };
     use tracedecay_application::handlers::CanonicalApplicationDispatcher;
     use tracedecay_application::{
         ApplicationOperation, ApplicationProblem, RetryDirective, SafeDiagnostic,
     };
     use tracedecay_tool_catalog::SurfaceOperationName;
+
+    // Growth tripwire only, not an MCP client or protocol limit. The original
+    // full-registry measurement was 231,640 bytes; the exact deterministic
+    // default-profile baseline is 222,664 bytes after catalog filtering.
+    // Raising this 512 KiB ceiling requires a fresh serialized tools/list
+    // measurement and a stated reason for the additional payload.
+    const DEFAULT_PROFILE_TOOLS_LIST_REGRESSION_CEILING_BYTES: usize = 524_288;
 
     const DASHBOARD_OPERATIONS: [&str; 23] = [
         "feedback_diagnostics",
@@ -557,26 +568,44 @@ mod tests {
         assert_eq!(default_profile.budget().maximum_bindings(), 320);
         assert!(default_binding_count > 0);
         assert!(default_binding_count <= default_profile.budget().maximum_bindings() as usize);
-        let mut default_schemas = std::collections::BTreeMap::new();
-        for capability in contributions
+
+        let definitions = get_catalog_filtered_tool_definitions_with_budget(
+            0,
+            crate::mcp::tools::explore_call_budget(0),
+            &default_profile_id,
+            &default_catalog_discovery_authority().expect("default discovery authority"),
+            &project_catalog_discovery_scope(),
+            ToolRegistryMode::DeterministicMaximal,
+        )
+        .expect("default-profile MCP definitions");
+        let measured_bytes = serde_json::to_vec(&serde_json::json!({ "tools": &definitions }))
+            .expect("serialize default-profile tools/list response")
+            .len();
+        let mut contributors = definitions
             .iter()
-            .flat_map(CatalogContributionV1::capabilities)
-            .filter(|capability| default_profile.includes_capability(capability.capability_id()))
-        {
-            for schema in capability.schema_refs() {
-                default_schemas
-                    .entry((schema.schema_id().clone(), schema.revision()))
-                    .or_insert(schema.canonical_size_bytes());
-            }
-        }
-        let default_schema_bytes = default_schemas
-            .values()
-            .copied()
-            .map(u64::from)
-            .sum::<u64>();
-        assert_eq!(default_profile.budget().maximum_schema_bytes(), 90_000_000);
-        assert!(default_schema_bytes > 0);
-        assert!(default_schema_bytes <= u64::from(default_profile.budget().maximum_schema_bytes()));
+            .map(|definition| {
+                (
+                    definition.name.as_str(),
+                    serde_json::to_vec(definition)
+                        .expect("serialize tool definition")
+                        .len(),
+                )
+            })
+            .collect::<Vec<_>>();
+        contributors.sort_by(|left, right| right.1.cmp(&left.1).then(left.0.cmp(right.0)));
+        let largest_contributors = contributors
+            .iter()
+            .take(10)
+            .map(|(name, bytes)| format!("{name}={bytes}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        assert!(
+            measured_bytes <= DEFAULT_PROFILE_TOOLS_LIST_REGRESSION_CEILING_BYTES,
+            "default-profile MCP tools/list payload measured {measured_bytes} bytes, exceeding \
+             the {DEFAULT_PROFILE_TOOLS_LIST_REGRESSION_CEILING_BYTES}-byte regression ceiling; \
+             largest serialized tool definitions: {largest_contributors}"
+        );
     }
 
     #[test]
