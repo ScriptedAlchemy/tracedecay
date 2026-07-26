@@ -29,6 +29,32 @@ async fn test_search() {
 }
 
 #[tokio::test]
+async fn strict_semantic_without_executor_never_serves_legacy_fallback() {
+    let (cg, _dir) = setup_project().await;
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_search",
+        json!({
+            "query": "helper",
+            "semantic_mode": "strict_semantic",
+            "format": "json"
+        }),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let payload = extract_json(&result.value);
+    assert_eq!(payload["results"].as_array().map(Vec::len), Some(0));
+    assert_eq!(payload["status"].as_str(), Some("unavailable"));
+    assert_eq!(
+        payload["semantic"]["mode"].as_str(),
+        Some("strict_semantic")
+    );
+    assert_eq!(payload["semantic"]["status"].as_str(), Some("unavailable"));
+}
+
+#[tokio::test]
 async fn test_grep_literal_hit_is_enriched_with_symbol() {
     let (cg, _dir) = setup_project().await;
     // `format!("Hello, {}!", name)` lives inside `format_greeting` in utils.rs.
@@ -610,8 +636,10 @@ async fn test_search_skips_ignored_dependency_hint_when_results_fill_limit() {
     .await
     .unwrap();
     let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
-    assert_eq!(payload.as_array().map(Vec::len), Some(1));
-    assert_eq!(payload[0]["name"].as_str(), Some("Foo"));
+    assert_eq!(payload["results"].as_array().map(Vec::len), Some(1));
+    assert_eq!(payload["results"][0]["name"].as_str(), Some("Foo"));
+    assert!(payload.get("ignored_dependency_hint").is_none());
+    assert_eq!(payload["status"].as_str(), Some("lexical_fallback"));
 }
 
 #[tokio::test]
@@ -629,10 +657,10 @@ async fn test_search_omits_index_coverage_hint_when_generated_dir_is_included() 
     .unwrap();
     let text = extract_text(&result.value);
     let parsed: Value = serde_json::from_str(text).unwrap();
-    assert!(
-        parsed.as_array().is_some(),
-        "search should keep array shape when there is no coverage hint, got: {text}"
-    );
+    assert_eq!(parsed["results"].as_array().map(Vec::len), Some(0));
+    assert!(parsed.get("index_coverage_hint").is_none());
+    assert_eq!(parsed["status"].as_str(), Some("lexical_fallback"));
+    assert_eq!(parsed["semantic"]["status"].as_str(), Some("unavailable"));
     close_test_graph(cg).await;
 }
 
