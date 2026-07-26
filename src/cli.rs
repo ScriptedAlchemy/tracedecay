@@ -1154,6 +1154,12 @@ pub enum MigrateAction {
         /// Profile root to inspect (defaults to the resolved user data dir).
         #[arg(long = "profile-root")]
         profile_root: Option<String>,
+        /// Inspect only this project shard, bypassing the global registry.
+        #[arg(long = "project-id", requires = "project_root")]
+        project_id: Option<String>,
+        /// Canonical project root used to resolve the code-index scope.
+        #[arg(long = "project-root", requires = "project_id")]
+        project_root: Option<String>,
         /// Output as JSON.
         #[arg(long)]
         json: bool,

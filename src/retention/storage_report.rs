@@ -27,6 +27,11 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::time::Duration;
 
+use super::code_index_generations::{
+    CodeGenerationRetentionGenerationV1, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+    plan_code_generation_retention, scoped_code_index_store_root,
+};
+
 const GLOBAL_DB_FILENAME: &str = "global.db";
 
 /// How long a size sample will wait on a lock before giving up and reporting
@@ -57,9 +62,26 @@ pub struct StoreSizeReportEntry {
 pub struct StorageReport {
     pub profile_root: String,
     pub stores: Vec<StoreSizeReportEntry>,
+    pub code_generation_retention: Vec<CodeGenerationRetentionDryRunEntry>,
     pub unregistered_dir_count: usize,
     pub unregistered_bytes: u64,
     pub global_db_bytes: u64,
+}
+
+/// Read-only mark-and-sweep preview for one code-index scope.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct CodeGenerationRetentionDryRunEntry {
+    pub project_id: String,
+    pub store_root: String,
+    pub active_generation_id: String,
+    pub active_generation_file: String,
+    pub vector_readable_sources: Vec<String>,
+    pub rollback_floor: usize,
+    pub superseded_generation_count: usize,
+    pub superseded_generation_bytes: u64,
+    pub collectable_generation_count: usize,
+    pub collectable_generation_bytes: u64,
+    pub collectable_generations: Vec<CodeGenerationRetentionGenerationV1>,
 }
 
 /// Builds the report by reading `global.db`'s `code_projects` table and every
@@ -70,6 +92,7 @@ pub async fn build_storage_report(profile_root: &Path) -> crate::errors::Result<
     let global_db_path = profile_root.join(GLOBAL_DB_FILENAME);
     let mut registered_ids = HashSet::new();
     let mut stores = Vec::new();
+    let mut code_generation_retention = Vec::new();
 
     if global_db_path.exists() {
         // The snapshot layer creates only the final scratch component, so its
@@ -101,19 +124,13 @@ pub async fn build_storage_report(profile_root: &Path) -> crate::errors::Result<
                 .get::<String>(1)
                 .map_err(|error| report_error("decode canonical root", error))?;
             registered_ids.insert(project_id.clone());
-            let graph_db_path = profile_root
-                .join("projects")
-                .join(&project_id)
-                .join(crate::config::DB_FILENAME);
-            if let Some(entry) = sample_store_size(&graph_db_path) {
-                stores.push(StoreSizeReportEntry {
-                    project_id,
-                    canonical_root,
-                    total_bytes: entry.total_bytes,
-                    free_bytes: entry.free_bytes,
-                    free_page_ratio: entry.free_page_ratio,
-                });
-            }
+            append_project_report(
+                profile_root,
+                &project_id,
+                &canonical_root,
+                &mut stores,
+                &mut code_generation_retention,
+            )?;
         }
     }
 
@@ -124,10 +141,101 @@ pub async fn build_storage_report(profile_root: &Path) -> crate::errors::Result<
     Ok(StorageReport {
         profile_root: profile_root.display().to_string(),
         stores,
+        code_generation_retention,
         unregistered_dir_count,
         unregistered_bytes,
         global_db_bytes,
     })
+}
+
+/// Build the same read-only report for one explicitly identified shard without
+/// opening `global.db`. This is the daemon-independent path for maintenance
+/// when the global registry's exclusive-maintenance authority is unavailable.
+pub fn build_project_storage_report(
+    profile_root: &Path,
+    project_id: &str,
+    canonical_root: &Path,
+) -> crate::errors::Result<StorageReport> {
+    crate::storage::validate_project_id(project_id).map_err(|message| {
+        crate::errors::TraceDecayError::Config {
+            message: message.to_owned(),
+        }
+    })?;
+    let mut stores = Vec::new();
+    let mut code_generation_retention = Vec::new();
+    append_project_report(
+        profile_root,
+        project_id,
+        &canonical_root.to_string_lossy(),
+        &mut stores,
+        &mut code_generation_retention,
+    )?;
+    let global_db_path = profile_root.join(GLOBAL_DB_FILENAME);
+    Ok(StorageReport {
+        profile_root: profile_root.display().to_string(),
+        stores,
+        code_generation_retention,
+        unregistered_dir_count: 0,
+        unregistered_bytes: 0,
+        global_db_bytes: std::fs::metadata(global_db_path).map_or(0, |metadata| metadata.len()),
+    })
+}
+
+fn append_project_report(
+    profile_root: &Path,
+    project_id: &str,
+    canonical_root: &str,
+    stores: &mut Vec<StoreSizeReportEntry>,
+    code_generation_retention: &mut Vec<CodeGenerationRetentionDryRunEntry>,
+) -> crate::errors::Result<()> {
+    let data_root = profile_root.join("projects").join(project_id);
+    let graph_db_path = data_root.join(crate::config::DB_FILENAME);
+    if let Some(entry) = sample_store_size(&graph_db_path) {
+        stores.push(StoreSizeReportEntry {
+            project_id: project_id.to_owned(),
+            canonical_root: canonical_root.to_owned(),
+            total_bytes: entry.total_bytes,
+            free_bytes: entry.free_bytes,
+            free_page_ratio: entry.free_page_ratio,
+        });
+    }
+    let code_index_store_root =
+        scoped_code_index_store_root(&data_root.join("code-index-v1"), Path::new(canonical_root));
+    if !code_index_store_root
+        .join("active-code-generation-v1.json")
+        .is_file()
+    {
+        return Ok(());
+    }
+    let readable_sources =
+        crate::store::vector_generations::retained_readable_sources_from_read_only_project_store(
+            &data_root,
+        )
+        .map_err(|error| report_error("read vector-readable code generations", error))?;
+    let plan = plan_code_generation_retention(
+        &code_index_store_root,
+        &readable_sources,
+        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+    )
+    .map_err(|error| report_error("plan code-generation retention", error))?;
+    code_generation_retention.push(CodeGenerationRetentionDryRunEntry {
+        project_id: project_id.to_owned(),
+        store_root: code_index_store_root.display().to_string(),
+        active_generation_id: plan.active_generation_id.as_str().to_owned(),
+        active_generation_file: plan.active_generation_file().to_owned(),
+        vector_readable_sources: plan
+            .vector_readable_sources
+            .iter()
+            .map(|source| source.as_str().to_owned())
+            .collect(),
+        rollback_floor: plan.rollback_floor,
+        superseded_generation_count: plan.superseded_generations.len(),
+        superseded_generation_bytes: plan.superseded_generation_bytes(),
+        collectable_generation_count: plan.collectable_generations.len(),
+        collectable_generation_bytes: plan.collectable_generation_bytes(),
+        collectable_generations: plan.collectable_generations,
+    });
+    Ok(())
 }
 
 /// A store's sampled size. `total_bytes` is always available (filesystem
@@ -407,5 +515,22 @@ mod tests {
         assert!(report.stores.is_empty());
         assert_eq!(report.unregistered_dir_count, 0);
         assert_eq!(report.global_db_bytes, 0);
+    }
+
+    #[test]
+    fn targeted_project_report_bypasses_global_registry() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile_root = tmp.path().join("profile");
+        std::fs::create_dir_all(&profile_root).unwrap();
+        seed_graph_db(&profile_root, "proj_a");
+
+        let report =
+            build_project_storage_report(&profile_root, "proj_a", Path::new("/repos/a")).unwrap();
+
+        assert_eq!(report.stores.len(), 1);
+        assert_eq!(report.stores[0].project_id, "proj_a");
+        assert_eq!(report.stores[0].canonical_root, "/repos/a");
+        assert!(report.code_generation_retention.is_empty());
+        assert!(!profile_root.join(GLOBAL_DB_FILENAME).exists());
     }
 }

@@ -1,12 +1,13 @@
 import { useQuery } from '@tanstack/react-query';
 import type { z } from 'zod';
 import { fetchLegacy, type LegacyResult } from './legacy.ts';
+import type { WireSchema } from './wireSchema.ts';
 import { scopeKey, scopedUrl, useScope } from '../scope/store.ts';
 
 export function useLegacy<T>(
   key: readonly unknown[],
   url: string,
-  schema: z.ZodType<T>,
+  schema: WireSchema<T>,
   options?: { refetchInterval?: number | false; staleTime?: number; enabled?: boolean },
 ) {
   const scope = useScope((s) => s.scope);

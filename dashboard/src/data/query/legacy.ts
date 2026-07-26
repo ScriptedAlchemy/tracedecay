@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { WireSchema } from './wireSchema.ts';
 
 /** Result for the legacy (pre-envelope) JSON endpoints. These are the
  * compatibility surfaces the old dashboard consumed; they return plain
@@ -13,7 +14,7 @@ export type LegacyResult<T> =
 
 export async function fetchLegacy<T>(
   url: string,
-  schema: z.ZodType<T>,
+  schema: WireSchema<T>,
   init?: RequestInit,
 ): Promise<LegacyResult<T>> {
   let response: Response;

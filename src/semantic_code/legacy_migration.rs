@@ -45,6 +45,22 @@ impl LegacyVectorInventoryV1 {
         ))
         .map_err(|error| LegacyVectorMigrationErrorV1::CanonicalCode(error.to_string()))
     }
+
+    /// Code generations still named by readable vector inventory entries.
+    ///
+    /// This is the shared liveness authority for legacy migration reads,
+    /// code-generation retention, and Doctor's exact collectable-byte reading.
+    pub(crate) fn retained_readable_sources(&self) -> BTreeSet<CodeGenerationId> {
+        self.entries
+            .iter()
+            .filter_map(|entry| match entry {
+                LegacyVectorInventoryEntryV1::Readable {
+                    source_generation, ..
+                } => Some(source_generation.clone()),
+                LegacyVectorInventoryEntryV1::Unreadable { .. } => None,
+            })
+            .collect()
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

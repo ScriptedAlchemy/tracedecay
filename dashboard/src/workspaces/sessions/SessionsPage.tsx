@@ -14,32 +14,18 @@ import { formatStamp, splitCount } from '../../ui/format.ts';
 import { VirtualList } from '../../ui/VirtualList.tsx';
 import { AnyObject } from '../../data/query/legacy.ts';
 import { useLegacy } from '../../data/query/useLegacy.ts';
+import { LcmTimelinePayloadSchema } from '../../contracts/wire.ts';
 
 const BASE = '/api/plugins/hermes-lcm';
 
+/**
+ * UNCONTRACTED. `lcm_api.rs::overview` and `::search` still answer with
+ * `serde_json::Value`, so these two are read structurally. Every other route
+ * this workspace touches is generated; when those two gain a schemars DTO these
+ * go with them.
+ */
 const OverviewPayload = z
   .object({ exists: z.boolean().optional(), latest_sessions: z.array(AnyObject).optional() })
-  .passthrough();
-const TimelinePayload = z
-  .object({
-    exists: z.boolean().optional(),
-    buckets: z.array(AnyObject).optional(),
-    undated: z
-      .object({ count: z.number().optional(), token_estimate: z.number().optional() })
-      .passthrough()
-      .optional(),
-    coverage: z
-      .object({
-        limit: z.number(),
-        returned_buckets: z.number(),
-        total_dated_buckets: z.number(),
-        truncated: z.boolean(),
-        ordering: z.literal('most_recent'),
-        next_before_bucket: z.string().nullable().optional(),
-      })
-      .passthrough()
-      .optional(),
-  })
   .passthrough();
 /** Wire-true transcript search (lcm_api.rs search): hits nest under
  * matches.messages / matches.summary_nodes. */
@@ -63,7 +49,7 @@ const SearchPayload = z
  * provider, session list, and drill-down. */
 export function SessionsPage() {
   const overview = useLegacy(['lcm', 'overview'], `${BASE}/overview`, OverviewPayload);
-  const timeline = useLegacy(['lcm', 'timeline'], `${BASE}/timeline`, TimelinePayload);
+  const timeline = useLegacy(['lcm', 'timeline'], `${BASE}/timeline`, LcmTimelinePayloadSchema);
   const [selected, setSelected] = useState<Record<string, unknown> | null>(null);
   const [query, setQuery] = useState('');
   const [submitted, setSubmitted] = useState('');
@@ -112,15 +98,21 @@ export function SessionsPage() {
                 </p>
               );
             }
-            const buckets = (data.buckets ?? []).map((b) => ({
-              label: String(b['bucket'] ?? ''),
-              value: Number(b['count'] ?? 0),
-              hint: `~${Number(b['token_estimate'] ?? 0).toLocaleString()} tokens`,
+            const buckets = data.buckets.map((b) => ({
+              label: b.bucket,
+              value: b.count,
+              hint: `~${b.token_estimate.toLocaleString()} tokens`,
             }));
             const total = buckets.reduce((sum, b) => sum + b.value, 0);
             const split = splitCount(total);
             const coverage = data.coverage;
-            const undated = data.undated?.count ?? 0;
+            // `undated` is still a bare map on the Rust side, so its one known
+            // key is read rather than typed. A non-numeric value means the
+            // daemon reported something this build cannot count, which is not
+            // the same as counting zero — so the line below stays unrendered
+            // rather than claiming there are no undated messages.
+            const undatedCount = data.undated['count'];
+            const undated = typeof undatedCount === 'number' ? undatedCount : null;
             return (
               <div className="flex flex-col gap-3">
                 <div className="td-raised border border-edge-subtle px-3 py-3">
@@ -148,7 +140,7 @@ export function SessionsPage() {
                     Timeline coverage was not reported.
                   </p>
                 )}
-                {undated > 0 ? (
+                {undated != null && undated > 0 ? (
                   <p className="text-3xs leading-relaxed text-text-muted">
                     {undated.toLocaleString()} undated messages are separate from this chart.
                   </p>
