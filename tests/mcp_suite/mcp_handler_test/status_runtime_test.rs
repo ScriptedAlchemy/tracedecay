@@ -3,7 +3,10 @@
 use crate::support::*;
 use serde_json::{Value, json};
 use std::fs;
+use std::process::Command;
+use tempfile::TempDir;
 use tracedecay::application::host_admission::HostAdmissionScope;
+use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 use tracedecay::sessions::SessionRecord;
 
 // ---------------------------------------------------------------------------
@@ -303,16 +306,56 @@ async fn test_runtime_snapshot_exposes_process_and_db_signals() {
 
 #[tokio::test]
 async fn test_runtime_snapshot_runs_authority_audit_only_when_requested() {
-    let (cg, _dir) = setup_project().await;
-    let server = real_mcp_server(cg).await;
-    let result = handle_real_server_tool_call(
-        &server,
-        "tracedecay_runtime",
-        json!({ "authority_audit": true, "format": "json" }),
+    let isolation = TempDir::new().unwrap();
+    let project = isolation.path().join("project");
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(
+        project.join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
     )
-    .await;
+    .unwrap();
+    fs::write(
+        project.join("src/lib.rs"),
+        "pub fn indexed_fixture() -> bool { true }\n",
+    )
+    .unwrap();
+    for args in [
+        &["init", "--quiet"][..],
+        &["add", "."][..],
+        &[
+            "-c",
+            "user.name=TraceDecay Tests",
+            "-c",
+            "user.email=tests@tracedecay.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "fixture",
+        ][..],
+    ] {
+        assert!(
+            Command::new("git")
+                .args(args)
+                .current_dir(&project)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    let harness = ProductionProjectCompositionHarnessV1::open(isolation.path(), [project.clone()])
+        .await
+        .unwrap();
+    let response = harness
+        .call_tool(
+            &project,
+            "tracedecay_runtime",
+            json!({ "authority_audit": true, "format": "json" }),
+        )
+        .await
+        .expect("production invocation succeeds");
+    let result = response.result.unwrap();
     let parsed: serde_json::Value =
-        serde_json::from_str(extract_real_server_text(&result)).unwrap();
+        serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
     let db = &parsed["database"];
     assert_eq!(db["authority_audit_ok"], true);
     assert!(db["authority_audit_error"].is_null());
