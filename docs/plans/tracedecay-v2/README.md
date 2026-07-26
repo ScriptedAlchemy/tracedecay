@@ -1,7 +1,10 @@
 # TraceDecay V2 rewrite
 
 Status: active product rewrite. PR8 is complete. PR9/PR10 acceptance and
-PR12/PR13 production integration are active, and PR #421 remains open.
+PR12/PR13 production integration are active. Draft PR #421 is the consolidated
+delivery vehicle; the former six-separate-PR model for PR8–PR13 is superseded.
+PR14 integration paths have an implemented but unverified checkpoint and PR14
+remains blocked on the active contracts, direct tests, and normal CI.
 
 The authoritative delivery order is [00-plan-set-index.md](00-plan-set-index.md).
 The active production-integration and incremental-indexing slice is
@@ -145,8 +148,8 @@ non-product and never justify implementation or CI by themselves.
 
 The current executable slice is always [NEXT.md](NEXT.md). This roadmap is
 contributor documentation, never daemon input, workflow input, product state, or
-a source of completion truth. PR #421 merges only after PR20, direct product
-tests, and normal cross-platform CI are stable.
+a source of completion truth. Draft PR #421 merges only after PR20, direct
+product tests, and normal cross-platform CI are stable.
 
 ## Release
 

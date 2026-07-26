@@ -265,6 +265,7 @@ pub(crate) async fn overview(State(state): State<DashboardState>) -> Json<Value>
 }
 
 async fn savings_overview(gdb: &RegisteredGlobalDb, db_path: &str) -> Value {
+    const PROJECT_LIMIT: i64 = 25;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -277,20 +278,58 @@ async fn savings_overview(gdb: &RegisteredGlobalDb, db_path: &str) -> Value {
     // Legacy lifetime counters (`projects.tokens_saved`) predate the ledger
     // and often carry history the event log does not — surface both.
     let conn = gdb.read_connection();
-    let lifetime_projects = query_rows(
+    let lifetime_projects = match query_rows(
         conn,
         "SELECT path, tokens_saved FROM projects
-         WHERE tokens_saved > 0 ORDER BY tokens_saved DESC LIMIT 25",
-        (),
+         WHERE tokens_saved > 0 ORDER BY tokens_saved DESC LIMIT ?1",
+        params![PROJECT_LIMIT],
     )
     .await
-    .unwrap_or_default();
-    let lifetime_total = query_i64(
+    {
+        Ok(projects) => projects,
+        Err(error) => {
+            return json!({
+                "available": false,
+                "db": db_path,
+                "recording": recording_block(),
+                "error": format!("failed to read lifetime project savings: {error}"),
+            });
+        }
+    };
+    let lifetime_total = match query_i64_result(
         conn,
         "SELECT COALESCE(SUM(tokens_saved), 0) FROM projects",
         (),
     )
-    .await;
+    .await
+    {
+        Ok(total) => total,
+        Err(error) => {
+            return json!({
+                "available": false,
+                "db": db_path,
+                "recording": recording_block(),
+                "error": format!("failed to read lifetime savings total: {error}"),
+            });
+        }
+    };
+    let project_total = match query_i64_result(
+        conn,
+        "SELECT COUNT(*) FROM projects WHERE tokens_saved > 0",
+        (),
+    )
+    .await
+    {
+        Ok(total) => total,
+        Err(error) => {
+            return json!({
+                "available": false,
+                "db": db_path,
+                "recording": recording_block(),
+                "error": format!("failed to read lifetime project count: {error}"),
+            });
+        }
+    };
 
     let sum_json = |total: &crate::global_db::SavingsTotal| json!({ "saved_tokens": total.saved_tokens, "calls": total.calls });
     json!({
@@ -305,6 +344,9 @@ async fn savings_overview(gdb: &RegisteredGlobalDb, db_path: &str) -> Value {
         },
         "lifetime_counters": {
             "total_tokens_saved": lifetime_total,
+            "project_total": project_total,
+            "projects_limit": PROJECT_LIMIT,
+            "projects_truncated": project_total > lifetime_projects.len() as i64,
             "projects": lifetime_projects.iter().map(|row| json!({
                 "path": str_field(row, "path"),
                 "tokens_saved": i64_field(row, "tokens_saved"),

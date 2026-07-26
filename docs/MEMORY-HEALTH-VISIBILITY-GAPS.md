@@ -1,5 +1,9 @@
 # Holographic Memory — Health Visibility Gap Analysis
 
+> Historical gap analysis. Its `dashboard/holographic/*` frontend references
+> describe the legacy plugin at `/legacy`, not the single-app product dashboard
+> built from `dashboard/src/workspaces/` and served at `/`.
+
 Scope: operator visibility into **holographic (FHRR) memory health** across every
 user-facing surface — the `tracedecay` CLI, the standalone `tracedecay dashboard`
 HTTP backend, the `dashboard/holographic/*` frontend page, the MCP tool surface,

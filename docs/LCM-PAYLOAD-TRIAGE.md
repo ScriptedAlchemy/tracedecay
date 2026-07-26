@@ -1,5 +1,9 @@
 # LCM external payload retention & GC — triage decision
 
+> Historical triage record. References to `dashboard/build.mjs` and legacy LCM
+> plugin bundles describe the pre-single-app frontend and are not current build
+> instructions; current production assets come from `dashboard/app-dist`.
+
 Status: **triage complete**. This is the decision record and single entry point for the
 LCM external-payload retention/GC effort. It does not re-specify anything — the four
 normative specs below do — it records the **triage verdict**, **reconciles the open

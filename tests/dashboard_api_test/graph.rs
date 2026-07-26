@@ -304,11 +304,9 @@ fn graph_api_returns_seeded_overview_search_detail_and_subgraph() {
             get_json(&agent, &format!("{}/api/capabilities", fixture.base_url));
         assert_eq!(status, 200);
         assert_eq!(capabilities["features"]["graph"], true);
-        assert!(
-            capabilities["dashboards"]
-                .as_array()
-                .is_some_and(|dashboards| dashboards.iter().any(|name| name == "graph")),
-            "capabilities should advertise the graph dashboard"
+        assert_eq!(
+            capabilities["dashboards"],
+            serde_json::json!(["tracedecay"])
         );
 
         let (status, overview) = get_json(
@@ -709,7 +707,6 @@ fn structure_visualization_endpoints_report_measured_data() {
                 })),
             "test map should report the covering test: {tests}"
         );
-
         let (status, sessions) = get_json(
             &agent,
             &format!(

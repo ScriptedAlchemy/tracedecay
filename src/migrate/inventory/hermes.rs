@@ -3,10 +3,12 @@ use std::path::{Path, PathBuf};
 
 use super::artifacts::file_size;
 use super::model::{
-    InventoryIntegrityMode, InventoryStoreAuthority, RegistryStatus, SkippedPath,
-    SqliteIntegrityOutcome, StoreArtifact, StoreBrand, StoreInventory, StoreRole, StoreStatus,
+    InventoryIntegrityMode, InventoryStoreAuthority, RegistryStatus, SkippedPath, StoreArtifact,
+    StoreBrand, StoreInventory, StoreRole, StoreStatus,
 };
-use super::project::{InventoryScanOptions, canonicalize_lossy, inspect_data_dir_candidate};
+use super::project::{
+    InventoryScanOptions, canonicalize_lossy, inspect_data_dir_candidate, push_integrity_issue,
+};
 use super::sqlite::sqlite_quick_check;
 use crate::config::TRACEDECAY_DIR;
 use crate::errors::Result;
@@ -134,14 +136,14 @@ async fn inspect_hermes_state_db(
     let mut statuses = Vec::new();
     match integrity {
         InventoryIntegrityMode::MetadataOnly => statuses.push(StoreStatus::IntegrityUnchecked),
-        InventoryIntegrityMode::Full => match sqlite_quick_check(&db_path).await {
-            SqliteIntegrityOutcome::Verified => {}
-            outcome => statuses.push(StoreStatus::IntegrityIssue {
-                path: db_path.clone(),
-                authority: InventoryStoreAuthority::ExternalSource,
-                outcome,
-            }),
-        },
+        InventoryIntegrityMode::Full => {
+            push_integrity_issue(
+                &mut statuses,
+                &db_path,
+                InventoryStoreAuthority::ExternalSource,
+                sqlite_quick_check(&db_path).await,
+            );
+        }
     }
     if statuses.is_empty() {
         statuses.push(StoreStatus::Ok);

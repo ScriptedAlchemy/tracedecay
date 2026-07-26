@@ -1,5 +1,10 @@
 # Holographic Memory Replacement Implementation Plan
 
+> Historical implementation plan, retained for provenance rather than
+> execution. Its Rust 2021 and `libsql` instructions describe the design-time
+> codebase and are superseded by Rust 2024 plus the
+> `tracedecay-rusqlite-runtime`; do not resurrect the unchecked libSQL tasks.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the current `tracedecay` cross-session memory implementation with a Rust-native holographic fact memory backed by `amari-holographic`, SQLite, FTS5, trust scoring, and MCP tools inspired by Hermes Holographic.

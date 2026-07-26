@@ -25,26 +25,26 @@
  *            more turns in it is a thicker thread.
  *
  *   solidity — EVIDENCE QUALITY, per plan 11a's fill-pattern axis. A thread
- *            whose END the store serves (`last_message_at`) is drawn solid
- *            from start to end: its extent is measured. A thread whose end is
- *            NOT served is drawn as a solid head with an open, dashed tail:
- *            it started here, and how long it ran is unknown. On the real
- *            profile most threads are open, and that is the single most
- *            important true thing this surface has to say about its own data.
- *            Drawing them all as points, or all as some default duration,
- *            would erase it.
+ *            with a recorded session end is drawn solid to that end. When the
+ *            session has no end but does have a later message timestamp, the
+ *            solid extent ends at that last observation and is labelled as
+ *            such. Only a thread with neither quantity gets an open, dashed
+ *            tail: it started here, and how long it ran is unknown. Drawing a
+ *            default duration would erase that distinction.
  *
- * There is no weft. Every crossing the plan asks the Loom to weave — a
- * session landing on a commit, on an edited file, on a branch or a PR — is a
- * relation the daemon does not serve to the dashboard (see `WEFT_SOURCES`).
- * The surface prints that list rather than drawing a single invented crossing.
+ * Causal relations are kept out of this placement module: the Loom temporal
+ * read serves them as provider-qualified rows, and the selected-thread rail
+ * renders those rows without projecting a made-up continuous coordinate.
  */
 import { packTrack, type LoomSpan } from './tracks.ts';
 import type { LoomSession } from './contracts.ts';
 
 /** One session, reduced to the quantities the weave actually draws. */
 export interface WeaveThread {
+  /** Provider-qualified identity used for selection and React keys. */
   id: string;
+  /** Durable session identifier used by session-detail and relation reads. */
+  sessionId: string;
   label: string;
   /** Provider — the host that ran the session. Picks the column and the hue. */
   host: string;
@@ -53,9 +53,14 @@ export interface WeaveThread {
   /** Epoch seconds when the store served an end later than the start; null
    * when it served nothing usable. Never inferred. */
   end: number | null;
+  /** Which durable field supplied `end`; null means the extent is unknown. */
+  endSource: 'session_end' | 'last_message' | null;
   /** Measured message count; zero is a real reading, not a missing one. */
   messages: number;
   isSubagent: boolean;
+  /** True when the session carried an explicit edited-files rollup, including
+   * an empty one. False means file coverage is unknown, not zero. */
+  editedFilesRecorded: boolean;
   /** Distinct models named on the session's own accounting rows. */
   models: string[];
 }
@@ -105,54 +110,6 @@ export interface Weave {
   laneTotal: number;
 }
 
-/**
- * A causal landing the plan asks the Loom to weave, and where it actually
- * lives. Every entry here is a relation TraceDecay genuinely records and does
- * NOT serve to the dashboard, so the surface can name the gap precisely
- * instead of shrugging. Printed as `unsupported` chips, one per row.
- *
- * This list is the honest weft. It is not a TODO: it is the reading.
- */
-export const WEFT_SOURCES: ReadonlyArray<{
-  id: string;
-  label: string;
-  /** Where the relation is recorded in the daemon. */
-  store: string;
-  /** Why it cannot be drawn. */
-  detail: string;
-}> = [
-  {
-    id: 'session-commit',
-    label: 'Session ↔ commit',
-    store: 'src/sessions/git_correlation.rs',
-    detail: 'recorded with span_overlap_kind; no dashboard route',
-  },
-  {
-    id: 'session-file',
-    label: 'Session → edited file',
-    store: 'sessions.metadata_json $.edited_files[]',
-    detail: 'Claude rollup only; no dashboard route',
-  },
-  {
-    id: 'branch-event',
-    label: 'Branch & worktree events',
-    store: 'project registry',
-    detail: 'names served, no event times',
-  },
-  {
-    id: 'pull-request',
-    label: 'Pull requests & review',
-    store: '—',
-    detail: 'not recorded by the daemon',
-  },
-  {
-    id: 'ci-outcome',
-    label: 'CI & release outcomes',
-    store: '—',
-    detail: 'not recorded by the daemon',
-  },
-];
-
 /** Distinct model names on a session's accounting rows, in wire order and
  * without the null placeholder the daemon uses for untagged turns. */
 function modelsOf(session: LoomSession): string[] {
@@ -183,23 +140,36 @@ export function threadsFrom(sessions: readonly LoomSession[]): {
       undated += 1;
       continue;
     }
-    const rawEnd = session.last_message_at;
+    const recordedEnd = session.ended_at;
+    const lastMessage = session.last_message_at;
     // An end equal to the start is not a duration, it is the same instant
     // recorded twice; treating it as a one-second span would draw a mark that
     // claims a measurement nobody made.
-    const end =
-      typeof rawEnd === 'number' && Number.isFinite(rawEnd) && rawEnd > start
-        ? rawEnd
+    const hasRecordedEnd =
+      typeof recordedEnd === 'number' &&
+      Number.isFinite(recordedEnd) &&
+      recordedEnd > start;
+    const hasLastMessage =
+      typeof lastMessage === 'number' &&
+      Number.isFinite(lastMessage) &&
+      lastMessage > start;
+    const end = hasRecordedEnd ? recordedEnd : hasLastMessage ? lastMessage : null;
+    const endSource = hasRecordedEnd
+      ? 'session_end'
+      : hasLastMessage
+        ? 'last_message'
         : null;
-    const messages = Number(session.messages);
     threads.push({
-      id: session.session_id,
+      id: JSON.stringify([session.provider, session.session_id]),
+      sessionId: session.session_id,
       label: session.title?.trim() || session.session_id,
       host: session.provider || 'unknown',
       start,
       end,
-      messages: Number.isFinite(messages) && messages > 0 ? messages : 0,
+      endSource,
+      messages: session.messages,
       isSubagent: session.is_subagent === true,
+      editedFilesRecorded: session.edited_files_recorded === true,
       models: modelsOf(session),
     });
   }

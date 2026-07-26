@@ -715,6 +715,10 @@ pub(crate) async fn timeline_payload(
         "timeline message buckets",
         lcm_queries::timeline_message_buckets(conn, fmt, session_id, limit).await,
     )?;
+    let total_dated_buckets = map_query_error(
+        "timeline message bucket count",
+        lcm_queries::timeline_message_bucket_count(conn, fmt, session_id).await,
+    )?;
     let undated = map_query_error(
         "timeline undated messages",
         lcm_queries::timeline_undated_messages(conn, session_id).await,
@@ -723,6 +727,28 @@ pub(crate) async fn timeline_payload(
         "timeline summary buckets",
         lcm_queries::timeline_summary_buckets(conn, fmt, session_id, limit).await,
     )?;
+    let returned_buckets = buckets.len() as i64;
+    let truncated = total_dated_buckets > returned_buckets;
+    let next_before_bucket = if truncated {
+        buckets
+            .first()
+            .and_then(|row| row.get("bucket"))
+            .cloned()
+            .unwrap_or(Value::Null)
+    } else {
+        Value::Null
+    };
+    payload.insert(
+        "coverage".into(),
+        json!({
+            "limit": limit,
+            "returned_buckets": returned_buckets,
+            "total_dated_buckets": total_dated_buckets,
+            "truncated": truncated,
+            "ordering": "most_recent",
+            "next_before_bucket": next_before_bucket,
+        }),
+    );
     payload.insert("buckets".into(), json!(buckets));
     payload.insert(
         "undated".into(),

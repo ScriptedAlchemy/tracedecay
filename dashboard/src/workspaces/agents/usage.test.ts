@@ -102,6 +102,13 @@ describe('describeWindow', () => {
     expect(describeWindow(10_000, null).spanHours).toBeNull();
     expect(describeWindow(10_000, 0).spanHours).toBeNull();
   });
+
+  it('preserves an omitted event count as unknown instead of zero', () => {
+    const window = describeWindow(undefined, undefined);
+    expect(window.events).toBeNull();
+    expect(window.capped).toBe(false);
+    expect(window.spanHours).toBeNull();
+  });
 });
 
 describe('formatSpan', () => {

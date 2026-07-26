@@ -1,9 +1,14 @@
 # TraceDecay V2 canonical task/work graph and Kanban plan
 
-**Status:** required product work. PR17 delivers the complete callable product
-journey with [Plan 32](32-dynamic-workflow-runtime-and-sdk.md). PR18 stabilizes
-public SDK names for the same accepted operations; it does not add missing
-semantics.
+**Status:** required product work. Current plan authority assigns the complete
+callable product journey to PR17 with
+[Plan 32](32-dynamic-workflow-runtime-and-sdk.md). PR18 stabilizes public SDK
+names for the same accepted operations; it does not add missing semantics.
+The user explicitly requires this first-class product feature, inspired by
+Hermes Kanban but more powerful and not dependent on GitHub. He asked "ahat
+about kanban/task graph etc" while PR14 was active and did not record acceptance
+of PR17 deferral, so delivery timing remains an open owner question rather than
+a user-stated sequencing decision.
 
 Earlier task-schema names, operation registries, fixture catalogs, packet
 gates, and milestone/file inventories are historical evidence, not
@@ -19,6 +24,15 @@ Tasks and tickets are presentation vocabulary for canonical work items. Kanban,
 DAG, timeline, causal, critical-path, workload, executor/model,
 repository/delivery, evidence, and history views are projections over the same
 versioned graph, not separate stores or authorities.
+
+By current plan authority, PR14 does not own or deliver this graph, Kanban, or a
+Work workspace; its dashboard scope is the twelve pre-Work workspaces, and PR17
+delivers Work and these projections over Plan 24 state. The user neither
+enumerated those twelve workspaces nor agreed to that deferral in recorded
+speech. This allocation stays binding until the owner resolves the open timing
+question, but must not be presented as a user quote. Session-derived tasks, an
+independent Kanban database, or a dashboard-owned task authority remain
+rejected substitutes under either timing.
 
 Roadmap Markdown, `NEXT.md`, PR sequences, contributor checklists, and
 completion ledgers are documentation and Git evidence only. PR17 never parses,
@@ -357,11 +371,12 @@ target movement, exact ref CAS, safe fast-forward/merge/cherry-pick where
 authorized, partial or unknown external effects, and recovery without replaying
 ambiguity or moving a ref backward.
 
-The aggregate gate proves one graph authority and one Plan 32 runtime authority,
-no provider-local defaults, no hidden model choice, no auto-apply, no duplicate
-effect, and no parser or executor for these roadmap files. Compact focused
-fixtures may cover the named behaviors; PR17 does not require a giant
-declarative corpus or one gate per declaration.
+The direct journey tests plus normal aggregate repository checks prove one
+graph authority and one Plan 32 runtime authority, no provider-local defaults,
+no hidden model choice, no auto-apply, no duplicate effect, and no parser or
+executor for these roadmap files. Compact focused fixtures may cover the named
+behaviors; PR17 does not require a giant declarative corpus or a separate
+acceptance gate per declaration.
 
 ## Not in PR17
 
