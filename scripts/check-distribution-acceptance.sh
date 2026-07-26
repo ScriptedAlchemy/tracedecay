@@ -766,7 +766,7 @@ use tracedecay::agents::host_bundle_registry::{
     default_components, verified_embedded_default_host_component_set,
     verified_embedded_host_bundle,
 };
-use tracedecay::agents::host_bundle_v2::stock_host_kinds;
+use tracedecay::agents::host_bundle_v2::{HostKindV1, stock_host_kinds};
 use tracedecay::catalog_composition::build_application_catalog_snapshot;
 use tracedecay_tool_catalog::{AvailabilityContract, CapabilityId};
 
@@ -783,6 +783,15 @@ const REQUIRED_CAPABILITIES: [&str; 10] = [
     "capability.application.feedback.proximity",
 ];
 
+const REQUIRED_HOSTS: [HostKindV1; 6] = [
+    HostKindV1::ClaudeCode,
+    HostKindV1::Codex,
+    HostKindV1::CursorDesktop,
+    HostKindV1::Hermes,
+    HostKindV1::KimiCode,
+    HostKindV1::OpenCode,
+];
+
 fn main() {
     let snapshot = build_application_catalog_snapshot()
         .expect("packaged application catalog must compose");
@@ -797,13 +806,17 @@ fn main() {
         );
     }
 
-    let mut supported_hosts = 0;
-    for host in stock_host_kinds() {
+    let supported_hosts = stock_host_kinds()
+        .into_iter()
+        .filter(|host| !default_components(*host).is_empty())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        supported_hosts,
+        REQUIRED_HOSTS.to_vec(),
+        "packaged default host bundle inventory changed"
+    );
+    for host in REQUIRED_HOSTS {
         let components = default_components(host);
-        if components.is_empty() {
-            continue;
-        }
-        supported_hosts += 1;
         let component_set = verified_embedded_default_host_component_set(host, 0)
             .expect("default packaged host component set must verify");
         assert_eq!(component_set.component_set.components.len(), components.len());
@@ -817,7 +830,6 @@ fn main() {
             assert!(!bundle.contents.is_empty(), "packaged host bundle has no assets");
         }
     }
-    assert!(supported_hosts >= 8, "required host bundles are missing");
 }
 RS
 
