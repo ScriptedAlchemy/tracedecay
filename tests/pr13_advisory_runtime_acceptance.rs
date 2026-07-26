@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
@@ -67,7 +67,10 @@ impl GitHubCanonicalReviewAnchorAuthorityV1 for NoAnchors {
     }
 }
 
-struct FixtureAnchors;
+#[derive(Clone, Default)]
+struct FixtureAnchors {
+    seeds: Arc<Mutex<Vec<GitHubReviewAnchorSeedV1>>>,
+}
 
 impl GitHubCanonicalReviewAnchorAuthorityV1 for FixtureAnchors {
     fn resolve<'a>(
@@ -76,6 +79,7 @@ impl GitHubCanonicalReviewAnchorAuthorityV1 for FixtureAnchors {
         seed: &'a GitHubReviewAnchorSeedV1,
     ) -> FeedbackPortFuture<'a, Option<GitHubCanonicalReviewAnchorsV1>> {
         Box::pin(async move {
+            self.seeds.lock().ok()?.push(seed.clone());
             let original = GitHubReviewImmutableAnchorV1 {
                 repository_id: request.scope.repository_id.clone(),
                 commit_id: seed.original_commit_id.clone(),
@@ -246,6 +250,7 @@ async fn authentic_github_and_ci_responses_use_production_decoders() {
 
     assert!(GITHUB_REVIEW_THREADS_QUERY_V1.contains("author { __typename login }"));
     assert!(!GITHUB_REVIEW_THREADS_QUERY_V1.contains("author { __typename id }"));
+    let fixture_anchors = FixtureAnchors::default();
     let graphql_decoder = GitHubOfficialResponseDecoderV1::new(
         GitHubReviewProviderIdentityV1 {
             provider: ProviderId::new("provider.github").unwrap(),
@@ -257,7 +262,7 @@ async fn authentic_github_and_ci_responses_use_production_decoders() {
             merge_base_commit_id: CommitId::new("8339371d01311289e2b7cd7b0669ea3549308b8c")
                 .unwrap(),
         },
-        FixtureAnchors,
+        fixture_anchors.clone(),
     )
     .unwrap();
     let thread = captured_response(include_str!(
@@ -280,6 +285,17 @@ async fn authentic_github_and_ci_responses_use_production_decoders() {
     assert_eq!(
         ingress.items[0].body_anchor.as_str(),
         "anchor.fixture.github.body"
+    );
+    let seeds = fixture_anchors.seeds.lock().unwrap();
+    assert_eq!(seeds.len(), 1);
+    assert_eq!(
+        seeds[0].body_digest.as_str(),
+        "sha256:81b743cede9ff0d124beb58731d91c556343545f71c0ba51eb2b5378fdb95652"
+    );
+    assert!(
+        seeds[0]
+            .retained_body
+            .contains("Schedule the catalog before generated-metadata consumers")
     );
 
     let ci = GitHubCiOfficialResponseDecoderV1::decode(
@@ -739,4 +755,86 @@ async fn production_host_ingest_uses_registered_project_runtime() {
         stdout.contains("\"status\":\"committed\"") || stdout.contains("\"status\": \"committed\""),
         "registered daemon ingest did not commit: {stdout}"
     );
+
+    let mut stop: Value = serde_json::from_str(include_str!(
+        "../crates/tracedecay-hooks/fixtures/host_events/codex/stop.json"
+    ))
+    .unwrap();
+    stop["session_id"] = json!("session-pr13-proximity");
+    stop["turn_id"] = json!("turn-pr13-proximity-stop");
+    stop["cwd"] = json!(project.clone());
+    stop["model"] = json!("codex-fixture");
+    stop["permission_mode"] = json!("default");
+    stop["last_assistant_message"] = json!("Saved src/lib.rs.");
+    let stop_args = json!({
+        "action": "ingest_transcript",
+        "provider": "codex",
+        "user_scope": false,
+        "event_json": stop.to_string(),
+        "format": "json",
+    })
+    .to_string();
+    let stop_output = common::tracedecay_command_with_home(environment.home())
+        .args([
+            "tool",
+            "--project",
+            project_arg.as_str(),
+            "tracedecay_hook_runtime",
+            "--args",
+            stop_args.as_str(),
+            "--json",
+        ])
+        .current_dir(&project)
+        .output()
+        .expect("invoke registered daemon stop path");
+    assert!(
+        stop_output.status.success(),
+        "registered daemon stop ingest failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&stop_output.stdout),
+        String::from_utf8_lossy(&stop_output.stderr)
+    );
+    let stop_stdout = String::from_utf8_lossy(&stop_output.stdout);
+    assert!(
+        stop_stdout.contains("\"status\":\"committed\"")
+            || stop_stdout.contains("\"status\": \"committed\""),
+        "registered daemon stop ingest did not commit: {stop_stdout}"
+    );
+
+    let advisory_args = json!({
+        "document_uri": format!("file://{}", project.join("src/lib.rs").display()),
+    })
+    .to_string();
+    let advisory = common::tracedecay_command_with_home(environment.home())
+        .args([
+            "tool",
+            "--project",
+            project_arg.as_str(),
+            "tracedecay_feedback_advisory_cycle",
+            "--args",
+            advisory_args.as_str(),
+            "--json",
+        ])
+        .current_dir(&project)
+        .output()
+        .expect("invoke registered four-pillar advisory path");
+    assert!(
+        advisory.status.success(),
+        "registered advisory cycle failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&advisory.stdout),
+        String::from_utf8_lossy(&advisory.stderr)
+    );
+    let advisory: Value = serde_json::from_slice(&advisory.stdout).unwrap();
+    let advisory = advisory.to_string();
+    for required in [
+        "request_handle",
+        "diagnostics",
+        "github_review_ingest",
+        "ci_failure_localize",
+        "feedback_proximity",
+    ] {
+        assert!(
+            advisory.contains(required),
+            "advisory result omitted {required}: {advisory}"
+        );
+    }
 }
