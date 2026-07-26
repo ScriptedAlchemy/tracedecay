@@ -486,7 +486,7 @@ async fn repository_provenance_survives_restart_rebuild_and_owner_checks() {
         .expect_err("project-scoped repository evidence must not resolve through profile scope");
     assert!(matches!(
         profile_error,
-        EvidenceAnchorResolutionError::Authority { .. }
+        EvidenceAnchorResolutionError::Unavailable { .. }
     ));
 
     let project_b_error = facade

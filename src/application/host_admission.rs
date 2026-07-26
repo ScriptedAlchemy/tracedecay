@@ -2367,6 +2367,7 @@ impl HostAdmissionTestRuntimeV1 {
                 operation: "bind MCP test profile authority".to_string(),
                 message: "profile database has no parent directory".to_string(),
             })?;
+        let profile_identity = crate::daemon::profile_identity::load_or_create(&profile_root)?;
         let project_sessions = self.project_registered.as_ref().cloned().ok_or_else(|| {
             crate::errors::TraceDecayError::Database {
                 operation: "bind MCP test project sessions".to_string(),

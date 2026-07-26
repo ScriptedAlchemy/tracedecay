@@ -174,8 +174,30 @@ impl SemanticAugmentationOutcomeV1 {
 pub(in crate::daemon) enum Pr9SemanticSearchExecutionErrorV1 {
     #[error(transparent)]
     Pr9(#[from] Pr9SearchExecutionErrorV1),
+    #[error(
+        "strict semantic retrieval is unavailable for code generation {generation}: {abstention:?}"
+    )]
+    StrictSemanticUnavailable {
+        generation: tracedecay_domain::CodeGenerationId,
+        abstention: SemanticAbstentionV1,
+    },
     #[error(transparent)]
     Semantic(#[from] SemanticQueryServiceError),
+}
+
+fn bind_semantic_execution_error(
+    generation: &tracedecay_domain::CodeGenerationId,
+    error: SemanticQueryServiceError,
+) -> Pr9SemanticSearchExecutionErrorV1 {
+    match error {
+        SemanticQueryServiceError::StrictUnavailable(abstention) => {
+            Pr9SemanticSearchExecutionErrorV1::StrictSemanticUnavailable {
+                generation: generation.clone(),
+                abstention,
+            }
+        }
+        error => Pr9SemanticSearchExecutionErrorV1::Semantic(error),
+    }
 }
 
 pub(crate) const fn semantic_abstention_reason(abstention: &SemanticAbstentionV1) -> &'static str {
@@ -319,7 +341,8 @@ impl CodeIndexSchedulerRegistryV1 {
                 mode,
                 SemanticAbstentionV1::IndexStale,
                 Arc::clone(&pr9.authorized.fallback),
-            )?;
+            )
+            .map_err(|error| bind_semantic_execution_error(&pr9.generation, error))?;
             return Ok(ExecutedPr9SemanticSearchV1 { pr9, semantic });
         };
         let semantic = self
@@ -333,7 +356,8 @@ impl CodeIndexSchedulerRegistryV1 {
                 control,
                 mode,
             )
-            .await?;
+            .await
+            .map_err(|error| bind_semantic_execution_error(&pr9.generation, error))?;
         Ok(ExecutedPr9SemanticSearchV1 { pr9, semantic })
     }
 
@@ -370,6 +394,7 @@ impl CodeIndexSchedulerRegistryV1 {
             &code_generation.manifest().generation_id,
             &pins.vector_generation_id,
             pins.projection.projection_key(),
+            &pins.search_index_key,
             &pins.fusion_revision,
         ) {
             return semantic_abstention(
@@ -383,6 +408,7 @@ impl CodeIndexSchedulerRegistryV1 {
             query_digest: authorized_pr9.query_digest.clone(),
             query_view,
             projection: &pins.projection,
+            search_index_key: &pins.search_index_key,
             capability_manifest_digest: pins.calibration.capability_manifest_digest.clone(),
             vector_generation: pins.vector_generation_id.clone(),
             code_generation: code_generation.manifest().generation_id.clone(),
@@ -470,6 +496,7 @@ impl CodeIndexSchedulerRegistryV1 {
                     &code_generation.manifest().generation_id,
                     &pins.vector_generation_id,
                     pins.projection.projection_key(),
+                    &pins.search_index_key,
                     &pins.fusion_revision,
                     &authority.profile.retrieval_budget,
                     &rerank,
@@ -495,6 +522,7 @@ fn semantic_cursor_matches_activation(
     code_generation: &tracedecay_domain::CodeGenerationId,
     vector_generation: &tracedecay_domain::VectorGenerationIdV1,
     projection_key: &tracedecay_domain::ProjectionKeyV1,
+    search_index_key: &tracedecay_domain::SemanticSearchIndexKeyV1,
     semantic_ranking_revision: &tracedecay_domain::ComponentRevision,
 ) -> bool {
     let Some(cursor) = cursor else {
@@ -508,6 +536,7 @@ fn semantic_cursor_matches_activation(
         && semantic.code_generation == *code_generation
         && semantic.vector_generation == *vector_generation
         && semantic.projection_key == *projection_key
+        && semantic.search_index_key == *search_index_key
         && semantic.ranking_revision.as_str() == semantic_ranking_revision.as_str()
 }
 
@@ -622,6 +651,7 @@ fn paginate_semantic_composition(
     code_generation: &tracedecay_domain::CodeGenerationId,
     vector_generation: &tracedecay_domain::VectorGenerationIdV1,
     projection_key: &tracedecay_domain::ProjectionKeyV1,
+    search_index_key: &tracedecay_domain::SemanticSearchIndexKeyV1,
     semantic_ranking_revision: &tracedecay_domain::ComponentRevision,
     semantic_budget: &tracedecay_domain::RetrievalBudget,
     rerank: &OptionalStagePublicStatus,
@@ -648,6 +678,7 @@ fn paginate_semantic_composition(
                 && cursor.code_generation == *code_generation
                 && cursor.vector_generation == *vector_generation
                 && cursor.projection_key == *projection_key
+                && cursor.search_index_key == *search_index_key
                 && cursor.candidate_set_digest == candidate_set_digest
                 && cursor.public_lane_statuses == composition.public_lane_statuses
                 && cursor.lane_checkpoints == composition.lane_checkpoints
@@ -696,6 +727,7 @@ fn paginate_semantic_composition(
                     code_generation: code_generation.clone(),
                     vector_generation: vector_generation.clone(),
                     projection_key: projection_key.clone(),
+                    search_index_key: search_index_key.clone(),
                     candidate_set_digest,
                     public_lane_statuses: composition.public_lane_statuses.clone(),
                     lane_checkpoints: composition.lane_checkpoints.clone(),
@@ -745,7 +777,8 @@ mod tests {
         LogicalEvidenceId, ManifestDigest, Pr9FallbackSubpayload, PrincipalId, ProjectionKeyV1,
         ProjectionKindV1, PublicRetrieverStatus, QueryNormalizationRevision, RankedCandidate,
         RetrievalAnchorId, RetrievalBudget, RetrievalCursorKeyId, RetrievalRequest, RetrievalScope,
-        RetrievalSnapshot, SanitizerRevision, SingleRootScopeV1, TemporalModeV1, UtcMicros,
+        RetrievalSnapshot, SanitizerRevision, SemanticSearchIndexKeyV1,
+        SemanticSearchIndexProfileV1, SingleRootScopeV1, TemporalModeV1, UtcMicros,
         VectorGenerationIdV1, VectorWatermark,
     };
 
@@ -766,6 +799,12 @@ mod tests {
         T::Error: std::fmt::Debug,
     {
         id(&format!("sha256:{}", byte.to_string().repeat(64)))
+    }
+
+    fn search_index_key() -> SemanticSearchIndexKeyV1 {
+        SemanticSearchIndexProfileV1::exact_flat_v1()
+            .and_then(|profile| profile.index_key())
+            .expect("exact-flat search index key")
     }
 
     fn fallback() -> Arc<Pr9FallbackSubpayload> {
@@ -1008,6 +1047,7 @@ mod tests {
                 &code_generation,
                 &vector_generation,
                 &projection,
+                &search_index_key(),
                 &ranking_revision,
                 &semantic_budget(2),
                 &OptionalStagePublicStatus::NotRequested,
@@ -1077,6 +1117,7 @@ mod tests {
                 schema_revision: "projection.pagination.v1".to_owned(),
                 profile_digest: digest('b'),
             },
+            &search_index_key(),
             &id::<ComponentRevision>("ranking.semantic.pagination.v1"),
             &semantic_budget(2),
             &OptionalStagePublicStatus::NotRequested,
@@ -1143,6 +1184,7 @@ mod tests {
             &code_generation,
             &vector_generation,
             &projection,
+            &search_index_key(),
             &ranking_revision,
             &semantic_budget(2),
             &OptionalStagePublicStatus::Complete,
@@ -1198,6 +1240,7 @@ mod tests {
             &code_generation,
             &vector_generation,
             &projection,
+            &search_index_key(),
             &ranking_revision,
             &semantic_budget(2),
             &continuation_rerank,
@@ -1262,6 +1305,7 @@ mod tests {
                 schema_revision: "projection.pagination.v1".to_owned(),
                 profile_digest: digest('b'),
             },
+            &search_index_key(),
             &id::<ComponentRevision>("ranking.semantic.pagination.v1"),
             &semantic_budget(2),
             &OptionalStagePublicStatus::NotRequested,
@@ -1316,6 +1360,7 @@ mod tests {
             &code_generation,
             &vector_generation,
             &projection,
+            &search_index_key(),
             &ranking_revision,
         ));
         let fallback = fallback_page(&[2, 3]);
@@ -1402,6 +1447,7 @@ mod tests {
             &code_generation,
             &vector_generation,
             &projection,
+            &search_index_key(),
             &ranking_revision,
             &semantic_budget(2),
             &OptionalStagePublicStatus::NotRequested,
@@ -1417,6 +1463,7 @@ mod tests {
             &code_generation,
             &vector_generation,
             &projection,
+            &search_index_key(),
             &ranking_revision,
         ));
         assert!(!semantic_cursor_matches_activation(
@@ -1426,6 +1473,7 @@ mod tests {
             &code_generation,
             &vector_generation,
             &projection,
+            &search_index_key(),
             &ranking_revision,
         ));
         assert!(!semantic_cursor_matches_activation(
@@ -1435,6 +1483,19 @@ mod tests {
             &code_generation,
             &vector_generation,
             &projection,
+            &search_index_key(),
+            &ranking_revision,
+        ));
+        let mut changed_search_index = search_index_key();
+        changed_search_index.profile_digest = digest('e');
+        assert!(!semantic_cursor_matches_activation(
+            Some(&cursor),
+            &original_profile,
+            &digest::<ManifestDigest>('c'),
+            &code_generation,
+            &vector_generation,
+            &projection,
+            &changed_search_index,
             &ranking_revision,
         ));
         let fallback = fallback_page(&[2, 3]);
@@ -1497,6 +1558,25 @@ mod tests {
             Err(SemanticQueryServiceError::StrictUnavailable(
                 SemanticAbstentionV1::CalibrationUnavailable
             ))
+        ));
+    }
+
+    #[test]
+    fn strict_semantic_execution_error_preserves_the_pr9_generation() {
+        let generation = id::<CodeGenerationId>("code-generation.strict-semantic-selected.v1");
+        let error = bind_semantic_execution_error(
+            &generation,
+            SemanticQueryServiceError::StrictUnavailable(
+                SemanticAbstentionV1::CalibrationUnavailable,
+            ),
+        );
+
+        assert!(matches!(
+            error,
+            Pr9SemanticSearchExecutionErrorV1::StrictSemanticUnavailable {
+                generation: selected,
+                abstention: SemanticAbstentionV1::CalibrationUnavailable,
+            } if selected == generation
         ));
     }
 

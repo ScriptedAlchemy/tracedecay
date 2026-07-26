@@ -997,7 +997,14 @@ fn codex_update_plugin_refreshes_bundle_with_malformed_unrelated_legacy_config()
     .unwrap();
     let before = bytes(&config);
 
-    let output = tracedecay_command_with_home(home.path())
+    let mut command = tracedecay_command_with_home(home.path());
+    command.env(
+        "PATH",
+        Path::new(env!("CARGO_BIN_EXE_tracedecay"))
+            .parent()
+            .expect("test binary should have a parent"),
+    );
+    let output = command
         .arg("update-plugin")
         .output()
         .expect("run tracedecay update-plugin");

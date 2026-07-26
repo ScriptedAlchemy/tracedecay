@@ -26,11 +26,16 @@ fn code_diagnostics_dashboard_api_exposes_engines_and_applies_settings() {
             "inactive",
             "fixture has .rs files but no Cargo.toml, so rust-analyzer should not auto-start"
         );
+        let mut settings_revision = initial["settings_revision"]
+            .as_str()
+            .unwrap_or_else(|| panic!("missing settings revision: {initial}"))
+            .to_owned();
 
         let (status, patched) = patch_json_body(
             &agent,
             &url,
             &serde_json::json!({
+                "expected_revision": settings_revision,
                 "idle_backfill": "off",
                 "languages": {
                     "rust": {
@@ -57,14 +62,22 @@ fn code_diagnostics_dashboard_api_exposes_engines_and_applies_settings() {
                     .unwrap_or_default()
                     .contains("rust-analyzer"))
         );
+        settings_revision = patched["settings_revision"]
+            .as_str()
+            .unwrap_or_else(|| panic!("missing patched settings revision: {patched}"))
+            .to_owned();
 
         let (status, refreshed) = post_json(&agent, &format!("{url}/refresh/rust"));
         assert_eq!(
-            status, 200,
-            "disabled refresh should be fail-open: {refreshed}"
+            status, 400,
+            "disabled refresh must be rejected before execution: {refreshed}"
         );
-        let refreshed_rust = engine(&refreshed, "rust");
-        assert_eq!(refreshed_rust["state"], "disabled");
+        assert!(
+            refreshed["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("language is disabled")),
+            "disabled refresh should explain the rejection: {refreshed}"
+        );
 
         let (status, reloaded) = get_json(&agent, &url);
         assert_eq!(status, 200);
@@ -79,6 +92,7 @@ fn code_diagnostics_dashboard_api_exposes_engines_and_applies_settings() {
             &agent,
             &url,
             &serde_json::json!({
+                "expected_revision": settings_revision,
                 "languages": {
                     "rust": {
                         "enabled": true
@@ -92,11 +106,16 @@ fn code_diagnostics_dashboard_api_exposes_engines_and_applies_settings() {
             toggled["settings"]["languages"]["rust"]["command_override"],
             "/opt/tracedecay-test/rust-analyzer"
         );
+        settings_revision = toggled["settings_revision"]
+            .as_str()
+            .unwrap_or_else(|| panic!("missing toggled settings revision: {toggled}"))
+            .to_owned();
 
         let (status, command_only) = patch_json_body(
             &agent,
             &url,
             &serde_json::json!({
+                "expected_revision": settings_revision,
                 "languages": {
                     "rust": {
                         "command_override": "/opt/tracedecay-test/rust-analyzer-2"
@@ -113,11 +132,16 @@ fn code_diagnostics_dashboard_api_exposes_engines_and_applies_settings() {
             command_only["settings"]["languages"]["rust"]["command_override"],
             "/opt/tracedecay-test/rust-analyzer-2"
         );
+        settings_revision = command_only["settings_revision"]
+            .as_str()
+            .unwrap_or_else(|| panic!("missing command settings revision: {command_only}"))
+            .to_owned();
 
         let (status, cleared) = patch_json_body(
             &agent,
             &url,
             &serde_json::json!({
+                "expected_revision": settings_revision,
                 "languages": {
                     "rust": {
                         "command_override": null

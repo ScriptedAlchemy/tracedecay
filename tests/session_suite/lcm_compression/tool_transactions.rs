@@ -136,7 +136,7 @@ async fn budget_and_overflow_replay_never_split_tool_transaction() {
 }
 
 #[tokio::test]
-async fn legacy_partial_tool_transaction_keeps_matched_pair_and_repairs_orphans() {
+async fn legacy_partial_tool_transaction_drops_invalid_group_and_repairs_orphans() {
     let tmp = TempDir::new().unwrap();
     let db = open_lcm_db(&tmp).await;
     insert_session(&db, "cursor", "session-legacy-tools").await;
@@ -180,21 +180,19 @@ async fn legacy_partial_tool_transaction_keeps_matched_pair_and_repairs_orphans(
     request.fresh_tail_count = Some(10);
 
     let response = db.lcm_compress(request).await.unwrap();
-    let paired_assistant = response
-        .replay_messages
-        .iter()
-        .find(|message| message["id"] == "assistant-tools")
-        .unwrap_or_else(|| panic!("partial assistant missing: {:?}", response.replay_messages));
-    assert_eq!(paired_assistant["tool_calls"].as_array().unwrap().len(), 1);
-    assert_eq!(paired_assistant["tool_calls"][0]["id"], "call-a");
-    assert_eq!(
+    assert!(
         response
             .replay_messages
             .iter()
-            .filter(|message| message["role"] == "tool")
-            .map(|message| message["tool_call_id"].as_str().unwrap())
-            .collect::<Vec<_>>(),
-        vec!["call-a"]
+            .all(|message| message["id"] != "assistant-tools"),
+        "an incomplete multi-call assistant group must not replay"
+    );
+    assert!(
+        response
+            .replay_messages
+            .iter()
+            .all(|message| message["role"] != "tool"),
+        "orphan tool results must not replay"
     );
     let repaired_assistant = response
         .replay_messages

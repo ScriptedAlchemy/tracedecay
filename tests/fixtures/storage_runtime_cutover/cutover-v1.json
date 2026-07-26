@@ -100,6 +100,11 @@
         ]
       },
       {
+        "family": "external_source",
+        "write_payloads": ["external_source"],
+        "read_operations": ["external_source_state"]
+      },
+      {
         "family": "sessions",
         "write_payloads": ["session_projection", "session_summary"],
         "read_operations": ["projection_batch", "summary"]
