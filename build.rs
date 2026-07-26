@@ -2,6 +2,11 @@ use std::hash::{Hash, Hasher};
 use std::process::Command;
 use std::{collections::hash_map::DefaultHasher, fmt::Write as _, fs, path::Path};
 
+// Shared with the crate as `tracedecay::version::build_identity`, so the probe
+// that bakes the build's commit identity is the code its unit tests exercise
+// rather than a second copy that can drift.
+include!("src/version/build_identity.rs");
+
 /// Recursively collects every file under `root`, relative to `root`, using
 /// forward-slash separators. Returns sorted paths so codegen is deterministic.
 fn collect_files_relative(root: &Path) -> Vec<String> {
@@ -379,19 +384,27 @@ fn main() {
     }
     println!("cargo::rerun-if-changed=src/resources/logo.png");
 
-    // Generator provenance: baked into generated agent plugins (manifest +
-    // module header) so a stale installed plugin is distinguishable from
-    // the binary that should have generated it. Advisory only — may lag a
-    // commit until the next build-script rerun.
-    let git_sha = Command::new("git")
-        .args(["rev-parse", "--short=12", "HEAD"])
-        .output()
-        .ok()
-        .filter(|out| out.status.success())
-        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
-        .filter(|sha| !sha.is_empty())
-        .unwrap_or_else(|| "unknown".to_string());
-    println!("cargo::rustc-env=TRACEDECAY_GIT_SHA={git_sha}");
+    // Build identity: the commit this binary is compiled from and whether the
+    // worktree was clean. Feeds the generated agent plugins' provenance header
+    // (so a stale installed plugin is distinguishable from the binary that
+    // should have generated it) and the SemVer build metadata the binary
+    // reports as its own version. Watching HEAD, its reflog, and the index
+    // keeps both honest; without those the baked commit would describe
+    // whichever tree last happened to trigger this script.
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
+    let identity = resolve(Path::new(&manifest_dir));
+    for path in watch_paths(Path::new(&manifest_dir)) {
+        println!("cargo::rerun-if-changed={}", path.display());
+    }
+    println!("cargo::rerun-if-changed=src/version/build_identity.rs");
+    println!(
+        "cargo::rustc-env=TRACEDECAY_GIT_SHA={}",
+        identity.sha.as_deref().unwrap_or("unknown")
+    );
+    println!(
+        "cargo::rustc-env=TRACEDECAY_GIT_DIRTY={}",
+        u8::from(identity.dirty)
+    );
 
     // Vendored WGSL grammar — compiled only when lang-wgsl is enabled.
     // Using vendored sources avoids pulling in tree-sitter-wgsl 0.0.6 which was
