@@ -9,6 +9,7 @@
 
 use axum::Json;
 use axum::extract::State;
+use schemars::JsonSchema;
 use serde::Serialize;
 use tracedecay_application::doctor::{
     DoctorCoverageCompletenessV1, DoctorEvidenceStateV1, DoctorFamilyConsultationV1,
@@ -33,7 +34,7 @@ const STORAGE_KINDS: [DoctorStorageFindingKindV1; 5] = [
 /// Whether one Plan 38 producer had enough source evidence to report a real
 /// result. This is source coverage, not a health grade: `Real` can describe a
 /// clean observation or a problem finding.
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum StorageFindingSourceStateV1 {
     Real,
@@ -43,7 +44,7 @@ pub(crate) enum StorageFindingSourceStateV1 {
 }
 
 /// Source-coverage status for one typed storage finding producer.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq)]
 pub(crate) struct StorageFindingKindStatusV1 {
     pub kind: DoctorStorageFindingKindV1,
     pub state: StorageFindingSourceStateV1,

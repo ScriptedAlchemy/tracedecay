@@ -37,6 +37,8 @@ mod automation_scheduler_api;
 mod automation_skills_api;
 mod code_diagnostics_api;
 mod code_index_freshness_api;
+#[doc(hidden)]
+pub mod contract_schema;
 mod delivery_api;
 mod doctor_findings_api;
 pub(crate) mod doctor_remediation_api;

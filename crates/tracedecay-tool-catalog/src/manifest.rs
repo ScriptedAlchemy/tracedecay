@@ -1,3 +1,4 @@
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::id::{BindingId, CapabilityId, FeatureId, ProfileId, SchemaId, UseCaseId};
@@ -136,7 +137,7 @@ pub enum LifecycleClass {
 ///
 /// Git index writes remain separate classes so policy cannot accidentally
 /// substitute one index mutation for another.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum EffectClass {
     Read,
