@@ -1,6 +1,7 @@
 //! Transport-neutral PR11 configuration control plane.
 
 pub mod authorization;
+mod ephemeral_grants;
 pub mod operations;
 pub mod ports;
 pub mod runtime;
