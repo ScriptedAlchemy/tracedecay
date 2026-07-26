@@ -39,6 +39,43 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
             state.mark_running();
             state.busy.store(true, Ordering::Release);
             state.pass_count.fetch_add(1, Ordering::AcqRel);
+            let migration = database.advance_projection_version_migration();
+            tokio::pin!(migration);
+            let migration_complete = tokio::select! {
+                biased;
+                () = state.wait_for_cancellation() => return,
+                outcome = &mut migration => outcome,
+            };
+            match migration_complete {
+                Ok(true) => {}
+                Ok(false) => {
+                    state.dirty.store(true, Ordering::Release);
+                    tokio::task::yield_now().await;
+                    continue;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        database = %database.db_path().display(),
+                        error = %error,
+                        "background observation projection migration deferred"
+                    );
+                    retry_attempt = retry_attempt.saturating_add(1);
+                    state.mark_recovering(
+                        SessionTemporalRefreshRetryClass::Storage.into(),
+                        SessionTemporalRefreshRetryClass::Storage,
+                    );
+                    state.dirty.store(true, Ordering::Release);
+                    tokio::select! {
+                        () = state.wait_for_cancellation() => return,
+                        () = state.wake.notified() => {}
+                        () = tokio::time::sleep(session_refresh_retry_delay(
+                            SessionTemporalRefreshRetryClass::Storage,
+                            retry_attempt,
+                        )) => {}
+                    }
+                    continue;
+                }
+            }
             let pass =
                 run_session_temporal_refresh_pass(&database, &state, projector.as_ref(), policy);
             tokio::pin!(pass);
