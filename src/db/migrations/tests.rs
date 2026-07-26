@@ -1,11 +1,14 @@
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 
 use tempfile::TempDir;
+use tracedecay_rusqlite_runtime::migration_sql::{
+    MigrationSqlError, MigrationSqlWriteAuthority, MigrationSqlWriteIntent,
+};
 
 use crate::db::engine::{Connection, TestConnection};
 use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 
-use super::{create_schema_connection, migrate_connection};
+use super::{LATEST_VERSION, create_schema_connection, migrate_connection};
 
 mod fts;
 mod memory_v2_v19_v23;
@@ -14,6 +17,14 @@ mod pre_v19;
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+struct AllowMigrationWrites;
+
+impl MigrationSqlWriteAuthority for AllowMigrationWrites {
+    fn verify(&self, _intent: MigrationSqlWriteIntent) -> Result<(), MigrationSqlError> {
+        Ok(())
+    }
+}
 
 /// Creates a database owned by the engine test runtime.
 async fn create_raw_db() -> (TestConnection, TempDir) {
@@ -29,7 +40,7 @@ async fn create_raw_db() -> (TestConnection, TempDir) {
         )
         .expect("failed to apply pragmas");
     drop(setup);
-    let conn = TestConnection::open(&db_path);
+    let conn = TestConnection::open_with_write_authority(&db_path, Arc::new(AllowMigrationWrites));
     (conn, dir)
 }
 

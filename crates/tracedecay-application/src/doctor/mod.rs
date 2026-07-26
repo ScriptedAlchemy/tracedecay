@@ -24,14 +24,15 @@ pub use report::{
 };
 pub use sources::{
     AdvisoryFeedbackDoctorPort, AdvisoryFeedbackFindingReadV1, AdvisoryFeedbackReadV1,
-    CodeIndexMountDoctorPort, CodeIndexMountReadV1, CodeIndexMountStateV1,
-    ConfigurationAuthorityDoctorPort, ConfigurationAuthorityReadV1, ConfigurationDriftV1,
-    DoctorSourceFuture, DoctorStorageFamilyReadV1, HostConformanceV1, HostIntegrationDoctorPort,
-    HostIntegrationReadV1, LanguageServerDoctorPort, LanguageServerReadV1, LanguageServerStateV1,
-    ObservabilityDoctorPort, ObservabilityReadV1, ObservabilityStateV1, RuntimeHealthDoctorPort,
-    RuntimeHealthReadV1, RuntimeLivenessV1, StorageDoctorPort, advisory_feedback_findings,
-    code_index_finding, configuration_finding, host_integration_finding, language_server_finding,
-    observability_finding, runtime_health_finding,
+    AdvisoryFeedbackSummaryReadV1, CodeIndexMountDoctorPort, CodeIndexMountReadV1,
+    CodeIndexMountStateV1, ConfigurationAuthorityDoctorPort, ConfigurationAuthorityReadV1,
+    ConfigurationDriftV1, DoctorSourceFuture, DoctorStorageFamilyReadV1, HostConformanceV1,
+    HostIntegrationDoctorPort, HostIntegrationReadV1, LanguageServerDoctorPort,
+    LanguageServerReadV1, LanguageServerStateV1, ObservabilityDoctorPort, ObservabilityReadV1,
+    ObservabilityStateV1, RuntimeHealthDoctorPort, RuntimeHealthReadV1, RuntimeLivenessV1,
+    StorageDoctorPort, advisory_feedback_findings, code_index_finding, configuration_finding,
+    host_integration_finding, language_server_finding, observability_finding,
+    runtime_health_finding,
 };
 pub use types::{
     DoctorCoverageCompletenessV1, DoctorCoverageStatementV1, DoctorEvidenceRefV1,

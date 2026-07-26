@@ -27,6 +27,10 @@ fn workload_pins_exact_current_and_ten_x_measurement_matrix() {
     let workload = load_json(WORKLOAD_PATH);
     assert_eq!(u64_at(&workload, "/schema_version"), 1);
     assert_eq!(workload["workload_id"].as_str(), Some("pr9-code-index-v1"));
+    assert_eq!(
+        workload["harness_revision"].as_str(),
+        Some("code-index-chunks.v2")
+    );
     assert_eq!(u64_at(&workload, "/repetitions/warmups"), 5);
     assert_eq!(u64_at(&workload, "/repetitions/measured"), 30);
 
