@@ -423,7 +423,7 @@ mod tests {
         let registry = DoctorRemediationRegistryV1::default_registry();
         let error = registry
             .resolve(&reference(
-                operations::FEEDBACK_GET_FINDING,
+                crate::feedback::FEEDBACK_GET_USE_CASE_ID_V1,
                 DoctorRemediationKindV1::Action,
             ))
             .expect_err("feedback read is not a Doctor remediation action");
@@ -431,7 +431,7 @@ mod tests {
         assert_eq!(
             error,
             DoctorRemediationResolutionErrorV1::UnknownOperation {
-                operation: operations::FEEDBACK_GET_FINDING.to_string(),
+                operation: crate::feedback::FEEDBACK_GET_USE_CASE_ID_V1.to_string(),
             }
         );
     }
