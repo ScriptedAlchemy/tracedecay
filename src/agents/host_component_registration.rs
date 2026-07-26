@@ -156,7 +156,7 @@ impl HostComponentRegistrationDelegate {
                 }))
         {
             CompatibilityRegistrationMode::DeployedActivation
-        } else if matches!(self.integration.id(), "opencode" | "cursor") || !includes_core {
+        } else if self.integration.id() == "opencode" || !includes_core {
             CompatibilityRegistrationMode::ArtifactOnly
         } else {
             CompatibilityRegistrationMode::LegacyIntegration
@@ -192,28 +192,50 @@ impl HostComponentRegistrationDelegate {
         }
     }
 
-    fn competing_opencode_analyzer_present(&self) -> bool {
+    fn competing_opencode_analyzer_claim(
+        &self,
+    ) -> Option<crate::agents::host_bundle_v2::CompetingHostExtensionClaimV1> {
         if self.integration.id() != "opencode" {
-            return false;
+            return None;
         }
         let Some(path) = &self.registration_path else {
-            return false;
+            return None;
         };
         let Ok(bytes) = fs::read(path) else {
-            return false;
+            return None;
         };
         let Ok(config) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
-            return false;
+            return None;
         };
+        let evidence_digest = Sha256::digest(&bytes).into();
         config
             .get("lsp")
             .and_then(serde_json::Value::as_object)
-            .is_some_and(|servers| {
-                servers.iter().any(|(name, registration)| {
-                    name != "tracedecay"
-                        && registration
-                            .get("command")
-                            .is_some_and(|command| command.to_string().contains("tracedecay"))
+            .and_then(|servers| {
+                servers.iter().find_map(|(name, registration)| {
+                    if name == "tracedecay" {
+                        return None;
+                    }
+                    let aliases_tracedecay = registration
+                        .get("command")
+                        .is_some_and(|command| command.to_string().contains("tracedecay"));
+                    let overlaps_extensions = registration
+                        .get("extensions")
+                        .and_then(serde_json::Value::as_array)
+                        .is_some_and(|extensions| {
+                            extensions.iter().filter_map(serde_json::Value::as_str).any(
+                                |extension| {
+                                    super::opencode::TRACEDECAY_LSP_EXTENSIONS.contains(&extension)
+                                },
+                            )
+                        });
+                    (aliases_tracedecay || overlaps_extensions).then(|| {
+                        crate::agents::host_bundle_v2::CompetingHostExtensionClaimV1 {
+                            extension_id: name.clone(),
+                            capability: crate::agents::host_bundle_v2::HostCapabilityV1::Lsp,
+                            evidence_digest,
+                        }
+                    })
                 })
             })
     }
@@ -437,7 +459,7 @@ impl crate::agents::host_bundle_v2::HostComponentSetRegistrationV1
         _request: &crate::agents::host_bundle_v2::HostComponentSetExecutionRequestV1,
     ) -> Result<(), crate::agents::host_bundle_v2::HostBundleError> {
         if self.requires_competing_analyzer_preflight(component_set)
-            && self.competing_opencode_analyzer_present()
+            && self.competing_opencode_analyzer_claim().is_some()
         {
             return Err(crate::agents::host_bundle_v2::HostBundleError::OwnershipConflict);
         }
@@ -487,7 +509,7 @@ impl crate::agents::host_bundle_v2::HostComponentSetRegistrationV1
         request: &crate::agents::host_bundle_v2::HostComponentSetExecutionRequestV1,
     ) -> Result<(), crate::agents::host_bundle_v2::HostBundleError> {
         if self.requires_competing_analyzer_preflight(component_set)
-            && self.competing_opencode_analyzer_present()
+            && self.competing_opencode_analyzer_claim().is_some()
         {
             return Err(crate::agents::host_bundle_v2::HostBundleError::OwnershipConflict);
         }

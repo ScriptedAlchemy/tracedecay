@@ -18,7 +18,9 @@ use std::fmt;
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
-use crate::code_intelligence::{CodeGenerationId, ProjectionKeyV1, VectorGenerationIdV1};
+use crate::code_intelligence::{
+    CodeGenerationId, ProjectionKeyV1, SemanticSearchIndexKeyV1, VectorGenerationIdV1,
+};
 use crate::research::id::{ManifestDigest, PrivacyDomainId, RetrievalAnchorId};
 use crate::research::time::UtcMicros;
 use crate::research::watermark::VectorWatermark;
@@ -321,9 +323,9 @@ impl From<DomainError> for RetrievalContractError {
     }
 }
 
-/// The independent retrieval lanes (Plan 15). Each lane is independently
-/// testable, disableable, budgeted, and attributable; one lane is never an
-/// alias over another.
+/// Runtime-backed retrieval lanes. Each lane is independently testable,
+/// disableable, budgeted, and attributable; one lane is never an alias over
+/// another.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum RetrieverKind {
@@ -331,9 +333,6 @@ pub enum RetrieverKind {
     Lexical,
     Semantic,
     Graph,
-    Temporal,
-    TaskSession,
-    Diagnostic,
 }
 
 impl RetrieverKind {
@@ -346,9 +345,6 @@ impl RetrieverKind {
             Self::Lexical => "lexical",
             Self::Semantic => "semantic",
             Self::Graph => "graph",
-            Self::Temporal => "temporal",
-            Self::TaskSession => "task_session",
-            Self::Diagnostic => "diagnostic",
         }
     }
 
@@ -1120,6 +1116,7 @@ pub struct SemanticRetrievalContinuationV1 {
     pub code_generation: CodeGenerationId,
     pub vector_generation: VectorGenerationIdV1,
     pub projection_key: ProjectionKeyV1,
+    pub search_index_key: SemanticSearchIndexKeyV1,
     pub candidate_set_digest: CandidateSetDigest,
     pub public_lane_statuses: BTreeMap<RetrieverKind, PublicRetrieverStatus>,
     pub lane_checkpoints: Vec<RetrieverContinuation>,
@@ -1131,6 +1128,11 @@ pub struct SemanticRetrievalContinuationV1 {
 
 impl SemanticRetrievalContinuationV1 {
     pub fn validate(&self) -> Result<(), RetrievalContractError> {
+        self.search_index_key.validate().map_err(|_| {
+            RetrievalContractError::InvalidCursorBinding {
+                field: "semantic search index key",
+            }
+        })?;
         if !self
             .public_lane_statuses
             .contains_key(&RetrieverKind::Semantic)
@@ -1537,17 +1539,22 @@ mod tests {
         ]);
         accepted.validate().expect("PR9 lanes are admissible");
 
-        for lane in [
-            RetrieverKind::Semantic,
-            RetrieverKind::Temporal,
-            RetrieverKind::TaskSession,
-            RetrieverKind::Diagnostic,
-        ] {
+        for lane in [RetrieverKind::Semantic] {
             let rejected = subpayload(&[lane]);
             assert_eq!(
                 rejected.validate(),
                 Err(RetrievalContractError::FallbackLaneViolation),
                 "lane {lane:?} must not enter the PR9 fallback subpayload"
+            );
+        }
+    }
+
+    #[test]
+    fn retriever_contract_rejects_lanes_without_runtime_adapters() {
+        for unsupported in ["temporal", "task_session", "diagnostic"] {
+            assert!(
+                serde_json::from_str::<RetrieverKind>(&format!("\"{unsupported}\"")).is_err(),
+                "{unsupported} must not be advertised without a runtime adapter"
             );
         }
     }

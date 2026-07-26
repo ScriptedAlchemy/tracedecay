@@ -204,11 +204,12 @@ const FEEDBACK_SPECS: [FeedbackSurfaceSpec; 11] = [
     },
 ];
 
-/// Specs with concrete owners in the production application registrar.
+/// Specs with concrete internal application owners.
 ///
-/// Indices avoid duplicating operation names while keeping registration
-/// explicit: adding catalog metadata alone cannot advertise a callable route.
-const REGISTERED_FEEDBACK_HANDLER_SPECS: [usize; 11] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+/// Registration proves the handler exists; it does not prove that a host can
+/// construct the request. Transport availability is narrowed independently
+/// below.
+const REGISTERED_FEEDBACK_HANDLER_SPECS: [usize; 10] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
 
 pub fn feedback_surface_catalog_contribution()
 -> Result<CatalogContributionV1, ApplicationContractError> {
@@ -226,7 +227,8 @@ fn feedback_surface_catalog_contribution_for_handlers(
     for spec in &FEEDBACK_SPECS {
         let capability_id = CapabilityId::new(spec.capability)?;
         let mut binding_ids = Vec::new();
-        let callable = handlers.contains(&handler_descriptor(spec)?);
+        let callable =
+            spec.operation == "test_results" && handlers.contains(&handler_descriptor(spec)?);
         if callable {
             binding_ids.reserve(spec.surfaces.len());
             for &surface in spec.surfaces {
@@ -402,7 +404,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn feedback_surface_names_are_exact() {
+    fn catalog_advertises_only_feedback_operations_with_host_routes() {
         let contribution = feedback_surface_catalog_contribution().expect("contribution");
         let mut names: Vec<_> = contribution
             .bindings()
@@ -411,23 +413,11 @@ mod tests {
             .collect();
         names.sort();
         names.dedup();
-        assert_eq!(
-            names,
-            vec![
-                "affected_tests".to_owned(),
-                "feedback_advisory_cycle".to_owned(),
-                "feedback_diagnostics".to_owned(),
-                "feedback_expand".to_owned(),
-                "feedback_get".to_owned(),
-                "feedback_impact".to_owned(),
-                "feedback_list".to_owned(),
-                "test_results".to_owned(),
-            ]
-        );
+        assert_eq!(names, vec!["test_results".to_owned()]);
     }
 
     #[test]
-    fn availability_and_bindings_follow_registered_handler_contribution() {
+    fn internal_feedback_handlers_do_not_imply_transport_availability() {
         let unavailable =
             feedback_surface_catalog_contribution_for_handlers(&[]).expect("unavailable catalog");
         for spec in &FEEDBACK_SPECS {
@@ -447,8 +437,13 @@ mod tests {
                 .iter()
                 .find(|capability| capability.capability_id().as_str() == spec.capability)
                 .expect("registered feedback capability");
-            assert!(capability.availability().is_callable());
-            assert_eq!(capability.binding_ids().len(), spec.surfaces.len());
+            if spec.operation == "test_results" {
+                assert!(capability.availability().is_callable());
+                assert_eq!(capability.binding_ids().len(), spec.surfaces.len());
+            } else {
+                assert!(!capability.availability().is_callable());
+                assert!(capability.binding_ids().is_empty());
+            }
         }
     }
 }

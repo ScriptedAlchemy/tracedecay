@@ -34,8 +34,10 @@ pub const MAX_EPHEMERAL_QUERY_VIEW_BYTES: usize = 4 * 1024;
 const CHANGED_CODE_CHUNK_SET_DIGEST_DOMAIN: &str = "tracedecay.changed-code-chunks.v1";
 const CODE_INDEX_CAPABILITY_MANIFEST_DIGEST_DOMAIN: &str = "tracedecay.code-index-capability.v1";
 const EMBEDDING_PROJECTION_KEY_DIGEST_DOMAIN: &str = "tracedecay.embedding-projection-key.v1";
+const SEMANTIC_SEARCH_INDEX_KEY_DIGEST_DOMAIN: &str = "tracedecay.semantic-search-index-key.v1";
 
 pub const EMBEDDING_PROJECTION_SCHEMA_V1: &str = "tracedecay.embedding-projection.v1";
+pub const SEMANTIC_SEARCH_INDEX_SCHEMA_V1: &str = "tracedecay.semantic-search-index.v1";
 
 fn validate_sorted_unique<T: Ord>(values: &[T], field: &'static str) -> Result<(), DomainError> {
     if values.windows(2).any(|pair| pair[0] >= pair[1]) {
@@ -1098,6 +1100,76 @@ impl AdmittedEmbeddingProjectionKeyV1 {
 
     pub fn privacy_key_epoch(&self) -> u64 {
         self.embedding_key.privacy_key_epoch
+    }
+}
+
+/// Search structure used over one compatible immutable vector generation.
+///
+/// This is intentionally distinct from [`EmbeddingProjectionKeyV1`]:
+/// changing an index implementation or its parameters must rebuild only the
+/// derived search structure and query caches, never the vector projection.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum SemanticSearchIndexKindV1 {
+    ExactFlat,
+}
+
+/// Complete identity inputs for one semantic search structure.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(deny_unknown_fields)]
+pub struct SemanticSearchIndexProfileV1 {
+    pub kind: SemanticSearchIndexKindV1,
+    pub implementation_revision: String,
+    pub parameters_digest: ManifestDigest,
+}
+
+/// Independent immutable identity of a derived semantic search structure.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(deny_unknown_fields)]
+pub struct SemanticSearchIndexKeyV1 {
+    pub kind: SemanticSearchIndexKindV1,
+    pub schema_revision: String,
+    pub profile_digest: ManifestDigest,
+}
+
+impl SemanticSearchIndexProfileV1 {
+    pub fn exact_flat_v1() -> Result<Self, DomainError> {
+        Ok(Self {
+            kind: SemanticSearchIndexKindV1::ExactFlat,
+            implementation_revision: "semantic.exact-flat.v1".to_owned(),
+            parameters_digest: canonical_sha256(&(
+                "tracedecay.semantic-exact-flat-parameters.v1",
+                "scan-all-compatible-vectors",
+                "canonical-distance-then-anchor",
+            ))?,
+        })
+    }
+
+    pub fn validate(&self) -> Result<(), DomainError> {
+        validate_revision(
+            &self.implementation_revision,
+            "semantic search index implementation revision",
+        )?;
+        self.parameters_digest.validate()
+    }
+
+    pub fn index_key(&self) -> Result<SemanticSearchIndexKeyV1, DomainError> {
+        self.validate()?;
+        Ok(SemanticSearchIndexKeyV1 {
+            kind: self.kind,
+            schema_revision: SEMANTIC_SEARCH_INDEX_SCHEMA_V1.to_owned(),
+            profile_digest: canonical_sha256(&(SEMANTIC_SEARCH_INDEX_KEY_DIGEST_DOMAIN, self))?,
+        })
+    }
+}
+
+impl SemanticSearchIndexKeyV1 {
+    pub fn validate(&self) -> Result<(), DomainError> {
+        validate_revision(
+            &self.schema_revision,
+            "semantic search index schema revision",
+        )?;
+        self.profile_digest.validate()
     }
 }
 

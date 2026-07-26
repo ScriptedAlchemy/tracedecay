@@ -382,6 +382,12 @@ pub(crate) async fn analytics_diagnostics_with_db(
         0,
     )
     .await;
+    let observatory = crate::application::observability::observatory_cli_value(&observatory)
+        .map_err(cli_error)?;
+    let costs =
+        crate::application::observability::costs_read_model(gdb, project_filter.as_deref(), 0)
+            .await;
+    let costs = crate::application::observability::costs_cli_value(&costs).map_err(cli_error)?;
     let event_rows: Vec<Value> = events
         .iter()
         .map(crate::dashboard::analytics_api::durable_analytics_event_row)
@@ -416,7 +422,8 @@ pub(crate) async fn analytics_diagnostics_with_db(
             "project_id".to_string(),
             project_filter.clone().map_or(Value::Null, Value::String),
         );
-        summary.insert("observatory".to_string(), json!(observatory));
+        summary.insert("observatory".to_string(), observatory);
+        summary.insert("costs".to_string(), costs);
         summary.insert("import".to_string(), import);
         summary.insert(
             "global_db".to_string(),
@@ -435,7 +442,7 @@ pub(crate) async fn analytics_diagnostics_with_db(
 mod tests {
     use std::path::Path;
 
-    use super::hook_row_to_analytics_event;
+    use super::{analytics_diagnostics_with_db, hook_row_to_analytics_event};
 
     #[test]
     fn maps_hook_invoked_row_with_attribution() {
@@ -484,5 +491,34 @@ mod tests {
     fn rows_without_event_field_are_skipped() {
         assert!(hook_row_to_analytics_event("{}", None).is_none());
         assert!(hook_row_to_analytics_event("not json", None).is_none());
+    }
+
+    #[tokio::test]
+    async fn cli_diagnostics_exposes_canonical_observatory_and_costs_coverage() {
+        let harness = crate::global_db::tests::harness::RegisteredGlobalDbHarness::open(
+            "analytics-cli-observability-parity",
+        )
+        .await;
+        let output =
+            analytics_diagnostics_with_db(&harness.registered, None, None, None, true, true)
+                .await
+                .expect("CLI diagnostics");
+
+        assert!(
+            output["observatory"]["metrics"]
+                .as_array()
+                .is_some_and(|metrics| !metrics.is_empty())
+        );
+        assert!(
+            output["costs"]["usage"]
+                .as_array()
+                .is_some_and(|metrics| !metrics.is_empty())
+        );
+        assert_eq!(output["observatory"]["metrics"][0]["value"], 0.0);
+        assert_eq!(output["observatory"]["metrics"][0]["denominator_value"], 0);
+        assert_eq!(
+            output["observatory"]["metrics"][0]["coverage"]["state"],
+            "known"
+        );
     }
 }
