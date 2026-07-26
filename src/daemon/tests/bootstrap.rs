@@ -1,4 +1,6 @@
 use super::*;
+use crate::daemon::ProductionProjectCompositionHarnessV1;
+use crate::mcp::JsonRpcResponse;
 
 #[test]
 fn bootstrap_tool_catalog_uses_project_node_count() {
@@ -1035,4 +1037,192 @@ async fn direct_tool_cache_miss_returns_warming_while_project_opens_in_backgroun
     tokio::time::timeout(PHASE_TIMEOUT, engine.shutdown_all())
         .await
         .expect("direct warmup shutdown timed out");
+}
+
+fn production_composition_tool_text(response: &JsonRpcResponse) -> &str {
+    assert!(response.error.is_none(), "tool failed: {response:?}");
+    let result = response.result.as_ref().expect("tool result");
+    assert_ne!(result["isError"], true, "tool returned an error: {result}");
+    result["content"][0]["text"].as_str().expect("tool text")
+}
+
+fn commit_production_composition_project(project: &std::path::Path) {
+    let run_git = |arguments: &[&str]| {
+        let status = std::process::Command::new("git")
+            .current_dir(project)
+            .args(arguments)
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {arguments:?}");
+    };
+    run_git(&["init", "--quiet"]);
+    run_git(&["add", "."]);
+    run_git(&[
+        "-c",
+        "user.name=TraceDecay Test",
+        "-c",
+        "user.email=tracedecay@example.invalid",
+        "commit",
+        "--quiet",
+        "-m",
+        "test: seed production composition",
+    ]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn production_composition_harness_wires_pr9_search_authority() {
+    let temp = TempDir::new().expect("temp dir");
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(project.join("src")).expect("source dir");
+    std::fs::write(
+        project.join("src/lib.rs"),
+        "pub fn production_composition_probe() -> bool { true }\n",
+    )
+    .expect("source file");
+    commit_production_composition_project(&project);
+
+    let harness = ProductionProjectCompositionHarnessV1::open(temp.path(), vec![project.clone()])
+        .await
+        .expect("production composition");
+    let response = harness
+        .call_tool(
+            &project,
+            "tracedecay_search",
+            json!({
+                "query": "production_composition_probe",
+                "limit": 10,
+                "format": "json"
+            }),
+        )
+        .await
+        .expect("production search");
+    let payload: serde_json::Value =
+        serde_json::from_str(production_composition_tool_text(&response)).expect("search json");
+    assert!(
+        payload["results"].as_array().is_some_and(|matches| {
+            matches.iter().any(|candidate| {
+                candidate["display"]["name"] == json!("production_composition_probe")
+            })
+        }),
+        "production PR9 search authority did not return the indexed symbol: {payload}"
+    );
+    harness.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn production_composition_harness_wires_cross_project_resolver() {
+    let temp = TempDir::new().expect("temp dir");
+    let first_project = temp.path().join("first");
+    let second_project = temp.path().join("second");
+    for project in [&first_project, &second_project] {
+        std::fs::create_dir_all(project.join("src")).expect("source dir");
+    }
+    std::fs::write(
+        first_project.join("src/lib.rs"),
+        "pub fn first_project_probe() {}\n",
+    )
+    .expect("first source file");
+    std::fs::write(
+        second_project.join("src/lib.rs"),
+        "pub fn second_project_probe() {}\n",
+    )
+    .expect("second source file");
+    for project in [&first_project, &second_project] {
+        commit_production_composition_project(project);
+    }
+
+    let harness = ProductionProjectCompositionHarnessV1::open(
+        temp.path(),
+        vec![first_project.clone(), second_project.clone()],
+    )
+    .await
+    .expect("production composition");
+    let canonical_second = second_project
+        .canonicalize()
+        .expect("canonical second project");
+    let response = harness
+        .call_tool(
+            &first_project,
+            "tracedecay_grep",
+            json!({
+                "pattern": "second_project_probe",
+                "project_path": canonical_second,
+                "format": "json"
+            }),
+        )
+        .await
+        .expect("cross-project grep");
+    let payload = production_composition_tool_text(&response);
+    assert!(
+        payload.contains("second_project_probe") && !payload.contains("first_project_probe"),
+        "production retained-project resolver must route search to the mounted project: {payload}"
+    );
+    harness.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn production_composition_harness_dispatches_application_invocations_in_process() {
+    let temp = TempDir::new().expect("temp dir");
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(project.join("src")).expect("source dir");
+    std::fs::write(project.join("src/lib.rs"), "pub fn storage_probe() {}\n").expect("source file");
+    commit_production_composition_project(&project);
+
+    let harness = ProductionProjectCompositionHarnessV1::open(temp.path(), vec![project.clone()])
+        .await
+        .expect("production composition");
+    assert!(
+        !harness.semantic_auto_download_enabled(),
+        "the effective semantic startup policy used by production composition must disable auto-download"
+    );
+    let response = harness
+        .call_tool(
+            &project,
+            "tracedecay_storage_status",
+            serde_json::json!({"format": "json"}),
+        )
+        .await
+        .expect("in-process application invocation");
+    let payload: serde_json::Value =
+        serde_json::from_str(production_composition_tool_text(&response))
+            .expect("storage-status application envelope");
+    assert!(
+        payload["contract"]["schema_id"]
+            == serde_json::json!("schema.application.primitive.storage-status.result"),
+        "production invocation must preserve the application result contract: {payload}"
+    );
+    assert!(
+        payload["problem"].is_null() && !payload["outcome"].is_null(),
+        "production composition must dispatch through retained daemon state: {payload}"
+    );
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn production_composition_harness_rejects_live_profile_overlap() {
+    let temp = TempDir::new().expect("temp dir");
+    let live_profile = temp.path().join("live-profile");
+    let overlapping_isolation = live_profile.join("test-isolation");
+    std::fs::create_dir_all(&live_profile).expect("live profile");
+
+    let error = match ProductionProjectCompositionHarnessV1::open_with_live_profile_root_for_test(
+        &overlapping_isolation,
+        Vec::new(),
+        live_profile.clone(),
+    )
+    .await
+    {
+        Ok(_) => panic!("live-profile overlap must be rejected before any project or store opens"),
+        Err(error) => error,
+    };
+    let message = error.to_string();
+    assert!(
+        message.contains("overlaps live profile")
+            && message.contains(&live_profile.display().to_string()),
+        "overlap rejection must identify the protected live profile: {message}"
+    );
+    assert!(
+        !overlapping_isolation.join("profile").exists(),
+        "rejection must fire before the harness creates an isolated profile"
+    );
 }

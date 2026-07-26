@@ -29,11 +29,16 @@ Runtime sanitizer provenance for those fixtures is in
 ```bash
 scripts/run-pr8-temporal-benchmark.sh --dry-run
 scripts/run-pr8-temporal-benchmark.sh --run   # Linux only; exit 64 elsewhere
+scripts/run-pr8-temporal-benchmark.sh --refresh-contract
 cargo bench --bench session_temporal --all-features -- --run
 ```
 
 Dry-run is Cargo-free. `--run` isolates `HOME` and `TRACEDECAY_DATA_DIR` and
 measures: `rebuild_activate`, `exact_replay`, `compact_rank`, and `late_hydrate`.
+`--refresh-contract` requires a clean source commit, performs that same real
+measurement without accepting caller-supplied values, and publishes the
+workload and result as one hash-checked pair. The refreshed provenance records
+the source commit and mode, warmups, measured repetitions, and record counts.
 
 ## Observed focused tests
 

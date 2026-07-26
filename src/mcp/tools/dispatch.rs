@@ -13,14 +13,14 @@ use crate::application_surface::{
     observe_surface_argument_rejection, resolve_application_surface_dispatch,
     resolve_application_surface_dispatch_with_controls,
 };
-use crate::daemon_client::{DaemonInvocationClient, DispatchedInvocation, RequestedOutputFormat};
+use crate::daemon_client::{DaemonInvocationExecutor, DispatchedInvocation, RequestedOutputFormat};
 
 pub async fn resolve_mcp_application_surface(
     operation: ApplicationSurfaceOperation,
     request_id: RequestId,
     request: ApplicationSurfaceRequest,
     requested_format: RequestedOutputFormat,
-    client: Option<&DaemonInvocationClient>,
+    executor: Option<&dyn DaemonInvocationExecutor>,
 ) -> Result<ApplicationSurfaceInvocationResult, ApplicationSurfaceAdapterError> {
     let dispatched = match resolve_mcp_application_surface_dispatch(
         operation,
@@ -31,7 +31,7 @@ pub async fn resolve_mcp_application_surface(
         Ok(dispatched) => dispatched,
         Err(error) => {
             observe_surface_argument_rejection(
-                client,
+                executor,
                 BindingSurface::Mcp,
                 operation,
                 &request_id,
@@ -41,7 +41,7 @@ pub async fn resolve_mcp_application_surface(
             return Err(error);
         }
     };
-    execute_application_surface(operation, dispatched, client).await
+    execute_application_surface(operation, dispatched, executor).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -52,14 +52,14 @@ pub async fn resolve_mcp_application_surface_with_controls(
     requested_format: RequestedOutputFormat,
     deadline: Deadline,
     cancellation: CancellationSignal,
-    client: Option<&DaemonInvocationClient>,
+    executor: Option<&dyn DaemonInvocationExecutor>,
 ) -> Result<ApplicationSurfaceInvocationResult, ApplicationSurfaceAdapterError> {
     let page = match PageRequest::first(10) {
         Ok(page) => page,
         Err(error) => {
             let error = ApplicationSurfaceAdapterError::from(error);
             observe_surface_argument_rejection(
-                client,
+                executor,
                 BindingSurface::Mcp,
                 operation,
                 &request_id,
@@ -82,7 +82,7 @@ pub async fn resolve_mcp_application_surface_with_controls(
         Ok(dispatched) => dispatched,
         Err(error) => {
             observe_surface_argument_rejection(
-                client,
+                executor,
                 BindingSurface::Mcp,
                 operation,
                 &request_id,
@@ -92,7 +92,7 @@ pub async fn resolve_mcp_application_surface_with_controls(
             return Err(error);
         }
     };
-    execute_application_surface(operation, dispatched, client).await
+    execute_application_surface(operation, dispatched, executor).await
 }
 
 pub fn resolve_mcp_application_surface_dispatch(
