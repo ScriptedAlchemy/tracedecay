@@ -21,7 +21,7 @@ export default defineWorkspace([
     test: {
       name: 'dom',
       environment: 'jsdom',
-      include: ['src/**/*.dom.test.{ts,tsx}'],
+      include: ['src/**/*.dom.test.{ts,tsx}', 'e2e/**/*.dom.test.ts'],
       setupFiles: ['./vitest.setup.dom.ts'],
     },
   },
