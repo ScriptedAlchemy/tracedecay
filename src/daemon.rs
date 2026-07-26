@@ -4473,8 +4473,16 @@ async fn serve_broker_socket_client(
         return Ok(());
     }
     if let Some(request) = parse_branch_add_request(&first_request_line) {
-        let response =
-            branch_add_response(&engine.store_administration, &handshake, &request).await;
+        let response = match Box::pin(engine.project_server_for_request(&handshake)).await {
+            Ok(_) => {
+                branch_add_response(&engine.store_administration, &handshake, &request).await
+            }
+            Err(error) => JsonRpcResponse::error(
+                request.id.clone(),
+                ErrorCode::InternalError,
+                error.to_string(),
+            ),
+        };
         drop(setup_activity);
         write_json_rpc_response(&mut transport, &response).await?;
         return Ok(());
@@ -4783,7 +4791,25 @@ async fn serve_windows_broker_client_with_class_and_invocation(
         return Ok(());
     }
     if let Some(request) = parse_branch_add_request(&first_request_line) {
-        let response = branch_add_response(&store_administration, &handshake, &request).await;
+        let response = match Box::pin(portable_project_server_for_request(
+            lifecycle.clone(),
+            store_administration.clone(),
+            Arc::clone(&project_open_gates),
+            invocation.clone(),
+            http_application_registry.clone(),
+            &handshake,
+            #[cfg(test)]
+            project_open_attempts.clone(),
+        ))
+        .await
+        {
+            Ok(_) => branch_add_response(&store_administration, &handshake, &request).await,
+            Err(error) => JsonRpcResponse::error(
+                request.id.clone(),
+                ErrorCode::InternalError,
+                error.to_string(),
+            ),
+        };
         drop(setup_activity);
         write_json_rpc_response(&mut transport, &response).await?;
         return Ok(());
