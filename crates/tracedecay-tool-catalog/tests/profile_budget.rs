@@ -21,8 +21,8 @@ fn profile_budgets_reject_overflow_without_a_universal_tool_ceiling() {
     let manifest = read_manifest(
         capability_id.clone(),
         use_case_id("use-case.source.read"),
-        schema("schema.source.read.request", 128),
-        schema("schema.source.read.result", 256),
+        schema("schema.source.read.request"),
+        schema("schema.source.read.result"),
         vec![first_binding_id.clone(), second_binding_id.clone()],
         vec![profile_id.clone()],
     );
@@ -54,7 +54,7 @@ fn profile_budgets_reject_overflow_without_a_universal_tool_ceiling() {
         capability_ids: vec![capability_id.clone()],
         enabled_surfaces: vec![BindingSurface::Cli],
         requires_cli_mcp_pairing: false,
-        budget: ProfileBudget::new(1, 100_000, 100_000).unwrap(),
+        budget: ProfileBudget::new(1, 100_000).unwrap(),
         routing_fixtures: vec![
             RoutingFixtureV1::new(
                 "read source",
@@ -104,8 +104,8 @@ fn profile_absence_is_explicit_in_snapshot_discovery() {
     let manifest = read_manifest(
         capability_id.clone(),
         use_case_id("use-case.source.outline"),
-        schema("schema.source.outline.request", 128),
-        schema("schema.source.outline.result", 256),
+        schema("schema.source.outline.request"),
+        schema("schema.source.outline.result"),
         Vec::new(),
         vec![primary_profile_id.clone()],
     );
@@ -153,8 +153,8 @@ fn paired_profiles_reject_capabilities_without_cli_and_mcp_bindings() {
     let manifest = read_manifest(
         capability_id.clone(),
         use_case_id("use-case.source.outline"),
-        schema("schema.source.outline.request", 128),
-        schema("schema.source.outline.result", 256),
+        schema("schema.source.outline.request"),
+        schema("schema.source.outline.result"),
         Vec::new(),
         vec![profile_id.clone()],
     );

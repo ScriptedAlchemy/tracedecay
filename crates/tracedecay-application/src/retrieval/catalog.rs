@@ -150,16 +150,11 @@ const fn primitive_spec(operation: &'static str) -> PrimitiveReadSpec {
     }
 }
 
-fn primitive_schema(
-    operation: &str,
-    suffix: &str,
-    maximum_bytes: u32,
-) -> Result<SchemaRef, ApplicationContractError> {
+fn primitive_schema(operation: &str, suffix: &str) -> Result<SchemaRef, ApplicationContractError> {
     let operation = operation.replace('_', "-");
     Ok(SchemaRef::new(
         SchemaId::new(format!("schema.application.primitive.{operation}.{suffix}"))?,
         1,
-        maximum_bytes,
     )?)
 }
 
@@ -175,7 +170,7 @@ fn primitive_operation(
             "use-case.application.primitive.{}",
             spec.use_case.replace('_', "-")
         ))?,
-        ResultContractRef::from_schema(&primitive_schema(spec.operation, "result", 1_048_576)?),
+        ResultContractRef::from_schema(&primitive_schema(spec.operation, "result")?),
         true,
     ))
 }
@@ -200,8 +195,8 @@ pub fn primitive_read_handler_descriptors()
         .map(|spec| {
             ApplicationHandlerDescriptor::new(
                 primitive_operation(spec)?,
-                primitive_schema(spec.operation, "request", 65_536)?,
-                primitive_schema(spec.operation, "result", 1_048_576)?,
+                primitive_schema(spec.operation, "request")?,
+                primitive_schema(spec.operation, "result")?,
             )
         })
         .collect()
@@ -275,8 +270,8 @@ pub fn primitive_read_contribution() -> Result<CatalogContributionV1, Applicatio
                 "Invoke the daemon-retained typed primitive owner.",
                 vec![format!("Read {}", spec.operation.replace('_', " "))],
             )?,
-            request_schema: primitive_schema(spec.operation, "request", 65_536)?,
-            result_schema: primitive_schema(spec.operation, "result", 1_048_576)?,
+            request_schema: primitive_schema(spec.operation, "request")?,
+            result_schema: primitive_schema(spec.operation, "result")?,
             effect: EffectClass::Read,
             scope: symbol_search_scope()?,
             authority: AuthorityRequirement::CapabilityGrantWithRevalidation,
@@ -326,7 +321,6 @@ pub fn symbol_search_request_schema() -> Result<SchemaRef, ApplicationContractEr
     Ok(SchemaRef::new(
         SchemaId::new("schema.application.symbol-search.request")?,
         1,
-        384,
     )?)
 }
 
@@ -334,7 +328,6 @@ pub fn symbol_search_result_schema() -> Result<SchemaRef, ApplicationContractErr
     Ok(SchemaRef::new(
         SchemaId::new("schema.application.symbol-search.result")?,
         1,
-        1_024,
     )?)
 }
 
@@ -463,22 +456,18 @@ pub fn symbol_search_contribution() -> Result<CatalogContributionV1, Application
         coverage_contract: CoverageContractRef::new(SchemaRef::new(
             SchemaId::new("schema.application.evidence-coverage")?,
             1,
-            512,
         )?),
         omission_contract: OmissionContractRef::new(SchemaRef::new(
             SchemaId::new("schema.application.evidence-omission")?,
             1,
-            256,
         )?),
         scoring_contract: ScoringContractRef::new(SchemaRef::new(
             SchemaId::new("schema.application.evidence-score")?,
             1,
-            384,
         )?),
         contribution_contract: ContributionContractRef::new(SchemaRef::new(
             SchemaId::new("schema.application.retriever-contribution")?,
             1,
-            640,
         )?),
         deterministic_order: SortContract::new(
             SortContractId::new("sort.application.symbol-search.v1")?,
