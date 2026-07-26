@@ -31,6 +31,7 @@ use crate::query::retrieval::graph::production_code_index_freshness;
 use crate::query::retrieval::ports::{
     CodeCandidateBindingV1, CodeOccurrenceRefV1, RetrievalPortError,
 };
+use crate::query::retrieval::rerank::RerankExecutionControlV1;
 use crate::query::retrieval::semantic::{
     CalibratedSemanticQueryService, CodeSemanticEvidenceV1, CompleteSemanticGenerationV1,
     SemanticCalibrationProfileV1, SemanticCodeRetriever, SemanticExecutionControl,
@@ -54,6 +55,9 @@ use crate::semantic_code::legacy_migration::{
     StagedCanonicalVectorRebuildV1, prepare_legacy_vector_migration,
 };
 use crate::semantic_code::projector::PreparedVectorGenerationV1;
+use crate::semantic_code::rerank_adapter::{
+    GenerationBoundCodeRerankViewsV1, ProductionCodeRerankAuthorityV1,
+};
 use crate::semantic_code::{
     DaemonSemanticQueryFactoryV1, DaemonSemanticRuntimeHandleV1,
     FastEmbedSemanticGenerationRequestV1, LoadedSemanticArtifactV1,
@@ -1299,6 +1303,7 @@ impl PreparedSemanticEvaluationGenerationV1 {
     pub(crate) fn with_query_inputs(
         &self,
         context: ProductionCandidateNativeQueryContextV1<'_>,
+        rerank_authority: Option<&ProductionCodeRerankAuthorityV1>,
         evaluate: &mut dyn for<'inputs> FnMut(
             ProductionCandidateNativeQueryInputsV1<'inputs>,
         ) -> Result<(), CandidateOutputError>,
@@ -1310,10 +1315,27 @@ impl PreparedSemanticEvaluationGenerationV1 {
                 "native semantic evaluator generation changed".to_owned(),
             ));
         }
+        let control = SemanticEvaluationExecutionControlV1 {
+            started: std::time::Instant::now(),
+        };
+        let mut rerank_views =
+            GenerationBoundCodeRerankViewsV1::new(context.code, context.query_view);
+        let rerank = context
+            .rerank_policy
+            .zip(rerank_authority)
+            .map(
+                |(policy, authority)| crate::search_eval::pr10_native::Pr10NativeRerankInputV1 {
+                    request: context.request,
+                    policy,
+                    views: &mut rerank_views as &mut _,
+                    executor: authority.executor(),
+                    control: &control,
+                },
+            );
         if context.profile.semantic_weight_ppm == 0 {
             return evaluate(ProductionCandidateNativeQueryInputsV1 {
                 semantic: None,
-                rerank: None,
+                rerank,
             });
         }
         let query_digest = self
@@ -1333,9 +1355,6 @@ impl PreparedSemanticEvaluationGenerationV1 {
         request
             .validate()
             .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
-        let control = SemanticEvaluationExecutionControlV1 {
-            started: std::time::Instant::now(),
-        };
         let embedder = self.query_factory.create(&control);
         let scoped_vectors = ScopedSemanticEvaluationVectorReadPortV1 {
             inner: &self.vectors,
@@ -1347,7 +1366,7 @@ impl PreparedSemanticEvaluationGenerationV1 {
                 lane: &lane,
                 request: &request,
             }),
-            rerank: None,
+            rerank,
         })
     }
 }
@@ -1363,6 +1382,16 @@ impl SemanticExecutionControl for SemanticEvaluationExecutionControlV1 {
 
     fn elapsed_micros(&self) -> u64 {
         self.started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64
+    }
+}
+
+impl RerankExecutionControlV1 for SemanticEvaluationExecutionControlV1 {
+    fn elapsed_micros(&self) -> u64 {
+        self.started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64
+    }
+
+    fn is_cancelled(&self) -> bool {
+        false
     }
 }
 
