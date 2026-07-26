@@ -11,9 +11,8 @@ use crate::global_db::{
     StoreInstanceUpsert,
 };
 use crate::storage::{
-    ProjectStorageLocation, ProjectStorageStatus, STORE_MANIFEST_FILENAME,
-    STORE_MANIFEST_SCHEMA_VERSION, StorageMode, StoreKind, read_enrollment_marker,
-    read_repository_identity_marker, read_store_manifest,
+    ProjectStorageLocation, STORE_MANIFEST_FILENAME, STORE_MANIFEST_SCHEMA_VERSION, StorageMode,
+    StoreKind, read_enrollment_marker, read_repository_identity_marker, read_store_manifest,
     try_classify_project_storage_with_registry, validate_project_id,
 };
 
@@ -80,11 +79,13 @@ pub struct RegistryGcReport {
     pub metadata_candidate_count: usize,
     pub code_project_candidate_count: usize,
     pub storage_project_candidate_count: usize,
+    pub protected_code_project_count: usize,
     pub deleted_count: usize,
     pub deleted_code_project_count: usize,
     pub deleted_storage_project_count: usize,
     pub candidate_paths: Vec<String>,
     pub candidates: Vec<CodeProjectRecord>,
+    pub protected_code_projects: Vec<CodeProjectRecord>,
     pub storage_project_candidates: Vec<PathBuf>,
 }
 
@@ -912,16 +913,24 @@ pub fn stale_code_projects<'a>(
 /// authority before applying this plan.
 pub async fn registry_gc_report(
     db: &RegisteredGlobalDb,
-    profile_root: &Path,
+    _profile_root: &Path,
     prefix: Option<String>,
 ) -> crate::errors::Result<RegistryGcReport> {
     let prefixes = prefix.iter().map(PathBuf::from).collect::<Vec<_>>();
     let projects = db.list_code_projects(usize::MAX).await?;
-    let candidates =
-        stale_code_projects(&projects, &prefixes, StaleRootScope::CanonicalRootMissing)
-            .into_iter()
-            .cloned()
-            .collect::<Vec<_>>();
+    let mut candidates = Vec::new();
+    let mut protected_code_projects = Vec::new();
+    for project in stale_code_projects(&projects, &prefixes, StaleRootScope::CanonicalRootMissing) {
+        if db
+            .try_list_store_instances_for_project(&project.project_id)
+            .await?
+            .is_empty()
+        {
+            candidates.push(project.clone());
+        } else {
+            protected_code_projects.push(project.clone());
+        }
+    }
 
     let mut storage_project_candidates = Vec::new();
     for project_path in db.try_list_project_paths().await? {
@@ -932,11 +941,7 @@ pub async fn registry_gc_report(
         {
             continue;
         }
-        if try_classify_project_storage_with_registry(&project_path, db, profile_root)
-            .await?
-            .status
-            == ProjectStorageStatus::Stale
-        {
+        if !project_path.exists() {
             storage_project_candidates.push(project_path);
         }
     }
@@ -961,11 +966,13 @@ pub async fn registry_gc_report(
         metadata_candidate_count: candidates.len() + storage_project_candidates.len(),
         code_project_candidate_count: candidates.len(),
         storage_project_candidate_count: storage_project_candidates.len(),
+        protected_code_project_count: protected_code_projects.len(),
         deleted_count: 0,
         deleted_code_project_count: 0,
         deleted_storage_project_count: 0,
         candidate_paths,
         candidates,
+        protected_code_projects,
         storage_project_candidates,
     })
 }
@@ -988,11 +995,7 @@ pub async fn apply_registry_gc(
         }
     }
     for project_path in &report.storage_project_candidates {
-        if try_classify_project_storage_with_registry(project_path, db, profile_root)
-            .await?
-            .status
-            != ProjectStorageStatus::Stale
-        {
+        if project_path.exists() {
             return Err(crate::errors::TraceDecayError::Config {
                 message: format!(
                     "registry cleanup candidate '{}' became live while applying the plan",
