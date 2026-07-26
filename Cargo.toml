@@ -65,6 +65,7 @@ include = [
     "/tests/fixtures/redundancy_eval_labeled.json",
     "/tests/fixtures/search_quality/pr9-pr10-candidate-workload-v1.json",
     "/tests/fixtures/transcript_golden/cline_like/**",
+    "/tests/session_suite/lcm_schema/**",
     "/benchmarks/queries/default.toml",
     "/benchmarks/pr5-observation/**",
     "/benchmarks/pr7-memory/**",
