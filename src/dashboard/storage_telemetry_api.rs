@@ -1,10 +1,10 @@
 //! `GET /api/storage/telemetry` — per-store size, free-page ratio, and typed
 //! budget/growth dimensions (plan 38 §7 read models over the PR14 envelope).
 //!
-//! The size samples are **real**: they are read directly from the store
-//! connections the dashboard already holds, via the cheap `PRAGMA page_count`
-//! / `PRAGMA freelist_count` / `PRAGMA page_size` header reads that back
-//! [`StoreSizeSampleV1`].
+//! The size samples are **real**: the dashboard invokes the application
+//! [`StoreSizeTelemetryPort`] over retained runtime health readers. The runtime
+//! owns the `PRAGMA` and `dbstat` reads; this surface only projects their typed
+//! result.
 //!
 //! Both typed dimensions now have a real server-side source:
 //! - **budget**: the owner-configurable soft budgets live in the configuration
@@ -28,8 +28,7 @@
 //! carrying every role it serves, instead of the same store reported twice with
 //! identical sizes.
 
-use std::collections::HashMap;
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::Mutex;
 use std::sync::OnceLock;
 
@@ -40,10 +39,14 @@ use serde::Serialize;
 use tracedecay_application::storage::identity::StoreKeyV1;
 use tracedecay_application::storage::telemetry::{
     StorageTelemetryReadV1, StoreBudgetEvaluationV1, StoreSizeBudgetV1, StoreSizeSampleV1,
+    StoreSizeTelemetryPort,
 };
-use tracedecay_domain::UtcMicros;
-
-use crate::db::engine::QueryExecutor;
+use tracedecay_application::{
+    CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
+    RequestContext, RequestId,
+};
+use tracedecay_domain::{ActorId, ManifestDigest, ProjectId, UtcMicros, canonical_sha256};
+use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 use super::DashboardState;
 use super::read_model::{
@@ -254,14 +257,40 @@ fn resolve_store_budget(
 async fn collect_store_samples(state: &DashboardState) -> Vec<SampledStoreV1> {
     let mut entries: Vec<SampledStoreV1> = Vec::new();
     let mut seen: HashMap<String, usize> = HashMap::new();
+    let Some(context) = storage_telemetry_context(state) else {
+        for (role, path) in [
+            ("graph", state.graph_db_path.as_str()),
+            ("memory", state.mem_db_path.as_str()),
+            ("lcm", state.lcm_db_path.as_str()),
+            ("savings", state.savings_db_path.as_str()),
+        ] {
+            push_or_merge_unknown_role(
+                &mut entries,
+                &mut seen,
+                role,
+                path,
+                "exact project telemetry scope is unavailable".to_string(),
+            );
+        }
+        return entries;
+    };
 
-    // Graph store: the dashboard owns the connection directly.
+    // Graph store: use the retained database runtime that owns this exact path.
+    let graph = state
+        ._database_guards
+        .iter()
+        .find(|database| {
+            store_identity(&database.database_path().display().to_string())
+                == store_identity(&state.graph_db_path)
+        })
+        .and_then(|database| database.storage_telemetry_handle().ok());
     push_or_merge_role(
         &mut entries,
         &mut seen,
         "graph",
         &state.graph_db_path,
-        &state.graph_conn,
+        graph,
+        &context,
     )
     .await;
     // Project-memory store. In project storage mode this resolves to the same
@@ -272,52 +301,33 @@ async fn collect_store_samples(state: &DashboardState) -> Vec<SampledStoreV1> {
         &mut seen,
         "memory",
         &state.mem_db_path,
-        &state.mem_db.engine_conn(),
+        state.mem_db.storage_telemetry_handle().ok(),
+        &context,
     )
     .await;
-    // LCM session store, when a read connection is held.
+    // LCM session store, when a retained runtime is held.
     if let Some(db) = &state.lcm_db {
-        match db.read_snapshot().await {
-            Ok(snapshot) => {
-                push_or_merge_role(
-                    &mut entries,
-                    &mut seen,
-                    "lcm",
-                    &state.lcm_db_path,
-                    &snapshot,
-                )
-                .await;
-            }
-            Err(error) => push_or_merge_unknown_role(
-                &mut entries,
-                &mut seen,
-                "lcm",
-                &state.lcm_db_path,
-                format!("store snapshot open failed for lcm role: {error}"),
-            ),
-        }
+        push_or_merge_role(
+            &mut entries,
+            &mut seen,
+            "lcm",
+            &state.lcm_db_path,
+            db.storage_telemetry_handle().ok(),
+            &context,
+        )
+        .await;
     }
     // Global accounting store, when available.
     if let Some(db) = &state.savings_db {
-        match db.read_snapshot().await {
-            Ok(snapshot) => {
-                push_or_merge_role(
-                    &mut entries,
-                    &mut seen,
-                    "savings",
-                    &state.savings_db_path,
-                    &snapshot,
-                )
-                .await;
-            }
-            Err(error) => push_or_merge_unknown_role(
-                &mut entries,
-                &mut seen,
-                "savings",
-                &state.savings_db_path,
-                format!("store snapshot open failed for savings role: {error}"),
-            ),
-        }
+        push_or_merge_role(
+            &mut entries,
+            &mut seen,
+            "savings",
+            &state.savings_db_path,
+            db.storage_telemetry_handle().ok(),
+            &context,
+        )
+        .await;
     }
 
     entries
@@ -422,6 +432,87 @@ pub(crate) async fn telemetry(
     Json(envelope)
 }
 
+type CachedStoreTelemetryPort = (
+    ManifestDigest,
+    tracedecay_rusqlite_runtime::SqliteStoreSizeTelemetryPort,
+);
+
+fn storage_telemetry_ports() -> &'static Mutex<HashMap<String, CachedStoreTelemetryPort>> {
+    static PORTS: OnceLock<Mutex<HashMap<String, CachedStoreTelemetryPort>>> = OnceLock::new();
+    PORTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn storage_telemetry_context(state: &DashboardState) -> Option<RequestContext> {
+    let project_id = ProjectId::new(state.project_id.as_deref()?).ok()?;
+    let scope = crate::daemon::project_open_owners::resolved_scope_for_project(
+        &state.project_root,
+        &project_id,
+    )
+    .ok()?;
+    let now = UtcMicros(now_micros());
+    let expires_at = UtcMicros(now.0.saturating_add(30_000_000));
+    let actor = ActorId::new("actor.dashboard.storage-telemetry").ok()?;
+    let manifest = canonical_sha256(&(
+        "tracedecay.dashboard.storage-telemetry-grant.v1",
+        &scope.scope_digest,
+    ))
+    .ok()?;
+    let grant = CapabilityGrantSnapshot::new(
+        CapabilityGrantId::new(format!("grant.dashboard.storage-telemetry.{}", now.0)).ok()?,
+        1,
+        manifest,
+        actor.clone(),
+        now,
+        expires_at,
+        scope.clone(),
+        BTreeSet::from([CapabilityId::new("capability.application.storage.telemetry").ok()?]),
+        BTreeSet::from([UseCaseId::new("use-case.application.storage.telemetry.read").ok()?]),
+        DisclosureClass::Metadata,
+    )
+    .ok()?;
+    RequestContext::new(
+        actor,
+        scope,
+        grant,
+        RequestId::new(format!("request.dashboard.storage-telemetry.{}", now.0)).ok()?,
+        Deadline::new(expires_at).ok()?,
+        CancellationContext::active(format!("cancel.dashboard.storage-telemetry.{}", now.0))
+            .ok()?,
+    )
+    .ok()
+}
+
+fn storage_telemetry_port(
+    path: &str,
+    handle: Option<tracedecay_rusqlite_runtime::migration_sql::MigrationSqlHandle>,
+    context: &RequestContext,
+) -> Option<(
+    StoreKeyV1,
+    tracedecay_rusqlite_runtime::SqliteStoreSizeTelemetryPort,
+)> {
+    let store = StoreKeyV1::new(store_file_name(path)).ok()?;
+    let identity = store_identity(path);
+    let mut ports = storage_telemetry_ports()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((digest, port)) = ports.get(&identity)
+        && digest == &context.scope().scope_digest
+    {
+        return Some((store, port.clone()));
+    }
+    let port = tracedecay_rusqlite_runtime::SqliteStoreSizeTelemetryPort::new(
+        handle?,
+        store.clone(),
+        context.scope().clone(),
+        std::time::Duration::from_secs(5),
+    );
+    ports.insert(
+        identity,
+        (context.scope().scope_digest.clone(), port.clone()),
+    );
+    Some((store, port))
+}
+
 /// Sample a role's store, or merge the role into the existing entry when the
 /// role resolves to a store file already sampled in this read.
 async fn push_or_merge_role(
@@ -429,7 +520,8 @@ async fn push_or_merge_role(
     seen: &mut HashMap<String, usize>,
     role: &str,
     path: &str,
-    conn: &(impl QueryExecutor + ?Sized),
+    handle: Option<tracedecay_rusqlite_runtime::migration_sql::MigrationSqlHandle>,
+    context: &RequestContext,
 ) {
     let identity = store_identity(path);
     if let Some(index) = seen.get(&identity).copied() {
@@ -439,7 +531,7 @@ async fn push_or_merge_role(
         }
         return;
     }
-    let entry = sample_store(role, path, conn).await;
+    let entry = sample_store(role, path, handle, context).await;
     seen.insert(identity, entries.len());
     entries.push(entry);
 }
@@ -511,37 +603,33 @@ fn store_identity(path: &str) -> String {
     )
 }
 
-/// Sample one store's size from a live connection. A pragma failure produces a
-/// typed [`StorageTelemetryReadV1::Unknown`], never a fabricated size.
+/// Sample one store through the retained application telemetry port. A missing
+/// runtime or failed read produces typed `unknown`, never a fabricated size.
 #[allow(clippy::expect_used)] // the "store" fallback key is statically valid
 async fn sample_store(
     role: &str,
     path: &str,
-    conn: &(impl QueryExecutor + ?Sized),
+    handle: Option<tracedecay_rusqlite_runtime::migration_sql::MigrationSqlHandle>,
+    context: &RequestContext,
 ) -> SampledStoreV1 {
     let store_name = store_file_name(path);
-    let store_key = StoreKeyV1::new(store_name.clone());
-
-    let (read, omission_reason) = match &store_key {
-        Ok(store) => match read_size_sample(conn, store).await {
-            Some(sample) => (StorageTelemetryReadV1::Observed { sample }, None),
-            None => (
-                StorageTelemetryReadV1::Unknown {
-                    store: store.clone(),
-                },
-                Some(format!(
-                    "store telemetry pragma read failed for {role} role"
-                )),
-            ),
-        },
+    let (read, omission_reason) = match storage_telemetry_port(path, handle, context) {
+        Some((store, port)) => {
+            let read = port.store_size(context, &store).await;
+            let omission = (!matches!(read, StorageTelemetryReadV1::Observed { .. }))
+                .then(|| format!("store telemetry read failed for {role} role"));
+            (read, omission)
+        }
         // The store file name is not a valid store key; report the read as
-        // unknown against a sanitized fallback key rather than inventing a size.
-        Err(_) => (
+        // unknown against a sanitized fallback key rather than inventing size.
+        None => (
             StorageTelemetryReadV1::Unknown {
                 store: StoreKeyV1::new(sanitize_store_key(&store_name))
                     .unwrap_or_else(|_| StoreKeyV1::new("store").expect("static key")),
             },
-            Some(format!("store key is invalid for {role} role")),
+            Some(format!(
+                "store telemetry runtime is unavailable for {role} role"
+            )),
         ),
     };
 
@@ -671,39 +759,6 @@ fn growth_dimension(
         growth_bytes,
         samples,
     }
-}
-
-/// Read `PRAGMA page_size` / `page_count` / `freelist_count` into a validated
-/// [`StoreSizeSampleV1`]. Returns `None` on any pragma failure or an invalid
-/// sample so the caller reports a typed `unknown` read.
-async fn read_size_sample(
-    conn: &(impl QueryExecutor + ?Sized),
-    store: &StoreKeyV1,
-) -> Option<StoreSizeSampleV1> {
-    let page_size = pragma_u64(conn, "page_size").await?;
-    let page_count = pragma_u64(conn, "page_count").await?;
-    let freelist_pages = pragma_u64(conn, "freelist_count").await?;
-    let page_size_bytes = u32::try_from(page_size).ok()?;
-    let sample = StoreSizeSampleV1 {
-        store: store.clone(),
-        page_size_bytes,
-        page_count,
-        freelist_pages,
-        observed_at: UtcMicros(now_micros()),
-    };
-    sample.validate().ok()?;
-    Some(sample)
-}
-
-/// Run one `PRAGMA` and read its first column as a `u64`. `None` distinguishes a
-/// failed read from a real zero, so the caller never treats a query error as a
-/// zero-sized store.
-async fn pragma_u64(conn: &(impl QueryExecutor + ?Sized), pragma: &str) -> Option<u64> {
-    let sql = format!("PRAGMA {pragma}");
-    let mut rows = conn.query(&sql, ()).await.ok()?;
-    let row = rows.next().await.ok()??;
-    let value = row.get::<i64>(0).ok()?;
-    Some(value.max(0) as u64)
 }
 
 fn store_file_name(path: &str) -> String {
@@ -841,20 +896,31 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn two_roles_backed_by_one_file_produce_one_entry_carrying_both_roles() {
+    #[test]
+    fn two_roles_backed_by_one_file_produce_one_entry_carrying_both_roles() {
         // The graph and project-memory roles resolve to the same database file
         // in project storage mode. Reporting them as two entries produced two
         // cards with byte-identical sizes; they must merge into one store.
         let directory = tempfile::tempdir().expect("tempdir");
         let path = directory.path().join("shared.db");
-        let conn = crate::db::engine::TestConnection::open(&path);
         let display = path.display().to_string();
 
         let mut entries = Vec::new();
         let mut seen = HashMap::new();
-        push_or_merge_role(&mut entries, &mut seen, "graph", &display, &conn).await;
-        push_or_merge_role(&mut entries, &mut seen, "memory", &display, &conn).await;
+        push_or_merge_unknown_role(
+            &mut entries,
+            &mut seen,
+            "graph",
+            &display,
+            "test fixture".to_string(),
+        );
+        push_or_merge_unknown_role(
+            &mut entries,
+            &mut seen,
+            "memory",
+            &display,
+            "test fixture".to_string(),
+        );
 
         assert_eq!(entries.len(), 1, "one file is one store");
         assert_eq!(entries[0].primary_role(), "graph");
@@ -862,16 +928,14 @@ mod tests {
 
         // A genuinely distinct file is still its own entry.
         let other = directory.path().join("other.db");
-        let other_conn = crate::db::engine::TestConnection::open(&other);
         let other_display = other.display().to_string();
-        push_or_merge_role(
+        push_or_merge_unknown_role(
             &mut entries,
             &mut seen,
             "savings",
             &other_display,
-            &other_conn,
-        )
-        .await;
+            "test fixture".to_string(),
+        );
         assert_eq!(entries.len(), 2, "distinct files are never merged");
     }
 
@@ -989,19 +1053,6 @@ mod tests {
             }
             other => panic!("expected a bounded observed window, got {other:?}"),
         }
-    }
-
-    #[tokio::test]
-    async fn malformed_pragma_read_is_typed_unknown_not_zero() {
-        // A closed/empty connection cannot answer pragmas: the read is `unknown`,
-        // and the size fields stay `None` rather than collapsing to zero.
-        let directory = tempfile::tempdir().expect("tempdir");
-        let conn = crate::db::engine::TestConnection::open(&directory.path().join("telemetry.db"));
-        let store = StoreKeyV1::new("probe.db").expect("key");
-        // `PRAGMA not_a_real_pragma` returns no row -> None.
-        assert!(pragma_u64(&conn, "definitely_not_a_pragma").await.is_none());
-        // A valid pragma still reads.
-        assert!(read_size_sample(&conn, &store).await.is_some());
     }
 
     #[test]

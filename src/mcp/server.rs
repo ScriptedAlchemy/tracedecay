@@ -755,7 +755,7 @@ impl McpServer {
             Some(identity) => root.with_project_runtime_shard(identity),
             None => Some(root),
         });
-        #[cfg(feature = "test-transport")]
+        #[cfg(any(test, feature = "test-transport"))]
         let project_session_retrieval_root = project_session_retrieval_root.or_else(|| {
             session_db
                 .as_ref()

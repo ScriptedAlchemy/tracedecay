@@ -6,8 +6,7 @@ use std::task::{Context, Poll, Waker};
 use tracedecay_application::{
     AdvisoryFeedbackDoctorPort, AdvisoryFeedbackFindingReadV1, AdvisoryFeedbackReadV1,
     AdvisoryFeedbackSummaryReadV1, DoctorEvidenceStateV1, DoctorFindingFamilyV1,
-    DoctorOwningSurfaceV1, DoctorRemediationRegistryV1, DoctorReportComposerV1, DoctorSourceFuture,
-    RequestContext,
+    DoctorReportComposerV1, DoctorSourceFuture, RequestContext,
 };
 use tracedecay_domain::{
     CodeGenerationId, CommitId, FeedbackCycleId, FeedbackCycleTerminationV1, FeedbackFindingId,
@@ -59,7 +58,7 @@ fn advisory_feedback_preserves_canonical_identity_lifecycle_and_coverage() {
         omitted_findings: 3,
     };
     let port = StaticFeedback(AdvisoryFeedbackReadV1::Observed {
-        summary,
+        summary: Box::new(summary),
         findings: vec![AdvisoryFeedbackFindingReadV1 {
             result_id: FeedbackResultId::new("feedback.result.1").expect("result"),
             cycle_id: FeedbackCycleId::new("feedback.cycle.1").expect("cycle"),
@@ -119,17 +118,9 @@ fn advisory_feedback_preserves_canonical_identity_lifecycle_and_coverage() {
             "missing evidence {expected}"
         );
     }
-    let owner_action = finding.remediation().expect("feedback owner action");
-    assert_eq!(
-        owner_action.owning_operation().as_str(),
-        "use-case.application.feedback.get"
-    );
-    assert_eq!(
-        DoctorRemediationRegistryV1::default_registry()
-            .resolve(owner_action)
-            .expect("registered owner")
-            .surface(),
-        DoctorOwningSurfaceV1::FeedbackRead
+    assert!(
+        finding.remediation().is_none(),
+        "reading a finding is navigation, not a remediation effect"
     );
 }
 
@@ -143,7 +134,7 @@ fn advisory_feedback_keeps_omitted_only_result_distinct_from_absence() {
         head_commit_id: CommitId::new("commit-1").expect("commit"),
     };
     let port = StaticFeedback(AdvisoryFeedbackReadV1::Observed {
-        summary: AdvisoryFeedbackSummaryReadV1 {
+        summary: Box::new(AdvisoryFeedbackSummaryReadV1 {
             result_id: FeedbackResultId::new("feedback.result.omitted").expect("result"),
             cycle_id: FeedbackCycleId::new("feedback.cycle.omitted").expect("cycle"),
             scope,
@@ -154,7 +145,7 @@ fn advisory_feedback_keeps_omitted_only_result_distinct_from_absence() {
             total_findings: 3,
             returned_findings: 0,
             omitted_findings: 3,
-        },
+        }),
         findings: Vec::new(),
     });
     let report = block_on(
@@ -176,13 +167,9 @@ fn advisory_feedback_keeps_omitted_only_result_distinct_from_absence() {
         finding.coverage().statement(),
         "feedback coverage returned 0/3 findings; omitted 3"
     );
-    assert_eq!(
-        finding
-            .remediation()
-            .expect("list owner")
-            .owning_operation()
-            .as_str(),
-        "use-case.application.feedback.list"
+    assert!(
+        finding.remediation().is_none(),
+        "omitted feedback is evidence, not a dispatchable remediation"
     );
 }
 
@@ -196,7 +183,7 @@ fn advisory_feedback_rejects_summary_row_identity_disagreement() {
         head_commit_id: CommitId::new("commit-1").expect("commit"),
     };
     let port = StaticFeedback(AdvisoryFeedbackReadV1::Observed {
-        summary: AdvisoryFeedbackSummaryReadV1 {
+        summary: Box::new(AdvisoryFeedbackSummaryReadV1 {
             result_id: FeedbackResultId::new("feedback.result.expected").expect("result"),
             cycle_id: FeedbackCycleId::new("feedback.cycle.1").expect("cycle"),
             scope: scope.clone(),
@@ -207,7 +194,7 @@ fn advisory_feedback_rejects_summary_row_identity_disagreement() {
             total_findings: 1,
             returned_findings: 1,
             omitted_findings: 0,
-        },
+        }),
         findings: vec![AdvisoryFeedbackFindingReadV1 {
             result_id: FeedbackResultId::new("feedback.result.foreign").expect("result"),
             cycle_id: FeedbackCycleId::new("feedback.cycle.1").expect("cycle"),

@@ -3,6 +3,7 @@
 pub mod advisory;
 pub mod anchor_resolution;
 pub mod api_migration;
+pub mod code_diagnostics_control;
 pub mod code_index;
 pub mod configuration;
 pub mod context;
@@ -23,6 +24,7 @@ pub mod primitives;
 pub(crate) mod retrieval_anchor_store;
 pub mod semantic_runtime;
 pub mod session;
+pub mod settings_control;
 pub mod source_authorization;
 
 pub use source_authorization::{

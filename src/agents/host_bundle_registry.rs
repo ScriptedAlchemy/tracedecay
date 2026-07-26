@@ -13,7 +13,7 @@ use tracedecay_domain::{
 use super::host_bundle_v2::{
     HostBundleArtifactContentV1, HostBundleArtifactV1, HostBundleComponentV1, HostBundleError,
     HostBundleManifestV1, HostBundleVerificationAdapterV1, HostComponentSetEntryV1,
-    HostComponentSetV1, HostKindV1, validate_identifier,
+    HostComponentSetV1, HostKindV1, require_component_capabilities, validate_identifier,
 };
 
 pub const FIRST_PARTY_COMPONENT_CATALOG_VERSION: u64 = 1;
@@ -91,10 +91,7 @@ pub fn default_components(host: HostKindV1) -> Vec<HostBundleComponentV1> {
             HostBundleComponentV1::Agent,
             HostBundleComponentV1::ContextMcp,
         ],
-        HostKindV1::Hermes | HostKindV1::Kiro | HostKindV1::KimiCode => {
-            vec![HostBundleComponentV1::Core]
-        }
-        HostKindV1::Cline | HostKindV1::RooCode | HostKindV1::Kilo => {
+        HostKindV1::Hermes | HostKindV1::KimiCode => {
             vec![HostBundleComponentV1::Core]
         }
         HostKindV1::OpenCode => vec![
@@ -235,6 +232,8 @@ pub fn verified_embedded_host_bundle(
     component: HostBundleComponentV1,
     _now_unix: u64,
 ) -> Result<VerifiedEmbeddedHostBundleV1, HostBundleRegistryError> {
+    require_component_capabilities(host, component)
+        .map_err(|_| HostBundleRegistryError::Incompatible)?;
     let host_name = host_name(host);
     let component_name = component_name(component);
     let assets = component_assets(host, component)?;
@@ -863,7 +862,6 @@ mod tests {
             HostKindV1::CursorDesktop,
             HostKindV1::Codex,
             HostKindV1::Hermes,
-            HostKindV1::Kiro,
             HostKindV1::KimiCode,
             HostKindV1::OpenCode,
         ] {
@@ -927,78 +925,27 @@ mod tests {
     }
 
     #[test]
-    fn cline_roo_and_kilo_have_distinct_canonical_supported_routes() {
-        for (host, expected_path, expected_evidence) in [
-            (
-                HostKindV1::Cline,
-                ".cline/data/settings/tracedecay/component.json",
-                "src/agents/cline.rs",
-            ),
-            (
-                HostKindV1::RooCode,
-                ".roo/tracedecay/component.json",
-                "src/agents/roo_code.rs",
-            ),
-            (
-                HostKindV1::Kilo,
-                ".config/kilo/tracedecay/component.json",
-                "src/agents/kilo.rs",
-            ),
-        ] {
-            let component_set = verified_embedded_default_host_component_set(host, 0).unwrap();
-            assert_eq!(component_set.component_set.components.len(), 1);
+    fn cline_roo_and_kilo_refuse_components_without_native_evidence() {
+        for host in [HostKindV1::Cline, HostKindV1::RooCode, HostKindV1::Kilo] {
+            assert!(default_components(host).is_empty());
             assert_eq!(
-                component_set.component_set.components[0].manifest.artifacts[0].relative_path,
-                expected_path
+                verified_embedded_host_component_set(host, &[HostBundleComponentV1::Core], 0),
+                Err(HostBundleRegistryError::Incompatible)
             );
-            let evidence = crate::agents::host_bundle_v2::stock_host_registration_evidence(host);
-            assert!(evidence.iter().any(|record| {
-                record.route == crate::agents::host_bundle_v2::HostRegistrationRouteV1::Mcp
-                    && record.state
-                        == crate::agents::host_bundle_v2::HostCapabilityStateV1::Supported
-                    && record.evidence_ref == expected_evidence
-            }));
-            assert!(evidence.iter().any(|record| {
-                record.route == crate::agents::host_bundle_v2::HostRegistrationRouteV1::Hook
-                    && matches!(
-                        record.state,
-                        crate::agents::host_bundle_v2::HostCapabilityStateV1::Unavailable(_)
-                    )
-            }));
         }
     }
 
     #[test]
-    fn kiro_default_set_packages_its_evidence_backed_hook_and_mcp_route() {
-        let component_set =
-            verified_embedded_default_host_component_set(HostKindV1::Kiro, 0).unwrap();
-        assert_eq!(component_set.component_set.components.len(), 1);
-        let component = &component_set.component_set.components[0];
-        assert_eq!(component.manifest.component, HostBundleComponentV1::Core);
+    fn kiro_degraded_hook_route_is_not_packaged_as_supported() {
+        assert!(default_components(HostKindV1::Kiro).is_empty());
         assert_eq!(
-            component.manifest.artifacts[0].relative_path,
-            ".kiro/tracedecay/component.json"
+            verified_embedded_host_component_set(
+                HostKindV1::Kiro,
+                &[HostBundleComponentV1::Core],
+                0
+            ),
+            Err(HostBundleRegistryError::Incompatible)
         );
-        let declaration: serde_json::Value =
-            serde_json::from_slice(&component.contents[0].bytes).unwrap();
-        assert_eq!(declaration["route"], "hook+mcp");
-        assert_eq!(
-            declaration["native_events"],
-            "userPromptSubmit,preToolUse,postToolUse"
-        );
-        let evidence =
-            crate::agents::host_bundle_v2::stock_host_registration_evidence(HostKindV1::Kiro);
-        assert!(evidence.iter().any(|record| {
-            record.route == crate::agents::host_bundle_v2::HostRegistrationRouteV1::Mcp
-                && record.state == crate::agents::host_bundle_v2::HostCapabilityStateV1::Supported
-        }));
-        assert!(evidence.iter().any(|record| {
-            record.route == crate::agents::host_bundle_v2::HostRegistrationRouteV1::Hook
-                && record.state
-                    == crate::agents::host_bundle_v2::HostCapabilityStateV1::Degraded(
-                        crate::agents::host_bundle_v2::HostCapabilityUnavailableReasonV1::NativeFixtureLimited,
-                    )
-        }));
     }
 
     #[test]

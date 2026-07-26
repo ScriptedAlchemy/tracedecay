@@ -218,6 +218,24 @@ impl AgentIntegration for CursorIntegration {
         Some(cursor_plugin_manifest_path(home))
     }
 
+    fn host_registration_paths(&self, home: &Path) -> Vec<PathBuf> {
+        let mut paths = vec![
+            cursor_plugin_manifest_path(home),
+            home.join(".cursor/mcp.json"),
+        ];
+        if let Some(project_path) = std::env::current_dir()
+            .ok()
+            .and_then(|cwd| cwd_sweep_target(cwd, home))
+        {
+            paths.extend([
+                project_path.join(".cursor/mcp.json"),
+                project_path.join(".cursor/hooks.json"),
+                project_path.join(".cursor/rules/tracedecay.mdc"),
+            ]);
+        }
+        paths
+    }
+
     fn has_tracedecay(&self, home: &Path) -> bool {
         cursor_plugin_manifest_path(home).exists()
             || legacy_mcp_has_tracedecay(&home.join(".cursor/mcp.json"))
