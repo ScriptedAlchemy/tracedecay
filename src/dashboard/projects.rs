@@ -129,43 +129,41 @@ pub(crate) struct ProjectsParams {
 pub(crate) async fn list(
     State(runtime): State<DashboardRuntime>,
     Query(params): Query<ProjectsParams>,
-) -> Json<Value> {
+) -> (StatusCode, Json<Value>) {
     let limit = params.limit.unwrap_or(100).clamp(1, 250);
     let Some(db) = runtime.active.savings_db.as_ref() else {
-        return Json(json!({
-            "status": "missing_registry",
-            "limit": limit,
-            "truncated": null,
-            "projects": null,
-            "active_project_id": runtime.active_project_id(),
-            "active_project_root": runtime.active_project_root(),
-            "summary": {
-                "project_count": null,
-                "repo_count": null,
-                "truncated": null,
-            },
-            "project_tree": null,
-        }));
-    };
-
-    let mut projects = match db.list_code_projects(limit + 1).await {
-        Ok(projects) => projects,
-        Err(error) => {
-            return Json(json!({
-                "status": "registry_unavailable",
-                "error": error.to_string(),
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "status": "missing_registry",
                 "limit": limit,
                 "truncated": null,
                 "projects": null,
                 "active_project_id": runtime.active_project_id(),
                 "active_project_root": runtime.active_project_root(),
-                "summary": {
-                    "project_count": null,
-                    "repo_count": null,
-                    "truncated": null,
-                },
+                "summary": null,
                 "project_tree": null,
-            }));
+            })),
+        );
+    };
+
+    let mut projects = match db.list_code_projects(limit + 1).await {
+        Ok(projects) => projects,
+        Err(error) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "status": "registry_unavailable",
+                    "error": error.to_string(),
+                    "limit": limit,
+                    "truncated": null,
+                    "projects": null,
+                    "active_project_id": runtime.active_project_id(),
+                    "active_project_root": runtime.active_project_root(),
+                    "summary": null,
+                    "project_tree": null,
+                })),
+            );
         }
     };
     let truncated = projects.len() > limit;
@@ -174,21 +172,20 @@ pub(crate) async fn list(
     let contexts = match db.project_registry_contexts_for_projects(&projects).await {
         Ok(contexts) => contexts,
         Err(error) => {
-            return Json(json!({
-                "status": "registry_unavailable",
-                "error": error.to_string(),
-                "limit": limit,
-                "truncated": null,
-                "projects": null,
-                "active_project_id": active_project_id,
-                "active_project_root": runtime.active_project_root(),
-                "summary": {
-                    "project_count": null,
-                    "repo_count": null,
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "status": "registry_unavailable",
+                    "error": error.to_string(),
+                    "limit": limit,
                     "truncated": null,
-                },
-                "project_tree": null,
-            }));
+                    "projects": null,
+                    "active_project_id": active_project_id,
+                    "active_project_root": runtime.active_project_root(),
+                    "summary": null,
+                    "project_tree": null,
+                })),
+            );
         }
     };
     let view = build_project_registry_view(&contexts, runtime.active_project_id(), truncated);
@@ -197,16 +194,19 @@ pub(crate) async fn list(
         .map(|project| PublicCodeProject::from_record(project, runtime.active_project_id()))
         .collect::<Vec<_>>();
 
-    Json(json!({
-        "status": "ok",
-        "limit": limit,
-        "truncated": truncated,
-        "active_project_id": active_project_id,
-        "active_project_root": runtime.active_project_root(),
-        "summary": view.summary,
-        "project_tree": view.project_tree,
-        "projects": rows,
-    }))
+    (
+        StatusCode::OK,
+        Json(json!({
+            "status": "ok",
+            "limit": limit,
+            "truncated": truncated,
+            "active_project_id": active_project_id,
+            "active_project_root": runtime.active_project_root(),
+            "summary": view.summary,
+            "project_tree": view.project_tree,
+            "projects": rows,
+        })),
+    )
 }
 
 pub(crate) fn is_registry_unavailable_error(error: &TraceDecayError) -> bool {

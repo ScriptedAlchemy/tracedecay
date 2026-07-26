@@ -196,9 +196,12 @@ need Cursor-only `disable-model-invocation` frontmatter.
 ### 6. Checks outside the Rust test harness
 
 Most validation deliberately lives in `cargo test`, because the existing
-`ci.yml` `test` job already runs the full suite on every PR — a check that can
-be a `#[test]` needs no new YAML. CI-only additions are limited to what cargo
-can't do:
+`ci.yml` `test` job is configured to run the full suite on every PR — a check
+that can be a `#[test]` needs no new YAML. That describes what CI is wired to
+invoke, not a green baseline: the aggregate suite has not completed
+successfully on this branch, so a new `#[test]` joins a suite whose overall
+state is unverified rather than a known-passing one. CI-only additions are
+limited to what cargo can't do:
 
 - **Schema-validation workflow**
   (`.github/workflows/plugin-validation.yml`, `manifest-schema` job). Mirrors

@@ -4,7 +4,9 @@
 
 - Cross-cutting V2 safety requirement; its PR5 capture foundation is complete.
 - Mandatory for every later ingestion, storage, indexing, retrieval, logging, and export path.
-- Delivered as product behavior, remediation, Doctor checks, and UI state; none is deferred.
+- Delivered structural sanitization remains required product behavior.
+  Sensitive-value redaction of lossless LCM raw payloads is conditionally
+  delivered through the owner setting described below.
 
 Historical detector-corpus names, sink inventories, remediation packets, and
 intermediate gate layouts are evidence, not mechanisms that later work must
@@ -14,15 +16,29 @@ direct prevention, remediation, disclosure, and regression behavior below.
 
 ## Outcome
 
-TraceDecay does not persist or disclose known secrets and private values through derived data.
-Structured content is parsed before scanning, safety state follows data through the system, and every
-durable or external sink enforces the same policy.
+TraceDecay does not persist or disclose known secrets and private values
+through sanitized observations and derived data. Structured content is parsed
+before scanning, safety state follows data through the system, and each
+covered durable or external sink enforces the same policy.
+
+**Conditional LCM raw-payload guarantee (2026-07-26).** Sensitive-value
+redaction of new `lcm_raw_messages` input is enforced when
+`UserConfig::lcm_sensitive_redaction_enabled` is set. The profile default
+flows through `IngestProtectionDefaults::from_profile()` into `ingest_config`
+and `redact_sensitive_text`; a per-message metadata key can override that
+profile default in either direction. The default remains `false` because
+redaction is irreversible and the LCM contract is lossless by default.
+Enabling it protects newly ingested values; it does not rewrite transcripts
+already at rest. Structural payload externalization remains independent of
+this sensitive-value setting.
 
 ## Owns
 
 - Structured parsing and secret/private-data detection.
 - Redaction, taint metadata, and verified-safe markers.
-- Sink firewalls for storage, indexes, facts, sessions, analytics, logs, APIs, UI, and exports.
+- Sink firewalls for storage, indexes, facts, sanitized session projections,
+  analytics, logs, APIs, UI, and exports. LCM raw sensitive-value protection
+  is conditional on the named owner setting above.
 - Safe audit records and incident evidence.
 - Existing-data scanning, quarantine, remediation, and derivative rebuilds.
 - Doctor diagnostics and healing guidance.
@@ -57,7 +73,9 @@ durable or external sink enforces the same policy.
    - Concatenation, formatting, summarization, and extraction preserve taint unless re-sanitized.
 
 3. Enforce sink firewalls
-   - Every durable or externally visible sink accepts only verified-safe payloads.
+   - Every covered durable or externally visible sink accepts only
+     verified-safe payloads; LCM raw sensitive-value protection is conditional
+     on the owner setting above.
    - Diagnostic messages and provenance pass the same sink firewall without
      retaining raw analyzer stderr, environment values, command lines, or source.
    - Missing, stale, or incompatible safety metadata fails closed with a structured error.
@@ -108,9 +126,14 @@ durable or external sink enforces the same policy.
 
 - PR5 established shared parsing, detection, redaction, receipt, and safe-marker primitives.
 - Representative structured and malformed inputs prove parse-before-scan behavior.
-- Every sink rejects raw, tainted, unmarked, and stale-policy payloads.
-- End-to-end tests prove secrets do not appear in databases, indexes, facts, sessions, logs,
-  analytics, API responses, UI payloads, exports, or diagnostic bundles.
+- Every covered sink rejects raw, tainted, unmarked, and stale-policy payloads;
+  LCM raw sensitive values follow the conditional guarantee above.
+- End-to-end tests prove secrets do not appear in covered databases, indexes,
+  facts, sanitized session projections, logs, analytics, API responses, UI
+  payloads, exports, or diagnostic bundles. LCM raw tests prove the profile
+  setting enables redaction without message metadata, message metadata
+  overrides the profile in both directions, the default remains off, and
+  enablement affects new ingestion without claiming an at-rest rewrite.
 - LSP tests prove unsaved document content remains session-ephemeral, reaches
   only authorized analyzers, and cannot reach remote analyzers without the
   required capability and disclosure.
