@@ -260,8 +260,10 @@ fn text_field(row: &Value, key: &str) -> Option<String> {
 
 // ── CLI entry points (`tracedecay analytics …`) ────────────────────────
 
-fn cli_error(message: String) -> crate::errors::TraceDecayError {
-    crate::errors::TraceDecayError::Config { message }
+fn cli_error(message: impl std::fmt::Display) -> crate::errors::TraceDecayError {
+    crate::errors::TraceDecayError::Config {
+        message: message.to_string(),
+    }
 }
 
 fn cli_project_root() -> Option<PathBuf> {

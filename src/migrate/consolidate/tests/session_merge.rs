@@ -91,6 +91,12 @@ async fn planning_rejects_future_source_lcm_schema_before_target_normalization()
     let target = layout_for_id(&fixture.project, &fixture.profile, &fixture.target_id)
         .unwrap()
         .sessions_db_path;
+    execute_owned_session_sql(
+        &fixture,
+        &fixture.target_id,
+        "DROP TABLE lcm_lifecycle_state",
+    )
+    .await;
     set_lcm_schema_version(
         &source,
         crate::sessions::lcm::LCM_SCHEMA_VERSION.saturating_add(1),
@@ -107,7 +113,7 @@ async fn planning_rejects_future_source_lcm_schema_before_target_normalization()
         "{error}"
     );
     assert_eq!(file_digest(&target).unwrap(), target_before);
-    assert!(!session_table_exists(&target, "dashboard_token_counts").await);
+    assert!(!session_table_exists(&target, "lcm_lifecycle_state").await);
 }
 
 #[tokio::test]
@@ -119,9 +125,15 @@ async fn planning_rejects_future_target_lcm_schema_without_normalization() {
     let target = layout_for_id(&fixture.project, &fixture.profile, &fixture.target_id)
         .unwrap()
         .sessions_db_path;
-    set_lcm_schema_version(
-        &target,
-        crate::sessions::lcm::LCM_SCHEMA_VERSION.saturating_add(1),
+    execute_owned_session_sql(
+        &fixture,
+        &fixture.target_id,
+        &format!(
+            "DROP TABLE lcm_lifecycle_state;
+             UPDATE session_schema_migrations SET version={}
+             WHERE name='lcm'",
+            crate::sessions::lcm::LCM_SCHEMA_VERSION.saturating_add(1)
+        ),
     )
     .await;
     let target_before = file_digest(&target).unwrap();
@@ -135,7 +147,7 @@ async fn planning_rejects_future_target_lcm_schema_without_normalization() {
         "{error}"
     );
     assert_eq!(file_digest(&target).unwrap(), target_before);
-    assert!(!session_table_exists(&target, "dashboard_token_counts").await);
+    assert!(!session_table_exists(&target, "lcm_lifecycle_state").await);
 }
 
 #[tokio::test]
@@ -239,19 +251,16 @@ async fn verification_rejects_a_missing_unique_row_when_target_is_larger() {
     let graph_path = report
         .destination_data_root
         .join(crate::config::DB_FILENAME);
-    let (graph, _) = test_open(&graph_path).await;
-    graph
-        .writer_connection("remove legacy fact fixture")
-        .await
-        .unwrap()
-        .execute_batch(
-            "PRAGMA foreign_keys = OFF;
-             DELETE FROM memory_facts WHERE content = 'legacy durable fact';",
+    // Deliberately corrupt the frozen result outside the product writer. The
+    // writer must continue rejecting the foreign-key bypass this fixture needs.
+    let fixture_db = rusqlite::Connection::open(&graph_path).unwrap();
+    fixture_db
+        .execute(
+            "DELETE FROM memory_facts WHERE content = 'legacy durable fact'",
+            (),
         )
-        .await
         .unwrap();
-    graph.checkpoint().await.unwrap();
-    graph.close();
+    drop(fixture_db);
     assert_eq!(
         sqlite::count_rows(&graph_path, "memory_facts")
             .await
