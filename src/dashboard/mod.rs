@@ -690,6 +690,16 @@ async fn run_until_shutdown_inner<F>(
 where
     F: std::future::Future<Output = ()> + Send + 'static,
 {
+    // A directly served dashboard is not handed a daemon-owned analyzer broker,
+    // so it opens the same one the MCP server mounts. Without it the code
+    // diagnostics surface would answer unsupported purely because of which
+    // entry point started the dashboard.
+    let code_diagnostics_broker =
+        crate::application::dashboard_diagnostics::open_diagnostic_broker(
+            cg.project_root().to_path_buf(),
+            &cg.store_layout().dashboard_root,
+        )
+        .await;
     let state = build_state_inner(
         cg,
         test_project_graph,
@@ -703,7 +713,7 @@ where
         None,
         None,
         None,
-        None,
+        Some(code_diagnostics_broker),
     )
     .await?;
     let app = router(cg, state).await?;
