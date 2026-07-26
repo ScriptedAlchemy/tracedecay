@@ -7,7 +7,7 @@
 //! closed and placeholder owners are never installed.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -850,11 +850,21 @@ pub(crate) async fn register_project_open_production_owners(
             });
         }
     };
-    let access =
-        daemon_owned_project_source_access_at(&scope, project_root, &configuration, now_micros())
-            .map_err(|error| TraceDecayError::Config {
-            message: format!("project-open source access denied: {error}"),
-        })?;
+    let source_binding_root = graph
+        .profile_database()
+        .project_registry_context_by_id(project_id.as_str())
+        .await?
+        .map(|context| PathBuf::from(context.project.canonical_root))
+        .unwrap_or_else(|| project_root.to_path_buf());
+    let access = daemon_owned_project_source_access_at(
+        &scope,
+        &source_binding_root,
+        &configuration,
+        now_micros(),
+    )
+    .map_err(|error| TraceDecayError::Config {
+        message: format!("project-open source access denied: {error}"),
+    })?;
     let source_edit_authorization = ProjectOpenSourceEditAuthorizationV1 {
         project_root: project_root.to_path_buf(),
         scope: scope.clone(),
