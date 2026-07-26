@@ -5464,7 +5464,7 @@ async fn projectless_response(
                 },
                 "serverInfo": {
                     "name": "tracedecay",
-                    "version": env!("CARGO_PKG_VERSION")
+                    "version": crate::version::build_version()
                 }
             }),
         )),

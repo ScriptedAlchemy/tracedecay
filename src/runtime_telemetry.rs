@@ -126,7 +126,7 @@ pub async fn collect(cg: &crate::tracedecay::TraceDecay) -> Result<RuntimeSnapsh
         .map_or(0, |d| d.as_secs());
     Ok(RuntimeSnapshot {
         captured_at,
-        tracedecay_version: env!("CARGO_PKG_VERSION"),
+        tracedecay_version: crate::version::build_version(),
         host_os: std::env::consts::OS,
         process,
         database,
