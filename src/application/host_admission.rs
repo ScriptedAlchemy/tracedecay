@@ -1645,6 +1645,7 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-transport"))]
     pub async fn session_database_sha256_for_test(
         &self,
         scope: HostAdmissionScope,
@@ -1655,6 +1656,7 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-transport"))]
     pub async fn session_domain_sha256_for_test(
         &self,
         scope: HostAdmissionScope,
