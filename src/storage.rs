@@ -929,23 +929,69 @@ pub fn default_profile_root() -> Result<PathBuf> {
     })
 }
 
+/// Synchronous store resolution for callers that cannot await the registry:
+/// hooks, MCP response handles, config resolution, the agent command, Doctor,
+/// and diagnostics.
+///
+/// This used to read only the enrollment marker and otherwise derive a project
+/// id from the checkout path, so it disagreed with the async registry resolver
+/// about the same directory and split one repository across shards. It now
+/// consults every authority available without awaiting — the same enrollment
+/// marker and repository identity marker via [`resolve_persisted_layout`], then
+/// legacy manifest recovery — and treats an ambiguous recovery as a failure
+/// rather than minting a fresh path-derived identity.
 pub fn resolve_layout_for_current_profile(project_root: &Path) -> Result<StoreLayout> {
-    match read_enrollment_marker(project_root)? {
-        Some(marker) if marker.storage_mode == StorageMode::ProfileSharded => {
-            let profile_root = default_profile_root()?;
-            profile_sharded_layout(project_root, &profile_root, &marker)
-        }
-        Some(marker) => Err(TraceDecayError::Config {
-            message: format!(
-                "unsupported storage_mode={:?} in enrollment marker for '{}'; \
-                 run TraceDecay migration to move this project into the user profile store",
-                marker.storage_mode,
-                project_root.display()
-            ),
-        }),
-        None => {
-            let profile_root = default_profile_root()?;
-            default_profile_sharded_layout(project_root, &profile_root)
+    let profile_root = default_profile_root()?;
+    match resolve_enrolled_layout(project_root, &profile_root)? {
+        Some(layout) => Ok(layout),
+        None => default_profile_sharded_layout(project_root, &profile_root),
+    }
+}
+
+/// Resolves this checkout's store only when an authority already names it, and
+/// reports `Ok(None)` when the answer would be a path-derived guess.
+///
+/// Callers that merely want somewhere to put a file — hook analytics is the
+/// motivating one — must not enroll a directory as a side effect. Every
+/// directory this resolver declines is a store shard that never gets minted for
+/// a path that was never a project.
+pub fn resolve_enrolled_layout_for_current_profile(
+    project_root: &Path,
+) -> Result<Option<StoreLayout>> {
+    let profile_root = default_profile_root()?;
+    resolve_enrolled_layout(project_root, &profile_root)
+}
+
+fn resolve_enrolled_layout(
+    project_root: &Path,
+    profile_root: &Path,
+) -> Result<Option<StoreLayout>> {
+    if let Some(layout) = resolve_persisted_layout(project_root, profile_root)? {
+        return Ok(Some(layout));
+    }
+    let (mut candidates, _) =
+        matching_legacy_profile_layouts(project_root, profile_root, None, false)?;
+    match candidates.len() {
+        0 => Ok(None),
+        1 => Ok(Some(candidates.remove(0))),
+        _ => {
+            // Choosing between several pre-identity stores needs the repair
+            // path the async resolver owns. Deriving an id from the path here
+            // would answer with a shard that holds none of this project's
+            // history, so report the ambiguity instead.
+            let ids = candidates
+                .iter()
+                .filter_map(|layout| layout.identity.project_id.as_deref())
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(TraceDecayError::Config {
+                message: format!(
+                    "project '{}' matches several profile stores ({ids}) and has no enrollment or \
+                     repository identity marker; open it through the daemon so the registry can \
+                     resolve and repair its identity",
+                    project_root.display()
+                ),
+            })
         }
     }
 }

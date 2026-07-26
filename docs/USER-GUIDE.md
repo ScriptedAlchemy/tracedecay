@@ -876,6 +876,33 @@ last_worldwide_total = 1000000
 last_worldwide_fetch_at = 1711375200
 ```
 
+#### Redacting secrets in ingested transcripts
+
+Agent transcripts occasionally contain credentials the agent pasted or echoed.
+TraceDecay always applies *structural* sanitization on ingestion routes, but
+the LCM raw payloads — the lossless archive that session expansion drills back
+into — keep message text verbatim by default, because redaction is
+irreversible and would silently destroy the archive's losslessness.
+
+Opt in per profile:
+
+```toml
+lcm_sensitive_redaction_enabled = true
+```
+
+When enabled, four redactors run over raw message text and structured values
+before they are persisted: `api_key`, `bearer_token`, `password_assignment`,
+and `private_key`. Redacted messages are marked lossy in their ingest
+protection metadata and the original value is not recoverable. Restrict the
+set with:
+
+```toml
+lcm_sensitive_redaction_patterns = ["api_key", "private_key"]
+```
+
+An empty or absent list runs all four. This applies to messages ingested after
+the change; transcripts already at rest are not rewritten.
+
 ---
 
 ## Troubleshooting
