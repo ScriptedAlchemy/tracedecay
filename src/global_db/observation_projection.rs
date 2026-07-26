@@ -16,7 +16,9 @@ pub(crate) use migration::{
     projection_version_migration_complete_with_engine,
 };
 pub(crate) use rebuild::{project_observation_with_engine, rebuild_projection_with_engine};
-pub(super) use schema::ensure_observation_projection_schema;
+pub(super) use schema::{
+    ensure_observation_projection_performance_indexes, ensure_observation_projection_schema,
+};
 pub(super) use state::{
     converge_session_project_paths, verify_output_authority, verify_projection_rows,
 };
