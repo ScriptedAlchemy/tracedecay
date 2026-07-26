@@ -1566,6 +1566,7 @@ impl EvidenceAssemblyService {
             | SessionRetrievalOutcome::Deleted
             | SessionRetrievalOutcome::Denied
             | SessionRetrievalOutcome::Unavailable
+            | SessionRetrievalOutcome::CursorManifestLimitExceeded { .. }
             | SessionRetrievalOutcome::BudgetExhausted
             | SessionRetrievalOutcome::Cancelled => {
                 return Err(EvidenceAssemblyError::SessionRetrievalUnavailable);
