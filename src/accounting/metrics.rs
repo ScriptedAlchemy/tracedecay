@@ -21,18 +21,18 @@ pub async fn quick_cost_summary(
     gdb: &RegisteredGlobalDb,
     tokens_saved: u64,
     global_tokens_saved: u64,
-) -> Option<CostRow> {
+) -> Result<Option<CostRow>, String> {
     let now = now_epoch();
     let today_start = today_start_epoch(now);
     let week_start = now.saturating_sub(7 * 86400);
 
-    let today_cost = gdb.total_cost_since(today_start).await?;
-    let week_cost = gdb.total_cost_since(week_start).await?;
-    let week_consumed = gdb.total_tokens_since(week_start).await.unwrap_or(0);
+    let today_cost = gdb.try_total_cost_since(today_start).await?;
+    let week_cost = gdb.try_total_cost_since(week_start).await?;
+    let week_consumed = gdb.try_total_tokens_since(week_start).await?;
 
     // Don't show the row if there's no meaningful data
     if today_cost < 0.001 && week_cost < 0.001 {
-        return None;
+        return Ok(None);
     }
 
     let total_saved = tokens_saved + global_tokens_saved;
@@ -42,11 +42,11 @@ pub async fn quick_cost_summary(
         0.0
     };
 
-    Some(CostRow {
+    Ok(Some(CostRow {
         today_cost,
         week_cost,
         efficiency_pct,
-    })
+    }))
 }
 
 /// Build a full cost summary for a given time range.
@@ -54,12 +54,12 @@ pub async fn cost_summary(
     gdb: &RegisteredGlobalDb,
     since: u64,
     tokens_saved: u64,
-) -> Option<CostSummary> {
-    let total_cost = gdb.total_cost_since(since).await?;
+) -> Result<CostSummary, String> {
+    let total_cost = gdb.try_total_cost_since(since).await?;
     let (total_input, total_output, total_cache_read) =
-        gdb.token_breakdown_since(since).await.unwrap_or((0, 0, 0));
-    let by_model = gdb.cost_by_model_since(since).await;
-    let by_category = gdb.cost_by_category_since(since).await;
+        gdb.try_token_breakdown_since(since).await?;
+    let by_model = gdb.try_cost_by_model_since(since).await?;
+    let by_category = gdb.try_cost_by_category_since(since).await?;
 
     let total_consumed = total_input + total_output;
     let efficiency_ratio = if tokens_saved + total_consumed > 0 {
@@ -68,7 +68,7 @@ pub async fn cost_summary(
         0.0
     };
 
-    Some(CostSummary {
+    Ok(CostSummary {
         total_cost,
         total_input_tokens: total_input,
         total_output_tokens: total_output,
