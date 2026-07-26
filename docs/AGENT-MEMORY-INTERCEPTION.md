@@ -356,7 +356,7 @@ and doctor checks cover it.
 
 Today `project-memory`'s guardrail says add facts "**only when the
 user asks**" — the opposite of agent-memory behavior. Change the instruction
-(rule Recall bullet in `plugin/overlays/cursor/rules/tracedecay.mdc` + the
+(rule Recall bullet in `plugin/rules/tracedecay.mdc` + the
 `plugin/skills/project-memory/SKILL.md` skill, shared across every host) to:
 
 - *Recall:* "before starting non-trivial work, search `tracedecay_fact_store`
