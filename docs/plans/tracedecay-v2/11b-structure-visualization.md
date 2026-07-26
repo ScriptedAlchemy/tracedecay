@@ -86,18 +86,11 @@ cache per graph generation). Chain selection rule: user-picked endpoints,
 shortest route, captioned as exactly that (single path; k-shortest is a later
 question).
 
-**Backend status (2026-07-26 audit; not acceptance).** Both endpoints are
-implemented and registered — `src/dashboard/mod.rs:1013-1018`, handlers
-`src/dashboard/graph_structure_api.rs:245` and `:342` — so the earlier
-instruction to "register the existing `get_call_chain`" is complete. Surface
-1's three endpoints are likewise registered (`src/dashboard/mod.rs:1019-1030`,
-handlers `graph_structure_api.rs:482`, `:606`, `:732`), their wire contracts are
-generated (`dashboard/src/contracts/generated.ts:1135-1163`), and
-`tests/dashboard_api_test/graph.rs:631-700` covers them under a declared module.
-No file under `dashboard/src` fetches any of the five, so Surfaces 1 and 2 are
-backend-only: implemented but unreachable. The remaining work is the frontend
-surface, not the endpoints. See
-[`GAP-LEDGER-PR8-PR14.md`](GAP-LEDGER-PR8-PR14.md).
+**Backend status (2026-07-26; not acceptance).** Both endpoints are
+implemented and registered at `src/dashboard/mod.rs:1013-1018`; the earlier
+instruction to register `get_call_chain` is complete. No frontend file fetches
+either endpoint. Surface 2 is therefore backend-only; the open work is the
+frontend surface.
 
 ## Surface 3 — Disagreement field (build last; premise gated)
 

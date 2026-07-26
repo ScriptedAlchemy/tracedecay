@@ -8,12 +8,14 @@ into current work. It is not a replacement for [NEXT.md](NEXT.md), which
 remains the active PR12/PR13 execution slice, and it is not a code-gap queue.
 The owning numbered plan remains authoritative for retained behavior.
 
-The earlier ledger on `codex/v2-gap-ledger` at `e780fd660` is superseded rather
-than merged. Its useful structural judgment—keep a companion ledger linked
-from `NEXT.md`—is retained. Its file also carried findings later retracted or
-fixed (including the Sigma single-mount claim and the dashboard Doctor
-`target` mismatch), so copying it would recreate the problem this correction
-pass is meant to solve. Valid edits were re-derived and applied selectively.
+The earlier ledger on `codex/v2-gap-ledger` at `e780fd660` was superseded
+because it carried findings later retracted or fixed, including the Sigma
+single-mount claim and the dashboard Doctor `target` mismatch. Integration
+later merged that branch at `5e868bd8a`. Reconciliation confirmed that conflict
+resolution retained this authoritative file, its complete retraction register,
+and one companion link from `NEXT.md`; no second ledger or withdrawn/refuted
+finding survived. Valid numbered-plan edits remain re-derived and selective,
+not inherited merely because the superseded branch entered history.
 
 ## Delivery-band authority
 
@@ -120,7 +122,9 @@ the temporary-alias deletion slices.
   real obstacle, but the whole `global.db` is only 0.98 GiB and no
   `StoreSizeTelemetryPort` implementation supports a per-table byte claim.
   Plan 38 also records that the reachable debris collector originally missed
-  bare `.corrupt` artifacts until `985cc5d4b`.
+  bare `.corrupt` artifacts until `985cc5d4b`, that live branch stores are full
+  graph copies rather than lightweight deltas, and that code-index generation
+  publication has no retention pass.
 
 No numbered plan claims `.tracedecay/domain-symbols.toml` as a delivered
 capability, so the no-op `DOMAIN-EXTRACTORS.md` proposal requires no plan-side
