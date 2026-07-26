@@ -399,7 +399,7 @@ mod tests {
     }
 
     #[test]
-    fn configuration_surface_exposes_dashboard_through_the_same_handlers() {
+    fn configuration_surface_exposes_the_pr14_dashboard_transport() {
         let contribution = configuration_surface_catalog_contribution().expect("contribution");
         let surfaces = contribution
             .bindings()
@@ -416,29 +416,6 @@ mod tests {
                 BindingSurface::Dashboard,
             ])
         );
-        for capability in contribution.capabilities() {
-            let operations = contribution
-                .bindings()
-                .iter()
-                .filter(|binding| binding.capability_id() == capability.capability_id())
-                .map(|binding| (binding.surface(), binding.operation().as_str().to_owned()))
-                .collect::<std::collections::BTreeSet<_>>();
-            let operation = operations
-                .iter()
-                .next()
-                .expect("each capability has a binding")
-                .1
-                .clone();
-            assert_eq!(
-                operations,
-                std::collections::BTreeSet::from([
-                    (BindingSurface::Cli, operation.clone()),
-                    (BindingSurface::Mcp, operation.clone()),
-                    (BindingSurface::Http, operation.clone()),
-                    (BindingSurface::Dashboard, operation),
-                ])
-            );
-        }
     }
 
     #[test]

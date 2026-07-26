@@ -8,7 +8,7 @@ use crate::errors::{Result, TraceDecayError};
 
 const SETTINGS_FILENAME: &str = "code_diagnostics_settings.json";
 
-/// Dashboard-owned idle whole-project diagnostics mode.
+/// Daemon-owned idle whole-project diagnostics mode.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IdleBackfillMode {
@@ -35,7 +35,7 @@ impl Default for LanguageDiagnosticsSettings {
     }
 }
 
-/// Project-scoped Code Diagnostics settings persisted for the dashboard.
+/// Project-scoped Code Diagnostics settings persisted by the daemon authority.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CodeDiagnosticsSettings {
     #[serde(default)]

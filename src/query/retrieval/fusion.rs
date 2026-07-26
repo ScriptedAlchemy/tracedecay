@@ -1131,7 +1131,7 @@ struct CursorAuthenticatedPayload<'a> {
     lane_checkpoints: &'a [RetrieverContinuation],
     ranking_revision: &'a tracedecay_domain::RankingRevision,
     next_ordinal: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     semantic: &'a Option<tracedecay_domain::SemanticRetrievalContinuationV1>,
     expiry: UtcMicros,
 }

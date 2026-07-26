@@ -436,7 +436,7 @@ mod tests {
     }
 
     #[test]
-    fn registry_authenticates_detach_reconnect_and_expires_state() {
+    fn registry_authenticates_detach_reconnect_and_close() {
         let mut endpoint = DaemonLspSessionEndpoint::new(Admission);
         let access = endpoint.open(LspSessionOpenRequest::default(), 0).unwrap();
         let forged = LspSessionAccess::new(

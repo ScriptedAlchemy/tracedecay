@@ -91,12 +91,12 @@ impl DaemonHookEvent {
         Self::new(HookAgent::Cursor, "afterFileEdit", rel_paths, None, None)
     }
 
-    pub fn cursor_after_shell_execution(command: String, cwd: PathBuf) -> Self {
+    pub fn cursor_after_shell_execution(cwd: PathBuf) -> Self {
         Self::new(
             HookAgent::Cursor,
             "afterShellExecution",
             Vec::new(),
-            Some(command),
+            None,
             Some(cwd),
         )
     }

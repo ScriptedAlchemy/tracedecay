@@ -136,7 +136,7 @@ impl McpServerConstructionContext {
             allow_default_registry_fallback: true,
             automation_scheduler_reconciler: None,
             database_owner_reconciler: None,
-            dashboard_automation_writer: crate::dashboard::direct_dashboard_automation_writer(),
+            dashboard_automation_writer: crate::dashboard::standalone_dashboard_automation_writer(),
             dashboard_doctor_report_reader: None,
             dashboard_doctor_remediation_dispatcher: None,
             dashboard_code_index_freshness_reader: None,

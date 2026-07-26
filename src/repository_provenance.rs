@@ -268,7 +268,10 @@ impl NativeRepositoryProvenanceProbe {
         &self,
         request: &RepositoryProvenanceProbeRequest<'_>,
     ) -> EvidenceAvailabilityV1<RepositoryProvenanceV1> {
-        let Ok(repo) = gix::discover(request.project_root) else {
+        // Admission has already resolved the exact checkout root. Opening that
+        // root directly prevents a removed nested checkout from silently
+        // walking up to, and capturing evidence from, an ambient repository.
+        let Ok(repo) = gix::open(request.project_root) else {
             return EvidenceAvailabilityV1::Unavailable;
         };
         Self::capture_open_repository(&repo, request)

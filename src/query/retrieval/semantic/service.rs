@@ -12,6 +12,9 @@ use tracedecay_domain::{
     CalibrationProfileId, CodeGenerationId, ManifestDigest, Pr9FallbackSubpayload, ProjectionKeyV1,
     RetrieverBatch, RetrieverKind, RetrieverOutcome, VectorGenerationIdV1, canonical_sha256,
 };
+use tracedecay_policy::retrieval_selection::{
+    RetrievalAvailabilityV1, RetrievalRequirementV1, RetrievalSelectionV1, select_retrieval,
+};
 
 use super::{
     CanonicalSemanticDistanceV1, CodeSemanticEvidenceV1, SemanticLaneRetriever,
@@ -23,38 +26,6 @@ use crate::query::retrieval::fusion::CompositionLaneInput;
 pub enum SemanticQueryModeV1 {
     FallbackAllowed,
     StrictSemantic,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SemanticRetrievalAvailabilityV1 {
-    Ready,
-    Unavailable,
-    Indexing,
-    Degraded,
-    Failed,
-    Stale,
-    Incompatible,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SemanticRetrievalRequirementV1 {
-    FallbackAllowed,
-    StrictSemantic,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SemanticRetrievalSelectionV1 {
-    Semantic,
-    FrozenFallback,
-    Unavailable,
-}
-
-pub trait SemanticRetrievalSelectionPolicyV1 {
-    fn select(
-        &self,
-        availability: SemanticRetrievalAvailabilityV1,
-        requirement: SemanticRetrievalRequirementV1,
-    ) -> SemanticRetrievalSelectionV1;
 }
 
 /// Non-ready asynchronous index states. None of these states may start query
@@ -222,21 +193,16 @@ pub enum SemanticQueryServiceError {
     InvalidCursor,
 }
 
-pub struct CalibratedSemanticQueryService<'a, L, P> {
+pub struct CalibratedSemanticQueryService<'a, L> {
     lane: &'a L,
-    selection_policy: &'a P,
 }
 
-impl<'a, L, P> CalibratedSemanticQueryService<'a, L, P>
+impl<'a, L> CalibratedSemanticQueryService<'a, L>
 where
     L: SemanticLaneRetriever,
-    P: SemanticRetrievalSelectionPolicyV1,
 {
-    pub const fn new(lane: &'a L, selection_policy: &'a P) -> Self {
-        Self {
-            lane,
-            selection_policy,
-        }
+    pub const fn new(lane: &'a L) -> Self {
+        Self { lane }
     }
 
     pub fn execute(
@@ -249,44 +215,37 @@ where
             return Err(SemanticQueryServiceError::InvalidFallback);
         }
         let requirement = match mode {
-            SemanticQueryModeV1::FallbackAllowed => SemanticRetrievalRequirementV1::FallbackAllowed,
-            SemanticQueryModeV1::StrictSemantic => SemanticRetrievalRequirementV1::StrictSemantic,
+            SemanticQueryModeV1::FallbackAllowed => RetrievalRequirementV1::FallbackAllowed,
+            SemanticQueryModeV1::StrictSemantic => RetrievalRequirementV1::StrictSemantic,
         };
         let availability = match &readiness {
-            SemanticLaneReadinessV1::Ready { .. } => SemanticRetrievalAvailabilityV1::Ready,
+            SemanticLaneReadinessV1::Ready { .. } => RetrievalAvailabilityV1::Ready,
             SemanticLaneReadinessV1::Unavailable(state) => policy_availability(*state),
         };
-        let selection = self.selection_policy.select(availability, requirement);
+        let selection = select_retrieval(availability, requirement);
         let (request, generation, calibration) = match (selection, readiness) {
             (
-                SemanticRetrievalSelectionV1::Semantic,
+                RetrievalSelectionV1::Semantic,
                 SemanticLaneReadinessV1::Ready {
                     request,
                     generation,
                     calibration,
                 },
             ) => (request, generation, calibration),
-            (
-                SemanticRetrievalSelectionV1::FrozenFallback,
-                SemanticLaneReadinessV1::Unavailable(state),
-            ) => {
+            (RetrievalSelectionV1::FrozenFallback, SemanticLaneReadinessV1::Unavailable(state)) => {
                 return Ok(SemanticQueryServiceOutcomeV1::Fallback {
                     abstention: index_abstention(state),
                     fallback,
                 });
             }
-            (
-                SemanticRetrievalSelectionV1::Unavailable,
-                SemanticLaneReadinessV1::Unavailable(state),
-            ) => {
+            (RetrievalSelectionV1::Unavailable, SemanticLaneReadinessV1::Unavailable(state)) => {
                 return Err(SemanticQueryServiceError::StrictUnavailable(
                     index_abstention(state),
                 ));
             }
-            (SemanticRetrievalSelectionV1::Semantic, SemanticLaneReadinessV1::Unavailable(_))
+            (RetrievalSelectionV1::Semantic, SemanticLaneReadinessV1::Unavailable(_))
             | (
-                SemanticRetrievalSelectionV1::FrozenFallback
-                | SemanticRetrievalSelectionV1::Unavailable,
+                RetrievalSelectionV1::FrozenFallback | RetrievalSelectionV1::Unavailable,
                 SemanticLaneReadinessV1::Ready { .. },
             ) => unreachable!("retrieval selection must match the immutable readiness facts"),
         };
@@ -368,14 +327,14 @@ fn index_abstention(state: SemanticIndexStateV1) -> SemanticAbstentionV1 {
     }
 }
 
-const fn policy_availability(state: SemanticIndexStateV1) -> SemanticRetrievalAvailabilityV1 {
+const fn policy_availability(state: SemanticIndexStateV1) -> RetrievalAvailabilityV1 {
     match state {
-        SemanticIndexStateV1::Unavailable => SemanticRetrievalAvailabilityV1::Unavailable,
-        SemanticIndexStateV1::Indexing => SemanticRetrievalAvailabilityV1::Indexing,
-        SemanticIndexStateV1::Degraded => SemanticRetrievalAvailabilityV1::Degraded,
-        SemanticIndexStateV1::Failed => SemanticRetrievalAvailabilityV1::Failed,
-        SemanticIndexStateV1::Stale => SemanticRetrievalAvailabilityV1::Stale,
-        SemanticIndexStateV1::Incompatible => SemanticRetrievalAvailabilityV1::Incompatible,
+        SemanticIndexStateV1::Unavailable => RetrievalAvailabilityV1::Unavailable,
+        SemanticIndexStateV1::Indexing => RetrievalAvailabilityV1::Indexing,
+        SemanticIndexStateV1::Degraded => RetrievalAvailabilityV1::Degraded,
+        SemanticIndexStateV1::Failed => RetrievalAvailabilityV1::Failed,
+        SemanticIndexStateV1::Stale => RetrievalAvailabilityV1::Stale,
+        SemanticIndexStateV1::Incompatible => RetrievalAvailabilityV1::Incompatible,
     }
 }
 

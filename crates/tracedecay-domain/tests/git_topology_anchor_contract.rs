@@ -8,23 +8,21 @@ use tracedecay_domain::{
     CoverageReportV1, EvidenceAvailabilityV1, EvidenceClass, FeedbackScopeV1, GitCommitIdentityV1,
     GitCoverageV1, GitHeadStateV1, GitHubPullRequestIdV1, GitHubReviewCoverageV1,
     GitHubReviewIngressProviderOutcomeV1, GitHubReviewIngressResultV1, GitHubReviewReadOperationV1,
-    GitHubStackCapabilitySnapshotV1, GitHubStackCapabilityStateV1, GitHubStackLayerSnapshotV1,
-    GitHubStackSnapshotV1, GitIndexCommitIntentV1, GitIndexPreviewDispositionV1, GitIndexPreviewId,
-    GitIndexPreviewV1, GitIndexReceiptId, GitIndexReceiptOutcomeV1, GitIndexSigningPolicyV1,
-    GitIndexTransactionId, GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1,
-    GitObjectFormatV1, GitOidV1, GitOperationStateV1, GitTopologyAnchorTargetV1,
-    GitTopologyGenerationRefV1, GitTopologySourceRoleV1, IntegrationReceiptAnchorRefV1,
-    ManifestDigest, NativeGitObjectAnchorRefV1, NativeGitObjectKindV1, ObservationScopeV1,
-    PayloadAccessState, PreflightPreviewAnchorRefV1, PrivacyDomainBoundLocatorDigest,
-    PrivacyDomainId, ProjectId, ProjectionGenerationId, ProviderId, PullRequestSnapshotAnchorRefV1,
-    RefId, RefSnapshotAnchorRefV1, RefSnapshotKindV1, RepositoryCaptureAnchorRefV1,
+    GitIndexCommitIntentV1, GitIndexPreviewDispositionV1, GitIndexPreviewId, GitIndexPreviewV1,
+    GitIndexReceiptId, GitIndexReceiptOutcomeV1, GitIndexSigningPolicyV1, GitIndexTransactionId,
+    GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1, GitObjectFormatV1, GitOidV1,
+    GitOperationStateV1, GitTopologyAnchorTargetV1, GitTopologyGenerationRefV1,
+    GitTopologySourceRoleV1, IntegrationReceiptAnchorRefV1, ManifestDigest,
+    NativeGitObjectAnchorRefV1, NativeGitObjectKindV1, ObservationScopeV1, PayloadAccessState,
+    PreflightPreviewAnchorRefV1, PrivacyDomainBoundLocatorDigest, PrivacyDomainId, ProjectId,
+    ProjectionGenerationId, ProviderId, PullRequestSnapshotAnchorRefV1, RefId,
+    RefSnapshotAnchorRefV1, RefSnapshotKindV1, RepositoryCaptureAnchorRefV1,
     RepositoryDirtyStateV1, RepositoryEvidenceV1, RepositoryId, RepositoryIndexSnapshotV1,
     RepositoryIndexStateV1, RepositoryProvenanceV1, RepositoryRemoteIdentityV1,
     RepositoryStateSnapshotV1, RepositoryWorkingTreeSnapshotV1, RepositoryWorkingTreeStateV1,
     ResolutionAuthorizationV1, RetentionClass, RetrievalAnchorRecordV2,
     RetrievalAnchorRecordV2Parts, RetrievalAnchorTargetV2, ScopeResolutionId, ShardId, UtcMicros,
-    VectorWatermark, WorktreeCaptureAnchorRefV1, WorktreeId, canonical_sha256,
-    derive_git_topology_anchor_id,
+    VectorWatermark, WorktreeCaptureAnchorRefV1, WorktreeId, derive_git_topology_anchor_id,
 };
 
 fn id<T>(value: &str) -> T
@@ -366,170 +364,5 @@ fn pr11_preview_apply_and_integration_receipts_remain_exact_and_ordered() {
             preview_id: receipt.preview_id,
             commit_id: receipt.created_commit,
         }
-    );
-}
-
-#[test]
-fn github_stack_targets_bind_exact_capability_generation_and_linear_snapshot_content() {
-    let capability = GitHubStackCapabilitySnapshotV1::new(
-        id("provider.github"),
-        id("project.fixture"),
-        id("repository.fixture"),
-        id("worktree.fixture"),
-        GitHubStackCapabilityStateV1::Enabled,
-        id("projection.github-stack-capability.1"),
-        id("anchor.github-stack-capability.1"),
-    )
-    .unwrap();
-    assert_eq!(
-        capability.generation(),
-        GitTopologyGenerationRefV1::GitHubStackCapability {
-            generation_id: id("projection.github-stack-capability.1"),
-            source_anchor_id: id("anchor.github-stack-capability.1"),
-            content_digest: capability.content_digest.clone(),
-        }
-    );
-
-    let ingress = |pull_request: &str,
-                   base_ref: &str,
-                   head_ref: &str,
-                   base_commit: &str,
-                   head_commit: &str,
-                   source_anchor: &str| {
-        let scope = FeedbackScopeV1 {
-            project_id: id("project.fixture"),
-            repository_id: id("repository.fixture"),
-            worktree_id: id("worktree.fixture"),
-            branch_ref: head_ref.to_owned(),
-            head_commit_id: id(head_commit),
-        };
-        let result = GitHubReviewIngressResultV1 {
-            provider: id("provider.github"),
-            scope,
-            pull_request_id: GitHubPullRequestIdV1::new(pull_request).unwrap(),
-            provider_base_commit_id: id(base_commit),
-            provider_head_commit_id: id(head_commit),
-            merge_base_commit_id: id(base_commit),
-            operation: GitHubReviewReadOperationV1::RestGetPullRequest,
-            outcome: GitHubReviewIngressProviderOutcomeV1::Complete,
-            coverage: GitHubReviewCoverageV1::Complete,
-            items: vec![],
-            fetched_at: UtcMicros(1),
-        };
-        let pull_request =
-            PullRequestSnapshotAnchorRefV1::from_ingress(&result, id(source_anchor)).unwrap();
-        (pull_request, id::<RefId>(base_ref), id::<RefId>(head_ref))
-    };
-    let (lower, lower_base_ref, lower_head_ref) = ingress(
-        "pr.41",
-        "refs/heads/main",
-        "refs/heads/lower",
-        "commit.main",
-        "commit.lower",
-        "anchor.pr.41",
-    );
-    let (upper, upper_base_ref, upper_head_ref) = ingress(
-        "pr.42",
-        "refs/heads/lower",
-        "refs/heads/upper",
-        "commit.lower",
-        "commit.upper",
-        "anchor.pr.42",
-    );
-    let layer =
-        |provider_position, pull_request, base_ref_id, head_ref_id| GitHubStackLayerSnapshotV1 {
-            provider_position,
-            pull_request,
-            base_ref_id,
-            head_ref_id,
-            protection_digest: digest('a'),
-            ci_digest: digest('b'),
-            merge_queue_digest: digest('c'),
-        };
-    let snapshot = GitHubStackSnapshotV1::new(
-        capability.clone(),
-        id::<PrivacyDomainBoundLocatorDigest>(digest('d').as_str()),
-        id("projection.github-stack.1"),
-        id("refs/heads/main"),
-        id("commit.main"),
-        vec![
-            layer(0, lower, lower_base_ref, lower_head_ref),
-            layer(1, upper, upper_base_ref, upper_head_ref),
-        ],
-        id("anchor.github-stack.1"),
-    )
-    .unwrap();
-    let target = GitTopologyAnchorTargetV1::GitHubStackSnapshot(snapshot.clone());
-    let encoded = serde_json::to_value(&target).unwrap();
-    assert_eq!(encoded["kind"], "git_hub_stack_snapshot");
-    assert_eq!(
-        serde_json::from_value::<GitTopologyAnchorTargetV1>(encoded).unwrap(),
-        target
-    );
-    assert_eq!(
-        target.generation(),
-        GitTopologyGenerationRefV1::GitHubStackSnapshot {
-            generation_id: id("projection.github-stack.1"),
-            source_anchor_id: id("anchor.github-stack.1"),
-            content_digest: snapshot.content_digest.clone(),
-            final_target_commit_id: id("commit.main"),
-        }
-    );
-
-    let owner = ObservationScopeV1::Project {
-        project_id: id("project.fixture"),
-    };
-    let anchored = derive_git_topology_anchor_id(&owner, &target).unwrap();
-    let mut changed = snapshot.clone();
-    changed.generation_id = id("projection.github-stack.2");
-    changed.content_digest = canonical_sha256(&(
-        "tracedecay.github-stack.snapshot.v1",
-        &changed.capability,
-        &changed.provider_stack_id_digest,
-        &changed.generation_id,
-        &changed.final_target_ref_id,
-        &changed.final_target_commit_id,
-        &changed.layers,
-        &changed.source_anchor_id,
-    ))
-    .unwrap();
-    changed.validate().unwrap();
-    assert_ne!(
-        anchored,
-        derive_git_topology_anchor_id(
-            &owner,
-            &GitTopologyAnchorTargetV1::GitHubStackSnapshot(changed),
-        )
-        .unwrap()
-    );
-
-    let mut tampered = snapshot;
-    tampered.layers[1].pull_request.head_commit_id = id("commit.tampered");
-    assert!(tampered.validate().is_err());
-}
-
-#[test]
-fn github_stack_snapshot_rejects_non_enabled_capability_and_broken_topology() {
-    let disabled = GitHubStackCapabilitySnapshotV1::new(
-        id("provider.github"),
-        id("project.fixture"),
-        id("repository.fixture"),
-        id("worktree.fixture"),
-        GitHubStackCapabilityStateV1::PrivatePreviewDisabled,
-        id("projection.github-stack-capability.1"),
-        id("anchor.github-stack-capability.1"),
-    )
-    .unwrap();
-    assert!(
-        GitHubStackSnapshotV1::new(
-            disabled,
-            id::<PrivacyDomainBoundLocatorDigest>(digest('d').as_str()),
-            id("projection.github-stack.1"),
-            id("refs/heads/main"),
-            id("commit.main"),
-            vec![],
-            id("anchor.github-stack.1"),
-        )
-        .is_err()
     );
 }

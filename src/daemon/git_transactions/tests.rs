@@ -806,11 +806,11 @@ fn safe_native_failure_receives_terminal_abort_and_replays_without_native_work()
     assert_eq!(replay.receipt, first.receipt);
     assert_eq!(harness.apply_calls.load(Ordering::SeqCst), 1);
     assert_eq!(harness.recovery_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(harness.policy_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(harness.policy_calls.load(Ordering::SeqCst), 1);
 }
 
 #[test]
-fn terminal_replay_requires_current_authorization_but_conflicting_effect_input_rejects() {
+fn terminal_replay_bypasses_revalidated_policy_but_conflicting_effect_input_rejects() {
     let harness = test_port(
         [NativeMode::Completed(GitIndexReceiptOutcomeV1::Committed)],
         [],
@@ -821,15 +821,15 @@ fn terminal_replay_requires_current_authorization_but_conflicting_effect_input_r
         .apply(&harness.request)
         .expect("complete transaction");
     harness.allow.store(false, Ordering::SeqCst);
-    assert_eq!(
-        harness.port.apply(&harness.request),
-        Err(GitIndexTransactionPortError::PolicyDenied)
-    );
+    let replay = harness
+        .port
+        .apply(&harness.request)
+        .expect("replay ignores later policy denial");
+    assert_eq!(replay.receipt, first.receipt);
     assert_eq!(harness.apply_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(harness.policy_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(harness.policy_calls.load(Ordering::SeqCst), 1);
     assert_eq!(harness.discard_calls.load(Ordering::SeqCst), 1);
 
-    harness.allow.store(true, Ordering::SeqCst);
     let mut revalidated = harness.request.clone();
     revalidated.proof.configuration_digest = digest('e');
     let replay = harness
@@ -845,31 +845,21 @@ fn terminal_replay_requires_current_authorization_but_conflicting_effect_input_r
         Err(GitIndexTransactionPortError::IdempotencyConflict)
     );
     assert_eq!(harness.apply_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(harness.policy_calls.load(Ordering::SeqCst), 4);
 }
 
 #[test]
-fn rejected_admitted_apply_does_not_consume_the_idempotency_key() {
+fn rejected_admitted_apply_discards_ephemeral_preview_material() {
     let harness = test_port([], []);
     harness.allow.store(false, Ordering::SeqCst);
 
-    assert_eq!(
-        harness.port.apply(&harness.request),
-        Err(GitIndexTransactionPortError::PolicyDenied)
+    let result = harness.port.apply(&harness.request);
+
+    assert!(
+        result.is_ok(),
+        "a pre-native denial receives a no-change receipt"
     );
     assert_eq!(harness.apply_calls.load(Ordering::SeqCst), 0);
     assert_eq!(harness.discard_calls.load(Ordering::SeqCst), 1);
-
-    harness.allow.store(true, Ordering::SeqCst);
-    let admitted = harness
-        .port
-        .apply(&harness.request)
-        .expect("the denied attempt left the idempotency key unused");
-    assert_eq!(
-        admitted.receipt.outcome,
-        GitIndexReceiptOutcomeV1::AbortedNoChange
-    );
-    assert_eq!(harness.apply_calls.load(Ordering::SeqCst), 1);
 }
 
 #[test]
@@ -880,9 +870,14 @@ fn deadline_elapsed_during_policy_recheck_never_reaches_native_git() {
         .lock()
         .expect("policy evaluated-at") = Some(harness.request.context.deadline().expires_at);
 
+    let result = harness
+        .port
+        .apply(&harness.request)
+        .expect("elapsed deadline is a durable no-change result");
+
     assert_eq!(
-        harness.port.apply(&harness.request),
-        Err(GitIndexTransactionPortError::PolicyDenied)
+        result.receipt.outcome,
+        GitIndexReceiptOutcomeV1::AbortedNoChange
     );
     assert_eq!(harness.apply_calls.load(Ordering::SeqCst), 0);
     assert_eq!(harness.discard_calls.load(Ordering::SeqCst), 1);
@@ -945,7 +940,7 @@ fn cancellation_after_native_entry_does_not_rewrite_the_terminal_outcome() {
 }
 
 #[test]
-fn authorized_terminal_replay_bypasses_preview_expiry_without_native_execution() {
+fn terminal_replay_bypasses_preview_expiry_before_policy_or_native_execution() {
     let directory = tempfile::tempdir().expect("store directory");
     let store = test_store(&directory);
     let preview = preview_with_expiry(UtcMicros(14));
@@ -954,6 +949,7 @@ fn authorized_terminal_replay_bypasses_preview_expiry_without_native_execution()
     let native = FakeNative::new([], []);
     let apply_calls = Arc::clone(&native.apply_calls);
     let policy = TestPolicy::allowing();
+    policy.allow.store(false, Ordering::SeqCst);
     let policy_calls = Arc::clone(&policy.calls);
     let port =
         DaemonGitIndexTransactionPort::new(store, native, GitEffectClassifierV1::default(), policy);
@@ -964,7 +960,7 @@ fn authorized_terminal_replay_bypasses_preview_expiry_without_native_execution()
         GitIndexReceiptOutcomeV1::AbortedNoChange
     );
     assert_eq!(apply_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(policy_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(policy_calls.load(Ordering::SeqCst), 0);
 }
 
 #[test]

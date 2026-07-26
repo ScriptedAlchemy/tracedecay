@@ -10,13 +10,6 @@ use tracedecay_domain::feedback::{
 use tracedecay_domain::{CommitId, ProjectId, RepositoryId, UtcMicros, WorktreeId};
 use tracedecay_tool_catalog::BindingSurface;
 
-const PR13_TRANSPORT_AND_LSP: [BindingSurface; 4] = [
-    BindingSurface::Cli,
-    BindingSurface::Mcp,
-    BindingSurface::Http,
-    BindingSurface::Lsp,
-];
-
 fn scope() -> FeedbackScopeV1 {
     FeedbackScopeV1 {
         project_id: ProjectId::new("project.pr13.runtime").unwrap(),
@@ -147,8 +140,8 @@ fn feedback_catalog_binds_pr13_advisory_handlers_to_supported_surfaces() {
         .filter(|binding| binding.capability_id() == advisory.capability_id())
         .map(|binding| binding.surface())
         .collect::<Vec<_>>();
-    assert_eq!(surfaces.len(), PR13_TRANSPORT_AND_LSP.len());
-    for surface in PR13_TRANSPORT_AND_LSP {
+    assert_eq!(surfaces.len(), PR13_ADVISORY_TRANSPORT.len());
+    for surface in PR13_ADVISORY_TRANSPORT {
         assert!(surfaces.contains(&surface));
     }
 }

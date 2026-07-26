@@ -29,6 +29,9 @@ pub struct ObservabilityQueryV1 {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ObservabilityPageV1 {
     pub events: Vec<ObservabilityEnvelopeV1>,
+    /// Registered authority cursor corresponding to each event at the same
+    /// index. Consumers must not derive storage identity from event payloads.
+    pub event_cursors: Vec<String>,
     pub watermark: String,
     pub coverage: CoverageStateV1,
     pub next_watermark: Option<String>,

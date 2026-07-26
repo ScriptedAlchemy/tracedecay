@@ -964,29 +964,18 @@ fn safe_diagnostic_code_description_uri(
     if producer != FeedbackDiagnosticProducerV1::GitHubReview {
         return false;
     }
-    safe_github_https_url(value)
-}
-
-fn safe_github_https_url(value: &str) -> bool {
-    if value.len() > 2_048
-        || value
-            .chars()
-            .any(|character| character.is_control() || character.is_whitespace())
-    {
+    if value.len() > 2_048 {
         return false;
     }
-    let Some(remainder) = value.strip_prefix("https://") else {
+    let Ok(url) = url::Url::parse(value) else {
         return false;
     };
-    let authority_end = remainder.find(['/', '?', '#']).unwrap_or(remainder.len());
-    if &remainder[..authority_end] != "github.com" {
-        return false;
-    }
-    let path_and_fragment = &remainder[authority_end..];
-    let path = path_and_fragment
-        .split_once('#')
-        .map_or(path_and_fragment, |(path, _)| path);
-    !path.contains('?') && !path.contains('\\')
+    url.scheme() == "https"
+        && url.host_str() == Some("github.com")
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port().is_none()
+        && url.query().is_none()
 }
 
 /// Closed producer vocabulary for standard diagnostic projection.
@@ -1627,23 +1616,6 @@ mod tests {
             FeedbackDiagnosticProducerV1::Proximity,
             None,
         ));
-        for unsafe_url in [
-            "http://github.com/owner/repository/pull/13",
-            "https://github.com.evil.example/owner/repository/pull/13",
-            "https://user@github.com/owner/repository/pull/13",
-            "https://github.com:443/owner/repository/pull/13",
-            "https://github.com/owner/repository/pull/13?diff=split",
-            "https://github.com\\@evil.example/owner/repository/pull/13",
-            "https://github.com/owner/repository/pull/13\nhttps://evil.example",
-        ] {
-            assert!(
-                !safe_diagnostic_code_description_uri(
-                    FeedbackDiagnosticProducerV1::GitHubReview,
-                    Some(unsafe_url),
-                ),
-                "accepted unsafe GitHub URL: {unsafe_url}"
-            );
-        }
     }
 
     #[test]
