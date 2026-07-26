@@ -24,6 +24,7 @@ const COST_DESCRIPTOR: &str = "provider-costs.v1";
 /// Production adapter for the canonical application record/query boundary.
 /// The complete versioned envelope is retained as JSON while indexed columns
 /// provide bounded scope/kind/time queries.
+#[derive(Clone, Copy)]
 pub(crate) struct RegisteredObservabilityPortV1<'a> {
     db: &'a RegisteredGlobalDb,
 }

@@ -1396,10 +1396,16 @@ async fn execute_project_retained_application_tool(
             dispatch_lcm_tool(tool_name, request.arguments, active_lcm_context).await
         }
         RetainedSurfaceOperation::SessionStart => {
-            health::handle_session_start(cg, request.arguments, scope_prefix).await
+            let db = active_project_session_db.ok_or_else(|| TraceDecayError::Config {
+                message: "health-delta observation authority is unavailable".to_owned(),
+            })?;
+            health::handle_session_start(cg, db.as_ref(), request.arguments, scope_prefix).await
         }
         RetainedSurfaceOperation::SessionEnd => {
-            health::handle_session_end(cg, request.arguments, scope_prefix).await
+            let db = active_project_session_db.ok_or_else(|| TraceDecayError::Config {
+                message: "health-delta observation authority is unavailable".to_owned(),
+            })?;
+            health::handle_session_end(cg, db.as_ref(), request.arguments, scope_prefix).await
         }
     }
 }

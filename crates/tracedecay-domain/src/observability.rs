@@ -1,5 +1,7 @@
 //! Canonical, payload-safe Plan 26 observability contracts.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -82,6 +84,8 @@ pub enum ObservabilityPayloadV1 {
     AnalyticsConsent(AnalyticsConsentChangedV1),
     OperationResource(OperationResourceObservedV1),
     TelemetryDrop(TelemetryDropObservedV1),
+    HealthSnapshot(HealthSnapshotObservedV1),
+    Activity(ActivityObservedV1),
 }
 
 impl ObservabilityPayloadV1 {
@@ -99,6 +103,8 @@ impl ObservabilityPayloadV1 {
             Self::AnalyticsConsent(_) => "analytics.consent.changed.v1",
             Self::OperationResource(_) => "operation.resource.observed.v1",
             Self::TelemetryDrop(_) => "telemetry.drop.observed.v1",
+            Self::HealthSnapshot(_) => "health.snapshot.observed.v1",
+            Self::Activity(_) => "activity.observed.v1",
         }
     }
 }
@@ -273,6 +279,32 @@ pub struct TelemetryDropObservedV1 {
     pub last_missing_sequence: u64,
     pub proved_drop_lower_bound: u64,
     pub clean_shutdown_observed: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct HealthDimensionObservedV1 {
+    pub score_ppm: u64,
+    pub denominator: Option<u64>,
+}
+
+/// Payload-safe health observation retained by the registered observability
+/// authority. Project paths and source content never enter this record.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct HealthSnapshotObservedV1 {
+    pub scope_digest: String,
+    pub quality_signal: u32,
+    pub files_analyzed: u64,
+    pub function_denominator: u64,
+    pub dimensions: BTreeMap<String, HealthDimensionObservedV1>,
+}
+
+/// One bounded project activity observation. `family` and `detail` are
+/// producer-controlled finite labels; paths, source, and messages are excluded.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ActivityObservedV1 {
+    pub family: String,
+    pub units: u64,
+    pub detail: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
