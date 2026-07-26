@@ -1039,26 +1039,7 @@ fn project_api_router() -> Router<DashboardState> {
         )
         .route("/api/plugins/graph/subgraph", get(graph_api::subgraph))
         .route("/api/plugins/graph/path", get(graph_api::path))
-        .route(
-            "/api/plugins/graph/call-chain",
-            get(graph_structure_api::call_chain),
-        )
-        .route(
-            "/api/plugins/graph/strata",
-            get(graph_structure_api::strata),
-        )
-        .route(
-            "/api/plugins/graph/node/{node_id}/facts",
-            get(graph_structure_api::node_facts),
-        )
-        .route(
-            "/api/plugins/graph/node/{node_id}/tests",
-            get(graph_structure_api::node_tests),
-        )
-        .route(
-            "/api/plugins/graph/node/{node_id}/sessions",
-            get(graph_structure_api::node_sessions),
-        )
+        .merge(graph_structure_api::contracted_routes())
         // Durable analytics API (hint lifecycle scaffolds + session usage rollups)
         .route(
             "/api/plugins/analytics/overview",
