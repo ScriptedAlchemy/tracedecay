@@ -903,8 +903,11 @@ fn response(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
     use tracedecay_application::{Deadline, OperationBudgetUsage, OperationTermination};
     use tracedecay_domain::UtcMicros;
+    use tower::ServiceExt;
 
     use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
@@ -1015,6 +1018,112 @@ mod tests {
                     .unwrap(),
             },
         )
+    }
+
+    #[tokio::test]
+    async fn preview_route_forwards_its_typed_target_to_the_bound_dispatcher() {
+        let _pin = crate::config::PinnedUserDataDir::new();
+        let (_project, mut state) = state_for_test().await;
+        let dispatched = Arc::new(std::sync::Mutex::new(Vec::new()));
+        state.doctor_remediation_dispatcher = Some(DoctorRemediationDispatcherV1::new(
+            Arc::new(|_| Box::pin(async { vec![DashboardLegalActionKindV1::RequestDryRun] })),
+            Arc::new({
+                let dispatched = Arc::clone(&dispatched);
+                move |command| {
+                    dispatched
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(command);
+                    Box::pin(async { Err(DoctorRemediationDispatchErrorV1::OwnerUnavailable) })
+                }
+            }),
+        ));
+        let operation = configuration_operation();
+        let target = configuration_preview_target();
+        let body = serde_json::to_vec(&serde_json::json!({
+            "operation": operation,
+            "target": target,
+        }))
+        .unwrap();
+
+        let response = crate::dashboard::project_api_router()
+            .with_state(state)
+            .oneshot(
+                Request::post("/api/doctor/remediations/preview")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let dispatched = dispatched
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(dispatched.len(), 1, "the route must reach its bound owner");
+        assert_eq!(
+            dispatched[0],
+            DoctorRemediationDispatchCommandV1::Preview { operation, target }
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_route_forwards_its_typed_target_to_the_bound_dispatcher() {
+        let _pin = crate::config::PinnedUserDataDir::new();
+        let (_project, mut state) = state_for_test().await;
+        let dispatched = Arc::new(std::sync::Mutex::new(Vec::new()));
+        state.doctor_remediation_dispatcher = Some(DoctorRemediationDispatcherV1::new(
+            Arc::new(|_| Box::pin(async { vec![DashboardLegalActionKindV1::RequestApply] })),
+            Arc::new({
+                let dispatched = Arc::clone(&dispatched);
+                move |command| {
+                    dispatched
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(command);
+                    Box::pin(async { Err(DoctorRemediationDispatchErrorV1::OwnerUnavailable) })
+                }
+            }),
+        ));
+        let operation = configuration_operation();
+        let target = configuration_apply_target();
+        let preview_id = PreviewId::new("preview.route-target").unwrap();
+        let idempotency_key = IdempotencyKey::new("idempotency.route-target").unwrap();
+        let body = serde_json::to_vec(&serde_json::json!({
+            "operation": operation,
+            "target": target,
+            "preview_id": preview_id,
+            "idempotency_key": idempotency_key,
+            "confirmed": true,
+        }))
+        .unwrap();
+
+        let response = crate::dashboard::project_api_router()
+            .with_state(state)
+            .oneshot(
+                Request::post("/api/doctor/remediations/apply")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let dispatched = dispatched
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(dispatched.len(), 1, "the route must reach its bound owner");
+        assert_eq!(
+            dispatched[0],
+            DoctorRemediationDispatchCommandV1::Apply {
+                operation,
+                target,
+                preview_id: Some(preview_id),
+                idempotency_key,
+            }
+        );
     }
 
     #[test]
