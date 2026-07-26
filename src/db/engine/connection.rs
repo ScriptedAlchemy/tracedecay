@@ -17,6 +17,7 @@ pub(super) trait Runtime: Send + Sync {
     fn query(&self, statement: MigrationSqlStatement) -> Result<MigrationSqlRows>;
     fn checkpoint_wal_truncate(&self) -> Result<MigrationSqlRows>;
     fn execute_batch(&self, sql: String) -> Result<MigrationSqlBatchResult>;
+    fn repair_incremental_auto_vacuum(&self) -> Result<()>;
     fn validate(&self, statement: MigrationSqlStatement) -> Result<()>;
     fn last_insert_rowid(&self) -> i64;
     fn begin_read_snapshot(&self) -> Result<MigrationSqlReadSnapshot>;
@@ -40,6 +41,10 @@ impl Runtime for MigrationSqlHandle {
 
     fn execute_batch(&self, sql: String) -> Result<MigrationSqlBatchResult> {
         self.execute_batch(sql).map_err(Into::into)
+    }
+
+    fn repair_incremental_auto_vacuum(&self) -> Result<()> {
+        self.repair_incremental_auto_vacuum().map_err(Into::into)
     }
 
     fn validate(&self, statement: MigrationSqlStatement) -> Result<()> {
@@ -162,6 +167,13 @@ impl Connection {
             .await
             .map_err(join_error)?
             .map(|_| ())
+    }
+
+    pub(crate) async fn repair_incremental_auto_vacuum(&self) -> Result<()> {
+        let runtime = Arc::clone(&self.runtime);
+        tokio::task::spawn_blocking(move || runtime.repair_incremental_auto_vacuum())
+            .await
+            .map_err(join_error)?
     }
 
     pub(crate) async fn prepare(&self, sql: &str) -> Result<Statement<'_>> {
