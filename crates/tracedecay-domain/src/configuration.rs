@@ -8,6 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
@@ -129,7 +130,7 @@ pub const LEGACY_CONFIG_JSON_SETTING_KEYS_V1: &[&str] = &[
 
 macro_rules! configuration_string_id {
     ($($name:ident => $field:literal),+ $(,)?) => {$(
-        #[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        #[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash)]
         #[serde(transparent)]
         pub struct $name(String);
 
@@ -1002,7 +1003,9 @@ impl SettingDefinitionV1 {
 
 /// Authoritative scope of a source binding. A mutable path, label, or host
 /// profile cannot be represented as authority.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "id")]
 pub enum AuthorityRef {
     Project(ProjectId),
@@ -1018,7 +1021,9 @@ impl AuthorityRef {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum SourceKindV1 {
     Claude,
@@ -1031,7 +1036,7 @@ pub enum SourceKindV1 {
 
 /// A source-to-authority binding. It stores only the source kind, a redacted
 /// locator digest, and the pre-resolved authority reference.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ScopeSourceBinding {
     pub binding_id: SourceBindingId,
@@ -1072,7 +1077,9 @@ impl ScopeSourceBinding {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ScopeControlOperationV1 {
     Read,
@@ -1089,7 +1096,7 @@ pub enum ScopeControlOperationV1 {
 /// Typed rule selectors. Unset dimensions match all values at that dimension,
 /// but at least one dimension must be constrained. Free-form paths, labels,
 /// collection names, and branch names are deliberately absent.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ScopeAccessSubjectV1 {
     pub actor: Option<ActorId>,
@@ -1120,7 +1127,9 @@ impl ScopeAccessSubjectV1 {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum RuleEffect {
     Allow,
@@ -1129,7 +1138,7 @@ pub enum RuleEffect {
 
 /// Restrictive policy input. An allow never grants capabilities absent from
 /// the independently authorized capability set passed to the resolver.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ScopeAccessRule {
     pub rule_id: AccessRuleId,
@@ -1259,7 +1268,7 @@ pub fn resolve_restrictive_capabilities(
 
 /// The protected configuration operation set. Ordinary scalar mutations are
 /// intentionally absent; they activate directly after validation.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "value")]
 pub enum ProtectedChange {
     BindSource(ScopeSourceBinding),

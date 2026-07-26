@@ -41,18 +41,20 @@ describe("contracts generator", () => {
     const { files } = generateContracts(bundles);
     const generated = files[OUTPUT_FILES.GENERATED_FILE]!;
     const order = [
-      "interface Authorization",
-      "interface Coverage",
-      "type DashboardDomainState",
-      "interface DashboardEnvelope",
-      "interface FindingPayload",
-      "interface Freshness",
-      "type LegalActionKind",
-      "interface LegalActionRef",
-      "interface Scope",
-      "interface Time",
-      "interface Version",
-      "interface Watermark",
+      "const ActorIdSchema",
+      "const CancellationObservationSchema",
+      "const DashboardAuthorizationV1Schema",
+      "const DashboardCoverageV1Schema",
+      "const DashboardDomainStateV1Schema",
+      "interface DashboardEnvelopeV1",
+      "const DashboardFreshnessV1Schema",
+      "const DashboardLegalActionKindV1Schema",
+      "const DashboardLegalActionRefV1Schema",
+      "const DashboardScopeV1Schema",
+      "const DashboardTimeV1Schema",
+      "const DashboardVersionV1Schema",
+      "const DashboardWatermarkV1Schema",
+      "const DeadlineSchema",
     ].map((needle) => generated.indexOf(needle));
     expect(order.every((i) => i >= 0)).toBe(true);
     const sorted = [...order].sort((a, b) => a - b);
@@ -70,14 +72,17 @@ describe("contracts generator", () => {
     const { files } = generateContracts(bundles);
     const generated = files[OUTPUT_FILES.GENERATED_FILE]!;
     // Flat string enum, not a `{ kind }` tagged union.
-    expect(generated).toContain("export type DashboardDomainState =");
-    expect(generated).toContain("export const DashboardDomainStateSchema");
+    expect(generated).toContain("export type DashboardDomainStateV1 =");
+    expect(generated).toContain("export const DashboardDomainStateV1Schema");
     // `unsupported` (server-emitted backend-gap state) and `unsupported_schema`
     // (undecodable schema) are BOTH present and distinct.
     expect(generated).toMatch(/"unsupported"/);
     expect(generated).toMatch(/"unsupported_schema"/);
-    const schema = bundles.find((b) => (b.$defs ?? {}).DashboardDomainState)!;
-    const values = schema.$defs?.DashboardDomainState?.enum ?? [];
+    const schema = bundles[0]?.$defs?.DashboardDomainStateV1;
+    const values = (schema?.oneOf ?? []).flatMap((part) => [
+      ...(part.enum ?? []),
+      ...(part.const === undefined ? [] : [part.const]),
+    ]);
     expect(values).toHaveLength(17);
     expect(values).toContain("unsupported");
     expect(values).toContain("unsupported_schema");
@@ -86,23 +91,20 @@ describe("contracts generator", () => {
   it("emits a decoder factory for the generic DashboardEnvelope<T>", () => {
     const { files } = generateContracts(bundles);
     const generated = files[OUTPUT_FILES.GENERATED_FILE]!;
-    expect(generated).toContain("export interface DashboardEnvelope<TPayload>");
-    expect(generated).toContain("export function DashboardEnvelopeSchema<TPayload>(");
+    expect(generated).toContain("export interface DashboardEnvelopeV1<TPayload>");
+    expect(generated).toContain("export function DashboardEnvelopeV1Schema<TPayload>(");
     expect(generated).toContain("payload: payloadSchema,");
     // The exact scope + authorization shapes from read_model.rs are carried.
     expect(generated).toContain("store_root");
     expect(generated).toContain("outcome");
   });
 
-  it("emits a preview index that re-exports the generated preview module", () => {
+  it("emits the live index that re-exports the generated contract", () => {
     const { files } = generateContracts(bundles);
-    expect(files[OUTPUT_FILES.INDEX_FILE]!).toContain('export * from "./contracts.generated";');
+    expect(files[OUTPUT_FILES.INDEX_FILE]!).toContain('export * from "./generated";');
   });
 
-  it("maps a minimal synthetic tagged-union bundle to the unsupported fallback shape", () => {
-    // The generator still supports internally-tagged `oneOf` unions with a
-    // synthesized `unsupported_schema` branch (exercised here even though the
-    // read_model.rs domain state is now a flat string enum).
+  it("maps a synthetic tagged union without inventing variants", () => {
     const bundle: JsonSchema = {
       schemaRevision: "test.1",
       $defs: {
@@ -124,8 +126,8 @@ describe("contracts generator", () => {
     };
     const { files } = generateContracts([bundle]);
     const generated = files[OUTPUT_FILES.GENERATED_FILE]!;
-    expect(generated).toContain("export type Signal =");
-    expect(generated).toContain('kind: "unsupported_schema";');
-    expect(generated).toContain('SCHEMA_REVISION = "test.1"');
+    expect(generated).toContain('z.discriminatedUnion("kind"');
+    expect(generated).not.toContain('kind: "unsupported_schema";');
+    expect(generated).toContain('WIRE_SCHEMA_REVISION = "test.1"');
   });
 });

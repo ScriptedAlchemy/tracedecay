@@ -103,20 +103,54 @@ describe('TraceView', () => {
   it('states the depth and what it is leaving out, in counted figures', async () => {
     mockFetch();
     const { container } = renderTrace();
-    await screen.findByText(/hops · \d+ symbols drawn/);
-    const caption = container.querySelector('figure > figcaption')!.textContent ?? '';
-    // Depth and the uncounted remainder, both as numbers.
-    expect(caption).toMatch(/2 hops · \d+ symbols drawn/);
-    expect(caption).toMatch(/\d+ further symbols? not drawn/);
-    expect(caption).toMatch(/symbols beyond hop 2 were never named to this view/);
-    // Every encoding the field uses is named, including the ones that are felt
-    // rather than seen.
-    expect(caption).toMatch(/row = hop distance from the focus/);
-    expect(caption).toMatch(/not elevation and not importance/);
-    expect(caption).toMatch(/channel width = call sites/);
-    expect(caption).toMatch(/sill width = the symbol’s degree/);
-    expect(caption).toMatch(/hover latency, settle time and bloom depth = degree/);
-    expect(caption).toMatch(/deformation under drag = call sites/);
+    await screen.findByText(/symbols on the field/i);
+
+    // The readout strip above the field. These were a prose caption once; the
+    // claims did not change when they became layout, so the assertions did not
+    // weaken either — each figure now has to appear under its own label.
+    const readout = container.querySelector('[data-testid="trace-readout"]')!.textContent ?? '';
+    expect(readout).toContain('Depth limit');
+    expect(readout).toContain('2 ↑ / 2 ↓');
+    expect(readout).toContain('Beyond the limit');
+    expect(readout).toMatch(/\d+named, not drawn/);
+    expect(readout).toContain('past hop 2, nothing was named to this view');
+    expect(readout).toMatch(/Callers ≤ 2 hops/);
+    expect(readout).toMatch(/\d+ call sites/);
+
+    // Every encoding the field uses is named in the key below it, including
+    // the ones that are felt rather than seen.
+    const key = container.querySelector('figure > figcaption')!.textContent ?? '';
+    expect(key).toContain('hop distance from the focus — not elevation, not importance');
+    expect(key).toContain('call sites on that one edge');
+    expect(key).toContain("the symbol's degree, straight off the payload");
+    expect(key).toContain('symbol kind, off the same arc as the connectivity spine');
+    expect(key).toContain('edges this frame does not draw');
+    expect(key).toContain('hover latency, bloom depth and settle time');
+    expect(key).toContain('dragging deforms the neighbourhood');
+  });
+
+  it('derives the key from the same rows the field draws, so the two cannot drift', async () => {
+    mockFetch();
+    const { container } = renderTrace();
+    await screen.findByText(/symbols on the field/i);
+
+    // A legend is where a second source of truth grows: the picture comes from
+    // the payload and the legend gets typed by hand. Here the up/down split is
+    // printed twice, once on the strip and once in the key, and both are
+    // counted from `model.nodes` — so if they ever disagree, one of them has
+    // stopped reading the data.
+    const reading = (label: string): string => {
+      const cells = [...container.querySelectorAll('[data-testid="trace-readout"] dl > div')];
+      const cell = cells.find((c) => (c.querySelector('dt')?.textContent ?? '').startsWith(label));
+      return cell?.querySelector('dd .td-value')?.textContent ?? '';
+    };
+    const callers = reading('Callers');
+    const callees = reading('Callees');
+    expect(callers).toMatch(/^\d+$/);
+    expect(callees).toMatch(/^\d+$/);
+
+    const key = container.querySelector('figure > figcaption')!.textContent ?? '';
+    expect(key).toContain(`${callers} ↑ / ${callees} ↓`);
   });
 
   it('says the wire carried no contains edges rather than inventing membranes', async () => {
@@ -139,9 +173,15 @@ describe('TraceView', () => {
     const { container } = renderTrace();
     await screen.findByText(/symbols on the field/i);
     await waitFor(() => {
-      const caption = container.querySelector('figcaption')!.textContent ?? '';
-      expect(caption).toMatch(/the payload carried no contains edges/);
-      expect(caption).toMatch(/says nothing about whether these symbols have types/);
+      // The strip prints the absence as a reading in its own right — the word
+      // `absent`, not a blank and not a zero — and refuses the inference that
+      // would make it comfortable.
+      const readout = container.querySelector('[data-testid="trace-readout"]')!.textContent ?? '';
+      expect(readout).toMatch(/Types enteredabsent/);
+      expect(readout).toContain('the payload carried no contains edges');
+      expect(readout).toContain('not a claim about whether these symbols have types');
+      const key = container.querySelector('figure > figcaption')!.textContent ?? '';
+      expect(key).toContain('no enclosure is drawn on this frame');
     });
   });
 

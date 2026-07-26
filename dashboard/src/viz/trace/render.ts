@@ -36,6 +36,48 @@ export function sillWidth(degree: number | null): number {
   return 16 + Math.max(0, degree ?? 0) * 0.62;
 }
 
+/**
+ * How wide a channel is at its head, as a fraction of its width at the mouth.
+ *
+ * The approved sheet tapers 0.78 → 1.0 and calls it hydrological; at that
+ * depth, over a run this short, the two edges are within a pixel of parallel
+ * and the ribbon reads as a machined bar with a hue on it. Direction is
+ * supposed to be said twice — by hue and by taper — and only one of them was
+ * audible. 0.55 makes the second one legible without letting the head fall
+ * under the 2.2 px floor `channelWidth` sets for a single call site.
+ */
+export const CHANNEL_HEAD_FRACTION = 0.55;
+
+/**
+ * Width along a channel as a fraction of its width at the mouth, at `t` = 0
+ * (head) through 1 (mouth).
+ *
+ * A straight line between two widths is a wedge, and a wedge is a machined
+ * shape. Water is not: a watercourse gains width as the square root of the
+ * flow it has accumulated, which is the standing exponent in hydraulic
+ * geometry, and it is also — not coincidentally — the same square root
+ * `channelWidth` above already puts between a call-site count and a width, and
+ * that `markDiameter` puts between a symbol count and a mark on the Code
+ * spine. So the taper is not a new law invented for this curve. It is the law
+ * the field already uses for magnitude, applied along the run instead of
+ * across it: accumulate flow linearly down the channel, then take its root.
+ *
+ * The consequence is a slightly convex edge — fuller at mid-run than a line
+ * would be, easing as it nears the mouth — which is the profile of a
+ * watercourse rather than a funnel.
+ *
+ * Both endpoints stay exact: `t = 0` returns `headFraction` and `t = 1`
+ * returns 1, so the measured width at the mouth is drawn at the mouth and the
+ * shaping happens strictly between two measurements, never at one.
+ */
+export function taperAt(t: number, headFraction: number = CHANNEL_HEAD_FRACTION): number {
+  const clamped = t < 0 ? 0 : t > 1 ? 1 : t;
+  // Flow at the head, back-derived so that √(flow) lands exactly on the head
+  // fraction — the inverse of the width law, so the two cannot disagree.
+  const headFlow = headFraction * headFraction;
+  return Math.sqrt(headFlow + (1 - headFlow) * clamped);
+}
+
 /** Below this stretch a channel is at rest and gets no tension rail. */
 export const TENSION_FLOOR_PX = 5;
 /**
@@ -128,7 +170,14 @@ function traceCurve(ctx: CanvasRenderingContext2D, points: readonly Point[], mov
   }
 }
 
-/** A tapered ribbon: width is a measured quantity at each end. */
+/**
+ * A tapered ribbon: width is a measured quantity at each end, and the run
+ * between them follows the hydrological profile in `taperAt`.
+ *
+ * The wider end is the mouth whichever end it is on, so an upstream tributary
+ * converging on the focus and a downstream distributary fanning away from it
+ * are the same curve read in opposite directions rather than two shapes.
+ */
 function ribbon(
   ctx: CanvasRenderingContext2D,
   points: readonly Point[],
@@ -145,7 +194,16 @@ function ribbon(
     const len = Math.hypot(dx, dy) || 1;
     return [-dy / len, dx / len] as const;
   });
-  const half = (i: number): number => (widthStart + (widthEnd - widthStart) * (i / (n - 1))) / 2;
+  const mouthWidth = Math.max(widthStart, widthEnd);
+  const headWidth = Math.min(widthStart, widthEnd);
+  // Which end the mouth is on. `t` always runs head → mouth so the profile is
+  // written once and read forwards or backwards.
+  const mouthAtEnd = widthEnd >= widthStart;
+  const headFraction = mouthWidth === 0 ? 1 : headWidth / mouthWidth;
+  const half = (i: number): number => {
+    const along = i / (n - 1);
+    return (mouthWidth * taperAt(mouthAtEnd ? along : 1 - along, headFraction)) / 2;
+  };
   const upper: Point[] = points.map((pt, i) => [
     pt[0] + normals[i]![0] * half(i),
     pt[1] + normals[i]![1] * half(i),
@@ -459,8 +517,15 @@ export function createRenderer(
       const points = channelPath(ax, ay, bx, by, channel.dir, focusX);
       const upstream = channel.dir === 'up' || channel.dir === 'in';
       const hue = upstream ? pal.upstream : pal.downstream;
-      const widthStart = channel.dir === 'up' ? w * 0.78 : w;
-      const widthEnd = channel.dir === 'up' ? w : w * 0.78;
+      // A channel that leaves the graph keeps FULL width to its dashed mouth.
+      // The design note's absence beat is "full width, then it stops" — the
+      // flow it carried was measured, and narrowing it toward the end would
+      // draw the lost traffic as dwindling when what is unknown is only where
+      // it went.
+      const lost = channel.dir === 'lost';
+      const head = lost ? w : w * CHANNEL_HEAD_FRACTION;
+      const widthStart = channel.dir === 'up' ? head : w;
+      const widthEnd = channel.dir === 'up' ? w : head;
       const stretch = Math.abs(stretches[e] ?? 0);
       // Tension is the SAME measurement as width (call sites); under load the
       // channel reports how far it has been pulled off its rest length, so the

@@ -88,7 +88,7 @@ fn doctor_runtime_unavailable(
     reason: &'static str,
 ) -> serde_json::Value {
     json!({
-        "tracedecay_version": env!("CARGO_PKG_VERSION"),
+        "tracedecay_version": crate::version::build_version(),
         "database": {
             "project_root": project_path,
             "quick_check_ok": null,
@@ -328,7 +328,7 @@ async fn doctor_runtime_value_inner(
         .unwrap_or_default();
     let page_size = page_counts.map(|(page_size, _, _)| page_size);
     let mut value = json!({
-        "tracedecay_version": env!("CARGO_PKG_VERSION"),
+        "tracedecay_version": crate::version::build_version(),
         "process": {
             "pid": std::process::id(),
         },
