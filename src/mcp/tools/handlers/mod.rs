@@ -1296,6 +1296,7 @@ async fn dispatch_health_tools(
                 args.clone(),
                 options.global_db,
                 active_project_session_db.map(Arc::as_ref),
+                options.doctor_report_reader.as_ref(),
             )
             .await
         }
@@ -2204,7 +2205,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             compatibility_tools.len(),
-            100 + usize::from(super::super::definitions::ast_grep_available())
+            102 + usize::from(super::super::definitions::ast_grep_available())
         );
         for tool in compatibility_tools {
             assert!(

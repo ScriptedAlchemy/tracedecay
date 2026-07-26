@@ -787,42 +787,56 @@ pub async fn collect_unregistered_store_findings(
 /// Evaluate every owner-configured soft budget against the daemon's retained
 /// project, registry, and session stores. A configured key that is not mounted
 /// is emitted as typed unknown telemetry rather than silently omitted.
-pub async fn collect_over_budget_store_findings(
+struct CollectedStoreTelemetryV1 {
+    findings: DoctorStorageFamilyReadV1,
+    table_growth_evidence: Vec<tracedecay_application::storage::TableGrowthDoctorEvidenceV1>,
+}
+
+async fn collect_over_budget_store_findings(
     context: &RequestContext,
     telemetry_ports: &[(
         tracedecay_application::storage::StoreKeyV1,
         tracedecay_rusqlite_runtime::SqliteStoreSizeTelemetryPort,
     )],
     retention: &crate::config::RetentionConfig,
-) -> DoctorStorageFamilyReadV1 {
+) -> CollectedStoreTelemetryV1 {
     use std::collections::BTreeMap;
     use tracedecay_application::storage::{
-        StorageTelemetryReadV1, StoreSizeTelemetryPort, over_budget_finding,
+        StorageTelemetryReadV1, StoreSizeTelemetryPort, TableGrowthTelemetryReadV1,
+        over_budget_finding, table_growth_doctor_evidence,
     };
 
     let mut reads = BTreeMap::new();
+    let mut table_growth_evidence = Vec::new();
     for (store, port) in telemetry_ports {
         let read = port.store_size(context, store).await;
-        for sample in port.table_growth(context, store).await {
-            tracing::info!(
-                target: "tracedecay::storage_telemetry",
-                store = sample.store.as_str(),
-                table = sample.table.as_str(),
-                previous_bytes = sample.previous_bytes.0,
-                current_bytes = sample.current_bytes.0,
-                growth_bytes = sample.growth_bytes().0,
-                previous_observed_at = sample.previous_observed_at.0,
-                current_observed_at = sample.current_observed_at.0,
-                "observed SQLite table payload growth"
-            );
+        let table_growth = port.table_growth(context, store).await;
+        if let TableGrowthTelemetryReadV1::Observed { samples, .. } = &table_growth {
+            for sample in samples {
+                tracing::info!(
+                    target: "tracedecay::storage_telemetry",
+                    store = sample.store.as_str(),
+                    table = sample.table.as_str(),
+                    previous_bytes = sample.previous_bytes.0,
+                    current_bytes = sample.current_bytes.0,
+                    growth_bytes = sample.growth_bytes().0,
+                    previous_observed_at = sample.previous_observed_at.0,
+                    current_observed_at = sample.current_observed_at.0,
+                    "observed SQLite table payload growth"
+                );
+            }
         }
+        table_growth_evidence.extend(table_growth_doctor_evidence(&table_growth));
         reads.entry(store.as_str().to_owned()).or_insert(read);
     }
 
     let mut findings = Vec::new();
     for configured_store in retention.store_soft_budgets_bytes.keys() {
         let Ok(Some(budget)) = retention.store_soft_budget(configured_store) else {
-            return DoctorStorageFamilyReadV1::Unknown;
+            return CollectedStoreTelemetryV1 {
+                findings: DoctorStorageFamilyReadV1::Unknown,
+                table_growth_evidence,
+            };
         };
         let read =
             reads
@@ -833,11 +847,17 @@ pub async fn collect_over_budget_store_findings(
         let Ok(finding) =
             over_budget_finding(&budget, &read, DoctorCoverageCompletenessV1::Complete)
         else {
-            return DoctorStorageFamilyReadV1::Unknown;
+            return CollectedStoreTelemetryV1 {
+                findings: DoctorStorageFamilyReadV1::Unknown,
+                table_growth_evidence,
+            };
         };
         findings.push(finding);
     }
-    storage_family_read(findings)
+    CollectedStoreTelemetryV1 {
+        findings: storage_family_read(findings),
+        table_growth_evidence,
+    }
 }
 
 /// Observe current-project branch stores against live local refs.
@@ -1300,7 +1320,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                 now,
             )
             .await;
-            let over_budget =
+            let store_telemetry =
                 collect_over_budget_store_findings(&context, &telemetry_ports, &retention).await;
             let stale_branches = collect_stale_branch_store_findings(&project_root, &layout);
             let incident_debris =
@@ -1320,7 +1340,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
             let storage = [
                 orphan,
                 unregistered,
-                over_budget,
+                store_telemetry.findings,
                 stale_branches,
                 incident_debris,
                 profile_retention_backlog,
@@ -1375,7 +1395,8 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                 storage,
             };
             let report = compose_doctor_report(&context, &inputs).await?;
-            Ok(crate::dashboard::AdmittedDoctorReportV1::new(report))
+            Ok(crate::dashboard::AdmittedDoctorReportV1::new(report)
+                .with_table_growth_evidence(store_telemetry.table_growth_evidence))
         })
     })
 }

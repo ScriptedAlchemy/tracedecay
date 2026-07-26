@@ -8,7 +8,8 @@ use tracedecay_application::{
     RequestAdmission, RequestContext, ResolvedScope,
     storage::{
         StorageByteSizeV1, StorageTelemetryFuture, StorageTelemetryReadV1, StoreKeyV1,
-        StoreSizeSampleV1, StoreSizeTelemetryPort, TableGrowthSampleV1, TableNameV1,
+        StoreSizeSampleV1, StoreSizeTelemetryPort, TableGrowthSampleV1, TableGrowthTelemetryReadV1,
+        TableNameV1,
     },
 };
 use tracedecay_domain::UtcMicros;
@@ -30,7 +31,7 @@ pub struct SqliteStoreSizeTelemetryPort {
     store: StoreKeyV1,
     scope: ResolvedScope,
     reader_wait: Duration,
-    table_watermarks: Arc<Mutex<BTreeMap<TableNameV1, TableWatermark>>>,
+    table_watermarks: Arc<Mutex<Option<BTreeMap<TableNameV1, TableWatermark>>>>,
 }
 
 impl SqliteStoreSizeTelemetryPort {
@@ -46,7 +47,7 @@ impl SqliteStoreSizeTelemetryPort {
             store,
             scope,
             reader_wait,
-            table_watermarks: Arc::new(Mutex::new(BTreeMap::new())),
+            table_watermarks: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -98,44 +99,60 @@ impl StoreSizeTelemetryPort for SqliteStoreSizeTelemetryPort {
         &'a self,
         context: &'a RequestContext,
         store: &'a StoreKeyV1,
-    ) -> StorageTelemetryFuture<'a, Vec<TableGrowthSampleV1>> {
+    ) -> StorageTelemetryFuture<'a, TableGrowthTelemetryReadV1> {
         Box::pin(async move {
             if !self.admits(context, store) {
-                return Vec::new();
+                return TableGrowthTelemetryReadV1::Denied {
+                    store: store.clone(),
+                };
             }
             let Ok(current) = self
                 .handle
                 .table_size_telemetry(self.reader_wait, || interruption(context))
             else {
-                return Vec::new();
+                return TableGrowthTelemetryReadV1::Unknown {
+                    store: store.clone(),
+                };
             };
             let observed_at = now_micros();
-            let current: BTreeMap<_, _> = current
-                .into_iter()
-                .filter_map(|sample| {
-                    TableNameV1::new(sample.table_name)
-                        .ok()
-                        .map(|table| (table, StorageByteSizeV1(sample.bytes)))
-                })
-                .collect();
+            let mut current_tables = BTreeMap::new();
+            for sample in current {
+                let Ok(table) = TableNameV1::new(sample.table_name) else {
+                    return TableGrowthTelemetryReadV1::Unknown {
+                        store: store.clone(),
+                    };
+                };
+                current_tables.insert(table, StorageByteSizeV1(sample.bytes));
+            }
             let mut watermarks = self
                 .table_watermarks
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if watermarks.is_empty() {
-                *watermarks = current
-                    .into_iter()
-                    .map(|(table, bytes)| (table, TableWatermark { bytes, observed_at }))
-                    .collect();
-                return Vec::new();
-            }
+            let Some(previous_watermarks) = watermarks.as_ref() else {
+                let tables_observed = u64::try_from(current_tables.len()).unwrap_or(u64::MAX);
+                *watermarks = Some(
+                    current_tables
+                        .into_iter()
+                        .map(|(table, bytes)| (table, TableWatermark { bytes, observed_at }))
+                        .collect(),
+                );
+                return TableGrowthTelemetryReadV1::BaselineEstablished {
+                    store: store.clone(),
+                    observed_at,
+                    tables_observed,
+                };
+            };
 
-            let tables: BTreeSet<_> = watermarks.keys().chain(current.keys()).cloned().collect();
+            let tables: BTreeSet<_> = previous_watermarks
+                .keys()
+                .chain(current_tables.keys())
+                .cloned()
+                .collect();
             let growth = tables
                 .into_iter()
                 .filter_map(|table| {
-                    let previous = watermarks.get(&table)?;
-                    let current_bytes = current
+                    let previous = previous_watermarks.get(&table)?;
+                    let current_bytes = current_tables
                         .get(&table)
                         .copied()
                         .unwrap_or(StorageByteSizeV1::ZERO);
@@ -150,11 +167,16 @@ impl StoreSizeTelemetryPort for SqliteStoreSizeTelemetryPort {
                     sample.validate().ok().map(|_| sample)
                 })
                 .collect();
-            *watermarks = current
-                .into_iter()
-                .map(|(table, bytes)| (table, TableWatermark { bytes, observed_at }))
-                .collect();
-            growth
+            *watermarks = Some(
+                current_tables
+                    .into_iter()
+                    .map(|(table, bytes)| (table, TableWatermark { bytes, observed_at }))
+                    .collect(),
+            );
+            TableGrowthTelemetryReadV1::Observed {
+                store: store.clone(),
+                samples: growth,
+            }
         })
     }
 }
