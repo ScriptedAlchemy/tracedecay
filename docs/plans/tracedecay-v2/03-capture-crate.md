@@ -4,12 +4,17 @@
 
 PR5 sanitized Claude capture and PR6 expansion through the shared
 session-observation admission/sanitizer/store path are complete for Claude,
-Codex, Cursor, Hermes, Kiro, Cline, Roo Code, and Kilo. That completion
-statement does not include the external-source convergence section below:
-`SourceCaptureApplicationV1` is retained contract code with no production
-caller, acquisition adapter, or backing migration. It is a future seam,
-neither delivered PR5/PR6 behavior nor PR8–PR14 work to implement or delete
-(status corrected 2026-07-26).
+Codex, Cursor, Hermes, Kiro, Cline, Roo Code, and Kilo. External-source
+convergence is split (status corrected again 2026-07-26): the host-observation
+specialization is live. The MCP Hook V2 entry reaches host admission, which
+passes every persisted observation receipt through
+`RuntimeExternalSourceStore::capture_host_observation`; that path authorizes
+and invokes `SourceCaptureApplicationV1`, then commits through the retained
+external-source reducer and SQLite adapter. The earlier claim that
+`SourceCaptureApplicationV1` had no production caller, adapter, or migration
+was wrong for this specialization. Broader acquisition, scheduled refresh, and
+canonical-refetch adapters remain dormant and are not certified as delivered
+PR5/PR6 behavior or PR8–PR14 work to rebuild.
 
 This boundary records the deterministic privacy and admission behavior retained
 by current product ingestion; it is not a crate-first framework project. Shared

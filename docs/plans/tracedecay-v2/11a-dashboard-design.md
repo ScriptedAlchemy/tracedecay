@@ -12,6 +12,12 @@ design history. In particular, never delete or rename existing design tokens
 to simplify a theme, and never fork a workspace-local copy of a shared
 primitive; use additive token evolution and the shared UI primitive owner.
 
+**Visual-gate correction (2026-07-26).** `dashboard/stories/audit.ts` now makes
+render failures, uncaught page errors, axe violations, and any pixelmatch
+baseline drift set a failing process exit status. The baseline-diff language
+below is implemented gate behavior; the former run that measured pixel drift
+and still exited successfully is superseded.
+
 ## User authority versus design decisions
 
 The user supplied the quality bar — beautiful and functional, world class,

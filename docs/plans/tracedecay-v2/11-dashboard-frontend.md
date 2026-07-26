@@ -56,6 +56,15 @@ artifact, not evidence that the dashboard or embed path is absent. The
 specific unverified and unreachable sub-surfaces named in this plan remain
 open; the twelve workspace routes and embed mechanism must not be replanned.
 
+**PR14 surface alignment (2026-07-26).** The five Plan 11b graph-structure
+routes now have generated contracts and Code-workspace consumers. Explorer's
+duplicate query-run/source schemas were removed in favor of the generated
+barrel; only the two routes that still lack Rust wire types retain explicitly
+labelled hand-written schemas. Automations consumes the generated scheduler
+status type and wires typed pause/resume mutations that replace cached state
+only with the server's post-control reading. These are delivered surface
+corrections, not acceptance of the still-unverified checkpoint above.
+
 ## Rejected and superseded frontend approaches
 
 - **Module Federation is rejected.** The dashboard is one ordinary Rsbuild
@@ -287,10 +296,12 @@ Legacy-surface dispositions (from the 2026-07-23 inventory):
   the unreferenced `automation_jobs_api` family, and the three uncalled
   analytics endpoints. Each deletion lands only when its workspace slice
   ships or the surface is confirmed dead.
-- Known backend gaps feeding PR14 are separate completion work, not
-  frontend scope: the Doctor finding family has no HTTP surface binding yet,
-  and the plan-38 storage telemetry/findings and code-index
-  freshness/coverage read models have no exposure; the PR14 journeys
+- Known backend gaps feeding PR14 are separate completion work, not frontend
+  scope: the Doctor finding family has no HTTP surface binding yet. The
+  dashboard exposes per-store size/free ratio and whole-store history, but
+  Plan 38's per-table `dbstat` samples remain daemon tracing rather than a
+  Doctor finding, dashboard payload, or CLI Doctor result. Code-index
+  freshness/coverage read models also have no exposure; the PR14 journeys
   require those bindings to exist server-side.
 
 ## Frontend ownership and compatibility

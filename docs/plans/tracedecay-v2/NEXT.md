@@ -152,20 +152,26 @@ unverified.
    registry orphan detection/collection, §3 session retention, §4
    one-content-copy machinery, §5 debris contract, §6 compaction policy types,
    and §7 telemetry read models with typed Doctor storage findings. Status
-   correction 2026-07-26: §3/§4 are only partially engaged by default.
-   Projected-message dedupe runs after 30 days once lineage is durable, but raw
-   LCM offload/drop default to `None`, older session/raw windows remain
-   unlimited, observation-evidence retention defaults disabled, and
-   `source_cursor_advances` cannot be reclaimed through the immutable
-   update/delete triggers. Daemon-owned GC/retention/compaction cadence runs
-   under writer authority, retries failed passes without advancing the
-   cadence, and reauthorizes each retention transaction; exact registry
-   relink/retirement, durable incident-debris quarantine/collection, and real
-   stale-branch and retention-backlog Doctor sources are wired. Existing
-   reserved-health reads supply store-level evidence used by current findings,
-   but `StoreSizeTelemetryPort` has no implementation and no product-supported
-   per-table byte measurement exists. Owner-configured soft budgets remain
-   inert when absent.)*
+   correction 2026-07-26: §3/§4 are engaged by default. Projection-durable raw
+   LCM payloads offload after 30 days and drop after 180 days, projected copies
+   dedupe after 30 days, legacy session/raw pruning defaults to 180 days once
+   durable summary lineage exists, and superseded/deleted observation payloads
+   default to a 30-day release window. Superseded `source_cursor_advances` are
+   reclaimed by the daemon-authorized retention transaction while preserving
+   the current-frontier receipt and restoring the immutable delete trigger
+   before commit. Daemon-owned GC/retention/compaction cadence runs under
+   writer authority, retries failed passes without advancing the cadence, and
+   reauthorizes each retention transaction; exact registry relink/retirement,
+   durable incident-debris quarantine/collection, and real stale-branch and
+   retention-backlog Doctor sources are wired.
+   `SqliteStoreSizeTelemetryPort` at
+   `crates/tracedecay-rusqlite-runtime/src/telemetry/store_size.rs` implements
+   `StoreSizeTelemetryPort` through the retained read-only SQLite health
+   reader. The dashboard exposes per-store size/free ratio and whole-store
+   history; the daemon Doctor kernel emits `dbstat` table-growth samples only
+   as tracing. They are not Doctor findings, dashboard payloads, or CLI Doctor
+   output, so this path does not validate historical ad hoc per-table byte
+   estimates. Owner-configured soft budgets remain inert when absent.)*
 7. Run focused crate tests, all-feature workspace checks, release builds,
    package/install checks, and normal Linux/macOS/Windows CI. *(Ongoing. The
    SQLite session-store parity harness proves 27 session-store tables across
