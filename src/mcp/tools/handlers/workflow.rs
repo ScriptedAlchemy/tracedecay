@@ -1221,8 +1221,11 @@ mod tests {
         cg.index_all().await.unwrap();
         {
             let database = cg.dashboard_database_guard();
-            crate::diagnostics_store::DiagnosticsStore::new(database.conn())
-                .ensure_schema()
+            database
+                .execute_write_batch(
+                    "seed managed test-run diagnostics schema",
+                    crate::diagnostics_store::SCHEMA,
+                )
                 .await
                 .unwrap();
         }

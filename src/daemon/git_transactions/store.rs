@@ -7,8 +7,8 @@
 //! rusqlite-runtime calls and every synchronous port call receives exactly one reply.
 //! It has no filesystem path and cannot create a JSON side-file authority.
 
-use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tracedecay_domain::{
@@ -73,7 +73,8 @@ enum StoreCommand {
 /// actor exit. It intentionally has no `Clone` implementation: one daemon
 /// service owns one bounded queue and actor for its transaction authority.
 pub(crate) struct DaemonGitIndexTransactionStore {
-    commands: SyncSender<StoreCommand>,
+    commands: Mutex<Option<SyncSender<StoreCommand>>>,
+    worker: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 enum ActorDatabase {
@@ -139,7 +140,7 @@ impl DaemonGitIndexTransactionStore {
     fn open_actor(database: ActorDatabase) -> GitIndexTransactionStoreResult<Self> {
         let (commands, receiver) = sync_channel(GIT_INDEX_TRANSACTION_STORE_ACTOR_CAPACITY);
         let (ready, started) = sync_channel::<GitIndexTransactionStoreResult<()>>(1);
-        std::thread::Builder::new()
+        let worker = std::thread::Builder::new()
             .name("tracedecay-git-index-store".to_owned())
             .spawn(move || {
                 let runtime = tokio::runtime::Builder::new_current_thread()
@@ -157,14 +158,27 @@ impl DaemonGitIndexTransactionStore {
                 run_store_actor(&runtime, &database, &receiver);
             })
             .map_err(|_| GitIndexTransactionStoreError::Unavailable)?;
-        started
+        let startup = started
             .recv_timeout(GIT_INDEX_TRANSACTION_STORE_ACTOR_TIMEOUT)
-            .map_err(|_| GitIndexTransactionStoreError::Unavailable)??;
-        Ok(Self { commands })
+            .map_err(|_| GitIndexTransactionStoreError::Unavailable)
+            .and_then(|result| result);
+        if let Err(error) = startup {
+            drop(commands);
+            let _ = worker.join();
+            return Err(error);
+        }
+        Ok(Self {
+            commands: Mutex::new(Some(commands)),
+            worker: Mutex::new(Some(worker)),
+        })
     }
 
     fn submit(&self, command: StoreCommand) -> GitIndexTransactionStoreResult<()> {
         self.commands
+            .lock()
+            .map_err(|_| GitIndexTransactionStoreError::Unavailable)?
+            .as_ref()
+            .ok_or(GitIndexTransactionStoreError::Unavailable)?
             .try_send(command)
             .map_err(|error| match error {
                 TrySendError::Full(_) | TrySendError::Disconnected(_) => {
@@ -192,6 +206,19 @@ impl DaemonGitIndexTransactionStore {
         let (reply, receiver) = sync_channel(1);
         self.submit(StoreCommand::ReadCode(operation, reply))?;
         Self::await_reply(&receiver)
+    }
+}
+
+impl Drop for DaemonGitIndexTransactionStore {
+    fn drop(&mut self) {
+        if let Ok(commands) = self.commands.get_mut() {
+            commands.take();
+        }
+        if let Ok(worker) = self.worker.get_mut()
+            && let Some(worker) = worker.take()
+        {
+            let _ = worker.join();
+        }
     }
 }
 

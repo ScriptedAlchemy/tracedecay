@@ -3412,6 +3412,13 @@ impl DaemonEngine {
 }
 
 async fn shutdown_project_servers(store_administration: &StoreAdministration) {
+    let servers = detach_project_servers(store_administration).await;
+    shutdown_detached_project_servers(servers).await;
+}
+
+async fn detach_project_servers(
+    store_administration: &StoreAdministration,
+) -> Vec<Arc<crate::mcp::McpServer>> {
     let servers: Vec<Arc<crate::mcp::McpServer>> = store_administration
         .with_writer(|| async {
             let mut registry = store_administration.project_servers().lock().await;
@@ -3429,6 +3436,10 @@ async fn shutdown_project_servers(store_administration: &StoreAdministration) {
             servers
         })
         .await;
+    servers
+}
+
+async fn shutdown_detached_project_servers(servers: Vec<Arc<crate::mcp::McpServer>>) {
     for server in servers {
         let graph = server.cg().await;
         hook_v2_replay::shutdown_hook_v2_replay_consumer(&graph.hook_store_layout().data_root)
@@ -3781,6 +3792,7 @@ async fn begin_portable_project_open(
                         &handshake,
                         ProductionProjectCompositionRuntime::Portable {
                             semantic_auto_download: true,
+                            startup_catch_up: true,
                         },
                         #[cfg(test)]
                         project_open_attempts.as_ref(),
@@ -3914,8 +3926,10 @@ async fn shutdown_portable_project_open_tasks(
 enum ProductionProjectCompositionRuntime {
     #[cfg(unix)]
     Unix(DaemonEngine),
+    #[cfg(any(not(unix), test, feature = "test-transport"))]
     Portable {
         semantic_auto_download: bool,
+        startup_catch_up: bool,
     },
 }
 
@@ -3936,6 +3950,7 @@ impl ProductionProjectCompositionRuntime {
                 route_registered,
                 handshake,
             ),
+            #[cfg(any(not(unix), test, feature = "test-transport"))]
             Self::Portable { .. } => portable_database_owner_reconciler(
                 store_administration.clone(),
                 current_key,
@@ -3958,6 +3973,7 @@ impl ProductionProjectCompositionRuntime {
                 current_project_path,
                 handshake,
             )),
+            #[cfg(any(not(unix), test, feature = "test-transport"))]
             Self::Portable { .. } => None,
         }
     }
@@ -3966,9 +3982,22 @@ impl ProductionProjectCompositionRuntime {
         match self {
             #[cfg(unix)]
             Self::Unix(_) => true,
+            #[cfg(any(not(unix), test, feature = "test-transport"))]
             Self::Portable {
                 semantic_auto_download,
+                ..
             } => *semantic_auto_download,
+        }
+    }
+
+    const fn startup_catch_up(&self) -> bool {
+        match self {
+            #[cfg(unix)]
+            Self::Unix(_) => true,
+            #[cfg(any(not(unix), test, feature = "test-transport"))]
+            Self::Portable {
+                startup_catch_up, ..
+            } => *startup_catch_up,
         }
     }
 }
@@ -4065,6 +4094,7 @@ async fn production_project_server(
         semantic_auto_download_enabled,
     );
     let semantic_database = cg.dashboard_database_guard();
+    let project_database_is_read_only = cg.db().filesystem_is_read_only();
     let semantic_lifecycle = crate::semantic_code::shared_lifecycle_owner();
     let existing = {
         let mut servers = store_administration.project_servers().lock().await;
@@ -4285,6 +4315,7 @@ async fn production_project_server(
     .with_code_index_search_executor(code_index_search_executor)
     .with_code_index_search_authority(code_search_authority)
     .with_application_invocation_executor(application_invocation_executor)
+    .with_startup_catch_up_enabled(runtime.startup_catch_up())
     .with_retained_project_graph_resolver(retained_project_graph_resolver(
         store_administration.clone(),
     ));
@@ -4334,20 +4365,22 @@ async fn production_project_server(
         {
             Ok(()) | Err(DaemonSemanticRuntimeRegistrationError::AlreadyRegistered) => {}
         }
-        project_open_owners::register_project_open_production_owners(
-            invocation,
-            store_administration.git_index_transaction_services(),
-            canonical_project_path,
-            &project_id,
-            resolved.as_ref(),
-        )
-        .await?;
-        mount_http_application_router(
-            http_application_registry,
-            &project_id,
-            canonical_project_path,
-        )
-        .await?;
+        if !project_database_is_read_only {
+            project_open_owners::register_project_open_production_owners(
+                invocation,
+                store_administration.git_index_transaction_services(),
+                canonical_project_path,
+                &project_id,
+                resolved.as_ref(),
+            )
+            .await?;
+            mount_http_application_router(
+                http_application_registry,
+                &project_id,
+                canonical_project_path,
+            )
+            .await?;
+        }
     }
     Ok(ProductionProjectComposition {
         key,
@@ -4360,12 +4393,12 @@ async fn production_project_server(
 
 #[cfg(any(test, feature = "test-transport"))]
 struct ProductionProjectHarnessResourcesV1 {
-    _lifecycle_lease: crate::lifecycle_lease::LifecycleLease,
-    _database_scope: crate::db::DaemonDatabaseScope,
     store_administration: StoreAdministration,
     invocation: DaemonInvocationState,
     project_open_gates: Arc<tokio::sync::Mutex<ProjectOpenGates>>,
     servers: HashMap<PathBuf, Arc<crate::mcp::McpServer>>,
+    _database_scope: crate::db::DaemonDatabaseScope,
+    _lifecycle_lease: crate::lifecycle_lease::LifecycleLease,
 }
 
 /// In-process owner for the same production project composition used by the
@@ -4519,6 +4552,7 @@ impl ProductionProjectCompositionHarnessV1 {
                         &handshake,
                         ProductionProjectCompositionRuntime::Portable {
                             semantic_auto_download: false,
+                            startup_catch_up: false,
                         },
                         #[cfg(test)]
                         None,
@@ -4545,12 +4579,12 @@ impl ProductionProjectCompositionHarnessV1 {
             profile_root,
             semantic_auto_download_enabled,
             resources: Some(ProductionProjectHarnessResourcesV1 {
-                _lifecycle_lease: lifecycle_lease,
-                _database_scope: database_scope,
                 store_administration,
                 invocation,
                 project_open_gates,
                 servers,
+                _database_scope: database_scope,
+                _lifecycle_lease: lifecycle_lease,
             }),
         })
     }
@@ -4575,6 +4609,28 @@ impl ProductionProjectCompositionHarnessV1 {
 
     pub fn semantic_auto_download_enabled(&self) -> bool {
         self.semantic_auto_download_enabled
+    }
+
+    pub async fn read_profile_analytics_events(
+        &self,
+        query: &crate::global_db::AnalyticsEventQuery,
+    ) -> Result<Vec<crate::global_db::AnalyticsEventRecord>> {
+        let resources = self
+            .resources
+            .as_ref()
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "production-composition harness is shut down".to_owned(),
+            })?;
+        resources
+            .store_administration
+            .registered_profile_database()
+            .await?
+            .query_analytics_events(query)
+            .await
+            .map_err(|message| TraceDecayError::Database {
+                message,
+                operation: "read retained production profile analytics".to_owned(),
+            })
     }
 
     pub fn server(&self, project_root: impl AsRef<Path>) -> Result<Arc<crate::mcp::McpServer>> {
@@ -4675,13 +4731,24 @@ impl Drop for ProductionProjectCompositionHarnessV1 {
 
 #[cfg(any(test, feature = "test-transport"))]
 async fn shutdown_production_project_harness(mut resources: ProductionProjectHarnessResourcesV1) {
-    resources.invocation.shutdown().await;
+    let servers = detach_project_servers(&resources.store_administration).await;
+    resources.servers.clear();
+    for server in &servers {
+        server.ledger_writes_settled().await;
+        server.shutdown_background_tasks().await;
+    }
+    resources
+        .store_administration
+        .session_temporal_refresh_schedulers()
+        .shutdown()
+        .await;
     resources
         .store_administration
         .shutdown_host_admission_replay()
         .await;
-    shutdown_project_servers(&resources.store_administration).await;
-    resources.servers.clear();
+    resources.invocation.shutdown().await;
+    shutdown_detached_project_servers(servers).await;
+    drop(resources);
 }
 
 async fn write_routed_initialize_response(
@@ -5434,6 +5501,14 @@ async fn open_project_for_handshake(
                 .await?,
                 true,
             ),
+            Err(err) if is_unregistered_identity_error(&err) => {
+                return Err(TraceDecayError::Config {
+                    message: format!(
+                        "no TraceDecay index found at '{}'; run 'tracedecay init' first",
+                        project_path.display()
+                    ),
+                });
+            }
             Err(err) => return Err(err),
         };
     let project_id =

@@ -176,6 +176,18 @@ impl TraceDecay {
         self.open_options.clone()
     }
 
+    pub(crate) fn retained_profile_root(&self) -> Result<PathBuf> {
+        self.open_options.resolved_profile_root()
+    }
+
+    pub(crate) fn retained_store_runtime_registry(
+        &self,
+    ) -> std::sync::Arc<
+        crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1,
+    > {
+        std::sync::Arc::clone(&self.store_runtime_registry)
+    }
+
     async fn project_memory_mount(&self) -> Result<(tracedecay_domain::ProjectId, Vec<PathBuf>)> {
         let project_id = Self::registered_project_id(&self.store_layout)?;
         let enrollment_roots = Self::registered_enrollment_roots(

@@ -696,6 +696,11 @@ impl Database {
         self.inner.writable
     }
 
+    pub(crate) fn filesystem_is_read_only(&self) -> bool {
+        std::fs::metadata(self.canonical_database_path())
+            .is_ok_and(|metadata| metadata.permissions().readonly())
+    }
+
     /// Clones the originating revocable write capability for actor-time checks.
     pub(crate) fn write_authority(&self) -> Result<DatabaseAuthority> {
         if !self.inner.writable {

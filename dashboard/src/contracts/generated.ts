@@ -956,7 +956,7 @@ The storage family never reports a silent overage: each subclass names one
 observable retention/size condition Doctor surfaces over the Plan 26 size
 observability read models. The set is closed and grows only through a future
 versioned enum, never by widening an existing subclass. */
-export const DoctorStorageFindingKindV1Schema = z.union([z.literal("over_budget_store"), z.literal("orphan_store"), z.literal("stale_branch_dbs"), z.literal("incident_debris_present"), z.literal("retention_backlog")]);
+export const DoctorStorageFindingKindV1Schema = z.union([z.literal("over_budget_store"), z.literal("orphan_store"), z.literal("stale_branch_dbs"), z.literal("incident_debris_present"), z.literal("retention_backlog"), z.literal("table_growth")]);
 export type DoctorStorageFindingKindV1 = z.infer<typeof DoctorStorageFindingKindV1Schema>;
 
 /** The stable effect classification of one application operation.
@@ -2339,6 +2339,17 @@ export const SettingsPayloadV1Schema = z.object({
 });
 export type SettingsPayloadV1 = z.infer<typeof SettingsPayloadV1Schema>;
 
+/** One significant table-growth sample exposed to the dashboard. */
+export const SignificantTableGrowthSampleV1Schema = z.object({
+  current_bytes: z.number().int(),
+  current_observed_at: z.number().int(),
+  growth_bytes: z.number().int(),
+  previous_bytes: z.number().int(),
+  previous_observed_at: z.number().int(),
+  table: z.string(),
+});
+export type SignificantTableGrowthSampleV1 = z.infer<typeof SignificantTableGrowthSampleV1Schema>;
+
 export const SourceKindV1Schema = z.enum(["claude", "codex", "cursor", "git_hub", "hermes", "kiro"]);
 export type SourceKindV1 = z.infer<typeof SourceKindV1Schema>;
 
@@ -2398,6 +2409,8 @@ export const StorageTelemetryPayloadV1Schema = z.object({
   budget_note: z.string(),
   growth_note: z.string(),
   stores: z.array(z.lazy(() => StoreTelemetryEntryV1Schema)),
+  table_growth_coverage: z.lazy(() => DashboardCoverageV1Schema),
+  table_growth_threshold: z.lazy(() => TableGrowthThresholdV1Schema),
 });
 export type StorageTelemetryPayloadV1 = z.infer<typeof StorageTelemetryPayloadV1Schema>;
 
@@ -2543,6 +2556,7 @@ export const StoreTelemetryEntryV1Schema = z.object({
   role: z.string(),
   roles: z.array(z.string()),
   store: z.string(),
+  table_growth: z.lazy(() => TableGrowthDimensionV1Schema),
   total_bytes: z.number().int().nullable(),
 });
 export type StoreTelemetryEntryV1 = z.infer<typeof StoreTelemetryEntryV1Schema>;
@@ -2677,6 +2691,63 @@ export const SyncSettingsV1Schema = z.object({
   auto_track_pr_poll_secs: z.number().int(),
 });
 export type SyncSettingsV1 = z.infer<typeof SyncSettingsV1Schema>;
+
+/** Per-store typed table-growth state. Unavailable reads carry no byte values;
+each state includes source coverage and explicit omissions. */
+export const TableGrowthDimensionV1Schema = z.discriminatedUnion("state", [z.object({
+  coverage: z.lazy(() => DashboardCoverageV1Schema),
+  observed_at: z.number().int(),
+  omission_reasons: z.array(z.string()),
+  state: z.literal("baseline_established"),
+  tables_observed: z.number().int(),
+}), z.object({
+  coverage: z.lazy(() => DashboardCoverageV1Schema),
+  omission_reasons: z.array(z.string()),
+  state: z.literal("denied"),
+}), z.object({
+  coverage: z.lazy(() => DashboardCoverageV1Schema),
+  omission_reasons: z.array(z.string()),
+  omissions: z.array(z.lazy(() => TableGrowthOmissionV1Schema)),
+  significant_samples: z.array(z.lazy(() => SignificantTableGrowthSampleV1Schema)),
+  state: z.literal("observed"),
+}), z.object({
+  coverage: z.lazy(() => DashboardCoverageV1Schema),
+  omission_reasons: z.array(z.string()),
+  state: z.literal("unknown"),
+}), z.object({
+  coverage: z.lazy(() => DashboardCoverageV1Schema),
+  omission_reasons: z.array(z.string()),
+  state: z.literal("unsupported"),
+})]);
+export type TableGrowthDimensionV1 = z.infer<typeof TableGrowthDimensionV1Schema>;
+
+/** One current table omitted from the significant-sample list. Numeric evidence
+remains structured so clients can format units consistently. */
+export const TableGrowthOmissionV1Schema = z.discriminatedUnion("kind", [z.object({
+  current_bytes: z.number().int(),
+  kind: z.literal("baseline_pending"),
+  observed_at: z.number().int(),
+  reason: z.string(),
+  table: z.string(),
+}), z.object({
+  current_bytes: z.number().int(),
+  current_observed_at: z.number().int(),
+  growth_bytes: z.number().int(),
+  kind: z.literal("below_threshold"),
+  previous_bytes: z.number().int(),
+  previous_observed_at: z.number().int(),
+  reason: z.string(),
+  table: z.string(),
+})]);
+export type TableGrowthOmissionV1 = z.infer<typeof TableGrowthOmissionV1Schema>;
+
+/** Informational threshold applied to per-table payload growth samples. */
+export const TableGrowthThresholdV1Schema = z.object({
+  absolute_bytes: z.number().int(),
+  relative_floor_bytes: z.number().int(),
+  relative_percent: z.number().int(),
+});
+export type TableGrowthThresholdV1 = z.infer<typeof TableGrowthThresholdV1Schema>;
 
 export const TelemetrySettingsPatchSchema = z.object({
   timings: z.boolean().nullable(),
@@ -3238,6 +3309,8 @@ export const SettingsAvailabilitySchema = SettingsAvailabilityV1Schema;
 export type SettingsAvailability = SettingsAvailabilityV1;
 export const SettingsPayloadSchema = SettingsPayloadV1Schema;
 export type SettingsPayload = SettingsPayloadV1;
+export const SignificantTableGrowthSampleSchema = SignificantTableGrowthSampleV1Schema;
+export type SignificantTableGrowthSample = SignificantTableGrowthSampleV1;
 export const SourceKindSchema = SourceKindV1Schema;
 export type SourceKind = SourceKindV1;
 export const StorageByteSizeSchema = StorageByteSizeV1Schema;
@@ -3280,6 +3353,12 @@ export const StructureReadSchema = StructureReadV1Schema;
 export type StructureRead = StructureReadV1;
 export const SyncSettingsSchema = SyncSettingsV1Schema;
 export type SyncSettings = SyncSettingsV1;
+export const TableGrowthDimensionSchema = TableGrowthDimensionV1Schema;
+export type TableGrowthDimension = TableGrowthDimensionV1;
+export const TableGrowthOmissionSchema = TableGrowthOmissionV1Schema;
+export type TableGrowthOmission = TableGrowthOmissionV1;
+export const TableGrowthThresholdSchema = TableGrowthThresholdV1Schema;
+export type TableGrowthThreshold = TableGrowthThresholdV1;
 export const TelemetrySettingsSchema = TelemetrySettingsV1Schema;
 export type TelemetrySettings = TelemetrySettingsV1;
 export const TestMapMeasurementSchema = TestMapMeasurementV1Schema;

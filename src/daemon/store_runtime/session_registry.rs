@@ -48,6 +48,24 @@ pub(crate) struct DaemonSessionRuntimeRegistryV1 {
 }
 
 impl DaemonSessionRuntimeRegistryV1 {
+    pub(crate) async fn close_code_graph_paths(
+        &self,
+        database_paths: impl IntoIterator<Item = PathBuf>,
+    ) -> Result<()> {
+        for database_path in database_paths {
+            self.registry
+                .close_path(&database_path)
+                .await
+                .map_err(|error| {
+                    session_registry_error(
+                        "close registered code-shard runtime",
+                        format!("{error:?}"),
+                    )
+                })?;
+        }
+        Ok(())
+    }
+
     pub(crate) async fn open(identity: LocalProfileIdentityAuthorityV1) -> Result<Self> {
         let incarnation = runtime_incarnation(&identity)?;
         let resolver = Arc::new(LocalStoreRuntimeResolverV1::new(
@@ -671,6 +689,7 @@ fn session_registry_error(operation: &'static str, message: String) -> TraceDeca
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::engine::TestConnection;
 
     #[test]
     fn fallback_runtime_generation_always_fits_sqlite_integer() {
@@ -750,29 +769,11 @@ mod tests {
         let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
             .expect("durable profile identity");
         let memory_path = crate::memory::user::user_memory_db_path(identity.profile_root());
-        let authority = DatabaseAuthority::acquire_test(
-            &memory_path,
-            "seed existing profile memory migration fixture",
-        )
-        .expect("profile memory test authority");
-        let (seed, _) = Database::publish_test_runtime(
-            &memory_path,
-            &authority,
-            crate::db::TestDatabaseRuntimeMode::Initialize,
-        )
-        .await
-        .expect("seed profile memory database");
-        seed.writer_connection("downgrade profile memory fixture")
+        let seed = TestConnection::open(&memory_path);
+        crate::db::migrations::migrate_test_connection_to_version(&seed, 22)
             .await
-            .expect("profile memory fixture writer")
-            .execute_batch(
-                "DROP TABLE memory_v2_fact_relations;
-                 PRAGMA user_version = 22;",
-            )
-            .await
-            .expect("downgrade profile memory fixture");
+            .expect("migrate profile memory fixture through production v22");
         drop(seed);
-        drop(authority);
 
         let registry = DaemonSessionRuntimeRegistryV1::open(identity)
             .await

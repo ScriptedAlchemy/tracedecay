@@ -330,6 +330,26 @@ impl Default for StoreAdministration {
 }
 
 impl StoreAdministration {
+    pub(super) async fn for_retained_project_graph(
+        graph: &crate::tracedecay::TraceDecay,
+    ) -> Result<Self> {
+        let profile_root = graph.retained_profile_root()?;
+        let profile_identity = crate::daemon::profile_identity::load_or_create(&profile_root)?;
+        let administration = Self::default().with_profile_identity(profile_identity);
+        let registry = Arc::new(tokio::sync::OnceCell::new());
+        registry
+            .set(graph.retained_store_runtime_registry())
+            .map_err(|_| TraceDecayError::Config {
+                message: "retained project runtime registry was already initialized".to_owned(),
+            })?;
+        administration
+            .session_runtime_registries
+            .lock()
+            .await
+            .insert(authority::canonical_identity_path(&profile_root)?, registry);
+        Ok(administration)
+    }
+
     pub(super) fn with_profile_identity(
         mut self,
         profile_identity: crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1,
@@ -985,6 +1005,11 @@ impl StoreAdministration {
             if database_paths.is_empty() {
                 return prepared.finish_without_database_deletion();
             }
+
+            self.session_runtime_registry()
+                .await?
+                .close_code_graph_paths(database_paths.iter().cloned())
+                .await?;
 
             {
                 let project_servers = self.project_servers.lock().await;
