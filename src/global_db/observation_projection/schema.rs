@@ -282,6 +282,10 @@ pub(in super::super) async fn ensure_observation_projection_schema(
          CREATE INDEX IF NOT EXISTS idx_observation_projection_provenance_global_output
          ON observation_projection_provenance
             (output_provider, output_message_id, projector_version);
+         CREATE INDEX IF NOT EXISTS idx_observations_identity_receipt
+         ON observations (observation_id, receipt_id);
+         CREATE INDEX IF NOT EXISTS idx_projection_dispositions_observation_receipt
+         ON observation_projection_dispositions (observation_id, receipt_id);
          CREATE INDEX IF NOT EXISTS idx_observation_workflow_facts_query
          ON observation_workflow_facts
             (provider, session_id, semantic_kind, status, observation_sequence);

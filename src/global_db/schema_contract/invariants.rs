@@ -21,7 +21,7 @@ use repair::{
 use rows::{
     authority_violation, query_has_rows, validate_mutable_invariant_rows,
     validate_observation_authority_rows, validate_receipt_authority_rows,
-    validate_source_cursor_authority_rows,
+    validate_source_cursor_authority_chunk, validate_source_cursor_authority_rows,
 };
 use triggers::{FOREIGN_KEY_AUDIT_QUERY, replace_trigger, trigger_contracts_intact};
 pub(super) use triggers::{INVARIANTS, Trigger};
@@ -182,7 +182,44 @@ pub(crate) async fn ensure_authority_invariants(
         )
         .await?;
     }
-    validate_source_cursor_authority_rows(conn).await?;
+    let checkpoint = {
+        let mut progress = AuditCheckpoint {
+            receipt_rowid,
+            observation_sequence,
+            bounded_passes_since_exhaustive: if exhaustive {
+                INCOMPLETE_EXHAUSTIVE_PASS
+            } else {
+                checkpoint.bounded_passes_since_exhaustive
+            },
+            ..checkpoint
+        };
+        loop {
+            let (source_cursor_rowid, source_advance_rowid, complete) =
+                validate_source_cursor_authority_chunk(
+                    conn,
+                    progress.source_cursor_rowid,
+                    progress.source_advance_rowid,
+                )
+                .await?;
+            progress.source_cursor_rowid = source_cursor_rowid;
+            progress.source_advance_rowid = source_advance_rowid;
+            write_audit_checkpoint(
+                conn,
+                AuditProgress {
+                    checkpoint: progress,
+                    receipts_audited,
+                    observations_audited,
+                    provenance_audited: 0,
+                    dispositions_audited: 0,
+                    aliases_audited: 0,
+                },
+            )
+            .await?;
+            if complete {
+                break progress;
+            }
+        }
+    };
     repair_committed_source_cursors(conn, checkpoint.observation_sequence).await?;
     validate_observation_cursor_coverage(conn, checkpoint.observation_sequence).await?;
 
