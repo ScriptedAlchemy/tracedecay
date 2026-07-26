@@ -7,7 +7,10 @@ use tracedecay_store::{
 use crate::db::engine::{Connection, Executor, QueryExecutor, TransactionBehavior, params};
 
 use super::apply::{apply_effect, derive_projection_with_alias, seed_predecessor_message_lineage};
-use super::rebuild::{read_observation_frontier, rebuild_projection_with_engine};
+use super::rebuild::{
+    prepare_projection_rebuild_with_engine, projection_rebuild_pending, read_observation_frontier,
+    resume_projection_rebuild_with_engine,
+};
 use super::state::{
     consume_projection_queue_item, decode_observation_row, decode_sequence,
     ensure_projection_output_state_cache, inherit_predecessor_output_state, storage,
@@ -38,6 +41,9 @@ pub(crate) async fn prepare_projection_version_migration_with_engine(
     if !migration_target_is_registered()? {
         return Ok(());
     }
+    if projection_rebuild_pending(conn).await? {
+        return Ok(());
+    }
     if !projection_version_migration_pending(conn).await? {
         return Ok(());
     }
@@ -48,6 +54,34 @@ pub(crate) async fn prepare_projection_version_migration_with_engine(
             rebuild_instead_of_migrating_with_engine(conn).await
         }
     }
+}
+
+pub(crate) async fn advance_projection_version_migration_with_engine(
+    conn: &Connection,
+) -> ProjectionStoreResult<bool> {
+    if !migration_target_is_registered()? {
+        return Ok(true);
+    }
+    if let Some(complete) = resume_projection_rebuild_with_engine(conn).await? {
+        finish_projection_rebuild_migration(conn, complete).await?;
+    } else {
+        prepare_projection_version_migration_with_engine(conn).await?;
+    }
+    projection_version_migration_complete_with_engine(conn).await
+}
+
+pub(crate) async fn projection_version_migration_complete_with_engine(
+    conn: &Connection,
+) -> ProjectionStoreResult<bool> {
+    if !migration_target_is_registered()? {
+        return Ok(true);
+    }
+    if projection_rebuild_pending(conn).await? {
+        return Ok(false);
+    }
+    projection_version_migration_pending(conn)
+        .await
+        .map(|pending| !pending)
 }
 
 fn migration_target_is_registered() -> ProjectionStoreResult<bool> {
@@ -75,8 +109,14 @@ async fn rebuild_instead_of_migrating_with_engine(conn: &Connection) -> Projecti
         "projection version migration fell back to a full rebuild"
     );
     let frontier = read_observation_frontier(conn).await?;
-    let outcome = rebuild_projection_with_engine(conn, frontier).await?;
-    if !outcome.is_complete() {
+    prepare_projection_rebuild_with_engine(conn, frontier).await
+}
+
+async fn finish_projection_rebuild_migration(
+    conn: &Connection,
+    complete: bool,
+) -> ProjectionStoreResult<()> {
+    if !complete {
         return Ok(());
     }
     let transaction = conn
@@ -253,6 +293,15 @@ async fn migrate_projection_page_transaction(
         .last()
         .map(|((sequence, _), _)| *sequence)
         .ok_or_else(|| storage_message("migrate projection frontier", "empty migration page"))?;
+    let mut expected_sequence = migrated_frontier.saturating_add(1);
+    for ((sequence, _), predecessor_outcomes) in &page {
+        if *sequence != expected_sequence || *predecessor_outcomes != 1 {
+            // Reject incompatible predecessor authority before the lineage
+            // queries below, which can be expensive on a large legacy store.
+            return Ok(MigrationPageOutcome::UnmigratableLineage);
+        }
+        expected_sequence = expected_sequence.saturating_add(1);
+    }
     let page_last_sequence_i64 = i64::try_from(page_last_sequence)
         .map_err(|_| storage_message("migrate projection frontier", "sequence overflow"))?;
     transaction
@@ -402,12 +451,7 @@ async fn migrate_projection_page_transaction(
         .await?;
     }
 
-    for ((sequence, observation), predecessor_outcomes) in page {
-        if sequence != migrated_frontier.saturating_add(1) || predecessor_outcomes != 1 {
-            // Dropping the transaction rolls this page back; the caller
-            // converges through a full rebuild instead.
-            return Ok(MigrationPageOutcome::UnmigratableLineage);
-        }
+    for ((sequence, observation), _) in page {
         let effect = derive_projection_with_alias(transaction, &observation).await?;
         apply_effect(transaction, sequence, &observation, &effect).await?;
         inherit_predecessor_output_state(
