@@ -147,6 +147,16 @@ impl RegisteredGlobalDb {
         })
     }
 
+    pub(crate) async fn advance_projection_version_migration(&self) -> crate::errors::Result<bool> {
+        self.authority
+            .require_active_write_scope("advance observation projection migration")?;
+        super::observation_projection::advance_projection_version_migration_with_engine(
+            &self.write_connection,
+        )
+        .await
+        .map_err(|error| registered_error("advance observation projection migration", error))
+    }
+
     pub(crate) async fn begin_write_transaction(
         &self,
     ) -> crate::errors::Result<RegisteredGlobalDbWriteTransaction<'_>> {
