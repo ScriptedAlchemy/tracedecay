@@ -203,6 +203,38 @@ pub fn over_budget_finding(
                 "store size observed within soft budget",
             )?,
         },
+        StorageTelemetryReadV1::ObservedBytes {
+            store, total_bytes, ..
+        } => {
+            budget.validate()?;
+            if budget.store != *store {
+                return Err(ApplicationContractError::Inconsistent {
+                    field: "storage budget store mismatch",
+                });
+            }
+            if *total_bytes > budget.soft_limit_bytes {
+                problem_finding(
+                    kind,
+                    store,
+                    DoctorEvidenceStateV1::Degraded,
+                    completeness,
+                    &format!(
+                        "observed-{}b.overage-{}b",
+                        total_bytes.get(),
+                        total_bytes.saturating_sub(budget.soft_limit_bytes).get()
+                    ),
+                    "store size observed against soft budget",
+                )?
+            } else {
+                clean_finding(
+                    kind,
+                    store,
+                    completeness,
+                    &format!("observed-{}b.within-budget", total_bytes.get()),
+                    "store size observed within soft budget",
+                )?
+            }
+        }
         StorageTelemetryReadV1::Unsupported { store } => unobservable_finding(
             kind,
             store,

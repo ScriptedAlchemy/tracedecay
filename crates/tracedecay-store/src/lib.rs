@@ -48,8 +48,9 @@ pub use evidence_assembly::{
 };
 pub use external_source::{
     MAX_SOURCE_COMMIT_OBSERVATIONS_V1, SourceCommitApplyOutcomeV1, SourceCommitReceiptV1,
-    SourceCommitV1, SourceProjectionCommitV1, SourceProjectionEffectV1, SourceStoreErrorV1,
-    SourceStoreResult, SourceStoreStateV1, apply_source_commit,
+    SourceCommitV1, SourceObjectLineageV1, SourceObjectMutationV1, SourceObjectTransitionV1,
+    SourceObservationEvidenceV1, SourceProjectionCommitV1, SourceProjectionEffectV1,
+    SourceStoreErrorV1, SourceStoreResult, SourceStoreStateV1, apply_source_commit,
 };
 pub use git_index_transactions::{
     GitIndexTransactionBeginRequestV1, GitIndexTransactionBeginResultV1,

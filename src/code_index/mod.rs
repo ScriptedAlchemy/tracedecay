@@ -35,6 +35,7 @@ pub mod intake;
 pub mod languages;
 pub mod lineage;
 pub mod production;
+pub mod production_joins;
 pub mod projection;
 pub mod provider;
 pub mod receipts;

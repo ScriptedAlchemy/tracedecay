@@ -40,6 +40,7 @@ python3 tests/distribution/fastembed/validate_fixture.py <temporary verified fix
 cargo build --workspace --release --all-features --lib --bins
 cargo package --workspace --all-features --allow-dirty --no-verify
 cargo check --release --all-features --lib <extracted tracedecay package>
+CARGO_NET_OFFLINE=true HF_HUB_OFFLINE=1 cargo test --release --all-features --lib <packaged background model-acquisition acceptance>
 CARGO_NET_OFFLINE=true cargo test --release --all-features --lib <packaged typed semantic-unavailable acceptance>
 cargo install --root <temporary install root> --all-features <extracted tracedecay package>
 CARGO_NET_OFFLINE=true cargo run --release --bin tracedecay-distribution-consumer <temporary packaged-library consumer>
@@ -100,6 +101,7 @@ assert_required_assets() {
     "src/query/retrieval/semantic/service.rs"
     "src/query/retrieval/semantic/tests.rs"
     "src/semantic_code/fastembed_adapter.rs"
+    "src/semantic_code/model_lifecycle.rs"
     # Packaged fixture/workload pins (PR5 harness embeds its workload via
     # include_str!; PR7 keeps a workload pin for distribution completeness).
     "tests/fixtures/provider_normalization/codex/session_meta.input.json"
@@ -265,6 +267,7 @@ run_self_test() {
     "cargo build --workspace --release --all-features --lib --bins" \
     "cargo package --workspace --all-features --allow-dirty --no-verify" \
     "cargo check --release --all-features --lib" \
+    "packaged background model-acquisition acceptance" \
     "CARGO_NET_OFFLINE=true cargo test --release --all-features --lib" \
     "cargo install --root <temporary install root> --all-features" \
     "cargo build --release --all-features --example fastembed_distribution_acceptance" \
@@ -308,6 +311,7 @@ run_self_test() {
     src/query/retrieval/semantic/service.rs \
     src/query/retrieval/semantic/tests.rs \
     src/semantic_code/fastembed_adapter.rs \
+    src/semantic_code/model_lifecycle.rs \
     tests/fixtures/provider_normalization/codex/session_meta.input.json \
     tests/fixtures/provider_normalization/codex/agent_message.input.json \
     tests/fixtures/analytics/codex_skill_prose.txt \
@@ -513,7 +517,10 @@ cleanup() {
 trap cleanup EXIT
 
 fastembed_fixture_source="$repo/tests/distribution/fastembed"
+fastembed_acquisition_acceptance="$fastembed_fixture_source/acquisition_tests.rs.inc"
 fastembed_fixture="$work/fastembed"
+[[ -f $fastembed_acquisition_acceptance ]] ||
+  die "FastEmbed acquisition acceptance is missing: $fastembed_acquisition_acceptance"
 echo "distribution acceptance: acquiring immutable Jina FastEmbed fixture"
 python3 \
   "$fastembed_fixture_source/prepare_fixture.py" \
@@ -619,9 +626,6 @@ cargo check \
   --lib \
   --config "$patch_config"
 
-cat "$repo/tests/distribution/fastembed/semantic_unavailable_tests.rs.inc" \
-  >>"$root_package/src/query/retrieval/semantic/tests.rs"
-echo "distribution acceptance: checking typed semantic fallback and strict unavailability"
 ort_lib_path=${ORT_LIB_PATH:-$(python3 - <<'PY'
 import os
 from pathlib import Path
@@ -641,8 +645,28 @@ if candidates:
 PY
 )}
 [[ -n $ort_lib_path ]] ||
-  die "cached ONNX Runtime library is unavailable for the offline semantic test"
+  die "cached ONNX Runtime library is unavailable for the offline semantic tests"
 export ORT_LIB_PATH="$ort_lib_path"
+
+cat "$repo/tests/distribution/fastembed/semantic_unavailable_tests.rs.inc" \
+  >>"$root_package/src/query/retrieval/semantic/tests.rs"
+cat "$fastembed_acquisition_acceptance" \
+  >>"$root_package/src/semantic_code/model_lifecycle.rs"
+echo "distribution acceptance: checking packaged background model acquisition"
+TRACEDECAY_DISTRIBUTION_FASTEMBED_FIXTURE="$fastembed_fixture" \
+  TRACEDECAY_DISTRIBUTION_FASTEMBED_PROFILE_PARENT="$work/semantic-model-profile" \
+  CARGO_NET_OFFLINE=true \
+  HF_HUB_OFFLINE=1 \
+  cargo test \
+  --manifest-path "$root_package/Cargo.toml" \
+  --release \
+  --all-features \
+  --lib \
+  --config "$patch_config" \
+  semantic_code::model_lifecycle::distribution_acquisition_acceptance::distribution_background_acquisition_installs_verified_jina_model \
+  -- \
+  --exact
+echo "distribution acceptance: checking typed semantic fallback and strict unavailability"
 CARGO_NET_OFFLINE=true cargo test \
   --manifest-path "$root_package/Cargo.toml" \
   --release \

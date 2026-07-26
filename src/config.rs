@@ -474,11 +474,7 @@ fn default_incident_debris_retention_days() -> Option<u64> {
 }
 
 fn default_compaction_threshold() -> Option<CompactionThresholdConfig> {
-    Some(CompactionThresholdConfig {
-        free_page_ratio_threshold: 0.25,
-        minimum_reclaimable_bytes: 64 * 1024 * 1024,
-        max_pages_per_tick: default_compaction_max_pages_per_tick(),
-    })
+    Some(CompactionThresholdConfig::default())
 }
 
 /// Incremental-vacuum compaction trigger for the daemon background lane
@@ -506,8 +502,8 @@ fn default_compaction_max_pages_per_tick() -> u32 {
 impl Default for CompactionThresholdConfig {
     fn default() -> Self {
         Self {
-            free_page_ratio_threshold: 0.0,
-            minimum_reclaimable_bytes: 0,
+            free_page_ratio_threshold: 0.25,
+            minimum_reclaimable_bytes: 64 * 1024 * 1024,
             max_pages_per_tick: default_compaction_max_pages_per_tick(),
         }
     }
@@ -2191,12 +2187,14 @@ pub fn save_config_to_path(config_path: &Path, config: &TraceDecayConfig) -> Res
                 config_path.display()
             ),
         })?;
-    fs::create_dir_all(data_dir).map_err(|e| TraceDecayError::Config {
-        message: format!(
-            "failed to create tracedecay directory '{}': {}",
-            data_dir.display(),
-            e
-        ),
+    crate::storage::PrivateStoreIo::create_dir_all(data_dir).map_err(|e| {
+        TraceDecayError::Config {
+            message: format!(
+                "failed to create tracedecay directory '{}': {}",
+                data_dir.display(),
+                e
+            ),
+        }
     })?;
 
     let tmp_path = config_path.with_extension("tmp");
@@ -2577,7 +2575,7 @@ impl PinnedUserDataDir {
         let root = tempfile::TempDir::new()
             .unwrap_or_else(|err| panic!("failed to create temp profile dir: {err}"));
         let profile = root.path().join(TRACEDECAY_DIR);
-        fs::create_dir_all(&profile)
+        crate::storage::PrivateStoreIo::create_dir_all(&profile)
             .unwrap_or_else(|err| panic!("failed to create isolated profile root: {err}"));
         let previous = std::env::var_os(USER_DATA_DIR_ENV);
         let previous_home = std::env::var_os("HOME");
