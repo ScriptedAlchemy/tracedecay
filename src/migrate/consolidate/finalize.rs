@@ -59,6 +59,19 @@ pub(super) async fn verify_destination(
             "destination feedback logical union differs from frozen inputs",
         ));
     }
+    if !resolved
+        .evidence
+        .source_graph
+        .identities
+        .external_source_union_matches(
+            &resolved.evidence.target_graph.identities,
+            &destination_identities,
+        )
+    {
+        return Err(config_error(
+            "destination external source state union differs from frozen inputs",
+        ));
+    }
     let destination_snapshots = crate::sqlite_read_snapshot::SnapshotSet::capture_in(
         std::slice::from_ref(&sessions),
         resolved.scratch_root.path(),

@@ -877,9 +877,7 @@ mod tests {
     #[test]
     fn scheduled_work_self_drains_in_worktree_fair_order_after_capacity_returns() {
         let scheduler = scheduler();
-        scheduler
-            .enqueue(batch("blocker", "one", 1, 100))
-            .unwrap();
+        scheduler.enqueue(batch("blocker", "one", 1, 100)).unwrap();
         let blocker = scheduler.try_dispatch().expect("capacity blocker");
         let order = Arc::new(Mutex::new(Vec::new()));
         for (worktree, label) in [("a", "a1"), ("a", "a2"), ("b", "b1")] {
