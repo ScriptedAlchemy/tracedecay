@@ -137,12 +137,15 @@ impl DirectConfigurationMutation {
     }
 
     pub fn target_scope_digest(&self) -> Result<ManifestDigest, ConfigurationError> {
-        canonical_sha256(&(
-            "tracedecay.configuration.direct-target-layer.v1",
-            self.target_layer()?,
-        ))
-        .map_err(ConfigurationError::validation)
+        configuration_layer_scope_digest(self.target_layer()?)
     }
+}
+
+pub fn configuration_layer_scope_digest(
+    layer: &ConfigurationLayerIdV1,
+) -> Result<ManifestDigest, ConfigurationError> {
+    canonical_sha256(&("tracedecay.configuration.direct-target-layer.v1", layer))
+        .map_err(ConfigurationError::validation)
 }
 
 /// Opaque write-handle returned by a secret-safe adapter. The secret material

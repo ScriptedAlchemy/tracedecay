@@ -96,17 +96,6 @@ pub struct SavingsDay {
     pub calls: u64,
 }
 
-/// One freshly computed token count headed for the dashboard sidecar cache
-/// (see [`RegisteredGlobalDb::save_token_counts`]).
-#[derive(Debug, Clone)]
-pub struct TokenCountUpsert {
-    pub provider: String,
-    pub message_id: String,
-    pub text_len: i64,
-    pub encoder: &'static str,
-    pub token_count: i64,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnalyticsEventInsert {
     pub provider: String,
@@ -186,6 +175,10 @@ pub struct AnalyticsEventQuery {
     pub event_kind: Option<String>,
     /// Inclusive lower bound on `timestamp` (unix seconds). `None` = unbounded.
     pub since: Option<i64>,
+    /// Exclusive upper bound on `timestamp` (unix seconds). `None` = unbounded.
+    pub until: Option<i64>,
+    /// Exclusive row-id cursor used by bounded reverse-chronological scans.
+    pub before_id: Option<i64>,
     pub limit: usize,
 }
 
@@ -913,4 +906,4 @@ impl RegisteredGlobalDb {
 mod checkpoint_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
-mod tests;
+pub(crate) mod tests;

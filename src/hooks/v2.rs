@@ -156,6 +156,9 @@ struct NativeIdentityFields {
     properties: Option<NativeIdentityProperties>,
     input: Option<NativeIdentityInput>,
     output: Option<NativeIdentityOutput>,
+    extra: Option<NativeIdentityExtra>,
+    route: Option<NativeIdentityRoute>,
+    receipt: Option<NativeIdentityReceipt>,
 }
 
 #[derive(Default, Deserialize)]
@@ -185,6 +188,21 @@ struct NativeIdentityOutput {
 struct NativeIdentityOutputMetadata {
     #[serde(default)]
     files: Vec<NativeIdentityFile>,
+}
+
+#[derive(Default, Deserialize)]
+struct NativeIdentityExtra {
+    tool_call_id: Option<String>,
+}
+
+#[derive(Default, Deserialize)]
+struct NativeIdentityRoute {
+    session_id: Option<String>,
+}
+
+#[derive(Default, Deserialize)]
+struct NativeIdentityReceipt {
+    tool_call_id: Option<String>,
 }
 
 /// Provider-native lifecycle identity that may cross the local hook/daemon
@@ -241,6 +259,11 @@ impl NativeIdentityFields {
                     .as_ref()
                     .and_then(|input| input.session_id.as_deref())
             })
+            .or_else(|| {
+                self.route
+                    .as_ref()
+                    .and_then(|route| route.session_id.as_deref())
+            })
     }
 
     fn event_key(&self) -> Option<&str> {
@@ -252,6 +275,16 @@ impl NativeIdentityFields {
                 self.input
                     .as_ref()
                     .and_then(|input| input.call_id.as_deref())
+            })
+            .or_else(|| {
+                self.extra
+                    .as_ref()
+                    .and_then(|extra| extra.tool_call_id.as_deref())
+            })
+            .or_else(|| {
+                self.receipt
+                    .as_ref()
+                    .and_then(|receipt| receipt.tool_call_id.as_deref())
             })
             .or(self.generation_id.as_deref())
             .or(self.prompt_id.as_deref())
@@ -268,6 +301,16 @@ impl NativeIdentityFields {
                 self.input
                     .as_ref()
                     .and_then(|input| input.call_id.as_deref())
+            })
+            .or_else(|| {
+                self.extra
+                    .as_ref()
+                    .and_then(|extra| extra.tool_call_id.as_deref())
+            })
+            .or_else(|| {
+                self.receipt
+                    .as_ref()
+                    .and_then(|receipt| receipt.tool_call_id.as_deref())
             })
     }
 
@@ -1222,6 +1265,44 @@ mod tests {
 
         assert_eq!(lifecycle.session_id.as_str(), "session.kimi.native");
         assert_eq!(lifecycle.call_id.as_str(), "call.kimi.native");
+    }
+
+    #[test]
+    fn hermes_real_tool_fixture_uses_terminal_receipt_identity() {
+        let fixture = include_str!(
+            "../../crates/tracedecay-hooks/fixtures/host_events/hermes/saved-edit.json"
+        );
+        let material = native_material(
+            fixture,
+            tracedecay_hooks::HookEventFamily::ToolLifecycle,
+            UtcMicros(43),
+        )
+        .unwrap();
+
+        assert_eq!(material.event_id, hash16(b"<TOOL_CALL_ID>"));
+        assert_eq!(material.protected_session_id, hash32(b"<SESSION_ID>"));
+        assert_eq!(material.tool_id, Some(hash16(b"<TOOL_CALL_ID>")));
+        assert_eq!(material.effect_receipt_id, Some(hash16(b"<TOOL_CALL_ID>")));
+        assert_eq!(material.file_id, None);
+    }
+
+    #[test]
+    fn hermes_adapter_fixture_preserves_native_terminal_identity() {
+        let fixture = include_str!(
+            "../../crates/tracedecay-hooks/fixtures/host_events/hermes/terminal-receipt.json"
+        );
+        let material = native_material(
+            fixture,
+            tracedecay_hooks::HookEventFamily::ToolLifecycle,
+            UtcMicros(47),
+        )
+        .unwrap();
+
+        assert_eq!(material.event_id, hash16(b"<TOOL_CALL_ID>"));
+        assert_eq!(material.protected_session_id, hash32(b"<SESSION_ID>"));
+        assert_eq!(material.tool_id, Some(hash16(b"<TOOL_CALL_ID>")));
+        assert_eq!(material.effect_receipt_id, Some(hash16(b"<TOOL_CALL_ID>")));
+        assert_eq!(material.file_id, None);
     }
 
     #[test]
