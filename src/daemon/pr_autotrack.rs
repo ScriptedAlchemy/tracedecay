@@ -51,11 +51,26 @@ use super::log_daemon_event;
 #[derive(Clone, Copy)]
 struct PrStoreAdministration<'a> {
     daemon: &'a StoreAdministration,
+    graph: Option<&'a std::sync::Arc<crate::tracedecay::TraceDecay>>,
 }
 
 impl<'a> PrStoreAdministration<'a> {
-    fn new(daemon: &'a StoreAdministration) -> Self {
-        Self { daemon }
+    fn new(
+        daemon: &'a StoreAdministration,
+        graph: &'a std::sync::Arc<crate::tracedecay::TraceDecay>,
+    ) -> Self {
+        Self {
+            daemon,
+            graph: Some(graph),
+        }
+    }
+
+    #[cfg(test)]
+    fn state_only(daemon: &'a StoreAdministration) -> Self {
+        Self {
+            daemon,
+            graph: None,
+        }
     }
 }
 
@@ -458,13 +473,22 @@ fn log_pr_skip(repo_root: &Path, branch_label: Option<&str>, pr: Option<u64>, re
 /// PRs) are always processed. Idempotent: PRs already managed and still open are
 /// left untouched. State is persisted before returning.
 pub async fn reconcile_project(
+    graph: std::sync::Arc<crate::tracedecay::TraceDecay>,
     repo_root: &Path,
     data_root: &Path,
     discovery: &PrDiscovery,
     cap: usize,
 ) -> ReconcileReport {
-    let administration = StoreAdministration::default();
-    let administration = PrStoreAdministration::new(&administration);
+    let administration = match StoreAdministration::for_retained_project_graph(&graph).await {
+        Ok(administration) => administration,
+        Err(error) => {
+            return ReconcileReport {
+                failures: vec![("project".to_owned(), error.to_string())],
+                ..ReconcileReport::default()
+            };
+        }
+    };
+    let administration = PrStoreAdministration::new(&administration, &graph);
     reconcile_project_with_administration(repo_root, data_root, discovery, cap, administration)
         .await
 }
@@ -674,7 +698,7 @@ async fn track_pr(
     let worktree = data_root
         .join("pr-worktrees")
         .join(format!("pr-{}", pr.number));
-    let Some(graph) = retained_project_graph(administration.daemon, repo_root).await else {
+    let Some(graph) = administration.graph.map(std::sync::Arc::clone) else {
         return Err("retained project graph is unavailable".to_string());
     };
 
@@ -1180,7 +1204,7 @@ async fn poll_project(repo_root: PathBuf, administration: &StoreAdministration) 
         &data_root,
         &discovery,
         MAX_NEW_TRACKS_PER_CYCLE,
-        PrStoreAdministration::new(administration),
+        PrStoreAdministration::new(administration, &graph),
     )
     .await;
     let managed = load_state(&data_root).managed.len();
@@ -1206,9 +1230,14 @@ async fn poll_project(repo_root: PathBuf, administration: &StoreAdministration) 
 /// in `branch_list` and consuming disk). This runs one removals-only reconcile
 /// (empty desired set) to clean the managed set down to empty. Cheap and inert
 /// once nothing is managed, so it is safe to call every poll cadence.
-pub async fn teardown_disabled_project(repo_root: &Path) {
-    let administration = StoreAdministration::default();
-    teardown_disabled_project_with_administration(repo_root, &administration).await;
+pub async fn teardown_disabled_project(
+    graph: std::sync::Arc<crate::tracedecay::TraceDecay>,
+    repo_root: &Path,
+) {
+    let Ok(administration) = StoreAdministration::for_retained_project_graph(&graph).await else {
+        return;
+    };
+    teardown_disabled_project_with_graph(repo_root, graph, &administration).await;
 }
 
 async fn teardown_disabled_project_with_administration(
@@ -1218,6 +1247,14 @@ async fn teardown_disabled_project_with_administration(
     let Some(graph) = retained_project_graph(administration, repo_root).await else {
         return; // not indexed — no managed state to tear down
     };
+    teardown_disabled_project_with_graph(repo_root, graph, administration).await;
+}
+
+async fn teardown_disabled_project_with_graph(
+    repo_root: &Path,
+    graph: std::sync::Arc<crate::tracedecay::TraceDecay>,
+    administration: &StoreAdministration,
+) {
     let data_root = graph.store_layout().data_root.clone();
     if load_state(&data_root).managed.is_empty() {
         return; // nothing stranded — the common case, kept cheap
@@ -1229,7 +1266,7 @@ async fn teardown_disabled_project_with_administration(
         &data_root,
         &PrDiscovery::default(),
         MAX_NEW_TRACKS_PER_CYCLE,
-        PrStoreAdministration::new(administration),
+        PrStoreAdministration::new(administration, &graph),
     )
     .await;
     log_daemon_event(

@@ -45,6 +45,39 @@ struct CloseReservation {
 }
 
 impl StoreRuntimeRegistry {
+    pub(crate) async fn close_path(
+        &self,
+        path: &Path,
+    ) -> Result<Option<ClosedStoreRuntime>, StoreRuntimeRegistryFailure> {
+        let selected = {
+            let state = self.lock_state();
+            let mut selected = state.entries.values().filter_map(|entry| match entry {
+                RegistryEntry::Ready(ready) if ready.handle.locator().path() == path => {
+                    Some(ready.handle.clone())
+                }
+                _ => None,
+            });
+            let first = selected.next();
+            if first.is_some() && selected.next().is_some() {
+                return Err(StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
+                    operation: "select exact registered runtime close",
+                    message: format!(
+                        "multiple registered runtimes resolve to database path '{}'",
+                        path.display()
+                    ),
+                });
+            }
+            first
+        };
+        let Some(handle) = selected else {
+            return Ok(None);
+        };
+        let binding = handle.binding().clone();
+        let authority = handle.database_authority("close registered runtime by path")?;
+        drop(handle);
+        self.close_exact(&binding, &authority).await.map(Some)
+    }
+
     /// Closes one exact runtime for an exclusive maintenance handoff.
     ///
     /// The caller retains only the binding and originating authority. Any

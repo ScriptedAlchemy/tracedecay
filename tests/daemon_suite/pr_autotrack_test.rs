@@ -13,12 +13,12 @@ use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::Arc;
 
 use crate::common::IsolatedEnv;
 use fs2::FileExt;
 use tracedecay::branch_meta::{load_branch_meta, save_branch_meta};
 use tracedecay::daemon::pr_autotrack;
-use tracedecay::storage::resolve_layout_for_current_profile;
 use tracedecay::tracedecay::TraceDecay;
 
 fn git_out(cwd: &Path, args: &[&str]) -> std::process::Output {
@@ -50,28 +50,28 @@ fn head_sha(cwd: &Path) -> String {
 }
 
 fn commit_all(project: &Path, message: &str) {
-    git(project, &["add", "."]);
+    git(
+        project,
+        &["add", "--all", "--", ".", ":(exclude).tracedecay"],
+    );
     git(project, &["commit", "-m", message]);
 }
 
-fn project_data_dir(project: &Path) -> PathBuf {
-    resolve_layout_for_current_profile(project)
-        .unwrap_or_else(|err| panic!("failed to resolve test project storage layout: {err}"))
-        .data_root
+fn project_data_dir(graph: &TraceDecay) -> PathBuf {
+    graph.store_layout().data_root.clone()
 }
 
 /// Fixture: an indexed project on `main` with a local bare `origin` it has been
-/// pushed to. Returns `(env, project, origin_bare)`.
-async fn indexed_repo_with_origin() -> (IsolatedEnv, PathBuf, PathBuf) {
+/// pushed to. Returns `(env, project, origin_bare, retained_graph)`.
+async fn indexed_repo_with_origin() -> (IsolatedEnv, PathBuf, PathBuf, Arc<TraceDecay>) {
     let (env, project) = IsolatedEnv::acquire().await;
     git(&project, &["init", "-b", "main"]);
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn on_main() {}\n").unwrap();
     commit_all(&project, "initial commit");
 
-    let main = TraceDecay::init(&project).await.unwrap();
+    let main = Arc::new(TraceDecay::init(&project).await.unwrap());
     main.index_all().await.unwrap();
-    drop(main);
 
     // A sibling bare repo acts as `origin`. Keep it next to the project so it
     // lives as long as the isolated env dir.
@@ -84,7 +84,17 @@ async fn indexed_repo_with_origin() -> (IsolatedEnv, PathBuf, PathBuf) {
     );
     git(&project, &["push", "origin", "main"]);
 
-    (env, project, origin)
+    (env, project, origin, main)
+}
+
+async fn reconcile(
+    graph: &Arc<TraceDecay>,
+    project: &Path,
+    data_root: &Path,
+    discovery: &pr_autotrack::PrDiscovery,
+    cap: usize,
+) -> pr_autotrack::ReconcileReport {
+    pr_autotrack::reconcile_project(Arc::clone(graph), project, data_root, discovery, cap).await
 }
 
 /// Creates a same-repo PR: a new branch on `origin` with unique content, plus a
@@ -164,8 +174,25 @@ fn bump_pr(project: &Path, origin: &Path, n: u64, symbol: &str) {
 }
 
 #[tokio::test]
+async fn production_reconciliation_publishes_managed_pr_ref() {
+    let (_env, project, origin, graph) = indexed_repo_with_origin().await;
+    add_same_repo_pr(&project, &origin, 1, "managed_ref_symbol");
+    let data_root = project_data_dir(&graph);
+    let discovery = pr_autotrack::discover_open_prs(&project).expect("PR discovery succeeds");
+
+    let report = reconcile(&graph, &project, &data_root, &discovery, 10).await;
+
+    assert_eq!(report.tracked, vec!["tracedecay/autotrack/pr/1".to_owned()]);
+    assert!(
+        git_out(&project, &["rev-parse", "--verify", "refs/tracedecay/pr/1"])
+            .status
+            .success()
+    );
+}
+
+#[tokio::test]
 async fn tracks_same_repo_pr_indexes_its_content_and_untracks_on_close() {
-    let (_env, project, origin) = indexed_repo_with_origin().await;
+    let (_env, project, origin, graph) = indexed_repo_with_origin().await;
     let head_branch = add_same_repo_pr(&project, &origin, 1, "pr_one_symbol");
     add_fork_pr(&project, 2, "fork_symbol");
     git(&project, &["branch", "pr/1", "main"]);
@@ -175,7 +202,7 @@ async fn tracks_same_repo_pr_indexes_its_content_and_untracks_on_close() {
             .trim()
             .to_string();
 
-    let data_root = project_data_dir(&project);
+    let data_root = project_data_dir(&graph);
     let tracking_label = "tracedecay/autotrack/pr/1";
 
     // Discovery: PR 1 is a tracked same-repo PR; PR 2 is a skipped fork.
@@ -187,7 +214,9 @@ async fn tracks_same_repo_pr_indexes_its_content_and_untracks_on_close() {
     assert_eq!(discovery.skipped_forks, vec![2]);
 
     // Reconcile → PR 1 tracked.
-    let report = pr_autotrack::reconcile_project(&project, &data_root, &discovery, 10).await;
+    let report =
+        pr_autotrack::reconcile_project(Arc::clone(&graph), &project, &data_root, &discovery, 10)
+            .await;
     assert_eq!(report.tracked, vec![tracking_label.to_string()]);
     assert_eq!(report.skipped_forks, vec![2]);
 
@@ -220,7 +249,9 @@ async fn tracks_same_repo_pr_indexes_its_content_and_untracks_on_close() {
     drop(branch_cg);
 
     // Idempotent: a second reconcile with the same discovery changes nothing.
-    let again = pr_autotrack::reconcile_project(&project, &data_root, &discovery, 10).await;
+    let again =
+        pr_autotrack::reconcile_project(Arc::clone(&graph), &project, &data_root, &discovery, 10)
+            .await;
     assert!(again.tracked.is_empty(), "no re-track on repeat poll");
     assert!(again.untracked.is_empty());
     assert_eq!(pr_autotrack::managed_summary(&data_root).len(), 1);
@@ -260,8 +291,14 @@ async fn tracks_same_repo_pr_indexes_its_content_and_untracks_on_close() {
         refreshed_discovery.open[0].head_sha,
         discovery.open[0].head_sha
     );
-    let refreshed =
-        pr_autotrack::reconcile_project(&project, &data_root, &refreshed_discovery, 10).await;
+    let refreshed = pr_autotrack::reconcile_project(
+        Arc::clone(&graph),
+        &project,
+        &data_root,
+        &refreshed_discovery,
+        10,
+    )
+    .await;
     assert_eq!(refreshed.tracked, vec![tracking_label.to_string()]);
     let refreshed_cg = TraceDecay::open_branch(&project, tracking_label)
         .await
@@ -283,7 +320,9 @@ async fn tracks_same_repo_pr_indexes_its_content_and_untracks_on_close() {
         after_close.open.iter().all(|p| p.number != 1),
         "closed PR must not be discovered"
     );
-    let closing = pr_autotrack::reconcile_project(&project, &data_root, &after_close, 10).await;
+    let closing =
+        pr_autotrack::reconcile_project(Arc::clone(&graph), &project, &data_root, &after_close, 10)
+            .await;
     assert_eq!(closing.untracked, vec![tracking_label.to_string()]);
 
     let meta = load_branch_meta(&data_root).expect("branch meta exists");
@@ -306,13 +345,15 @@ async fn tracks_same_repo_pr_indexes_its_content_and_untracks_on_close() {
 /// whose worktree/ref was already deleted.
 #[tokio::test]
 async fn busy_untrack_retains_managed_state_until_a_later_poll_succeeds() {
-    let (_env, project, origin) = indexed_repo_with_origin().await;
+    let (_env, project, origin, graph) = indexed_repo_with_origin().await;
     add_same_repo_pr(&project, &origin, 6, "pr_six_symbol");
-    let data_root = project_data_dir(&project);
+    let data_root = project_data_dir(&graph);
     let label = "tracedecay/autotrack/pr/6";
     let worktree = data_root.join("pr-worktrees/pr-6");
     let discovery = pr_autotrack::discover_open_prs(&project).expect("PR discovery succeeds");
-    let tracked = pr_autotrack::reconcile_project(&project, &data_root, &discovery, 10).await;
+    let tracked =
+        pr_autotrack::reconcile_project(Arc::clone(&graph), &project, &data_root, &discovery, 10)
+            .await;
     assert_eq!(tracked.tracked, vec![label.to_string()]);
 
     // The branch-administration coordinator takes this same metadata lock. It
@@ -327,6 +368,7 @@ async fn busy_untrack_retains_managed_state_until_a_later_poll_succeeds() {
     lock.lock_exclusive().unwrap();
 
     let busy = pr_autotrack::reconcile_project(
+        Arc::clone(&graph),
         &project,
         &data_root,
         &pr_autotrack::PrDiscovery::default(),
@@ -364,6 +406,7 @@ async fn busy_untrack_retains_managed_state_until_a_later_poll_succeeds() {
     lock.unlock().unwrap();
 
     let retried = pr_autotrack::reconcile_project(
+        Arc::clone(&graph),
         &project,
         &data_root,
         &pr_autotrack::PrDiscovery::default(),
@@ -397,9 +440,9 @@ async fn busy_untrack_retains_managed_state_until_a_later_poll_succeeds() {
 
 #[tokio::test]
 async fn deferred_tracking_is_not_persisted_and_retries_next_cycle() {
-    let (_env, project, origin) = indexed_repo_with_origin().await;
+    let (_env, project, origin, graph) = indexed_repo_with_origin().await;
     add_same_repo_pr(&project, &origin, 7, "pr_seven_symbol");
-    let data_root = project_data_dir(&project);
+    let data_root = project_data_dir(&graph);
     let discovery = pr_autotrack::discover_open_prs(&project).expect("PR discovery succeeds");
 
     let lock = std::fs::OpenOptions::new()
@@ -410,7 +453,9 @@ async fn deferred_tracking_is_not_persisted_and_retries_next_cycle() {
         .unwrap();
     lock.lock_exclusive().unwrap();
 
-    let deferred = pr_autotrack::reconcile_project(&project, &data_root, &discovery, 10).await;
+    let deferred =
+        pr_autotrack::reconcile_project(Arc::clone(&graph), &project, &data_root, &discovery, 10)
+            .await;
     assert!(deferred.tracked.is_empty());
     assert!(pr_autotrack::managed_summary(&data_root).is_empty());
     assert!(
@@ -419,7 +464,9 @@ async fn deferred_tracking_is_not_persisted_and_retries_next_cycle() {
     );
 
     lock.unlock().unwrap();
-    let retried = pr_autotrack::reconcile_project(&project, &data_root, &discovery, 10).await;
+    let retried =
+        pr_autotrack::reconcile_project(Arc::clone(&graph), &project, &data_root, &discovery, 10)
+            .await;
     assert_eq!(
         retried.tracked,
         vec!["tracedecay/autotrack/pr/7".to_string()]
@@ -429,17 +476,19 @@ async fn deferred_tracking_is_not_persisted_and_retries_next_cycle() {
 
 #[tokio::test]
 async fn complete_orphan_is_rebuilt_after_interrupted_state_write() {
-    let (_env, project, origin) = indexed_repo_with_origin().await;
+    let (_env, project, origin, graph) = indexed_repo_with_origin().await;
     add_same_repo_pr(&project, &origin, 8, "pr_eight_symbol");
-    let data_root = project_data_dir(&project);
+    let data_root = project_data_dir(&graph);
     let discovery = pr_autotrack::discover_open_prs(&project).expect("PR discovery succeeds");
     let label = "tracedecay/autotrack/pr/8";
 
-    let first = pr_autotrack::reconcile_project(&project, &data_root, &discovery, 10).await;
+    let first =
+        pr_autotrack::reconcile_project(Arc::clone(&graph), &project, &data_root, &discovery, 10)
+            .await;
     assert_eq!(first.tracked, vec![label.to_string()]);
     fs::remove_file(data_root.join("pr-autotrack.json")).unwrap();
 
-    let recovered = pr_autotrack::reconcile_project(&project, &data_root, &discovery, 10).await;
+    let recovered = reconcile(&graph, &project, &data_root, &discovery, 10).await;
     assert_eq!(recovered.tracked, vec![label.to_string()]);
     assert_eq!(pr_autotrack::managed_summary(&data_root).len(), 1);
     assert!(load_branch_meta(&data_root).unwrap().is_tracked(label));
@@ -447,14 +496,14 @@ async fn complete_orphan_is_rebuilt_after_interrupted_state_write() {
 
 #[tokio::test]
 async fn validated_branch_ref_orphan_without_worktree_is_rebuilt() {
-    let (_env, project, origin) = indexed_repo_with_origin().await;
+    let (_env, project, origin, graph) = indexed_repo_with_origin().await;
     add_same_repo_pr(&project, &origin, 11, "pr_eleven_symbol");
-    let data_root = project_data_dir(&project);
+    let data_root = project_data_dir(&graph);
     let discovery = pr_autotrack::discover_open_prs(&project).expect("PR discovery succeeds");
     let label = "tracedecay/autotrack/pr/11";
     let worktree = data_root.join("pr-worktrees/pr-11");
 
-    let first = pr_autotrack::reconcile_project(&project, &data_root, &discovery, 10).await;
+    let first = reconcile(&graph, &project, &data_root, &discovery, 10).await;
     assert_eq!(first.tracked, vec![label.to_string()]);
     fs::remove_file(data_root.join("pr-autotrack.json")).unwrap();
     let mut meta = load_branch_meta(&data_root).unwrap();
@@ -470,7 +519,7 @@ async fn validated_branch_ref_orphan_without_worktree_is_rebuilt() {
         &["worktree", "remove", "--force", &worktree.to_string_lossy()],
     );
 
-    let recovered = pr_autotrack::reconcile_project(&project, &data_root, &discovery, 10).await;
+    let recovered = reconcile(&graph, &project, &data_root, &discovery, 10).await;
     assert_eq!(recovered.tracked, vec![label.to_string()]);
     assert_eq!(pr_autotrack::managed_summary(&data_root).len(), 1);
     assert!(worktree.exists());
@@ -478,14 +527,14 @@ async fn validated_branch_ref_orphan_without_worktree_is_rebuilt() {
 
 #[tokio::test]
 async fn state_persistence_failure_rolls_back_completed_tracking() {
-    let (_env, project, origin) = indexed_repo_with_origin().await;
+    let (_env, project, origin, graph) = indexed_repo_with_origin().await;
     add_same_repo_pr(&project, &origin, 10, "pr_ten_symbol");
-    let data_root = project_data_dir(&project);
+    let data_root = project_data_dir(&graph);
     let discovery = pr_autotrack::discover_open_prs(&project).expect("PR discovery succeeds");
     let label = "tracedecay/autotrack/pr/10";
     fs::create_dir(data_root.join("pr-autotrack.json")).unwrap();
 
-    let report = pr_autotrack::reconcile_project(&project, &data_root, &discovery, 10).await;
+    let report = reconcile(&graph, &project, &data_root, &discovery, 10).await;
     assert!(report.tracked.is_empty());
     assert!(
         report
@@ -511,13 +560,13 @@ async fn state_persistence_failure_rolls_back_completed_tracking() {
 
 #[tokio::test]
 async fn legacy_close_recovers_empty_head_sha_before_owned_ref_cleanup() {
-    let (_env, project, origin) = indexed_repo_with_origin().await;
+    let (_env, project, origin, graph) = indexed_repo_with_origin().await;
     add_same_repo_pr(&project, &origin, 9, "pr_nine_symbol");
-    let data_root = project_data_dir(&project);
+    let data_root = project_data_dir(&graph);
     let discovery = pr_autotrack::discover_open_prs(&project).expect("PR discovery succeeds");
     let current_label = "tracedecay/autotrack/pr/9";
     let legacy_label = "pr/9";
-    let first = pr_autotrack::reconcile_project(&project, &data_root, &discovery, 10).await;
+    let first = reconcile(&graph, &project, &data_root, &discovery, 10).await;
     assert_eq!(first.tracked, vec![current_label.to_string()]);
 
     let mut state = pr_autotrack::load_state(&data_root);
@@ -540,7 +589,7 @@ async fn legacy_close_recovers_empty_head_sha_before_owned_ref_cleanup() {
 
     git(&origin, &["update-ref", "-d", "refs/pull/9/head"]);
     let closed = pr_autotrack::discover_open_prs(&project).expect("PR discovery succeeds");
-    let report = pr_autotrack::reconcile_project(&project, &data_root, &closed, 10).await;
+    let report = reconcile(&graph, &project, &data_root, &closed, 10).await;
     assert_eq!(report.untracked, vec![legacy_label.to_string()]);
     assert!(
         !load_branch_meta(&data_root)
@@ -564,23 +613,23 @@ async fn legacy_close_recovers_empty_head_sha_before_owned_ref_cleanup() {
 
 #[tokio::test]
 async fn caps_new_tracks_per_cycle_and_ramps() {
-    let (_env, project, origin) = indexed_repo_with_origin().await;
+    let (_env, project, origin, graph) = indexed_repo_with_origin().await;
     add_same_repo_pr(&project, &origin, 1, "pr_one");
     add_same_repo_pr(&project, &origin, 2, "pr_two");
     add_same_repo_pr(&project, &origin, 3, "pr_three");
 
-    let data_root = project_data_dir(&project);
+    let data_root = project_data_dir(&graph);
     let discovery = pr_autotrack::discover_open_prs(&project).expect("PR discovery succeeds");
     assert_eq!(discovery.open.len(), 3);
 
     // First cycle with cap=2 tracks only two and flags the cap.
-    let first = pr_autotrack::reconcile_project(&project, &data_root, &discovery, 2).await;
+    let first = reconcile(&graph, &project, &data_root, &discovery, 2).await;
     assert_eq!(first.tracked.len(), 2, "cap holds back the third PR");
     assert!(first.capped, "cap flag set when additions are held back");
     assert_eq!(pr_autotrack::managed_summary(&data_root).len(), 2);
 
     // Second cycle tracks the remaining PR.
-    let second = pr_autotrack::reconcile_project(&project, &data_root, &discovery, 2).await;
+    let second = reconcile(&graph, &project, &data_root, &discovery, 2).await;
     assert_eq!(second.tracked.len(), 1);
     assert!(!second.capped);
     assert_eq!(pr_autotrack::managed_summary(&data_root).len(), 3);
@@ -593,13 +642,13 @@ async fn caps_new_tracks_per_cycle_and_ramps() {
 /// the cycle and leaves the managed set intact.
 #[tokio::test]
 async fn failed_discovery_returns_error_and_never_mass_untracks() {
-    let (_env, project, origin) = indexed_repo_with_origin().await;
+    let (_env, project, origin, graph) = indexed_repo_with_origin().await;
     add_same_repo_pr(&project, &origin, 1, "pr_one_symbol");
-    let data_root = project_data_dir(&project);
+    let data_root = project_data_dir(&graph);
     let label = "tracedecay/autotrack/pr/1";
 
     let discovery = pr_autotrack::discover_open_prs(&project).expect("PR discovery succeeds");
-    let report = pr_autotrack::reconcile_project(&project, &data_root, &discovery, 10).await;
+    let report = reconcile(&graph, &project, &data_root, &discovery, 10).await;
     assert_eq!(report.tracked, vec![label.to_string()]);
 
     // Break `origin` so every ls-remote/gh discovery command fails.
@@ -624,14 +673,14 @@ async fn failed_discovery_returns_error_and_never_mass_untracks() {
 /// now be idempotent: adopt/reset the orphan branch to the new head and recover.
 #[tokio::test]
 async fn interrupted_track_with_advanced_head_recovers_instead_of_wedging() {
-    let (_env, project, origin) = indexed_repo_with_origin().await;
+    let (_env, project, origin, graph) = indexed_repo_with_origin().await;
     add_same_repo_pr(&project, &origin, 12, "pr_twelve_v1");
-    let data_root = project_data_dir(&project);
+    let data_root = project_data_dir(&graph);
     let label = "tracedecay/autotrack/pr/12";
     let worktree = data_root.join("pr-worktrees/pr-12");
 
     let discovery = pr_autotrack::discover_open_prs(&project).expect("PR discovery succeeds");
-    let first = pr_autotrack::reconcile_project(&project, &data_root, &discovery, 10).await;
+    let first = reconcile(&graph, &project, &data_root, &discovery, 10).await;
     assert_eq!(first.tracked, vec![label.to_string()]);
 
     // Reproduce the mid-track crash aftermath: state gone, DB gone, worktree
@@ -668,7 +717,7 @@ async fn interrupted_track_with_advanced_head_recovers_instead_of_wedging() {
     let refreshed = pr_autotrack::discover_open_prs(&project).expect("PR discovery succeeds");
     assert_ne!(refreshed.open[0].head_sha, discovery.open[0].head_sha);
 
-    let recovered = pr_autotrack::reconcile_project(&project, &data_root, &refreshed, 10).await;
+    let recovered = reconcile(&graph, &project, &data_root, &refreshed, 10).await;
     assert_eq!(
         recovered.tracked,
         vec![label.to_string()],
@@ -688,13 +737,13 @@ async fn interrupted_track_with_advanced_head_recovers_instead_of_wedging() {
 /// sorts lexically after new PRs 10/11/12.)
 #[tokio::test]
 async fn cap_does_not_starve_head_updates_for_managed_prs() {
-    let (_env, project, origin) = indexed_repo_with_origin().await;
+    let (_env, project, origin, graph) = indexed_repo_with_origin().await;
     add_same_repo_pr(&project, &origin, 9, "pr_nine_v1");
-    let data_root = project_data_dir(&project);
+    let data_root = project_data_dir(&graph);
     let label = "tracedecay/autotrack/pr/9";
 
     let d0 = pr_autotrack::discover_open_prs(&project).expect("PR discovery succeeds");
-    let r0 = pr_autotrack::reconcile_project(&project, &data_root, &d0, 10).await;
+    let r0 = reconcile(&graph, &project, &data_root, &d0, 10).await;
     assert_eq!(r0.tracked, vec![label.to_string()]);
 
     // Open three NEW PRs (cap will be 2) and advance managed PR 9's head.
@@ -704,7 +753,7 @@ async fn cap_does_not_starve_head_updates_for_managed_prs() {
     bump_pr(&project, &origin, 9, "pr_nine_v2");
 
     let d1 = pr_autotrack::discover_open_prs(&project).expect("PR discovery succeeds");
-    let r1 = pr_autotrack::reconcile_project(&project, &data_root, &d1, 2).await;
+    let r1 = reconcile(&graph, &project, &data_root, &d1, 2).await;
 
     assert!(r1.capped, "three new PRs under cap=2 flags the cap");
     assert!(
@@ -724,17 +773,17 @@ async fn cap_does_not_starve_head_updates_for_managed_prs() {
 /// than stranding worktrees, refs, synthetic branches and stores forever.
 #[tokio::test]
 async fn teardown_removes_all_managed_state_on_disable() {
-    let (_env, project, origin) = indexed_repo_with_origin().await;
+    let (_env, project, origin, graph) = indexed_repo_with_origin().await;
     add_same_repo_pr(&project, &origin, 4, "pr_four_symbol");
-    let data_root = project_data_dir(&project);
+    let data_root = project_data_dir(&graph);
     let label = "tracedecay/autotrack/pr/4";
 
     let discovery = pr_autotrack::discover_open_prs(&project).expect("PR discovery succeeds");
-    let report = pr_autotrack::reconcile_project(&project, &data_root, &discovery, 10).await;
+    let report = reconcile(&graph, &project, &data_root, &discovery, 10).await;
     assert_eq!(report.tracked, vec![label.to_string()]);
 
     // The daemon runs this when it observes the feature disabled.
-    pr_autotrack::teardown_disabled_project(&project).await;
+    pr_autotrack::teardown_disabled_project(Arc::clone(&graph), &project).await;
 
     assert!(pr_autotrack::managed_summary(&data_root).is_empty());
     assert!(!load_branch_meta(&data_root).unwrap().is_tracked(label));
@@ -760,6 +809,6 @@ async fn teardown_removes_all_managed_state_on_disable() {
     );
 
     // Idempotent: a second teardown with nothing managed is a no-op.
-    pr_autotrack::teardown_disabled_project(&project).await;
+    pr_autotrack::teardown_disabled_project(Arc::clone(&graph), &project).await;
     assert!(pr_autotrack::managed_summary(&data_root).is_empty());
 }
