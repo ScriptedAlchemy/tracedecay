@@ -21,6 +21,14 @@ telemetry events, rollout states, planning authority, or a generated delivery
 tracker. Product owners emit through this plan's existing schemas, and Plan 33
 never changes Plan 26 labels.
 
+**Observatory truthfulness correction (2026-07-26).** The canonical event
+envelope preserves `Failed` and `TimedOut` as terminal outcomes. The
+Observatory projector counts either as an observed failure only when coverage
+is known; unknown, stale, partial, sampled, capped, invalid, or dropped input
+withholds the numeric value and carries an unavailable reason instead of
+rendering zero. This behavior shipped in `7d1e1d1f5` and was hardened in
+`5d5902dd3`; the broader dashboard acceptance status above remains unchanged.
+
 Earlier event-file layouts, implementation ownership lists, fixture matrices,
 benchmark packets, panel paths, and aggregate gate manifests are historical
 evidence, not prerequisites or artifacts that later work must recreate.
