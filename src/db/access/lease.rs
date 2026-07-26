@@ -102,6 +102,34 @@ pub fn enter_maintenance_database_scope<'lease>(
     profile_root: &Path,
     intent: &str,
 ) -> Result<MaintenanceDatabaseScope<'lease>> {
+    let (profile_root, token) =
+        register_maintenance_database_scope(lifecycle, profile_root, intent)?;
+    Ok(MaintenanceDatabaseScope {
+        profile_root,
+        token,
+        _lifecycle: std::marker::PhantomData,
+    })
+}
+
+pub(crate) fn enter_owned_maintenance_database_scope(
+    lifecycle: crate::lifecycle_lease::LifecycleLease,
+    profile_root: &Path,
+    intent: &str,
+) -> Result<OwnedMaintenanceDatabaseScope> {
+    let (profile_root, token) =
+        register_maintenance_database_scope(&lifecycle, profile_root, intent)?;
+    Ok(OwnedMaintenanceDatabaseScope {
+        profile_root,
+        token,
+        lifecycle,
+    })
+}
+
+fn register_maintenance_database_scope(
+    lifecycle: &crate::lifecycle_lease::LifecycleLease,
+    profile_root: &Path,
+    intent: &str,
+) -> Result<(PathBuf, String)> {
     if !lifecycle.is_exclusive() {
         return Err(access_error(
             intent,
@@ -147,11 +175,7 @@ pub fn enter_maintenance_database_scope<'lease>(
             );
         }
     }
-    Ok(MaintenanceDatabaseScope {
-        profile_root,
-        token,
-        _lifecycle: std::marker::PhantomData,
-    })
+    Ok((profile_root, token))
 }
 
 impl Drop for DaemonDatabaseScope {
@@ -174,19 +198,29 @@ impl Drop for DaemonDatabaseScope {
 
 impl Drop for MaintenanceDatabaseScope<'_> {
     fn drop(&mut self) {
-        let mut scopes = MAINTENANCE_SCOPES
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let should_clear = scopes.get_mut(&self.profile_root).is_some_and(|existing| {
-            if existing.token != self.token {
-                return false;
-            }
-            existing.refs = existing.refs.saturating_sub(1);
-            existing.refs == 0
-        });
-        if should_clear {
-            scopes.remove(&self.profile_root);
+        release_maintenance_database_scope(&self.profile_root, &self.token);
+    }
+}
+
+impl Drop for OwnedMaintenanceDatabaseScope {
+    fn drop(&mut self) {
+        release_maintenance_database_scope(&self.profile_root, &self.token);
+    }
+}
+
+fn release_maintenance_database_scope(profile_root: &Path, token: &str) {
+    let mut scopes = MAINTENANCE_SCOPES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let should_clear = scopes.get_mut(profile_root).is_some_and(|existing| {
+        if existing.token != token {
+            return false;
         }
+        existing.refs = existing.refs.saturating_sub(1);
+        existing.refs == 0
+    });
+    if should_clear {
+        scopes.remove(profile_root);
     }
 }
 
