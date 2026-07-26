@@ -45,7 +45,7 @@ pub(crate) async fn rebuild_projection_with_engine(
     conn: &Connection,
     frontier_sequence: u64,
 ) -> ProjectionStoreResult<ProjectionRebuildOutcome> {
-    start_or_resume_projection_rebuild_with_engine(conn, frontier_sequence).await?;
+    prepare_projection_rebuild_with_engine(conn, frontier_sequence).await?;
     for _ in 0..REBUILD_MAX_STEPS_PER_INVOCATION {
         match advance_projection_rebuild_with_engine(conn, frontier_sequence).await? {
             RebuildAdvance::Pending => {}
@@ -55,7 +55,27 @@ pub(crate) async fn rebuild_projection_with_engine(
     projection_rebuild_progress_on(conn).await
 }
 
-async fn start_or_resume_projection_rebuild_with_engine(
+pub(super) async fn resume_projection_rebuild_with_engine(
+    conn: &Connection,
+) -> ProjectionStoreResult<Option<bool>> {
+    let Some(job) = read_optional_rebuild_job(conn).await? else {
+        return Ok(None);
+    };
+    let frontier = decode_sequence(job.frontier, "resume projection rebuild frontier")?;
+    rebuild_projection_with_engine(conn, frontier)
+        .await
+        .map(|outcome| Some(outcome.is_complete()))
+}
+
+pub(super) async fn projection_rebuild_pending(
+    conn: &impl QueryExecutor,
+) -> ProjectionStoreResult<bool> {
+    read_optional_rebuild_job(conn)
+        .await
+        .map(|job| job.is_some())
+}
+
+pub(super) async fn prepare_projection_rebuild_with_engine(
     conn: &Connection,
     frontier_sequence: u64,
 ) -> ProjectionStoreResult<()> {
