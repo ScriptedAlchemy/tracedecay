@@ -19,8 +19,43 @@ env:
   CARGO_PROFILE_DEV_DEBUG: "0"
   CARGO_PROFILE_TEST_DEBUG: "0"
   AST_GREP_VERSION: "0.44.0"
+  # Every Rust job downloads the dashboard built once by dashboard-assets.
+  TRACEDECAY_SKIP_DASHBOARD_BUILD: "1"
 
 jobs:
+  dashboard-assets:
+    name: Build dashboard artifact
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Install dashboard dependencies
+        working-directory: dashboard
+        run: npm ci
+
+      - name: Build dashboard
+        working-directory: dashboard
+        run: npm run build
+
+      - name: Validate dashboard bundle
+        run: python3 scripts/check-dashboard-bundle.py dashboard/app-dist
+
+      - name: Upload dashboard artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dashboard-app-dist
+          path: dashboard/app-dist
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 7
+
   commit-messages:
     name: Commit Messages
     runs-on: ubuntu-latest
@@ -74,6 +109,9 @@ jobs:
       - name: Test release workflow contract
         run: bash tests/release_workflow_contract_test.sh
 
+      - name: Test dashboard workflow contract
+        run: bash tests/dashboard_workflow_contract_test.sh
+
       - name: Test local dogfood command contract
         run: bash tests/dogfood_command_test.sh
 
@@ -82,6 +120,7 @@ jobs:
 
   test:
     name: Test ${{ matrix.name }}
+    needs: dashboard-assets
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
     runs-on: ${{ fromJSON(matrix.runner) }}
     env:
@@ -97,6 +136,12 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
+
+      - name: Download dashboard artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dashboard-app-dist
+          path: dashboard/app-dist
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -198,11 +243,18 @@ jobs:
 
   windows-build:
     name: Build Windows tests
+    needs: dashboard-assets
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
+
+      - name: Download dashboard artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dashboard-app-dist
+          path: dashboard/app-dist
 
       - name: Tune Windows runner for build I/O
         shell: pwsh
@@ -526,11 +578,17 @@ jobs:
   windows-pr12-pr13-packets:
     name: PR12/PR13 packets (Windows evidence)
     if: ${{ !cancelled() && needs.windows-test-shard.result == 'success' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref)) }}
-    needs: windows-test-shard
+    needs: [dashboard-assets, windows-test-shard]
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
+
+      - name: Download dashboard artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dashboard-app-dist
+          path: dashboard/app-dist
 
       - uses: actions/setup-node@v4
         with:
@@ -666,10 +724,17 @@ jobs:
 
   release-compatibility:
     name: Release compatibility
+    needs: dashboard-assets
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+
+      - name: Download dashboard artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dashboard-app-dist
+          path: dashboard/app-dist
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -699,10 +764,17 @@ jobs:
 
   clippy:
     name: Clippy
+    needs: dashboard-assets
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+
+      - name: Download dashboard artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dashboard-app-dist
+          path: dashboard/app-dist
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -737,17 +809,21 @@ jobs:
       - run: cargo fmt --all -- --check
 
   dashboard:
-    name: Dashboard
+    name: Dashboard integration
+    needs: dashboard-assets
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
-    # Covers both halves of the dashboard: the frontend sources under
-    # dashboard/src (typecheck, unit tests, production build) and the Rust API
-    # surface they talk to. Without the frontend steps, dashboard/src is never
-    # compiled or tested anywhere in CI and wire-contract drift between
-    # dashboard/src/contracts/generated.ts and the Rust handlers ships silently.
+    # Frontend checks and the production build run in dashboard-assets. This job
+    # verifies the Rust API surface against those exact downloaded bytes.
     steps:
       - uses: actions/checkout@v7
+
+      - name: Download dashboard artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dashboard-app-dist
+          path: dashboard/app-dist
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -789,15 +865,12 @@ jobs:
         working-directory: dashboard
         run: npm test
 
-      - name: Build dashboard
-        working-directory: dashboard
-        run: npm run build
-
       - name: Run dashboard integration tests
         run: cargo nextest run --all-features --test dashboard_api_test --no-fail-fast --locked
 
   hermes-integration:
     name: Hermes integration (stock)
+    needs: dashboard-assets
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -809,6 +882,12 @@ jobs:
       HERMES_UPSTREAM_REF: 9dd9ef0ec99a87f078f7272b4323df5440b4b3f9
     steps:
       - uses: actions/checkout@v7
+
+      - name: Download dashboard artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dashboard-app-dist
+          path: dashboard/app-dist
 
       - uses: dtolnay/rust-toolchain@stable
 

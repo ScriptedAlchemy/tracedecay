@@ -108,19 +108,15 @@ fn largest_file_rows(files: &[FileRecord]) -> Vec<Value> {
 /// Adapts typed graph-database aggregates to the legacy dashboard JSON shape.
 /// Storage access stays behind [`crate::db::Database`]; this layer only sorts
 /// and labels presentation rows.
-fn overview_metrics(stats: Option<&GraphStats>, files: &[FileRecord]) -> Value {
+fn overview_metrics(stats: &GraphStats, files: &[FileRecord]) -> Value {
     json!({
         "totals": {
-            "nodes": stats.map_or(0, |stats| stats.node_count),
-            "edges": stats.map_or(0, |stats| stats.edge_count),
-            "files": stats.map_or(0, |stats| stats.file_count),
+            "nodes": stats.node_count,
+            "edges": stats.edge_count,
+            "files": stats.file_count,
         },
-        "nodes_by_kind": stats
-            .map(|stats| kind_count_rows(&stats.nodes_by_kind))
-            .unwrap_or_default(),
-        "edges_by_kind": stats
-            .map(|stats| kind_count_rows(&stats.edges_by_kind))
-            .unwrap_or_default(),
+        "nodes_by_kind": kind_count_rows(&stats.nodes_by_kind),
+        "edges_by_kind": kind_count_rows(&stats.edges_by_kind),
         "files_by_language": rows_by_language(files),
         "largest_files": largest_file_rows(files),
     })
@@ -175,23 +171,30 @@ fn collect_node_ids(nodes: &[Value]) -> Vec<String> {
         .collect()
 }
 
-async fn nodes_by_ids(state: &DashboardState, ids: &[String]) -> Vec<Value> {
-    graph_queries::node_rows_by_ids(&state.graph_conn, ids)
-        .await
+async fn nodes_by_ids(state: &DashboardState, ids: &[String]) -> Result<Vec<Value>, String> {
+    Ok(graph_queries::node_rows_by_ids(&state.graph_conn, ids)
+        .await?
         .into_iter()
         .map(node_with_span)
-        .collect()
+        .collect())
 }
 
-async fn edges_for_ids(state: &DashboardState, ids: &[String], limit: i64) -> Vec<Value> {
+async fn edges_for_ids(
+    state: &DashboardState,
+    ids: &[String],
+    limit: i64,
+) -> Result<Vec<Value>, String> {
     graph_queries::edge_rows_for_ids(&state.graph_conn, ids, limit).await
 }
 
 /// Total (in + out) edge count per node, for the given ids. Drives the UI's
 /// size encoding and the "+N collapsed neighbors" affordance.
-async fn degrees_for_ids(state: &DashboardState, ids: &[String]) -> BTreeMap<String, i64> {
+async fn degrees_for_ids(
+    state: &DashboardState,
+    ids: &[String],
+) -> Result<BTreeMap<String, i64>, String> {
     let mut degrees = BTreeMap::new();
-    for row in graph_queries::degree_rows_for_ids(&state.graph_conn, ids).await {
+    for row in graph_queries::degree_rows_for_ids(&state.graph_conn, ids).await? {
         if let (Some(id), Some(degree)) = (
             row.get("node_id").and_then(Value::as_str),
             row.get("degree").and_then(Value::as_i64),
@@ -199,7 +202,7 @@ async fn degrees_for_ids(state: &DashboardState, ids: &[String]) -> BTreeMap<Str
             degrees.insert(id.to_string(), degree);
         }
     }
-    degrees
+    Ok(degrees)
 }
 
 /// Cached whole-graph degree aggregation feeding the overview's
@@ -223,10 +226,10 @@ struct DegreeSummary {
 static DEGREE_CACHE: OnceLock<tokio::sync::Mutex<HashMap<String, Arc<DegreeSummary>>>> =
     OnceLock::new();
 
-async fn degree_summary(state: &DashboardState) -> Arc<DegreeSummary> {
+async fn degree_summary(state: &DashboardState) -> Result<Arc<DegreeSummary>, String> {
     let fingerprint = (
-        graph_queries::total_edges(&state.graph_conn).await,
-        graph_queries::max_edge_id(&state.graph_conn).await,
+        graph_queries::total_edges(&state.graph_conn).await?,
+        graph_queries::max_edge_id(&state.graph_conn).await?,
     );
     let cache = DEGREE_CACHE.get_or_init(|| tokio::sync::Mutex::new(HashMap::new()));
     // Held across the rebuild so concurrent requests share one aggregation.
@@ -234,11 +237,11 @@ async fn degree_summary(state: &DashboardState) -> Arc<DegreeSummary> {
     if let Some(existing) = guard.get(&state.graph_db_path)
         && existing.fingerprint == fingerprint
     {
-        return existing.clone();
+        return Ok(existing.clone());
     }
 
     let pool = graph_queries::degree_pool_rows(&state.graph_conn, DEGREE_POOL_CAP)
-        .await
+        .await?
         .iter()
         .filter_map(|row| {
             row.get("id")
@@ -246,7 +249,7 @@ async fn degree_summary(state: &DashboardState) -> Arc<DegreeSummary> {
                 .map(|id| (id.to_string(), i64_field(row, "degree")))
         })
         .collect();
-    let top_connected = graph_queries::top_connected_rows(&state.graph_conn).await;
+    let top_connected = graph_queries::top_connected_rows(&state.graph_conn).await?;
 
     let summary = Arc::new(DegreeSummary {
         fingerprint,
@@ -254,21 +257,24 @@ async fn degree_summary(state: &DashboardState) -> Arc<DegreeSummary> {
         top_connected,
     });
     guard.insert(state.graph_db_path.clone(), summary.clone());
-    summary
+    Ok(summary)
 }
 
-pub(crate) async fn overview_payload(state: &DashboardState) -> Value {
+pub(crate) async fn overview_payload(state: &DashboardState) -> Result<Value, String> {
     let (stats, files, summary) = tokio::join!(
         state.mem_db.get_stats(),
         state.mem_db.get_all_files(),
         degree_summary(state),
     );
-    let mut payload = overview_metrics(stats.as_ref().ok(), files.as_deref().unwrap_or_default());
+    let stats = stats.map_err(|error| error.to_string())?;
+    let files = files.map_err(|error| error.to_string())?;
+    let summary = summary?;
+    let mut payload = overview_metrics(&stats, &files);
     if let Some(object) = payload.as_object_mut() {
         object.insert("path".into(), json!(state.graph_db_path));
         object.insert("top_connected".into(), json!(summary.top_connected));
     }
-    payload
+    Ok(payload)
 }
 
 pub(crate) async fn search_payload(
@@ -276,52 +282,61 @@ pub(crate) async fn search_payload(
     query: &str,
     limit: i64,
     offset: i64,
-) -> Value {
-    let total = graph_queries::search_total(&state.graph_conn, query).await;
-    let results = graph_queries::search_rows(&state.graph_conn, query, limit, offset).await;
+) -> Result<Value, String> {
+    let total = graph_queries::search_total(&state.graph_conn, query).await?;
+    let results = graph_queries::search_rows(&state.graph_conn, query, limit, offset).await?;
     let ids = collect_node_ids(&results);
-    let degrees = degrees_for_ids(state, &ids).await;
+    let degrees = degrees_for_ids(state, &ids).await?;
     let results = attach_degrees(results.into_iter().map(node_with_span).collect(), &degrees);
 
-    json!({
+    Ok(json!({
         "query": query,
         "limit": limit,
         "offset": offset,
         "total": total,
         "count": results.len(),
         "results": results,
-    })
+    }))
 }
 
-pub(crate) async fn node_exists(state: &DashboardState, node_id: &str) -> bool {
+pub(crate) async fn node_exists(state: &DashboardState, node_id: &str) -> Result<bool, String> {
     graph_queries::node_exists(&state.graph_conn, node_id).await
 }
 
-pub(crate) async fn node_payload(state: &DashboardState, node_id: &str) -> Option<Value> {
-    let row = graph_queries::node_row(&state.graph_conn, node_id).await?;
-    let degrees = degrees_for_ids(state, &[node_id.to_string()]).await;
+pub(crate) async fn node_payload(
+    state: &DashboardState,
+    node_id: &str,
+) -> Result<Option<Value>, String> {
+    let Some(row) = graph_queries::node_row(&state.graph_conn, node_id).await? else {
+        return Ok(None);
+    };
+    let degrees = degrees_for_ids(state, &[node_id.to_string()]).await?;
     let node = attach_degrees(vec![node_with_span(row)], &degrees)
         .into_iter()
         .next()
         .unwrap_or(Value::Null);
-    Some(json!({ "node": node }))
+    Ok(Some(json!({ "node": node })))
 }
 
-pub(crate) async fn neighbors_payload(state: &DashboardState, node_id: &str, limit: i64) -> Value {
-    let callers = graph_queries::caller_rows(&state.graph_conn, node_id, limit).await;
-    let callees = graph_queries::callee_rows(&state.graph_conn, node_id, limit).await;
-    let edges = graph_queries::neighborhood_edge_rows(&state.graph_conn, node_id, limit).await;
-    let edges_by_kind = graph_queries::neighborhood_edge_counts(&state.graph_conn, node_id).await;
+pub(crate) async fn neighbors_payload(
+    state: &DashboardState,
+    node_id: &str,
+    limit: i64,
+) -> Result<Value, String> {
+    let callers = graph_queries::caller_rows(&state.graph_conn, node_id, limit).await?;
+    let callees = graph_queries::callee_rows(&state.graph_conn, node_id, limit).await?;
+    let edges = graph_queries::neighborhood_edge_rows(&state.graph_conn, node_id, limit).await?;
+    let edges_by_kind = graph_queries::neighborhood_edge_counts(&state.graph_conn, node_id).await?;
 
     let mut neighbor_ids = collect_node_ids(&callers);
     neighbor_ids.extend(collect_node_ids(&callees));
     neighbor_ids.sort();
     neighbor_ids.dedup();
-    let degrees = degrees_for_ids(state, &neighbor_ids).await;
+    let degrees = degrees_for_ids(state, &neighbor_ids).await?;
     let callers = attach_degrees(callers.into_iter().map(node_with_span).collect(), &degrees);
     let callees = attach_degrees(callees.into_iter().map(node_with_span).collect(), &degrees);
 
-    json!({
+    Ok(json!({
         "node_id": node_id,
         "depth": 1,
         "limit": limit,
@@ -329,7 +344,7 @@ pub(crate) async fn neighbors_payload(state: &DashboardState, node_id: &str, lim
         "callees": callees,
         "edges": edges,
         "edges_by_kind": edges_by_kind,
-    })
+    }))
 }
 
 /// Seedless "project overview" slice: the most-connected symbols plus the
@@ -342,11 +357,15 @@ pub(crate) async fn neighbors_payload(state: &DashboardState, node_id: &str, lim
 /// it), seed a new cluster from the highest-degree connected node when
 /// nothing touches the selection, and let isolated nodes fill whatever
 /// capacity is left (which also keeps tiny or edge-free indexes non-empty).
-async fn default_subgraph(state: &DashboardState, node_limit: i64, edge_limit: i64) -> Value {
+async fn default_subgraph(
+    state: &DashboardState,
+    node_limit: i64,
+    edge_limit: i64,
+) -> Result<Value, String> {
     // Candidate pool: 2x the node budget so selection has room to work with,
     // served as a prefix of the cached top-degree summary.
     let pool_limit = usize::try_from((node_limit * 2).min(DEGREE_POOL_CAP)).unwrap_or(0);
-    let summary = degree_summary(state).await;
+    let summary = degree_summary(state).await?;
 
     let mut pool_ids = Vec::new();
     let mut degrees: BTreeMap<String, i64> = BTreeMap::new();
@@ -355,7 +374,7 @@ async fn default_subgraph(state: &DashboardState, node_limit: i64, edge_limit: i
         degrees.insert(id.clone(), *degree);
     }
 
-    let pool_edges = edges_for_ids(state, &pool_ids, DEFAULT_POOL_EDGE_CAP).await;
+    let pool_edges = edges_for_ids(state, &pool_ids, DEFAULT_POOL_EDGE_CAP).await?;
 
     // Adjacency over the pool: node id -> indices of touching edges
     // (self-loops don't make a node "connected" for selection purposes).
@@ -444,10 +463,10 @@ async fn default_subgraph(state: &DashboardState, node_limit: i64, edge_limit: i
         .map(|idx| pool_edges[idx].clone())
         .collect();
 
-    let nodes = attach_degrees(nodes_by_ids(state, &selected).await, &degrees);
-    let total_nodes = graph_queries::total_nodes(&state.graph_conn).await;
+    let nodes = attach_degrees(nodes_by_ids(state, &selected).await?, &degrees);
+    let total_nodes = graph_queries::total_nodes(&state.graph_conn).await?;
 
-    json!({
+    Ok(json!({
         "seed_id": Value::Null,
         "mode": "default",
         "nodes": nodes,
@@ -460,7 +479,7 @@ async fn default_subgraph(state: &DashboardState, node_limit: i64, edge_limit: i
             "nodes": node_limit,
             "edges": edge_limit,
         },
-    })
+    }))
 }
 
 pub(crate) async fn subgraph_payload(
@@ -469,22 +488,22 @@ pub(crate) async fn subgraph_payload(
     query: &str,
     node_limit: i64,
     edge_limit: i64,
-) -> Value {
+) -> Result<Value, String> {
     let seed_id = match node_id.filter(|id| !id.trim().is_empty()) {
         Some(id) => Some(id),
         None if !query.is_empty() => {
-            let Some(id) = graph_queries::first_node_for_query(&state.graph_conn, query).await
+            let Some(id) = graph_queries::first_node_for_query(&state.graph_conn, query).await?
             else {
                 // Explicit query with no hit: an empty payload, not the
                 // default slice, so a failed search reads as "no match".
-                return json!({
+                return Ok(json!({
                     "seed_id": Value::Null,
                     "mode": "seeded",
                     "nodes": [],
                     "edges": [],
                     "capped": { "nodes": false, "edges": false },
                     "limits": { "nodes": node_limit, "edges": edge_limit },
-                });
+                }));
             };
             Some(id)
         }
@@ -494,7 +513,8 @@ pub(crate) async fn subgraph_payload(
         return default_subgraph(state, node_limit, edge_limit).await;
     };
 
-    let candidate_rows = graph_queries::subgraph_candidate_rows(&state.graph_conn, &seed_id).await;
+    let candidate_rows =
+        graph_queries::subgraph_candidate_rows(&state.graph_conn, &seed_id).await?;
     let mut all_ids = Vec::new();
     let mut seen = BTreeSet::new();
     for row in candidate_rows {
@@ -506,14 +526,14 @@ pub(crate) async fn subgraph_payload(
     }
 
     let selected_ids: Vec<String> = all_ids.iter().take(node_limit as usize).cloned().collect();
-    let degrees = degrees_for_ids(state, &selected_ids).await;
-    let nodes = attach_degrees(nodes_by_ids(state, &selected_ids).await, &degrees);
-    let edges = edges_for_ids(state, &selected_ids, edge_limit + 1).await;
+    let degrees = degrees_for_ids(state, &selected_ids).await?;
+    let nodes = attach_degrees(nodes_by_ids(state, &selected_ids).await?, &degrees);
+    let edges = edges_for_ids(state, &selected_ids, edge_limit + 1).await?;
     let edge_count = edges.len();
     let capped_edges = edge_count > edge_limit as usize;
     let visible_edges: Vec<Value> = edges.into_iter().take(edge_limit as usize).collect();
 
-    json!({
+    Ok(json!({
         "seed_id": seed_id,
         "mode": "seeded",
         "nodes": nodes,
@@ -526,7 +546,7 @@ pub(crate) async fn subgraph_payload(
             "nodes": node_limit,
             "edges": edge_limit,
         },
-    })
+    }))
 }
 
 /// Undirected shortest path between two nodes via breadth-first search over
@@ -537,7 +557,7 @@ pub(crate) async fn path_payload(
     from: &str,
     to: &str,
     max_depth: i64,
-) -> Value {
+) -> Result<Value, String> {
     let mut payload = json!({
         "from": from,
         "to": to,
@@ -548,7 +568,7 @@ pub(crate) async fn path_payload(
         "max_depth": max_depth,
     });
     if from.is_empty() || to.is_empty() {
-        return payload;
+        return Ok(payload);
     }
 
     // child -> (parent, edge row) back-pointers for path reconstruction.
@@ -564,7 +584,7 @@ pub(crate) async fn path_payload(
         }
         let mut next = Vec::new();
         for chunk in frontier.chunks(400) {
-            for row in graph_queries::frontier_edge_rows(&state.graph_conn, chunk).await {
+            for row in graph_queries::frontier_edge_rows(&state.graph_conn, chunk).await? {
                 let Some(source) = row.get("source").and_then(Value::as_str) else {
                     continue;
                 };
@@ -594,7 +614,7 @@ pub(crate) async fn path_payload(
     }
 
     if !found {
-        return payload;
+        return Ok(payload);
     }
 
     let mut path_ids = vec![to.to_string()];
@@ -611,15 +631,15 @@ pub(crate) async fn path_payload(
     path_ids.reverse();
     path_edges.reverse();
 
-    let degrees = degrees_for_ids(state, &path_ids).await;
-    let nodes = attach_degrees(nodes_by_ids(state, &path_ids).await, &degrees);
+    let degrees = degrees_for_ids(state, &path_ids).await?;
+    let nodes = attach_degrees(nodes_by_ids(state, &path_ids).await?, &degrees);
     if let Some(obj) = payload.as_object_mut() {
         obj.insert("found".into(), json!(true));
         obj.insert("path".into(), json!(path_ids));
         obj.insert("nodes".into(), json!(nodes));
         obj.insert("edges".into(), json!(path_edges));
     }
-    payload
+    Ok(payload)
 }
 
 #[cfg(test)]
@@ -653,7 +673,7 @@ mod tests {
             file_record("src/c.rs", 7, 300),
         ];
 
-        let payload = overview_metrics(Some(&stats), &files);
+        let payload = overview_metrics(&stats, &files);
 
         assert_eq!(
             payload["totals"],

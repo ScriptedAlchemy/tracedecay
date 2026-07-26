@@ -21,6 +21,7 @@ pub mod gemini;
 pub mod hermes;
 pub mod host_bundle_registry;
 pub mod host_bundle_v2;
+pub mod host_registration;
 pub mod kilo;
 pub mod kimi;
 pub mod kiro;

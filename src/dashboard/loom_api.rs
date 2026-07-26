@@ -98,6 +98,16 @@ struct LoomReadV1 {
     latest_activated_at: Option<i64>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct LoomFileSessionProjectionV1 {
+    pub(crate) granularity: &'static str,
+    pub(crate) authority: &'static str,
+    pub(crate) providers: Vec<String>,
+    pub(crate) eligible_sessions: u64,
+    pub(crate) matched_sessions: u64,
+    pub(crate) sessions: Vec<Value>,
+}
+
 pub(crate) async fn temporal(
     State(state): State<DashboardState>,
     JsonQuery(params): JsonQuery<LoomTemporalParamsV1>,
@@ -415,6 +425,43 @@ async fn read_temporal(
         },
         examined_sessions,
         latest_activated_at,
+    })
+}
+
+pub(crate) async fn sessions_for_edited_file(
+    conn: &(impl QueryExecutor + ?Sized),
+    file_path: &str,
+) -> Result<LoomFileSessionProjectionV1, String> {
+    let eligible_sessions = query_count(
+        conn,
+        "SELECT COUNT(*) AS eligible
+         FROM sessions
+         WHERE json_valid(metadata_json)
+           AND json_type(metadata_json, '$.edited_files') = 'array'",
+        (),
+        "eligible",
+    )
+    .await?;
+    let sessions = query_rows(
+        conn,
+        "SELECT DISTINCT s.provider, s.session_id, s.title, s.started_at, s.ended_at
+         FROM sessions AS s
+         JOIN json_each(s.metadata_json, '$.edited_files') AS edited
+         WHERE json_valid(s.metadata_json)
+           AND json_type(s.metadata_json, '$.edited_files') = 'array'
+           AND edited.type = 'text'
+           AND edited.value = ?1
+         ORDER BY (s.started_at IS NULL), s.started_at DESC, s.rowid DESC",
+        params![file_path],
+    )
+    .await?;
+    Ok(LoomFileSessionProjectionV1 {
+        granularity: "file",
+        authority: "sessions.metadata_json $.edited_files[]",
+        providers: providers(&sessions),
+        eligible_sessions,
+        matched_sessions: matched_sessions(&sessions),
+        sessions,
     })
 }
 
