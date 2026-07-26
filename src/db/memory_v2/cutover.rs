@@ -5,13 +5,13 @@ use crate::errors::Result;
 
 use super::backfill::{backfill_fact_batch, backfill_feedback_batch, backfill_oplog_batch};
 use super::types::{
-    CapturedMemoryV2Frontiers, MemoryV2BackfillBatchOutcome, MemoryV2CutoverOutcome,
-    MemoryV2CutoverReceipt,
+    CapturedMemoryV2Frontiers, MemoryV2BackfillBatchOutcome, MemoryV2CutoverCoverage,
+    MemoryV2CutoverOutcome, MemoryV2CutoverReceipt, OwnerKey,
 };
 use super::{
     MAX_BATCH_SIZE, OPERATION, begin, canonical_cutover_replay, db_error, db_message,
     finish_transaction, json_text, load_or_create_progress, now_micros, owner_key, scalar_i64,
-    validate_scope, validate_v1_compatibility_source,
+    scalar_i64_params, validate_scope, validate_v1_compatibility_source,
 };
 
 pub(in crate::db) async fn load_or_capture_memory_v2_frontiers(
@@ -161,6 +161,230 @@ pub(in crate::db) async fn backfill_memory_v2_batch(
     finish_transaction(transaction, result, OPERATION).await
 }
 
+async fn memory_v2_cutover_coverage(
+    conn: &impl super::MemoryV2Executor,
+    owner: &OwnerKey,
+    source_store_id: &SourceStoreId,
+    frontiers: CapturedMemoryV2Frontiers,
+) -> Result<MemoryV2CutoverCoverage> {
+    let source_fact_count = scalar_i64_params(
+        conn,
+        "SELECT COUNT(*) FROM memory_facts WHERE fact_id <= ?1",
+        params![frontiers.facts],
+    )
+    .await?;
+    let represented_fact_count = scalar_i64_params(
+        conn,
+        "SELECT COUNT(*)
+         FROM memory_facts AS legacy
+         WHERE legacy.fact_id <= ?1
+           AND EXISTS(
+             SELECT 1
+             FROM memory_v2_legacy_map AS mappings
+             JOIN memory_v2_facts AS facts
+               ON facts.fact_id = mappings.fact_id
+              AND facts.owner_kind = mappings.owner_kind
+              AND facts.project_id = mappings.project_id
+             JOIN memory_v2_current_facts AS current_facts
+               ON current_facts.fact_id = mappings.fact_id
+              AND current_facts.owner_kind = mappings.owner_kind
+              AND current_facts.project_id = mappings.project_id
+             WHERE mappings.owner_kind = ?2
+               AND mappings.project_id = ?3
+               AND mappings.owner_json = ?4
+               AND mappings.source_store_id = ?5
+               AND mappings.legacy_fact_id = legacy.fact_id
+               AND facts.owner_json = mappings.owner_json
+               AND (
+                 EXISTS(
+                   SELECT 1 FROM memory_v2_legacy_quarantine AS quarantine
+                   WHERE quarantine.owner_kind = mappings.owner_kind
+                     AND quarantine.project_id = mappings.project_id
+                     AND quarantine.source_store_id = mappings.source_store_id
+                     AND quarantine.source_table = 'memory_facts'
+                     AND quarantine.source_row_id = legacy.fact_id
+                 )
+                 OR (
+                   current_facts.payload_access IN ('eligible', 'redacted')
+                   AND current_facts.active_assertion_id IS NOT NULL
+                   AND EXISTS(
+                     SELECT 1 FROM memory_v2_assertion_payloads AS payloads
+                     WHERE payloads.assertion_id = current_facts.active_assertion_id
+                       AND payloads.fact_id = current_facts.fact_id
+                       AND payloads.owner_kind = current_facts.owner_kind
+                       AND payloads.project_id = current_facts.project_id
+                   )
+                 )
+               )
+           )",
+        params![
+            frontiers.facts,
+            owner.kind,
+            owner.project_id.as_str(),
+            owner.json.as_str(),
+            source_store_id.as_str()
+        ],
+    )
+    .await?;
+    let source_feedback_count = scalar_i64_params(
+        conn,
+        "SELECT COUNT(*) FROM memory_feedback_events WHERE event_id <= ?1",
+        params![frontiers.feedback],
+    )
+    .await?;
+    let represented_feedback_count = scalar_i64_params(
+        conn,
+        "SELECT COUNT(*)
+         FROM memory_feedback_events AS legacy
+         WHERE legacy.event_id <= ?1
+           AND (
+             EXISTS(
+               SELECT 1
+               FROM memory_v2_legacy_feedback_event_map AS mappings
+               JOIN memory_v2_lineage_events AS events
+                 ON events.event_id = mappings.event_id
+                AND events.fact_id = mappings.fact_id
+                AND events.owner_kind = mappings.owner_kind
+                AND events.project_id = mappings.project_id
+               WHERE mappings.owner_kind = ?2
+                 AND mappings.project_id = ?3
+                 AND mappings.source_store_id = ?4
+                 AND mappings.legacy_feedback_event_id = legacy.event_id
+             )
+             OR EXISTS(
+               SELECT 1 FROM memory_v2_legacy_quarantine AS quarantine
+               WHERE quarantine.owner_kind = ?2
+                 AND quarantine.project_id = ?3
+                 AND quarantine.source_store_id = ?4
+                 AND quarantine.source_table = 'memory_feedback_events'
+                 AND quarantine.source_row_id = legacy.event_id
+             )
+           )",
+        params![
+            frontiers.feedback,
+            owner.kind,
+            owner.project_id.as_str(),
+            source_store_id.as_str()
+        ],
+    )
+    .await?;
+    let source_oplog_count = scalar_i64_params(
+        conn,
+        "SELECT COUNT(*) FROM memory_oplog WHERE id <= ?1",
+        params![frontiers.oplog],
+    )
+    .await?;
+    // The legacy oplog is a processing journal rather than a one-row-per-event
+    // V2 projection: add/update/feedback/curate entries are intentionally
+    // quarantined and successful removals become lineage events. Reaching the
+    // facts phase proves the append-only oplog cursor was drained transactionally
+    // through this frontier, so the persisted frontier is its coverage witness.
+    let represented_oplog_count = source_oplog_count;
+    Ok(MemoryV2CutoverCoverage {
+        source_fact_count,
+        represented_fact_count,
+        source_feedback_count,
+        represented_feedback_count,
+        source_oplog_count,
+        represented_oplog_count,
+    })
+}
+
+async fn require_complete_cutover_coverage(
+    conn: &impl super::MemoryV2Executor,
+    owner: &OwnerKey,
+    source_store_id: &SourceStoreId,
+    frontiers: CapturedMemoryV2Frontiers,
+) -> Result<MemoryV2CutoverCoverage> {
+    let coverage = memory_v2_cutover_coverage(conn, owner, source_store_id, frontiers).await?;
+    if coverage.is_complete() {
+        return Ok(coverage);
+    }
+    Err(db_message(
+        "memory_v2_cutover",
+        format!(
+            "cutover coverage verification failed: facts {}/{}, feedback {}/{}, oplog {}/{}",
+            coverage.represented_fact_count,
+            coverage.source_fact_count,
+            coverage.represented_feedback_count,
+            coverage.source_feedback_count,
+            coverage.represented_oplog_count,
+            coverage.source_oplog_count,
+        ),
+    ))
+}
+
+pub(super) async fn verify_memory_v2_cutover_complete(
+    conn: &impl super::MemoryV2Executor,
+    owner: &OwnerKey,
+    source_store_id: &SourceStoreId,
+) -> Result<MemoryV2CutoverCoverage> {
+    let mut rows = conn
+        .query(
+            "SELECT phase, feedback_frontier, oplog_frontier, fact_frontier
+             FROM memory_v2_backfill_progress
+             WHERE owner_kind = ?1 AND project_id = ?2 AND source_store_id = ?3",
+            params![
+                owner.kind,
+                owner.project_id.as_str(),
+                source_store_id.as_str()
+            ],
+        )
+        .await
+        .map_err(|error| db_error("memory_v2_cutover", error))?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|error| db_error("memory_v2_cutover", error))?
+        .ok_or_else(|| db_message("memory_v2_cutover", "backfill progress is missing"))?;
+    let phase: String = row
+        .get(0)
+        .map_err(|error| db_error("memory_v2_cutover", error))?;
+    if phase != "cutover_complete" {
+        return Err(db_message(
+            "memory_v2_cutover",
+            "legacy payload purge requires a verified completed backfill",
+        ));
+    }
+    let frontiers = CapturedMemoryV2Frontiers {
+        feedback: row
+            .get(1)
+            .map_err(|error| db_error("memory_v2_cutover", error))?,
+        oplog: row
+            .get(2)
+            .map_err(|error| db_error("memory_v2_cutover", error))?,
+        facts: row
+            .get(3)
+            .map_err(|error| db_error("memory_v2_cutover", error))?,
+    };
+    drop(rows);
+    require_complete_cutover_coverage(conn, owner, source_store_id, frontiers).await
+}
+
+fn receipt_json_with_coverage(
+    receipt_json: &str,
+    coverage: MemoryV2CutoverCoverage,
+) -> Result<String> {
+    let mut receipt: serde_json::Value = serde_json::from_str(receipt_json).map_err(|_| {
+        db_message(
+            "memory_v2_cutover",
+            "stored cutover receipt is invalid JSON",
+        )
+    })?;
+    let object = receipt.as_object_mut().ok_or_else(|| {
+        db_message(
+            "memory_v2_cutover",
+            "stored cutover receipt is not an object",
+        )
+    })?;
+    object.insert(
+        "coverage".to_owned(),
+        serde_json::to_value(coverage)
+            .map_err(|_| db_message("memory_v2_cutover", "cutover coverage encoding failed"))?,
+    );
+    json_text(&receipt)
+}
+
 pub(in crate::db) async fn finalize_memory_v2_cutover(
     conn: &engine::Connection,
     receipt: &MemoryV2CutoverReceipt,
@@ -168,7 +392,7 @@ pub(in crate::db) async fn finalize_memory_v2_cutover(
     validate_scope(&receipt.owner, &receipt.source_store_id)?;
     validate_v1_compatibility_source(&receipt.source_store_id)?;
     let owner = owner_key(&receipt.owner)?;
-    let receipt_json = json_text(receipt)?;
+    let candidate_receipt_json = json_text(receipt)?;
     let transaction = begin(conn, "memory_v2_cutover").await?;
     let result = {
         let conn = &transaction;
@@ -210,7 +434,31 @@ pub(in crate::db) async fn finalize_memory_v2_cutover(
                 let existing = row
                     .get::<String>(4)
                     .map_err(|error| db_error("memory_v2_cutover", error))?;
-                canonical_cutover_replay(existing, &receipt_json)?;
+                canonical_cutover_replay(existing.clone(), &candidate_receipt_json)?;
+                let coverage = require_complete_cutover_coverage(
+                    conn,
+                    &owner,
+                    &receipt.source_store_id,
+                    stored,
+                )
+                .await?;
+                let verified_receipt_json = receipt_json_with_coverage(&existing, coverage)?;
+                if verified_receipt_json != existing {
+                    conn.execute(
+                        "UPDATE memory_v2_backfill_progress
+                         SET cutover_receipt_json = ?1, updated_at = ?2
+                         WHERE owner_kind = ?3 AND project_id = ?4 AND source_store_id = ?5",
+                        params![
+                            verified_receipt_json,
+                            now_micros()?,
+                            owner.kind,
+                            owner.project_id.as_str(),
+                            receipt.source_store_id.as_str()
+                        ],
+                    )
+                    .await
+                    .map_err(|error| db_error("memory_v2_cutover", error))?;
+                }
                 return Ok(MemoryV2CutoverOutcome::Complete);
             }
             if phase != "awaiting_cutover" {
@@ -263,6 +511,10 @@ pub(in crate::db) async fn finalize_memory_v2_cutover(
                     "cutover receipt does not bind the drained frontier",
                 ));
             }
+            let coverage =
+                require_complete_cutover_coverage(conn, &owner, &receipt.source_store_id, stored)
+                    .await?;
+            let verified_receipt_json = json_text(&receipt.with_verified_coverage(coverage))?;
             conn.execute(
                 "UPDATE memory_v2_backfill_progress SET
                 phase = 'cutover_complete', cutover_completed_at = ?1,
@@ -270,7 +522,7 @@ pub(in crate::db) async fn finalize_memory_v2_cutover(
              WHERE owner_kind = ?3 AND project_id = ?4 AND source_store_id = ?5",
                 params![
                     receipt.dual_write_activated_at.0,
-                    receipt_json,
+                    verified_receipt_json,
                     owner.kind,
                     owner.project_id.as_str(),
                     receipt.source_store_id.as_str()

@@ -237,8 +237,7 @@ pub(crate) enum DatabaseMemoryTransaction<'a> {
 ///
 /// This capability intentionally exposes neither the writable connection nor
 /// arbitrary SQL execution.
-#[doc(hidden)]
-pub struct DatabaseMemoryWriter<'a> {
+pub(crate) struct DatabaseMemoryWriter<'a> {
     writer: DatabaseWriterConnection<'a>,
 }
 
@@ -525,7 +524,7 @@ impl crate::db::engine::DatabaseAttachmentExecutor for DatabaseMemoryTransaction
 impl DatabaseMemoryWriter<'_> {
     /// Returns a memory store whose writable connection remains protected by
     /// the canonical database writer lane for this capability's lifetime.
-    pub fn store(&self) -> crate::memory::store::MemoryStore<'_> {
+    pub(crate) fn store(&self) -> crate::memory::store::MemoryStore<'_> {
         self.writer.memory_store()
     }
 
@@ -1212,9 +1211,8 @@ impl Database {
         })
     }
 
-    /// Acquires opaque, serialized access to memory mutations.
-    #[doc(hidden)]
-    pub async fn memory_writer(&self) -> Result<DatabaseMemoryWriter<'_>> {
+    /// Acquires migration/test-only serialized access to the V1 projection.
+    pub(crate) async fn memory_writer(&self) -> Result<DatabaseMemoryWriter<'_>> {
         Ok(DatabaseMemoryWriter {
             writer: self
                 .writer_connection("memory store writer capability")
