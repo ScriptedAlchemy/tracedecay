@@ -31,58 +31,46 @@ clean zeros. This dashboard/API checkpoint is **implemented but unverified**
 because the Rust `dashboard_api_test` suite has not completed successfully; do
 not replan the behavior as absent and do not report it as verified.
 
-**Audit correction (2026-07-26; see
-[`GAP-LEDGER-PR8-PR14.md`](GAP-LEDGER-PR8-PR14.md) P0-7 and P1-a.)** "All seven
-sections are implemented" is true of the mechanisms and misleading about
-effect. Three lossless-data cleanup policies ship disabled by default:
-
-- Observation evidence retention defaults `enabled: false` with every release
-  window `None` (`src/global_db/observation/retention.rs:174-182`), even though
-  the daemon calls it (`src/daemon/git_watch/store_maintenance.rs:216-224`).
-- LCM retention runs, but `offload_after_days` and `drop_after_days` default to
-  `None`, leaving deduplication at 30 days as its only effect
-  (`src/sessions/lcm/retention.rs:128-139`). §4's "one content copy" is
-  therefore only partly achieved.
-- Session-row retention defaults `session_messages_days: None` and
-  `lcm_raw_messages_days: None` (`src/retention.rs:74-82`), deliberately,
-  because those rows are the lossless session record. Only `analytics_events`
-  prunes by default, at 180 days.
-
-LCM deduplication and analytics-event pruning still run by default, and the
-other product-contract sections add cleanup paths for the measured failure
-classes below. Whether lossless payload retention remains the right default
-given those measurements is an open owner question, not an implementation gap.
-
 ## Measured failure classes (evidence, one dogfood profile)
 
 The current measured profile totals 106 GB: `projects/` is 101 GB across 464
 shards, all `sessions.db` files total 35.7 GiB, `branches/` totals 30.8 GiB,
-`code-index-v1/` totals 22.9 GiB, and `global.db` is 0.98 GiB. The largest
+`code-index-v1/` totals 22.2 GiB, and `global.db` is 0.98 GiB. The largest
 single file is a 15.7 GiB `sessions.db`. These are reproducible file/directory
 measurements, not inferred table sizes.
 
-1. **Branch graph-DB copies, never collected — 40 GB in one project.**
-   `branches/` holds a full graph shard per branch ever worked on. Branch
-   deletion does not trigger DB cleanup, and no periodic sweep runs. Manual
-   GC of stale entries freed 24.8 GB across projects.
-2. **Identity-drift orphan stores — ~41 GB.** A project-root path migration
+1. **Live branch stores scale as branches × full graph size.** Branch creation
+   clones the ancestor graph database wholesale. In the measured project the
+   main database is 161 MiB, the median branch database is 164 MiB, and 103
+   live branches occupy 17.2 GiB by construction rather than by neglect.
+   ext4 accounting is not inflating that result: every branch database has
+   inode link count 1 and apparent size equals allocated size. Branch GC can
+   collect stores whose branch is gone; it cannot make live branch stores
+   lightweight.
+2. **Code-index generations have no retention.** `code-index-v1/` contains 28
+   immutable generation files totalling 22.2 GiB with exactly one active
+   generation. The generation sequence is also 28, matching the file count, so
+   no generation has ever been deleted. Code inspection matches the disk
+   evidence: publication writes a new immutable generation file and advances
+   the active pointer, while removal exists only for temporary files.
+3. **Identity-drift orphan stores — ~41 GB.** A project-root path migration
    re-registered repositories under new project IDs; the old-identity stores
    remained silently, invisible to any surface. Registry GC exists but was
    not automatic and was blocked by a daemon configuration-authority bug.
-3. **Unbounded session retention with structural duplication.** The measured
+4. **Unbounded session retention with structural duplication.** The measured
    `sessions.db` population totals 35.7 GiB and includes a 15.7 GiB single
    file. Structurally, `lcm_raw_messages` and `session_messages` can retain the
    same conversations in raw and projected form, with FTS shadows and
    append-only evidence beside them. Per-table contribution is unknown until
    the product telemetry port has a real implementation.
-4. **Incident debris classifier that existed but never fired on live names.**
+5. **Incident debris classifier that existed but never fired on live names.**
    The live profile carried bare `tracedecay.db.corrupt` artifacts totalling
    125 MiB. `IncidentDebrisKindV1::classify` recognized only
    `*.corrupt-*`, `*.recovered*`, and `recovery-*`; all three patterns matched
    zero live profile files. Commit `985cc5d4b` added the bare `.corrupt`
    convention. The collector was reachable before that fix, but its classifier
    could not see the artifacts it was claimed to own.
-5. **Free-page bloat.** Large DBs carry unreclaimed free pages; no
+6. **Free-page bloat.** Large DBs carry unreclaimed free pages; no
    compaction policy exists.
 
 ## Product contract
@@ -130,6 +118,8 @@ measurements, not inferred table sizes.
 - Session retention is daemon-wired. Projected-message dedupe has a default
   window, while raw offload/drop and disposition-scoped observation-evidence
   release require owner configuration and are inactive by default.
+- Code-index generation retention is not implemented; publication advances the
+  active pointer without collecting superseded immutable generation files.
 - Reclaiming `source_cursor_advances` is not implemented; its immutable
   update/delete triggers must be versioned or the rows relocated before a
   retention pass can own them.

@@ -3,6 +3,7 @@
 use schemars::JsonSchema;
 use schemars::generate::SchemaSettings;
 
+use super::automation_scheduler_api::AutomationSchedulerStatusV1;
 use super::code_index_freshness_api::CodeIndexFreshnessPayloadV1;
 use super::doctor_findings_api::DoctorFindingsPayloadV1;
 use super::doctor_remediation_api::{
@@ -10,8 +11,8 @@ use super::doctor_remediation_api::{
 };
 use super::explorer_api::ExplorerQueryRunV1;
 use super::graph_structure_api::{
-    CallChainMeasurementV1, FactMatchesMeasurementV1, StrataMeasurementV1, StructureReadV1,
-    TestMapMeasurementV1,
+    CallChainMeasurementV1, FactMatchesMeasurementV1, NodeSessionsMeasurementV1,
+    StrataMeasurementV1, StructureReadV1, TestMapMeasurementV1,
 };
 use super::read_model::{DASHBOARD_SCHEMA_REVISION_V1, DashboardEnvelopeV1};
 use super::storage_findings_api::StorageFindingsPayloadV1;
@@ -33,6 +34,10 @@ struct DashboardContractCatalogV1 {
     graph_strata: StructureReadV1<StrataMeasurementV1>,
     graph_fact_matches: StructureReadV1<FactMatchesMeasurementV1>,
     graph_test_map: StructureReadV1<TestMapMeasurementV1>,
+    graph_node_sessions: StructureReadV1<NodeSessionsMeasurementV1>,
+    /// Served identically by `GET /api/automation/scheduler/status` and by the
+    /// `pause`/`resume` controls, which re-read rather than acknowledge.
+    automation_scheduler_status: AutomationSchedulerStatusV1,
 }
 
 #[derive(JsonSchema)]
