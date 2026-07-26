@@ -134,7 +134,7 @@
   },
   "expected_pr9_fallback_digests": {
     "train": "sha256:80fd668d9b7b6dfabd1977c7b8e0f5605225a33a26081cc2e8e22f4801815cd4",
-    "validation": "sha256:655971fe04db70cd591707030c5e17e046241209288b536bf5e4594558696697"
+    "validation": "sha256:105bb59aa0e537b99d2f71db234cc9c2722213209692b4d168351d424a42f7c7"
   },
   "profile_matrix": [
     {
@@ -519,7 +519,9 @@
       ],
       "label": {
         "anchors": [
-          "repository::RepositoryDirtyStateV1"
+          "repository::RepositoryDirtyStateV1",
+          "repository::RepositoryRemoteIdentityV1",
+          "repository::evidence"
         ],
         "document_id": "repository",
         "literal": "pub enum RepositoryDirtyStateV1"
@@ -643,7 +645,7 @@
     },
     {
       "allowed_scopes": [
-        "context_eval"
+        "project"
       ],
       "label": {
         "anchors": [
@@ -653,7 +655,7 @@
         "literal": "0123456789abcdef0123456789abcdef01234567"
       },
       "partition": "validation",
-      "query": "0123456789abcdef0123456789abcdef01234567",
+      "query": "COMMIT",
       "query_id": "validation-013",
       "strata": [
         "commit_identifier"

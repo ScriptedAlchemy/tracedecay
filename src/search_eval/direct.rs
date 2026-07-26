@@ -27,7 +27,7 @@ pub use candidate_output::{
 
 const DEFAULT_WORKLOAD: &str = "tests/fixtures/search_quality/pr9-pr10-candidate-workload-v1.json";
 const DEFAULT_WORKLOAD_SHA256: &str =
-    "bb429a1aebc4df13a2f47b4679db90232d49437230cd9ff31dae918b6d786539";
+    "c16b9c8e9a9cfadcf6d63c70dc58766d3ffa0aab78563b175402d97132a4098e";
 const PR9_BASELINE_PROFILE: &str = "pr9-fallback";
 const SEMANTIC_PROFILE: &str = "hybrid-conservative";
 const RERANK_PROFILE: &str = "hybrid-reranked";
