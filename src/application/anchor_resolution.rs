@@ -171,10 +171,10 @@ mod tests {
 
     use tracedecay_domain::{
         AccessPolicyDigest, AnchorDurabilityClass, AnchorSourceGenerationV2,
-        CanonicalObservationIdV1, CapabilityId, EvidenceClass, ObservationScopeV1,
-        ManifestDigest, PrivacyDomainBoundLocatorDigest, PrivacyDomainId, ProjectionGenerationId,
-        RetentionClass, RetrievalAnchorRecordV2Parts, RetrievalAnchorTargetV2, ScopeResolutionId,
-        ShardId, UtcMicros, WatermarkDriftV1,
+        CanonicalObservationIdV1, CapabilityId, EvidenceClass, ManifestDigest, ObservationScopeV1,
+        PrivacyDomainBoundLocatorDigest, PrivacyDomainId, ProjectionGenerationId, RetentionClass,
+        RetrievalAnchorRecordV2Parts, RetrievalAnchorTargetV2, ScopeResolutionId, ShardId,
+        UtcMicros, WatermarkDriftV1,
     };
 
     use super::*;
@@ -359,5 +359,4 @@ mod tests {
             .is_err()
         );
     }
-
 }

@@ -2,12 +2,11 @@ use std::{future::Future, sync::LazyLock};
 
 use tracedecay_store::{
     SessionGenerationActivatePermit, SessionGenerationActivationReceiptV1,
-    SessionGenerationActivationRequestV1,
-    SessionGenerationRebuildBeginPermit, SessionGenerationRebuildReceiptV1,
-    SessionGenerationRebuildRequestV1, SessionProjectionBatchPersistPermit,
-    SessionRefreshBeginOrJoinPermit, SessionRefreshBeginOrJoinReceiptV1,
-    SessionRefreshBeginOrJoinRequestV1, SessionRefreshCancelPermit,
-    SessionRefreshCancellationRequestV1, SessionRefreshCompletePermit,
+    SessionGenerationActivationRequestV1, SessionGenerationRebuildBeginPermit,
+    SessionGenerationRebuildReceiptV1, SessionGenerationRebuildRequestV1,
+    SessionProjectionBatchPersistPermit, SessionRefreshBeginOrJoinPermit,
+    SessionRefreshBeginOrJoinReceiptV1, SessionRefreshBeginOrJoinRequestV1,
+    SessionRefreshCancelPermit, SessionRefreshCancellationRequestV1, SessionRefreshCompletePermit,
     SessionRefreshCompletionRequestV1, SessionRefreshFailPermit, SessionRefreshFailureRequestV1,
     SessionRefreshProgressPersistPermit, SessionRefreshProgressReadPermit,
     SessionRefreshProgressRequestV1, SessionRefreshProgressV1, SessionRefreshReceiptReadPermit,
@@ -169,7 +168,6 @@ impl SessionRetrievalStore for GlobalDbSessionTemporalStore<'_> {
     ) -> impl Future<Output = SessionStoreResult<SessionRetrievalPageV1>> + Send {
         self.db.retrieve_session_temporal_page_result(request)
     }
-
 }
 
 impl SessionTemporalProjectionStore for GlobalDbSessionTemporalStore<'_> {
