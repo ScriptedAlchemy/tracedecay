@@ -978,6 +978,21 @@ impl RegisteredGlobalDb {
     }
 
     pub async fn search_code_projects(&self, query: &str, limit: usize) -> Vec<CodeProjectRecord> {
+        match self.try_search_code_projects(query, limit).await {
+            Ok(projects) => projects,
+            Err(error) => {
+                tracing::warn!(%error, "optional project search failed");
+                Vec::new()
+            }
+        }
+    }
+
+    pub async fn try_search_code_projects(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> crate::errors::Result<Vec<CodeProjectRecord>> {
+        const OPERATION: &str = "search registered code projects";
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         let mut patterns = query
             .split_whitespace()
@@ -1012,51 +1027,46 @@ impl RegisteredGlobalDb {
         );
         let mut values = patterns.into_iter().map(Value::Text).collect::<Vec<_>>();
         values.push(Value::Integer(limit));
-        let Ok(snapshot) = self.read_snapshot().await else {
-            return Vec::new();
-        };
-        let Ok(mut rows) = snapshot.query(&sql, values).await else {
-            return Vec::new();
-        };
+        let snapshot = self.read_snapshot().await?;
+        let mut rows = snapshot
+            .query(&sql, values)
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
         let mut projects = Vec::new();
-        while let Ok(Some(row)) = rows.next().await {
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?
+        {
             let project = CodeProjectRecord {
-                project_id: match row.get(0) {
-                    Ok(value) => value,
-                    Err(_) => continue,
-                },
-                canonical_root: match row.get(1) {
-                    Ok(value) => value,
-                    Err(_) => continue,
-                },
-                display_root: match row.get(2) {
-                    Ok(value) => value,
-                    Err(_) => continue,
-                },
-                git_common_dir: match row.get(3) {
-                    Ok(value) => value,
-                    Err(_) => continue,
-                },
-                git_remote_url: match row.get(4) {
-                    Ok(value) => value,
-                    Err(_) => continue,
-                },
-                default_branch: match row.get(5) {
-                    Ok(value) => value,
-                    Err(_) => continue,
-                },
-                created_at: match row.get(6) {
-                    Ok(value) => value,
-                    Err(_) => continue,
-                },
-                last_seen_at: match row.get(7) {
-                    Ok(value) => value,
-                    Err(_) => continue,
-                },
+                project_id: row
+                    .get(0)
+                    .map_err(|error| global_db_operation_error(OPERATION, error))?,
+                canonical_root: row
+                    .get(1)
+                    .map_err(|error| global_db_operation_error(OPERATION, error))?,
+                display_root: row
+                    .get(2)
+                    .map_err(|error| global_db_operation_error(OPERATION, error))?,
+                git_common_dir: row
+                    .get(3)
+                    .map_err(|error| global_db_operation_error(OPERATION, error))?,
+                git_remote_url: row
+                    .get(4)
+                    .map_err(|error| global_db_operation_error(OPERATION, error))?,
+                default_branch: row
+                    .get(5)
+                    .map_err(|error| global_db_operation_error(OPERATION, error))?,
+                created_at: row
+                    .get(6)
+                    .map_err(|error| global_db_operation_error(OPERATION, error))?,
+                last_seen_at: row
+                    .get(7)
+                    .map_err(|error| global_db_operation_error(OPERATION, error))?,
             };
             projects.push(project);
         }
-        projects
+        Ok(projects)
     }
 
     /// Resolves the sole store for a project-path alias without hiding

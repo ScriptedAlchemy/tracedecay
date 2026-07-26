@@ -47,8 +47,10 @@ use tracedecay_application::doctor::{
 };
 use tracedecay_application::{
     ApplicationContractError, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot,
-    Deadline, DisclosureClass, RequestContext, RequestId,
+    Deadline, DisclosureClass, EffectReceipt, EffectTermination, IdempotencyKey,
+    OperationBudgetUsage, OperationReceipt, PreviewId, RequestContext, RequestId,
 };
+use tracedecay_domain::ManifestDigest;
 
 use crate::config::PinnedRuntimeConfiguration;
 
@@ -56,6 +58,27 @@ const DOCTOR_REPORT_CAPABILITY: &str = "capability.application.doctor.report";
 const DOCTOR_REPORT_USE_CASE: &str = "use-case.application.doctor.report";
 const DOCTOR_CONTEXT_HORIZON_MICROS: i64 = 30_000_000;
 static DOCTOR_REQUEST_NONCE: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone)]
+pub(super) struct ProductionDoctorRemediationOwnersV1 {
+    pub project_root: PathBuf,
+    pub project_id: tracedecay_domain::ProjectId,
+    pub layout: crate::storage::StoreLayout,
+    pub registry: Arc<crate::global_db::RegisteredGlobalDb>,
+    pub profile_sessions: Arc<crate::global_db::RegisteredGlobalDb>,
+    pub project_sessions: Arc<crate::global_db::RegisteredGlobalDb>,
+    pub profile_root: PathBuf,
+    pub config: crate::config::TraceDecayConfig,
+    pub global_retention: crate::retention::RetentionConfig,
+    pub store_administration: super::StoreAdministration,
+    pub invocation: super::DaemonInvocationState,
+    pub code_index_store_root: PathBuf,
+    pub semantic_runtime: crate::semantic_code::DaemonSemanticRuntimeHandleV1,
+    pub semantic_database: Arc<crate::db::Database>,
+    pub semantic_lifecycle: Option<Arc<crate::semantic_code::SemanticModelLifecycleOwnerV1>>,
+    pub semantic_resources: crate::config::SemanticResourceCeilings,
+    pub route_registered: Arc<std::sync::atomic::AtomicBool>,
+}
 
 // === Configuration authority (Configuration family) ==========================
 
@@ -1216,6 +1239,800 @@ pub(in crate::daemon) fn production_doctor_report_reader(
             Ok(crate::dashboard::AdmittedDoctorReportV1::new(report))
         })
     })
+}
+
+pub(in crate::daemon) fn production_doctor_remediation_dispatcher(
+    owners: ProductionDoctorRemediationOwnersV1,
+) -> crate::dashboard::DoctorRemediationDispatcherV1 {
+    use crate::dashboard::{
+        DashboardLegalActionKindV1, DoctorRemediationDispatchErrorV1, DoctorRemediationDispatcherV1,
+    };
+    use tracedecay_application::doctor::{DoctorRemediationKindV1, DoctorRemediationRegistryV1};
+
+    let legal_owners = owners.clone();
+    let legal_actions: crate::dashboard::doctor_remediation_api::LegalActions = Arc::new(
+        move |reference| {
+            let owners = legal_owners.clone();
+            Box::pin(async move {
+                if !owners.route_registered.load(Ordering::Acquire)
+                    || super::project_open_owners::resolved_scope_for_project(
+                        &owners.project_root,
+                        &owners.project_id,
+                    )
+                    .is_err()
+                {
+                    return Vec::new();
+                }
+                let registry = DoctorRemediationRegistryV1::default_registry();
+                let Ok(descriptor) = registry.resolve(&reference) else {
+                    return Vec::new();
+                };
+                let mounted = match descriptor.surface() {
+                    tracedecay_application::doctor::DoctorOwningSurfaceV1::ConfigurationControlPlane => {
+                        owners
+                            .invocation
+                            .configuration_runtime_registrar()
+                            .doctor_owner_mounted(&owners.project_root)
+                            .await
+                    }
+                    tracedecay_application::doctor::DoctorOwningSurfaceV1::StorageRuntime => {
+                        owners.registry.writer_connection().is_ok()
+                            && owners.profile_sessions.writer_connection().is_ok()
+                            && owners.project_sessions.writer_connection().is_ok()
+                    }
+                    tracedecay_application::doctor::DoctorOwningSurfaceV1::DaemonRuntime => true,
+                    tracedecay_application::doctor::DoctorOwningSurfaceV1::HostIntegration => {
+                        crate::agents::home_dir().is_some()
+                            && crate::agents::host_bundle_v2::resolved_host_bundle_lifecycle_root()
+                                .is_ok()
+                    }
+                    tracedecay_application::doctor::DoctorOwningSurfaceV1::SemanticIndexRuntime => {
+                        true
+                    }
+                    tracedecay_application::doctor::DoctorOwningSurfaceV1::FeedbackRead => false,
+                };
+                if !mounted {
+                    return Vec::new();
+                }
+                match reference.kind() {
+                    DoctorRemediationKindV1::Preview if descriptor.preview_available() => {
+                        vec![DashboardLegalActionKindV1::RequestDryRun]
+                    }
+                    DoctorRemediationKindV1::Action => {
+                        let mut actions = vec![DashboardLegalActionKindV1::RequestApply];
+                        if descriptor.preview_available() {
+                            actions.push(DashboardLegalActionKindV1::RequestDryRun);
+                        }
+                        actions
+                    }
+                    _ => Vec::new(),
+                }
+            })
+        },
+    );
+    let dispatch_owners = owners.clone();
+    let dispatch: crate::dashboard::doctor_remediation_api::Dispatch = Arc::new(move |command| {
+        let owners = dispatch_owners.clone();
+        Box::pin(async move {
+            if !owners.route_registered.load(Ordering::Acquire) {
+                return Err(DoctorRemediationDispatchErrorV1::Denied);
+            }
+            let scope = super::project_open_owners::resolved_scope_for_project(
+                &owners.project_root,
+                &owners.project_id,
+            )
+            .map_err(|_| DoctorRemediationDispatchErrorV1::Denied)?;
+            dispatch_doctor_owner_operation(&owners, scope, command).await
+        })
+    });
+    DoctorRemediationDispatcherV1::new_durable(
+        owners
+            .layout
+            .dashboard_root
+            .join("doctor-remediation-operations"),
+        legal_actions,
+        dispatch,
+    )
+}
+
+async fn dispatch_doctor_owner_operation(
+    owners: &ProductionDoctorRemediationOwnersV1,
+    scope: tracedecay_application::ResolvedScope,
+    command: crate::dashboard::DoctorRemediationDispatchCommandV1,
+) -> Result<
+    crate::dashboard::DoctorRemediationOperationV1,
+    crate::dashboard::DoctorRemediationDispatchErrorV1,
+> {
+    use crate::application_surface::{ApplicationSurfaceOperation, ConfigurationSurfaceRequest};
+    use crate::dashboard::{
+        DoctorRemediationDispatchCommandV1, DoctorRemediationDispatchErrorV1,
+        DoctorRemediationOperationPhaseV1, DoctorRemediationOperationV1, DoctorRemediationTargetV1,
+    };
+
+    let operation_id =
+        crate::dashboard::doctor_remediation_api::operation_id_for_command(&command)?;
+    let request_id = operation_id.request_id().clone();
+    let (operation, target, preview_id, idempotency_key, apply, recovering) = match command {
+        DoctorRemediationDispatchCommandV1::Preview { operation, target } => {
+            (operation, target, None, None, false, false)
+        }
+        DoctorRemediationDispatchCommandV1::Apply {
+            operation,
+            target,
+            preview_id,
+            idempotency_key,
+        } => (
+            operation,
+            target,
+            preview_id,
+            Some(idempotency_key),
+            true,
+            false,
+        ),
+        DoctorRemediationDispatchCommandV1::Resume {
+            operation,
+            target,
+            preview_id,
+            idempotency_key,
+        } => (
+            operation,
+            target,
+            preview_id,
+            Some(idempotency_key),
+            true,
+            true,
+        ),
+        DoctorRemediationDispatchCommandV1::Status { .. } => {
+            return Err(DoctorRemediationDispatchErrorV1::OwnerUnavailable);
+        }
+    };
+    let started_at = now_micros();
+    let mut owner_execution = None;
+    let mut owner_effect = None;
+    let mut owner_preview = None;
+    let mut owner_observation = None;
+    let mut effect_unknown = false;
+    match (&target, apply) {
+        (DoctorRemediationTargetV1::ConfigurationProtectedPreview(request), false) => {
+            match owners
+                .invocation
+                .configuration_runtime_registrar()
+                .doctor_execute(
+                    &owners.project_root,
+                    &request_id,
+                    ApplicationSurfaceOperation::ConfigurationProtectedPreview,
+                    ConfigurationSurfaceRequest::ProtectedPreview(request.clone()),
+                )
+                .await
+            {
+                super::service::invocation::DoctorConfigurationOutcomeV1::Preview {
+                    preview_id,
+                    execution,
+                } => {
+                    owner_preview = Some(preview_id);
+                    owner_execution = Some(execution);
+                }
+                super::service::invocation::DoctorConfigurationOutcomeV1::Denied => {
+                    return Err(DoctorRemediationDispatchErrorV1::Denied);
+                }
+                _ => return Err(DoctorRemediationDispatchErrorV1::OwnerUnavailable),
+            }
+        }
+        (DoctorRemediationTargetV1::ConfigurationProtectedApply(request), true) => {
+            match owners
+                .invocation
+                .configuration_runtime_registrar()
+                .doctor_execute(
+                    &owners.project_root,
+                    &request_id,
+                    ApplicationSurfaceOperation::ConfigurationProtectedApply,
+                    ConfigurationSurfaceRequest::ProtectedApply(request.clone()),
+                )
+                .await
+            {
+                super::service::invocation::DoctorConfigurationOutcomeV1::Effect {
+                    execution,
+                    receipt,
+                } => {
+                    owner_observation = Some(doctor_owner_observation(
+                        "tracedecay.doctor.configuration-protected-apply.v1",
+                        &receipt,
+                    )?);
+                    owner_execution = Some(execution);
+                    owner_effect = Some(receipt);
+                }
+                super::service::invocation::DoctorConfigurationOutcomeV1::Denied => {
+                    return Err(DoctorRemediationDispatchErrorV1::Denied);
+                }
+                _ => return Err(DoctorRemediationDispatchErrorV1::OwnerUnavailable),
+            }
+        }
+        (DoctorRemediationTargetV1::StorageRetentionCollect, false) => {
+            let global = owners
+                .registry
+                .global_retention_report(&owners.global_retention, now_secs())
+                .await
+                .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)?;
+            let profile =
+                run_doctor_session_retention(owners, owners.profile_sessions.as_ref(), false)
+                    .await?;
+            let project =
+                run_doctor_session_retention(owners, owners.project_sessions.as_ref(), false)
+                    .await?;
+            owner_observation = Some(doctor_owner_observation(
+                "tracedecay.doctor.storage-retention.preview.v1",
+                &(global, profile, project),
+            )?);
+        }
+        (DoctorRemediationTargetV1::StorageRetentionCollect, true) => {
+            let global = owners
+                .registry
+                .prune_global_retention(&owners.global_retention, now_secs())
+                .await
+                .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)?;
+            let profile =
+                run_doctor_session_retention(owners, owners.profile_sessions.as_ref(), true)
+                    .await?;
+            let project =
+                run_doctor_session_retention(owners, owners.project_sessions.as_ref(), true)
+                    .await?;
+            owner_observation = Some(doctor_owner_observation(
+                "tracedecay.doctor.storage-retention.apply.v1",
+                &(global, profile, project),
+            )?);
+        }
+        (DoctorRemediationTargetV1::StorageCollectOrphanStore, apply) => {
+            let retention_secs =
+                retention_window_secs(owners.config.sync.retention.orphan_store_gc_days);
+            let orphan = crate::retention::orphan_stores::sweep_orphan_stores(
+                owners.registry.as_ref(),
+                &owners.profile_root,
+                retention_secs,
+                now_secs(),
+                apply,
+            )
+            .await
+            .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)?;
+            let unregistered = crate::retention::orphan_stores::sweep_unregistered_stores(
+                owners.registry.as_ref(),
+                &owners.profile_root,
+                retention_secs,
+                now_secs(),
+                apply,
+            )
+            .await
+            .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)?;
+            owner_observation = Some(doctor_owner_observation(
+                "tracedecay.doctor.storage-orphan-store.v1",
+                &(
+                    apply,
+                    orphan.plan.collect.len(),
+                    orphan.outcome.collected.len(),
+                    orphan.outcome.reclaimed_bytes,
+                    orphan.outcome.errors.len(),
+                    orphan.relinked_registry_rows,
+                    orphan.retired_registry_rows,
+                    unregistered.plan.collect.len(),
+                    unregistered.outcome.collected.len(),
+                    unregistered.outcome.reclaimed_bytes,
+                    unregistered.outcome.errors.len(),
+                ),
+            )?);
+        }
+        (DoctorRemediationTargetV1::StorageBranchGc, false) => {
+            let prepared = crate::branch::prepare_branch_admin_mutation(
+                &owners.project_root,
+                &owners.layout.data_root,
+                crate::branch::BranchAdminAction::Gc,
+                owners.config.sync.branch_gc_days,
+                owners.config.sync.orphan_db_gc_days,
+            )
+            .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)?;
+            owner_observation = Some(doctor_owner_observation(
+                "tracedecay.doctor.storage-branch-gc.preview.v1",
+                prepared.report(),
+            )?);
+        }
+        (DoctorRemediationTargetV1::StorageBranchGc, true) => {
+            let report = owners
+                .store_administration
+                .execute_branch_admin_in_layout(
+                    &owners.project_root,
+                    &owners.layout.data_root,
+                    crate::branch::BranchAdminAction::Gc,
+                    owners.config.sync.branch_gc_days,
+                    owners.config.sync.orphan_db_gc_days,
+                )
+                .await
+                .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)?;
+            owner_observation = Some(doctor_owner_observation(
+                "tracedecay.doctor.storage-branch-gc.apply.v1",
+                &report,
+            )?);
+        }
+        (DoctorRemediationTargetV1::StorageQuarantineAndCollectDebris, apply) => {
+            let census = crate::retention::orphan_stores::build_store_census(
+                owners.registry.as_ref(),
+                &owners.profile_root,
+            )
+            .await
+            .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)?;
+            if apply {
+                let report = crate::retention::incident_debris::sweep_incident_debris(
+                    &census,
+                    &owners.profile_root,
+                    retention_window_secs(
+                        owners.config.sync.retention.incident_debris_retention_days,
+                    ),
+                    now_secs(),
+                );
+                if !report.errors.is_empty() {
+                    return Err(DoctorRemediationDispatchErrorV1::OwnerUnavailable);
+                }
+                owner_observation = Some(doctor_owner_observation(
+                    "tracedecay.doctor.storage-debris.apply.v1",
+                    &(
+                        report.quarantined,
+                        report.collected,
+                        report.retained,
+                        report.reclaimed_bytes,
+                    ),
+                )?);
+            } else {
+                let mut reports = Vec::with_capacity(census.len());
+                for entry in &census {
+                    let report = crate::retention::incident_debris::scan_incident_debris(
+                        entry,
+                        &owners.profile_root,
+                        now_secs(),
+                    )
+                    .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)?;
+                    reports.push((
+                        entry.store_id.as_str(),
+                        report.artifacts.len(),
+                        report.listing_complete,
+                    ));
+                }
+                owner_observation = Some(doctor_owner_observation(
+                    "tracedecay.doctor.storage-debris.preview.v1",
+                    &reports,
+                )?);
+            }
+        }
+        (DoctorRemediationTargetV1::ConfigurationPinAuthority, false) => {
+            let pinned =
+                crate::config::load_runtime_configuration_for_registered_database_read_only(
+                    &owners.project_root,
+                    &owners.layout,
+                    Arc::clone(&owners.project_sessions),
+                )
+                .await
+                .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)?;
+            owner_observation = Some(doctor_owner_observation(
+                "tracedecay.doctor.configuration-pin.preview.v1",
+                &pinned.revision_id,
+            )?);
+        }
+        (DoctorRemediationTargetV1::ConfigurationPinAuthority, true) => {
+            let pinned = crate::config::resolve_runtime_configuration_for_registered_database(
+                &owners.project_root,
+                &owners.layout,
+                Arc::clone(&owners.project_sessions),
+            )
+            .await
+            .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)?;
+            let revision_id = pinned.revision_id.clone();
+            crate::config::install_pinned_runtime_configuration(pinned)
+                .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)?;
+            owner_observation = Some(doctor_owner_observation(
+                "tracedecay.doctor.configuration-pin.apply.v1",
+                &revision_id,
+            )?);
+        }
+        (DoctorRemediationTargetV1::RuntimeRecoverDaemon, true) => {
+            owner_observation = if recovering {
+                Some(doctor_owner_observation(
+                    "tracedecay.doctor.runtime-restart.recovery-unknown.v1",
+                    &operation_id,
+                )?)
+            } else {
+                let executable = std::env::current_exe()
+                    .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)?;
+                let child = std::process::Command::new(executable)
+                    .args(["daemon", "restart"])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)?;
+                Some(doctor_owner_observation(
+                    "tracedecay.doctor.runtime-restart.spawned.v1",
+                    &child.id(),
+                )?)
+            };
+            // Restart necessarily crosses this daemon process boundary. The
+            // durable intent survives it; status remains effect-unknown until
+            // an independently observed Doctor report proves recovery.
+            effect_unknown = true;
+        }
+        (DoctorRemediationTargetV1::HostRepairIntegration { host, components }, apply) => {
+            owner_observation = Some(execute_host_repair(
+                *host,
+                components,
+                apply,
+                &operation_id,
+            )?);
+        }
+        (DoctorRemediationTargetV1::CodeIndexRemount, false) => {
+            let mounted = owners
+                .invocation
+                .code_index_schedulers
+                .is_worktree_mounted(&owners.project_root)
+                .await;
+            owner_observation = Some(doctor_owner_observation(
+                "tracedecay.doctor.code-index.preview.v1",
+                &mounted,
+            )?);
+        }
+        (DoctorRemediationTargetV1::CodeIndexRemount, true) => {
+            owners
+                .invocation
+                .mount_code_index(
+                    &owners.project_root,
+                    owners.code_index_store_root.clone(),
+                    Some(&owners.semantic_runtime),
+                    Some(Arc::clone(&owners.semantic_database)),
+                    owners.semantic_lifecycle.clone(),
+                    Some(owners.semantic_resources),
+                )
+                .await
+                .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)?;
+            let mounted = owners
+                .invocation
+                .code_index_schedulers
+                .is_worktree_mounted(&owners.project_root)
+                .await;
+            owner_observation = Some(doctor_owner_observation(
+                "tracedecay.doctor.code-index.apply.v1",
+                &mounted,
+            )?);
+        }
+        _ => return Err(DoctorRemediationDispatchErrorV1::InvalidReference),
+    }
+    let ended_at = now_micros();
+    if !apply {
+        let execution = owner_execution.unwrap_or(
+            completed_doctor_execution(started_at, ended_at)
+                .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)?,
+        );
+        let preview_id = match owner_preview {
+            Some(preview_id) => preview_id,
+            None => PreviewId::new(format!("preview.doctor-remediation.{}", operation_id))
+                .map_err(|_| DoctorRemediationDispatchErrorV1::InvalidReference)?,
+        };
+        return Ok(DoctorRemediationOperationV1 {
+            operation_id,
+            owning_operation: operation,
+            phase: DoctorRemediationOperationPhaseV1::Previewed,
+            preview_id: Some(preview_id),
+            execution: Some(execution),
+            effect_receipt: None,
+            owner_effect_receipt: None,
+            owner_result_digest: owner_observation,
+        });
+    }
+    let idempotency_key =
+        idempotency_key.ok_or(DoctorRemediationDispatchErrorV1::InvalidReference)?;
+    let termination = if effect_unknown {
+        EffectTermination::EffectUnknown
+    } else {
+        EffectTermination::Completed
+    };
+    let execution = match owner_execution {
+        Some(execution) if execution.termination == termination.into() => execution,
+        _ => terminal_doctor_execution(started_at, ended_at, termination)
+            .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)?,
+    };
+    let owner_result_digest =
+        owner_observation.ok_or(DoctorRemediationDispatchErrorV1::OwnerUnavailable)?;
+    let effect_receipt = completed_doctor_effect(
+        &operation,
+        operation_id.request_id(),
+        scope,
+        idempotency_key,
+        &target,
+        owners,
+        owner_result_digest.clone(),
+        termination,
+    )?;
+    Ok(DoctorRemediationOperationV1 {
+        operation_id,
+        owning_operation: operation,
+        phase: if effect_unknown {
+            DoctorRemediationOperationPhaseV1::EffectUnknown
+        } else {
+            DoctorRemediationOperationPhaseV1::Completed
+        },
+        preview_id,
+        execution: Some(execution),
+        effect_receipt: Some(effect_receipt),
+        owner_effect_receipt: owner_effect,
+        owner_result_digest: Some(owner_result_digest),
+    })
+}
+
+fn retention_window_secs(days: Option<u64>) -> i64 {
+    days.and_then(|days| i64::try_from(days).ok())
+        .and_then(|days| days.checked_mul(24 * 60 * 60))
+        .unwrap_or(i64::MAX)
+}
+
+async fn run_doctor_session_retention(
+    owners: &ProductionDoctorRemediationOwnersV1,
+    database: &crate::global_db::RegisteredGlobalDb,
+    apply: bool,
+) -> Result<
+    (
+        Vec<crate::retention::RetentionTableReport>,
+        Option<crate::sessions::lcm::retention::LcmRetentionReport>,
+        Option<crate::global_db::observation::retention::ObservationRetentionReport>,
+    ),
+    crate::dashboard::DoctorRemediationDispatchErrorV1,
+> {
+    use crate::dashboard::DoctorRemediationDispatchErrorV1;
+    let now = now_secs();
+    let global = if apply {
+        database
+            .prune_global_retention(&owners.global_retention, now)
+            .await
+            .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)?
+    } else {
+        database
+            .global_retention_report(&owners.global_retention, now)
+            .await
+            .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)?
+    };
+    let lcm = if owners.config.sync.retention.session_lcm.enabled {
+        Some(
+            database
+                .run_session_lcm_retention(
+                    "all",
+                    None,
+                    &owners.config.sync.retention.session_lcm,
+                    if apply {
+                        crate::sessions::lcm::RetentionMode::Apply
+                    } else {
+                        crate::sessions::lcm::RetentionMode::DryRun
+                    },
+                    now,
+                )
+                .await
+                .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)?,
+        )
+    } else {
+        None
+    };
+    let observation = if owners.config.sync.retention.observation.enabled {
+        Some(
+            database
+                .run_observation_retention(
+                    None,
+                    &owners.config.sync.retention.observation,
+                    if apply {
+                        crate::global_db::observation::retention::RetentionMode::Apply
+                    } else {
+                        crate::global_db::observation::retention::RetentionMode::DryRun
+                    },
+                    now,
+                )
+                .await
+                .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)?,
+        )
+    } else {
+        None
+    };
+    Ok((global, lcm, observation))
+}
+
+fn completed_doctor_execution(
+    started_at: tracedecay_domain::UtcMicros,
+    ended_at: tracedecay_domain::UtcMicros,
+) -> Result<OperationReceipt, ApplicationContractError> {
+    terminal_doctor_execution(started_at, ended_at, EffectTermination::Completed)
+}
+
+fn terminal_doctor_execution(
+    started_at: tracedecay_domain::UtcMicros,
+    ended_at: tracedecay_domain::UtcMicros,
+    termination: EffectTermination,
+) -> Result<OperationReceipt, ApplicationContractError> {
+    let receipt = OperationReceipt {
+        started_at,
+        ended_at,
+        effective_deadline: Deadline::new(tracedecay_domain::UtcMicros(
+            ended_at.0.saturating_add(DOCTOR_CONTEXT_HORIZON_MICROS),
+        ))?,
+        cancellation: None,
+        budget: OperationBudgetUsage::default(),
+        termination: termination.into(),
+    };
+    receipt.validate()?;
+    Ok(receipt)
+}
+
+fn completed_doctor_effect(
+    operation: &tracedecay_application::doctor::DoctorOwningOperationRefV1,
+    request_id: &RequestId,
+    scope: tracedecay_application::ResolvedScope,
+    idempotency_key: IdempotencyKey,
+    target: &crate::dashboard::DoctorRemediationTargetV1,
+    owners: &ProductionDoctorRemediationOwnersV1,
+    owner_result_digest: ManifestDigest,
+    termination: EffectTermination,
+) -> Result<EffectReceipt, crate::dashboard::DoctorRemediationDispatchErrorV1> {
+    use crate::dashboard::DoctorRemediationDispatchErrorV1;
+    let digest = target
+        .digest()
+        .map_err(|_| DoctorRemediationDispatchErrorV1::InvalidReference)?;
+    let operation_name = operation.as_str();
+    let expected_state = doctor_orchestration_digest(
+        "tracedecay.doctor-remediation.expected-owner-state.v1",
+        &scope,
+        &digest,
+        &operation_name,
+    )?;
+    let policy_digest = doctor_orchestration_digest(
+        "tracedecay.doctor-remediation.authorized-legal-action.v1",
+        &scope,
+        &digest,
+        &(operation_name, &scope),
+    )?;
+    let configuration_digest = doctor_orchestration_digest(
+        "tracedecay.doctor-remediation.mounted-configuration.v1",
+        &scope,
+        &digest,
+        &(&owners.config, &owners.global_retention),
+    )?;
+    let catalog_digest = doctor_orchestration_digest(
+        "tracedecay.doctor-remediation.owner-catalog-entry.v1",
+        &scope,
+        &digest,
+        &(operation_name, target),
+    )?;
+    let privacy_digest = doctor_orchestration_digest(
+        "tracedecay.doctor-remediation.local-scoped-owner-effect.v1",
+        &scope,
+        &digest,
+        &scope,
+    )?;
+    let receipt = EffectReceipt {
+        operation: tracedecay_tool_catalog::UseCaseId::new(operation.as_str().to_owned())
+            .map_err(|_| DoctorRemediationDispatchErrorV1::InvalidReference)?,
+        request_id: request_id.clone(),
+        actor: tracedecay_domain::ActorId::new("actor.tracedecay-daemon")
+            .map_err(|_| DoctorRemediationDispatchErrorV1::InvalidReference)?,
+        scope: scope.clone(),
+        effect_class: tracedecay_tool_catalog::EffectClass::Administrative,
+        idempotency_key,
+        input_digest: digest.clone(),
+        expected_state,
+        policy_digest,
+        configuration_digest,
+        catalog_digest,
+        privacy_digest,
+        outcome: termination,
+        committed_state: (termination == EffectTermination::Completed)
+            .then_some(owner_result_digest),
+        external_proof: None,
+    };
+    receipt
+        .validate()
+        .map_err(|_| DoctorRemediationDispatchErrorV1::InvalidReference)?;
+    Ok(receipt)
+}
+
+fn doctor_owner_observation(
+    domain: &'static str,
+    evidence: &impl serde::Serialize,
+) -> Result<ManifestDigest, crate::dashboard::DoctorRemediationDispatchErrorV1> {
+    tracedecay_domain::canonical_sha256(&(domain, evidence))
+        .map_err(|_| crate::dashboard::DoctorRemediationDispatchErrorV1::InvalidReference)
+}
+
+fn doctor_orchestration_digest(
+    domain: &'static str,
+    scope: &tracedecay_application::ResolvedScope,
+    target_digest: &ManifestDigest,
+    evidence: &impl serde::Serialize,
+) -> Result<ManifestDigest, crate::dashboard::DoctorRemediationDispatchErrorV1> {
+    tracedecay_domain::canonical_sha256(&(domain, scope, target_digest, evidence))
+        .map_err(|_| crate::dashboard::DoctorRemediationDispatchErrorV1::InvalidReference)
+}
+
+fn execute_host_repair(
+    host: crate::agents::host_bundle_v2::HostKindV1,
+    components: &[crate::agents::host_bundle_v2::HostBundleComponentV1],
+    apply: bool,
+    operation_id: &crate::application::operation_stream::OperationId,
+) -> Result<ManifestDigest, crate::dashboard::DoctorRemediationDispatchErrorV1> {
+    use crate::agents::host_bundle_v2::{
+        HostBundleLifecycleOpV1, HostBundleWriterV1, HostComponentSetExecutionRequestV1,
+        HostComponentSetLifecycleRequestV1, HostComponentSetTransactionV1,
+    };
+    use crate::dashboard::DoctorRemediationDispatchErrorV1;
+    let home =
+        crate::agents::home_dir().ok_or(DoctorRemediationDispatchErrorV1::OwnerUnavailable)?;
+    let lifecycle_root = crate::agents::host_bundle_v2::resolved_host_bundle_lifecycle_root()
+        .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)?;
+    let now_unix = u64::try_from(now_secs())
+        .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)?;
+    let set = crate::agents::host_bundle_registry::verified_embedded_host_component_set(
+        host, components, now_unix,
+    )
+    .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)?;
+    let digest = tracedecay_domain::canonical_sha256(&(
+        "tracedecay.doctor-host-repair-operation.v1",
+        operation_id,
+    ))
+    .map_err(|_| DoctorRemediationDispatchErrorV1::InvalidReference)?;
+    let bytes = hex::decode(digest.as_str())
+        .map_err(|_| DoctorRemediationDispatchErrorV1::InvalidReference)?;
+    let mut host_operation_id = [0_u8; 16];
+    host_operation_id.copy_from_slice(
+        bytes
+            .get(..16)
+            .ok_or(DoctorRemediationDispatchErrorV1::InvalidReference)?,
+    );
+    let request = HostComponentSetExecutionRequestV1 {
+        lifecycle: HostComponentSetLifecycleRequestV1 {
+            operation: HostBundleLifecycleOpV1::Repair,
+            expected_host: host,
+            expected_components: components.to_vec(),
+            explicit_confirmation: apply,
+            hermes_profile_bindings: u8::from(
+                host == crate::agents::host_bundle_v2::HostKindV1::Hermes,
+            ),
+        },
+        operation_id: host_operation_id,
+    };
+    let mut writer = HostBundleWriterV1::open_with_lifecycle_root(&home, &lifecycle_root)
+        .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)?;
+    let mut transaction = HostComponentSetTransactionV1::new(&mut writer);
+    let mut registration =
+        crate::agents::host_registration::CompatibilityAgentRegistrationDelegate::new(
+            crate::agents::integration_id_for_host(host),
+            &home,
+            &lifecycle_root,
+            HostBundleLifecycleOpV1::Repair,
+        )
+        .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)?;
+    let preview = transaction
+        .preview(&set.component_set, &request, &set, &mut registration)
+        .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)?;
+    if apply {
+        let receipt = transaction
+            .execute_confirmed(
+                &set.component_set,
+                &request,
+                &preview,
+                &set,
+                &mut registration,
+            )
+            .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)?;
+        return doctor_owner_observation("tracedecay.doctor.host-repair.apply.v1", &receipt);
+    }
+    doctor_owner_observation(
+        "tracedecay.doctor.host-repair.preview.v1",
+        &(
+            preview.operation_id,
+            preview.plan_digest,
+            preview.base_registration_revision,
+            preview.current_registration_revision,
+            preview.artifact_state_revision,
+            preview.component_plans.len(),
+            preview.confirmation_required,
+        ),
+    )
 }
 
 fn merge_storage_reads(

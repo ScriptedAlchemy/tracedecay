@@ -1,8 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use super::model::{GlobalDbInventory, InventoryIntegrityMode, SqliteIntegrityOutcome};
-use crate::db::engine::QueryExecutor;
-use crate::db::engine::params;
+use crate::db::engine::{Error as EngineError, QueryExecutor, params};
 use crate::global_db::{self, RegisteredGlobalDb};
 
 pub(super) async fn inspect_global_db(
@@ -183,11 +182,7 @@ where
 {
     let mut rows = match conn.query("PRAGMA quick_check", ()).await {
         Ok(rows) => rows,
-        Err(error) => {
-            return SqliteIntegrityOutcome::Unavailable {
-                reason: format!("could not run quick_check: {error}"),
-            };
-        }
+        Err(error) => return classify_quick_check_failure("could not run quick_check", error),
     };
     let mut values = Vec::new();
     loop {
@@ -202,6 +197,22 @@ where
         }
     }
     classify_quick_check_values(values)
+}
+
+fn classify_quick_check_failure(
+    operation: &'static str,
+    error: EngineError,
+) -> SqliteIntegrityOutcome {
+    const SQLITE_CORRUPT: i32 = 11;
+    const SQLITE_NOTADB: i32 = 26;
+
+    let detail = format!("{operation}: {error}");
+    match error.sqlite_code().map(|code| code & 0xff) {
+        Some(SQLITE_CORRUPT | SQLITE_NOTADB) => SqliteIntegrityOutcome::Damaged {
+            details: vec![detail],
+        },
+        _ => SqliteIntegrityOutcome::Unavailable { reason: detail },
+    }
 }
 
 fn classify_quick_check_values(values: Vec<Result<String, String>>) -> SqliteIntegrityOutcome {
@@ -306,8 +317,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        InventoryIntegrityMode, SqliteIntegrityOutcome, classify_quick_check_values,
-        should_verify_integrity,
+        EngineError, InventoryIntegrityMode, SqliteIntegrityOutcome, classify_quick_check_failure,
+        classify_quick_check_values, should_verify_integrity,
     };
 
     #[test]
@@ -340,5 +351,23 @@ mod tests {
                 reason: "quick_check returned no rows".to_string()
             }
         );
+    }
+    #[test]
+    fn quick_check_sqlite_corruption_error_is_specific_damage() {
+        let outcome = classify_quick_check_failure(
+            "could not run quick_check",
+            EngineError::Sqlite {
+                operation: "read snapshot row",
+                code: Some(11),
+                extended_code: Some(11),
+                message: "database disk image is malformed".to_string(),
+            },
+        );
+
+        assert!(matches!(
+            outcome,
+            SqliteIntegrityOutcome::Damaged { details }
+                if details.iter().any(|detail| detail.contains("malformed"))
+        ));
     }
 }
