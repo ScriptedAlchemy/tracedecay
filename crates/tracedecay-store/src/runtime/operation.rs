@@ -880,17 +880,16 @@ impl RepositoryWritePayloadV1 {
                     | StoreShardScopeV1::ProjectSessions { .. }
                     | StoreShardScopeV1::ProfileSessions
             ),
-            Self::ExternalSource(commit) => match (&commit.binding().owner, scope) {
+            Self::ExternalSource(commit) => matches!(
+                (&commit.binding().owner, scope),
                 (
                     tracedecay_domain::SourceBindingOwnerV1::Project(_),
                     StoreShardScopeV1::Project { .. } | StoreShardScopeV1::ProjectSessions { .. },
-                )
-                | (
+                ) | (
                     tracedecay_domain::SourceBindingOwnerV1::Profile(_),
                     StoreShardScopeV1::Profile | StoreShardScopeV1::ProfileSessions,
-                ) => true,
-                _ => false,
-            },
+                )
+            ),
             Self::RetrievalAnchorDisposition(_) | Self::RetrievalAnchorDerivative(_) => matches!(
                 scope,
                 StoreShardScopeV1::Project { .. }
