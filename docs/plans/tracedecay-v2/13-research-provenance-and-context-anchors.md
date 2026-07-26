@@ -27,6 +27,14 @@ implemented across `crates/tracedecay-domain/src/research/`,
 Per-section verdicts follow. Known pending: dedicated GitHub-stack anchor targets
 (Required behavior 19).
 
+**Audit note (2026-07-26).** "Implemented" above means the code exists and is
+reached, not that it is proven: no aggregate Rust suite has completed
+successfully in this checkout, so the anchor and evidence-span work is
+`IMPLEMENTED BUT UNVERIFIED`. Because PR13's GitHub integration is read-only
+ingest that never posts, Required behavior 19 is not on any PR8–PR14 journey and
+is a candidate for explicit deferral rather than carry-forward. See
+[`GAP-LEDGER-PR8-PR14.md`](GAP-LEDGER-PR8-PR14.md).
+
 ## Outcome
 
 Any authorized result can lead back to the exact retained observation or entity that

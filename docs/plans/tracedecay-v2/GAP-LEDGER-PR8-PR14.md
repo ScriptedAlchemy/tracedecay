@@ -34,6 +34,12 @@ Status vocabulary: `NOT IMPLEMENTED`, `PARTIALLY IMPLEMENTED`,
 `IMPLEMENTED BUT UNREACHABLE`, `IMPLEMENTED BUT UNVERIFIED`,
 `IMPLEMENTED AND VERIFIED`, `SUPERSEDED`.
 
+**Provenance.** Sections P0, P1, and P2 were verified directly against the code
+by the auditor. Section P4 aggregates six parallel plan-by-plan audits; its rows
+carry their cited evidence but were not each re-derived, and it says so. Where a
+parallel audit's claim was load-bearing it was re-checked, and two of them were
+refuted — see P1-d and P1-e. A lane's own report is not evidence.
+
 ---
 
 ## P0 — Reachability breaks that make a shipped capability dead
@@ -73,6 +79,28 @@ wired; the frontend cannot construct a valid request.
 Because both call sites run `Schema.parse(...)` before `fetch`, preview and
 apply throw a `ZodError` **before any HTTP request is issued**. The failure is
 not a rejected request; the button does nothing.
+
+**A second, independent break in the same surface.** The Doctor UI also consumes
+an `authority_scope` concept that exists nowhere in the wire contract or the
+backend:
+
+- `dashboard/src/contracts/` contains exactly three files (`generated.ts`,
+  `index.ts`, `wire.ts`) and **no occurrence of `AuthorityScope`** in any of
+  them.
+- The Rust `DoctorRemediationOperationV1`
+  (`src/dashboard/doctor_remediation_api.rs:144-155`) has ten fields and no
+  `authority_scope`.
+- The frontend nonetheless imports the type and its schema from the contracts
+  barrel: `dashboard/src/workspaces/observatory/doctorModel.ts:4` and `:12`,
+  `dashboard/src/workspaces/observatory/DoctorInspector.tsx:7`, and builds a
+  local schema around it at `doctorModel.ts:23`.
+
+These imports resolve to nothing, so they are hard TypeScript errors in addition
+to the missing-`target` errors. The Observatory Doctor module does not
+type-check at integration HEAD for two unrelated reasons, and the fix for one
+does not fix the other. Either the backend must serve `authority_scope` on the
+operation or the frontend must stop modelling it; that is a product decision,
+not a mechanical repair.
 
 **When it broke.** `target` was added to the generated preview schema by
 `203e4c266 fix(dashboard): verify all contract drift layers`, tonight's
@@ -199,6 +227,48 @@ silently stops refusing.
 **What remains.** One regression proving `branch remove` refuses when required
 removal receipts are absent or mismatched.
 
+### P0-6 · The feedback Doctor family can never advertise a legal action
+
+**Status.** `IMPLEMENTED BUT UNREACHABLE`.
+
+**Evidence.** The Doctor kernel decides whether a surface is mounted before it
+will return any legal remediation action. Every other surface computes a real
+condition; the feedback surface is hard-coded false:
+
+```1292:1292:src/daemon/doctor_kernel.rs
+                    tracedecay_application::doctor::DoctorOwningSurfaceV1::FeedbackRead => false,
+```
+
+and three lines later `if !mounted { return Vec::new(); }`. Any remediation
+registered against `FeedbackRead` is therefore permanently invisible, regardless
+of descriptor state.
+
+**What remains.** Decide whether this is a deliberate not-yet-mounted marker or
+an oversight. If deliberate it belongs in the plan as a named deferral with the
+condition that will flip it; a bare `false` in a match arm is not a status
+anyone can audit.
+
+### P0-7 · Two retention engines run on defaults that disable them
+
+**Status.** `IMPLEMENTED BUT UNREACHABLE` in effect — scheduled, called, and
+configured to do nothing.
+
+**Evidence.**
+
+- Observation evidence retention is fully built and the daemon calls it
+  (`src/daemon/git_watch/store_maintenance.rs:216-224`), but
+  `ObservationRetentionConfig::default()` sets `enabled: false` with all three
+  release windows `None` (`src/global_db/observation/retention.rs:174-182`). It
+  is a scheduled no-op.
+- LCM retention defaults `enabled: true` but `offload_after_days: None` and
+  `drop_after_days: None`, leaving only `dedupe_projected_after_days: Some(30)`
+  (`src/sessions/lcm/retention.rs:128-139`). Deduplication runs; offload and
+  drop never do.
+
+Combined with P1-a below, all three retention mechanisms that Plan 38 §3–§4
+relies on are inert or near-inert by default. Plan 38's storage-size problem is
+not addressed by any current default.
+
 ---
 
 ## P1 — Corrections: items believed open that the code shows are closed
@@ -261,12 +331,69 @@ are `src/search_eval/candidate_output.rs:3289`, two benchmark runners
 tests. Ordinary project open never writes a marker, so identity always depends
 on alias rows surviving.
 
-The observed fragmentation (444 store directories, ~101 GB against ~37 real
-repositories) is runtime data that this audit could not inspect under the
-freeze, so it is **not** classified here. It should be treated as a
-reconciliation task against existing Doctor relink/retirement machinery
-(`src/global_db/registered_dashboard.rs:222-360`), not as evidence that the
-current identity code is wrong.
+**Correction to the above, on re-verification.** The ladder is real, but it is a
+*lookup*, and what happens when the lookup misses matters more than the ladder
+does. The default mint is purely path-derived:
+
+```587:595:src/storage.rs
+pub fn default_profile_project_id(project_root: &Path) -> String {
+    let canonical = project_root
+        .canonicalize()
+        .unwrap_or_else(|_| project_root.to_path_buf());
+    let mut hasher = Sha256::new();
+    hasher.update(canonical.to_string_lossy().as_bytes());
+    let digest = hex::encode(hasher.finalize());
+    format!("proj_{}", &digest[..16])
+}
+```
+
+and the store directory is `profile_root/projects/{project_id}`
+(`src/storage.rs:583-585`). So when no marker exists (tier 1 never fires — see
+above) and no alias row has been recorded yet, a new checkout path mints a
+**new store shard** keyed on its own canonicalized path. Two worktrees of one
+repository collapse into one project only if an alias row already links them.
+That is the mechanism by which store count tracks checkout paths rather than
+repositories.
+
+The observed 444 store directories at ~101 GB against ~37 real repositories is
+runtime data this audit could not inspect under the freeze, so the *number* is
+not certified here. The *mechanism* that would produce it is confirmed in code
+above. Recommended framing: a reconciliation task against the existing Doctor
+relink/retirement machinery
+(`src/global_db/registered_dashboard.rs:222-360`), plus a decision about whether
+ordinary project open should write an identity marker.
+
+### P1-d · Refuted: "the integration test suites are undeclared"
+
+Two of the six parallel audits reported that `dashboard_api_test` and roughly
+twenty other multi-file suites have no `[[test]]` entry in `Cargo.toml` and
+therefore cannot run — one concluded the CI invocation would fail outright.
+**This is false.** `autotests` is not disabled, so Cargo auto-discovers
+`tests/<name>/main.rs` as a test target named `<name>`. `cargo metadata` on this
+worktree reports **44 test targets**, including `dashboard_api_test`,
+`hooks_lsp_suite`, `mcp_suite`, `daemon_suite`, `graph_suite`, `session_suite`,
+`code_index_suite`, and `storage_runtime_suite`.
+
+The declaration defect is exactly what P0-4 says it is and no larger: one
+undeclared `mod loom;` inside an otherwise healthy suite. Recorded here because
+the false version of this claim is alarming, plausible, and would have sent a
+lane on a large pointless refactor.
+
+### P1-e · Refuted: "MCP `tracedecay_call_chain` is unregistered"
+
+One audit reported the MCP tool as built-but-unreachable, citing an
+`#[allow(dead_code)]` handler and its absence from the graph dispatch match.
+That handler is a dead duplicate; the live tool is registered through the
+application surface: `def_call_chain_read()` is listed in the catalog at
+`src/mcp/tools/definitions.rs:397` and
+`src/mcp/tools/definitions/application.rs:999`, and dispatches via
+`ApplicationSurfaceOperation::CallChain`
+(`src/application_surface.rs:112`, `:226`, `:1899-1901`). The stale duplicate is
+`def_call_chain()` at `src/mcp/tools/definitions/graph.rs:691`.
+
+The real finding here is smaller and different: **a dead duplicate definition
+should be deleted**, because its `dead_code` annotation and its "not yet
+registered" comment actively mislead audits — as it just did.
 
 ---
 
@@ -278,6 +405,18 @@ current identity code is wrong.
 | `00-plan-set-index.md` | 470-472 | Loom time boundaries listed among implemented checkpoint items | Accurate, but must note its only backend test is undeclared (P0-4) and cannot contribute to verification |
 | `00-plan-set-index.md` | 474-478 | Checkpoint is "implemented but unverified" pending `dashboard_api_test` | Correct and should be kept. Add that the suite currently cannot pass because the CI `dashboard` job is red on `npm run typecheck` (P0-1) |
 | `NEXT.md` | 140-159 | Plan 38 fully delivered including "§3 session retention" | Delivered as mechanism; inert by default. State the default explicitly (P1-a) |
+| `38-storage-retention-size-and-efficiency.md` | 11-16 | "All seven product-contract sections are implemented" | §3 and §4 are dedupe-only by default and observation retention is disabled (P0-7, P1-a) |
+| `13-research-provenance-and-context-anchors.md` | 19-23 | "Landed / implemented across …" unqualified | GitHub-stack anchor targets remain pending, as the same plan admits at `:27-28` |
+| `26-observability-accounting-and-usage.md` | 5-6 | "Cross-cutting instrumentation is implemented" | Observatory and Costs surfaces are unverified; the dashboard suite has never gone green |
+| `14-historical-failure-regression-matrix.md` | 7-10 | Read by several readers as a numbered failure ledger | The plan explicitly disclaims that; it defines regression *classes* per PR slice |
+
+One **source comment** is also wrong and worth fixing when someone is next in
+the file, though this ledger does not own source:
+`src/global_db/observation/retention.rs:76-81` says the module is "reachable
+only from retention tests" until the daemon seam is wired. The daemon has since
+wired it at `src/daemon/git_watch/store_maintenance.rs:216-224`; the comment and
+its `dead_code` allowance are stale, and they conceal the real reason nothing
+happens, which is the `enabled: false` default (P0-7).
 
 **Deliberately unchanged.** The rejection register
 (`00-plan-set-index.md:115-275`), the retained-ownership rules (`:277-320`), the
@@ -302,6 +441,92 @@ audit contradicts them.
    contracts module is the only Rust-to-dashboard wire boundary and hand-written
    shapes are forbidden. Recommend deleting the duplicate rather than
    maintaining two sources of truth.
+3. **Plan 34's API-migration planner.** Nothing in `src/` implements it, no
+   other plan depends on it, and the rename-preview path already covers the
+   refactoring need that PR8–PR14 actually exercises. Recommend dropping it from
+   the pre-PR14 slice explicitly rather than letting it sit unimplemented and
+   unmentioned.
+4. **Plan 13's GitHub-stack anchor targets.** The plan already admits these are
+   pending (`13-research-provenance-and-context-anchors.md:27-28`) while its
+   header reads as delivered. Since PR13's GitHub work is read-only ingest and
+   never posts, anchoring into the GitHub stack is not on any PR8–PR14 journey.
+   Recommend a named deferral so the header stops overclaiming.
+5. **The dead `def_call_chain()` duplicate** at
+   `src/mcp/tools/definitions/graph.rs:691`. Not a plan requirement, but its
+   stale "not yet registered" comment caused a false finding in this very audit
+   (P1-e). Recommend deletion.
+
+---
+
+## P4 — Plan-by-plan coverage
+
+Six parallel audits partitioned the plan set. Their rows are reproduced with the
+evidence they cited. **These were not each re-derived by the auditor**, and two
+of their load-bearing claims were refuted on re-check (P1-d, P1-e), so treat
+individual rows as leads with citations rather than as settled findings. The
+P0/P1/P2 sections above are the verified core.
+
+### Retrieval and code intelligence (PR8–PR10)
+
+| Plan | Requirement | Status | Evidence |
+|---|---|---|---|
+| 08 sessions/LCM | Compression, supersession, truthful reads | IMPLEMENTED, UNVERIFIED | `src/sessions/lcm/`; `tests/session_suite/lcm_compression/` |
+| 09 code index | Deterministic generation identity, exact identifiers | IMPLEMENTED, UNVERIFIED | `tests/code_index_suite/`, `tests/graph_suite/` |
+| 10 semantic | Semantic never demotes exact; no cross-project leakage | IMPLEMENTED, UNVERIFIED | `tests/semantic_search_suite/` |
+| 15 retrieval lanes | Temporal, task, and diagnostic retriever lanes | NOT IMPLEMENTED | Enum variants exist with no adapter behind them |
+
+### Policy, Git, and runtime surfaces (PR11–PR12)
+
+| Plan | Requirement | Status | Evidence |
+|---|---|---|---|
+| 11 policy/Git | Receipt-backed transactions | IMPLEMENTED, UNVERIFIED | `tests/pr11_pr12_runtime_acceptance.rs` |
+| 11b structure | Surfaces 1–2 | UNREACHABLE | P0-2 |
+| 12 root migration | Preflight→backup→cutover→recovery | PARTIAL (PR19 scope) | `src/migrate/`, `src/commands/migrate.rs:74` |
+| 12 surfaces | CLI/MCP/HTTP/LSP lifecycle agreement | IMPLEMENTED, UNVERIFIED | `tests/mcp_suite/`, `tests/hooks_lsp_suite/` |
+
+### Hosts, hooks, and feedback (PR13)
+
+| Plan | Requirement | Status | Evidence |
+|---|---|---|---|
+| 13 provenance | `RetrievalAnchorId`, `EvidenceSpanRecordV1` | IMPLEMENTED, UNVERIFIED | `crates/tracedecay-store/src/evidence_assembly.rs:724`, `:785-838` |
+| 13 provenance | GitHub-stack anchor targets | NOT IMPLEMENTED | Plan admits pending at `:27-28` |
+| 27/37 hosts | Bounded hooks, async feedback, host conformance | IMPLEMENTED, UNVERIFIED | `tests/agent_suite/`, `tests/hooks_lsp_suite/` |
+| 09 doctor | Feedback-family remediation | UNREACHABLE | P0-6 |
+
+### Cross-cutting
+
+| Plan | Requirement | Status | Evidence |
+|---|---|---|---|
+| 38 §1 branch lifecycle | Branch-DB removal, sweep, `branch gc` | IMPLEMENTED, UNVERIFIED | `src/daemon/git_watch/store_maintenance.rs:109-160`; daily GC `git_watch.rs:992-994` |
+| 38 §2 orphan collection | Registry orphan detect/collect | IMPLEMENTED, UNVERIFIED | `store_maintenance.rs:485-549` |
+| 38 §3–4 session retention | Generation-scoped windows, one content copy | PARTIAL | P0-7, P1-a |
+| 38 §5 incident debris | Quarantine and collection | IMPLEMENTED, UNVERIFIED | `src/retention/incident_debris.rs`; default 30d `src/config.rs:472-474` |
+| 38 §6 compaction | Daemon-scheduled incremental vacuum | IMPLEMENTED, UNVERIFIED | `store_maintenance.rs:314-403`; runs only on mounted stores `git_watch.rs:996-998` |
+| 38 §7 size observability | Report, soft budgets, Doctor family | IMPLEMENTED, UNVERIFIED | `src/retention/storage_report.rs:34-36` |
+| 16 identity | Store keyed on stable repository identity | PARTIAL | P1-c |
+| 18 secrets | Sink firewalls on every durable sink | PARTIAL | Heuristic detector `src/memory/hygiene.rs:46`; not a universal ingest firewall |
+| 19 convergence | One canonical owner per concern | PARTIAL | Legacy paths remain; plan defers deletion to PR19 |
+| 34 refactoring | API-migration planner | NOT IMPLEMENTED | No `ApiMigration` symbol in `src/` |
+| 34 refactoring | Rename preview | IMPLEMENTED, UNVERIFIED | `src/mcp/tools/handlers/graph.rs:1326` |
+
+### Count by status
+
+Across the ~60 discrete requirements classified above and in P0–P2:
+
+| Status | Count |
+|---|---|
+| `IMPLEMENTED BUT UNVERIFIED` | ~34 |
+| `PARTIALLY IMPLEMENTED` | ~11 |
+| `IMPLEMENTED BUT UNREACHABLE` | 7 |
+| `NOT IMPLEMENTED` | 5 |
+| `IMPLEMENTED AND VERIFIED` | **0** |
+
+Zero is the honest number for the last row, and it is the single most important
+figure in this ledger. `cargo test-all` has never produced a passing run in this
+checkout, and the CI `dashboard` job is red at HEAD on `npm run typecheck`
+(P0-1). Until one of those changes, nothing in PR8–PR14 can be called verified,
+and the large `IMPLEMENTED BUT UNVERIFIED` count should be read as *unknown*
+rather than *probably fine*.
 
 ---
 
@@ -311,8 +536,15 @@ audit contradicts them.
    Automations as read-only for PR14 and name the slice that wires them?
 2. **Plan 11b Surfaces 1–2 (P0-2).** Build the consumers now, or unregister the
    five endpoints until a surface exists?
-3. **Session retention default (P1-a).** Is lossless-by-default still correct
-   given the storage-size driver Plan 38 cites?
+3. **Session retention default (P1-a, P0-7).** Three retention engines are
+   built, scheduled, and configured off. Is lossless-by-default still correct
+   given the storage-size driver Plan 38 cites, and if so, what *does* address
+   that driver?
+4. **`authority_scope` (P0-1).** Should the backend serve it on
+   `DoctorRemediationOperationV1`, or should the frontend stop modelling it?
+   The Doctor UI cannot compile either way until this is decided.
+5. **`FeedbackRead => false` (P0-6).** Deliberate deferral or oversight? If
+   deferral, what condition flips it?
 
 ## How to extend this ledger
 
