@@ -18,5 +18,6 @@
     "noEmit": true,
     "types": ["node"]
   },
-  "include": ["codegen", "src"]
+  "include": ["codegen", "src", "e2e", "stories"],
+  "exclude": ["stories/audit.ts"]
 }
