@@ -11,6 +11,8 @@ const sigmaState = vi.hoisted(() => ({
   graph: undefined as Graph | undefined,
   nodeReducer: undefined as NodeReducer | undefined,
   refreshCount: 0,
+  constructCount: 0,
+  killCount: 0,
   strikeListeners: new Set<() => void>(),
 }));
 
@@ -52,24 +54,42 @@ vi.mock('graphology-layout-forceatlas2', () => ({
   },
 }));
 
+/** Mirrors the one behaviour of the real renderer this file is about: Sigma
+ * measures `container.offsetWidth` on construction AND on every render, and
+ * throws rather than drawing when the answer is zero. A mock that quietly
+ * tolerated a collapsed container could not have caught the bug. */
 vi.mock('sigma', () => ({
   default: class MockSigma {
+    private readonly container: HTMLElement;
+
     constructor(
       graph: Graph,
-      _container: unknown,
+      container: HTMLElement,
       settings: { nodeReducer?: NodeReducer },
     ) {
+      this.container = container;
+      this.measure();
       sigmaState.graph = graph;
       sigmaState.nodeReducer = settings.nodeReducer;
+      sigmaState.constructCount += 1;
+    }
+
+    private measure() {
+      if (this.container.offsetWidth === 0) {
+        throw new Error('Sigma: Container has no width.');
+      }
     }
 
     setCustomBBox() {}
     on() {}
     refresh() {
+      this.measure();
       sigmaState.refreshCount += 1;
     }
     setSetting() {}
-    kill() {}
+    kill() {
+      sigmaState.killCount += 1;
+    }
   },
 }));
 
@@ -84,20 +104,119 @@ function stubWebGl(available: boolean) {
   });
 }
 
+/** The measured box every element reports, mutable so a test can take it away
+ * the way navigating off a workspace does. */
+const box = { width: 640, height: 320 };
+/** Every live ResizeObserver callback, so a test can deliver a measurement. */
+const observerCallbacks = new Set<() => void>();
+
 describe('GraphCanvas', () => {
   beforeEach(() => {
     sigmaState.graph = undefined;
     sigmaState.nodeReducer = undefined;
     sigmaState.refreshCount = 0;
+    sigmaState.constructCount = 0;
+    sigmaState.killCount = 0;
     sigmaState.strikeListeners.clear();
+    box.width = 640;
+    box.height = 320;
+    observerCallbacks.clear();
     stubWebGl(true);
+    vi.stubGlobal(
+      'ResizeObserver',
+      class MockResizeObserver {
+        private readonly callback: () => void;
+        constructor(callback: () => void) {
+          this.callback = callback;
+          observerCallbacks.add(callback);
+        }
+        observe() {}
+        disconnect() {
+          observerCallbacks.delete(this.callback);
+        }
+        unobserve() {}
+      },
+    );
     Object.defineProperties(HTMLElement.prototype, {
-      clientWidth: { configurable: true, get: () => 640 },
-      clientHeight: { configurable: true, get: () => 320 },
+      clientWidth: { configurable: true, get: () => box.width },
+      clientHeight: { configurable: true, get: () => box.height },
+      // Sigma measures `offsetWidth`, and so does the guard that decides
+      // whether a renderer may exist, so the fixture has to answer that name.
+      offsetWidth: { configurable: true, get: () => box.width },
+      offsetHeight: { configurable: true, get: () => box.height },
     });
     Object.defineProperty(window, 'matchMedia', {
       configurable: true,
       value: vi.fn().mockReturnValue({ matches: false }),
+    });
+  });
+
+  describe('renderer lifetime against the container box', () => {
+    const NODES = [{ id: 'node', label: 'Node', kind: 'function', degree: 1 }];
+
+    /** Deliver a measurement the way the browser does after a layout change. */
+    function deliverMeasurement() {
+      for (const callback of [...observerCallbacks]) callback();
+    }
+
+    it('does not build a renderer for a container that has no box', () => {
+      box.width = 0;
+      box.height = 0;
+
+      expect(() => render(<GraphCanvas nodes={NODES} edges={[]} />)).not.toThrow();
+      expect(sigmaState.constructCount).toBe(0);
+    });
+
+    it('builds one once the container is measured, without a mount retry', async () => {
+      box.width = 0;
+      box.height = 0;
+      render(<GraphCanvas nodes={NODES} edges={[]} />);
+      expect(sigmaState.constructCount).toBe(0);
+
+      box.width = 640;
+      box.height = 320;
+      deliverMeasurement();
+
+      await waitFor(() => expect(sigmaState.constructCount).toBe(1));
+    });
+
+    // The regression: leaving a workspace collapses the container while the
+    // renderer is still alive, and Sigma's next frame -- including ones it
+    // schedules itself from a window resize -- measures zero and throws. The
+    // renderer has to be gone by then, not merely told to skip a frame.
+    it('kills the renderer when the container loses its box', async () => {
+      const { rerender } = render(
+        <GraphCanvas nodes={NODES} edges={[]} selectedId={null} />,
+      );
+      await waitFor(() => expect(sigmaState.constructCount).toBe(1));
+      expect(sigmaState.killCount).toBe(0);
+
+      box.width = 0;
+      box.height = 0;
+      deliverMeasurement();
+
+      expect(sigmaState.killCount).toBe(1);
+      // A repaint request arriving after the collapse must find nothing to
+      // repaint rather than reaching a renderer that would measure zero.
+      expect(() =>
+        rerender(<GraphCanvas nodes={NODES} edges={[]} selectedId="node" />),
+      ).not.toThrow();
+    });
+
+    it('rebuilds when the box comes back', async () => {
+      render(<GraphCanvas nodes={NODES} edges={[]} />);
+      await waitFor(() => expect(sigmaState.constructCount).toBe(1));
+
+      box.width = 0;
+      box.height = 0;
+      deliverMeasurement();
+      expect(sigmaState.killCount).toBe(1);
+
+      box.width = 800;
+      box.height = 400;
+      deliverMeasurement();
+
+      await waitFor(() => expect(sigmaState.constructCount).toBe(2));
     });
   });
 
