@@ -455,7 +455,7 @@ async fn compute_health_snapshot(
         .build_file_adjacency(path_prefix)
         .await?;
     let files_analyzed = adj.len();
-    let total_edges = adj.values().map(Vec::len).sum();
+    let total_edges = adj.values().map(HashSet::len).sum();
 
     let (acyclicity, edges_in_cycles) = acyclicity_score(&adj);
     let depth_result = dependency_depth(&adj, 1);

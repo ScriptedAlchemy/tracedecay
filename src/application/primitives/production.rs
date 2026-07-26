@@ -12,13 +12,13 @@ use tracedecay_application::retrieval::grep_analysis::{
 };
 use tracedecay_application::retrieval::{
     AffectedFileTestsPrimitiveRequest, AffectedFileTestsPrimitiveResultV1,
-    AffectedTestAttributionV1, AffectedTestsRequest, AffectedTestsResult, HealthReadRequest,
-    HealthReadResult, OperationalRetrievalPort, RankedAffectedTestV1, RetrievalPortContext,
-    RetrievalPortOutcome, SessionLookupRequest, SessionLookupResult, SourceLinesRequest,
-    SourceLinesResult, SourceReference, SourceRetrievalPort, SymbolPrimitiveRecord,
-    TemporalRetrievalPort, TestMapCoverageV1, TestMapPrimitiveRequest, TestMapPrimitiveResultV1,
-    TestPrimitivePort, TestPrimitivePortContext, TestPrimitivePortFuture, TestPrimitivePortOutcome,
-    TestReferenceV1, UncoveredSourceV1,
+    AffectedTestAttributionV1, AffectedTestsRequest, AffectedTestsResult, HealthDeltaRequest,
+    HealthDeltaResult, HealthReadRequest, HealthReadResult, OperationalRetrievalPort,
+    RankedAffectedTestV1, RetrievalPortContext, RetrievalPortOutcome, SessionLookupRequest,
+    SessionLookupResult, SourceLinesRequest, SourceLinesResult, SourceReference,
+    SourceRetrievalPort, SymbolPrimitiveRecord, TemporalRetrievalPort, TestMapCoverageV1,
+    TestMapPrimitiveRequest, TestMapPrimitiveResultV1, TestPrimitivePort, TestPrimitivePortContext,
+    TestPrimitivePortFuture, TestPrimitivePortOutcome, TestReferenceV1, UncoveredSourceV1,
 };
 use tracedecay_application::{
     ApplicationContractError, CoverageCompleteness, CoverageDomainState, EvidenceAuthority,
