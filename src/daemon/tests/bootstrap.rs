@@ -227,6 +227,33 @@ fn mutable_cursor_key_rejection_keeps_the_transient_debounce() {
     );
 }
 
+/// Every authority verdict that is a property of the stored rows must back off,
+/// including messages nobody has enumerated yet.
+///
+/// The column-versus-JSON disagreement below was unclassified and spun warm-up
+/// at the debounce cadence, burning roughly three quarters of a core. It is a
+/// deterministic judgement of persisted data, so it cannot self-clear, and
+/// neither can the rest of this family.
+#[test]
+fn deterministic_authority_verdicts_all_back_off() {
+    for message in [
+        "committed observation authority columns disagree with observation JSON",
+        "sanitization receipt authority columns disagree with receipt JSON",
+        "summary publication receipt authority columns disagree with receipt JSON",
+        "source cursor authority keys disagree with cursor JSON",
+        "committed source cursor disagrees with observation source evidence",
+        "committed observation references a missing receipt",
+        "projection provenance disagrees with deterministic output",
+        "an invariant message that does not exist yet",
+    ] {
+        assert_eq!(
+            super::super::project_open_retry_backoff(&authority_invariant_error(message)),
+            Some(super::super::PROJECT_OPEN_UNREPAIRABLE_RETRY_BACKOFF),
+            "{message} cannot clear on its own and must not reopen at the debounce cadence"
+        );
+    }
+}
+
 #[test]
 fn transient_authority_failures_stay_immediately_retryable() {
     // A locked or unreadable database surfaces under the same operation but
