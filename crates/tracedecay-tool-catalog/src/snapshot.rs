@@ -7,7 +7,7 @@ use crate::id::{
     BindingId, CapabilityId, CatalogDigest, ContributionId, FeatureId, ProfileId, SchemaId,
     UseCaseId,
 };
-use crate::manifest::{CapabilityManifestV1, SchemaRef, canonicalize_set};
+use crate::manifest::{CapabilityManifestV1, SchemaRef, ScopeDimension, canonicalize_set};
 use crate::profile::ProfileDefinition;
 use crate::retrieval::RetrievalPrimitiveManifestV1;
 use crate::validation::{CatalogValidationError, validate_catalog};
@@ -305,6 +305,56 @@ impl CatalogSnapshotV1 {
                     && features_satisfied(capability.required_features(), negotiated_features)
             })
             .collect()
+    }
+
+    /// Lists callable bindings after applying every discovery boundary.
+    ///
+    /// The caller supplies its already-resolved scope and authorization
+    /// intersection. This keeps transport adapters from publishing a static
+    /// superset and preserves indistinguishable omission for hidden entries.
+    #[allow(clippy::too_many_arguments)]
+    pub fn visible_bindings<'a>(
+        &'a self,
+        profile_id: &ProfileId,
+        surface: BindingSurface,
+        protocol_revision: u32,
+        negotiated_features: &BTreeSet<FeatureId>,
+        authorized_capabilities: &BTreeSet<CapabilityId>,
+        available_scope: &BTreeSet<ScopeDimension>,
+    ) -> Vec<(&'a SurfaceBindingV1, &'a CapabilityManifestV1)> {
+        let Some(profile) = self.profiles.get(profile_id) else {
+            return Vec::new();
+        };
+        if !profile.enables_surface(surface) {
+            return Vec::new();
+        }
+        let mut visible = Vec::new();
+        for capability in self.visible_capabilities(profile_id, negotiated_features) {
+            if !authorized_capabilities.contains(capability.capability_id())
+                || !capability
+                    .scope()
+                    .dimensions()
+                    .iter()
+                    .all(|dimension| available_scope.contains(dimension))
+            {
+                continue;
+            }
+            for binding_id in capability.binding_ids() {
+                let Some(binding) = self.bindings.get(binding_id) else {
+                    continue;
+                };
+                if binding.surface() == surface
+                    && binding.protocol_revisions().contains(protocol_revision)
+                    && features_satisfied(binding.required_features(), negotiated_features)
+                {
+                    visible.push((binding, capability));
+                }
+            }
+        }
+        visible.sort_by(|(left, _), (right, _)| {
+            left.operation().as_str().cmp(right.operation().as_str())
+        });
+        visible
     }
 }
 

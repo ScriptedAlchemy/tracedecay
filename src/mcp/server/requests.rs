@@ -515,8 +515,42 @@ impl McpServer {
             .await
             .map_or(0, |s| s.node_count);
         let budget = explore_call_budget(node_count);
-        let tools = get_tool_definitions_with_budget(node_count, budget);
-        JsonRpcResponse::success(id, json!({ "tools": tools }))
+        let profile_id = match tracedecay_tool_catalog::ProfileId::new(
+            tracedecay_application::APPLICATION_DEFAULT_PROFILE_ID,
+        ) {
+            Ok(profile_id) => profile_id,
+            Err(error) => {
+                return JsonRpcResponse::error(
+                    id,
+                    ErrorCode::InternalError,
+                    format!("invalid MCP discovery profile: {error}"),
+                );
+            }
+        };
+        let authority = match default_catalog_discovery_authority() {
+            Ok(authority) => authority,
+            Err(error) => {
+                return JsonRpcResponse::error(
+                    id,
+                    ErrorCode::InternalError,
+                    format!("MCP catalog discovery unavailable: {error}"),
+                );
+            }
+        };
+        match get_catalog_filtered_tool_definitions_with_budget(
+            node_count,
+            budget,
+            &profile_id,
+            &authority,
+            &project_catalog_discovery_scope(),
+        ) {
+            Ok(tools) => JsonRpcResponse::success(id, json!({ "tools": tools })),
+            Err(error) => JsonRpcResponse::error(
+                id,
+                ErrorCode::InternalError,
+                format!("MCP catalog discovery unavailable: {error}"),
+            ),
+        }
     }
 
     /// Handles the `resources/list` method, returning available resources.

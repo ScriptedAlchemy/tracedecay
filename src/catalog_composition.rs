@@ -8,8 +8,10 @@ use std::collections::BTreeMap;
 use thiserror::Error;
 use tracedecay_application::handlers::BoundApplicationHandler;
 use tracedecay_application::{
-    APPLICATION_DEFAULT_PROFILE_ID, ApplicationContractError, ApplicationHandlerDescriptors,
-    application_catalog_contributions, application_handler_descriptors,
+    APPLICATION_ADMINISTRATIVE_PROFILE_ID, APPLICATION_COMPACT_PROFILE_ID,
+    APPLICATION_DEFAULT_PROFILE_ID, APPLICATION_HOST_LIMITED_PROFILE_ID, ApplicationContractError,
+    ApplicationHandlerDescriptors, application_catalog_contributions,
+    application_handler_descriptors,
 };
 use tracedecay_tool_catalog::{
     BindingSurface, CapabilityId, CatalogContributionV1, CatalogSnapshotBuilderV1,
@@ -17,10 +19,6 @@ use tracedecay_tool_catalog::{
     ProfileDefinitionInputV1, ProfileId, ProfileKind, RoutingFixtureExpectation, RoutingFixtureV1,
     UseCaseId,
 };
-
-const APPLICATION_COMPACT_PROFILE_ID: &str = "profile.compact";
-const APPLICATION_ADMINISTRATIVE_PROFILE_ID: &str = "profile.administrative";
-const APPLICATION_HOST_LIMITED_PROFILE_ID: &str = "profile.host-limited";
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum CatalogCompositionError {
@@ -133,19 +131,19 @@ fn application_profiles(
         (
             APPLICATION_COMPACT_PROFILE_ID,
             ProfileKind::Compact,
-            ProfileBudget::COMPACT,
+            ProfileBudget::new(20, 12_000_000, 4_000)?,
             false,
         ),
         (
             APPLICATION_ADMINISTRATIVE_PROFILE_ID,
             ProfileKind::Administrative,
-            ProfileBudget::ADMINISTRATIVE,
+            ProfileBudget::new(32, 16_000_000, 8_000)?,
             false,
         ),
         (
             APPLICATION_HOST_LIMITED_PROFILE_ID,
             ProfileKind::HostLimited,
-            ProfileBudget::HOST_LIMITED,
+            ProfileBudget::new(12, 8_000_000, 2_000)?,
             false,
         ),
     ]

@@ -19,6 +19,18 @@ use crate::result::ResultContractRef;
 const SYMBOL_SEARCH_CAPABILITY: &str = "capability.retrieval.symbol-search";
 const SYMBOL_SEARCH_USE_CASE: &str = "use-case.retrieval.symbol-search";
 pub const APPLICATION_DEFAULT_PROFILE_ID: &str = "profile.default";
+pub const APPLICATION_COMPACT_PROFILE_ID: &str = "profile.compact";
+pub const APPLICATION_ADMINISTRATIVE_PROFILE_ID: &str = "profile.administrative";
+pub const APPLICATION_HOST_LIMITED_PROFILE_ID: &str = "profile.host-limited";
+
+pub(crate) fn application_profile_ids(
+    profile_ids: &[&str],
+) -> Result<Vec<ProfileId>, ApplicationContractError> {
+    profile_ids
+        .iter()
+        .map(|profile_id| ProfileId::new(*profile_id).map_err(Into::into))
+        .collect()
+}
 
 /// Closed set of catalog contributions for declared application use cases.
 /// Adding metadata here requires adding its typed handler descriptor to
@@ -34,6 +46,7 @@ pub fn application_catalog_contributions()
         crate::configuration::configuration_surface_catalog_contribution()?,
         crate::context_scout::context_scout_surface_catalog_contribution()?,
         crate::feedback::feedback_surface_catalog_contribution()?,
+        crate::lsp_context_catalog::lsp_context_catalog_contribution()?,
         crate::source_edit::source_edit_catalog_contribution()?,
     ])
 }
@@ -42,6 +55,49 @@ struct PrimitiveReadSpec {
     operation: &'static str,
     capability: &'static str,
     use_case: &'static str,
+}
+
+fn primitive_profile_ids(operation: &str) -> &'static [&'static str] {
+    match operation {
+        "source_lines" => &[
+            APPLICATION_DEFAULT_PROFILE_ID,
+            APPLICATION_COMPACT_PROFILE_ID,
+            APPLICATION_HOST_LIMITED_PROFILE_ID,
+        ],
+        "source_outline" | "diagnostics_read" => &[
+            APPLICATION_DEFAULT_PROFILE_ID,
+            APPLICATION_COMPACT_PROFILE_ID,
+            APPLICATION_ADMINISTRATIVE_PROFILE_ID,
+            APPLICATION_HOST_LIMITED_PROFILE_ID,
+        ],
+        "health_read" | "storage_status" => &[
+            APPLICATION_DEFAULT_PROFILE_ID,
+            APPLICATION_ADMINISTRATIVE_PROFILE_ID,
+        ],
+        _ => &[APPLICATION_DEFAULT_PROFILE_ID],
+    }
+}
+
+fn primitive_lsp_methods(operation: &str) -> &'static [&'static str] {
+    match operation {
+        "code_signature_search" => &["textDocument/signatureHelp"],
+        "code_implementations" => &["textDocument/implementation"],
+        "code_type_hierarchy" => &[
+            "textDocument/typeDefinition",
+            "textDocument/prepareTypeHierarchy",
+            "typeHierarchy/supertypes",
+            "typeHierarchy/subtypes",
+        ],
+        "code_callers" => &[
+            "textDocument/prepareCallHierarchy",
+            "callHierarchy/incomingCalls",
+        ],
+        "qualified_name" => &["textDocument/declaration"],
+        "source_body" => &["textDocument/hover"],
+        "source_outline" => &["textDocument/documentSymbol"],
+        "diagnostics_read" => &["textDocument/diagnostic"],
+        _ => &[],
+    }
 }
 
 const PRIMITIVE_READ_SPECS: [PrimitiveReadSpec; 16] = [
@@ -130,13 +186,13 @@ pub fn primitive_read_handler_descriptors()
 
 pub fn primitive_read_contribution() -> Result<CatalogContributionV1, ApplicationContractError> {
     let mut capabilities = Vec::with_capacity(PRIMITIVE_READ_SPECS.len());
-    let mut bindings = Vec::with_capacity(PRIMITIVE_READ_SPECS.len() * 3);
+    let mut bindings = Vec::with_capacity(PRIMITIVE_READ_SPECS.len() * 4);
     for spec in &PRIMITIVE_READ_SPECS {
         let capability_id = CapabilityId::new(format!(
             "capability.application.primitive.{}",
             spec.capability.replace('_', "-")
         ))?;
-        let mut binding_ids = Vec::with_capacity(3);
+        let mut binding_ids = Vec::with_capacity(3 + primitive_lsp_methods(spec.operation).len());
         for surface in [
             BindingSurface::Cli,
             BindingSurface::Mcp,
@@ -156,6 +212,22 @@ pub fn primitive_read_contribution() -> Result<CatalogContributionV1, Applicatio
                 capability_id: capability_id.clone(),
                 surface,
                 operation: SurfaceOperationName::new(spec.operation)?,
+                protocol_revisions: ProtocolRevisionRange::new(1, 1)?,
+                required_features: Vec::new(),
+                status: BindingStatus::Current,
+                alias_of: None,
+            })?);
+            binding_ids.push(binding_id);
+        }
+        for method in primitive_lsp_methods(spec.operation) {
+            let method_id = method.to_ascii_lowercase().replace('/', "-");
+            let binding_id =
+                BindingId::new(format!("binding.lsp.{}.{}.v1", spec.operation, method_id))?;
+            bindings.push(SurfaceBindingV1::new(SurfaceBindingInputV1 {
+                binding_id: binding_id.clone(),
+                capability_id: capability_id.clone(),
+                surface: BindingSurface::Lsp,
+                operation: SurfaceOperationName::new(*method)?,
                 protocol_revisions: ProtocolRevisionRange::new(1, 1)?,
                 required_features: Vec::new(),
                 status: BindingStatus::Current,
@@ -209,7 +281,7 @@ pub fn primitive_read_contribution() -> Result<CatalogContributionV1, Applicatio
             ])?,
             availability: AvailabilityContract::Available,
             binding_ids,
-            profile_eligibility: vec![ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID)?],
+            profile_eligibility: application_profile_ids(primitive_profile_ids(spec.operation))?,
             required_features: Vec::new(),
         })?);
     }
@@ -265,8 +337,8 @@ pub fn symbol_search_contribution() -> Result<CatalogContributionV1, Application
     let capability_id = CapabilityId::new(SYMBOL_SEARCH_CAPABILITY)?;
     let request_schema = symbol_search_request_schema()?;
     let result_schema = symbol_search_result_schema()?;
-    let mut bindings = Vec::with_capacity(3);
-    let mut binding_ids = Vec::with_capacity(3);
+    let mut bindings = Vec::with_capacity(4);
+    let mut binding_ids = Vec::with_capacity(4);
     for surface in [
         BindingSurface::Cli,
         BindingSurface::Mcp,
@@ -292,6 +364,18 @@ pub fn symbol_search_contribution() -> Result<CatalogContributionV1, Application
         })?);
         binding_ids.push(binding_id);
     }
+    let lsp_binding_id = BindingId::new("binding.lsp.symbol-search.workspace-symbol.v1")?;
+    bindings.push(SurfaceBindingV1::new(SurfaceBindingInputV1 {
+        binding_id: lsp_binding_id.clone(),
+        capability_id: capability_id.clone(),
+        surface: BindingSurface::Lsp,
+        operation: SurfaceOperationName::new("workspace/symbol")?,
+        protocol_revisions: ProtocolRevisionRange::new(1, 1)?,
+        required_features: Vec::new(),
+        status: BindingStatus::Current,
+        alias_of: None,
+    })?);
+    binding_ids.push(lsp_binding_id);
     let capability = CapabilityManifestV1::new(CapabilityManifestInputV1 {
         capability_id: capability_id.clone(),
         use_case_id: tracedecay_tool_catalog::UseCaseId::new(SYMBOL_SEARCH_USE_CASE)?,
@@ -335,7 +419,11 @@ pub fn symbol_search_contribution() -> Result<CatalogContributionV1, Application
         ])?,
         availability: AvailabilityContract::Available,
         binding_ids,
-        profile_eligibility: vec![ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID)?],
+        profile_eligibility: application_profile_ids(&[
+            APPLICATION_DEFAULT_PROFILE_ID,
+            APPLICATION_COMPACT_PROFILE_ID,
+            APPLICATION_HOST_LIMITED_PROFILE_ID,
+        ])?,
         required_features: Vec::new(),
     })?;
     let primitive = RetrievalPrimitiveManifestV1::new(RetrievalPrimitiveManifestInputV1 {

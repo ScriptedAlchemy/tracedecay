@@ -145,9 +145,15 @@ pub enum ApplicationSurfaceOperation {
     ContextScoutFeedback,
 }
 
-pub const APPLICATION_SURFACE_OPERATIONS: [ApplicationSurfaceOperation; 47] = [
+pub const APPLICATION_SURFACE_OPERATIONS: [ApplicationSurfaceOperation; 53] = [
     ApplicationSurfaceOperation::GitPreview,
     ApplicationSurfaceOperation::GitApply,
+    ApplicationSurfaceOperation::FeedbackDiagnostics,
+    ApplicationSurfaceOperation::FeedbackGet,
+    ApplicationSurfaceOperation::FeedbackExpand,
+    ApplicationSurfaceOperation::FeedbackList,
+    ApplicationSurfaceOperation::FeedbackImpact,
+    ApplicationSurfaceOperation::AffectedTests,
     ApplicationSurfaceOperation::TestResults,
     ApplicationSurfaceOperation::CodeExactOccurrence,
     ApplicationSurfaceOperation::CodePhraseSearch,
@@ -863,7 +869,8 @@ pub fn http_application_invoker(
         }
     })?);
     let resolver = CatalogBindingResolver::new(composition.snapshot());
-    for operation in APPLICATION_SURFACE_OPERATIONS {
+    for http_operation in HttpApplicationOperation::ALL {
+        let operation = application_operation_for_http(http_operation);
         if resolve_application_binding(&resolver, BindingSurface::Http, operation).is_none() {
             return Err(ApplicationSurfaceAdapterError::UnknownOrNotAuthorized);
         }
@@ -2742,8 +2749,6 @@ fn application_operation_for_http(
     operation: HttpApplicationOperation,
 ) -> ApplicationSurfaceOperation {
     match operation {
-        HttpApplicationOperation::GitPreview => ApplicationSurfaceOperation::GitPreview,
-        HttpApplicationOperation::GitApply => ApplicationSurfaceOperation::GitApply,
         HttpApplicationOperation::TestResults => ApplicationSurfaceOperation::TestResults,
         HttpApplicationOperation::CodeExactOccurrence => {
             ApplicationSurfaceOperation::CodeExactOccurrence
