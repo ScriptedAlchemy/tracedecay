@@ -413,14 +413,17 @@ pub(crate) async fn strata(State(state): State<DashboardState>) -> Response {
         let clusters = dsm_clusters(&scan.adjacency)
             .into_iter()
             .enumerate()
-            .map(|(index, cluster)| StrataClusterV1 {
-                order: index,
-                directory: cluster.directory,
-                file_count: cluster.file_count,
-                internal_edges: cluster.internal_edges,
-                outgoing_edges: cluster.outgoing_edges,
-                incoming_edges: cluster.incoming_edges,
-                boundary_edges: cluster.boundary_edges(),
+            .map(|(index, cluster)| {
+                let boundary_edges = cluster.boundary_edges();
+                StrataClusterV1 {
+                    order: index,
+                    directory: cluster.directory,
+                    file_count: cluster.file_count,
+                    internal_edges: cluster.internal_edges,
+                    outgoing_edges: cluster.outgoing_edges,
+                    incoming_edges: cluster.incoming_edges,
+                    boundary_edges,
+                }
             })
             .collect();
         let computed = Arc::new(CachedStrataV1 {
