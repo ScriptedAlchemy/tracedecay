@@ -1804,6 +1804,21 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
+    pub async fn plan_registry_reap(
+        &self,
+    ) -> crate::errors::Result<crate::project_registry::RegistryReapPlan> {
+        self.profile_database.plan_registry_reap().await
+    }
+
+    #[doc(hidden)]
+    pub async fn apply_registry_reap(
+        &self,
+        plan: &crate::project_registry::RegistryReapPlan,
+    ) -> crate::errors::Result<usize> {
+        self.profile_database.apply_registry_reap(plan).await
+    }
+
+    #[doc(hidden)]
     pub async fn list_code_projects(
         &self,
         limit: usize,

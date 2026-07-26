@@ -2,6 +2,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::db::engine::{Executor, IntoParams, QueryExecutor, Rows, Value, params};
+use crate::project_registry::{
+    ReapEntryKind, RegistryReapEntry, RegistryReapPlan, RetainedRegistryEntry,
+};
 
 use super::{
     CodeProjectRecord, GraphScopeRecord, GraphScopeUpsert, ProjectAliasRecord,
@@ -669,6 +672,13 @@ impl RegisteredGlobalDb {
                 || selector.contains('\\'))
     }
 
+    /// Applies [`crate::project_registry::ephemeral_root_rejection`] against
+    /// the profile this database belongs to (`<profile>/global.db`).
+    fn ephemeral_root_rejection(&self, project_root: &Path) -> Option<String> {
+        let profile_root = self.db_path().parent()?;
+        crate::project_registry::ephemeral_root_rejection(project_root, profile_root)
+    }
+
     pub async fn upsert_code_project(
         &self,
         project_id: &str,
@@ -677,6 +687,14 @@ impl RegisteredGlobalDb {
         git_remote_url: Option<&str>,
         default_branch: Option<&str>,
     ) -> Option<CodeProjectRecord> {
+        // The one door through which a project authority is minted. Enforcing
+        // admission here rather than at each caller means an ephemeral root
+        // cannot become a durable authority even from a call site that has
+        // never heard of the policy.
+        if let Some(reason) = self.ephemeral_root_rejection(project_root) {
+            eprintln!("warning: refusing to register a TraceDecay project — {reason}");
+            return None;
+        }
         let now = crate::tracedecay::current_timestamp();
         let canonical_project_root = canonical_project_path(project_root);
         let canonical_root = canonical_project_root.to_string_lossy().into_owned();
@@ -1487,5 +1505,187 @@ impl RegisteredGlobalDb {
 
     pub(crate) async fn list_project_alias_paths_compat(&self) -> Vec<String> {
         list_registered_project_alias_paths_compat(self).await
+    }
+
+    /// Classifies registry rows whose referenced path no longer exists.
+    ///
+    /// Dead references accumulate forever: every deleted worktree, renamed
+    /// checkout, and throwaway clone leaves ledger, alias, and authority rows
+    /// behind that nothing ever removes. This reports them without changing
+    /// anything, so the result can be reviewed before [`apply_registry_reap`]
+    /// removes the rows.
+    ///
+    /// A missing path is *not* evidence that data is disposable. An authority
+    /// whose store directory still exists on disk is always retained with a
+    /// reason: that store may hold facts, sessions, or branch graphs that
+    /// exist nowhere else, and reclaiming it is a separate, verified
+    /// operation. Nothing in planning or applying a reap deletes a file.
+    ///
+    /// [`apply_registry_reap`]: Self::apply_registry_reap
+    pub async fn plan_registry_reap(&self) -> crate::errors::Result<RegistryReapPlan> {
+        const OPERATION: &str = "plan registry reap";
+        let profile_root = self
+            .db_path()
+            .parent()
+            .ok_or_else(|| {
+                global_db_operation_message(OPERATION, "global database has no profile directory")
+            })?
+            .to_path_buf();
+        let snapshot = self
+            .read_snapshot()
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let mut plan = RegistryReapPlan::default();
+
+        let mut rows = snapshot
+            .query("SELECT path FROM projects ORDER BY path", ())
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?
+        {
+            let path: String = row
+                .get(0)
+                .map_err(|error| global_db_operation_error(OPERATION, error))?;
+            if Path::new(&path).is_absolute() && !Path::new(&path).exists() {
+                plan.reapable.push(RegistryReapEntry {
+                    kind: ReapEntryKind::SavingsLedgerPath,
+                    key: path.clone(),
+                    missing_path: path,
+                    project_id: None,
+                });
+            }
+        }
+
+        let mut live_roots_by_project: BTreeMap<String, usize> = BTreeMap::new();
+        let mut dead_aliases = Vec::new();
+        let mut rows = snapshot
+            .query(
+                "SELECT alias_path, project_id FROM project_aliases ORDER BY alias_path",
+                (),
+            )
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?
+        {
+            let alias: String = row
+                .get(0)
+                .map_err(|error| global_db_operation_error(OPERATION, error))?;
+            let project_id: String = row
+                .get(1)
+                .map_err(|error| global_db_operation_error(OPERATION, error))?;
+            // A non-path alias (a remote-name search key) can never be judged
+            // dead by consulting the filesystem, so it is never a candidate.
+            let missing_path = match crate::project_registry::alias_key_path(&alias) {
+                Some(path) if !path.exists() => path.to_string_lossy().into_owned(),
+                // Either a non-path alias, which the filesystem can never
+                // judge dead, or a path that is still there.
+                _ => {
+                    *live_roots_by_project.entry(project_id).or_default() += 1;
+                    continue;
+                }
+            };
+            dead_aliases.push(RegistryReapEntry {
+                kind: ReapEntryKind::ProjectAlias,
+                key: alias,
+                missing_path,
+                project_id: Some(project_id),
+            });
+        }
+        plan.reapable.extend(dead_aliases);
+
+        let mut rows = snapshot
+            .query(
+                "SELECT project_id, canonical_root, git_common_dir
+                 FROM code_projects ORDER BY project_id",
+                (),
+            )
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?
+        {
+            let project_id: String = row
+                .get(0)
+                .map_err(|error| global_db_operation_error(OPERATION, error))?;
+            let canonical_root: String = row
+                .get(1)
+                .map_err(|error| global_db_operation_error(OPERATION, error))?;
+            let git_common_dir: Option<String> = row.get(2).ok();
+            if Path::new(&canonical_root).exists()
+                || git_common_dir
+                    .as_deref()
+                    .is_some_and(|dir| Path::new(dir).exists())
+                || live_roots_by_project.contains_key(&project_id)
+            {
+                continue;
+            }
+            let entry = RegistryReapEntry {
+                kind: ReapEntryKind::CodeProject,
+                key: project_id.clone(),
+                missing_path: canonical_root,
+                project_id: Some(project_id.clone()),
+            };
+            let store_root = crate::storage::profile_sharded_data_root(&profile_root, &project_id);
+            if store_root.exists() {
+                plan.retained.push(RetainedRegistryEntry {
+                    entry,
+                    reason: format!(
+                        "store directory '{}' still holds data; reclaiming it is a separate \
+                         verified operation",
+                        store_root.display()
+                    ),
+                });
+            } else {
+                plan.reapable.push(entry);
+            }
+        }
+
+        Ok(plan)
+    }
+
+    /// Removes the rows in `plan.reapable`, and only those rows.
+    ///
+    /// Every path is re-checked here rather than trusted from planning time,
+    /// so a checkout that reappeared between the two calls is skipped instead
+    /// of unregistered. Returns the number of rows actually removed. No
+    /// filesystem path is deleted, moved, or opened for writing.
+    pub async fn apply_registry_reap(
+        &self,
+        plan: &RegistryReapPlan,
+    ) -> crate::errors::Result<usize> {
+        const OPERATION: &str = "apply registry reap";
+        let transaction = self
+            .begin_write_transaction()
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let mut removed = 0;
+        for entry in &plan.reapable {
+            if Path::new(&entry.missing_path).exists() {
+                continue;
+            }
+            let statement = match entry.kind {
+                ReapEntryKind::SavingsLedgerPath => "DELETE FROM projects WHERE path = ?1",
+                ReapEntryKind::ProjectAlias => "DELETE FROM project_aliases WHERE alias_path = ?1",
+                ReapEntryKind::CodeProject => "DELETE FROM code_projects WHERE project_id = ?1",
+            };
+            transaction
+                .execute(statement, params![entry.key.as_str()])
+                .await
+                .map_err(|error| global_db_operation_error(OPERATION, error))?;
+            removed += 1;
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        Ok(removed)
     }
 }
