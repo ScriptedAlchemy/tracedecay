@@ -342,7 +342,7 @@ async fn inventory_does_not_open_or_recover_dirty_project_db() {
             StoreStatus::IntegrityIssue {
                 path,
                 authority: InventoryStoreAuthority::Authoritative,
-                outcome: SqliteIntegrityOutcome::Unavailable { .. },
+                outcome: SqliteIntegrityOutcome::Damaged { .. },
             } if same_path(path, &db_path)
         )
     }));
@@ -441,16 +441,20 @@ async fn damaged_stale_branch_is_attributed_without_condemning_authoritative_sto
             && artifact.size_bytes == 3
     }));
     assert!(!store.statuses.contains(&StoreStatus::Corrupt));
-    assert!(store.statuses.iter().any(|status| {
-        matches!(
-            status,
-            StoreStatus::IntegrityIssue {
-                path,
-                authority: InventoryStoreAuthority::StaleBranch,
-                outcome: SqliteIntegrityOutcome::Damaged { details },
-            } if same_path(path, &branch_db) && !details.is_empty()
-        )
-    }));
+    assert!(
+        store.statuses.iter().any(|status| {
+            matches!(
+                status,
+                StoreStatus::IntegrityIssue {
+                    path,
+                    authority: InventoryStoreAuthority::StaleBranch,
+                    outcome: SqliteIntegrityOutcome::Damaged { details },
+                } if same_path(path, &branch_db) && !details.is_empty()
+            )
+        }),
+        "{:?}",
+        store.statuses
+    );
     assert!(!store.statuses.iter().any(|status| {
         matches!(
             status,
@@ -771,7 +775,7 @@ async fn inventory_reports_registered_project_with_missing_local_store() {
 }
 
 #[tokio::test]
-async fn inventory_warns_instead_of_failing_on_unreadable_global_db() {
+async fn inventory_reports_non_sqlite_global_db_as_damaged() {
     let dir = TempDir::new().unwrap();
     let db_path = dir.path().join("global.db");
     fs::write(&db_path, b"not sqlite").unwrap();
@@ -789,8 +793,8 @@ async fn inventory_warns_instead_of_failing_on_unreadable_global_db() {
     assert_eq!(global.project_count, 0);
     assert!(matches!(
         global.integrity,
-        SqliteIntegrityOutcome::Unavailable { ref reason }
-            if !reason.is_empty()
+        SqliteIntegrityOutcome::Damaged { ref details }
+            if !details.is_empty()
     ));
     assert!(!global.warnings.is_empty());
 }

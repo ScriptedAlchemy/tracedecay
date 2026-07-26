@@ -39,10 +39,11 @@ mod code_diagnostics_api;
 mod code_index_freshness_api;
 mod delivery_api;
 mod doctor_findings_api;
-mod doctor_remediation_api;
+pub(crate) mod doctor_remediation_api;
 pub(crate) use doctor_remediation_api::{
     DoctorRemediationDispatchCommandV1, DoctorRemediationDispatchErrorV1,
     DoctorRemediationDispatcherV1, DoctorRemediationOperationPhaseV1, DoctorRemediationOperationV1,
+    DoctorRemediationTargetV1,
 };
 mod events_api;
 mod explorer_api;
@@ -1021,6 +1022,10 @@ fn project_api_router() -> Router<DashboardState> {
         .route(
             "/api/plugins/graph/node/{node_id}/tests",
             get(graph_structure_api::node_tests),
+        )
+        .route(
+            "/api/plugins/graph/node/{node_id}/sessions",
+            get(graph_structure_api::node_sessions),
         )
         // Durable analytics API (hint lifecycle scaffolds + session usage rollups)
         .route(

@@ -570,7 +570,18 @@ async fn code_source(
     request: &ExplorerQueryRequestV1,
 ) -> ExplorerSourceProgressV1 {
     let payload =
-        graph_service::search_payload(state, &request.query, request.limit, request.offset).await;
+        match graph_service::search_payload(state, &request.query, request.limit, request.offset)
+            .await
+        {
+            Ok(payload) => payload,
+            Err(error) => {
+                return ExplorerSourceProgressV1::error(
+                    ExplorerSourceIdV1::CodeGraph,
+                    "code_graph_read_failed",
+                    error,
+                );
+            }
+        };
     let Some(total) = payload.get("total").and_then(Value::as_u64) else {
         return ExplorerSourceProgressV1::error(
             ExplorerSourceIdV1::CodeGraph,

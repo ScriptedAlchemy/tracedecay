@@ -4,7 +4,7 @@ import { StateChip, type DomainStateKind } from '../../ui/StateChip.tsx';
 import { Meter } from '../../ui/instrument.tsx';
 import {
   ageTickIntervalMs,
-  formatDuration,
+  formatDurationMs,
   summarizeActivity,
   RATE_WINDOW_MS,
 } from './activitySummary.ts';
@@ -75,8 +75,15 @@ export function SignalPanel({
         <p className="max-w-52 text-3xs leading-snug text-text-secondary">
           {connection.sentence}
         </p>
+        {/* Each term precedes its description in the DOM, and
+          * `flex-col-reverse` puts the figure back above its legend on screen.
+          * The readout looks identical; a screen reader now hears a name before
+          * the number it belongs to instead of after it. */}
         <dl className="flex flex-wrap items-end gap-x-5 gap-y-2">
-          <div className="flex flex-col gap-1">
+          <div className="flex flex-col-reverse gap-1">
+            <dt className="td-legend">
+              {offline ? 'rate · not measured' : `per min · last ${RATE_WINDOW_MS / 1000}s`}
+            </dt>
             <dd className="td-value text-xs text-text-primary" data-cell="numeric">
               {/* A rate is a claim that something is being measured right now.
                * With the stream down nothing is, so the figure is withheld
@@ -84,23 +91,20 @@ export function SignalPanel({
                * exactly like a healthy quiet system. */}
               {offline ? '—' : summary.ratePerMinute.toFixed(0)}
             </dd>
-            <dt className="td-legend">
-              {offline ? 'rate · not measured' : `per min · last ${RATE_WINDOW_MS / 1000}s`}
-            </dt>
           </div>
-          <div className="flex flex-col gap-1">
-            <dd className="td-value text-xs text-text-primary" data-cell="numeric">
-              {formatDuration(ageMs)}
-            </dd>
+          <div className="flex flex-col-reverse gap-1">
             <dt className="td-legend">since last event</dt>
+            <dd className="td-value text-xs text-text-primary" data-cell="numeric">
+              {formatDurationMs(ageMs)}
+            </dd>
           </div>
-          <div className="flex flex-col gap-1">
+          <div className="flex flex-col-reverse gap-1">
+            <dt className="td-legend">
+              held{summary.spanMs != null ? ` · ${formatDurationMs(summary.spanMs)} span` : ''}
+            </dt>
             <dd className="td-value text-xs text-text-primary" data-cell="numeric">
               {summary.total}
             </dd>
-            <dt className="td-legend">
-              held{summary.spanMs != null ? ` · ${formatDuration(summary.spanMs)} span` : ''}
-            </dt>
           </div>
         </dl>
         {peak != null ? (
