@@ -1,23 +1,9 @@
 use std::sync::Arc;
 
-use rusqlite::Savepoint;
-use tracedecay_rusqlite_runtime::{
-    StorageOperationExecutor,
-    effects::{
-        EffectCoordinator, EffectDispatchOutcome, EffectUnknownCause,
-        SqliteOriginEffectTransactions, SqliteTargetEffectTransactions,
-    },
-    read_consistency::{CommitWatermarkSource, WatermarkSourceState},
-};
-use tracedecay_store::{
-    CommitSequenceV1, RepositoryWritePayloadV1, RuntimeSubmitOutcomeV1, StoreEffectIdV1,
-    TransactionalOutboxEntryV1,
-};
+use tracedecay_rusqlite_runtime::read_consistency::{CommitWatermarkSource, WatermarkSourceState};
+use tracedecay_store::{CommitSequenceV1, RuntimeSubmitOutcomeV1};
 
-use crate::cutover_support::{
-    Probe, RecordingEffect, TestDatabase, fixture, outbox_request, run, writer,
-    writer_with_executor,
-};
+use crate::cutover_support::{Probe, TestDatabase, fixture, outbox_request, run, writer};
 
 #[test]
 fn writer_serializes_commit_checkpoints_and_publishes_only_committed_watermarks() {
@@ -79,104 +65,4 @@ fn writer_serializes_commit_checkpoints_and_publishes_only_committed_watermarks(
         .unwrap_or_else(|_| panic!("submit tasks retained the S10 writer"))
         .shutdown_and_join()
         .expect("close S10 writer");
-}
-
-#[test]
-fn uncertain_target_publication_is_durable_and_requires_explicit_retry() {
-    let fixture = fixture();
-    let s9 = fixture.s9;
-    let s10 = fixture.s10;
-    let origin = TestDatabase::new("s10-origin.sqlite3");
-    let target = TestDatabase::new("s10-target.sqlite3");
-    let request = outbox_request(
-        &s9.origin_binding,
-        &s9.target_binding,
-        "operation.cutover.uncertain",
-        &s10.effect_id,
-        &s10.ordering_key,
-    );
-    let origin_writer = writer(&origin, &s9.origin_binding);
-    assert!(matches!(
-        run(origin_writer.submit(request.clone(), Probe::for_submit(&request),))
-            .expect("commit uncertain-publication outbox"),
-        RuntimeSubmitOutcomeV1::Committed { .. }
-    ));
-    let effect_id = StoreEffectIdV1::new(s10.effect_id).expect("valid uncertain effect identity");
-    let failing_target = writer_with_executor(&target, &s9.target_binding, FailingEffect);
-    run(async {
-        let mut origin_transactions = SqliteOriginEffectTransactions::open(&origin_writer)
-            .expect("open uncertain origin effect view");
-        let mut target_transactions = SqliteTargetEffectTransactions::new(&failing_target);
-        match EffectCoordinator
-            .dispatch(
-                &effect_id,
-                &s9.origin_binding,
-                &s9.target_binding,
-                &mut origin_transactions,
-                &mut target_transactions,
-            )
-            .await
-        {
-            Ok(EffectDispatchOutcome::EffectUnknown(unknown)) => {
-                assert!(matches!(unknown.cause, EffectUnknownCause::Target(_)));
-                assert_eq!(
-                    unknown.entry.state,
-                    tracedecay_store::OutboxEffectStateV1::EffectUnknown
-                );
-            }
-            outcome => panic!("expected durable uncertain-publication state: {outcome:?}"),
-        }
-    });
-    failing_target
-        .shutdown_and_join()
-        .expect("close failing target writer");
-
-    let target_writer = writer_with_executor(&target, &s9.target_binding, RecordingEffect);
-    run(async {
-        let mut origin_transactions = SqliteOriginEffectTransactions::open(&origin_writer)
-            .expect("reopen uncertain origin effect view");
-        let mut target_transactions = SqliteTargetEffectTransactions::new(&target_writer);
-        assert!(matches!(
-            EffectCoordinator
-                .dispatch(
-                    &effect_id,
-                    &s9.origin_binding,
-                    &s9.target_binding,
-                    &mut origin_transactions,
-                    &mut target_transactions,
-                )
-                .await,
-            Ok(EffectDispatchOutcome::Acknowledged {
-                replayed: false,
-                ..
-            })
-        ));
-    });
-    origin_writer
-        .shutdown_and_join()
-        .expect("close uncertain-publication writer");
-    target_writer
-        .shutdown_and_join()
-        .expect("close successful target writer");
-}
-
-#[derive(Clone, Copy)]
-struct FailingEffect;
-
-impl StorageOperationExecutor for FailingEffect {
-    fn execute(
-        &mut self,
-        _savepoint: &Savepoint<'_>,
-        _payload: &RepositoryWritePayloadV1,
-    ) -> rusqlite::Result<()> {
-        Ok(())
-    }
-
-    fn apply_inbox(
-        &mut self,
-        _savepoint: &Savepoint<'_>,
-        _entry: &TransactionalOutboxEntryV1,
-    ) -> rusqlite::Result<()> {
-        Err(rusqlite::Error::InvalidQuery)
-    }
 }

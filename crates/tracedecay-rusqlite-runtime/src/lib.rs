@@ -9,23 +9,17 @@ pub use connection::{
     ConnectionPolicyError, OpenedDatabaseFileError, open_immutable_health_reader,
     open_immutable_reader,
 };
-pub mod effects;
-pub mod evidence;
 pub mod graph;
 mod ledger;
 pub mod maintenance;
-mod migration;
 #[doc(hidden)]
 pub mod migration_sql;
 mod operation;
 mod persistence;
 pub mod read_consistency;
 pub mod reader;
-pub mod repair;
 pub mod repository;
 pub mod runtime;
-#[cfg(test)]
-mod s11_evidence_tests;
 mod telemetry;
 #[cfg(test)]
 mod test_support;
