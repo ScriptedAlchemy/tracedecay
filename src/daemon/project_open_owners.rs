@@ -662,6 +662,8 @@ fn source_edit_request_context(
     if expires_at.0 <= observed_at.0 {
         return Err(source_edit_authority_error());
     }
+    // Correlation IDs remain on each RequestContext, but durable retries must
+    // resolve the same route authority for the same access and operation.
     let grant_digest = canonical_sha256(&(
         "tracedecay.daemon.source-edit-grant.v1",
         &access.scope,
@@ -669,7 +671,6 @@ fn source_edit_request_context(
         &access.configuration_digest,
         operation.capability_id(),
         operation.use_case_id(),
-        request_id.as_str(),
     ))
     .map_err(|error| TraceDecayError::Config {
         message: format!("source edit route grant unavailable: {error}"),
