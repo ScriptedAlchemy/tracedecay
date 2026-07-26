@@ -3,6 +3,17 @@ use super::connection::{Database, DatabaseWriteTransaction};
 use crate::errors::{Result, TraceDecayError};
 
 impl Database {
+    pub(crate) fn storage_telemetry_handle(
+        &self,
+    ) -> Result<tracedecay_rusqlite_runtime::migration_sql::MigrationSqlHandle> {
+        self.retained_runtime()
+            .telemetry_read_handle()
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("failed to attach graph-store telemetry reader: {error:?}"),
+                operation: "attach graph-store telemetry reader".to_string(),
+            })
+    }
+
     pub(crate) async fn storage_page_counts(&self) -> Result<(u64, u64, u64)> {
         self.retained_runtime()
             .storage_page_counts(std::time::Duration::from_secs(5))
