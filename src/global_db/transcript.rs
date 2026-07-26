@@ -320,6 +320,8 @@ impl RegisteredGlobalDb {
         )
         .await
         .map_err(|error| TranscriptPersistenceError::storage("upsert LCM raw message", error))?;
+        self.publish_compaction_summary_in_existing_tx(conn, &canonical_message)
+            .await?;
         if Self::upsert_session_message_projection(
             conn,
             &canonical_message,
@@ -335,6 +337,166 @@ impl RegisteredGlobalDb {
                 "database write failed",
             ))
         }
+    }
+
+    async fn publish_compaction_summary_in_existing_tx(
+        &self,
+        conn: &impl Executor,
+        message: &SessionMessageRecord,
+    ) -> Result<(), TranscriptPersistenceError> {
+        let metadata = message
+            .metadata_json
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok());
+        if message.kind.as_deref() != Some("summary")
+            || metadata
+                .as_ref()
+                .and_then(|value| value.get("source"))
+                .and_then(serde_json::Value::as_str)
+                != Some("codex_context_compacted")
+        {
+            return Ok(());
+        }
+
+        let mut current_rows = conn
+            .query(
+                "SELECT store_id
+                 FROM lcm_raw_messages
+                 WHERE provider = ?1 AND message_id = ?2
+                 LIMIT 1",
+                params![message.provider.as_str(), message.message_id.as_str()],
+            )
+            .await
+            .map_err(|error| {
+                TranscriptPersistenceError::storage(
+                    "load transcript compaction summary message",
+                    error,
+                )
+            })?;
+        let current_store_id = current_rows
+            .next()
+            .await
+            .map_err(|error| {
+                TranscriptPersistenceError::storage(
+                    "load transcript compaction summary message",
+                    error,
+                )
+            })?
+            .ok_or_else(|| {
+                TranscriptPersistenceError::message(
+                    "load transcript compaction summary message",
+                    "summary raw message is unavailable",
+                )
+            })?
+            .get::<i64>(0)
+            .map_err(|error| {
+                TranscriptPersistenceError::storage(
+                    "decode transcript compaction summary message",
+                    error,
+                )
+            })?;
+
+        let mut source_rows = conn
+            .query(
+                "SELECT raw.store_id, raw.timestamp, raw.index_text
+                 FROM lcm_raw_messages AS raw
+                 WHERE raw.provider = ?1
+                   AND raw.session_id = ?2
+                   AND raw.store_id < ?3
+                   AND NOT EXISTS (
+                       SELECT 1
+                       FROM lcm_summary_sources AS source
+                       JOIN lcm_summary_nodes AS summary
+                         ON summary.node_id = source.node_id
+                       WHERE source.source_kind = 'raw_message'
+                         AND CAST(source.source_id AS INTEGER) = raw.store_id
+                         AND summary.provider = raw.provider
+                         AND summary.session_id = raw.session_id
+                   )
+                 ORDER BY raw.store_id",
+                params![
+                    message.provider.as_str(),
+                    message.session_id.as_str(),
+                    current_store_id
+                ],
+            )
+            .await
+            .map_err(|error| {
+                TranscriptPersistenceError::storage(
+                    "load transcript compaction summary sources",
+                    error,
+                )
+            })?;
+        let mut source_refs = Vec::new();
+        let mut source_token_count = 0_i64;
+        let mut source_time_start = None;
+        let mut source_time_end = None;
+        while let Some(row) = source_rows.next().await.map_err(|error| {
+            TranscriptPersistenceError::storage("load transcript compaction summary sources", error)
+        })? {
+            let store_id = row.get::<i64>(0).map_err(|error| {
+                TranscriptPersistenceError::storage(
+                    "decode transcript compaction summary source",
+                    error,
+                )
+            })?;
+            let timestamp = row.get::<Option<i64>>(1).map_err(|error| {
+                TranscriptPersistenceError::storage(
+                    "decode transcript compaction summary timestamp",
+                    error,
+                )
+            })?;
+            let text = row.get::<String>(2).map_err(|error| {
+                TranscriptPersistenceError::storage(
+                    "decode transcript compaction summary text",
+                    error,
+                )
+            })?;
+            source_refs.push(crate::sessions::lcm::LcmSourceRef::RawMessage { store_id });
+            source_token_count = source_token_count.saturating_add(i64::from(
+                crate::context::read_modes::estimate_tokens(&text),
+            ));
+            if let Some(timestamp) = timestamp {
+                source_time_start =
+                    Some(source_time_start.map_or(timestamp, |start: i64| start.min(timestamp)));
+                source_time_end =
+                    Some(source_time_end.map_or(timestamp, |end: i64| end.max(timestamp)));
+            }
+        }
+        if source_refs.is_empty() {
+            return Ok(());
+        }
+
+        let depth = metadata
+            .as_ref()
+            .and_then(|value| value.get("codex_compaction_depth"))
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(1)
+            .max(1);
+        crate::sessions::lcm::dag::insert_summary_node_in_transaction(
+            conn,
+            crate::sessions::lcm::LcmSummaryNodeDraft {
+                provider: message.provider.clone(),
+                conversation_id: message.session_id.clone(),
+                session_id: message.session_id.clone(),
+                depth,
+                summary_text: message.text.clone(),
+                source_refs,
+                source_token_count,
+                summary_token_count: i64::from(crate::context::read_modes::estimate_tokens(
+                    &message.text,
+                )),
+                source_time_start,
+                source_time_end,
+                expand_hint: Some("transcript messages before compaction".to_string()),
+                metadata_json: message.metadata_json.clone(),
+            },
+        )
+        .await
+        .map(|_| ())
+        .map_err(|error| {
+            TranscriptPersistenceError::storage("publish transcript compaction summary", error)
+        })
     }
 
     async fn upsert_session_message_projection(
