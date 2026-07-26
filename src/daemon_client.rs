@@ -559,12 +559,14 @@ impl DaemonInvocationClient {
                 scope,
                 profile_digest,
                 report_digest,
+                report,
                 source_generation,
                 snapshot_digest,
             } => Ok(SemanticEvaluationPublicationResultV1 {
                 project_id: scope.project_id.as_str().to_owned(),
                 profile_digest: profile_digest.as_str().to_owned(),
                 report_digest: report_digest.as_str().to_owned(),
+                report,
                 source_generation: source_generation.as_str().to_owned(),
                 snapshot_digest: snapshot_digest.as_str().to_owned(),
             }),
@@ -642,6 +644,7 @@ pub struct SemanticEvaluationPublicationResultV1 {
     pub project_id: String,
     pub profile_digest: String,
     pub report_digest: String,
+    pub report: crate::search_eval::DirectEvaluationReportV1,
     pub source_generation: String,
     pub snapshot_digest: String,
 }
@@ -668,6 +671,7 @@ pub struct DaemonLspSessionClient {
     invocation: DaemonInvocationClient,
     session: crate::daemon::DaemonLspSessionAccess,
     next_request: u64,
+    detached: bool,
 }
 
 impl DaemonLspSessionClient {
@@ -693,6 +697,7 @@ impl DaemonLspSessionClient {
             invocation,
             session,
             next_request: 2,
+            detached: false,
         })
     }
 
@@ -759,6 +764,23 @@ impl DaemonLspSessionClient {
         }
     }
 
+    pub async fn reconnect(&mut self) -> crate::errors::Result<()> {
+        let request_id = self.next_request_id();
+        let response = self
+            .invoke(crate::daemon::DaemonInvocationRequest::lsp_reconnect(
+                request_id,
+                self.session.clone(),
+            ))
+            .await?;
+        match response.outcome {
+            crate::daemon::DaemonInvocationOutcome::LspReconnected { session } => {
+                self.session = session;
+                Ok(())
+            }
+            outcome => Err(invocation_outcome_error(outcome)),
+        }
+    }
+
     pub async fn detach(&mut self) -> crate::errors::Result<()> {
         let request_id = self.next_request_id();
         let response = self
@@ -768,7 +790,10 @@ impl DaemonLspSessionClient {
             ))
             .await?;
         match response.outcome {
-            crate::daemon::DaemonInvocationOutcome::LspDetached => Ok(()),
+            crate::daemon::DaemonInvocationOutcome::LspDetached => {
+                self.detached = true;
+                Ok(())
+            }
             outcome => Err(invocation_outcome_error(outcome)),
         }
     }
@@ -784,6 +809,27 @@ impl DaemonLspSessionClient {
         let request_id = format!("lsp.{}", self.next_request);
         self.next_request = self.next_request.saturating_add(1);
         request_id
+    }
+}
+
+impl Drop for DaemonLspSessionClient {
+    fn drop(&mut self) {
+        if self.detached {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let invocation = self.invocation.clone();
+        let session = self.session.clone();
+        let request_id = self.next_request_id();
+        runtime.spawn(async move {
+            let _ = invocation
+                .invoke(crate::daemon::DaemonInvocationRequest::lsp_detach(
+                    request_id, session,
+                ))
+                .await;
+        });
     }
 }
 
@@ -814,7 +860,9 @@ fn invocation_outcome_error(
 
 #[cfg(test)]
 mod tests {
-    use super::{DaemonInvocationError, InvocationCancellationPolicy};
+    use super::{
+        DaemonInvocationError, InvocationCancellationPolicy, SemanticEvaluationPublicationResultV1,
+    };
     use tracedecay_application::{
         ApplicationProblem, ApplicationProblemKind, CancellationStage, RetryDirective,
     };
@@ -869,5 +917,29 @@ mod tests {
         assert!(
             InvocationCancellationPolicy::ReadOnly.may_interrupt(CancellationStage::DuringRead)
         );
+    }
+
+    #[test]
+    fn semantic_evaluation_result_retains_the_direct_report() {
+        let result = SemanticEvaluationPublicationResultV1 {
+            project_id: "project-1".to_owned(),
+            profile_digest: format!("sha256:{}", "1".repeat(64)),
+            report_digest: format!("sha256:{}", "2".repeat(64)),
+            report: crate::search_eval::DirectEvaluationReportV1 {
+                command: "compare".to_owned(),
+                status: crate::search_eval::DirectEvaluationStatusV1::Pass,
+                workload_digest: format!("sha256:{}", "3".repeat(64)),
+                corpus_digest: format!("sha256:{}", "4".repeat(64)),
+                fixture_source_repository_commit: "fixture-commit".to_owned(),
+                fixture_source_repository_tree: "fixture-tree".to_owned(),
+                profiles: Vec::new(),
+            },
+            source_generation: "generation-1".to_owned(),
+            snapshot_digest: format!("sha256:{}", "5".repeat(64)),
+        };
+
+        let encoded = serde_json::to_value(result).expect("serialize evaluation result");
+        assert_eq!(encoded["report"]["status"], "pass");
+        assert_eq!(encoded["report"]["command"], "compare");
     }
 }
