@@ -22,6 +22,14 @@ exclusive maintenance scope and delegate to the registered production
 authorities; `configuration_runtime_unavailable` remains only in test-transport
 builds.
 
+**Schema-disposition evidence correction (2026-07-26).** A consolidation
+inventory test accepted any non-`None` disposition, so labelling a table
+`"merged"` passed without proving corresponding merge SQL existed.
+`external_source_states_v1` exposed this false green. A disposition label is
+inventory coverage only; it cannot certify migration delivery. Only an
+executable source-to-target migration with direct row/identity/semantic
+verification satisfies this plan.
+
 Earlier migration fixture names, family inventories, packet layouts, and
 intermediate cutover scaffolding are historical evidence, not prerequisites
 or artifacts that PR19 must recreate. Published API aliases and persisted data

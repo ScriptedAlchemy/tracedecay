@@ -49,10 +49,14 @@ live.
 
 Plans 01, 02, and 03 now split their completion status. The eight-provider
 session-observation path is production-reached through one shared
-admission/sanitizer/store composition. The external-source domain,
-application, and store contracts are not production-composed: their capture,
-authorization, commit, adapter, and migration path is absent. This retained
-seam is neither to be implemented nor deleted in the PR8–PR14 band.
+admission/sanitizer/store composition. The retained external-source stack is
+also production-composed for the host-observation specialization: MCP Hook V2
+reaches host admission, `SourceCaptureApplicationV1`,
+`apply_source_commit`, `ExternalSourceExecutor`, and
+`external_source_states_v1`. The earlier “no production callers” adjudication
+was wrong for this path. Broader provider acquisition, scheduled refresh, and
+canonical refetch remain dormant; that narrower seam is neither to be rebuilt
+nor deleted in the PR8–PR14 band.
 
 ### Dashboard reachability
 
@@ -74,7 +78,8 @@ the temporary-alias deletion slices.
 - `00-plan-set-index.md`: Loom's undeclared backend test and the injected-only
   Settings mutation proof are explicit verification limits.
 - `01-domain-crate.md`, `02-store-crate.md`, `03-capture-crate.md`: completion
-  is limited to the session-observation path; the external-source block is a
+  includes both the shared session-observation path and the external-source
+  host-observation specialization. Broader acquisition/refetch remains a
   retained, unmounted seam.
 - `08-tool-catalog-crate.md`: host discovery no longer advertises
   handle-gated feedback operations or unsupported symbol-search `AsOf`;
@@ -97,7 +102,9 @@ the temporary-alias deletion slices.
   migrated-fact reclamation is production-reached, and the permanent V1-shaped
   compatibility projection is distinguished from a superseded writer. Direct
   init/open/read-only/branch lifecycle entry points now own production
-  maintenance authority.
+  maintenance authority. A schema-disposition label is explicitly not
+  migration evidence because the old gate accepted `"merged"` without proving
+  merge SQL.
 - `13-research-provenance-and-context-anchors.md`: core anchors are delivered;
   dedicated GitHub-stack targets remain a named PR13 follow-up.
 - `14-historical-failure-regression-matrix.md`: already states that it owns
