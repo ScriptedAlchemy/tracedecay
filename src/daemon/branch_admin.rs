@@ -894,7 +894,8 @@ impl StoreAdministration {
                     )?;
                 }
 
-                let canonical_paths = database_paths.iter().cloned().collect::<Vec<_>>();
+                let mut canonical_paths = database_paths.iter().cloned().collect::<Vec<_>>();
+                canonical_paths.sort();
                 let (fence, states) = crate::db::DatabaseDeletionFence::reacquire(
                     &canonical_paths,
                     recovery.transaction_id(),
@@ -968,7 +969,8 @@ impl StoreAdministration {
                 )?;
             }
 
-            let canonical_paths = database_paths.iter().cloned().collect::<Vec<_>>();
+            let mut canonical_paths = database_paths.iter().cloned().collect::<Vec<_>>();
+            canonical_paths.sort();
             let fence = crate::db::DatabaseDeletionFence::acquire(
                 &canonical_paths,
                 "delete branch SQLite families",
