@@ -155,3 +155,87 @@ fn authority_error(error: DashboardDiagnosticsErrorV1) -> JsonError {
         DashboardDiagnosticsErrorV1::Runtime(_) => internal_error(error),
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::application::dashboard_diagnostics::diagnostic_broker;
+    use crate::application::host_admission::HostAdmissionTestRuntimeV1;
+    use crate::diagnostics::lsp::settings::CodeDiagnosticsSettings;
+    use tracedecay_domain::ProjectId;
+
+    async fn state_for_test() -> (
+        tempfile::TempDir,
+        HostAdmissionTestRuntimeV1,
+        DashboardState,
+    ) {
+        let project = tempfile::tempdir().expect("project tempdir");
+        std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
+            .expect("fixture source");
+        let runtime = HostAdmissionTestRuntimeV1::project(
+            crate::storage::default_profile_root().expect("profile root"),
+            project.path(),
+            ProjectId::new("project.dashboard-code-diagnostics").expect("project id"),
+        )
+        .await
+        .expect("registered test runtime");
+        let cg = runtime
+            .initialize_project_graph_for_test(
+                project.path(),
+                crate::tracedecay::TraceDecayOpenOptions::default(),
+            )
+            .await
+            .expect("project init");
+        let state = crate::dashboard::build_state(&cg)
+            .await
+            .expect("dashboard state");
+        (project, runtime, state)
+    }
+
+    #[tokio::test]
+    async fn overview_delegates_to_the_exact_mounted_diagnostics_authority() {
+        let _pin = crate::config::PinnedUserDataDir::new();
+        let (_project, _runtime, mut state) = state_for_test().await;
+        let mut settings = CodeDiagnosticsSettings {
+            idle_backfill: IdleBackfillMode::Off,
+            ..CodeDiagnosticsSettings::default()
+        };
+        settings.set_language_enabled("rust", false);
+        let authority = DashboardDiagnosticsAuthorityV1::new(
+            state.project_root.clone(),
+            state.dashboard_root.clone(),
+            Arc::clone(&state.mem_db),
+            Arc::new(tokio::sync::Mutex::new(diagnostic_broker(
+                state.project_root.clone(),
+                settings,
+            ))),
+        );
+        let expected = authority.snapshot().await.expect("authority snapshot");
+        state.code_diagnostics_authority = Some(authority);
+
+        let Json(actual) = overview(State(state)).await.expect("diagnostics overview");
+
+        assert_eq!(actual, json!(expected));
+        assert_eq!(actual["settings"]["idle_backfill"], json!("off"));
+        assert_eq!(actual["settings"]["languages"]["rust"]["enabled"], false);
+    }
+
+    #[tokio::test]
+    async fn overview_returns_service_unavailable_without_mounted_authority() {
+        let _pin = crate::config::PinnedUserDataDir::new();
+        let (_project, _runtime, state) = state_for_test().await;
+
+        let (status, Json(body)) = overview(State(state))
+            .await
+            .expect_err("unmounted authority must fail closed");
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            body["detail"],
+            "canonical daemon diagnostics authority is unavailable"
+        );
+    }
+}
