@@ -86,16 +86,14 @@ pub enum Phase {
     ExactReplay,
     CompactRank,
     LateHydrate,
-    MemberExpand,
 }
 
 impl Phase {
-    pub const ALL: [Phase; 5] = [
+    pub const ALL: [Phase; 4] = [
         Phase::RebuildActivate,
         Phase::ExactReplay,
         Phase::CompactRank,
         Phase::LateHydrate,
-        Phase::MemberExpand,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -104,7 +102,6 @@ impl Phase {
             Phase::ExactReplay => "exact_replay",
             Phase::CompactRank => "compact_rank",
             Phase::LateHydrate => "late_hydrate",
-            Phase::MemberExpand => "member_expand",
         }
     }
 }
@@ -650,33 +647,11 @@ async fn run_one_repetition(repetition: usize) -> BenchResult<Vec<(Phase, u64)>>
     )?;
     let late_hydrate_ns = elapsed_ns(hydrate_started);
 
-    let expand_started = Instant::now();
-    require_retrieval_success(
-        "member_expand_span",
-        retrieval
-            .retrieve(
-                &prepared.context,
-                query(RetrievalGrainV1::EvidenceSpan, "pipeline"),
-            )
-            .await,
-    )?;
-    require_retrieval_success(
-        "member_expand_burst",
-        retrieval
-            .retrieve(
-                &prepared.context,
-                query(RetrievalGrainV1::EvidenceBurst, "pipeline"),
-            )
-            .await,
-    )?;
-    let member_expand_ns = elapsed_ns(expand_started);
-
     Ok(vec![
         (Phase::RebuildActivate, prepared.rebuild_activate_ns),
         (Phase::ExactReplay, exact_replay_ns),
         (Phase::CompactRank, compact_rank_ns),
         (Phase::LateHydrate, late_hydrate_ns),
-        (Phase::MemberExpand, member_expand_ns),
     ])
 }
 
@@ -1000,7 +975,6 @@ mod tests {
                 "exact_replay",
                 "compact_rank",
                 "late_hydrate",
-                "member_expand",
             ]
         );
         assert_eq!(P95_LABEL, "descriptive nearest-rank sample p95");
