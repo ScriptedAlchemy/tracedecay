@@ -56,6 +56,7 @@ function sourceFiles(root: string): string[] {
   return entries.flatMap((entry) => {
     const path = join(absolute, entry);
     if (entry === "node_modules") return [];
+    if (root === "codegen" && entry === ".preview") return [];
     if (statSync(path).isDirectory()) return sourceFiles(join(root, entry));
     return /\.tsx?$/.test(entry) ? [join(root, entry)] : [];
   });
