@@ -30,6 +30,12 @@ pub(crate) enum HostBundleCliOperation {
     Uninstall,
 }
 
+#[derive(Debug)]
+pub(crate) enum AgentReinstallOutcome {
+    Installed,
+    DeferredUserAction(tracedecay::agents::DeferredUserAction),
+}
+
 pub(crate) async fn handle_host_bundle_component_command(
     agent: Option<String>,
     operation: HostBundleCliOperation,
@@ -224,11 +230,11 @@ fn apply_host_bundle_artifact_action_at(
             message: "artifact backup/restore requires exactly one canonical component".to_string(),
         });
     };
-    let mut operation_id = [0_u8; 16];
-    getrandom::getrandom(&mut operation_id).map_err(|error| {
-        tracedecay::errors::TraceDecayError::Config {
-            message: format!("could not generate host artifact operation id: {error}"),
-        }
+    let operation_id = tracedecay::request_identity::mint_global_operation_id(
+        tracedecay::request_identity::GlobalOperationIdentityKind::HostArtifact,
+    )
+    .map_err(|error| tracedecay::errors::TraceDecayError::Config {
+        message: format!("could not generate host artifact operation id: {error}"),
     })?;
     let mut writer =
         tracedecay::agents::host_bundle_v2::HostBundleWriterV1::open_with_lifecycle_root(
@@ -321,11 +327,11 @@ fn component_set_request(
 ) -> tracedecay::errors::Result<
     tracedecay::agents::host_bundle_v2::HostComponentSetExecutionRequestV1,
 > {
-    let mut operation_id = [0_u8; 16];
-    getrandom::getrandom(&mut operation_id).map_err(|error| {
-        tracedecay::errors::TraceDecayError::Config {
-            message: format!("could not generate host lifecycle operation id: {error}"),
-        }
+    let operation_id = tracedecay::request_identity::mint_global_operation_id(
+        tracedecay::request_identity::GlobalOperationIdentityKind::HostComponentSet,
+    )
+    .map_err(|error| tracedecay::errors::TraceDecayError::Config {
+        message: format!("could not generate host lifecycle operation id: {error}"),
     })?;
     let host = component_set.component_set.host;
     Ok(
@@ -737,11 +743,11 @@ fn feedback_request(
     operation: tracedecay::agents::host_bundle_v2::HostBundleLifecycleOpV1,
     confirmed: bool,
 ) -> tracedecay::errors::Result<tracedecay::agents::host_bundle_v2::HostBundleExecutionRequestV1> {
-    let mut operation_id = [0; 16];
-    getrandom::getrandom(&mut operation_id).map_err(|error| {
-        tracedecay::errors::TraceDecayError::Config {
-            message: format!("could not generate feedback rollback operation id: {error}"),
-        }
+    let operation_id = tracedecay::request_identity::mint_global_operation_id(
+        tracedecay::request_identity::GlobalOperationIdentityKind::HostFeedbackRollback,
+    )
+    .map_err(|error| tracedecay::errors::TraceDecayError::Config {
+        message: format!("could not generate feedback rollback operation id: {error}"),
     })?;
     Ok(
         tracedecay::agents::host_bundle_v2::HostBundleExecutionRequestV1 {
@@ -1655,6 +1661,13 @@ pub(crate) async fn handle_install_command(
             project_root: None,
             dashboard: !no_dashboard,
         };
+        if let tracedecay::agents::NonInteractiveInstallOutcome::DeferredUserAction(deferred) =
+            ag.prepare_non_interactive_install(&ctx)?
+        {
+            return Err(tracedecay::errors::TraceDecayError::Config {
+                message: deferred.remediation,
+            });
+        }
         if !apply_default_canonical_component_set(&id, HostBundleCliOperation::Install, &home)? {
             ag.install(&ctx)?;
             print_legacy_install_guidance(&id);
@@ -1707,6 +1720,13 @@ pub(crate) async fn handle_install_command(
                 project_root: None,
                 dashboard: !no_dashboard,
             };
+            if let tracedecay::agents::NonInteractiveInstallOutcome::DeferredUserAction(deferred) =
+                ag.prepare_non_interactive_install(&ctx)?
+            {
+                return Err(tracedecay::errors::TraceDecayError::Config {
+                    message: deferred.remediation,
+                });
+            }
             if !apply_default_canonical_component_set(id, HostBundleCliOperation::Install, &home)? {
                 ag.install(&ctx)?;
                 print_legacy_install_guidance(id);
@@ -1771,6 +1791,19 @@ pub(crate) async fn handle_reinstall_command() -> tracedecay::errors::Result<()>
             agents.join(", ")
         );
         let results = reinstall_agent_integrations(&agents, &home, &tracedecay_bin).await;
+        let mut deferred_any = false;
+        for (id, result) in &results {
+            if let Ok(AgentReinstallOutcome::DeferredUserAction(deferred)) = result {
+                deferred_any = true;
+                eprintln!(
+                    "\x1b[33mwarning:\x1b[0m {id} reinstall deferred: {}",
+                    deferred.remediation
+                );
+                for path in &deferred.staged_paths {
+                    eprintln!("  staged: {}", path.display());
+                }
+            }
+        }
         // Keep the reason with the name — a bare id list left "failed for:
         // claude, cursor, hermes, kimi" undiagnosable from the output.
         let failed: Vec<String> = results
@@ -1782,7 +1815,13 @@ pub(crate) async fn handle_reinstall_command() -> tracedecay::errors::Result<()>
                 message: format!("failed to reinstall agent(s): {}", failed.join("; ")),
             });
         }
-        eprintln!("\x1b[32m✔\x1b[0m All agents reinstalled");
+        if deferred_any {
+            eprintln!(
+                "\x1b[32m✔\x1b[0m Agent refresh completed; deferred user actions remain above"
+            );
+        } else {
+            eprintln!("\x1b[32m✔\x1b[0m All agents reinstalled");
+        }
         user_cfg.last_installed_version = env!("CARGO_PKG_VERSION").to_string();
         user_cfg
             .save()
@@ -1842,6 +1881,16 @@ pub(crate) async fn handle_update_plugin_command() -> tracedecay::errors::Result
                     integration.name()
                 );
             }
+            tracedecay::agents::UpdatePluginOutcome::DeferredUserAction(deferred) => {
+                eprintln!(
+                    "\x1b[33mwarning:\x1b[0m {} plugin activation deferred: {}",
+                    integration.name(),
+                    deferred.remediation
+                );
+                for path in deferred.staged_paths {
+                    eprintln!("  staged: {}", path.display());
+                }
+            }
         }
     }
     Ok(())
@@ -1865,7 +1914,7 @@ pub(crate) async fn reinstall_agent_integrations(
     agent_ids: &[String],
     home: &Path,
     tracedecay_bin: &str,
-) -> Vec<(String, tracedecay::errors::Result<()>)> {
+) -> Vec<(String, tracedecay::errors::Result<AgentReinstallOutcome>)> {
     reinstall_agent_integrations_with_lease(agent_ids, home, tracedecay_bin, None).await
 }
 
@@ -1876,7 +1925,7 @@ pub(crate) async fn reinstall_agent_integrations_under_lease(
     home: &Path,
     tracedecay_bin: &str,
     lifecycle: &tracedecay::lifecycle_lease::LifecycleLease,
-) -> Vec<(String, tracedecay::errors::Result<()>)> {
+) -> Vec<(String, tracedecay::errors::Result<AgentReinstallOutcome>)> {
     reinstall_agent_integrations_with_lease(agent_ids, home, tracedecay_bin, Some(lifecycle)).await
 }
 
@@ -1885,7 +1934,7 @@ async fn reinstall_agent_integrations_with_lease(
     home: &Path,
     tracedecay_bin: &str,
     lifecycle: Option<&tracedecay::lifecycle_lease::LifecycleLease>,
-) -> Vec<(String, tracedecay::errors::Result<()>)> {
+) -> Vec<(String, tracedecay::errors::Result<AgentReinstallOutcome>)> {
     let project_path = std::env::current_dir().ok();
     let mut results = Vec::new();
     let hermes_migration_error = if agent_ids.iter().any(|id| id == "hermes") {
@@ -1908,20 +1957,6 @@ async fn reinstall_agent_integrations_with_lease(
             ));
             continue;
         }
-        match apply_default_canonical_component_set(id, HostBundleCliOperation::Repair, home) {
-            Ok(true) => {
-                if let Ok(integration) = tracedecay::agents::get_integration(id) {
-                    integration.post_install(project_path.as_deref()).await;
-                }
-                results.push((id.clone(), Ok(())));
-                continue;
-            }
-            Ok(false) => {}
-            Err(error) => {
-                results.push((id.clone(), Err(error)));
-                continue;
-            }
-        }
         let ag = match tracedecay::agents::get_integration(id) {
             Ok(ag) => ag,
             Err(_) => {
@@ -1939,10 +1974,36 @@ async fn reinstall_agent_integrations_with_lease(
             project_root: None,
             dashboard: true,
         };
+        match ag.prepare_non_interactive_install(&ctx) {
+            Ok(tracedecay::agents::NonInteractiveInstallOutcome::Ready) => {}
+            Ok(tracedecay::agents::NonInteractiveInstallOutcome::DeferredUserAction(deferred)) => {
+                results.push((
+                    id.clone(),
+                    Ok(AgentReinstallOutcome::DeferredUserAction(deferred)),
+                ));
+                continue;
+            }
+            Err(error) => {
+                results.push((id.clone(), Err(error)));
+                continue;
+            }
+        }
+        match apply_default_canonical_component_set(id, HostBundleCliOperation::Repair, home) {
+            Ok(true) => {
+                ag.post_install(project_path.as_deref()).await;
+                results.push((id.clone(), Ok(AgentReinstallOutcome::Installed)));
+                continue;
+            }
+            Ok(false) => {}
+            Err(error) => {
+                results.push((id.clone(), Err(error)));
+                continue;
+            }
+        }
         let result = match ag.install(&ctx) {
             Ok(()) => {
                 ag.post_install(project_path.as_deref()).await;
-                Ok(())
+                Ok(AgentReinstallOutcome::Installed)
             }
             Err(e) => Err(e),
         };
@@ -2027,9 +2088,10 @@ mod tests {
     use tracedecay::migrate::hermes::{LegacyHermesMigrationIssue, LegacyHermesMigrationReport};
 
     use super::{
-        CompatibilityAgentRegistrationDelegate, HostBundleCliOperation,
+        AgentReinstallOutcome, CompatibilityAgentRegistrationDelegate, HostBundleCliOperation,
         apply_canonical_component_set, broker_codex_daemon_automation_project,
         canonical_host_component_set, component_set_request, finish_legacy_hermes_migration,
+        reinstall_agent_integrations,
     };
 
     const OPENCODE_UNRELATED_CONFIG: &[u8] = br#"{"lsp":{"other":{"command":["tracedecay","lsp","bridge","--stdio"]}},"unrelated":{"keep":true}}
@@ -2661,6 +2723,41 @@ mod tests {
         for artifact in &component_set.component_set.components[0].manifest.artifacts {
             assert!(!home.path().join(&artifact.relative_path).exists());
         }
+    }
+
+    #[tokio::test]
+    async fn kimi_tracked_reinstall_returns_non_blocking_typed_deferral() {
+        let _env_lock = HOST_ENV_LOCK.lock().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let code_home = home.path().join(".kimi-code");
+        let _kimi_home = EnvVarGuard::set(tracedecay::agents::kimi::KIMI_CODE_HOME_ENV, &code_home);
+        let installed_path = code_home.join("plugins/installed.json");
+        std::fs::create_dir_all(installed_path.parent().unwrap()).unwrap();
+        let original = br#"{"version":1,"plugins":[{"id":"tracedecay","enabled":false}]}
+"#;
+        std::fs::write(&installed_path, original).unwrap();
+
+        let results =
+            reinstall_agent_integrations(&["kimi".to_string()], home.path(), "new-tracedecay")
+                .await;
+
+        let [(id, Ok(AgentReinstallOutcome::DeferredUserAction(deferred)))] = results.as_slice()
+        else {
+            panic!("tracked Kimi reinstall should return one typed deferral");
+        };
+        assert_eq!(id, "kimi");
+        let staged = home
+            .path()
+            .join(".tracedecay/host-bundle-stage/kimi/tracedecay");
+        assert_eq!(deferred.staged_paths, vec![staged.clone()]);
+        assert!(
+            deferred
+                .remediation
+                .contains(&format!("/plugins install {}", staged.display()))
+        );
+        assert_eq!(std::fs::read(&installed_path).unwrap(), original);
+        assert!(!code_home.join("plugins/managed/tracedecay").exists());
+        assert!(staged.join(".kimi-plugin/plugin.json").is_file());
     }
 
     #[test]

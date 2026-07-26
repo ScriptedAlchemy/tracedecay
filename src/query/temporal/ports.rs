@@ -2253,7 +2253,10 @@ mod tests {
     };
     use std::time::{Duration, Instant};
 
-    use tracedecay_domain::{RetrievalAnchorId, RetrievalGrainV1, SessionId, TemporalModeV1};
+    use tracedecay_domain::{
+        RetrievalAnchorId, RetrievalGrainV1, SessionId, SessionSourceCoverageStateV1,
+        TemporalModeV1,
+    };
 
     use super::*;
     use crate::query::temporal::candidates::{CandidateChannel, CandidatePlan};
@@ -4286,8 +4289,6 @@ mod tests {
 
     #[test]
     fn authorized_lifecycle_states_do_not_become_snapshot_denials() {
-        use tracedecay_domain::SessionSourceCoverageStateV1;
-
         let configuration =
             BindingDigest::new("configuration_digest", digest('3')).expect("digest");
         let authorization =

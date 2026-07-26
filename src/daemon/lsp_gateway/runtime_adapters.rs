@@ -7,7 +7,6 @@
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -23,6 +22,7 @@ use crate::diagnostics::lsp::broker::{
     CodeDiagnostic, DiagnosticBroker, DiagnosticSeverity as BrokerDiagnosticSeverity,
 };
 use crate::diagnostics::lsp::client::{LspDocument, LspSemanticRequest};
+use crate::request_identity::ProcessLocalRequestSequence;
 
 use super::context::{
     ContextExpansionOutcome, ContextExpansionRequest, ContextProjectionChange,
@@ -265,7 +265,7 @@ struct PendingDiagnosticOperation {
 pub struct Pr12DiagnosticSnapshotAdapter {
     runtime: Handle,
     authority: Arc<dyn CanonicalDiagnosticSnapshotAuthority>,
-    next_operation: AtomicU64,
+    next_operation: ProcessLocalRequestSequence,
     in_flight: Mutex<BTreeMap<DiagnosticOperationKey, PendingDiagnosticOperation>>,
 }
 
@@ -274,7 +274,7 @@ impl Pr12DiagnosticSnapshotAdapter {
         Self {
             runtime,
             authority,
-            next_operation: AtomicU64::new(1),
+            next_operation: ProcessLocalRequestSequence::starting_at(1),
             in_flight: Mutex::new(BTreeMap::new()),
         }
     }
@@ -360,10 +360,11 @@ impl DiagnosticSnapshotPort for Pr12DiagnosticSnapshotAdapter {
             };
         }
 
-        let operation_id = format!(
-            "lsp-diagnostic-{}",
-            self.next_operation.fetch_add(1, Ordering::Relaxed)
-        );
+        let Ok(operation_id) = self.next_operation.next_string("lsp-diagnostic-") else {
+            return DiagnosticRefreshAdmission::Rejected {
+                failure_class: "diagnostic-identity-exhausted".to_owned(),
+            };
+        };
         let identity = DiagnosticRefreshIdentity {
             operation_id: operation_id.clone(),
             source_generation,
@@ -1581,7 +1582,7 @@ mod tests {
         ContextProjectionKind, ContextProjectionRegistration,
     };
     use serde_json::json;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::AtomicBool;
 
     struct Diagnostics;
 
@@ -1731,7 +1732,8 @@ mod tests {
         }
 
         fn cancel_request(&self, _root: &AdmittedRoot, _request_id: &LspRequestId) -> bool {
-            self.cancelled.store(true, Ordering::Release);
+            self.cancelled
+                .store(true, std::sync::atomic::Ordering::Release);
             true
         }
     }
@@ -1874,7 +1876,7 @@ mod tests {
             SemanticProviderOutcome::Pending
         );
         assert!(adapter.cancel_request(&root, &request_id));
-        assert!(cancelled.load(Ordering::Acquire));
+        assert!(cancelled.load(std::sync::atomic::Ordering::Acquire));
 
         let completion_id = LspRequestId::Number(9);
         assert_eq!(

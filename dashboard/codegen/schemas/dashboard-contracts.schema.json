@@ -1253,6 +1253,70 @@
       ],
       "type": "object"
     },
+    "DashboardEnvelopeV12": {
+      "description": "The normative read-model envelope. Every V2 read-model route returns exactly\nthis shape; only `payload` varies by route.",
+      "properties": {
+        "authorization": {
+          "$ref": "#/$defs/DashboardAuthorizationV1"
+        },
+        "coverage": {
+          "$ref": "#/$defs/DashboardCoverageV1"
+        },
+        "domain_state": {
+          "$ref": "#/$defs/DashboardDomainStateV1"
+        },
+        "freshness": {
+          "$ref": "#/$defs/DashboardFreshnessV1"
+        },
+        "legal_actions": {
+          "items": {
+            "$ref": "#/$defs/DashboardLegalActionRefV1"
+          },
+          "type": "array"
+        },
+        "payload": {
+          "$ref": "#/$defs/FeedbackObservationReadModelV1"
+        },
+        "schema_revision": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "scope": {
+          "$ref": "#/$defs/DashboardScopeV1"
+        },
+        "source_watermark": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DashboardWatermarkV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "time": {
+          "$ref": "#/$defs/DashboardTimeV1"
+        },
+        "version": {
+          "$ref": "#/$defs/DashboardVersionV1"
+        }
+      },
+      "required": [
+        "schema_revision",
+        "scope",
+        "version",
+        "time",
+        "source_watermark",
+        "authorization",
+        "coverage",
+        "freshness",
+        "domain_state",
+        "legal_actions",
+        "payload"
+      ],
+      "type": "object"
+    },
     "DashboardFreshnessStateV1": {
       "description": "Freshness of the observed state relative to its live source watermark.\n`Absent` (no source produced anything) and `Unsupported` (no source wired)\nare distinct from `Stale` (behind the watermark) and `Unknown`.",
       "enum": [
@@ -2696,6 +2760,12 @@
             "string",
             "null"
           ]
+        },
+        "verification": {
+          "$ref": "#/$defs/DoctorRemediationVerificationV1",
+          "default": {
+            "state": "pending"
+          }
         }
       },
       "required": [
@@ -2704,7 +2774,8 @@
         "phase",
         "preview_id",
         "execution",
-        "effect_receipt"
+        "effect_receipt",
+        "verification"
       ],
       "type": "object"
     },
@@ -2922,6 +2993,126 @@
           },
           "required": [
             "owner_operation"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DoctorRemediationVerificationV1": {
+      "description": "Independent post-effect observation. Owner execution cannot set this state;\nonly the separately admitted observation callback can.",
+      "oneOf": [
+        {
+          "description": "A mutating owner effect has not yet been independently observed.",
+          "properties": {
+            "state": {
+              "const": "pending",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A preview or a cancellation before any effect requires no recovery check.",
+          "properties": {
+            "state": {
+              "const": "not_required",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Current owner state proves the finding is recovered.",
+          "properties": {
+            "observation_digest": {
+              "$ref": "#/$defs/ManifestDigest"
+            },
+            "state": {
+              "const": "verified",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "observation_digest"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Current owner state is usable but evidence or recovery remains incomplete.",
+          "properties": {
+            "observation_digest": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ManifestDigest"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "state": {
+              "const": "partial",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Current owner state proves the remediation did not recover the finding.",
+          "properties": {
+            "observation_digest": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ManifestDigest"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "state": {
+              "const": "failed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Current authority denied the independent observation.",
+          "properties": {
+            "state": {
+              "const": "denied",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Current owner state could not be observed.",
+          "properties": {
+            "state": {
+              "const": "unavailable",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state"
           ],
           "type": "object"
         }
@@ -3648,6 +3839,294 @@
         "entity_matches",
         "payload_fts_matches",
         "arms"
+      ],
+      "type": "object"
+    },
+    "FeedbackObservationDenominatorsV1": {
+      "additionalProperties": false,
+      "properties": {
+        "delayed": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "dropped": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "eligible": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "emitted": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "incomplete_boots": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "persisted": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "retention_dropped": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "eligible",
+        "persisted",
+        "emitted",
+        "delayed",
+        "dropped",
+        "retention_dropped",
+        "incomplete_boots"
+      ],
+      "type": "object"
+    },
+    "FeedbackObservationReadModelV1": {
+      "additionalProperties": false,
+      "properties": {
+        "coverage": {
+          "$ref": "#/$defs/Plan26CoverageV1"
+        },
+        "denominators": {
+          "$ref": "#/$defs/FeedbackObservationDenominatorsV1"
+        },
+        "event_counts": {
+          "additionalProperties": {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "object"
+        },
+        "first_observed_at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UtcMicros"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "last_observed_at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UtcMicros"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "schema_version": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "system_quality": {
+          "$ref": "#/$defs/FeedbackSystemQualityReadModelV1"
+        },
+        "total_count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "watermark": {
+          "$ref": "#/$defs/FeedbackObservationWatermarkV1"
+        }
+      },
+      "required": [
+        "schema_version",
+        "total_count",
+        "first_observed_at",
+        "last_observed_at",
+        "event_counts",
+        "coverage",
+        "watermark",
+        "denominators",
+        "system_quality"
+      ],
+      "type": "object"
+    },
+    "FeedbackObservationWatermarkV1": {
+      "additionalProperties": false,
+      "properties": {
+        "observed_through": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/UtcMicros"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "producer_boot_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ManifestDigest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "producer_sequence": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "producer_boot_id",
+        "producer_sequence",
+        "observed_through"
+      ],
+      "type": "object"
+    },
+    "FeedbackSystemMetricDenominatorV1": {
+      "enum": [
+        "eligible_observations",
+        "relevance_labels",
+        "eligible_source_families",
+        "latency_samples",
+        "returned_and_omitted_items",
+        "outcome_observations",
+        "revocation_observations",
+        "stack_transition_observations"
+      ],
+      "type": "string"
+    },
+    "FeedbackSystemMetricKindV1": {
+      "enum": [
+        "coverage",
+        "relevance",
+        "diversity",
+        "latency",
+        "omission",
+        "denial",
+        "staleness",
+        "revocation_propagation",
+        "stack_transitions"
+      ],
+      "type": "string"
+    },
+    "FeedbackSystemMetricUnavailableReasonV1": {
+      "enum": [
+        "no_eligible_observations",
+        "no_relevance_labels",
+        "no_diversity_observations",
+        "no_latency_samples",
+        "no_truncation_observations",
+        "no_outcome_observations",
+        "no_revocation_observations",
+        "no_stack_transition_observations"
+      ],
+      "type": "string"
+    },
+    "FeedbackSystemMetricUnitV1": {
+      "enum": [
+        "ratio",
+        "microseconds",
+        "transitions"
+      ],
+      "type": "string"
+    },
+    "FeedbackSystemMetricV1": {
+      "additionalProperties": false,
+      "properties": {
+        "coverage": {
+          "$ref": "#/$defs/Plan26CoverageV1"
+        },
+        "denominator": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "denominator_population": {
+          "$ref": "#/$defs/FeedbackSystemMetricDenominatorV1"
+        },
+        "metric": {
+          "$ref": "#/$defs/FeedbackSystemMetricKindV1"
+        },
+        "numerator": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "unavailable_reason": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FeedbackSystemMetricUnavailableReasonV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "unit": {
+          "$ref": "#/$defs/FeedbackSystemMetricUnitV1"
+        },
+        "value": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "metric",
+        "value",
+        "unit",
+        "numerator",
+        "denominator",
+        "denominator_population",
+        "coverage",
+        "unavailable_reason"
+      ],
+      "type": "object"
+    },
+    "FeedbackSystemQualityReadModelV1": {
+      "additionalProperties": false,
+      "properties": {
+        "metrics": {
+          "items": {
+            "$ref": "#/$defs/FeedbackSystemMetricV1"
+          },
+          "type": "array"
+        },
+        "schema_version": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "schema_version",
+        "metrics"
       ],
       "type": "object"
     },
@@ -6131,6 +6610,7 @@
     "MetricSourceV1": {
       "enum": [
         "observability_envelope",
+        "feedback_observations",
         "accounting_turn",
         "savings_ledger"
       ],
@@ -6470,6 +6950,17 @@
         "failed",
         "partial",
         "effect_unknown"
+      ],
+      "type": "string"
+    },
+    "Plan26CoverageV1": {
+      "enum": [
+        "known",
+        "partial",
+        "stale",
+        "unknown",
+        "sampled",
+        "capped"
       ],
       "type": "string"
     },
@@ -10074,6 +10565,9 @@
     "explorer_session_size": {
       "$ref": "#/$defs/ExplorerSessionSizeV1"
     },
+    "feedback_status": {
+      "$ref": "#/$defs/DashboardEnvelopeV12"
+    },
     "graph_call_chain": {
       "$ref": "#/$defs/StructureReadV1"
     },
@@ -10185,6 +10679,7 @@
     "lcm_timeline",
     "loom_temporal",
     "delivery_overview",
+    "feedback_status",
     "code_index_freshness",
     "settings",
     "settings_project_patch",

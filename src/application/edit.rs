@@ -7,12 +7,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tracedecay_application::{
-    ApplicationOperation, CancellationObservation, CancellationSignal, CancellationStage, Deadline,
-    DirectorySyncPolicy, EffectId, EffectReceipt, EffectResult, EffectTermination,
-    OperationBudgetUsage, OperationReceipt, OperationTermination, ReconciliationState,
-    SourceEditAuthorizationPort, SourceEditDiagnosticV1, SourceEditEffectRequestV1,
-    SourceEditReconciliationDispositionV1, SourceEditReconciliationRequestV1, SourceEditRequest,
-    SourceEditVerificationStateV1, SourceEditVerificationV1, read_bounded, source_edit_operation,
+    ApiMigrationApplyResultV1, ApiMigrationPlanRequestV1, ApiMigrationPlanV1, ApplicationOperation,
+    CancellationObservation, CancellationSignal, CancellationStage, Deadline, DirectorySyncPolicy,
+    EffectId, EffectReceipt, EffectResult, EffectTermination, OperationBudgetUsage,
+    OperationReceipt, OperationTermination, ReconciliationState, SourceEditAuthorizationPort,
+    SourceEditDiagnosticV1, SourceEditEffectRequestV1, SourceEditReconciliationDispositionV1,
+    SourceEditReconciliationRequestV1, SourceEditRequest, SourceEditVerificationStateV1,
+    SourceEditVerificationV1, read_bounded, source_edit_operation,
     source_edit_reconciliation_operation, sync_parent_directory, with_owned_temp_publish,
 };
 use tracedecay_domain::{ManifestDigest, UtcMicros, canonical_sha256};
@@ -109,6 +110,9 @@ impl SourceEditDurableOutcomeV1 {
                 Some(result.applied_imports.len()),
                 Some(result.impact.len()),
             ),
+            SourceEditOutcome::ApiMigration(result) => {
+                (Some(result.changed_sites), None, None, None, None)
+            }
             _ => (None, None, None, None, None),
         };
         Self {
@@ -163,6 +167,7 @@ pub enum SourceEditOutcome {
     Insert(InsertResult),
     AstGrep(AstGrepResult),
     Move(MoveResult),
+    ApiMigration(ApiMigrationApplyResultV1),
     Failed { message: String },
     Cancelled { message: String },
     TimedOut { message: String },
@@ -179,6 +184,7 @@ impl SourceEditOutcome {
             Self::Insert(result) => result.success,
             Self::AstGrep(result) => result.success,
             Self::Move(result) => result.success,
+            Self::ApiMigration(result) => result.success,
             Self::Failed { .. }
             | Self::Cancelled { .. }
             | Self::TimedOut { .. }
@@ -195,6 +201,7 @@ impl SourceEditOutcome {
             Self::Insert(result) => &result.message,
             Self::AstGrep(result) => &result.message,
             Self::Move(result) => &result.message,
+            Self::ApiMigration(result) => &result.message,
             Self::Failed { message } | Self::Cancelled { message } | Self::TimedOut { message } => {
                 message
             }
@@ -227,6 +234,7 @@ impl SourceEditOutcome {
             Self::Insert(result) => vec![result.file_path.clone()],
             Self::AstGrep(result) => vec![result.file_path.clone()],
             Self::Move(result) => vec![result.source_file.clone(), result.dest_file.clone()],
+            Self::ApiMigration(result) => result.changed_files.clone(),
             Self::Failed { .. }
             | Self::Cancelled { .. }
             | Self::TimedOut { .. }
@@ -243,6 +251,7 @@ impl SourceEditOutcome {
             Self::Insert(result) => vec![result.file_path.clone()],
             Self::AstGrep(result) => vec![result.file_path.clone()],
             Self::Move(result) => vec![result.source_file.clone(), result.dest_file.clone()],
+            Self::ApiMigration(result) => result.changed_files.clone(),
             Self::Failed { .. }
             | Self::Cancelled { .. }
             | Self::TimedOut { .. }
@@ -259,6 +268,7 @@ impl SourceEditOutcome {
             Self::Insert(result) => Some(&result.file_path),
             Self::AstGrep(result) => Some(&result.file_path),
             Self::Move(_)
+            | Self::ApiMigration(_)
             | Self::Failed { .. }
             | Self::Cancelled { .. }
             | Self::TimedOut { .. }
@@ -285,6 +295,7 @@ impl SourceEditOutcome {
             Self::Insert(result) => serde_json::to_value(result),
             Self::AstGrep(result) => serde_json::to_value(result),
             Self::Move(result) => serde_json::to_value(result),
+            Self::ApiMigration(result) => serde_json::to_value(result),
             Self::Failed { message } => Ok(json!({
                 "success": false,
                 "failed": true,
@@ -1035,10 +1046,10 @@ where
 
     let (effect_result, plan_complete) = crate::tracedecay::apply_source_edit_plan(
         planned_files,
-        run_source_edit(graph, request.edit.clone().with_dry_run(false)),
+        run_source_edit(graph, request.edit.clone().with_dry_run(false), control),
     )
     .await;
-    let outcome = match effect_result {
+    let mut outcome = match effect_result {
         Ok(outcome) => outcome,
         Err(error) => {
             // The edit primitive may have crossed its atomic rename boundary.
@@ -1057,7 +1068,8 @@ where
     let mut control_observation = control
         .and_then(|control| control.checkpoint(CancellationStage::EffectInFlight))
         .map(|stop| stop.observation);
-    let committed_state = source_edit_state_digest(graph.project_root(), &journal.candidate_files)?;
+    let mut committed_state =
+        source_edit_state_digest(graph.project_root(), &journal.candidate_files)?;
     if outcome.success() && (!plan_complete || committed_state != predicted_state) {
         let live_outcome = SourceEditOutcome::EffectUnknown {
             message: "source edit effect is unknown and requires reconciliation: the observed committed state did not match the exact preview".to_owned(),
@@ -1074,6 +1086,42 @@ where
         durability.persist_receipt(&record)?;
         return Ok(record.into_live_application_result(live_outcome, None));
     }
+    let verification = if request.edit.verify() && outcome.success() {
+        let files = outcome.candidate_files();
+        if files.is_empty() {
+            None
+        } else {
+            Some(run_edit_verifications(graph, &files).await)
+        }
+    } else {
+        None
+    };
+    if verification
+        .as_ref()
+        .is_some_and(|result| !matches!(result.state, SourceEditVerificationStateV1::Clean))
+        && let (
+            SourceEditRequest::ApiMigrationApply { plan, .. },
+            SourceEditOutcome::ApiMigration(result),
+        ) = (&request.edit, &mut outcome)
+    {
+        graph.rollback_api_migration_plan(plan).await?;
+        result.success = false;
+        result.rolled_back = true;
+        result.changed_files.clear();
+        result.message =
+            "API migration verification did not pass; every changed file was restored".to_owned();
+        committed_state = source_edit_state_digest(graph.project_root(), &journal.candidate_files)?;
+        if committed_state != journal.expected_state {
+            let live_outcome = SourceEditOutcome::EffectUnknown {
+                message: "API migration verification rollback did not restore the previewed state"
+                    .to_owned(),
+            };
+            let record = unknown_record(&journal)?;
+            durability.persist_receipt(&record)?;
+            return Ok(record.into_live_application_result(live_outcome, verification));
+        }
+    }
+
     let ended_at = now_micros();
     journal.state = SourceEditJournalStateV1::Applied {
         outcome: SourceEditDurableOutcomeV1::from_live(&journal.request.operation, &outcome),
@@ -1084,14 +1132,6 @@ where
     };
     durability.persist_journal(&journal)?;
 
-    let verification = if request.edit.verify() && outcome.success() {
-        match outcome.file_path() {
-            Some(file_path) => Some(run_edit_verification(graph, file_path).await),
-            None => None,
-        }
-    } else {
-        None
-    };
     if let SourceEditJournalStateV1::Applied {
         verification_state, ..
     } = &mut journal.state
@@ -1135,6 +1175,7 @@ async fn resolve_source_edit_preview(
     let (outcome, planned_files) = crate::tracedecay::capture_source_edit_plan(run_source_edit(
         graph,
         edit.with_dry_run(true),
+        None,
     ))
     .await;
     let outcome = outcome?;
@@ -1963,6 +2004,7 @@ fn durable_record(
 async fn run_source_edit(
     graph: &TraceDecay,
     request: SourceEditRequest,
+    control: Option<&SourceEditEffectControlV1>,
 ) -> Result<SourceEditOutcome> {
     Ok(match request {
         SourceEditRequest::StrReplace {
@@ -2042,7 +2084,51 @@ async fn run_source_edit(
                 .move_symbol(&symbol, &dest_file, dry_run, update_references)
                 .await?,
         ),
+        SourceEditRequest::ApiMigrationApply {
+            plan,
+            plan_digest,
+            dry_run,
+            ..
+        } => {
+            if plan.plan_digest != plan_digest {
+                return Err(config_error(
+                    "API migration apply digest does not match its immutable plan",
+                ));
+            }
+            let replanned = crate::application::api_migration::plan_api_migration(
+                graph,
+                ApiMigrationPlanRequestV1 {
+                    family_id: plan.family_id.clone(),
+                    operations: plan.operations.clone(),
+                },
+            )
+            .await?;
+            validate_replanned_api_migration(&plan, &replanned)?;
+            SourceEditOutcome::ApiMigration(
+                graph
+                    .apply_api_migration_plan(&replanned, dry_run, || {
+                        control
+                            .and_then(|control| {
+                                control.checkpoint(CancellationStage::EffectInFlight)
+                            })
+                            .is_some()
+                    })
+                    .await?,
+            )
+        }
     })
+}
+
+fn validate_replanned_api_migration(
+    supplied: &ApiMigrationPlanV1,
+    replanned: &ApiMigrationPlanV1,
+) -> Result<()> {
+    if supplied != replanned {
+        return Err(config_error(
+            "API migration plan does not match current graph-backed evidence; replan before apply",
+        ));
+    }
+    Ok(())
 }
 
 fn normalize_candidate_files(root: &Path, files: Vec<String>) -> Result<Vec<String>> {
@@ -2248,6 +2334,46 @@ async fn run_edit_verification(graph: &TraceDecay, file_path: &str) -> SourceEdi
     }
 }
 
+async fn run_edit_verifications(
+    graph: &TraceDecay,
+    file_paths: &[String],
+) -> SourceEditVerificationV1 {
+    let mut aggregate = SourceEditVerificationV1 {
+        state: SourceEditVerificationStateV1::Clean,
+        verdict: "clean".to_owned(),
+        error_count: 0,
+        warning_count: 0,
+        first_errors: Vec::new(),
+        message: None,
+    };
+    for file_path in file_paths {
+        let result = run_edit_verification(graph, file_path).await;
+        aggregate.error_count += result.error_count;
+        aggregate.warning_count += result.warning_count;
+        for error in result.first_errors {
+            if aggregate.first_errors.len() < 3 {
+                aggregate.first_errors.push(error);
+            }
+        }
+        if verification_priority(result.state) > verification_priority(aggregate.state) {
+            aggregate.state = result.state;
+            aggregate.verdict = result.verdict;
+            aggregate.message = result.message;
+        }
+    }
+    aggregate
+}
+
+const fn verification_priority(state: SourceEditVerificationStateV1) -> u8 {
+    match state {
+        SourceEditVerificationStateV1::Clean => 0,
+        SourceEditVerificationStateV1::Unavailable => 1,
+        SourceEditVerificationStateV1::Errors => 2,
+        SourceEditVerificationStateV1::Cancelled => 3,
+        SourceEditVerificationStateV1::Failed => 4,
+    }
+}
+
 fn failed_edit_verification(error: TraceDecayError) -> SourceEditVerificationV1 {
     let (state, verdict) = match &error {
         TraceDecayError::Io(error) if error.kind() == std::io::ErrorKind::Interrupted => {
@@ -2300,15 +2426,18 @@ fn config_error(message: impl Into<String>) -> TraceDecayError {
 mod tests {
     use std::collections::BTreeSet;
     use std::ops::Deref;
+    use std::process::Command;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use tempfile::tempdir;
+    use tempfile::{TempDir, tempdir};
     use tracedecay_application::{
+        ApiCompatibilityDispositionV1, ApiCompatibilityLifetimeV1, ApiDefinitionInsertionV1,
+        ApiMigrationOperationRequestV1, ApiMigrationSiteDispositionV1, ApiMigrationSymbolV1,
         AuthorityReceipt, CancellationContext, CancellationSignal, CancellationStage,
         CapabilityGrantSnapshot, Deadline, DisclosureClass, IdempotencyKey, PolicyDecisionRef,
         RequestContext, RequestId, ResolvedScope, SourceEditAuthorizationFuture,
-        SourceEditEffectProofV1, SourceEditKind,
+        SourceEditEffectProofV1, SourceEditKind, api_migration_definition_digest,
     };
     use tracedecay_domain::{ActorId, ComponentVersion, ProjectId, RepositoryId, WorktreeId};
 
@@ -2406,6 +2535,335 @@ mod tests {
             .unwrap(),
             _database_scope: database_scope,
         }
+    }
+
+    fn git(project_root: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .current_dir(project_root)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} must succeed");
+    }
+
+    async fn indexed_api_migration_fixture(initial_source: &str) -> (TempDir, FixtureGraph) {
+        let project = tempdir().unwrap();
+        fs::create_dir_all(project.path().join("src")).unwrap();
+        fs::write(project.path().join("src/lib.rs"), initial_source).unwrap();
+        git(
+            project.path(),
+            &["init", "--quiet", "--initial-branch=main"],
+        );
+        git(project.path(), &["add", "src/lib.rs"]);
+        git(
+            project.path(),
+            &[
+                "-c",
+                "user.name=TraceDecay Test",
+                "-c",
+                "user.email=tracedecay@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "fixture",
+            ],
+        );
+        let graph = fixture_graph(project.path()).await;
+        let indexed = graph.index_all().await.unwrap();
+        assert!(indexed.node_count > 0);
+        (project, graph)
+    }
+
+    async fn api_migration_symbol(graph: &TraceDecay, name: &str) -> ApiMigrationSymbolV1 {
+        let node = graph
+            .get_nodes_by_name(name)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|node| node.file_path == "src/lib.rs")
+            .unwrap_or_else(|| panic!("indexed fixture symbol {name}"));
+        ApiMigrationSymbolV1 {
+            node_id: node.id,
+            qualified_name: node.qualified_name,
+            kind: node.kind.as_str().to_owned(),
+            file: node.file_path,
+            old_name: node.name,
+        }
+    }
+
+    async fn plan_api_migration_fixture(
+        graph: &TraceDecay,
+        family_id: &str,
+        operation: ApiMigrationOperationRequestV1,
+    ) -> ApiMigrationPlanV1 {
+        crate::application::api_migration::plan_api_migration(
+            graph,
+            ApiMigrationPlanRequestV1 {
+                family_id: family_id.to_owned(),
+                operations: vec![operation],
+            },
+        )
+        .await
+        .unwrap()
+    }
+
+    async fn apply_api_migration_fixture(
+        graph: &TraceDecay,
+        plan: ApiMigrationPlanV1,
+    ) -> ApiMigrationApplyResultV1 {
+        let plan_digest = plan.plan_digest.clone();
+        let outcome = run_source_edit(
+            graph,
+            SourceEditRequest::ApiMigrationApply {
+                plan,
+                plan_digest,
+                dry_run: false,
+                verify: false,
+            },
+            None,
+        )
+        .await
+        .unwrap();
+        match outcome {
+            SourceEditOutcome::ApiMigration(result) => result,
+            unexpected => panic!("unexpected API migration outcome: {unexpected:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn api_migration_promote_primary_plans_and_applies_the_replacement_definition() {
+        let initial = "pub fn legacy_api() -> &'static str {\n    \"legacy\"\n}\n";
+        let expected = "pub fn primary_api() -> &'static str {\n    \"primary\"\n}\n";
+        let (project, graph) = indexed_api_migration_fixture(initial).await;
+        let operation = ApiMigrationOperationRequestV1::PromotePrimary {
+            operation_id: "promote-primary".to_owned(),
+            depends_on: Vec::new(),
+            symbol: api_migration_symbol(&graph, "legacy_api").await,
+            expected_definition_digest: api_migration_definition_digest(initial).unwrap(),
+            replacement_definition: expected.to_owned(),
+        };
+
+        let plan = plan_api_migration_fixture(&graph, "family.promote-primary", operation).await;
+
+        assert!(!plan.blocked);
+        assert_eq!(plan.sites.len(), 1);
+        assert_eq!(plan.sites[0].reason, "whole definition replacement");
+        assert_eq!(plan.files[0].intended_content, expected);
+        let result = apply_api_migration_fixture(&graph, plan).await;
+        assert!(result.success);
+        assert_eq!(result.changed_sites, 1);
+        assert_eq!(result.changed_files, ["src/lib.rs"]);
+        assert_eq!(
+            fs::read_to_string(project.path().join("src/lib.rs")).unwrap(),
+            expected
+        );
+    }
+
+    #[tokio::test]
+    async fn api_migration_replace_definition_replans_rejects_stale_bytes_then_applies_current_plan()
+     {
+        let initial = "pub fn current_value() -> i32 {\n    1\n}\n";
+        let concurrent = "pub fn current_value() -> i32 {\n    2\n}\n";
+        let expected = "pub fn current_value() -> i32 {\n    3\n}\n";
+        let (project, graph) = indexed_api_migration_fixture(initial).await;
+        let operation = ApiMigrationOperationRequestV1::ReplaceDefinition {
+            operation_id: "replace-definition".to_owned(),
+            depends_on: Vec::new(),
+            symbol: api_migration_symbol(&graph, "current_value").await,
+            expected_definition_digest: api_migration_definition_digest(initial).unwrap(),
+            replacement_definition: expected.to_owned(),
+        };
+        let plan = plan_api_migration_fixture(&graph, "family.replace-definition", operation).await;
+        assert_eq!(plan.files[0].intended_content, expected);
+
+        fs::write(project.path().join("src/lib.rs"), concurrent).unwrap();
+        let stale_error = run_source_edit(
+            &graph,
+            SourceEditRequest::ApiMigrationApply {
+                plan: plan.clone(),
+                plan_digest: plan.plan_digest.clone(),
+                dry_run: false,
+                verify: false,
+            },
+            None,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            stale_error
+                .to_string()
+                .contains("plan does not match current graph-backed evidence; replan before apply")
+        );
+        assert_eq!(
+            fs::read_to_string(project.path().join("src/lib.rs")).unwrap(),
+            concurrent
+        );
+        fs::write(project.path().join("src/lib.rs"), initial).unwrap();
+        let result = apply_api_migration_fixture(&graph, plan).await;
+        assert!(result.success);
+        assert_eq!(result.changed_sites, 1);
+        assert_eq!(
+            fs::read_to_string(project.path().join("src/lib.rs")).unwrap(),
+            expected
+        );
+    }
+
+    #[tokio::test]
+    async fn api_migration_rename_bound_symbol_plans_and_applies_declaration_and_caller_sites() {
+        let initial = "pub fn legacy_name() -> i32 {\n    1\n}\n\npub fn caller() -> i32 {\n    legacy_name()\n}\n";
+        let expected = "pub fn current_name() -> i32 {\n    1\n}\n\npub fn caller() -> i32 {\n    current_name()\n}\n";
+        let (project, graph) = indexed_api_migration_fixture(initial).await;
+        let operation = ApiMigrationOperationRequestV1::RenameBoundSymbol {
+            operation_id: "rename-bound-symbol".to_owned(),
+            depends_on: Vec::new(),
+            symbol: api_migration_symbol(&graph, "legacy_name").await,
+            new_name: "current_name".to_owned(),
+        };
+
+        let plan =
+            plan_api_migration_fixture(&graph, "family.rename-bound-symbol", operation).await;
+
+        assert!(!plan.blocked);
+        assert_eq!(plan.sites.len(), 2);
+        assert!(
+            plan.sites
+                .iter()
+                .all(|site| { site.disposition == ApiMigrationSiteDispositionV1::Changed })
+        );
+        assert!(
+            plan.sites
+                .iter()
+                .any(|site| site.reason == "bound declaration rename")
+        );
+        assert!(
+            plan.sites
+                .iter()
+                .any(|site| site.reason == "graph-bound caller rename")
+        );
+        assert_eq!(plan.files[0].intended_content, expected);
+        let result = apply_api_migration_fixture(&graph, plan).await;
+        assert!(result.success);
+        assert_eq!(result.changed_sites, 2);
+        assert_eq!(
+            fs::read_to_string(project.path().join("src/lib.rs")).unwrap(),
+            expected
+        );
+    }
+
+    #[tokio::test]
+    async fn api_migration_insert_compatibility_plans_and_applies_the_definition_after_its_anchor()
+    {
+        let initial = "pub fn current_api() -> i32 {\n    7\n}\n";
+        let compatibility = "#[deprecated]\npub fn legacy_api() -> i32 {\n    current_api()\n}";
+        let expected = format!("{initial}\n{compatibility}");
+        let (project, graph) = indexed_api_migration_fixture(initial).await;
+        let operation = ApiMigrationOperationRequestV1::InsertCompatibility {
+            operation_id: "insert-compatibility".to_owned(),
+            depends_on: Vec::new(),
+            anchor: api_migration_symbol(&graph, "current_api").await,
+            position: ApiDefinitionInsertionV1::After,
+            definition: compatibility.to_owned(),
+            disposition: ApiCompatibilityDispositionV1 {
+                lifetime: ApiCompatibilityLifetimeV1::StablePublicContract,
+                external_consumer: "fixture consumer".to_owned(),
+                owner: "fixture API team".to_owned(),
+                deprecation_policy: "retained as a stable compatibility alias".to_owned(),
+                pr19_deletion_condition: None,
+            },
+        };
+
+        let plan =
+            plan_api_migration_fixture(&graph, "family.insert-compatibility", operation).await;
+
+        assert!(!plan.blocked);
+        assert_eq!(plan.sites.len(), 1);
+        assert_eq!(plan.sites[0].reason, "deliberate compatibility definition");
+        assert_eq!(plan.files[0].intended_content, expected);
+        let result = apply_api_migration_fixture(&graph, plan).await;
+        assert!(result.success);
+        assert_eq!(result.compatibility_sites, 1);
+        assert_eq!(result.changed_sites, 1);
+        assert_eq!(
+            fs::read_to_string(project.path().join("src/lib.rs")).unwrap(),
+            expected
+        );
+    }
+
+    #[tokio::test]
+    async fn api_migration_replace_selected_terminology_plans_and_applies_only_selected_ast_occurrences()
+     {
+        let initial = "pub fn terminology() -> i32 {\n    let legacy = 1;\n    legacy\n}\n";
+        let expected = "pub fn terminology() -> i32 {\n    let current = 1;\n    current\n}\n";
+        let (project, graph) = indexed_api_migration_fixture(initial).await;
+        let operation = ApiMigrationOperationRequestV1::ReplaceSelectedTerminology {
+            operation_id: "replace-selected-terminology".to_owned(),
+            depends_on: Vec::new(),
+            enclosing_symbol: api_migration_symbol(&graph, "terminology").await,
+            old_term: "legacy".to_owned(),
+            new_term: "current".to_owned(),
+            occurrence_indexes: vec![0, 1],
+        };
+
+        let plan =
+            plan_api_migration_fixture(&graph, "family.replace-selected-terminology", operation)
+                .await;
+
+        assert!(!plan.blocked);
+        assert_eq!(plan.sites.len(), 2);
+        assert!(plan.sites.iter().all(|site| {
+            site.reason == "selected AST terminology replacement"
+                && site.disposition == ApiMigrationSiteDispositionV1::Changed
+        }));
+        assert_eq!(plan.files[0].intended_content, expected);
+        let result = apply_api_migration_fixture(&graph, plan).await;
+        assert!(result.success);
+        assert_eq!(result.changed_sites, 2);
+        assert_eq!(
+            fs::read_to_string(project.path().join("src/lib.rs")).unwrap(),
+            expected
+        );
+    }
+
+    #[tokio::test]
+    async fn api_migration_assert_stable_value_plans_and_applies_a_byte_identical_protected_site() {
+        let initial = "pub fn stable_value() -> i32 {\n    42\n}\n";
+        let (project, graph) = indexed_api_migration_fixture(initial).await;
+        let operation = ApiMigrationOperationRequestV1::AssertStableValue {
+            operation_id: "assert-stable-value".to_owned(),
+            depends_on: Vec::new(),
+            enclosing_symbol: api_migration_symbol(&graph, "stable_value").await,
+            category: "wire discriminant".to_owned(),
+            exact_bytes: "42".to_owned(),
+            occurrence_indexes: vec![0],
+        };
+
+        let plan =
+            plan_api_migration_fixture(&graph, "family.assert-stable-value", operation).await;
+
+        assert!(!plan.blocked);
+        assert_eq!(plan.sites.len(), 1);
+        assert_eq!(
+            plan.sites[0].disposition,
+            ApiMigrationSiteDispositionV1::Unchanged
+        );
+        assert_eq!(
+            plan.sites[0].reason,
+            "protected wire discriminant remains byte-identical"
+        );
+        assert_eq!(
+            plan.files[0].expected_content,
+            plan.files[0].intended_content
+        );
+        let result = apply_api_migration_fixture(&graph, plan).await;
+        assert!(result.success);
+        assert_eq!(result.changed_sites, 0);
+        assert_eq!(result.protected_values_verified, 1);
+        assert!(result.changed_files.is_empty());
+        assert_eq!(
+            fs::read_to_string(project.path().join("src/lib.rs")).unwrap(),
+            initial
+        );
     }
 
     fn fixture_request() -> SourceEditEffectRequestV1 {
@@ -3521,6 +3979,24 @@ mod tests {
         let after = source_edit_state_digest(directory.path(), &files).unwrap();
 
         assert_ne!(before, after);
+    }
+
+    #[test]
+    fn api_migration_apply_requires_the_current_graph_backed_plan() {
+        let supplied = ApiMigrationPlanV1 {
+            family_id: "family".to_owned(),
+            repository_revision: "revision".to_owned(),
+            graph_revision: digest(SHA256_A),
+            operations: Vec::new(),
+            sites: Vec::new(),
+            files: Vec::new(),
+            blocked: false,
+            plan_digest: digest(SHA256_B),
+        };
+        let mut replanned = supplied.clone();
+        assert!(validate_replanned_api_migration(&supplied, &replanned).is_ok());
+        replanned.graph_revision = digest(SHA256_B);
+        assert!(validate_replanned_api_migration(&supplied, &replanned).is_err());
     }
 
     #[cfg(unix)]

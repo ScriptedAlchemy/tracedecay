@@ -11,7 +11,6 @@ use tracedecay::agents::context_scout_v2::{
 use tracedecay::agents::host_bundle_v2::{
     HostKindV1, HostRegistrationRouteV1, stock_host_registration_evidence,
 };
-use tracedecay::storage::resolve_layout_for_current_profile;
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 use tracedecay_application::feedback_surface_catalog_contribution;
 use tracedecay_domain::UtcMicros;
@@ -32,7 +31,7 @@ async fn authentic_callback_to_all_delivery_surfaces() {
     TraceDecay::init(&project)
         .await
         .expect("production project initialization");
-    let _project_runtime = TraceDecay::open(&project)
+    let project_runtime = TraceDecay::open(&project)
         .await
         .expect("production project-open startup");
 
@@ -42,7 +41,7 @@ async fn authentic_callback_to_all_delivery_surfaces() {
     let decoded =
         decode_native_hook_event(HookHostV1::ClaudeCode, callback).expect("authentic callback");
 
-    let layout = resolve_layout_for_current_profile(&project).expect("project store layout");
+    let layout = project_runtime.store_layout();
     let subscriber = HookConfigurationSubscriberV1::new(HookConfigurationFileReaderV1::new(
         hook_configuration_path(&layout.data_root, HookHostV1::ClaudeCode),
     ));
@@ -165,6 +164,7 @@ async fn authentic_callback_to_all_delivery_surfaces() {
                 BindingSurface::Cli,
                 BindingSurface::Mcp,
                 BindingSurface::Http,
+                BindingSurface::Dashboard,
             ]),
             "{operation} must bind every canonical publication read surface"
         );

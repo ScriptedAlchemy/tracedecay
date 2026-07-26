@@ -10,15 +10,14 @@ use crate::mcp::project_route::HookProjectRouteCache;
 
 /// Per-connection routing and identity context, constructed once per client
 /// connection (or per initialize-replay dispatch) and threaded through
-/// [`McpServer::handle_request_for_connection`]. Bundling these values makes
-/// the memory-replay scope unconditionally present: there is no "no scope"
-/// state, so a memory operation identity can never silently degrade to a
-/// generated fallback.
+/// [`McpServer::handle_request_for_connection`]. Bundling these values keeps
+/// persisted application request correlation and cancellation scoped to the
+/// exact client connection.
 pub(crate) struct ConnectionRouteState {
     implicit_project_path: Option<PathBuf>,
     /// Connection-scoped prefix (`{mcp_instance_id}-c{seq}`) that widens
-    /// client-chosen, connection-local envelope ids into store-unique memory
-    /// operation identities.
+    /// client-chosen, connection-local envelope ids into store-unique
+    /// application request identities.
     memory_request_scope: String,
     /// Hook workspace routing cache, refreshed per request.
     pub(crate) route_cache: HookProjectRouteCache,

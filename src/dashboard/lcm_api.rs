@@ -15,10 +15,7 @@
 //! - FTS mirrors → `lcm_raw_messages_fts` / `lcm_summary_nodes_fts`
 
 use std::collections::BTreeMap;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -31,6 +28,9 @@ use serde_json::{Map, Value, json};
 use super::DashboardState;
 use super::lcm_service;
 use super::util::{JsonPath, JsonQuery, coerce_limit};
+use crate::request_identity::{
+    GlobalOpaqueIdentityKind, RequestIdentityError, mint_global_opaque_id,
+};
 use crate::sessions::lcm::{LcmGcConfig, query};
 use crate::tracedecay::current_timestamp;
 
@@ -150,7 +150,6 @@ fn decode_lcm_contract<T: serde::de::DeserializeOwned>(
 
 static PAYLOAD_GC_PREVIEW: LazyLock<Mutex<Option<PayloadGcPreview>>> =
     LazyLock::new(|| Mutex::new(None));
-static PAYLOAD_GC_PREVIEW_NONCE: AtomicU64 = AtomicU64::new(0);
 
 fn ok(payload: Map<String, Value>) -> LcmResponse {
     (StatusCode::OK, Json(Value::Object(payload)))
@@ -454,7 +453,12 @@ pub(crate) async fn payloads_gc_preview(
                 format!("payload GC preview failed: {e}"),
             )
         })?;
-    let token = make_preview_token(&state.lcm_db_path, provider, session_id);
+    let token = make_preview_token().map_err(|error| {
+        err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("payload GC preview identity is unavailable: {error}"),
+        )
+    })?;
     if let Ok(mut preview) = PAYLOAD_GC_PREVIEW.lock() {
         *preview = Some(PayloadGcPreview {
             token: token.clone(),
@@ -605,19 +609,8 @@ fn now_unix() -> i64 {
         .unwrap_or_default()
 }
 
-fn make_preview_token(store_path: &str, provider: &str, session_id: Option<&str>) -> String {
-    let session = session_id.unwrap_or("all");
-    let mut store_hasher = DefaultHasher::new();
-    store_path.hash(&mut store_hasher);
-    let store_digest = store_hasher.finish();
-    let nonce = PAYLOAD_GC_PREVIEW_NONCE.fetch_add(1, Ordering::Relaxed);
-    format!(
-        "payload-gc-{store_digest:016x}-{}-{}-{}-{}-{nonce}",
-        provider,
-        session,
-        std::process::id(),
-        now_unix()
-    )
+fn make_preview_token() -> Result<String, RequestIdentityError> {
+    mint_global_opaque_id(GlobalOpaqueIdentityKind::DashboardPayloadGcPreview)
 }
 
 #[cfg(test)]
@@ -625,11 +618,10 @@ mod tests {
     use super::make_preview_token;
 
     #[test]
-    fn payload_gc_preview_tokens_bind_store_scope_and_are_single_use_unique() {
-        let first = make_preview_token("/profile/projects/a/sessions.db", "cursor", Some("s1"));
-        let repeated = make_preview_token("/profile/projects/a/sessions.db", "cursor", Some("s1"));
-        let other_store =
-            make_preview_token("/profile/projects/b/sessions.db", "cursor", Some("s1"));
+    fn payload_gc_preview_tokens_are_globally_unique() {
+        let first = make_preview_token().unwrap();
+        let repeated = make_preview_token().unwrap();
+        let other_store = make_preview_token().unwrap();
 
         assert_ne!(first, repeated);
         assert_ne!(first, other_store);

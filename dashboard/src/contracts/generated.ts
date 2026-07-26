@@ -397,6 +397,23 @@ export function DashboardEnvelopeV1Schema<TPayload>(
   }) as unknown as z.ZodType<DashboardEnvelopeV1<TPayload>>;
 }
 
+/** The normative read-model envelope. Every V2 read-model route returns exactly
+this shape; only `payload` varies by route. */
+export const DashboardEnvelopeV12Schema = z.object({
+  authorization: z.lazy(() => DashboardAuthorizationV1Schema),
+  coverage: z.lazy(() => DashboardCoverageV1Schema),
+  domain_state: z.lazy(() => DashboardDomainStateV1Schema),
+  freshness: z.lazy(() => DashboardFreshnessV1Schema),
+  legal_actions: z.array(z.lazy(() => DashboardLegalActionRefV1Schema)),
+  payload: z.lazy(() => FeedbackObservationReadModelV1Schema),
+  schema_revision: z.number().int(),
+  scope: z.lazy(() => DashboardScopeV1Schema),
+  source_watermark: z.union([z.lazy(() => DashboardWatermarkV1Schema), z.null()]),
+  time: z.lazy(() => DashboardTimeV1Schema),
+  version: z.lazy(() => DashboardVersionV1Schema),
+});
+export type DashboardEnvelopeV12 = z.infer<typeof DashboardEnvelopeV12Schema>;
+
 /** Freshness of the observed state relative to its live source watermark.
 `Absent` (no source produced anything) and `Unsupported` (no source wired)
 are distinct from `Stale` (behind the watermark) and `Unknown`. */
@@ -833,6 +850,7 @@ export const DoctorRemediationOperationV1Schema = z.object({
   owning_operation: z.lazy(() => DoctorOwningOperationRefV1Schema),
   phase: z.lazy(() => DoctorRemediationOperationPhaseV1Schema),
   preview_id: z.string().nullable(),
+  verification: z.lazy(() => DoctorRemediationVerificationV1Schema),
 });
 export type DoctorRemediationOperationV1 = z.infer<typeof DoctorRemediationOperationV1Schema>;
 
@@ -890,6 +908,28 @@ export const DoctorRemediationTargetV1Schema = z.discriminatedUnion("owner_opera
   owner_operation: z.literal("storage_retention_collect"),
 })]);
 export type DoctorRemediationTargetV1 = z.infer<typeof DoctorRemediationTargetV1Schema>;
+
+/** Independent post-effect observation. Owner execution cannot set this state;
+only the separately admitted observation callback can. */
+export const DoctorRemediationVerificationV1Schema = z.discriminatedUnion("state", [z.object({
+  state: z.literal("denied"),
+}), z.object({
+  observation_digest: z.union([z.lazy(() => ManifestDigestSchema), z.null()]).optional(),
+  state: z.literal("failed"),
+}), z.object({
+  state: z.literal("not_required"),
+}), z.object({
+  observation_digest: z.union([z.lazy(() => ManifestDigestSchema), z.null()]).optional(),
+  state: z.literal("partial"),
+}), z.object({
+  state: z.literal("pending"),
+}), z.object({
+  state: z.literal("unavailable"),
+}), z.object({
+  observation_digest: z.lazy(() => ManifestDigestSchema),
+  state: z.literal("verified"),
+})]);
+export type DoctorRemediationVerificationV1 = z.infer<typeof DoctorRemediationVerificationV1Schema>;
 
 /** The report-wide coverage statement: which families were consulted versus
 unavailable, plus an overall completeness and a bounded human statement. */
@@ -1094,6 +1134,67 @@ export const FactMatchesMeasurementV1Schema = z.object({
   same_name_collision_possible: z.boolean(),
 });
 export type FactMatchesMeasurementV1 = z.infer<typeof FactMatchesMeasurementV1Schema>;
+
+export const FeedbackObservationDenominatorsV1Schema = z.object({
+  delayed: z.number().int(),
+  dropped: z.number().int(),
+  eligible: z.number().int(),
+  emitted: z.number().int(),
+  incomplete_boots: z.number().int(),
+  persisted: z.number().int(),
+  retention_dropped: z.number().int(),
+});
+export type FeedbackObservationDenominatorsV1 = z.infer<typeof FeedbackObservationDenominatorsV1Schema>;
+
+export const FeedbackObservationReadModelV1Schema = z.object({
+  coverage: z.lazy(() => Plan26CoverageV1Schema),
+  denominators: z.lazy(() => FeedbackObservationDenominatorsV1Schema),
+  event_counts: z.record(z.number().int()),
+  first_observed_at: z.union([z.lazy(() => UtcMicrosSchema), z.null()]),
+  last_observed_at: z.union([z.lazy(() => UtcMicrosSchema), z.null()]),
+  schema_version: z.number().int(),
+  system_quality: z.lazy(() => FeedbackSystemQualityReadModelV1Schema),
+  total_count: z.number().int(),
+  watermark: z.lazy(() => FeedbackObservationWatermarkV1Schema),
+});
+export type FeedbackObservationReadModelV1 = z.infer<typeof FeedbackObservationReadModelV1Schema>;
+
+export const FeedbackObservationWatermarkV1Schema = z.object({
+  observed_through: z.union([z.lazy(() => UtcMicrosSchema), z.null()]),
+  producer_boot_id: z.union([z.lazy(() => ManifestDigestSchema), z.null()]),
+  producer_sequence: z.number().int().nullable(),
+});
+export type FeedbackObservationWatermarkV1 = z.infer<typeof FeedbackObservationWatermarkV1Schema>;
+
+export const FeedbackSystemMetricDenominatorV1Schema = z.enum(["eligible_observations", "eligible_source_families", "latency_samples", "outcome_observations", "relevance_labels", "returned_and_omitted_items", "revocation_observations", "stack_transition_observations"]);
+export type FeedbackSystemMetricDenominatorV1 = z.infer<typeof FeedbackSystemMetricDenominatorV1Schema>;
+
+export const FeedbackSystemMetricKindV1Schema = z.enum(["coverage", "denial", "diversity", "latency", "omission", "relevance", "revocation_propagation", "stack_transitions", "staleness"]);
+export type FeedbackSystemMetricKindV1 = z.infer<typeof FeedbackSystemMetricKindV1Schema>;
+
+export const FeedbackSystemMetricUnavailableReasonV1Schema = z.enum(["no_diversity_observations", "no_eligible_observations", "no_latency_samples", "no_outcome_observations", "no_relevance_labels", "no_revocation_observations", "no_stack_transition_observations", "no_truncation_observations"]);
+export type FeedbackSystemMetricUnavailableReasonV1 = z.infer<typeof FeedbackSystemMetricUnavailableReasonV1Schema>;
+
+export const FeedbackSystemMetricUnitV1Schema = z.enum(["microseconds", "ratio", "transitions"]);
+export type FeedbackSystemMetricUnitV1 = z.infer<typeof FeedbackSystemMetricUnitV1Schema>;
+
+export const FeedbackSystemMetricV1Schema = z.object({
+  coverage: z.lazy(() => Plan26CoverageV1Schema),
+  denominator: z.number().int().nullable(),
+  denominator_population: z.lazy(() => FeedbackSystemMetricDenominatorV1Schema),
+  metric: z.lazy(() => FeedbackSystemMetricKindV1Schema),
+  numerator: z.number().int().nullable(),
+  unavailable_reason: z.union([z.lazy(() => FeedbackSystemMetricUnavailableReasonV1Schema), z.null()]),
+  unit: z.lazy(() => FeedbackSystemMetricUnitV1Schema),
+  value: z.number().nullable(),
+});
+export type FeedbackSystemMetricV1 = z.infer<typeof FeedbackSystemMetricV1Schema>;
+
+export const FeedbackSystemQualityReadModelV1Schema = z.object({
+  metrics: z.array(z.lazy(() => FeedbackSystemMetricV1Schema)),
+  schema_version: z.number().int(),
+});
+export type FeedbackSystemQualityReadModelV1 = z.infer<typeof FeedbackSystemQualityReadModelV1Schema>;
 
 export const GitHubStackedPullRequestPolicyV1Schema = z.enum(["disabled", "probe_private_preview"]);
 export type GitHubStackedPullRequestPolicyV1 = z.infer<typeof GitHubStackedPullRequestPolicyV1Schema>;
@@ -1707,7 +1808,7 @@ export const MetricProvenanceV1Schema = z.object({
 });
 export type MetricProvenanceV1 = z.infer<typeof MetricProvenanceV1Schema>;
 
-export const MetricSourceV1Schema = z.enum(["accounting_turn", "observability_envelope", "savings_ledger"]);
+export const MetricSourceV1Schema = z.enum(["accounting_turn", "feedback_observations", "observability_envelope", "savings_ledger"]);
 export type MetricSourceV1 = z.infer<typeof MetricSourceV1Schema>;
 
 export const MetricTemporalV1Schema = z.object({
@@ -1805,6 +1906,9 @@ export type OperationReceipt = z.infer<typeof OperationReceiptSchema>;
 /** Terminal state after an operation has been admitted. */
 export const OperationTerminationSchema = z.enum(["cancelled", "completed", "effect_unknown", "failed", "partial", "timed_out"]);
 export type OperationTermination = z.infer<typeof OperationTerminationSchema>;
+
+export const Plan26CoverageV1Schema = z.enum(["capped", "known", "partial", "sampled", "stale", "unknown"]);
+export type Plan26CoverageV1 = z.infer<typeof Plan26CoverageV1Schema>;
 
 export const PrAutoTrackEntryV1Schema = z.object({
   branch: z.string(),
@@ -2878,6 +2982,8 @@ export const DoctorRemediationRefSchema = DoctorRemediationRefV1Schema;
 export type DoctorRemediationRef = DoctorRemediationRefV1;
 export const DoctorRemediationTargetSchema = DoctorRemediationTargetV1Schema;
 export type DoctorRemediationTarget = DoctorRemediationTargetV1;
+export const DoctorRemediationVerificationSchema = DoctorRemediationVerificationV1Schema;
+export type DoctorRemediationVerification = DoctorRemediationVerificationV1;
 export const DoctorReportCoverageSchema = DoctorReportCoverageV1Schema;
 export type DoctorReportCoverage = DoctorReportCoverageV1;
 export const DoctorReportEntrySchema = DoctorReportEntryV1Schema;
@@ -2918,6 +3024,24 @@ export const FactMatchArmSchema = FactMatchArmV1Schema;
 export type FactMatchArm = FactMatchArmV1;
 export const FactMatchesMeasurementSchema = FactMatchesMeasurementV1Schema;
 export type FactMatchesMeasurement = FactMatchesMeasurementV1;
+export const FeedbackObservationDenominatorsSchema = FeedbackObservationDenominatorsV1Schema;
+export type FeedbackObservationDenominators = FeedbackObservationDenominatorsV1;
+export const FeedbackObservationReadModelSchema = FeedbackObservationReadModelV1Schema;
+export type FeedbackObservationReadModel = FeedbackObservationReadModelV1;
+export const FeedbackObservationWatermarkSchema = FeedbackObservationWatermarkV1Schema;
+export type FeedbackObservationWatermark = FeedbackObservationWatermarkV1;
+export const FeedbackSystemMetricDenominatorSchema = FeedbackSystemMetricDenominatorV1Schema;
+export type FeedbackSystemMetricDenominator = FeedbackSystemMetricDenominatorV1;
+export const FeedbackSystemMetricKindSchema = FeedbackSystemMetricKindV1Schema;
+export type FeedbackSystemMetricKind = FeedbackSystemMetricKindV1;
+export const FeedbackSystemMetricUnavailableReasonSchema = FeedbackSystemMetricUnavailableReasonV1Schema;
+export type FeedbackSystemMetricUnavailableReason = FeedbackSystemMetricUnavailableReasonV1;
+export const FeedbackSystemMetricUnitSchema = FeedbackSystemMetricUnitV1Schema;
+export type FeedbackSystemMetricUnit = FeedbackSystemMetricUnitV1;
+export const FeedbackSystemMetricSchema = FeedbackSystemMetricV1Schema;
+export type FeedbackSystemMetric = FeedbackSystemMetricV1;
+export const FeedbackSystemQualityReadModelSchema = FeedbackSystemQualityReadModelV1Schema;
+export type FeedbackSystemQualityReadModel = FeedbackSystemQualityReadModelV1;
 export const GitHubStackedPullRequestPolicySchema = GitHubStackedPullRequestPolicyV1Schema;
 export type GitHubStackedPullRequestPolicy = GitHubStackedPullRequestPolicyV1;
 export const GraphCappedSchema = GraphCappedV1Schema;
@@ -3050,6 +3174,8 @@ export const ObservabilityHorizonSchema = ObservabilityHorizonV1Schema;
 export type ObservabilityHorizon = ObservabilityHorizonV1;
 export const ObservatoryReadModelSchema = ObservatoryReadModelV1Schema;
 export type ObservatoryReadModel = ObservatoryReadModelV1;
+export const Plan26CoverageSchema = Plan26CoverageV1Schema;
+export type Plan26Coverage = Plan26CoverageV1;
 export const PrAutoTrackEntrySchema = PrAutoTrackEntryV1Schema;
 export type PrAutoTrackEntry = PrAutoTrackEntryV1;
 export const PrAutoTrackPayloadSchema = PrAutoTrackPayloadV1Schema;

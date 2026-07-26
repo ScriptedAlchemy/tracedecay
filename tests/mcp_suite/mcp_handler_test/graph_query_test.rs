@@ -560,7 +560,7 @@ export const value = 1;
     let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
     let candidates = payload["ignored_dependency_hint"]["candidates"]
         .as_array()
-        .expect("scoped ignored dependency candidates");
+        .unwrap_or_else(|| panic!("scoped ignored dependency candidates: {payload:#}"));
     assert!(!candidates.is_empty());
     assert!(candidates.iter().all(|candidate| {
         candidate["import_file"]
@@ -2013,7 +2013,7 @@ pub mod e;
     let result = handle_tool_call(
         &cg,
         "tracedecay_search",
-        json!({"query": "LinearOperator", "limit": 10}),
+        json!({"query": "LinearOperator", "limit": 10, "format": "json"}),
         None,
         None,
     )
@@ -2021,8 +2021,12 @@ pub mod e;
     .unwrap();
     let text = extract_text(&result.value);
     let items: Value = serde_json::from_str(text).unwrap();
-    let arr = items.as_array().unwrap();
-    let first_kind = arr[0]["kind"].as_str().unwrap_or("");
+    let arr = items["results"].as_array().expect("search results");
+    assert!(!arr.is_empty(), "search results: {items:#}");
+    let first_kind = arr[0]["display"]["kind"]
+        .as_str()
+        .or_else(|| arr[0]["kind"].as_str())
+        .unwrap_or("");
     assert_eq!(
         first_kind, "trait",
         "first search hit for LinearOperator should be the trait definition, got '{first_kind}' (full: {arr:?})"

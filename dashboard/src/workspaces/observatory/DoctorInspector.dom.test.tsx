@@ -446,6 +446,8 @@ function operationEnvelope(
           termination: phase === 'failed' ? 'failed' : 'completed',
         },
         effect_receipt: null,
+        verification:
+          phase === 'previewed' ? { state: 'not_required' } : { state: 'unavailable' },
       },
     },
     phase === 'failed' ? 'error' : 'ready',

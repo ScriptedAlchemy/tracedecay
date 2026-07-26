@@ -3,6 +3,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::symlink;
 use std::time::SystemTime;
 
+use rusqlite::Connection as RusqliteConnection;
+
 use super::*;
 use crate::global_db::StoreInstanceUpsert;
 use crate::storage::{
@@ -1641,35 +1643,22 @@ async fn temporal_health_detects_cross_session_ownership() {
     )
     .await;
     let db = runtime.database();
-    let writer = db.writer_connection().unwrap();
+    db.checkpoint_result().await.unwrap();
+    let writer = RusqliteConnection::open(db.db_path()).unwrap();
     writer
-        .execute("PRAGMA foreign_keys = OFF", ())
-        .await
-        .unwrap();
-    writer
-        .execute("DROP TRIGGER session_summary_sources_owner_guard_v1", ())
-        .await
-        .unwrap();
-    writer
-        .execute(
-            "INSERT INTO session_summary_nodes (
+        .execute_batch(
+            "PRAGMA foreign_keys = OFF;
+             DROP TRIGGER session_summary_sources_owner_guard_v1;
+             INSERT INTO session_summary_nodes (
                  summary_id, session_id, summary_anchor_id, summary_text, index_text,
                  source_horizon_json, publication_json, created_at
              ) VALUES
                  ('summary-a', 'session-a', 'anchor-a', 'a', 'a', '{}', NULL, 1),
-                 ('summary-b', 'session-b', 'anchor-b', 'b', 'b', '{}', NULL, 2)",
-            (),
-        )
-        .await
-        .unwrap();
-    writer
-        .execute(
-            "INSERT INTO session_summary_sources (
+                 ('summary-b', 'session-b', 'anchor-b', 'b', 'b', '{}', NULL, 2);
+             INSERT INTO session_summary_sources (
                  summary_id, source_ordinal, source_kind, source_anchor_id, source_summary_id
-             ) VALUES ('summary-b', 0, 'summary', NULL, 'summary-a')",
-            (),
+             ) VALUES ('summary-b', 0, 'summary', NULL, 'summary-a');",
         )
-        .await
         .unwrap();
     drop(writer);
     db.checkpoint_result().await.unwrap();
