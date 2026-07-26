@@ -627,19 +627,25 @@ async fn validated_branch_ref_orphan_without_worktree_is_rebuilt() {
 
     let first = reconcile(&graph, &project, &data_root, &discovery, 10).await;
     assert_eq!(first.tracked, vec![label.to_string()]);
-    fs::remove_file(data_root.join("pr-autotrack.json")).unwrap();
-    let mut meta = load_branch_meta(&data_root).unwrap();
-    let entry = meta.remove_branch(label).unwrap();
-    save_branch_meta(&data_root, &meta).unwrap();
-    fs::rename(
-        data_root.join(entry.db_file),
-        data_root.join("interrupted-branch-store.db"),
+    let head_sha = discovery.open[0].head_sha.clone();
+    let removed = reconcile(
+        &graph,
+        &project,
+        &data_root,
+        &pr_autotrack::PrDiscovery::default(),
+        10,
     )
-    .unwrap();
+    .await;
+    assert_eq!(removed.untracked, vec![label.to_string()]);
     git(
         &project,
-        &["worktree", "remove", "--force", &worktree.to_string_lossy()],
+        &[
+            "update-ref",
+            &format!("refs/heads/{label}"),
+            head_sha.as_str(),
+        ],
     );
+    assert!(!worktree.exists());
 
     let recovered = reconcile(&graph, &project, &data_root, &discovery, 10).await;
     assert_eq!(recovered.tracked, vec![label.to_string()]);
@@ -805,21 +811,29 @@ async fn interrupted_track_with_advanced_head_recovers_instead_of_wedging() {
     let first = reconcile(&graph, &project, &data_root, &discovery, 10).await;
     assert_eq!(first.tracked, vec![label.to_string()]);
 
-    // Reproduce the mid-track crash aftermath: state gone, DB gone, worktree
-    // gone — but the synthetic branch survives pointing at the OLD head.
-    fs::remove_file(data_root.join("pr-autotrack.json")).unwrap();
-    let mut meta = load_branch_meta(&data_root).unwrap();
-    let entry = meta.remove_branch(label).unwrap();
-    save_branch_meta(&data_root, &meta).unwrap();
-    fs::rename(
-        data_root.join(entry.db_file),
-        data_root.join("interrupted-branch-store.db"),
+    // Reproduce the durable aftermath of a mid-track daemon crash without
+    // mutating a database that remains mounted in this process: retire the
+    // managed runtime through production cleanup, then restore only the stale
+    // synthetic ref that would survive the interrupted state write.
+    let old_head_sha = discovery.open[0].head_sha.clone();
+    let removed = reconcile(
+        &graph,
+        &project,
+        &data_root,
+        &pr_autotrack::PrDiscovery::default(),
+        10,
     )
-    .unwrap();
+    .await;
+    assert_eq!(removed.untracked, vec![label.to_string()]);
     git(
         &project,
-        &["worktree", "remove", "--force", &worktree.to_string_lossy()],
+        &[
+            "update-ref",
+            &format!("refs/heads/{label}"),
+            old_head_sha.as_str(),
+        ],
     );
+    assert!(!worktree.exists());
     assert!(
         git_out(
             &project,
