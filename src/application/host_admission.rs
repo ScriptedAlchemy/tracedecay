@@ -2119,6 +2119,13 @@ impl HostAdmissionTestRuntimeV1 {
             })
     }
 
+    #[doc(hidden)]
+    pub(crate) fn project_observation_database_for_test(
+        &self,
+    ) -> crate::errors::Result<&RegisteredGlobalDb> {
+        self.project_database_for_test()
+    }
+
     fn session_database_for_test(
         &self,
         scope: HostAdmissionScope,
