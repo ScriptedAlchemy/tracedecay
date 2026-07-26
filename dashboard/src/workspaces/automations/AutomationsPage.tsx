@@ -123,7 +123,12 @@ export function AutomationsPage() {
   );
 
   return (
-    <div className="flex h-full flex-col overflow-auto">
+    // Scrollable regions need keyboard operation (WCAG 2.1.1). At narrow widths
+    // this column scrolls while everything inside it is read-out — counts,
+    // reasons, job rows — with nothing to tab to, and it grows taller exactly
+    // when a queue is unreadable and the reason paragraph appears. The column
+    // takes the tab stop itself, the same remedy Explorer's filter rail uses.
+    <div tabIndex={0} className="flex h-full flex-col overflow-auto">
       <div className="flex items-center gap-3 border-b border-edge-subtle px-4 py-2">
         <h1 className="text-sm font-semibold tracking-tight">Automations</h1>
         {scheduler.data?.outcome === 'ok' ? (
