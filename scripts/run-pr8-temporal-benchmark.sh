@@ -150,12 +150,16 @@ run_benchmark() {
     exit 64
   fi
   isolation_root="$(mktemp -d "${TMPDIR:-/tmp}/pr8-temporal-bench.XXXXXX")"
+  cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+  rustup_home="${RUSTUP_HOME:-$HOME/.rustup}"
   cleanup() {
     rm -rf "$isolation_root"
   }
   trap cleanup EXIT
   export HOME="$isolation_root/home"
   export TRACEDECAY_DATA_DIR="$isolation_root/tracedecay-data"
+  export CARGO_HOME="$cargo_home"
+  export RUSTUP_HOME="$rustup_home"
   mkdir -p "$HOME" "$TRACEDECAY_DATA_DIR"
   cargo bench --bench session_temporal --all-features -- "$mode"
 }
