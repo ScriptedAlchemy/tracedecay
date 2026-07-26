@@ -1620,7 +1620,18 @@ const TABLE_GROWTH_COVERAGE = {
 const TABLE_GROWTH_STATES = [
   {
     state: 'observed',
-    coverage: TABLE_GROWTH_COVERAGE,
+    // Two of this store's three current tables had a previous watermark, so the
+    // observed read is partial and says so.
+    coverage: {
+      ...TABLE_GROWTH_COVERAGE,
+      completeness: 'partial',
+      eligible: 3,
+      examined: 2,
+      omitted: 1,
+      denominator: 3,
+      unit: 'current_tables',
+      omission_reasons: ['embeddings: no previous table watermark exists; baseline pending'],
+    },
     significant_samples: [
       {
         table: 'messages',
@@ -1642,9 +1653,17 @@ const TABLE_GROWTH_STATES = [
         current_observed_at: nowMicros,
         reason: 'observed growth was below the informational significance threshold',
       },
+      {
+        kind: 'baseline_pending',
+        table: 'embeddings',
+        current_bytes: 4_194_304,
+        observed_at: nowMicros,
+        reason: 'embeddings: no previous table watermark exists; baseline pending',
+      },
     ],
     omission_reasons: [
       'metadata: observed growth was below the informational significance threshold',
+      'embeddings: no previous table watermark exists; baseline pending',
     ],
   },
   {
