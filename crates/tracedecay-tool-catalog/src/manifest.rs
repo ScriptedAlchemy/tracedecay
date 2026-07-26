@@ -57,6 +57,9 @@ impl SchemaRef {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScopeDimension {
+    /// One exact typed configuration layer. Its project, profile, or
+    /// collection identity is revalidated by the configuration authority.
+    ConfigurationLayer,
     Project,
     Repository,
     Worktree,

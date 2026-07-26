@@ -47,6 +47,13 @@ CREATE TABLE IF NOT EXISTS semantic_vector_generation_state_v1 (
     state_json TEXT NOT NULL
 ) STRICT;
 ";
+const VECTOR_EVALUATION_STATE_SCHEMA_V1: &str = "
+CREATE TABLE IF NOT EXISTS semantic_vector_evaluation_state_v1 (
+    evaluation_id TEXT PRIMARY KEY,
+    revision INTEGER NOT NULL CHECK (revision >= 0),
+    state_json TEXT NOT NULL
+) STRICT;
+";
 const LEGACY_VECTOR_QUARANTINE_SCHEMA_V1: &str = "
 CREATE TABLE IF NOT EXISTS semantic_legacy_vector_quarantine_v1 (
     receipt_digest TEXT NOT NULL,
@@ -955,6 +962,17 @@ pub struct DatabaseVectorGenerationStoreV1<'database> {
     database: &'database Database,
 }
 
+/// SQLite-backed, non-authoritative state used by the native PR10 evaluator.
+///
+/// It executes the same generation state machine and writer path as
+/// production, but uses an isolated row that is removed after the measured
+/// run. It can therefore exercise publication/activation without changing the
+/// project's active semantic generation.
+pub(crate) struct DatabaseVectorEvaluationStoreV1<'database> {
+    database: &'database Database,
+    evaluation_id: String,
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct ActiveVectorGenerationSnapshotV1 {
     revision: i64,
@@ -1804,6 +1822,189 @@ impl<'database> DatabaseVectorGenerationStoreV1<'database> {
         let row = rows.next().await.map_err(storage_error)?.ok_or_else(|| {
             VectorGenerationStoreErrorV1::Storage(
                 "vector generation state row is missing".to_string(),
+            )
+        })?;
+        let revision = row.get::<i64>(0).map_err(storage_error)?;
+        let state_json = row.get::<String>(1).map_err(storage_error)?;
+        drop(rows);
+        let mut state: FakeVectorGenerationStoreV1 =
+            serde_json::from_str(&state_json).map_err(storage_error)?;
+        state.ensure_physical_reuse_index()?;
+        validate_loaded_state(&state)?;
+        Ok((revision, state))
+    }
+}
+
+impl<'database> DatabaseVectorEvaluationStoreV1<'database> {
+    pub(crate) async fn open(
+        database: &'database Database,
+        evaluation_id: impl Into<String>,
+    ) -> Result<Self, VectorGenerationStoreErrorV1> {
+        let evaluation_id = evaluation_id.into();
+        if evaluation_id.is_empty()
+            || evaluation_id.len() > 256
+            || evaluation_id.trim() != evaluation_id
+            || evaluation_id.chars().any(char::is_control)
+        {
+            return Err(VectorGenerationStoreErrorV1::Storage(
+                "semantic evaluation identity is invalid".to_owned(),
+            ));
+        }
+        database
+            .execute_write_batch(
+                VECTOR_GENERATION_STATE_OPERATION,
+                VECTOR_EVALUATION_STATE_SCHEMA_V1,
+            )
+            .await
+            .map_err(storage_error)?;
+        let initial_state = serde_json::to_string(&FakeVectorGenerationStoreV1::default())
+            .map_err(storage_error)?;
+        let inserted = database
+            .execute_write_engine(
+                VECTOR_GENERATION_STATE_OPERATION,
+                "INSERT INTO semantic_vector_evaluation_state_v1 (
+                    evaluation_id, revision, state_json
+                 ) VALUES (?1, 0, ?2)",
+                params![evaluation_id.clone(), initial_state],
+            )
+            .await
+            .map_err(storage_error)?;
+        if inserted != 1 {
+            return Err(VectorGenerationStoreErrorV1::Storage(
+                "semantic evaluation state could not be initialized".to_owned(),
+            ));
+        }
+        Ok(Self {
+            database,
+            evaluation_id,
+        })
+    }
+
+    pub(crate) async fn rebuild_generation(
+        &self,
+        plan: VectorGenerationPlanV1,
+    ) -> Result<VectorGenerationBuildIdV1, VectorGenerationStoreErrorV1> {
+        self.mutate_state(|state| state.rebuild_generation(plan.clone()))
+            .await
+    }
+
+    pub(crate) async fn commit_batch(
+        &self,
+        build_id: &VectorGenerationBuildIdV1,
+        expected_checkpoint: Option<&VectorProjectionCheckpointV1>,
+        prepared: PreparedVectorGenerationV1,
+    ) -> Result<VectorProjectionCheckpointV1, VectorGenerationStoreErrorV1> {
+        self.mutate_state(|state| {
+            state.commit_batch(build_id, expected_checkpoint, prepared.clone())
+        })
+        .await
+    }
+
+    pub(crate) async fn publish_generation(
+        &self,
+        build_id: &VectorGenerationBuildIdV1,
+        expected_active_generation: Option<&VectorGenerationIdV1>,
+    ) -> Result<VectorGenerationPublicationV1, VectorGenerationStoreErrorV1> {
+        self.mutate_state(|state| state.publish_generation(build_id, expected_active_generation))
+            .await
+    }
+
+    pub(crate) async fn cancel_generation(
+        &self,
+        build_id: &VectorGenerationBuildIdV1,
+    ) -> Result<bool, VectorGenerationStoreErrorV1> {
+        self.mutate_state(|state| Ok(state.cancel_generation(build_id)))
+            .await
+    }
+
+    pub(crate) async fn active_generation_id(
+        &self,
+    ) -> Result<Option<VectorGenerationIdV1>, VectorGenerationStoreErrorV1> {
+        let (_, state) = self.load_state().await?;
+        Ok(state.active_generation_id().cloned())
+    }
+
+    pub(crate) async fn active_generation(
+        &self,
+    ) -> Result<Option<PublishedVectorGenerationV1>, VectorGenerationStoreErrorV1> {
+        let (_, state) = self.load_state().await?;
+        Ok(state.active_generation().cloned())
+    }
+
+    pub(crate) async fn active_generation_for(
+        &self,
+        embedding_key: &AdmittedEmbeddingProjectionKeyV1,
+        source_generation: &CodeGenerationId,
+        source_manifest_digest: &ManifestDigest,
+    ) -> Result<Option<PublishedVectorGenerationV1>, VectorGenerationStoreErrorV1> {
+        let (_, state) = self.load_state().await?;
+        Ok(state
+            .active_generation_for(embedding_key, source_generation, source_manifest_digest)
+            .cloned())
+    }
+
+    pub(crate) async fn close(self) -> Result<(), VectorGenerationStoreErrorV1> {
+        let deleted = self
+            .database
+            .execute_write_engine(
+                VECTOR_GENERATION_STATE_OPERATION,
+                "DELETE FROM semantic_vector_evaluation_state_v1
+                 WHERE evaluation_id = ?1",
+                params![self.evaluation_id],
+            )
+            .await
+            .map_err(storage_error)?;
+        if deleted != 1 {
+            return Err(VectorGenerationStoreErrorV1::ConcurrentMutation);
+        }
+        Ok(())
+    }
+
+    async fn mutate_state<ResultValue>(
+        &self,
+        mut mutation: impl FnMut(
+            &mut FakeVectorGenerationStoreV1,
+        ) -> Result<ResultValue, VectorGenerationStoreErrorV1>,
+    ) -> Result<ResultValue, VectorGenerationStoreErrorV1> {
+        for _ in 0..MAX_STATE_CAS_RETRIES {
+            let (revision, mut state) = self.load_state().await?;
+            let result = mutation(&mut state)?;
+            let state_json = serde_json::to_string(&state).map_err(storage_error)?;
+            let changed = self
+                .database
+                .execute_write_engine(
+                    VECTOR_GENERATION_STATE_OPERATION,
+                    "UPDATE semantic_vector_evaluation_state_v1
+                     SET revision = revision + 1, state_json = ?1
+                     WHERE evaluation_id = ?2 AND revision = ?3",
+                    params![state_json, self.evaluation_id.clone(), revision],
+                )
+                .await
+                .map_err(storage_error)?;
+            if changed == 1 {
+                return Ok(result);
+            }
+        }
+        Err(VectorGenerationStoreErrorV1::ConcurrentMutation)
+    }
+
+    async fn load_state(
+        &self,
+    ) -> Result<(i64, FakeVectorGenerationStoreV1), VectorGenerationStoreErrorV1> {
+        let mut rows = self
+            .database
+            .engine_conn()
+            .query(
+                "SELECT revision, state_json
+                 FROM semantic_vector_evaluation_state_v1
+                 WHERE evaluation_id = ?1",
+                params![self.evaluation_id.clone()],
+            )
+            .await
+            .map_err(storage_error)?;
+        let row = rows.next().await.map_err(storage_error)?.ok_or_else(|| {
+            VectorGenerationStoreErrorV1::Storage(
+                "semantic evaluation state row is missing".to_owned(),
             )
         })?;
         let revision = row.get::<i64>(0).map_err(storage_error)?;
@@ -3030,6 +3231,65 @@ mod tests {
                 .await
                 .is_err(),
             "full-state decoding would observe unrelated corruption"
+        );
+    }
+
+    #[tokio::test]
+    async fn native_evaluation_state_is_sqlite_backed_and_never_becomes_authoritative() {
+        let temporary = tempfile::tempdir().expect("temporary project database");
+        let path = temporary.path().join("project.db");
+        let authority = DatabaseAuthority::acquire_test(&path, "native semantic evaluation")
+            .expect("authority");
+        let (database, _) =
+            Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
+                .await
+                .expect("database");
+
+        let evaluation =
+            DatabaseVectorEvaluationStoreV1::open(&database, "pr10-native-evaluation:test")
+                .await
+                .expect("SQLite-backed evaluation store");
+        assert_eq!(
+            evaluation
+                .active_generation_id()
+                .await
+                .expect("evaluation active generation"),
+            None
+        );
+        assert_eq!(
+            database
+                .query_scalar_i64(
+                    "inspect native evaluation row",
+                    "SELECT COUNT(*) FROM semantic_vector_evaluation_state_v1",
+                )
+                .await
+                .expect("evaluation row count"),
+            1
+        );
+        assert_eq!(
+            database
+                .query_scalar_i64(
+                    "prove native evaluation did not create authoritative state",
+                    "SELECT COUNT(*)
+                     FROM sqlite_schema
+                     WHERE type = 'table'
+                       AND name = 'semantic_vector_generation_state_v1'",
+                )
+                .await
+                .expect("authoritative schema count"),
+            0
+        );
+
+        evaluation.close().await.expect("remove evaluation row");
+        assert_eq!(
+            database
+                .query_scalar_i64(
+                    "verify native evaluation cleanup",
+                    "SELECT COUNT(*) FROM semantic_vector_evaluation_state_v1",
+                )
+                .await
+                .expect("evaluation row count after cleanup"),
+            0
         );
     }
 

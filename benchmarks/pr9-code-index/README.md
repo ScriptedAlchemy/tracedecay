@@ -43,8 +43,11 @@ Metrics:
   Tree-sitter source edit exists;
 - invalidated chunks: deleted prior chunks plus changed chunks that name a
   prior digest;
-- embedding batches: zero because PR9 projects lexical chunks and deliberately
-  does not invoke semantic inference;
+- embedding batches/chunks: `null` because this PR9 lexical benchmark
+  deliberately does not invoke semantic inference; it never reports invented
+  zero work for an unmounted PR10 capability;
+- process read/write amplification: observed `/proc/self/io` bytes divided by
+  admitted input/output bytes, or `null` when the denominator is zero;
 - invalidation and projection amplification: invalidated chunks or projection
   operations per changed range, reported as `null` when there is no source
   changed range;

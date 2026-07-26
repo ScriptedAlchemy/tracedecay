@@ -12,6 +12,11 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+pub use tracedecay_domain::{
+    EmbeddingDeviceClassV1 as DeviceClassV1, EmbeddingMetricV1 as SemanticMetricV1,
+    EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingPrecisionV1,
+    EmbeddingTruncationSideV1 as TruncationSideV1,
+};
 
 /// Schema marker pinned into every V1 manifest payload.
 pub const MODEL_ARTIFACT_MANIFEST_SCHEMA_V1: &str = "tracedecay.model-artifact-manifest.v1";
@@ -71,49 +76,12 @@ impl std::fmt::Display for Sha256DigestHex {
 /// installed embedding profile and, independently, an optional
 /// reranker profile (Plan 31 "Model and offline lifecycle").
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ArtifactProfileKindV1 {
+    #[serde(alias = "Embedding")]
     Embedding,
+    #[serde(alias = "Reranker")]
     Reranker,
-}
-
-/// Canonical vector distance metric pinned by the projection identity.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum SemanticMetricV1 {
-    Cosine,
-    DotProduct,
-    EuclideanL2,
-}
-
-/// Output-vector normalization pinned by the projection identity.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum EmbeddingNormalizationV1 {
-    L2,
-    None,
-}
-
-/// Token-to-vector pooling pinned by the projection identity.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum EmbeddingPoolingV1 {
-    Mean,
-    Cls,
-    LastToken,
-    MeanSqrtLength,
-}
-
-/// Numeric precision / quantization of the artifact weights.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum EmbeddingPrecisionV1 {
-    Fp32,
-    Fp16,
-    Bf16,
-    Int8,
-}
-
-/// Deterministic device class. PR10 admits CPU only; accelerator classes are
-/// later measured candidate profiles, not defaults.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum DeviceClassV1 {
-    Cpu,
 }
 
 /// Truncation policy: side and maximum token length, both part of the
@@ -123,12 +91,6 @@ pub enum DeviceClassV1 {
 pub struct TruncationPolicyV1 {
     pub side: TruncationSideV1,
     pub max_length: u32,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum TruncationSideV1 {
-    Left,
-    Right,
 }
 
 /// Digest + byte length pin for the primary model member. The complete package
@@ -535,6 +497,18 @@ mod tests {
         ModelArtifactManifestV1 {
             payload: sample_payload(),
         }
+    }
+
+    #[test]
+    fn manifest_uses_domain_embedding_vocabulary_directly() {
+        let payload = sample_payload();
+
+        let _: tracedecay_domain::EmbeddingMetricV1 = payload.metric;
+        let _: tracedecay_domain::EmbeddingNormalizationV1 = payload.normalization;
+        let _: tracedecay_domain::EmbeddingPoolingV1 = payload.pooling;
+        let _: tracedecay_domain::EmbeddingTruncationSideV1 = payload.truncation.side;
+        let _: tracedecay_domain::EmbeddingPrecisionV1 = payload.precision;
+        let _: tracedecay_domain::EmbeddingDeviceClassV1 = payload.device;
     }
 
     #[test]

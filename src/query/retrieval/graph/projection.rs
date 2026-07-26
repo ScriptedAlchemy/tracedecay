@@ -5,6 +5,7 @@
 //! generation-local symbol/file/chunk occurrences from admitted chunks.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::Arc;
 
 use tracedecay_domain::{
     CanonicalRelationEdgeV1, CodeGenerationId, CodeSearchChunkId, CodeSearchChunkV1,
@@ -35,8 +36,8 @@ pub struct CodeGraphEvidenceAdapterV1 {
     freshness: SourceFreshness,
     retriever_revision: ComponentRevision,
     score_domain: ScoreDomainId,
-    adjacency: BTreeMap<SymbolOccurrenceId, Vec<CanonicalRelationEdgeV1>>,
-    symbols: BTreeMap<SymbolOccurrenceId, SymbolBindingV1>,
+    adjacency: Arc<BTreeMap<SymbolOccurrenceId, Vec<CanonicalRelationEdgeV1>>>,
+    symbols: Arc<BTreeMap<SymbolOccurrenceId, SymbolBindingV1>>,
 }
 
 impl CodeGraphEvidenceAdapterV1 {
@@ -154,8 +155,8 @@ impl CodeGraphEvidenceAdapterV1 {
             .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
             score_domain: ScoreDomainId::new(crate::query::retrieval::PR9_GRAPH_SCORE_DOMAIN_V1)
                 .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
-            adjacency,
-            symbols,
+            adjacency: Arc::new(adjacency),
+            symbols: Arc::new(symbols),
         })
     }
 

@@ -18,6 +18,10 @@ use tracedecay::global_db::AnalyticsEventInsert;
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
 use tracedecay::storage::resolve_layout_for_current_profile;
 use tracedecay::tracedecay::TraceDecay;
+use tracedecay_domain::{
+    CoverageStateV1, ObservabilityEnvelopeV1, ObservabilityPayloadV1,
+    ObservabilityRetentionClassV1, ObservabilityTerminalResultV1, RetrievalQueryObservedV1,
+};
 
 struct Fixture {
     _tmp: TempDir,
@@ -220,6 +224,69 @@ fn analytics_event(project_id: &str, timestamp: i64, event_kind: &str) -> Analyt
         hint_id: None,
         outcome: None,
         metadata_json: None,
+    }
+}
+
+fn observability_event(
+    project_id: &str,
+    timestamp: i64,
+    terminal_result: ObservabilityTerminalResultV1,
+) -> AnalyticsEventInsert {
+    let envelope = ObservabilityEnvelopeV1 {
+        event_id: "dashboard-observability-failed".to_string(),
+        event_kind: "retrieval.query.observed.v1".to_string(),
+        schema_revision: 1,
+        idempotency_key: "dashboard-observability-failed".to_string(),
+        trace_id: "dashboard-observability-trace".to_string(),
+        scope_ref: project_id.to_string(),
+        capability: "retrieval".to_string(),
+        operation: "query".to_string(),
+        event_time_micros: timestamp.saturating_mul(1_000_000),
+        observation_time_micros: timestamp.saturating_mul(1_000_000),
+        valid_from_micros: None,
+        valid_until_micros: None,
+        quantity: None,
+        unit: None,
+        terminal_result: Some(terminal_result),
+        producer_revision: "dashboard-test.v1".to_string(),
+        configuration_revision: "dashboard-test.v1".to_string(),
+        policy_revision: "dashboard-test.v1".to_string(),
+        watermark: "dashboard-test:1".to_string(),
+        coverage: CoverageStateV1::Known,
+        sampling_probability: None,
+        retention_class: ObservabilityRetentionClassV1::LocalRollup395d,
+        emitted_count: 1,
+        delayed_count: 0,
+        dropped_count: 0,
+        process_boot_id: "dashboard-test-boot".to_string(),
+        producer_sequence: 1,
+        payload: ObservabilityPayloadV1::RetrievalQuery(RetrievalQueryObservedV1 {
+            query_family: "exact_technical".to_string(),
+            enabled_lanes: vec!["exact_literal".to_string()],
+            candidate_budget: 1,
+            context_budget: 1,
+            token_budget: 1,
+            answered: false,
+            source_coverage: CoverageStateV1::Known,
+            lane_coverage: CoverageStateV1::Known,
+        }),
+    };
+    AnalyticsEventInsert {
+        provider: "tracedecay-observability".to_string(),
+        project_id: project_id.to_string(),
+        session_id: None,
+        timestamp,
+        event_kind: envelope.event_kind.clone(),
+        hook_name: None,
+        tool_name: None,
+        tool_category: None,
+        skill_name: None,
+        hint_category: None,
+        hint_id: Some(envelope.idempotency_key.clone()),
+        outcome: Some("failed".to_string()),
+        metadata_json: Some(
+            serde_json::to_string(&envelope).expect("serialize observability event"),
+        ),
     }
 }
 
@@ -610,5 +677,117 @@ fn analytics_api_uses_recent_durable_events_when_window_is_capped() {
             1,
             "skill",
         );
+    });
+}
+
+#[test]
+fn observatory_and_costs_http_dashboard_export_preserve_value_and_coverage() {
+    let _lock = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_fixture(true).await;
+        let agent = http_agent();
+
+        let (status, observatory_dashboard) =
+            get_json(&agent, &format!("{}/api/observatory", fixture.base_url));
+        assert_eq!(status, 200);
+        assert_eq!(observatory_dashboard["schema_revision"], 1);
+        let (status, observatory_http) = get_json(
+            &agent,
+            &format!("{}/api/plugins/analytics/observatory", fixture.base_url),
+        );
+        assert_eq!(status, 200);
+        let (status, observatory_export) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/analytics/observatory/export",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(
+            observatory_dashboard["payload"]["metrics"],
+            observatory_http["metrics"]
+        );
+        assert_eq!(observatory_http["metrics"], observatory_export["metrics"]);
+
+        let (status, costs_dashboard) =
+            get_json(&agent, &format!("{}/api/costs", fixture.base_url));
+        assert_eq!(status, 200);
+        assert_eq!(costs_dashboard["schema_revision"], 1);
+        let (status, costs_http) = get_json(
+            &agent,
+            &format!("{}/api/plugins/savings/costs", fixture.base_url),
+        );
+        assert_eq!(status, 200);
+        let (status, costs_export) = get_json(
+            &agent,
+            &format!("{}/api/plugins/savings/costs/export", fixture.base_url),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(costs_dashboard["payload"]["usage"], costs_http["usage"]);
+        assert_eq!(
+            costs_dashboard["payload"]["estimated_cost"],
+            costs_http["estimated_cost"]
+        );
+        assert_eq!(costs_http["usage"], costs_export["usage"]);
+        assert_eq!(costs_http["estimated_cost"], costs_export["estimated_cost"]);
+    });
+}
+
+#[test]
+fn observatory_counts_canonical_failed_outcomes() {
+    let _lock = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_fixture(false).await;
+        let project_id = HostAdmissionTestRuntimeV1::canonical_project_key(&fixture.project_root);
+        fixture
+            .host_runtime
+            .append_analytics_event_for_test(
+                HostAdmissionScope::Profile,
+                &observability_event(
+                    &project_id,
+                    tracedecay::tracedecay::current_timestamp(),
+                    ObservabilityTerminalResultV1::Failed,
+                ),
+            )
+            .await
+            .expect("append canonical failed event");
+
+        let (status, observatory) = get_json(
+            &http_agent(),
+            &format!("{}/api/observatory", fixture.base_url),
+        );
+        assert_eq!(status, 200);
+        let failures = observatory["payload"]["metrics"]
+            .as_array()
+            .and_then(|metrics| {
+                metrics
+                    .iter()
+                    .find(|metric| metric["metric"] == "observability_failures")
+            })
+            .expect("observability failures metric");
+        assert_eq!(failures["value"], 1.0);
+    });
+}
+
+#[test]
+fn costs_read_model_is_mounted_on_the_active_dashboard() {
+    let _lock = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_fixture(false).await;
+        let (status, costs) = get_json(&http_agent(), &format!("{}/api/costs", fixture.base_url));
+        assert_eq!(status, 200);
+        assert_eq!(costs["authorized_scope_ref"], "all");
+        assert!(costs["payload"]["usage"].is_array());
+        assert!(costs["payload"]["estimated_cost"].is_array());
     });
 }

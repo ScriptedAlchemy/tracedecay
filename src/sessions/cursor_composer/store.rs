@@ -73,6 +73,9 @@ pub(crate) fn protobuf_child_refs(bytes: &[u8]) -> Option<Vec<String>> {
         if field == 0 {
             return None;
         }
+        if field == 1 && wire != 2 {
+            return None;
+        }
         match wire {
             0 => {
                 let (_, next) = read_varint(bytes, i)?;

@@ -10,16 +10,27 @@
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use tracedecay_domain::{CodeGenerationId, ManifestDigest, RepositoryId, WorktreeId};
 
 use super::{
-    CodeIndexBytePoolStatsV1, CodeIndexSchedulerErrorV1, CodeIndexWorktreeSchedulerV1,
-    LatestCompleteCodeIndexV1, SharedCodeIndexBytePoolV1,
+    CodeIndexBytePoolStatsV1, CodeIndexPublishEvidenceV1, CodeIndexReconcileOutcomeV1,
+    CodeIndexSchedulerErrorV1, CodeIndexWorktreeSchedulerV1, LatestCompleteCodeIndexV1,
+    SharedCodeIndexBytePoolV1, now_micros,
 };
 
 const MAX_CONCURRENT_BACKGROUND_RECONCILES: usize = 1;
+const GENERATION_PUBLICATION_CHANNEL_CAPACITY: usize = 128;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CodeIndexGenerationPublishedV1 {
+    pub project_root: PathBuf,
+    pub repository_id: RepositoryId,
+    pub generation_id: CodeGenerationId,
+    pub snapshot_content_identity: tracedecay_domain::ContentDigest,
+    pub observation_time_micros: i64,
+}
 
 pub(super) struct MountedCodeIndexWorktreeV1 {
     pub(super) repository_id: RepositoryId,
@@ -42,15 +53,29 @@ pub(in crate::daemon) struct CodeIndexSemanticEvaluationPublicationLeaseV1 {
 }
 
 #[derive(Clone)]
-pub(in crate::daemon) struct CodeIndexSchedulerRegistryV1 {
+pub(crate) struct CodeIndexSchedulerRegistryV1 {
     pub(super) max_worktrees: usize,
     pub(super) byte_pool: Arc<SharedCodeIndexBytePoolV1>,
     pub(super) mounted: Arc<tokio::sync::Mutex<BTreeMap<PathBuf, MountedCodeIndexWorktreeV1>>>,
     background_reconcile_admission: Arc<tokio::sync::Semaphore>,
+    generation_publications: tokio::sync::broadcast::Sender<CodeIndexGenerationPublishedV1>,
+    test_attribution_authorities: Arc<
+        RwLock<
+            BTreeMap<
+                PathBuf,
+                (
+                    CodeGenerationId,
+                    crate::code_index::production::PublishedGenerationTestAttributionAuthorityV1,
+                ),
+            >,
+        >,
+    >,
 }
 
 impl CodeIndexSchedulerRegistryV1 {
     pub fn new(max_worktrees: usize) -> Self {
+        let (generation_publications, _) =
+            tokio::sync::broadcast::channel(GENERATION_PUBLICATION_CHANNEL_CAPACITY);
         Self {
             max_worktrees,
             byte_pool: Arc::new(SharedCodeIndexBytePoolV1::default()),
@@ -58,7 +83,29 @@ impl CodeIndexSchedulerRegistryV1 {
             background_reconcile_admission: Arc::new(tokio::sync::Semaphore::new(
                 MAX_CONCURRENT_BACKGROUND_RECONCILES,
             )),
+            generation_publications,
+            test_attribution_authorities: Arc::new(RwLock::new(BTreeMap::new())),
         }
+    }
+
+    pub(crate) fn subscribe_generation_publications(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<CodeIndexGenerationPublishedV1> {
+        self.generation_publications.subscribe()
+    }
+
+    fn publish_generation(
+        sender: &tokio::sync::broadcast::Sender<CodeIndexGenerationPublishedV1>,
+        project_root: PathBuf,
+        evidence: &CodeIndexPublishEvidenceV1,
+    ) {
+        let _ = sender.send(CodeIndexGenerationPublishedV1 {
+            project_root,
+            repository_id: evidence.repository_id.clone(),
+            generation_id: evidence.generation_id.clone(),
+            snapshot_content_identity: evidence.snapshot_content_identity.clone(),
+            observation_time_micros: now_micros().0,
+        });
     }
 
     pub fn open_worktree(
@@ -124,7 +171,14 @@ impl CodeIndexSchedulerRegistryV1 {
         // the authority mounted immediately afterwards can bind one complete,
         // current generation instead of losing a race with the background
         // worker and remaining unavailable until a later edit.
-        opened.reconcile_now()?;
+        let initial_reconcile = opened.reconcile_now()?;
+        if let CodeIndexReconcileOutcomeV1::Published(evidence) = &initial_reconcile {
+            Self::publish_generation(
+                &self.generation_publications,
+                project_root.clone(),
+                evidence,
+            );
+        }
         let repository_id = opened.identity().repository_id().clone();
         let worktree_id = opened.identity().worktree_id().clone();
         let scheduler = Arc::new(Mutex::new(opened));
@@ -144,6 +198,8 @@ impl CodeIndexSchedulerRegistryV1 {
             Arc::clone(&semantic_evaluation_publication_gate);
         let worker_background_reconcile_admission =
             Arc::clone(&self.background_reconcile_admission);
+        let worker_generation_publications = self.generation_publications.clone();
+        let worker_project_root = project_root.clone();
         let task = tokio::spawn(async move {
             loop {
                 worker_wake.notified().await;
@@ -170,6 +226,13 @@ impl CodeIndexSchedulerRegistryV1 {
                         .reconcile_now()
                 })
                 .await;
+                if let Ok(Ok(CodeIndexReconcileOutcomeV1::Published(evidence))) = &result {
+                    Self::publish_generation(
+                        &worker_generation_publications,
+                        worker_project_root.clone(),
+                        evidence,
+                    );
+                }
                 if shutting_down.load(Ordering::Acquire) {
                     return;
                 }
@@ -366,6 +429,88 @@ impl CodeIndexSchedulerRegistryV1 {
             .map(|latest| latest.generation.manifest().generation_id.clone())
     }
 
+    /// Exact live dashboard projection for one mounted worktree.
+    ///
+    /// The freshness ladder runs before projection. Generation and scope fields
+    /// are copied from the durable sealed generation, never reconstructed from
+    /// the dashboard's display path.
+    pub(in crate::daemon) async fn dashboard_freshness(
+        &self,
+        project_root: &Path,
+    ) -> Option<crate::dashboard::code_index_freshness_api::CodeIndexWorktreeFreshnessV1> {
+        let canonical_root = project_root.canonicalize().ok()?;
+        let scheduler = {
+            let mounted = self.mounted.lock().await;
+            Arc::clone(&mounted.get(&canonical_root)?.scheduler)
+        };
+        tokio::task::spawn_blocking(move || {
+            let mut scheduler = scheduler
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let reconciled = scheduler.ensure_fresh_for_query().is_ok();
+            let latest = reconciled.then(|| scheduler.latest_complete()).flatten();
+            let hook_hint_count = scheduler.pending_hint_count();
+            let (
+                repository_id,
+                worktree_id,
+                source_reference,
+                generation_id,
+                content_identity,
+                sealed,
+            ) = latest
+                .as_ref()
+                .map_or((None, None, None, None, None, None), |latest| {
+                    let generation = &latest.generation;
+                    let snapshot = generation.snapshot();
+                    (
+                        Some(snapshot.repository.as_str().to_owned()),
+                        snapshot
+                            .worktree
+                            .as_ref()
+                            .map(|worktree| worktree.as_str().to_owned()),
+                        snapshot
+                            .reference
+                            .as_ref()
+                            .map(|reference| reference.as_str().to_owned()),
+                        Some(generation.manifest().generation_id.as_str().to_owned()),
+                        Some(snapshot.content_identity.as_str().to_owned()),
+                        Some(generation.manifest().seal.sealed_at.0),
+                    )
+                });
+            crate::dashboard::code_index_freshness_api::CodeIndexWorktreeFreshnessV1 {
+                worktree_root: canonical_root.display().to_string(),
+                repository_id,
+                worktree_id,
+                source_reference,
+                latest_generation_id: generation_id,
+                snapshot_content_identity: content_identity,
+                sealed_at_micros: sealed,
+                last_reconcile_micros: Some(scheduler.last_reconciled_at_micros()),
+                staleness_state: Some(
+                    if !reconciled {
+                        "unknown"
+                    } else if latest.is_some() {
+                        "fresh"
+                    } else {
+                        "indexing"
+                    }
+                    .to_owned(),
+                ),
+                hook_hint_count,
+                coverage: if !reconciled {
+                    "unknown_reconcile_failed"
+                } else if hook_hint_count.is_some() {
+                    "complete"
+                } else {
+                    "partial_hook_hint_overflow"
+                }
+                .to_owned(),
+            }
+        })
+        .await
+        .ok()
+    }
+
     /// Query-admission entry point: run the freshness ladder (tier-1 git
     /// metadata, tier-2 bounded staleness, tier-3 identity re-resolution) before
     /// returning the latest complete generation, so external out-of-band changes
@@ -387,16 +532,47 @@ impl CodeIndexSchedulerRegistryV1 {
         // Run the synchronous reconcile off the async executor. Freshness is an
         // admission requirement: if it cannot be established, fail closed
         // rather than serving a last-known generation that may now be stale.
-        tokio::task::spawn_blocking(move || {
+        let authority_root = project_root.clone();
+        let (latest, publication) = tokio::task::spawn_blocking(move || {
             let mut scheduler = scheduler
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            scheduler.ensure_fresh_for_query().ok()?;
-            scheduler.latest_complete()
+            let before = scheduler
+                .latest_complete()
+                .map(|latest| latest.generation.manifest().generation_id.clone());
+            let reconciled = scheduler.ensure_fresh_for_query().ok()?;
+            let latest = scheduler.latest_complete()?;
+            let publication = (reconciled
+                && before.as_ref() != Some(&latest.generation.manifest().generation_id))
+            .then(|| CodeIndexGenerationPublishedV1 {
+                project_root: project_root.clone(),
+                repository_id: latest.generation.snapshot().repository.clone(),
+                generation_id: latest.generation.manifest().generation_id.clone(),
+                snapshot_content_identity: latest.generation.snapshot().content_identity.clone(),
+                observation_time_micros: now_micros().0,
+            });
+            Some((latest, publication))
         })
         .await
         .ok()
-        .flatten()
+        .flatten()?;
+        if let Some(publication) = publication {
+            let _ = self.generation_publications.send(publication);
+        }
+        if let Ok(authority) = latest.test_attribution_authority() {
+            let mut authorities = self
+                .test_attribution_authorities
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            authorities.insert(
+                authority_root,
+                (
+                    latest.generation.manifest().generation_id.clone(),
+                    authority,
+                ),
+            );
+        }
+        Some(latest)
     }
 
     /// Resolve one mounted root by the exact admitted repository/worktree/ref
@@ -498,6 +674,10 @@ impl CodeIndexSchedulerRegistryV1 {
 
     pub async fn shutdown(&self) {
         let mounted = std::mem::take(&mut *self.mounted.lock().await);
+        self.test_attribution_authorities
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
         for worktree in mounted.values() {
             let scheduler = worktree
                 .scheduler
@@ -620,6 +800,44 @@ impl crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1
                 ),
             )
         })
+    }
+}
+
+impl crate::code_index::provider::GenerationTestAttributionJoinReadPort
+    for CodeIndexSchedulerRegistryV1
+{
+    fn read_test_attribution(
+        &self,
+        generation: &CodeGenerationId,
+    ) -> crate::code_index::provider::GenerationProviderReadV1<
+        crate::code_index::test_attribution::GenerationTestJoinV1,
+    > {
+        let authorities = self
+            .test_attribution_authorities
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut matching = authorities
+            .values()
+            .filter(|(candidate, _)| candidate == generation);
+        let Some((_, authority)) = matching.next() else {
+            return crate::code_index::provider::GenerationProviderReadV1::new(
+                tracedecay_domain::ProviderEvaluationStateV1::Unavailable,
+                crate::code_index::provider::GenerationProviderCoverageV1::Unavailable,
+                None,
+            )
+            .unwrap_or_else(|_| panic!("static unavailable attribution read"));
+        };
+        if matching.next().is_some() {
+            return crate::code_index::provider::GenerationProviderReadV1::new(
+                tracedecay_domain::ProviderEvaluationStateV1::Unavailable,
+                crate::code_index::provider::GenerationProviderCoverageV1::Unavailable,
+                None,
+            )
+            .unwrap_or_else(|_| panic!("static ambiguous attribution read"));
+        }
+        crate::code_index::provider::GenerationTestAttributionJoinReadPort::read_test_attribution(
+            authority, generation,
+        )
     }
 }
 

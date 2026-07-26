@@ -13,7 +13,6 @@ mod claude;
 mod codex;
 mod cursor;
 mod cursor_compact;
-mod cursor_shell;
 pub mod hint_outcomes;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
@@ -54,11 +53,6 @@ pub use cursor::{
     hook_cursor_subagent_start, hook_cursor_workspace_open,
 };
 pub use cursor_compact::{CursorPreCompactOutcome, cursor_pre_compact_via_daemon};
-pub use cursor_shell::{
-    CursorShellSyncPlan, cursor_branch_switch_target, cursor_shell_command_targets_project,
-    cursor_shell_sync_plan, cursor_shell_sync_plan_with_current_branch,
-    is_git_state_changing_command, resolve_worktree_add_root,
-};
 pub use kiro::{
     evaluate_kiro_pre_tool_use, hook_kiro_post_tool_use, hook_kiro_pre_tool_use,
     hook_kiro_prompt_submit, kiro_post_tool_use_rel_paths,
@@ -78,7 +72,7 @@ pub(crate) use analytics::HookCompletedReadinessDistributions;
 pub(crate) use analytics::{host_hook_telemetry_contract, measure_host_event_payload_bytes};
 use analytics::{
     mint_hint_id, record_hint_analytics, record_hint_emitted, record_hook_analytics,
-    record_hook_invoked, record_workspace_status_analytics,
+    record_hook_invoked, record_other_hook_invoked, record_workspace_status_analytics,
 };
 
 pub(crate) fn aggregate_hook_completed_readiness(
@@ -89,36 +83,39 @@ pub(crate) fn aggregate_hook_completed_readiness(
 use tool_hints::{HintAgent, ToolHint};
 
 pub async fn hook_kimi_v2(event_json: &str, project_root: &Path) -> Option<String> {
-    match v2::dispatch(
+    let telemetry = record_other_hook_invoked(Some(project_root), "kimiV2Event", event_json);
+    v2::dispatch(
         tracedecay_hooks::HookHostV1::KimiCode,
         event_json,
         project_root,
     )
     .await
-    {
-        v2::HookV2Dispatch::Handled { guidance, .. } => guidance,
-        v2::HookV2Dispatch::NotApplicable => None,
-    }
+    .into_recorded_guidance(&telemetry)
+    .flatten()
 }
 
 pub async fn hook_opencode_v2_event(event_json: &str, project_root: &Path) -> Option<String> {
-    match v2::dispatch(
-        tracedecay_hooks::HookHostV1::OpenCode,
-        event_json,
-        project_root,
-    )
-    .await
-    {
-        v2::HookV2Dispatch::Handled { guidance, .. } => guidance,
-        v2::HookV2Dispatch::NotApplicable => None,
-    }
+    let telemetry = record_other_hook_invoked(Some(project_root), "openCodeV2Event", event_json);
+    let dispatch = if tracedecay_hooks::decode_opencode_lsp_event(event_json.as_bytes()).is_ok() {
+        v2::dispatch_opencode_lsp_updated(event_json, project_root).await
+    } else {
+        v2::dispatch(
+            tracedecay_hooks::HookHostV1::OpenCode,
+            event_json,
+            project_root,
+        )
+        .await
+    };
+    dispatch.into_recorded_guidance(&telemetry).flatten()
 }
 
 pub async fn hook_opencode_v2_tool_after(event_json: &str, project_root: &Path) -> Option<String> {
-    match v2::dispatch_opencode_tool_after(event_json, project_root).await {
-        v2::HookV2Dispatch::Handled { guidance, .. } => guidance,
-        v2::HookV2Dispatch::NotApplicable => None,
-    }
+    let telemetry =
+        record_other_hook_invoked(Some(project_root), "openCodeV2ToolAfter", event_json);
+    v2::dispatch_opencode_tool_after(event_json, project_root)
+        .await
+        .into_recorded_guidance(&telemetry)
+        .flatten()
 }
 
 macro_rules! read_hook_event {
@@ -366,12 +363,13 @@ pub async fn hook_hermes_terminal_receipt() -> i32 {
         &event_json,
     );
     if let Some(project_root) = project_root.as_ref() {
-        if let v2::HookV2Dispatch::Handled { guidance, .. } = v2::dispatch(
+        if let Some(guidance) = v2::dispatch(
             tracedecay_hooks::HookHostV1::Hermes,
             &event_json,
             project_root,
         )
         .await
+        .into_recorded_guidance(&hook_telemetry)
         {
             if let Some(guidance) = guidance {
                 println!("{}", serde_json::json!({ "additional_context": guidance }));

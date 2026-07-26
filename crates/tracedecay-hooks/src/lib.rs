@@ -28,20 +28,19 @@ pub use config::{
     hook_configuration_path,
 };
 pub use native::{
-    DecodedNativeHookEventV1, NativeEnvelopeMaterialV1, NativeHookDecodeError, NativeHookSignalV1,
-    OpenCodePluginSurfaceV1, decode_bound_native_hook_event, decode_native_hook_event,
+    DecodedNativeHookEventV1, DecodedOpenCodeLspEventV1, NativeEnvelopeMaterialV1,
+    NativeHookDecodeError, NativeHookSignalV1, OpenCodePluginSurfaceV1,
+    decode_bound_native_hook_event, decode_native_hook_event, decode_opencode_lsp_event,
     decode_opencode_plugin_event,
 };
 pub use runtime::{
     AsyncHookAdmissionPortV1, HOOK_SYNCHRONOUS_BUDGET_MICROS, HookAdmissionFutureV1,
-    HookAdmissionPortV1, HookAdmissionReceiptV1, HookFeedbackDeliveryOutcomeV1,
-    HookFeedbackDeliveryPortV1, HookFeedbackDeliveryRouteV1, HookFeedbackRollbackSwitchV1,
-    HookGuidanceDispositionV1, HookGuidanceLookupOutcomeV1, HookGuidanceLookupPortV1,
-    HookGuidanceLookupRequestV1, HookGuidanceStateV1, HookImmediateAdmissionStateV1,
-    HookImmediateAdmissionV1, HookReadyGuidanceV1, HookReplaySpoolPortV1, HookRuntimeControlV1,
-    HookRuntimeErrorV1, HookRuntimeStatusV1, HookSynchronousDeadlineV1, HookSynchronousResultV1,
-    MAX_GUIDANCE_LOOKUP_ITEMS, admit_async_exact_scope, deliver_feedback_with_rollback,
-    finish_synchronous_hook,
+    HookAdmissionReceiptV1, HookFeedbackDeliveryOutcomeV1, HookFeedbackDeliveryPortV1,
+    HookFeedbackDeliveryRouteV1, HookFeedbackRollbackSwitchV1, HookGuidanceDispositionV1,
+    HookGuidanceStateV1, HookImmediateAdmissionStateV1, HookImmediateAdmissionV1,
+    HookReadyGuidanceV1, HookRuntimeControlV1, HookRuntimeErrorV1, HookRuntimeStatusV1,
+    HookSynchronousDeadlineV1, HookSynchronousResultV1, admit_async_exact_scope,
+    deliver_feedback_with_rollback, finish_synchronous_hook,
 };
 pub use spool::{
     HookReplayBatchV1, HookSpoolAckDispositionV1, HookSpoolAckV1, HookSpoolConfigV1,
@@ -133,9 +132,9 @@ pub const fn stock_event_support(host: HookHostV1, family: HookEventFamily) -> H
     use HookEventSupportV1::{Native, ReceiptDerived, Unavailable};
 
     match (host, family) {
-        (HookHostV1::ClaudeCode, SessionBoundary | SavedEdit) => Native,
-        (HookHostV1::ClaudeCode, TestLifecycle) => ReceiptDerived,
-        (HookHostV1::ClaudeCode, PromptBoundary | ToolLifecycle) => Unavailable,
+        (HookHostV1::ClaudeCode, SessionBoundary | ToolLifecycle) => Native,
+        (HookHostV1::ClaudeCode, SavedEdit | TestLifecycle) => ReceiptDerived,
+        (HookHostV1::ClaudeCode, PromptBoundary) => Unavailable,
         (HookHostV1::Codex, SessionBoundary) => Native,
         (HookHostV1::Codex, SavedEdit | TestLifecycle) => ReceiptDerived,
         (HookHostV1::Codex, PromptBoundary | ToolLifecycle) => Unavailable,
@@ -144,9 +143,9 @@ pub const fn stock_event_support(host: HookHostV1, family: HookEventFamily) -> H
         (HookHostV1::CursorDesktop | HookHostV1::CursorCloud, TestLifecycle) => ReceiptDerived,
         (HookHostV1::CursorDesktop, PromptBoundary | ToolLifecycle) => Unavailable,
         (HookHostV1::CursorCloud, PromptBoundary | ToolLifecycle | SavedEdit) => Unavailable,
-        (HookHostV1::Hermes, SessionBoundary | SavedEdit) => Native,
-        (HookHostV1::Hermes, TestLifecycle) => ReceiptDerived,
-        (HookHostV1::Hermes, PromptBoundary | ToolLifecycle) => Unavailable,
+        (HookHostV1::Hermes, SessionBoundary | ToolLifecycle) => Native,
+        (HookHostV1::Hermes, SavedEdit | TestLifecycle) => ReceiptDerived,
+        (HookHostV1::Hermes, PromptBoundary) => Unavailable,
         (HookHostV1::Kiro, PromptBoundary) => Native,
         (HookHostV1::Kiro, SessionBoundary | ToolLifecycle | SavedEdit | TestLifecycle) => {
             Unavailable
@@ -589,6 +588,21 @@ mod tests {
         assert_eq!(
             stock_event_support(HookHostV1::Hermes, HookEventFamily::TestLifecycle),
             HookEventSupportV1::ReceiptDerived
+        );
+        assert_eq!(
+            stock_event_support(HookHostV1::ClaudeCode, HookEventFamily::ToolLifecycle),
+            HookEventSupportV1::Native,
+            "the checked-in Claude PostToolUse capture proves this native family"
+        );
+        assert_eq!(
+            stock_event_support(HookHostV1::Hermes, HookEventFamily::ToolLifecycle),
+            HookEventSupportV1::Native,
+            "the checked-in Hermes post_tool_call capture proves this native family"
+        );
+        assert_eq!(
+            stock_event_support(HookHostV1::Codex, HookEventFamily::ToolLifecycle),
+            HookEventSupportV1::Unavailable,
+            "Codex has no checked-in authentic PostToolUse capture"
         );
         assert_eq!(
             stock_event_support(HookHostV1::CursorDesktop, HookEventFamily::SavedEdit),

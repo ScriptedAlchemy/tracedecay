@@ -83,6 +83,8 @@ pub struct ProductionFeedbackCycleOpenV1 {
     pub document_identity: Arc<dyn ProductionFeedbackDocumentIdentityPort + Send + Sync>,
     pub code_index_identity:
         Arc<dyn crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1>,
+    pub test_attribution:
+        Arc<dyn crate::code_index::provider::GenerationTestAttributionJoinReadPort + Send + Sync>,
     pub mounted_providers: Vec<MountedLspProvider>,
 }
 
@@ -451,9 +453,10 @@ pub async fn resolve_production_feedback_cycle_parts(
         evaluated_at,
         provider_candidates,
         affected_tests: Arc::new(
-            crate::application::primitives::TraceDecayAffectedTestsPortV1::new(
+            crate::application::primitives::TraceDecayAffectedTestsPortV1::with_generation_attribution(
                 Arc::clone(&input.graph),
                 provider_seed.generation_id.clone(),
+                input.test_attribution,
             ),
         ),
         operation,

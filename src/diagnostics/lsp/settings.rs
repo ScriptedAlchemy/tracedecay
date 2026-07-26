@@ -8,7 +8,7 @@ use crate::errors::{Result, TraceDecayError};
 
 const SETTINGS_FILENAME: &str = "code_diagnostics_settings.json";
 
-/// Dashboard-owned idle whole-project diagnostics mode.
+/// Daemon-owned idle whole-project diagnostics mode.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IdleBackfillMode {
@@ -35,7 +35,7 @@ impl Default for LanguageDiagnosticsSettings {
     }
 }
 
-/// Project-scoped Code Diagnostics settings persisted for the dashboard.
+/// Project-scoped Code Diagnostics settings persisted by the daemon authority.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CodeDiagnosticsSettings {
     #[serde(default)]
@@ -124,16 +124,63 @@ pub async fn save_settings(
     let bytes = serde_json::to_vec_pretty(settings).map_err(|e| TraceDecayError::Config {
         message: format!("failed to serialize code diagnostics settings: {e}"),
     })?;
-    tokio::fs::write(&path, bytes)
-        .await
-        .map_err(|e| TraceDecayError::Config {
-            message: format!(
-                "failed to write code diagnostics settings '{}': {e}",
-                path.display()
-            ),
-        })
+    if tokio::fs::try_exists(&path).await.unwrap_or(false) {
+        let backup = path.with_extension("json.bak");
+        tokio::fs::copy(&path, &backup)
+            .await
+            .map_err(|e| TraceDecayError::Config {
+                message: format!(
+                    "failed to back up code diagnostics settings '{}' to '{}': {e}",
+                    path.display(),
+                    backup.display()
+                ),
+            })?;
+    }
+    let staged = path.with_extension("json.pending");
+    let publish_path = path.clone();
+    tokio::task::spawn_blocking(move || {
+        crate::db::DatabaseAuthority::publish_record_atomically(
+            &staged,
+            &publish_path,
+            &bytes,
+            "code diagnostics settings",
+        )
+    })
+    .await
+    .map_err(|error| TraceDecayError::Config {
+        message: format!("code diagnostics settings write task failed: {error}"),
+    })?
+    .map_err(|e| TraceDecayError::Config {
+        message: format!(
+            "failed to publish code diagnostics settings '{}': {e}",
+            path.display()
+        ),
+    })
 }
 
 fn default_enabled() -> bool {
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn save_settings_atomically_replaces_an_existing_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut initial = CodeDiagnosticsSettings::default();
+        initial.set_language_enabled("rust", false);
+        save_settings(temp.path(), &initial).await.unwrap();
+
+        let mut replacement = CodeDiagnosticsSettings::default();
+        replacement.set_language_enabled("rust", true);
+        save_settings(temp.path(), &replacement).await.unwrap();
+
+        assert_eq!(load_settings(temp.path()).await.unwrap(), replacement);
+        let backup = settings_path(temp.path()).with_extension("json.bak");
+        let backup: CodeDiagnosticsSettings =
+            serde_json::from_slice(&tokio::fs::read(backup).await.unwrap()).unwrap();
+        assert_eq!(backup, initial);
+    }
 }

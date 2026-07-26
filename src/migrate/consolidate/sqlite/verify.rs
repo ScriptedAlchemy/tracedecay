@@ -4,8 +4,8 @@ use crate::db::engine::Executor;
 
 use super::{
     SessionMergeOffsets, attach_snapshot_as, build_consolidation_message_map, db_error, db_message,
-    mapped_parent_metadata, mapped_turn_message_id, observation, projection, query_i64,
-    table_exists,
+    external_source, mapped_parent_metadata, mapped_turn_message_id, observation, projection,
+    query_i64, table_exists,
 };
 use crate::errors::Result;
 
@@ -73,15 +73,10 @@ pub(in crate::migrate::consolidate) async fn verify_session_union_sql(
 async fn verify_attached_tables(conn: &impl Executor, offsets: &SessionMergeOffsets) -> Result<()> {
     let target_has_session_backfill_meta =
         table_exists(conn, "target_input", "session_backfill_meta").await?;
-    let target_has_dashboard_token_counts =
-        table_exists(conn, "target_input", "dashboard_token_counts").await?;
-    for spec in verification_specs(
-        offsets,
-        target_has_session_backfill_meta,
-        target_has_dashboard_token_counts,
-    ) {
+    for spec in verification_specs(offsets, target_has_session_backfill_meta) {
         verify_table(conn, &spec).await?;
     }
+    external_source::verify_union(conn, "main", "target_input", "source_input").await?;
     observation::verify_observation_union(conn, "target_input", "source_input").await?;
     projection::verify(conn).await?;
     if query_i64(
@@ -161,7 +156,6 @@ async fn verify_table(conn: &impl Executor, spec: &TableVerification) -> Result<
 fn verification_specs(
     offsets: &SessionMergeOffsets,
     target_has_session_backfill_meta: bool,
-    target_has_dashboard_token_counts: bool,
 ) -> Vec<TableVerification> {
     let turn_message_id = mapped_turn_message_id("s");
     let session_metadata = mapped_parent_metadata("s", false);
@@ -445,37 +439,6 @@ fn verification_specs(
             "session_backfill_meta",
             "key, value, updated_at",
             "SELECT key, value, updated_at FROM source_input.session_backfill_meta",
-        )
-    });
-    specs.push(if target_has_dashboard_token_counts {
-        custom(
-            "dashboard token count",
-            "dashboard_token_counts",
-            "store, provider, message_id, text_len, encoder, token_count, computed_at",
-            "SELECT store, provider, message_id, text_len, encoder, token_count, computed_at
-             FROM target_input.dashboard_token_counts
-             UNION ALL
-             SELECT s.store, s.provider, COALESCE(m.mapped_id, s.message_id),
-                    s.text_len, s.encoder, s.token_count, s.computed_at
-             FROM source_input.dashboard_token_counts s
-             LEFT JOIN consolidation_message_map m
-               ON m.provider=s.provider AND m.original_id=s.message_id
-             WHERE m.mapped_id IS NOT NULL OR NOT EXISTS (
-                 SELECT 1 FROM target_input.dashboard_token_counts t
-                 WHERE t.store=s.store AND t.provider=s.provider
-                   AND t.message_id=s.message_id
-             )",
-        )
-    } else {
-        custom(
-            "dashboard token count",
-            "dashboard_token_counts",
-            "store, provider, message_id, text_len, encoder, token_count, computed_at",
-            "SELECT s.store, s.provider, COALESCE(m.mapped_id, s.message_id),
-                    s.text_len, s.encoder, s.token_count, s.computed_at
-             FROM source_input.dashboard_token_counts s
-             LEFT JOIN consolidation_message_map m
-               ON m.provider=s.provider AND m.original_id=s.message_id",
         )
     });
     specs

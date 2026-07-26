@@ -14,13 +14,13 @@ import { formatCount, splitCount } from '../../ui/format.ts';
 import { cn } from '../../ui/cn';
 import { useLegacy } from '../../data/query/useLegacy.ts';
 import {
-  FactDetailPayloadSchema,
+  type MemoryCategoryCount,
+  MemoryFactDetailPayloadSchema,
+  type MemoryFactRow,
+  type MemoryHrrCoverage,
   MemoryOverviewPayloadSchema,
-  MemoryStatusSchema,
-  type CategoryCount,
-  type FactRow,
-  type HrrCoverageRow,
-} from './contracts.ts';
+  MemoryStatusPayloadSchema,
+} from '../../contracts/wire.ts';
 import {
   composeTrustDistribution,
   factsBelow,
@@ -49,14 +49,14 @@ export function KnowledgePage() {
   // store (see trust.ts). This route reports the same distribution in four
   // coarser bands and is correct, so it is read as the fallback source rather
   // than leaving the plate empty. Cheap — ~0.1s against a live daemon.
-  const status = useLegacy(['memory', 'status'], `${BASE}/status`, MemoryStatusSchema);
+  const status = useLegacy(['memory', 'status'], `${BASE}/status`, MemoryStatusPayloadSchema);
   const statusBands =
     status.data?.outcome === 'ok' ? status.data.data.memory : undefined;
-  const [selected, setSelected] = useState<FactRow | null>(null);
+  const [selected, setSelected] = useState<MemoryFactRow | null>(null);
   const detail = useLegacy(
     ['memory', 'fact', String(selected?.fact_id ?? '')],
     `${BASE}/fact/${encodeURIComponent(String(selected?.fact_id ?? ''))}`,
-    FactDetailPayloadSchema,
+    MemoryFactDetailPayloadSchema,
     { enabled: selected != null },
   );
   const selectedDetail =
@@ -433,7 +433,7 @@ function TrustDistributionPlate({ distribution }: { distribution: TrustDistribut
  * stale or incompletely vectorized, which no coverage percentage shows. The
  * uniformity is stated; only the banks that deviate get a row.
  */
-function HrrCoveragePlate({ rows }: { rows: readonly HrrCoverageRow[] }) {
+function HrrCoveragePlate({ rows }: { rows: readonly MemoryHrrCoverage[] }) {
   const summary = summarizeHrrCoverage(rows);
   if (!summary) return null;
   return (
@@ -553,7 +553,7 @@ function FactListRow({
   selected,
   onSelect,
 }: {
-  fact: FactRow;
+  fact: MemoryFactRow;
   recallCeiling: number;
   showTrustRail: boolean;
   selected: boolean;
@@ -691,7 +691,7 @@ function formatShortDate(iso: string): string {
  * category on screen for ranking. No fabricated denominator — the rail
  * measures against the largest category actually present, not an assumed
  * total. */
-function CategoryBar({ row, ceiling }: { row: CategoryCount; ceiling: number }) {
+function CategoryBar({ row, ceiling }: { row: MemoryCategoryCount; ceiling: number }) {
   const fraction = ceiling > 0 ? row.count / ceiling : null;
   return (
     <div className="flex flex-col gap-1">
@@ -720,7 +720,7 @@ function CategoryBar({ row, ceiling }: { row: CategoryCount; ceiling: number }) 
  * collided with the bar above. Category and status now share one line above a
  * full-width rail, so the longest status string in the taxonomy still sits on
  * one line inside a 224px filter rail. */
-function HrrCoverageBar({ row }: { row: HrrCoverageRow }) {
+function HrrCoverageBar({ row }: { row: MemoryHrrCoverage }) {
   const clamped = Math.max(0, Math.min(row.coverage, 1));
   const degraded = row.status !== 'ready';
   // missing_bank has no vector bank to measure against, so a percentage would

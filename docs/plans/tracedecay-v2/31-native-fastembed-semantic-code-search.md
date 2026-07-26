@@ -222,20 +222,22 @@ their exact key; partial receipt sets never activate.
 
 ## Model and offline lifecycle
 
-Configuration selects an installed versioned embedding profile and, independently,
-an optional reranker profile. Manifests pin actual model/tokenizer/config bytes,
-licenses, runtime/build identity, dimensions, normalization, metric, device,
-threads, batching, and resource ceilings. Implementation selects maintained
+Configuration selects a versioned embedding profile and, independently, an
+optional reranker profile. With automatic acquisition enabled, the daemon
+queues the selected catalog model's immutable Hugging Face repository revision
+in the background. Manifests pin actual model/tokenizer/config bytes, licenses,
+runtime/build identity, dimensions, normalization, metric, device, threads,
+batching, and resource ceilings. Implementation selects maintained
 crate/runtime versions during PR10; activated model and reranker profiles still
-require a passing Plan 15 evaluation. This plan contains no stale crate
-or model-version pin.
+require a passing Plan 15 evaluation. This plan contains no stale crate or
+model-version pin.
 
-Install/import verifies artifacts before activation. Queries never download a
-model or open an ambient cache. Offline startup remains healthy and
-PR9-baseline-complete. Compatible warmed sessions are pooled under bounded memory,
-concurrency, idle, and cancellation policy. Load failure, OOM, corruption,
-missing bytes, or incompatible pins disables the affected semantic stage without
-silently selecting another model.
+Every acquisition/import path verifies artifacts before installation or
+activation. Queries never download a model or open an ambient cache. Offline
+startup remains healthy and PR9-baseline-complete. Compatible warmed sessions
+are pooled under bounded memory, concurrency, idle, and cancellation policy.
+Load failure, OOM, corruption, missing bytes, or incompatible pins disables the
+affected semantic stage without silently selecting another model.
 
 Artifact handling is explicit:
 
@@ -245,23 +247,27 @@ Artifact handling is explicit:
   declared member are identified by SHA-256 solely to detect drift, corruption,
   or incomplete installation. These versioned manifests and integrity checks
   are the complete artifact-verification contract.
-- Import accepts an explicit local path or an explicitly configured HTTPS
-  source in a separate user action. It stages bytes under a random local
-  directory, streams length and SHA-256 verification for every declared member
-  before rename, fsyncs files/directories, and then
-  atomically publishes an inventory record. Query/runtime paths perform no
-  download, import, extraction, source discovery, or network inference.
+- Daemon-owned background acquisition resolves only the cataloged repository
+  and immutable revision into an explicit cache under the lifecycle root. It
+  stages each member, independently checks its declared length and SHA-256,
+  and atomically publishes the complete verified install. Query/runtime paths
+  perform no download, import, extraction, source discovery, or network
+  inference.
+- Explicit local-path and configured-HTTPS import APIs remain available as
+  manual operations, but no production surface currently wires them. They are
+  not the delivered acquisition journey.
 - Interrupted imports are resumable only when the source supplies immutable
   length, digest, and range identity; otherwise staging is discarded. Archive
   traversal, symlink/hardlink entries, absolute paths, duplicate members,
   undeclared members, size expansion beyond the manifest, and digest mismatch
   quarantine the import without exposing it to runtime discovery.
 - Installed artifacts live in one Plan-02-owned user store keyed by versioned
-  manifest digest, never an ambient Hugging Face/ORT/FastEmbed cache. Inventory
-  records distinguish `staged | verified | installed | quarantined |
-  retained_for_rollback`. Garbage collection may remove only unreferenced
-  non-active/non-rollback artifacts after a daemon lease and append-only
-  receipt.
+  manifest digest, never an ambient Hugging Face/ORT/FastEmbed cache. The
+  daemon's lifecycle-root Hugging Face cache is an acquisition source only,
+  not runtime or installation authority. Inventory records distinguish
+  `staged | verified | installed | quarantined | retained_for_rollback`.
+  Garbage collection may remove only unreferenced non-active/non-rollback
+  artifacts after a daemon lease and append-only receipt.
 - Activation is an authenticated Plan 20 compare-and-swap from the expected
   active/rollback profile digests. It verifies artifact inventory, accepted
   Plan 15 report, runtime/platform compatibility, complete projection
@@ -440,16 +446,30 @@ present source file or type name is not completion by itself; the cited direct
 regressions invoke the relevant boundary. Static fixture validation is useful,
 but the current Linux evaluation remains pending.
 
-**Production lifecycle correction (2026-07-26).** No shipped production path
-can install a model. `shared_lifecycle_owner()` opens the default owner with
-`HfHubModelMemberSourceV1`, whose `fetch_member` unconditionally returns
-`Rejected`; background acquisition therefore terminates in `Failed`.
-`import_local_artifact` and `import_configured_https_artifact` remain test-only
-or otherwise uncalled by production surfaces. The downstream verified-store,
-projection, publication, activation, retrieval, and fallback machinery remains
-real; artifact acquisition, cold-start/offline rollback, and production
-status/Doctor lifecycle acceptance are **not implemented end to end** until an
-install/import operation is production-reachable.
+**Production lifecycle correction (updated 2026-07-26).** Commit `dd4adbe2a`
+ships daemon-owned immutable `hf-hub` background acquisition.
+`shared_lifecycle_owner()` opens a lifecycle-root-scoped
+`HfHubModelMemberSourceV1`; startup queues acquisition when configured, and the
+source resolves only the cataloged repository/revision before the lifecycle
+checks every member's declared length and SHA-256 and atomically installs the
+package. Status and Doctor expose downloading, verifying, installed, and
+failed states. A clean temporary profile downloaded and digest-verified the
+full default Jina model end to end, and packaged offline acceptance installs
+the same verified model from the daemon-owned cache. The explicit local and
+configured-HTTPS import APIs remain manual and production-unwired; they are not
+being certified by this correction. Installed model bytes remain semantically
+omitted until compatible vector indexing publishes readiness, preserving the
+asynchronous non-blocking contract.
+
+**Why the old green gate was misleading.** Before `dd4adbe2a`,
+`HfHubModelMemberSourceV1::fetch_member` unconditionally returned
+`semantic model lifecycle operation rejected`, so no shipped binary could
+acquire a model. The distribution gate's packaged-semantic half tested only
+typed fallback/strict-unavailable behavior—the exact terminal absence produced
+by that rejection—and therefore encoded the bug as its passing specification.
+The corrected gate now runs packaged background acquisition and verifies the
+installed Jina members; restoring the unconditional rejection makes that gate
+fail, and restoring the source makes it pass.
 
 - **Library-first FastEmbed:** delivered. The root manifest keeps
   `fastembed` optional with upstream defaults disabled, the
@@ -460,13 +480,17 @@ install/import operation is production-reachable.
 - **Default equals all features:** delivered in the root feature manifest.
   Normal Linux/macOS/Windows CI builds and tests that default-feature product
   posture.
+- **Daemon-owned immutable acquisition:** delivered. Startup queues the
+  selected catalog revision without blocking startup or query paths; the
+  lifecycle-root source cache is explicit, and verification plus atomic install
+  remain independent of `hf-hub`.
 - **Local verified model bytes only:** delivered at the runtime boundary.
   Model, tokenizer, and config bytes come from the installed manifest members;
   runtime construction has no hub, ambient-cache, download, external-process,
-  or network-inference path. Direct tests validate the constructor and
-  integrity reads, but there is currently no production-reachable operation
-  that creates the installed manifest and members. Cross-platform runtime
-  coverage belongs to normal CI after that lifecycle gap closes.
+  or network-inference path. Background acquisition now creates the verified
+  installed manifest and members; explicit local/HTTPS imports remain
+  production-unwired. Direct tests validate constructor and integrity reads,
+  while cross-platform runtime coverage remains normal CI work.
 - **Exact-flat semantic baseline:** delivered by
   `SemanticCodeRetriever`/`SemanticVectorReadPort::scan_exact_flat`, with direct
   deterministic ordering, provenance, generation, and coverage regression in
@@ -549,8 +573,8 @@ and normal CI.
    semantics eligible for the existing configuration activation. Run staged
    shadow/cohort behavior, rollback, migration, privacy, architecture, direct
    tests, Linux evaluation, and normal all-feature cross-platform CI. Status
-   and Doctor behavior must be tested through the production semantic service
-   after a model can be installed through a production-reachable operation;
+   and Doctor behavior are exercised through the production lifecycle states;
+   activation still requires the remaining evaluation and indexing evidence.
    PR10 does not create a temporary public semantic endpoint or reserve later
    surface contracts.
 
@@ -657,6 +681,11 @@ semantic similarity as identity, impact, lineage, or equivalence.
   digest/length mismatch, incompatible runtime/platform pins, interrupted
   publication, and deletion of active/rollback artifacts. Query execution
   performs zero network/import/cache-discovery operations.
+- Distribution acceptance starts from an isolated profile, queues the
+  background worker, installs every digest-verified default Jina member, and
+  proves semantics remain omitted until indexing readiness. Its offline mode
+  consumes only the lifecycle-root cache and must fail if production
+  acquisition regresses to unconditional rejection.
 - The checked-in benchmark corpus contains only sanitized fixtures and expected
   opaque anchors; raw private queries/source are absent. Activation requires a
   passing Plan 15 evaluation and cannot be inferred from public rank or

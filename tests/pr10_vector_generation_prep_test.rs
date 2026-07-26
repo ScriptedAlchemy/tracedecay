@@ -21,8 +21,8 @@ use tracedecay_domain::{
     EmbeddingPoolingV1, EmbeddingPrecisionV1, EmbeddingProjectionKeyV1, EmbeddingTruncationSideV1,
     FileOccurrenceId, LanguageDescriptorRevision, ManifestDigest, PolicyRevisionId,
     PrivacyDomainId, ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1,
-    ProjectionReplayReasonV1, SanitizerRevision, SensitivityDecision, SensitivityLevelV1,
-    SourceSpan,
+    ProjectionReplayReasonV1, SanitizerRevision, SemanticSearchIndexProfileV1, SensitivityDecision,
+    SensitivityLevelV1, SourceSpan,
 };
 
 fn id<T>(value: &str) -> T
@@ -380,6 +380,13 @@ fn semantic_projection_key_is_complete_deterministic_and_maps_to_plan25() {
         key.canonical_digest().unwrap()
     );
     changed = key.clone();
+    changed.model_artifact_digest = digest(b'9');
+    assert_ne!(
+        changed.canonical_digest().unwrap(),
+        key.canonical_digest().unwrap(),
+        "model identity changes must force a new vector projection"
+    );
+    changed = key.clone();
     changed.privacy_key_epoch += 1;
     assert_ne!(
         changed.canonical_digest().unwrap(),
@@ -390,6 +397,25 @@ fn semantic_projection_key_is_complete_deterministic_and_maps_to_plan25() {
     assert_ne!(
         changed.canonical_digest().unwrap(),
         key.canonical_digest().unwrap()
+    );
+}
+
+#[test]
+fn semantic_search_index_identity_changes_without_reprojecting_vectors() {
+    let projection = embedding_key();
+    let projection_digest = projection.canonical_digest().unwrap();
+    let exact = SemanticSearchIndexProfileV1::exact_flat_v1().unwrap();
+    let exact_key = exact.index_key().unwrap();
+
+    let mut changed = exact;
+    changed.implementation_revision = "semantic.exact-flat.v2".to_owned();
+    let changed_key = changed.index_key().unwrap();
+
+    assert_ne!(exact_key, changed_key);
+    assert_eq!(
+        projection.canonical_digest().unwrap(),
+        projection_digest,
+        "search-index-only changes must not alter vector projection identity"
     );
 }
 
@@ -667,7 +693,7 @@ fn invalid_fake_vectors_and_key_only_reuse_fail_closed() {
     ));
 
     let mut replacement_key = key.clone();
-    replacement_key.runtime_build_revision = "ort-test-rev-2".to_string();
+    replacement_key.model_artifact_digest = digest(b'9');
     let replacement_projection_key = replacement_key.projection_key().unwrap();
     let key_only_replay = request(
         changes(
@@ -689,13 +715,40 @@ fn invalid_fake_vectors_and_key_only_reuse_fail_closed() {
     assert_eq!(
         prepare_vector_generation(
             &admitted_key(&replacement_key),
-            key_only_replay,
+            key_only_replay.clone(),
             &[],
             &mut encoder
         ),
         Err(SemanticProjectionErrorV1::KeyReplayRequiresExplicitEmbeds)
     );
     assert!(encoder.seen.is_empty());
+
+    let explicit_model_replay = request(
+        changes(
+            Some("code-generation.1"),
+            "code-generation.2",
+            vec![change(
+                &alpha,
+                Some(alpha.content_digest.clone()),
+                Some(alpha.content_digest.clone()),
+            )],
+            vec![],
+            vec![],
+        ),
+        key_only_replay.previous_projection_key,
+        key_only_replay.target_projection_key,
+        ProjectionReplayReasonV1::ProjectionProfileChange,
+    );
+    let prepared = prepare_vector_generation(
+        &admitted_key(&replacement_key),
+        explicit_model_replay,
+        std::slice::from_ref(&alpha),
+        &mut encoder,
+    )
+    .expect("model-key replay explicitly projects every retained chunk");
+    assert_eq!(encoder.seen, vec![alpha.id.clone()]);
+    assert_eq!(prepared.vectors.len(), 1);
+    assert_eq!(prepared.receipt.reused_count, 0);
 }
 
 #[test]

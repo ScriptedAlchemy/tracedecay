@@ -3,7 +3,8 @@ use std::fmt;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tracedecay_domain::{
-    ContextOmissionReasonV1, RetrievalAnchorId, RetrievalGrainV1, SessionId, TemporalModeV1,
+    ContextOmissionReasonV1, CursorManifestLimitKindV1, RetrievalAnchorId, RetrievalGrainV1,
+    SessionId, TemporalModeV1,
 };
 
 use crate::application::context::{
@@ -614,9 +615,7 @@ fn map_execution_error(
         SessionTemporalExecutionError::Deleted => SessionRetrievalOutcome::Deleted,
         SessionTemporalExecutionError::Denied => SessionRetrievalOutcome::Denied,
         SessionTemporalExecutionError::Unavailable => SessionRetrievalOutcome::Unavailable,
-        SessionTemporalExecutionError::Empty => SessionRetrievalOutcome::CompleteZero {
-            freshness: SessionDataFreshness::Fresh,
-        },
+        SessionTemporalExecutionError::Empty => SessionRetrievalOutcome::Unavailable,
         SessionTemporalExecutionError::BudgetExhausted => SessionRetrievalOutcome::BudgetExhausted,
         SessionTemporalExecutionError::Cancelled => SessionRetrievalOutcome::Cancelled,
         SessionTemporalExecutionError::Kernel(error) => map_kernel_error(error),
@@ -635,15 +634,23 @@ fn map_kernel_error(error: TemporalKernelError) -> SessionRetrievalOutcome<Tempo
             TemporalPortError::Cancelled | TemporalPortError::DeadlineExceeded => {
                 SessionRetrievalOutcome::Cancelled
             }
-            TemporalPortError::BudgetExceeded { .. }
-            | TemporalPortError::ParticipantLimitExceeded { .. }
-            | TemporalPortError::ParticipantManifestBytesExceeded { .. } => {
-                SessionRetrievalOutcome::BudgetExhausted
+            TemporalPortError::BudgetExceeded { .. } => SessionRetrievalOutcome::BudgetExhausted,
+            TemporalPortError::ParticipantLimitExceeded { observed, maximum } => {
+                SessionRetrievalOutcome::CursorManifestLimitExceeded {
+                    kind: CursorManifestLimitKindV1::Participants,
+                    observed,
+                    maximum,
+                }
+            }
+            TemporalPortError::ParticipantManifestBytesExceeded { observed, maximum } => {
+                SessionRetrievalOutcome::CursorManifestLimitExceeded {
+                    kind: CursorManifestLimitKindV1::CanonicalBytes,
+                    observed,
+                    maximum,
+                }
             }
             TemporalPortError::UnauthorizedSnapshot => SessionRetrievalOutcome::Denied,
-            TemporalPortError::EmptyParticipantManifest => SessionRetrievalOutcome::CompleteZero {
-                freshness: SessionDataFreshness::Fresh,
-            },
+            TemporalPortError::EmptyParticipantManifest => SessionRetrievalOutcome::Unavailable,
             TemporalPortError::InvalidBinding { .. }
             | TemporalPortError::DuplicateParticipant
             | TemporalPortError::ZeroGeneration
@@ -945,4 +952,53 @@ fn sha256_json(value: &impl Serialize) -> String {
 
 fn sha256_binding(bytes: &[u8]) -> String {
     format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cursor_manifest_limits_remain_typed_application_outcomes() {
+        assert_eq!(
+            map_kernel_error(TemporalKernelError::Port(
+                TemporalPortError::ParticipantLimitExceeded {
+                    observed: 257,
+                    maximum: 256,
+                },
+            )),
+            SessionRetrievalOutcome::CursorManifestLimitExceeded {
+                kind: CursorManifestLimitKindV1::Participants,
+                observed: 257,
+                maximum: 256,
+            }
+        );
+        assert_eq!(
+            map_kernel_error(TemporalKernelError::Port(
+                TemporalPortError::ParticipantManifestBytesExceeded {
+                    observed: 65_537,
+                    maximum: 65_536,
+                },
+            )),
+            SessionRetrievalOutcome::CursorManifestLimitExceeded {
+                kind: CursorManifestLimitKindV1::CanonicalBytes,
+                observed: 65_537,
+                maximum: 65_536,
+            }
+        );
+    }
+
+    #[test]
+    fn receiptless_empty_execution_does_not_fabricate_freshness() {
+        assert_eq!(
+            map_execution_error(SessionTemporalExecutionError::Empty),
+            SessionRetrievalOutcome::Unavailable
+        );
+        assert_eq!(
+            map_kernel_error(TemporalKernelError::Port(
+                TemporalPortError::EmptyParticipantManifest,
+            )),
+            SessionRetrievalOutcome::Unavailable
+        );
+    }
 }

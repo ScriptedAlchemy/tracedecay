@@ -63,11 +63,10 @@ Endpoints: `/api/plugins/graph/node/{id}/sessions` (edited_files json_each +
 FTS arm), `/api/plugins/graph/node/{id}/facts`, `/api/plugins/graph/node/{id}/tests`
 (in-process `project_graph` test-map). Neighbors endpoint exists.
 
-**Backend status (2026-07-26; not acceptance).** All three endpoints above are
-implemented and registered. Their generated wire contracts and declared
-backend tests exist, but no frontend file fetches them. Surface 1 is therefore
-backend-only; the open work is the truthful frontend drill-in, not endpoint
-registration.
+**End-to-end status (2026-07-26; not acceptance).** All three endpoints above
+are implemented and registered. Their generated wire contracts, backend tests,
+typed frontend reader, and `NodeEvidence` consumer now exist. Surface 1 is
+routed through the Code workspace; it is no longer a backend-only gap.
 
 ## Surface 2 — Call-chain transit map (historical standalone proposal)
 
@@ -86,11 +85,11 @@ cache per graph generation). Chain selection rule: user-picked endpoints,
 shortest route, captioned as exactly that (single path; k-shortest is a later
 question).
 
-**Backend status (2026-07-26; not acceptance).** Both endpoints are
+**End-to-end status (2026-07-26; not acceptance).** Both endpoints are
 implemented and registered at `src/dashboard/mod.rs:1013-1018`; the earlier
-instruction to register `get_call_chain` is complete. No frontend file fetches
-either endpoint. Surface 2 is therefore backend-only; the open work is the
-frontend surface.
+instruction to register `get_call_chain` is complete. The shared typed reader
+now feeds `CallChain` and `Strata` components in the Code workspace. Surface 2
+is no longer a backend-only gap.
 
 ## Surface 3 — Disagreement field (build last; premise gated)
 

@@ -136,6 +136,9 @@ const TRANSCRIPT_SCHEMA: &str = "
         ON analytics_events(project_id, timestamp);
     CREATE INDEX IF NOT EXISTS idx_analytics_events_timestamp
         ON analytics_events(timestamp);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_observability_event_idempotency
+        ON analytics_events(provider, project_id, hint_id)
+        WHERE provider = 'tracedecay-observability' AND hint_id IS NOT NULL;
     CREATE TABLE IF NOT EXISTS sessions (
         provider TEXT NOT NULL,
         session_id TEXT NOT NULL,
@@ -257,6 +260,11 @@ pub(crate) async fn ensure_registered_schema(conn: &Connection) -> crate::errors
     observation_projection::ensure_observation_projection_schema(&transaction)
         .await
         .map_err(|error| global_db_operation_error("initialize observation projection", error))?;
+    crate::db::install_external_source_schema(
+        &transaction,
+        "initialize registered external source state",
+    )
+    .await?;
     ensure_authority_invariant_schema(&transaction).await?;
     validate_authority_schema_contract(&transaction).await?;
 

@@ -4,7 +4,9 @@ use std::future::Future;
 use std::task::{Context, Poll, Waker};
 
 use tracedecay_application::retrieval::{
-    SymbolPrimitiveRecord, SymbolRelationRecord, TypeHierarchyRecord,
+    CodeFacetRecord, CodeFacetRequest, CodeLexicalField, CodeLexicalFieldFilter,
+    CodeNavigationRequest, CodeTimelineRecord, CodeTimelineRequest, SymbolPrimitiveRecord,
+    SymbolRelationRecord, TypeHierarchyRecord,
 };
 use tracedecay_application::{
     ApplicationOperation, ApplicationOutcome, ApplicationProblem, ApplicationProblemKind,
@@ -209,6 +211,16 @@ impl CallableCodeQueryPort for ExactOnlyPort {
     unused_callable_port_method!(impact, CodeImpactRequest, SymbolPrimitiveRecord);
     unused_callable_port_method!(module_api, ModuleApiRequest, SymbolPrimitiveRecord);
     unused_callable_port_method!(source_metadata, SourceMetadataRequest, SourceMetadataRecord);
+    unused_callable_port_method!(facets, CodeFacetRequest, CodeFacetRecord);
+    unused_callable_port_method!(timeline, CodeTimelineRequest, CodeTimelineRecord);
+    unused_callable_port_method!(declaration, CodeNavigationRequest, SymbolPrimitiveRecord);
+    unused_callable_port_method!(definition, CodeNavigationRequest, SymbolPrimitiveRecord);
+    unused_callable_port_method!(
+        type_definition,
+        CodeNavigationRequest,
+        SymbolPrimitiveRecord
+    );
+    unused_callable_port_method!(references, CodeNavigationRequest, SymbolRelationRecord);
 }
 
 struct RoutedAuthorization;
@@ -308,11 +320,14 @@ fn callable_code_requests_are_generation_bound_and_bounded() {
     let phrase = PhraseSearchRequest::new(
         query("application operation"),
         vec!["application operation".to_owned()],
+        Vec::new(),
+        0,
         scope(),
         meta(),
     )
     .unwrap();
     assert_eq!(phrase.phrases, vec!["application operation".to_owned()]);
+    assert_eq!(phrase.fuzzy_budget, 0);
 
     assert!(
         CodeQueryScope::new(
@@ -328,8 +343,49 @@ fn callable_code_requests_are_generation_bound_and_bounded() {
         )
         .is_err()
     );
-    assert!(PhraseSearchRequest::new(query("empty phrases"), Vec::new(), scope(), meta()).is_err());
+    assert!(
+        PhraseSearchRequest::new(
+            query("empty phrases"),
+            Vec::new(),
+            Vec::new(),
+            0,
+            scope(),
+            meta()
+        )
+        .is_err()
+    );
     assert!(SourceMetadataRequest::new(Vec::new(), scope(), meta()).is_err());
+    assert!(
+        PhraseSearchRequest::new(
+            query("duplicate fields"),
+            vec!["duplicate fields".to_owned()],
+            vec![
+                CodeLexicalFieldFilter {
+                    field: CodeLexicalField::Path,
+                    include: true,
+                },
+                CodeLexicalFieldFilter {
+                    field: CodeLexicalField::Path,
+                    include: false,
+                },
+            ],
+            0,
+            scope(),
+            meta(),
+        )
+        .is_err()
+    );
+    assert!(
+        PhraseSearchRequest::new(
+            query("fuzzy bound"),
+            vec!["fuzzy bound".to_owned()],
+            Vec::new(),
+            65,
+            scope(),
+            meta(),
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -548,6 +604,12 @@ fn callable_code_catalog_exposes_only_production_owned_transport_bindings() {
         ("exact_occurrence", "code_exact_occurrence"),
         ("phrase_search", "code_phrase_search"),
         ("callees", "code_callees"),
+        ("facets", "code_facets"),
+        ("timeline", "code_timeline"),
+        ("declaration", "code_declaration"),
+        ("definition", "code_definition"),
+        ("type_definition", "code_type_definition"),
+        ("references", "code_references"),
     ];
     assert_eq!(contribution.bindings().len(), reachable.len() * 3);
     for capability in contribution.capabilities() {

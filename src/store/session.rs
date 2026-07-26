@@ -1,14 +1,12 @@
 use std::{future::Future, sync::LazyLock};
 
-use tracedecay_domain::{DerivedEvidenceIdV1, DerivedEvidenceKindV1};
 use tracedecay_store::{
-    DerivedEvidenceMemberPageV1, SessionGenerationActivatePermit,
-    SessionGenerationActivationReceiptV1, SessionGenerationActivationRequestV1,
-    SessionGenerationRebuildBeginPermit, SessionGenerationRebuildReceiptV1,
-    SessionGenerationRebuildRequestV1, SessionProjectionBatchPersistPermit,
-    SessionRefreshBeginOrJoinPermit, SessionRefreshBeginOrJoinReceiptV1,
-    SessionRefreshBeginOrJoinRequestV1, SessionRefreshCancelPermit,
-    SessionRefreshCancellationRequestV1, SessionRefreshCompletePermit,
+    SessionGenerationActivatePermit, SessionGenerationActivationReceiptV1,
+    SessionGenerationActivationRequestV1, SessionGenerationRebuildBeginPermit,
+    SessionGenerationRebuildReceiptV1, SessionGenerationRebuildRequestV1,
+    SessionProjectionBatchPersistPermit, SessionRefreshBeginOrJoinPermit,
+    SessionRefreshBeginOrJoinReceiptV1, SessionRefreshBeginOrJoinRequestV1,
+    SessionRefreshCancelPermit, SessionRefreshCancellationRequestV1, SessionRefreshCompletePermit,
     SessionRefreshCompletionRequestV1, SessionRefreshFailPermit, SessionRefreshFailureRequestV1,
     SessionRefreshProgressPersistPermit, SessionRefreshProgressReadPermit,
     SessionRefreshProgressRequestV1, SessionRefreshProgressV1, SessionRefreshReceiptReadPermit,
@@ -169,24 +167,6 @@ impl SessionRetrievalStore for GlobalDbSessionTemporalStore<'_> {
         request: SessionTemporalRetrievalRequestV1,
     ) -> impl Future<Output = SessionStoreResult<SessionRetrievalPageV1>> + Send {
         self.db.retrieve_session_temporal_page_result(request)
-    }
-
-    fn expand_derived_members_supported(
-        &self,
-        _permit: SessionTemporalPageRetrievePermit,
-        snapshot: SessionTemporalSnapshotV1,
-        evidence_kind: DerivedEvidenceKindV1,
-        evidence_id: DerivedEvidenceIdV1,
-        after_ordinal: Option<u32>,
-        limit: usize,
-    ) -> impl Future<Output = SessionStoreResult<DerivedEvidenceMemberPageV1>> + Send {
-        self.db.expand_derived_members_result(
-            snapshot,
-            evidence_kind,
-            evidence_id,
-            after_ordinal,
-            limit,
-        )
     }
 }
 

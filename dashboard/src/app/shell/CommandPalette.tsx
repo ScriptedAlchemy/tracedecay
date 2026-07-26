@@ -6,7 +6,9 @@ import { WORKSPACES } from '../routes';
 import { cn } from '../../ui/cn';
 import { useLegacy } from '../../data/query/useLegacy.ts';
 import { useScope } from '../../data/scope/store.ts';
-import { ProjectsPayloadSchema } from '../../workspaces/brain/contracts.ts';
+import {
+  ProjectsPayloadSchema,
+} from '../../contracts/wire.ts';
 
 interface PaletteEntry {
   id: string;
@@ -52,7 +54,7 @@ export function CommandPalette({
     }));
     const projectEntries =
       projects.data?.outcome === 'ok'
-        ? projects.data.data.project_tree.flatMap((group) =>
+        ? (projects.data.data.project_tree ?? []).flatMap((group) =>
             group.projects.map((project) => ({
               id: `scope:${project.project_id}:${project.canonical_root}`,
               label: project.label,

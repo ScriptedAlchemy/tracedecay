@@ -250,6 +250,10 @@ pub(crate) struct DatabaseWriteTransaction<'a> {
 }
 
 impl DatabaseWriterConnection<'_> {
+    pub(crate) fn engine_connection(&self) -> &Connection {
+        &self.conn
+    }
+
     #[cfg(test)]
     pub(crate) async fn execute_batch(&self, sql: &str) -> crate::db::engine::Result<()> {
         self.conn.execute_batch(sql).await
@@ -686,6 +690,10 @@ impl Database {
     /// Physical SQLite identity captured when this retained handle was opened.
     pub(crate) fn opened_file_identity(&self) -> u64 {
         self.inner.opened_file_identity
+    }
+
+    pub(crate) fn is_writable(&self) -> bool {
+        self.inner.writable
     }
 
     /// Clones the originating revocable write capability for actor-time checks.
@@ -1197,7 +1205,9 @@ impl Database {
         operation: &str,
     ) -> Result<Connection> {
         self.require_active_write_scope(operation)?;
-        Ok(self.inner.conn.clone())
+        self.inner.write_conn.as_ref().cloned().ok_or_else(|| {
+            integrity::read_only_upgrade_error(self.canonical_database_path(), operation)
+        })
     }
 
     /// Opens an isolated writer while holding the process-local writer lane.
@@ -1348,9 +1358,10 @@ impl Database {
             });
         }
         let _writer = self.writer().await;
-        let mut rows = self
-            .inner
-            .conn
+        let connection = self
+            .open_writer_connection_unguarded("truncate WAL for offline maintenance")
+            .await?;
+        let mut rows = connection
             .checkpoint_wal_truncate()
             .await
             .map_err(|error| TraceDecayError::Database {
@@ -1594,7 +1605,14 @@ impl Database {
         transaction: &DatabaseWriteTransaction<'_>,
     ) -> Result<()> {
         transaction
-            .execute("INSERT INTO nodes_fts(nodes_fts) VALUES('rebuild')", ())
+            .execute_batch(
+                "DROP TABLE nodes_fts;
+                 CREATE VIRTUAL TABLE nodes_fts USING fts5(
+                     name, qualified_name, docstring, signature,
+                     content='nodes', content_rowid='rowid'
+                 );
+                 INSERT INTO nodes_fts(nodes_fts) VALUES('rebuild');",
+            )
             .await
             .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to rebuild FTS index: {e}"),
@@ -1815,10 +1833,11 @@ where
 }
 
 fn is_nodes_fts_only_corruption(problem: &str) -> bool {
+    let problem = problem.trim();
     matches!(
-        problem.trim(),
+        problem,
         NODES_FTS_CORRUPTION | "malformed inverted index for FTS5 table nodes_fts"
-    )
+    ) || (problem.contains("fts5: corruption found") && problem.contains("nodes_fts"))
 }
 
 #[cfg(test)]

@@ -10,6 +10,8 @@
 //! post-processing passes (project selectors, LCM storage scope, format).
 
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
+use tracedecay_tool_catalog::{CapabilityId, FeatureId, ProfileId, ScopeDimension};
 
 use super::ToolDefinition;
 use super::dispatch_policy::REGISTERED_PROJECT_READER_TOOL_NAMES;
@@ -17,7 +19,7 @@ use super::dispatch_policy::REGISTERED_PROJECT_READER_TOOL_NAMES;
 /// Tools registered on every host before optional external capabilities.
 /// Count-contract tests share this source of truth so branch rebases cannot
 /// leave independent stale literals on the unit and integration surfaces.
-pub const ALWAYS_REGISTERED_TOOL_COUNT: usize = 159;
+pub const ALWAYS_REGISTERED_TOOL_COUNT: usize = 161;
 
 mod admin;
 mod analysis;
@@ -317,6 +319,66 @@ pub fn get_tool_definitions_with_budget(node_count: u64, budget: u8) -> Vec<Tool
     defs
 }
 
+/// Build the live MCP discovery result from the application catalog rather
+/// than publishing the static compatibility registry as an unfiltered
+/// superset.
+pub fn get_catalog_filtered_tool_definitions_with_budget(
+    node_count: u64,
+    budget: u8,
+    profile_id: &ProfileId,
+    authorized_capabilities: &BTreeSet<CapabilityId>,
+    available_scope: &BTreeSet<ScopeDimension>,
+) -> Result<Vec<ToolDefinition>, crate::application_surface::ApplicationSurfaceAdapterError> {
+    let catalog = crate::application_surface::application_surface_catalog()?;
+    let visible_operations = catalog
+        .visible_bindings(
+            profile_id,
+            tracedecay_tool_catalog::BindingSurface::Mcp,
+            1,
+            &BTreeSet::<FeatureId>::new(),
+            authorized_capabilities,
+            available_scope,
+        )
+        .into_iter()
+        .map(|(binding, _)| format!("tracedecay_{}", binding.operation().as_str()))
+        .collect::<BTreeSet<_>>();
+    let catalog_operations = catalog
+        .capabilities()
+        .flat_map(|capability| capability.binding_ids())
+        .filter_map(|binding_id| catalog.binding(binding_id))
+        .filter(|binding| binding.surface() == tracedecay_tool_catalog::BindingSurface::Mcp)
+        .map(|binding| format!("tracedecay_{}", binding.operation().as_str()))
+        .collect::<BTreeSet<_>>();
+    Ok(get_tool_definitions_with_budget(node_count, budget)
+        .into_iter()
+        .filter(|definition| {
+            !catalog_operations.contains(&definition.name)
+                || visible_operations.contains(&definition.name)
+        })
+        .collect())
+}
+
+pub fn default_catalog_discovery_authority()
+-> Result<BTreeSet<CapabilityId>, crate::application_surface::ApplicationSurfaceAdapterError> {
+    Ok(crate::application_surface::application_surface_catalog()?
+        .capabilities()
+        .map(|capability| capability.capability_id().clone())
+        .collect())
+}
+
+pub fn project_catalog_discovery_scope() -> BTreeSet<ScopeDimension> {
+    [
+        ScopeDimension::Project,
+        ScopeDimension::Repository,
+        ScopeDimension::Worktree,
+        ScopeDimension::Branch,
+        ScopeDimension::Session,
+        ScopeDimension::Resource,
+    ]
+    .into_iter()
+    .collect()
+}
+
 /// Returns tool definitions with a conservative temporary context budget while
 /// a daemon opens the project graph needed to calculate the exact node count.
 pub fn get_tool_definitions_with_warming_budget(budget: u8) -> Vec<ToolDefinition> {
@@ -372,17 +434,11 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         def_git_hunks(),
         def_git_preview(),
         def_git_apply(),
-        def_feedback_diagnostics(),
-        def_feedback_get(),
-        def_feedback_expand(),
-        def_feedback_list(),
         def_context_scout_status(),
         def_context_scout_recent(),
         def_context_scout_explain(),
         def_context_scout_capability(),
         def_context_scout_budget(),
-        def_feedback_impact(),
-        def_affected_tests(),
         def_test_results(),
         def_code_exact_occurrence(),
         def_code_phrase_search(),
@@ -392,6 +448,12 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         def_code_type_hierarchy(),
         def_code_callers(),
         def_code_callees(),
+        def_code_facets(),
+        def_code_timeline(),
+        def_code_declaration(),
+        def_code_definition(),
+        def_code_type_definition(),
+        def_code_references(),
         def_session_lookup(),
         def_qualified_name_read(),
         def_call_chain_read(),
@@ -402,6 +464,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         def_module_api_read(),
         def_file_metadata_read(),
         def_health_read(),
+        def_health_delta(),
         def_storage_status_read(),
         def_diagnostics_read(),
         def_affected(),
@@ -513,6 +576,21 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
     definitions
 }
 
+/// Resolve a daemon-internal host surface for the CLI fallback without
+/// advertising it through MCP discovery.
+#[doc(hidden)]
+pub fn internal_daemon_tool_definition(name: &str) -> Option<ToolDefinition> {
+    match name {
+        "tracedecay_hook_runtime" => Some(def_rw(
+            "tracedecay_hook_runtime",
+            "Internal Host Ingest",
+            "Forward one exact host-ingest envelope to the daemon. The handler validates the action-specific payload.",
+            json!({ "type": "object" }),
+        )),
+        _ => None,
+    }
+}
+
 fn add_lcm_storage_scope_property(definitions: &mut [ToolDefinition]) {
     for definition in definitions.iter_mut().filter(|definition| {
         definition.name.starts_with("tracedecay_lcm_")
@@ -580,6 +658,7 @@ const FORMAT_CAPABLE_TOOL_NAMES: &[&str] = &[
     "tracedecay_project_list",
     "tracedecay_project_search",
     "tracedecay_project_context",
+    "tracedecay_files",
     "tracedecay_body",
     "tracedecay_todos",
     "tracedecay_read",
@@ -590,6 +669,11 @@ const FORMAT_CAPABLE_TOOL_NAMES: &[&str] = &[
     "tracedecay_port_order",
     "tracedecay_simplify_scan",
     // git
+    "tracedecay_git_status",
+    "tracedecay_git_diff",
+    "tracedecay_git_history",
+    "tracedecay_git_blame",
+    "tracedecay_git_hunks",
     "tracedecay_affected",
     "tracedecay_diff_context",
     "tracedecay_changelog",
@@ -604,6 +688,7 @@ const FORMAT_CAPABLE_TOOL_NAMES: &[&str] = &[
     "tracedecay_feedback_get",
     "tracedecay_feedback_expand",
     "tracedecay_feedback_list",
+    "tracedecay_feedback_advisory_cycle",
     "tracedecay_feedback_impact",
     "tracedecay_affected_tests",
     "tracedecay_test_results",
@@ -615,6 +700,12 @@ const FORMAT_CAPABLE_TOOL_NAMES: &[&str] = &[
     "tracedecay_code_type_hierarchy",
     "tracedecay_code_callers",
     "tracedecay_code_callees",
+    "tracedecay_code_facets",
+    "tracedecay_code_timeline",
+    "tracedecay_code_declaration",
+    "tracedecay_code_definition",
+    "tracedecay_code_type_definition",
+    "tracedecay_code_references",
     "tracedecay_session_lookup",
     "tracedecay_qualified_name",
     "tracedecay_call_chain",
@@ -625,6 +716,7 @@ const FORMAT_CAPABLE_TOOL_NAMES: &[&str] = &[
     "tracedecay_module_api",
     "tracedecay_file_metadata",
     "tracedecay_health_read",
+    "tracedecay_health_delta",
     "tracedecay_storage_status",
     "tracedecay_diagnostics_read",
     "tracedecay_configuration_list",
@@ -640,6 +732,17 @@ const FORMAT_CAPABLE_TOOL_NAMES: &[&str] = &[
     "tracedecay_configuration_rollback_preview",
     "tracedecay_configuration_rollback_apply",
     "tracedecay_configuration_audit",
+    "tracedecay_context_scout_status",
+    "tracedecay_context_scout_recent",
+    "tracedecay_context_scout_explain",
+    "tracedecay_context_scout_capability",
+    "tracedecay_context_scout_budget",
+    "tracedecay_context_scout_pause",
+    "tracedecay_context_scout_resume",
+    "tracedecay_context_scout_cancel",
+    "tracedecay_context_scout_claim",
+    "tracedecay_context_scout_delivery",
+    "tracedecay_context_scout_feedback",
     // analysis
     "tracedecay_dead_code",
     "tracedecay_circular",
@@ -678,6 +781,8 @@ const FORMAT_CAPABLE_TOOL_NAMES: &[&str] = &[
     "tracedecay_run_affected_tests",
     // session / LCM
     "tracedecay_message_search",
+    "tracedecay_sessions_for",
+    "tracedecay_workflows",
     "tracedecay_lcm_status",
     "tracedecay_lcm_doctor",
     "tracedecay_lcm_load_session",
@@ -702,6 +807,7 @@ const FORMAT_CAPABLE_TOOL_NAMES: &[&str] = &[
     "tracedecay_replace_symbol",
     "tracedecay_move_symbol",
     "tracedecay_ast_grep_rewrite",
+    "tracedecay_source_edit_reconcile",
     // git & info
     "tracedecay_branch_list",
     "tracedecay_active_project",
@@ -709,6 +815,7 @@ const FORMAT_CAPABLE_TOOL_NAMES: &[&str] = &[
     "tracedecay_dashboard",
     "tracedecay_retrieve",
     "tracedecay_analytics",
+    "tracedecay_type_hierarchy",
 ];
 
 pub fn format_capable_tool_names() -> &'static [&'static str] {
@@ -753,6 +860,20 @@ fn add_format_property(definitions: &mut [ToolDefinition]) {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::unreadable_literal)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn internal_host_ingest_is_cli_resolvable_but_not_advertised() {
+        assert!(
+            get_tool_definitions()
+                .iter()
+                .all(|definition| definition.name != "tracedecay_hook_runtime")
+        );
+        let definition = internal_daemon_tool_definition("tracedecay_hook_runtime")
+            .expect("internal host-ingest definition");
+        assert_eq!(definition.name, "tracedecay_hook_runtime");
+        assert_eq!(definition.input_schema, json!({ "type": "object" }));
+        assert!(internal_daemon_tool_definition("tracedecay_unknown").is_none());
+    }
 
     #[test]
     fn test_explore_call_budget_tiers() {
@@ -806,6 +927,24 @@ mod tests {
     }
 
     #[test]
+    fn feedback_tools_without_client_constructible_requests_are_not_advertised() {
+        let definitions = get_tool_definitions();
+        for name in [
+            "tracedecay_feedback_diagnostics",
+            "tracedecay_feedback_get",
+            "tracedecay_feedback_expand",
+            "tracedecay_feedback_list",
+            "tracedecay_feedback_impact",
+            "tracedecay_affected_tests",
+        ] {
+            assert!(
+                definitions.iter().all(|definition| definition.name != name),
+                "{name} must not be advertised until its request authority is reachable"
+            );
+        }
+    }
+
+    #[test]
     fn test_context_description_scopes_budget_and_frees_narrow_tools() {
         let desc = context_description(5000, 4);
         assert!(
@@ -838,6 +977,33 @@ mod tests {
             .unwrap();
         assert!(context_tool.description.contains("4 calls maximum"));
         assert!(context_tool.description.contains("10000 nodes"));
+    }
+
+    #[test]
+    fn catalog_filter_preserves_non_catalog_tools_and_filters_catalog_bindings() {
+        let profile =
+            ProfileId::new(tracedecay_application::APPLICATION_DEFAULT_PROFILE_ID).unwrap();
+        let definitions = get_catalog_filtered_tool_definitions_with_budget(
+            10_000,
+            4,
+            &profile,
+            &BTreeSet::new(),
+            &project_catalog_discovery_scope(),
+        )
+        .unwrap();
+
+        assert!(
+            definitions
+                .iter()
+                .any(|definition| definition.name == "tracedecay_context"),
+            "legacy production tools remain discoverable until cataloged"
+        );
+        assert!(
+            definitions
+                .iter()
+                .all(|definition| definition.name != "tracedecay_git_preview"),
+            "catalog-bound tools require explicit capability authority"
+        );
     }
 
     #[test]

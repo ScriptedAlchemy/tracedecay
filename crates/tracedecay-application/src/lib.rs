@@ -17,8 +17,11 @@ pub mod feedback;
 pub mod framed_log;
 pub mod git;
 pub mod handlers;
+pub mod lsp_context_catalog;
+pub mod observability;
 pub mod policy;
 pub mod result;
+pub mod retained_surfaces;
 pub mod retrieval;
 pub mod source_edit;
 pub mod storage;
@@ -54,19 +57,23 @@ pub use diagnostics::{
 };
 pub use doctor::{
     AdvisoryFeedbackDoctorPort, AdvisoryFeedbackFindingReadV1, AdvisoryFeedbackReadV1,
-    CodeIndexMountDoctorPort, CodeIndexMountReadV1, CodeIndexMountStateV1,
-    ConfigurationAuthorityDoctorPort, ConfigurationAuthorityReadV1, ConfigurationDriftV1,
-    DoctorConfirmationRequirementV1, DoctorCoverageCompletenessV1, DoctorCoverageStatementV1,
-    DoctorEvidenceRefV1, DoctorEvidenceReferenceV1, DoctorEvidenceStateV1,
-    DoctorFamilyConsultationV1, DoctorFamilyCoverageV1, DoctorFamilyUnavailableReasonV1,
-    DoctorFindingFamilyV1, DoctorFindingV1, DoctorOwningOperationRefV1, DoctorOwningSurfaceV1,
-    DoctorRemediationDescriptorV1, DoctorRemediationKindV1, DoctorRemediationRefV1,
-    DoctorRemediationRegistryV1, DoctorRemediationResolutionErrorV1, DoctorReportComposerV1,
-    DoctorReportCoverageV1, DoctorReportEntryV1, DoctorReportV1, DoctorSourceFuture,
-    DoctorStorageFamilyReadV1, DoctorStorageFindingKindV1, DoctorStorageFindingV1,
-    HostConformanceV1, HostIntegrationDoctorPort, HostIntegrationReadV1, RuntimeHealthDoctorPort,
-    RuntimeHealthReadV1, RuntimeLivenessV1, StorageDoctorPort, advisory_feedback_findings,
-    code_index_finding, configuration_finding, host_integration_finding, runtime_health_finding,
+    AdvisoryFeedbackSummaryReadV1, CodeIndexMountDoctorPort, CodeIndexMountReadV1,
+    CodeIndexMountStateV1, ConfigurationAuthorityDoctorPort, ConfigurationAuthorityReadV1,
+    ConfigurationDriftV1, DoctorConfirmationRequirementV1, DoctorCoverageCompletenessV1,
+    DoctorCoverageStatementV1, DoctorEvidenceRefV1, DoctorEvidenceReferenceV1,
+    DoctorEvidenceStateV1, DoctorFamilyConsultationV1, DoctorFamilyCoverageV1,
+    DoctorFamilyUnavailableReasonV1, DoctorFindingFamilyV1, DoctorFindingV1,
+    DoctorOwningOperationRefV1, DoctorOwningSurfaceV1, DoctorRemediationDescriptorV1,
+    DoctorRemediationKindV1, DoctorRemediationRefV1, DoctorRemediationRegistryV1,
+    DoctorRemediationResolutionErrorV1, DoctorReportComposerV1, DoctorReportCoverageV1,
+    DoctorReportEntryV1, DoctorReportV1, DoctorSourceFuture, DoctorStorageFamilyReadV1,
+    DoctorStorageFindingKindV1, DoctorStorageFindingV1, HostConformanceV1,
+    HostIntegrationDoctorPort, HostIntegrationReadV1, LanguageServerDoctorPort,
+    LanguageServerReadV1, LanguageServerStateV1, ObservabilityDoctorPort, ObservabilityReadV1,
+    ObservabilityStateV1, RuntimeHealthDoctorPort, RuntimeHealthReadV1, RuntimeLivenessV1,
+    StorageDoctorPort, advisory_feedback_findings, code_index_finding, configuration_finding,
+    host_integration_finding, language_server_finding, observability_finding,
+    runtime_health_finding,
 };
 pub use error::ApplicationContractError;
 pub use external_source::{
@@ -96,6 +103,8 @@ pub use handlers::{
     ApplicationHandlerDescriptor, ApplicationHandlerDescriptors, ApplicationOperation,
     application_handler_descriptors,
 };
+pub use lsp_context_catalog::{lsp_context_catalog_contribution, lsp_context_handler_descriptors};
+pub use observability::*;
 pub use policy::{
     PolicyConsumerV1, PolicyEvaluationContextV1, PolicyEvaluationV1, PolicyEvaluatorCompositionV1,
     PolicyEvidenceAgreementV1, PolicyEvidenceFrontierV1, PolicyEvidenceHorizonV1,
@@ -115,26 +124,32 @@ pub use result::{
     RetryScope, SafeDiagnostic, ScoreId, StreamEvent, StreamEventKind, StreamFrontier, StreamGap,
     StreamTermination, StreamValidationError, TemporalState, validate_stream,
 };
-pub use retrieval::catalog::{APPLICATION_DEFAULT_PROFILE_ID, application_catalog_contributions};
+pub use retained_surfaces::{
+    RetainedSurfaceOperation, retained_surface_application_operation,
+    retained_surface_catalog_contribution, retained_surface_handler_descriptors,
+};
+pub use retrieval::catalog::{
+    APPLICATION_ADMINISTRATIVE_PROFILE_ID, APPLICATION_COMPACT_PROFILE_ID,
+    APPLICATION_DEFAULT_PROFILE_ID, APPLICATION_HOST_LIMITED_PROFILE_ID,
+    application_catalog_contributions,
+};
 pub use retrieval::{
-    AffectedTestsRequest, AffectedTestsRetrievalPort, AffectedTestsService, AnchorExpandRequest,
-    AnchorExpandResult, AnchorHydrationPort, CALLABLE_CODE_OPERATION_COUNT,
-    CallableCodeAuthorizationAdmission, CallableCodeAuthorizationFuture,
-    CallableCodeAuthorizationPort, CallableCodeOperationKind, CallableCodeOperations,
-    CallableCodeQueryFuture, CallableCodeQueryPort, CallableCodeQueryService, CodeHierarchyRequest,
-    CodeImpactRequest, CodeImplementationsRequest, CodeOccurrenceRecord, CodeQueryPage,
-    CodeQueryScope, CodeRelationRequest, CodeSignatureRequest, CodeSymbolSearchRequest,
-    ExactOccurrenceRecord, ExactOccurrenceRequest, GraphCallersRequest, GraphCallersService,
+    AffectedTestsRequest, AffectedTestsRetrievalPort, AnchorExpandRequest, AnchorExpandResult,
+    AnchorHydrationPort, CALLABLE_CODE_OPERATION_COUNT, CallableCodeAuthorizationAdmission,
+    CallableCodeAuthorizationFuture, CallableCodeAuthorizationPort, CallableCodeOperationKind,
+    CallableCodeOperations, CallableCodeQueryFuture, CallableCodeQueryPort,
+    CallableCodeQueryService, CodeHierarchyRequest, CodeImpactRequest, CodeImplementationsRequest,
+    CodeOccurrenceRecord, CodeQueryPage, CodeQueryScope, CodeRelationRequest, CodeSignatureRequest,
+    CodeSymbolSearchRequest, ExactOccurrenceRecord, ExactOccurrenceRequest, GraphCallersRequest,
     GraphImpactRequest, GraphImpactResult, GraphImpactRetrievalPort, GraphRetrievalPort,
     HealthReadRequest, LexicalOccurrenceRecord, MAX_APPLICATION_PAGE_SIZE, ModuleApiRequest,
     OperationalRetrievalPort, PageRequest, PhraseSearchRequest, QualifiedNameRequest,
     ResultProjection, RetrievalOrder, RetrievalPortContext, RetrievalPortOutcome,
     RetrievalRequestMeta, SessionLookupRequest, SourceLinesRequest, SourceLinesResult,
-    SourceLinesService, SourceMetadataRecord, SourceMetadataRequest, SourceRetrievalPort,
-    SymbolRetrievalPort, SymbolSearchRequest, SymbolSearchResult, SymbolSearchService,
-    TemporalRetrievalPort, TestRetrievalPort, callable_code_catalog_contribution,
-    callable_code_handler_descriptors, callable_code_operation, callable_code_operations,
-    callable_code_request_schema, callable_code_result_schema,
+    SourceMetadataRecord, SourceMetadataRequest, SourceRetrievalPort, SymbolRetrievalPort,
+    SymbolSearchRequest, SymbolSearchResult, TemporalRetrievalPort, TestRetrievalPort,
+    callable_code_catalog_contribution, callable_code_handler_descriptors, callable_code_operation,
+    callable_code_operations, callable_code_request_schema, callable_code_result_schema,
 };
 pub use source_edit::{
     SourceEditAuthorizationAdmissionV1, SourceEditAuthorizationFuture, SourceEditAuthorizationPort,

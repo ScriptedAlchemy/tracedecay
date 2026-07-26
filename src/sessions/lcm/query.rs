@@ -3,6 +3,7 @@ use std::path::Path;
 
 use crate::{
     db::engine::{QueryExecutor, Value, params},
+    query::temporal::context::OrderedTextContextAssembler,
     tracedecay::current_timestamp,
 };
 
@@ -197,12 +198,13 @@ pub(crate) async fn expand_query(
         }
     }
 
+    let used_chars = assembler.used_chars();
     let context_blocks = assembler.context_blocks;
     let context_pagination = assembler.context_pagination;
     let context_truncated = !context_pagination.is_empty();
     let context_budget = LcmExpandQueryBudget {
         requested_max_chars: context_max_chars,
-        used_chars: assembler.used_chars,
+        used_chars,
     };
     let synthesis_prompt =
         expand_query_synthesis_prompt(&request.prompt, &context_blocks, context_truncated);
@@ -493,8 +495,7 @@ fn estimate_tokens(text: &str) -> i64 {
 struct ExpandQueryAssembler {
     context_blocks: Vec<LcmExpandQueryContextBlock>,
     context_pagination: Vec<LcmExpandQueryPagination>,
-    max_chars: usize,
-    used_chars: usize,
+    context: OrderedTextContextAssembler,
 }
 
 impl ExpandQueryAssembler {
@@ -502,13 +503,12 @@ impl ExpandQueryAssembler {
         Self {
             context_blocks: Vec::new(),
             context_pagination: Vec::new(),
-            max_chars,
-            used_chars: 0,
+            context: OrderedTextContextAssembler::new(max_chars),
         }
     }
 
-    fn remaining_chars(&self) -> usize {
-        self.max_chars.saturating_sub(self.used_chars)
+    fn used_chars(&self) -> usize {
+        self.context.used_chars()
     }
 
     fn add_summary_expansion(&mut self, expansion: LcmSummaryExpansion) {
@@ -604,39 +604,34 @@ impl ExpandQueryAssembler {
         if is_noise_block_content(content) {
             return None;
         }
-        let remaining = self.remaining_chars();
-        if remaining == 0 {
+        let admitted = self.context.admit(content);
+        let Some(content) = admitted.content else {
             self.context_pagination.push(LcmExpandQueryPagination {
                 kind: kind.to_string(),
                 node_id,
                 source_ref,
-                next_content_offset: Some(0),
-                has_more: true,
+                next_content_offset: admitted.next_content_offset,
+                has_more: admitted.truncated,
             });
             return None;
-        }
-
-        let (sliced, range) = slice_content(
-            content,
-            Some(LcmContentSlice {
-                offset: 0,
-                limit: remaining,
-            }),
-        );
-        self.used_chars = self
-            .used_chars
-            .saturating_add(sliced.chars().count())
-            .min(self.max_chars);
-        if range.truncated {
+        };
+        let range = LcmContentRange {
+            offset: 0,
+            limit: admitted.limit,
+            returned_chars: admitted.returned_chars,
+            total_chars: admitted.total_chars,
+            truncated: admitted.truncated,
+        };
+        if admitted.truncated {
             self.context_pagination.push(LcmExpandQueryPagination {
                 kind: kind.to_string(),
                 node_id,
                 source_ref,
-                next_content_offset: Some(range.returned_chars),
+                next_content_offset: admitted.next_content_offset,
                 has_more: true,
             });
         }
-        Some((sliced, range))
+        Some((content, range))
     }
 }
 

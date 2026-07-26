@@ -13,7 +13,6 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 
 use serde_json::{Map, Value, json};
 use tokio::sync::RwLock;
@@ -21,7 +20,8 @@ use tokio::sync::RwLock;
 use super::memory_service::{
     apply_delete_op, apply_merge_op, build_delete_plan, delete_fact, similarity_computation,
 };
-use super::{DashboardState, code_diagnostics_broker, storage_mode_label, token_count};
+use super::{DashboardState, storage_mode_label, token_count};
+use crate::application::configuration::ProductionUserSettingsDaemonClient;
 use crate::db::Database;
 #[cfg(test)]
 use crate::db::TestDatabaseRuntimeMode;
@@ -144,22 +144,21 @@ async fn cli_state(cg: &TraceDecay) -> Result<DashboardState> {
         savings_db: None,
         savings_db_path: String::new(),
         project_root: cg.project_root().to_path_buf(),
+        code_index_freshness_reader: None,
         storage_mode: storage_mode_label(&store_layout.storage_mode).to_string(),
         store_root: store_layout.data_root.clone(),
         config_path: store_layout.config_path.clone(),
         dashboard_root: store_layout.dashboard_root.clone(),
         retention_config: cg.get_config().sync.retention.clone(),
+        user_settings: cg.configuration_runtime().user_settings_client(),
         curation_activity: Arc::new(RwLock::new(Vec::new())),
         token_counts: Arc::new(token_count::TokenCountCache::new()),
-        code_diagnostics: Arc::new(RwLock::new(code_diagnostics_broker(
-            cg.project_root().to_path_buf(),
-            crate::diagnostics::lsp::settings::CodeDiagnosticsSettings::default(),
-        ))),
-        code_diagnostics_backfill_started: Arc::new(AtomicBool::new(false)),
+        code_diagnostics_authority: None,
         automation_scheduler_reconciler: None,
-        automation_writer: super::direct_dashboard_automation_writer(),
+        automation_writer: super::standalone_dashboard_automation_writer(),
         doctor_report_reader: None,
         doctor_remediation_dispatcher: None,
+        application_client: None,
     })
 }
 
@@ -186,22 +185,21 @@ fn user_state(
         savings_db: None,
         savings_db_path: String::new(),
         project_root: profile_root.to_path_buf(),
+        code_index_freshness_reader: None,
         storage_mode: "user".to_string(),
         store_root: profile_root.to_path_buf(),
         config_path: profile_root.join("config.json"),
         dashboard_root: dashboard_root.to_path_buf(),
         retention_config: crate::config::RetentionConfig::default(),
+        user_settings: Arc::new(ProductionUserSettingsDaemonClient),
         curation_activity: Arc::new(RwLock::new(Vec::new())),
         token_counts: Arc::new(token_count::TokenCountCache::new()),
-        code_diagnostics: Arc::new(RwLock::new(code_diagnostics_broker(
-            profile_root.to_path_buf(),
-            crate::diagnostics::lsp::settings::CodeDiagnosticsSettings::default(),
-        ))),
-        code_diagnostics_backfill_started: Arc::new(AtomicBool::new(false)),
+        code_diagnostics_authority: None,
         automation_scheduler_reconciler: None,
-        automation_writer: super::direct_dashboard_automation_writer(),
+        automation_writer: super::standalone_dashboard_automation_writer(),
         doctor_report_reader: None,
         doctor_remediation_dispatcher: None,
+        application_client: None,
     }
 }
 

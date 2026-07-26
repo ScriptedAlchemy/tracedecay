@@ -22,7 +22,10 @@
  *      one fact. The uniformity is stated once and only the banks that deviate
  *      are drawn.
  */
-import type { FactRow, HrrCoverageRow } from './contracts.ts';
+import {
+  type MemoryFactRow,
+  type MemoryHrrCoverage,
+} from '../../contracts/wire.ts';
 
 export interface TrustBand {
   /** Printed label, e.g. `0.75–1.00`. */
@@ -86,7 +89,7 @@ function finish(source: TrustSource, bands: TrustBand[]): TrustDistribution {
 export function composeTrustDistribution(
   histogram: ReadonlyArray<{ label: string; count: number; bucket: number }> | undefined,
   status: TrustStatusBands | undefined,
-  facts: ReadonlyArray<Pick<FactRow, 'trust_score'>> | undefined,
+  facts: ReadonlyArray<Pick<MemoryFactRow, 'trust_score'>> | undefined,
 ): TrustDistribution {
   const fromHistogram = (histogram ?? []).map((bucket) => ({
     label: bucket.label,
@@ -156,7 +159,7 @@ export interface LoadedTrust {
 /** The trust spread across the facts actually on screen. `null` when there is
  * nothing loaded to measure. */
 export function summarizeLoadedTrust(
-  facts: ReadonlyArray<Pick<FactRow, 'trust_score'>>,
+  facts: ReadonlyArray<Pick<MemoryFactRow, 'trust_score'>>,
   flatThreshold = 0.25,
 ): LoadedTrust | null {
   const scores = facts
@@ -202,7 +205,7 @@ export interface HrrSummary {
   /** Lowest per-category coverage, 0–1. */
   floor: number;
   /** Banks whose status is anything other than `ready`. */
-  exceptions: HrrCoverageRow[];
+  exceptions: MemoryHrrCoverage[];
   /** The one-line reading that replaces a rail of near-identical bars. */
   line: string;
 }
@@ -214,7 +217,7 @@ export interface HrrSummary {
  * and it buries the reading that does vary: four of those banks are stale or
  * incompletely vectorized, which no coverage percentage shows.
  */
-export function summarizeHrrCoverage(rows: readonly HrrCoverageRow[]): HrrSummary | null {
+export function summarizeHrrCoverage(rows: readonly MemoryHrrCoverage[]): HrrSummary | null {
   if (rows.length === 0) return null;
   const floor = rows.reduce((min, row) => Math.min(min, row.coverage), 1);
   const exceptions = rows.filter((row) => row.status !== 'ready');
@@ -232,8 +235,14 @@ export function summarizeHrrCoverage(rows: readonly HrrCoverageRow[]): HrrSummar
 }
 
 /** Human wording for a coverage status, so the row does not print an
- * identifier at a reader. */
-export function hrrStatusLabel(status: HrrCoverageRow['status']): string {
+ * identifier at a reader.
+ *
+ * The contract types this as an open string, and it is: `memory_api.rs` is free
+ * to grow a fifth status. An unrecognised one is shown verbatim rather than
+ * mapped onto the nearest known wording — the reader learns the store said
+ * something this build does not know about, which is the truth, instead of
+ * being told a state the daemon never reported. */
+export function hrrStatusLabel(status: MemoryHrrCoverage['status']): string {
   switch (status) {
     case 'ready':
       return 'ready';
@@ -243,5 +252,7 @@ export function hrrStatusLabel(status: HrrCoverageRow['status']): string {
       return 'missing vectors';
     case 'stale_bank':
       return 'stale bank';
+    default:
+      return status;
   }
 }

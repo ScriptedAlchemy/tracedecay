@@ -25,11 +25,6 @@
       "disposition": "private restore staging destination"
     },
     {
-      "path": "crates/tracedecay-rusqlite-runtime/src/backup/driver.rs",
-      "callee": "Connection::open_with_flags",
-      "disposition": "read-only staged restore verification"
-    },
-    {
       "path": "crates/tracedecay-rusqlite-runtime/src/connection/mod.rs",
       "callee": "Connection::open_with_flags",
       "disposition": "permanent daemon-owned shard opener"

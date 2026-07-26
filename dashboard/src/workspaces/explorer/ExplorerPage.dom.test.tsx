@@ -53,6 +53,40 @@ const SUMMARY_ROW = {
   summary: 'Graph route investigation',
 };
 
+/** The read-context route returns whole `LcmMessageV1` / `LcmSummaryNodeV1`
+ * rows, not the trimmed search hits above: the inspector reads a session's
+ * actual content, so nothing is projected away. */
+const CONTEXT_MESSAGE_ROW = {
+  message_id: 'message-1',
+  session_id: 'session-1',
+  role: 'assistant',
+  content: 'Using graph search',
+  ordinal: 0,
+  timestamp: 1_784_000_000,
+  tool_name: null,
+  token_estimate: 30,
+  pinned: 0,
+  source: 'cursor',
+  storage_kind: 'message',
+  store_id: 1,
+  summary_node_ids: [],
+  metadata_json: null,
+};
+
+const CONTEXT_SUMMARY_ROW = {
+  node_id: 'summary-1',
+  session_id: 'session-1',
+  summary: 'Graph route investigation',
+  category: 'investigation',
+  source_type: 'message',
+  depth: 0,
+  token_count: 30,
+  source_token_count: 90,
+  created_at: 1_784_000_100,
+  latest_at: 1_784_000_100,
+  expand_hint: 'lcm_expand --node summary-1',
+};
+
 const FACT_ROW = {
   fact_id: 11,
   content: 'Graph search is bounded',
@@ -196,8 +230,8 @@ const SEARCH_ROUTES = {
           summary_token_count: 30,
           source_token_count: 90,
         },
-        messages: [MESSAGE_ROW],
-        summary_nodes: [SUMMARY_ROW],
+        messages: [CONTEXT_MESSAGE_ROW],
+        summary_nodes: [CONTEXT_SUMMARY_ROW],
         has_more: true,
         has_more_messages: true,
         has_more_summary_nodes: false,

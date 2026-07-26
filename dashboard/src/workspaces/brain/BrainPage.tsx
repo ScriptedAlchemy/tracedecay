@@ -19,10 +19,10 @@ import {
 } from './field.ts';
 import { ScopedBrain } from './ScopedBrain.tsx';
 import {
-  ProjectsPayloadSchema,
   type ProjectRegistryEntry,
   type ProjectRepoGroup,
-} from './contracts.ts';
+  ProjectsPayloadSchema,
+} from '../../contracts/wire.ts';
 
 /** Brain. Two surfaces, because the question genuinely changes when a project
  * is selected.
@@ -52,14 +52,30 @@ export function BrainPage() {
             return <CenteredState title="Project registry read failed" kind="error" />;
           case 'ok':
             break;
-          default: {
-            const unhandled: never = data.status;
-            return unhandled;
-          }
+          default:
+            // `status` is a plain string on the wire, so a value added in
+            // `projects.rs` arrives here as an unfamiliar word rather than a
+            // parse failure. Name it instead of guessing which of the three
+            // known states it resembles.
+            return (
+              <CenteredState
+                title={`Project registry reported an unrecognised status: ${data.status}`}
+                kind="unknown"
+              />
+            );
         }
-        if (data.project_tree.length === 0) {
-          const measuredEmpty =
-            data.summary.project_count === 0 && data.summary.repo_count === 0;
+        // `ok` carries both, but the field is nullable because the two failure
+        // responses send it as an explicit null. A null here is a response that
+        // contradicts its own status, which is not the same thing as an empty
+        // registry and must not render as one.
+        const { project_tree: projectTree, summary } = data;
+        if (!projectTree || !summary) {
+          return (
+            <CenteredState title="Project registry response is inconsistent" kind="partial" />
+          );
+        }
+        if (projectTree.length === 0) {
+          const measuredEmpty = summary.project_count === 0 && summary.repo_count === 0;
           return (
             <CenteredState
               title={
@@ -71,7 +87,7 @@ export function BrainPage() {
             />
           );
         }
-        const groups = [...data.project_tree].sort(
+        const groups = [...projectTree].sort(
           (a, b) => latestSeen(b) - latestSeen(a),
         );
         const holdings = summarizeHoldings(groups.flatMap((group) => group.projects));
@@ -80,8 +96,8 @@ export function BrainPage() {
             <div className="flex items-center gap-3 border-b border-edge-subtle px-4 py-2">
               <h1 className="text-sm font-semibold tracking-tight">Brain</h1>
               <span className="text-2xs text-text-muted">
-                {data.summary.repo_count} repositories · {data.summary.project_count} projects
-                {data.summary.truncated ? ' · truncated' : ''}
+                {summary.repo_count} repositories · {summary.project_count} projects
+                {summary.truncated ? ' · truncated' : ''}
               </span>
             </div>
             {/* The brain is the surface, not a banner above a list: the canvas

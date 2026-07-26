@@ -31,7 +31,6 @@ struct ContextScoutOperationSpec {
     operation: &'static str,
     summary: &'static str,
     description: &'static str,
-    example: &'static str,
     effect: EffectClass,
     paginated: bool,
 }
@@ -55,7 +54,6 @@ const fn read_spec(operation: &'static str, summary: &'static str) -> ContextSco
         operation,
         summary,
         description: "Execute the exact-address Context Scout read through the daemon-owned application authority.",
-        example: "Inspect Context Scout for this exact address",
         effect: EffectClass::Read,
         paginated: false,
     }
@@ -66,7 +64,6 @@ const fn control_spec(operation: &'static str, summary: &'static str) -> Context
         operation,
         summary,
         description: "Execute the exact-address Context Scout control through the daemon-owned application authority.",
-        example: "Control Context Scout for this exact address",
         effect: EffectClass::Administrative,
         paginated: false,
     }
@@ -111,7 +108,7 @@ pub fn context_scout_surface_catalog_contribution()
                 1,
                 spec.summary,
                 spec.description,
-                vec![spec.example.to_owned()],
+                vec![format!("{} for this exact address", spec.summary)],
             )?,
             request_schema: request_schema(spec)?,
             result_schema: result_schema(spec)?,
@@ -292,6 +289,12 @@ mod tests {
     fn discovery_exposes_every_scout_operation_on_cli_mcp_and_http_only() {
         let contribution = context_scout_surface_catalog_contribution().unwrap();
         assert_eq!(contribution.capabilities().len(), CONTEXT_SCOUT_SPECS.len());
+        let routing_examples = contribution
+            .capabilities()
+            .iter()
+            .flat_map(|capability| capability.routing().examples())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(routing_examples.len(), CONTEXT_SCOUT_SPECS.len());
         for spec in CONTEXT_SCOUT_SPECS {
             let capability = contribution
                 .capabilities()

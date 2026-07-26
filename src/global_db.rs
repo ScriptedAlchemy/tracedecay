@@ -96,17 +96,6 @@ pub struct SavingsDay {
     pub calls: u64,
 }
 
-/// One freshly computed token count headed for the dashboard sidecar cache
-/// (see [`RegisteredGlobalDb::save_token_counts`]).
-#[derive(Debug, Clone)]
-pub struct TokenCountUpsert {
-    pub provider: String,
-    pub message_id: String,
-    pub text_len: i64,
-    pub encoder: &'static str,
-    pub token_count: i64,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnalyticsEventInsert {
     pub provider: String,
@@ -186,6 +175,10 @@ pub struct AnalyticsEventQuery {
     pub event_kind: Option<String>,
     /// Inclusive lower bound on `timestamp` (unix seconds). `None` = unbounded.
     pub since: Option<i64>,
+    /// Exclusive upper bound on `timestamp` (unix seconds). `None` = unbounded.
+    pub until: Option<i64>,
+    /// Exclusive row-id cursor used by bounded reverse-chronological scans.
+    pub before_id: Option<i64>,
     pub limit: usize,
 }
 
@@ -207,7 +200,7 @@ pub struct CodeProjectRecord {
     pub last_seen_at: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub struct ProjectAliasRecord {
     pub alias_path: String,
     pub project_id: String,
@@ -226,7 +219,7 @@ pub struct StoreInstanceUpsert {
     pub last_write_at: Option<i64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub struct StoreInstanceRecord {
     pub store_id: String,
     pub project_id: String,
@@ -251,7 +244,7 @@ pub struct GraphScopeUpsert {
     pub writable: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub struct GraphScopeRecord {
     pub graph_scope_id: String,
     pub project_id: String,
@@ -273,7 +266,7 @@ pub struct StoreArtifactUpsert {
     pub updated_at: Option<i64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub struct StoreArtifactRecord {
     pub store_id: String,
     pub artifact_kind: String,
@@ -291,7 +284,7 @@ pub struct ProjectStoreResolution {
     pub artifacts: Vec<StoreArtifactRecord>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 pub struct ProjectStoreContext {
     pub store: StoreInstanceRecord,
     pub graph_scopes: Vec<GraphScopeRecord>,
@@ -913,4 +906,4 @@ impl RegisteredGlobalDb {
 mod checkpoint_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
-mod tests;
+pub(crate) mod tests;

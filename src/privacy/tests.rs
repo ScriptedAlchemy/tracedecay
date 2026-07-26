@@ -9,11 +9,14 @@ use tracedecay_domain::{
 };
 
 use super::{
-    CLAUDE_SANITIZER_VERSION_V1, ClaudeRecordParseErrorV1, ClaudeRecordSanitizerV1,
-    ClaudeSanitizationOutcomeV1, ClaudeSanitizerPolicyV1, DetectionConfidenceV1,
-    MAX_OBSERVATION_RECORD_BYTES, OBSERVATION_SANITIZER_VERSION_V1, PrivacyDetectorV1,
-    PrivacySanitizerError, SanitizationActionV1, parse_claude_record_v1,
+    CLAUDE_SANITIZER_VERSION_V1, CODE_SOURCE_SANITIZER_VERSION_V1, ClaudeRecordParseErrorV1,
+    ClaudeRecordSanitizerV1, ClaudeSanitizationOutcomeV1, ClaudeSanitizerPolicyV1,
+    DetectionConfidenceV1, MAX_OBSERVATION_RECORD_BYTES, OBSERVATION_SANITIZER_VERSION_V1,
+    PrivacyDetectorV1, PrivacySanitizerError, SanitizationActionV1, SanitizationDetectorOriginV1,
+    SanitizationDetectorRevisionV1, SanitizationFindingV1, SanitizationRemediationClassV1,
+    SanitizationScanBoundaryV1, SanitizationScannedCoverageV1, parse_claude_record_v1,
     parse_normalized_observation_record_v1, parse_observation_record_v1,
+    sanitize_code_source_bytes,
 };
 
 fn identity_for(record: &[u8]) -> ClaudeObservationIdentityMaterialV1 {
@@ -74,6 +77,59 @@ fn generated_high_entropy_token() -> String {
     (0..48)
         .map(|index| char::from(ALPHABET[(index * 17) % ALPHABET.len()]))
         .collect()
+}
+
+#[test]
+fn code_source_sanitizer_redacts_and_issues_raw_bound_receipts() {
+    let first_secret = ["sk", "-test-", "1234567890abcdef"].concat();
+    let second_secret = ["sk", "-test-", "abcdef1234567890"].concat();
+    assert_eq!(first_secret.len(), second_secret.len());
+    let source = |secret: &str| format!("pub const TOKEN: &str = \"{secret}\";\n");
+
+    let first = sanitize_code_source_bytes(source(&first_secret).as_bytes())
+        .expect("sanitize first code source");
+    let replay = sanitize_code_source_bytes(source(&first_secret).as_bytes())
+        .expect("replay first code source");
+    let second = sanitize_code_source_bytes(source(&second_secret).as_bytes())
+        .expect("sanitize second code source");
+
+    assert!(!String::from_utf8_lossy(first.sanitized_bytes()).contains(&first_secret));
+    assert_eq!(first.sanitized_bytes(), second.sanitized_bytes());
+    assert_eq!(
+        first.receipt().receipt().sanitizer_version().as_str(),
+        CODE_SOURCE_SANITIZER_VERSION_V1
+    );
+    assert!(
+        first
+            .receipt()
+            .receipt()
+            .receipt_id()
+            .as_str()
+            .starts_with("privacy.code-source.v1.")
+    );
+    assert_eq!(
+        first.receipt().disposition(),
+        SanitizerDispositionV1::Redacted
+    );
+    assert_eq!(first.receipt().sensitivity(), SensitivityV1::Secret);
+    assert_eq!(
+        first.receipt().payload(),
+        Some(
+            &PayloadReferenceV1::for_payload(&Value::String(
+                String::from_utf8(first.sanitized_bytes().to_vec()).expect("sanitized UTF-8"),
+            ))
+            .expect("sanitized payload reference"),
+        )
+    );
+    assert_eq!(
+        first.receipt().receipt().receipt_id(),
+        replay.receipt().receipt().receipt_id()
+    );
+    assert_ne!(
+        first.receipt().receipt().receipt_id(),
+        second.receipt().receipt().receipt_id(),
+        "equal sanitized output from different raw secrets needs distinct scan evidence"
+    );
 }
 
 #[test]
@@ -955,6 +1011,121 @@ fn contextual_high_entropy_token_is_detected() {
             .as_str()
             .expect("message remains text")
             .contains(&token)
+    );
+}
+
+#[test]
+fn finding_contract_serializes_complete_safe_detector_evidence() {
+    let credential_prefix = ["s", "k", "-"].concat();
+    let secret = format!("{credential_prefix}{}", "Z9".repeat(10));
+    let record = serde_json::to_vec(&json!({ "payload": secret })).unwrap();
+    let outcome = sanitize(&ClaudeRecordSanitizerV1::claude_v1().unwrap(), &record);
+    let finding = outcome.findings().first().expect("credential finding");
+
+    assert_eq!(
+        finding.detector_origin(),
+        SanitizationDetectorOriginV1::BuiltInDetectorKernel
+    );
+    assert_eq!(
+        finding.detector_revision(),
+        SanitizationDetectorRevisionV1::V1
+    );
+    assert_eq!(
+        finding.remediation_class(),
+        SanitizationRemediationClassV1::RotateOrRevokeCredential
+    );
+    assert_eq!(
+        finding.scanned_coverage(),
+        SanitizationScannedCoverageV1::Complete
+    );
+    assert_eq!(finding.evidence_anchors().len(), 1);
+    assert_eq!(
+        finding.evidence_anchors()[0].structural_location(),
+        finding.location()
+    );
+
+    let serialized = serde_json::to_value(finding).unwrap();
+    assert_eq!(serialized["detector_origin"], "built_in_detector_kernel");
+    assert_eq!(serialized["detector_revision"], "v1");
+    assert_eq!(
+        serialized["remediation_class"],
+        "rotate_or_revoke_credential"
+    );
+    assert_eq!(serialized["scanned_coverage"]["status"], "complete");
+    assert!(!serialized.to_string().contains(&secret));
+    let decoded: SanitizationFindingV1 = serde_json::from_value(serialized).unwrap();
+    assert_eq!(&decoded, finding);
+}
+
+#[test]
+fn finding_contract_rejects_missing_or_unsafe_evidence_metadata() {
+    let record = serde_json::to_vec(&json!({
+        "password": "finding-contract-secret"
+    }))
+    .unwrap();
+    let outcome = sanitize(&ClaudeRecordSanitizerV1::claude_v1().unwrap(), &record);
+    let finding = outcome.findings().first().unwrap();
+    let serialized = serde_json::to_value(finding).unwrap();
+
+    for required in [
+        "detector_origin",
+        "detector_revision",
+        "remediation_class",
+        "evidence_anchors",
+        "scanned_coverage",
+    ] {
+        let mut incomplete = serialized.clone();
+        incomplete.as_object_mut().unwrap().remove(required);
+        assert!(
+            serde_json::from_value::<SanitizationFindingV1>(incomplete).is_err(),
+            "missing {required} must fail closed"
+        );
+    }
+
+    let mut unsafe_anchor = serialized;
+    unsafe_anchor["evidence_anchors"][0]["structural_location"] =
+        Value::String("finding-contract-secret".to_owned());
+    assert!(serde_json::from_value::<SanitizationFindingV1>(unsafe_anchor).is_err());
+
+    let mut oversized_location = serde_json::to_value(finding).unwrap();
+    let location = format!("$/{}", "1/".repeat(128));
+    oversized_location["location"] = Value::String(location.clone());
+    oversized_location["evidence_anchors"][0]["structural_location"] = Value::String(location);
+    assert!(serde_json::from_value::<SanitizationFindingV1>(oversized_location).is_err());
+
+    let mut duplicate_anchor = serde_json::to_value(finding).unwrap();
+    let anchor = duplicate_anchor["evidence_anchors"][0].clone();
+    duplicate_anchor["evidence_anchors"]
+        .as_array_mut()
+        .unwrap()
+        .push(anchor);
+    assert!(serde_json::from_value::<SanitizationFindingV1>(duplicate_anchor).is_err());
+}
+
+#[test]
+fn policy_limit_findings_report_incomplete_scanned_coverage() {
+    let policy = ClaudeSanitizerPolicyV1::claude_v1()
+        .unwrap()
+        .with_limits(32, 16, 100)
+        .unwrap();
+    let sanitizer = ClaudeRecordSanitizerV1::new(policy);
+    let record = serde_json::to_vec(&json!({ "message": "x".repeat(64) })).unwrap();
+    let outcome = sanitize(&sanitizer, &record);
+    let finding = outcome.findings().first().unwrap();
+
+    assert_eq!(
+        finding.detector_origin(),
+        SanitizationDetectorOriginV1::SanitizerPolicy
+    );
+    assert_eq!(
+        finding.remediation_class(),
+        SanitizationRemediationClassV1::ReduceInputAndRetry
+    );
+    assert_eq!(
+        finding.scanned_coverage(),
+        SanitizationScannedCoverageV1::Incomplete {
+            boundary: SanitizationScanBoundaryV1::RecordBytes,
+        }
     );
 }
 

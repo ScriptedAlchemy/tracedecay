@@ -126,39 +126,33 @@ pub(super) fn def_run_affected_tests() -> ToolDefinition {
 pub(super) fn def_diagnostics() -> ToolDefinition {
     def(
         "tracedecay_diagnostics",
-        "Compile / Type-Check Diagnostics",
-        "cargo check, tsc, type error, compile error, build failure, clippy. \
-         Run the project's type-checker (cargo check for Rust, tsc for \
-         TypeScript, pyright for Python) and return structured errors and \
-         warnings. Each diagnostic includes file, line range, level, code, \
-         message, driver, and the enclosing graph node when one can be \
-         resolved. Replaces the recurring 'run cargo → parse text → read \
-         file' loop with a single structured response. \
-         \n\nNote: the cargo target dir is forced to /tmp/tracedecay-target/<project_id>/diagnostics so \
-         we don't race with the user's interactive cargo runs. The first \
-         call against a fresh tree builds dependencies from scratch, which \
-         can take several minutes on large workspaces; subsequent calls \
-         are sub-second. Set config knob diagnostics_prewarm (env \
-         TRACEDECAY_DIAGNOSTICS_PREWARM=1, off by default) to make that first \
-         cold call spawn the build detached and return status 'warming' \
-         immediately instead of blocking — re-call once it is warm. Build \
-         scripts and proc macros from the project execute as part of cargo \
-         check — same trust model as running it manually.",
+        "Read Canonical Diagnostics",
+        "Read the daemon-retained clean-generation diagnostic authority. This \
+         compatibility name does not start an analyzer or execute a build; \
+         configured producers publish new diagnostics through their owned \
+         lifecycle.",
         json!({
             "type": "object",
             "properties": {
                 "scope": {
                     "type": "string",
-                    "enum": ["workspace", "package", "file"],
-                    "description": "Run scope. Default 'workspace'. 'package' requires `name`; 'file' requires `path` and currently runs workspace + post-filter (cargo has no native single-file mode)."
-                },
-                "name": {
-                    "type": "string",
-                    "description": "Package name when scope='package' (e.g. 'tracedecay', 'serde-json')."
+                    "enum": ["workspace", "file"],
+                    "description": "Read scope. Default 'workspace'. 'file' requires `path`."
                 },
                 "path": {
                     "type": "string",
                     "description": "Project-relative file path when scope='file'."
+                },
+                "maximum_diagnostics": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1000,
+                    "description": "Maximum diagnostics returned in this page."
+                },
+                "cursor": {
+                    "type": ["string", "null"],
+                    "minLength": 1,
+                    "description": "Opaque cursor returned by the prior page."
                 }
             }
         }),

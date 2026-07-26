@@ -31,7 +31,7 @@ pub use runtime::{
     Pr12PrimitiveDispatchFuture, Pr12PrimitiveInvocation, Pr12PrimitiveProjectRuntime,
     Pr12PrimitiveRequest, QualifiedNamePrimitiveRequest, QualifiedNamePrimitiveResult,
     SourceBodyPrimitiveRequest, SourceBodyPrimitiveResult, SourceOutlinePrimitiveRequest,
-    SourceOutlinePrimitiveResult, StorageStatusPrimitiveRequest, StorageStatusPrimitiveResult,
-    open_pr12_primitive_project_runtime,
+    SourceOutlinePrimitiveResult, StorageStatusHistoryPointV1, StorageStatusPrimitiveRequest,
+    StorageStatusPrimitiveResult, open_pr12_primitive_project_runtime,
 };
 pub use symbol_graph::{CanonicalSymbolGraphAdapter, SymbolGraphCursorPort};

@@ -12,12 +12,11 @@ import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { TraceView } from './TraceView.tsx';
+import { TraceView, type TraceFocus } from './TraceView.tsx';
 import { resolveFixture } from '../../../stories/fixtures/data.ts';
 import { setMotionPreference } from '../../viz/trace/reducedMotion.ts';
-import type { GraphNode } from './contracts.ts';
 
-const FOCUS: GraphNode = {
+const FOCUS: TraceFocus = {
   id: 'sym-0',
   kind: 'function',
   name: 'resolve_context',

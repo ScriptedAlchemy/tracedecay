@@ -20,11 +20,38 @@ async fn assert_fresh_project_open_owners(label: &str, git_state: ProjectGitStat
     initialize_test_project(&project, &client_identity).await;
     if !matches!(git_state, ProjectGitState::NonGit) {
         let initialized = Command::new("git")
-            .args(["init", "--quiet"])
+            .args(["init", "--quiet", "--initial-branch=main"])
             .current_dir(&project)
             .status()
             .expect("run git init");
         assert!(initialized.success(), "git init must succeed");
+    }
+    if matches!(git_state, ProjectGitState::Unborn) {
+        let symbolic_head = Command::new("git")
+            .args(["symbolic-ref", "--quiet", "HEAD"])
+            .current_dir(&project)
+            .output()
+            .expect("read unborn symbolic HEAD");
+        assert!(
+            symbolic_head.status.success(),
+            "unborn HEAD must be symbolic"
+        );
+        assert_eq!(
+            String::from_utf8(symbolic_head.stdout)
+                .expect("unborn symbolic HEAD must be UTF-8")
+                .trim(),
+            "refs/heads/main",
+            "unborn fixture must use its explicit default branch"
+        );
+        let resolved_head = Command::new("git")
+            .args(["rev-parse", "--verify", "HEAD"])
+            .current_dir(&project)
+            .output()
+            .expect("verify unborn HEAD");
+        assert!(
+            !resolved_head.status.success(),
+            "unborn fixture must not have a commit"
+        );
     }
     if matches!(git_state, ProjectGitState::Committed) {
         let added = Command::new("git")
@@ -87,7 +114,14 @@ async fn assert_fresh_project_open_owners(label: &str, git_state: ProjectGitStat
         crate::daemon::hook_v2_replay::hook_v2_replay_consumer_registered(&replay_root),
         "fresh project open must start Hook V2 replay"
     );
+    let graph_weak = Arc::downgrade(&graph);
+    drop(graph);
+    drop(server);
     engine.shutdown_all().await;
+    assert!(
+        graph_weak.upgrade().is_none(),
+        "daemon shutdown must release the project graph retained by Hook V2 replay"
+    );
 }
 
 #[cfg(unix)]

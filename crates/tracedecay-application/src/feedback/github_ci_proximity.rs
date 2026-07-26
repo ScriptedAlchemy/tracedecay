@@ -7,7 +7,8 @@
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::UtcMicros;
 use tracedecay_domain::feedback::{
-    CiFailureLocalizationResultV1, CiFailureRunIdentityV1, FeedbackScopeV1, GitHubPullRequestIdV1,
+    CiFailureLocalizationResultV1, CiFailureRateLimitCheckpointV1, CiFailureRunIdentityV1,
+    CiFailureSourceFailureV1, FeedbackScopeV1, GitHubPullRequestIdV1,
     GitHubReviewIngressProviderOutcomeV1, GitHubReviewIngressResultV1,
     GitHubReviewReadCheckpointV1, GitHubReviewReadOperationV1, ProximityContributionV1,
     ProximityInclusionV1,
@@ -28,6 +29,8 @@ pub const CI_FAILURE_LOCALIZE_USE_CASE_ID_V1: &str =
     "use-case.application.feedback.ci-failure-localize";
 pub const PROXIMITY_CAPABILITY_ID_V1: &str = "capability.application.feedback.proximity";
 pub const PROXIMITY_USE_CASE_ID_V1: &str = "use-case.application.feedback.proximity";
+pub const ADVISORY_CYCLE_CAPABILITY_ID_V1: &str = "capability.application.feedback.advisory-cycle";
+pub const ADVISORY_CYCLE_USE_CASE_ID_V1: &str = "use-case.application.feedback.advisory-cycle";
 
 /// Immutable, read-only ingress request for one pull request at one currently
 /// resolved branch scope. There is no field for a generic endpoint, HTTP
@@ -134,6 +137,8 @@ impl CiFailureLocalizationRequestV1 {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CiFailureLocalizationPortOutcomeV1 {
     Localized(Box<CiFailureLocalizationResultV1>),
+    RateLimited(CiFailureRateLimitCheckpointV1),
+    Failed(CiFailureSourceFailureV1),
     Denied,
     Unavailable,
 }
@@ -144,13 +149,17 @@ impl CiFailureLocalizationPortOutcomeV1 {
         request: &CiFailureLocalizationRequestV1,
     ) -> Result<(), ApplicationContractError> {
         request.validate()?;
-        if let Self::Localized(result) = self {
-            result.validate()?;
-            if result.branch.scope != request.scope || result.run != request.run {
-                return Err(ApplicationContractError::Inconsistent {
-                    field: "ci failure localization response",
-                });
+        match self {
+            Self::Localized(result) => {
+                result.validate()?;
+                if result.branch.scope != request.scope || result.run != request.run {
+                    return Err(ApplicationContractError::Inconsistent {
+                        field: "ci failure localization response",
+                    });
+                }
             }
+            Self::RateLimited(checkpoint) => checkpoint.validate()?,
+            Self::Failed(_) | Self::Denied | Self::Unavailable => {}
         }
         Ok(())
     }
@@ -225,27 +234,6 @@ pub enum ProximityDedupeOutcomeV1 {
     Unique,
     Duplicate,
     Unavailable,
-}
-
-/// The single producer boundary for both immediate and configured-threshold
-/// tiers. Splitting tiers into separate producers would permit divergent scope,
-/// threshold, and coverage decisions.
-pub trait ProximityPort {
-    fn candidates<'a>(
-        &'a self,
-        context: &'a RequestContext,
-        request: &'a ProximityEvaluationRequestV1,
-    ) -> FeedbackPortFuture<'a, ProximityCandidatesPortOutcomeV1>;
-}
-
-/// A presentation-dedupe decision. It never becomes a lock or a work claim.
-pub trait ProximityDedupePort {
-    fn classify<'a>(
-        &'a self,
-        context: &'a RequestContext,
-        request: &'a ProximityEvaluationRequestV1,
-        contribution: &'a ProximityContributionV1,
-    ) -> FeedbackPortFuture<'a, ProximityDedupeOutcomeV1>;
 }
 
 #[cfg(test)]

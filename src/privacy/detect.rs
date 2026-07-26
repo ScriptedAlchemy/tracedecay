@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::sync::OnceLock;
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -23,7 +24,11 @@ const REDACTED_ENTROPY: &str = "[TraceDecay redacted: high-entropy token]";
 const REDACTED_SENSITIVE_FIELD: &str = "[TraceDecay redacted: sensitive field]";
 const MEMORY_FACT_SANITIZER_VERSION_V1: &str = "privacy.memory-fact.v1";
 const MEMORY_FACT_RECEIPT_DOMAIN_V1: &[u8] = b"tracedecay.privacy.memory-fact.receipt.v1\0";
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub const CODE_SOURCE_SANITIZER_VERSION_V1: &str = "privacy.code-source.v1";
+const CODE_SOURCE_RECEIPT_DOMAIN_V1: &[u8] = b"tracedecay.privacy.code-source.receipt.v1\0";
+const MAX_FINDING_LOCATION_BYTES: usize = 256;
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PrivacyDetectorV1 {
     ExactCredential,
     BearerToken,
@@ -38,27 +43,180 @@ pub enum PrivacyDetectorV1 {
     StructureLimit,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DetectionConfidenceV1 {
     Exact,
     Contextual,
     Heuristic,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SanitizationActionV1 {
     Redacted,
     Rejected,
     Quarantined,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SanitizationDetectorOriginV1 {
+    BuiltInDetectorKernel,
+    SanitizerPolicy,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SanitizationDetectorRevisionV1 {
+    V1,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SanitizationScanBoundaryV1 {
+    RecordBytes,
+    NestingDepth,
+    ValueCount,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum SanitizationScannedCoverageV1 {
+    Complete,
+    Incomplete {
+        boundary: SanitizationScanBoundaryV1,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SanitizationRemediationClassV1 {
+    RotateOrRevokeCredential,
+    RemoveSensitiveValue,
+    CorrectMalformedRecord,
+    ReduceInputAndRetry,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SanitizationEvidenceAnchorV1 {
+    structural_location: String,
+}
+
+impl SanitizationEvidenceAnchorV1 {
+    fn structural(location: impl Into<String>) -> Self {
+        Self {
+            structural_location: bounded_location(location.into()),
+        }
+    }
+
+    pub fn structural_location(&self) -> &str {
+        &self.structural_location
+    }
+}
+
 /// Safe diagnostic evidence. It intentionally has no field for matched text.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(try_from = "SanitizationFindingWireV1")]
 pub struct SanitizationFindingV1 {
     detector: PrivacyDetectorV1,
+    detector_origin: SanitizationDetectorOriginV1,
+    detector_revision: SanitizationDetectorRevisionV1,
     location: String,
     confidence: DetectionConfidenceV1,
     action: SanitizationActionV1,
+    remediation_class: SanitizationRemediationClassV1,
+    evidence_anchors: Vec<SanitizationEvidenceAnchorV1>,
+    scanned_coverage: SanitizationScannedCoverageV1,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SanitizationFindingWireV1 {
+    detector: PrivacyDetectorV1,
+    detector_origin: SanitizationDetectorOriginV1,
+    detector_revision: SanitizationDetectorRevisionV1,
+    location: String,
+    confidence: DetectionConfidenceV1,
+    action: SanitizationActionV1,
+    remediation_class: SanitizationRemediationClassV1,
+    evidence_anchors: Vec<SanitizationEvidenceAnchorWireV1>,
+    scanned_coverage: SanitizationScannedCoverageV1,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SanitizationEvidenceAnchorWireV1 {
+    structural_location: String,
+}
+
+impl TryFrom<SanitizationFindingWireV1> for SanitizationFindingV1 {
+    type Error = &'static str;
+
+    fn try_from(wire: SanitizationFindingWireV1) -> Result<Self, Self::Error> {
+        if wire.location.len() > MAX_FINDING_LOCATION_BYTES
+            || !is_safe_structural_location(&wire.location)
+            || wire.evidence_anchors.len() != 1
+            || wire.evidence_anchors.iter().any(|anchor| {
+                anchor.structural_location.len() > MAX_FINDING_LOCATION_BYTES
+                    || anchor.structural_location != wire.location
+                    || !is_safe_structural_location(&anchor.structural_location)
+            })
+        {
+            return Err("sanitization finding evidence anchors are invalid");
+        }
+        if wire.remediation_class != remediation_class(wire.detector) {
+            return Err("sanitization finding remediation class is invalid");
+        }
+        match (wire.detector, wire.action, wire.scanned_coverage) {
+            (
+                PrivacyDetectorV1::RecordSizeLimit,
+                SanitizationActionV1::Rejected,
+                SanitizationScannedCoverageV1::Incomplete {
+                    boundary: SanitizationScanBoundaryV1::RecordBytes,
+                },
+            )
+            | (
+                PrivacyDetectorV1::StructureLimit,
+                SanitizationActionV1::Quarantined,
+                SanitizationScannedCoverageV1::Incomplete {
+                    boundary:
+                        SanitizationScanBoundaryV1::NestingDepth
+                        | SanitizationScanBoundaryV1::ValueCount,
+                },
+            ) if wire.detector_origin == SanitizationDetectorOriginV1::SanitizerPolicy => {}
+            (PrivacyDetectorV1::RecordSizeLimit | PrivacyDetectorV1::StructureLimit, _, _) => {
+                return Err("sanitization finding scanned coverage is invalid");
+            }
+            (_, _, SanitizationScannedCoverageV1::Complete) => {}
+            (_, _, SanitizationScannedCoverageV1::Incomplete { .. }) => {
+                return Err("sanitization finding scanned coverage is invalid");
+            }
+        }
+        if wire.detector == PrivacyDetectorV1::MalformedRecord
+            && wire.detector_origin != SanitizationDetectorOriginV1::SanitizerPolicy
+        {
+            return Err("sanitization finding detector origin is invalid");
+        }
+        Ok(Self {
+            detector: wire.detector,
+            detector_origin: wire.detector_origin,
+            detector_revision: wire.detector_revision,
+            location: wire.location,
+            confidence: wire.confidence,
+            action: wire.action,
+            remediation_class: wire.remediation_class,
+            evidence_anchors: wire
+                .evidence_anchors
+                .into_iter()
+                .map(|anchor| SanitizationEvidenceAnchorV1 {
+                    structural_location: anchor.structural_location,
+                })
+                .collect(),
+            scanned_coverage: wire.scanned_coverage,
+        })
+    }
 }
 
 impl SanitizationFindingV1 {
@@ -68,16 +226,66 @@ impl SanitizationFindingV1 {
         confidence: DetectionConfidenceV1,
         action: SanitizationActionV1,
     ) -> Self {
+        let origin = match detector {
+            PrivacyDetectorV1::MalformedRecord
+            | PrivacyDetectorV1::RecordSizeLimit
+            | PrivacyDetectorV1::StructureLimit => SanitizationDetectorOriginV1::SanitizerPolicy,
+            PrivacyDetectorV1::ExactCredential
+            | PrivacyDetectorV1::BearerToken
+            | PrivacyDetectorV1::CredentialAssignment
+            | PrivacyDetectorV1::PrivateKey
+            | PrivacyDetectorV1::SensitiveField
+            | PrivacyDetectorV1::HighEntropyToken => {
+                SanitizationDetectorOriginV1::BuiltInDetectorKernel
+            }
+        };
+        Self::new_with_origin(detector, origin, location, confidence, action)
+    }
+
+    pub(crate) fn new_with_origin(
+        detector: PrivacyDetectorV1,
+        detector_origin: SanitizationDetectorOriginV1,
+        location: impl Into<String>,
+        confidence: DetectionConfidenceV1,
+        action: SanitizationActionV1,
+    ) -> Self {
+        let remediation_class = remediation_class(detector);
+        let location = bounded_location(location.into());
         Self {
             detector,
-            location: bounded_location(location.into()),
+            detector_origin,
+            detector_revision: SanitizationDetectorRevisionV1::V1,
+            evidence_anchors: vec![SanitizationEvidenceAnchorV1::structural(location.clone())],
+            location,
             confidence,
             action,
+            remediation_class,
+            scanned_coverage: SanitizationScannedCoverageV1::Complete,
         }
+    }
+
+    pub(crate) fn new_with_incomplete_coverage(
+        detector: PrivacyDetectorV1,
+        location: impl Into<String>,
+        confidence: DetectionConfidenceV1,
+        action: SanitizationActionV1,
+        boundary: SanitizationScanBoundaryV1,
+    ) -> Self {
+        let mut finding = Self::new(detector, location, confidence, action);
+        finding.scanned_coverage = SanitizationScannedCoverageV1::Incomplete { boundary };
+        finding
     }
 
     pub fn detector(&self) -> PrivacyDetectorV1 {
         self.detector
+    }
+
+    pub fn detector_origin(&self) -> SanitizationDetectorOriginV1 {
+        self.detector_origin
+    }
+
+    pub fn detector_revision(&self) -> SanitizationDetectorRevisionV1 {
+        self.detector_revision
     }
 
     pub fn location(&self) -> &str {
@@ -91,6 +299,65 @@ impl SanitizationFindingV1 {
     pub fn action(&self) -> SanitizationActionV1 {
         self.action
     }
+
+    pub fn remediation_class(&self) -> SanitizationRemediationClassV1 {
+        self.remediation_class
+    }
+
+    pub fn evidence_anchors(&self) -> &[SanitizationEvidenceAnchorV1] {
+        &self.evidence_anchors
+    }
+
+    pub fn scanned_coverage(&self) -> SanitizationScannedCoverageV1 {
+        self.scanned_coverage
+    }
+}
+
+fn remediation_class(detector: PrivacyDetectorV1) -> SanitizationRemediationClassV1 {
+    match detector {
+        PrivacyDetectorV1::ExactCredential
+        | PrivacyDetectorV1::BearerToken
+        | PrivacyDetectorV1::CredentialAssignment
+        | PrivacyDetectorV1::PrivateKey => SanitizationRemediationClassV1::RotateOrRevokeCredential,
+        PrivacyDetectorV1::SensitiveField | PrivacyDetectorV1::HighEntropyToken => {
+            SanitizationRemediationClassV1::RemoveSensitiveValue
+        }
+        PrivacyDetectorV1::MalformedRecord => {
+            SanitizationRemediationClassV1::CorrectMalformedRecord
+        }
+        PrivacyDetectorV1::RecordSizeLimit | PrivacyDetectorV1::StructureLimit => {
+            SanitizationRemediationClassV1::ReduceInputAndRetry
+        }
+    }
+}
+
+fn is_safe_structural_location(location: &str) -> bool {
+    if matches!(
+        location,
+        "$" | "$/structural-identity" | "$/<bounded-location>"
+    ) {
+        return true;
+    }
+    let Some(mut remaining) = location.strip_prefix("$/") else {
+        return false;
+    };
+    while !remaining.is_empty() {
+        let (segment, rest) = remaining
+            .split_once('/')
+            .map_or((remaining, ""), |(segment, rest)| (segment, rest));
+        let valid_field = segment
+            .strip_prefix("field[")
+            .and_then(|value| value.strip_suffix(']'))
+            .is_some_and(|value| {
+                !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
+            });
+        let valid_index = !segment.is_empty() && segment.bytes().all(|byte| byte.is_ascii_digit());
+        if !valid_field && !valid_index {
+            return false;
+        }
+        remaining = rest;
+    }
+    true
 }
 
 #[derive(Debug, Error)]
@@ -109,6 +376,25 @@ pub(crate) enum MemoryFactSanitizationV1 {
     Quarantined,
 }
 
+pub(crate) struct CodeSourceSanitizationV1 {
+    sanitized_bytes: Vec<u8>,
+    receipt: SanitizationReceiptV1,
+}
+
+impl CodeSourceSanitizationV1 {
+    pub(crate) fn sanitized_bytes(&self) -> &[u8] {
+        &self.sanitized_bytes
+    }
+
+    pub(crate) fn receipt(&self) -> &SanitizationReceiptV1 {
+        &self.receipt
+    }
+
+    pub(crate) fn into_parts(self) -> (Vec<u8>, SanitizationReceiptV1) {
+        (self.sanitized_bytes, self.receipt)
+    }
+}
+
 pub(crate) struct DetectionResult {
     pub payload: Value,
     pub findings: Vec<SanitizationFindingV1>,
@@ -118,10 +404,15 @@ pub(crate) struct DetectionResult {
 struct ConfiguredSensitiveKeyPolicy<'a>(&'a BTreeSet<String>);
 
 impl SensitiveKeyPolicy for ConfiguredSensitiveKeyPolicy<'_> {
-    type Match = ();
+    type Match = SanitizationDetectorOriginV1;
 
     fn classify(&self, key: &NormalizedSensitiveKey) -> Option<Self::Match> {
-        (self.0.contains(key.ascii_compact()) || is_semantically_sensitive_key(key)).then_some(())
+        if self.0.contains(key.ascii_compact()) {
+            Some(SanitizationDetectorOriginV1::SanitizerPolicy)
+        } else {
+            is_semantically_sensitive_key(key)
+                .then_some(SanitizationDetectorOriginV1::BuiltInDetectorKernel)
+        }
     }
 }
 
@@ -175,17 +466,18 @@ pub(crate) fn redact_sensitive_values(
     });
     if quarantine_findings.is_empty() {
         visit_sensitive_json_mut(&mut payload, &policy, |value, path| match value {
-            JsonVisitMut::SensitiveValue(child, ()) if !child.is_null() => {
+            JsonVisitMut::SensitiveValue(child, origin) if !child.is_null() => {
                 *child = Value::String(REDACTED_SENSITIVE_FIELD.to_string());
-                findings.push(SanitizationFindingV1::new(
+                findings.push(SanitizationFindingV1::new_with_origin(
                     PrivacyDetectorV1::SensitiveField,
+                    origin,
                     structural_location(path),
                     DetectionConfidenceV1::Contextual,
                     SanitizationActionV1::Redacted,
                 ));
                 true
             }
-            JsonVisitMut::SensitiveValue(_, ()) => false,
+            JsonVisitMut::SensitiveValue(_, _) => false,
             JsonVisitMut::String(text) => redact_text(
                 text,
                 &structural_location(path),
@@ -212,6 +504,71 @@ pub(crate) fn sanitize_provider_metadata_text(text: &str) -> Option<String> {
         return None;
     }
     result.payload.as_str().map(str::to_owned)
+}
+
+/// Sanitizes arbitrary source bytes through the canonical credential detector
+/// and issues receipt evidence bound to both the raw input and sanitized text.
+pub(crate) fn sanitize_code_source_bytes(
+    raw: &[u8],
+) -> Result<CodeSourceSanitizationV1, DetectionError> {
+    let source = String::from_utf8_lossy(raw);
+    let invalid_utf8 = matches!(source, std::borrow::Cow::Owned(_));
+    let detected = redact_sensitive_values(Value::String(source.into_owned()), &BTreeSet::new())?;
+    if !detected.quarantine_findings.is_empty() {
+        return Err(DetectionError::Receipt);
+    }
+    let sanitized = detected
+        .payload
+        .as_str()
+        .ok_or(DetectionError::Receipt)?
+        .to_owned();
+    let disposition = if detected.findings.is_empty() && !invalid_utf8 {
+        SanitizerDispositionV1::Accepted
+    } else {
+        SanitizerDispositionV1::Redacted
+    };
+    let sensitivity = if detected.findings.is_empty() && !invalid_utf8 {
+        SensitivityV1::NonSensitive
+    } else {
+        SensitivityV1::Secret
+    };
+    let payload_reference = PayloadReferenceV1::for_payload(&Value::String(sanitized.clone()))
+        .map_err(|_| DetectionError::Receipt)?;
+    let sanitizer_version = ComponentVersion::new(CODE_SOURCE_SANITIZER_VERSION_V1)
+        .map_err(|_| DetectionError::Receipt)?;
+    let raw_digest = Sha256::digest(raw);
+    let payload_len = payload_reference.byte_len().to_be_bytes();
+    let mut hasher = Sha256::new();
+    for value in [
+        CODE_SOURCE_RECEIPT_DOMAIN_V1,
+        sanitizer_version.as_str().as_bytes(),
+        disposition.as_str().as_bytes(),
+        sensitivity.as_str().as_bytes(),
+        raw_digest.as_slice(),
+        payload_reference.digest().as_str().as_bytes(),
+        payload_len.as_slice(),
+    ] {
+        hasher.update((value.len() as u64).to_be_bytes());
+        hasher.update(value);
+    }
+    let receipt_id = SanitizationReceiptId::new(format!(
+        "privacy.code-source.v1.{}",
+        hex::encode(hasher.finalize())
+    ))
+    .map_err(|_| DetectionError::Receipt)?;
+    let receipt_ref = SanitizationReceiptRefV1::new(receipt_id, sanitizer_version)
+        .map_err(|_| DetectionError::Receipt)?;
+    let receipt = SanitizationReceiptV1::new(
+        receipt_ref,
+        disposition,
+        sensitivity,
+        Some(payload_reference),
+    )
+    .map_err(|_| DetectionError::Receipt)?;
+    Ok(CodeSourceSanitizationV1 {
+        sanitized_bytes: sanitized.into_bytes(),
+        receipt,
+    })
 }
 
 /// Sanitizes one structured legacy fact payload and binds durable output to
@@ -391,7 +748,7 @@ fn structural_location(path: &[JsonPathSegment]) -> String {
 }
 
 fn bounded_location(location: String) -> String {
-    if location.len() <= 256 {
+    if location.len() <= MAX_FINDING_LOCATION_BYTES {
         location
     } else {
         "$/<bounded-location>".to_string()

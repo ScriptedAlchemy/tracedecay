@@ -62,7 +62,31 @@ import { bloomStep, createSimulation, type Simulation } from '../../viz/trace/si
 import { resolveTracePalette } from '../../viz/trace/palette.ts';
 import { useReducedMotion, type MotionPreference } from '../../viz/trace/reducedMotion.ts';
 import type { SensoryChannelState, TraceModel, TraceNode } from '../../viz/trace/types.ts';
-import { GraphNeighborsPayloadSchema, type GraphNode } from './contracts.ts';
+import { CallChain } from './CallChain.tsx';
+import { NodeEvidence } from './NodeEvidence.tsx';
+import { GraphNeighborsPayloadSchema } from '../../contracts/wire.ts';
+
+/**
+ * The symbol a Code surface is currently centred on.
+ *
+ * Not a wire shape. The three things that can set a focus hold three different
+ * amounts: the search list and the hub field hold a whole `GraphNode` off the
+ * graph routes, while a click inside the trace field holds only what the
+ * simulation carries — id, kind, name, file and line. A `GraphNode` satisfies
+ * this, so the richer sources pass straight through; the trace field states
+ * what it actually knows instead of padding the rest of the wire shape with
+ * nulls it never received.
+ */
+export interface TraceFocus {
+  id: string;
+  kind: string;
+  name?: string | null;
+  qualified_name?: string | null;
+  file_path?: string | null;
+  start_line?: number | null;
+  signature?: string | null;
+  degree?: number | null;
+}
 
 const BASE = '/api/plugins/graph';
 /** The endpoint's own hard cap (`coerce_limit(params.limit, 50, 200)`). */
@@ -146,10 +170,10 @@ export function TraceView({
   onClose,
   onFocusChange,
 }: {
-  focus: GraphNode;
+  focus: TraceFocus;
   onClose: () => void;
   /** Re-flood the field on another symbol, from the list below. */
-  onFocusChange?: (node: GraphNode) => void;
+  onFocusChange?: (node: TraceFocus) => void;
 }) {
   const { root, expanded, expanding } = useTraceNeighborhood(focus.id);
 
@@ -225,11 +249,11 @@ function TraceField({
   expanding,
   onFocusChange,
 }: {
-  focus: GraphNode;
+  focus: TraceFocus;
   root: NeighborsPayload;
   expanded: ReadonlyMap<string, NeighborsPayload>;
   expanding: boolean;
-  onFocusChange?: (node: GraphNode) => void;
+  onFocusChange?: (node: TraceFocus) => void;
 }) {
   const model = useMemo(
     () =>
@@ -289,6 +313,14 @@ function TraceField({
               : 'hover a symbol to feel its weight, drag it to deform its neighbourhood'}
         </span>
       </div>
+
+      {/* What is known about the focus beyond its call edges, and a route
+       * through the neighbourhood the field can only show two hops of. Both
+       * sit between the field and the ranked list because they are readings
+       * about the SAME symbol the plate above is measuring — the list below is
+       * about its neighbours. */}
+      <NodeEvidence nodeId={focus.id} nodeName={displayName(focus)} />
+      <CallChain model={model} focusId={focus.id} />
 
       <TraceList model={model} focusId={focus.id} {...(onFocusChange ? { onFocusChange } : {})} />
     </div>
@@ -923,7 +955,7 @@ function TraceList({
 }: {
   model: TraceModel;
   focusId: string;
-  onFocusChange?: (node: GraphNode) => void;
+  onFocusChange?: (node: TraceFocus) => void;
 }) {
   const callSites = useMemo(() => {
     const totals = new Map<string, number>();
@@ -979,7 +1011,7 @@ function TraceRow({
   node: TraceNode;
   callSites: number;
   isFocus: boolean;
-  onFocusChange?: (node: GraphNode) => void;
+  onFocusChange?: (node: TraceFocus) => void;
 }) {
   const side = node.ring === 0 ? 'focus' : node.ring < 0 ? 'calls it' : 'called by it';
   const hop = node.ring === 0 ? 'focus' : `${Math.abs(node.ring)} hop${Math.abs(node.ring) === 1 ? '' : 's'} ${node.ring < 0 ? 'up' : 'down'}`;

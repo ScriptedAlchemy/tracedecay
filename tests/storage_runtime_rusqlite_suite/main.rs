@@ -11,4 +11,3 @@ mod s5_reader;
 mod s6_operations;
 mod s7_graph_attachment;
 mod s8_repository_parity;
-mod s9_effect_restart;

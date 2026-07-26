@@ -4,6 +4,7 @@ import { LegacyBoundary } from '../../ui/LegacyStates.tsx';
 import { Meter, ReadoutBar } from '../../ui/instrument.tsx';
 import { cn } from '../../ui/cn';
 import { useLegacy } from '../../data/query/useLegacy.ts';
+import { AnalyticsUsageSummarySchema } from '../../contracts/wire.ts';
 import {
   ANALYTICS_EVENT_LIMIT,
   describeWindow,
@@ -19,20 +20,6 @@ import {
 } from './usage.ts';
 
 const BASE = '/api/plugins/analytics';
-
-const UsagePayload = z
-  .object({
-    available: z.boolean(),
-    event_count: z.number().optional(),
-    by_category: z
-      .array(
-        z
-          .object({ kind: z.string(), category: z.string(), events: z.number() })
-          .passthrough(),
-      )
-      .optional(),
-  })
-  .passthrough();
 
 const HintsPayload = z
   .object({
@@ -114,7 +101,15 @@ const DiagnosticsPayload = z
  * covers is stated in hours beside it.
  */
 export function AgentsPage() {
-  const usage = useLegacy(['analytics', 'usage'], `${BASE}/usage`, UsagePayload);
+  // `analytics_api::usage` answers with the same body the overview route
+  // decodes as `AnalyticsUsageSummaryV1`, so this read is contracted even
+  // though the handler's own return type is still `Value`. Its three siblings
+  // below — underused, hints and diagnostics — are not modelled in Rust at all.
+  const usage = useLegacy(
+    ['analytics', 'usage'],
+    `${BASE}/usage`,
+    AnalyticsUsageSummarySchema,
+  );
   const hints = useLegacy(['analytics', 'underused'], `${BASE}/underused`, HintsPayload);
   const diagnostics = useLegacy(
     ['analytics', 'diagnostics'],
@@ -129,7 +124,7 @@ export function AgentsPage() {
   return (
     <LegacyBoundary title="Agents" pending={usage.isPending} result={usage.data}>
       {(data) => {
-        const rows = (data.by_category ?? []) as UsageRow[];
+        const rows: UsageRow[] = data.by_category;
         const dominance = summarizeDominance(rows);
         const diag =
           diagnostics.data?.outcome === 'ok' ? diagnostics.data.data : undefined;

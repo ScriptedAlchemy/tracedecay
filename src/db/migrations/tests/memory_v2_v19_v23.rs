@@ -76,7 +76,7 @@ async fn test_migrate_v19_pr7_schema_preserves_data_and_enforces_v20_to_v22_cont
             .await
             .expect("v19 PR7 schema should migrate through v20 and v21")
     );
-    assert_eq!(get_user_version(&conn).await, 24);
+    assert_eq!(get_user_version(&conn).await, LATEST_VERSION);
     assert!(column_exists(&conn, "memory_v2_backfill_progress", "cutover_receipt_json").await);
     assert!(column_exists(&conn, "memory_v2_proposals", "idempotency_key").await);
     assert!(column_exists(&conn, "memory_v2_proposals", "request_digest").await);
@@ -284,7 +284,7 @@ async fn test_migrate_v20_current_projection_adds_v21_compatibility_state() {
             .await
             .expect("v20 current projection should migrate to v21")
     );
-    assert_eq!(get_user_version(&conn).await, 24);
+    assert_eq!(get_user_version(&conn).await, LATEST_VERSION);
     for column in [
         "retrieval_count",
         "access_count",
@@ -389,7 +389,7 @@ async fn test_migrate_v21_adds_owner_bound_compatibility_receipt_ledger() {
             .await
             .expect("v21 current projection should migrate to v22")
     );
-    assert_eq!(get_user_version(&conn).await, 24);
+    assert_eq!(get_user_version(&conn).await, LATEST_VERSION);
     assert!(table_exists(&conn, "memory_v2_compatibility_operation_receipts").await);
     assert!(table_exists(&conn, "memory_v2_legacy_feedback_event_map").await);
     assert!(table_exists(&conn, "memory_v2_feedback_history").await);

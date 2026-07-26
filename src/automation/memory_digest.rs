@@ -343,7 +343,7 @@ pub fn memory_digest_snapshot_path(profile_root: &Path) -> PathBuf {
     agent_managed_root(profile_root).join(SNAPSHOT_FILE)
 }
 
-fn digest_targets_path(profile_root: &Path) -> PathBuf {
+pub(crate) fn digest_targets_path(profile_root: &Path) -> PathBuf {
     agent_managed_root(profile_root).join(TARGETS_FILE)
 }
 
