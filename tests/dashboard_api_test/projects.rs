@@ -138,7 +138,7 @@ fn dashboard_projects_endpoint_does_not_launder_registry_read_failure() {
     runtime.block_on(async {
         let fixture = start_dashboard_fixture_without_memory().await;
         let agent = http_agent_with_timeout(std::time::Duration::from_secs(20));
-        rusqlite::Connection::open(fixture._tmp.path().join("global/global.db"))
+        rusqlite::Connection::open(&fixture.global_db_path)
             .expect("open dashboard registry fixture")
             .execute_batch("DROP TABLE code_projects")
             .expect("break dashboard registry project reads");
