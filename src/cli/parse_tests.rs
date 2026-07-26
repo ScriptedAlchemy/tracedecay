@@ -412,6 +412,57 @@ fn host_bundle_recovery_commands_parse_agent_scope_and_quarantine() {
 }
 
 #[test]
+fn host_bundle_artifact_commands_parse_explicit_scope_and_confirmation() {
+    let backup = Cli::try_parse_from([
+        "tracedecay",
+        "host-bundle",
+        "artifact-backup",
+        "--agent",
+        "opencode",
+        "--component",
+        "agent",
+        "--yes",
+    ])
+    .expect("artifact backup is an explicit host-component command");
+    assert!(backup.yes);
+    assert_eq!(backup.component, Some(super::HostBundleComponentArg::Agent));
+    assert!(matches!(
+        backup.command,
+        Some(Commands::HostBundle {
+            action: HostBundleAction::ArtifactBackup { ref agent }
+        }) if agent == "opencode"
+    ));
+
+    let restore = Cli::try_parse_from([
+        "tracedecay",
+        "host-bundle",
+        "artifact-restore",
+        "--agent",
+        "opencode",
+        "--component",
+        "agent",
+        "--backup-id",
+        "01010101010101010101010101010101",
+        "--yes",
+    ])
+    .expect("artifact restore names its durable backup receipt");
+    assert!(restore.yes);
+    assert_eq!(
+        restore.component,
+        Some(super::HostBundleComponentArg::Agent)
+    );
+    assert!(matches!(
+        restore.command,
+        Some(Commands::HostBundle {
+            action: HostBundleAction::ArtifactRestore {
+                ref agent,
+                ref backup_id,
+            }
+        }) if agent == "opencode" && backup_id == "01010101010101010101010101010101"
+    ));
+}
+
+#[test]
 fn update_and_post_update_parse_no_heal_flag() {
     let update = Cli::try_parse_from(["tracedecay", "update", "--no-heal"])
         .expect("update --no-heal should parse");
