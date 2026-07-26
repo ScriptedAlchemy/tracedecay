@@ -23,8 +23,12 @@
  *     statics rather than pulling a fourth family in for coherence.
  *
  * Latin and Latin-Extended only, and no italics — the app sets none. Non-Latin
- * text falls through to Inter, which is still loaded for exactly that reason
- * (see --font-sans in tailwind.css).
+ * text falls through to `system-ui`, which carries Cyrillic, Greek and
+ * Vietnamese on every platform this ships to. Three families are vendored
+ * because three faces are designed; a fourth kept only to cover those scripts
+ * would ship real bytes to answer a case the platform already answers, and
+ * would sit between a designed face and the fallback where it could hide a
+ * missing glyph rather than reveal it.
  */
 
 /* ---- Archivo Variable: display (wght 100-900, wdth 62-125%) ---- */
