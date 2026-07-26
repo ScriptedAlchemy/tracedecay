@@ -12,8 +12,12 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
         let agent = http_agent();
         let url = format!("{}/api/settings", fixture.base_url);
 
-        let (status, settings) = get_json(&agent, &url);
-        assert_eq!(status, 200, "GET settings failed: {settings}");
+        let (status, settings_envelope) = get_json(&agent, &url);
+        assert_eq!(status, 200, "GET settings failed: {settings_envelope}");
+        assert_eq!(settings_envelope["schema_revision"], 1);
+        assert_eq!(settings_envelope["domain_state"], "ready");
+        assert_eq!(settings_envelope["coverage"]["completeness"], "complete");
+        let settings = settings_envelope["payload"].clone();
 
         assert_eq!(settings["project"]["config"]["git_ignore"], true);
         assert_eq!(settings["project"]["config"]["extract_docstrings"], true);
@@ -121,7 +125,7 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
         assert!(settings["environment"]["global_accounting_enabled"].is_boolean());
 
         let project_url = format!("{url}/project");
-        let (status, unchanged) = patch_json_body(
+        let (status, unchanged_envelope) = patch_json_body(
             &agent,
             &project_url,
             &json!({
@@ -129,11 +133,15 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
                 "max_file_size": 1_048_576
             }),
         );
-        assert_eq!(status, 200, "no-op project patch failed: {unchanged}");
+        assert_eq!(
+            status, 200,
+            "no-op project patch failed: {unchanged_envelope}"
+        );
+        let unchanged = unchanged_envelope["payload"].clone();
         assert_eq!(unchanged["resync_recommended"], false);
 
         let previous_revision = revision.clone();
-        let (status, patched) = patch_json_body(
+        let (status, patched_envelope) = patch_json_body(
             &agent,
             &project_url,
             &json!({
@@ -145,8 +153,9 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
         );
         assert_eq!(
             status, 200,
-            "project mutation through the injected control-plane client failed: {patched}"
+            "project mutation through the injected control-plane client failed: {patched_envelope}"
         );
+        let patched = patched_envelope["payload"].clone();
         assert_eq!(patched["resync_recommended"], true);
         assert_eq!(
             patched["project"]["config"]["max_file_size"], 2048,
@@ -230,7 +239,7 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
         assert_eq!(zero["validation_errors"][0]["field"], "max_file_size");
 
         let user_url = format!("{url}/user");
-        let (status, user) = patch_json_body(
+        let (status, user_envelope) = patch_json_body(
             &agent,
             &user_url,
             &json!({
@@ -239,7 +248,8 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
                 "watcher_debounce": "15s"
             }),
         );
-        assert_eq!(status, 200, "user patch failed: {user}");
+        assert_eq!(status, 200, "user patch failed: {user_envelope}");
+        let user = user_envelope["payload"].clone();
         assert_eq!(
             user["restart_recommended"], true,
             "watcher debounce changes need a daemon restart: {user}"
@@ -271,7 +281,7 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
         assert_eq!(stale_user["expected_revision_id"], user_revision);
         assert_eq!(stale_user["actual_revision_id"], next_user_revision);
 
-        let (status, upload_only) = patch_json_body(
+        let (status, upload_only_envelope) = patch_json_body(
             &agent,
             &user_url,
             &json!({
@@ -279,8 +289,17 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
                 "upload_enabled": true
             }),
         );
-        assert_eq!(status, 200, "upload-only patch failed: {upload_only}");
+        assert_eq!(
+            status, 200,
+            "upload-only patch failed: {upload_only_envelope}"
+        );
+        let upload_only = upload_only_envelope["payload"].clone();
         assert_eq!(upload_only["restart_recommended"], false);
+        let final_user_revision = upload_only["user"]["user_settings_revision_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("upload mutation omitted revision: {upload_only}"))
+            .to_owned();
+        assert_ne!(final_user_revision, next_user_revision);
 
         let (status, absent_user_revision) =
             patch_json_body(&agent, &user_url, &json!({ "upload_enabled": false }));
@@ -297,7 +316,7 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
             &agent,
             &user_url,
             &json!({
-                "expected_revision_id": next_user_revision,
+                "expected_revision_id": final_user_revision,
                 "watcher_debounce": "1h"
             }),
         );
@@ -307,8 +326,9 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
             "watcher_debounce"
         );
 
-        let (status, reloaded) = get_json(&agent, &url);
+        let (status, reloaded_envelope) = get_json(&agent, &url);
         assert_eq!(status, 200);
+        let reloaded = reloaded_envelope["payload"].clone();
         assert_eq!(reloaded["project"]["config"]["max_file_size"], 2048);
         assert_eq!(reloaded["project"]["config"]["include"][0], ".github/**");
         assert_eq!(reloaded["user"]["upload_enabled"], true);

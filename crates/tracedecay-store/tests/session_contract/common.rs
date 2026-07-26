@@ -29,7 +29,6 @@ pub(super) fn snapshot_for(
             SessionTemporalCapabilityV1::RefreshJoin,
             SessionTemporalCapabilityV1::RefreshProgressPersistence,
             SessionTemporalCapabilityV1::RefreshCancellation,
-            SessionTemporalCapabilityV1::MigrationReceipts,
         ]),
     )
 }
@@ -166,10 +165,6 @@ pub(super) fn operation_id() -> SessionRefreshOperationIdV1 {
     SessionRefreshOperationIdV1::new("refresh.fixture").unwrap()
 }
 
-pub(super) fn digest() -> SessionTemporalDigestV1 {
-    temporal_digest('4')
-}
-
 pub(super) fn temporal_digest(value: char) -> SessionTemporalDigestV1 {
     SessionTemporalDigestV1::new(format!("sha256:{}", value.to_string().repeat(64))).unwrap()
 }
@@ -272,7 +267,6 @@ fn session_contract_dtos_are_public_for_schema_and_kernel_adapters() {
         std::mem::size_of::<SessionGenerationActivationReceiptV1>(),
         std::mem::size_of::<SessionRetrievalPageV1>(),
         std::mem::size_of::<SessionSummaryPublicationRequestV1>(),
-        std::mem::size_of::<SessionSummaryPublicationReceiptV1>(),
         std::mem::size_of::<SessionRefreshBeginOrJoinRequestV1>(),
         std::mem::size_of::<SessionRefreshBeginOrJoinReceiptV1>(),
         std::mem::size_of::<SessionRefreshProgressRequestV1>(),
@@ -281,9 +275,6 @@ fn session_contract_dtos_are_public_for_schema_and_kernel_adapters() {
         std::mem::size_of::<SessionRefreshFailureRequestV1>(),
         std::mem::size_of::<SessionRefreshCancellationRequestV1>(),
         std::mem::size_of::<SessionRefreshReceiptV1>(),
-        std::mem::size_of::<SessionTemporalMigrationBatchV1>(),
-        std::mem::size_of::<SessionTemporalMigrationReceiptRequestV1>(),
-        std::mem::size_of::<SessionTemporalMigrationReceiptV1>(),
     );
 }
 
@@ -291,11 +282,9 @@ fn session_contract_dtos_are_public_for_schema_and_kernel_adapters() {
 pub(super) struct InMemorySessionState {
     pub(super) rebuild: Option<SessionGenerationRebuildReceiptV1>,
     pub(super) projection: Option<SessionTemporalProjectionBatchReceiptV1>,
-    pub(super) summary: Option<SessionSummaryRecordV1>,
     pub(super) refresh_request: Option<SessionRefreshBeginOrJoinRequestV1>,
     pub(super) refresh_progress: Option<SessionRefreshProgressV1>,
     pub(super) refresh_receipt: Option<SessionRefreshReceiptV1>,
-    pub(super) migration: Option<SessionTemporalMigrationReceiptV1>,
 }
 
 #[derive(Default)]
@@ -328,7 +317,6 @@ impl SessionTemporalCapabilityProvider for InMemorySessionPorts {
                     SessionTemporalCapabilityV1::RefreshJoin,
                     SessionTemporalCapabilityV1::RefreshProgressPersistence,
                     SessionTemporalCapabilityV1::RefreshCancellation,
-                    SessionTemporalCapabilityV1::MigrationReceipts,
                 ])
             });
         &CAPABILITIES

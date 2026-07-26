@@ -1728,6 +1728,16 @@ pub enum SessionSourceCoverageAggregateStateV1 {
     Partial,
 }
 
+pub const SESSION_TEMPORAL_CURSOR_MAX_PARTICIPANTS: usize = 256;
+pub const SESSION_TEMPORAL_CURSOR_MAX_CANONICAL_BYTES: usize = 65_536;
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum CursorManifestLimitKindV1 {
+    Participants,
+    CanonicalBytes,
+}
+
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SessionSourceCoverageReceiptV1 {

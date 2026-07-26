@@ -4,14 +4,16 @@
 //! unavailable authority, and a failed read. The existing graph Explorer JSON
 //! remains unchanged; new structure consumers receive `DashboardEnvelopeV1`.
 
+use std::borrow::Cow;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use axum::routing::get;
+use axum::{Json, Router};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -232,8 +234,8 @@ pub(super) struct TestMapMeasurementV1 {
     test_files: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
-struct NodeSessionsMeasurementV1 {
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub(super) struct NodeSessionsMeasurementV1 {
     node: NodeRefV1,
     linkage: super::loom_api::LoomFileSessionProjectionV1,
     available_granularities: Vec<&'static str>,
@@ -241,8 +243,55 @@ struct NodeSessionsMeasurementV1 {
     symbol_granularity_reason: &'static str,
 }
 
+pub(super) struct RegisteredDashboardRouteContractV1 {
+    pub(super) method: &'static str,
+    pub(super) path: &'static str,
+    pub(super) response_schema_name: fn() -> Cow<'static, str>,
+}
+
+fn response_schema_name<T: JsonSchema>() -> Cow<'static, str> {
+    T::schema_name()
+}
+
+macro_rules! contracted_graph_routes {
+    ($($path:literal => $handler:ident => $response:ty),+ $(,)?) => {
+        pub(super) fn contracted_routes() -> Router<DashboardState> {
+            Router::new()$(.route($path, get($handler)))+
+        }
+
+        pub(super) fn registered_route_contracts(
+        ) -> &'static [RegisteredDashboardRouteContractV1] {
+            &[
+                $(RegisteredDashboardRouteContractV1 {
+                    method: "GET",
+                    path: $path,
+                    response_schema_name: response_schema_name::<$response>,
+                },)+
+            ]
+        }
+    };
+}
+
+contracted_graph_routes! {
+    "/api/plugins/graph/call-chain"
+        => call_chain
+        => StructureReadV1<CallChainMeasurementV1>,
+    "/api/plugins/graph/strata"
+        => strata
+        => StructureReadV1<StrataMeasurementV1>,
+    "/api/plugins/graph/node/{node_id}/facts"
+        => node_facts
+        => StructureReadV1<FactMatchesMeasurementV1>,
+    "/api/plugins/graph/node/{node_id}/tests"
+        => node_tests
+        => StructureReadV1<TestMapMeasurementV1>,
+    "/api/plugins/graph/node/{node_id}/sessions"
+        => node_sessions
+        => StructureReadV1<NodeSessionsMeasurementV1>,
+}
+
 /// `GET /api/plugins/graph/call-chain`
-pub(crate) async fn call_chain(
+async fn call_chain(
     State(state): State<DashboardState>,
     JsonQuery(params): JsonQuery<CallChainParamsV1>,
 ) -> Response {
@@ -339,7 +388,7 @@ pub(crate) async fn call_chain(
 }
 
 /// `GET /api/plugins/graph/strata`
-pub(crate) async fn strata(State(state): State<DashboardState>) -> Response {
+async fn strata(State(state): State<DashboardState>) -> Response {
     let Some(graph) = state.project_graph.as_deref() else {
         return unmeasured_response::<StrataMeasurementV1>(
             &state,
@@ -479,7 +528,7 @@ pub(crate) async fn strata(State(state): State<DashboardState>) -> Response {
 }
 
 /// `GET /api/plugins/graph/node/{node_id}/facts`
-pub(crate) async fn node_facts(
+async fn node_facts(
     State(state): State<DashboardState>,
     JsonPath(node_id): JsonPath<String>,
 ) -> Response {
@@ -603,7 +652,7 @@ pub(crate) async fn node_facts(
 }
 
 /// `GET /api/plugins/graph/node/{node_id}/tests`
-pub(crate) async fn node_tests(
+async fn node_tests(
     State(state): State<DashboardState>,
     JsonPath(node_id): JsonPath<String>,
 ) -> Response {
@@ -729,7 +778,7 @@ pub(crate) async fn node_tests(
 }
 
 /// `GET /api/plugins/graph/node/{node_id}/sessions`
-pub(crate) async fn node_sessions(
+async fn node_sessions(
     State(state): State<DashboardState>,
     JsonPath(node_id): JsonPath<String>,
 ) -> Response {

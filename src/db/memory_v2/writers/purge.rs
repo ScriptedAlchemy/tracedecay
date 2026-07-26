@@ -5,11 +5,10 @@
 
 use serde::Serialize;
 use tracedecay_domain::{
-    FactEventId, FactId, FactLineageEventKindV1, FactLineageEventV1, FactOwnerV1,
+    ActorId, FactEventId, FactId, FactLineageEventKindV1, FactLineageEventV1, FactOwnerV1,
     PayloadAccessState, SourceStoreId, UtcMicros,
 };
 
-use crate::db::engine;
 use crate::db::engine::params;
 use crate::errors::Result;
 use crate::tracedecay::current_timestamp;
@@ -17,10 +16,12 @@ use crate::tracedecay::current_timestamp;
 use self::legacy_reclamation::LegacyReclamationAuthorization;
 use super::super::types::OwnerKey;
 use super::super::{
-    MemoryV2Executor, OPERATION, begin, canonical_replay, current_fact_state, db_error, db_message,
-    finish_transaction, load_legacy_entity_ids, optional_i64, optional_string, owner_key,
-    row_exists, validate_scope, validate_v1_compatibility_source,
+    MemoryV2Executor, OPERATION, canonical_replay, current_fact_state, db_error, db_message,
+    load_legacy_entity_ids, optional_i64, optional_string, owner_key, row_exists, validate_scope,
+    validate_v1_compatibility_source,
 };
+#[cfg(test)]
+use super::super::{begin, finish_transaction};
 use super::lineage::insert_event;
 
 /// Why a fact's payload is being purged. The variant, not an incidental
@@ -34,6 +35,7 @@ pub(in crate::db::memory_v2) enum PurgeIntent<'a> {
     /// lineage CAS expectation and requires a verified completed backfill.
     ReclaimLegacyPayload {
         expected_last_event_id: &'a FactEventId,
+        actor: Option<&'a ActorId>,
     },
 }
 
@@ -47,7 +49,7 @@ pub(in crate::db::memory_v2) enum PurgeIntent<'a> {
 mod legacy_reclamation {
     use tracedecay_domain::SourceStoreId;
 
-    use super::{MemoryV2Executor, OwnerKey, Result, db_message, params, row_exists};
+    use super::{MemoryV2Executor, OwnerKey, Result};
 
     pub(super) struct LegacyReclamationAuthorization {
         _verified: (),
@@ -59,25 +61,13 @@ mod legacy_reclamation {
             owner_key: &OwnerKey,
             source_store_id: &SourceStoreId,
         ) -> Result<Self> {
-            if row_exists(
+            super::super::super::cutover::verify_memory_v2_cutover_complete(
                 conn,
-                "SELECT 1 FROM memory_v2_backfill_progress
-                 WHERE owner_kind = ?1 AND project_id = ?2 AND source_store_id = ?3
-                   AND phase = 'cutover_complete'",
-                params![
-                    owner_key.kind,
-                    owner_key.project_id.as_str(),
-                    source_store_id.as_str()
-                ],
+                owner_key,
+                source_store_id,
             )
-            .await?
-            {
-                return Ok(Self { _verified: () });
-            }
-            Err(db_message(
-                "memory_v2_purge",
-                "legacy payload purge requires a verified completed backfill",
-            ))
+            .await?;
+            Ok(Self { _verified: () })
         }
     }
 }
@@ -108,8 +98,9 @@ impl MemoryV2LegacyPurgeReceipt {
 /// therefore always mints the `cutover_complete` authorization before any
 /// legacy row can be reclaimed. Production and tests share this exact code so
 /// the gate cannot be proven only in a test build.
+#[cfg(test)]
 pub(in crate::db) async fn purge_memory_v2_fact(
-    conn: &engine::Connection,
+    conn: &crate::db::engine::Connection,
     owner: &FactOwnerV1,
     source_store_id: &SourceStoreId,
     fact_id: &FactId,
@@ -134,6 +125,7 @@ pub(in crate::db) async fn purge_memory_v2_fact(
         fact_id,
         PurgeIntent::ReclaimLegacyPayload {
             expected_last_event_id,
+            actor: None,
         },
         occurred_at,
     )
@@ -144,6 +136,45 @@ pub(in crate::db) async fn purge_memory_v2_fact(
             .await
             .map_err(|error| db_error("memory_v2_purge", error))?;
     }
+    Ok(MemoryV2LegacyPurgeReceipt {
+        owner: owner.clone(),
+        source_store_id: source_store_id.clone(),
+        fact_id: fact_id.clone(),
+        expected_last_event_id: expected_last_event_id.clone(),
+        occurred_at,
+        payload_purged,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::db) async fn purge_memory_v2_fact_in_transaction(
+    conn: &impl MemoryV2Executor,
+    owner: &FactOwnerV1,
+    source_store_id: &SourceStoreId,
+    fact_id: &FactId,
+    expected_last_event_id: &FactEventId,
+    actor: Option<&ActorId>,
+    occurred_at: UtcMicros,
+) -> Result<MemoryV2LegacyPurgeReceipt> {
+    validate_scope(owner, source_store_id)?;
+    validate_v1_compatibility_source(source_store_id)?;
+    fact_id
+        .validate()
+        .map_err(|_| db_message("memory_v2_purge", "fact identity is invalid"))?;
+    let owner_key = owner_key(owner)?;
+    let payload_purged = purge_memory_v2_fact_inner(
+        conn,
+        owner,
+        &owner_key,
+        source_store_id,
+        fact_id,
+        PurgeIntent::ReclaimLegacyPayload {
+            expected_last_event_id,
+            actor,
+        },
+        occurred_at,
+    )
+    .await?;
     Ok(MemoryV2LegacyPurgeReceipt {
         owner: owner.clone(),
         source_store_id: source_store_id.clone(),
@@ -282,6 +313,7 @@ pub(in crate::db::memory_v2) async fn purge_memory_v2_fact_inner(
     let current = current_fact_state(conn, owner_key, fact_id).await?;
     if let PurgeIntent::ReclaimLegacyPayload {
         expected_last_event_id,
+        ..
     } = intent
         && expected_last_event_id != &current.last_event_id
     {
@@ -293,6 +325,10 @@ pub(in crate::db::memory_v2) async fn purge_memory_v2_fact_inner(
     if current.access == PayloadAccessState::Deleted {
         return Ok(false);
     }
+    let actor = match intent {
+        PurgeIntent::ReplayLegacyTombstone => None,
+        PurgeIntent::ReclaimLegacyPayload { actor, .. } => actor.cloned(),
+    };
     let event = FactLineageEventV1::new(
         fact_id.clone(),
         owner.clone(),
@@ -301,7 +337,7 @@ pub(in crate::db::memory_v2) async fn purge_memory_v2_fact_inner(
             current: PayloadAccessState::Deleted,
         },
         occurred_at,
-        None,
+        actor,
     )
     .map_err(|_| {
         db_message(

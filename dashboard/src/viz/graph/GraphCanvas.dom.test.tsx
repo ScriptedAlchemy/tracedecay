@@ -13,6 +13,7 @@ const sigmaState = vi.hoisted(() => ({
   refreshCount: 0,
   constructCount: 0,
   killCount: 0,
+  resizeCount: 0,
   strikeListeners: new Set<() => void>(),
 }));
 
@@ -81,6 +82,13 @@ vi.mock('sigma', () => ({
     }
 
     setCustomBBox() {}
+
+    /** Real Sigma exposes `resize(force?: boolean): this`; a live renderer
+     * absorbs a container resize through it rather than being rebuilt. */
+    resize() {
+      sigmaState.resizeCount += 1;
+      return this;
+    }
     on() {}
     refresh() {
       this.measure();
@@ -117,6 +125,7 @@ describe('GraphCanvas', () => {
     sigmaState.refreshCount = 0;
     sigmaState.constructCount = 0;
     sigmaState.killCount = 0;
+    sigmaState.resizeCount = 0;
     sigmaState.strikeListeners.clear();
     box.width = 640;
     box.height = 320;
@@ -217,6 +226,27 @@ describe('GraphCanvas', () => {
       deliverMeasurement();
 
       await waitFor(() => expect(sigmaState.constructCount).toBe(2));
+    });
+
+    // The counterpart to the three tests above, and the reason the renderer's
+    // lifetime is keyed on whether a box exists rather than on how big it is.
+    // Keying it on the dimensions made every drag of a window edge or opening
+    // of a side panel kill the renderer, rebuild the graphology graph and re-run
+    // the 200-iteration ForceAtlas2 settle -- a full layout per resize frame.
+    it('resizes the live renderer instead of rebuilding it', async () => {
+      render(<GraphCanvas nodes={NODES} edges={[]} />);
+      await waitFor(() => expect(sigmaState.constructCount).toBe(1));
+
+      box.width = 900;
+      box.height = 500;
+      deliverMeasurement();
+      box.width = 1200;
+      box.height = 640;
+      deliverMeasurement();
+
+      await waitFor(() => expect(sigmaState.resizeCount).toBeGreaterThan(0));
+      expect(sigmaState.constructCount).toBe(1);
+      expect(sigmaState.killCount).toBe(0);
     });
   });
 

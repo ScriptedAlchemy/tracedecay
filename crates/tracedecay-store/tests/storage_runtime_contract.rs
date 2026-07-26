@@ -684,34 +684,6 @@ impl RuntimeRequestProbeV1 for Probe {
     }
 }
 
-#[derive(Clone, Copy)]
-enum SubmitMode {
-    Commit,
-    InvalidReceipt,
-}
-
-struct FakeSubmitPort {
-    mode: SubmitMode,
-    calls: AtomicUsize,
-}
-
-impl StorageRuntimeSubmitPort for FakeSubmitPort {
-    fn dispatch_submit<'a>(
-        &'a self,
-        request: RuntimeSubmitRequestV1,
-        _probe: &'a dyn RuntimeRequestProbeV1,
-    ) -> StorageRuntimePortFutureV1<'a, RuntimeSubmitOutcomeV1> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        Box::pin(async move {
-            let mut receipt = commit_receipt(&request.envelope().metadata);
-            if matches!(self.mode, SubmitMode::InvalidReceipt) {
-                receipt.incarnation = incarnation(2);
-            }
-            Ok(RuntimeSubmitOutcomeV1::Committed { receipt })
-        })
-    }
-}
-
 struct FakeReadPort {
     calls: AtomicUsize,
 }
@@ -760,97 +732,9 @@ fn read_request(
 }
 
 #[test]
-fn async_runtime_ports_use_caller_owned_monotonic_interruption_decisions() {
-    let request = submit_request(metadata(
-        project_shard("project.one"),
-        DurabilityClassV1::Full,
-    ));
-    let probe = Probe::new(request.control(), None);
-    let commit_port = FakeSubmitPort {
-        mode: SubmitMode::Commit,
-        calls: AtomicUsize::new(0),
-    };
-    let object_safe_port: &dyn StorageRuntimeSubmitPort = &commit_port;
-    assert!(matches!(
-        block_on(object_safe_port.submit(request.clone(), &probe)).unwrap(),
-        RuntimeSubmitOutcomeV1::Committed { .. }
-    ));
-
-    let invalid_port = FakeSubmitPort {
-        mode: SubmitMode::InvalidReceipt,
-        calls: AtomicUsize::new(0),
-    };
-    assert!(matches!(
-        block_on(invalid_port.submit(request.clone(), &probe)),
-        Err(StorageRuntimePortErrorV1::InvalidResponse(
-            StorageRuntimeContractErrorV1::IncarnationMismatch { .. }
-        ))
-    ));
-
-    let deadline_port = FakeSubmitPort {
-        mode: SubmitMode::Commit,
-        calls: AtomicUsize::new(0),
-    };
-    let expired = Probe::new(
-        request.control(),
-        Some(RuntimeInterruptionV1::DeadlineExceeded),
-    );
-    assert!(matches!(
-        block_on(deadline_port.submit(request.clone(), &expired)).unwrap(),
-        RuntimeSubmitOutcomeV1::DeadlineExceededBeforeCommit { .. }
-    ));
-    assert_eq!(deadline_port.calls.load(Ordering::SeqCst), 0);
-
-    let cancellation_port = FakeSubmitPort {
-        mode: SubmitMode::Commit,
-        calls: AtomicUsize::new(0),
-    };
-    let cancelled = Probe::new(request.control(), Some(RuntimeInterruptionV1::Cancelled));
-    assert!(matches!(
-        block_on(cancellation_port.submit(request.clone(), &cancelled)).unwrap(),
-        RuntimeSubmitOutcomeV1::CancelledBeforeCommit {
-            stage: RuntimeCancellationStageV1::BeforeAdmission,
-            ..
-        }
-    ));
-    assert_eq!(cancellation_port.calls.load(Ordering::SeqCst), 0);
-
-    let mismatched_probe = Probe {
-        identity: RuntimeCancellationIdentityV1 {
-            cancellation_id: RuntimeCancellationIdV1::new("cancellation.other").unwrap(),
-            generation: 1,
-        },
-        deadline: request.control().deadline.clone(),
-        interruption: AtomicU8::new(0),
-    };
-    assert!(matches!(
-        block_on(cancellation_port.submit(request.clone(), &mismatched_probe)),
-        Err(StorageRuntimePortErrorV1::InvalidRequest(
-            StorageRuntimeContractErrorV1::ReceiptBindingMismatch {
-                field: "runtime cancellation probe identity"
-            }
-        ))
-    ));
-    assert_eq!(cancellation_port.calls.load(Ordering::SeqCst), 0);
-
-    let mismatched_deadline = Probe {
-        identity: request.control().cancellation.clone(),
-        deadline: RuntimeDeadlineV1 {
-            deadline_id: RuntimeDeadlineIdV1::new("deadline.other").unwrap(),
-        },
-        interruption: AtomicU8::new(0),
-    };
-    assert!(matches!(
-        block_on(cancellation_port.submit(request.clone(), &mismatched_deadline)),
-        Err(StorageRuntimePortErrorV1::InvalidRequest(
-            StorageRuntimeContractErrorV1::ReceiptBindingMismatch {
-                field: "runtime deadline probe identity"
-            }
-        ))
-    ));
-    assert_eq!(cancellation_port.calls.load(Ordering::SeqCst), 0);
-
+fn runtime_submit_outcomes_validate_request_identity() {
     let original = metadata(project_shard("project.one"), DurabilityClassV1::Full);
+    let request = submit_request(original.clone());
     let retry = StoreOperationMetadataV1 {
         operation_id: StoreOperationIdV1::new("operation.retry").unwrap(),
         ..original.clone()

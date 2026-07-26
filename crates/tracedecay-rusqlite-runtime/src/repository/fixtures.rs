@@ -48,6 +48,12 @@ pub const PRE_CUTOVER_ADAPTER_PARITY_FIXTURES_V1: &[AdapterParityFixtureV1] = &[
         ],
     },
     AdapterParityFixtureV1 {
+        family: "external_source",
+        write_payloads: &["external_source"],
+        read_operations: &["external_source_state"],
+        canonical_tables: &["external_source_states_v1"],
+    },
+    AdapterParityFixtureV1 {
         family: "sessions",
         write_payloads: &["session_projection", "session_summary"],
         read_operations: &["projection_batch", "summary"],

@@ -62,6 +62,8 @@ import { bloomStep, createSimulation, type Simulation } from '../../viz/trace/si
 import { resolveTracePalette } from '../../viz/trace/palette.ts';
 import { useReducedMotion, type MotionPreference } from '../../viz/trace/reducedMotion.ts';
 import type { SensoryChannelState, TraceModel, TraceNode } from '../../viz/trace/types.ts';
+import { CallChain } from './CallChain.tsx';
+import { NodeEvidence } from './NodeEvidence.tsx';
 import { GraphNeighborsPayloadSchema, type GraphNode } from './contracts.ts';
 
 const BASE = '/api/plugins/graph';
@@ -289,6 +291,14 @@ function TraceField({
               : 'hover a symbol to feel its weight, drag it to deform its neighbourhood'}
         </span>
       </div>
+
+      {/* What is known about the focus beyond its call edges, and a route
+       * through the neighbourhood the field can only show two hops of. Both
+       * sit between the field and the ranked list because they are readings
+       * about the SAME symbol the plate above is measuring — the list below is
+       * about its neighbours. */}
+      <NodeEvidence nodeId={focus.id} nodeName={displayName(focus)} />
+      <CallChain model={model} focusId={focus.id} />
 
       <TraceList model={model} focusId={focus.id} {...(onFocusChange ? { onFocusChange } : {})} />
     </div>

@@ -55,12 +55,7 @@ use tracedecay_domain::{
 };
 
 use super::artifact_store::AdmittedArtifactV1;
-use super::manifest::{
-    ArtifactMemberRoleV1, ArtifactProfileKindV1, DeviceClassV1,
-    EmbeddingNormalizationV1 as ManifestNormalizationV1, EmbeddingPoolingV1 as ManifestPoolingV1,
-    EmbeddingPrecisionV1 as ManifestPrecisionV1, SemanticMetricV1, Sha256DigestHex,
-    TruncationSideV1,
-};
+use super::manifest::{ArtifactMemberRoleV1, ArtifactProfileKindV1, Sha256DigestHex};
 use super::model_catalog::{CatalogMemberPinV1, CatalogedFastEmbedModelV1, catalog_package_digest};
 use crate::config::SemanticResourceCeilings;
 
@@ -355,11 +350,11 @@ impl AdmittedProjectionArtifactV1 {
             ProjectionArtifactPinV1::DocumentInstructionDigest,
         )?;
         require_pin(
-            key.pooling == bridge_pooling(payload.pooling),
+            key.pooling == payload.pooling,
             ProjectionArtifactPinV1::Pooling,
         )?;
         require_pin(
-            key.truncation_side == bridge_truncation_side(payload.truncation.side),
+            key.truncation_side == payload.truncation.side,
             ProjectionArtifactPinV1::TruncationSide,
         )?;
         require_pin(
@@ -376,7 +371,7 @@ impl AdmittedProjectionArtifactV1 {
             ProjectionArtifactPinV1::RuntimeBuildRevision,
         )?;
         require_pin(
-            key.device_class == bridge_device(payload.device),
+            key.device_class == payload.device,
             ProjectionArtifactPinV1::DeviceClass,
         )?;
         require_pin(
@@ -384,15 +379,15 @@ impl AdmittedProjectionArtifactV1 {
             ProjectionArtifactPinV1::Dimensions,
         )?;
         require_pin(
-            key.metric == bridge_metric(payload.metric),
+            key.metric == payload.metric,
             ProjectionArtifactPinV1::Metric,
         )?;
         require_pin(
-            key.normalization == bridge_normalization(payload.normalization),
+            key.normalization == payload.normalization,
             ProjectionArtifactPinV1::Normalization,
         )?;
         require_pin(
-            key.precision == bridge_precision(payload.precision),
+            key.precision == payload.precision,
             ProjectionArtifactPinV1::Precision,
         )?;
 
@@ -668,52 +663,6 @@ fn member_path(
         .package_member(role)
         .map(|member| member.path.clone())
         .ok_or(ProjectionArtifactPinV1::ManifestIdentity)
-}
-
-fn bridge_metric(metric: SemanticMetricV1) -> EmbeddingMetricV1 {
-    match metric {
-        SemanticMetricV1::Cosine => EmbeddingMetricV1::Cosine,
-        SemanticMetricV1::DotProduct => EmbeddingMetricV1::DotProduct,
-        SemanticMetricV1::EuclideanL2 => EmbeddingMetricV1::EuclideanL2,
-    }
-}
-
-fn bridge_normalization(normalization: ManifestNormalizationV1) -> EmbeddingNormalizationV1 {
-    match normalization {
-        ManifestNormalizationV1::L2 => EmbeddingNormalizationV1::L2,
-        ManifestNormalizationV1::None => EmbeddingNormalizationV1::None,
-    }
-}
-
-fn bridge_pooling(pooling: ManifestPoolingV1) -> EmbeddingPoolingV1 {
-    match pooling {
-        ManifestPoolingV1::Mean => EmbeddingPoolingV1::Mean,
-        ManifestPoolingV1::Cls => EmbeddingPoolingV1::Cls,
-        ManifestPoolingV1::LastToken => EmbeddingPoolingV1::LastToken,
-        ManifestPoolingV1::MeanSqrtLength => EmbeddingPoolingV1::MeanSqrtLength,
-    }
-}
-
-fn bridge_precision(precision: ManifestPrecisionV1) -> EmbeddingPrecisionV1 {
-    match precision {
-        ManifestPrecisionV1::Fp32 => EmbeddingPrecisionV1::Fp32,
-        ManifestPrecisionV1::Fp16 => EmbeddingPrecisionV1::Fp16,
-        ManifestPrecisionV1::Bf16 => EmbeddingPrecisionV1::Bf16,
-        ManifestPrecisionV1::Int8 => EmbeddingPrecisionV1::Int8,
-    }
-}
-
-fn bridge_device(device: DeviceClassV1) -> EmbeddingDeviceClassV1 {
-    match device {
-        DeviceClassV1::Cpu => EmbeddingDeviceClassV1::Cpu,
-    }
-}
-
-fn bridge_truncation_side(side: TruncationSideV1) -> EmbeddingTruncationSideV1 {
-    match side {
-        TruncationSideV1::Left => EmbeddingTruncationSideV1::Left,
-        TruncationSideV1::Right => EmbeddingTruncationSideV1::Right,
-    }
 }
 
 /// One typed embedding vector. Dimensions, metric, and normalization are
@@ -1903,71 +1852,6 @@ mod tests {
                 ..
             }))
         ));
-    }
-
-    #[test]
-    fn manifest_bridges_exhaustively_cover_domain_vector_types() {
-        assert_eq!(
-            [
-                bridge_metric(SemanticMetricV1::Cosine),
-                bridge_metric(SemanticMetricV1::DotProduct),
-                bridge_metric(SemanticMetricV1::EuclideanL2),
-            ],
-            [
-                EmbeddingMetricV1::Cosine,
-                EmbeddingMetricV1::DotProduct,
-                EmbeddingMetricV1::EuclideanL2,
-            ]
-        );
-        assert_eq!(
-            [
-                bridge_normalization(ManifestNormalizationV1::L2),
-                bridge_normalization(ManifestNormalizationV1::None),
-            ],
-            [EmbeddingNormalizationV1::L2, EmbeddingNormalizationV1::None,]
-        );
-        assert_eq!(
-            [
-                bridge_precision(ManifestPrecisionV1::Fp32),
-                bridge_precision(ManifestPrecisionV1::Fp16),
-                bridge_precision(ManifestPrecisionV1::Bf16),
-                bridge_precision(ManifestPrecisionV1::Int8),
-            ],
-            [
-                EmbeddingPrecisionV1::Fp32,
-                EmbeddingPrecisionV1::Fp16,
-                EmbeddingPrecisionV1::Bf16,
-                EmbeddingPrecisionV1::Int8,
-            ]
-        );
-        assert_eq!(
-            [
-                bridge_pooling(ManifestPoolingV1::Mean),
-                bridge_pooling(ManifestPoolingV1::Cls),
-                bridge_pooling(ManifestPoolingV1::LastToken),
-                bridge_pooling(ManifestPoolingV1::MeanSqrtLength),
-            ],
-            [
-                EmbeddingPoolingV1::Mean,
-                EmbeddingPoolingV1::Cls,
-                EmbeddingPoolingV1::LastToken,
-                EmbeddingPoolingV1::MeanSqrtLength,
-            ]
-        );
-        assert_eq!(
-            [
-                bridge_truncation_side(TruncationSideV1::Left),
-                bridge_truncation_side(TruncationSideV1::Right),
-            ],
-            [
-                EmbeddingTruncationSideV1::Left,
-                EmbeddingTruncationSideV1::Right,
-            ]
-        );
-        assert_eq!(
-            bridge_device(DeviceClassV1::Cpu),
-            EmbeddingDeviceClassV1::Cpu
-        );
     }
 
     #[test]
