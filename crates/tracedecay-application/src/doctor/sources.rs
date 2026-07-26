@@ -683,15 +683,12 @@ fn advisory_feedback_finding(
         "feedback coverage returned {}/{} findings; omitted {}",
         read.returned_findings, read.total_findings, read.omitted_findings
     );
-    let remediation = (!state.is_healthy_complete())
-        .then(|| action_remediation(operations::FEEDBACK_GET_FINDING))
-        .transpose()?;
     DoctorFindingV1::new(
         DoctorFindingFamilyV1::Advisory,
         state,
         evidence,
         DoctorCoverageStatementV1::new(completeness, statement)?,
-        remediation,
+        None,
     )
 }
 
