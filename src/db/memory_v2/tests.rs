@@ -11,8 +11,8 @@ use super::backfill::facts::ensure_legacy_identity;
 use super::repair::repair_memory_v2_feedback_history_batch;
 use super::schema::{proposal_schema_is_v22, table_exists, table_has_column};
 use super::writers::{
-    ensure_current, insert_event, insert_fact_identity, insert_mapping, purge_memory_v2_fact,
-    purge_payload_rows, update_current,
+    ensure_current, insert_event, insert_fact_identity, insert_mapping, purge_payload_rows,
+    update_current,
 };
 use super::*;
 
@@ -1308,6 +1308,7 @@ async fn purge_is_owner_store_fact_scoped_and_clears_payload_fts_and_vectors() {
         )
         .await
         .unwrap()
+        .payload_purged()
     );
     assert!(
         purge_memory_v2_fact(
@@ -1336,6 +1337,7 @@ async fn purge_is_owner_store_fact_scoped_and_clears_payload_fts_and_vectors() {
         )
         .await
         .unwrap()
+        .payload_purged()
     );
     assert_eq!(
         scalar(&conn, "SELECT COUNT(*) FROM memory_v2_assertion_payloads").await,
@@ -1469,6 +1471,7 @@ async fn purge_clears_runtime_fact_payload_without_a_legacy_mapping() {
         )
         .await
         .unwrap()
+        .payload_purged()
     );
     assert_eq!(
         scalar(&conn, "SELECT COUNT(*) FROM memory_v2_assertion_payloads").await,

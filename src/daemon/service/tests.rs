@@ -223,7 +223,7 @@ fn daemon_protocol_probe_requires_current_tracedecay_identity() {
     let ready_server = serve_probe_response(
         ready_listener,
         "tracedecay",
-        env!("CARGO_PKG_VERSION"),
+        crate::version::build_version(),
         None,
     );
     assert_eq!(
@@ -263,7 +263,7 @@ fn daemon_protocol_probe_authenticates_to_managed_daemon() {
     let server = serve_probe_response(
         listener,
         "tracedecay",
-        env!("CARGO_PKG_VERSION"),
+        crate::version::build_version(),
         Some(authority.auth_token().to_string()),
     );
 
