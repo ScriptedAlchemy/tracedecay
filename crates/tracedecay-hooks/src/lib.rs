@@ -28,8 +28,9 @@ pub use config::{
     hook_configuration_path,
 };
 pub use native::{
-    DecodedNativeHookEventV1, NativeEnvelopeMaterialV1, NativeHookDecodeError, NativeHookSignalV1,
-    OpenCodePluginSurfaceV1, decode_bound_native_hook_event, decode_native_hook_event,
+    DecodedNativeHookEventV1, DecodedOpenCodeLspEventV1, NativeEnvelopeMaterialV1,
+    NativeHookDecodeError, NativeHookSignalV1, OpenCodePluginSurfaceV1,
+    decode_bound_native_hook_event, decode_native_hook_event, decode_opencode_lsp_event,
     decode_opencode_plugin_event,
 };
 pub use runtime::{

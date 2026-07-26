@@ -1006,6 +1006,7 @@ mod tests {
             .unwrap();
         assert!(plugin.contains("await dispatch(\"hook-opencode-tool-after\", { input, output })"));
         assert!(plugin.contains("await dispatch(\"hook-opencode-event\", event)"));
+        assert!(plugin.contains("event.type === \"lsp.updated\""));
     }
 
     #[test]

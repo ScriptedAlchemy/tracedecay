@@ -96,6 +96,12 @@ pub async fn hook_kimi_v2(event_json: &str, project_root: &Path) -> Option<Strin
 }
 
 pub async fn hook_opencode_v2_event(event_json: &str, project_root: &Path) -> Option<String> {
+    if tracedecay_hooks::decode_opencode_lsp_event(event_json.as_bytes()).is_ok() {
+        return match v2::dispatch_opencode_lsp_updated(event_json, project_root).await {
+            v2::HookV2Dispatch::Handled { guidance, .. } => guidance,
+            v2::HookV2Dispatch::NotApplicable => None,
+        };
+    }
     match v2::dispatch(
         tracedecay_hooks::HookHostV1::OpenCode,
         event_json,

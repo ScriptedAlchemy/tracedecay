@@ -36,6 +36,17 @@ pub enum OpenCodePluginSurfaceV1 {
     ToolExecuteAfter,
 }
 
+/// Content-free result of decoding OpenCode's native project-scoped LSP event.
+///
+/// `lsp.updated` has no session identity and therefore must not be coerced into
+/// the session-scoped Hook V2 envelope. The daemon ingests it through the
+/// project-scoped host-event path instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DecodedOpenCodeLspEventV1 {
+    pub ordering: HookOrderingV1,
+}
+
 impl OpenCodePluginSurfaceV1 {
     pub const fn native_name(self) -> &'static str {
         match self {
@@ -186,6 +197,22 @@ pub fn decode_opencode_plugin_event(
         OpenCodePluginSurfaceV1::ToolExecuteAfter => decode_opencode_tool_after(&raw)?,
     };
     finish_decoded_native_event(HookHostV1::OpenCode, signal, &raw)
+}
+
+pub fn decode_opencode_lsp_event(
+    payload: &[u8],
+) -> Result<DecodedOpenCodeLspEventV1, NativeHookDecodeError> {
+    let raw = parse_native_payload(payload)?;
+    if event_name(&raw, "type")? != "lsp.updated" {
+        return Err(NativeHookDecodeError::UnsupportedNativeEvent);
+    }
+    let event = decode_shape::<OpenCodeLspUpdatedEvent>(&raw)?;
+    if event.id.is_empty() {
+        return Err(NativeHookDecodeError::MissingTypedIdentity);
+    }
+    Ok(DecodedOpenCodeLspEventV1 {
+        ordering: native_ordering(&raw)?,
+    })
 }
 
 fn parse_native_payload(payload: &[u8]) -> Result<Value, NativeHookDecodeError> {
@@ -407,6 +434,21 @@ struct OpenCodeBusEvent {
     id: String,
     properties: OpenCodeEventProperties,
 }
+
+#[allow(dead_code)]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OpenCodeLspUpdatedEvent {
+    id: String,
+    #[serde(rename = "type")]
+    kind: String,
+    properties: OpenCodeLspUpdatedProperties,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OpenCodeLspUpdatedProperties {}
 
 #[allow(dead_code)]
 #[derive(Deserialize)]
@@ -761,6 +803,12 @@ mod tests {
             .unwrap()
             .signal,
             NativeHookSignalV1::SavedEdit
+        );
+        assert_eq!(
+            decode_opencode_lsp_event(fixture_request(opencode, "lsp_updated").as_slice(),)
+                .unwrap()
+                .ordering,
+            HookOrderingV1::Unknown
         );
     }
 
