@@ -184,6 +184,26 @@ pub(in crate::db::memory_v2) async fn purge_memory_v2_fact_inner(
     {
         return Ok(false);
     }
+    if expected_last_event_id.is_some()
+        && legacy_fact_id.is_some()
+        && !row_exists(
+            conn,
+            "SELECT 1 FROM memory_v2_backfill_progress
+             WHERE owner_kind = ?1 AND project_id = ?2 AND source_store_id = ?3
+               AND phase = 'cutover_complete'",
+            params![
+                owner_key.kind,
+                owner_key.project_id.as_str(),
+                source_store_id.as_str()
+            ],
+        )
+        .await?
+    {
+        return Err(db_message(
+            "memory_v2_purge",
+            "legacy payload purge requires a verified completed backfill",
+        ));
+    }
     let current = current_fact_state(conn, owner_key, fact_id).await?;
     if expected_last_event_id.is_some_and(|expected| expected != &current.last_event_id) {
         return Err(db_message(

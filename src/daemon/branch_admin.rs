@@ -918,7 +918,7 @@ impl StoreAdministration {
                         self.prove_no_external_branch_store_holders(paths)?;
                         crate::migrate::memory_cutover::verify_branch_removal_receipts(
                             data_root,
-                            &database_paths,
+                            &canonical_paths,
                             paths,
                         )
                     },
@@ -992,7 +992,7 @@ impl StoreAdministration {
                     self.prove_no_external_branch_store_holders(paths)?;
                     crate::migrate::memory_cutover::verify_branch_removal_receipts(
                         data_root,
-                        &database_paths,
+                        &canonical_paths,
                         paths,
                     )
                 },
