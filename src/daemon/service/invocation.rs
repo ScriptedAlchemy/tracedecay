@@ -12,6 +12,7 @@ use std::fmt;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, RwLock, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -26,27 +27,29 @@ use tracedecay_application::{
     ApplicationOperation, ApplicationOutcome, ApplicationProblem, ApplicationProblemKind,
     ApplicationResult, AuthorityReceipt, CallableCodeAuthorizationPort, CallableCodeOperationKind,
     CallableCodeQueryService, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot,
-    Deadline, DiagnosticProviderIdentity, DisclosureClass, EffectId, EffectReceipt, EffectResult,
-    EffectTermination, EvidenceAuthority, EvidenceCoverage, EvidenceDomain, EvidencePacket,
-    EvidenceScore, GitIndexApplyPortResultV1, GitIndexApplyRequestV1, GitIndexEffectProofV1,
+    CoverageCompleteness, CoverageDomainState, Deadline, DiagnosticProviderIdentity,
+    DisclosureClass, EffectId, EffectReceipt, EffectResult, EffectTermination, EvidenceAuthority,
+    EvidenceCoverage, EvidenceDomain, EvidenceIdentity, EvidencePacket, EvidenceScore,
+    GitIndexApplyPortResultV1, GitIndexApplyRequestV1, GitIndexEffectProofV1,
     GitIndexOperationBindingV1, GitIndexPreviewPortResultV1, GitIndexPreviewRequestV1,
     GitIndexRecoveryRequestV1, GitIndexTransactionApplicationError, GitIndexTransactionPort,
     GitIndexTransactionPortError, GitIndexTransactionService, IdempotencyKey, Omission,
-    OperationBudgetUsage, OperationReceipt, OperationTermination, PageRequest, PageState,
-    PolicyConsumerV1, PolicyDecisionRef, PolicyEvaluationContextV1, PolicyEvaluatorCompositionV1,
+    OmissionReason, OperationBudgetUsage, OperationReceipt, OperationTermination, PageRequest,
+    PageState, PolicyDecisionRef, PolicyEvaluationContextV1, PolicyEvaluatorCompositionV1,
     PolicyEvidenceHorizonV1, PreviewId, PreviewResult, ReconciliationState, RequestContext,
     RequestId, ResolvedScope, RetrieverContribution, RetryDirective, SafeDiagnostic, TemporalState,
     callable_code_operations,
 };
 use tracedecay_domain::configuration::{
-    ConfigurationGrantId, ConfigurationGrantReceiptId, ConfigurationMutationEffectV1,
-    ConfigurationMutationGrantReceiptV1, ConfigurationMutationOperationV1,
-    ConfigurationMutationSinkV1, ConfigurationRevisionId, ProtectedApplyRequest,
+    CandidateDispositionV1, ConfigurationGrantId, ConfigurationGrantReceiptId,
+    ConfigurationLayerIdV1, ConfigurationMutationEffectV1, ConfigurationMutationGrantReceiptV1,
+    ConfigurationMutationOperationV1, ConfigurationMutationSinkV1, ConfigurationRevisionId,
+    ConfigurationSnapshotV1, ProtectedApplyRequest,
 };
 use tracedecay_domain::{
     AccessPolicyDigest, ActorId, ComponentVersion, GitHeadStateV1, GitIndexPreviewId,
     GitIndexPreviewV1, GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1,
-    ManifestDigest, ProjectId, RetrievalAnchorId, UtcMicros, canonical_sha256,
+    ManifestDigest, ProjectId, RetrievalAnchorId, UserProfileId, UtcMicros, canonical_sha256,
 };
 use tracedecay_policy::configuration::{
     ConfigurationMutationGrantSnapshotV1, ConfigurationMutationGrantStateV1,
@@ -56,7 +59,7 @@ use tracedecay_policy::{
     AnalyzerAdmissionInputV1, CapabilityAvailabilityV1, CapabilityEffectClassV1, ScopeMatchV1,
     TruthFreshnessRequirementV1, TruthSourceStateV1,
 };
-use tracedecay_tool_catalog::{EffectClass, SortContractId, UseCaseId};
+use tracedecay_tool_catalog::{CapabilityId, EffectClass, SortContractId, UseCaseId};
 
 use crate::agents::context_scout_ports::{
     AdmittedContextScoutHookV1, ContextScoutLifecycleAddressV1,
@@ -79,6 +82,7 @@ use crate::application::configuration::{
     ConfigurationRollbackRequest, CredentialWriteHandleV1, DirectConfigurationMutation,
     PolicyBackedConfigurationMutationAuthorization, ProjectConfigurationRuntime,
     ScopeResolutionPort, ScopeRevalidationEvidenceV1, WriteOnlyCredentialMutation,
+    configuration_layer_scope_digest,
 };
 use crate::application::feedback::concrete::{
     Pr12FeedbackRuntime, Pr12FeedbackRuntimeError, ProjectFeedbackStore, open_pr12_feedback_runtime,
@@ -114,7 +118,7 @@ use crate::application::semantic_runtime::{
 };
 use crate::application_surface::{
     ConfigurationSurfaceRequest, ContextScoutSurfaceRequest, GitApplySurfaceRequest,
-    GitPreviewSurfaceRequest,
+    GitPreviewSurfaceRequest, GitReadSurfaceRequest,
 };
 use crate::daemon::callable_code_authorization::DaemonCallableCodeAuthorizationSource;
 use crate::daemon::git_transactions::{
@@ -161,12 +165,18 @@ const MAX_OPAQUE_HANDLE_BYTES: usize = 256;
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum DaemonInvocationOperation {
+    GitStatus,
+    GitDiff,
+    GitHistory,
+    GitBlame,
+    GitHunks,
     GitPreview,
     GitApply,
     FeedbackDiagnostics,
     FeedbackGet,
     FeedbackExpand,
     FeedbackList,
+    FeedbackAdvisoryCycle,
     FeedbackImpact,
     AffectedTests,
     FeedbackObserve,
@@ -177,6 +187,12 @@ pub(crate) enum DaemonInvocationOperation {
     CodeExactOccurrence,
     CodePhraseSearch,
     CodeCallees,
+    CodeFacets,
+    CodeTimeline,
+    CodeDeclaration,
+    CodeDefinition,
+    CodeTypeDefinition,
+    CodeReferences,
     Configuration,
     ContextScout,
     SemanticEvaluateAndPublish,
@@ -184,18 +200,25 @@ pub(crate) enum DaemonInvocationOperation {
     LspFrame,
     LspPoll,
     LspAcknowledge,
+    LspReconnect,
     LspDetach,
 }
 
 impl DaemonInvocationOperation {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
+            Self::GitStatus => "git_status",
+            Self::GitDiff => "git_diff",
+            Self::GitHistory => "git_history",
+            Self::GitBlame => "git_blame",
+            Self::GitHunks => "git_hunks",
             Self::GitPreview => "git_preview",
             Self::GitApply => "git_apply",
             Self::FeedbackDiagnostics => "feedback_diagnostics",
             Self::FeedbackGet => "feedback_get",
             Self::FeedbackExpand => "feedback_expand",
             Self::FeedbackList => "feedback_list",
+            Self::FeedbackAdvisoryCycle => "feedback_advisory_cycle",
             Self::FeedbackImpact => "feedback_impact",
             Self::AffectedTests => "affected_tests",
             Self::FeedbackObserve => "feedback_observe",
@@ -206,6 +229,12 @@ impl DaemonInvocationOperation {
             Self::CodeExactOccurrence => "code_exact_occurrence",
             Self::CodePhraseSearch => "code_phrase_search",
             Self::CodeCallees => "code_callees",
+            Self::CodeFacets => "code_facets",
+            Self::CodeTimeline => "code_timeline",
+            Self::CodeDeclaration => "code_declaration",
+            Self::CodeDefinition => "code_definition",
+            Self::CodeTypeDefinition => "code_type_definition",
+            Self::CodeReferences => "code_references",
             Self::Configuration => "configuration",
             Self::ContextScout => "context_scout",
             Self::SemanticEvaluateAndPublish => "semantic_evaluate_and_publish",
@@ -213,6 +242,7 @@ impl DaemonInvocationOperation {
             Self::LspFrame => "lsp_frame",
             Self::LspPoll => "lsp_poll",
             Self::LspAcknowledge => "lsp_acknowledge",
+            Self::LspReconnect => "lsp_reconnect",
             Self::LspDetach => "lsp_detach",
         }
     }
@@ -271,6 +301,13 @@ pub(crate) struct DaemonInvocationRequest {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case")]
 pub(crate) enum DaemonInvocationPayload {
+    GitRead {
+        surface_operation: crate::application_surface::ApplicationSurfaceOperation,
+        request: GitReadSurfaceRequest,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
     GitPreview {
         request: GitPreviewSurfaceRequest,
         observed_at: UtcMicros,
@@ -307,6 +344,12 @@ pub(crate) enum DaemonInvocationPayload {
         deadline: Deadline,
         cancellation: CancellationContext,
     },
+    FeedbackAdvisoryCycle {
+        document_uri: String,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    },
     FeedbackImpact {
         request_handle: String,
         observed_at: UtcMicros,
@@ -337,6 +380,7 @@ pub(crate) enum DaemonInvocationPayload {
         cancellation: CancellationContext,
     },
     PrimitiveTestResults {
+        page: PageRequest,
         observed_at: UtcMicros,
         deadline: Deadline,
         cancellation: CancellationContext,
@@ -396,12 +440,38 @@ pub(crate) enum DaemonInvocationPayload {
     LspAcknowledge {
         session: DaemonLspSessionAccess,
     },
+    LspReconnect {
+        session: DaemonLspSessionAccess,
+    },
     LspDetach {
         session: DaemonLspSessionAccess,
     },
 }
 
 impl DaemonInvocationRequest {
+    pub(crate) fn git_read(
+        request_id: impl Into<String>,
+        surface_operation: crate::application_surface::ApplicationSurfaceOperation,
+        request: GitReadSurfaceRequest,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    ) -> Self {
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: request_id.into(),
+            delivery_route: None,
+            payload: DaemonInvocationPayload::GitRead {
+                surface_operation,
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            },
+        }
+    }
+
     pub(crate) fn git_preview(
         request_id: impl Into<String>,
         request: GitPreviewSurfaceRequest,
@@ -502,6 +572,7 @@ impl DaemonInvocationRequest {
                 }
             }
             crate::application_surface::ApplicationSurfaceOperation::TestResults
+            | crate::application_surface::ApplicationSurfaceOperation::FeedbackAdvisoryCycle
             | crate::application_surface::ApplicationSurfaceOperation::SessionLookup
             | crate::application_surface::ApplicationSurfaceOperation::QualifiedName
             | crate::application_surface::ApplicationSurfaceOperation::CallChain
@@ -512,6 +583,7 @@ impl DaemonInvocationRequest {
             | crate::application_surface::ApplicationSurfaceOperation::ModuleApi
             | crate::application_surface::ApplicationSurfaceOperation::FileMetadata
             | crate::application_surface::ApplicationSurfaceOperation::HealthRead
+            | crate::application_surface::ApplicationSurfaceOperation::HealthDelta
             | crate::application_surface::ApplicationSurfaceOperation::StorageStatus
             | crate::application_surface::ApplicationSurfaceOperation::DiagnosticsRead
             | crate::application_surface::ApplicationSurfaceOperation::CodeSymbolSearch
@@ -523,10 +595,21 @@ impl DaemonInvocationRequest {
             }
             crate::application_surface::ApplicationSurfaceOperation::CodeExactOccurrence
             | crate::application_surface::ApplicationSurfaceOperation::CodePhraseSearch
-            | crate::application_surface::ApplicationSurfaceOperation::CodeCallees => {
+            | crate::application_surface::ApplicationSurfaceOperation::CodeCallees
+            | crate::application_surface::ApplicationSurfaceOperation::CodeFacets
+            | crate::application_surface::ApplicationSurfaceOperation::CodeTimeline
+            | crate::application_surface::ApplicationSurfaceOperation::CodeDeclaration
+            | crate::application_surface::ApplicationSurfaceOperation::CodeDefinition
+            | crate::application_surface::ApplicationSurfaceOperation::CodeTypeDefinition
+            | crate::application_surface::ApplicationSurfaceOperation::CodeReferences => {
                 unreachable!("callable code operations use their typed constructor")
             }
-            crate::application_surface::ApplicationSurfaceOperation::GitPreview
+            crate::application_surface::ApplicationSurfaceOperation::GitStatus
+            | crate::application_surface::ApplicationSurfaceOperation::GitDiff
+            | crate::application_surface::ApplicationSurfaceOperation::GitHistory
+            | crate::application_surface::ApplicationSurfaceOperation::GitBlame
+            | crate::application_surface::ApplicationSurfaceOperation::GitHunks
+            | crate::application_surface::ApplicationSurfaceOperation::GitPreview
             | crate::application_surface::ApplicationSurfaceOperation::GitApply => {
                 unreachable!("Git operations use their typed constructors")
             }
@@ -565,6 +648,27 @@ impl DaemonInvocationRequest {
             request_id: request_id.into(),
             delivery_route: None,
             payload,
+        }
+    }
+
+    pub(crate) fn feedback_advisory_cycle(
+        request_id: impl Into<String>,
+        document_uri: String,
+        observed_at: UtcMicros,
+        deadline: Deadline,
+        cancellation: CancellationContext,
+    ) -> Self {
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: request_id.into(),
+            delivery_route: None,
+            payload: DaemonInvocationPayload::FeedbackAdvisoryCycle {
+                document_uri,
+                observed_at,
+                deadline,
+                cancellation,
+            },
         }
     }
 
@@ -616,8 +720,9 @@ impl DaemonInvocationRequest {
             },
             (
                 crate::application_surface::ApplicationSurfaceOperation::TestResults,
-                Pr12PrimitiveRequest::RecentTestResults,
+                Pr12PrimitiveRequest::RecentTestResults(page),
             ) => DaemonInvocationPayload::PrimitiveTestResults {
+                page,
                 observed_at,
                 deadline,
                 cancellation,
@@ -661,6 +766,10 @@ impl DaemonInvocationRequest {
             | (
                 surface_operation @ crate::application_surface::ApplicationSurfaceOperation::HealthRead,
                 request @ Pr12PrimitiveRequest::HealthRead(_),
+            )
+            | (
+                surface_operation @ crate::application_surface::ApplicationSurfaceOperation::HealthDelta,
+                request @ Pr12PrimitiveRequest::HealthDelta(_),
             )
             | (
                 surface_operation @ crate::application_surface::ApplicationSurfaceOperation::StorageStatus,
@@ -768,6 +877,24 @@ impl DaemonInvocationRequest {
             ) | (
                 crate::application_surface::CallableCodeSurfaceRequest::Callees(_),
                 crate::application_surface::ApplicationSurfaceOperation::CodeCallees,
+            ) | (
+                crate::application_surface::CallableCodeSurfaceRequest::Facets(_),
+                crate::application_surface::ApplicationSurfaceOperation::CodeFacets,
+            ) | (
+                crate::application_surface::CallableCodeSurfaceRequest::Timeline(_),
+                crate::application_surface::ApplicationSurfaceOperation::CodeTimeline,
+            ) | (
+                crate::application_surface::CallableCodeSurfaceRequest::Declaration(_),
+                crate::application_surface::ApplicationSurfaceOperation::CodeDeclaration,
+            ) | (
+                crate::application_surface::CallableCodeSurfaceRequest::Definition(_),
+                crate::application_surface::ApplicationSurfaceOperation::CodeDefinition,
+            ) | (
+                crate::application_surface::CallableCodeSurfaceRequest::TypeDefinition(_),
+                crate::application_surface::ApplicationSurfaceOperation::CodeTypeDefinition,
+            ) | (
+                crate::application_surface::CallableCodeSurfaceRequest::References(_),
+                crate::application_surface::ApplicationSurfaceOperation::CodeReferences,
             )
         ));
         Self {
@@ -883,6 +1010,19 @@ impl DaemonInvocationRequest {
         }
     }
 
+    pub(crate) fn lsp_reconnect(
+        request_id: impl Into<String>,
+        session: DaemonLspSessionAccess,
+    ) -> Self {
+        Self {
+            protocol: DAEMON_INVOCATION_PROTOCOL.to_owned(),
+            revision: DAEMON_INVOCATION_REVISION,
+            request_id: request_id.into(),
+            delivery_route: None,
+            payload: DaemonInvocationPayload::LspReconnect { session },
+        }
+    }
+
     pub(crate) fn with_delivery_route(mut self, route: Plan26DeliveryRouteV1) -> Self {
         self.delivery_route = Some(route);
         self
@@ -890,6 +1030,26 @@ impl DaemonInvocationRequest {
 
     pub(crate) fn operation(&self) -> DaemonInvocationOperation {
         match self.payload {
+            DaemonInvocationPayload::GitRead {
+                surface_operation, ..
+            } => match surface_operation {
+                crate::application_surface::ApplicationSurfaceOperation::GitStatus => {
+                    DaemonInvocationOperation::GitStatus
+                }
+                crate::application_surface::ApplicationSurfaceOperation::GitDiff => {
+                    DaemonInvocationOperation::GitDiff
+                }
+                crate::application_surface::ApplicationSurfaceOperation::GitHistory => {
+                    DaemonInvocationOperation::GitHistory
+                }
+                crate::application_surface::ApplicationSurfaceOperation::GitBlame => {
+                    DaemonInvocationOperation::GitBlame
+                }
+                crate::application_surface::ApplicationSurfaceOperation::GitHunks => {
+                    DaemonInvocationOperation::GitHunks
+                }
+                _ => unreachable!("Git read payloads use a Git read surface operation"),
+            },
             DaemonInvocationPayload::GitPreview { .. } => DaemonInvocationOperation::GitPreview,
             DaemonInvocationPayload::GitApply { .. } => DaemonInvocationOperation::GitApply,
             DaemonInvocationPayload::FeedbackDiagnostics { .. } => {
@@ -900,6 +1060,9 @@ impl DaemonInvocationRequest {
                 DaemonInvocationOperation::FeedbackExpand
             }
             DaemonInvocationPayload::FeedbackList { .. } => DaemonInvocationOperation::FeedbackList,
+            DaemonInvocationPayload::FeedbackAdvisoryCycle { .. } => {
+                DaemonInvocationOperation::FeedbackAdvisoryCycle
+            }
             DaemonInvocationPayload::FeedbackImpact { .. } => {
                 DaemonInvocationOperation::FeedbackImpact
             }
@@ -936,6 +1099,30 @@ impl DaemonInvocationRequest {
                 request: crate::application_surface::CallableCodeSurfaceRequest::Callees(_),
                 ..
             } => DaemonInvocationOperation::CodeCallees,
+            DaemonInvocationPayload::CallableCode {
+                request: crate::application_surface::CallableCodeSurfaceRequest::Facets(_),
+                ..
+            } => DaemonInvocationOperation::CodeFacets,
+            DaemonInvocationPayload::CallableCode {
+                request: crate::application_surface::CallableCodeSurfaceRequest::Timeline(_),
+                ..
+            } => DaemonInvocationOperation::CodeTimeline,
+            DaemonInvocationPayload::CallableCode {
+                request: crate::application_surface::CallableCodeSurfaceRequest::Declaration(_),
+                ..
+            } => DaemonInvocationOperation::CodeDeclaration,
+            DaemonInvocationPayload::CallableCode {
+                request: crate::application_surface::CallableCodeSurfaceRequest::Definition(_),
+                ..
+            } => DaemonInvocationOperation::CodeDefinition,
+            DaemonInvocationPayload::CallableCode {
+                request: crate::application_surface::CallableCodeSurfaceRequest::TypeDefinition(_),
+                ..
+            } => DaemonInvocationOperation::CodeTypeDefinition,
+            DaemonInvocationPayload::CallableCode {
+                request: crate::application_surface::CallableCodeSurfaceRequest::References(_),
+                ..
+            } => DaemonInvocationOperation::CodeReferences,
             DaemonInvocationPayload::Configuration { .. } => {
                 DaemonInvocationOperation::Configuration
             }
@@ -949,6 +1136,7 @@ impl DaemonInvocationRequest {
             DaemonInvocationPayload::LspAcknowledge { .. } => {
                 DaemonInvocationOperation::LspAcknowledge
             }
+            DaemonInvocationPayload::LspReconnect { .. } => DaemonInvocationOperation::LspReconnect,
             DaemonInvocationPayload::LspDetach { .. } => DaemonInvocationOperation::LspDetach,
         }
     }
@@ -956,12 +1144,18 @@ impl DaemonInvocationRequest {
     pub(crate) fn requires_project(&self) -> bool {
         matches!(
             self.operation(),
-            DaemonInvocationOperation::GitPreview
+            DaemonInvocationOperation::GitStatus
+                | DaemonInvocationOperation::GitDiff
+                | DaemonInvocationOperation::GitHistory
+                | DaemonInvocationOperation::GitBlame
+                | DaemonInvocationOperation::GitHunks
+                | DaemonInvocationOperation::GitPreview
                 | DaemonInvocationOperation::GitApply
                 | DaemonInvocationOperation::FeedbackDiagnostics
                 | DaemonInvocationOperation::FeedbackGet
                 | DaemonInvocationOperation::FeedbackExpand
                 | DaemonInvocationOperation::FeedbackList
+                | DaemonInvocationOperation::FeedbackAdvisoryCycle
                 | DaemonInvocationOperation::FeedbackImpact
                 | DaemonInvocationOperation::AffectedTests
                 | DaemonInvocationOperation::FeedbackObserve
@@ -990,7 +1184,13 @@ impl DaemonInvocationRequest {
             return Err(DaemonInvocationProblem::InvalidRequest);
         }
         match &self.payload {
-            DaemonInvocationPayload::GitPreview {
+            DaemonInvocationPayload::GitRead {
+                observed_at,
+                deadline,
+                cancellation,
+                ..
+            }
+            | DaemonInvocationPayload::GitPreview {
                 observed_at,
                 deadline,
                 cancellation,
@@ -1018,6 +1218,7 @@ impl DaemonInvocationRequest {
                 observed_at,
                 deadline,
                 cancellation,
+                ..
             }
             | DaemonInvocationPayload::PrimitiveRead {
                 observed_at,
@@ -1187,6 +1388,20 @@ impl DaemonInvocationRequest {
                     return Err(DaemonInvocationProblem::InvalidRequest);
                 }
             }
+            DaemonInvocationPayload::FeedbackAdvisoryCycle {
+                document_uri,
+                observed_at,
+                deadline,
+                cancellation,
+            } => {
+                if !valid_printable(document_uri, MAX_ROOT_HINT_BYTES)
+                    || observed_at.0 <= 0
+                    || deadline.expires_at.0 <= 0
+                    || cancellation.token_id.as_str().len() > MAX_OPAQUE_HANDLE_BYTES
+                {
+                    return Err(DaemonInvocationProblem::InvalidRequest);
+                }
+            }
             DaemonInvocationPayload::FeedbackObserve {
                 subject_digest,
                 observed_at,
@@ -1224,6 +1439,7 @@ impl DaemonInvocationRequest {
             }
             DaemonInvocationPayload::LspPoll { session }
             | DaemonInvocationPayload::LspAcknowledge { session }
+            | DaemonInvocationPayload::LspReconnect { session }
             | DaemonInvocationPayload::LspDetach { session } => {
                 let _ = session.clone().into_access()?;
             }
@@ -1761,6 +1977,62 @@ async fn execute_feedback(
     }
 }
 
+async fn execute_feedback_advisory_cycle(
+    wire_request_id: String,
+    invoker: Option<Arc<dyn Pr13AdvisoryCycleInvocationPortV1>>,
+    feedback_owner: Option<DaemonFeedbackInvocationOwner>,
+    document_uri: String,
+    observed_at: UtcMicros,
+    deadline: Deadline,
+    cancellation: CancellationContext,
+) -> DaemonInvocationResponse {
+    let Some(invoker) = invoker else {
+        return application_problem(
+            wire_request_id,
+            ApplicationProblem::unavailable(SafeDiagnostic {
+                code: "feedback.advisory_cycle_unavailable".to_owned(),
+                message: "The advisory feedback cycle is unavailable".to_owned(),
+            }),
+        );
+    };
+    let request_handle = match invoker
+        .invoke(Pr13AdvisoryCycleInvocationRequestV1 {
+            request_id: wire_request_id.clone(),
+            document_uri,
+            observed_at,
+            deadline: deadline.clone(),
+            cancellation: cancellation.clone(),
+        })
+        .await
+    {
+        Ok(handle) => handle,
+        Err(problem) => return application_problem(wire_request_id, problem),
+    };
+    let mut response = execute_feedback(
+        wire_request_id,
+        feedback_owner,
+        DaemonInvocationOperation::FeedbackDiagnostics,
+        request_handle.clone(),
+        observed_at,
+        deadline,
+        cancellation,
+    )
+    .await;
+    if let DaemonInvocationOutcome::Feedback { result, .. } = &mut response.outcome {
+        let diagnostics = result.payload.take();
+        result.payload = Some(serde_json::json!({
+            "request_handle": request_handle,
+            "diagnostics": diagnostics,
+            "producer_contributions": [
+                "github_review_ingest",
+                "ci_failure_localize",
+                "feedback_proximity"
+            ]
+        }));
+    }
+    response
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn execute_primitive(
     service: &DaemonInvocationService,
@@ -1914,6 +2186,30 @@ async fn execute_callable_code(
             crate::application_surface::CallableCodeSurfaceRequest::Callees(_),
             crate::application_surface::ApplicationSurfaceOperation::CodeCallees,
         ) => CallableCodeOperationKind::Callees,
+        (
+            crate::application_surface::CallableCodeSurfaceRequest::Facets(_),
+            crate::application_surface::ApplicationSurfaceOperation::CodeFacets,
+        ) => CallableCodeOperationKind::Facets,
+        (
+            crate::application_surface::CallableCodeSurfaceRequest::Timeline(_),
+            crate::application_surface::ApplicationSurfaceOperation::CodeTimeline,
+        ) => CallableCodeOperationKind::Timeline,
+        (
+            crate::application_surface::CallableCodeSurfaceRequest::Declaration(_),
+            crate::application_surface::ApplicationSurfaceOperation::CodeDeclaration,
+        ) => CallableCodeOperationKind::Declaration,
+        (
+            crate::application_surface::CallableCodeSurfaceRequest::Definition(_),
+            crate::application_surface::ApplicationSurfaceOperation::CodeDefinition,
+        ) => CallableCodeOperationKind::Definition,
+        (
+            crate::application_surface::CallableCodeSurfaceRequest::TypeDefinition(_),
+            crate::application_surface::ApplicationSurfaceOperation::CodeTypeDefinition,
+        ) => CallableCodeOperationKind::TypeDefinition,
+        (
+            crate::application_surface::CallableCodeSurfaceRequest::References(_),
+            crate::application_surface::ApplicationSurfaceOperation::CodeReferences,
+        ) => CallableCodeOperationKind::References,
         _ => {
             return DaemonInvocationResponse::problem(
                 wire_request_id,
@@ -1979,6 +2275,54 @@ async fn execute_callable_code(
                 wire_request_id,
                 &registered.scope,
                 query.callees(&context, request, observed_at).await,
+            )
+        }
+        crate::application_surface::CallableCodeSurfaceRequest::Facets(request) => {
+            let request = request.into_application_request(page);
+            callable_code_response(
+                wire_request_id,
+                &registered.scope,
+                query.facets(&context, request, observed_at).await,
+            )
+        }
+        crate::application_surface::CallableCodeSurfaceRequest::Timeline(request) => {
+            let request = request.into_application_request(page);
+            callable_code_response(
+                wire_request_id,
+                &registered.scope,
+                query.timeline(&context, request, observed_at).await,
+            )
+        }
+        crate::application_surface::CallableCodeSurfaceRequest::Declaration(request) => {
+            let request = request.into_application_request(page);
+            callable_code_response(
+                wire_request_id,
+                &registered.scope,
+                query.declaration(&context, request, observed_at).await,
+            )
+        }
+        crate::application_surface::CallableCodeSurfaceRequest::Definition(request) => {
+            let request = request.into_application_request(page);
+            callable_code_response(
+                wire_request_id,
+                &registered.scope,
+                query.definition(&context, request, observed_at).await,
+            )
+        }
+        crate::application_surface::CallableCodeSurfaceRequest::TypeDefinition(request) => {
+            let request = request.into_application_request(page);
+            callable_code_response(
+                wire_request_id,
+                &registered.scope,
+                query.type_definition(&context, request, observed_at).await,
+            )
+        }
+        crate::application_surface::CallableCodeSurfaceRequest::References(request) => {
+            let request = request.into_application_request(page);
+            callable_code_response(
+                wire_request_id,
+                &registered.scope,
+                query.references(&context, request, observed_at).await,
             )
         }
     }
@@ -2061,7 +2405,7 @@ fn callable_code_request_context(
     let grant = CapabilityGrantSnapshot::new(
         grant_id,
         1,
-        grant_digest,
+        grant_digest.clone(),
         access.requester.clone(),
         observed_at,
         expires_at,
@@ -2482,7 +2826,12 @@ async fn execute_context_scout_state_transition(
             )
         });
     if let Some(refreshed) = refreshed {
-        let _ = owner.install_configuration(refreshed, None).await;
+        if owner.install_state_transition(refreshed).await.is_err() {
+            return DaemonInvocationResponse::problem(
+                request_id,
+                DaemonInvocationProblem::Unavailable,
+            );
+        }
     } else {
         return DaemonInvocationResponse::problem(request_id, DaemonInvocationProblem::Unavailable);
     }
@@ -2619,14 +2968,11 @@ async fn execute_configuration(
                     key: request.key,
                     value: request.value,
                 };
-                let mutation_authority = issue_configuration_mutation_authority(
+                let mutation_authority = issue_direct_configuration_mutation_authority(
                     &registered,
                     &wire_request_id,
-                    ConfigurationMutationOperationV1::DirectMutation,
-                    mutation.target_scope_digest()?,
+                    &mutation,
                     request.expected_revision.clone(),
-                    ConfigurationMutationSinkV1::ConfigurationStore,
-                    ConfigurationMutationEffectV1::CommitConfigurationRevision,
                     observed_at,
                 )?;
                 let receipt = apply_configuration_or_semantic_transition(
@@ -2658,14 +3004,11 @@ async fn execute_configuration(
                     layer: request.layer,
                     key: request.key,
                 };
-                let mutation_authority = issue_configuration_mutation_authority(
+                let mutation_authority = issue_direct_configuration_mutation_authority(
                     &registered,
                     &wire_request_id,
-                    ConfigurationMutationOperationV1::DirectMutation,
-                    mutation.target_scope_digest()?,
+                    &mutation,
                     request.expected_revision.clone(),
-                    ConfigurationMutationSinkV1::ConfigurationStore,
-                    ConfigurationMutationEffectV1::CommitConfigurationRevision,
                     observed_at,
                 )?;
                 let receipt = apply_configuration_or_semantic_transition(
@@ -2709,14 +3052,11 @@ async fn execute_configuration(
                     })
                     .collect();
                 let mutation = DirectConfigurationMutation::Batch { mutations };
-                let mutation_authority = issue_configuration_mutation_authority(
+                let mutation_authority = issue_direct_configuration_mutation_authority(
                     &registered,
                     &wire_request_id,
-                    ConfigurationMutationOperationV1::DirectMutation,
-                    mutation.target_scope_digest()?,
+                    &mutation,
                     request.expected_revision.clone(),
-                    ConfigurationMutationSinkV1::ConfigurationStore,
-                    ConfigurationMutationEffectV1::CommitConfigurationRevision,
                     observed_at,
                 )?;
                 let receipt = apply_configuration_or_semantic_transition(
@@ -3082,6 +3422,27 @@ fn issue_configuration_mutation_authority(
         .map_err(|_| ConfigurationError::Unavailable)
 }
 
+fn issue_direct_configuration_mutation_authority(
+    registered: &RegisteredConfigurationRuntime,
+    request_id: &str,
+    mutation: &DirectConfigurationMutation,
+    expected_revision: ConfigurationRevisionId,
+    observed_at: UtcMicros,
+) -> Result<ConfigurationMutationAuthority, ConfigurationError> {
+    registered
+        .grants
+        .issue_direct(request_id, mutation, expected_revision, observed_at)
+        .map_err(|problem| match problem {
+            DaemonInvocationProblem::NotFoundOrNotAuthorized => {
+                ConfigurationError::MutationAuthorityRejected
+            }
+            DaemonInvocationProblem::InvalidRequest => {
+                ConfigurationError::validation_message("invalid configuration mutation target")
+            }
+            _ => ConfigurationError::Unavailable,
+        })
+}
+
 fn configuration_request_authority(
     registered: &RegisteredConfigurationRuntime,
     request_id: &str,
@@ -3403,6 +3764,10 @@ fn configuration_problem(error: ConfigurationError) -> ApplicationProblem {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub(crate) enum DaemonInvocationOutcome {
+    GitRead {
+        scope: ResolvedScope,
+        result: DaemonFeedbackResult,
+    },
     GitPreview {
         scope: ResolvedScope,
         preview: DaemonGitPreviewResult,
@@ -3435,6 +3800,7 @@ pub(crate) enum DaemonInvocationOutcome {
         scope: ResolvedScope,
         profile_digest: ManifestDigest,
         report_digest: ManifestDigest,
+        report: crate::search_eval::DirectEvaluationReportV1,
         source_generation: tracedecay_domain::CodeGenerationId,
         snapshot_digest: ManifestDigest,
     },
@@ -3456,6 +3822,9 @@ pub(crate) enum DaemonInvocationOutcome {
     },
     LspAcknowledged {
         acknowledged: bool,
+    },
+    LspReconnected {
+        session: DaemonLspSessionAccess,
     },
     LspDetached,
     Problem {
@@ -3567,6 +3936,27 @@ impl Pr13HookOrchestrationRequestV1 {
 /// retrieval, or model work begins.
 pub(crate) trait Pr13HookOrchestrationPortV1: Send + Sync {
     fn admit(&self, request: Pr13HookOrchestrationRequestV1) -> Pr13HookOrchestrationAdmissionV1;
+}
+
+pub(crate) struct Pr13AdvisoryCycleInvocationRequestV1 {
+    pub request_id: String,
+    pub document_uri: String,
+    pub observed_at: UtcMicros,
+    pub deadline: Deadline,
+    pub cancellation: CancellationContext,
+}
+
+pub(crate) type Pr13AdvisoryCycleInvocationFutureV1<'a> =
+    Pin<Box<dyn Future<Output = Result<String, ApplicationProblem>> + Send + 'a>>;
+
+/// Authenticated explicit entry to the same project-open four-pillar owner
+/// used by LSP and Hook V2. The returned diagnostics handle is minted by that
+/// owner after a durable publication; callers never provide one.
+pub(crate) trait Pr13AdvisoryCycleInvocationPortV1: Send + Sync {
+    fn invoke(
+        &self,
+        request: Pr13AdvisoryCycleInvocationRequestV1,
+    ) -> Pr13AdvisoryCycleInvocationFutureV1<'_>;
 }
 
 type Pr13HookOrchestrationFutureV1 = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
@@ -3789,6 +4179,8 @@ pub(crate) struct DaemonInvocationService {
     configuration_runtimes: Arc<Mutex<BTreeMap<PathBuf, RegisteredConfigurationRuntime>>>,
     lsp_owners: Arc<Mutex<BTreeMap<PathBuf, DaemonLspInvocationOwner>>>,
     advisory_runtimes: Arc<Mutex<BTreeMap<PathBuf, Arc<dyn Any + Send + Sync>>>>,
+    advisory_cycle_invokers:
+        Arc<Mutex<BTreeMap<PathBuf, Arc<dyn Pr13AdvisoryCycleInvocationPortV1>>>>,
     advisory_hook_orchestrators:
         Arc<Mutex<BTreeMap<PathBuf, Arc<dyn Pr13HookOrchestrationPortV1>>>>,
     semantic_runtimes:
@@ -3820,6 +4212,7 @@ impl DaemonInvocationService {
             configuration_runtimes: Arc::new(Mutex::new(BTreeMap::new())),
             lsp_owners: Arc::new(Mutex::new(BTreeMap::new())),
             advisory_runtimes: Arc::new(Mutex::new(BTreeMap::new())),
+            advisory_cycle_invokers: Arc::new(Mutex::new(BTreeMap::new())),
             advisory_hook_orchestrators: Arc::new(Mutex::new(BTreeMap::new())),
             semantic_runtimes: Arc::new(Mutex::new(BTreeMap::new())),
             operation_events: daemon_operation_event_authority(),
@@ -3896,10 +4289,63 @@ struct DaemonConfigurationGrantAuthority {
     policy_epoch: u64,
     policy_digest: AccessPolicyDigest,
     expires_at: UtcMicros,
+    direct_layers: Arc<BTreeMap<ManifestDigest, ConfigurationLayerIdV1>>,
     grants: Arc<RwLock<BTreeMap<ConfigurationGrantId, ConfigurationMutationGrantSnapshotV1>>>,
 }
 
 impl DaemonConfigurationGrantAuthority {
+    fn issue_direct(
+        &self,
+        request_id: &str,
+        mutation: &DirectConfigurationMutation,
+        expected_revision: ConfigurationRevisionId,
+        issued_at: UtcMicros,
+    ) -> Result<ConfigurationMutationAuthority, DaemonInvocationProblem> {
+        let layer = mutation
+            .target_layer()
+            .map_err(|_| DaemonInvocationProblem::InvalidRequest)?;
+        let scope_digest = mutation
+            .target_scope_digest()
+            .map_err(|_| DaemonInvocationProblem::InvalidRequest)?;
+        if self.direct_layers.get(&scope_digest) != Some(layer) {
+            return Err(DaemonInvocationProblem::NotFoundOrNotAuthorized);
+        }
+        self.issue(
+            request_id,
+            ConfigurationMutationOperationV1::DirectMutation,
+            scope_digest,
+            expected_revision,
+            ConfigurationMutationSinkV1::ConfigurationStore,
+            ConfigurationMutationEffectV1::CommitConfigurationRevision,
+            issued_at,
+        )
+    }
+
+    #[cfg(test)]
+    fn for_test(
+        layers: impl IntoIterator<Item = ConfigurationLayerIdV1>,
+        expires_at: UtcMicros,
+    ) -> Self {
+        Self {
+            actor: ActorId::new("actor.configuration.test").expect("actor"),
+            policy_epoch: 1,
+            policy_digest: AccessPolicyDigest::new(format!("sha256:{}", "a".repeat(64)))
+                .expect("policy"),
+            expires_at,
+            direct_layers: Arc::new(
+                layers
+                    .into_iter()
+                    .map(|layer| {
+                        let digest =
+                            configuration_layer_scope_digest(&layer).expect("layer digest");
+                        (digest, layer)
+                    })
+                    .collect(),
+            ),
+            grants: Arc::new(RwLock::new(BTreeMap::new())),
+        }
+    }
+
     fn issue(
         &self,
         request_id: &str,
@@ -3975,6 +4421,46 @@ impl DaemonConfigurationGrantAuthority {
             .insert(grant_id, snapshot);
         Ok(ConfigurationMutationAuthority { receipt })
     }
+}
+
+fn mounted_configuration_layers(
+    project_id: &ProjectId,
+    profile_id: &UserProfileId,
+    snapshot: &ConfigurationSnapshotV1,
+) -> Result<BTreeMap<ManifestDigest, ConfigurationLayerIdV1>, DaemonInvocationProblem> {
+    let mut layers = std::collections::BTreeSet::from([
+        ConfigurationLayerIdV1::Project {
+            project_id: project_id.clone(),
+        },
+        ConfigurationLayerIdV1::UserProfile {
+            profile_id: profile_id.clone(),
+        },
+    ]);
+    layers.extend(
+        snapshot
+            .provenance
+            .values()
+            .flatten()
+            .filter_map(|candidate| match &candidate.layer {
+                ConfigurationLayerIdV1::Collection { .. }
+                    if matches!(
+                        candidate.disposition,
+                        CandidateDispositionV1::Winning | CandidateDispositionV1::Defaulted
+                    ) =>
+                {
+                    Some(candidate.layer.clone())
+                }
+                _ => None,
+            }),
+    );
+    layers
+        .into_iter()
+        .map(|layer| {
+            configuration_layer_scope_digest(&layer)
+                .map(|digest| (digest, layer))
+                .map_err(|_| DaemonInvocationProblem::Unavailable)
+        })
+        .collect()
 }
 
 impl ConfigurationMutationGrantAuthority for DaemonConfigurationGrantAuthority {
@@ -4099,12 +4585,15 @@ impl DaemonFeedbackRuntimeRegistrar {
             return Err(DaemonFeedbackRuntimeRegistrationError::AlreadyRegistered);
         }
         let project_id = scope.project_id.clone();
-        let runtime = Arc::new(open_pr12_feedback_runtime(
-            database,
-            project_root.clone(),
-            scope.clone(),
-            access.clone(),
-        )?);
+        let runtime = Arc::new(
+            open_pr12_feedback_runtime(
+                database,
+                project_root.clone(),
+                scope.clone(),
+                access.clone(),
+            )
+            .await?,
+        );
         self.service.callable_code_runtimes.lock().await.insert(
             project_root.clone(),
             RegisteredCallableCodeRuntime {
@@ -4170,16 +4659,15 @@ impl DaemonFeedbackRuntimeRegistrar {
         // reaches here (`RequestContext::validate` rejects a scope that differs
         // from the grant's), so this route really is scope-matched. Live
         // correlation only reads, so it requires the Read effect class.
-        let correlation_policy = operation.evaluate_policy_route(
+        let correlation_policy = operation.evaluate_local_live_policy(
             &policy,
-            PolicyConsumerV1::LocalLiveCorrelation,
             &policy_context,
             correlation_availability,
             ScopeMatchV1::Match,
             correlation_state,
             CapabilityEffectClassV1::Read,
             TruthFreshnessRequirementV1::FreshOrPartial,
-            Some(evidence_horizon),
+            evidence_horizon,
             evaluated_at,
         )?;
         let provider_admissions = provider_candidates
@@ -4406,6 +4894,7 @@ impl DaemonConfigurationRuntimeRegistrar {
         project_root: PathBuf,
         runtime: Arc<ProjectConfigurationRuntime>,
         scope: ResolvedScope,
+        profile_id: UserProfileId,
         actor: ActorId,
         expires_at: UtcMicros,
         membership_digest: Option<ManifestDigest>,
@@ -4430,11 +4919,28 @@ impl DaemonConfigurationRuntimeRegistrar {
             authorization_policy_digest: policy_digest.clone(),
             policy_epoch: 1,
         };
+        let current =
+            runtime
+                .client()
+                .current()
+                .await
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!("configuration layer authority unavailable: {error}"),
+                })?;
+        let direct_layers = mounted_configuration_layers(
+            &runtime.configuration_target().project_id,
+            &profile_id,
+            &current.snapshot,
+        )
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("configuration layer authority invalid: {error:?}"),
+        })?;
         let grants = DaemonConfigurationGrantAuthority {
             actor: actor.clone(),
             policy_epoch: 1,
             policy_digest,
             expires_at,
+            direct_layers: Arc::new(direct_layers),
             grants: Arc::new(RwLock::new(BTreeMap::new())),
         };
         let current = runtime.client().current().await.map_err(|error| {
@@ -4741,6 +5247,28 @@ impl DaemonAdvisoryRuntimeRegistrar {
             Err(DaemonAdvisoryRuntimeRegistrationError::HookOrchestrationUnavailable)
         }
     }
+
+    pub(crate) async fn register_cycle_invoker(
+        &self,
+        project_root: PathBuf,
+        invoker: Arc<dyn Pr13AdvisoryCycleInvocationPortV1>,
+    ) -> Result<(), DaemonAdvisoryRuntimeRegistrationError> {
+        if !self
+            .service
+            .advisory_runtimes
+            .lock()
+            .await
+            .contains_key(&project_root)
+        {
+            return Err(DaemonAdvisoryRuntimeRegistrationError::MissingFeedbackRuntime);
+        }
+        let mut invokers = self.service.advisory_cycle_invokers.lock().await;
+        if invokers.contains_key(&project_root) {
+            return Err(DaemonAdvisoryRuntimeRegistrationError::AlreadyRegistered);
+        }
+        invokers.insert(project_root, invoker);
+        Ok(())
+    }
 }
 
 /// Mounts one project's semantic-runtime scheduling handle as daemon-private
@@ -4806,6 +5334,16 @@ struct RuntimeLspSession {
     actor: RuntimeLspActor,
 }
 
+impl Drop for RuntimeLspSession {
+    fn drop(&mut self) {
+        // Every removal path (explicit detach, transport loss, TTL expiry, and
+        // daemon shutdown) must cancel provider work and release overlays,
+        // subscriptions, publications, and queued frames before the actor is
+        // discarded.
+        self.actor.expire();
+    }
+}
+
 type RuntimeLspActor = DaemonLspRuntimeSession;
 
 #[derive(Clone)]
@@ -4850,28 +5388,360 @@ impl LspSessionAdmissionPort for AdmittedRootSessionAdmission {
 }
 
 #[derive(Clone)]
-struct SharedGitTransactionPort(Arc<DaemonProjectGitIndexTransactionService>);
+struct SharedGitTransactionPort {
+    service: Arc<DaemonProjectGitIndexTransactionService>,
+    cancellation: Option<OperationEmitter>,
+}
 
 impl GitIndexTransactionPort for SharedGitTransactionPort {
     fn preview(
         &self,
         request: &GitIndexPreviewRequestV1,
     ) -> Result<GitIndexPreviewPortResultV1, GitIndexTransactionPortError> {
-        self.0.preview(request)
+        self.service.preview(request)
     }
 
     fn apply(
         &self,
         request: &GitIndexApplyRequestV1,
     ) -> Result<GitIndexApplyPortResultV1, GitIndexTransactionPortError> {
-        self.0.apply(request)
+        self.cancellation.as_ref().map_or_else(
+            || self.service.apply(request),
+            |emitter| {
+                self.service
+                    .apply_cancellable(request, || emitter.cancellation_requested_at())
+            },
+        )
     }
 
     fn recover(
         &self,
         request: &GitIndexRecoveryRequestV1,
     ) -> Result<GitIndexTransactionReceiptV1, GitIndexTransactionPortError> {
-        self.0.recover(request)
+        self.service.recover(request)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn git_read_evidence_packet(
+    request_id: &str,
+    request: &crate::application::git_reads::GitReadRequestV1,
+    current: &DaemonGitAuthorityStateV1,
+    result: crate::application::git_reads::GitReadResultV1,
+    observed_at: UtcMicros,
+    deadline: Deadline,
+    cancellation: CancellationContext,
+) -> Result<EvidencePacket<serde_json::Value>, ApplicationProblem> {
+    let capability_id =
+        CapabilityId::new(request.capability_id()).map_err(|_| invalid_git_request())?;
+    let use_case_id = UseCaseId::new(request.use_case_id()).map_err(|_| invalid_git_request())?;
+    if !current.effective_capabilities.contains(&capability_id) {
+        return Err(ApplicationProblem::not_found_or_not_authorized(
+            RetryDirective::Never,
+        ));
+    }
+    let grant_digest = stable_digest(&(
+        &current.scope,
+        &current.requester,
+        &current.policy_digest,
+        &current.configuration_digest,
+        &current.catalog_digest,
+        &current.privacy_digest,
+        &capability_id,
+        &use_case_id,
+    ))?;
+    let grant = CapabilityGrantSnapshot::new(
+        CapabilityGrantId::new(format!(
+            "grant.daemon.git-read.{}",
+            grant_digest.as_str().trim_start_matches("sha256:")
+        ))
+        .map_err(|_| invalid_git_request())?,
+        current.policy_revision,
+        grant_digest.clone(),
+        current.requester.clone(),
+        current.evaluated_at,
+        current.grant_expires_at,
+        current.scope.clone(),
+        std::collections::BTreeSet::from([capability_id]),
+        std::collections::BTreeSet::from([use_case_id]),
+        DisclosureClass::Sensitive,
+    )
+    .map_err(|_| invalid_git_request())?;
+    let context = RequestContext::new(
+        current.requester.clone(),
+        current.scope.clone(),
+        grant,
+        RequestId::new(request_id).map_err(|_| invalid_git_request())?,
+        deadline.clone(),
+        cancellation,
+    )
+    .map_err(|_| invalid_git_request())?;
+    let authority = AuthorityReceipt::from_context(
+        &context,
+        PolicyDecisionRef::new(
+            "policy.daemon.git-read.v1",
+            current.policy_revision,
+            current.policy_digest.clone(),
+            ComponentVersion::new("tracedecay.daemon.git-policy.v2")
+                .map_err(|_| invalid_git_request())?,
+        )
+        .map_err(|_| invalid_git_request())?,
+        current.evaluated_at,
+    )
+    .map_err(|_| invalid_git_request())?;
+    let native_coverage = match &result {
+        crate::application::git_reads::GitReadResultV1::Status(envelope) => &envelope.coverage,
+        crate::application::git_reads::GitReadResultV1::Diff(envelope) => &envelope.coverage,
+        crate::application::git_reads::GitReadResultV1::History(envelope) => &envelope.coverage,
+        crate::application::git_reads::GitReadResultV1::Blame(envelope) => &envelope.coverage,
+        crate::application::git_reads::GitReadResultV1::Hunks(envelope) => &envelope.coverage,
+    };
+    let coverage = if native_coverage.is_complete() {
+        EvidenceCoverage::complete(vec![EvidenceDomain::Source], 1, 1, 1)
+            .map_err(|_| invalid_git_request())?
+    } else {
+        let coverage = EvidenceCoverage {
+            requested_domains: vec![EvidenceDomain::Source],
+            visited: Some(1),
+            eligible: Some(1),
+            returned: 1,
+            completeness: CoverageCompleteness::Partial,
+            domains: vec![CoverageDomainState {
+                domain: EvidenceDomain::Source,
+                completeness: CoverageCompleteness::Partial,
+            }],
+        };
+        coverage.validate().map_err(|_| invalid_git_request())?;
+        coverage
+    };
+    let mut omission_counts = BTreeMap::<OmissionReason, u64>::new();
+    for degradation in &native_coverage.degradations {
+        use tracedecay_domain::git::GitDegradationV1;
+        let reason = match degradation {
+            GitDegradationV1::TruncatedOutput => OmissionReason::Budget,
+            GitDegradationV1::ConflictedState | GitDegradationV1::InProgressOperation => {
+                OmissionReason::Conflict
+            }
+            GitDegradationV1::UnreadableState => OmissionReason::Failed,
+            GitDegradationV1::IgnoredCollision
+            | GitDegradationV1::DetachedHead
+            | GitDegradationV1::UnbornBranch
+            | GitDegradationV1::SparseCheckout
+            | GitDegradationV1::SplitIndex
+            | GitDegradationV1::SubmoduleState
+            | GitDegradationV1::UnsupportedObjectFormat
+            | GitDegradationV1::ShallowBoundary => OmissionReason::Unsupported,
+        };
+        omission_counts
+            .entry(reason)
+            .and_modify(|count| *count = count.saturating_add(1))
+            .or_insert(1);
+    }
+    let omissions = omission_counts
+        .into_iter()
+        .map(|(reason, count)| Omission {
+            domain: EvidenceDomain::Source,
+            count,
+            reason,
+        })
+        .collect();
+    let execution = OperationReceipt::completed(
+        observed_at,
+        current_micros(),
+        deadline,
+        OperationBudgetUsage::default(),
+    )
+    .map_err(|_| invalid_git_request())?;
+    let payload = serde_json::to_value(result).map_err(|_| {
+        ApplicationProblem::unavailable(SafeDiagnostic {
+            code: "git_read.result_encoding_failed".to_owned(),
+            message: "The Git read result could not be encoded".to_owned(),
+        })
+    })?;
+    let evidence_digest = stable_digest(&(
+        "tracedecay.native-git-read-evidence.v1",
+        request,
+        &current.scope,
+        &current.configuration_digest,
+        &current.catalog_digest,
+        &payload,
+    ))?;
+    Ok(EvidencePacket {
+        temporal: TemporalState::current(execution.ended_at),
+        authority,
+        evidence_authorities: vec![EvidenceAuthority {
+            evidence_id: EvidenceIdentity::new(format!(
+                "evidence.git-read.{}",
+                evidence_digest.as_str().trim_start_matches("sha256:")
+            ))
+            .map_err(|_| invalid_git_request())?,
+            source_kind: "native_git".to_owned(),
+            producer: "git_query".to_owned(),
+            scope: current.scope.clone(),
+            revision: ComponentVersion::new("tracedecay.git-read.v1")
+                .map_err(|_| invalid_git_request())?,
+            horizon: Some(current.evaluated_at),
+        }],
+        coverage,
+        omissions,
+        scores: Vec::new(),
+        contributions: Vec::new(),
+        page: PageState::first_page(
+            SortContractId::new("sort.git-read.stable.v1").map_err(|_| invalid_git_request())?,
+            1,
+            Some(1),
+            1,
+        )
+        .map_err(|_| invalid_git_request())?,
+        execution,
+        payload: Some(payload),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_git_read(
+    wire_request_id: String,
+    project_root: Option<&Path>,
+    owner: Option<DaemonGitInvocationOwner>,
+    surface_operation: crate::application_surface::ApplicationSurfaceOperation,
+    request: GitReadSurfaceRequest,
+    observed_at: UtcMicros,
+    deadline: Deadline,
+    cancellation: CancellationContext,
+) -> DaemonInvocationResponse {
+    let Some(owner) = owner else {
+        return concealed_application_problem(wire_request_id);
+    };
+    let Some(project_root) = project_root.map(Path::to_path_buf) else {
+        return concealed_application_problem(wire_request_id);
+    };
+    let expected_operation = match &request.request {
+        crate::application::git_reads::GitReadRequestV1::Status => {
+            crate::application_surface::ApplicationSurfaceOperation::GitStatus
+        }
+        crate::application::git_reads::GitReadRequestV1::Diff { .. } => {
+            crate::application_surface::ApplicationSurfaceOperation::GitDiff
+        }
+        crate::application::git_reads::GitReadRequestV1::History { .. } => {
+            crate::application_surface::ApplicationSurfaceOperation::GitHistory
+        }
+        crate::application::git_reads::GitReadRequestV1::Blame { .. } => {
+            crate::application_surface::ApplicationSurfaceOperation::GitBlame
+        }
+        crate::application::git_reads::GitReadRequestV1::Hunks { .. } => {
+            crate::application_surface::ApplicationSurfaceOperation::GitHunks
+        }
+    };
+    if surface_operation != expected_operation {
+        return DaemonInvocationResponse::problem(
+            wire_request_id,
+            DaemonInvocationProblem::InvalidRequest,
+        );
+    }
+    if cancellation.is_cancelled() {
+        return application_problem(
+            wire_request_id,
+            ApplicationProblem::cancelled_before_admission(),
+        );
+    }
+    if deadline.is_elapsed_at(observed_at) || deadline.is_elapsed_at(current_micros()) {
+        return application_problem(
+            wire_request_id,
+            ApplicationProblem::timed_out_before_admission(),
+        );
+    }
+    let initial = match owner.current_read_authority(&request.request) {
+        Ok(authority) => authority,
+        Err(_) => return concealed_application_problem(wire_request_id),
+    };
+    let remaining_micros = deadline
+        .expires_at
+        .0
+        .saturating_sub(current_micros().0)
+        .max(0) as u64;
+    let bounds = crate::git_query::GitQueryBounds {
+        max_entries: request.max_entries,
+        max_bytes: request.max_bytes,
+        deadline: Some(std::time::Instant::now() + Duration::from_micros(remaining_micros)),
+        cancel: Some(Arc::new(AtomicBool::new(false))),
+    };
+    let selected_scope = initial.scope.clone();
+    let read_request = request.request.clone();
+    let authority = crate::application::git_reads::GitReadAuthorityV1::new(
+        project_root,
+        selected_scope.clone(),
+    );
+    let outcome = tokio::task::spawn_blocking(move || {
+        crate::application::git_reads::execute_git_read(
+            Some(&authority),
+            &selected_scope,
+            &read_request,
+            &bounds,
+        )
+    })
+    .await
+    .unwrap_or(
+        crate::application::git_reads::GitReadOutcomeV1::Unavailable {
+            reason: crate::application::git_reads::GitReadUnavailableReasonV1::ReadFailed,
+        },
+    );
+    let terminal = match owner.current_read_authority(&request.request) {
+        Ok(authority) => authority,
+        Err(_) => return concealed_application_problem(wire_request_id),
+    };
+    if initial.scope != terminal.scope
+        || initial.requester != terminal.requester
+        || initial.effective_capabilities != terminal.effective_capabilities
+        || initial.grant_expires_at != terminal.grant_expires_at
+        || initial.policy_revision != terminal.policy_revision
+        || initial.policy_digest != terminal.policy_digest
+        || initial.configuration_digest != terminal.configuration_digest
+        || initial.catalog_digest != terminal.catalog_digest
+        || initial.privacy_digest != terminal.privacy_digest
+        || current_micros() >= terminal.grant_expires_at
+    {
+        return concealed_application_problem(wire_request_id);
+    }
+    match outcome {
+        crate::application::git_reads::GitReadOutcomeV1::Complete { scope, result }
+            if scope == terminal.scope =>
+        {
+            let packet = match git_read_evidence_packet(
+                &wire_request_id,
+                &request.request,
+                &terminal,
+                result,
+                observed_at,
+                deadline,
+                cancellation,
+            ) {
+                Ok(packet) => packet,
+                Err(problem) => return application_problem(wire_request_id, problem),
+            };
+            DaemonInvocationResponse::with_outcome(
+                wire_request_id,
+                DaemonInvocationOutcome::GitRead {
+                    scope,
+                    result: DaemonFeedbackResult::from_application(packet),
+                },
+            )
+        }
+        crate::application::git_reads::GitReadOutcomeV1::Unavailable {
+            reason: crate::application::git_reads::GitReadUnavailableReasonV1::Cancelled,
+        } => application_problem(
+            wire_request_id,
+            ApplicationProblem::cancelled_before_admission(),
+        ),
+        crate::application::git_reads::GitReadOutcomeV1::Unavailable {
+            reason: crate::application::git_reads::GitReadUnavailableReasonV1::TimedOut,
+        } => application_problem(
+            wire_request_id,
+            ApplicationProblem::timed_out_before_admission(),
+        ),
+        crate::application::git_reads::GitReadOutcomeV1::Complete { .. }
+        | crate::application::git_reads::GitReadOutcomeV1::Unavailable { .. } => {
+            DaemonInvocationResponse::problem(wire_request_id, DaemonInvocationProblem::Unavailable)
+        }
     }
 }
 
@@ -4933,7 +5803,11 @@ async fn execute_git_preview(
     let started_at = request.observed_at;
     let effective_deadline = request.context.deadline().clone();
     let result = tokio::task::spawn_blocking(move || {
-        GitIndexTransactionService::new(SharedGitTransactionPort(service)).preview(request)
+        GitIndexTransactionService::new(SharedGitTransactionPort {
+            service,
+            cancellation: None,
+        })
+        .preview(request)
     })
     .await;
     let response = match result {
@@ -5013,8 +5887,13 @@ async fn execute_git_apply(
     let _ = emitter.progress(0, Some(1)).await;
     let started_at = request.observed_at;
     let effective_deadline = request.context.deadline().clone();
+    let cancellation = emitter.clone();
     let result = tokio::task::spawn_blocking(move || {
-        GitIndexTransactionService::new(SharedGitTransactionPort(service)).apply(request)
+        GitIndexTransactionService::new(SharedGitTransactionPort {
+            service,
+            cancellation: Some(cancellation),
+        })
+        .apply(request)
     })
     .await;
     let response = match result {
@@ -5065,6 +5944,7 @@ async fn publish_invocation_terminal(
 
 fn invocation_operation_receipt(response: &DaemonInvocationResponse) -> Option<OperationReceipt> {
     match &response.outcome {
+        DaemonInvocationOutcome::GitRead { result, .. } => Some(result.execution.clone()),
         DaemonInvocationOutcome::GitPreview { preview, .. } => Some(preview.execution.clone()),
         DaemonInvocationOutcome::GitApply { effect, .. } => Some(effect.execution.clone()),
         DaemonInvocationOutcome::Feedback { result, .. } => Some(result.execution.clone()),
@@ -5396,6 +6276,18 @@ impl DaemonInvocationService {
             .map(|registered| registered.runtime.clone())
     }
 
+    async fn advisory_cycle_invoker(
+        &self,
+        project_root: Option<&Path>,
+    ) -> Option<Arc<dyn Pr13AdvisoryCycleInvocationPortV1>> {
+        let project_root = project_root?;
+        self.advisory_cycle_invokers
+            .lock()
+            .await
+            .get(project_root)
+            .cloned()
+    }
+
     async fn configuration_runtime(
         &self,
         project_root: Option<&Path>,
@@ -5518,6 +6410,7 @@ impl DaemonInvocationService {
                         .evaluation()
                         .report_digest()
                         .clone(),
+                    report: publication.report,
                     source_generation: publication.snapshot.code_generation,
                     snapshot_digest: publication.snapshot.code_snapshot_digest,
                 },
@@ -5597,10 +6490,30 @@ impl DaemonInvocationService {
         let now_ms = now_millis();
         self.expire_sessions(now_ms).await;
         let feedback_service = self.feedback_owner(project_root).await;
+        let advisory_cycle_invoker = self.advisory_cycle_invoker(project_root).await;
         let configuration_runtime = self.configuration_runtime(project_root).await;
         let lsp_owner = self.lsp_owner(project_root).await;
 
         let response = match request.payload {
+            DaemonInvocationPayload::GitRead {
+                surface_operation,
+                request,
+                observed_at,
+                deadline,
+                cancellation,
+            } => {
+                execute_git_read(
+                    request_id,
+                    project_root,
+                    git_service,
+                    surface_operation,
+                    request,
+                    observed_at,
+                    deadline,
+                    cancellation,
+                )
+                .await
+            }
             DaemonInvocationPayload::GitPreview {
                 request,
                 observed_at,
@@ -5703,6 +6616,23 @@ impl DaemonInvocationService {
                 )
                 .await
             }
+            DaemonInvocationPayload::FeedbackAdvisoryCycle {
+                document_uri,
+                observed_at,
+                deadline,
+                cancellation,
+            } => {
+                execute_feedback_advisory_cycle(
+                    request_id,
+                    advisory_cycle_invoker,
+                    feedback_service,
+                    document_uri,
+                    observed_at,
+                    deadline,
+                    cancellation,
+                )
+                .await
+            }
             DaemonInvocationPayload::FeedbackImpact {
                 request_handle,
                 observed_at,
@@ -5796,6 +6726,7 @@ impl DaemonInvocationService {
                 .await
             }
             DaemonInvocationPayload::PrimitiveTestResults {
+                page,
                 observed_at,
                 deadline,
                 cancellation,
@@ -5805,7 +6736,7 @@ impl DaemonInvocationService {
                     project_root,
                     request_id,
                     crate::application_surface::ApplicationSurfaceOperation::TestResults,
-                    Pr12PrimitiveRequest::RecentTestResults,
+                    Pr12PrimitiveRequest::RecentTestResults(page),
                     observed_at,
                     deadline,
                     cancellation,
@@ -5957,6 +6888,10 @@ impl DaemonInvocationService {
                 self.acknowledge_lsp_frame(lsp_registry, request_id, session, now_ms)
                     .await
             }
+            DaemonInvocationPayload::LspReconnect { session } => {
+                self.reconnect_lsp_session(lsp_registry, request_id, session, now_ms)
+                    .await
+            }
             DaemonInvocationPayload::LspDetach { session } => {
                 self.detach_lsp_session(lsp_registry, request_id, session, now_ms)
                     .await
@@ -5979,9 +6914,24 @@ impl DaemonInvocationService {
         self.callable_code_runtimes.lock().await.clear();
         self.lsp_sessions.lock().await.clear();
         self.context_scout_registries.lock().await.clear();
-        self.feedback_runtimes.lock().await.clear();
+        let feedback_runtimes = std::mem::take(&mut *self.feedback_runtimes.lock().await);
+        let feedback_cycle_inputs = std::mem::take(&mut *self.feedback_cycle_inputs.lock().await);
+        // The production advisory input retains its LSP factory, whose
+        // feedback adapter retains this switchable router. Reset the router
+        // before dropping the registries so shutdown cannot leave that cycle
+        // retaining the project graph and database runtimes.
+        for (project_root, router) in &feedback_cycle_inputs {
+            if let Some(registered) = feedback_runtimes.get(project_root) {
+                let unavailable = Arc::new(UnavailableFeedbackCycleRuntimeV1::new(
+                    registered.project_id.clone(),
+                    registered.runtime.source_observation_port(),
+                ));
+                let _ = router.replace(unavailable);
+            }
+        }
+        drop(feedback_cycle_inputs);
+        drop(feedback_runtimes);
         self.feedback_cycles.lock().await.clear();
-        self.feedback_cycle_inputs.lock().await.clear();
         self.primitive_runtimes.lock().await.clear();
         self.configuration_runtimes.lock().await.clear();
         let semantic_runtimes = std::mem::take(&mut *self.semantic_runtimes.lock().await);
@@ -5993,6 +6943,7 @@ impl DaemonInvocationService {
         }
         self.lsp_owners.lock().await.clear();
         self.advisory_runtimes.lock().await.clear();
+        self.advisory_cycle_invokers.lock().await.clear();
         self.advisory_hook_orchestrators.lock().await.clear();
         if let Ok(mut registry) = pr13_hook_orchestration_registry().lock() {
             registry.retain(|_, runtime| runtime.strong_count() > 0);
@@ -6165,22 +7116,126 @@ impl DaemonInvocationService {
         };
         let endpoint_detached = {
             let mut registry = lsp_registry.lock().await;
-            registry.detach(&access, now_ms).is_ok()
+            registry.close(&access, now_ms).is_ok()
         };
-        let mut sessions = self.lsp_sessions.lock().await;
-        let Some(session) = sessions.get_mut(access.session_id()) else {
+        let Some(mut session) = self.lsp_sessions.lock().await.remove(access.session_id()) else {
             return DaemonInvocationResponse::problem(
                 request_id,
                 DaemonInvocationProblem::NotFoundOrNotAuthorized,
             );
         };
-        if !endpoint_detached || session.actor.detach().is_err() {
+        if !endpoint_detached {
             return DaemonInvocationResponse::problem(
                 request_id,
                 DaemonInvocationProblem::NotFoundOrNotAuthorized,
             );
         }
+        let _ = session.actor.detach();
         DaemonInvocationResponse::with_outcome(request_id, DaemonInvocationOutcome::LspDetached)
+    }
+
+    async fn reconnect_lsp_session(
+        &self,
+        lsp_registry: &Arc<Mutex<LspSessionRegistry>>,
+        request_id: String,
+        session: DaemonLspSessionAccess,
+        now_ms: u64,
+    ) -> DaemonInvocationResponse {
+        let access = match session.into_access() {
+            Ok(access) => access,
+            Err(problem) => return DaemonInvocationResponse::problem(request_id, problem),
+        };
+        let mut credential_bytes = [0_u8; 32];
+        if getrandom::getrandom(&mut credential_bytes).is_err() {
+            return DaemonInvocationResponse::problem(
+                request_id,
+                DaemonInvocationProblem::Unavailable,
+            );
+        }
+        let Ok(credential) = LspSessionCredential::new(credential_bytes.to_vec()) else {
+            return DaemonInvocationResponse::problem(
+                request_id,
+                DaemonInvocationProblem::Unavailable,
+            );
+        };
+        let reconnected_access = lsp_registry
+            .lock()
+            .await
+            .reconnect_with_credential(&access, credential, now_ms);
+        let Ok(reconnected_access) = reconnected_access else {
+            return DaemonInvocationResponse::problem(
+                request_id,
+                DaemonInvocationProblem::NotFoundOrNotAuthorized,
+            );
+        };
+        let mut sessions = self.lsp_sessions.lock().await;
+        let Some(session) = sessions.get_mut(access.session_id()) else {
+            drop(sessions);
+            let _ = lsp_registry.lock().await.close(&reconnected_access, now_ms);
+            return DaemonInvocationResponse::problem(
+                request_id,
+                DaemonInvocationProblem::NotFoundOrNotAuthorized,
+            );
+        };
+        let actor_reconnected = match session.actor.lifecycle() {
+            SessionLifecycle::Detached => session.actor.reconnect().is_ok(),
+            SessionLifecycle::AwaitingInitialize
+            | SessionLifecycle::AwaitingInitialized
+            | SessionLifecycle::Ready
+            | SessionLifecycle::Shutdown => true,
+            SessionLifecycle::Exited | SessionLifecycle::Expired => false,
+        };
+        if !actor_reconnected {
+            drop(sessions);
+            let _ = lsp_registry.lock().await.close(&reconnected_access, now_ms);
+            self.lsp_sessions.lock().await.remove(access.session_id());
+            return DaemonInvocationResponse::problem(
+                request_id,
+                DaemonInvocationProblem::NotFoundOrNotAuthorized,
+            );
+        }
+        DaemonInvocationResponse::with_outcome(
+            request_id,
+            DaemonInvocationOutcome::LspReconnected {
+                session: DaemonLspSessionAccess::from_access(&reconnected_access),
+            },
+        )
+    }
+
+    pub(crate) async fn disconnect_lsp_session(
+        &self,
+        lsp_registry: &Arc<Mutex<LspSessionRegistry>>,
+        session: DaemonLspSessionAccess,
+    ) {
+        let Ok(access) = session.into_access() else {
+            return;
+        };
+        let now_ms = now_millis();
+        if lsp_registry.lock().await.detach(&access, now_ms).is_err() {
+            return;
+        }
+        let expires_at_ms = {
+            let mut sessions = self.lsp_sessions.lock().await;
+            let Some(session) = sessions.get_mut(access.session_id()) else {
+                return;
+            };
+            let _ = session.actor.detach();
+            session.expires_at_ms
+        };
+        let sessions = Arc::clone(&self.lsp_sessions);
+        let registry = Arc::clone(lsp_registry);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(
+                expires_at_ms.saturating_sub(now_millis()),
+            ))
+            .await;
+            let now_ms = now_millis();
+            registry.lock().await.expire_at(now_ms);
+            sessions
+                .lock()
+                .await
+                .retain(|_, session| session.expires_at_ms > now_ms);
+        });
     }
 
     async fn authenticate(
@@ -6190,15 +7245,21 @@ impl DaemonInvocationService {
         now_ms: u64,
     ) -> Result<LspSessionAccess, DaemonInvocationProblem> {
         let access = session.into_access()?;
-        let authenticated = {
+        let authentication = {
             let mut registry = lsp_registry.lock().await;
-            registry.authenticate(&access, now_ms).is_ok()
+            registry
+                .authenticate(&access, now_ms)
+                .map(|_| ())
+                .map_err(|error| matches!(error, LspEndpointError::SessionExpired))
         };
-        if authenticated {
-            Ok(access)
-        } else {
-            self.lsp_sessions.lock().await.remove(access.session_id());
-            Err(DaemonInvocationProblem::NotFoundOrNotAuthorized)
+        match authentication {
+            Ok(()) => Ok(access),
+            Err(expired) => {
+                if expired {
+                    self.lsp_sessions.lock().await.remove(access.session_id());
+                }
+                Err(DaemonInvocationProblem::NotFoundOrNotAuthorized)
+            }
         }
     }
 
@@ -6235,6 +7296,7 @@ fn plan26_observable_operation(operation: DaemonInvocationOperation) -> bool {
             | DaemonInvocationOperation::FeedbackGet
             | DaemonInvocationOperation::FeedbackExpand
             | DaemonInvocationOperation::FeedbackList
+            | DaemonInvocationOperation::FeedbackAdvisoryCycle
             | DaemonInvocationOperation::FeedbackImpact
             | DaemonInvocationOperation::AffectedTests
             | DaemonInvocationOperation::PrimitiveImpact
@@ -6252,6 +7314,9 @@ fn plan26_feedback_operation(operation: DaemonInvocationOperation) -> Plan26Feed
         DaemonInvocationOperation::FeedbackGet => Plan26FeedbackOperationV1::FeedbackGet,
         DaemonInvocationOperation::FeedbackExpand => Plan26FeedbackOperationV1::FeedbackExpand,
         DaemonInvocationOperation::FeedbackList => Plan26FeedbackOperationV1::FeedbackList,
+        DaemonInvocationOperation::FeedbackAdvisoryCycle => {
+            Plan26FeedbackOperationV1::FeedbackCycle
+        }
         DaemonInvocationOperation::FeedbackImpact => Plan26FeedbackOperationV1::PrimitiveImpact,
         DaemonInvocationOperation::AffectedTests => {
             Plan26FeedbackOperationV1::PrimitiveAffectedTests
@@ -6267,15 +7332,27 @@ fn plan26_feedback_operation(operation: DaemonInvocationOperation) -> Plan26Feed
         | DaemonInvocationOperation::LspFrame
         | DaemonInvocationOperation::LspPoll
         | DaemonInvocationOperation::LspAcknowledge
+        | DaemonInvocationOperation::LspReconnect
         | DaemonInvocationOperation::LspDetach => Plan26FeedbackOperationV1::LspSession,
         DaemonInvocationOperation::FeedbackObserve
         | DaemonInvocationOperation::PrimitiveRead
         | DaemonInvocationOperation::CodeExactOccurrence
         | DaemonInvocationOperation::CodePhraseSearch
         | DaemonInvocationOperation::CodeCallees
+        | DaemonInvocationOperation::CodeFacets
+        | DaemonInvocationOperation::CodeTimeline
+        | DaemonInvocationOperation::CodeDeclaration
+        | DaemonInvocationOperation::CodeDefinition
+        | DaemonInvocationOperation::CodeTypeDefinition
+        | DaemonInvocationOperation::CodeReferences
         | DaemonInvocationOperation::Configuration
         | DaemonInvocationOperation::ContextScout
         | DaemonInvocationOperation::SemanticEvaluateAndPublish
+        | DaemonInvocationOperation::GitStatus
+        | DaemonInvocationOperation::GitDiff
+        | DaemonInvocationOperation::GitHistory
+        | DaemonInvocationOperation::GitBlame
+        | DaemonInvocationOperation::GitHunks
         | DaemonInvocationOperation::GitPreview
         | DaemonInvocationOperation::GitApply => Plan26FeedbackOperationV1::FeedbackCycle,
     }
@@ -6294,7 +7371,8 @@ fn emit_plan26_invocation_event(
 
 fn plan26_response_outcome(response: &DaemonInvocationResponse) -> Plan26FeedbackOutcomeV1 {
     match &response.outcome {
-        DaemonInvocationOutcome::GitPreview { .. }
+        DaemonInvocationOutcome::GitRead { .. }
+        | DaemonInvocationOutcome::GitPreview { .. }
         | DaemonInvocationOutcome::GitApply { .. }
         | DaemonInvocationOutcome::Configuration { .. }
         | DaemonInvocationOutcome::ContextScout { .. }
@@ -6302,6 +7380,7 @@ fn plan26_response_outcome(response: &DaemonInvocationResponse) -> Plan26Feedbac
         | DaemonInvocationOutcome::ObservationAccepted
         | DaemonInvocationOutcome::LspOpened { .. }
         | DaemonInvocationOutcome::LspAcknowledged { .. }
+        | DaemonInvocationOutcome::LspReconnected { .. }
         | DaemonInvocationOutcome::LspDetached => Plan26FeedbackOutcomeV1::Completed,
         DaemonInvocationOutcome::Feedback { result, .. }
         | DaemonInvocationOutcome::Primitive { result, .. }
@@ -6526,6 +7605,354 @@ fn valid_printable(value: &str, max_len: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct MintedAdvisoryCycleHandle(&'static str);
+
+    impl Pr13AdvisoryCycleInvocationPortV1 for MintedAdvisoryCycleHandle {
+        fn invoke(
+            &self,
+            _request: Pr13AdvisoryCycleInvocationRequestV1,
+        ) -> Pr13AdvisoryCycleInvocationFutureV1<'_> {
+            Box::pin(async { Ok(self.0.to_owned()) })
+        }
+    }
+
+    struct RecordingFeedbackHandle(Arc<std::sync::Mutex<Vec<String>>>);
+
+    impl DaemonFeedbackInvocationPort for RecordingFeedbackHandle {
+        fn invoke(
+            &self,
+            request: DaemonFeedbackInvocationRequest,
+        ) -> DaemonFeedbackInvocationFuture<'_> {
+            self.0
+                .lock()
+                .expect("recorded feedback handles")
+                .push(request.request_handle);
+            Box::pin(async {
+                Err(ApplicationProblem::not_found_or_not_authorized(
+                    RetryDirective::Never,
+                ))
+            })
+        }
+    }
+
+    #[test]
+    fn advisory_cycle_wire_request_has_no_client_selected_handle() {
+        let request = DaemonInvocationRequest::feedback_advisory_cycle(
+            "request.feedback-cycle",
+            "file:///project/src/lib.rs".to_owned(),
+            UtcMicros(1),
+            Deadline::new(UtcMicros(2)).expect("deadline"),
+            CancellationContext::active("cancel.feedback-cycle").expect("cancellation"),
+        );
+        let value = serde_json::to_value(request).expect("wire request");
+
+        assert_eq!(value["operation"], "feedback_advisory_cycle");
+        assert_eq!(value["document_uri"], "file:///project/src/lib.rs");
+        assert!(value.get("request_handle").is_none());
+    }
+
+    #[tokio::test]
+    async fn advisory_cycle_reads_diagnostics_with_daemon_minted_handle() {
+        let handles = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let project_id = ProjectId::new("project.feedback-cycle").expect("project");
+        let response = execute_feedback_advisory_cycle(
+            "request.feedback-cycle".to_owned(),
+            Some(Arc::new(MintedAdvisoryCycleHandle("rh.daemon.minted"))),
+            Some(DaemonFeedbackInvocationOwner::new(
+                project_id,
+                Arc::new(RecordingFeedbackHandle(Arc::clone(&handles))),
+            )),
+            "file:///project/src/lib.rs".to_owned(),
+            UtcMicros(1),
+            Deadline::new(UtcMicros(2)).expect("deadline"),
+            CancellationContext::active("cancel.feedback-cycle").expect("cancellation"),
+        )
+        .await;
+
+        assert!(matches!(
+            response.outcome,
+            DaemonInvocationOutcome::ApplicationProblem {
+                problem: ApplicationProblem::NotFoundOrNotAuthorized { .. }
+            }
+        ));
+        assert_eq!(
+            handles
+                .lock()
+                .expect("recorded feedback handles")
+                .as_slice(),
+            ["rh.daemon.minted"]
+        );
+    }
+
+    #[test]
+    fn direct_configuration_grants_reject_foreign_caller_selected_layers() {
+        let exact_project = tracedecay_domain::configuration::ConfigurationLayerIdV1::Project {
+            project_id: ProjectId::new("project.configuration.exact").expect("project"),
+        };
+        let exact_profile = tracedecay_domain::configuration::ConfigurationLayerIdV1::UserProfile {
+            profile_id: tracedecay_domain::UserProfileId::new("profile.configuration.exact")
+                .expect("profile"),
+        };
+        let exact_collection =
+            tracedecay_domain::configuration::ConfigurationLayerIdV1::Collection {
+                collection_id: tracedecay_domain::QueryCollectionId::new(
+                    "collection.configuration.exact",
+                )
+                .expect("collection"),
+            };
+        let authority = DaemonConfigurationGrantAuthority::for_test(
+            [
+                exact_project.clone(),
+                exact_profile.clone(),
+                exact_collection.clone(),
+            ],
+            UtcMicros(100),
+        );
+        let expected_revision =
+            ConfigurationRevisionId::new("configuration.revision.exact").expect("revision");
+
+        for (index, layer) in [exact_project, exact_profile, exact_collection]
+            .into_iter()
+            .enumerate()
+        {
+            let mutation = DirectConfigurationMutation::Unset {
+                layer,
+                key: tracedecay_domain::configuration::SettingKey::new("sync.auto_watch")
+                    .expect("setting"),
+            };
+            assert!(
+                authority
+                    .issue_direct(
+                        &format!("request.configuration.exact.{index}"),
+                        &mutation,
+                        expected_revision.clone(),
+                        UtcMicros(1),
+                    )
+                    .is_ok()
+            );
+        }
+
+        for (index, layer) in [
+            tracedecay_domain::configuration::ConfigurationLayerIdV1::Project {
+                project_id: ProjectId::new("project.configuration.foreign").expect("project"),
+            },
+            tracedecay_domain::configuration::ConfigurationLayerIdV1::UserProfile {
+                profile_id: tracedecay_domain::UserProfileId::new("profile.configuration.foreign")
+                    .expect("profile"),
+            },
+            tracedecay_domain::configuration::ConfigurationLayerIdV1::Collection {
+                collection_id: tracedecay_domain::QueryCollectionId::new(
+                    "collection.configuration.foreign",
+                )
+                .expect("collection"),
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let foreign = DirectConfigurationMutation::Unset {
+                layer,
+                key: tracedecay_domain::configuration::SettingKey::new("sync.auto_watch")
+                    .expect("setting"),
+            };
+            assert!(matches!(
+                authority.issue_direct(
+                    &format!("request.configuration.foreign.{index}"),
+                    &foreign,
+                    expected_revision.clone(),
+                    UtcMicros(1),
+                ),
+                Err(DaemonInvocationProblem::NotFoundOrNotAuthorized)
+            ));
+        }
+    }
+
+    #[test]
+    fn mounted_configuration_layers_exclude_stale_collection_provenance() {
+        use tracedecay_domain::configuration::{
+            CandidateDispositionV1, ConfigurationCandidateV1, ConfigurationSnapshotV1,
+            ConfigurationValueV1,
+        };
+
+        let project_id = ProjectId::new("project.configuration.mounted").expect("project");
+        let profile_id = tracedecay_domain::UserProfileId::new("profile.configuration.mounted")
+            .expect("profile");
+        let winning = tracedecay_domain::QueryCollectionId::new("collection.configuration.winning")
+            .expect("collection");
+        let overridden =
+            tracedecay_domain::QueryCollectionId::new("collection.configuration.overridden")
+                .expect("collection");
+        let rejected =
+            tracedecay_domain::QueryCollectionId::new("collection.configuration.rejected")
+                .expect("collection");
+        let key =
+            tracedecay_domain::configuration::SettingKey::new("sync.auto_watch").expect("setting");
+        let revision =
+            ConfigurationRevisionId::new("configuration.revision.mounted").expect("revision");
+        let candidate = |collection_id, disposition| ConfigurationCandidateV1 {
+            layer: ConfigurationLayerIdV1::Collection { collection_id },
+            revision_id: revision.clone(),
+            disposition,
+            safe_reason: None,
+        };
+        let snapshot = ConfigurationSnapshotV1::new(
+            BTreeMap::from([(key.clone(), ConfigurationValueV1::Boolean(true))]),
+            BTreeMap::from([(
+                key,
+                vec![
+                    candidate(winning.clone(), CandidateDispositionV1::Winning),
+                    candidate(overridden.clone(), CandidateDispositionV1::Overridden),
+                    candidate(rejected.clone(), CandidateDispositionV1::Rejected),
+                ],
+            )]),
+        )
+        .expect("snapshot");
+
+        let mounted =
+            mounted_configuration_layers(&project_id, &profile_id, &snapshot).expect("layers");
+        let contains = |layer: ConfigurationLayerIdV1| {
+            let digest = configuration_layer_scope_digest(&layer).expect("digest");
+            mounted.get(&digest) == Some(&layer)
+        };
+        assert!(contains(ConfigurationLayerIdV1::Collection {
+            collection_id: winning,
+        }));
+        assert!(!contains(ConfigurationLayerIdV1::Collection {
+            collection_id: overridden,
+        }));
+        assert!(!contains(ConfigurationLayerIdV1::Collection {
+            collection_id: rejected,
+        }));
+    }
+
+    #[test]
+    fn git_read_packet_binds_catalog_authority_and_native_coverage() {
+        let scope = ResolvedScope::new(
+            ProjectId::new("project.git-read-packet").expect("project"),
+            tracedecay_domain::RepositoryId::new("repository.git-read-packet").expect("repository"),
+            tracedecay_domain::WorktreeId::new("worktree.git-read-packet").expect("worktree"),
+            Some(tracedecay_domain::RefId::new("refs/heads/main").expect("reference")),
+        )
+        .expect("scope");
+        let request = crate::application::git_reads::GitReadRequestV1::Status;
+        let capability = tracedecay_tool_catalog::CapabilityId::new(request.capability_id())
+            .expect("capability");
+        let digest =
+            || ManifestDigest::new(format!("sha256:{}", "a".repeat(64))).expect("manifest digest");
+        let authority = DaemonGitAuthorityStateV1 {
+            scope: scope.clone(),
+            requester: ActorId::new("actor.git-read-packet").expect("actor"),
+            effective_capabilities: std::collections::BTreeSet::from([capability]),
+            grant_expires_at: UtcMicros(i64::MAX),
+            policy_revision: 1,
+            policy_digest: digest(),
+            configuration_digest: digest(),
+            catalog_digest: digest(),
+            privacy_digest: digest(),
+            evaluated_at: UtcMicros(1),
+        };
+        let result = crate::application::git_reads::GitReadResultV1::Status(
+            crate::git_query::GitQueryEnvelopeV1 {
+                value: crate::git_query::GitStatusSummaryV1 {
+                    repository: scope.repository_id.clone(),
+                    head: GitHeadStateV1::Unborn {
+                        branch: "refs/heads/main".to_owned(),
+                    },
+                    operation: tracedecay_domain::git::GitOperationStateV1::None,
+                    staged: 0,
+                    unstaged: 0,
+                    conflicted: 0,
+                    untracked: 0,
+                    ignored: 0,
+                    changed_paths: Vec::new(),
+                    schema_version: crate::git_query::GIT_QUERY_SCHEMA_VERSION_V1.to_owned(),
+                },
+                coverage: tracedecay_domain::git::GitCoverageV1::complete(),
+                truncated_by_bound: false,
+            },
+        );
+
+        let packet = git_read_evidence_packet(
+            "request.git-read-packet",
+            &request,
+            &authority,
+            result,
+            UtcMicros(2),
+            Deadline::new(UtcMicros(i64::MAX)).expect("deadline"),
+            CancellationContext::active("cancel.git-read-packet").expect("cancellation"),
+        )
+        .expect("Git read packet");
+
+        assert_eq!(packet.authority.authorized_scope_digest, scope.scope_digest);
+        assert_eq!(
+            packet.coverage.completeness,
+            tracedecay_application::CoverageCompleteness::Complete
+        );
+        assert_eq!(packet.page.returned, 1);
+        assert!(packet.payload.is_some());
+        assert!(matches!(
+            packet.evidence_authorities.as_slice(),
+            [EvidenceAuthority { source_kind, .. }] if source_kind == "native_git"
+        ));
+        let complete_evidence_id = packet.evidence_authorities[0].evidence_id.clone();
+
+        let partial = git_read_evidence_packet(
+            "request.git-read-packet-partial",
+            &request,
+            &authority,
+            crate::application::git_reads::GitReadResultV1::Status(
+                crate::git_query::GitQueryEnvelopeV1 {
+                    value: crate::git_query::GitStatusSummaryV1 {
+                        repository: scope.repository_id,
+                        head: GitHeadStateV1::Unborn {
+                            branch: "refs/heads/main".to_owned(),
+                        },
+                        operation: tracedecay_domain::git::GitOperationStateV1::None,
+                        staged: 0,
+                        unstaged: 0,
+                        conflicted: 0,
+                        untracked: 0,
+                        ignored: 0,
+                        changed_paths: Vec::new(),
+                        schema_version: crate::git_query::GIT_QUERY_SCHEMA_VERSION_V1.to_owned(),
+                    },
+                    coverage: tracedecay_domain::git::GitCoverageV1::degraded(vec![
+                        tracedecay_domain::git::GitDegradationV1::TruncatedOutput,
+                        tracedecay_domain::git::GitDegradationV1::ConflictedState,
+                    ]),
+                    truncated_by_bound: true,
+                },
+            ),
+            UtcMicros(3),
+            Deadline::new(UtcMicros(i64::MAX)).expect("deadline"),
+            CancellationContext::active("cancel.git-read-packet-partial").expect("cancellation"),
+        )
+        .expect("partial Git read packet");
+        assert_eq!(
+            partial.coverage.completeness,
+            tracedecay_application::CoverageCompleteness::Partial
+        );
+        assert!(matches!(
+            partial.omissions.as_slice(),
+            [
+                Omission {
+                    domain: EvidenceDomain::Source,
+                    reason: OmissionReason::Budget,
+                    ..
+                },
+                Omission {
+                    domain: EvidenceDomain::Source,
+                    reason: OmissionReason::Conflict,
+                    ..
+                }
+            ]
+        ));
+        assert_ne!(
+            partial.evidence_authorities[0].evidence_id, complete_evidence_id,
+            "native Git evidence identity must bind the captured result"
+        );
+    }
 
     #[derive(Default)]
     struct RecordingFeedbackCycleObservations(std::sync::Mutex<Vec<Plan26FeedbackSourceEventV1>>);
@@ -6829,7 +8256,11 @@ mod tests {
             async move { release.notified().await }
         };
         let runtime = BoundedPr13HookOrchestratorV1::new(1, work).unwrap();
-        let request = Pr13HookOrchestrationRequestV1::from_envelope(
+        let completions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_completions = Arc::clone(&completions);
+        let completed = Arc::new(tokio::sync::Notify::new());
+        let completion_notification = Arc::clone(&completed);
+        let mut request = Pr13HookOrchestrationRequestV1::from_envelope(
             hook_envelope(HookEventV2::SavedEdit {
                 file_id: [7; 16],
                 changed_range_count: 1,
@@ -6840,6 +8271,10 @@ mod tests {
             false,
         )
         .unwrap();
+        request.completion = Some(Arc::new(move || {
+            observed_completions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            completion_notification.notify_one();
+        }));
 
         assert_eq!(
             runtime.admit(request.clone()),
@@ -6849,7 +8284,16 @@ mod tests {
             runtime.admit(request),
             Pr13HookOrchestrationAdmissionV1::Backpressured
         );
+        assert_eq!(completions.load(std::sync::atomic::Ordering::Relaxed), 0);
         release.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(1), completed.notified())
+            .await
+            .expect("producer work completion");
+        assert_eq!(
+            completions.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "only completed producer work may clear the durable outbox"
+        );
     }
 
     #[tokio::test]
@@ -6902,6 +8346,30 @@ mod tests {
             parse_daemon_invocation_request(&encoded),
             Some(Ok(_))
         ));
+    }
+
+    #[test]
+    fn test_results_invocation_retains_the_transport_page() {
+        let page = PageRequest::first(17).expect("page");
+        let request = DaemonInvocationRequest::primitive(
+            "request.test-results.page",
+            crate::application_surface::ApplicationSurfaceOperation::TestResults,
+            Pr12PrimitiveRequest::RecentTestResults(page.clone()),
+            UtcMicros(1),
+            Deadline::new(UtcMicros(2)).expect("deadline"),
+            CancellationContext::active("cancel.test-results.page").expect("cancellation"),
+        );
+        let encoded = serde_json::to_string(&request).expect("encode request");
+        let decoded = parse_daemon_invocation_request(&encoded)
+            .expect("daemon protocol")
+            .expect("valid request");
+        let DaemonInvocationPayload::PrimitiveTestResults {
+            page: decoded_page, ..
+        } = decoded.payload
+        else {
+            panic!("test-results request must retain its typed payload");
+        };
+        assert_eq!(decoded_page, page);
     }
 
     #[tokio::test]
@@ -7023,6 +8491,11 @@ mod tests {
         let phrase = crate::application_surface::CodePhraseSearchSurfaceRequest {
             query: "daemon invocation".to_owned(),
             phrases: vec!["daemon invocation".to_owned()],
+            field_filters: vec![tracedecay_application::CodeLexicalFieldFilter {
+                field: tracedecay_application::CodeLexicalField::Path,
+                include: true,
+            }],
+            fuzzy_budget: 7,
             scope: tracedecay_application::CodeQueryScope::new(
                 tracedecay_domain::CodeGenerationId::new("generation.callable-code")
                     .expect("generation"),
@@ -7052,6 +8525,14 @@ mod tests {
             canonical.query.normalization_revision().as_str(),
             "query-normalization.daemon.v1"
         );
+        assert_eq!(
+            canonical.field_filters,
+            [tracedecay_application::CodeLexicalFieldFilter {
+                field: tracedecay_application::CodeLexicalField::Path,
+                include: true,
+            }]
+        );
+        assert_eq!(canonical.fuzzy_budget, 7);
         let request = crate::application_surface::CallableCodeSurfaceRequest::PhraseSearch(phrase);
         let invocation = DaemonInvocationRequest::callable_code(
             "request.callable-code.transport",
@@ -7090,6 +8571,42 @@ mod tests {
                 && carried_deadline == deadline
                 && carried_cancellation == cancellation
         ));
+    }
+
+    #[test]
+    fn callable_code_invocation_accepts_facets_surface_variant() {
+        let scope = tracedecay_application::CodeQueryScope::new(
+            tracedecay_domain::CodeGenerationId::new("generation.callable-code")
+                .expect("generation"),
+            None,
+        )
+        .expect("scope");
+        let meta = crate::application_surface::CallableCodeSurfaceMeta {
+            projection: tracedecay_application::ResultProjection::Evidence,
+            order: tracedecay_application::RetrievalOrder::Relevance,
+        };
+        let request = crate::application_surface::CallableCodeSurfaceRequest::Facets(
+            crate::application_surface::CodeFacetSurfaceRequest {
+                dimension: tracedecay_application::CodeFacetDimension::Kind,
+                scope,
+                meta,
+            },
+        );
+
+        let invocation = DaemonInvocationRequest::callable_code(
+            "request.callable-code.facets",
+            crate::application_surface::ApplicationSurfaceOperation::CodeFacets,
+            request,
+            tracedecay_application::PageRequest::first(16).expect("page"),
+            UtcMicros(30),
+            Deadline::new(UtcMicros(90)).expect("deadline"),
+            CancellationContext::active("cancel.callable-code.facets").expect("cancellation"),
+        );
+
+        assert_eq!(
+            invocation.operation(),
+            DaemonInvocationOperation::CodeFacets
+        );
     }
 
     #[test]
@@ -7329,6 +8846,160 @@ mod tests {
             serde_json::from_str(&frame).expect("initialize success must be JSON-RPC");
         assert_eq!(response["id"], 2);
         assert!(response["result"]["capabilities"].is_object());
+    }
+
+    #[tokio::test]
+    async fn lsp_session_admission_accepts_the_lsp_protocol_revision() {
+        let service = DaemonInvocationService::default();
+        let project_root = PathBuf::from("/authoritative");
+        DaemonLspOwnerRegistrar::new(&service)
+            .register_pr12_factory(project_root.clone(), unavailable_lsp_session_factory())
+            .await;
+        let registry = Arc::new(Mutex::new(LspSessionRegistry::default()));
+
+        let response = service
+            .invoke(
+                &registry,
+                Some(&project_root),
+                Some(AdmittedRoot::new("file:///authoritative")),
+                None,
+                DaemonInvocationRequest::lsp_open("request.revision", "3.17", None, Vec::new()),
+            )
+            .await;
+
+        assert!(matches!(
+            response.outcome,
+            DaemonInvocationOutcome::LspOpened { .. }
+        ));
+        assert_eq!(registry.lock().await.active_sessions(), 1);
+        assert_eq!(service.lsp_sessions.lock().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn lsp_disconnect_reconnect_and_final_detach_have_distinct_lifecycles() {
+        let service = DaemonInvocationService::default();
+        let project_root = PathBuf::from("/authoritative");
+        DaemonLspOwnerRegistrar::new(&service)
+            .register_pr12_factory(project_root.clone(), unavailable_lsp_session_factory())
+            .await;
+        let registry = Arc::new(Mutex::new(LspSessionRegistry::new(1)));
+        let open = |request_id: &'static str| {
+            service.invoke(
+                &registry,
+                Some(&project_root),
+                Some(AdmittedRoot::new("file:///authoritative")),
+                None,
+                DaemonInvocationRequest::lsp_open(
+                    request_id,
+                    env!("CARGO_PKG_VERSION"),
+                    None,
+                    Vec::new(),
+                ),
+            )
+        };
+
+        let DaemonInvocationOutcome::LspOpened { session, .. } =
+            open("request.open.1").await.outcome
+        else {
+            panic!("expected first session");
+        };
+        let detached = service
+            .invoke(
+                &registry,
+                None,
+                None,
+                None,
+                DaemonInvocationRequest::lsp_detach("request.detach", session),
+            )
+            .await;
+        assert!(matches!(
+            detached.outcome,
+            DaemonInvocationOutcome::LspDetached
+        ));
+        assert_eq!(registry.lock().await.active_sessions(), 0);
+        assert!(service.lsp_sessions.lock().await.is_empty());
+
+        let DaemonInvocationOutcome::LspOpened { session, .. } =
+            open("request.open.2").await.outcome
+        else {
+            panic!("released capacity must admit a replacement");
+        };
+        service
+            .disconnect_lsp_session(&registry, session.clone())
+            .await;
+        assert_eq!(registry.lock().await.active_sessions(), 1);
+        assert_eq!(service.lsp_sessions.lock().await.len(), 1);
+
+        let reconnected = service
+            .invoke(
+                &registry,
+                None,
+                None,
+                None,
+                DaemonInvocationRequest::lsp_reconnect("request.reconnect", session.clone()),
+            )
+            .await;
+        let DaemonInvocationOutcome::LspReconnected {
+            session: reconnected_session,
+        } = reconnected.outcome
+        else {
+            panic!("expected reconnect");
+        };
+        let takeover = service
+            .invoke(
+                &registry,
+                None,
+                None,
+                None,
+                DaemonInvocationRequest::lsp_reconnect(
+                    "request.reconnect-race",
+                    reconnected_session.clone(),
+                ),
+            )
+            .await;
+        let DaemonInvocationOutcome::LspReconnected {
+            session: current_session,
+        } = takeover.outcome
+        else {
+            panic!("expected active transport takeover");
+        };
+        service
+            .disconnect_lsp_session(&registry, reconnected_session)
+            .await;
+        assert_eq!(registry.lock().await.active_sessions(), 1);
+        assert_eq!(service.lsp_sessions.lock().await.len(), 1);
+        let stale_transport = service
+            .invoke(
+                &registry,
+                None,
+                None,
+                None,
+                DaemonInvocationRequest::lsp_poll("request.stale", session),
+            )
+            .await;
+        assert!(matches!(
+            stale_transport.outcome,
+            DaemonInvocationOutcome::Problem {
+                problem: DaemonInvocationProblem::NotFoundOrNotAuthorized
+            }
+        ));
+        assert_eq!(service.lsp_sessions.lock().await.len(), 1);
+
+        let detached = service
+            .invoke(
+                &registry,
+                None,
+                None,
+                None,
+                DaemonInvocationRequest::lsp_detach("request.detach.2", current_session),
+            )
+            .await;
+        assert!(matches!(
+            detached.outcome,
+            DaemonInvocationOutcome::LspDetached
+        ));
+        assert_eq!(registry.lock().await.active_sessions(), 0);
+        assert!(service.lsp_sessions.lock().await.is_empty());
     }
 
     #[tokio::test]

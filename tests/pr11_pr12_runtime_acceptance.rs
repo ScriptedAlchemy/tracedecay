@@ -22,9 +22,9 @@ use tracedecay::application::operation_stream::{
 use tracedecay::application::primitives::{Pr12PrimitiveRequest, StorageStatusPrimitiveRequest};
 use tracedecay::application_surface::{
     ApplicationSurfaceInvocationResult, ApplicationSurfaceOperation, ApplicationSurfaceRequest,
-    FeedbackSurfaceRequest, execute_application_surface, http_application_router,
-    parse_application_surface_request, resolve_application_surface_dispatch_with_controls,
-    resolve_http_application_surface,
+    FeedbackSurfaceRequest, GitApplySurfaceRequest, GitPreviewSurfaceRequest,
+    execute_application_surface, http_application_router, parse_application_surface_request,
+    resolve_application_surface_dispatch_with_controls, resolve_http_application_surface,
 };
 use tracedecay::daemon::lsp_gateway::TRACEDECAY_CONTEXT_REVISION;
 use tracedecay::daemon::{DaemonHandshake, call_default_tool};
@@ -40,17 +40,19 @@ use tracedecay_application::feedback::{
     FeedbackDiagnosticsReadRequestV1,
 };
 use tracedecay_application::{
-    ApplicationOutcome, ApplicationProblemKind, CancellationContext, CancellationObservation,
-    CancellationSignal, CancellationStage, CapabilityGrantId, CapabilityGrantSnapshot,
-    CoverageCompleteness, Deadline, DisclosureClass, OperationBudgetUsage, OperationReceipt,
-    OperationTermination, PageRequest, RequestContext, RequestId, ResolvedScope,
+    ApplicationEnvelope, ApplicationOutcome, ApplicationProblemKind, CancellationContext,
+    CancellationObservation, CancellationSignal, CancellationStage, CapabilityGrantId,
+    CapabilityGrantSnapshot, CoverageCompleteness, Deadline, DisclosureClass, IdempotencyKey,
+    OperationBudgetUsage, OperationReceipt, OperationTermination, PageRequest, RequestContext,
+    RequestId, ResolvedScope,
 };
 use tracedecay_domain::configuration::{
     AuthorityRef, ConfigurationRevisionId, ScopeSourceBinding, SourceBindingId, SourceKindV1,
 };
 use tracedecay_domain::{
-    ActorId, CommitId, LocatorDigest, ManifestDigest, ProjectId, RefId, RepositoryId, UtcMicros,
-    WorktreeId,
+    ActorId, CommitId, GitCommitIdentityV1, GitIndexCommitIntentV1, GitIndexPreviewId,
+    GitIndexPreviewV1, GitIndexSigningPolicyV1, GitIndexTransactionOperationV1, LocatorDigest,
+    ManifestDigest, ProjectId, RefId, RepositoryId, UtcMicros, WorktreeId,
 };
 use tracedecay_tool_catalog::{BindingSurface, CapabilityId, UseCaseId};
 
@@ -82,6 +84,74 @@ async fn runtime_fixture() -> RuntimeFixture {
         project,
         _environment: environment,
     }
+}
+
+#[cfg(unix)]
+async fn git_runtime_fixture() -> RuntimeFixture {
+    let (environment, project) = common::IsolatedEnv::acquire().await;
+    copy_dir(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/context_eval_project"),
+        &project,
+    );
+    git(&project, &["init", "--quiet"]);
+    git(&project, &["config", "user.name", "TraceDecay Test"]);
+    git(
+        &project,
+        &["config", "user.email", "tracedecay@example.com"],
+    );
+    git(&project, &["add", "."]);
+    git(&project, &["commit", "--quiet", "-m", "base"]);
+
+    let daemon = common::spawn_tracedecay_daemon(environment.home());
+    let output = common::tracedecay_command_with_home(environment.home())
+        .arg("init")
+        .current_dir(&project)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run tracedecay init");
+    assert_command_success("tracedecay init", &output);
+
+    git(&project, &["add", "."]);
+    let staged = std::process::Command::new(common::git_program())
+        .current_dir(&project)
+        .args(["diff", "--cached", "--quiet"])
+        .status()
+        .expect("inspect daemon enrollment");
+    if !staged.success() {
+        git(&project, &["commit", "--quiet", "-m", "daemon enrollment"]);
+    }
+    std::fs::write(
+        project.join("src/main.rs"),
+        "mod cli;\n\nfn main() {\n    cli::run();\n}\n\n// PR12 transport parity\n",
+    )
+    .expect("write staged Git change");
+    git(&project, &["add", "src/main.rs"]);
+
+    let handshake = DaemonHandshake::for_current_client(Some(project.clone()), None, false, false)
+        .expect("daemon handshake");
+    let client = DaemonInvocationClient::for_current(handshake.clone()).expect("daemon client");
+    RuntimeFixture {
+        _daemon: daemon,
+        client,
+        handshake,
+        project,
+        _environment: environment,
+    }
+}
+
+#[cfg(unix)]
+fn git(project: &Path, args: &[&str]) {
+    let output = std::process::Command::new(common::git_program())
+        .current_dir(project)
+        .args(args)
+        .output()
+        .expect("run Git fixture command");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 async fn poll_lsp_response(session: &mut DaemonLspSessionClient, response_id: u64) -> Value {
@@ -595,6 +665,196 @@ async fn production_primitive_code_routes_have_cli_mcp_http_parity() {
     );
 }
 
+#[cfg(all(unix, feature = "test-transport"))]
+#[tokio::test(flavor = "multi_thread")]
+async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
+    let fixture = git_runtime_fixture().await;
+    let status = resolve_mcp_application_surface(
+        ApplicationSurfaceOperation::GitStatus,
+        RequestId::new("request.git-parity.status").expect("status request id"),
+        parse_application_surface_request(
+            ApplicationSurfaceOperation::GitStatus,
+            serde_json::json!({}),
+        )
+        .expect("Git status request"),
+        RequestedOutputFormat::Json,
+        Some(&fixture.client),
+    )
+    .await
+    .expect("Git status dispatch");
+    let scope = status
+        .result
+        .as_ref()
+        .expect("Git status result")
+        .scope
+        .clone();
+    let captured_at = wall_clock_micros();
+    let snapshot = tracedecay::daemon::capture_exact_git_snapshot_for_test(
+        &fixture.project,
+        scope.project_id.clone(),
+        scope.repository_id.clone(),
+        scope.worktree_id.clone(),
+        captured_at,
+    );
+    let identity = GitCommitIdentityV1 {
+        name: "TraceDecay Test".to_owned(),
+        email: "tracedecay@example.com".to_owned(),
+        at: captured_at,
+    };
+    let preview_request = GitPreviewSurfaceRequest {
+        operation: GitIndexTransactionOperationV1::CommitIndex,
+        preview_id: GitIndexPreviewId::new("preview.transport-parity").expect("preview id"),
+        repository_snapshot: snapshot,
+        selected_hunks: Vec::new(),
+        commit_intent: Some(
+            GitIndexCommitIntentV1::new(
+                "test: prove Git transport parity\n".to_owned(),
+                identity.clone(),
+                identity,
+                GitIndexSigningPolicyV1::UnsignedPermitted,
+            )
+            .expect("commit intent"),
+        ),
+    };
+    let mut preview_arguments = serde_json::to_value(&preview_request).expect("preview arguments");
+    preview_arguments
+        .as_object_mut()
+        .expect("preview object")
+        .remove("preview_id");
+
+    let cli_preview = run_application_tool(
+        fixture.home(),
+        &fixture.project,
+        ApplicationSurfaceOperation::GitPreview,
+        &preview_arguments,
+    );
+    assert_command_success("CLI git_preview", &cli_preview);
+    let cli_preview: ApplicationEnvelope<Value> =
+        serde_json::from_slice(&cli_preview.stdout).expect("CLI preview envelope");
+    let ApplicationOutcome::Preview(cli_preview) = cli_preview.outcome else {
+        panic!("CLI git_preview must return a preview outcome");
+    };
+    let cli_preview_payload: GitIndexPreviewV1 =
+        serde_json::from_value(cli_preview.payload.expect("CLI immutable preview"))
+            .expect("CLI immutable preview");
+
+    let mcp_preview = resolve_mcp_application_surface(
+        ApplicationSurfaceOperation::GitPreview,
+        RequestId::new("request.git-parity.preview.mcp").expect("MCP preview request id"),
+        parse_application_surface_request(
+            ApplicationSurfaceOperation::GitPreview,
+            preview_arguments,
+        )
+        .expect("MCP preview request"),
+        RequestedOutputFormat::Json,
+        Some(&fixture.client),
+    )
+    .await
+    .expect("MCP preview dispatch");
+    assert_eq!(
+        mcp_preview.binding_id.as_str(),
+        "binding.mcp.git_preview.v1"
+    );
+    let ApplicationOutcome::Preview(mcp_preview) = &mcp_preview
+        .result
+        .as_ref()
+        .expect("MCP preview result")
+        .outcome
+    else {
+        panic!("MCP git_preview must return a preview outcome");
+    };
+    assert_eq!(
+        mcp_preview.execution.termination,
+        OperationTermination::Completed
+    );
+    let mcp_preview_payload: GitIndexPreviewV1 =
+        serde_json::from_value(mcp_preview.payload.clone().expect("MCP immutable preview"))
+            .expect("typed MCP preview");
+    assert_eq!(
+        cli_preview_payload.repository_snapshot,
+        mcp_preview_payload.repository_snapshot
+    );
+    assert_eq!(
+        cli_preview_payload.candidate_index_tree,
+        mcp_preview_payload.candidate_index_tree
+    );
+    assert_eq!(
+        cli_preview_payload.commit_intent_digest,
+        mcp_preview_payload.commit_intent_digest
+    );
+    assert_eq!(
+        cli_preview_payload.disposition,
+        mcp_preview_payload.disposition
+    );
+
+    let apply_arguments = serde_json::to_value(GitApplySurfaceRequest {
+        preview: cli_preview_payload,
+        idempotency_key: IdempotencyKey::new("idempotency.git-transport-parity")
+            .expect("idempotency key"),
+    })
+    .expect("apply arguments");
+    let cli_apply = run_application_tool(
+        fixture.home(),
+        &fixture.project,
+        ApplicationSurfaceOperation::GitApply,
+        &apply_arguments,
+    );
+    assert_command_success("CLI git_apply", &cli_apply);
+    let cli_apply_wire: Value = serde_json::from_slice(&cli_apply.stdout).expect("CLI apply JSON");
+    assert!(
+        cli_apply_wire.get("problem").is_none(),
+        "CLI git_apply problem: {cli_apply_wire:#}"
+    );
+    let cli_apply: ApplicationEnvelope<Value> =
+        serde_json::from_value(cli_apply_wire).expect("CLI apply envelope");
+    let ApplicationOutcome::Effect(cli_apply) = cli_apply.outcome else {
+        panic!("CLI git_apply must return an effect outcome");
+    };
+    assert_eq!(
+        cli_apply.execution.termination,
+        OperationTermination::Completed
+    );
+
+    let mcp_apply = resolve_mcp_application_surface(
+        ApplicationSurfaceOperation::GitApply,
+        RequestId::new("request.git-parity.apply.mcp").expect("MCP apply request id"),
+        parse_application_surface_request(ApplicationSurfaceOperation::GitApply, apply_arguments)
+            .expect("MCP apply request"),
+        RequestedOutputFormat::Json,
+        Some(&fixture.client),
+    )
+    .await
+    .expect("MCP apply replay");
+    assert_eq!(mcp_apply.binding_id.as_str(), "binding.mcp.git_apply.v1");
+    let ApplicationOutcome::Effect(mcp_apply) =
+        &mcp_apply.result.as_ref().expect("MCP apply result").outcome
+    else {
+        panic!("MCP git_apply must return an effect outcome");
+    };
+    assert_eq!(
+        mcp_apply.execution.termination,
+        OperationTermination::Completed
+    );
+    let normalize_replay = |effect: &tracedecay_application::EffectResult<Value>| {
+        let mut value = serde_json::to_value(effect).expect("effect wire value");
+        value["authority"]
+            .as_object_mut()
+            .expect("authority object")
+            .remove("revalidated_at");
+        value
+            .as_object_mut()
+            .expect("effect object")
+            .remove("execution");
+        value["receipt"]
+            .as_object_mut()
+            .expect("receipt object")
+            .remove("request_id");
+        value
+    };
+    assert_eq!(normalize_replay(&cli_apply), normalize_replay(mcp_apply));
+    git(&fixture.project, &["diff", "--cached", "--quiet"]);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn production_lsp_negotiates_and_projects_canonical_context() {
     let fixture = runtime_fixture().await;
@@ -989,6 +1249,7 @@ async fn feedback_handle_bootstrap_reads() {
     let observed_at = wall_clock_micros();
     let access = feedback_access(&scope, observed_at);
     let runtime = open_pr12_feedback_runtime(database, project.path(), scope, access)
+        .await
         .expect("feedback runtime");
     let owner = runtime.owner();
 
