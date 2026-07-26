@@ -303,8 +303,10 @@ pub async fn hook_claude_post_tool_use() -> i32 {
     let hook_telemetry =
         record_hook_invoked(root.as_deref(), HintAgent::Claude, hook_event_name, &event);
     if let Some(root) = root.as_deref()
-        && let super::v2::HookV2Dispatch::Handled { guidance, .. } =
-            super::v2::dispatch(tracedecay_hooks::HookHostV1::ClaudeCode, &event, root).await
+        && let Some(guidance) =
+            super::v2::dispatch(tracedecay_hooks::HookHostV1::ClaudeCode, &event, root)
+                .await
+                .into_recorded_guidance(&hook_telemetry)
     {
         if let Some(guidance) = guidance {
             println!(
@@ -466,9 +468,12 @@ pub async fn hook_stop() {
     };
     let parsed = serde_json::from_str::<Value>(&event).unwrap_or(Value::Null);
     let root = claude_session_project_root(&parsed).await;
+    let hook_telemetry = record_hook_invoked(root.as_deref(), HintAgent::Claude, "Stop", &event);
     if let Some(root) = root.as_deref()
-        && let super::v2::HookV2Dispatch::Handled { guidance, .. } =
-            super::v2::dispatch(tracedecay_hooks::HookHostV1::ClaudeCode, &event, root).await
+        && let Some(guidance) =
+            super::v2::dispatch(tracedecay_hooks::HookHostV1::ClaudeCode, &event, root)
+                .await
+                .into_recorded_guidance(&hook_telemetry)
     {
         if let Some(guidance) = guidance {
             println!("{}", codex_additional_context_json("Stop", &guidance));
@@ -476,7 +481,6 @@ pub async fn hook_stop() {
         return;
     }
     let session_id = event_session_id(&parsed);
-    let hook_telemetry = record_hook_invoked(root.as_deref(), HintAgent::Claude, "Stop", &event);
     if root.is_none()
         && ingest_user_claude_session_with_telemetry(session_id.clone(), Some(&hook_telemetry))
             .await

@@ -28,11 +28,11 @@
 //! the surface handlers are wired to it.
 #![allow(dead_code)]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tracedecay_application::doctor::{
     AdvisoryFeedbackDoctorPort, AdvisoryFeedbackFindingReadV1, AdvisoryFeedbackReadV1,
@@ -447,7 +447,10 @@ pub fn advisory_feedback_read_from_publication(
             }
         })
         .collect();
-    AdvisoryFeedbackReadV1::Observed { summary, findings }
+    AdvisoryFeedbackReadV1::Observed {
+        summary: Box::new(summary),
+        findings,
+    }
 }
 
 /// Adapter over the mounted feedback owner's canonical read store.
@@ -785,59 +788,35 @@ pub async fn collect_unregistered_store_findings(
 /// project, registry, and session stores. A configured key that is not mounted
 /// is emitted as typed unknown telemetry rather than silently omitted.
 pub async fn collect_over_budget_store_findings(
-    graph: &crate::db::Database,
-    registry: &crate::global_db::RegisteredGlobalDb,
-    profile_sessions: &crate::global_db::RegisteredGlobalDb,
-    project_sessions: &crate::global_db::RegisteredGlobalDb,
+    context: &RequestContext,
+    telemetry_ports: &[(
+        tracedecay_application::storage::StoreKeyV1,
+        tracedecay_rusqlite_runtime::SqliteStoreSizeTelemetryPort,
+    )],
     retention: &crate::config::RetentionConfig,
-    observed_at_secs: i64,
 ) -> DoctorStorageFamilyReadV1 {
     use std::collections::BTreeMap;
     use tracedecay_application::storage::{
-        StorageTelemetryReadV1, StoreKeyV1, StoreSizeSampleV1, over_budget_finding,
+        StorageTelemetryReadV1, StoreSizeTelemetryPort, over_budget_finding,
     };
 
-    fn key(path: &Path) -> Option<StoreKeyV1> {
-        StoreKeyV1::new(path.file_name()?.to_str()?.to_owned()).ok()
-    }
-
-    fn read(
-        store: StoreKeyV1,
-        counts: crate::errors::Result<(u64, u64, u64)>,
-        observed_at_secs: i64,
-    ) -> StorageTelemetryReadV1 {
-        let Ok((page_size, page_count, freelist_pages)) = counts else {
-            return StorageTelemetryReadV1::Unknown { store };
-        };
-        let Ok(page_size_bytes) = u32::try_from(page_size) else {
-            return StorageTelemetryReadV1::Unknown { store };
-        };
-        StorageTelemetryReadV1::Observed {
-            sample: StoreSizeSampleV1 {
-                store,
-                page_size_bytes,
-                page_count,
-                freelist_pages,
-                observed_at: tracedecay_domain::UtcMicros(
-                    observed_at_secs.saturating_mul(1_000_000),
-                ),
-            },
-        }
-    }
-
     let mut reads = BTreeMap::new();
-    if let Some(store) = key(graph.database_path()) {
-        reads.insert(
-            store.as_str().to_owned(),
-            read(store, graph.storage_page_counts().await, observed_at_secs),
-        );
-    }
-    for database in [registry, profile_sessions, project_sessions] {
-        if let Some(store) = key(database.db_path()) {
-            reads
-                .entry(store.as_str().to_owned())
-                .or_insert_with(|| read(store, database.storage_page_counts(), observed_at_secs));
+    for (store, port) in telemetry_ports {
+        let read = port.store_size(context, store).await;
+        for sample in port.table_growth(context, store).await {
+            tracing::info!(
+                target: "tracedecay::storage_telemetry",
+                store = sample.store.as_str(),
+                table = sample.table.as_str(),
+                previous_bytes = sample.previous_bytes.0,
+                current_bytes = sample.current_bytes.0,
+                growth_bytes = sample.growth_bytes().0,
+                previous_observed_at = sample.previous_observed_at.0,
+                current_observed_at = sample.current_observed_at.0,
+                "observed SQLite table payload growth"
+            );
         }
+        reads.entry(store.as_str().to_owned()).or_insert(read);
     }
 
     let mut findings = Vec::new();
@@ -1100,6 +1079,49 @@ pub async fn compose_doctor_report(
     composer.compose(context).await
 }
 
+type CachedStoreTelemetryPort = (
+    ManifestDigest,
+    tracedecay_rusqlite_runtime::SqliteStoreSizeTelemetryPort,
+);
+
+#[derive(Default)]
+struct StoreTelemetryPortCache {
+    ports: HashMap<PathBuf, CachedStoreTelemetryPort>,
+}
+
+fn cached_store_telemetry_port<E>(
+    cache: &Mutex<StoreTelemetryPortCache>,
+    path: &Path,
+    scope: &tracedecay_application::ResolvedScope,
+    open: impl FnOnce() -> Result<tracedecay_rusqlite_runtime::migration_sql::MigrationSqlHandle, E>,
+) -> Option<(
+    tracedecay_application::storage::StoreKeyV1,
+    tracedecay_rusqlite_runtime::SqliteStoreSizeTelemetryPort,
+)> {
+    let store =
+        tracedecay_application::storage::StoreKeyV1::new(path.file_name()?.to_str()?.to_owned())
+            .ok()?;
+    let mut cache = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((digest, port)) = cache.ports.get(path)
+        && digest == &scope.scope_digest
+    {
+        return Some((store, port.clone()));
+    }
+    let port = tracedecay_rusqlite_runtime::SqliteStoreSizeTelemetryPort::new(
+        open().ok()?,
+        store.clone(),
+        scope.clone(),
+        Duration::from_secs(5),
+    );
+    cache.ports.insert(
+        path.to_path_buf(),
+        (scope.scope_digest.clone(), port.clone()),
+    );
+    Some((store, port))
+}
+
 /// Build the daemon-owned live Doctor reader installed into a project MCP
 /// server. Every read re-resolves exact project/worktree identity, observes the
 /// current registered runtimes, and composes through the sole application
@@ -1120,6 +1142,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
     diagnostic_broker: Arc<tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>>,
     feedback_runtimes: crate::daemon::service::invocation::DaemonFeedbackRuntimeRegistrar,
 ) -> crate::dashboard::DoctorReportReader {
+    let store_telemetry_ports = Arc::new(Mutex::new(StoreTelemetryPortCache::default()));
     Arc::new(move || {
         let project_root = project_root.clone();
         let project_id = project_id.clone();
@@ -1133,6 +1156,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
         let schedulers = schedulers.clone();
         let diagnostic_broker = Arc::clone(&diagnostic_broker);
         let feedback_runtimes = feedback_runtimes.clone();
+        let store_telemetry_ports = Arc::clone(&store_telemetry_ports);
         Box::pin(async move {
             let scope =
                 super::project_open_owners::resolved_scope_for_project(&project_root, &project_id)
@@ -1140,6 +1164,34 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                         field: "daemon Doctor project scope",
                     })?;
             let context = doctor_report_request_context(scope)?;
+            let mut telemetry_ports = Vec::new();
+            let mut telemetry_paths = BTreeSet::new();
+            if telemetry_paths.insert(graph.database_path().to_path_buf())
+                && let Some(port) = cached_store_telemetry_port(
+                    &store_telemetry_ports,
+                    graph.database_path(),
+                    context.scope(),
+                    || graph.storage_telemetry_handle(),
+                )
+            {
+                telemetry_ports.push(port);
+            }
+            for database in [
+                registry.as_ref(),
+                profile_sessions.as_ref(),
+                project_sessions.as_ref(),
+            ] {
+                if telemetry_paths.insert(database.db_path().to_path_buf())
+                    && let Some(port) = cached_store_telemetry_port(
+                        &store_telemetry_ports,
+                        database.db_path(),
+                        context.scope(),
+                        || database.storage_telemetry_handle(),
+                    )
+                {
+                    telemetry_ports.push(port);
+                }
+            }
             let pinned = crate::config::runtime_configuration_for_layout(&project_root, &layout);
             let quick_check_ok = graph
                 .quick_check_report()
@@ -1185,15 +1237,8 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                 now,
             )
             .await;
-            let over_budget = collect_over_budget_store_findings(
-                &graph,
-                registry.as_ref(),
-                profile_sessions.as_ref(),
-                project_sessions.as_ref(),
-                &retention,
-                now,
-            )
-            .await;
+            let over_budget =
+                collect_over_budget_store_findings(&context, &telemetry_ports, &retention).await;
             let stale_branches = collect_stale_branch_store_findings(&project_root, &layout);
             let incident_debris =
                 collect_incident_debris_findings(registry.as_ref(), &profile_root, now).await;
@@ -1313,7 +1358,6 @@ pub(in crate::daemon) fn production_doctor_remediation_dispatcher(
                     tracedecay_application::doctor::DoctorOwningSurfaceV1::SemanticIndexRuntime => {
                         true
                     }
-                    tracedecay_application::doctor::DoctorOwningSurfaceV1::FeedbackRead => false,
                 };
                 if !mounted {
                     return Vec::new();

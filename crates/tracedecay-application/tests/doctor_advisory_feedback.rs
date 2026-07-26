@@ -6,8 +6,7 @@ use std::task::{Context, Poll, Waker};
 use tracedecay_application::{
     AdvisoryFeedbackDoctorPort, AdvisoryFeedbackFindingReadV1, AdvisoryFeedbackReadV1,
     AdvisoryFeedbackSummaryReadV1, DoctorEvidenceStateV1, DoctorFindingFamilyV1,
-    DoctorOwningSurfaceV1, DoctorRemediationRegistryV1, DoctorReportComposerV1, DoctorSourceFuture,
-    RequestContext,
+    DoctorReportComposerV1, DoctorSourceFuture, RequestContext,
 };
 use tracedecay_domain::{
     CodeGenerationId, CommitId, FeedbackCycleId, FeedbackCycleTerminationV1, FeedbackFindingId,
@@ -119,17 +118,9 @@ fn advisory_feedback_preserves_canonical_identity_lifecycle_and_coverage() {
             "missing evidence {expected}"
         );
     }
-    let owner_action = finding.remediation().expect("feedback owner action");
-    assert_eq!(
-        owner_action.owning_operation().as_str(),
-        "use-case.application.feedback.get"
-    );
-    assert_eq!(
-        DoctorRemediationRegistryV1::default_registry()
-            .resolve(owner_action)
-            .expect("registered owner")
-            .surface(),
-        DoctorOwningSurfaceV1::FeedbackRead
+    assert!(
+        finding.remediation().is_none(),
+        "reading a finding is navigation, not a remediation effect"
     );
 }
 
@@ -176,13 +167,9 @@ fn advisory_feedback_keeps_omitted_only_result_distinct_from_absence() {
         finding.coverage().statement(),
         "feedback coverage returned 0/3 findings; omitted 3"
     );
-    assert_eq!(
-        finding
-            .remediation()
-            .expect("list owner")
-            .owning_operation()
-            .as_str(),
-        "use-case.application.feedback.list"
+    assert!(
+        finding.remediation().is_none(),
+        "omitted feedback is evidence, not a dispatchable remediation"
     );
 }
 

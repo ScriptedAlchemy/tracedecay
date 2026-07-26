@@ -9,7 +9,11 @@ use crate::{
 };
 
 pub(super) struct DatabaseInner {
+    /// Reader-only channel exposed through the retained database facade.
     pub(super) conn: Connection,
+    /// Writer-authorized channel cloned only while the logical writer lane is
+    /// held. Read-only facades never retain one.
+    pub(super) write_conn: Option<Connection>,
     /// Retains the registry-owned physical runtime. The registry remains the
     /// sole lifecycle owner; this facade never extracts or reopens its
     /// attachment.
@@ -60,29 +64,33 @@ impl DatabaseInner {
                 database_registry_error("publish canonical database runtime", format!("{error:?}"))
             })?;
 
-        let handle = if writable {
+        let write_conn = if writable {
             let authority = authority.clone().ok_or_else(|| {
                 database_registry_error(
                     "authorize canonical database engine",
                     "writable database publication requires originating authority",
                 )
             })?;
-            runtime
-                .authorized_migration_sql_handle(authority)
-                .map_err(|error| {
-                    database_registry_error(
-                        "authorize canonical database engine",
-                        format!("{error:?}"),
-                    )
-                })?
+            Some(Connection::attach(
+                runtime
+                    .authorized_migration_sql_handle(authority)
+                    .map_err(|error| {
+                        database_registry_error(
+                            "authorize canonical database engine",
+                            format!("{error:?}"),
+                        )
+                    })?,
+            ))
         } else {
-            runtime.telemetry_read_handle().map_err(|error| {
-                database_registry_error("attach canonical database reader", format!("{error:?}"))
-            })?
+            None
         };
+        let read_conn = Connection::attach(runtime.telemetry_read_handle().map_err(|error| {
+            database_registry_error("attach canonical database reader", format!("{error:?}"))
+        })?);
 
         Ok(Self {
-            conn: Connection::attach(handle),
+            conn: read_conn,
+            write_conn,
             canonical_path: runtime.locator().path().to_path_buf(),
             _runtime: runtime,
             writable,

@@ -669,3 +669,58 @@ fn observatory_and_costs_http_dashboard_export_preserve_value_and_coverage() {
         assert_eq!(costs_http["estimated_cost"], costs_export["estimated_cost"]);
     });
 }
+
+#[test]
+fn observatory_counts_canonical_failed_outcomes() {
+    let _lock = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_fixture(false).await;
+        let project_id = HostAdmissionTestRuntimeV1::canonical_project_key(&fixture.project_root);
+        fixture
+            .host_runtime
+            .append_analytics_event_for_test(
+                HostAdmissionScope::Profile,
+                &observability_event(
+                    &project_id,
+                    tracedecay::tracedecay::current_timestamp(),
+                    ObservabilityTerminalResultV1::Failed,
+                ),
+            )
+            .await
+            .expect("append canonical failed event");
+
+        let (status, observatory) = get_json(
+            &http_agent(),
+            &format!("{}/api/observatory", fixture.base_url),
+        );
+        assert_eq!(status, 200);
+        let failures = observatory["payload"]["metrics"]
+            .as_array()
+            .and_then(|metrics| {
+                metrics
+                    .iter()
+                    .find(|metric| metric["metric"] == "observability_failures")
+            })
+            .expect("observability failures metric");
+        assert_eq!(failures["value"], 1.0);
+    });
+}
+
+#[test]
+fn costs_read_model_is_mounted_on_the_active_dashboard() {
+    let _lock = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_fixture(false).await;
+        let (status, costs) = get_json(&http_agent(), &format!("{}/api/costs", fixture.base_url));
+        assert_eq!(status, 200);
+        assert_eq!(costs["authorized_scope_ref"], "all");
+        assert!(costs["payload"]["usage"].is_array());
+        assert!(costs["payload"]["estimated_cost"].is_array());
+    });
+}

@@ -995,12 +995,11 @@ async fn rename_preview_lists_declaration_and_call_sites() {
     );
 }
 
-/// Exercises the post-edit verification loop end-to-end through the MCP
-/// dispatcher: a real edit that plants a type error, with `verify: true`, must
-/// re-run file-scoped diagnostics and surface the planted error; the same edit
-/// tool without `verify` must not attach a verification verdict. Compiles a
-/// tiny throwaway crate, so it shells out to `cargo check` (into an isolated
-/// diagnostics target dir) and is intentionally on the slower side.
+/// Exercises the post-edit verification loop through the authorized effect
+/// boundary: a preview-pinned real edit that plants a type error, with
+/// `verify: true`, must re-run file-scoped diagnostics and surface the planted
+/// error; the same edit without `verify` must not attach a verdict. Compiles a
+/// tiny throwaway crate, so it shells out to `cargo check`.
 #[tokio::test]
 async fn edit_verify_flag_surfaces_planted_compiler_error() {
     let tmp = tempfile::tempdir().unwrap();
@@ -1016,56 +1015,46 @@ async fn edit_verify_flag_surfaces_planted_compiler_error() {
     let cg = TraceDecay::init(project).await.unwrap();
     cg.sync().await.unwrap();
 
-    // Default path (no `verify`): output must NOT carry a verification verdict.
-    let clean = tracedecay::mcp::handle_tool_call(
+    // Default path (no `verify`): `run_authorized_source_edit` previews the
+    // exact state before applying it through the idempotency/CAS boundary.
+    let clean = run_authorized_source_edit(
         &cg,
-        "tracedecay_str_replace",
-        serde_json::json!({
-            "path": "src/lib.rs",
-            "old_str": "pub fn answer() -> u32 { 1 }",
-            "new_str": "pub fn answer() -> u32 { 2 }",
-        }),
-        None,
-        None,
+        SourceEditRequest::StrReplace {
+            path: "src/lib.rs".to_owned(),
+            old_str: "pub fn answer() -> u32 { 1 }".to_owned(),
+            new_str: "pub fn answer() -> u32 { 2 }".to_owned(),
+            dry_run: false,
+            verify: false,
+        },
+        "core-cli.edit-verify.clean",
     )
-    .await
-    .unwrap();
-    let clean_text = clean.value["content"][0]["text"]
-        .as_str()
-        .unwrap_or_default()
-        .to_lowercase();
+    .await;
     assert!(
-        !clean_text.contains("verif"),
-        "edit without verify should not run verification: {clean_text}"
+        clean.verification.is_none(),
+        "edit without verify should not run verification"
     );
 
     // verify=true on an edit that introduces `-> u32 { "no" }` (E0308) must
     // surface the planted error in a verification verdict.
-    let broken = tracedecay::mcp::handle_tool_call(
+    let broken = run_authorized_source_edit(
         &cg,
-        "tracedecay_str_replace",
-        serde_json::json!({
-            "path": "src/lib.rs",
-            "old_str": "pub fn answer() -> u32 { 2 }",
-            "new_str": "pub fn answer() -> u32 { \"no\" }",
-            "verify": true,
-        }),
-        None,
-        None,
+        SourceEditRequest::StrReplace {
+            path: "src/lib.rs".to_owned(),
+            old_str: "pub fn answer() -> u32 { 2 }".to_owned(),
+            new_str: "pub fn answer() -> u32 { \"no\" }".to_owned(),
+            dry_run: false,
+            verify: true,
+        },
+        "core-cli.edit-verify.broken",
     )
-    .await
-    .unwrap();
-    let broken_text = broken.value["content"][0]["text"]
-        .as_str()
-        .unwrap_or_default()
-        .to_lowercase();
+    .await;
+    let verification = broken
+        .verification
+        .expect("verify=true should attach a verification verdict");
+    let verification_text = serde_json::to_string(&verification).unwrap().to_lowercase();
     assert!(
-        broken_text.contains("verif"),
-        "verify=true should attach a verification verdict: {broken_text}"
-    );
-    assert!(
-        broken_text.contains("mismatched types") || broken_text.contains("error"),
-        "verification should surface the planted compiler error: {broken_text}"
+        verification_text.contains("mismatched types") || verification_text.contains("error"),
+        "verification should surface the planted compiler error: {verification_text}"
     );
 }
 

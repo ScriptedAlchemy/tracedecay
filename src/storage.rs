@@ -1850,7 +1850,10 @@ mod tests {
             "persisted repository identity must outrank a newly-derived fallback id"
         );
         assert_eq!(resolved.data_root, existing_store);
-        assert!(sentinel.is_file(), "the selected existing store must stay intact");
+        assert!(
+            sentinel.is_file(),
+            "the selected existing store must stay intact"
+        );
     }
 
     #[test]

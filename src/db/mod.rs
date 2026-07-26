@@ -27,6 +27,8 @@ mod unresolved;
 pub(crate) use access::OwnedMaintenanceDatabaseScope;
 #[doc(hidden)]
 pub use access::enter_maintenance_database_scope;
+#[cfg(any(test, feature = "test-transport"))]
+pub(crate) use access::is_isolated_test_path;
 #[cfg(windows)]
 pub(crate) use access::windows_hard_link_count;
 pub(crate) use access::{DaemonDatabaseScope, MaintenanceDatabaseScope};

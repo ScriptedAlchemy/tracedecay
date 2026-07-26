@@ -543,7 +543,7 @@ fn access_io_error(operation: &str, path: &Path, error: &std::io::Error) -> Trac
 }
 
 #[cfg(any(test, feature = "test-transport"))]
-pub(super) fn is_isolated_test_path(path: &Path) -> bool {
+pub(crate) fn is_isolated_test_path(path: &Path) -> bool {
     let root = std::env::temp_dir();
     if path.starts_with(root.canonicalize().unwrap_or(root)) {
         return true;

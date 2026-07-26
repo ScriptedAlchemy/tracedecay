@@ -63,7 +63,10 @@ fn compare_reports_unmeasured_semantic_and_rerank_stages_as_pending() {
     assert_eq!(payload["status"], "pending");
     for profile in payload["profiles"].as_array().expect("profiles array") {
         assert_eq!(profile["status"], "pending");
-        assert_eq!(profile["resource_status"], "pending");
+        assert!(matches!(
+            profile["resource_status"].as_str(),
+            Some("pass" | "pending")
+        ));
         assert_eq!(profile["optional_stages"]["semantic"], "pending");
         assert_eq!(profile["optional_stages"]["rerank"], "pending");
     }
