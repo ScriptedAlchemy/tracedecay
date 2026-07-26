@@ -48,6 +48,7 @@ use crate::query::temporal::context::{ContextBudget, TokenPolicy, VersionedToken
 use crate::query::temporal::ports::TemporalExecutionSnapshot;
 use crate::query::temporal::ranking::DiversityLimits;
 use crate::query::temporal::{TemporalHydratedResult, TemporalKernelResult};
+use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use crate::sessions::lcm::{
     LcmContentSlice, LcmDescribeRequest, LcmDescribeTarget, LcmExpandRequest, LcmExpandTarget,
 };
@@ -445,6 +446,7 @@ impl DaemonSessionRetrievalService {
     }
 
     fn request_context(&self, provider: Option<&str>) -> Option<RequestContext> {
+        let request_id = mint_global_request_id(GlobalRequestSurface::McpSessionRetrieval).ok()?;
         let capability = message_search_digest(
             b"tracedecay.mcp.message-search.capability.v1\0",
             &self.root.identity,
@@ -458,7 +460,7 @@ impl DaemonSessionRetrievalService {
         );
         Some(RequestContext::new(
             ActorId::new(MESSAGE_SEARCH_ACTOR_ID).ok()?,
-            RequestId::new(MESSAGE_SEARCH_ACTOR_ID).ok()?,
+            RequestId::new(request_id.as_str()).ok()?,
             self.root.identity.clone(),
             CapabilityDigest::new(capability),
             PolicyDigest::new(policy),

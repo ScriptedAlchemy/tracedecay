@@ -69,6 +69,7 @@ fn is_source_edit_tool(tool_name: &str) -> bool {
             | "tracedecay_replace_symbol"
             | "tracedecay_insert_at_symbol"
             | "tracedecay_move_symbol"
+            | "tracedecay_api_migration_apply"
             | "tracedecay_source_edit_reconcile"
     )
 }
@@ -251,7 +252,15 @@ impl McpServer {
         // exactly like the live connection loop. These callers never dispatch
         // memory tools, but the scope is unconditionally present rather than an
         // absent-scope special case.
-        let mut connection = self.new_connection_route_state();
+        let Ok(mut connection) = self.new_connection_route_state() else {
+            return request.id.clone().map(|id| {
+                JsonRpcResponse::error(
+                    id,
+                    ErrorCode::InternalError,
+                    "MCP connection identity is unavailable".to_owned(),
+                )
+            });
+        };
         Box::pin(self.handle_request_for_connection(
             request,
             self.timings_enabled(),
@@ -265,17 +274,18 @@ impl McpServer {
     /// allocates a new connection scope sequence, so the derived
     /// `{mcp_instance_id}-c{seq}` prefix is unique across connections and
     /// initialize-replay dispatches alike.
-    pub(crate) fn new_connection_route_state(&self) -> ConnectionRouteState {
-        // One replay-identity scope per client connection: envelope ids are
-        // client-chosen and connection-local, so the daemon widens them here
-        // before they become persistent memory operation identities.
-        let memory_request_scope = format!(
-            "{}-c{}",
-            self.mcp_instance_id,
-            self.connection_scope_seq
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        );
-        ConnectionRouteState::new(memory_request_scope, self.hook_project_routes.snapshot())
+    pub(crate) fn new_connection_route_state(
+        &self,
+    ) -> std::result::Result<ConnectionRouteState, crate::request_identity::RequestIdentityError>
+    {
+        // One request-correlation scope per client connection: envelope ids
+        // are client-chosen and connection-local, so the daemon widens them
+        // before they become persisted application request identities.
+        let memory_request_scope = self.connection_identity.establish_connection_scope()?;
+        Ok(ConnectionRouteState::new(
+            memory_request_scope,
+            self.hook_project_routes.snapshot(),
+        ))
     }
 
     pub(crate) async fn handle_request_for_connection(
@@ -827,12 +837,6 @@ impl McpServer {
         {
             map.insert("__mcp_request_id".to_string(), json!(request_id));
         }
-        inject_trusted_memory_request_id(
-            tool_name,
-            id,
-            memory_request_scope,
-            &mut handler_arguments,
-        );
         if tool_supports_live_cancellation(tool_name)
             && let Some(map) = handler_arguments.as_object_mut()
         {
@@ -1254,7 +1258,7 @@ impl McpServer {
                 arguments: analytics_arguments,
                 internal_analytics: result.internal_analytics(),
                 client_name: client_name.as_deref(),
-                mcp_instance_id: Some(self.mcp_instance_id.as_str()),
+                mcp_instance_id: self.connection_identity.instance_id(),
                 failure_reason: failure_reason.as_deref(),
             });
             self.spawn_observed_ledger_write(async move {
@@ -1676,6 +1680,7 @@ mod git_read_control_tests {
             "tracedecay_replace_symbol",
             "tracedecay_insert_at_symbol",
             "tracedecay_move_symbol",
+            "tracedecay_api_migration_apply",
             "tracedecay_source_edit_reconcile",
         ] {
             assert!(is_source_edit_tool(tool_name));

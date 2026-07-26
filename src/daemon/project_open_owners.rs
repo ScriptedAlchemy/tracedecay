@@ -51,6 +51,9 @@ use crate::agents::context_scout_ports::{
     ContextScoutAuthorityPinV1, ContextScoutCanonicalInputAssemblerV1,
     ContextScoutConfigurationPinV1, ProjectContextScoutAddressRegistryV1,
 };
+use crate::request_identity::{
+    GlobalRequestSurface, PreviewIdentityDomain, derive_preview_identity, mint_global_request_id,
+};
 
 const SOURCE_EDIT_PRIVACY_KEY_EPOCH_V1: u64 = 1;
 use crate::agents::context_scout_v2::{
@@ -486,11 +489,11 @@ async fn invoke_project_open_source_edit(
     let idempotency_key = match invocation.idempotency_key {
         Some(key) => key,
         None if dry_run => {
-            let preview_identity = canonical_sha256(&(
-                "tracedecay.source-edit-preview-idempotency.v1",
+            let preview_identity = derive_preview_identity(
+                PreviewIdentityDomain::SourceEdit,
                 context.request_id(),
                 &invocation.edit,
-            ))
+            )
             .map_err(|error| TraceDecayError::Config {
                 message: format!("source edit preview identity failed: {error}"),
             })?;
@@ -2136,19 +2139,17 @@ fn github_discovery_authorization_context(
         tracedecay_application::DisclosureClass::Evidence,
     )
     .ok()?;
+    let request_id =
+        mint_global_request_id(GlobalRequestSurface::ProjectOpenGithubDiscovery).ok()?;
     tracedecay_application::RequestContext::new(
         access.requester.clone(),
         access.scope.clone(),
         grant,
-        tracedecay_application::RequestId::new(format!(
-            "request.project-open.github-discovery.{}",
-            feedback_scope.head_commit_id.as_str()
-        ))
-        .ok()?,
+        request_id.clone(),
         tracedecay_application::Deadline::new(access.grant_expires_at).ok()?,
         tracedecay_application::CancellationContext::active(format!(
             "cancel.project-open.github-discovery.{}",
-            feedback_scope.head_commit_id.as_str()
+            request_id.as_str()
         ))
         .ok()?,
     )

@@ -43,7 +43,7 @@ use tracedecay_application::storage::telemetry::{
 };
 use tracedecay_application::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
-    RequestContext, RequestId,
+    RequestContext,
 };
 use tracedecay_domain::{ActorId, ManifestDigest, ProjectId, UtcMicros, canonical_sha256};
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
@@ -53,6 +53,7 @@ use super::read_model::{
     DashboardCoverageV1, DashboardEnvelopeV1, DashboardLegalActionKindV1,
     DashboardLegalActionRefV1, now_micros, scope_from_state,
 };
+use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
 /// One store's telemetry entry. One entry per distinct store **file**, not per
 /// dashboard role.
@@ -452,13 +453,19 @@ fn storage_telemetry_context(state: &DashboardState) -> Option<RequestContext> {
     let now = UtcMicros(now_micros());
     let expires_at = UtcMicros(now.0.saturating_add(30_000_000));
     let actor = ActorId::new("actor.dashboard.storage-telemetry").ok()?;
+    let request_id =
+        mint_global_request_id(GlobalRequestSurface::DashboardStorageTelemetry).ok()?;
     let manifest = canonical_sha256(&(
         "tracedecay.dashboard.storage-telemetry-grant.v1",
         &scope.scope_digest,
     ))
     .ok()?;
     let grant = CapabilityGrantSnapshot::new(
-        CapabilityGrantId::new(format!("grant.dashboard.storage-telemetry.{}", now.0)).ok()?,
+        CapabilityGrantId::new(format!(
+            "grant.dashboard.storage-telemetry.{}",
+            request_id.as_str()
+        ))
+        .ok()?,
         1,
         manifest,
         actor.clone(),
@@ -474,10 +481,13 @@ fn storage_telemetry_context(state: &DashboardState) -> Option<RequestContext> {
         actor,
         scope,
         grant,
-        RequestId::new(format!("request.dashboard.storage-telemetry.{}", now.0)).ok()?,
+        request_id.clone(),
         Deadline::new(expires_at).ok()?,
-        CancellationContext::active(format!("cancel.dashboard.storage-telemetry.{}", now.0))
-            .ok()?,
+        CancellationContext::active(format!(
+            "cancel.dashboard.storage-telemetry.{}",
+            request_id.as_str()
+        ))
+        .ok()?,
     )
     .ok()
 }

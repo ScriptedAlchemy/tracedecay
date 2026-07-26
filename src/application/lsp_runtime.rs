@@ -11,7 +11,6 @@ use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use cap_std::ambient_authority;
@@ -74,6 +73,7 @@ use crate::diagnostics_store::DiagnosticsStore;
 use crate::mcp::response_handles::{
     ResponseHandleLookup, retrieve_response_handle, store_response_handle,
 };
+use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
 const LSP_CONTEXT_EXPANSION_HANDLE_SCHEMA_VERSION: u16 = 1;
 const LSP_TEST_RUN_EXPANSION_HANDLE_SCHEMA_VERSION: u16 = 1;
@@ -1356,7 +1356,6 @@ pub struct ConcretePr12FeedbackLspSource {
     scope: Arc<dyn LspFeedbackProjectionScopePort>,
     diagnostic_projection: Arc<dyn LspFeedbackDiagnosticProjectionPort>,
     test_runs: Arc<dyn LspTestRunProjectionPort>,
-    next_request: Arc<AtomicU64>,
     changes: ProjectionChangeQueue,
 }
 
@@ -1382,7 +1381,6 @@ impl ConcretePr12FeedbackLspSource {
             scope,
             diagnostic_projection,
             test_runs,
-            next_request: Arc::new(AtomicU64::new(1)),
             changes: ProjectionChangeQueue::default(),
         }
     }
@@ -1454,11 +1452,12 @@ impl ConcretePr12FeedbackLspSource {
             .runtime
             .request_expiry_at(observed_at)
             .map_err(|_| LspRuntimeFailure::new("feedback-request-expiry-unavailable"))?;
-        let sequence = self.next_request.fetch_add(1, Ordering::Relaxed);
+        let request_id = mint_global_request_id(GlobalRequestSurface::LspFeedbackDiagnostics)
+            .map_err(|_| LspRuntimeFailure::new("feedback-request-identity-unavailable"))?;
         let handle = self
             .runtime
             .mint_diagnostics(
-                format!("lsp-feedback-diagnostics-{sequence}"),
+                request_id.as_str(),
                 FeedbackDiagnosticsReadRequestV1 {
                     head_commit_id: scope.head_commit_id.clone(),
                 },
@@ -1513,41 +1512,49 @@ impl ConcretePr12FeedbackLspSource {
             .filter_map(|finding| finding_item(finding).map(|item| (finding, item)))
             .take(maximum_items)
             .map(|(finding, item)| {
-                let sequence = self.next_request.fetch_add(1, Ordering::Relaxed);
-                let (canonical_operation, canonical_handle) =
-                    if let Some(anchor) = finding.retrieval_anchor_id.as_ref() {
-                        let page = PageRequest::first(MAX_CONTEXT_PROJECTION_ITEMS as u32)
-                            .map_err(|_| LspRuntimeFailure::new("feedback-expand-page-invalid"))?;
-                        let handle = self
-                            .runtime
-                            .mint_expand(
-                                format!("lsp-feedback-expand-{sequence}"),
-                                FeedbackExpandRequestV1 {
-                                    finding_id: finding.finding_id.clone(),
-                                    expansion: AnchorExpandRequest {
-                                        anchor: anchor.clone(),
-                                        meta: RetrievalRequestMeta::current(
-                                            page,
-                                            ResultProjection::ReferencesOnly,
-                                            RetrievalOrder::StableIdentity,
-                                        ),
-                                    },
+                let (canonical_operation, canonical_handle) = if let Some(anchor) =
+                    finding.retrieval_anchor_id.as_ref()
+                {
+                    let page = PageRequest::first(MAX_CONTEXT_PROJECTION_ITEMS as u32)
+                        .map_err(|_| LspRuntimeFailure::new("feedback-expand-page-invalid"))?;
+                    let handle = self
+                        .runtime
+                        .mint_expand(
+                            mint_global_request_id(GlobalRequestSurface::LspFeedbackExpand)
+                                .map_err(|_| {
+                                    LspRuntimeFailure::new("feedback-request-identity-unavailable")
+                                })?
+                                .as_str(),
+                            FeedbackExpandRequestV1 {
+                                finding_id: finding.finding_id.clone(),
+                                expansion: AnchorExpandRequest {
+                                    anchor: anchor.clone(),
+                                    meta: RetrievalRequestMeta::current(
+                                        page,
+                                        ResultProjection::ReferencesOnly,
+                                        RetrievalOrder::StableIdentity,
+                                    ),
                                 },
-                                observed_at,
-                            )
-                            .map_err(|_| LspRuntimeFailure::new("feedback-expand-mint-failed"))?;
-                        (FeedbackReadOperationV1::Expand, handle)
-                    } else {
-                        let handle = self
-                            .runtime
-                            .mint_get(
-                                format!("lsp-feedback-get-{sequence}"),
-                                finding.finding_id.clone(),
-                                observed_at,
-                            )
-                            .map_err(|_| LspRuntimeFailure::new("feedback-get-mint-failed"))?;
-                        (FeedbackReadOperationV1::Get, handle)
-                    };
+                            },
+                            observed_at,
+                        )
+                        .map_err(|_| LspRuntimeFailure::new("feedback-expand-mint-failed"))?;
+                    (FeedbackReadOperationV1::Expand, handle)
+                } else {
+                    let handle = self
+                        .runtime
+                        .mint_get(
+                            mint_global_request_id(GlobalRequestSurface::LspFeedbackGet)
+                                .map_err(|_| {
+                                    LspRuntimeFailure::new("feedback-request-identity-unavailable")
+                                })?
+                                .as_str(),
+                            finding.finding_id.clone(),
+                            observed_at,
+                        )
+                        .map_err(|_| LspRuntimeFailure::new("feedback-get-mint-failed"))?;
+                    (FeedbackReadOperationV1::Get, handle)
+                };
                 self.attach_context_handle(
                     root,
                     document_uri,

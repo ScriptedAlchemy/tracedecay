@@ -2,6 +2,7 @@
 
 pub mod advisory;
 pub mod anchor_resolution;
+pub mod api_migration;
 pub mod code_index;
 pub mod configuration;
 pub mod context;

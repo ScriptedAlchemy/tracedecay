@@ -17,7 +17,7 @@ const AUDIT_NAME: &str = "observation-authority";
 const AUDIT_VERSION: i64 = 2;
 pub(super) const MAX_BOUNDED_AUDIT_PASSES: i64 = 64;
 const DETAILED_AUDIT_CONCURRENCY: usize = 32;
-const MAX_DETAILED_OBSERVATIONS_PER_PAGE: usize = 4;
+const MAX_DETAILED_OBSERVATIONS_PER_PAGE: usize = 1;
 const PROJECTION_PROGRESS_PAGE_INTERVAL: i64 = 1;
 
 #[derive(Clone, Copy, Default)]
@@ -1272,7 +1272,7 @@ mod tests {
 
     #[test]
     fn exhaustive_projection_audit_bounds_detailed_work() {
-        assert_eq!(MAX_DETAILED_OBSERVATIONS_PER_PAGE, 4);
+        assert_eq!(MAX_DETAILED_OBSERVATIONS_PER_PAGE, 1);
         assert_eq!(PROJECTION_PROGRESS_PAGE_INTERVAL, 1);
     }
 

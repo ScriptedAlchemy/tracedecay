@@ -25,6 +25,7 @@ use super::read_model::{
 };
 use super::{DashboardState, graph_service, memory_service};
 use crate::application::context::CancellationToken;
+use crate::request_identity::{GlobalOpaqueIdentityKind, mint_global_opaque_id};
 
 const SOURCE_IDS: [ExplorerSourceIdV1; 3] = [
     ExplorerSourceIdV1::CodeGraph,
@@ -222,9 +223,7 @@ fn run_owner(state: &DashboardState) -> String {
 }
 
 fn new_run_id() -> Option<String> {
-    let mut bytes = [0_u8; 16];
-    getrandom::getrandom(&mut bytes).ok()?;
-    Some(format!("explorer-run-{}", hex::encode(bytes)))
+    mint_global_opaque_id(GlobalOpaqueIdentityKind::ExplorerRun).ok()
 }
 
 fn bad_request(message: impl Into<String>) -> Response {

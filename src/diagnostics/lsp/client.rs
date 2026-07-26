@@ -29,6 +29,7 @@ use tokio::task::JoinHandle;
 use crate::application::context::CancellationToken;
 use crate::diagnostics::lsp::broker::{CodeDiagnostic, DiagnosticSeverity};
 use crate::errors::{Result, TraceDecayError};
+use crate::request_identity::ConnectionLocalRequestSequence;
 
 const MIN_MESSAGE_IO_TIMEOUT: Duration = Duration::from_secs(2);
 const MIN_INITIALIZE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(3);
@@ -179,7 +180,7 @@ pub async fn collect_document_diagnostics_with_timeouts(
 pub struct StdioLspClient {
     command: String,
     document_versions: BTreeMap<String, i32>,
-    next_request_id: u64,
+    next_request_id: ConnectionLocalRequestSequence,
     stdin: tokio::process::ChildStdin,
     reader: BufReader<tokio::process::ChildStdout>,
     child: tokio::process::Child,
@@ -306,7 +307,7 @@ impl StdioLspClient {
         Ok(Self {
             command: command.to_string(),
             document_versions: BTreeMap::new(),
-            next_request_id: 2,
+            next_request_id: ConnectionLocalRequestSequence::starting_at(2),
             stdin,
             reader,
             child,
@@ -564,8 +565,11 @@ impl StdioLspClient {
         if cancellation.is_cancelled() {
             return Err(LspSemanticRequestError::Cancelled);
         }
-        let request_id = self.next_request_id;
-        self.next_request_id = self.next_request_id.checked_add(1).unwrap_or(2);
+        let request_id = self.next_request_id.next_number().map_err(|error| {
+            LspSemanticRequestError::InvalidResponse {
+                class: error.to_string(),
+            }
+        })?;
         let params = serde_json::to_value(params).map_err(|error| {
             LspSemanticRequestError::InvalidResponse {
                 class: error.to_string(),
