@@ -51,11 +51,11 @@ pub use dto::{
 };
 pub(crate) use dto::{GraphQlResponseV1, RestPullRequestV1, RestReviewCommentV1, RestReviewV1};
 pub use network::{
-    GITHUB_REVIEW_THREADS_QUERY_V1, GitHubCiTransportOutcomeV1, GitHubHttpReadConfigV1,
-    GitHubReadOnlyClientV1, GitHubReadOnlyCredentialAuthorityOutcomeV1,
-    GitHubReadOnlyCredentialAuthorityV1, GitHubReadOnlyCredentialSecretV1,
-    GitHubReadOnlyCredentialV1, GitHubReadPermissionV1, GitHubRepositoryTargetV1,
-    register_github_read_only_credential_authority_v1,
+    GITHUB_REVIEW_THREADS_QUERY_V1, GitHubCiReadOnlyClientV1, GitHubCiRepositoryTargetV1,
+    GitHubCiTransportOutcomeV1, GitHubHttpReadConfigV1, GitHubReadOnlyClientV1,
+    GitHubReadOnlyCredentialAuthorityOutcomeV1, GitHubReadOnlyCredentialAuthorityV1,
+    GitHubReadOnlyCredentialSecretV1, GitHubReadOnlyCredentialV1, GitHubReadPermissionV1,
+    GitHubRepositoryTargetV1, register_github_read_only_credential_authority_v1,
     register_profile_github_read_only_credential_authority_v1,
     unregister_github_read_only_credential_authority_v1,
     unregister_profile_github_read_only_credential_authority_v1,
@@ -150,6 +150,7 @@ pub struct GitHubReadNetworkMetadataV1 {
     pub etag: Option<GitHubReviewEtagV1>,
     pub next_cursor: Option<GitHubReviewCursorV1>,
     pub rate_limit: Option<GitHubReviewRateLimitCheckpointV1>,
+    pub retry_at: Option<tracedecay_domain::UtcMicros>,
 }
 
 impl GitHubReadNetworkMetadataV1 {
@@ -165,7 +166,14 @@ impl GitHubReadNetworkMetadataV1 {
                 .rate_limit
                 .as_ref()
                 .is_none_or(|limit| limit.validate().is_ok())
-            && (self.status != GitHubReadNetworkStatusV1::RateLimited || self.rate_limit.is_some())
+            && match self.status {
+                GitHubReadNetworkStatusV1::RateLimited => {
+                    self.rate_limit.is_some() || self.retry_at.is_some()
+                }
+                GitHubReadNetworkStatusV1::Ok | GitHubReadNetworkStatusV1::NotModified => {
+                    self.retry_at.is_none()
+                }
+            }
     }
 }
 
@@ -1588,6 +1596,7 @@ mod tests {
                     remaining: 0,
                     reset_at: UtcMicros(100),
                 }),
+                retry_at: None,
             },
             body: Vec::new(),
         })
@@ -1788,6 +1797,7 @@ mod tests {
                         .transpose()
                         .unwrap(),
                     rate_limit: None,
+                    retry_at: None,
                 },
                 body: Vec::new(),
             })
@@ -1871,6 +1881,7 @@ mod tests {
                         etag: None,
                         next_cursor: None,
                         rate_limit: None,
+                        retry_at: None,
                     },
                     body: Vec::new(),
                 }),

@@ -24,7 +24,7 @@ use crate::query::temporal::context::ContextBudget;
 use crate::query::temporal::ranking::DiversityLimits;
 use crate::sessions::lcm::{
     LcmContentRange, LcmExpandQueryBudget, LcmExpandQueryContextBlock, LcmExpandQueryMatch,
-    LcmExpandQueryPagination, LcmExpandQueryResponse, LcmExpandQuerySynthesisPrompt,
+    LcmExpandQueryPagination, LcmExpandQueryResponse, LcmExpandQuerySynthesisPrompt, LcmSourceRef,
 };
 
 fn lcm_status_payload<T: Serialize>(
@@ -184,6 +184,8 @@ fn lcm_retrieval_command(
     message_type: SessionMessageType,
     roles: Vec<String>,
     time_range: SessionSearchTimeRange,
+    source: Option<String>,
+    include_summaries: bool,
 ) -> Result<SessionRetrievalCommand> {
     let session_id =
         SessionId::new(session_id).map_err(|error| argument_error(error.to_string()))?;
@@ -205,6 +207,8 @@ fn lcm_retrieval_command(
         SessionRetrievalFilters {
             project_key: None,
             parent_session_id: None,
+            source,
+            include_summaries,
             scope: relationship_scope,
             message_type,
             roles,
@@ -293,6 +297,14 @@ fn lcm_typed_outcome(
         SessionRetrievalServiceOutcome::Unavailable(unavailable) => Some(*unavailable),
         _ => None,
     };
+    let cursor_manifest_limit = match &outcome {
+        SessionRetrievalServiceOutcome::CursorManifestLimitExceeded {
+            kind,
+            observed,
+            maximum,
+        } => Some((*kind, *observed, *maximum)),
+        _ => None,
+    };
     let (status, code, message) = match outcome {
         SessionRetrievalServiceOutcome::WrongScope => (
             "wrong_scope",
@@ -323,6 +335,11 @@ fn lcm_typed_outcome(
             "unavailable",
             "lcm_retrieval_service_unavailable",
             "the authorized session retrieval service is unavailable",
+        ),
+        SessionRetrievalServiceOutcome::CursorManifestLimitExceeded { .. } => (
+            "cursor_manifest_limit_exceeded",
+            "lcm_cursor_manifest_limit_exceeded",
+            "the canonical session cursor manifest exceeded its bounded limit",
         ),
         SessionRetrievalServiceOutcome::BudgetExhausted => (
             "budget_exhausted",
@@ -361,6 +378,11 @@ fn lcm_typed_outcome(
                 "retry_class": worker.retry_class.map(super::message_search::SessionRetrievalWorkerRetryClass::as_str),
             });
         }
+    }
+    if let Some((kind, observed, maximum)) = cursor_manifest_limit {
+        payload["error"]["kind"] = json!(kind);
+        payload["error"]["observed"] = json!(observed);
+        payload["error"]["maximum"] = json!(maximum);
     }
     payload[legacy_key] = json!([]);
     tool_json(project_root, args, &payload)
@@ -455,6 +477,8 @@ pub(in super::super) async fn handle_lcm_load_session(
             start_time: non_negative_i64_arg_alias(&args, "start_time", "time_from")?,
             end_time: non_negative_i64_arg_alias(&args, "end_time", "time_to")?,
         },
+        None,
+        false,
     )?;
     let outcome = match context.retrieval_service {
         Some(service) => service.execute(command).await,
@@ -533,14 +557,7 @@ pub(in super::super) async fn handle_lcm_grep(
     let message_type = parse_session_message_type(&args)?;
     let provider = lcm_grep_provider_arg(&args)?;
     let git_filter = parse_git_scope_filter(&args)?;
-    if bool_arg(&args, "include_summaries")?.unwrap_or(false) {
-        return Ok(unsupported_lcm_filter(
-            context.project_root,
-            &args,
-            "hits",
-            "summary",
-        ));
-    }
+    let include_summaries = bool_arg(&args, "include_summaries")?.unwrap_or(false);
     if !git_filter.is_empty() {
         return Ok(unsupported_lcm_filter(
             context.project_root,
@@ -549,17 +566,17 @@ pub(in super::super) async fn handle_lcm_grep(
             "git",
         ));
     }
-    if let Some(source) = args.get("source") {
-        if source.as_str().is_none() {
-            return Err(argument_error("source must be a string"));
-        }
-        return Ok(unsupported_lcm_filter(
-            context.project_root,
-            &args,
-            "hits",
-            "source",
-        ));
-    }
+    let source = args
+        .get("source")
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .ok_or_else(|| argument_error("source must be a non-empty string"))
+        })
+        .transpose()?;
     if !matches!(parse_lcm_grep_sort(&args)?, LcmGrepSort::Relevance) {
         return Ok(unsupported_lcm_filter(
             context.project_root,
@@ -592,6 +609,8 @@ pub(in super::super) async fn handle_lcm_grep(
         message_type,
         lcm_roles_arg(&args)?,
         message_search_time_range(&args)?,
+        source,
+        include_summaries,
     )?;
     let outcome = match context.retrieval_service {
         Some(service) => service.execute(command).await,
@@ -632,14 +651,28 @@ pub(in super::super) async fn handle_lcm_grep(
         .into_iter()
         .map(|result| {
             let (snippet, _) = truncate_chars(&result.message.text, DEFAULT_LCM_CONTENT_LIMIT);
+            let is_summary = result.message.kind.as_deref() == Some("summary");
+            let message_id = result.message.message_id;
             json!({
-                "kind": "raw_message",
+                "kind": if is_summary { "summary_node" } else { "raw_message" },
                 "provider": result.message.provider,
                 "session_id": result.message.session_id,
-                "message_id": result.message.message_id,
-                "node_id": Value::Null,
+                "message_id": if is_summary {
+                    Value::Null
+                } else {
+                    json!(&message_id)
+                },
+                "node_id": if is_summary {
+                    json!(&message_id)
+                } else {
+                    Value::Null
+                },
                 "store_id": Value::Null,
-                "role": result.message.role,
+                "role": if is_summary {
+                    Value::Null
+                } else {
+                    json!(result.message.role)
+                },
                 "snippet": snippet,
                 "score": result.score,
             })
@@ -887,23 +920,22 @@ fn expand_query_response_from_sources(
         query
     });
     let source_count = sources.len();
-    let mut used_chars = 0;
+    let mut context =
+        crate::query::temporal::context::OrderedTextContextAssembler::new(context_max_tokens);
     let mut context_truncated = false;
     let mut matches = Vec::new();
     let mut context_blocks = Vec::new();
     let mut node_ids = Vec::new();
     for (kind, node_id, source_content) in sources {
-        let remaining = context_max_tokens.saturating_sub(used_chars);
-        if remaining == 0 {
-            context_truncated = true;
+        let admitted = context.admit(&source_content);
+        let Some(content) = admitted.content else {
+            context_truncated |= admitted.truncated;
             break;
-        }
-        let total_chars = source_content.chars().count();
-        let (content, truncated) = truncate_chars(&source_content, remaining);
-        let returned_chars = content.chars().count();
-        used_chars = used_chars.saturating_add(returned_chars);
-        context_truncated |= truncated;
-        if let Some(node_id) = &node_id {
+        };
+        context_truncated |= admitted.truncated;
+        if let Some(node_id) = &node_id
+            && !node_ids.contains(node_id)
+        {
             node_ids.push(node_id.clone());
         }
         matches.push(LcmExpandQueryMatch {
@@ -919,10 +951,10 @@ fn expand_query_response_from_sources(
             content,
             content_range: LcmContentRange {
                 offset: 0,
-                limit: u64::try_from(remaining).unwrap_or(u64::MAX),
-                returned_chars: u64::try_from(returned_chars).unwrap_or(u64::MAX),
-                total_chars: u64::try_from(total_chars).unwrap_or(u64::MAX),
-                truncated,
+                limit: admitted.limit,
+                returned_chars: admitted.returned_chars,
+                total_chars: admitted.total_chars,
+                truncated: admitted.truncated,
             },
             raw_message: None,
             summary_node: None,
@@ -949,7 +981,7 @@ fn expand_query_response_from_sources(
             context_max_tokens,
             context_budget: LcmExpandQueryBudget {
                 requested_max_chars: context_max_tokens,
-                used_chars,
+                used_chars: context.used_chars(),
             },
             context_truncated,
             context_pagination: Vec::new(),
@@ -1053,6 +1085,7 @@ pub(in super::super) async fn handle_lcm_expand_query(
         MAX_LCM_EXPAND_QUERY_CONTEXT_LIMIT,
     )?
     .unwrap_or(DEFAULT_LCM_EXPAND_QUERY_CONTEXT_LIMIT);
+    let cursor = optional_non_empty_string_arg(&args, "cursor")?.map(str::to_string);
     let request = LcmExpandQueryRequest {
         provider: provider.to_string(),
         session_id: session_id.to_string(),
@@ -1063,6 +1096,11 @@ pub(in super::super) async fn handle_lcm_expand_query(
         max_tokens,
         context_max_tokens,
     };
+    if cursor.is_some() && request.node_ids.len() > 1 {
+        return Err(argument_error(
+            "cursor continuation requires exactly one node_id",
+        ));
+    }
     if !request.node_ids.is_empty() {
         let Some(service) = context.retrieval_service else {
             return Ok(lcm_typed_outcome(
@@ -1093,7 +1131,7 @@ pub(in super::super) async fn handle_lcm_expand_query(
                     },
                     0,
                     Some(request.max_results),
-                    None,
+                    cursor.clone(),
                     context.retrieval_store_scope,
                 ))
                 .await;
@@ -1104,10 +1142,14 @@ pub(in super::super) async fn handle_lcm_expand_query(
                     ..
                 } => {
                     for source in expansion.summary_sources {
+                        let kind = match &source.source_ref {
+                            LcmSourceRef::RawMessage { .. } => "raw_message",
+                            LcmSourceRef::SummaryNode { .. } => "summary_source",
+                        };
                         summary_provenance.push(LcmExpandQueryPagination {
-                            kind: "summary_source".to_string(),
+                            kind: kind.to_string(),
                             node_id: Some(node_id.clone()),
-                            source_ref: Some(source.source_ref),
+                            source_ref: Some(source.source_ref.clone()),
                             next_content_offset: source.content_range.as_ref().and_then(|range| {
                                 range
                                     .truncated
@@ -1115,6 +1157,7 @@ pub(in super::super) async fn handle_lcm_expand_query(
                             }),
                             has_more: source.content_truncated,
                         });
+                        sources.push((kind, Some(node_id.clone()), source.content));
                     }
                     sources.push(("summary_node", Some(node_id.clone()), expansion.content));
                     if !merge_temporal_metadata(&mut temporal, expansion_temporal) {
@@ -1171,14 +1214,15 @@ pub(in super::super) async fn handle_lcm_expand_query(
         ));
     }
     let query = request.query.as_deref();
-    let outcome = match (query, context.retrieval_service) {
-        (Some(query), Some(service)) => {
+    let retrieval_query = query.unwrap_or(&request.prompt);
+    let outcome = match context.retrieval_service {
+        Some(service) => {
             let command = lcm_retrieval_command(
                 context,
                 session_id,
                 Some(provider),
-                query,
-                None,
+                retrieval_query,
+                cursor,
                 TemporalModeV1::Current,
                 request.max_results,
                 ContextBudget {
@@ -1195,16 +1239,14 @@ pub(in super::super) async fn handle_lcm_expand_query(
                 SessionMessageType::All,
                 Vec::new(),
                 SessionSearchTimeRange::default(),
+                None,
+                false,
             )?;
             service.execute(command).await
         }
-        (Some(_), None) => SessionRetrievalServiceOutcome::Unavailable(
+        None => SessionRetrievalServiceOutcome::Unavailable(
             SessionRetrievalUnavailable::service_not_configured(),
         ),
-        (None, _) => SessionRetrievalServiceOutcome::CompleteZero {
-            temporal: SessionTemporalMetadataView::default(),
-            freshness: SessionDataFreshness::Fresh,
-        },
     };
     let (results, temporal, status, service_omitted) = match outcome {
         SessionRetrievalServiceOutcome::Complete { page, .. } => {
@@ -1432,7 +1474,7 @@ mod compatibility_tests {
     use tracedecay_domain::{
         HydrationStateV1, RetrievalAnchorId, RetrievalGrainV1, SessionId, SessionSourceCoverageV1,
         SessionSourceFrontierV1, SessionSourceIdV1, SessionTemporalCoverageRequestV1,
-        TemporalCoverageCountsV1, TemporalModeV1,
+        TemporalCoverageCountsV1, TemporalModeV1, UtcMicros,
     };
 
     use super::super::message_search::{
@@ -1596,6 +1638,13 @@ mod compatibility_tests {
         }
     }
 
+    fn summary_result(text: &str, node_id: &str) -> SessionMessageSearchResult {
+        let mut result = result(text, "summary");
+        result.message.message_id = node_id.to_string();
+        result.message.kind = Some("summary".to_string());
+        result
+    }
+
     fn complete(text: &str, role: &str, cursor: Option<&str>) -> SessionRetrievalServiceOutcome {
         SessionRetrievalServiceOutcome::Complete {
             page: SessionRetrievalPageView {
@@ -1747,11 +1796,65 @@ mod compatibility_tests {
     }
 
     #[tokio::test]
+    async fn grep_binds_summary_source_as_of_and_renders_stable_summary_hits() {
+        let service = RecordingService::new(SessionRetrievalServiceOutcome::Complete {
+            page: SessionRetrievalPageView {
+                results: vec![summary_result(
+                    "current canonical summary",
+                    "summary-successor",
+                )],
+                temporal: temporal(Some("summary-next")),
+            },
+            freshness: SessionDataFreshness::Fresh,
+        });
+        let response = payload(
+            handle_lcm_grep(
+                LcmHandlerContext::user(Path::new("/missing"), None, Some(&service)),
+                json!({
+                    "query": "canonical summary",
+                    "provider": "claude",
+                    "scope": "session",
+                    "session_id": "session-exact",
+                    "include_summaries": true,
+                    "source": "claude",
+                    "temporal_mode": "as_of",
+                    "as_of_micros": 1234,
+                    "cursor": "summary-current",
+                    "format": "json"
+                }),
+            )
+            .await
+            .unwrap(),
+        );
+
+        let command = service.command();
+        assert_eq!(
+            command.query().temporal_mode(),
+            TemporalModeV1::AsOf {
+                cutoff: UtcMicros(1234)
+            }
+        );
+        assert_eq!(command.query().cursor(), Some("summary-current"));
+        assert_eq!(command.filters().source.as_deref(), Some("claude"));
+        assert!(command.filters().include_summaries);
+        assert_eq!(
+            command.query().semantic_filter().source.as_deref(),
+            Some("claude")
+        );
+        assert!(command.query().semantic_filter().include_summaries);
+
+        assert_eq!(response["hits"][0]["kind"], "summary_node");
+        assert_eq!(response["hits"][0]["node_id"], "summary-successor");
+        assert!(response["hits"][0]["message_id"].is_null());
+        assert!(response["hits"][0]["role"].is_null());
+        assert_eq!(response["next_cursor"], "summary-next");
+        assert_eq!(response["anchors"][0], "anchor.compatibility.1");
+    }
+
+    #[tokio::test]
     async fn unsupported_filters_are_typed_and_never_call_the_service() {
         for args in [
-            json!({"query": "x", "include_summaries": true, "format": "json"}),
             json!({"query": "x", "branch": "main", "include_summaries": false, "format": "json"}),
-            json!({"query": "x", "source": "cursor", "include_summaries": false, "format": "json"}),
             json!({"query": "x", "sort": "recency", "include_summaries": false, "format": "json"}),
         ] {
             let service = RecordingService::new(complete("unused", "user", None));
@@ -2159,6 +2262,7 @@ mod compatibility_tests {
                     "max_results": 3,
                     "max_tokens": 512,
                     "context_max_tokens": 4096,
+                    "cursor": "expand-query-current",
                     "format": "json"
                 }),
             )
@@ -2176,6 +2280,7 @@ mod compatibility_tests {
         assert_eq!(command.query().grain(), RetrievalGrainV1::Occurrence);
         assert_eq!(command.query().limit(), 3);
         assert_eq!(command.query().context_budget().max_tokens, 4096);
+        assert_eq!(command.query().cursor(), Some("expand-query-current"));
         assert_eq!(service.calls(), 1);
         assert_eq!(response["status"], "ok");
         assert_eq!(response["needs_synthesis"], true);
@@ -2242,6 +2347,53 @@ mod compatibility_tests {
         assert_eq!(
             response["context_blocks"][0]["content"],
             "canonical summary context"
+        );
+    }
+
+    #[tokio::test]
+    async fn expand_query_forwards_single_node_cursor_to_canonical_expansion() {
+        let service = RecordingService::new(complete("unused", "assistant", None));
+        service.set_expand_outcome(LcmExpandServiceOutcome::Complete {
+            expansion: LcmExpandResponse {
+                kind: "summary_node".to_string(),
+                content: "continued context".to_string(),
+                content_range: LcmContentRange {
+                    offset: 0,
+                    limit: 4096,
+                    returned_chars: 17,
+                    total_chars: 17,
+                    truncated: false,
+                },
+                raw_message: None,
+                summary_node: None,
+                summary_sources: Vec::new(),
+                payload_ref: None,
+                from_current_session: Some(true),
+                externalized_note: None,
+                source_pagination: None,
+            },
+            temporal: temporal(None),
+            grain: RetrievalGrainV1::Summary,
+            state: HydrationStateV1::Available,
+        });
+
+        handle_lcm_expand_query(
+            LcmHandlerContext::user(Path::new("/missing"), None, Some(&service)),
+            json!({
+                "provider": "claude",
+                "session_id": "session-exact",
+                "prompt": "Continue",
+                "node_ids": ["summary-1"],
+                "cursor": "expand-query-node-current",
+                "format": "json"
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            service.expand_command().cursor(),
+            Some("expand-query-node-current")
         );
     }
 

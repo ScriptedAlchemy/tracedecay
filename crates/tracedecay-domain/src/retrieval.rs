@@ -18,8 +18,10 @@ use std::fmt;
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
-use crate::code_intelligence::{CodeGenerationId, ProjectionKeyV1, VectorGenerationIdV1};
-use crate::research::id::{PrivacyDomainId, RetrievalAnchorId};
+use crate::code_intelligence::{
+    CodeGenerationId, ProjectionKeyV1, SemanticSearchIndexKeyV1, VectorGenerationIdV1,
+};
+use crate::research::id::{ManifestDigest, PrivacyDomainId, RetrievalAnchorId};
 use crate::research::time::UtcMicros;
 use crate::research::watermark::VectorWatermark;
 use crate::research::{DomainError, canonical_sha256};
@@ -321,9 +323,9 @@ impl From<DomainError> for RetrievalContractError {
     }
 }
 
-/// The independent retrieval lanes (Plan 15). Each lane is independently
-/// testable, disableable, budgeted, and attributable; one lane is never an
-/// alias over another.
+/// Runtime-backed retrieval lanes. Each lane is independently testable,
+/// disableable, budgeted, and attributable; one lane is never an alias over
+/// another.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum RetrieverKind {
@@ -331,9 +333,6 @@ pub enum RetrieverKind {
     Lexical,
     Semantic,
     Graph,
-    Temporal,
-    TaskSession,
-    Diagnostic,
 }
 
 impl RetrieverKind {
@@ -346,9 +345,6 @@ impl RetrieverKind {
             Self::Lexical => "lexical",
             Self::Semantic => "semantic",
             Self::Graph => "graph",
-            Self::Temporal => "temporal",
-            Self::TaskSession => "task_session",
-            Self::Diagnostic => "diagnostic",
         }
     }
 
@@ -1083,32 +1079,6 @@ pub struct RerankPolicy {
     pub deadline_micros: Option<u64>,
 }
 
-/// Deterministic fixed-point fusion surface (Plan 15/Plan 05). The promoted
-/// PR9 profile uses deterministic fixed-point contributions, complete
-/// comparator provenance, and the total order: exact class, utility, source
-/// validity, stable anchor ID, logical evidence ID, then ordered source
-/// occurrence IDs.
-pub trait FixedPointFusion {
-    /// Fuse one snapshot's lane batches into a deterministically ordered
-    /// candidate list under `profile`.
-    fn fuse(
-        &self,
-        profile: &FusionProfile,
-        batches: &[(RetrieverKind, RetrieverBatch<OccurrenceProvenance>)],
-    ) -> Result<Vec<FusedCandidate>, RetrievalError>;
-}
-
-/// Deterministic diversity-cap surface (Plan 15 pipeline step 9).
-pub trait DiversityArbiter {
-    /// Apply `policy` to an ordered fused list, recording one
-    /// [`RankingDecisionKind::DiversityCap`] decision per capped candidate.
-    fn apply(
-        &self,
-        policy: &DiversityPolicy,
-        candidates: Vec<FusedCandidate>,
-    ) -> Result<Vec<FusedCandidate>, RetrievalError>;
-}
-
 /// Ephemeral authorized rerank view (Plan 15 pipeline step 10): only approved
 /// source-local text or token features, never cached or persisted.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -1119,18 +1089,6 @@ pub struct AuthorizedRerankView {
     pub privacy_domain: PrivacyDomainId,
     pub compatibility: FreshnessCompatibilityV1,
     pub approved_features: Vec<u8>,
-}
-
-/// Bounded late hydration surface (Plan 15 pipeline step 11: recheck
-/// authorization and hydrate only the selected anchors under byte/token/
-/// deadline budgets).
-pub trait CandidateHydrator {
-    /// Hydrate the selected anchors; emit one [`HydrationReceipt`] per anchor.
-    fn hydrate(
-        &self,
-        request: &RetrievalRequest,
-        anchors: &[RetrievalAnchorId],
-    ) -> Result<Vec<HydrationReceipt>, RetrievalError>;
 }
 
 /// Per-anchor hydration receipt (Plan 15: every contribution and hydration
@@ -1154,18 +1112,27 @@ pub struct HydrationReceipt {
 #[serde(deny_unknown_fields)]
 pub struct SemanticRetrievalContinuationV1 {
     pub profile_id: FusionProfileId,
+    pub profile_digest: ManifestDigest,
     pub code_generation: CodeGenerationId,
     pub vector_generation: VectorGenerationIdV1,
     pub projection_key: ProjectionKeyV1,
+    pub search_index_key: SemanticSearchIndexKeyV1,
     pub candidate_set_digest: CandidateSetDigest,
     pub public_lane_statuses: BTreeMap<RetrieverKind, PublicRetrieverStatus>,
     pub lane_checkpoints: Vec<RetrieverContinuation>,
     pub ranking_revision: RankingRevision,
+    pub rerank: OptionalStagePublicStatus,
+    pub ordered_candidate_anchors: Vec<RetrievalAnchorId>,
     pub next_ordinal: u32,
 }
 
 impl SemanticRetrievalContinuationV1 {
     pub fn validate(&self) -> Result<(), RetrievalContractError> {
+        self.search_index_key.validate().map_err(|_| {
+            RetrievalContractError::InvalidCursorBinding {
+                field: "semantic search index key",
+            }
+        })?;
         if !self
             .public_lane_statuses
             .contains_key(&RetrieverKind::Semantic)
@@ -1181,6 +1148,19 @@ impl SemanticRetrievalContinuationV1 {
         {
             return Err(RetrievalContractError::InvalidCursorBinding {
                 field: "semantic lane checkpoint without admitted lane status",
+            });
+        }
+        let unique_anchors = self
+            .ordered_candidate_anchors
+            .iter()
+            .collect::<BTreeSet<_>>();
+        if unique_anchors.len() != self.ordered_candidate_anchors.len()
+            || usize::try_from(self.next_ordinal)
+                .ok()
+                .is_none_or(|next| next > self.ordered_candidate_anchors.len())
+        {
+            return Err(RetrievalContractError::InvalidCursorBinding {
+                field: "semantic frozen candidate order",
             });
         }
         Ok(())
@@ -1559,17 +1539,22 @@ mod tests {
         ]);
         accepted.validate().expect("PR9 lanes are admissible");
 
-        for lane in [
-            RetrieverKind::Semantic,
-            RetrieverKind::Temporal,
-            RetrieverKind::TaskSession,
-            RetrieverKind::Diagnostic,
-        ] {
+        for lane in [RetrieverKind::Semantic] {
             let rejected = subpayload(&[lane]);
             assert_eq!(
                 rejected.validate(),
                 Err(RetrievalContractError::FallbackLaneViolation),
                 "lane {lane:?} must not enter the PR9 fallback subpayload"
+            );
+        }
+    }
+
+    #[test]
+    fn retriever_contract_rejects_lanes_without_runtime_adapters() {
+        for unsupported in ["temporal", "task_session", "diagnostic"] {
+            assert!(
+                serde_json::from_str::<RetrieverKind>(&format!("\"{unsupported}\"")).is_err(),
+                "{unsupported} must not be advertised without a runtime adapter"
             );
         }
     }

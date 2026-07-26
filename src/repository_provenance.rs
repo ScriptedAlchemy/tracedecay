@@ -39,6 +39,7 @@ pub(crate) struct RepositoryProvenanceAdmissionContext {
     project_id: ProjectId,
     repository_id: RepositoryId,
     worktree_id: Option<WorktreeId>,
+    expected_common_dir: Option<PathBuf>,
     /// A deterministic project-domain salt, not a secret or credential.
     privacy_domain_salt: [u8; 32],
 }
@@ -51,11 +52,13 @@ impl RepositoryProvenanceAdmissionContext {
         worktree_id: Option<WorktreeId>,
         privacy_domain_salt: [u8; 32],
     ) -> Self {
+        let expected_common_dir = discover_canonical_common_dir(&project_root);
         Self {
             project_root,
             project_id,
             repository_id,
             worktree_id,
+            expected_common_dir,
             privacy_domain_salt,
         }
     }
@@ -109,13 +112,14 @@ impl RepositoryProvenanceAdmissionContext {
             ),
         ))
         .ok()?;
-        Some(Self::new(
-            canonical_root,
-            project_id.clone(),
+        Some(Self {
+            project_root: canonical_root,
+            project_id: project_id.clone(),
             repository_id,
-            Some(worktree_id),
+            worktree_id: Some(worktree_id),
+            expected_common_dir: Some(canonical_common_dir),
             privacy_domain_salt,
-        ))
+        })
     }
 
     pub(crate) fn matches_admitted_identity(
@@ -153,14 +157,17 @@ impl RepositoryProvenanceAdmissionContext {
         if observation_project_id != &self.project_id {
             return PreparedRepositoryProvenanceV1::unavailable();
         }
-        let captured = capture_repository_provenance(&RepositoryProvenanceProbeRequest::new(
-            &self.project_root,
-            &self.repository_id,
-            Some(&self.project_id),
-            self.worktree_id.as_ref(),
-            &self.privacy_domain_salt,
-            ingested_at,
-        ));
+        let captured = capture_repository_provenance(
+            &RepositoryProvenanceProbeRequest::new(
+                &self.project_root,
+                &self.repository_id,
+                Some(&self.project_id),
+                self.worktree_id.as_ref(),
+                &self.privacy_domain_salt,
+                ingested_at,
+            )
+            .with_expected_common_dir(self.expected_common_dir.as_deref()),
+        );
         prepare_generation_binding(
             captured,
             observation,
@@ -219,12 +226,13 @@ pub(crate) struct RepositoryProvenanceProbeRequest<'a> {
     repository_id: &'a RepositoryId,
     project_id: Option<&'a ProjectId>,
     worktree_id: Option<&'a WorktreeId>,
+    expected_common_dir: Option<PathBuf>,
     privacy_domain_salt: &'a [u8; 32],
     captured_at: UtcMicros,
 }
 
 impl<'a> RepositoryProvenanceProbeRequest<'a> {
-    pub(crate) const fn new(
+    pub(crate) fn new(
         project_root: &'a Path,
         repository_id: &'a RepositoryId,
         project_id: Option<&'a ProjectId>,
@@ -237,9 +245,17 @@ impl<'a> RepositoryProvenanceProbeRequest<'a> {
             repository_id,
             project_id,
             worktree_id,
+            expected_common_dir: discover_canonical_common_dir(project_root),
             privacy_domain_salt,
             captured_at,
         }
+    }
+
+    fn with_expected_common_dir(mut self, expected_common_dir: Option<&Path>) -> Self {
+        if let Some(expected_common_dir) = expected_common_dir {
+            self.expected_common_dir = Some(expected_common_dir.to_path_buf());
+        }
+        self
     }
 }
 
@@ -252,7 +268,10 @@ impl NativeRepositoryProvenanceProbe {
         &self,
         request: &RepositoryProvenanceProbeRequest<'_>,
     ) -> EvidenceAvailabilityV1<RepositoryProvenanceV1> {
-        let Ok(repo) = gix::discover(request.project_root) else {
+        // Admission has already resolved the exact checkout root. Opening that
+        // root directly prevents a removed nested checkout from silently
+        // walking up to, and capturing evidence from, an ambient repository.
+        let Ok(repo) = gix::open(request.project_root) else {
             return EvidenceAvailabilityV1::Unavailable;
         };
         Self::capture_open_repository(&repo, request)
@@ -272,6 +291,13 @@ impl NativeRepositoryProvenanceProbe {
         }
         let (git_dir, git_dir_is_partial) = canonical_path(repo.git_dir());
         let (common_dir, common_dir_is_partial) = canonical_path(repo.common_dir());
+        if request
+            .expected_common_dir
+            .as_ref()
+            .is_some_and(|expected| expected != &common_dir)
+        {
+            return EvidenceAvailabilityV1::Unavailable;
+        }
         let remote_identity = observe_remote_identity(repo, request.privacy_domain_salt);
 
         let Some(canonical_root_digest) = privacy_bound_digest(
@@ -464,6 +490,12 @@ fn observe_head(repo: &gix::Repository) -> HeadObservation {
 fn canonical_path(path: &Path) -> (PathBuf, bool) {
     path.canonicalize()
         .map_or_else(|_| (path.to_path_buf(), true), |path| (path, false))
+}
+
+fn discover_canonical_common_dir(project_root: &Path) -> Option<PathBuf> {
+    let repository = gix::discover(project_root).ok()?;
+    let (common_dir, partial) = canonical_path(repository.common_dir());
+    (!partial && common_dir.is_absolute()).then_some(common_dir)
 }
 
 struct RemoteIdentityObservation {

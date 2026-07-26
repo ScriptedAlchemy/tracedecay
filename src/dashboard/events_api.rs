@@ -23,11 +23,11 @@
 //!   size (a real change signal that tells the client to refetch
 //!   `/api/storage/telemetry`).
 //!
-//! **Live activity pulses** (pushed, via [`super::activity_bus`]): the daemon
+//! **Durable activity records** (via [`crate::application::event_lane`]): the daemon
 //! observes real agent work continuously — host hooks admitted on the MCP
 //! boundary, transcript messages persisted, touched paths queued for indexing,
-//! tool calls dispatched. Each producer publishes an in-memory pulse carrying
-//! **its own** project scope, and this endpoint turns those pulses into
+//! tool calls dispatched. Each producer durably publishes its own project
+//! scope before waking live consumers, and this endpoint turns those records into
 //! `hook_activity`, `session_ingest_activity`, `code_index_activity`, and
 //! `tool_call_activity` events.
 //!
@@ -37,13 +37,13 @@
 //! accumulate into one bucket per `(family, project)` and flush on a fixed
 //! [`ACTIVITY_FLUSH_INTERVAL`] tick — at most **two events per second per family
 //! per project**, each carrying the coalesced `count`/`units` in its payload.
-//! Dropping a pulse under backpressure loses part of a count, never a
-//! correctness signal.
+//! Slow or lagged consumers replay from the persisted producer frontier.
+//! Retention eviction and rejected oversized records advance explicit drop and
+//! coverage accounting; an expired resume emits `resume_gap`.
 //!
-//! Envelope discipline is identical for both kinds: every activity bucket is its
-//! own stream (`<family>:<project>`) with its own monotone `event_revision`, so
-//! the client's per-stream gap detection stays meaningful instead of one busy
-//! project tearing another's sequence.
+//! All activity families share one canonical `dashboard_activity` stream and
+//! producer sequence. SSE `Last-Event-ID` binds the durable run and sequence,
+//! while the named SSE event and typed family preserve routing semantics.
 //!
 //! Declared-but-unfed families (documented seams; additive, tolerated
 //! downstream):
@@ -60,6 +60,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use axum::extract::State;
+use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use serde::Serialize;
@@ -68,9 +69,11 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::db::engine::QueryExecutor;
 
 use super::DashboardState;
-use super::activity_bus::{ActivityFamilyV1, ActivityPulseV1};
 use super::read_model::{
     DashboardCoverageV1, DashboardScopeV1, DashboardWatermarkV1, now_micros, scope_from_state,
+};
+use crate::application::event_lane::{
+    ActivityFamilyV1, ActivityFrontierV1, ActivityPulseV1, ActivityRecordV1,
 };
 
 /// Poll cadence for the source pollers and heartbeat. Kept modest so a settled
@@ -85,15 +88,12 @@ const CHANNEL_CAPACITY: usize = 256;
 /// Flush cadence for coalesced activity buckets. This is the rate limit: one
 /// event per `(family, project)` per tick, i.e. at most 2/s per bucket.
 const ACTIVITY_FLUSH_INTERVAL: Duration = Duration::from_millis(500);
-/// Bound the coalescing map so a machine touching an unbounded number of
-/// projects cannot grow it without limit. Pulses for projects beyond this many
-/// distinct buckets in one window are folded into the buckets already open.
-const MAX_PENDING_ACTIVITY_BUCKETS: usize = 64;
 
 /// Stream identity labels. Each stream carries its own monotone revision.
 const STREAM_HEARTBEAT: &str = "heartbeat";
 const STREAM_PROJECT_REGISTRY: &str = "project_registry";
 const STREAM_STORAGE_TELEMETRY: &str = "storage_telemetry";
+const STREAM_DASHBOARD_ACTIVITY: &str = "dashboard_activity";
 
 /// The closed, additive event-family union.
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
@@ -135,6 +135,13 @@ pub(crate) enum DashboardEventKindV1 {
         calls: u64,
         detail: Option<String>,
     },
+    /// Requested durable cursor predates the retained frontier. The client
+    /// invalidates canonical reads once, then continues from `first_available`.
+    ResumeGap {
+        requested_after: u64,
+        first_available: u64,
+        dropped_events: u64,
+    },
 }
 
 impl DashboardEventKindV1 {
@@ -152,6 +159,7 @@ impl DashboardEventKindV1 {
             Self::SessionIngestActivity { .. } => ActivityFamilyV1::SessionIngest.stream_name(),
             Self::CodeIndexActivity { .. } => ActivityFamilyV1::CodeIndex.stream_name(),
             Self::ToolCallActivity { .. } => ActivityFamilyV1::ToolCall.stream_name(),
+            Self::ResumeGap { .. } => "control",
         }
     }
 
@@ -202,6 +210,8 @@ struct ActivityBucketV1 {
     project_id: Option<String>,
     /// Most recent producer label in the window.
     detail: Option<String>,
+    /// Exact persisted control record at the end of this coalesced bucket.
+    last_record: Option<ActivityRecordV1>,
 }
 
 impl ActivityBucketV1 {
@@ -215,6 +225,17 @@ impl ActivityBucketV1 {
             self.detail = pulse.detail;
         }
     }
+
+    fn absorb_record(&mut self, record: ActivityRecordV1) {
+        self.absorb(record.pulse.clone());
+        if self
+            .last_record
+            .as_ref()
+            .is_none_or(|current| current.producer_sequence < record.producer_sequence)
+        {
+            self.last_record = Some(record);
+        }
+    }
 }
 
 /// One typed SSE event with its full monotone-revision envelope.
@@ -223,6 +244,12 @@ pub(crate) struct DashboardEventV1 {
     pub stream: String,
     pub run_id: String,
     pub event_revision: u64,
+    /// Global producer sequence used by SSE `Last-Event-ID`.
+    pub producer_sequence: Option<u64>,
+    /// First producer sequence still replayable from the durable lane.
+    pub retained_from_sequence: Option<u64>,
+    /// Total events evicted or rejected before this event was published.
+    pub dropped_events: u64,
     pub entity_revision: Option<u64>,
     pub scope: DashboardScopeV1,
     pub observation_time_micros: i64,
@@ -238,12 +265,9 @@ struct EventStreamState {
     heartbeat_revision: u64,
     registry_revision: u64,
     storage_revision: u64,
+    activity_dropped_events: u64,
     last_registry_digest: Option<String>,
     last_store_total_bytes: Option<u64>,
-    /// Monotone revision per activity stream (`<family>:<project>`). Each
-    /// bucket owns its own sequence so one busy project can never tear the gap
-    /// detection of another.
-    activity_revisions: HashMap<String, u64>,
     /// Canonical project root → registered project id, refreshed for free from
     /// the registry poll this task already runs. Lets a producer that does not
     /// hold its project id (transcript ingest) still land on the right neuron.
@@ -257,9 +281,9 @@ impl EventStreamState {
             heartbeat_revision: 0,
             registry_revision: 0,
             storage_revision: 0,
+            activity_dropped_events: 0,
             last_registry_digest: None,
             last_store_total_bytes: None,
-            activity_revisions: HashMap::new(),
             registry_roots: HashMap::new(),
         }
     }
@@ -271,6 +295,9 @@ impl EventStreamState {
             stream: STREAM_HEARTBEAT.to_string(),
             run_id: self.run_id.clone(),
             event_revision: self.heartbeat_revision,
+            producer_sequence: None,
+            retained_from_sequence: None,
+            dropped_events: 0,
             entity_revision: None,
             scope: scope.clone(),
             observation_time_micros: now_micros(),
@@ -304,6 +331,9 @@ impl EventStreamState {
             stream: STREAM_PROJECT_REGISTRY.to_string(),
             run_id: self.run_id.clone(),
             event_revision: self.registry_revision,
+            producer_sequence: None,
+            retained_from_sequence: None,
+            dropped_events: 0,
             entity_revision: Some(self.registry_revision),
             scope: scope.clone(),
             observation_time_micros: now_micros(),
@@ -338,6 +368,9 @@ impl EventStreamState {
             stream: STREAM_STORAGE_TELEMETRY.to_string(),
             run_id: self.run_id.clone(),
             event_revision: self.storage_revision,
+            producer_sequence: None,
+            retained_from_sequence: None,
+            dropped_events: 0,
             entity_revision: Some(self.storage_revision),
             scope: scope.clone(),
             observation_time_micros: now_micros(),
@@ -375,43 +408,48 @@ impl EventStreamState {
         key: &ActivityBucketKeyV1,
         bucket: ActivityBucketV1,
         base: &DashboardScopeV1,
-    ) -> DashboardEventV1 {
+    ) -> Option<DashboardEventV1> {
+        let record = bucket.last_record.as_ref()?;
         let project_id = self.resolve_project_id(&key.project_root, bucket.project_id);
-        let stream = format!(
-            "{}:{}",
-            key.family.stream_name(),
-            project_id
-                .as_deref()
-                .unwrap_or_else(|| key.project_root.to_str().unwrap_or("unresolved"))
-        );
-        let revision = self
-            .activity_revisions
-            .entry(stream.clone())
-            .and_modify(|revision| *revision = revision.saturating_add(1))
-            .or_insert(1);
-        let revision = *revision;
-        DashboardEventV1 {
-            stream,
-            run_id: self.run_id.clone(),
-            event_revision: revision,
-            entity_revision: Some(revision),
+        let dropped_events = record.dropped_events;
+        let newly_dropped = dropped_events.saturating_sub(self.activity_dropped_events);
+        self.activity_dropped_events = self.activity_dropped_events.max(dropped_events);
+        let coverage = if newly_dropped == 0 {
+            DashboardCoverageV1::complete(bucket.count, "activity_events")
+        } else {
+            DashboardCoverageV1::partial(
+                bucket.count.saturating_add(newly_dropped),
+                bucket.count,
+                "activity_events",
+                vec!["retention_eviction".to_string()],
+            )
+        };
+        Some(DashboardEventV1 {
+            stream: STREAM_DASHBOARD_ACTIVITY.to_string(),
+            run_id: record.run_id.clone(),
+            event_revision: record.producer_sequence,
+            producer_sequence: Some(record.producer_sequence),
+            retained_from_sequence: Some(record.retained_from_sequence),
+            dropped_events,
+            entity_revision: Some(record.producer_sequence),
             scope: DashboardScopeV1 {
                 project_id,
                 storage_mode: base.storage_mode.clone(),
                 store_root: base.store_root.clone(),
             },
-            observation_time_micros: now_micros(),
-            source_watermark: None,
-            // The tap is lossy by design (see `activity_bus`): a flush window
-            // reports what it observed, and cannot claim it observed everything.
-            coverage: DashboardCoverageV1::unknown(),
+            observation_time_micros: record.observation_time_micros,
+            source_watermark: Some(DashboardWatermarkV1 {
+                source: "dashboard_activity_lane".to_string(),
+                watermark: record.producer_sequence.to_string(),
+            }),
+            coverage,
             kind: DashboardEventKindV1::activity(
                 key.family,
                 bucket.count,
                 bucket.units,
                 bucket.detail,
             ),
-        }
+        })
     }
 
     /// Drain every open bucket into events, emptying `pending`.
@@ -420,9 +458,16 @@ impl EventStreamState {
         pending: &mut std::collections::BTreeMap<ActivityBucketKeyV1, ActivityBucketV1>,
         base: &DashboardScopeV1,
     ) -> Vec<DashboardEventV1> {
-        std::mem::take(pending)
+        let mut buckets: Vec<_> = std::mem::take(pending).into_iter().collect();
+        buckets.sort_by_key(|(_, bucket)| {
+            bucket
+                .last_record
+                .as_ref()
+                .map_or(0, |record| record.producer_sequence)
+        });
+        buckets
             .into_iter()
-            .map(|(key, bucket)| self.activity_event(&key, bucket, base))
+            .filter_map(|(key, bucket)| self.activity_event(&key, bucket, base))
             .collect()
     }
 
@@ -450,14 +495,32 @@ impl EventStreamState {
 }
 
 /// `GET /api/events`
-pub(crate) async fn events(State(state): State<DashboardState>) -> impl IntoResponse {
+pub(crate) async fn events(
+    State(state): State<DashboardState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
     let scope = scope_from_state(&state);
     let run_id = format!("run-{}-{}", std::process::id(), now_micros());
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(CHANNEL_CAPACITY);
 
-    // Attach to the live activity tap before the first poll, so work observed
-    // during startup is already accumulating.
-    let mut activity = super::activity_bus::subscribe();
+    // Subscribe before reading history. Any event appended between those two
+    // steps is either in the replay or the live receiver and is deduplicated by
+    // producer sequence.
+    let mut activity = crate::application::event_lane::subscribe();
+    let requested = parse_last_event_id(&headers);
+    let activity_db = state.lcm_db.clone();
+    let activity_project_id = state.project_id.clone();
+    let initial_replay = match (activity_db.as_deref(), activity_project_id.as_deref()) {
+        (Some(db), Some(project_id)) => {
+            crate::application::event_lane::replay_after(
+                db,
+                project_id,
+                requested.as_ref().map(|resume| resume.sequence),
+            )
+            .await
+        }
+        _ => None,
+    };
 
     tokio::spawn(async move {
         let mut stream_state = EventStreamState::new(run_id);
@@ -468,10 +531,50 @@ pub(crate) async fn events(State(state): State<DashboardState>) -> impl IntoResp
         let mut tick: u64 = 0;
         let mut pending: std::collections::BTreeMap<ActivityBucketKeyV1, ActivityBucketV1> =
             std::collections::BTreeMap::new();
-        let mut activity_open = true;
+        let mut producer_cursor = requested.as_ref().map_or(0, |resume| resume.sequence);
+        let mut control = Vec::new();
+        if let Some(mut replay) = initial_replay {
+            let run_mismatch = requested
+                .as_ref()
+                .is_some_and(|resume| resume.run_id != replay.frontier.run_id);
+            let invalid_frontier = requested
+                .as_ref()
+                .is_some_and(|resume| resume.sequence >= replay.frontier.next_sequence);
+            if (run_mismatch || invalid_frontier)
+                && let (Some(db), Some(project_id)) =
+                    (activity_db.as_deref(), activity_project_id.as_deref())
+                && let Some(from_start) =
+                    crate::application::event_lane::replay_after(db, project_id, None).await
+            {
+                replay = from_start;
+            }
+            if replay.resume_gap || run_mismatch || invalid_frontier {
+                control.push(resume_gap_event(
+                    requested.as_ref().map_or(0, |resume| resume.sequence),
+                    &replay.frontier,
+                    &scope,
+                ));
+                producer_cursor = replay.frontier.retained_from_sequence.saturating_sub(1);
+            }
+            for record in replay.records {
+                producer_cursor = producer_cursor.max(record.producer_sequence);
+                accumulate_record(&mut pending, record);
+            }
+        }
 
         // Prime the source baselines immediately so the first real change emits.
         let _ = stream_state.poll_sources(&state, &scope).await;
+        for event in control
+            .into_iter()
+            .chain(stream_state.flush_activity(&mut pending, &scope))
+        {
+            let Ok(frame) = encode_event(&event) else {
+                return;
+            };
+            if tx.send(Ok(frame)).await.is_err() {
+                return;
+            }
+        }
 
         loop {
             let batch: Vec<DashboardEventV1> = tokio::select! {
@@ -492,26 +595,55 @@ pub(crate) async fn events(State(state): State<DashboardState>) -> impl IntoResp
                 }
                 // `broadcast::Receiver::recv` is cancel-safe, so losing this
                 // branch to a poll/flush tick never drops a pulse.
-                received = activity.recv(), if activity_open => {
+                received = receive_activity(&mut activity) => {
                     match received {
-                        Ok(pulse) => accumulate_pulse(&mut pending, pulse),
-                        // Lagged: the tap dropped pulses under backpressure.
-                        // That is the designed failure mode — counts undercount,
-                        // the stream stays correct — so keep consuming.
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
-                        // The sender is a process-global static and is never
-                        // dropped; if that ever changes, disarm this branch
-                        // rather than spinning on a closed channel.
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                            activity_open = false;
+                        Some(Ok(record)) => {
+                            if record.producer_sequence > producer_cursor {
+                                producer_cursor = record.producer_sequence;
+                                accumulate_record(&mut pending, record);
+                            }
                         }
+                        Some(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {
+                            if let (Some(db), Some(project_id)) =
+                                (activity_db.as_deref(), activity_project_id.as_deref())
+                                && let Some(replay) = crate::application::event_lane::replay_after(
+                                    db,
+                                    project_id,
+                                    Some(producer_cursor),
+                                ).await
+                            {
+                                if replay.resume_gap {
+                                    let event = resume_gap_event(producer_cursor, &replay.frontier, &scope);
+                                    let Ok(frame) = encode_event(&event) else {
+                                        return;
+                                    };
+                                    if tx.send(Ok(frame)).await.is_err() {
+                                        return;
+                                    }
+                                    producer_cursor = replay.frontier.retained_from_sequence.saturating_sub(1);
+                                }
+                                for record in replay.records {
+                                    if record.producer_sequence > producer_cursor {
+                                        producer_cursor = record.producer_sequence;
+                                        accumulate_record(&mut pending, record);
+                                    }
+                                }
+                            }
+                        }
+                        Some(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
+                            activity = None;
+                        }
+                        None => {}
                     }
                     continue;
                 }
             };
 
             for event in batch {
-                if tx.send(encode_event(&event)).await.is_err() {
+                let Ok(frame) = encode_event(&event) else {
+                    return;
+                };
+                if tx.send(Ok(frame)).await.is_err() {
                     return; // client disconnected
                 }
             }
@@ -525,43 +657,106 @@ pub(crate) async fn events(State(state): State<DashboardState>) -> impl IntoResp
     )
 }
 
-/// Fold one pulse into its `(family, project)` bucket. Once the map is at
-/// capacity a pulse for a *new* bucket is folded into an existing one of the
-/// same family rather than opening an unbounded number of buckets; if the family
-/// has no open bucket the pulse is dropped, which is the same lossy contract the
-/// tap already declares.
-fn accumulate_pulse(
+#[derive(Clone)]
+struct EventResumeV1 {
+    run_id: String,
+    sequence: u64,
+}
+
+fn parse_last_event_id(headers: &HeaderMap) -> Option<EventResumeV1> {
+    let value = headers.get("last-event-id")?.to_str().ok()?;
+    if let Ok(sequence) = value.parse() {
+        return Some(EventResumeV1 {
+            run_id: String::new(),
+            sequence,
+        });
+    }
+    let (run_id, sequence) = value.rsplit_once(':')?;
+    Some(EventResumeV1 {
+        run_id: run_id.to_string(),
+        sequence: sequence.parse().ok()?,
+    })
+}
+
+async fn receive_activity(
+    receiver: &mut Option<tokio::sync::broadcast::Receiver<ActivityRecordV1>>,
+) -> Option<Result<ActivityRecordV1, tokio::sync::broadcast::error::RecvError>> {
+    match receiver {
+        Some(receiver) => Some(receiver.recv().await),
+        None => std::future::pending().await,
+    }
+}
+
+fn resume_gap_event(
+    requested_after: u64,
+    frontier: &ActivityFrontierV1,
+    scope: &DashboardScopeV1,
+) -> DashboardEventV1 {
+    let missing = frontier
+        .retained_from_sequence
+        .saturating_sub(requested_after.saturating_add(1));
+    DashboardEventV1 {
+        stream: "control".to_string(),
+        run_id: frontier.run_id.clone(),
+        event_revision: frontier.retained_from_sequence,
+        producer_sequence: None,
+        retained_from_sequence: Some(frontier.retained_from_sequence),
+        dropped_events: frontier.dropped_events,
+        entity_revision: None,
+        scope: scope.clone(),
+        observation_time_micros: now_micros(),
+        source_watermark: Some(DashboardWatermarkV1 {
+            source: "dashboard_activity_lane".to_string(),
+            watermark: frontier.watermark.clone(),
+        }),
+        coverage: if missing == 0 {
+            DashboardCoverageV1::unknown()
+        } else {
+            DashboardCoverageV1::partial(
+                missing,
+                0,
+                "activity_events",
+                vec!["resume_gap".to_string()],
+            )
+        },
+        kind: DashboardEventKindV1::ResumeGap {
+            requested_after,
+            first_available: frontier.retained_from_sequence,
+            dropped_events: frontier.dropped_events,
+        },
+    }
+}
+
+fn accumulate_record(
     pending: &mut std::collections::BTreeMap<ActivityBucketKeyV1, ActivityBucketV1>,
-    pulse: ActivityPulseV1,
+    record: ActivityRecordV1,
 ) {
     let key = ActivityBucketKeyV1 {
-        family: pulse.family,
-        project_root: pulse.project_root.clone(),
+        family: record.pulse.family,
+        project_root: record.pulse.project_root.clone(),
     };
     if let Some(bucket) = pending.get_mut(&key) {
-        bucket.absorb(pulse);
+        bucket.absorb_record(record);
         return;
     }
-    if pending.len() >= MAX_PENDING_ACTIVITY_BUCKETS {
-        if let Some((_, bucket)) = pending
-            .iter_mut()
-            .find(|(existing, _)| existing.family == pulse.family)
-        {
-            bucket.absorb(pulse);
-        }
-        return;
-    }
-    pending.entry(key).or_default().absorb(pulse);
+    pending.entry(key).or_default().absorb_record(record);
 }
 
 /// Serialize one typed event into an SSE frame, named by its stream so the
 /// client can route by `event:` without parsing the payload first.
-fn encode_event(event: &DashboardEventV1) -> Result<Event, Infallible> {
-    let data = serde_json::to_string(event).unwrap_or_else(|_| "{}".to_string());
-    Ok(Event::default()
-        .event(event.kind.stream())
-        .id(event.event_revision.to_string())
-        .data(data))
+fn encode_event(event: &DashboardEventV1) -> Result<Event, serde_json::Error> {
+    let data = serde_json::to_string(event)?;
+    let frame = Event::default().event(event.kind.stream()).data(data);
+    let resume_sequence = match &event.kind {
+        DashboardEventKindV1::ResumeGap {
+            first_available, ..
+        } => Some(first_available.saturating_sub(1)),
+        _ => event.producer_sequence,
+    };
+    Ok(match resume_sequence {
+        Some(sequence) => frame.id(format!("{}:{sequence}", event.run_id)),
+        None => frame,
+    })
 }
 
 /// One observation of the project registry: its change digest, its size, and
@@ -656,6 +851,51 @@ mod tests {
     }
 
     #[test]
+    fn activity_coverage_counts_only_new_drops_for_each_bucket() {
+        let mut state = EventStreamState::new("run-test".to_string());
+        let scope = scope();
+        let key = ActivityBucketKeyV1 {
+            family: ActivityFamilyV1::Hook,
+            project_root: PathBuf::from("/repo/alpha"),
+        };
+        let pulse = ActivityPulseV1 {
+            family: ActivityFamilyV1::Hook,
+            project_root: key.project_root.clone(),
+            project_id: Some("proj-alpha".into()),
+            units: 1,
+            detail: None,
+        };
+        let bucket = |sequence, pulse| ActivityBucketV1 {
+            count: 1,
+            units: 1,
+            project_id: Some("proj-alpha".into()),
+            detail: None,
+            last_record: Some(ActivityRecordV1 {
+                schema_version: 1,
+                run_id: "lane-1".into(),
+                producer_sequence: sequence,
+                observation_time_micros: sequence as i64,
+                retained_from_sequence: 3,
+                dropped_events: 2,
+                pulse,
+            }),
+        };
+
+        let first = state
+            .activity_event(&key, bucket(3, pulse.clone()), &scope)
+            .expect("first activity");
+        assert_eq!(first.coverage.eligible, Some(3));
+        assert_eq!(first.coverage.examined, Some(1));
+
+        let second = state
+            .activity_event(&key, bucket(4, pulse), &scope)
+            .expect("second activity");
+        assert!(second.coverage.is_complete());
+        assert_eq!(second.coverage.eligible, Some(1));
+        assert_eq!(second.coverage.examined, Some(1));
+    }
+
+    #[test]
     fn registry_change_emits_only_after_baseline_and_is_monotone() {
         let mut state = EventStreamState::new("run-test".to_string());
         let scope = scope();
@@ -735,16 +975,34 @@ mod tests {
         }
     }
 
+    fn record(sequence: u64, _stream_revision: u64, pulse: ActivityPulseV1) -> ActivityRecordV1 {
+        ActivityRecordV1 {
+            schema_version: 1,
+            run_id: "run-durable".into(),
+            producer_sequence: sequence,
+            observation_time_micros: 42,
+            retained_from_sequence: 1,
+            dropped_events: 0,
+            pulse,
+        }
+    }
+
     #[test]
     fn a_burst_coalesces_into_one_bucket_per_family_and_project() {
         let mut pending = std::collections::BTreeMap::new();
-        for _ in 0..50 {
-            accumulate_pulse(&mut pending, pulse(ActivityFamilyV1::Hook, "/repo/a", 2));
+        for sequence in 1..=50 {
+            accumulate_record(
+                &mut pending,
+                record(sequence, 0, pulse(ActivityFamilyV1::Hook, "/repo/a", 2)),
+            );
         }
-        accumulate_pulse(&mut pending, pulse(ActivityFamilyV1::Hook, "/repo/b", 1));
-        accumulate_pulse(
+        accumulate_record(
             &mut pending,
-            pulse(ActivityFamilyV1::ToolCall, "/repo/a", 1),
+            record(51, 0, pulse(ActivityFamilyV1::Hook, "/repo/b", 1)),
+        );
+        accumulate_record(
+            &mut pending,
+            record(52, 0, pulse(ActivityFamilyV1::ToolCall, "/repo/a", 1)),
         );
 
         assert_eq!(pending.len(), 3, "one bucket per (family, project)");
@@ -759,53 +1017,47 @@ mod tests {
     }
 
     #[test]
-    fn the_coalescing_map_is_bounded() {
-        let mut pending = std::collections::BTreeMap::new();
-        for index in 0..(MAX_PENDING_ACTIVITY_BUCKETS * 4) {
-            accumulate_pulse(
-                &mut pending,
-                pulse(ActivityFamilyV1::Hook, &format!("/repo/{index}"), 1),
-            );
-        }
-        assert_eq!(pending.len(), MAX_PENDING_ACTIVITY_BUCKETS);
-        let total: u64 = pending.values().map(|bucket| bucket.units).sum();
-        assert_eq!(
-            total,
-            (MAX_PENDING_ACTIVITY_BUCKETS * 4) as u64,
-            "overflow folds into an open bucket of the same family rather than \
-             silently discarding the observation"
-        );
-    }
-
-    #[test]
-    fn activity_streams_are_per_project_and_monotone_within_each() {
+    fn canonical_activity_stream_is_monotone_and_preserves_project_scope() {
         let mut state = EventStreamState::new("run-test".to_string());
         let base = scope();
         let mut pending = std::collections::BTreeMap::new();
 
-        accumulate_pulse(&mut pending, {
-            let mut p = pulse(ActivityFamilyV1::Hook, "/repo/a", 3);
-            p.project_id = Some("proj-a".into());
-            p.detail = Some("file_edit".into());
-            p
-        });
-        accumulate_pulse(&mut pending, {
-            let mut p = pulse(ActivityFamilyV1::Hook, "/repo/b", 1);
-            p.project_id = Some("proj-b".into());
-            p
-        });
+        accumulate_record(
+            &mut pending,
+            record(1, 1, {
+                let mut p = pulse(ActivityFamilyV1::Hook, "/repo/a", 3);
+                p.project_id = Some("proj-a".into());
+                p.detail = Some("file_edit".into());
+                p
+            }),
+        );
+        accumulate_record(
+            &mut pending,
+            record(2, 1, {
+                let mut p = pulse(ActivityFamilyV1::Hook, "/repo/b", 1);
+                p.project_id = Some("proj-b".into());
+                p
+            }),
+        );
 
         let first = state.flush_activity(&mut pending, &base);
         assert!(pending.is_empty(), "flushing drains every bucket");
         assert_eq!(first.len(), 2);
+        assert_eq!(
+            first
+                .iter()
+                .map(|event| event.event_revision)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
         for event in &first {
-            assert_eq!(event.event_revision, 1, "each stream starts at 1");
             assert_eq!(event.kind.stream(), "hook_activity");
         }
         let a = first
             .iter()
-            .find(|event| event.stream == "hook_activity:proj-a")
+            .find(|event| event.scope.project_id.as_deref() == Some("proj-a"))
             .expect("project a stream");
+        assert_eq!(a.stream, STREAM_DASHBOARD_ACTIVITY);
         assert_eq!(a.scope.project_id.as_deref(), Some("proj-a"));
         assert_eq!(
             a.kind,
@@ -816,16 +1068,19 @@ mod tests {
             }
         );
 
-        // A second window advances only the stream that fired again.
-        accumulate_pulse(&mut pending, {
-            let mut p = pulse(ActivityFamilyV1::Hook, "/repo/a", 1);
-            p.project_id = Some("proj-a".into());
-            p
-        });
+        // A second window continues the shared durable producer frontier.
+        accumulate_record(
+            &mut pending,
+            record(3, 2, {
+                let mut p = pulse(ActivityFamilyV1::Hook, "/repo/a", 1);
+                p.project_id = Some("proj-a".into());
+                p
+            }),
+        );
         let second = state.flush_activity(&mut pending, &base);
         assert_eq!(second.len(), 1);
-        assert_eq!(second[0].stream, "hook_activity:proj-a");
-        assert_eq!(second[0].event_revision, 2);
+        assert_eq!(second[0].stream, STREAM_DASHBOARD_ACTIVITY);
+        assert_eq!(second[0].event_revision, 3);
     }
 
     #[test]
@@ -835,15 +1090,18 @@ mod tests {
             .registry_roots
             .insert(PathBuf::from("/repo/ingested"), "proj-ingested".to_string());
         let mut pending = std::collections::BTreeMap::new();
-        accumulate_pulse(&mut pending, {
-            let mut p = pulse(ActivityFamilyV1::SessionIngest, "/repo/ingested", 7);
-            p.detail = Some("claude".into());
-            p
-        });
+        accumulate_record(
+            &mut pending,
+            record(1, 1, {
+                let mut p = pulse(ActivityFamilyV1::SessionIngest, "/repo/ingested", 7);
+                p.detail = Some("claude".into());
+                p
+            }),
+        );
 
         let events = state.flush_activity(&mut pending, &scope());
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].stream, "session_ingest:proj-ingested");
+        assert_eq!(events[0].stream, STREAM_DASHBOARD_ACTIVITY);
         assert_eq!(
             events[0].scope.project_id.as_deref(),
             Some("proj-ingested"),
@@ -884,18 +1142,136 @@ mod tests {
         );
     }
 
+    #[test]
+    fn resume_header_and_gap_event_preserve_canonical_control_values() {
+        let mut headers = HeaderMap::new();
+        headers.insert("last-event-id", "lane-a:41".parse().expect("valid header"));
+        let resume = parse_last_event_id(&headers).expect("resume");
+        assert_eq!(resume.run_id, "lane-a");
+        assert_eq!(resume.sequence, 41);
+
+        let event = resume_gap_event(
+            41,
+            &ActivityFrontierV1 {
+                run_id: "lane-b".into(),
+                next_sequence: 48,
+                retained_from_sequence: 44,
+                dropped_events: 43,
+                watermark: "47".into(),
+            },
+            &scope(),
+        );
+        let wire = serde_json::to_value(event).expect("canonical event value");
+        assert_eq!(wire["kind"]["family"], "resume_gap");
+        assert_eq!(wire["kind"]["requested_after"], 41);
+        assert_eq!(wire["kind"]["first_available"], 44);
+        assert_eq!(wire["source_watermark"]["watermark"], "47");
+        assert_eq!(wire["coverage"]["completeness"], "partial");
+    }
+
+    #[test]
+    fn coalesced_events_end_at_the_highest_persisted_producer_sequence() {
+        let mut state = EventStreamState::new("connection-run".into());
+        let mut pending = std::collections::BTreeMap::new();
+        accumulate_record(
+            &mut pending,
+            record(9, 1, pulse(ActivityFamilyV1::ToolCall, "/repo/z", 1)),
+        );
+        accumulate_record(
+            &mut pending,
+            record(10, 1, pulse(ActivityFamilyV1::Hook, "/repo/a", 1)),
+        );
+        let events = state.flush_activity(&mut pending, &scope());
+        assert_eq!(
+            events
+                .iter()
+                .filter_map(|event| event.producer_sequence)
+                .collect::<Vec<_>>(),
+            vec![9, 10],
+            "the final SSE id must always be the durable frontier"
+        );
+    }
+
+    #[tokio::test]
+    async fn http_sse_frame_uses_the_canonical_event_value_and_resume_identity() {
+        let mut state = EventStreamState::new("connection-run".into());
+        let mut pending = std::collections::BTreeMap::new();
+        accumulate_record(
+            &mut pending,
+            record(7, 0, pulse(ActivityFamilyV1::Hook, "/repo/a", 2)),
+        );
+        let event = state
+            .flush_activity(&mut pending, &scope())
+            .pop()
+            .expect("event");
+        let frame = encode_event(&event).expect("SSE encoding");
+        let response =
+            Sse::new(tokio_stream::iter(vec![Ok::<_, Infallible>(frame)])).into_response();
+        let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .expect("SSE body");
+        let text = std::str::from_utf8(&body).expect("UTF-8 SSE");
+        assert_eq!(
+            text.lines()
+                .find_map(|line| line.strip_prefix("id:"))
+                .map(str::trim),
+            Some("run-durable:7")
+        );
+        assert_eq!(
+            text.lines()
+                .find_map(|line| line.strip_prefix("event:"))
+                .map(str::trim),
+            Some("hook_activity")
+        );
+        let data = text
+            .lines()
+            .find_map(|line| line.strip_prefix("data:"))
+            .map(str::trim)
+            .expect("SSE data");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(data).expect("event JSON"),
+            serde_json::to_value(event).expect("canonical event value")
+        );
+    }
+
     #[tokio::test]
     async fn poll_sources_reads_real_state_and_primes_baseline() {
         let _pin = crate::config::PinnedUserDataDir::new();
+        let profile_root = crate::storage::default_profile_root().expect("test profile root");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&profile_root, std::fs::Permissions::from_mode(0o700))
+                .expect("secure test profile root");
+        }
         let project = tempfile::tempdir().expect("project tempdir");
         std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
             .expect("fixture source");
-        let cg = TraceDecay::init(project.path())
-            .await
-            .expect("project init");
-        let dash = crate::dashboard::build_state(&cg)
+        let lifecycle = crate::lifecycle_lease::acquire_exclusive_for_profile(
+            &profile_root,
+            "dashboard event source fixture",
+        )
+        .expect("fixture lifecycle authority");
+        let _database_scope = crate::db::enter_maintenance_database_scope(
+            &lifecycle,
+            &profile_root,
+            "dashboard event source fixture",
+        )
+        .expect("fixture database authority");
+        let cg = TraceDecay::init_with_exclusive_maintenance(
+            project.path(),
+            crate::tracedecay::TraceDecayOpenOptions {
+                profile_root: Some(profile_root),
+                global_db_path: None,
+            },
+            &lifecycle,
+        )
+        .await
+        .expect("project init");
+        let mut dash = crate::dashboard::build_state(&cg)
             .await
             .expect("dashboard state");
+        dash.savings_db = Some(std::sync::Arc::clone(cg.profile_database()));
         let scope = scope_from_state(&dash);
         let mut state = EventStreamState::new("run-test".to_string());
 

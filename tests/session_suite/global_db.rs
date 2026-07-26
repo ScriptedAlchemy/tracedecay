@@ -275,6 +275,8 @@ fn analytics_query(
         session_id: session_id.map(ToOwned::to_owned),
         event_kind: event_kind.map(ToOwned::to_owned),
         since: None,
+        until: None,
+        before_id: None,
         limit,
     }
 }
@@ -1413,6 +1415,8 @@ async fn hook_analytics_import_is_incremental_and_idempotent() {
             session_id: None,
             event_kind: None,
             since: None,
+            until: None,
+            before_id: None,
             limit: 100,
         })
         .await

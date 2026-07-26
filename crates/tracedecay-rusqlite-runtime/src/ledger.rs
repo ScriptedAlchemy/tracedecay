@@ -21,6 +21,7 @@ pub(crate) use error::LedgerError;
 pub(crate) use idempotency::{LedgerDisposition, lookup_receipt};
 #[cfg(test)]
 pub(crate) use inbox::lookup as lookup_inbox;
+#[cfg(test)]
 pub(crate) use outbox::outbox_entry;
 pub(crate) use schema::initialize_schema;
 

@@ -26,8 +26,8 @@ use crate::diagnostics::lsp::client::{LspDocument, LspSemanticRequest};
 
 use super::context::{
     ContextExpansionOutcome, ContextExpansionRequest, ContextProjectionChange,
-    ContextProjectionOutcome, ContextProjectionPort, ContextProjectionRegistration,
-    ContextProjectionRequest,
+    ContextProjectionKind, ContextProjectionOutcome, ContextProjectionPort,
+    ContextProjectionRegistration, ContextProjectionRequest, TRACEDECAY_CONTEXT_REVISION,
 };
 use super::diagnostics::{
     DiagnosticSeverity, DiagnosticSource, GatewayDiagnostic, LspPosition, LspRange,
@@ -236,8 +236,10 @@ fn broker_diagnostic(document_uri: &str, diagnostic: CodeDiagnostic) -> GatewayD
             BrokerDiagnosticSeverity::Hint => DiagnosticSeverity::Hint,
         }),
         code: diagnostic.code,
+        code_description_uri: None,
         message: diagnostic.message,
         source: DiagnosticSource::Upstream,
+        related_information: Vec::new(),
         data: None,
     }
 }
@@ -1330,6 +1332,8 @@ pub struct Pr12ContextProjectionAdapter {
     authority: Arc<dyn CanonicalContextProjectionAuthority>,
     in_flight: Mutex<BTreeMap<ContextRequestKey, PendingContextOperation>>,
     expansions: Mutex<BTreeMap<ContextRequestKey, PendingContextExpansion>>,
+    delivered_changes:
+        Mutex<BTreeMap<(String, Option<String>, ContextProjectionKind), ContextProjectionChange>>,
 }
 
 impl Pr12ContextProjectionAdapter {
@@ -1339,6 +1343,7 @@ impl Pr12ContextProjectionAdapter {
             authority,
             in_flight: Mutex::new(BTreeMap::new()),
             expansions: Mutex::new(BTreeMap::new()),
+            delivered_changes: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -1517,7 +1522,37 @@ impl ContextProjectionPort for Pr12ContextProjectionAdapter {
         root: &AdmittedRoot,
         subscriptions: &std::collections::BTreeSet<ContextProjectionRegistration>,
     ) -> Vec<ContextProjectionChange> {
-        self.authority.poll_changes(root, subscriptions)
+        let changes = self.authority.poll_changes(root, subscriptions);
+        let Ok(mut delivered) = self.delivered_changes.try_lock() else {
+            return Vec::new();
+        };
+        changes
+            .into_iter()
+            .filter(|change| {
+                let key = (
+                    change.root_uri.clone(),
+                    change.document_uri.clone(),
+                    change.kind.clone(),
+                );
+                !matches!(delivered.insert(key, change.clone()), Some(previous) if previous == *change)
+            })
+            .collect()
+    }
+
+    fn update_subscriptions(
+        &self,
+        root: &AdmittedRoot,
+        subscriptions: &std::collections::BTreeSet<ContextProjectionRegistration>,
+    ) {
+        if let Ok(mut delivered) = self.delivered_changes.try_lock() {
+            delivered.retain(|(root_uri, _, kind), _| {
+                root_uri != root.uri()
+                    || subscriptions.contains(&ContextProjectionRegistration {
+                        kind: kind.clone(),
+                        revision: TRACEDECAY_CONTEXT_REVISION,
+                    })
+            });
+        }
     }
 }
 
@@ -1634,8 +1669,36 @@ mod tests {
                     revision: 1,
                     evidence: Some(json!({ "canonical": true })),
                     omission_reason: None,
+                    next_retrieval_handle: None,
                 })
             })
+        }
+
+        fn poll_changes(
+            &self,
+            root: &AdmittedRoot,
+            subscriptions: &std::collections::BTreeSet<ContextProjectionRegistration>,
+        ) -> Vec<ContextProjectionChange> {
+            let registration = ContextProjectionRegistration {
+                kind: ContextProjectionKind::diagnostics(),
+                revision: TRACEDECAY_CONTEXT_REVISION,
+            };
+            subscriptions
+                .contains(&registration)
+                .then(|| ContextProjectionChange {
+                    root_uri: root.uri().to_owned(),
+                    document_uri: Some("file:///root/a.rs".to_owned()),
+                    kind: ContextProjectionKind::diagnostics(),
+                    generation: 7,
+                    identity: fixture_projection_identity(true),
+                    freshness: ContextFreshness::Current,
+                    producer_state: ContextProducerState::Complete,
+                    coverage: ContextCoverage::Complete,
+                    revision: TRACEDECAY_CONTEXT_REVISION,
+                    retrieval_handle: None,
+                })
+                .into_iter()
+                .collect()
         }
     }
 
@@ -1717,6 +1780,7 @@ mod tests {
         let request = ContextProjectionRequest {
             kind: ContextProjectionKind::diagnostics(),
             document_uri: Some("file:///root/a.rs".to_owned()),
+            document_content_digest: None,
         };
         assert_eq!(
             adapter.snapshot(&root, &request_id, &request),
@@ -1732,6 +1796,32 @@ mod tests {
             }
         }
         panic!("context operation did not complete");
+    }
+
+    #[tokio::test]
+    async fn context_change_delivery_is_isolated_coalesced_and_reset_on_unsubscribe() {
+        let authority = Arc::new(Context);
+        let first = Pr12ContextProjectionAdapter::new(Handle::current(), authority.clone());
+        let second = Pr12ContextProjectionAdapter::new(Handle::current(), authority);
+        let root = root();
+        let subscriptions = [ContextProjectionRegistration {
+            kind: ContextProjectionKind::diagnostics(),
+            revision: TRACEDECAY_CONTEXT_REVISION,
+        }]
+        .into_iter()
+        .collect();
+
+        first.update_subscriptions(&root, &subscriptions);
+        second.update_subscriptions(&root, &subscriptions);
+        assert_eq!(first.poll_changes(&root, &subscriptions).len(), 1);
+        assert_eq!(second.poll_changes(&root, &subscriptions).len(), 1);
+        assert!(first.poll_changes(&root, &subscriptions).is_empty());
+        assert!(second.poll_changes(&root, &subscriptions).is_empty());
+
+        first.update_subscriptions(&root, &Default::default());
+        first.update_subscriptions(&root, &subscriptions);
+        assert_eq!(first.poll_changes(&root, &subscriptions).len(), 1);
+        assert!(second.poll_changes(&root, &subscriptions).is_empty());
     }
 
     #[tokio::test]

@@ -42,15 +42,15 @@ and the specific scans the user asked for — don't run every tool by reflex.
 
 ## Session health delta
 
-1. **Before the first edit → `tracedecay_session_start`** (no args):
-   snapshots current health as the baseline
-   (`.tracedecay/session_baseline.json`).
-2. **After the work → `tracedecay_session_end`**: the per-dimension diff —
-   what improved, what degraded — and clears the baseline. A dropped
-   dimension names the follow-up (redundancy fell → `tracedecay_redundancy`;
-   acyclicity fell → `tracedecay_circular`).
-3. Bracket only work where a before/after delta is wanted; a second
-   `session_start` silently overwrites the baseline.
+1. **Before the first edit → `tracedecay_health_delta`** without
+   `before_cursor`: pins the current project health and returns its stable
+   `after_cursor`.
+2. **After the work → `tracedecay_health_delta`** with that cursor as
+   `before_cursor`: returns the exact per-dimension diff. A dropped dimension
+   names the follow-up (redundancy fell → `tracedecay_redundancy`; acyclicity
+   fell → `tracedecay_circular`).
+3. Keep the returned cursor with the task evidence; it is project- and
+   path-scope-bound and does not rely on a mutable session baseline file.
 
 ## Project & index status
 
@@ -79,9 +79,11 @@ and the specific scans the user asked for — don't run every tool by reflex.
 ## Guardrails
 
 - Discovery/analysis tools are read-only and parallel-safe.
-  `tracedecay_session_start`/`session_end` write/remove the baseline file and
-  `tracedecay_dashboard` starts/stops a local server — use them only when
-  relevant and respect Cursor approval/run-mode.
+  The compatibility wrappers `tracedecay_session_start` /
+  `tracedecay_session_end` write/remove the mutable baseline file; prefer
+  `tracedecay_health_delta` for generation-bound evidence.
+  `tracedecay_dashboard` starts/stops a local server — use it only when relevant
+  and respect Cursor approval/run-mode.
 - `tracedecay_redundancy` is computed lazily and cached; the first call on a
   fresh index can be slow — keep `path`/`max_pairs` tight.
 - For large audits, use scoped read-only subagents by path, weak health

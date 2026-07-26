@@ -107,9 +107,6 @@ pub struct ClientCapabilities {
     pub publish_diagnostics_code_description: bool,
     pub publish_diagnostics_data: bool,
     pub supports_document_diagnostics: bool,
-    pub document_diagnostics_related_information: bool,
-    pub document_diagnostics_code_description: bool,
-    pub document_diagnostics_data: bool,
     pub workspace_diagnostic_refresh_support: bool,
     pub semantic: BTreeSet<SemanticCapability>,
     pub context_projections: BTreeMap<ContextProjectionKind, u32>,
@@ -171,11 +168,10 @@ impl ClientCapabilities {
             .and_then(|text_document| text_document.get("diagnostic"))
             .and_then(Value::as_object);
         capabilities.supports_document_diagnostics = diagnostic.is_some();
-        capabilities.document_diagnostics_related_information =
-            bool_at(diagnostic, "relatedInformation");
-        capabilities.document_diagnostics_code_description =
-            bool_at(diagnostic, "codeDescriptionSupport");
-        capabilities.document_diagnostics_data = bool_at(diagnostic, "dataSupport");
+        // LSP 3.17's `textDocument.diagnostic` capability advertises pull
+        // support only. Optional fields on the shared `Diagnostic` shape are
+        // negotiated by `textDocument.publishDiagnostics`; accepting invented
+        // fields under `diagnostic` would overstate a real client's support.
         capabilities.workspace_diagnostic_refresh_support = root
             .get("workspace")
             .and_then(Value::as_object)
@@ -303,7 +299,14 @@ pub struct EffectiveCapabilities {
     pub client_supports_utf16: bool,
     pub text_document_sync: TextDocumentSync,
     pub supports_publish_diagnostics: bool,
+    pub publish_diagnostics_version: bool,
+    pub publish_diagnostics_related_information: bool,
+    pub publish_diagnostics_code_description: bool,
+    pub publish_diagnostics_data: bool,
     pub supports_document_diagnostics: bool,
+    pub document_diagnostics_related_information: bool,
+    pub document_diagnostics_code_description: bool,
+    pub document_diagnostics_data: bool,
     pub supports_workspace_diagnostic_refresh: bool,
     pub semantic: BTreeSet<SemanticCapability>,
     pub context_projections: BTreeMap<ContextProjectionKind, u32>,
@@ -514,28 +517,26 @@ pub fn negotiate_capabilities(
     let supports_context_expansion = client.supports_context_expansion
         && gateway.supports_context_expansion
         && !context_projections.is_empty();
-    let push_client_supported = client.supports_versioned_publish_diagnostics
-        && client.publish_diagnostics_related_information
-        && client.publish_diagnostics_code_description
-        && client.publish_diagnostics_data;
-    let pull_client_supported = client.supports_document_diagnostics
-        && client.document_diagnostics_related_information
-        && client.document_diagnostics_code_description
-        && client.document_diagnostics_data;
-
     EffectiveCapabilities {
         protocol_version: LSP_PROTOCOL_VERSION,
         position_encoding: PositionEncoding::Utf16,
         client_supports_utf16,
         text_document_sync: TextDocumentSync::default(),
         supports_publish_diagnostics: diagnostics_supported
-            && push_client_supported
+            && client.supports_versioned_publish_diagnostics
             && gateway.supports_publish_diagnostics,
+        publish_diagnostics_version: client.supports_versioned_publish_diagnostics,
+        publish_diagnostics_related_information: client.publish_diagnostics_related_information,
+        publish_diagnostics_code_description: client.publish_diagnostics_code_description,
+        publish_diagnostics_data: client.publish_diagnostics_data,
         supports_document_diagnostics: diagnostics_supported
-            && pull_client_supported
+            && client.supports_document_diagnostics
             && gateway.supports_document_diagnostics,
+        document_diagnostics_related_information: client.publish_diagnostics_related_information,
+        document_diagnostics_code_description: client.publish_diagnostics_code_description,
+        document_diagnostics_data: client.publish_diagnostics_data,
         supports_workspace_diagnostic_refresh: diagnostics_supported
-            && pull_client_supported
+            && client.supports_document_diagnostics
             && gateway.supports_document_diagnostics
             && client.workspace_diagnostic_refresh_support,
         semantic,
@@ -571,9 +572,6 @@ mod tests {
             publish_diagnostics_code_description: true,
             publish_diagnostics_data: true,
             supports_document_diagnostics: true,
-            document_diagnostics_related_information: true,
-            document_diagnostics_code_description: true,
-            document_diagnostics_data: true,
             semantic: SemanticCapability::ALL.into_iter().collect(),
             ..ClientCapabilities::default()
         }
@@ -644,18 +642,42 @@ mod tests {
     }
 
     #[test]
-    fn missing_stale_data_prerequisite_disables_only_diagnostic_paths() {
+    fn optional_diagnostic_fields_are_negotiated_without_disabling_diagnostics() {
         let mut client = full_client();
         client.publish_diagnostics_data = false;
-        client.document_diagnostics_data = false;
+        client.publish_diagnostics_related_information = false;
         let upstream = UpstreamCapabilities {
             supports_diagnostics: true,
             semantic: SemanticCapability::ALL.into_iter().collect(),
         };
 
         let effective = negotiate_capabilities(&client, &GatewayCapabilities::default(), &upstream);
+        assert!(effective.supports_publish_diagnostics);
+        assert!(effective.supports_document_diagnostics);
+        assert!(!effective.publish_diagnostics_data);
+        assert!(!effective.publish_diagnostics_related_information);
+        assert!(effective.publish_diagnostics_code_description);
+        assert!(!effective.document_diagnostics_data);
+        assert!(effective.document_diagnostics_code_description);
+        assert!(!effective.document_diagnostics_related_information);
+        assert!(effective.supports_semantic(SemanticCapability::Definition));
+    }
+
+    #[test]
+    fn missing_version_support_disables_only_push_diagnostics() {
+        let mut client = full_client();
+        client.supports_versioned_publish_diagnostics = false;
+        let effective = negotiate_capabilities(
+            &client,
+            &GatewayCapabilities::default(),
+            &UpstreamCapabilities {
+                supports_diagnostics: true,
+                semantic: SemanticCapability::ALL.into_iter().collect(),
+            },
+        );
+
         assert!(!effective.supports_publish_diagnostics);
-        assert!(!effective.supports_document_diagnostics);
+        assert!(effective.supports_document_diagnostics);
         assert!(effective.supports_semantic(SemanticCapability::Definition));
     }
 
@@ -692,11 +714,7 @@ mod tests {
                     "codeDescriptionSupport": true,
                     "dataSupport": true
                 },
-                "diagnostic": {
-                    "relatedInformation": true,
-                    "codeDescriptionSupport": true,
-                    "dataSupport": true
-                },
+                "diagnostic": {},
                 "definition": {},
                 "hover": {}
             },
@@ -730,6 +748,33 @@ mod tests {
         assert!(advertised.get("renameProvider").is_none());
         assert!(advertised.get("codeActionProvider").is_none());
         assert!(advertised.get("executeCommandProvider").is_none());
+        assert!(effective.document_diagnostics_related_information);
+        assert!(effective.document_diagnostics_code_description);
+        assert!(effective.document_diagnostics_data);
+    }
+
+    #[test]
+    fn pull_diagnostics_ignore_nonstandard_field_claims() {
+        let client = ClientCapabilities::from_initialize_capabilities(&json!({
+            "textDocument": {
+                "diagnostic": {
+                    "relatedInformation": true,
+                    "codeDescriptionSupport": true,
+                    "dataSupport": true
+                }
+            }
+        }))
+        .expect("standard pull capability");
+
+        assert!(client.supports_document_diagnostics);
+        let effective = negotiate_capabilities(
+            &client,
+            &GatewayCapabilities::default(),
+            &UpstreamCapabilities::default(),
+        );
+        assert!(!effective.document_diagnostics_related_information);
+        assert!(!effective.document_diagnostics_code_description);
+        assert!(!effective.document_diagnostics_data);
     }
 
     #[test]

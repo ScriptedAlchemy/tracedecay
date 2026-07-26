@@ -1,8 +1,8 @@
 use tracedecay_domain::{
-    CodeGenerationId, EphemeralSanitizedQueryViewV1, ManifestDigest, ProjectionKeyV1,
-    ProjectionKindV1, PublicRetrieverStatus, QueryMac, QueryNormalizationRevision, RetrievalCursor,
-    RetrievalCursorKeyId, RetrievalError, RetrievalFailure, RetrievalRequest,
-    RetrieverContinuation, RetrieverKind, RetrieverOutcome, SanitizerRevision,
+    CodeGenerationId, EphemeralSanitizedQueryViewV1, ManifestDigest, OptionalStagePublicStatus,
+    ProjectionKeyV1, ProjectionKindV1, PublicRetrieverStatus, QueryMac, QueryNormalizationRevision,
+    RetrievalAnchorId, RetrievalCursor, RetrievalCursorKeyId, RetrievalError, RetrievalFailure,
+    RetrievalRequest, RetrieverContinuation, RetrieverKind, RetrieverOutcome, SanitizerRevision,
     SemanticRetrievalContinuationV1, UtcMicros, VectorGenerationIdV1,
 };
 
@@ -225,6 +225,7 @@ fn pr9_cursor_mac_authenticates_the_semantic_continuation_envelope() {
     statuses.insert(RetrieverKind::Semantic, PublicRetrieverStatus::Complete);
     cursor.semantic = Some(SemanticRetrievalContinuationV1 {
         profile_id: id("profile.semantic.cursor.v1"),
+        profile_digest: super::digest_id('c'),
         code_generation: id::<CodeGenerationId>("code-generation.cursor.v1"),
         vector_generation: VectorGenerationIdV1::new(super::digest_id::<ManifestDigest>('a')),
         projection_key: ProjectionKeyV1 {
@@ -232,10 +233,18 @@ fn pr9_cursor_mac_authenticates_the_semantic_continuation_envelope() {
             schema_revision: "projection.cursor.v1".to_owned(),
             profile_digest: super::digest_id('b'),
         },
+        search_index_key: tracedecay_domain::SemanticSearchIndexProfileV1::exact_flat_v1()
+            .and_then(|profile| profile.index_key())
+            .expect("search index key"),
         candidate_set_digest: cursor.candidate_set_digest.clone(),
         public_lane_statuses: statuses,
         lane_checkpoints: Vec::new(),
         ranking_revision: id("ranking.semantic.cursor.v1"),
+        rerank: OptionalStagePublicStatus::NotRequested,
+        ordered_candidate_anchors: vec![
+            id::<RetrievalAnchorId>("anchor.semantic.cursor.0"),
+            id::<RetrievalAnchorId>("anchor.semantic.cursor.1"),
+        ],
         next_ordinal: 2,
     });
     keys.resign_cursor(&mut cursor).unwrap();

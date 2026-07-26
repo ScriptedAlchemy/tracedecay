@@ -9,6 +9,7 @@ mod attachment;
 mod configuration;
 mod diagnostics;
 pub(crate) mod evidence_assembly;
+mod external_source;
 mod fact;
 mod fixtures;
 mod observation;
@@ -29,6 +30,7 @@ pub use attachment::{
 pub use configuration::ConfigurationExecutor;
 pub use diagnostics::DiagnosticExecutor;
 pub use evidence_assembly::EvidenceAssemblyExecutor;
+pub use external_source::{EXTERNAL_SOURCE_SCHEMA_V1, ExternalSourceExecutor};
 pub use fact::FactExecutor;
 pub use fixtures::{AdapterParityFixtureV1, PRE_CUTOVER_ADAPTER_PARITY_FIXTURES_V1};
 pub use observation::ObservationExecutor;
@@ -41,10 +43,11 @@ pub use session::SessionExecutor;
 // workspace.
 pub use tracedecay_store::{
     CodeReadOperationV1, CodeReadResultV1, DiagnosticReadOperationV1, DiagnosticReadResultV1,
-    EffectsReadOperationV1, EffectsReadResultV1, FactReadOperationV1, FactReadResultV1,
-    ObservationReadOperationV1, ObservationReadResultV1, ProfileReadOperationV1,
-    ProfileReadResultV1, ProjectReadOperationV1, ProjectReadResultV1, RepositoryReadOperationV1,
-    RepositoryReadResultV1, SessionReadOperationV1, SessionReadResultV1, StoredObservationRowV1,
+    EffectsReadOperationV1, EffectsReadResultV1, ExternalSourceReadOperationV1,
+    ExternalSourceReadResultV1, FactReadOperationV1, FactReadResultV1, ObservationReadOperationV1,
+    ObservationReadResultV1, ProfileReadOperationV1, ProfileReadResultV1, ProjectReadOperationV1,
+    ProjectReadResultV1, RepositoryReadOperationV1, RepositoryReadResultV1, SessionReadOperationV1,
+    SessionReadResultV1, StoredObservationRowV1,
 };
 
 #[derive(Default)]
@@ -79,6 +82,9 @@ impl StorageOperationExecutor for ConcreteRepositoryWriteExecutor {
             RepositoryWritePayloadV1::EvidenceAssembly(write) => self
                 .project
                 .execute_evidence_assembly_write(savepoint, write),
+            RepositoryWritePayloadV1::ExternalSource(commit) => self
+                .project
+                .execute_external_source_write(savepoint, commit),
             RepositoryWritePayloadV1::RetrievalAnchorDisposition(record) => self
                 .project
                 .execute_retrieval_anchor_disposition_write(savepoint, record),
@@ -88,10 +94,8 @@ impl StorageOperationExecutor for ConcreteRepositoryWriteExecutor {
             RepositoryWritePayloadV1::SessionProjection(batch) => {
                 self.session.execute_projection_write(savepoint, batch)
             }
-            RepositoryWritePayloadV1::SessionSummary(request) => {
-                self.session.execute_summary_write(savepoint, request)
-            }
-            RepositoryWritePayloadV1::GitIndexTransaction(_)
+            RepositoryWritePayloadV1::SessionSummary(_)
+            | RepositoryWritePayloadV1::GitIndexTransaction(_)
             | RepositoryWritePayloadV1::EnqueueOutbox(_)
             | RepositoryWritePayloadV1::ApplyInbox(_)
             | RepositoryWritePayloadV1::AcknowledgeOutbox(_) => {
@@ -126,6 +130,10 @@ impl ConcreteRepositoryReadExecutor {
                 .project
                 .execute_read(snapshot, operation)
                 .map(|result| RepositoryReadResultV1::Project(Box::new(result))),
+            RepositoryReadOperationV1::ExternalSource(operation) => self
+                .project
+                .execute_external_source_read(snapshot, operation)
+                .map(RepositoryReadResultV1::ExternalSource),
             RepositoryReadOperationV1::Session(operation) => self
                 .session
                 .execute_read(snapshot, operation)

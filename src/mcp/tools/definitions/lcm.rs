@@ -205,7 +205,7 @@ pub(super) fn def_lcm_grep() -> ToolDefinition {
                 "include_summaries": {
                     "type": "boolean",
                     "default": false,
-                    "description": "Canonical compatibility retrieval currently supports raw occurrences only. true returns a typed unsupported_filter response."
+                    "description": "Include eligible canonical summary nodes alongside raw occurrences. Current/as-of/evolution supersession and source-horizon rules are applied before ranking."
                 },
                 "sort": {
                     "type": "string",
@@ -215,7 +215,7 @@ pub(super) fn def_lcm_grep() -> ToolDefinition {
                 },
                 "source": {
                     "type": "string",
-                    "description": "Optional source/platform filter from raw-message metadata."
+                    "description": "Optional canonical observation source id or provider filter. Summary nodes match when an eligible retained source matches."
                 },
                 "role": {
                     "type": "string",
@@ -488,6 +488,11 @@ pub(super) fn def_lcm_expand_query() -> ToolDefinition {
                     "minimum": 1,
                     "maximum": 65536,
                     "description": "Maximum retrieval context budget (tokens of LCM material assembled before synthesis). Defaults to 32000. Independent of max_tokens, which governs the synthesis output size."
+                },
+                "cursor": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Opaque continuation cursor returned by the same expand-query request. The original provider, session, query or single node id, limits, and context budget must remain unchanged."
                 }
             },
             "required": ["provider", "session_id", "prompt"]
@@ -734,14 +739,14 @@ pub(super) fn def_lcm_session_boundary() -> ToolDefinition {
 pub(super) fn def_session_start() -> ToolDefinition {
     ToolDefinition {
         name: "tracedecay_session_start".to_string(),
-        description: "Save current health metrics as baseline for later comparison via session_end. Call this before starting work.".to_string(),
+        description: "Deprecated compatibility wrapper. Use tracedecay_health_delta without before_cursor to pin current health.".to_string(),
         input_schema: json!({
             "type": "object",
             "properties": {}
         }),
         annotations: Some(json!({
             "readOnlyHint": false,
-            "title": "Session Start"
+            "title": "Session Start (Deprecated)"
         })),
         meta: None,
     }
@@ -750,14 +755,14 @@ pub(super) fn def_session_start() -> ToolDefinition {
 pub(super) fn def_session_end() -> ToolDefinition {
     ToolDefinition {
         name: "tracedecay_session_end".to_string(),
-        description: "Re-scan and compare current health against session baseline (saved by session_start). Returns diff showing what improved or degraded.".to_string(),
+        description: "Deprecated compatibility wrapper. Use tracedecay_health_delta with the prior after_cursor.".to_string(),
         input_schema: json!({
             "type": "object",
             "properties": {}
         }),
         annotations: Some(json!({
             "readOnlyHint": false,
-            "title": "Session End"
+            "title": "Session End (Deprecated)"
         })),
         meta: None,
     }

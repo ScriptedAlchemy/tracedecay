@@ -17,7 +17,7 @@ use tracedecay_domain::{
     GitIndexPreviewId, GitIndexPreviewV1, NativeAliasV2, ObservationScopeV1,
     ObservationSourceCursorV1, ObservationSourceIdentityV1, ProjectionGenerationId, RepositoryId,
     RetrievalAnchorId, RetrievalAnchorRecordV2, SessionId, SessionProjectionGenerationV1,
-    SessionSummaryIdV1, SessionSummaryRecordV1,
+    SessionSummaryIdV1, SessionSummaryRecordV1, SourceBindingIdentityV1, SourceBindingOwnerV1,
 };
 
 use crate::{
@@ -25,17 +25,17 @@ use crate::{
     FactCurrentQuery, FactLineageQuery, GitIndexTransactionRecordV1,
     RepositoryProvenanceAttachmentV1, RetrievalAnchorDerivativeV1,
     RetrievalAnchorDispositionRecordV1, RetrievalAnchorOwnerV1, RetrievalAnchorTombstoneV1,
-    SessionTemporalProjectionBatchV1, StorageRuntimeContractErrorV1, StoreEffectIdV1,
-    StoreRuntimeBindingV1, StoreShardIdV1, StoreShardScopeV1, StoredFactV1,
+    SessionTemporalProjectionBatchV1, SourceStoreStateV1, StorageRuntimeContractErrorV1,
+    StoreEffectIdV1, StoreRuntimeBindingV1, StoreShardIdV1, StoreShardScopeV1, StoredFactV1,
     StoredRetrievalAnchorRecordV1, TransactionalInboxReceiptV1, TransactionalOutboxEntryV1,
 };
 
 /// One repository read operation, dispatched across the profile, project,
-/// session, code, and effects families.
+/// external-source, session, code, and effects families.
 ///
 /// This enum mirrors [`RepositoryWritePayloadV1`](crate::RepositoryWritePayloadV1)
 /// family for family: the write payload is a single closed enum spanning all
-/// five families even though no single executor owns every family. The
+/// typed families even though no single executor owns every family. The
 /// repository attachment executes profile/project/session and rejects
 /// code/effects (which the graph shard and the writer ledger own); the read
 /// contract keeps the same unified vocabulary with the same ownership split.
@@ -44,6 +44,7 @@ use crate::{
 pub enum RepositoryReadOperationV1 {
     Profile(ProfileReadOperationV1),
     Project(ProjectReadOperationV1),
+    ExternalSource(ExternalSourceReadOperationV1),
     Session(SessionReadOperationV1),
     Code(CodeReadOperationV1),
     Effects(EffectsReadOperationV1),
@@ -67,6 +68,9 @@ impl RepositoryReadOperationV1 {
             }
             Self::Project(ProjectReadOperationV1::EvidenceAssembly(operation)) => {
                 evidence_owner_matches_shard(evidence_read_owner(operation), &binding.shard_id)
+            }
+            Self::ExternalSource(operation) => {
+                external_source_read_matches_shard(operation, &binding.shard_id)
             }
             Self::Project(ProjectReadOperationV1::RetrievalAnchor(operation)) => {
                 retrieval_owner_matches_shard(retrieval_read_owner(operation), &binding.shard_id)
@@ -171,6 +175,32 @@ fn evidence_owner_matches_shard(
         }
 }
 
+fn external_source_read_matches_shard(
+    operation: &ExternalSourceReadOperationV1,
+    shard: &StoreShardIdV1,
+) -> bool {
+    let binding = match operation {
+        ExternalSourceReadOperationV1::State { binding } => binding,
+    };
+    binding.validate().is_ok()
+        && match (&binding.owner, &shard.scope) {
+            (
+                SourceBindingOwnerV1::Project(project_id),
+                StoreShardScopeV1::Project {
+                    project_id: shard_project,
+                }
+                | StoreShardScopeV1::ProjectSessions {
+                    project_id: shard_project,
+                },
+            ) => project_id == shard_project,
+            (
+                SourceBindingOwnerV1::Profile(profile_id),
+                StoreShardScopeV1::Profile | StoreShardScopeV1::ProfileSessions,
+            ) => profile_id == &shard.profile_id,
+            _ => false,
+        }
+}
+
 fn retrieval_read_owner(operation: &RetrievalAnchorReadOperationV1) -> &RetrievalAnchorOwnerV1 {
     match operation {
         RetrievalAnchorReadOperationV1::AnchorById { owner, .. }
@@ -252,6 +282,7 @@ fn shard_family(scope: &StoreShardScopeV1) -> &'static str {
 pub enum RepositoryReadResultV1 {
     Profile(ProfileReadResultV1),
     Project(Box<ProjectReadResultV1>),
+    ExternalSource(ExternalSourceReadResultV1),
     Session(SessionReadResultV1),
     Code(Box<CodeReadResultV1>),
     Effects(Box<EffectsReadResultV1>),
@@ -295,6 +326,20 @@ pub enum ProjectReadResultV1 {
     Diagnostics(DiagnosticReadResultV1),
     EvidenceAssembly(EvidenceAssemblyReadResultV1),
     RetrievalAnchor(RetrievalAnchorReadResultV1),
+}
+
+/// Exact owner-bound external source state. The binding identity contains no
+/// raw provider locator or mutable path.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalSourceReadOperationV1 {
+    State { binding: SourceBindingIdentityV1 },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalSourceReadResultV1 {
+    State(Option<Box<SourceStoreStateV1>>),
 }
 
 /// Retrieval-anchor authority reads. Application authorization must run before

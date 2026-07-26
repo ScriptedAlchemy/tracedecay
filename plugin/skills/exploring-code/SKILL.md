@@ -53,8 +53,12 @@ For daemon-admitted, generation-bound code intelligence, use the production
 `tracedecay_code_signature_search`, and `tracedecay_code_exact_occurrence`
 reads. Traverse only evidenced relationships with `tracedecay_code_callers`,
 `tracedecay_code_callees`, `tracedecay_code_implementations`, and
-`tracedecay_code_type_hierarchy`; an unavailable generation stays unavailable
-instead of falling back to a different project or worktree.
+`tracedecay_code_type_hierarchy`. From an exact occurrence, navigate with
+`tracedecay_code_declaration`, `tracedecay_code_definition`,
+`tracedecay_code_type_definition`, and `tracedecay_code_references`; summarize
+the pinned generation with `tracedecay_code_facets` or
+`tracedecay_code_timeline`. An unavailable generation stays unavailable instead
+of falling back to a different project or worktree.
 
 ## Rules
 

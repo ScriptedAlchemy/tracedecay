@@ -1,4 +1,4 @@
-//! Reachable S5-S10 SQLite storage-runtime cutover acceptance target.
+//! Reachable SQLite storage-runtime acceptance target.
 
 #[path = "../../../tests/storage_runtime_rusqlite_suite/cutover_support.rs"]
 mod cutover_support;
@@ -13,5 +13,3 @@ mod s6_operations;
 mod s7_graph_attachment;
 #[path = "../../../tests/storage_runtime_rusqlite_suite/s8_repository_parity.rs"]
 mod s8_repository_parity;
-#[path = "../../../tests/storage_runtime_rusqlite_suite/s9_effect_restart.rs"]
-mod s9_effect_restart;

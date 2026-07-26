@@ -13,8 +13,8 @@ use super::assembly::{
 use super::wire::StreamingWriter;
 use super::{
     CANONICAL_CONTEXT_FORMAT, CompactContext, ContextBudget, ContextError, ContextPayload,
-    ContextUnavailable, MAX_CONTEXT_FRAME_ITEMS, MAX_CONTEXT_OUTPUT_BYTES, TemporalContextFrames,
-    TokenPolicy, VersionedTokenEstimator,
+    ContextUnavailable, MAX_CONTEXT_FRAME_ITEMS, MAX_CONTEXT_OUTPUT_BYTES,
+    OrderedTextContextAssembler, TemporalContextFrames, TokenPolicy, VersionedTokenEstimator,
 };
 use crate::query::temporal::ports::{ExecutionControl, TemporalPortError};
 use crate::query::temporal::resolution::summary::{SummaryLineageRejection, SummaryOmission};
@@ -22,6 +22,23 @@ use crate::query::temporal::resolution::summary::{SummaryLineageRejection, Summa
 struct HydratedPayload {
     anchor_id: RetrievalAnchorId,
     bytes: Vec<u8>,
+}
+
+#[test]
+fn ordered_text_context_admission_is_utf8_safe_and_resumable() {
+    let mut context = OrderedTextContextAssembler::new(3);
+    let first = context.admit("a😀bc");
+    assert_eq!(first.content.as_deref(), Some("a😀b"));
+    assert_eq!(first.returned_chars, 3);
+    assert_eq!(first.total_chars, 4);
+    assert_eq!(first.next_content_offset, Some(3));
+    assert!(first.truncated);
+    assert_eq!(context.used_chars(), 3);
+
+    let second = context.admit("later");
+    assert_eq!(second.content, None);
+    assert_eq!(second.next_content_offset, Some(0));
+    assert!(second.truncated);
 }
 
 impl ContextPayload for HydratedPayload {

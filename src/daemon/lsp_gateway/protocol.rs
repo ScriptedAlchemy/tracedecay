@@ -47,11 +47,12 @@ use super::provider::{
     UnavailableDiagnosticSnapshotProvider,
 };
 use super::rpc::{
-    RpcFailure, diagnostic_result_id, diagnostic_value, document_diagnostic_report_value,
-    document_position, document_uri, error_response, incoming_calls_value, initialized_root_uri,
-    outgoing_calls_value, overlay_failure, parse_call_item, parse_overlay_change, parse_type_item,
-    request_id, request_id_value, required_i64, required_nonempty_string, required_string,
-    response_value, semantic_response_value, success_response, text_document, type_items_value,
+    DiagnosticSerializationCapabilities, RpcFailure, diagnostic_result_id, diagnostic_value,
+    document_diagnostic_report_value, document_position, document_uri, error_response,
+    incoming_calls_value, initialized_root_uri, outgoing_calls_value, overlay_failure,
+    parse_call_item, parse_overlay_change, parse_type_item, request_id, request_id_value,
+    required_i64, required_nonempty_string, required_string, response_value,
+    semantic_response_value, success_response, text_document, type_items_value,
 };
 use super::session::{
     CancellationOutcome, CompletionDisposition, LifecycleError, LspRequestFailure, LspRequestId,
@@ -145,10 +146,18 @@ struct PendingSemanticRequest {
     request: SemanticRequest,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Eq, PartialEq)]
 struct NativeDiagnosticSnapshot {
     version: i64,
     diagnostics: Vec<GatewayDiagnostic>,
+}
+
+fn bind_context_document_digest(request: &mut ContextProjectionRequest, overlays: &OverlayStore) {
+    request.document_content_digest = request
+        .document_uri
+        .as_deref()
+        .and_then(|uri| overlays.snapshot(uri))
+        .map(|snapshot| crate::code_index::intake::content_digest(snapshot.text.as_bytes()));
 }
 
 #[derive(Deserialize)]
@@ -196,6 +205,7 @@ impl NativeDiagnosticsNotification {
         let diagnostics = self
             .diagnostics
             .into_iter()
+            .filter(|diagnostic| !native_source_is_tracedecay(&diagnostic.source))
             .map(|diagnostic| diagnostic.into_gateway_diagnostic(&uri))
             .collect::<Option<Vec<_>>>()?;
         Some((
@@ -206,6 +216,12 @@ impl NativeDiagnosticsNotification {
             },
         ))
     }
+}
+
+fn native_source_is_tracedecay(source: &str) -> bool {
+    source
+        .get(.."tracedecay".len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("tracedecay"))
 }
 
 impl NativeDiagnostic {
@@ -255,8 +271,10 @@ impl NativeDiagnostic {
             range,
             severity,
             code,
+            code_description_uri: None,
             message: self.message,
             source: DiagnosticSource::Upstream,
+            related_information: Vec::new(),
             data: None,
         })
     }
@@ -1021,6 +1039,9 @@ where
         if document_version != snapshot.version {
             return;
         }
+        if self.native_upstream.get(&uri) == Some(&snapshot) {
+            return;
+        }
         let version = snapshot.version;
         self.native_upstream.insert(uri.clone(), snapshot);
         if !self
@@ -1098,6 +1119,7 @@ where
             .overlays
             .change(&uri, version, &changes)
             .map_err(|error| self.close_for_overlay_error(error))?;
+        self.discard_document_context(&uri);
         self.native_upstream.remove(&uri);
         self.control.supersede_document(&uri, snapshot.version);
         if !self
@@ -1118,6 +1140,7 @@ where
         let uri = required_nonempty_string(text_document(params)?, "uri")?;
         self.require_document_root(&uri)?;
         let closed = self.overlays.close(&uri).map_err(overlay_failure)?;
+        self.discard_document_context(&uri);
         self.native_upstream.remove(&uri);
         self.control
             .supersede_document(&uri, closed.version.saturating_add(1));
@@ -1135,6 +1158,7 @@ where
         self.require_ready()?;
         let uri = required_nonempty_string(text_document(params)?, "uri")?;
         self.require_document_root(&uri)?;
+        self.discard_document_context(&uri);
         if matches!(
             self.gateway.document_saved(uri.clone()),
             FeedbackCycleResponse::Accepted
@@ -1257,7 +1281,7 @@ where
         let request = serde_json::from_value::<ContextProjectionRequest>(params.clone())
             .map_err(|_| RpcFailure::invalid_params("invalid tracedecay/context parameters"));
         match request {
-            Ok(request) if request.kind.is_valid() => {
+            Ok(mut request) if request.kind.is_valid() => {
                 let Some(context_request_id) = request_id(&id) else {
                     let _ = self.enqueue_value(error_response(
                         Value::Null,
@@ -1273,6 +1297,7 @@ where
                     let _ = self.enqueue_value(error_response(id, error));
                     return;
                 }
+                bind_context_document_digest(&mut request, &self.overlays);
                 let document = request
                     .document_uri
                     .as_ref()
@@ -1956,9 +1981,12 @@ where
         let valid_payload = !envelope.stable_id.is_empty()
             && envelope.stable_id.len() <= MAX_CONTEXT_RETRIEVAL_HANDLE_BYTES
             && envelope.expires_at > 0
+            && valid_retrieval_handle(envelope.next_retrieval_handle.as_deref())
             && match envelope.coverage {
                 ContextCoverage::Complete => {
-                    envelope.evidence.is_some() && envelope.omission_reason.is_none()
+                    envelope.evidence.is_some()
+                        && envelope.omission_reason.is_none()
+                        && envelope.next_retrieval_handle.is_none()
                 }
                 ContextCoverage::Partial => envelope.omission_reason.is_some(),
                 ContextCoverage::Unavailable | ContextCoverage::Failed => false,
@@ -2001,6 +2029,9 @@ where
             ));
         }
         self.context_subscriptions = subscriptions;
+        if let Some(context) = &self.context {
+            context.update_subscriptions(self.gateway.root(), &self.context_subscriptions);
+        }
         Ok(json!({
             "projections": self.context_subscriptions.iter().collect::<Vec<_>>(),
         }))
@@ -2028,7 +2059,13 @@ where
                 (true, Some(digest)) => !digest.is_empty(),
                 (false, None) => true,
                 _ => false,
-            };
+            }
+            && request
+                .document_content_digest
+                .as_ref()
+                .is_none_or(|expected| {
+                    envelope.identity.document_content_digest.as_deref() == Some(expected.as_str())
+                });
         let valid_items = envelope.items.len() <= MAX_CONTEXT_PROJECTION_ITEMS
             && envelope.items.iter().all(|item| {
                 !item.stable_id.is_empty()
@@ -2148,14 +2185,21 @@ where
         let result_id = diagnostic_result_id(generation, version);
         let merged =
             self.merge_document_diagnostics(uri, diagnostics.upstream, diagnostics.tracedecay);
-        let value = document_diagnostic_report_value(DocumentDiagnosticReport::full(
-            result_id.clone(),
-            self.visible_diagnostics(merged.items),
-        ));
+        let value = document_diagnostic_report_value(
+            DocumentDiagnosticReport::full(
+                result_id.clone(),
+                self.visible_diagnostics(
+                    merged.items,
+                    self.gateway.capabilities().document_diagnostics_data,
+                ),
+            ),
+            DiagnosticSerializationCapabilities::pull(self.gateway.capabilities()),
+        );
         let previous = params.get("previousResultId").and_then(Value::as_str);
         if previous == Some(result_id.as_str()) {
             return Ok(document_diagnostic_report_value(
                 DocumentDiagnosticReport::Unchanged { result_id },
+                DiagnosticSerializationCapabilities::pull(self.gateway.capabilities()),
             ));
         }
         if overlay.is_some() {
@@ -2337,7 +2381,10 @@ where
                 uri,
                 version,
                 generation,
-                self.visible_diagnostics(merged.items),
+                self.visible_diagnostics(
+                    merged.items,
+                    self.gateway.capabilities().publish_diagnostics_data,
+                ),
             )
         {
             return false;
@@ -2365,13 +2412,22 @@ where
         DiagnosticMerge::for_document(uri, upstream, tracedecay)
     }
 
-    fn visible_diagnostics(&self, diagnostics: Vec<GatewayDiagnostic>) -> Vec<GatewayDiagnostic> {
-        if !self.cursor_native_mode {
-            return diagnostics;
+    fn visible_diagnostics(
+        &self,
+        mut diagnostics: Vec<GatewayDiagnostic>,
+        supports_diagnostic_data: bool,
+    ) -> Vec<GatewayDiagnostic> {
+        for diagnostic in &mut diagnostics {
+            diagnostic
+                .related_information
+                .retain(|related| self.gateway.root().contains_document(&related.uri));
         }
         diagnostics
             .into_iter()
-            .filter(|diagnostic| diagnostic.source.is_tracedecay())
+            .filter(|diagnostic| {
+                (!self.cursor_native_mode || diagnostic.source.is_tracedecay())
+                    && (supports_diagnostic_data || !diagnostic.source.is_tracedecay())
+            })
             .collect()
     }
 
@@ -2385,14 +2441,24 @@ where
         if !self.gateway.capabilities().supports_publish_diagnostics {
             return false;
         }
+        let capabilities = self.gateway.capabilities();
+        let mut params = json!({
+            "uri": uri,
+            "diagnostics": diagnostics
+                .into_iter()
+                .map(|diagnostic| diagnostic_value(
+                    diagnostic,
+                    DiagnosticSerializationCapabilities::push(capabilities),
+                ))
+                .collect::<Vec<_>>(),
+        });
+        if capabilities.publish_diagnostics_version {
+            params["version"] = Value::from(version);
+        }
         let value = json!({
             "jsonrpc": "2.0",
             "method": "textDocument/publishDiagnostics",
-            "params": {
-                "uri": uri,
-                "version": version,
-                "diagnostics": diagnostics.into_iter().map(diagnostic_value).collect::<Vec<_>>(),
-            },
+            "params": params,
         });
         self.enqueue_publication(
             value,
@@ -2450,19 +2516,17 @@ where
             let key = (change.kind.clone(), change.document_uri.clone());
             let identity_drift_clear = match self.context_currentness.get(&key) {
                 Some(current) if current.generation > change.generation => continue,
-                Some(current)
-                    if current.generation == change.generation
-                        && current.identity == change.identity =>
-                {
-                    continue;
-                }
                 Some(current) if current.generation == change.generation => {
-                    change.identity = current.identity.clone();
-                    change.freshness = ContextFreshness::Unknown;
-                    change.producer_state = ContextProducerState::Unavailable;
-                    change.coverage = ContextCoverage::Unavailable;
-                    change.retrieval_handle = None;
-                    true
+                    if current.identity == change.identity {
+                        false
+                    } else {
+                        change.identity = current.identity.clone();
+                        change.freshness = ContextFreshness::Unknown;
+                        change.producer_state = ContextProducerState::Unavailable;
+                        change.coverage = ContextCoverage::Unavailable;
+                        change.retrieval_handle = None;
+                        true
+                    }
                 }
                 _ => false,
             };
@@ -2776,6 +2840,7 @@ where
     }
 
     fn discard_document_publications(&mut self, uri: &str) {
+        self.discard_document_context(uri);
         self.active_diagnostic_refreshes.remove(uri);
         let mut retained = VecDeque::with_capacity(self.outbound.len());
         let mut index = 0_usize;
@@ -2798,6 +2863,11 @@ where
         self.outbound = retained;
         self.control.remove_publication(uri);
         self.published.remove(uri);
+    }
+
+    fn discard_document_context(&mut self, uri: &str) {
+        self.context_currentness
+            .retain(|(_, document_uri), _| document_uri.as_deref() != Some(uri));
     }
 
     fn has_outbound_capacity(&self, reserve_bytes: usize) -> bool {
@@ -2976,8 +3046,10 @@ mod tests {
     use super::super::overlay::{MAX_OVERLAY_BYTES, OverlaySnapshot};
     use super::super::provider::GenerationDiagnostics;
     use super::*;
+    use crate::daemon::lsp_gateway::TRACEDECAY_CONTEXT_REVISION;
     use crate::lsp_bridge::{DaemonLspSessionTransport, FramePoll, FrameSend};
     use std::cell::RefCell;
+    use std::sync::Mutex;
 
     #[derive(Default)]
     struct Feedback(RefCell<Vec<FeedbackCycleRequest>>);
@@ -3041,13 +3113,44 @@ mod tests {
                         },
                         severity: Some(DiagnosticSeverity::Warning),
                         code: Some("warning".into()),
+                        code_description_uri: None,
                         message: "bounded diagnostic".into(),
                         source: DiagnosticSource::Upstream,
+                        related_information: Vec::new(),
                         data: None,
                     }],
                     tracedecay: Vec::new(),
                 },
                 completed_operation_id: None,
+            }
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct CapturingContext {
+        document_content_digest: Arc<Mutex<Option<ContentDigest>>>,
+    }
+
+    impl ContextProjectionPort for CapturingContext {
+        fn registrations(&self) -> Vec<ContextProjectionRegistration> {
+            vec![ContextProjectionRegistration {
+                kind: ContextProjectionKind::test_run_results(),
+                revision: TRACEDECAY_CONTEXT_REVISION,
+            }]
+        }
+
+        fn snapshot(
+            &self,
+            _root: &AdmittedRoot,
+            _request_id: &LspRequestId,
+            request: &ContextProjectionRequest,
+        ) -> ContextProjectionOutcome {
+            *self
+                .document_content_digest
+                .lock()
+                .expect("capture context request") = request.document_content_digest.clone();
+            ContextProjectionOutcome::Deferred {
+                reason: "captured".to_owned(),
             }
         }
     }
@@ -3065,9 +3168,6 @@ mod tests {
                 publish_diagnostics_code_description: true,
                 publish_diagnostics_data: true,
                 supports_document_diagnostics: true,
-                document_diagnostics_related_information: true,
-                document_diagnostics_code_description: true,
-                document_diagnostics_data: true,
                 workspace_diagnostic_refresh_support: true,
                 semantic: SemanticCapability::ALL.into_iter().collect(),
                 ..ClientCapabilities::default()
@@ -3189,6 +3289,145 @@ mod tests {
     }
 
     #[test]
+    fn context_request_binds_exact_session_overlay_digest() {
+        let document_uri = "file:///root/a.rs";
+        let mut overlays = OverlayStore::default();
+        overlays
+            .open(document_uri, "rust", 1, "fn dirty() {}")
+            .expect("open overlay");
+        let mut request = ContextProjectionRequest {
+            kind: ContextProjectionKind::test_run_results(),
+            document_uri: Some(document_uri.to_owned()),
+            document_content_digest: None,
+        };
+
+        bind_context_document_digest(&mut request, &overlays);
+
+        assert_eq!(
+            request.document_content_digest,
+            Some(crate::code_index::intake::content_digest(b"fn dirty() {}"))
+        );
+        assert!(
+            serde_json::from_value::<ContextProjectionRequest>(json!({
+                "kind": "testRunResults",
+                "documentUri": document_uri,
+                "documentContentDigest": format!("sha256:{}", "a".repeat(64)),
+            }))
+            .is_err(),
+            "clients cannot supply the trusted overlay digest"
+        );
+    }
+
+    #[test]
+    fn document_change_invalidates_context_currentness_before_expansion() {
+        let document_uri = "file:///root/a.rs";
+        let mut session = session();
+        initialize(&mut session);
+        session.handle_payload(
+            br#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///root/a.rs","languageId":"rust","version":1,"text":"fn a() {}"}}}"#,
+            1,
+        );
+        session.context_currentness.insert(
+            (
+                ContextProjectionKind::test_run_results(),
+                Some(document_uri.to_owned()),
+            ),
+            ContextProjectionCurrentness {
+                generation: 7,
+                identity: ContextProjectionIdentity {
+                    head_commit_id: "0123456789abcdef".to_owned(),
+                    code_generation_id: "generation:7".to_owned(),
+                    snapshot_digest: format!("sha256:{}", "a".repeat(64)),
+                    invalidation_digest: format!("sha256:{}", "b".repeat(64)),
+                    snapshot_content_digest: format!("sha256:{}", "c".repeat(64)),
+                    document_content_digest: Some(format!("sha256:{}", "d".repeat(64))),
+                },
+            },
+        );
+
+        session.handle_payload(
+            br#"{"jsonrpc":"2.0","method":"textDocument/didChange","params":{"textDocument":{"uri":"file:///root/a.rs","version":2},"contentChanges":[{"text":"fn b() {}"}]}}"#,
+            2,
+        );
+
+        assert!(
+            !session
+                .context_currentness
+                .keys()
+                .any(|(_, uri)| uri.as_deref() == Some(document_uri))
+        );
+    }
+
+    #[test]
+    fn context_dispatch_supplies_session_overlay_digest_to_canonical_reader() {
+        let captured = CapturingContext::default();
+        let observed = Arc::clone(&captured.document_content_digest);
+        let mut capabilities = GatewayCapabilities::default();
+        capabilities.context_projections.insert(
+            ContextProjectionKind::test_run_results(),
+            TRACEDECAY_CONTEXT_REVISION,
+        );
+        let upstream = UpstreamCapabilities::default();
+        let effective =
+            negotiate_capabilities(&ClientCapabilities::default(), &capabilities, &upstream);
+        let mut session = DaemonLspProtocolSession::new(
+            DaemonLspGateway::with_semantic_provider(
+                AdmittedRoot::new("file:///root"),
+                effective,
+                Feedback::default(),
+                Semantics,
+            ),
+            capabilities,
+            upstream,
+            Diagnostics,
+        )
+        .with_context_projection_port(captured);
+        session.handle_payload(
+            &serde_json::to_vec(&json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "rootUri": "file:///root",
+                    "capabilities": {
+                        "general": { "positionEncodings": ["utf-16"] },
+                        "experimental": {
+                            "tracedecay": {
+                                "revision": TRACEDECAY_CONTEXT_REVISION,
+                                "projections": [{
+                                    "kind": "testRunResults",
+                                    "revision": TRACEDECAY_CONTEXT_REVISION
+                                }],
+                                "opaqueExpansion": false
+                            }
+                        }
+                    }
+                }
+            }))
+            .expect("initialize request"),
+            0,
+        );
+        session.drain_outbound();
+        session.handle_payload(
+            br#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#,
+            1,
+        );
+        session.handle_payload(
+            br#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///root/a.rs","languageId":"rust","version":1,"text":"fn dirty() {}"}}}"#,
+            2,
+        );
+        session.handle_payload(
+            br#"{"jsonrpc":"2.0","id":2,"method":"tracedecay/context","params":{"kind":"testRunResults","documentUri":"file:///root/a.rs"}}"#,
+            3,
+        );
+
+        assert_eq!(
+            *observed.lock().expect("read captured context request"),
+            Some(crate::code_index::intake::content_digest(b"fn dirty() {}"))
+        );
+    }
+
+    #[test]
     fn malformed_position_encoding_initialize_is_retryable() {
         let mut session = session();
         session.handle_payload(
@@ -3242,6 +3481,136 @@ mod tests {
     }
 
     #[test]
+    fn publish_diagnostics_omits_unnegotiated_optional_fields() {
+        let mut session = session();
+        session.handle_payload(
+            br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":"file:///root","capabilities":{"general":{"positionEncodings":["utf-16"]},"textDocument":{"publishDiagnostics":{"versionSupport":true}}}}}"#,
+            0,
+        );
+        session.handle_payload(
+            br#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#,
+            1,
+        );
+        session.handle_payload(
+            br#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///root/a.rs","languageId":"rust","version":4,"text":"fn a() {}"}}}"#,
+            2,
+        );
+        session.handle_payload(
+            br#"{"jsonrpc":"2.0","method":"textDocument/didSave","params":{"textDocument":{"uri":"file:///root/a.rs"}}}"#,
+            3,
+        );
+
+        let publication: Value = session
+            .drain_outbound()
+            .iter()
+            .map(|message| serde_json::from_slice(message).unwrap())
+            .find(|message: &Value| message["method"] == "textDocument/publishDiagnostics")
+            .expect("baseline publish diagnostics remains available");
+        assert_eq!(publication["params"]["version"], 4);
+        let diagnostic = &publication["params"]["diagnostics"][0];
+        assert!(diagnostic.get("relatedInformation").is_none());
+        assert!(diagnostic.get("codeDescription").is_none());
+        assert!(diagnostic.get("data").is_none());
+    }
+
+    #[test]
+    fn related_locations_are_limited_to_the_admitted_root() {
+        let session = session();
+        let diagnostic = GatewayDiagnostic {
+            uri: "file:///root/a.rs".to_owned(),
+            range: LspRange {
+                start: LspPosition {
+                    line: 0,
+                    character: 0,
+                },
+                end: LspPosition {
+                    line: 0,
+                    character: 1,
+                },
+            },
+            severity: Some(DiagnosticSeverity::Information),
+            code: Some("github-review".to_owned()),
+            code_description_uri: None,
+            message: "review".to_owned(),
+            source: DiagnosticSource::TraceDecayGitHub,
+            related_information: vec![
+                super::super::diagnostics::GatewayDiagnosticRelatedInformation {
+                    uri: "file:///root/caller.rs".to_owned(),
+                    range: LspRange {
+                        start: LspPosition {
+                            line: 1,
+                            character: 0,
+                        },
+                        end: LspPosition {
+                            line: 1,
+                            character: 1,
+                        },
+                    },
+                    message: "authorized".to_owned(),
+                },
+                super::super::diagnostics::GatewayDiagnosticRelatedInformation {
+                    uri: "file:///other/secret.rs".to_owned(),
+                    range: LspRange {
+                        start: LspPosition {
+                            line: 1,
+                            character: 0,
+                        },
+                        end: LspPosition {
+                            line: 1,
+                            character: 1,
+                        },
+                    },
+                    message: "outside root".to_owned(),
+                },
+            ],
+            data: None,
+        };
+
+        let visible = session.visible_diagnostics(vec![diagnostic], true);
+        assert_eq!(visible[0].related_information.len(), 1);
+        assert_eq!(
+            visible[0].related_information[0].uri,
+            "file:///root/caller.rs"
+        );
+    }
+
+    #[test]
+    fn managed_diagnostics_require_negotiated_data_identity() {
+        let session = session();
+        let diagnostic = |source| GatewayDiagnostic {
+            uri: "file:///root/a.rs".to_owned(),
+            range: LspRange {
+                start: LspPosition {
+                    line: 0,
+                    character: 0,
+                },
+                end: LspPosition {
+                    line: 0,
+                    character: 1,
+                },
+            },
+            severity: Some(DiagnosticSeverity::Information),
+            code: Some("finding".to_owned()),
+            code_description_uri: None,
+            message: "finding".to_owned(),
+            source,
+            related_information: Vec::new(),
+            data: None,
+        };
+
+        let visible = session.visible_diagnostics(
+            vec![
+                diagnostic(DiagnosticSource::Upstream),
+                diagnostic(DiagnosticSource::TraceDecayGitHub),
+            ],
+            false,
+        );
+
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].source, DiagnosticSource::Upstream);
+    }
+
+    #[test]
     fn cursor_native_diagnostics_are_merged_but_not_republished() {
         let mut session = session();
         let request = json!({
@@ -3289,7 +3658,7 @@ mod tests {
         );
         session.drain_outbound();
         session.handle_payload(
-            br#"{"jsonrpc":"2.0","method":"tracedecay/nativeDiagnostics","params":{"uri":"file:///root/a.rs","version":7,"diagnostics":[{"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":1}},"source":"typescript","message":"native diagnostic","data":{"ruleId":"typescript"}}]}}"#,
+            br#"{"jsonrpc":"2.0","method":"tracedecay/nativeDiagnostics","params":{"uri":"file:///root/a.rs","version":7,"diagnostics":[{"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":1}},"source":"tracedecay","message":"projected diagnostic"},{"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":1}},"source":"TraceDecay-CI","message":"projected CI diagnostic"},{"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":1}},"source":"tracedecay-proximity","message":"projected proximity diagnostic"},{"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":1}},"source":"typescript","message":"native diagnostic","data":{"ruleId":"typescript"}}]}}"#,
             11,
         );
         assert_eq!(
@@ -3300,6 +3669,11 @@ mod tests {
                 .diagnostics
                 .len(),
             1
+        );
+        assert_eq!(
+            session.native_upstream["file:///root/a.rs"].diagnostics[0].message,
+            "native diagnostic",
+            "TraceDecay-projected sources must never be inverted into native upstream evidence"
         );
         session.detach().unwrap();
         session.reconnect().unwrap();
@@ -3322,9 +3696,35 @@ mod tests {
                 .is_empty(),
             "Cursor-native clients must not receive their own diagnostics back"
         );
+        let projected_only = br#"{"jsonrpc":"2.0","method":"tracedecay/nativeDiagnostics","params":{"uri":"file:///root/a.rs","version":7,"diagnostics":[{"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":1}},"source":"tracedecay-github","message":"projected diagnostic"}]}}"#;
+        session.handle_payload(projected_only, 62);
+        session.flush_due(62);
+        session.drain_outbound();
+        assert!(
+            session.native_upstream["file:///root/a.rs"]
+                .diagnostics
+                .is_empty(),
+            "a projected-only native publication clears prior upstream evidence once"
+        );
+        session.handle_payload(projected_only, 63);
+        assert_eq!(
+            session.flush_due(10_000).queued_messages,
+            0,
+            "an unchanged projected-only publication must not start a refresh loop"
+        );
+        session.handle_payload(
+            br#"{"jsonrpc":"2.0","method":"tracedecay/nativeDiagnostics","params":{"uri":"file:///root/a.rs","version":7,"diagnostics":[{"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":1}},"source":"typescript","message":"changed native diagnostic"}]}}"#,
+            10_001,
+        );
+        assert_eq!(
+            session.native_upstream["file:///root/a.rs"].diagnostics[0].message,
+            "changed native diagnostic",
+            "duplicate suppression must not suppress a real native evidence change"
+        );
+        session.drain_outbound();
         session.handle_payload(
             br#"{"jsonrpc":"2.0","method":"textDocument/didClose","params":{"textDocument":{"uri":"file:///root/a.rs"}}}"#,
-            62,
+            10_002,
         );
         assert!(
             !session.native_upstream.contains_key("file:///root/a.rs"),
