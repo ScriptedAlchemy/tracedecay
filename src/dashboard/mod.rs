@@ -228,8 +228,7 @@ pub(crate) struct DashboardState {
     pub(crate) retention_config: crate::config::RetentionConfig,
     /// Recent deterministic curation activity emitted by the standalone dashboard.
     pub(crate) curation_activity: Arc<RwLock<Vec<Value>>>,
-    /// In-process BPE token-count cache for the Savings & Cost tab (backed
-    /// by the `dashboard_token_counts` sidecar in the global accounting DB).
+    /// Process-local derived BPE token-count cache for the Savings & Cost tab.
     pub(crate) token_counts: Arc<token_count::TokenCountCache>,
     /// Dashboard-owned LSP diagnostics broker. This is deliberately not
     /// exposed to hooks or model-context paths in Phase 1.

@@ -1522,11 +1522,6 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
-    pub async fn ensure_token_count_cache_for_test(&self) -> bool {
-        self.profile_database.ensure_token_count_cache().await
-    }
-
-    #[doc(hidden)]
     pub async fn delete_project(&self, project_path: &Path) {
         self.profile_database.delete_project(project_path).await;
     }
