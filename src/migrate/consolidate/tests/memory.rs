@@ -11,7 +11,9 @@ async fn branch_legacy_cutover_accepts_v17_and_preserves_latest_full_fact_state(
     let (source, _) = test_initialize(&source_path).await;
 
     target
-        .conn()
+        .writer_connection("seed target legacy memory fixture")
+        .await
+        .unwrap()
         .execute_batch(
             "INSERT INTO memory_facts(
                  fact_id, content, category, tags, trust_score, retrieval_count,
@@ -27,7 +29,9 @@ async fn branch_legacy_cutover_accepts_v17_and_preserves_latest_full_fact_state(
         .await
         .unwrap();
     source
-        .conn()
+        .writer_connection("seed source legacy memory fixture")
+        .await
+        .unwrap()
         .execute_batch(
             "DROP TABLE memory_fact_relations;
              PRAGMA user_version = 17;

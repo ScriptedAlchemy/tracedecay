@@ -225,12 +225,7 @@ async fn registered_occurrence_hydrates_inline_and_external_payloads_without_wri
     let harness = RegisteredTemporalHarness::open("registered-hydration").await;
     let policy_digest = harness.seed_application_fixture().await;
     let before_db = Sha256::digest(std::fs::read(harness.registered.db_path()).unwrap());
-    let payload_path = harness
-        .registered
-        .db_path()
-        .parent()
-        .unwrap()
-        .join("lcm-payloads/application-fixture.bin");
+    let payload_path = harness.application_external_payload_path();
     let before_payload = Sha256::digest(std::fs::read(&payload_path).unwrap());
     let execution = RegisteredGlobalDbSessionTemporalExecution::new(harness.registered.as_ref());
     let service = SessionRetrievalService::new(
@@ -273,7 +268,11 @@ async fn registered_occurrence_hydrates_inline_and_external_payloads_without_wri
         panic!("registered external hydration was not complete: {external:?}");
     };
     assert_eq!(items[0].ranked.len(), 1);
-    assert!(items[0].context.rendered.contains(EXTERNAL_PAYLOAD));
+    assert!(
+        items[0].context.rendered.contains(EXTERNAL_PAYLOAD),
+        "{}",
+        items[0].context.rendered
+    );
     assert_eq!(
         Sha256::digest(std::fs::read(harness.registered.db_path()).unwrap()),
         before_db

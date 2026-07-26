@@ -835,6 +835,7 @@ fn db_message(operation: &str, message: impl Into<String>) -> TraceDecayError {
 #[cfg(test)]
 mod cancellation_tests {
     use std::future::pending;
+    use std::sync::Arc;
 
     use super::*;
     use crate::memory::trust::DEFAULT_TRUST;
@@ -844,16 +845,16 @@ mod cancellation_tests {
     async fn cancelled_immediate_transaction_rolls_back() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("memory.db");
-        let runtime = crate::db::engine::TestConnection::open(&path);
+        let runtime = Arc::new(crate::db::engine::TestConnection::open(&path));
         runtime
             .execute_batch("CREATE TABLE cancellation_probe(value INTEGER NOT NULL)")
             .await
             .unwrap();
-        let retained = runtime.clone();
+        let retained = Arc::clone(&runtime);
         let (started, started_rx) = tokio::sync::oneshot::channel();
 
         let task = tokio::spawn(async move {
-            MemoryStore::new_runtime(&runtime)
+            MemoryStore::new_runtime(runtime.as_ref())
                 .with_immediate_tx("cancelled memory write", move |transactional| {
                     Box::pin(async move {
                         transactional

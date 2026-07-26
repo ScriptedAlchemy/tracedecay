@@ -1164,11 +1164,21 @@ async fn untracked_branch_databases_with_mixed_case_extensions_are_recovered() {
 async fn corrupt_untracked_branch_database_is_rejected_before_mutation() {
     let fixture = fixture().await;
     let source = layout_for_id(&fixture.project, &fixture.profile, &fixture.source_id).unwrap();
-    add_untracked_branch(&source, "corrupt-orphan", "fact in corrupt orphan").await;
-    let corrupt = source.data_root.join("branches/corrupt-orphan.db");
-    let file = fs::OpenOptions::new().write(true).open(&corrupt).unwrap();
-    file.set_len(fs::metadata(&corrupt).unwrap().len() / 2)
+    let branches = source.data_root.join("branches");
+    fs::create_dir_all(&branches).unwrap();
+    let corrupt = branches.join("corrupt-orphan.db");
+    let connection = rusqlite::Connection::open(&corrupt).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA journal_mode = DELETE;
+             CREATE TABLE damaged_fixture(payload BLOB NOT NULL);
+             INSERT INTO damaged_fixture(payload) VALUES (zeroblob(65536));",
+        )
         .unwrap();
+    drop(connection);
+    let file = fs::OpenOptions::new().write(true).open(&corrupt).unwrap();
+    let length = fs::metadata(&corrupt).unwrap().len();
+    file.set_len(length.saturating_sub(4096)).unwrap();
     drop(file);
     let before = full_tree_snapshot(&fixture.profile);
 

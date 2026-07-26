@@ -1,7 +1,9 @@
 use std::fs;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde_json::{Value, json};
+use sha2::Digest;
 use tempfile::TempDir;
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
@@ -20,6 +22,7 @@ use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistry
 use crate::db::DaemonDatabaseScope;
 use crate::db::engine::params;
 use crate::global_db::RegisteredGlobalDb;
+use crate::sessions::lcm::payload::{upsert_payload_metadata, write_external_payload};
 
 pub(super) const PROJECT_ID: &str = "project.tracedecay";
 pub(super) const INLINE_PAYLOAD: &str = "non-empty inline occurrence payload";
@@ -116,6 +119,21 @@ impl RegisteredTemporalHarness {
         .await;
         self.seed_external_payload(&authority_anchor).await;
         policy_digest_bytes(&inline_anchor)
+    }
+
+    pub(super) fn application_external_payload_path(&self) -> PathBuf {
+        let payload_dir = self
+            .registered
+            .db_path()
+            .parent()
+            .expect("registered profile storage root")
+            .join("lcm-payloads");
+        let mut payloads = fs::read_dir(payload_dir)
+            .expect("application payload directory")
+            .map(|entry| entry.expect("application payload entry").path())
+            .collect::<Vec<_>>();
+        assert_eq!(payloads.len(), 1, "application fixture has one payload");
+        payloads.pop().expect("application payload path")
     }
 
     pub(super) async fn seed_empty_fixture(&self) -> [u8; 32] {
@@ -292,11 +310,12 @@ impl RegisteredTemporalHarness {
     }
 
     async fn seed_session(&self, session_id: &str, provider: &str, key_id: &str, version: i64) {
-        let writer = self
+        let transaction = self
             .registered
-            .writer_connection()
-            .expect("registered writer");
-        writer
+            .begin_write_transaction()
+            .await
+            .expect("registered writer transaction");
+        transaction
             .execute(
                 "INSERT INTO sessions (provider, session_id, project_key, project_path)
                  VALUES (?1, ?2, ?3, '/fixture')",
@@ -312,7 +331,7 @@ impl RegisteredTemporalHarness {
             "summary_frontier": 0
         })
         .to_string();
-        writer
+        transaction
             .execute(
                 "INSERT INTO session_temporal_generations (
                     session_id, generation, state, frozen_watermarks_json, created_at,
@@ -322,7 +341,7 @@ impl RegisteredTemporalHarness {
             )
             .await
             .expect("seed building generation");
-        writer
+        transaction
             .execute(
                 "UPDATE session_temporal_generations
                  SET state = 'ready', ready_at = 1
@@ -331,7 +350,7 @@ impl RegisteredTemporalHarness {
             )
             .await
             .expect("ready generation");
-        writer
+        transaction
             .execute(
                 "UPDATE session_temporal_generations
                  SET state = 'active', activated_at = 1
@@ -340,6 +359,7 @@ impl RegisteredTemporalHarness {
             )
             .await
             .expect("activate generation");
+        transaction.commit().await.expect("commit session fixture");
     }
 
     async fn persist_observation(
@@ -362,11 +382,12 @@ impl RegisteredTemporalHarness {
         let observation_json = serde_json::to_string(observation).unwrap();
         let anchor_json = serde_json::to_string(&anchor).unwrap();
         let owner_json = serde_json::to_string(anchor.owner()).unwrap();
-        let writer = self
+        let transaction = self
             .registered
-            .writer_connection()
-            .expect("registered writer");
-        writer
+            .begin_write_transaction()
+            .await
+            .expect("registered writer transaction");
+        transaction
             .execute(
                 "INSERT INTO sanitization_receipts (
                     receipt_id, sanitizer_version, payload_digest, receipt_json
@@ -380,7 +401,7 @@ impl RegisteredTemporalHarness {
             )
             .await
             .expect("seed receipt");
-        writer
+        transaction
             .execute(
                 "INSERT INTO observations (
                     observation_id, payload_digest, receipt_id,
@@ -395,7 +416,7 @@ impl RegisteredTemporalHarness {
             )
             .await
             .expect("seed observation");
-        writer
+        transaction
             .execute(
                 "INSERT INTO retrieval_anchors (
                     anchor_id, anchor_json, owner_json, projection_generation
@@ -409,7 +430,7 @@ impl RegisteredTemporalHarness {
             )
             .await
             .expect("seed retrieval anchor");
-        writer
+        transaction
             .execute(
                 "INSERT INTO observation_retrieval_anchors (observation_id, anchor_id)
                  VALUES (?1, ?2)",
@@ -420,6 +441,10 @@ impl RegisteredTemporalHarness {
             )
             .await
             .expect("bind observation anchor");
+        transaction
+            .commit()
+            .await
+            .expect("commit observation fixture");
         anchor
     }
 
@@ -513,16 +538,22 @@ impl RegisteredTemporalHarness {
 
     async fn seed_external_payload(&self, authority_anchor: &RetrievalAnchorRecord) {
         let db_path = self.registered.db_path();
-        let payload_ref = "application-fixture.bin";
-        let payload_dir = db_path.parent().unwrap().join("lcm-payloads");
-        fs::create_dir_all(&payload_dir).unwrap();
-        fs::write(payload_dir.join(payload_ref), EXTERNAL_PAYLOAD).unwrap();
-        let digest = payload_digest(EXTERNAL_PAYLOAD);
-        let writer = self
+        let payload = write_external_payload(
+            db_path.parent().unwrap(),
+            "provider.application",
+            "session.temporal.application",
+            "message-2",
+            "message",
+            EXTERNAL_PAYLOAD,
+            None,
+        )
+        .expect("write external payload through production filesystem authority");
+        let transaction = self
             .registered
-            .writer_connection()
-            .expect("registered writer");
-        writer
+            .begin_write_transaction()
+            .await
+            .expect("registered writer transaction");
+        transaction
             .execute(
                 "INSERT INTO lcm_raw_messages (
                     provider, message_id, session_id, role, ordinal, timestamp,
@@ -532,46 +563,35 @@ impl RegisteredTemporalHarness {
                     'provider.application', 'message-2', 'session.temporal.application',
                     'assistant', 2, 2, NULL, ?1, 'external', ?2, ?3, ?3, 0, 0
                  )",
-                params![digest, payload_ref, EXTERNAL_PAYLOAD],
-            )
-            .await
-            .expect("seed external raw message");
-        writer
-            .execute(
-                "INSERT INTO lcm_external_payloads (
-                    payload_ref, provider, session_id, message_id, kind,
-                    content_hash, byte_count, char_count, created_at
-                 ) VALUES (
-                    ?1, 'provider.application', 'session.temporal.application',
-                    'message-2', 'message', ?2, ?3, ?4, 1
-                 )",
                 params![
-                    payload_ref,
-                    payload_digest(EXTERNAL_PAYLOAD),
-                    i64::try_from(EXTERNAL_PAYLOAD.len()).unwrap(),
-                    i64::try_from(EXTERNAL_PAYLOAD.chars().count()).unwrap()
+                    payload.content_hash.as_str(),
+                    payload.payload_ref.as_str(),
+                    EXTERNAL_PAYLOAD
                 ],
             )
             .await
+            .expect("seed external raw message");
+        upsert_payload_metadata(&transaction, &payload)
+            .await
             .expect("seed external payload");
         let manifest = json!({
-            "provider": "provider.application",
-            "session_id": "session.temporal.application",
-            "message_id": "message-2",
-            "byte_count": EXTERNAL_PAYLOAD.len(),
-            "char_count": EXTERNAL_PAYLOAD.chars().count()
+            "provider": payload.provider.as_str(),
+            "session_id": payload.session_id.as_str(),
+            "message_id": payload.message_id.as_str(),
+            "byte_count": payload.byte_count,
+            "char_count": payload.char_count
         })
         .to_string();
         let publication = json!({
             "receipt_id": "receipt-3",
             "payloads": [{
-                "payload_ref": payload_ref,
-                "digest": payload_digest(EXTERNAL_PAYLOAD),
-                "manifest_json": manifest
+                "payload_ref": payload.payload_ref.as_str(),
+                "digest": payload.content_hash.as_str(),
+                "manifest_json": manifest.as_str()
             }]
         })
         .to_string();
-        writer
+        transaction
             .execute(
                 "INSERT INTO session_summary_nodes (
                     summary_id, session_id, summary_anchor_id, summary_text,
@@ -584,15 +604,23 @@ impl RegisteredTemporalHarness {
             )
             .await
             .expect("seed external payload authority");
-        writer
+        transaction
             .execute(
                 "INSERT INTO session_external_payload_manifests (
                     payload_ref, session_id, payload_digest, manifest_json, receipt_id, created_at
                  ) VALUES (?1, 'session.temporal.application', ?2, ?3, 'receipt-3', 1)",
-                params![payload_ref, payload_digest(EXTERNAL_PAYLOAD), manifest],
+                params![
+                    payload.payload_ref.as_str(),
+                    payload.content_hash.as_str(),
+                    manifest
+                ],
             )
             .await
             .expect("seed external payload manifest");
+        transaction
+            .commit()
+            .await
+            .expect("commit external payload fixture");
     }
 }
 
@@ -644,10 +672,11 @@ fn fixture_observation(
             timestamp: Some(ordinal as i64),
         }]
     };
+    let kind = if without_payload { "usage" } else { "message" };
     let relations = CanonicalObservationRelationsV1::new(session_id).with_message_id(message_id);
     let envelope = CanonicalObservationEnvelopeV1::new(
         provider,
-        "message",
+        kind,
         record_id.clone(),
         relations,
         facts,
@@ -686,8 +715,6 @@ fn policy_digest_bytes(anchor: &RetrievalAnchorRecord) -> [u8; 32] {
 }
 
 fn payload_digest(payload: &str) -> String {
-    use sha2::Digest;
-
     format!(
         "sha256:{}",
         hex::encode(sha2::Sha256::digest(payload.as_bytes()))
