@@ -67,8 +67,6 @@ pub enum GenerationPlanningErrorV1 {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(tag = "trigger", content = "detail", rename_all = "snake_case")]
 pub enum RebuildTriggerV1 {
-    /// A canonical document/chunk schema revision is incompatible.
-    CanonicalSchema,
     /// A present language's grammar revision changed.
     GrammarRevision(LanguageId),
     /// A present language's extractor revision changed.
@@ -77,14 +75,10 @@ pub enum RebuildTriggerV1 {
     SanitizerRevision,
     /// The chunker revision changed.
     ChunkerRevision,
-    /// An input to logical file, symbol, or chunk identity changed.
-    IdentityInputs,
     /// The privacy domain changed.
     PrivacyDomain,
     /// The privacy key epoch changed.
     PrivacyKeyEpoch,
-    /// Retained generation evidence failed integrity verification.
-    QuarantinedCorruption,
 }
 
 /// What the next generation does with one logical path.

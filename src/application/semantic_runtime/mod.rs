@@ -37,9 +37,9 @@ pub(crate) use coordinator::{
     ProductionSemanticActivationCoordinatorV1, SemanticActivationCoordinationErrorV1,
 };
 pub use fair_scheduler::{
-    DaemonGlobalSemanticProjectionSchedulerV1, SemanticInteractiveQueryLeaseV1,
-    SemanticProjectionBatchV1, SemanticProjectionCancellationOutcomeV1,
-    SemanticProjectionDispatchV1, SemanticProjectionEnqueueOutcomeV1, SemanticProjectionLeaseV1,
+    DaemonGlobalSemanticProjectionSchedulerV1, SemanticProjectionBatchV1,
+    SemanticProjectionCancellationOutcomeV1, SemanticProjectionDispatchV1,
+    SemanticProjectionEnqueueOutcomeV1, SemanticProjectionLeaseV1,
     SemanticProjectionPublicationLeaseV1, SemanticProjectionScheduleErrorV1,
     SemanticProjectionSchedulerConfigErrorV1, SemanticProjectionSchedulerLimitsV1,
     SemanticProjectionSchedulerStatsV1, SemanticProjectionSchedulingPortV1,
