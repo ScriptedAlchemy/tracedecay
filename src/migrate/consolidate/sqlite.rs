@@ -211,7 +211,116 @@ pub(super) async fn merge_registered_graph_facts(
     transaction.commit().await
 }
 
+/// Merges one frozen branch store's legacy memory authority into the canonical
+/// project database. Source schemas v17 and v18 are accepted without mutating
+/// them; V18 relations are copied when present. Memory V2 is deliberately
+/// rebuilt from this canonical legacy union so branch-local numeric identities
+/// cannot collide across stores.
+pub(in crate::migrate) async fn merge_branch_legacy_memory_snapshot(
+    target: &Database,
+    source: &crate::sqlite_read_snapshot::SnapshotDatabase,
+) -> Result<()> {
+    let offsets = registered_graph_maxima(target).await?;
+    let transaction = target
+        .begin_memory_write_transaction("merge branch legacy memory")
+        .await?;
+    let token = source
+        .attach_token()
+        .map_err(|error| db_error("merge_branch_legacy_memory", error))?;
+    attach_snapshot_as(&transaction, &token, "source").await?;
+    transaction
+        .execute("PRAGMA defer_foreign_keys = ON", ())
+        .await
+        .map_err(|error| db_error("merge_branch_legacy_memory", error))?;
+    let result = async {
+        merge_legacy_memory_tx(&transaction, offsets).await?;
+        verify_legacy_fact_coverage(&transaction).await
+    }
+    .await;
+    match result {
+        Ok(()) => transaction
+            .commit()
+            .await
+            .map_err(|error| db_error("merge_branch_legacy_memory", error))?,
+        Err(error) => {
+            let _ = transaction.rollback().await;
+            return Err(error);
+        }
+    }
+    source
+        .validate_source()
+        .map_err(|error| db_error("merge_branch_legacy_memory", error))
+}
+
+pub(in crate::migrate) async fn rebuild_branch_cutover_memory_banks(
+    target: &Database,
+) -> Result<()> {
+    let transaction = target
+        .begin_memory_write_transaction("rebuild branch-cutover memory banks")
+        .await?;
+    let result = MemoryStore::new_database_transaction(&transaction)
+        .rebuild_all_banks()
+        .await;
+    match result {
+        Ok(()) => transaction
+            .commit()
+            .await
+            .map_err(|error| db_error("rebuild_branch_cutover_memory_banks", error)),
+        Err(error) => {
+            let _ = transaction.rollback().await;
+            Err(error)
+        }
+    }
+}
+
+async fn verify_legacy_fact_coverage(conn: &impl Executor) -> Result<()> {
+    let table_missing = query_i64(
+        conn,
+        "SELECT COUNT(*) FROM source.memory_facts AS source_fact NOT INDEXED
+         WHERE NOT EXISTS(
+             SELECT 1 FROM memory_facts AS target_fact
+             WHERE target_fact.content = source_fact.content
+         )",
+    )
+    .await?;
+    let index_missing = query_i64(
+        conn,
+        "SELECT COUNT(*) FROM source.memory_facts AS source_fact
+             INDEXED BY sqlite_autoindex_memory_facts_1
+         WHERE NOT EXISTS(
+             SELECT 1 FROM memory_facts AS target_fact
+             WHERE target_fact.content = source_fact.content
+         )",
+    )
+    .await?;
+    if table_missing == 0 && index_missing == 0 {
+        Ok(())
+    } else {
+        Err(db_message(
+            "merge_branch_legacy_memory",
+            format!(
+                "branch memory coverage failed: {table_missing} table row(s) and \
+                 {index_missing} content-index row(s) are absent from project memory"
+            ),
+        ))
+    }
+}
+
 async fn merge_one_graph_tx(conn: &impl Executor, offset: &GraphMergeOffsets) -> Result<()> {
+    merge_legacy_memory_tx(
+        conn,
+        (
+            offset.fact_id,
+            offset.entity_id,
+            offset.feedback_id,
+            offset.oplog_id,
+        ),
+    )
+    .await?;
+    merge_memory_v2_authority(conn).await
+}
+
+async fn merge_legacy_memory_tx(conn: &impl Executor, offset: (i64, i64, i64, i64)) -> Result<()> {
     conn.execute_batch(&format!(
         "CREATE TEMP TABLE IF NOT EXISTS consolidation_fact_map(
              source_id INTEGER PRIMARY KEY, target_id INTEGER NOT NULL
@@ -286,40 +395,67 @@ async fn merge_one_graph_tx(conn: &impl Executor, offset: &GraphMergeOffsets) ->
                  WHEN t.last_feedback_at IS NULL THEN (SELECT s.last_feedback_at FROM source.memory_facts s WHERE s.content = t.content)
                  WHEN (SELECT s.last_feedback_at FROM source.memory_facts s WHERE s.content = t.content) IS NULL THEN t.last_feedback_at
                  ELSE MAX(t.last_feedback_at, (SELECT s.last_feedback_at FROM source.memory_facts s WHERE s.content = t.content)) END,
-             metadata = json_patch(COALESCE((
-                 SELECT s.metadata FROM source.memory_facts s WHERE s.content = t.content
-             ), '{{}}'), t.metadata)
+             source = CASE WHEN COALESCE((
+                 SELECT s.updated_at FROM source.memory_facts s WHERE s.content = t.content
+             ), -1) > t.updated_at THEN (
+                 SELECT s.source FROM source.memory_facts s WHERE s.content = t.content
+             ) ELSE t.source END,
+             metadata = CASE WHEN COALESCE((
+                 SELECT s.updated_at FROM source.memory_facts s WHERE s.content = t.content
+             ), -1) > t.updated_at THEN json_patch(
+                 t.metadata,
+                 COALESCE((SELECT s.metadata FROM source.memory_facts s
+                           WHERE s.content = t.content), '{{}}')
+             ) ELSE json_patch(
+                 COALESCE((SELECT s.metadata FROM source.memory_facts s
+                           WHERE s.content = t.content), '{{}}'),
+                 t.metadata
+             ) END,
+             hrr_vector = CASE
+                 WHEN (SELECT s.hrr_vector FROM source.memory_facts s
+                       WHERE s.content = t.content) IS NOT NULL
+                  AND (t.hrr_vector IS NULL OR COALESCE((
+                      SELECT s.updated_at FROM source.memory_facts s
+                      WHERE s.content = t.content
+                  ), -1) > t.updated_at)
+                 THEN (SELECT s.hrr_vector FROM source.memory_facts s
+                       WHERE s.content = t.content)
+                 ELSE t.hrr_vector END,
+             hrr_algebra = CASE
+                 WHEN (SELECT s.hrr_vector FROM source.memory_facts s
+                       WHERE s.content = t.content) IS NOT NULL
+                  AND (t.hrr_vector IS NULL OR COALESCE((
+                      SELECT s.updated_at FROM source.memory_facts s
+                      WHERE s.content = t.content
+                  ), -1) > t.updated_at)
+                 THEN (SELECT s.hrr_algebra FROM source.memory_facts s
+                       WHERE s.content = t.content)
+                 ELSE t.hrr_algebra END,
+             hrr_dim = CASE
+                 WHEN (SELECT s.hrr_vector FROM source.memory_facts s
+                       WHERE s.content = t.content) IS NOT NULL
+                  AND (t.hrr_vector IS NULL OR COALESCE((
+                      SELECT s.updated_at FROM source.memory_facts s
+                      WHERE s.content = t.content
+                  ), -1) > t.updated_at)
+                 THEN (SELECT s.hrr_dim FROM source.memory_facts s
+                       WHERE s.content = t.content)
+                 ELSE t.hrr_dim END,
+             hrr_precision = CASE
+                 WHEN (SELECT s.hrr_vector FROM source.memory_facts s
+                       WHERE s.content = t.content) IS NOT NULL
+                  AND (t.hrr_vector IS NULL OR COALESCE((
+                      SELECT s.updated_at FROM source.memory_facts s
+                      WHERE s.content = t.content
+                  ), -1) > t.updated_at)
+                 THEN (SELECT s.hrr_precision FROM source.memory_facts s
+                       WHERE s.content = t.content)
+                 ELSE t.hrr_precision END
          WHERE EXISTS (SELECT 1 FROM source.memory_facts s WHERE s.content = t.content);
 
          INSERT INTO consolidation_fact_map(source_id, target_id)
          SELECT s.fact_id, t.fact_id
          FROM source.memory_facts s JOIN memory_facts t ON t.content = s.content;
-
-         INSERT INTO memory_fact_relations (
-             source_fact_id, target_fact_id, relation, confidence,
-             source, metadata, created_at, updated_at
-         )
-         SELECT source_map.target_id, target_map.target_id, relation.relation,
-                relation.confidence, relation.source, relation.metadata,
-                relation.created_at, relation.updated_at
-         FROM source.memory_fact_relations AS relation
-         JOIN consolidation_fact_map AS source_map
-           ON source_map.source_id = relation.source_fact_id
-         JOIN consolidation_fact_map AS target_map
-           ON target_map.source_id = relation.target_fact_id
-         WHERE source_map.target_id != target_map.target_id
-         ON CONFLICT(source_fact_id, target_fact_id, relation) DO UPDATE SET
-             confidence = CASE
-                 WHEN excluded.updated_at >= memory_fact_relations.updated_at
-                 THEN excluded.confidence ELSE memory_fact_relations.confidence END,
-             source = CASE
-                 WHEN excluded.updated_at >= memory_fact_relations.updated_at
-                 THEN excluded.source ELSE memory_fact_relations.source END,
-             metadata = CASE
-                 WHEN excluded.updated_at >= memory_fact_relations.updated_at
-                 THEN excluded.metadata ELSE memory_fact_relations.metadata END,
-             created_at = MIN(memory_fact_relations.created_at, excluded.created_at),
-             updated_at = MAX(memory_fact_relations.updated_at, excluded.updated_at);
 
          INSERT OR IGNORE INTO memory_entities (
              entity_id, name, normalized_name, entity_type, aliases, created_at
@@ -393,16 +529,58 @@ async fn merge_one_graph_tx(conn: &impl Executor, offset: &GraphMergeOffsets) ->
          INSERT OR IGNORE INTO memory_oplog(id, ts, op, fact_id, detail_json)
          SELECT o.id + {oplog}, o.ts, o.op, fm.target_id, o.detail_json
          FROM source.memory_oplog o
-         LEFT JOIN consolidation_fact_map fm ON fm.source_id = o.fact_id;",
-        fact = offset.fact_id,
-        entity = offset.entity_id,
-        feedback = offset.feedback_id,
-        oplog = offset.oplog_id,
+         LEFT JOIN consolidation_fact_map fm ON fm.source_id = o.fact_id
+         WHERE NOT EXISTS (
+             SELECT 1 FROM memory_oplog AS target_op
+             WHERE target_op.ts = o.ts
+               AND target_op.op = o.op
+               AND target_op.fact_id IS fm.target_id
+               AND target_op.detail_json = o.detail_json
+         );",
+        fact = offset.0,
+        entity = offset.1,
+        feedback = offset.2,
+        oplog = offset.3,
     ))
     .await
     .map_err(|error| db_error("merge_graph_facts", error))?;
-    merge_memory_v2_authority(conn).await?;
+    merge_legacy_fact_relations(conn).await?;
     Ok(())
+}
+
+async fn merge_legacy_fact_relations(conn: &impl Executor) -> Result<()> {
+    if !table_exists(conn, "source", "memory_fact_relations").await? {
+        return Ok(());
+    }
+    conn.execute_batch(
+        "INSERT INTO memory_fact_relations (
+             source_fact_id, target_fact_id, relation, confidence,
+             source, metadata, created_at, updated_at
+         )
+         SELECT source_map.target_id, target_map.target_id, relation.relation,
+                relation.confidence, relation.source, relation.metadata,
+                relation.created_at, relation.updated_at
+         FROM source.memory_fact_relations AS relation
+         JOIN consolidation_fact_map AS source_map
+           ON source_map.source_id = relation.source_fact_id
+         JOIN consolidation_fact_map AS target_map
+           ON target_map.source_id = relation.target_fact_id
+         WHERE source_map.target_id != target_map.target_id
+         ON CONFLICT(source_fact_id, target_fact_id, relation) DO UPDATE SET
+             confidence = CASE
+                 WHEN excluded.updated_at >= memory_fact_relations.updated_at
+                 THEN excluded.confidence ELSE memory_fact_relations.confidence END,
+             source = CASE
+                 WHEN excluded.updated_at >= memory_fact_relations.updated_at
+                 THEN excluded.source ELSE memory_fact_relations.source END,
+             metadata = CASE
+                 WHEN excluded.updated_at >= memory_fact_relations.updated_at
+                 THEN excluded.metadata ELSE memory_fact_relations.metadata END,
+             created_at = MIN(memory_fact_relations.created_at, excluded.created_at),
+             updated_at = MAX(memory_fact_relations.updated_at, excluded.updated_at);",
+    )
+    .await
+    .map_err(|error| db_error("merge_graph_fact_relations", error))
 }
 
 #[cfg(test)]

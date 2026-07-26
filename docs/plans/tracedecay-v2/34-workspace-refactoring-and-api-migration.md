@@ -238,7 +238,8 @@ source-level dual-write/shadow/lazy store migration.
   before commit; MCP/CLI typed results agree.
 - Optional staging/commit accepts exact revalidated hunks and never performs
   autonomous branch/worktree/ref/history/remote mutation.
-- One aggregate repository gate passes after the end-to-end journeys.
+- Ordinary aggregate repository checks pass after the end-to-end journeys; no
+  separate acceptance gate is created.
 
 ## Not in this plan
 

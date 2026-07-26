@@ -1,5 +1,10 @@
 # Code Graph Explorer test blockers
 
+> Historical follow-up for the retired plugin dashboard harness. The
+> `dashboard/smoke.mjs`, `test:dom`, and `smoke:mobile` paths below no longer
+> exist; current single-app checks are `npm test` and
+> `npm run visual:audit` from `dashboard/`.
+
 This follow-up keeps the existing pure-node graph coverage, adds a jsdom/vitest lane for React interaction hooks, and extends the canvas helper seam coverage.
 
 Harness added

@@ -1,6 +1,9 @@
 # LCM external payload GC & retention — test plan
 
-Status: **test plan** (normative for the implementation/tests task). This is the third
+Status: **historical test plan**. The implementation now lives in
+`src/sessions/lcm/gc.rs` with tests in `src/sessions/lcm/gc/tests.rs`; those
+sources, not the pre-implementation file/line anchors below, are authoritative.
+This was the third
 sibling of the payload work; it enumerates the **named test cases, fixtures, and
 pass/fail criteria** the implementation (`t_baa1d2cf`) must satisfy. The *what/why*,
 the *how*, and the *visibility* live in the three specs it defers to:
@@ -77,11 +80,10 @@ All integration cases build a store the same way, mirroring the existing pattern
 `src/sessions/lcm/doctor.rs` (`mod tests`, `clean_apply_backup_callback_runs_under_immediate_transaction`,
 `doctor.rs:1487`):
 
-1. `temp = tempfile::tempdir()`; `storage_root = temp.path()` (a `tempfile` dev-dep, `Cargo.toml:162`).
-2. Open the store exactly as production does: `GlobalDb::open_at(&db_path)` then a
-   `libsql::Builder::new_local(db_path)` connection; set `busy_timeout`. The payload dir
-   `<root>/lcm-payloads` is created lazily by `prepare_payload_dir` (`payload.rs:342`) on
-   first `write_external_payload`.
+1. `temp = tempfile::tempdir()`; `storage_root = temp.path()`.
+2. Open `sessions.db` with the engine `TestConnection`, which is backed by the
+   rusqlite runtime. The payload dir `<root>/lcm-payloads` is created lazily by
+   the production payload path on first `write_external_payload`.
 3. `ensure_lcm_schema(&conn)` runs the v5 DDL (`lcm_gc_marks`, `lcm_gc_meta`) — its guard
    (`schema.rs:91`) makes this safe to call at the top of every test.
 
@@ -298,7 +300,7 @@ This plan is "done" when:
 2. **Setup expectations are explicit** — §2 lists the testability hooks; §3.1 the store
    harness + named plant helpers; §3.2 the platform gating.
 3. **Fixtures/tempdir strategy is concrete** — §3 reuses the existing `doctor.rs` test
-   pattern (`tempfile::tempdir` → `GlobalDb::open_at` → `libsql::Builder::new_local` →
+   pattern (`tempfile::tempdir` → engine `TestConnection::open` →
    `ensure_lcm_schema`), names the `test_store()` builder and every plant helper, and pins
    the mtime policy (prefer clock injection).
 4. **Pass/fail criteria are tied to the specs** — every case cites LIFECYCLE/GC/VIS

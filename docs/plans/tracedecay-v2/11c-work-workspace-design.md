@@ -1,11 +1,28 @@
 # 11c — Work workspace design (PR17): projections, navigation, and the bigger picture
 
-Status: design contract for the PR17 Work workspace, written 2026-07-25 after
-the PR14 grammar library landed. Semantics are owned by
+Status: design contract for the Work workspace, currently allocated to PR17 by
+plan authority and written 2026-07-25 after the PR14 grammar library landed.
+Semantics are owned by
 [Plan 24](24-canonical-task-plan-graph-and-multi-agent-executor.md); this doc
 owns how those semantics look, move, and connect. Normative like 11a/11b: every
 channel encodes a stated measurement, absence is drawn, degenerate
 distributions are said rather than drawn, caps are captioned.
+
+The user explicitly requires a first-class TraceDecay task graph/Kanban
+inspired by Hermes but more powerful; it is a product feature, not roadmap
+plumbing and does not require GitHub. He asked "ahat about kanban/task graph
+etc" while PR14 was active and never recorded acceptance of deferral to PR17.
+Therefore Plan 24 remains the semantic authority and PR17 remains the current
+binding plan allocation, but delivery timing is an **open owner question**, not
+a user-stated decision.
+
+Beauty and function are simultaneous acceptance criteria here too. Generic,
+clinical, simple, or non-magnificent workflow UI; a bland vertical list that
+consumes the workspace; and falsified task, activity, cost, or readiness state
+are rejected.
+
+Specific hue, type, spacing, dark/light, motion, and easing choices inherited
+from Plans 11a/11b are design-owner/agent decisions, not user preferences.
 
 ## Inheritance — one grammar, new nouns
 
@@ -83,13 +100,25 @@ reduced-motion static path that produces identical final order.
 ## Reference images
 
 The grammars this doc inherits are visual; read them as pictures, not prose.
-The authoritative sheet per grammar is indexed in
+Historical reference sheets per grammar are indexed in
 [11b — Visual artifact index](11b-structure-visualization.md#visual-artifact-index-reference-images):
 measured columns → the shipped Brain baselines (`dashboard/audit-baselines/`),
 strata → the transit sheet, weave → the TRACE prototype + the PR-421 weave,
 disagreement → the disagreement-field sheet, cortex aggregation → the CORTEX
-sheet, zoom-as-position → the LENS sheet. A PR17 implementer should open the
-sheet beside this doc before writing any layout code.
+sheet, zoom-as-position → the LENS sheet. These branch-tied artifacts are
+historical design evidence, not acceptance authority or records to recreate.
+An implementer may consult them but must verify the current product in real
+Google Chrome.
+
+## Visual verification
+
+Review every Work projection in real Google Chrome at full viewport, capture
+screenshots, and click through every interaction state, including drag,
+selection synchronization, projection switches, live activity, cancellation,
+and unavailable paths. The embedded browser is rejected because its viewport
+is too small. Automated browser tests support this pass but do not replace it,
+and the pass produces no per-commit evaluation document or git-hash-tied
+evidence manifest.
 
 ## Dependencies and sequencing
 

@@ -1,6 +1,6 @@
 import * as Dialog from '@radix-ui/react-dialog';
 import { useMutation } from '@tanstack/react-query';
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Search, X } from 'lucide-react';
 import { AnyObject } from '../../data/query/legacy.ts';
 import { useLegacy } from '../../data/query/useLegacy.ts';
@@ -273,9 +273,23 @@ function SettingsEditorPanel({
     readonly resyncRecommended: boolean;
     readonly restartRecommended: boolean;
   } | null>(null);
+  const projectPlan = useMemo(
+    () => (project ? planProjectSettingsChange(payload, project) : null),
+    [payload, project],
+  );
+  const userPlan = useMemo(
+    () => (user ? planUserSettingsChange(payload, user) : null),
+    [payload, user],
+  );
   const mutation = useMutation({
     mutationFn: applySettingsMutation,
     onSuccess: (result) => {
+      if (result.outcome === 'validation') {
+        setClientErrors(result.errors);
+        setReview(null);
+        setConfirmed(false);
+        return;
+      }
       if (result.outcome !== 'success') return;
       setNotice({
         message:
@@ -307,12 +321,14 @@ function SettingsEditorPanel({
   }
 
   const openProjectReview = () => {
-    const plan = planProjectSettingsChange(payload, project);
-    openReview('project', plan, setReview, setClientErrors, mutation.reset);
+    if (projectPlan) {
+      openReview('project', projectPlan, setReview, setClientErrors, mutation.reset);
+    }
   };
   const openUserReview = () => {
-    const plan = planUserSettingsChange(payload, user);
-    openReview('user', plan, setReview, setClientErrors, mutation.reset);
+    if (userPlan) {
+      openReview('user', userPlan, setReview, setClientErrors, mutation.reset);
+    }
   };
   const apply = () => {
     if (!review) return;
@@ -349,11 +365,22 @@ function SettingsEditorPanel({
           {notice.restartRecommended ? <span>Restart recommended</span> : null}
         </div>
       ) : null}
-      <ValidationErrors errors={clientErrors} />
 
       <div className="grid gap-3 xl:grid-cols-2">
-        <ProjectSettingsFields values={project} onChange={setProject} onReview={openProjectReview} />
-        <UserSettingsFields values={user} onChange={setUser} onReview={openUserReview} />
+        <ProjectSettingsFields
+          values={project}
+          errors={clientErrors}
+          dirty={projectPlan?.outcome !== 'unchanged'}
+          onChange={setProject}
+          onReview={openProjectReview}
+        />
+        <UserSettingsFields
+          values={user}
+          errors={clientErrors}
+          dirty={userPlan?.outcome !== 'unchanged'}
+          onChange={setUser}
+          onReview={openUserReview}
+        />
       </div>
 
       <SettingsReviewDialog
@@ -362,6 +389,12 @@ function SettingsEditorPanel({
         result={mutation.data}
         applying={mutation.isPending}
         onConfirmedChange={setConfirmed}
+        onResolveConflict={() => {
+          setReview(null);
+          setConfirmed(false);
+          mutation.reset();
+          onApplied();
+        }}
         onOpenChange={(open) => {
           if (!open) {
             setReview(null);
@@ -403,37 +436,46 @@ function openReview<T extends ProjectSettingsPatch | UserSettingsPatch>(
 
 function ProjectSettingsFields({
   values,
+  errors,
+  dirty,
   onChange,
   onReview,
 }: {
   values: ProjectSettingsValues;
+  errors: readonly SettingsValidationError[];
+  dirty: boolean;
   onChange: (values: ProjectSettingsValues) => void;
   onReview: () => void;
 }) {
   return (
     <fieldset className="min-w-0 border border-edge-subtle bg-surface-1 p-3">
       <legend className="px-1 text-xs font-semibold text-text-primary">Project settings</legend>
+      <EditState scope="project" dirty={dirty} />
       <div className="grid gap-2 sm:grid-cols-2">
         <SettingsTextArea
           label="Include globs"
           value={values.include.join('\n')}
+          error={errorFor(errors, 'include')}
           onChange={(value) => onChange({ ...values, include: globLines(value) })}
         />
         <SettingsTextArea
           label="Exclude globs"
           value={values.exclude.join('\n')}
+          error={errorFor(errors, 'exclude')}
           onChange={(value) => onChange({ ...values, exclude: globLines(value) })}
         />
         <SettingsInput
           label="Maximum file size (bytes)"
           inputMode="numeric"
           value={values.max_file_size}
+          error={errorFor(errors, 'max_file_size')}
           onChange={(value) => onChange({ ...values, max_file_size: value })}
         />
         <SettingsInput
           label="PR branch poll interval (seconds)"
           inputMode="numeric"
           value={values.auto_track_pr_poll_secs}
+          error={errorFor(errors, 'auto_track_pr_poll_secs')}
           onChange={(value) => onChange({ ...values, auto_track_pr_poll_secs: value })}
         />
       </div>
@@ -441,69 +483,84 @@ function ProjectSettingsFields({
         <SettingsCheckbox
           label="Extract docstrings"
           checked={values.extract_docstrings}
+          error={errorFor(errors, 'extract_docstrings')}
           onChange={(checked) => onChange({ ...values, extract_docstrings: checked })}
         />
         <SettingsCheckbox
           label="Track call sites"
           checked={values.track_call_sites}
+          error={errorFor(errors, 'track_call_sites')}
           onChange={(checked) => onChange({ ...values, track_call_sites: checked })}
         />
         <SettingsCheckbox
           label="Honor git ignore"
           checked={values.git_ignore}
+          error={errorFor(errors, 'git_ignore')}
           onChange={(checked) => onChange({ ...values, git_ignore: checked })}
         />
         <SettingsCheckbox
           label="Record telemetry timings"
           checked={values.telemetry_timings}
+          error={errorFor(errors, 'telemetry_timings')}
           onChange={(checked) => onChange({ ...values, telemetry_timings: checked })}
         />
         <SettingsCheckbox
           label="Auto-track pull request branches"
           checked={values.auto_track_pr_branches}
+          error={errorFor(errors, 'auto_track_pr_branches')}
           onChange={(checked) => onChange({ ...values, auto_track_pr_branches: checked })}
         />
       </div>
       <button type="button" className={`${settingsButtonClass} mt-3`} onClick={onReview}>
         Review project changes
       </button>
+      <FieldError error={errorFor(errors, 'project')} />
     </fieldset>
   );
 }
 
 function UserSettingsFields({
   values,
+  errors,
+  dirty,
   onChange,
   onReview,
 }: {
   values: UserSettingsValues;
+  errors: readonly SettingsValidationError[];
+  dirty: boolean;
   onChange: (values: UserSettingsValues) => void;
   onReview: () => void;
 }) {
   return (
     <fieldset className="min-w-0 border border-edge-subtle bg-surface-1 p-3">
       <legend className="px-1 text-xs font-semibold text-text-primary">User settings</legend>
+      <EditState scope="user" dirty={dirty} />
       <div className="grid gap-2">
         <SettingsInput
           label="Watcher debounce"
           value={values.watcher_debounce}
+          error={errorFor(errors, 'watcher_debounce')}
           onChange={(value) => onChange({ ...values, watcher_debounce: value })}
         />
         <SettingsInput
           label="Extraction timeout (seconds)"
           inputMode="numeric"
           value={values.extraction_timeout_secs}
+          error={errorFor(errors, 'extraction_timeout_secs')}
           onChange={(value) => onChange({ ...values, extraction_timeout_secs: value })}
         />
         <SettingsCheckbox
           label="Upload enabled"
           checked={values.upload_enabled}
+          error={errorFor(errors, 'upload_enabled')}
           onChange={(checked) => onChange({ ...values, upload_enabled: checked })}
         />
       </div>
       <button type="button" className={`${settingsButtonClass} mt-3`} onClick={onReview}>
         Review user changes
       </button>
+      <FieldError error={errorFor(errors, 'user')} />
     </fieldset>
   );
 }
@@ -512,22 +569,28 @@ function SettingsInput({
   label,
   value,
   inputMode,
+  error,
   onChange,
 }: {
   label: string;
   value: string;
   inputMode?: 'numeric';
+  error?: string;
   onChange: (value: string) => void;
 }) {
+  const errorId = useId();
   return (
     <label className="grid gap-1 text-2xs text-text-secondary">
       <span>{label}</span>
       <input
         value={value}
         inputMode={inputMode}
+        aria-invalid={error ? true : undefined}
+        aria-describedby={error ? errorId : undefined}
         onChange={(event) => onChange(event.target.value)}
         className={settingsInputClass}
       />
+      <FieldError id={errorId} error={error} />
     </label>
   );
 }
@@ -535,21 +598,27 @@ function SettingsInput({
 function SettingsTextArea({
   label,
   value,
+  error,
   onChange,
 }: {
   label: string;
   value: string;
+  error?: string;
   onChange: (value: string) => void;
 }) {
+  const errorId = useId();
   return (
     <label className="grid gap-1 text-2xs text-text-secondary">
       <span>{label}</span>
       <textarea
         rows={3}
         value={value}
+        aria-invalid={error ? true : undefined}
+        aria-describedby={error ? errorId : undefined}
         onChange={(event) => onChange(event.target.value)}
         className={`${settingsInputClass} h-auto min-h-16 py-1.5 font-mono`}
       />
+      <FieldError id={errorId} error={error} />
     </label>
   );
 }
@@ -557,21 +626,29 @@ function SettingsTextArea({
 function SettingsCheckbox({
   label,
   checked,
+  error,
   onChange,
 }: {
   label: string;
   checked: boolean;
+  error?: string;
   onChange: (checked: boolean) => void;
 }) {
+  const errorId = useId();
   return (
-    <label className="flex min-h-8 items-center gap-2 text-2xs text-text-secondary">
-      <input
-        type="checkbox"
-        checked={checked}
-        onChange={(event) => onChange(event.target.checked)}
-      />
-      <span>{label}</span>
-    </label>
+    <div>
+      <label className="flex min-h-8 items-center gap-2 text-2xs text-text-secondary">
+        <input
+          type="checkbox"
+          checked={checked}
+          aria-invalid={error ? true : undefined}
+          aria-describedby={error ? errorId : undefined}
+          onChange={(event) => onChange(event.target.checked)}
+        />
+        <span>{label}</span>
+      </label>
+      <FieldError id={errorId} error={error} />
+    </div>
   );
 }
 
@@ -581,6 +658,7 @@ function SettingsReviewDialog({
   result,
   applying,
   onConfirmedChange,
+  onResolveConflict,
   onOpenChange,
   onApply,
 }: {
@@ -589,10 +667,12 @@ function SettingsReviewDialog({
   result: SettingsMutationResult | undefined;
   applying: boolean;
   onConfirmedChange: (confirmed: boolean) => void;
+  onResolveConflict: () => void;
   onOpenChange: (open: boolean) => void;
   onApply: () => void;
 }) {
   const scope = review?.scope ?? 'project';
+  const conflicted = result?.outcome === 'conflict';
   return (
     <Dialog.Root open={review != null} onOpenChange={onOpenChange}>
       <Dialog.Portal>
@@ -634,17 +714,27 @@ function SettingsReviewDialog({
                   {review.plan.expectedRevisionId}.
                 </span>
               </label>
-              <MutationFeedback result={result} />
+              <MutationFeedback scope={scope} result={result} />
               <div className="flex justify-end gap-2">
                 <Dialog.Close className={secondarySettingsButtonClass}>Cancel</Dialog.Close>
-                <button
-                  type="button"
-                  className={settingsButtonClass}
-                  disabled={!confirmed || applying}
-                  onClick={onApply}
-                >
-                  {applying ? `Applying ${scope} settings` : `Apply ${scope} settings`}
-                </button>
+                {conflicted ? (
+                  <button
+                    type="button"
+                    className={settingsButtonClass}
+                    onClick={onResolveConflict}
+                  >
+                    Load current values
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    className={settingsButtonClass}
+                    disabled={!confirmed || applying}
+                    onClick={onApply}
+                  >
+                    {applying ? `Applying ${scope} settings` : `Apply ${scope} settings`}
+                  </button>
+                )}
               </div>
             </div>
           ) : null}
@@ -654,13 +744,20 @@ function SettingsReviewDialog({
   );
 }
 
-function MutationFeedback({ result }: { result: SettingsMutationResult | undefined }) {
+function MutationFeedback({
+  scope,
+  result,
+}: {
+  scope: SettingsMutationScope;
+  result: SettingsMutationResult | undefined;
+}) {
   if (!result || result.outcome === 'success') return null;
   if (result.outcome === 'conflict') {
     return (
       <p role="alert" className="text-xs text-state-conflicting">
-        Configuration changed since this form loaded (held {result.expectedRevisionId}, current{' '}
-        {result.actualRevisionId ?? 'unknown'}).
+        Another writer saved {scope} settings after this form loaded. Your draft was based on{' '}
+        {result.expectedRevisionId}; the current authority is {result.actualRevisionId ?? 'unknown'}.
+        Nothing was applied.
       </p>
     );
   }
@@ -685,6 +782,33 @@ function ValidationErrors({ errors }: { errors: readonly SettingsValidationError
         </li>
       ))}
     </ul>
+  );
+}
+
+function errorFor(errors: readonly SettingsValidationError[], field: string): string | undefined {
+  return errors.find((error) => error.field === field)?.message;
+}
+
+function FieldError({ id, error }: { id?: string; error?: string }) {
+  if (!error) return null;
+  return (
+    <p id={id} role="alert" className="mt-1 text-2xs text-state-error">
+      {error}
+    </p>
+  );
+}
+
+function EditState({ scope, dirty }: { scope: SettingsMutationScope; dirty: boolean }) {
+  return (
+    <p
+      aria-live="polite"
+      className={cn(
+        'mb-2 text-3xs font-semibold uppercase tracking-[0.16em]',
+        dirty ? 'text-accent' : 'text-text-muted',
+      )}
+    >
+      {dirty ? `Unsaved ${scope} changes` : `Current ${scope} values`}
+    </p>
   );
 }
 

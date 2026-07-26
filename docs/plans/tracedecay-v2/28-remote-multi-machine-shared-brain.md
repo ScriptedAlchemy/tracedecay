@@ -146,10 +146,12 @@ finding and remediation identities.
 
 ## PR16 implementation defaults
 
-- Build the first delivery on existing HTTP/SSE, rustls, and libSQL paths.
-  They replace no semantics: TraceDecay still owns authentication, revocation,
-  authority fencing, single-writer admission, replay identity, coverage,
-  backup/restore verification, and failover.
+- Build the first delivery on existing HTTP/SSE, rustls, and the daemon-owned
+  rusqlite runtime path. The retired libSQL compatibility/runtime path is not a
+  remote seam to revive. These foundations replace no semantics: TraceDecay
+  still owns authentication, revocation, authority fencing, single-writer
+  admission, replay identity, coverage, backup/restore verification, and
+  failover.
 - At the concrete integration that needs them, consider `reqwest` plus
   `eventsource-stream` for remote streaming, `tokio-util` for cancellation,
   `zstd`/`tar` for backup payloads, `object_store` for an admitted object
@@ -159,9 +161,9 @@ finding and remediation identities.
   recovery budgets.
 - If admission fails or no shipped journey yet needs the integration, retain
   the existing path or report the capability unavailable. Do not add
-  speculative transport layers, HMAC/attestation machinery, or another
-  authority protocol; remote authentication and every durable fence remain
-  mandatory.
+  speculative transport layers, HMAC/attestation machinery, local signatures,
+  trust roots, or another authority protocol; remote authentication and every
+  durable fence remain mandatory.
 
 ## Implementation slices
 
@@ -233,8 +235,9 @@ unavailable, or recovery-required truth. Compatibility checks prove supported
 older local/API/stored-data inputs migrate or fail explicitly without authority
 or project-scope drift. Negative checks prove unsaved overlays and analyzer state
 never become durable remote records and no client or offline path opens
-authority storage. The relevant all-feature aggregate gate is the final PR16
-gate; PR16 adds no benchmark harness or placeholder baseline.
+authority storage. The final PR16 check is the relevant ordinary all-feature
+repository test run, not a separate acceptance gate; PR16 adds no benchmark
+harness or placeholder baseline.
 
 ## Not in PR16
 

@@ -332,7 +332,7 @@ and keeps existing tests green, code moves behind re-export shims.**
   the dashboard in `tests/` today; the only safety net is in-module unit tests
   in `util.rs`, `memory_analysis.rs`, `memory_curate.rs`, `token_count.rs`,
   `savings_*.rs`. Before moving any handler, add golden-payload snapshot tests
-  (seed a tiny in-memory libsql DB, hit the service/route fn, assert the exact
+  (seed a tiny in-memory engine test database, hit the service/route fn, assert the exact
   JSON) for at least: one memory overview + `curate` dry_run, one lcm overview +
   search (FTS and LIKE paths), one graph overview + subgraph + path. These tests
   are the regression net for C2/C3. Keep them after migration.
@@ -456,45 +456,34 @@ Keep these conventions when adding or moving dashboard endpoints:
   (for example LCM FTS→LIKE and graph default-subgraph selection), and all
   cross-query/domain math.
 - `*_queries.rs` owns SQL text and should expose named functions over
-  `&libsql::Connection` plus already-normalized parameters. User-controlled
-  values stay bound as SQL parameters; only literal column lists and placeholder
-  fragments may be assembled with `format!`.
+  `&(impl QueryExecutor + ?Sized)` plus already-normalized parameters.
+  User-controlled values stay bound as SQL parameters; only literal column
+  lists and placeholder fragments may be assembled with `format!`.
 - `src/dashboard/mod.rs` remains the single route table for the standalone
   server. The Hermes dashboard wrapper remains a thin reverse proxy from
   `/api/plugins/tracedecay/{holographic,lcm,graph,savings}/*` to the native
   standalone routes, preserving query strings verbatim.
 
-Regression coverage that should stay in the verification set:
+Regression tests that should stay in the verification set:
 
-- `tests/dashboard_api_test.rs` covers holographic memory route shapes,
-  curation, JSON error bodies, and LCM empty/global/project-store behavior.
-- `tests/dashboard_lcm_api_test.rs` covers the standalone LCM route surface and
-  source expansion against a seeded session store.
-- `tests/dashboard_graph_api_test.rs` covers graph overview/search/detail,
-  neighbors, subgraphs, and paths against a seeded code graph.
+- `tests/dashboard_api_test/{api,memory_curation,lcm,graph}.rs` contain the
+  route-shape, curation, JSON-error, LCM-store, and graph coverage.
 - `tests/hermes_suite/dashboard.rs::deployed_wrapper_preserves_canonical_api_proxy_surface`
   pins the Hermes wrapper route rewrite/query-preservation contract so the
   wrapper cannot silently drift from the canonical standalone server.
 
+The tests are implemented, but the aggregate `dashboard_api_test` suite has not
+completed successfully on this branch and therefore is not a verified gate.
+
 ---
 
-## 16. Open decisions (for future implementation workers)
+## 16. Resolved implementation decisions
 
-1. **`pub(crate)` vs `pub(super)` for service/query fns.** `pub(crate)` is the
-   existing style in these modules and is recommended for consistency;
-   `pub(super)` would be stricter. Decide once and apply uniformly.
-2. **Whether `*_queries.rs` fns take `&Connection` or `&DashboardState`.**
-   Recommend `&Connection` (and pass `mem_db_path` only where a cache needs it) —
-   it keeps the query layer state-free and testable with a bare libsql
-   connection, matching the existing `util::query_rows` signature.
-3. **Where param-struct clamp/normalize logic lives** (e.g. `coerce_limit`).
-   Recommend: route layer clamps (it owns param parsing); service/query receive
-   already-clamped values. This keeps the "overview-card semantics" (P2) at the
-   edge.
-4. **Characterization-test fixture shape.** Recommend a single shared helper
-   that builds an in-memory libsql DB with the minimal schema for one domain and
-   returns a `DashboardState`-like handle, so each domain's snapshot tests share
-   scaffolding. Implementer to choose exact shape.
+- Query helpers receive the engine `QueryExecutor` abstraction rather than a
+  concrete storage-driver connection or `DashboardState`.
+- Route handlers own parameter parsing and clamping; service/query functions
+  receive normalized values.
+- Dashboard integration fixtures live under `tests/dashboard_api_test/`.
 
 ---
 

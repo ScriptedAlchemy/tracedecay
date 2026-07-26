@@ -556,7 +556,7 @@ function buildSection(key: string, value: unknown): ConfigSection {
   return {
     id: key,
     title: meta?.title ?? humanize(key),
-    blurb: meta?.blurb ?? 'Reported by the daemon',
+    blurb: sectionBlurb(key, value, meta?.blurb ?? 'Reported by the daemon'),
     origin: meta?.origin ?? 'resolved',
     location: location?.value ?? null,
     locationKind: location?.kind ?? null,
@@ -564,6 +564,14 @@ function buildSection(key: string, value: unknown): ConfigSection {
     rows,
     settingCount,
   };
+}
+
+function sectionBlurb(key: string, value: unknown, fallback: string): string {
+  if (key !== 'automation' || !isRecord(value)) return fallback;
+  const availability = value['availability'];
+  return isRecord(availability) && availability['available'] === false
+    ? 'Automation configuration unavailable'
+    : fallback;
 }
 
 /** Where a section's values live, when the payload says so. */

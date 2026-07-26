@@ -238,6 +238,7 @@ export function Meter({
   tone,
   align = 'left',
   ariaLabel,
+  height = 'standard',
 }: {
   fraction: number | null | undefined;
   className?: string;
@@ -248,6 +249,19 @@ export function Meter({
    * column reads as two unrelated ragged things instead of one measurement. */
   align?: 'left' | 'right';
   ariaLabel?: string;
+  /**
+   * `standard` is the 4px measurement bar; `hairline` is the 1px rule dense
+   * lists need, where a 4px bar per row reads as a chart rather than as an
+   * annotation.
+   *
+   * This is a prop rather than a `className` override because `cn` is a plain
+   * class joiner with no conflict resolution: passing `h-px` would leave both
+   * `h-1` and `h-px` on the element and let stylesheet order pick the winner,
+   * which is not something a call site can depend on. Track colour, by
+   * contrast, is safely overridable — `td-meter` lives in `@layer components`,
+   * so a `bg-*` utility from the caller reliably wins.
+   */
+  height?: 'standard' | 'hairline';
 }) {
   const clamped =
     fraction == null || !Number.isFinite(fraction)
@@ -257,7 +271,10 @@ export function Meter({
     ? ({ role: 'img', 'aria-label': ariaLabel } as const)
     : ({ 'aria-hidden': true } as const);
   return (
-    <span {...a11y} className={cn('td-meter h-1', className)}>
+    <span
+      {...a11y}
+      className={cn('td-meter', height === 'hairline' ? 'h-px' : 'h-1', className)}
+    >
       {clamped != null ? (
         <span
           className={cn('td-meter-fill', align === 'right' && 'left-auto right-0', tone)}

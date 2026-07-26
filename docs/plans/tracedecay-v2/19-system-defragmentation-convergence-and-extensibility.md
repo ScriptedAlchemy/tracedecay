@@ -148,10 +148,10 @@ behavior and dependency-direction tests protect the surviving architecture.
 - Dependency-direction tests prevent domain/application layers from importing
   adapters or concrete stores, and focused build/test workflows do not pull
   unrelated heavy subsystems without measured ownership justification.
-- One aggregate repository gate passes after direct journey and recovery tests.
-  PR19 ends with no V1 runtime, dual read/write, lazy migration, reverse
-  cutover, writable fallback, skipped family, migration TODO, or
-  migration-only path.
+- Ordinary aggregate repository checks pass after direct journey and recovery
+  tests; no separate acceptance gate is created. PR19 ends with no V1 runtime,
+  dual read/write, lazy migration, reverse cutover, writable fallback, skipped
+  family, migration TODO, or migration-only path.
 
 ## Not in PR19
 

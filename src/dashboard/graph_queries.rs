@@ -423,3 +423,52 @@ mod tests {
         assert!(total.is_err(), "query failure should remain a failed read");
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[allow(clippy::unwrap_used)]
+    fn test_conn() -> (tempfile::TempDir, crate::db::engine::TestConnection) {
+        let directory = tempfile::tempdir().unwrap();
+        let connection =
+            crate::db::engine::TestConnection::open(&directory.path().join("graph-queries.db"));
+        (directory, connection)
+    }
+
+    #[tokio::test]
+    async fn failed_search_rows_are_not_reported_as_empty() {
+        let (_directory, conn) = test_conn();
+
+        let rows = search_rows(&conn, "missing", 10, 0).await;
+
+        assert!(
+            !rows.is_empty(),
+            "query failure was laundered into a successful empty search"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_node_lookup_is_not_reported_as_absent() {
+        let (_directory, conn) = test_conn();
+
+        let node = node_row(&conn, "missing").await;
+
+        assert!(
+            node.is_some(),
+            "query failure was laundered into confirmed node absence"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_node_count_is_not_reported_as_zero() {
+        let (_directory, conn) = test_conn();
+
+        let total = total_nodes(&conn).await;
+
+        assert_ne!(
+            total, 0,
+            "query failure was laundered into an authoritative zero"
+        );
+    }
+}

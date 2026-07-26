@@ -352,7 +352,6 @@ mod tests {
             }
         );
     }
-
     #[test]
     fn quick_check_sqlite_corruption_error_is_specific_damage() {
         let outcome = classify_quick_check_failure(

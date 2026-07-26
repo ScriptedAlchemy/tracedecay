@@ -1,6 +1,11 @@
-# Code Graph Explorer
+# Legacy Code Graph Explorer
 
-The third dashboard tab (`tracedecay dashboard` → **Code Graph**) is an
+> Historical documentation for the compatibility graph plugin served through
+> `/legacy`. The product dashboard at `/` is the real `app-dist` application;
+> its current graph experiences live in the Code and Explorer workspaces under
+> `dashboard/src/workspaces/`.
+
+The legacy **Code Graph** tab is an
 interactive exploration surface over the project's indexed code graph
 (`nodes`, `edges`, `files` in `.tracedecay/tracedecay.db`). It is designed for
 graphs with tens of thousands of nodes: every endpoint is bounded, the canvas
@@ -25,12 +30,13 @@ Under the Hermes wrapper the same routes are reverse-proxied at
 in `dashboards`; hosts can feature-detect via
 `window.__HERMES_PLUGIN_SDK__.capabilities`.
 
-## Frontend (`dashboard/graph/`)
+## Legacy frontend (`dashboard/graph/`)
 
 TypeScript/React plugin bundle (esbuild IIFE, React externalized onto the
-host SDK — same conventions as `dashboard/holographic/`). Registers as
+host SDK — same conventions as `dashboard/holographic/`). It registers as
 `graph` via `window.__HERMES_PLUGINS__`, so it runs unmodified in the
-standalone shell and under the Hermes wrapper. No runtime dependencies
+legacy shell and under the Hermes wrapper. It is not the frontend served at
+`/`. No runtime dependencies
 beyond the host SDK; the force layout and charts are hand-rolled.
 
 ### Views
@@ -81,15 +87,17 @@ beyond the host SDK; the force layout and charts are hand-rolled.
 ## Wiring
 
 - Routes: `src/dashboard/mod.rs` (`/api/plugins/graph/*`).
-- Assets: `dashboard/build.mjs` (`buildGraph()`), embedded via
-  `src/dashboard/assets.rs` + `build.rs` rerun stamps.
+- Product assets: Rsbuild compiles `dashboard/src/app/main.tsx` to
+  `dashboard/app-dist/`, which `build.rs` embeds for `/`.
+- Legacy assets: committed `dashboard/graph/dist/**` files are embedded through
+  `src/dashboard/assets.rs` for `/legacy`.
 - Hermes: `dashboard/hermes-wrapper/src/entry.js` loads `graph.js` and
   rewrites its API base; `dashboard/hermes-wrapper/plugin_api.py` proxies
   `/graph/*`.
 
 ## Tests
 
-`tests/dashboard_graph_api_test.rs` seeds a temp project with a known
+`tests/dashboard_api_test/graph.rs` seeds a temp project with a known
 call graph (`dashboard → route_graph → render_graph`, plus a `uses` edge and
 file records) and covers: capability flag, overview totals/kind/language
 breakdowns, search ranking, node detail + span + doc, neighbors
@@ -97,6 +105,7 @@ breakdowns, search ranking, node detail + span + doc, neighbors
 flags and per-node degrees, the seedless default slice (hub selection,
 isolated-node prune/fill, no-hit queries staying empty), shortest-path
 success and not-found, and the `top_connected` / `largest_files` analytics.
-`dashboard/test/graph-logic.test.mjs` covers the default-view budget and the
-canvas empty-state copy; `dashboard/smoke.mjs` asserts the graph tab
-auto-populates its canvas in a live browser.
+The aggregate Rust suite is implemented but has not completed successfully on
+this branch. Current frontend graph behavior is covered by Vitest DOM tests
+under `dashboard/src/workspaces/{code,explorer}/` and
+`dashboard/src/viz/graph/`.

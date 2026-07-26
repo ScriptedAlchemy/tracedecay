@@ -287,7 +287,8 @@ provable terminal outcome.
 - Remove the exhaustive fixture matrix, benchmark harness, checked-in
   placeholder baseline, and gates that prove declarations agree. Keep the
   direct product journey, focused safety/failure cases, native-Git parity, and
-  one aggregate gate.
+  ordinary aggregate repository checks; do not replace the removed machinery
+  with another acceptance gate.
 
 ## Direct acceptance
 
@@ -326,8 +327,9 @@ The direct journey also confirms the shipped status/diff/history/blame/hunk,
 branch-relative impact, PR/review anchor/remap, stage/unstage/commit, and
 CLI/MCP compatibility capabilities still reach their existing production
 kernels. It differentially verifies candidate and final trees against pinned
-native Git and runs the relevant all-feature aggregate gate. PR15 adds no
-benchmark harness or placeholder performance baseline.
+native Git and runs the relevant ordinary all-feature repository checks. PR15
+adds no benchmark harness, placeholder performance baseline, or separate
+acceptance gate.
 
 ## Not in PR15
 

@@ -1,5 +1,9 @@
 # Code Graph Explorer — Component Seam Map
 
+> Historical seam audit of the legacy graph plugin, now isolated at `/legacy`.
+> Current Code and Explorer workspace sources live under
+> `dashboard/src/workspaces/` and build into the product `app-dist` bundle.
+
 Audit of `dashboard/graph/src/CodeGraphExplorer.tsx` and `GraphCanvas.tsx` for
 component complexity hotspots and practical split points. Scope: graph rendering,
 layout, interaction handlers, filtering/search/state coordination, and

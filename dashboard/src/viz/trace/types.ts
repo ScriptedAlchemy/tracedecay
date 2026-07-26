@@ -131,6 +131,57 @@ export interface TraceCoverage {
    * carry them — it does not imply the code has no types.
    */
   readonly membranesAvailable: boolean;
+  /**
+   * Every distinct field name observed on the neighbour rows this model was
+   * built from, sorted.
+   *
+   * Recorded because the sensory contract has five channels and this route
+   * serves the measurement behind two of them. Which two is a property of the
+   * PAYLOAD, not of a capability list someone typed here: the schemas are
+   * passthrough, so the day a producer starts sending a complexity or churn
+   * field, that field appears in this array and the corresponding channel goes
+   * live without a copy edit. Understating what the wire carries would be as
+   * false as overstating it, so neither is asserted — both are read.
+   */
+  readonly rowFields: readonly string[];
+}
+
+/** Whether a sensory channel can be driven by the payload actually in hand. */
+export type SensoryChannelState =
+  /** The measurement arrived on this payload; the channel is live. */
+  | 'measured'
+  /**
+   * No field on this payload carries the measurement. Absence of a field is
+   * not absence of the property — this says the wire was silent, nothing more.
+   */
+  | 'not-on-this-wire'
+  /**
+   * The measurement exists but only at a coarser scope than this field draws,
+   * so binding it to a symbol here would be a fabricated join.
+   */
+  | 'coarser-scope';
+
+/**
+ * One channel of the app-wide sensory contract as it stands on THIS field.
+ *
+ * The contract is "sensation encodes a stated measurement". A channel with no
+ * measurement behind it must therefore be inert AND said out loud, because a
+ * surface that quietly animates four channels and drives two is claiming two
+ * measurements it does not have.
+ */
+export interface SensoryChannel {
+  /** The felt quantity, in the contract's own words. */
+  readonly feel: string;
+  /** The measurement it is bound to, in the contract's own words. */
+  readonly measurement: string;
+  readonly state: SensoryChannelState;
+  /** How this channel reads when motion is reduced. */
+  readonly staticEquivalent: string;
+  /**
+   * The mechanism when measured, or why it is inert when not. Never empty:
+   * an unexplained inert channel is indistinguishable from a broken one.
+   */
+  readonly note: string;
 }
 
 /** The complete drawable field: pure data, no DOM, no colour, no clock. */

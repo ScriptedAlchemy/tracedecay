@@ -94,7 +94,17 @@
   --raw-graph-edge: oklch(0.43 0.075 245);
   --raw-graph-accent: oklch(0.82 0.16 205);
   --raw-graph-dim: oklch(0.28 0.035 252);
+  /* Five layers, front to back: a vignette that pulls the corners down so the
+   * field has a centre to look INTO rather than an even wash; the central lift
+   * where the network is suspended; two off-axis nebulae that keep the medium
+   * from being radially symmetric (a perfectly centred glow reads as a
+   * spotlight, not as depth); and the graded substrate underneath.
+   *
+   * The vignette is the layer that does the actual work. Without it the three
+   * lifts brighten the middle but nothing darkens the edge, so the field has no
+   * falloff and flattens against the chassis around it. */
   --raw-graph-field:
+    radial-gradient(125% 125% at 50% 44%, transparent 34%, oklch(0.045 0.012 272 / 0.58) 100%),
     radial-gradient(62% 72% at 50% 46%, oklch(0.25 0.07 246 / 0.62) 0%, transparent 66%),
     radial-gradient(52% 60% at 12% 18%, oklch(0.19 0.07 292 / 0.28) 0%, transparent 74%),
     radial-gradient(50% 58% at 88% 82%, oklch(0.2 0.065 215 / 0.24) 0%, transparent 72%),
@@ -104,6 +114,19 @@
    * no drop-shadow stacks. */
   --raw-membrane-lift: oklch(0.34 0.016 262 / 0.55);
   --raw-depth: oklch(0.07 0.012 262 / 0.6);
+  /* Sensor grain. A continuous gradient field is mathematically smooth in a way
+   * nothing observed ever is, and at these sizes the eye reads that smoothness
+   * as "flat fill" rather than "deep space". A single tile of fractal noise,
+   * held far below the threshold where it could be mistaken for a drawn mark,
+   * is what makes the field read as something being LOOKED at.
+   *
+   * Inlined as a data URI, so it is part of the stylesheet: no image request,
+   * nothing to fail on an offline install. */
+  --raw-grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23g)'/%3E%3C/svg%3E");
+  /* Deliberately tiny. Anything the grain does that is individually visible is
+   * a defect: it is there to deny the eye a perfectly even surface, not to be
+   * seen. */
+  --grain-opacity: 0.055;
 
   /* ---- elevation: the chassis has three planes, and they are three verbs ----
    *
@@ -130,6 +153,13 @@
     inset 0 1px 3px var(--raw-depth), inset 0 -1px 0 var(--raw-membrane-lift);
   --shadow-raised:
     inset 0 1px 0 var(--raw-membrane-lift), 0 1px 2px var(--raw-depth);
+  /* The window plane: the graph field is not a panel sitting on the chassis, it
+   * is an aperture cut through it, so it carries a deeper cast than `raised`
+   * does. Previously spelled out as an arbitrary shadow inside GraphCanvas;
+   * living here means the depth of the aperture is a property of the design
+   * system rather than of one component. */
+  --shadow-field:
+    inset 0 1px 0 var(--raw-membrane-lift), 0 18px 44px -28px var(--raw-depth);
 
   /* ---- rhythm ----
    * 36px data row: the VirtualList windowing estimate is derived from this, so
@@ -143,9 +173,28 @@
   --radius-chip: 1px;
   --radius-card: 2px;
   --grid-cell: 32px;
+  /* How far the display face is expanded at the uppercase engraved tiers.
+   * Measured, not chosen by eye: across all twelve surfaces at 1440 and 768,
+   * 112% clips one more label than the unexpanded baseline and 125% clips
+   * thirteen more. This is the widest setting that costs no information. */
+  --display-width: 112%;
   --dur-state: 120ms;
   --dur-panel: 180ms;
   --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  /* Entrance stagger step. One orchestrated reveal per surface is built from a
+   * single duration and this delay multiplied by a region's index, so a
+   * workspace never has to invent its own timing. */
+  --dur-stagger: 45ms;
+
+  /* Every animation in the design system is reached through one of these, so
+   * "still" is a single state to switch rather than a rule to remember at each
+   * call site. The reduced blocks below set all of them to their resting value
+   * at once; nothing needs a matching `animation: none` override of its own. */
+  --anim-enter: td-rise var(--dur-panel) var(--ease-standard) both;
+  --anim-signal: td-signal 1.8s var(--ease-standard) infinite;
+  /* Ruling is motionless, but it is the one texture that reads as a moving
+   * screen, so it belongs to the same switch. */
+  --texture-scanlines: block;
 }
 
 [data-theme='light'] {
@@ -200,6 +249,7 @@
   --raw-graph-accent: oklch(0.84 0.16 205);
   --raw-graph-dim: oklch(0.3 0.035 252);
   --raw-graph-field:
+    radial-gradient(125% 125% at 50% 44%, transparent 34%, oklch(0.045 0.012 272 / 0.58) 100%),
     radial-gradient(62% 72% at 50% 46%, oklch(0.25 0.07 246 / 0.66) 0%, transparent 66%),
     radial-gradient(52% 60% at 12% 18%, oklch(0.19 0.07 292 / 0.3) 0%, transparent 74%),
     radial-gradient(50% 58% at 88% 82%, oklch(0.2 0.065 215 / 0.26) 0%, transparent 72%),
@@ -227,6 +277,9 @@
   --raw-graph-dim: var(--raw-surface-3);
   --raw-membrane-lift: transparent;
   --raw-depth: transparent;
+  /* Grain is atmosphere, and atmosphere is the first thing to go: a reader who
+   * asked for maximum contrast asked for an even surface behind the marks. */
+  --grain-opacity: 0;
   /* With atmosphere gone, the three planes stop being lit and become ruled:
    * a well is told apart by its border alone, which is what high contrast
    * asked for. */
@@ -234,6 +287,7 @@
   --raw-raised: var(--raw-surface-0);
   --shadow-well: none;
   --shadow-raised: none;
+  --shadow-field: none;
 }
 
 @media (forced-colors: active) {
@@ -270,6 +324,31 @@
   background: var(--raw-graph-field);
 }
 
+/** Sensor grain over a field, so no region of it is perfectly even.
+ *
+ * Requires a positioned ancestor. Stacked UNDER `.td-scanlines`' own ::after so
+ * the two textures compose instead of fighting for the same pseudo-element.
+ *
+ * The same rule serves both themes because grain is only ever applied to the
+ * dark analytical field, which stays dark inside a light shell — see the
+ * --raw-graph-* block above. It is inert (opacity 0) under data-contrast=more
+ * and removed outright under reduced motion's sibling concern, forced colors.
+ *
+ * This texture is decoration in the strict sense: `aria-hidden` by virtue of
+ * being a pseudo-element, non-interactive, and carrying no state. It must never
+ * be used to suggest density, activity, or any other quantity. */
+.td-grain::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background-image: var(--raw-grain);
+  background-repeat: repeat;
+  background-size: 160px 160px;
+  opacity: var(--grain-opacity);
+}
+
 /** Bezel screen ruling: the faint horizontal discipline of a CRT face, used
  * only on the graph field so the canvas reads as an instrument screen.
  *
@@ -281,6 +360,10 @@
  * thing on the canvas that is actually supposed to be looked at. */
 .td-scanlines::after {
   content: '';
+  /* Blockified anyway by the absolute positioning, so this carries no layout
+   * meaning of its own; it is here purely as the switch the stillness and
+   * forced-colors blocks below throw. */
+  display: var(--texture-scanlines);
   position: absolute;
   inset: 0;
   pointer-events: none;
@@ -290,6 +373,86 @@
     transparent 1px 4px
   );
   opacity: 0.13;
+}
+
+/* ---------------------------------------------------------------------------
+ * Motion primitives: one orchestrated entrance, shared
+ *
+ * A console gets exactly one piece of choreography — the moment a surface
+ * arrives — and after that it holds still. The alternative, which is what a
+ * dozen independently-authored panels each easing their own hover and their own
+ * count-up produces, is a screen that twitches whenever the pointer moves and
+ * an operator who stops trusting movement to mean anything.
+ *
+ * So these are deliberately the ONLY entrance primitives, and every workspace
+ * composes its reveal from them rather than writing keyframes:
+ *
+ *   .td-enter    one region rises into place. Order comes from `--td-index`
+ *                (an integer), so a caller whose regions are not DOM siblings
+ *                can still join the same sequence.
+ *   .td-stagger  the common case: a container whose direct children arrive in
+ *                markup order, no per-child bookkeeping.
+ *
+ * WHAT THESE MAY NEVER DO: animate a value. Opacity and a 6px offset move a
+ * region onto the screen; they say nothing about what the region reports. A
+ * width, a bar length, a count, a needle position, or a chart series that eases
+ * from one number toward another is a claim that the backend observed a change
+ * over that interval, and none of these do. If a readout appears to move, it is
+ * because the daemon sent a new value — never because a stylesheet interpolated
+ * one.
+ * ------------------------------------------------------------------------- */
+@keyframes td-rise {
+  from {
+    opacity: 0;
+    /* Small on purpose: this is a region settling onto the plate, not a card
+     * flying in. Anything larger competes with reading. */
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.td-enter,
+.td-stagger > * {
+  /* `both` holds the from-state before the delay elapses, so a staggered region
+   * is invisible while it waits rather than flashing at full opacity first —
+   * which is also why stillness must remove the animation rather than shorten
+   * it: a 0ms animation with `both` fill still applies the from-state. */
+  animation: var(--anim-enter);
+}
+
+.td-enter {
+  animation-delay: calc(var(--td-index, 0) * var(--dur-stagger));
+}
+
+/* Positions 1-8 cover every surface's region count in this app; a ninth child
+ * and beyond joins at the eighth beat rather than trailing indefinitely, which
+ * keeps the whole entrance inside ~500ms however long a list gets. */
+.td-stagger > *:nth-child(1) {
+  animation-delay: calc(0 * var(--dur-stagger));
+}
+.td-stagger > *:nth-child(2) {
+  animation-delay: calc(1 * var(--dur-stagger));
+}
+.td-stagger > *:nth-child(3) {
+  animation-delay: calc(2 * var(--dur-stagger));
+}
+.td-stagger > *:nth-child(4) {
+  animation-delay: calc(3 * var(--dur-stagger));
+}
+.td-stagger > *:nth-child(5) {
+  animation-delay: calc(4 * var(--dur-stagger));
+}
+.td-stagger > *:nth-child(6) {
+  animation-delay: calc(5 * var(--dur-stagger));
+}
+.td-stagger > *:nth-child(7) {
+  animation-delay: calc(6 * var(--dur-stagger));
+}
+.td-stagger > *:nth-child(n + 8) {
+  animation-delay: calc(7 * var(--dur-stagger));
 }
 
 /** Live signal: a slow, low-amplitude flash on the single element that proves
@@ -306,24 +469,62 @@
 }
 
 .td-signal {
-  animation: td-signal 1.8s var(--ease-standard) infinite;
+  animation: var(--anim-signal);
+  /* The resting state of a live-signal indicator is fully lit, not dark: when
+   * the flash is removed the thing it indicates is still true. */
+  opacity: 1;
 }
 
+/* -----------------------------------------------------------------------------
+ * STILLNESS
+ *
+ * Reduced motion is a rendering MODE, not a degradation: nothing below removes
+ * information, it only removes the transitions between states. Every channel
+ * that carried meaning by moving has a static equivalent that carries the same
+ * meaning by being — a signal that flashed is pinned lit, a region that rose is
+ * simply present, a spinner that turned holds its position and keeps indicating.
+ * A surface built this way is not "the animated one with the animation turned
+ * off"; both modes are compositions of the same facts.
+ *
+ * It is reached two ways, and both must work:
+ *
+ *   the OS preference          `prefers-reduced-motion: reduce`
+ *   the app's own control      `data-motion` on the root element, written from
+ *                              the persisted preference by
+ *                              `viz/trace/reducedMotion.ts`
+ *
+ * The attribute wins once JS has run, because a reader who pinned Full on a
+ * machine configured to reduce has made a more specific request than the OS
+ * default — hence `:not([data-motion='full'])` on the media path. Canvas
+ * surfaces, which cannot consume any of this, resolve the same decision through
+ * the `useReducedMotion()` hook so there is exactly one answer in the app.
+ * -------------------------------------------------------------------------- */
 @media (prefers-reduced-motion: reduce) {
-  :root {
+  :root:not([data-motion='full']) {
     --dur-state: 0ms;
     --dur-panel: 0ms;
+    --dur-stagger: 0ms;
+    --anim-enter: none;
+    --anim-signal: none;
+    --animate-spin: none;
+    --texture-scanlines: none;
   }
-  .td-signal {
-    animation: none;
-    opacity: 1;
-  }
-  /* The one Tailwind-owned animation the chrome uses: the loading state's
-   * spinner. A state indicator has to keep indicating without moving, so it
-   * stops where it is rather than disappearing. */
-  .animate-spin {
-    animation: none;
-  }
+}
+
+:root[data-motion='reduced'] {
+  --dur-state: 0ms;
+  --dur-panel: 0ms;
+  --dur-stagger: 0ms;
+  --anim-enter: none;
+  --anim-signal: none;
+  --animate-spin: none;
+  --texture-scanlines: none;
+}
+
+@media (forced-colors: active) {
+  /* System colors replace the whole palette, so an atmospheric texture drawn in
+   * our own values would survive as noise over content it no longer relates to. */
+  .td-grain::before,
   .td-scanlines::after {
     display: none;
   }

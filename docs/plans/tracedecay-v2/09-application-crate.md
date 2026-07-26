@@ -266,10 +266,11 @@ Focused failures cover cycle and stale-version rejection, authorization
 narrowing, partial evidence, missing provider capability, invalid
 fallback, idempotent replay/conflict, cancellation before and after an effect
 commit point, restart recovery, stale lease/attempt receipts, unknown effects,
-no recursive provider dispatch, and no false completion. The aggregate gate
-proves CLI/MCP/HTTP/dashboard semantic parity for this journey and the absence
-of transport, concrete-store, provider, or runtime dependencies from the
-application crate. Every problem fixture asserts exactly one of `Never`,
+no recursive provider dispatch, and no false completion. Those direct tests
+plus ordinary aggregate repository checks prove CLI/MCP/HTTP/dashboard
+semantic parity for this journey and the absence of transport, concrete-store,
+provider, or runtime dependencies from the application crate; they create no
+separate acceptance gate. Every problem fixture asserts exactly one of `Never`,
 `SameRequest`, `AfterDelay`, `AfterRevalidate`, or `AfterReconcile` at the
 canonical application boundary and byte/semantic preservation of that
 directive by every exercised adapter, with no adapter-side inference.

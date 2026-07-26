@@ -238,6 +238,8 @@ decision reference; non-task observations leave it absent. Validation rejects
 owner/privacy/repository/capture/object-format mismatch, cross-repository
 native apply, destinations outside the bound capture, changed source sets, and
 owner receipts whose identity or digest does not match the referenced record.
+These are product-runtime provenance receipts from the owning operation, not
+PR acceptance owner receipts or planning evidence.
 Historical Rust type and source-file names remain evidence for wire migration,
 not an implementation layout requirement.
 
