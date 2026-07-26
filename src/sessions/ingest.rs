@@ -13,7 +13,6 @@ pub(crate) use failure::{
 #[cfg(test)]
 pub(crate) use project::ingest_project_sources_for_provider_without_registered_authority;
 pub(crate) use project::{home_dir, ingest_project_sources_for_provider};
-pub use project::{ingest_global_sources, ingest_global_sources_for_provider};
 pub(crate) use startup::ingest_user_global_sources_for_startup_with_db;
 #[cfg(test)]
 pub(crate) use startup::ingest_user_global_sources_for_startup_with_db_without_registered_authority;

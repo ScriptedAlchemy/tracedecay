@@ -283,7 +283,13 @@ pub(crate) async fn upsert_raw_message_with_payload_tracked(
         storage_root,
         rollback,
     };
-    let prepared = prepare_message(conn, message, &mut externalizer).await?;
+    let prepared = prepare_message(
+        conn,
+        message,
+        &mut externalizer,
+        &IngestProtectionDefaults::from_profile(),
+    )
+    .await?;
     if !security::should_externalize(&message.role, message.kind.as_deref(), &prepared.text) {
         let projection_text = derived_text_for_index(&prepared.text);
         return if upsert_inline_raw_message(
@@ -382,7 +388,10 @@ pub(crate) async fn protect_replay_field_value_tracked(
         storage_root,
         rollback,
     };
-    let config = ingest_config(message.metadata_json.as_deref());
+    let config = ingest_config(
+        message.metadata_json.as_deref(),
+        &IngestProtectionDefaults::from_profile(),
+    );
     let mut protected = value.clone();
 
     if config.sensitive_patterns_enabled {
@@ -419,8 +428,9 @@ async fn prepare_message(
     conn: &(impl Executor + ?Sized),
     message: &SessionMessageRecord,
     externalizer: &mut PayloadExternalizer<'_>,
+    defaults: &IngestProtectionDefaults,
 ) -> Result<PreparedMessage, LcmError> {
-    let config = ingest_config(message.metadata_json.as_deref());
+    let config = ingest_config(message.metadata_json.as_deref(), defaults);
     let mut protection = IngestProtection::default();
     let redacted = redact_sensitive_text(&message.text, &config);
     let mut text = redacted.text;
@@ -776,15 +786,55 @@ fn redact_sensitive_json_values(
     )
 }
 
-fn ingest_config(metadata_json: Option<&str>) -> IngestConfig {
+/// The redactors [`redact_sensitive_text`] knows how to run.
+const BUILT_IN_SENSITIVE_PATTERNS: [&str; 4] = [
+    "api_key",
+    "bearer_token",
+    "password_assignment",
+    "private_key",
+];
+
+/// Profile-level ingest-protection defaults, resolved from the user
+/// configuration once per ingest call.
+///
+/// Sensitive-value redaction is irreversible, so LCM keeps raw payloads
+/// lossless unless an owner opts in through
+/// `lcm_sensitive_redaction_enabled`. Without this, the redactors in this
+/// module could only ever be reached by a per-message metadata key that no
+/// production producer writes.
+#[derive(Clone, Debug, Default)]
+struct IngestProtectionDefaults {
+    sensitive_patterns_enabled: bool,
+    sensitive_patterns: Option<Vec<String>>,
+}
+
+impl IngestProtectionDefaults {
+    fn from_profile() -> Self {
+        Self::from_user_config(&crate::user_config::UserConfig::load())
+    }
+
+    fn from_user_config(config: &crate::user_config::UserConfig) -> Self {
+        let patterns: Vec<String> = config
+            .lcm_sensitive_redaction_patterns
+            .iter()
+            .map(|pattern| pattern.to_ascii_lowercase())
+            .collect();
+        Self {
+            sensitive_patterns_enabled: config.lcm_sensitive_redaction_enabled,
+            sensitive_patterns: (!patterns.is_empty()).then_some(patterns),
+        }
+    }
+}
+
+fn ingest_config(metadata_json: Option<&str>, defaults: &IngestProtectionDefaults) -> IngestConfig {
     let mut config = IngestConfig {
-        sensitive_patterns_enabled: false,
-        sensitive_patterns: vec![
-            "api_key".to_string(),
-            "bearer_token".to_string(),
-            "password_assignment".to_string(),
-            "private_key".to_string(),
-        ],
+        sensitive_patterns_enabled: defaults.sensitive_patterns_enabled,
+        sensitive_patterns: defaults.sensitive_patterns.clone().unwrap_or_else(|| {
+            BUILT_IN_SENSITIVE_PATTERNS
+                .iter()
+                .map(|pattern| (*pattern).to_string())
+                .collect()
+        }),
     };
     let Some(metadata_json) = metadata_json else {
         return config;
@@ -796,10 +846,14 @@ fn ingest_config(metadata_json: Option<&str>) -> IngestConfig {
         .get("lcm_ingest")
         .or_else(|| value.get("ingest_protection"))
         .unwrap_or(&value);
-    config.sensitive_patterns_enabled = ingest
+    // A per-message key still overrides the profile default in either
+    // direction; its absence leaves the owner's configured default in place.
+    if let Some(enabled) = ingest
         .get("sensitive_patterns_enabled")
         .and_then(JsonValue::as_bool)
-        .unwrap_or(false);
+    {
+        config.sensitive_patterns_enabled = enabled;
+    }
     if let Some(patterns) = ingest
         .get("sensitive_patterns")
         .and_then(JsonValue::as_array)
@@ -1130,4 +1184,69 @@ fn add_ingest_protection_metadata(metadata: &mut JsonValue, protection: &IngestP
 
 pub(crate) fn sha256_hex(content: &str) -> String {
     util::sha256_hex(content.as_bytes())
+}
+
+#[cfg(test)]
+mod ingest_protection_defaults_tests {
+    use super::{BUILT_IN_SENSITIVE_PATTERNS, IngestProtectionDefaults, ingest_config};
+    use crate::user_config::UserConfig;
+
+    fn profile(enabled: bool, patterns: &[&str]) -> IngestProtectionDefaults {
+        IngestProtectionDefaults::from_user_config(&UserConfig {
+            lcm_sensitive_redaction_enabled: enabled,
+            lcm_sensitive_redaction_patterns: patterns
+                .iter()
+                .map(|pattern| (*pattern).to_string())
+                .collect(),
+            ..UserConfig::default()
+        })
+    }
+
+    #[test]
+    fn default_profile_leaves_redaction_off() {
+        let config = ingest_config(
+            None,
+            &IngestProtectionDefaults::from_user_config(&UserConfig::default()),
+        );
+        assert!(!config.sensitive_patterns_enabled);
+    }
+
+    #[test]
+    fn profile_setting_enables_redaction_without_a_metadata_key() {
+        let config = ingest_config(None, &profile(true, &[]));
+        assert!(config.sensitive_patterns_enabled);
+        assert_eq!(config.sensitive_patterns, BUILT_IN_SENSITIVE_PATTERNS);
+    }
+
+    #[test]
+    fn profile_patterns_restrict_the_redactor_set() {
+        let config = ingest_config(None, &profile(true, &["API_KEY"]));
+        assert_eq!(config.sensitive_patterns, vec!["api_key".to_string()]);
+    }
+
+    #[test]
+    fn message_metadata_still_overrides_the_profile_in_both_directions() {
+        let off = ingest_config(
+            Some(r#"{"lcm_ingest":{"sensitive_patterns_enabled":false}}"#),
+            &profile(true, &[]),
+        );
+        assert!(!off.sensitive_patterns_enabled);
+        let on = ingest_config(
+            Some(r#"{"lcm_ingest":{"sensitive_patterns_enabled":true}}"#),
+            &profile(false, &[]),
+        );
+        assert!(on.sensitive_patterns_enabled);
+    }
+
+    #[test]
+    fn enabled_profile_redacts_an_api_key_assignment() {
+        let config = ingest_config(None, &profile(true, &[]));
+        let outcome = super::redact_sensitive_text("api_key=sk-liveSECRETVALUE123", &config);
+        assert!(outcome.redacted, "profile-enabled redaction must fire");
+        assert!(
+            !outcome.text.contains("sk-liveSECRETVALUE123"),
+            "secret survived redaction: {}",
+            outcome.text
+        );
+    }
 }

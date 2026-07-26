@@ -1,0 +1,16 @@
+{
+  "agent": "hermes",
+  "event": "terminalReceipt",
+  "cwd": "/workspace/project",
+  "route": {
+    "session_id": "<SESSION_ID>",
+    "thread_id": null
+  },
+  "receipt": {
+    "tool_call_id": "<TOOL_CALL_ID>",
+    "turn_id": "<TURN_ID>",
+    "status": "success",
+    "duration_ms": 297,
+    "transcript_watermark": "<TOOL_CALL_ID>"
+  }
+}

@@ -11,7 +11,8 @@ async fn test_create_schema_fresh_db() {
         .await
         .expect("create_schema should succeed");
 
-    assert_eq!(get_user_version(&conn).await, 24);
+    assert_eq!(get_user_version(&conn).await, LATEST_VERSION);
+    assert!(table_exists(&conn, "external_source_states_v1").await);
     assert_eq!(
         scalar_i64(&conn, "PRAGMA auto_vacuum").await,
         2,
@@ -83,7 +84,7 @@ async fn test_create_schema_idempotent() {
         .await
         .expect("second create_schema should succeed");
 
-    assert_eq!(get_user_version(&conn).await, 24);
+    assert_eq!(get_user_version(&conn).await, LATEST_VERSION);
 }
 
 /// migrate returns false when already at the latest version.
@@ -99,20 +100,24 @@ async fn test_migrate_already_latest_returns_false() {
         !migrated,
         "migrate should return false when already at latest"
     );
-    assert_eq!(get_user_version(&conn).await, 24);
+    assert_eq!(get_user_version(&conn).await, LATEST_VERSION);
 }
 
 #[tokio::test]
 async fn test_migrate_rejects_schema_newer_than_supported() {
     let (conn, _dir) = create_schema_db().await;
-    set_user_version(&conn, 25).await;
+    set_user_version(&conn, LATEST_VERSION + 1).await;
 
     let error = migrate_connection(&conn)
         .await
         .expect_err("future schema versions must be rejected");
 
-    assert!(error.to_string().contains("newer than supported v24"));
-    assert_eq!(get_user_version(&conn).await, 25);
+    assert!(
+        error
+            .to_string()
+            .contains(&format!("newer than supported v{LATEST_VERSION}"))
+    );
+    assert_eq!(get_user_version(&conn).await, LATEST_VERSION + 1);
 }
 
 /// migrate from v0 (completely empty database) applies all migrations to latest.
@@ -131,7 +136,7 @@ async fn test_migrate_from_v0() {
         migrated,
         "migrate should return true when migrations were applied"
     );
-    assert_eq!(get_user_version(&conn).await, 24);
+    assert_eq!(get_user_version(&conn).await, LATEST_VERSION);
 
     // All expected tables should exist
     assert!(table_exists(&conn, "nodes").await);
@@ -172,7 +177,7 @@ async fn test_migrate_from_v1() {
         .expect("migrate from v1 should succeed");
 
     assert!(migrated);
-    assert_eq!(get_user_version(&conn).await, 24);
+    assert_eq!(get_user_version(&conn).await, LATEST_VERSION);
 
     // V2: metadata table
     assert!(table_exists(&conn, "metadata").await);
@@ -208,7 +213,7 @@ async fn test_migrate_from_v2() {
         .expect("migrate from v2 should succeed");
 
     assert!(migrated);
-    assert_eq!(get_user_version(&conn).await, 24);
+    assert_eq!(get_user_version(&conn).await, LATEST_VERSION);
 
     // V3 columns
     assert!(column_exists(&conn, "nodes", "branches").await);
@@ -238,7 +243,7 @@ async fn test_migrate_from_v3() {
         .expect("migrate from v3 should succeed");
 
     assert!(migrated);
-    assert_eq!(get_user_version(&conn).await, 24);
+    assert_eq!(get_user_version(&conn).await, LATEST_VERSION);
 
     // V4 columns
     assert!(column_exists(&conn, "nodes", "unsafe_blocks").await);
@@ -266,7 +271,7 @@ async fn test_migrate_from_v4() {
         .expect("migrate from v4 should succeed");
 
     assert!(migrated);
-    assert_eq!(get_user_version(&conn).await, 24);
+    assert_eq!(get_user_version(&conn).await, LATEST_VERSION);
 
     assert!(index_exists(&conn, "idx_edges_unique").await);
 }
@@ -395,7 +400,7 @@ async fn test_database_initialize_creates_latest_version() {
     let (db, _migrated) =
         publish_test_database(&db_path, TestDatabaseRuntimeMode::Initialize).await;
 
-    assert_eq!(get_user_version(db.conn()).await, 24);
+    assert_eq!(get_user_version(db.conn()).await, LATEST_VERSION);
 }
 
 /// Rejoining an already-current registered runtime does not re-migrate.
@@ -426,13 +431,15 @@ async fn test_database_open_migrates_v1_to_latest() {
     // Create a v1 fixture on one engine-owned runtime, then release that
     // physical owner before opening through the public registered facade.
     {
+        let setup = rusqlite::Connection::open(&db_path).expect("open v1 fixture");
+        setup
+            .execute_batch(
+                "PRAGMA journal_mode = WAL;
+                 PRAGMA foreign_keys = ON;",
+            )
+            .expect("failed to apply pragmas");
+        drop(setup);
         let conn = TestConnection::open(&db_path);
-        conn.execute_batch(
-            "PRAGMA journal_mode = WAL;
-             PRAGMA foreign_keys = ON;",
-        )
-        .await
-        .expect("failed to apply pragmas");
         create_v1_schema(&conn).await;
     }
 
@@ -442,7 +449,7 @@ async fn test_database_open_migrates_v1_to_latest() {
 
     assert!(migrated, "opening a v1 database should trigger migration");
 
-    assert_eq!(get_user_version(db.conn()).await, 24);
+    assert_eq!(get_user_version(db.conn()).await, LATEST_VERSION);
 }
 
 /// After create_schema, all v5 columns on nodes exist.
@@ -557,7 +564,7 @@ async fn test_v7_to_latest_upgrade_path() {
     let did_migrate = migrate_connection(&conn).await.unwrap();
     assert!(did_migrate, "expected migrate() to return true");
 
-    assert_eq!(get_user_version(&conn).await, 24);
+    assert_eq!(get_user_version(&conn).await, LATEST_VERSION);
 
     let mut rows = conn
         .query(
@@ -609,7 +616,7 @@ async fn test_migrate_v16_adds_redundancy_pairs() {
         .expect("v16 migration should apply");
 
     assert!(migrated, "expected migrate() to run the v16 addition");
-    assert_eq!(get_user_version(&conn).await, 24);
+    assert_eq!(get_user_version(&conn).await, LATEST_VERSION);
     assert!(
         table_exists(&conn, "redundancy_pairs").await,
         "v16 migration should create the redundancy_pairs table"
@@ -655,7 +662,7 @@ async fn test_migrate_v18_preserves_memory_and_adds_bounded_relations() {
 
     assert!(migrate_connection(&conn).await.unwrap());
 
-    assert_eq!(get_user_version(&conn).await, 24);
+    assert_eq!(get_user_version(&conn).await, LATEST_VERSION);
     assert!(table_exists(&conn, "memory_fact_relations").await);
     assert!(index_exists(&conn, "idx_memory_fact_relations_target").await);
     assert_eq!(
@@ -815,7 +822,7 @@ async fn test_v10_to_v11_backfills_and_drops_legacy_memory_tables() {
         .expect("v10 to v11 should migrate");
 
     assert!(did_migrate);
-    assert_eq!(get_user_version(&conn).await, 24);
+    assert_eq!(get_user_version(&conn).await, LATEST_VERSION);
     assert!(!table_exists(&conn, "memory_decisions").await);
     assert!(!table_exists(&conn, "memory_code_areas").await);
     assert!(table_exists(&conn, "memory_facts").await);
@@ -837,7 +844,7 @@ async fn test_v11_database_migrates_to_monotonic_v12() {
         .expect("v11 to v12 should migrate");
 
     assert!(did_migrate);
-    assert_eq!(get_user_version(&conn).await, 24);
+    assert_eq!(get_user_version(&conn).await, LATEST_VERSION);
     assert!(table_exists(&conn, "memory_bank_dirty").await);
 }
 
@@ -1190,7 +1197,7 @@ async fn test_v13_drops_archive_columns_with_generated_column_dependency() {
         .await
         .expect("v13 must drop archive columns even with a generated-column dependency");
     assert!(migrated, "expected migrate() to run the v13 cleanup");
-    assert_eq!(get_user_version(&conn).await, 24);
+    assert_eq!(get_user_version(&conn).await, LATEST_VERSION);
 
     let columns = column_names(&conn, "memory_facts").await;
     for col in [
@@ -1241,7 +1248,7 @@ async fn test_v14_adds_access_tracking_and_oplog() {
         .await
         .expect("v14 must apply cleanly");
     assert!(migrated, "expected migrate() to run the v14 additions");
-    assert_eq!(get_user_version(&conn).await, 24);
+    assert_eq!(get_user_version(&conn).await, LATEST_VERSION);
 
     let columns = column_names(&conn, "memory_facts").await;
     for col in ["access_count", "last_recalled_at"] {
@@ -1267,7 +1274,7 @@ async fn test_v14_adds_access_tracking_and_oplog() {
         .await
         .expect("v14 must be idempotent on an already-upgraded schema");
     assert!(migrated_again);
-    assert_eq!(get_user_version(&conn).await, 24);
+    assert_eq!(get_user_version(&conn).await, LATEST_VERSION);
     assert_eq!(
         scalar_i64(&conn, "SELECT COUNT(*) FROM memory_facts").await,
         1
@@ -1276,7 +1283,8 @@ async fn test_v14_adds_access_tracking_and_oplog() {
 
 #[tokio::test]
 async fn test_v15_compacts_legacy_f64_vectors_without_open_time_vacuum() {
-    let (conn, _dir) = create_schema_db().await;
+    let (conn, dir) = create_schema_db().await;
+    let db_path = dir.path().join("test.db");
     let legacy_vector = vec![0.0_f64; crate::memory::encoding::HolographicEncoder::DIMENSIONS];
     let legacy_bytes = bincode::serialize(&legacy_vector).unwrap();
     assert_eq!(legacy_bytes.len(), 16_392);
@@ -1291,16 +1299,20 @@ async fn test_v15_compacts_legacy_f64_vectors_without_open_time_vacuum() {
     )
     .await
     .expect("failed to seed legacy f64 vector");
-    conn.execute_batch("PRAGMA auto_vacuum = NONE; VACUUM;")
-        .await
-        .expect("failed to simulate a legacy database without incremental auto-vacuum");
     set_user_version(&conn, 14).await;
+    drop(conn);
+    let setup = rusqlite::Connection::open(&db_path).expect("open legacy auto-vacuum fixture");
+    setup
+        .execute_batch("PRAGMA auto_vacuum = NONE; VACUUM;")
+        .expect("failed to simulate a legacy database without incremental auto-vacuum");
+    drop(setup);
+    let conn = TestConnection::open(&db_path);
 
     let migrated = migrate_connection(&conn)
         .await
         .expect("v15 must compact legacy vectors");
     assert!(migrated);
-    assert_eq!(get_user_version(&conn).await, 24);
+    assert_eq!(get_user_version(&conn).await, LATEST_VERSION);
     assert_eq!(
         scalar_i64(&conn, "PRAGMA auto_vacuum").await,
         0,
@@ -1335,15 +1347,19 @@ async fn test_v15_compacts_legacy_f64_vectors_without_open_time_vacuum() {
 
 #[tokio::test]
 async fn test_latest_open_defers_incremental_vacuum_repair() {
-    let (conn, _dir) = create_schema_db().await;
-
-    conn.execute_batch(
-        "PRAGMA auto_vacuum = NONE;
-         VACUUM;",
-    )
-    .await
-    .expect("failed to simulate pre-repair auto_vacuum mode");
-    set_user_version(&conn, 24).await;
+    let (conn, dir) = create_schema_db().await;
+    let db_path = dir.path().join("test.db");
+    set_user_version(&conn, LATEST_VERSION).await;
+    drop(conn);
+    let setup = rusqlite::Connection::open(&db_path).expect("open pre-repair auto-vacuum fixture");
+    setup
+        .execute_batch(
+            "PRAGMA auto_vacuum = NONE;
+             VACUUM;",
+        )
+        .expect("failed to simulate pre-repair auto_vacuum mode");
+    drop(setup);
+    let conn = TestConnection::open(&db_path);
     assert_eq!(
         scalar_i64(&conn, "PRAGMA auto_vacuum").await,
         0,
@@ -1358,10 +1374,38 @@ async fn test_latest_open_defers_incremental_vacuum_repair() {
         !migrated,
         "auto_vacuum repair should not report a schema migration"
     );
-    assert_eq!(get_user_version(&conn).await, 24);
+    assert_eq!(get_user_version(&conn).await, LATEST_VERSION);
     assert_eq!(
         scalar_i64(&conn, "PRAGMA auto_vacuum").await,
         0,
         "ordinary open must not run a whole-file VACUUM"
+    );
+}
+
+#[tokio::test]
+async fn test_v25_adds_external_source_state_without_touching_existing_rows() {
+    let (conn, _dir) = create_schema_db().await;
+    conn.execute(
+        "INSERT INTO metadata(key, value) VALUES('migration.fixture', 'retained')",
+        (),
+    )
+    .await
+    .unwrap();
+    conn.execute("DROP TABLE external_source_states_v1", ())
+        .await
+        .unwrap();
+    set_user_version(&conn, 24).await;
+
+    assert!(migrate_connection(&conn).await.unwrap());
+    assert_eq!(get_user_version(&conn).await, LATEST_VERSION);
+    assert!(table_exists(&conn, "external_source_states_v1").await);
+    assert_eq!(
+        scalar_i64(
+            &conn,
+            "SELECT COUNT(*) FROM metadata
+             WHERE key = 'migration.fixture' AND value = 'retained'"
+        )
+        .await,
+        1
     );
 }

@@ -1,10 +1,11 @@
 //! Application-port implementation for daemon-owned Git index transactions.
 
 use tracedecay_application::{
-    EffectId, EffectTermination, GitIndexApplyPortResultV1, GitIndexApplyRequestV1,
-    GitIndexPreviewPortResultV1, GitIndexPreviewRequestV1, GitIndexRecoveryRequestV1,
-    GitIndexTransactionPort, GitIndexTransactionPortError, OperationBudgetUsage, OperationReceipt,
-    OperationTermination, ReconciliationState, RequestAdmission,
+    CancellationObservation, CancellationStage, EffectId, EffectTermination,
+    GitIndexApplyPortResultV1, GitIndexApplyRequestV1, GitIndexPreviewPortResultV1,
+    GitIndexPreviewRequestV1, GitIndexRecoveryRequestV1, GitIndexTransactionPort,
+    GitIndexTransactionPortError, OperationBudgetUsage, OperationReceipt, OperationTermination,
+    ReconciliationState, RequestAdmission,
 };
 #[cfg(test)]
 use tracedecay_domain::GitIndexIdempotencyKey;
@@ -188,33 +189,7 @@ where
         &self,
         request: &GitIndexApplyRequestV1,
     ) -> Result<GitIndexApplyPortResultV1, GitIndexTransactionPortError> {
-        request
-            .validate()
-            .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
-        let preview = match self.store.read_preview(&request.preview_id) {
-            Ok(Some(preview)) => preview,
-            Ok(None) => {
-                self.native.discard_preview(&request.preview_id);
-                return Err(GitIndexTransactionPortError::StalePreview);
-            }
-            Err(error) => {
-                self.native.discard_preview(&request.preview_id);
-                return Err(map_store_error(error));
-            }
-        };
-        if preview.validate().is_err() {
-            self.native.discard_preview(&request.preview_id);
-            return Err(GitIndexTransactionPortError::StalePreview);
-        }
-        let repository_id = preview.repository_snapshot.repository_id.clone();
-        let result = self
-            .queue
-            .with_repository(&repository_id, || self.apply_serialized(request, &preview))
-            .map_err(map_queue_error);
-        if result.is_err() {
-            self.native.discard_preview(&request.preview_id);
-        }
-        result?
+        self.apply_cancellable(request, || None)
     }
 
     fn recover(
@@ -251,10 +226,65 @@ where
     C: GitEffectClassifier,
     A: GitIndexPolicyRecheckPort,
 {
+    pub(crate) fn apply_cancellable(
+        &self,
+        request: &GitIndexApplyRequestV1,
+        cancellation_requested: impl Fn() -> Option<tracedecay_domain::UtcMicros>,
+    ) -> Result<GitIndexApplyPortResultV1, GitIndexTransactionPortError> {
+        request
+            .validate()
+            .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
+        let preview = match self.store.read_preview(&request.preview_id) {
+            Ok(Some(preview)) => preview,
+            Ok(None) => {
+                self.native.discard_preview(&request.preview_id);
+                return Err(GitIndexTransactionPortError::StalePreview);
+            }
+            Err(error) => {
+                self.native.discard_preview(&request.preview_id);
+                return Err(map_store_error(error));
+            }
+        };
+        if preview.validate().is_err() {
+            self.native.discard_preview(&request.preview_id);
+            return Err(GitIndexTransactionPortError::StalePreview);
+        }
+        let repository_id = preview.repository_snapshot.repository_id.clone();
+        let result = self
+            .queue
+            .with_repository_cancellable(
+                &repository_id,
+                &cancellation_requested,
+                |cancellation_observed| {
+                    self.apply_serialized(
+                        request,
+                        &preview,
+                        cancellation_observed,
+                        &cancellation_requested,
+                    )
+                },
+            )
+            .map_err(map_queue_error);
+        if result.is_err() {
+            self.native.discard_preview(&request.preview_id);
+        }
+        result?
+    }
+}
+
+impl<S, N, C, A> DaemonGitIndexTransactionPort<S, N, C, A>
+where
+    S: GitIndexTransactionStore,
+    N: GitIndexNativeExecutor + GitIndexRecoveryExecutor,
+    C: GitEffectClassifier,
+    A: GitIndexPolicyRecheckPort,
+{
     fn apply_serialized(
         &self,
         request: &GitIndexApplyRequestV1,
         preview: &GitIndexPreviewV1,
+        cancellation_observed_while_queued: Option<tracedecay_domain::UtcMicros>,
+        cancellation_requested: &impl Fn() -> Option<tracedecay_domain::UtcMicros>,
     ) -> Result<GitIndexApplyPortResultV1, GitIndexTransactionPortError> {
         let idempotency_key = request
             .native_idempotency_key()
@@ -293,6 +323,22 @@ where
             }
             GitIndexTransactionBeginResultV1::Started(record) => record,
         };
+        if let Some(cancelled_at) =
+            cancellation_observed_while_queued.or_else(cancellation_requested)
+        {
+            self.native.discard_preview(&preview.preview_id);
+            return finish_aborted_no_change(
+                &self.store,
+                &durable,
+                &idempotency_key,
+                &record.journal,
+                &transaction_id,
+                preview,
+                request,
+                EffectTermination::Cancelled,
+                Some(cancelled_at),
+            );
+        }
         // Terminal replay has already returned above. All remaining paths
         // have admitted a new durable record and therefore must end in an
         // atomic terminal receipt or a durable quarantine.
@@ -308,6 +354,22 @@ where
                 &transaction_id,
                 preview,
                 request,
+                EffectTermination::Failed,
+                None,
+            );
+        }
+        if let Some(cancelled_at) = cancellation_requested() {
+            self.native.discard_preview(&preview.preview_id);
+            return finish_aborted_no_change(
+                &self.store,
+                &durable,
+                &idempotency_key,
+                &record.journal,
+                &transaction_id,
+                preview,
+                request,
+                EffectTermination::Cancelled,
+                Some(cancelled_at),
             );
         }
         let Ok(started) = durable.advance(
@@ -328,11 +390,27 @@ where
                 &transaction_id,
                 preview,
                 request,
+                EffectTermination::Failed,
+                None,
             )
             .inspect_err(|_| {
                 let _ = quarantine_after_admission(&self.store, preview, &transaction_id);
             });
         };
+        if let Some(cancelled_at) = cancellation_requested() {
+            self.native.discard_preview(&preview.preview_id);
+            return finish_aborted_no_change(
+                &self.store,
+                &durable,
+                &idempotency_key,
+                &started,
+                &transaction_id,
+                preview,
+                request,
+                EffectTermination::Cancelled,
+                Some(cancelled_at),
+            );
+        }
         match self.native.apply(&transaction_id, preview, request) {
             Ok(NativeGitIndexApplyOutcomeV1::ProvenNoMutation) => finish_aborted_no_change(
                 &self.store,
@@ -342,6 +420,8 @@ where
                 &transaction_id,
                 preview,
                 request,
+                EffectTermination::Failed,
+                None,
             ),
             Ok(NativeGitIndexApplyOutcomeV1::Completed(native))
                 if native_result_binds_record(&native, &record, &transaction_id) =>
@@ -382,7 +462,7 @@ where
                     request,
                     deterministic_effect_id(&transaction_id)?,
                     receipt,
-                    terminal_execution(request, termination),
+                    terminal_execution(request, termination, None),
                 )
             }
         }
@@ -469,6 +549,8 @@ fn finish_aborted_no_change<S>(
     transaction_id: &GitIndexTransactionId,
     preview: &GitIndexPreviewV1,
     request: &GitIndexApplyRequestV1,
+    termination: EffectTermination,
+    cancelled_at: Option<tracedecay_domain::UtcMicros>,
 ) -> Result<GitIndexApplyPortResultV1, GitIndexTransactionPortError>
 where
     S: GitIndexTransactionStore,
@@ -499,7 +581,7 @@ where
         request,
         deterministic_effect_id(transaction_id)?,
         receipt,
-        terminal_execution(request, EffectTermination::Failed),
+        terminal_execution(request, termination, cancelled_at),
     )
 }
 
@@ -657,6 +739,7 @@ fn replay_result(
                 GitIndexReceiptOutcomeV1::AbortedNoChange => EffectTermination::Failed,
                 GitIndexReceiptOutcomeV1::NeedsInspection => EffectTermination::EffectUnknown,
             },
+            None,
         ),
     )
 }
@@ -672,9 +755,16 @@ fn result_from_receipt(
             EffectTermination::Completed,
             ReconciliationState::Reconciled,
         ),
-        GitIndexReceiptOutcomeV1::AbortedNoChange => {
-            (EffectTermination::Failed, ReconciliationState::Reconciled)
-        }
+        GitIndexReceiptOutcomeV1::AbortedNoChange => match execution.termination {
+            OperationTermination::Cancelled => (
+                EffectTermination::Cancelled,
+                ReconciliationState::Reconciled,
+            ),
+            OperationTermination::TimedOut => {
+                (EffectTermination::TimedOut, ReconciliationState::Reconciled)
+            }
+            _ => (EffectTermination::Failed, ReconciliationState::Reconciled),
+        },
         GitIndexReceiptOutcomeV1::NeedsInspection => (
             EffectTermination::EffectUnknown,
             ReconciliationState::Pending,
@@ -696,12 +786,17 @@ fn result_from_receipt(
 fn terminal_execution(
     request: &GitIndexApplyRequestV1,
     termination: EffectTermination,
+    cancelled_at: Option<tracedecay_domain::UtcMicros>,
 ) -> OperationReceipt {
+    let ended_at = cancelled_at.unwrap_or(request.observed_at);
     OperationReceipt {
         started_at: request.observed_at,
-        ended_at: request.observed_at,
+        ended_at,
         effective_deadline: request.context.deadline().clone(),
-        cancellation: None,
+        cancellation: cancelled_at.map(|observed_at| CancellationObservation {
+            stage: CancellationStage::BeforeEffect,
+            observed_at,
+        }),
         budget: OperationBudgetUsage::default(),
         termination: operation_termination(termination),
     }

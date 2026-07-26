@@ -62,6 +62,8 @@ pub struct TraceDecay {
     context_scout_owner:
         Option<Arc<crate::agents::context_scout_owner::ProjectContextScoutOwnerV1>>,
     context_scout_claim_authorities: tokio::sync::RwLock<Vec<MountedContextScoutClaimAuthorityV1>>,
+    #[cfg(any(test, feature = "test-transport"))]
+    test_runtime_guard: Option<Arc<crate::application::host_admission::HostAdmissionTestRuntimeV1>>,
 }
 
 const MAX_MOUNTED_CONTEXT_SCOUT_CLAIM_AUTHORITIES: usize = 256;
@@ -79,6 +81,10 @@ struct MountedContextScoutClaimAuthorityV1 {
 impl TraceDecay {
     pub(crate) async fn storage_page_counts(&self) -> Result<(u64, u64, u64)> {
         self.db.storage_page_counts().await
+    }
+
+    pub(crate) async fn storage_table_bytes(&self) -> Result<Vec<(String, u64)>> {
+        self.db.storage_table_bytes().await
     }
 
     pub(crate) async fn run_incremental_vacuum(&self, pages: u64) -> Result<()> {
@@ -99,6 +105,14 @@ impl TraceDecay {
 
     pub(crate) fn profile_database(&self) -> &Arc<crate::global_db::RegisteredGlobalDb> {
         &self.profile_database
+    }
+
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-transport"))]
+    pub fn test_runtime_for_test(
+        &self,
+    ) -> Option<Arc<crate::application::host_admission::HostAdmissionTestRuntimeV1>> {
+        self.test_runtime_guard.clone()
     }
 
     pub(crate) fn hook_store_layout(&self) -> &StoreLayout {

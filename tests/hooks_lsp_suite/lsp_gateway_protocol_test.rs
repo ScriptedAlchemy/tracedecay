@@ -651,6 +651,63 @@ impl ContextProjectionPort for IdentityDriftContext {
 }
 
 #[test]
+fn context_projection_rejects_result_for_stale_open_document_content() {
+    struct StaleDocumentContext;
+
+    impl ContextProjectionPort for StaleDocumentContext {
+        fn registrations(&self) -> Vec<ContextProjectionRegistration> {
+            vec![ContextProjectionRegistration {
+                kind: ContextProjectionKind::diagnostics(),
+                revision: TRACEDECAY_CONTEXT_REVISION,
+            }]
+        }
+
+        fn snapshot(
+            &self,
+            root: &AdmittedRoot,
+            _request_id: &LspRequestId,
+            request: &ContextProjectionRequest,
+        ) -> ContextProjectionOutcome {
+            let mut identity = fixture_projection_identity();
+            identity.document_content_digest = Some(format!("sha256:{}", "d".repeat(64)));
+            ContextProjectionOutcome::Ready(ContextProjectionEnvelope {
+                root_uri: root.uri().to_owned(),
+                document_uri: request.document_uri.clone(),
+                kind: ContextProjectionKind::diagnostics(),
+                generation: 1,
+                identity,
+                freshness: ContextFreshness::Current,
+                producer_state: ContextProducerState::Complete,
+                coverage: ContextCoverage::Complete,
+                revision: TRACEDECAY_CONTEXT_REVISION,
+                items: Vec::new(),
+                omitted_count: 0,
+                omission_reasons: Vec::new(),
+                retrieval_handle: None,
+            })
+        }
+    }
+
+    let mut session = session_with_context(Arc::new(StaleDocumentContext));
+    initialize_context(&mut session, TRACEDECAY_CONTEXT_REVISION);
+    session.handle_payload(
+        br#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///root/a.rs","languageId":"rust","version":1,"text":"fn current_overlay() {}"}}}"#,
+        2,
+    );
+    session.handle_payload(
+        br#"{"jsonrpc":"2.0","id":2,"method":"tracedecay/context","params":{"kind":"diagnostics","documentUri":"file:///root/a.rs"}}"#,
+        3,
+    );
+
+    let response: Value = serde_json::from_slice(&session.drain_outbound()[0]).unwrap();
+    assert_eq!(response["error"]["code"], -32603);
+    assert_eq!(
+        response["error"]["data"]["failureClass"],
+        "invalid-context-projection"
+    );
+}
+
+#[test]
 fn equal_generation_cannot_replace_a_different_projection_identity() {
     let mut session = session_with_context(IdentityDriftContext {
         requests: AtomicUsize::new(0),

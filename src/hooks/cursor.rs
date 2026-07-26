@@ -9,7 +9,6 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use super::cursor_shell::paths_same;
 use super::memory_inject;
 use super::post_tool_use::{captured_tool_output, trusted_tool_failure};
 use super::steering::{
@@ -37,6 +36,13 @@ const CURSOR_HOT_INGEST_BUDGET: Duration = Duration::from_millis(1_500);
 const CURSOR_SESSION_INGEST_BUDGET: Duration = Duration::from_secs(4);
 /// Budget for the end-of-turn `stop` catch-up ingest (registered with a 30s timeout).
 const CURSOR_STOP_INGEST_BUDGET: Duration = Duration::from_secs(25);
+
+fn paths_same(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
 
 const CURSOR_FILE_PATH_FIELDS: &[&str] = &[
     "file_path",
@@ -383,8 +389,8 @@ async fn cursor_session_context_for_root(root: Option<&Path>) -> String {
 
 /// Cursor `afterShellExecution` hook handler.
 ///
-/// Notifies the daemon after Cursor shell execution. The daemon decides whether
-/// the command requires branch tracking or coalesced incremental sync.
+/// Notifies the daemon that Cursor completed a shell action. Command text is
+/// not forwarded and cannot become Git or synchronization authority.
 pub async fn hook_cursor_after_shell() -> i32 {
     let event = read_hook_event!();
     let root = cursor_project_root_from_event_with_identity(&event).await;
@@ -759,10 +765,6 @@ async fn notify_cursor_after_shell_event(
     let Ok(parsed) = serde_json::from_str::<Value>(event_json) else {
         return;
     };
-    let command = parsed
-        .get("command")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
     let Some(root) = cursor_project_root_from_event_with_identity(event_json).await else {
         return;
     };
@@ -772,7 +774,7 @@ async fn notify_cursor_after_shell_event(
     let cwd = cursor_event_cwd(&parsed).unwrap_or_else(|| root.clone());
     super::notify_hook_event_with_telemetry(
         &root,
-        crate::daemon::DaemonHookEvent::cursor_after_shell_execution(command.to_string(), cwd)
+        crate::daemon::DaemonHookEvent::cursor_after_shell_execution(cwd)
             .with_route(hook_route_metadata_from_event(event_json, &root)),
         telemetry,
     )

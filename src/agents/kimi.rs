@@ -217,11 +217,7 @@ impl AgentIntegration for KimiIntegration {
             component,
             HostBundleComponentV1::ContextMcp | HostBundleComponentV1::OperatorMcp
         ) {
-            return if mcp_current {
-                State::Current
-            } else {
-                State::Repairable
-            };
+            return State::Missing;
         }
         let events = manifest
             .get("hooks")
@@ -269,6 +265,13 @@ impl AgentIntegration for KimiIntegration {
                 upsert_kimi_installed_entry(&code_home)
             }
         }
+    }
+
+    fn deactivate_deployed_host_registration(&self, ctx: &InstallContext) -> Result<()> {
+        let code_home = kimi_code_home(&ctx.home);
+        remove_kimi_installed_entry(&code_home);
+        prune_empty_kimi_plugin_dirs(&code_home, &ctx.tracedecay_bin)?;
+        Ok(())
     }
 
     fn has_tracedecay(&self, home: &Path) -> bool {
@@ -630,6 +633,43 @@ fn remove_kimi_plugin_dir(kimi_code_home: &Path) -> Result<()> {
         "\x1b[32m✔\x1b[0m Removed Kimi Code CLI plugin at {}",
         managed_dir.display()
     );
+    Ok(())
+}
+
+/// Remove only empty directories from the receipt-backed managed inventory.
+/// Artifact files are owned and removed by the component transaction; this
+/// cleanup never recursively deletes an unexpected file.
+fn prune_empty_kimi_plugin_dirs(kimi_code_home: &Path, tracedecay_bin: &str) -> Result<()> {
+    let managed_dir = kimi_plugin_managed_dir(kimi_code_home);
+    let mut directories = std::collections::BTreeSet::new();
+    directories.insert(managed_dir.clone());
+    for (relative, _) in rendered_plugin_files(tracedecay_bin)? {
+        let mut parent = Path::new(relative).parent();
+        while let Some(relative_dir) = parent.filter(|path| !path.as_os_str().is_empty()) {
+            directories.insert(managed_dir.join(relative_dir));
+            parent = relative_dir.parent();
+        }
+    }
+    let mut directories = directories.into_iter().collect::<Vec<_>>();
+    directories.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+    for directory in directories {
+        match std::fs::remove_dir(&directory) {
+            Ok(()) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
+                ) => {}
+            Err(error) => {
+                return Err(TraceDecayError::Config {
+                    message: format!(
+                        "failed to prune managed Kimi plugin directory {}: {error}",
+                        directory.display()
+                    ),
+                });
+            }
+        }
+    }
     Ok(())
 }
 

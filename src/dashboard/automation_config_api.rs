@@ -9,8 +9,8 @@ use super::DashboardState;
 use super::util::{JsonError, http_detail};
 use crate::automation::backend;
 use crate::automation::config::{
-    AutomationBackend, AutomationConfig, AutomationConfigPatch, clear_project_config,
-    effective_config, load_project_config, merge_project_config, save_project_config,
+    AutomationBackend, AutomationConfig, AutomationConfigPatch, apply_project_config_patch,
+    clear_project_config, effective_config, load_project_config, merge_project_config,
 };
 use crate::user_config::UserConfig;
 
@@ -31,27 +31,46 @@ pub(crate) async fn patch_config(
     reject_unselectable_backend(&patch)?;
     let global = UserConfig::load().automation;
     let current = load_project_or_error(&state).await?;
-    let project = merge_project_config(current, patch);
-    let effective = effective_config(&global, Some(&project)).map_err(|err| bad_request(&err))?;
-    save_project_config(&state.dashboard_root, &project)
-        .await
-        .map_err(|err| internal_error(&err))?;
-    state.reconcile_automation_scheduler();
-    Ok(Json(config_payload_value(
+    let candidate = merge_project_config(current, patch.clone());
+    effective_config(&global, Some(&candidate)).map_err(|err| bad_request(&err))?;
+    let global_for_write = global.clone();
+    let payload = super::automation_run_service::execute_dashboard_automation_write(
         &state,
-        &global,
-        Some(&project),
-        &effective,
-    )))
+        move |state| async move {
+            let (project, effective) =
+                apply_project_config_patch(&state.dashboard_root, &global_for_write, patch)
+                    .await
+                    .map_err(|err| err.to_string())?;
+            state.reconcile_automation_scheduler();
+            Ok(config_payload_value(
+                &state,
+                &global_for_write,
+                Some(&project),
+                &effective,
+            ))
+        },
+    )
+    .await
+    .map_err(|err| internal_error(&err))?;
+    Ok(Json(payload))
 }
 
 pub(crate) async fn reset_config(State(state): State<DashboardState>) -> ApiResult {
     let global = UserConfig::load().automation;
-    clear_project_config(&state.dashboard_root)
-        .await
-        .map_err(|err| internal_error(&err))?;
-    state.reconcile_automation_scheduler();
-    config_payload(&state, &global, None)
+    let payload = super::automation_run_service::execute_dashboard_automation_write(
+        &state,
+        move |state| async move {
+            clear_project_config(&state.dashboard_root)
+                .await
+                .map_err(|err| err.to_string())?;
+            state.reconcile_automation_scheduler();
+            let effective = effective_config(&global, None).map_err(|err| err.to_string())?;
+            Ok(config_payload_value(&state, &global, None, &effective))
+        },
+    )
+    .await
+    .map_err(|err| internal_error(&err))?;
+    Ok(Json(payload))
 }
 
 async fn load_project_or_error(

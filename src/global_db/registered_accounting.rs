@@ -147,13 +147,47 @@ impl RegisteredGlobalDb {
     pub(crate) async fn sum_savings(&self, project: Option<&str>, since: i64) -> SavingsTotal {
         let project =
             project.map(|path| RegisteredGlobalDb::canonical_project_key(Path::new(path)));
-        let Ok(snapshot) = self.read_snapshot().await else {
-            return SavingsTotal {
+        self.sum_savings_by_project_id(project.as_deref(), since)
+            .await
+    }
+
+    /// Same aggregation for an already-resolved canonical project identity.
+    /// Application read models use this to avoid reinterpreting identity as a path.
+    pub(crate) async fn sum_savings_by_project_id(
+        &self,
+        project_id: Option<&str>,
+        since: i64,
+    ) -> SavingsTotal {
+        self.sum_savings_by_project_id_checked(project_id, since)
+            .await
+            .unwrap_or(SavingsTotal {
                 saved_tokens: 0,
                 calls: 0,
-            };
-        };
-        let rows = match project.as_deref() {
+            })
+    }
+
+    /// Checked form used by denominator-safe read models. A failed read must
+    /// remain unavailable instead of becoming a trustworthy zero.
+    pub(crate) async fn sum_savings_by_project_id_checked(
+        &self,
+        project_id: Option<&str>,
+        since: i64,
+    ) -> Result<SavingsTotal, String> {
+        self.savings_totals_with_watermark(project_id, since)
+            .await
+            .map(|(totals, _)| totals)
+    }
+
+    pub(crate) async fn savings_totals_with_watermark(
+        &self,
+        project_id: Option<&str>,
+        since: i64,
+    ) -> Result<(SavingsTotal, i64), String> {
+        let snapshot = self
+            .read_snapshot()
+            .await
+            .map_err(|error| format!("failed to begin savings snapshot: {error}"))?;
+        let rows = match project_id {
             Some(project) => {
                 snapshot
                     .query(
@@ -161,7 +195,8 @@ impl RegisteredGlobalDb {
                                 WHEN before_tokens > after_tokens
                                 THEN before_tokens - after_tokens
                                 ELSE 0 END), 0),
-                                COUNT(*)
+                                COUNT(*),
+                                COALESCE(MAX(id), 0)
                          FROM savings_ledger
                          WHERE project_path = ?1 AND ts >= ?2",
                         crate::db::engine::params![project, since],
@@ -175,7 +210,8 @@ impl RegisteredGlobalDb {
                                 WHEN before_tokens > after_tokens
                                 THEN before_tokens - after_tokens
                                 ELSE 0 END), 0),
-                                COUNT(*)
+                                COUNT(*),
+                                COALESCE(MAX(id), 0)
                          FROM savings_ledger
                          WHERE ts >= ?1",
                         crate::db::engine::params![since],
@@ -183,22 +219,27 @@ impl RegisteredGlobalDb {
                     .await
             }
         };
-        let Ok(mut rows) = rows else {
-            return SavingsTotal {
-                saved_tokens: 0,
-                calls: 0,
-            };
-        };
-        match rows.next().await {
-            Ok(Some(row)) => SavingsTotal {
-                saved_tokens: row.get::<i64>(0).unwrap_or(0).max(0) as u64,
-                calls: row.get::<i64>(1).unwrap_or(0).max(0) as u64,
+        let mut rows = rows.map_err(|error| format!("failed to query savings totals: {error}"))?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|error| format!("failed to read savings totals: {error}"))?
+            .ok_or_else(|| "savings totals query returned no row".to_string())?;
+        Ok((
+            SavingsTotal {
+                saved_tokens: row
+                    .get::<i64>(0)
+                    .map_err(|error| format!("failed to decode saved tokens: {error}"))?
+                    .max(0) as u64,
+                calls: row
+                    .get::<i64>(1)
+                    .map_err(|error| format!("failed to decode savings calls: {error}"))?
+                    .max(0) as u64,
             },
-            _ => SavingsTotal {
-                saved_tokens: 0,
-                calls: 0,
-            },
-        }
+            row.get::<i64>(2)
+                .map_err(|error| format!("failed to decode savings watermark: {error}"))?
+                .max(0),
+        ))
     }
 
     pub(crate) async fn savings_history(
@@ -408,6 +449,29 @@ impl RegisteredGlobalDb {
 
     pub(crate) async fn total_tokens_since(&self, since: u64) -> Option<u64> {
         self.try_total_tokens_since(since).await.ok()
+    }
+
+    /// One-snapshot denominator and aggregate for the canonical turn store.
+    pub(crate) async fn accounting_totals_since(&self, since: u64) -> Option<(u64, u64, f64, i64)> {
+        let snapshot = self.read_snapshot().await.ok()?;
+        let mut rows = snapshot
+            .query(
+                "SELECT COUNT(*),
+                        COALESCE(SUM(input_tokens + output_tokens), 0),
+                        COALESCE(SUM(cost_usd), 0.0),
+                        COALESCE(MAX(timestamp), 0)
+                 FROM turns WHERE timestamp >= ?1",
+                crate::db::engine::params![since as i64],
+            )
+            .await
+            .ok()?;
+        let row = rows.next().await.ok()??;
+        Some((
+            row.get::<i64>(0).ok()?.max(0) as u64,
+            row.get::<i64>(1).ok()?.max(0) as u64,
+            row.get::<f64>(2).ok()?,
+            row.get::<i64>(3).ok()?.max(0),
+        ))
     }
 
     pub(crate) async fn try_token_breakdown_since(

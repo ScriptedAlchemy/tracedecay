@@ -40,6 +40,8 @@ vi.mock('sigma', () => ({
     }
 
     setCustomBBox() {}
+
+    resize() {}
     on() {}
     refresh() {
       sigmaState.refreshes += 1;

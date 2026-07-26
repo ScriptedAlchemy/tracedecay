@@ -8,6 +8,9 @@ use std::collections::BTreeSet;
 
 pub const MAX_DOCUMENT_DIAGNOSTICS: usize = 200;
 pub const MAX_DIAGNOSTIC_MESSAGE_BYTES: usize = 512;
+pub const MAX_DIAGNOSTIC_RELATED_INFORMATION: usize = 8;
+pub const MAX_DIAGNOSTIC_RELATED_MESSAGE_BYTES: usize = 256;
+pub const MAX_DIAGNOSTIC_URI_BYTES: usize = 2_048;
 pub const TRACEDECAY_DIAGNOSTIC_DATA_REVISION: u32 = 1;
 
 /// A zero-based LSP position using the negotiated UTF-16 encoding.
@@ -145,6 +148,17 @@ pub struct GatewayDiagnosticData {
     pub expansion_handle: String,
 }
 
+/// One already-authorized, source-free location related to a diagnostic.
+///
+/// The application projection owns authorization. This protocol type only
+/// enforces the bounded, credential-free wire contract.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct GatewayDiagnosticRelatedInformation {
+    pub uri: String,
+    pub range: LspRange,
+    pub message: String,
+}
+
 /// A protocol-facing diagnostic projection.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct GatewayDiagnostic {
@@ -152,8 +166,10 @@ pub struct GatewayDiagnostic {
     pub range: LspRange,
     pub severity: Option<DiagnosticSeverity>,
     pub code: Option<String>,
+    pub code_description_uri: Option<String>,
     pub message: String,
     pub source: DiagnosticSource,
+    pub related_information: Vec<GatewayDiagnosticRelatedInformation>,
     pub data: Option<GatewayDiagnosticData>,
 }
 
@@ -176,9 +192,51 @@ impl GatewayDiagnostic {
             self.source = lane;
             self.data = None;
         }
+        self.code_description_uri = self
+            .code_description_uri
+            .filter(|uri| safe_code_description_uri(uri));
+        self.related_information.retain_mut(|related| {
+            if !safe_related_uri(&related.uri) || related.range.start > related.range.end {
+                return false;
+            }
+            truncate_utf8(&mut related.message, MAX_DIAGNOSTIC_RELATED_MESSAGE_BYTES);
+            true
+        });
+        self.related_information
+            .truncate(MAX_DIAGNOSTIC_RELATED_INFORMATION);
         truncate_utf8(&mut self.message, MAX_DIAGNOSTIC_MESSAGE_BYTES);
         self
     }
+}
+
+pub(super) fn safe_code_description_uri(value: &str) -> bool {
+    if value.is_empty() || value.len() > MAX_DIAGNOSTIC_URI_BYTES {
+        return false;
+    }
+    let Ok(uri) = url::Url::parse(value) else {
+        return false;
+    };
+    uri.scheme() == "https"
+        && uri.host_str().is_some()
+        && uri.username().is_empty()
+        && uri.password().is_none()
+        && uri.port().is_none()
+        && uri.query().is_none()
+}
+
+pub(super) fn safe_related_uri(value: &str) -> bool {
+    if value.is_empty() || value.len() > MAX_DIAGNOSTIC_URI_BYTES {
+        return false;
+    }
+    let Ok(uri) = url::Url::parse(value) else {
+        return false;
+    };
+    uri.scheme() == "file"
+        && uri.username().is_empty()
+        && uri.password().is_none()
+        && uri.port().is_none()
+        && uri.query().is_none()
+        && uri.fragment().is_none()
 }
 
 /// The two document diagnostic-report shapes used by LSP 3.17 pull
@@ -388,7 +446,7 @@ fn utf16_column_to_byte_offset(
     }
 }
 
-fn truncate_utf8(value: &mut String, max_bytes: usize) {
+pub(super) fn truncate_utf8(value: &mut String, max_bytes: usize) {
     if value.len() <= max_bytes {
         return;
     }
@@ -418,8 +476,10 @@ mod tests {
             },
             severity: None,
             code: Some("test".into()),
+            code_description_uri: None,
             message: message.into(),
             source,
+            related_information: Vec::new(),
             data: None,
         }
     }
@@ -574,8 +634,10 @@ mod producer_source_tests {
             },
             severity: None,
             code: Some(source.wire_name().to_owned()),
+            code_description_uri: None,
             message: source.wire_name().to_owned(),
             source,
+            related_information: Vec::new(),
             data: None,
         }
     }

@@ -433,6 +433,14 @@ impl PhysicalRuntimeAttachment for GraphRuntimePhysicalAttachment {
         )
     }
 
+    fn storage_table_bytes(&self, reader_wait: Duration) -> Result<Vec<(String, u64)>, String> {
+        retained_storage_table_bytes(
+            GraphRuntimePhysicalAttachment::migration_sql_handle(self)
+                .map_err(|error| error.to_string())?,
+            reader_wait,
+        )
+    }
+
     fn run_bounded_incremental_compaction(
         &self,
         max_pages: u32,
@@ -560,6 +568,14 @@ impl PhysicalRuntimeAttachment for RepositoryRuntimePhysicalAttachment {
         )
     }
 
+    fn storage_table_bytes(&self, reader_wait: Duration) -> Result<Vec<(String, u64)>, String> {
+        retained_storage_table_bytes(
+            RepositoryRuntimePhysicalAttachment::migration_sql_handle(self)
+                .map_err(|error| error.to_string())?,
+            reader_wait,
+        )
+    }
+
     fn run_bounded_incremental_compaction(
         &self,
         max_pages: u32,
@@ -657,6 +673,20 @@ fn retained_storage_page_counts(
         sample.page_count,
         sample.freelist_pages,
     ))
+}
+
+fn retained_storage_table_bytes(
+    handle: tracedecay_rusqlite_runtime::migration_sql::MigrationSqlHandle,
+    reader_wait: Duration,
+) -> Result<Vec<(String, u64)>, String> {
+    let samples = handle
+        .read_only_clone()
+        .table_size_telemetry(reader_wait, || None)
+        .map_err(|error| error.to_string())?;
+    Ok(samples
+        .into_iter()
+        .map(|sample| (sample.table_name, sample.bytes))
+        .collect())
 }
 
 #[derive(Clone, Debug)]
