@@ -132,7 +132,6 @@ pub use retrieval_anchor::{
 };
 pub use runtime::*;
 pub use session::{
-    DerivedEvidenceMemberPageItemV1, DerivedEvidenceMemberPageV1,
     MAX_SESSION_SUMMARY_SOURCE_ANCHORS, MAX_SESSION_TEMPORAL_MIGRATION_BATCH_ITEMS,
     MAX_SESSION_TEMPORAL_PROJECTION_BATCH_ITEMS, MAX_SESSION_TEMPORAL_RETRIEVAL_PAGE_SIZE,
     SessionFrozenWatermarksV1, SessionGenerationActivateOperation, SessionGenerationActivatePermit,

@@ -2346,7 +2346,6 @@ fn fair_schedule_failure(
         SemanticProjectionScheduleErrorV1::QueueBytesCapacity { .. }
         | SemanticProjectionScheduleErrorV1::QueueBatchCapacity { .. }
         | SemanticProjectionScheduleErrorV1::SessionMemoryReservationTooLarge { .. }
-        | SemanticProjectionScheduleErrorV1::SessionMemoryCapacity { .. }
         | SemanticProjectionScheduleErrorV1::PublicationCapacity { .. }
         | SemanticProjectionScheduleErrorV1::PublicationAlreadyClaimed => {
             SemanticRuntimeScheduleFailureV1::Publication

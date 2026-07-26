@@ -9,11 +9,12 @@ use tracedecay_domain::{
 };
 
 use super::{
-    CLAUDE_SANITIZER_VERSION_V1, ClaudeRecordParseErrorV1, ClaudeRecordSanitizerV1,
-    ClaudeSanitizationOutcomeV1, ClaudeSanitizerPolicyV1, DetectionConfidenceV1,
-    MAX_OBSERVATION_RECORD_BYTES, OBSERVATION_SANITIZER_VERSION_V1, PrivacyDetectorV1,
-    PrivacySanitizerError, SanitizationActionV1, parse_claude_record_v1,
+    CLAUDE_SANITIZER_VERSION_V1, CODE_SOURCE_SANITIZER_VERSION_V1, ClaudeRecordParseErrorV1,
+    ClaudeRecordSanitizerV1, ClaudeSanitizationOutcomeV1, ClaudeSanitizerPolicyV1,
+    DetectionConfidenceV1, MAX_OBSERVATION_RECORD_BYTES, OBSERVATION_SANITIZER_VERSION_V1,
+    PrivacyDetectorV1, PrivacySanitizerError, SanitizationActionV1, parse_claude_record_v1,
     parse_normalized_observation_record_v1, parse_observation_record_v1,
+    sanitize_code_source_bytes,
 };
 
 fn identity_for(record: &[u8]) -> ClaudeObservationIdentityMaterialV1 {
@@ -74,6 +75,59 @@ fn generated_high_entropy_token() -> String {
     (0..48)
         .map(|index| char::from(ALPHABET[(index * 17) % ALPHABET.len()]))
         .collect()
+}
+
+#[test]
+fn code_source_sanitizer_redacts_and_issues_raw_bound_receipts() {
+    let first_secret = ["sk", "-test-", "1234567890abcdef"].concat();
+    let second_secret = ["sk", "-test-", "abcdef1234567890"].concat();
+    assert_eq!(first_secret.len(), second_secret.len());
+    let source = |secret: &str| format!("pub const TOKEN: &str = \"{secret}\";\n");
+
+    let first = sanitize_code_source_bytes(source(&first_secret).as_bytes())
+        .expect("sanitize first code source");
+    let replay = sanitize_code_source_bytes(source(&first_secret).as_bytes())
+        .expect("replay first code source");
+    let second = sanitize_code_source_bytes(source(&second_secret).as_bytes())
+        .expect("sanitize second code source");
+
+    assert!(!String::from_utf8_lossy(first.sanitized_bytes()).contains(&first_secret));
+    assert_eq!(first.sanitized_bytes(), second.sanitized_bytes());
+    assert_eq!(
+        first.receipt().receipt().sanitizer_version().as_str(),
+        CODE_SOURCE_SANITIZER_VERSION_V1
+    );
+    assert!(
+        first
+            .receipt()
+            .receipt()
+            .receipt_id()
+            .as_str()
+            .starts_with("privacy.code-source.v1.")
+    );
+    assert_eq!(
+        first.receipt().disposition(),
+        SanitizerDispositionV1::Redacted
+    );
+    assert_eq!(first.receipt().sensitivity(), SensitivityV1::Secret);
+    assert_eq!(
+        first.receipt().payload(),
+        Some(
+            &PayloadReferenceV1::for_payload(&Value::String(
+                String::from_utf8(first.sanitized_bytes().to_vec()).expect("sanitized UTF-8"),
+            ))
+            .expect("sanitized payload reference"),
+        )
+    );
+    assert_eq!(
+        first.receipt().receipt().receipt_id(),
+        replay.receipt().receipt().receipt_id()
+    );
+    assert_ne!(
+        first.receipt().receipt().receipt_id(),
+        second.receipt().receipt().receipt_id(),
+        "equal sanitized output from different raw secrets needs distinct scan evidence"
+    );
 }
 
 #[test]
