@@ -60,13 +60,7 @@ pub(in crate::db::memory_v2) async fn purge_memory_v2_fact(
         occurred_at,
     )
     .await;
-    let purged = finish_transaction(transaction, result, "memory_v2_purge").await?;
-    if purged {
-        conn.execute_batch("PRAGMA incremental_vacuum(64)")
-            .await
-            .map_err(|error| db_error("memory_v2_purge", error))?;
-    }
-    Ok(purged)
+    finish_transaction(transaction, result, "memory_v2_purge").await
 }
 
 #[allow(clippy::too_many_arguments)]
