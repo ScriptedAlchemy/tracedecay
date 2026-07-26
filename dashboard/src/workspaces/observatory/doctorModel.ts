@@ -1,26 +1,21 @@
 import type {
+  DashboardDoctorRemediationDescriptorV1,
   DoctorEvidenceState,
   DoctorFindingFamily,
-  DoctorRemediationAuthorityScope,
-  DoctorRemediationDescriptor,
   DoctorRemediationOperation,
   DoctorReportEntry,
   WireScope,
   WireLegalActionRef,
 } from '../../contracts/wire.ts';
-import {
-  DoctorRemediationAuthorityScopeSchema,
-  ScopeSchema,
-} from '../../contracts/wire.ts';
+import { ScopeSchema } from '../../contracts/wire.ts';
 import { z } from 'zod';
 import type { DomainStateKind } from '../../ui/StateChip.tsx';
 
-const ACTIVE_OPERATION_KEY = 'tracedecay.doctor.active-operation.v2';
+const ACTIVE_OPERATION_KEY = 'tracedecay.doctor.active-operation.v3';
 const ActiveDoctorOperationSchema = z.object({
-  schema_revision: z.literal(2),
+  schema_revision: z.literal(3),
   operation_id: z.string(),
   transport_scope: ScopeSchema,
-  authority_scope: DoctorRemediationAuthorityScopeSchema,
 });
 
 export type ActiveDoctorOperation = z.infer<typeof ActiveDoctorOperationSchema>;
@@ -67,8 +62,8 @@ export function doctorEvidencePresentation(state: DoctorEvidenceState) {
 
 export function remediationForEntry(
   entry: DoctorReportEntry,
-  descriptors: DoctorRemediationDescriptor[],
-): DoctorRemediationDescriptor | undefined {
+  descriptors: DashboardDoctorRemediationDescriptorV1[],
+): DashboardDoctorRemediationDescriptorV1 | undefined {
   const operation = entry.finding.remediation?.owning_operation;
   return operation
     ? descriptors.find((descriptor) => descriptor.operation === operation)
@@ -76,7 +71,7 @@ export function remediationForEntry(
 }
 
 export function availableRemediationActions(
-  descriptor: DoctorRemediationDescriptor,
+  descriptor: DashboardDoctorRemediationDescriptorV1,
   legalActions: WireLegalActionRef[],
 ): { canPreview: boolean; canApply: boolean } {
   const exactKinds = new Set(
@@ -127,31 +122,6 @@ export function sameDoctorScope(left: WireScope, right: WireScope): boolean {
     left.storage_mode === right.storage_mode &&
     left.store_root === right.store_root
   );
-}
-
-export function sameDoctorAuthorityScope(
-  left: DoctorRemediationAuthorityScope,
-  right: DoctorRemediationAuthorityScope,
-): boolean {
-  if (left.scope_kind !== right.scope_kind) return false;
-  if (left.scope_kind === 'profile' && right.scope_kind === 'profile') {
-    return (
-      left.brain_id === right.brain_id &&
-      left.profile_id === right.profile_id &&
-      left.profile_sessions_binding_digest === right.profile_sessions_binding_digest &&
-      left.scope_digest === right.scope_digest
-    );
-  }
-  if (left.scope_kind === 'project' && right.scope_kind === 'project') {
-    return (
-      left.project_id === right.project_id &&
-      left.repository_id === right.repository_id &&
-      left.worktree_id === right.worktree_id &&
-      left.reference === right.reference &&
-      left.scope_digest === right.scope_digest
-    );
-  }
-  return false;
 }
 
 function browserStorage(): Storage | undefined {

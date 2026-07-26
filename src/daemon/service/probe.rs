@@ -78,7 +78,7 @@ impl std::fmt::Display for DaemonProtocolState {
                 "identity mismatch (name={}, version={}, expected name=tracedecay, version={})",
                 name.as_deref().unwrap_or("missing"),
                 version.as_deref().unwrap_or("missing"),
-                env!("CARGO_PKG_VERSION")
+                crate::version::build_version()
             ),
         }
     }
@@ -89,7 +89,7 @@ pub(super) fn daemon_protocol_state(socket_path: &Path) -> DaemonProtocolState {
     match query_daemon_identity(socket_path) {
         Ok((name, version))
             if name.as_deref() == Some("tracedecay")
-                && version.as_deref() == Some(env!("CARGO_PKG_VERSION")) =>
+                && version.as_deref() == Some(crate::version::build_version()) =>
         {
             DaemonProtocolState::Ready
         }

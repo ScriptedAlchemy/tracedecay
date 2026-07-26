@@ -1230,7 +1230,7 @@ async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
     let standalone_automation = automation_mode == "standalone_backend";
     Json(json!({
         "name": "tracedecay-dashboard",
-        "version": env!("CARGO_PKG_VERSION"),
+        "version": crate::version::build_version(),
         "mode": "standalone",
         "project_id": state.project_id,
         "project_root": state.project_root.display().to_string(),

@@ -52,18 +52,33 @@ pub(crate) struct StorageFindingKindStatusV1 {
     pub reason: String,
 }
 
+/// Route-specific payload for `/api/storage/findings`.
+///
+/// Storage producer coverage is required here rather than an optional field on
+/// the general Doctor payload, so generated consumers cannot mistake one route
+/// for the other.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub(crate) struct StorageFindingsPayloadV1 {
+    #[serde(flatten)]
+    pub findings: DoctorFindingsPayloadV1,
+    pub kind_statuses: Vec<StorageFindingKindStatusV1>,
+}
+
 /// `GET /api/storage/findings`
 pub(crate) async fn findings(
     State(state): State<DashboardState>,
-) -> Json<DashboardEnvelopeV1<DoctorFindingsPayloadV1>> {
+) -> Json<DashboardEnvelopeV1<StorageFindingsPayloadV1>> {
     let budget = budget_source_summary(&state).await;
-    let mut envelope = super::doctor_findings_api::findings_for_family(
+    let envelope = super::doctor_findings_api::findings_for_family(
         state,
         Some(DoctorFindingFamilyV1::Storage),
     )
     .await;
-    envelope.payload.kind_statuses = Some(storage_kind_statuses(&envelope.payload, budget));
-    Json(envelope)
+    let kind_statuses = storage_kind_statuses(&envelope.payload, budget);
+    Json(envelope.map_payload(|findings| StorageFindingsPayloadV1 {
+        findings,
+        kind_statuses,
+    }))
 }
 
 fn storage_kind_statuses(
@@ -308,19 +323,15 @@ mod tests {
         let Json(envelope) = findings(State(state)).await;
 
         assert_eq!(
-            envelope.payload.family_filter,
+            envelope.payload.findings.family_filter,
             Some(DoctorFindingFamilyV1::Storage)
         );
         assert_eq!(
             envelope.domain_state,
             super::super::read_model::DashboardDomainStateV1::Unsupported
         );
-        assert!(envelope.payload.entries.is_empty());
-        let statuses = envelope
-            .payload
-            .kind_statuses
-            .as_ref()
-            .expect("storage route names every producer source");
+        assert!(envelope.payload.findings.entries.is_empty());
+        let statuses = &envelope.payload.kind_statuses;
         assert_eq!(statuses.len(), STORAGE_KINDS.len());
         assert_eq!(
             statuses[0].state,
