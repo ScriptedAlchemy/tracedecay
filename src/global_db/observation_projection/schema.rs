@@ -1,6 +1,6 @@
 use tracedecay_store::SESSION_MESSAGE_PROJECTOR_VERSION_V4;
 
-use crate::db::engine::{Error, Executor, QueryExecutor, params};
+use crate::db::engine::{Connection, Error, Executor, QueryExecutor, params};
 
 const PROJECTION_ANCHOR_BACKFILL_PAGE_ROWS: i64 = 256;
 const LEGACY_PROJECTION_PROVENANCE_TABLE_SQL: &str =
@@ -280,11 +280,14 @@ pub(in super::super) async fn ensure_observation_projection_schema(
 }
 
 pub(in super::super) async fn ensure_observation_projection_performance_indexes(
-    conn: &impl Executor,
+    conn: &Connection,
 ) -> Result<(), Error> {
     // Install each historical-data index as its own durable schema step. These
     // cannot share the lease-bounded all-schema transaction: an interrupted
-    // later build would otherwise roll back every earlier completed build.
+    // later build would otherwise roll back every earlier completed build. The
+    // explicit schema-step API keeps shutdown cancellation while allowing one
+    // real-scale SQLite index build to use the schema transaction's fixed
+    // 120-second lease instead of the ordinary 30-second statement deadline.
     for sql in [
         "CREATE INDEX IF NOT EXISTS idx_observation_projection_provenance_output
          ON observation_projection_provenance
@@ -314,10 +317,14 @@ pub(in super::super) async fn ensure_observation_projection_performance_indexes(
             WHERE retrieval_anchor_id IS NULL;",
         "CREATE INDEX IF NOT EXISTS idx_observations_identity_receipt
          ON observations (observation_id, receipt_id);",
+        "CREATE INDEX IF NOT EXISTS idx_observations_receipt_id
+         ON observations (receipt_id);",
         "CREATE INDEX IF NOT EXISTS idx_projection_dispositions_observation_receipt
          ON observation_projection_dispositions (observation_id, receipt_id);",
     ] {
-        conn.execute_batch(sql).await?;
+        let transaction = conn.schema_migration_transaction().await?;
+        transaction.execute_schema_batch_step(sql).await?;
+        transaction.commit().await?;
     }
     Ok(())
 }
@@ -1250,6 +1257,7 @@ mod tests {
              DROP INDEX idx_observation_projection_provenance_pending_anchor;
              DROP INDEX idx_observation_workflow_facts_pending_anchor;
              DROP INDEX idx_observations_identity_receipt;
+             DROP INDEX idx_observations_receipt_id;
              DROP INDEX idx_projection_dispositions_observation_receipt;",
         )
         .await
@@ -1275,6 +1283,7 @@ mod tests {
                     'idx_observation_projection_provenance_pending_anchor',
                     'idx_observation_workflow_facts_pending_anchor',
                     'idx_observations_identity_receipt',
+                    'idx_observations_receipt_id',
                     'idx_projection_dispositions_observation_receipt'
                  )",
                 (),
