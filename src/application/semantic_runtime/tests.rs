@@ -344,6 +344,7 @@ mod config_backend_tests {
             query_count: 0,
             failed_queries: 0,
             fallback_stable: true,
+            fallback_matches_expected: true,
             cancellation_bounded: true,
             offline: true,
             resource_status: DirectEvaluationStatusV1::Pass,
