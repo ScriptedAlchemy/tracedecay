@@ -7,10 +7,12 @@ use std::time::Duration;
 use tempfile::TempDir;
 use tracedecay_application::{
     CallableCodeOperationKind, CallableCodeQueryPort, CancellationContext, CapabilityGrantSnapshot,
-    CodeQueryScope, CodeRelationRequest, CodeSymbolSearchRequest, Deadline, DisclosureClass,
-    ExactOccurrenceRequest, OmissionReason, PageRequest, PhraseSearchRequest, RequestContext,
-    RequestId, ResolvedScope, ResultProjection, RetrievalOrder, RetrievalPortContext,
-    RetrievalPortOutcome, RetrievalRequestMeta, callable_code_operation,
+    CodeFacetDimension, CodeFacetRequest, CodeNavigationRequest, CodeQueryScope,
+    CodeRelationRequest, CodeSymbolSearchRequest, CodeTimelineRequest, Deadline, DisclosureClass,
+    ExactOccurrenceRequest, OmissionReason, OpaqueCursor, PageRequest, PhraseSearchRequest,
+    QualifiedNameRequest, RequestContext, RequestId, ResolvedScope, ResultProjection,
+    RetrievalOrder, RetrievalPortContext, RetrievalPortOutcome, RetrievalRequestMeta,
+    SourceMetadataRequest, callable_code_operation,
 };
 use tracedecay_domain::{
     ActorId, AuthorizationRevision, CalibrationProfileId, CommitId, ComponentRevision,
@@ -409,15 +411,17 @@ async fn registry_feeds_publications_and_bounded_freshness_reads() {
         fixture.path().canonicalize().expect("canonical fixture")
     );
 
-    let freshness = registry.freshness_snapshot().await;
-    assert_eq!(freshness.len(), 1);
+    let freshness = registry
+        .dashboard_freshness(fixture.path())
+        .await
+        .expect("dashboard freshness");
     assert_eq!(
-        freshness[0].latest_generation_id.as_ref(),
-        Some(&initial.generation_id)
+        freshness.latest_generation_id.as_deref(),
+        Some(initial.generation_id.as_str())
     );
-    assert!(freshness[0].last_reconcile_micros.is_some());
-    assert_eq!(freshness[0].staleness_state, "fresh");
-    assert_eq!(freshness[0].hook_hint_count, Some(0));
+    assert!(freshness.last_reconcile_micros.is_some());
+    assert_eq!(freshness.staleness_state.as_deref(), Some("fresh"));
+    assert_eq!(freshness.hook_hint_count, Some(0));
 
     fixture.edit("src/lib.rs", "pub fn alpha() -> u32 { 2 }\n");
     assert!(
@@ -678,8 +682,22 @@ fn cross_worktree_byte_reuse_without_identity_alias() {
         "publication identity remains generation-local"
     );
 
-    write(&linked, "src/lib.rs", "pub fn shared() -> u32 { 8 }\n");
+    git(&linked, &["mv", "src/lib.rs", "src/renamed.rs"]);
     second_scheduler.notify_path(linked.join("src/lib.rs"));
+    second_scheduler.notify_path(linked.join("src/renamed.rs"));
+    published(
+        second_scheduler
+            .reconcile_now()
+            .expect("renamed linked-worktree publish"),
+    );
+    let after_rename = registry.byte_pool_stats();
+    assert_eq!(
+        after_rename.parse_chunk_reused, reuse.parse_chunk_reused,
+        "same content at a new logical path must not reuse path-bound parse/chunk artifacts"
+    );
+
+    write(&linked, "src/renamed.rs", "pub fn shared() -> u32 { 8 }\n");
+    second_scheduler.notify_path(linked.join("src/renamed.rs"));
     published(
         second_scheduler
             .reconcile_now()
@@ -687,7 +705,7 @@ fn cross_worktree_byte_reuse_without_identity_alias() {
     );
     let after_edit = registry.byte_pool_stats();
     assert_eq!(
-        after_edit.parse_chunk_reused, reuse.parse_chunk_reused,
+        after_edit.parse_chunk_reused, after_rename.parse_chunk_reused,
         "changed source content must not reuse the prior parse/chunk artifact"
     );
     assert_eq!(
@@ -892,6 +910,34 @@ async fn bundled_pr9_profile_composes_live_code_index_lanes() {
         "live main symbol is returned"
     );
     registry.shutdown().await;
+}
+
+#[tokio::test]
+async fn dashboard_freshness_projects_the_mounted_scheduler_generation() {
+    let fixture = GitFixture::new(&[("src/main.rs", "fn main() {}\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(fixture.path(), store.path().to_path_buf(), None)
+        .await
+        .expect("mount daemon-owned scheduler");
+    wait_for_initial_generation(&registry, fixture.path()).await;
+
+    let projected = registry
+        .dashboard_freshness(fixture.path())
+        .await
+        .expect("mounted scheduler projection");
+    let latest = registry
+        .latest_complete_fresh(fixture.path())
+        .await
+        .expect("latest generation");
+
+    assert_eq!(
+        projected.latest_generation_id.as_deref(),
+        Some(latest.generation.manifest().generation_id.as_str())
+    );
+    assert_eq!(projected.staleness_state.as_deref(), Some("fresh"));
+    assert_eq!(projected.coverage, "complete");
 }
 
 #[test]
@@ -1587,10 +1633,15 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
             &exact_request,
         )
         .await;
+    assert!(
+        exact.evidence().finished_at > latest.generation.manifest().seal.sealed_at,
+        "query completion time must not reuse the generation seal time"
+    );
     assert_eq!(
-        serde_json::to_vec(exact.evidence()).expect("serialize exact evidence"),
-        serde_json::to_vec(exact_repeat.evidence()).expect("serialize repeated exact evidence"),
-        "same generation and request produce byte-stable production evidence"
+        serde_json::to_vec(&exact.evidence().payload).expect("serialize exact payload"),
+        serde_json::to_vec(&exact_repeat.evidence().payload)
+            .expect("serialize repeated exact payload"),
+        "same generation and request produce byte-stable production query payload"
     );
     match exact {
         RetrievalPortOutcome::Completed(evidence) => {
@@ -1617,6 +1668,8 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
     let lexical_request = PhraseSearchRequest::new(
         query,
         vec!["callee".to_owned()],
+        Vec::new(),
+        0,
         scope.clone(),
         query_meta(),
     )
@@ -1654,7 +1707,7 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
         .to_owned();
     let graph_operation =
         callable_code_operation(CallableCodeOperationKind::Callees).expect("operation");
-    let graph_context = application_context(&graph_operation, repository, worktree);
+    let graph_context = application_context(&graph_operation, repository.clone(), worktree.clone());
     let graph_request = CodeRelationRequest {
         node_id: caller,
         maximum_depth: 2,
@@ -1682,6 +1735,181 @@ async fn callable_application_operations_consume_exact_lexical_and_graph_owners(
         }
         outcome => panic!("expected completed graph operation, got {outcome:?}"),
     }
+
+    let qualified_name = latest
+        .generation
+        .symbols()
+        .symbols
+        .iter()
+        .find(|record| record.qualified_name.ends_with("callee"))
+        .expect("callee symbol")
+        .qualified_name
+        .clone();
+    let qualified_operation =
+        callable_code_operation(CallableCodeOperationKind::QualifiedName).expect("operation");
+    let qualified_context =
+        application_context(&qualified_operation, repository.clone(), worktree.clone());
+    let qualified_request = QualifiedNameRequest {
+        qualified_name,
+        scope: graph_request.scope.clone(),
+        meta: query_meta(),
+    };
+    let qualified = registry
+        .qualified_name(
+            RetrievalPortContext {
+                request: &qualified_context,
+                operation: &qualified_operation,
+            },
+            &qualified_request,
+        )
+        .await;
+    assert_eq!(
+        qualified
+            .evidence()
+            .payload
+            .as_ref()
+            .expect("qualified page")
+            .items
+            .len(),
+        1
+    );
+
+    let file = latest.generation.snapshot().files[0]
+        .file_occurrence_id
+        .clone();
+    let metadata_operation =
+        callable_code_operation(CallableCodeOperationKind::SourceMetadata).expect("operation");
+    let metadata_context = application_context(&metadata_operation, repository, worktree);
+    let metadata_request =
+        SourceMetadataRequest::new(vec![file], graph_request.scope.clone(), query_meta())
+            .expect("metadata request");
+    let metadata = registry
+        .source_metadata(
+            RetrievalPortContext {
+                request: &metadata_context,
+                operation: &metadata_operation,
+            },
+            &metadata_request,
+        )
+        .await;
+    let metadata_page = metadata.evidence().payload.as_ref().expect("metadata page");
+    assert_eq!(metadata_page.items[0].path, "src/lib.rs");
+    assert_eq!(metadata_page.items[0].language.as_deref(), Some("rust"));
+
+    let facets_operation =
+        callable_code_operation(CallableCodeOperationKind::Facets).expect("operation");
+    let facets_context = application_context(
+        &facets_operation,
+        latest.generation.snapshot().repository.clone(),
+        latest
+            .generation
+            .snapshot()
+            .worktree
+            .clone()
+            .expect("worktree"),
+    );
+    let facets = registry
+        .facets(
+            RetrievalPortContext {
+                request: &facets_context,
+                operation: &facets_operation,
+            },
+            &CodeFacetRequest {
+                dimension: CodeFacetDimension::Kind,
+                scope: graph_request.scope.clone(),
+                meta: query_meta(),
+            },
+        )
+        .await;
+    assert!(
+        !facets
+            .evidence()
+            .payload
+            .as_ref()
+            .expect("facet page")
+            .items
+            .is_empty()
+    );
+
+    let timeline_operation =
+        callable_code_operation(CallableCodeOperationKind::Timeline).expect("operation");
+    let timeline_context = application_context(
+        &timeline_operation,
+        latest.generation.snapshot().repository.clone(),
+        latest
+            .generation
+            .snapshot()
+            .worktree
+            .clone()
+            .expect("worktree"),
+    );
+    let timeline = registry
+        .timeline(
+            RetrievalPortContext {
+                request: &timeline_context,
+                operation: &timeline_operation,
+            },
+            &CodeTimelineRequest {
+                scope: graph_request.scope.clone(),
+                meta: query_meta(),
+            },
+        )
+        .await;
+    assert_eq!(
+        timeline
+            .evidence()
+            .payload
+            .as_ref()
+            .expect("timeline page")
+            .items
+            .len(),
+        1
+    );
+
+    let callee = latest
+        .generation
+        .symbols()
+        .symbols
+        .iter()
+        .find(|record| record.qualified_name.ends_with("callee"))
+        .expect("callee")
+        .occurrence
+        .as_str()
+        .to_owned();
+    let references_operation =
+        callable_code_operation(CallableCodeOperationKind::References).expect("operation");
+    let references_context = application_context(
+        &references_operation,
+        latest.generation.snapshot().repository.clone(),
+        latest
+            .generation
+            .snapshot()
+            .worktree
+            .clone()
+            .expect("worktree"),
+    );
+    let references = registry
+        .references(
+            RetrievalPortContext {
+                request: &references_context,
+                operation: &references_operation,
+            },
+            &CodeNavigationRequest {
+                node_id: callee,
+                scope: graph_request.scope.clone(),
+                meta: query_meta(),
+            },
+        )
+        .await;
+    assert!(
+        !references
+            .evidence()
+            .payload
+            .as_ref()
+            .expect("references page")
+            .items
+            .is_empty()
+    );
 
     registry.shutdown().await;
 }
@@ -2449,6 +2677,155 @@ async fn unpinned_query_resolves_exact_admitted_worktree_scope() {
 }
 
 #[tokio::test]
+async fn unpinned_cursor_continues_on_its_immutable_generation() {
+    let fixture = GitFixture::new(&[(
+        "src/lib.rs",
+        "mod a { pub fn shared() {} }\nmod b { pub fn shared() {} }\nmod c { pub fn shared() {} }\n",
+    )]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(fixture.path(), store.path().to_path_buf(), None)
+        .await
+        .expect("mount worktree");
+    wait_for_initial_generation(&registry, fixture.path()).await;
+    let initial = registry
+        .latest_complete_fresh(fixture.path())
+        .await
+        .expect("initial generation");
+    let operation =
+        callable_code_operation(CallableCodeOperationKind::ExactOccurrence).expect("operation");
+    let context = application_context(
+        &operation,
+        initial.generation.snapshot().repository.clone(),
+        initial
+            .generation
+            .snapshot()
+            .worktree
+            .clone()
+            .expect("worktree identity"),
+    );
+    mount_query_authority(
+        &registry,
+        fixture.path(),
+        &context,
+        initial.generation.manifest().privacy_domain.clone(),
+    )
+    .await;
+    let scope =
+        CodeQueryScope::new(super::queries::unpinned_latest_generation(), None).expect("scope");
+    let first_request = ExactOccurrenceRequest::new(
+        "shared",
+        None,
+        scope.clone(),
+        RetrievalRequestMeta::current(
+            PageRequest::first(1).expect("first page"),
+            ResultProjection::Evidence,
+            RetrievalOrder::Relevance,
+        ),
+    )
+    .expect("first request");
+    let first = registry
+        .exact_occurrence(
+            RetrievalPortContext {
+                request: &context,
+                operation: &operation,
+            },
+            &first_request,
+        )
+        .await;
+    let first_page = match first {
+        RetrievalPortOutcome::Completed(evidence) => evidence.payload.expect("first page"),
+        other => panic!("expected first page, got {other:?}"),
+    };
+    let cursor = first_page.next_cursor.clone().expect("continuation cursor");
+    let original_generation = first_page.generation.clone();
+
+    let encoded = cursor
+        .as_str()
+        .strip_prefix("ccq1.")
+        .expect("callable cursor prefix");
+    let mut tampered: serde_json::Value =
+        serde_json::from_slice(&hex::decode(encoded).expect("cursor hex")).expect("cursor JSON");
+    tampered["payload"]["expires_at"] = serde_json::json!(0);
+    let tampered = OpaqueCursor::new(format!(
+        "ccq1.{}",
+        hex::encode(serde_json::to_vec(&tampered).expect("tampered cursor JSON"))
+    ))
+    .expect("tampered cursor");
+    let tampered_request = ExactOccurrenceRequest::new(
+        "shared",
+        None,
+        scope.clone(),
+        RetrievalRequestMeta::current(
+            PageRequest::new(1, Some(tampered)).expect("tampered continuation page"),
+            ResultProjection::Evidence,
+            RetrievalOrder::Relevance,
+        ),
+    )
+    .expect("tampered continuation request");
+    let tampered_outcome = registry
+        .exact_occurrence(
+            RetrievalPortContext {
+                request: &context,
+                operation: &operation,
+            },
+            &tampered_request,
+        )
+        .await;
+    let RetrievalPortOutcome::Unavailable(tampered_evidence) = tampered_outcome else {
+        panic!("tampered cursor must be rejected");
+    };
+    assert_eq!(
+        tampered_evidence.omissions[0].reason,
+        OmissionReason::Failed,
+        "MAC verification must precede expiry and other binding diagnostics"
+    );
+
+    fixture.edit(
+        "src/lib.rs",
+        "mod a { pub fn shared() {} }\nmod b { pub fn shared() {} }\nmod c { pub fn shared() {} }\npub fn unrelated() {}\n",
+    );
+    git(fixture.path(), &["commit", "-qam", "refresh"]);
+    let refreshed = registry
+        .latest_complete_fresh(fixture.path())
+        .await
+        .expect("refreshed generation");
+    assert_ne!(
+        refreshed.generation.manifest().generation_id,
+        original_generation
+    );
+
+    let continuation_request = ExactOccurrenceRequest::new(
+        "shared",
+        None,
+        scope,
+        RetrievalRequestMeta::current(
+            PageRequest::new(1, Some(cursor)).expect("continuation page"),
+            ResultProjection::Evidence,
+            RetrievalOrder::Relevance,
+        ),
+    )
+    .expect("continuation request");
+    let continuation = registry
+        .exact_occurrence(
+            RetrievalPortContext {
+                request: &context,
+                operation: &operation,
+            },
+            &continuation_request,
+        )
+        .await;
+    let continuation_page = match continuation {
+        RetrievalPortOutcome::Completed(evidence) => evidence.payload.expect("continuation page"),
+        other => panic!("expected continuation page, got {other:?}"),
+    };
+    assert_eq!(continuation_page.generation, original_generation);
+    assert_eq!(continuation_page.items.len(), 1);
+    registry.shutdown().await;
+}
+
+#[tokio::test]
 async fn pinned_generation_from_another_worktree_is_unavailable() {
     let owner = GitFixture::new(&[("src/lib.rs", "pub fn owner_only() {}\n")]);
     let requester = GitFixture::new(&[("src/lib.rs", "pub fn requester_only() {}\n")]);
@@ -2955,6 +3332,10 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
                 severity: DiagnosticSeverityV1::Information,
                 safe_bounded_message: "Unresolved GitHub review comment".to_owned(),
                 producer: FeedbackDiagnosticProducerV1::GitHubReview,
+                code_description_uri: Some(
+                    "https://github.com/ScriptedAlchemy/tracedecay/pull/13#discussion_r1"
+                        .to_owned(),
+                ),
             }),
         }],
         total_findings: 1,

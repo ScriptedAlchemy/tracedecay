@@ -12,6 +12,11 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+pub use tracedecay_domain::{
+    EmbeddingDeviceClassV1 as DeviceClassV1, EmbeddingMetricV1 as SemanticMetricV1,
+    EmbeddingNormalizationV1, EmbeddingPoolingV1, EmbeddingPrecisionV1,
+    EmbeddingTruncationSideV1 as TruncationSideV1,
+};
 
 /// Schema marker pinned into every V1 manifest payload.
 pub const MODEL_ARTIFACT_MANIFEST_SCHEMA_V1: &str = "tracedecay.model-artifact-manifest.v1";
@@ -79,65 +84,6 @@ pub enum ArtifactProfileKindV1 {
     Reranker,
 }
 
-/// Canonical vector distance metric pinned by the projection identity.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SemanticMetricV1 {
-    #[serde(alias = "Cosine")]
-    Cosine,
-    #[serde(alias = "DotProduct")]
-    DotProduct,
-    #[serde(alias = "EuclideanL2")]
-    EuclideanL2,
-}
-
-/// Output-vector normalization pinned by the projection identity.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EmbeddingNormalizationV1 {
-    #[serde(alias = "None")]
-    None,
-    #[serde(alias = "L2")]
-    L2,
-}
-
-/// Token-to-vector pooling pinned by the projection identity.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EmbeddingPoolingV1 {
-    #[serde(alias = "Mean")]
-    Mean,
-    #[serde(alias = "Cls")]
-    Cls,
-    #[serde(alias = "LastToken")]
-    LastToken,
-    #[serde(alias = "MeanSqrtLength")]
-    MeanSqrtLength,
-}
-
-/// Numeric precision / quantization of the artifact weights.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EmbeddingPrecisionV1 {
-    #[serde(alias = "Fp32")]
-    Fp32,
-    #[serde(alias = "Fp16")]
-    Fp16,
-    #[serde(alias = "Bf16")]
-    Bf16,
-    #[serde(alias = "Int8")]
-    Int8,
-}
-
-/// Deterministic device class. PR10 admits CPU only; accelerator classes are
-/// later measured candidate profiles, not defaults.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DeviceClassV1 {
-    #[serde(alias = "Cpu")]
-    Cpu,
-}
-
 /// Truncation policy: side and maximum token length, both part of the
 /// projection identity (changing either creates a new projection generation).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -145,15 +91,6 @@ pub enum DeviceClassV1 {
 pub struct TruncationPolicyV1 {
     pub side: TruncationSideV1,
     pub max_length: u32,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TruncationSideV1 {
-    #[serde(alias = "Left")]
-    Left,
-    #[serde(alias = "Right")]
-    Right,
 }
 
 /// Digest + byte length pin for the primary model member. The complete package
@@ -563,32 +500,23 @@ mod tests {
     }
 
     #[test]
+    fn manifest_uses_domain_embedding_vocabulary_directly() {
+        let payload = sample_payload();
+
+        let _: tracedecay_domain::EmbeddingMetricV1 = payload.metric;
+        let _: tracedecay_domain::EmbeddingNormalizationV1 = payload.normalization;
+        let _: tracedecay_domain::EmbeddingPoolingV1 = payload.pooling;
+        let _: tracedecay_domain::EmbeddingTruncationSideV1 = payload.truncation.side;
+        let _: tracedecay_domain::EmbeddingPrecisionV1 = payload.precision;
+        let _: tracedecay_domain::EmbeddingDeviceClassV1 = payload.device;
+    }
+
+    #[test]
     fn manifest_round_trip_preserves_every_field() {
         let manifest = sample_manifest();
         let bytes = manifest.to_canonical_bytes();
         let parsed = ModelArtifactManifestV1::parse(&bytes).unwrap();
         assert_eq!(manifest, parsed);
-    }
-
-    #[test]
-    fn embedding_enums_write_snake_case_and_read_legacy_names() {
-        assert_eq!(
-            serde_json::to_value(EmbeddingNormalizationV1::L2).unwrap(),
-            serde_json::json!("l2")
-        );
-        assert_eq!(
-            serde_json::from_value::<EmbeddingNormalizationV1>(serde_json::json!("L2")).unwrap(),
-            EmbeddingNormalizationV1::L2
-        );
-        assert_eq!(
-            serde_json::to_value(EmbeddingPoolingV1::MeanSqrtLength).unwrap(),
-            serde_json::json!("mean_sqrt_length")
-        );
-        assert_eq!(
-            serde_json::from_value::<EmbeddingPoolingV1>(serde_json::json!("MeanSqrtLength"))
-                .unwrap(),
-            EmbeddingPoolingV1::MeanSqrtLength
-        );
     }
 
     #[test]

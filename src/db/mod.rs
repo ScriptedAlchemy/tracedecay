@@ -5,6 +5,7 @@ mod coverage;
 mod edges;
 pub(crate) mod engine;
 mod evidence_assembly;
+mod external_source;
 mod files;
 mod fingerprints;
 mod maintenance;
@@ -40,13 +41,14 @@ pub(crate) use connection::{
     DatabaseAccessMode, DatabaseEngineConnection, DatabaseMemoryTransaction,
     DatabaseWriteTransaction,
 };
+pub(crate) use external_source::install_external_source_schema;
 pub use fingerprints::StoredFingerprint;
 pub(crate) use memory_connection::MemoryConnection;
 pub use memory_connection::SqliteDriverError;
 pub(crate) use memory_v2::{
     CapturedMemoryV2Frontiers, MemoryV2BackfillBatchOutcome, MemoryV2CutoverOutcome,
     MemoryV2CutoverReceipt, MemoryV2FeedbackHistoryRepairBatchOutcome,
-    MemoryV2FeedbackHistoryRepairProgress,
+    MemoryV2FeedbackHistoryRepairProgress, MemoryV2LegacyPurgeReceipt,
 };
 pub use redundancy_pairs::{RedundancyPairRow, RedundancyPairWrite};
 pub(crate) use retrieval_anchor_authority::{

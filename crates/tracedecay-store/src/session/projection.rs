@@ -140,25 +140,6 @@ impl SessionTemporalProjectionBatchV1 {
             .saturating_add(self.assertions.len())
     }
 
-    pub(super) fn validate(&self) -> SessionStoreResult<()> {
-        Self::new(
-            self.session_id.clone(),
-            self.generation,
-            self.watermarks.clone(),
-            self.occurrences.clone(),
-            self.copies.clone(),
-            self.assertions.clone(),
-        )
-        .and_then(|batch| {
-            batch.with_checkpoint(
-                self.batch_ordinal,
-                self.source_through,
-                self.projection_through,
-            )
-        })
-        .map(|_| ())
-    }
-
     pub fn replay_disposition(
         &self,
         batch_digest: &SessionTemporalDigestV1,

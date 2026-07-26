@@ -33,8 +33,8 @@
       }
     },
     {
-      "identity": "saved_edit",
-      "family": "saved_edit",
+      "identity": "tool_completed",
+      "family": "tool_lifecycle",
       "support": "native",
       "capture_path": "crates/tracedecay-hooks/fixtures/host_events/claude/post_tool_use_write.json",
       "request": {

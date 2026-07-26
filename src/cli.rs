@@ -86,7 +86,7 @@ pub enum HostBundleAction {
     name = "tracedecay",
     about = "Code intelligence for 34 languages — semantic graph queries instead of file reads",
     after_help = TOP_LEVEL_AFTER_HELP,
-    version
+    version = tracedecay::version::build_version()
 )]
 pub struct Cli {
     /// Select one compiled first-party host component; without it, lifecycle commands apply
@@ -703,7 +703,7 @@ pub enum LspAction {
         stdio: bool,
         /// Explicit project root to authorize for this session
         #[arg(long)]
-        project: String,
+        project: Option<String>,
     },
 }
 

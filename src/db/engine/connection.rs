@@ -265,7 +265,8 @@ mod tests {
     #[tokio::test]
     async fn schema_migration_entrypoint_requires_attached_write_authority() {
         let directory = tempfile::TempDir::new().unwrap();
-        let plain = TestConnection::open(&directory.path().join("plain.sqlite3"));
+        let plain =
+            TestConnection::open_without_write_authority(&directory.path().join("plain.sqlite3"));
 
         let error = match plain.schema_migration_transaction().await {
             Ok(_) => panic!("schema migration must require attached authority"),

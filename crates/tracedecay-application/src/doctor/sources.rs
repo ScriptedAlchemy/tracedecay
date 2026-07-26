@@ -34,8 +34,9 @@ use std::pin::Pin;
 
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{
-    CodeGenerationId, FeedbackCycleId, FeedbackFindingId, FeedbackFindingLifecycleV1,
-    FeedbackResultId, FeedbackScopeV1, ProviderEvaluationStateV1, RetrievalAnchorId,
+    CodeGenerationId, FeedbackCycleId, FeedbackCycleTerminationV1, FeedbackFindingId,
+    FeedbackFindingLifecycleV1, FeedbackResultId, FeedbackScopeV1, ProviderEvaluationStateV1,
+    RetrievalAnchorId,
 };
 
 use crate::RequestContext;
@@ -466,9 +467,26 @@ pub struct AdvisoryFeedbackFindingReadV1 {
     pub finding_id: FeedbackFindingId,
     pub scope: FeedbackScopeV1,
     pub generation_id: CodeGenerationId,
+    pub generation_current: bool,
     pub lifecycle: FeedbackFindingLifecycleV1,
     pub provider_state: ProviderEvaluationStateV1,
     pub evidence_anchors: Vec<RetrievalAnchorId>,
+    pub total_findings: u64,
+    pub returned_findings: u64,
+    pub omitted_findings: u64,
+}
+
+/// Result-level identity and denominator state retained even when a bounded
+/// canonical publication returns no finding rows.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AdvisoryFeedbackSummaryReadV1 {
+    pub result_id: FeedbackResultId,
+    pub cycle_id: FeedbackCycleId,
+    pub scope: FeedbackScopeV1,
+    pub generation_id: CodeGenerationId,
+    pub generation_current: bool,
+    pub termination: FeedbackCycleTerminationV1,
+    pub provider_states: Vec<ProviderEvaluationStateV1>,
     pub total_findings: u64,
     pub returned_findings: u64,
     pub omitted_findings: u64,
@@ -479,6 +497,7 @@ pub struct AdvisoryFeedbackFindingReadV1 {
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum AdvisoryFeedbackReadV1 {
     Observed {
+        summary: Box<AdvisoryFeedbackSummaryReadV1>,
         findings: Vec<AdvisoryFeedbackFindingReadV1>,
     },
     Unsupported,
@@ -511,6 +530,20 @@ const fn feedback_provider_state_slug(state: ProviderEvaluationStateV1) -> &'sta
     }
 }
 
+fn feedback_counts_coverage(
+    total: u64,
+    returned: u64,
+    omitted: u64,
+) -> DoctorCoverageCompletenessV1 {
+    if returned > total || omitted != total - returned {
+        DoctorCoverageCompletenessV1::Unknown
+    } else if omitted == 0 {
+        DoctorCoverageCompletenessV1::Complete
+    } else {
+        DoctorCoverageCompletenessV1::Partial
+    }
+}
+
 fn feedback_evidence(
     reference: impl Into<String>,
 ) -> Result<DoctorEvidenceRefV1, ApplicationContractError> {
@@ -520,66 +553,116 @@ fn feedback_evidence(
     ))
 }
 
+fn feedback_identity_evidence(
+    result_id: &FeedbackResultId,
+    cycle_id: &FeedbackCycleId,
+    scope: &FeedbackScopeV1,
+    generation_id: &CodeGenerationId,
+) -> Result<Vec<DoctorEvidenceRefV1>, ApplicationContractError> {
+    Ok(vec![
+        feedback_evidence(format!("feedback.result:{}", result_id.as_str()))?,
+        feedback_evidence(format!("feedback.cycle:{}", cycle_id.as_str()))?,
+        feedback_evidence(format!(
+            "feedback.scope.project:{}",
+            scope.project_id.as_str()
+        ))?,
+        feedback_evidence(format!(
+            "feedback.scope.repository:{}",
+            scope.repository_id.as_str()
+        ))?,
+        feedback_evidence(format!(
+            "feedback.scope.worktree:{}",
+            scope.worktree_id.as_str()
+        ))?,
+        feedback_evidence(format!("feedback.scope.branch:{}", scope.branch_ref))?,
+        feedback_evidence(format!(
+            "feedback.scope.head:{}",
+            scope.head_commit_id.as_str()
+        ))?,
+        feedback_evidence(format!("feedback.generation:{}", generation_id.as_str()))?,
+    ])
+}
+
 fn advisory_feedback_finding(
     read: &AdvisoryFeedbackFindingReadV1,
+    summary: &AdvisoryFeedbackSummaryReadV1,
 ) -> Result<DoctorFindingV1, ApplicationContractError> {
-    let coverage_complete = read.omitted_findings == 0
-        && read.returned_findings == read.total_findings
-        && read.provider_state == ProviderEvaluationStateV1::SupportedCompletedComplete;
-    let completeness = if coverage_complete {
+    let count_coverage = feedback_counts_coverage(
+        read.total_findings,
+        read.returned_findings,
+        read.omitted_findings,
+    );
+    let providers_complete = !summary.provider_states.is_empty()
+        && summary
+            .provider_states
+            .iter()
+            .all(|state| *state == ProviderEvaluationStateV1::SupportedCompletedComplete);
+    let coverage_complete = read.generation_current
+        && count_coverage == DoctorCoverageCompletenessV1::Complete
+        && providers_complete;
+    let completeness = if count_coverage == DoctorCoverageCompletenessV1::Unknown
+        || summary.provider_states.is_empty()
+    {
+        DoctorCoverageCompletenessV1::Unknown
+    } else if coverage_complete {
         DoctorCoverageCompletenessV1::Complete
     } else {
         DoctorCoverageCompletenessV1::Partial
     };
-    let state = match read.provider_state {
-        ProviderEvaluationStateV1::SupportedCompletedComplete => {
-            if matches!(
-                read.lifecycle,
-                FeedbackFindingLifecycleV1::Resolved
-                    | FeedbackFindingLifecycleV1::Cleared
-                    | FeedbackFindingLifecycleV1::Superseded
-            ) && coverage_complete
-            {
-                DoctorEvidenceStateV1::HealthyCompleteCoverage
-            } else {
-                DoctorEvidenceStateV1::Degraded
+    let state = if !read.generation_current
+        || summary.termination == FeedbackCycleTerminationV1::StaleReplanRequired
+        || summary
+            .provider_states
+            .contains(&ProviderEvaluationStateV1::Stale)
+    {
+        DoctorEvidenceStateV1::Stale
+    } else if completeness == DoctorCoverageCompletenessV1::Unknown {
+        DoctorEvidenceStateV1::Unknown
+    } else {
+        match read.provider_state {
+            ProviderEvaluationStateV1::SupportedCompletedComplete => {
+                if matches!(
+                    read.lifecycle,
+                    FeedbackFindingLifecycleV1::Resolved
+                        | FeedbackFindingLifecycleV1::Cleared
+                        | FeedbackFindingLifecycleV1::Superseded
+                ) {
+                    if coverage_complete {
+                        DoctorEvidenceStateV1::HealthyCompleteCoverage
+                    } else {
+                        DoctorEvidenceStateV1::Partial
+                    }
+                } else {
+                    DoctorEvidenceStateV1::Degraded
+                }
             }
+            ProviderEvaluationStateV1::Unsupported => DoctorEvidenceStateV1::Unsupported,
+            ProviderEvaluationStateV1::Absent => DoctorEvidenceStateV1::Absent,
+            ProviderEvaluationStateV1::Indexing | ProviderEvaluationStateV1::Stale => {
+                DoctorEvidenceStateV1::Stale
+            }
+            ProviderEvaluationStateV1::Partial => DoctorEvidenceStateV1::Partial,
+            ProviderEvaluationStateV1::Cancelled
+            | ProviderEvaluationStateV1::TimedOut
+            | ProviderEvaluationStateV1::Failed
+            | ProviderEvaluationStateV1::Unavailable => DoctorEvidenceStateV1::Unknown,
         }
-        ProviderEvaluationStateV1::Unsupported => DoctorEvidenceStateV1::Unsupported,
-        ProviderEvaluationStateV1::Absent => DoctorEvidenceStateV1::Absent,
-        ProviderEvaluationStateV1::Indexing | ProviderEvaluationStateV1::Stale => {
-            DoctorEvidenceStateV1::Stale
-        }
-        ProviderEvaluationStateV1::Partial => DoctorEvidenceStateV1::Partial,
-        ProviderEvaluationStateV1::Cancelled
-        | ProviderEvaluationStateV1::TimedOut
-        | ProviderEvaluationStateV1::Failed
-        | ProviderEvaluationStateV1::Unavailable => DoctorEvidenceStateV1::Unknown,
     };
-    let mut evidence = vec![
-        feedback_evidence(format!("feedback.result:{}", read.result_id.as_str()))?,
-        feedback_evidence(format!("feedback.cycle:{}", read.cycle_id.as_str()))?,
+    let mut evidence = feedback_identity_evidence(
+        &read.result_id,
+        &read.cycle_id,
+        &read.scope,
+        &read.generation_id,
+    )?;
+    evidence.extend([
         feedback_evidence(format!("feedback.finding:{}", read.finding_id.as_str()))?,
         feedback_evidence(format!(
-            "feedback.scope.project:{}",
-            read.scope.project_id.as_str()
-        ))?,
-        feedback_evidence(format!(
-            "feedback.scope.repository:{}",
-            read.scope.repository_id.as_str()
-        ))?,
-        feedback_evidence(format!(
-            "feedback.scope.worktree:{}",
-            read.scope.worktree_id.as_str()
-        ))?,
-        feedback_evidence(format!("feedback.scope.branch:{}", read.scope.branch_ref))?,
-        feedback_evidence(format!(
-            "feedback.scope.head:{}",
-            read.scope.head_commit_id.as_str()
-        ))?,
-        feedback_evidence(format!(
-            "feedback.generation:{}",
-            read.generation_id.as_str()
+            "feedback.generation_state:{}",
+            if read.generation_current {
+                "current"
+            } else {
+                "stale"
+            }
         ))?,
         feedback_evidence(format!(
             "feedback.lifecycle:{}",
@@ -589,7 +672,7 @@ fn advisory_feedback_finding(
             "feedback.provider_state:{}",
             feedback_provider_state_slug(read.provider_state)
         ))?,
-    ];
+    ]);
     for anchor in &read.evidence_anchors {
         evidence.push(feedback_evidence(format!(
             "feedback.anchor:{}",
@@ -600,8 +683,79 @@ fn advisory_feedback_finding(
         "feedback coverage returned {}/{} findings; omitted {}",
         read.returned_findings, read.total_findings, read.omitted_findings
     );
+    DoctorFindingV1::new(
+        DoctorFindingFamilyV1::Advisory,
+        state,
+        evidence,
+        DoctorCoverageStatementV1::new(completeness, statement)?,
+        None,
+    )
+}
+
+fn advisory_feedback_summary_finding(
+    read: &AdvisoryFeedbackSummaryReadV1,
+) -> Result<DoctorFindingV1, ApplicationContractError> {
+    let count_completeness = feedback_counts_coverage(
+        read.total_findings,
+        read.returned_findings,
+        read.omitted_findings,
+    );
+    let completeness = if read.generation_current {
+        count_completeness
+    } else {
+        DoctorCoverageCompletenessV1::Partial
+    };
+    let coverage_complete =
+        read.generation_current && count_completeness == DoctorCoverageCompletenessV1::Complete;
+    let providers_complete = !read.provider_states.is_empty()
+        && read
+            .provider_states
+            .iter()
+            .all(|state| *state == ProviderEvaluationStateV1::SupportedCompletedComplete);
+    let state = if !read.generation_current {
+        DoctorEvidenceStateV1::Stale
+    } else if completeness == DoctorCoverageCompletenessV1::Unknown {
+        DoctorEvidenceStateV1::Unknown
+    } else if read.termination == FeedbackCycleTerminationV1::Clean
+        && coverage_complete
+        && providers_complete
+    {
+        DoctorEvidenceStateV1::HealthyCompleteCoverage
+    } else if read.termination == FeedbackCycleTerminationV1::StaleReplanRequired
+        || read
+            .provider_states
+            .contains(&ProviderEvaluationStateV1::Stale)
+    {
+        DoctorEvidenceStateV1::Stale
+    } else if !coverage_complete
+        || read
+            .provider_states
+            .contains(&ProviderEvaluationStateV1::Partial)
+    {
+        DoctorEvidenceStateV1::Partial
+    } else {
+        DoctorEvidenceStateV1::Unknown
+    };
+    let mut evidence = feedback_identity_evidence(
+        &read.result_id,
+        &read.cycle_id,
+        &read.scope,
+        &read.generation_id,
+    )?;
+    evidence.push(feedback_evidence(format!(
+        "feedback.generation_state:{}",
+        if read.generation_current {
+            "current"
+        } else {
+            "stale"
+        }
+    ))?);
+    let statement = format!(
+        "feedback coverage returned {}/{} findings; omitted {}",
+        read.returned_findings, read.total_findings, read.omitted_findings
+    );
     let remediation = (!state.is_healthy_complete())
-        .then(|| action_remediation(operations::FEEDBACK_GET_FINDING))
+        .then(|| action_remediation(operations::FEEDBACK_LIST_FINDINGS))
         .transpose()?;
     DoctorFindingV1::new(
         DoctorFindingFamilyV1::Advisory,
@@ -612,23 +766,59 @@ fn advisory_feedback_finding(
     )
 }
 
+fn advisory_feedback_observation_is_consistent(
+    summary: &AdvisoryFeedbackSummaryReadV1,
+    findings: &[AdvisoryFeedbackFindingReadV1],
+) -> bool {
+    feedback_counts_coverage(
+        summary.total_findings,
+        summary.returned_findings,
+        summary.omitted_findings,
+    ) != DoctorCoverageCompletenessV1::Unknown
+        && summary.returned_findings == findings.len() as u64
+        && summary
+            .termination
+            .is_consistent_with_provider_states(&summary.provider_states)
+        && findings.iter().all(|finding| {
+            finding.result_id == summary.result_id
+                && finding.cycle_id == summary.cycle_id
+                && finding.scope == summary.scope
+                && finding.generation_id == summary.generation_id
+                && finding.generation_current == summary.generation_current
+                && finding.total_findings == summary.total_findings
+                && finding.returned_findings == summary.returned_findings
+                && finding.omitted_findings == summary.omitted_findings
+                && summary.provider_states.contains(&finding.provider_state)
+        })
+}
+
 /// Map the mounted canonical feedback-owner read into distinct Advisory
 /// findings. Host conformance is deliberately not part of this producer.
 pub fn advisory_feedback_findings(
     read: &AdvisoryFeedbackReadV1,
 ) -> Result<Vec<DoctorFindingV1>, ApplicationContractError> {
     match read {
-        AdvisoryFeedbackReadV1::Observed { findings } if !findings.is_empty() => {
-            findings.iter().map(advisory_feedback_finding).collect()
+        AdvisoryFeedbackReadV1::Observed { summary, findings } => {
+            if !advisory_feedback_observation_is_consistent(summary, findings) {
+                return Err(ApplicationContractError::Inconsistent {
+                    field: "Doctor advisory feedback read",
+                });
+            }
+            if findings.is_empty() {
+                Ok(vec![advisory_feedback_summary_finding(summary)?])
+            } else {
+                findings
+                    .iter()
+                    .map(|finding| advisory_feedback_finding(finding, summary))
+                    .collect()
+            }
         }
-        AdvisoryFeedbackReadV1::Observed { .. } | AdvisoryFeedbackReadV1::Absent => {
-            Ok(vec![unobservable_finding(
-                DoctorFindingFamilyV1::Advisory,
-                DoctorEvidenceStateV1::Absent,
-                "feedback.absent",
-                "canonical advisory feedback produced no findings",
-            )?])
-        }
+        AdvisoryFeedbackReadV1::Absent => Ok(vec![unobservable_finding(
+            DoctorFindingFamilyV1::Advisory,
+            DoctorEvidenceStateV1::Absent,
+            "feedback.absent",
+            "canonical advisory feedback produced no findings",
+        )?]),
         AdvisoryFeedbackReadV1::Unsupported => Ok(vec![unobservable_finding(
             DoctorFindingFamilyV1::Advisory,
             DoctorEvidenceStateV1::Unsupported,
