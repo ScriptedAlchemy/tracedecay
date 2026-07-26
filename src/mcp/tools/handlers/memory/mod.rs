@@ -29,7 +29,6 @@ mod fact_store;
 mod feedback;
 mod status;
 
-pub(crate) use actions::needs_operation_context;
 pub(super) use fact_store::handle_fact_store;
 pub(super) use feedback::handle_fact_feedback;
 pub(super) use status::handle_memory_status;
@@ -170,18 +169,16 @@ fn memory_operation_context(
     target_memory: &TargetMemoryDb<'_>,
     action: &str,
 ) -> Result<MemoryOperationContext> {
-    // `McpServer` overwrites this private field from the JSON-RPC id for
-    // mutations and retrieval-accounting actions. Direct non-retriable calls
-    // deliberately receive a fresh opaque operation identity instead.
-    match args.get("__mcp_request_id").and_then(Value::as_str) {
-        Some(request_id) => MemoryOperationContext::from_trusted_request_id(
-            target_memory.owner(),
-            action,
-            request_id,
-            None,
-        ),
-        None => MemoryOperationContext::generated(target_memory.owner(), action, None),
+    let mut logical_effect = args.clone();
+    if let Some(effect) = logical_effect.as_object_mut() {
+        effect.remove("__mcp_request_id");
     }
+    MemoryOperationContext::from_logical_effect(
+        target_memory.owner(),
+        action,
+        &logical_effect,
+        None,
+    )
     .map_err(memory_application_error)
 }
 
@@ -370,6 +367,97 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(history.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn fact_add_replays_after_reconnection_changes_request_correlation() {
+        let (_tmp, cg) = empty_memory().await;
+        let first = handle_fact_store(
+            &cg,
+            json!({
+                "action": "add",
+                "content": "stable logical memory write",
+                "__mcp_request_id": "request.mcp.connection-a.first",
+            }),
+            None,
+            true,
+        )
+        .await
+        .unwrap();
+        let replay = handle_fact_store(
+            &cg,
+            json!({
+                "action": "add",
+                "content": "stable logical memory write",
+                "__mcp_request_id": "request.mcp.connection-b.first",
+            }),
+            None,
+            true,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(replay.value, first.value);
+        assert_eq!(
+            active_memory(&cg)
+                .list_facts_untracked_v1(None, None, 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn fact_add_accepts_request_derived_operation_as_legacy_replay() {
+        let (_tmp, cg) = empty_memory().await;
+        let owner = active_project_memory_owner(&cg).unwrap();
+        active_memory(&cg)
+            .add_fact_v1(
+                AddFactRequest {
+                    content: "legacy request-derived memory write".to_owned(),
+                    category: MemoryCategory::General,
+                    source: None,
+                    tags: Vec::new(),
+                    entities: Vec::new(),
+                    trust: None,
+                    metadata: json!({}),
+                },
+                MemoryOperationContext::from_trusted_request_id(
+                    &owner,
+                    "add",
+                    "request.mcp.legacy-connection.first",
+                    None,
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let replay = handle_fact_store(
+            &cg,
+            json!({
+                "action": "add",
+                "content": "legacy request-derived memory write",
+                "__mcp_request_id": "request.mcp.reconnected.first",
+            }),
+            None,
+            true,
+        )
+        .await
+        .unwrap();
+        let rendered = replay.value.to_string();
+
+        assert!(rendered.contains("**diff:** add"), "{rendered}");
+        assert!(!rendered.contains("near_duplicate"), "{rendered}");
+        assert_eq!(
+            active_memory(&cg)
+                .list_facts_untracked_v1(None, None, 10)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]

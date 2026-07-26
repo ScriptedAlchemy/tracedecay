@@ -6,8 +6,7 @@
       "result_schema": "schema.application.git.preview.result",
       "bindings": {
         "cli": "binding.cli.git_preview.v1",
-        "mcp": "binding.mcp.git_preview.v1",
-        "http": "binding.http.git_preview.v1"
+        "mcp": "binding.mcp.git_preview.v1"
       }
     },
     "git_apply": {
@@ -15,8 +14,7 @@
       "result_schema": "schema.application.git.apply.result",
       "bindings": {
         "cli": "binding.cli.git_apply.v1",
-        "mcp": "binding.mcp.git_apply.v1",
-        "http": "binding.http.git_apply.v1"
+        "mcp": "binding.mcp.git_apply.v1"
       }
     },
     "feedback_diagnostics": {

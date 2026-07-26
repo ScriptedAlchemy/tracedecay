@@ -29,7 +29,6 @@ pub(crate) use dispatch_policy::tool_dispatches_registered_project_reader;
 pub(crate) use handlers::handle_user_lcm_tool_with_retained_authority;
 pub(crate) use handlers::hook_runtime::structured_hook_error_data;
 pub use handlers::memory::handle_user_memory_tool;
-pub(crate) use handlers::memory::needs_operation_context as memory_needs_operation_context;
 pub(crate) use handlers::{
     LcmDescribeServiceCommand, LcmDescribeServiceFuture, LcmDescribeServiceOutcome,
     LcmExpandServiceCommand, LcmExpandServiceFuture, LcmExpandServiceOutcome, SessionRefreshAction,

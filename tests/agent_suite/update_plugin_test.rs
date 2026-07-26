@@ -1124,13 +1124,12 @@ fn kimi_update_plugin_stages_bundle_and_preserves_official_host_state() {
     .unwrap();
     let registry_before = bytes(&installed_path);
 
-    let error = kimi
+    let outcome = kimi
         .update_plugin(&ctx(home.path(), NEW_BIN))
-        .err()
-        .expect("Kimi update must require the official host API")
-        .to_string();
-    assert!(error.contains("interactive `/plugins` host API"));
-    assert!(error.contains("made no Kimi host-state changes"));
+        .expect("Kimi maintenance should return a typed deferral");
+    let UpdatePluginOutcome::DeferredUserAction(deferred) = outcome else {
+        panic!("Kimi maintenance should require deferred user action");
+    };
     assert_eq!(bytes(&user_mcp), user_mcp_before);
     assert_eq!(bytes(&installed_path), registry_before);
     assert!(!kimi_code_home.join("plugins/managed/tracedecay").exists());
@@ -1138,6 +1137,22 @@ fn kimi_update_plugin_stages_bundle_and_preserves_official_host_state() {
     let staged = home
         .path()
         .join(".tracedecay/host-bundle-stage/kimi/tracedecay");
+    assert_eq!(deferred.staged_paths, vec![staged.clone()]);
+    assert!(
+        deferred
+            .remediation
+            .contains("interactive `/plugins` host API")
+    );
+    assert!(
+        deferred
+            .remediation
+            .contains(&format!("/plugins install {}", staged.display()))
+    );
+    assert!(
+        deferred
+            .remediation
+            .contains("made no Kimi host-state changes")
+    );
     let manifest = text(&staged.join(".kimi-plugin/plugin.json"));
     assert!(manifest.contains(NEW_BIN));
     assert!(manifest.contains(env!("CARGO_PKG_VERSION")));

@@ -75,8 +75,30 @@ pub(super) async fn compatibility_lookup_operation_receipt_tx(
         .query(
             "SELECT operation_kind, request_digest, fact_id, event_id, receipt_json
              FROM memory_v2_compatibility_operation_receipts
-             WHERE owner_kind = ?1 AND project_id = ?2 AND operation_id = ?3",
-            params![key.kind, key.project_id.as_str(), operation_id.as_str()],
+             WHERE owner_kind = ?1
+               AND project_id = ?2
+               AND (
+                    operation_id = ?3
+                    OR (
+                        ?6 = 1
+                        AND operation_kind = ?4
+                        AND request_digest = ?5
+                        AND operation_id LIKE 'memory-operation.v1.%'
+                    )
+               )
+             ORDER BY
+                CASE WHEN operation_id = ?3 THEN 0 ELSE 1 END,
+                recorded_at ASC,
+                operation_id ASC
+             LIMIT 1",
+            params![
+                key.kind,
+                key.project_id.as_str(),
+                operation_id.as_str(),
+                expected_kind,
+                request_digest,
+                i64::from(operation_id.as_str().starts_with("memory-operation.v2.")),
+            ],
         )
         .await
         .map_err(|error| storage_error(COMPATIBILITY_WRITE_OPERATION, error))?;

@@ -100,6 +100,7 @@ pub mod project_registry;
 pub mod query;
 pub mod redundancy;
 mod repository_provenance;
+pub mod request_identity;
 pub mod resolution;
 pub mod retention;
 pub mod runtime_identity;

@@ -1,0 +1,23 @@
+{
+  "cwd": "<PROJECT_ROOT>",
+  "extra": {
+    "api_request_id": "<API_REQUEST_ID>",
+    "duration_ms": 297,
+    "error_message": null,
+    "error_type": null,
+    "middleware_trace": [],
+    "result": "{\"bytes_written\": 37, \"dirs_created\": true, \"lint\": {\"status\": \"skipped\", \"message\": \"No linter for .txt files\"}, \"resolved_path\": \"<SAVED_PATH>\", \"files_modified\": [\"<SAVED_PATH>\"]}",
+    "status": "ok",
+    "task_id": "<TASK_ID>",
+    "telemetry_schema_version": "hermes.observer.v1",
+    "tool_call_id": "<TOOL_CALL_ID>",
+    "turn_id": "<TURN_ID>"
+  },
+  "hook_event_name": "post_tool_call",
+  "session_id": "<SESSION_ID>",
+  "tool_input": {
+    "content": "<REDACTED_CONTENT>",
+    "path": "<SAVED_PATH>"
+  },
+  "tool_name": "write_file"
+}

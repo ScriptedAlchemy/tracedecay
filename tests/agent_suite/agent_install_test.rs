@@ -459,12 +459,17 @@ fn test_kimi_update_refuses_direct_registry_or_managed_dir_mutation() {
     std::fs::create_dir_all(&managed_dir).unwrap();
     std::fs::write(managed_dir.join("foreign.txt"), b"keep").unwrap();
     let ctx = make_install_ctx(home);
-    let error = KimiIntegration
+    let outcome = KimiIntegration
         .update_plugin(&ctx)
-        .err()
-        .expect("Kimi update must require the official host API")
-        .to_string();
-    assert!(error.contains("interactive `/plugins` host API"));
+        .expect("Kimi update should stage a typed deferral");
+    let UpdatePluginOutcome::DeferredUserAction(deferred) = outcome else {
+        panic!("Kimi update must require deferred user action");
+    };
+    assert!(
+        deferred
+            .remediation
+            .contains("interactive `/plugins` host API")
+    );
     assert_eq!(std::fs::read(&installed_path).unwrap(), registry);
     assert_eq!(
         std::fs::read(managed_dir.join("foreign.txt")).unwrap(),

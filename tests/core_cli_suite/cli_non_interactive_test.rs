@@ -460,6 +460,32 @@ fn init_skips_gitignore_prompt_when_stdin_not_a_terminal() {
     );
 }
 
+#[test]
+fn explicit_kimi_install_fails_with_interactive_remediation() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let kimi_home = canonical_temp_path(home.path()).join(".kimi-code");
+    let mut install = tracedecay_command_without_daemon(home.path(), project.path());
+    let _shim = add_tracedecay_path_shim(&mut install, home.path());
+    install
+        .env(tracedecay::agents::kimi::KIMI_CODE_HOME_ENV, &kimi_home)
+        .args(["install", "--agent", "kimi"]);
+
+    let output = run_with_timeout(install, cli_timeout());
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("interactive `/plugins` host API"));
+    assert!(stderr.contains("/plugins install"));
+    assert!(stderr.contains("made no Kimi host-state changes"));
+    assert!(
+        canonical_temp_path(home.path())
+            .join(".tracedecay/host-bundle-stage/kimi/tracedecay/.kimi-plugin/plugin.json")
+            .is_file()
+    );
+    assert!(!kimi_home.join("plugins/installed.json").exists());
+}
+
 fn run_codex_automation_install(
     home: &TempDir,
     project_root: &Path,
