@@ -40,6 +40,26 @@ use scheduler::{
 };
 use transport::{BrokerListener, BrokerStream, DaemonAuthPreface, DaemonEndpoint};
 
+/// Captures the daemon's exact native Git transaction precondition for
+/// transport-parity tests. This is not compiled into production builds.
+#[cfg(all(unix, feature = "test-transport"))]
+#[doc(hidden)]
+pub fn capture_exact_git_snapshot_for_test(
+    repository_root: &Path,
+    project_id: tracedecay_domain::ProjectId,
+    repository_id: tracedecay_domain::RepositoryId,
+    worktree_id: tracedecay_domain::WorktreeId,
+    captured_at: tracedecay_domain::UtcMicros,
+) -> tracedecay_domain::RepositoryStateSnapshotV1 {
+    git_transactions::capture_exact_snapshot_for_test(
+        repository_root,
+        project_id,
+        repository_id,
+        worktree_id,
+        captured_at,
+    )
+}
+
 pub const SERVICE_NAME: &str = "tracedecay.service";
 pub const SOCKET_ENV: &str = "TRACEDECAY_DAEMON_SOCKET";
 pub(crate) const PROJECT_WARMING_RETRY_HINT: &str =
