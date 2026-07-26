@@ -885,6 +885,9 @@ impl Pr12ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                 if let Some(warning) = branch.fallback_warning {
                     details.push(warning);
                 }
+                details.extend(largest_table_details(
+                    self.graph.storage_table_bytes().await,
+                ));
             }
             completed(
                 StorageStatusPrimitiveResult {
@@ -1162,6 +1165,42 @@ impl tracedecay_application::AffectedTestsRetrievalPort for TraceDecayAffectedTe
             finished_at,
         )
     }
+}
+
+/// How many tables the storage detail lines name before summarising the rest.
+const STORAGE_TABLE_DETAIL_LIMIT: usize = 10;
+
+/// Renders per-table byte attribution for the graph store.
+///
+/// Without this, a store total is one opaque number and no claim about which
+/// table holds the bytes can be reproduced through the product. A read the
+/// runtime cannot serve reports that it could not be sampled, never an absent
+/// or zero line that would read as "no table holds any bytes".
+fn largest_table_details(tables: crate::errors::Result<Vec<(String, u64)>>) -> Vec<String> {
+    let mut tables = match tables {
+        Ok(tables) => tables,
+        Err(error) => return vec![format!("table sizes could not be sampled: {error}")],
+    };
+    if tables.is_empty() {
+        return vec!["table sizes reported no tables".to_owned()];
+    }
+    tables.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    let total: u64 = tables.iter().map(|(_, bytes)| bytes).sum();
+    let remainder = tables.len().saturating_sub(STORAGE_TABLE_DETAIL_LIMIT);
+    let mut details = vec![format!(
+        "table bytes total {total} across {} tables",
+        tables.len()
+    )];
+    details.extend(
+        tables
+            .iter()
+            .take(STORAGE_TABLE_DETAIL_LIMIT)
+            .map(|(table, bytes)| format!("table {table} holds {bytes} bytes")),
+    );
+    if remainder > 0 {
+        details.push(format!("{remainder} smaller tables not listed"));
+    }
+    details
 }
 
 fn project_id_for_graph(graph: &TraceDecay) -> Option<ProjectId> {
@@ -1593,6 +1632,57 @@ pub fn worktree_id_for_project(
     .map_err(|_| ApplicationContractError::Inconsistent {
         field: "PR12 primitive worktree id",
     })
+}
+
+#[cfg(test)]
+mod storage_table_detail_tests {
+    use super::{STORAGE_TABLE_DETAIL_LIMIT, largest_table_details};
+
+    #[test]
+    fn tables_are_ranked_by_bytes_and_the_tail_is_counted() {
+        let tables = (0..STORAGE_TABLE_DETAIL_LIMIT + 3)
+            .map(|index| (format!("t{index:02}"), (index as u64 + 1) * 100))
+            .collect();
+
+        let details = largest_table_details(Ok(tables));
+
+        assert_eq!(
+            details.first().map(String::as_str),
+            Some("table bytes total 9100 across 13 tables")
+        );
+        assert_eq!(
+            details.get(1).map(String::as_str),
+            Some("table t12 holds 1300 bytes"),
+            "the largest table must lead"
+        );
+        assert_eq!(
+            details.last().map(String::as_str),
+            Some("3 smaller tables not listed")
+        );
+    }
+
+    #[test]
+    fn an_unsampled_store_says_so_instead_of_reporting_no_bytes() {
+        let details = largest_table_details(Err(crate::errors::TraceDecayError::Database {
+            message: "reader lease timed out".to_owned(),
+            operation: "sample graph-store table sizes".to_owned(),
+        }));
+
+        assert_eq!(details.len(), 1);
+        assert!(
+            details[0].starts_with("table sizes could not be sampled: "),
+            "unexpected detail: {}",
+            details[0]
+        );
+    }
+
+    #[test]
+    fn a_store_with_no_tables_is_distinct_from_an_unsampled_store() {
+        assert_eq!(
+            largest_table_details(Ok(Vec::new())),
+            vec!["table sizes reported no tables".to_owned()]
+        );
+    }
 }
 
 #[cfg(test)]
