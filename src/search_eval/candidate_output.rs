@@ -3576,6 +3576,7 @@ mod tests {
 
         let mut missing = workload();
         missing.queries.retain(|query| query.partition == "train");
+        missing.execution_contract.exact_query_count = missing.queries.len() as u64;
         let error = validate_workload_for_tuning(&missing).expect_err("empty validation partition");
         assert!(
             error
