@@ -20,6 +20,7 @@ use crate::application::context::{
 use crate::application::session::SessionRefreshTarget;
 use crate::errors::Result;
 use crate::mcp::tools::ToolResult;
+use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use tracedecay_store::SessionRefreshFrontierV1;
 
 const TOOL_NAME: &str = "tracedecay_session_refresh";
@@ -337,9 +338,11 @@ fn command_from_request(
     }
     let identity = resolved_identity(&request)?;
     let digest_material = stable_digest_material(&request)?;
+    let request_id = mint_global_request_id(GlobalRequestSurface::SessionRefresh)
+        .map_err(|error| error.to_string())?;
     let context = RequestContext::new(
         ActorId::new("mcp.session-refresh").map_err(|error| error.to_string())?,
-        RequestId::new("mcp.session-refresh").map_err(|error| error.to_string())?,
+        RequestId::new(request_id.as_str()).map_err(|error| error.to_string())?,
         identity,
         CapabilityDigest::new(stable_digest(
             b"tracedecay.mcp.session-refresh.capability.v1\0",

@@ -243,7 +243,7 @@ impl McpServer {
             arguments,
             internal_analytics: None,
             client_name: client_name.as_deref(),
-            mcp_instance_id: Some(self.mcp_instance_id.as_str()),
+            mcp_instance_id: self.connection_identity.instance_id(),
             failure_reason: Some(&failure_reason),
         });
         self.spawn_observed_ledger_write(async move {

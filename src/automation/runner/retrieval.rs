@@ -36,6 +36,7 @@ use crate::global_db::session_temporal::RegisteredGlobalDbSessionTemporalExecuti
 use crate::query::temporal::TemporalKernelResult;
 use crate::query::temporal::context::{ContextBudget, TokenPolicy, VersionedTokenEstimator};
 use crate::query::temporal::ranking::DiversityLimits;
+use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use crate::sessions::lcm::LcmScope;
 use crate::tracedecay::TraceDecay;
 
@@ -177,9 +178,11 @@ impl SessionScopeAuthorizer for ProductionAutomationSessionAuthorizer {
 
 impl ProductionAutomationSessionRetrieval {
     fn request_context(&self, provider: Option<&str>) -> Option<RequestContext> {
+        let request_id =
+            mint_global_request_id(GlobalRequestSurface::AutomationSessionRetrieval).ok()?;
         Some(RequestContext::new(
             ActorId::new(AUTOMATION_SESSION_ACTOR_ID).ok()?,
-            RequestId::new(AUTOMATION_SESSION_ACTOR_ID).ok()?,
+            RequestId::new(request_id.as_str()).ok()?,
             self.identity.clone(),
             CapabilityDigest::new(automation_session_digest(
                 b"tracedecay.automation.session.capability.v1\0",

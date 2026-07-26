@@ -1,5 +1,3 @@
-use std::sync::atomic::{AtomicU64, Ordering};
-
 use serde_json::Value;
 use tracedecay_application::{
     ApplicationProblemKind, ApplicationResult, CancellationSignal, Deadline, RequestId,
@@ -17,17 +15,14 @@ use crate::errors::{Result, TraceDecayError};
 use crate::mcp::tools::dispatch::{
     resolve_mcp_application_surface, resolve_mcp_application_surface_with_controls,
 };
+use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use crate::tracedecay::{TraceDecay, current_timestamp};
 
-static NEXT_SURFACE_REQUEST: AtomicU64 = AtomicU64::new(1);
 const DEFAULT_SURFACE_DEADLINE_MICROS: i64 = 30_000_000;
 
 fn request_id() -> Result<RequestId> {
-    let sequence = NEXT_SURFACE_REQUEST.fetch_add(1, Ordering::Relaxed);
-    RequestId::new(format!("request.mcp.{}.{}", current_timestamp(), sequence)).map_err(|_| {
-        TraceDecayError::Config {
-            message: "could not allocate an application surface request id".to_owned(),
-        }
+    mint_global_request_id(GlobalRequestSurface::McpFallback).map_err(|_| TraceDecayError::Config {
+        message: "could not allocate an application surface request id".to_owned(),
     })
 }
 
