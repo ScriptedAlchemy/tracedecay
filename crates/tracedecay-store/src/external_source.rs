@@ -827,32 +827,9 @@ pub struct SourceStoreStateV1 {
 }
 
 impl SourceStoreStateV1 {
-    fn new(
-        definition: SourceDefinitionV1,
-        binding: SourceBindingV1,
-        source_frontier: SourceAggregateFrontierV1,
-        projection: SourceProjectionCommitV1,
-        projected_objects: BTreeMap<SourceNativeObjectIdV1, SourceObjectObservationV1>,
-        object_partitions: BTreeMap<SourceNativeObjectIdV1, SourcePartitionIdV1>,
-        revision_history: BTreeMap<SourceNativeObjectIdV1, Vec<SourceObjectMutationV1>>,
-        lineage: Vec<SourceObjectLineageV1>,
-        receipt_history: BTreeMap<ManifestDigest, SourceCommitReceiptV1>,
-        receipt: SourceCommitReceiptV1,
-    ) -> SourceStoreResult<Self> {
-        let state = Self {
-            definition,
-            binding,
-            source_frontier,
-            projection,
-            projected_objects,
-            object_partitions,
-            revision_history,
-            lineage,
-            receipt_history,
-            receipt,
-        };
-        state.validate()?;
-        Ok(state)
+    fn validated(self) -> SourceStoreResult<Self> {
+        self.validate()?;
+        Ok(self)
     }
 
     pub fn source_frontier(&self) -> &SourceAggregateFrontierV1 {
@@ -1156,10 +1133,10 @@ pub fn apply_source_commit(
         current.map_or_else(BTreeMap::new, |state| state.receipt_history.clone());
     receipt_history.insert(receipt.idempotency_key().clone(), receipt.clone());
     Ok(SourceCommitApplyOutcomeV1::Committed(Box::new(
-        SourceStoreStateV1::new(
-            commit.definition().clone(),
-            commit.binding().clone(),
-            commit.next_frontier().clone(),
+        SourceStoreStateV1 {
+            definition: commit.definition().clone(),
+            binding: commit.binding().clone(),
+            source_frontier: commit.next_frontier().clone(),
             projection,
             projected_objects,
             object_partitions,
@@ -1167,7 +1144,8 @@ pub fn apply_source_commit(
             lineage,
             receipt_history,
             receipt,
-        )?,
+        }
+        .validated()?,
     )))
 }
 
