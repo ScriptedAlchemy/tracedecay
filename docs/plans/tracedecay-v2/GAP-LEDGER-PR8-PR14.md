@@ -8,12 +8,14 @@ into current work. It is not a replacement for [NEXT.md](NEXT.md), which
 remains the active PR12/PR13 execution slice, and it is not a code-gap queue.
 The owning numbered plan remains authoritative for retained behavior.
 
-The earlier ledger on `codex/v2-gap-ledger` at `e780fd660` is superseded rather
-than merged. Its useful structural judgment—keep a companion ledger linked
-from `NEXT.md`—is retained. Its file also carried findings later retracted or
-fixed (including the Sigma single-mount claim and the dashboard Doctor
-`target` mismatch), so copying it would recreate the problem this correction
-pass is meant to solve. Valid edits were re-derived and applied selectively.
+The earlier ledger on `codex/v2-gap-ledger` at `e780fd660` was superseded
+because it carried findings later retracted or fixed, including the Sigma
+single-mount claim and the dashboard Doctor `target` mismatch. Integration
+later merged that branch at `5e868bd8a`. Reconciliation confirmed that conflict
+resolution retained this authoritative file, its complete retraction register,
+and one companion link from `NEXT.md`; no second ledger or withdrawn/refuted
+finding survived. Valid numbered-plan edits remain re-derived and selective,
+not inherited merely because the superseded branch entered history.
 
 ## Delivery-band authority
 
@@ -79,8 +81,9 @@ the temporary-alias deletion slices.
 - `11-dashboard-frontend.md`: twelve-workspace/embed reachability is recorded;
   abandoned projection names are removed; live Rust `EvidencePacket` is
   protected.
-- `11b-structure-visualization.md`: five backend endpoints are registered;
-  their missing frontend consumers are the open work.
+- `11b-structure-visualization.md`: all five endpoints are registered and now
+  consumed through typed Code-workspace surfaces; the former backend-only gap
+  is closed, without converting implementation into acceptance.
 - `13-research-provenance-and-context-anchors.md`: core anchors are delivered;
   dedicated GitHub-stack targets remain a named PR13 follow-up.
 - `14-historical-failure-regression-matrix.md`: already states that it owns
@@ -102,9 +105,11 @@ the temporary-alias deletion slices.
   implemented but unverified.
 - `27-cross-host-agent-plugin-bundles.md`: four declared safety/evidence guards
   are not production-reached, and Cursor Cloud has no default component set.
-- `31-native-fastembed-semantic-code-search.md`: downstream semantic machinery
-  is real, but no production path can install a model; lifecycle/Doctor and
-  cold-offline acceptance remain open.
+- `31-native-fastembed-semantic-code-search.md`: daemon-owned immutable
+  `hf-hub` background acquisition shipped in `dd4adbe2a`, including verified
+  online acquisition and packaged offline-cache acceptance. Manual local/HTTPS
+  import APIs remain production-unwired, and semantic results remain omitted
+  until compatible indexing is ready.
 - `32-dynamic-workflow-runtime-and-sdk.md`: explicitly PR17-only.
 - `34-workspace-refactoring-and-api-migration.md`: rename preview is live;
   API migration is an unimplemented PR11–PR12 deliverable consumed by PR19,
@@ -120,7 +125,9 @@ the temporary-alias deletion slices.
   real obstacle, but the whole `global.db` is only 0.98 GiB and no
   `StoreSizeTelemetryPort` implementation supports a per-table byte claim.
   Plan 38 also records that the reachable debris collector originally missed
-  bare `.corrupt` artifacts until `985cc5d4b`.
+  bare `.corrupt` artifacts until `985cc5d4b`, that live branch stores are full
+  graph copies rather than lightweight deltas, and that code-index generation
+  publication has no retention pass.
 
 No numbered plan claims `.tracedecay/domain-symbols.toml` as a delivered
 capability, so the no-op `DOMAIN-EXTRACTORS.md` proposal requires no plan-side
