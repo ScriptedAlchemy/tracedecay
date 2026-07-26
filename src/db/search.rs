@@ -63,17 +63,23 @@ impl Database {
         match fts_result {
             Ok(ref results) if !results.is_empty() => return fts_result,
             Ok(_) => {} // empty — fall through to LIKE
-            Err(e) if Self::is_corruption_error(&e) => match self.non_fts_schema_intact(conn).await
+            Err(e)
+                if Self::is_corruption_error(&e)
+                    || e.to_string()
+                        .to_ascii_lowercase()
+                        .contains("fts5: corruption") =>
             {
-                Ok(true) => {
-                    if !FTS_REPAIR_WARNING_EMITTED.swap(true, Ordering::Relaxed) {
-                        eprintln!(
-                            "[tracedecay] FTS index corruption detected; using LIKE fallback. Offline repair required."
-                        );
+                match self.non_fts_schema_intact_in_fresh_snapshot().await {
+                    Ok(true) => {
+                        if !FTS_REPAIR_WARNING_EMITTED.swap(true, Ordering::Relaxed) {
+                            eprintln!(
+                                "[tracedecay] FTS index corruption detected; using LIKE fallback. Offline repair required."
+                            );
+                        }
                     }
+                    Ok(false) | Err(_) => return Err(e),
                 }
-                Ok(false) | Err(_) => return Err(e),
-            },
+            }
             Err(e) => return Err(e),
         }
 
@@ -109,6 +115,15 @@ impl Database {
         Ok(results)
     }
 
+    async fn non_fts_schema_intact_in_fresh_snapshot(&self) -> Result<bool> {
+        let snapshot = self
+            .begin_engine_read_snapshot("validate_search_fallback")
+            .await?;
+        let intact = self.non_fts_schema_intact(&snapshot).await?;
+        super::tx::commit(snapshot, "validate_search_fallback").await?;
+        Ok(intact)
+    }
+
     /// Validates every non-FTS table and its indexes without asking `SQLite`
     /// to inspect the known-corrupt FTS virtual table or shadow tables.
     async fn non_fts_schema_intact(&self, conn: &DatabaseEngineReadSnapshot) -> Result<bool> {
@@ -120,6 +135,8 @@ impl Database {
                        'nodes_fts', 'nodes_fts_data', 'nodes_fts_idx',
                        'nodes_fts_content', 'nodes_fts_docsize', 'nodes_fts_config'
                    )
+                   AND name NOT LIKE '%_fts%'
+                   AND COALESCE(sql, '') NOT LIKE 'CREATE VIRTUAL TABLE%'
                  ORDER BY name",
                 (),
             )

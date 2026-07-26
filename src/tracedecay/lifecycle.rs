@@ -2174,6 +2174,7 @@ fn count_tree_files(root: &Path) -> u64 {
 pub(crate) fn is_fts_only_corruption(problem: &str) -> bool {
     problem.contains("malformed inverted index for FTS5 table main.nodes_fts")
         || problem.contains("malformed inverted index for FTS5 table nodes_fts")
+        || (problem.contains("fts5: corruption found") && problem.contains("nodes_fts"))
 }
 
 /// Whether a read-only preflight failure means the store needs ordinary
