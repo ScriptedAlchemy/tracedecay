@@ -17,7 +17,7 @@ use tracedecay_domain::{
 
 use super::{
     GitHubCanonicalReviewAnchorAuthorityV1, GitHubCanonicalReviewAnchorsV1,
-    GitHubReviewAnchorSeedV1,
+    GitHubProviderLifecycleV1, GitHubReviewAnchorSeedV1, GitHubSourceAccessAuthorityV1,
 };
 use crate::application::advisory::{GitHubCurrentBranchRemapper, context_matches_scope};
 use crate::db::Database;
@@ -27,6 +27,8 @@ const ANCHOR_KEY_PREFIX_V1: &str = "feedback.github-review.anchor.v1.";
 const ANCHOR_ID_DOMAIN_V1: &str = "tracedecay.pr13.github.code-anchor.v1";
 const FILE_ID_DOMAIN_V1: &str = "tracedecay.pr13.github.file-occurrence.v1";
 const RELATED_ANCHOR_DOMAIN_V1: &str = "tracedecay.pr13.github.related-anchor.v1";
+const BODY_KEY_PREFIX_V1: &str = "feedback.github-review.body.v1.";
+const BODY_DIGEST_DOMAIN_V1: &str = "tracedecay.pr13.github.retained-body.v1";
 const MAX_GIT_BLOB_BYTES_V1: usize = 4 * 1024 * 1024;
 
 #[derive(Clone)]
@@ -48,6 +50,53 @@ pub struct ProjectGitHubRegistrarAuthoritiesV1<A> {
 struct StoredGitHubAnchorV1 {
     seed: GitHubReviewAnchorSeedV1,
     anchors: GitHubCanonicalReviewAnchorsV1,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct StoredGitHubReviewBodyV1 {
+    scope: FeedbackScopeV1,
+    pull_request_id: tracedecay_domain::feedback::GitHubPullRequestIdV1,
+    comment_id: tracedecay_domain::feedback::GitHubReviewCommentIdV1,
+    body_anchor: RetrievalAnchorId,
+    provider_body_digest: ManifestDigest,
+    retained_body_digest: ManifestDigest,
+    retained_body: String,
+}
+
+/// Sanitized review prose returned only after exact route and GitHub source
+/// authorization have both been rechecked. `Debug` and Serde are
+/// intentionally absent so ordinary receipts cannot expose the body.
+pub struct GitHubReviewBodyEvidenceV1 {
+    pub body_anchor: RetrievalAnchorId,
+    pub provider_body_digest: ManifestDigest,
+    pub retained_body_digest: ManifestDigest,
+    retained_body: String,
+}
+
+impl GitHubReviewBodyEvidenceV1 {
+    pub fn body(&self) -> &str {
+        &self.retained_body
+    }
+}
+
+pub enum GitHubReviewBodyReadOutcomeV1 {
+    Current(Box<GitHubReviewBodyEvidenceV1>),
+    Denied,
+    Stale,
+    Unavailable,
+}
+
+/// Authorized expansion boundary for retained GitHub review prose. The
+/// provider source is re-authorized by the concrete authority for every read.
+pub trait GitHubReviewBodyEvidenceAuthorityV1: Send + Sync {
+    fn read_retained_body<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        request: &'a GitHubReviewReadRequestV1,
+        body_anchor: &'a RetrievalAnchorId,
+        source_access: &'a dyn GitHubSourceAccessAuthorityV1,
+    ) -> FeedbackPortFuture<'a, GitHubReviewBodyReadOutcomeV1>;
 }
 
 impl ProjectGitHubAnchorAuthorityV1 {
@@ -89,7 +138,24 @@ impl ProjectGitHubAnchorAuthorityV1 {
         }
         let existing_id = original_anchor_id(&self.scope, seed).ok()?;
         if let Some(stored) = self.load(&existing_id).await? {
-            return (stored.seed == *seed).then_some(stored.anchors);
+            if !same_original_locator(&stored.seed, seed) {
+                return None;
+            }
+            let original = stored.anchors.original;
+            let initial_remap = self.remap_original(&original, &self.scope).await?;
+            let anchors = GitHubCanonicalReviewAnchorsV1 {
+                original,
+                initial_remap,
+                author_anchor: related_anchor("author", &self.scope, seed, &seed.author_node_id)?,
+                body_anchor: related_anchor("body", &self.scope, seed, seed.body_digest.as_str())?,
+                safe_url_anchor: if seed.safe_url.is_empty() {
+                    None
+                } else {
+                    Some(related_anchor("url", &self.scope, seed, &seed.safe_url)?)
+                },
+            };
+            let body = stored_body(request, seed, &anchors)?;
+            return self.persist_body(&body).await.then_some(anchors);
         }
         let project_root = Arc::clone(&self.project_root);
         let commit = seed.original_commit_id.clone();
@@ -125,7 +191,8 @@ impl ProjectGitHubAnchorAuthorityV1 {
             seed: seed.clone(),
             anchors: anchors.clone(),
         };
-        self.persist(&stored).await.then_some(anchors)
+        let body = stored_body(request, seed, &anchors)?;
+        self.persist(&stored, &body).await.then_some(anchors)
     }
 
     async fn remap_original(
@@ -186,9 +253,17 @@ impl ProjectGitHubAnchorAuthorityV1 {
         }
     }
 
-    async fn persist(&self, candidate: &StoredGitHubAnchorV1) -> bool {
+    async fn persist(
+        &self,
+        candidate: &StoredGitHubAnchorV1,
+        body: &StoredGitHubReviewBodyV1,
+    ) -> bool {
         let key = anchor_key(&candidate.anchors.original.retrieval_anchor_id);
+        let body_key = body_key(&body.body_anchor);
         let Ok(encoded) = serde_json::to_string(candidate) else {
+            return false;
+        };
+        let Ok(encoded_body) = serde_json::to_string(body) else {
             return false;
         };
         let Ok(transaction) = self
@@ -216,9 +291,69 @@ impl ProjectGitHubAnchorAuthorityV1 {
             Err(_) => return false,
         };
         drop(rows);
+        if let Some(existing) = existing.as_ref()
+            && !serde_json::from_str::<StoredGitHubAnchorV1>(existing)
+                .is_ok_and(|stored| stored == *candidate)
+        {
+            let _ = transaction.rollback().await;
+            return false;
+        }
+        let Ok(existing_body) = self
+            .database
+            .get_metadata_unguarded(&transaction, &body_key)
+            .await
+        else {
+            let _ = transaction.rollback().await;
+            return false;
+        };
+        if existing_body
+            .as_deref()
+            .is_some_and(|value| value != encoded_body)
+        {
+            let _ = transaction.rollback().await;
+            return false;
+        }
+        if (existing.is_none()
+            && self
+                .database
+                .set_metadata_unguarded(&transaction, &key, &encoded)
+                .await
+                .is_err())
+            || (existing_body.is_none()
+                && self
+                    .database
+                    .set_metadata_unguarded(&transaction, &body_key, &encoded_body)
+                    .await
+                    .is_err())
+        {
+            let _ = transaction.rollback().await;
+            return false;
+        }
+        transaction.commit().await.is_ok()
+    }
+
+    async fn persist_body(&self, body: &StoredGitHubReviewBodyV1) -> bool {
+        let key = body_key(&body.body_anchor);
+        let Ok(encoded) = serde_json::to_string(body) else {
+            return false;
+        };
+        let Ok(transaction) = self
+            .database
+            .begin_write_transaction("record GitHub review body evidence")
+            .await
+        else {
+            return false;
+        };
+        let Ok(existing) = self
+            .database
+            .get_metadata_unguarded(&transaction, &key)
+            .await
+        else {
+            let _ = transaction.rollback().await;
+            return false;
+        };
         if let Some(existing) = existing {
-            let matches = serde_json::from_str::<StoredGitHubAnchorV1>(&existing)
-                .is_ok_and(|stored| stored == *candidate);
+            let matches = existing == encoded;
             let _ = transaction.rollback().await;
             return matches;
         }
@@ -232,6 +367,105 @@ impl ProjectGitHubAnchorAuthorityV1 {
             return false;
         }
         transaction.commit().await.is_ok()
+    }
+
+    /// Expands one retained body. Possession of an anchor is insufficient:
+    /// exact project/repository/worktree/ref identity and the current GitHub
+    /// source authorization are checked before and after storage access.
+    pub fn read_body<'a, A>(
+        &'a self,
+        context: &'a RequestContext,
+        request: &'a GitHubReviewReadRequestV1,
+        body_anchor: &'a RetrievalAnchorId,
+        source_access: &'a A,
+    ) -> FeedbackPortFuture<'a, GitHubReviewBodyReadOutcomeV1>
+    where
+        A: GitHubSourceAccessAuthorityV1 + Sync + ?Sized,
+    {
+        Box::pin(async move {
+            if request.validate().is_err()
+                || request.scope != self.scope
+                || !context_matches_scope(context, &self.scope)
+                || body_anchor.validate().is_err()
+            {
+                return GitHubReviewBodyReadOutcomeV1::Denied;
+            }
+            match source_access.authorize(context, request).await {
+                GitHubProviderLifecycleV1::Ready => {}
+                GitHubProviderLifecycleV1::Stale => {
+                    return GitHubReviewBodyReadOutcomeV1::Stale;
+                }
+                GitHubProviderLifecycleV1::Denied | GitHubProviderLifecycleV1::Ambiguous => {
+                    return GitHubReviewBodyReadOutcomeV1::Denied;
+                }
+                GitHubProviderLifecycleV1::Unavailable => {
+                    return GitHubReviewBodyReadOutcomeV1::Unavailable;
+                }
+            }
+            let Some(encoded) = self
+                .database
+                .get_metadata(&body_key(body_anchor))
+                .await
+                .ok()
+                .flatten()
+            else {
+                return GitHubReviewBodyReadOutcomeV1::Denied;
+            };
+            let Some(body) = serde_json::from_str::<StoredGitHubReviewBodyV1>(&encoded)
+                .ok()
+                .filter(|body| valid_stored_body(body))
+                .filter(|body| {
+                    body.scope == request.scope
+                        && body.pull_request_id == request.pull_request_id
+                        && &body.body_anchor == body_anchor
+                })
+            else {
+                return GitHubReviewBodyReadOutcomeV1::Denied;
+            };
+            match source_access.authorize(context, request).await {
+                GitHubProviderLifecycleV1::Ready => {}
+                GitHubProviderLifecycleV1::Stale => {
+                    return GitHubReviewBodyReadOutcomeV1::Stale;
+                }
+                GitHubProviderLifecycleV1::Denied | GitHubProviderLifecycleV1::Ambiguous => {
+                    return GitHubReviewBodyReadOutcomeV1::Denied;
+                }
+                GitHubProviderLifecycleV1::Unavailable => {
+                    return GitHubReviewBodyReadOutcomeV1::Unavailable;
+                }
+            }
+            GitHubReviewBodyReadOutcomeV1::Current(Box::new(GitHubReviewBodyEvidenceV1 {
+                body_anchor: body.body_anchor,
+                provider_body_digest: body.provider_body_digest,
+                retained_body_digest: body.retained_body_digest,
+                retained_body: body.retained_body,
+            }))
+        })
+    }
+}
+
+impl GitHubReviewBodyEvidenceAuthorityV1 for ProjectGitHubAnchorAuthorityV1 {
+    fn read_retained_body<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        request: &'a GitHubReviewReadRequestV1,
+        body_anchor: &'a RetrievalAnchorId,
+        source_access: &'a dyn GitHubSourceAccessAuthorityV1,
+    ) -> FeedbackPortFuture<'a, GitHubReviewBodyReadOutcomeV1> {
+        self.read_body(context, request, body_anchor, source_access)
+    }
+}
+
+impl GitHubReviewBodyEvidenceAuthorityV1 for Arc<ProjectGitHubAnchorAuthorityV1> {
+    fn read_retained_body<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        request: &'a GitHubReviewReadRequestV1,
+        body_anchor: &'a RetrievalAnchorId,
+        source_access: &'a dyn GitHubSourceAccessAuthorityV1,
+    ) -> FeedbackPortFuture<'a, GitHubReviewBodyReadOutcomeV1> {
+        self.as_ref()
+            .read_body(context, request, body_anchor, source_access)
     }
 }
 
@@ -416,15 +650,77 @@ fn related_anchor(
     seed: &GitHubReviewAnchorSeedV1,
     value: &str,
 ) -> Option<RetrievalAnchorId> {
+    related_anchor_from_comment(role, scope, &seed.comment_id, value)
+}
+
+fn related_anchor_from_comment(
+    role: &str,
+    scope: &FeedbackScopeV1,
+    comment_id: &tracedecay_domain::feedback::GitHubReviewCommentIdV1,
+    value: &str,
+) -> Option<RetrievalAnchorId> {
     let digest = canonical_sha256(&(
         RELATED_ANCHOR_DOMAIN_V1,
         role,
         &scope.repository_id,
-        &seed.comment_id,
+        comment_id,
         value,
     ))
     .ok()?;
     RetrievalAnchorId::new(format!("anchor.github-{role}.{}", digest_suffix(&digest)?)).ok()
+}
+
+fn stored_body(
+    request: &GitHubReviewReadRequestV1,
+    seed: &GitHubReviewAnchorSeedV1,
+    anchors: &GitHubCanonicalReviewAnchorsV1,
+) -> Option<StoredGitHubReviewBodyV1> {
+    let body = StoredGitHubReviewBodyV1 {
+        scope: request.scope.clone(),
+        pull_request_id: request.pull_request_id.clone(),
+        comment_id: seed.comment_id.clone(),
+        body_anchor: anchors.body_anchor.clone(),
+        provider_body_digest: seed.body_digest.clone(),
+        retained_body_digest: canonical_sha256(&(
+            BODY_DIGEST_DOMAIN_V1,
+            seed.retained_body.as_str(),
+        ))
+        .ok()?,
+        retained_body: seed.retained_body.clone(),
+    };
+    valid_stored_body(&body).then_some(body)
+}
+
+fn valid_stored_body(body: &StoredGitHubReviewBodyV1) -> bool {
+    body.scope.validate().is_ok()
+        && body.pull_request_id.validate().is_ok()
+        && body.comment_id.validate().is_ok()
+        && body.body_anchor.validate().is_ok()
+        && body.provider_body_digest.validate().is_ok()
+        && body.retained_body_digest.validate().is_ok()
+        && !body.retained_body.is_empty()
+        && body.retained_body.len() <= super::MAX_GITHUB_REVIEW_BODY_BYTES_V1
+        && canonical_sha256(&(BODY_DIGEST_DOMAIN_V1, body.retained_body.as_str()))
+            .is_ok_and(|digest| digest == body.retained_body_digest)
+        && related_anchor_from_comment(
+            "body",
+            &body.scope,
+            &body.comment_id,
+            body.provider_body_digest.as_str(),
+        )
+        .as_ref()
+            == Some(&body.body_anchor)
+}
+
+fn same_original_locator(
+    left: &GitHubReviewAnchorSeedV1,
+    right: &GitHubReviewAnchorSeedV1,
+) -> bool {
+    left.comment_id == right.comment_id
+        && left.path == right.path
+        && left.original_commit_id == right.original_commit_id
+        && left.original_start_line == right.original_start_line
+        && left.original_line == right.original_line
 }
 
 fn remap_state(
@@ -523,6 +819,206 @@ fn valid_git_oid(value: &str) -> bool {
     matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeSet, VecDeque};
+    use std::sync::Mutex;
+
+    use serde_json::Value;
+    use tracedecay_application::{
+        CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
+        RequestId, ResolvedScope,
+    };
+    use tracedecay_domain::feedback::{
+        GitHubPullRequestIdV1, GitHubReviewCommentIdV1, GitHubReviewReadOperationV1,
+    };
+    use tracedecay_domain::{ActorId, ProjectId, RefId, RepositoryId, UtcMicros, WorktreeId};
+    use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
+
+    use super::*;
+    use crate::tracedecay::TraceDecay;
+
+    const SHA: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    struct Access {
+        outcomes: Mutex<VecDeque<GitHubProviderLifecycleV1>>,
+    }
+
+    impl Access {
+        fn new(outcomes: impl IntoIterator<Item = GitHubProviderLifecycleV1>) -> Self {
+            Self {
+                outcomes: Mutex::new(outcomes.into_iter().collect()),
+            }
+        }
+    }
+
+    impl GitHubSourceAccessAuthorityV1 for Access {
+        fn authorize<'a>(
+            &'a self,
+            _context: &'a RequestContext,
+            _request: &'a GitHubReviewReadRequestV1,
+        ) -> FeedbackPortFuture<'a, GitHubProviderLifecycleV1> {
+            let outcome = self
+                .outcomes
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(GitHubProviderLifecycleV1::Unavailable);
+            Box::pin(async move { outcome })
+        }
+    }
+
+    fn run_git(root: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .expect("git runs");
+        assert!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn request_context(scope: &FeedbackScopeV1, project_id: ProjectId) -> RequestContext {
+        let resolved = ResolvedScope::new(
+            project_id,
+            scope.repository_id.clone(),
+            scope.worktree_id.clone(),
+            Some(RefId::new(scope.branch_ref.clone()).unwrap()),
+        )
+        .unwrap();
+        let grant = CapabilityGrantSnapshot::new(
+            CapabilityGrantId::new("grant.github.body").unwrap(),
+            1,
+            ManifestDigest::new(SHA).unwrap(),
+            ActorId::new("actor.github.body.issuer").unwrap(),
+            UtcMicros(1),
+            UtcMicros(i64::MAX),
+            resolved.clone(),
+            BTreeSet::from([CapabilityId::new(
+                "capability.application.feedback.github-review-ingest",
+            )
+            .unwrap()]),
+            BTreeSet::from([
+                UseCaseId::new("use-case.application.feedback.github-review-ingest").unwrap(),
+            ]),
+            DisclosureClass::Evidence,
+        )
+        .unwrap();
+        RequestContext::new(
+            ActorId::new("actor.github.body").unwrap(),
+            resolved,
+            grant,
+            RequestId::new("request.github.body").unwrap(),
+            Deadline::new(UtcMicros(i64::MAX - 1)).unwrap(),
+            CancellationContext::active("cancel.github.body").unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn retained_review_body_expansion_rechecks_exact_scope_and_source_access() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path();
+        run_git(root, &["init"]);
+        run_git(root, &["config", "user.email", "tests@example.invalid"]);
+        run_git(root, &["config", "user.name", "TraceDecay Tests"]);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "pub fn reviewed() {}\n").unwrap();
+        run_git(root, &["add", "src/lib.rs"]);
+        run_git(root, &["commit", "-m", "test: seed reviewed source"]);
+        let output = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        let head = CommitId::new(String::from_utf8(output.stdout).unwrap().trim()).unwrap();
+        let graph = TraceDecay::init(root).await.unwrap();
+        let database = graph.dashboard_database_guard().as_ref().clone();
+        let scope = FeedbackScopeV1 {
+            project_id: ProjectId::new("project.github.body").unwrap(),
+            repository_id: RepositoryId::new("repository.github.body").unwrap(),
+            worktree_id: WorktreeId::new("worktree.github.body").unwrap(),
+            branch_ref: "refs/heads/github-body".to_owned(),
+            head_commit_id: head.clone(),
+        };
+        let authority = ProjectGitHubAnchorAuthorityV1::new(database, root, scope.clone()).unwrap();
+        let request = GitHubReviewReadRequestV1 {
+            operation: GitHubReviewReadOperationV1::RestListPullRequestReviewComments,
+            scope: scope.clone(),
+            pull_request_id: GitHubPullRequestIdV1::new("4026204542").unwrap(),
+        };
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../fixtures/pr13_branch_pr/review_comment.json"
+        ))
+        .unwrap();
+        let body = fixture.pointer("/response/body").unwrap().as_str().unwrap();
+        let provider_body_digest =
+            ManifestDigest::new(format!("sha256:{}", hex::encode(Sha256::digest(body)))).unwrap();
+        let retained_body = crate::privacy::sanitize_provider_metadata_text(body).unwrap();
+        let seed = GitHubReviewAnchorSeedV1 {
+            comment_id: GitHubReviewCommentIdV1::new("3556767423").unwrap(),
+            author_node_id: "BOT_kgDOC98s_g".to_owned(),
+            body_digest: provider_body_digest.clone(),
+            retained_body: retained_body.clone(),
+            safe_url:
+                "https://github.com/ScriptedAlchemy/tracedecay/pull/421#discussion_r3556767423"
+                    .to_owned(),
+            path: "src/lib.rs".to_owned(),
+            original_commit_id: head.clone(),
+            observed_commit_id: head,
+            original_start_line: Some(1),
+            original_line: Some(1),
+            current_start_line: Some(1),
+            current_line: Some(1),
+        };
+        let anchors = authority
+            .resolve(&request, &seed)
+            .await
+            .expect("canonical body anchor");
+        let context = request_context(&scope, scope.project_id.clone());
+        let access = Access::new([
+            GitHubProviderLifecycleV1::Ready,
+            GitHubProviderLifecycleV1::Ready,
+        ]);
+        let GitHubReviewBodyReadOutcomeV1::Current(evidence) = authority
+            .read_body(&context, &request, &anchors.body_anchor, &access)
+            .await
+        else {
+            panic!("authorized body evidence must expand");
+        };
+        assert_eq!(evidence.body(), retained_body);
+        assert_eq!(evidence.provider_body_digest, provider_body_digest);
+
+        let revoked = Access::new([
+            GitHubProviderLifecycleV1::Ready,
+            GitHubProviderLifecycleV1::Denied,
+        ]);
+        assert!(matches!(
+            authority
+                .read_body(&context, &request, &anchors.body_anchor, &revoked)
+                .await,
+            GitHubReviewBodyReadOutcomeV1::Denied
+        ));
+        let wrong_project =
+            request_context(&scope, ProjectId::new("project.github.body.other").unwrap());
+        let never_called = Access::new([]);
+        assert!(matches!(
+            authority
+                .read_body(
+                    &wrong_project,
+                    &request,
+                    &anchors.body_anchor,
+                    &never_called,
+                )
+                .await,
+            GitHubReviewBodyReadOutcomeV1::Denied
+        ));
+    }
+}
+
 fn valid_relative_path(value: &str) -> bool {
     let path = Path::new(value);
     !value.is_empty()
@@ -538,4 +1034,8 @@ fn digest_suffix(digest: &ManifestDigest) -> Option<&str> {
 
 fn anchor_key(anchor_id: &RetrievalAnchorId) -> String {
     format!("{ANCHOR_KEY_PREFIX_V1}{}", anchor_id.as_str())
+}
+
+fn body_key(anchor_id: &RetrievalAnchorId) -> String {
+    format!("{BODY_KEY_PREFIX_V1}{}", anchor_id.as_str())
 }

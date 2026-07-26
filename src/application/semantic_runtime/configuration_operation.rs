@@ -48,6 +48,7 @@ pub struct SemanticEvaluationDiversityCandidateV1 {
     pub per_source_namespace: Option<u32>,
     pub per_source_instance: Option<u32>,
     pub per_repository: Option<u32>,
+    pub per_file: Option<u32>,
     pub per_session_or_thread: Option<u32>,
     pub per_copy_cluster: Option<u32>,
     pub per_evidence_role: Option<u32>,
@@ -235,6 +236,7 @@ impl ProductionSemanticConfigurationOperationV1 {
             per_source_namespace: evaluated_diversity.per_source_namespace,
             per_source_instance: evaluated_diversity.per_source_instance,
             per_repository: evaluated_diversity.per_repository,
+            per_file: evaluated_diversity.per_file,
             per_session_or_thread: evaluated_diversity.per_session_or_thread,
             per_copy_cluster: evaluated_diversity.per_copy_cluster,
             per_evidence_role: evaluated_diversity.per_evidence_role,
@@ -515,6 +517,7 @@ fn candidate_matches_evaluated_material(
         && candidate.diversity.per_source_namespace == evaluated.diversity.per_source_namespace
         && candidate.diversity.per_source_instance == evaluated.diversity.per_source_instance
         && candidate.diversity.per_repository == evaluated.diversity.per_repository
+        && candidate.diversity.per_file == evaluated.diversity.per_file
         && candidate.diversity.per_session_or_thread == evaluated.diversity.per_session_or_thread
         && candidate.diversity.per_copy_cluster == evaluated.diversity.per_copy_cluster
         && candidate.diversity.per_evidence_role == evaluated.diversity.per_evidence_role
@@ -668,6 +671,7 @@ mod tests {
                 per_source_namespace: material.diversity.per_source_namespace,
                 per_source_instance: material.diversity.per_source_instance,
                 per_repository: material.diversity.per_repository,
+                per_file: material.diversity.per_file,
                 per_session_or_thread: material.diversity.per_session_or_thread,
                 per_copy_cluster: material.diversity.per_copy_cluster,
                 per_evidence_role: material.diversity.per_evidence_role,

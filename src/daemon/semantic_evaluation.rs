@@ -119,7 +119,16 @@ impl ProductionCandidateNativeExecutionAuthorityV1 for DaemonSemanticEvaluationS
                     .to_owned(),
             ));
         }
-        generation.with_query_inputs(context, evaluate)
+        let rerank_authority = self
+            .candidate
+            .compatibility
+            .rerank
+            .as_ref()
+            .and_then(|pins| {
+                crate::semantic_code::shared_lifecycle_owner()
+                    .and_then(|owner| owner.mount_reranker(pins.clone()).ok())
+            });
+        generation.with_query_inputs(context, rerank_authority.as_ref(), evaluate)
     }
 
     fn measure_resources(
@@ -312,9 +321,12 @@ impl SemanticEvaluationPublicationSnapshotPortV1 for DaemonSemanticEvaluationSna
                 }
                 None => (None, None, None, None),
             };
-            if self.candidate.compatibility.rerank.is_some() || self.candidate.rerank.is_some() {
-                return Err(SemanticActivationCoordinationErrorV1::Unavailable);
-            }
+            let evaluated = crate::search_eval::load_direct_evaluated_profile_material(
+                &self.project_root,
+                None,
+                &self.candidate.evaluated_profile_id,
+            )
+            .map_err(|_| SemanticActivationCoordinationErrorV1::Rejected)?;
             Ok(SemanticEvaluationPublicationSnapshotV1 {
                 project_root: self.project_root.clone(),
                 scope: self.scope.clone(),
@@ -329,8 +341,8 @@ impl SemanticEvaluationPublicationSnapshotPortV1 for DaemonSemanticEvaluationSna
                         super::code_index_scheduler::queries::maximum_retrieval_budget(),
                     semantic: self.candidate.compatibility.semantic.clone(),
                     semantic_ceiling,
-                    rerank: None,
-                    rerank_ceiling: None,
+                    rerank: self.candidate.compatibility.rerank.clone(),
+                    rerank_ceiling: evaluated.rerank,
                 },
             })
         })

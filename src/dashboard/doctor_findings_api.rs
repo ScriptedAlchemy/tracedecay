@@ -208,6 +208,14 @@ async fn project_report(
             && let Some(dispatcher) = dispatcher
         {
             for kind in dispatcher.legal_actions(reference).await {
+                let kind = match kind {
+                    super::doctor_remediation_api::DoctorRemediationLegalActionV1::RequestPreview => {
+                        DashboardLegalActionKindV1::RequestDryRun
+                    }
+                    super::doctor_remediation_api::DoctorRemediationLegalActionV1::RequestApply => {
+                        DashboardLegalActionKindV1::RequestApply
+                    }
+                };
                 let action = DashboardLegalActionRefV1::new(
                     kind,
                     reference.owning_operation().as_str().to_string(),
@@ -672,7 +680,13 @@ mod tests {
         let (_project, _runtime, mut state) = state_with_inputs(inputs).await;
         state.doctor_remediation_dispatcher = Some(
             super::super::doctor_remediation_api::DoctorRemediationDispatcherV1::new(
-                Arc::new(|_| Box::pin(async { vec![DashboardLegalActionKindV1::RequestApply] })),
+                Arc::new(|_| {
+                    Box::pin(async {
+                        vec![
+                            super::super::doctor_remediation_api::DoctorRemediationLegalActionV1::RequestApply,
+                        ]
+                    })
+                }),
                 Arc::new(|_| {
                     Box::pin(async {
                         Err(
@@ -680,6 +694,7 @@ mod tests {
                         )
                     })
                 }),
+                Arc::new(|_| panic!("finding projection never observes remediation")),
             ),
         );
 
