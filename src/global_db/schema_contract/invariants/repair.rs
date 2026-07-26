@@ -8,10 +8,7 @@ use tracedecay_store::SESSION_MESSAGE_PROJECTOR_VERSION;
 use crate::db::engine::{Executor, QueryExecutor, params};
 use crate::global_db::global_db_operation_error;
 
-use super::rows::{
-    authority_violation, decode_authority_json, encode_authority_json,
-    validate_source_cursor_authority_rows,
-};
+use super::rows::{authority_violation, decode_authority_json, encode_authority_json};
 use super::{AUDIT_PAGE_ROWS, OBSERVATION_AUDIT_PAGE_ROWS, OPERATION};
 
 struct CommittedCursorCandidate {
@@ -213,7 +210,7 @@ pub(super) async fn repair_committed_source_cursors(
             }
         }
     }
-    validate_source_cursor_authority_rows(conn).await
+    Ok(())
 }
 
 async fn latest_committed_source_cursors(

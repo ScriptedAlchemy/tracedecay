@@ -318,13 +318,29 @@ pub fn context_description(node_count: u64, budget: u8) -> String {
 /// Returns tool definitions with a dynamic call budget for `tracedecay_context`.
 pub fn get_tool_definitions_with_budget(node_count: u64, budget: u8) -> Vec<ToolDefinition> {
     let mut defs = get_tool_definitions();
+    apply_context_budget(&mut defs, node_count, budget);
+    defs
+}
+
+fn get_maximal_tool_definitions_with_budget(node_count: u64, budget: u8) -> Vec<ToolDefinition> {
+    let mut defs = get_maximal_tool_definitions();
+    apply_context_budget(&mut defs, node_count, budget);
+    defs
+}
+
+fn apply_context_budget(defs: &mut [ToolDefinition], node_count: u64, budget: u8) {
     // Replace the context tool's description with the budgeted version
-    for def in &mut defs {
+    for def in defs {
         if def.name == "tracedecay_context" {
             def.description = context_description(node_count, budget);
         }
     }
-    defs
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToolRegistryMode {
+    HostAvailable,
+    DeterministicMaximal,
 }
 
 /// Build the live MCP discovery result from the application catalog rather
@@ -336,6 +352,7 @@ pub fn get_catalog_filtered_tool_definitions_with_budget(
     profile_id: &ProfileId,
     authorized_capabilities: &BTreeSet<CapabilityId>,
     available_scope: &BTreeSet<ScopeDimension>,
+    registry_mode: ToolRegistryMode,
 ) -> Result<Vec<ToolDefinition>, crate::application_surface::ApplicationSurfaceAdapterError> {
     let catalog = crate::application_surface::application_surface_catalog()?;
     let visible_operations = catalog
@@ -357,7 +374,11 @@ pub fn get_catalog_filtered_tool_definitions_with_budget(
         .filter(|binding| binding.surface() == tracedecay_tool_catalog::BindingSurface::Mcp)
         .map(|binding| format!("tracedecay_{}", binding.operation().as_str()))
         .collect::<BTreeSet<_>>();
-    Ok(get_tool_definitions_with_budget(node_count, budget)
+    let mut definitions = get_maximal_tool_definitions_with_budget(node_count, budget);
+    if registry_mode == ToolRegistryMode::HostAvailable {
+        retain_host_available_tool_definitions(&mut definitions);
+    }
+    Ok(definitions
         .into_iter()
         .filter(|definition| {
             !catalog_operations.contains(&definition.name)
@@ -419,6 +440,12 @@ pub fn get_tool_definitions_with_warming_budget(budget: u8) -> Vec<ToolDefinitio
 /// `ast-grep outline` requirement from the handler, because the Cursor
 /// plugin docs/rules intentionally teach agents to start there.
 pub fn get_tool_definitions() -> Vec<ToolDefinition> {
+    let mut definitions = get_maximal_tool_definitions();
+    retain_host_available_tool_definitions(&mut definitions);
+    definitions
+}
+
+fn get_maximal_tool_definitions() -> Vec<ToolDefinition> {
     let mut definitions = vec![
         def_search(),
         def_grep(),
@@ -571,6 +598,10 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
     add_registered_project_selector_properties(&mut definitions);
     add_lcm_storage_scope_property(&mut definitions);
     add_format_property(&mut definitions);
+    definitions
+}
+
+fn retain_host_available_tool_definitions(definitions: &mut Vec<ToolDefinition>) {
     if !ast_grep_available() {
         definitions.retain(|d| d.name != "tracedecay_ast_grep_rewrite");
     }
@@ -584,7 +615,6 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
             .all(|d| d.name.starts_with("tracedecay_")),
         "all tool definitions must have 'tracedecay_' prefix"
     );
-    definitions
 }
 
 /// Resolve a daemon-internal host surface for the CLI fallback without
@@ -934,6 +964,27 @@ mod tests {
     }
 
     #[test]
+    fn catalog_filtered_discovery_uses_the_deterministic_maximal_registry() {
+        let profile_id = ProfileId::new(tracedecay_application::APPLICATION_DEFAULT_PROFILE_ID)
+            .expect("default profile");
+        let definitions = get_catalog_filtered_tool_definitions_with_budget(
+            0,
+            explore_call_budget(0),
+            &profile_id,
+            &default_catalog_discovery_authority().expect("default discovery authority"),
+            &project_catalog_discovery_scope(),
+            ToolRegistryMode::DeterministicMaximal,
+        )
+        .expect("catalog-filtered definitions");
+
+        assert!(
+            definitions
+                .iter()
+                .any(|definition| definition.name == "tracedecay_ast_grep_rewrite")
+        );
+    }
+
+    #[test]
     fn feedback_tools_without_client_constructible_requests_are_not_advertised() {
         let definitions = get_tool_definitions();
         for &name in UNADVERTISED_HANDLE_GATED_TOOL_NAMES {
@@ -989,6 +1040,7 @@ mod tests {
             &profile,
             &BTreeSet::new(),
             &project_catalog_discovery_scope(),
+            ToolRegistryMode::HostAvailable,
         )
         .unwrap();
 

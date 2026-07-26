@@ -550,6 +550,7 @@ impl McpServer {
             &profile_id,
             &authority,
             &project_catalog_discovery_scope(),
+            ToolRegistryMode::HostAvailable,
         ) {
             Ok(tools) => JsonRpcResponse::success(id, json!({ "tools": tools })),
             Err(error) => JsonRpcResponse::error(

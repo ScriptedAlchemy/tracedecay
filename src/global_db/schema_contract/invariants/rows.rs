@@ -293,140 +293,150 @@ pub(super) async fn validate_observation_authority_rows(
 pub(super) async fn validate_source_cursor_authority_rows(
     conn: &impl QueryExecutor,
 ) -> crate::errors::Result<()> {
-    let mut cursor_rowid = 0_i64;
+    let mut cursor_rowid = 0;
+    let mut advance_rowid = 0;
     loop {
-        let mut rows = conn
-            .query(
-                "SELECT rowid, source_json, scope_json, cursor_json FROM source_cursors
-             WHERE rowid > ?1 ORDER BY rowid LIMIT ?2",
-                params![cursor_rowid, AUDIT_PAGE_ROWS],
-            )
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        let mut page_rows = 0_i64;
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?
-        {
-            page_rows += 1;
-            cursor_rowid = row
-                .get::<i64>(0)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            let source_json = row
-                .get::<String>(1)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            let scope_json = row
-                .get::<String>(2)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            let cursor_json = row
-                .get::<String>(3)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            let source: ObservationSourceIdentityV1 =
-                decode_authority_json(&source_json, "source cursor identity JSON")?;
-            let scope: ObservationScopeV1 =
-                decode_authority_json(&scope_json, "source cursor scope JSON")?;
-            let cursor: ObservationSourceCursorV1 =
-                decode_authority_json(&cursor_json, "source cursor authority JSON")?;
-            if cursor.source() != &source
-                || cursor.scope() != &scope
-                || source_json != encode_authority_json(&source, "source cursor identity JSON")?
-                || scope_json != encode_authority_json(&scope, "source cursor scope JSON")?
-                || cursor_json != encode_authority_json(&cursor, "source cursor authority JSON")?
-            {
-                return Err(authority_violation(
-                    "source cursor authority keys disagree with cursor JSON",
-                ));
-            }
-        }
-        drop(rows);
-        if page_rows < AUDIT_PAGE_ROWS {
-            break;
+        let (next_cursor_rowid, next_advance_rowid, complete) =
+            validate_source_cursor_authority_chunk(conn, cursor_rowid, advance_rowid).await?;
+        cursor_rowid = next_cursor_rowid;
+        advance_rowid = next_advance_rowid;
+        if complete {
+            return Ok(());
         }
     }
+}
 
-    let mut advance_rowid = 0_i64;
-    loop {
-        let mut rows = conn
-            .query(
-                "SELECT advance.rowid, advance.source_json, advance.scope_json,
+pub(super) async fn validate_source_cursor_authority_chunk(
+    conn: &impl QueryExecutor,
+    mut cursor_rowid: i64,
+    mut advance_rowid: i64,
+) -> crate::errors::Result<(i64, i64, bool)> {
+    let mut rows = conn
+        .query(
+            "SELECT rowid, source_json, scope_json, cursor_json FROM source_cursors
+             WHERE rowid > ?1 ORDER BY rowid LIMIT ?2",
+            params![cursor_rowid, AUDIT_PAGE_ROWS],
+        )
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    let mut page_rows = 0_i64;
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?
+    {
+        page_rows += 1;
+        cursor_rowid = row
+            .get::<i64>(0)
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let source_json = row
+            .get::<String>(1)
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let scope_json = row
+            .get::<String>(2)
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let cursor_json = row
+            .get::<String>(3)
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let source: ObservationSourceIdentityV1 =
+            decode_authority_json(&source_json, "source cursor identity JSON")?;
+        let scope: ObservationScopeV1 =
+            decode_authority_json(&scope_json, "source cursor scope JSON")?;
+        let cursor: ObservationSourceCursorV1 =
+            decode_authority_json(&cursor_json, "source cursor authority JSON")?;
+        if cursor.source() != &source
+            || cursor.scope() != &scope
+            || source_json != encode_authority_json(&source, "source cursor identity JSON")?
+            || scope_json != encode_authority_json(&scope, "source cursor scope JSON")?
+            || cursor_json != encode_authority_json(&cursor, "source cursor authority JSON")?
+        {
+            return Err(authority_violation(
+                "source cursor authority keys disagree with cursor JSON",
+            ));
+        }
+    }
+    drop(rows);
+    if page_rows == AUDIT_PAGE_ROWS {
+        return Ok((cursor_rowid, advance_rowid, false));
+    }
+
+    let mut rows = conn
+        .query(
+            "SELECT advance.rowid, advance.source_json, advance.scope_json,
                     advance.coverage_json, advance.reason, advance.receipt_id,
                     receipt.receipt_json
              FROM source_cursor_advances AS advance
              LEFT JOIN sanitization_receipts AS receipt
                ON receipt.receipt_id = advance.receipt_id
              WHERE advance.rowid > ?1 ORDER BY advance.rowid LIMIT ?2",
-                params![advance_rowid, AUDIT_PAGE_ROWS],
-            )
-            .await
+            params![advance_rowid, AUDIT_PAGE_ROWS],
+        )
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    let mut page_rows = 0_i64;
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?
+    {
+        page_rows += 1;
+        advance_rowid = row
+            .get::<i64>(0)
             .map_err(|error| global_db_operation_error(OPERATION, error))?;
-        let mut page_rows = 0_i64;
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|error| global_db_operation_error(OPERATION, error))?
+        let source_json = row
+            .get::<String>(1)
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let scope_json = row
+            .get::<String>(2)
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let coverage_json = row
+            .get::<String>(3)
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let reason = row
+            .get::<String>(4)
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let receipt_id = row
+            .get::<Option<String>>(5)
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let receipt_json = row
+            .get::<Option<String>>(6)
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let source: ObservationSourceIdentityV1 =
+            decode_authority_json(&source_json, "source cursor advance identity JSON")?;
+        let scope: ObservationScopeV1 =
+            decode_authority_json(&scope_json, "source cursor advance scope JSON")?;
+        let coverage: ObservationCoverageV1 =
+            decode_authority_json(&coverage_json, "source cursor advance coverage JSON")?;
+        let receipt_matches = match ObservationCoverageReason::try_from(reason.as_str()) {
+            Ok(parsed_reason) => match (receipt_id, receipt_json) {
+                (None, None) => parsed_reason.is_receiptless(),
+                (Some(receipt_id), Some(receipt_json)) if !parsed_reason.is_receiptless() => {
+                    let receipt: SanitizationReceiptV1 = decode_authority_json(
+                        &receipt_json,
+                        "source cursor advance sanitization receipt JSON",
+                    )?;
+                    receipt.receipt().receipt_id().as_str() == receipt_id
+                        && parsed_reason.disposition_matches(Some(receipt.disposition()))
+                        && (parsed_reason == ObservationCoverageReason::DuplicateObservation)
+                            == receipt.payload().is_some()
+                }
+                _ => false,
+            },
+            Err(_) => false,
+        };
+        if source_json != encode_authority_json(&source, "source cursor advance identity JSON")?
+            || scope_json != encode_authority_json(&scope, "source cursor advance scope JSON")?
+            || coverage_json
+                != encode_authority_json(&coverage, "source cursor advance coverage JSON")?
+            || !receipt_matches
         {
-            page_rows += 1;
-            advance_rowid = row
-                .get::<i64>(0)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            let source_json = row
-                .get::<String>(1)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            let scope_json = row
-                .get::<String>(2)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            let coverage_json = row
-                .get::<String>(3)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            let reason = row
-                .get::<String>(4)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            let receipt_id = row
-                .get::<Option<String>>(5)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            let receipt_json = row
-                .get::<Option<String>>(6)
-                .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            let source: ObservationSourceIdentityV1 =
-                decode_authority_json(&source_json, "source cursor advance identity JSON")?;
-            let scope: ObservationScopeV1 =
-                decode_authority_json(&scope_json, "source cursor advance scope JSON")?;
-            let coverage: ObservationCoverageV1 =
-                decode_authority_json(&coverage_json, "source cursor advance coverage JSON")?;
-            let receipt_matches = match ObservationCoverageReason::try_from(reason.as_str()) {
-                Ok(parsed_reason) => match (receipt_id, receipt_json) {
-                    (None, None) => parsed_reason.is_receiptless(),
-                    (Some(receipt_id), Some(receipt_json)) if !parsed_reason.is_receiptless() => {
-                        let receipt: SanitizationReceiptV1 = decode_authority_json(
-                            &receipt_json,
-                            "source cursor advance sanitization receipt JSON",
-                        )?;
-                        receipt.receipt().receipt_id().as_str() == receipt_id
-                            && parsed_reason.disposition_matches(Some(receipt.disposition()))
-                            && (parsed_reason == ObservationCoverageReason::DuplicateObservation)
-                                == receipt.payload().is_some()
-                    }
-                    _ => false,
-                },
-                Err(_) => false,
-            };
-            if source_json != encode_authority_json(&source, "source cursor advance identity JSON")?
-                || scope_json != encode_authority_json(&scope, "source cursor advance scope JSON")?
-                || coverage_json
-                    != encode_authority_json(&coverage, "source cursor advance coverage JSON")?
-                || !receipt_matches
-            {
-                return Err(authority_violation(
-                    "source cursor advance contains invalid authority evidence",
-                ));
-            }
-        }
-        drop(rows);
-        if page_rows < AUDIT_PAGE_ROWS {
-            return Ok(());
+            return Err(authority_violation(
+                "source cursor advance contains invalid authority evidence",
+            ));
         }
     }
+    drop(rows);
+    Ok((cursor_rowid, advance_rowid, page_rows < AUDIT_PAGE_ROWS))
 }
 
 pub(super) async fn validate_mutable_invariant_rows(
@@ -588,6 +598,47 @@ mod tests {
         assert!(
             error.to_string().contains("source cursor advance"),
             "unexpected advance audit error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn source_cursor_advance_audit_resumes_from_durable_seek_position() {
+        let harness = open_db().await;
+        let transaction = harness
+            .registered
+            .begin_write_transaction()
+            .await
+            .expect("begin resumable advance audit fixture transaction");
+        let conn = &transaction;
+        let page_spanning_rows = usize::try_from(AUDIT_PAGE_ROWS).unwrap() + 1;
+        let values = (0..page_spanning_rows)
+            .map(|index| advance_values(u64::try_from(index).unwrap() * 2))
+            .collect::<Vec<_>>()
+            .join(",\n");
+        conn.execute_batch(&format!(
+            "INSERT INTO source_cursor_advances(
+                source_json, scope_json, coverage_json, reason, receipt_id
+             ) VALUES {values};"
+        ))
+        .await
+        .expect("seed resumable cursor advances");
+
+        let (cursor_rowid, advance_rowid, complete) =
+            validate_source_cursor_authority_chunk(conn, 0, 0)
+                .await
+                .expect("audit first source authority chunk");
+        assert!(!complete);
+        assert_eq!(cursor_rowid, 0);
+        assert_eq!(advance_rowid, AUDIT_PAGE_ROWS);
+
+        let (_, final_advance_rowid, complete) =
+            validate_source_cursor_authority_chunk(conn, cursor_rowid, advance_rowid)
+                .await
+                .expect("resume source authority audit");
+        assert!(complete);
+        assert_eq!(
+            final_advance_rowid,
+            i64::try_from(page_spanning_rows).unwrap()
         );
     }
 
