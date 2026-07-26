@@ -8,7 +8,8 @@
  * directory, and drives the surface through browse / searched / inspector so
  * the states a plain navigation never reaches are scanned too.
  *
- *   npx tsx .explorer-axe/run.ts [label]
+ *   npm run axe:explorer              # from `dashboard/`
+ *   npm run axe:explorer -- <label>   # output subdirectory under `.explorer-axe/`
  */
 import { mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';

@@ -15,6 +15,20 @@ schema-registry names, exact setting-definition files, migration packets, and
 fixture inventories are not. Missing effective behavior or an unreachable
 mutation is a gap; a renamed/deleted declaration scaffold is not.
 
+**Reachability correction (2026-07-26).** The read model and the canonical
+grant-bearing MCP mutation path exist, but the control plane is not yet
+user-drivable end to end. The installed
+`ProductionConfigurationDaemonClient::mutate_direct` unconditionally returns
+`configuration mutation authority unavailable` for a matching project, so
+non-MCP CLI/dashboard/branch surfaces that use that client cannot write.
+Desired-versus-observed drift is also structurally empty in production:
+`record_component_activation` is called only below the store's `#[cfg(test)]`
+boundary, while the production desired-state advance can update only
+activation rows that already exist. Until production creates activation
+events, `observed_state` has no components to report. Requirements below
+remain owned here; they are not delivered merely because schemas and an
+injected-client test exist.
+
 PR17 adds only the settings needed by the executable work loop. It does not
 create a workflow-specific registry or provider-local configuration source.
 
