@@ -3791,6 +3791,7 @@ pub(crate) enum DaemonInvocationOutcome {
         scope: ResolvedScope,
         profile_digest: ManifestDigest,
         report_digest: ManifestDigest,
+        report: crate::search_eval::DirectEvaluationReportV1,
         source_generation: tracedecay_domain::CodeGenerationId,
         snapshot_digest: ManifestDigest,
     },
@@ -6387,6 +6388,7 @@ impl DaemonInvocationService {
                         .evaluation()
                         .report_digest()
                         .clone(),
+                    report: publication.report,
                     source_generation: publication.snapshot.code_generation,
                     snapshot_digest: publication.snapshot.code_snapshot_digest,
                 },
