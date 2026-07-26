@@ -49,6 +49,7 @@ use tracedecay::application_surface::{
 use tracedecay::daemon::{DaemonHandshake, call_default_tool_within};
 use tracedecay::daemon_client::{DaemonInvocationClient, RequestedOutputFormat};
 use tracedecay::errors::{Result, TraceDecayError};
+use tracedecay::mcp::tools::internal_daemon_tool_definition;
 use tracedecay::mcp::tools::{
     RESERVED_FLAGS_FOOTER, ToolDefinition, get_tool_definitions, render_tool_cli_help,
     short_tool_name,
@@ -171,7 +172,12 @@ pub(crate) async fn run(
     };
 
     let canonical = canonical_tool_name(&raw_name);
-    let Some(def) = defs.iter().find(|d| d.name == canonical) else {
+    let internal_def = internal_daemon_tool_definition(&canonical);
+    let Some(def) = defs
+        .iter()
+        .find(|definition| definition.name == canonical)
+        .or(internal_def.as_ref())
+    else {
         let suggestion = nearest_tool_name(&canonical, &defs)
             .map(|name| format!(" Did you mean '{name}'?"))
             .unwrap_or_default();

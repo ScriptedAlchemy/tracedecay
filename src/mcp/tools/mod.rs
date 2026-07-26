@@ -19,7 +19,8 @@ pub use definitions::{
     ALWAYS_REGISTERED_TOOL_COUNT, ast_grep_available, ast_grep_diagnostics_json,
     ast_grep_outline_available, context_description, explore_call_budget,
     format_capable_tool_names, get_tool_definitions, get_tool_definitions_with_budget,
-    get_tool_definitions_with_warming_budget, tool_defaults_to_markdown,
+    get_tool_definitions_with_warming_budget, internal_daemon_tool_definition,
+    tool_defaults_to_markdown,
 };
 pub(crate) use dispatch_policy::tool_dispatches_registered_project_reader;
 pub(crate) use handlers::handle_user_lcm_tool_with_retained_authority;

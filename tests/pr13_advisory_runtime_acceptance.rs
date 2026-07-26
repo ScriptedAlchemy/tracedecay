@@ -663,9 +663,16 @@ async fn production_host_ingest_uses_registered_project_runtime() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("\"status\":\"committed\"") || stdout.contains("\"status\": \"committed\""),
-        "registered daemon ingest did not commit: {stdout}"
+    let response: Value =
+        serde_json::from_slice(&output.stdout).expect("registered daemon ingest response");
+    let payload: Value = serde_json::from_str(
+        response["content"][0]["text"]
+            .as_str()
+            .expect("registered daemon ingest response text"),
+    )
+    .expect("registered daemon ingest payload");
+    assert_eq!(
+        payload["status"], "committed",
+        "registered daemon ingest did not commit: {response}"
     );
 }
