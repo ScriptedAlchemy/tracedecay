@@ -9,7 +9,6 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::convert::Infallible;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -61,7 +60,7 @@ use super::session::{
 use crate::lsp_bridge::{
     DaemonLspSessionTransport, FramePoll, FrameSend, LspFrame, MAX_LSP_FRAME_BYTES,
 };
-use crate::request_identity::ConnectionLocalRequestSequence;
+use crate::request_identity::{ConnectionLocalRequestSequence, ProcessLocalRequestSequence};
 
 /// A protocol actor allows bounded synchronous work before returning a typed
 /// cancellation response. Long-running adapters receive the same deadline via
@@ -87,7 +86,8 @@ const MIN_CLIENT_FRAME_OUTBOUND_RESERVE: usize = MAX_PUBLICATION_BYTES;
 pub(super) const TRACEDECAY_NATIVE_DIAGNOSTICS_METHOD: &str = "tracedecay/nativeDiagnostics";
 const MAX_NATIVE_DIAGNOSTIC_URI_BYTES: usize = 4 * 1024;
 const MAX_NATIVE_DIAGNOSTIC_METADATA_BYTES: usize = 256;
-static NEXT_CONTEXT_OPERATION_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_CONTEXT_OPERATION_ID: ProcessLocalRequestSequence =
+    ProcessLocalRequestSequence::starting_at(1);
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ProtocolDispatch {
@@ -1572,10 +1572,21 @@ where
             .admit_request_with_deadline(request_id.clone(), document, Some(deadline))
         {
             super::session::RequestAdmission::Accepted => {
-                let operation_id = LspRequestId::String(format!(
-                    "lsp-context-operation-{}",
-                    NEXT_CONTEXT_OPERATION_ID.fetch_add(1, Ordering::Relaxed)
-                ));
+                let Ok(operation_id) =
+                    NEXT_CONTEXT_OPERATION_ID.next_string("lsp-context-operation-")
+                else {
+                    self.complete_context_request(
+                        request_id,
+                        response_id,
+                        Err(RpcFailure::request_failure(
+                            LspRequestFailure::ServerCancelled {
+                                retrigger_request: true,
+                            },
+                        )),
+                    );
+                    return;
+                };
+                let operation_id = LspRequestId::String(operation_id);
                 match self.context_snapshot_value(&operation_id, &request) {
                     Ok(None) => {
                         self.pending_context_requests.insert(
@@ -1632,10 +1643,21 @@ where
             .admit_request_with_deadline(request_id.clone(), None, Some(deadline))
         {
             super::session::RequestAdmission::Accepted => {
-                let operation_id = LspRequestId::String(format!(
-                    "lsp-context-expansion-{}",
-                    NEXT_CONTEXT_OPERATION_ID.fetch_add(1, Ordering::Relaxed)
-                ));
+                let Ok(operation_id) =
+                    NEXT_CONTEXT_OPERATION_ID.next_string("lsp-context-expansion-")
+                else {
+                    self.complete_context_request(
+                        request_id,
+                        response_id,
+                        Err(RpcFailure::request_failure(
+                            LspRequestFailure::ServerCancelled {
+                                retrigger_request: true,
+                            },
+                        )),
+                    );
+                    return;
+                };
+                let operation_id = LspRequestId::String(operation_id);
                 match self.context_expansion_value(&operation_id, &request) {
                     Ok(None) => {
                         self.pending_context_expansions.insert(
