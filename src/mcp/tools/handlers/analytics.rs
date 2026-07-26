@@ -291,6 +291,12 @@ pub(super) async fn handle_analytics(
         .count_analytics_events(scope.filter.as_deref(), since)
         .await
         .map_err(config_error)?;
+    let observatory = crate::application::observability::observatory_read_model(
+        gdb,
+        scope.filter.as_deref(),
+        since,
+    )
+    .await;
 
     let mut value = json!({
         "status": "ok",
@@ -301,6 +307,7 @@ pub(super) async fn handle_analytics(
         "since": since,
         "event_count": event_count,
         "event_count_truncated": false,
+        "observatory": observatory,
     });
 
     if wants_section(section, "tools") {

@@ -2,16 +2,13 @@ use crate::common::{EnvVarGuard, GLOBAL_DB_ENV, lock_global_db_env, lock_recover
 use std::path::Path;
 use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay::hooks::{
-    CursorShellSyncPlan, HookWorkspaceStatus, build_cursor_session_context,
-    claude_session_context_for_event, codex_additional_context_json, codex_apply_patch_rel_paths,
-    codex_project_root_from_event, codex_subagent_start_log_line,
-    codex_user_prompt_submit_context_for_event, codex_workspace_status_from_event,
-    cursor_branch_switch_target, cursor_project_root_from_event, cursor_session_start_json,
-    cursor_shell_command_targets_project, cursor_shell_sync_plan,
-    cursor_shell_sync_plan_with_current_branch, cursor_should_run_sync, cursor_staleness_hint,
-    evaluate_codex_subagent_start, evaluate_cursor_post_tool_use, evaluate_cursor_subagent_start,
-    evaluate_hook_decision, evaluate_kiro_pre_tool_use, is_git_state_changing_command,
-    kiro_post_tool_use_rel_paths, record_codex_subagent_start,
+    HookWorkspaceStatus, build_cursor_session_context, claude_session_context_for_event,
+    codex_additional_context_json, codex_apply_patch_rel_paths, codex_project_root_from_event,
+    codex_subagent_start_log_line, codex_user_prompt_submit_context_for_event,
+    codex_workspace_status_from_event, cursor_project_root_from_event, cursor_session_start_json,
+    cursor_should_run_sync, cursor_staleness_hint, evaluate_codex_subagent_start,
+    evaluate_cursor_post_tool_use, evaluate_cursor_subagent_start, evaluate_hook_decision,
+    evaluate_kiro_pre_tool_use, kiro_post_tool_use_rel_paths, record_codex_subagent_start,
 };
 use tracedecay::storage::{
     EnrollmentMarker, StorageMode, resolve_layout_for_current_profile, write_enrollment_marker,
@@ -744,47 +741,6 @@ fn test_cursor_project_root_prefers_cwd_in_multi_root_workspace() {
 }
 
 #[test]
-fn test_is_git_state_changing_command_detects_branch_switches() {
-    for command in [
-        "git checkout main",
-        "git switch -c feature/x",
-        "git pull --rebase",
-        "git merge origin/main",
-        "git rebase main",
-        "git reset --hard HEAD~1",
-        "git cherry-pick abc123",
-        "git stash pop",
-        "git stash apply stash@{0}",
-        "  GIT  checkout main  ",
-    ] {
-        assert!(
-            is_git_state_changing_command(command),
-            "{command} should be treated as a git state-changing command"
-        );
-    }
-}
-
-#[test]
-fn test_is_git_state_changing_command_ignores_read_only_and_non_git() {
-    for command in [
-        "git status",
-        "git log --oneline",
-        "git diff",
-        "git commit -m wip",
-        "git add .",
-        "git stash list",
-        "ls -la",
-        "cargo test",
-        "echo git checkout",
-    ] {
-        assert!(
-            !is_git_state_changing_command(command),
-            "{command} should NOT trigger a sync"
-        );
-    }
-}
-
-#[test]
 fn test_cursor_after_file_edit_rel_paths_targets_edited_files() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().canonicalize().unwrap();
@@ -1198,150 +1154,6 @@ fn test_cursor_session_start_json_without_root_omits_env_path() {
     let v: serde_json::Value = serde_json::from_str(&json).unwrap();
     assert_eq!(v["additional_context"], "ctx");
     assert!(v["env"].get("TRACEDECAY_PROJECT_ROOT").is_none());
-}
-
-#[test]
-fn test_cursor_branch_switch_target_extracts_branch() {
-    assert_eq!(
-        cursor_branch_switch_target("git checkout main"),
-        Some("main".to_string())
-    );
-    assert_eq!(
-        cursor_branch_switch_target("git switch develop"),
-        Some("develop".to_string())
-    );
-    assert_eq!(
-        cursor_branch_switch_target("git checkout -b feature/x"),
-        Some("feature/x".to_string())
-    );
-    assert_eq!(
-        cursor_branch_switch_target("git switch -c feature/y"),
-        Some("feature/y".to_string())
-    );
-}
-
-#[test]
-fn test_cursor_shell_sync_plan_routes_worktree_add_to_worktree_branch_add() {
-    assert_eq!(
-        cursor_shell_sync_plan("git worktree add ../wt feature/z"),
-        CursorShellSyncPlan::WorktreeBranchAdd {
-            branch: "feature/z".to_string(),
-            worktree_path: "../wt".to_string(),
-        }
-    );
-    assert_eq!(
-        cursor_shell_sync_plan("git worktree add -b newbranch ../wt"),
-        CursorShellSyncPlan::WorktreeBranchAdd {
-            branch: "newbranch".to_string(),
-            worktree_path: "../wt".to_string(),
-        }
-    );
-    assert_eq!(
-        cursor_shell_sync_plan("git worktree add -b feature/new ../wt main"),
-        CursorShellSyncPlan::WorktreeBranchAdd {
-            branch: "feature/new".to_string(),
-            worktree_path: "../wt".to_string(),
-        }
-    );
-}
-
-#[test]
-fn test_cursor_shell_sync_plan_ignores_branchless_and_detached_worktree_adds() {
-    assert_eq!(
-        cursor_shell_sync_plan("git worktree add ../wt"),
-        CursorShellSyncPlan::Noop
-    );
-    assert_eq!(
-        cursor_shell_sync_plan("git worktree add --detach ../wt main"),
-        CursorShellSyncPlan::Noop
-    );
-}
-
-#[test]
-fn test_cursor_branch_switch_target_ignores_path_checkouts_and_non_switches() {
-    assert_eq!(
-        cursor_branch_switch_target("git checkout -- src/main.rs"),
-        None
-    );
-    assert_eq!(cursor_branch_switch_target("git checkout ."), None);
-    assert_eq!(cursor_branch_switch_target("git checkout README.md"), None);
-    assert_eq!(cursor_branch_switch_target("git pull --rebase"), None);
-    assert_eq!(cursor_branch_switch_target("git merge origin/main"), None);
-    assert_eq!(cursor_branch_switch_target("git status"), None);
-    assert_eq!(cursor_branch_switch_target("echo git checkout main"), None);
-}
-
-#[test]
-fn test_cursor_shell_sync_plan_routes_branch_switch_to_branch_add() {
-    assert_eq!(
-        cursor_shell_sync_plan("git checkout main"),
-        CursorShellSyncPlan::BranchAdd("main".to_string())
-    );
-    assert_eq!(
-        cursor_shell_sync_plan("git switch -c feature/x"),
-        CursorShellSyncPlan::BranchAdd("feature/x".to_string())
-    );
-}
-
-#[test]
-fn test_cursor_shell_sync_plan_routes_same_branch_changes_to_incremental_sync() {
-    for command in [
-        "git pull --rebase",
-        "git merge origin/main",
-        "git rebase main",
-        "git reset --hard HEAD~1",
-        "git cherry-pick abc123",
-        "git stash pop",
-    ] {
-        assert_eq!(
-            cursor_shell_sync_plan(command),
-            CursorShellSyncPlan::IncrementalSync,
-            "{command} should route to an incremental sync"
-        );
-    }
-}
-
-#[test]
-fn test_cursor_shell_sync_plan_uses_current_branch_for_implicit_git_changes() {
-    assert_eq!(
-        cursor_shell_sync_plan_with_current_branch("git pull --rebase", Some("feature/x")),
-        CursorShellSyncPlan::CurrentBranchSync("feature/x".to_string())
-    );
-    assert_eq!(
-        cursor_shell_sync_plan_with_current_branch("git pull --rebase", None),
-        CursorShellSyncPlan::IncrementalSync
-    );
-}
-
-#[test]
-fn test_cursor_shell_sync_plan_noop_for_read_only_and_non_git() {
-    for command in ["git status", "git log", "ls -la", "cargo build"] {
-        assert_eq!(
-            cursor_shell_sync_plan(command),
-            CursorShellSyncPlan::Noop,
-            "{command} should be a no-op"
-        );
-    }
-}
-
-#[test]
-fn test_cursor_shell_command_targets_project_respects_explicit_git_workdir() {
-    let workspace = tempfile::tempdir().unwrap();
-    let project = workspace.path().join("project");
-    let other = workspace.path().join("other");
-    std::fs::create_dir_all(&project).unwrap();
-    std::fs::create_dir_all(&other).unwrap();
-
-    assert!(!cursor_shell_command_targets_project(
-        &format!("git -C {} pull", other.display()),
-        &project,
-        &project,
-    ));
-    assert!(cursor_shell_command_targets_project(
-        &format!("git --work-tree={} pull", project.display()),
-        &project,
-        &project,
-    ));
 }
 
 // ---------------------------------------------------------------------------

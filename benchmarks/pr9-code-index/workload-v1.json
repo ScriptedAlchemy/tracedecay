@@ -19,14 +19,14 @@
       "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/research/watermark.rs",
       "tests/fixtures/search_quality/corpus/crates/tracedecay-domain/src/session.rs"
     ],
-    "content_digest": "sha256:da792d990ea60aa311c4be2ec58a68f1a9e86a6520ee7a50e433d1f9d22b0fd9",
+    "content_digest": "sha256:17b99edc856108ded994daed7b29d6dd383b2f0890c94867eed5cf2ba903427f",
     "descriptor_digest": "sha256:5aecc3b0c4b0d2c7dce830c192ef7267c4792586d6cb11fbd3e2f2e321a424b0",
     "language_strata": [
       {
         "language": "rust",
         "files": 9,
-        "bytes": 116543,
-        "chunks": 1505
+        "bytes": 153569,
+        "chunks": 1957
       }
     ]
   },
@@ -35,15 +35,15 @@
       "name": "current",
       "factor": 1,
       "files": 9,
-      "bytes": 116543,
-      "chunks": 1505
+      "bytes": 153569,
+      "chunks": 1957
     },
     {
       "name": "10x",
       "factor": 10,
       "files": 90,
-      "bytes": 1165430,
-      "chunks": 15050
+      "bytes": 1535690,
+      "chunks": 19570
     }
   ],
   "cases": [

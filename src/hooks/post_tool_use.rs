@@ -3,9 +3,9 @@
 //! Both agents send the same shaped event (Codex adopted Claude's hook
 //! schema): parse the event JSON, read `tool_name`, resolve the session `cwd`
 //! and project root, check for an initialized store, then notify the daemon
-//! about edits (targeted sync) or shell commands (branch tracking /
-//! coalesced sync). Each agent supplies a [`PostToolUseSpec`] with its own
-//! tool-name predicates and edit-path extractor.
+//! about edits (targeted sync) or content-free shell completion observations.
+//! Each agent supplies a [`PostToolUseSpec`] with its own tool-name predicates
+//! and edit-path extractor.
 
 use std::path::Path;
 
@@ -66,10 +66,8 @@ pub(crate) const CODEX_POST_TOOL_USE_SPEC: PostToolUseSpec = PostToolUseSpec {
 
 /// Shared post-tool-use daemon notification. Fail-open and silent.
 ///
-/// Behavior note: empty shell commands are skipped for both agents. The
-/// Claude path always did this; the Codex path previously forwarded empty
-/// commands (which produced no-op daemon events), so the two were unified on
-/// the safer skip-empty behavior.
+/// Shell completion is forwarded without command text. It remains an
+/// observation and cannot authorize branch, worktree, or sync planning.
 pub(crate) async fn notify_post_tool_use(spec: &PostToolUseSpec, event_json: &str) {
     notify_post_tool_use_inner(spec, event_json, None).await;
 }
@@ -117,18 +115,10 @@ async fn notify_post_tool_use_inner(
         )
         .await;
     } else if (spec.is_shell_tool)(tool_name) {
-        let command = tool_input_command(&parsed);
-        if command.is_empty() {
-            return;
-        }
         super::notify_hook_event_with_optional_telemetry(
             &root,
-            crate::daemon::DaemonHookEvent::post_tool_use_shell(
-                spec.agent,
-                command.to_string(),
-                cwd,
-            )
-            .with_route(Some(hook_route_metadata_from_parsed(&parsed, &root))),
+            crate::daemon::DaemonHookEvent::post_tool_use_shell(spec.agent, cwd)
+                .with_route(Some(hook_route_metadata_from_parsed(&parsed, &root))),
             telemetry,
         )
         .await;

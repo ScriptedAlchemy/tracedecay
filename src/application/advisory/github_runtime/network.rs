@@ -574,13 +574,22 @@ impl GitHubReadOnlyCredentialV1 {
         target: &GitHubRepositoryTargetV1,
         permission: GitHubReadPermissionV1,
     ) -> GitHubCredentialAuthorizationV1 {
+        self.authorization_for_repository(&target.owner, &target.repository, permission)
+    }
+
+    fn authorization_for_repository(
+        &self,
+        owner: &str,
+        repository: &str,
+        permission: GitHubReadPermissionV1,
+    ) -> GitHubCredentialAuthorizationV1 {
         match &self.kind {
             GitHubReadOnlyCredentialKindV1::Anonymous => GitHubCredentialAuthorizationV1::Anonymous,
             GitHubReadOnlyCredentialKindV1::VerifiedPrivate {
                 repository_owner,
                 repository_name,
                 ..
-            } if repository_owner != &target.owner || repository_name != &target.repository => {
+            } if repository_owner != owner || repository_name != repository => {
                 GitHubCredentialAuthorizationV1::Denied
             }
             GitHubReadOnlyCredentialKindV1::VerifiedPrivate { .. } => {
@@ -641,6 +650,18 @@ pub struct GitHubRepositoryTargetV1 {
     pub repository: String,
     pub pull_request_number: u64,
     pub pull_request_id: tracedecay_domain::feedback::GitHubPullRequestIdV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GitHubCiRepositoryTargetV1 {
+    pub owner: String,
+    pub repository: String,
+}
+
+impl GitHubCiRepositoryTargetV1 {
+    pub fn validate(&self) -> bool {
+        valid_path_segment(&self.owner) && valid_path_segment(&self.repository)
+    }
 }
 
 impl GitHubRepositoryTargetV1 {
@@ -716,20 +737,11 @@ impl GitHubReadOnlyClientV1 {
     }
 
     pub fn new_for_ci(
-        target: GitHubRepositoryTargetV1,
+        target: GitHubCiRepositoryTargetV1,
         credential: GitHubReadOnlyCredentialV1,
         config: GitHubHttpReadConfigV1,
-    ) -> Option<Self> {
-        if matches!(
-            credential.authorization_for_target(&target, GitHubReadPermissionV1::Actions),
-            GitHubCredentialAuthorizationV1::Denied
-        ) || matches!(
-            credential.authorization_for_target(&target, GitHubReadPermissionV1::Checks),
-            GitHubCredentialAuthorizationV1::Denied
-        ) {
-            return None;
-        }
-        Self::build(target, credential, config)
+    ) -> Option<GitHubCiReadOnlyClientV1> {
+        GitHubCiReadOnlyClientV1::new(target, credential, config)
     }
 
     fn build(
@@ -1164,6 +1176,81 @@ impl GitHubReadOnlyClientV1 {
             MAX_GITHUB_READ_RESPONSE_BYTES_V1,
         )
     }
+}
+
+#[derive(Clone)]
+pub struct GitHubCiReadOnlyClientV1 {
+    agent: ureq::Agent,
+    target: GitHubCiRepositoryTargetV1,
+    credential: GitHubReadOnlyCredentialV1,
+    config: GitHubHttpReadConfigV1,
+}
+
+impl GitHubCiReadOnlyClientV1 {
+    fn new(
+        target: GitHubCiRepositoryTargetV1,
+        credential: GitHubReadOnlyCredentialV1,
+        config: GitHubHttpReadConfigV1,
+    ) -> Option<Self> {
+        if !target.validate()
+            || !config.validate()
+            || matches!(
+                credential.authorization_for_repository(
+                    &target.owner,
+                    &target.repository,
+                    GitHubReadPermissionV1::Actions,
+                ),
+                GitHubCredentialAuthorizationV1::Denied
+            )
+            || matches!(
+                credential.authorization_for_repository(
+                    &target.owner,
+                    &target.repository,
+                    GitHubReadPermissionV1::Checks,
+                ),
+                GitHubCredentialAuthorizationV1::Denied
+            )
+        {
+            return None;
+        }
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_global(Some(config.request_timeout))
+            .timeout_connect(Some(config.connect_timeout))
+            .timeout_recv_response(Some(config.socket_timeout))
+            .timeout_recv_body(Some(config.socket_timeout))
+            .https_only(true)
+            .max_redirects(0)
+            .http_status_as_error(false)
+            .build()
+            .into();
+        Some(Self {
+            agent,
+            target,
+            credential,
+            config,
+        })
+    }
+
+    fn get(&self, url: &str, permission: GitHubReadPermissionV1) -> HttpResponseV1 {
+        let authorization = self.credential.authorization_for_repository(
+            &self.target.owner,
+            &self.target.repository,
+            permission,
+        );
+        if matches!(&authorization, GitHubCredentialAuthorizationV1::Denied) {
+            return HttpResponseV1::Denied;
+        }
+        let mut request = self
+            .agent
+            .get(url)
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .header("User-Agent", "tracedecay-github-read");
+        if let GitHubCredentialAuthorizationV1::Private(authorization) = &authorization {
+            request = request.header("Authorization", authorization.as_str());
+        }
+        decode_ureq_response(request.call(), MAX_GITHUB_READ_RESPONSE_BYTES_V1)
+    }
 
     pub(crate) fn read_workflow_run<'a>(
         &'a self,
@@ -1329,8 +1416,11 @@ impl GitHubReadOnlyClientV1 {
             return Box::pin(async { GitHubCiTransportOutcomeV1::Unavailable });
         }
         if matches!(
-            self.credential
-                .authorization_for_target(&self.target, permission),
+            self.credential.authorization_for_repository(
+                &self.target.owner,
+                &self.target.repository,
+                permission,
+            ),
             GitHubCredentialAuthorizationV1::Denied
         ) {
             return Box::pin(async { GitHubCiTransportOutcomeV1::Denied });
@@ -1341,18 +1431,22 @@ impl GitHubReadOnlyClientV1 {
             let task = tokio::task::spawn_blocking(move || {
                 if request_context_admitted(&context_for_read)
                     && !matches!(
-                        client
-                            .credential
-                            .authorization_for_target(&client.target, permission),
+                        client.credential.authorization_for_repository(
+                            &client.target.owner,
+                            &client.target.repository,
+                            permission,
+                        ),
                         GitHubCredentialAuthorizationV1::Denied
                     )
                 {
-                    let response = client.get(&url, None, permission);
+                    let response = client.get(&url, permission);
                     if request_context_admitted(&context_for_read)
                         && !matches!(
-                            client
-                                .credential
-                                .authorization_for_target(&client.target, permission),
+                            client.credential.authorization_for_repository(
+                                &client.target.owner,
+                                &client.target.repository,
+                                permission,
+                            ),
                             GitHubCredentialAuthorizationV1::Denied
                         )
                     {
@@ -2112,7 +2206,10 @@ mod tests {
         );
         assert!(
             GitHubReadOnlyClientV1::new_for_ci(
-                target,
+                GitHubCiRepositoryTargetV1 {
+                    owner: target.owner,
+                    repository: target.repository,
+                },
                 credential.clone(),
                 GitHubHttpReadConfigV1::default(),
             )
@@ -2377,17 +2474,15 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let address = listener.local_addr().unwrap();
-        let client = GitHubReadOnlyClientV1 {
+        let client = GitHubCiReadOnlyClientV1 {
             agent: ureq::Agent::config_builder()
                 .https_only(false)
                 .http_status_as_error(false)
                 .build()
                 .into(),
-            target: GitHubRepositoryTargetV1 {
+            target: GitHubCiRepositoryTargetV1 {
                 owner: "ScriptedAlchemy".to_owned(),
                 repository: "tracedecay".to_owned(),
-                pull_request_number: 421,
-                pull_request_id: GitHubPullRequestIdV1::new("4026204542").unwrap(),
             },
             credential: GitHubReadOnlyCredentialV1::anonymous(),
             config: GitHubHttpReadConfigV1 {

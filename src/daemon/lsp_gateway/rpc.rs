@@ -2,16 +2,18 @@
 
 use serde_json::{Map, Value, json};
 
+use super::capabilities::EffectiveCapabilities;
 use super::diagnostics::{
     DiagnosticSeverity, DocumentDiagnosticReport, GatewayDiagnostic, GatewayDiagnosticCoverage,
     GatewayDiagnosticData, GatewayDiagnosticLifecycle, GatewayDiagnosticProviderState, LspPosition,
-    LspRange, TRACEDECAY_DIAGNOSTIC_DATA_REVISION,
+    LspRange, MAX_DIAGNOSTIC_RELATED_INFORMATION, MAX_DIAGNOSTIC_RELATED_MESSAGE_BYTES,
+    TRACEDECAY_DIAGNOSTIC_DATA_REVISION, safe_code_description_uri, safe_related_uri,
+    truncate_utf8,
 };
 use super::gateway::{
-    CallHierarchyItem, DocumentSymbol, GatewayDocumentDiagnostics, GatewayResponse, Hover,
-    IncomingCall, LspLocation, MethodUnavailableReason, OutgoingCall, RenameCandidateResult,
-    RenameCandidateUnavailableReason, SemanticResponse, SignatureHelp, TypeHierarchyItem,
-    WorkspaceSymbol,
+    CallHierarchyItem, DocumentSymbol, GatewayResponse, Hover, IncomingCall, LspLocation,
+    MethodUnavailableReason, OutgoingCall, RenameCandidateResult, RenameCandidateUnavailableReason,
+    SemanticResponse, SignatureHelp, TypeHierarchyItem, WorkspaceSymbol,
 };
 use super::overlay::{OverlayChange, OverlayError};
 use super::session::{LspRequestFailure, LspRequestId};
@@ -126,17 +128,52 @@ fn rename_candidate_value(value: RenameCandidateResult) -> Value {
     }
 }
 
-#[allow(dead_code)] // Plan 35 gateway diagnostic — staged
-pub(super) fn gateway_diagnostic_value(value: GatewayDocumentDiagnostics) -> Value {
-    document_diagnostic_report_value(value.report)
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct DiagnosticSerializationCapabilities {
+    related_information: bool,
+    code_description: bool,
+    data: bool,
 }
 
-pub(super) fn document_diagnostic_report_value(report: DocumentDiagnosticReport) -> Value {
+impl DiagnosticSerializationCapabilities {
+    pub(super) fn push(capabilities: &EffectiveCapabilities) -> Self {
+        Self {
+            related_information: capabilities.publish_diagnostics_related_information,
+            code_description: capabilities.publish_diagnostics_code_description,
+            data: capabilities.publish_diagnostics_data,
+        }
+    }
+
+    pub(super) fn pull(capabilities: &EffectiveCapabilities) -> Self {
+        Self {
+            related_information: capabilities.document_diagnostics_related_information,
+            code_description: capabilities.document_diagnostics_code_description,
+            data: capabilities.document_diagnostics_data,
+        }
+    }
+
+    #[cfg(test)]
+    const fn all() -> Self {
+        Self {
+            related_information: true,
+            code_description: true,
+            data: true,
+        }
+    }
+}
+
+pub(super) fn document_diagnostic_report_value(
+    report: DocumentDiagnosticReport,
+    capabilities: DiagnosticSerializationCapabilities,
+) -> Value {
     match report {
         DocumentDiagnosticReport::Full { result_id, items } => json!({
             "kind": "full",
             "resultId": result_id,
-            "items": items.into_iter().map(diagnostic_value).collect::<Vec<_>>(),
+            "items": items
+                .into_iter()
+                .map(|item| diagnostic_value(item, capabilities))
+                .collect::<Vec<_>>(),
         }),
         DocumentDiagnosticReport::Unchanged { result_id } => json!({
             "kind": "unchanged",
@@ -145,7 +182,10 @@ pub(super) fn document_diagnostic_report_value(report: DocumentDiagnosticReport)
     }
 }
 
-pub(super) fn diagnostic_value(diagnostic: GatewayDiagnostic) -> Value {
+pub(super) fn diagnostic_value(
+    diagnostic: GatewayDiagnostic,
+    capabilities: DiagnosticSerializationCapabilities,
+) -> Value {
     let mut value = json!({
         "range": range_value(diagnostic.range),
         "severity": diagnostic.severity.map(severity_value),
@@ -153,7 +193,39 @@ pub(super) fn diagnostic_value(diagnostic: GatewayDiagnostic) -> Value {
         "source": diagnostic.source.wire_name(),
         "message": diagnostic.message,
     });
-    if let Some(data) = diagnostic.data {
+    if capabilities.code_description
+        && let Some(uri) = diagnostic
+            .code_description_uri
+            .filter(|uri| safe_code_description_uri(uri))
+    {
+        value["codeDescription"] = json!({ "href": uri });
+    }
+    if capabilities.related_information {
+        let related = diagnostic
+            .related_information
+            .into_iter()
+            .filter(|related| {
+                safe_related_uri(&related.uri) && related.range.start <= related.range.end
+            })
+            .take(MAX_DIAGNOSTIC_RELATED_INFORMATION)
+            .map(|mut related| {
+                truncate_utf8(&mut related.message, MAX_DIAGNOSTIC_RELATED_MESSAGE_BYTES);
+                json!({
+                    "location": {
+                        "uri": related.uri,
+                        "range": range_value(related.range),
+                    },
+                    "message": related.message,
+                })
+            })
+            .collect::<Vec<_>>();
+        if !related.is_empty() {
+            value["relatedInformation"] = Value::Array(related);
+        }
+    }
+    if capabilities.data
+        && let Some(data) = diagnostic.data
+    {
         value["data"] = diagnostic_data_value(data);
     }
     value
@@ -621,6 +693,7 @@ mod tests {
     use crate::daemon::lsp_gateway::diagnostics::{
         GatewayDiagnosticCoverage, GatewayDiagnosticData, GatewayDiagnosticIdentity,
         GatewayDiagnosticLifecycle, GatewayDiagnosticProviderState,
+        GatewayDiagnosticRelatedInformation,
     };
 
     #[test]
@@ -639,8 +712,10 @@ mod tests {
             },
             severity: Some(DiagnosticSeverity::Warning),
             code: Some("clippy::needless_borrow".to_owned()),
+            code_description_uri: None,
             message: "needless borrow".to_owned(),
             source: super::super::diagnostics::DiagnosticSource::TraceDecay,
+            related_information: Vec::new(),
             data: Some(GatewayDiagnosticData {
                 identity: GatewayDiagnosticIdentity {
                     finding_id: "feedback.finding.v1.abc".to_owned(),
@@ -666,7 +741,7 @@ mod tests {
                 coverage: GatewayDiagnosticCoverage::Complete,
                 expansion_handle: "rh_0123456789abcdef01234567".to_owned(),
             }),
-        });
+        }, DiagnosticSerializationCapabilities::all());
 
         assert_eq!(
             value,
@@ -705,25 +780,119 @@ mod tests {
 
     #[test]
     fn diagnostic_data_is_omitted_when_canonical_identity_is_unavailable() {
-        let value = diagnostic_value(GatewayDiagnostic {
+        let value = diagnostic_value(
+            GatewayDiagnostic {
+                uri: "file:///root/a.rs".to_owned(),
+                range: LspRange {
+                    start: LspPosition {
+                        line: 0,
+                        character: 0,
+                    },
+                    end: LspPosition {
+                        line: 0,
+                        character: 1,
+                    },
+                },
+                severity: None,
+                code: None,
+                code_description_uri: None,
+                message: "upstream".to_owned(),
+                source: super::super::diagnostics::DiagnosticSource::Upstream,
+                related_information: Vec::new(),
+                data: None,
+            },
+            DiagnosticSerializationCapabilities::all(),
+        );
+
+        assert!(value.get("data").is_none());
+    }
+
+    #[test]
+    fn diagnostic_optional_fields_require_negotiated_capabilities_and_safe_urls() {
+        let diagnostic = GatewayDiagnostic {
             uri: "file:///root/a.rs".to_owned(),
             range: LspRange {
                 start: LspPosition {
-                    line: 0,
-                    character: 0,
+                    line: 1,
+                    character: 2,
                 },
                 end: LspPosition {
-                    line: 0,
-                    character: 1,
+                    line: 1,
+                    character: 3,
                 },
             },
-            severity: None,
-            code: None,
-            message: "upstream".to_owned(),
-            source: super::super::diagnostics::DiagnosticSource::Upstream,
+            severity: Some(DiagnosticSeverity::Information),
+            code: Some("github-review".to_owned()),
+            code_description_uri: Some(
+                "https://github.com/acme/repo/pull/7#discussion_r42".to_owned(),
+            ),
+            message: "Unresolved GitHub review comment".to_owned(),
+            source: super::super::diagnostics::DiagnosticSource::TraceDecayGitHub,
+            related_information: vec![
+                GatewayDiagnosticRelatedInformation {
+                    uri: "file:///root/caller.rs".to_owned(),
+                    range: LspRange {
+                        start: LspPosition {
+                            line: 8,
+                            character: 0,
+                        },
+                        end: LspPosition {
+                            line: 8,
+                            character: 6,
+                        },
+                    },
+                    message: "Affected caller".to_owned(),
+                },
+                GatewayDiagnosticRelatedInformation {
+                    uri: "https://user:secret@example.com/private".to_owned(),
+                    range: LspRange {
+                        start: LspPosition {
+                            line: 0,
+                            character: 0,
+                        },
+                        end: LspPosition {
+                            line: 0,
+                            character: 1,
+                        },
+                    },
+                    message: "must be redacted".to_owned(),
+                },
+            ],
             data: None,
-        });
+        };
 
-        assert!(value.get("data").is_none());
+        let enabled = diagnostic_value(
+            diagnostic.clone(),
+            DiagnosticSerializationCapabilities::all(),
+        );
+        assert_eq!(
+            enabled["codeDescription"]["href"],
+            "https://github.com/acme/repo/pull/7#discussion_r42"
+        );
+        assert_eq!(enabled["relatedInformation"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            enabled["relatedInformation"][0]["location"]["uri"],
+            "file:///root/caller.rs"
+        );
+
+        let mut unsafe_url = diagnostic.clone();
+        unsafe_url.code_description_uri =
+            Some("https://user:secret@github.com/acme/repo/pull/7".to_owned());
+        assert!(
+            diagnostic_value(unsafe_url, DiagnosticSerializationCapabilities::all())
+                .get("codeDescription")
+                .is_none()
+        );
+
+        let disabled = diagnostic_value(
+            diagnostic,
+            DiagnosticSerializationCapabilities {
+                related_information: false,
+                code_description: false,
+                data: false,
+            },
+        );
+        assert!(disabled.get("codeDescription").is_none());
+        assert!(disabled.get("relatedInformation").is_none());
     }
 }
