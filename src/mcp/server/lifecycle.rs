@@ -254,7 +254,7 @@ impl McpServer {
             let user_session_refresh_wake = self.user_session_refresh_wake.clone();
             let ingest_done_flag = Arc::clone(&self.transcript_ingest_done);
             let analytics_db = self.accounting_db.clone();
-            tokio::spawn(async move {
+            let task = tokio::spawn(async move {
                 if let Some(db) = run_startup_session_catch_up(
                     session_db,
                     registered_session_db,
@@ -313,6 +313,7 @@ impl McpServer {
                 }
                 ingest_done_flag.store(true, Ordering::Release);
             });
+            *self.startup_transcript_ingest_task.lock().await = Some(task);
         }
 
         self.startup_catch_up_done.store(true, Ordering::Release);

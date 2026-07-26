@@ -1198,6 +1198,115 @@ async fn production_composition_harness_dispatches_application_invocations_in_pr
     harness.shutdown().await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn production_composition_harness_reads_retained_profile_analytics_authority() {
+    let temp = TempDir::new().expect("temp dir");
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(project.join("src")).expect("source dir");
+    std::fs::write(project.join("src/lib.rs"), "pub fn analytics_probe() {}\n")
+        .expect("source file");
+    commit_production_composition_project(&project);
+
+    let harness = ProductionProjectCompositionHarnessV1::open(temp.path(), vec![project.clone()])
+        .await
+        .expect("production composition");
+    harness
+        .call_tool(
+            &project,
+            "tracedecay_search",
+            json!({"query": "analytics_probe", "format": "json"}),
+        )
+        .await
+        .expect("production search");
+    harness
+        .server(&project)
+        .expect("production server")
+        .ledger_writes_settled()
+        .await;
+
+    let second_owner = crate::application::host_admission::HostAdmissionTestRuntimeV1::profile(
+        harness.profile_root(),
+    )
+    .await;
+    let error = match second_owner {
+        Ok(_) => panic!("parallel profile authority must remain rejected"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("different daemon election already owns database scope"),
+        "parallel authority must fail at daemon election: {error}"
+    );
+
+    let events = harness
+        .read_profile_analytics_events(&crate::global_db::AnalyticsEventQuery {
+            provider: Some("mcp".to_owned()),
+            project_id: None,
+            session_id: None,
+            event_kind: Some("mcp_tool_call".to_owned()),
+            since: None,
+            until: None,
+            before_id: None,
+            limit: 100,
+        })
+        .await
+        .expect("read retained profile analytics");
+    assert!(
+        events
+            .iter()
+            .any(|event| event.tool_name.as_deref() == Some("tracedecay_search")),
+        "retained production authority must expose the exercised tool event: {events:?}"
+    );
+    harness.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn production_composition_harness_shutdown_allows_immediate_profile_reopen() {
+    let temp = TempDir::new().expect("temp dir");
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(project.join("src")).expect("source dir");
+    std::fs::write(project.join("src/lib.rs"), "pub fn reopen_probe() {}\n").expect("source file");
+    commit_production_composition_project(&project);
+
+    let harness = ProductionProjectCompositionHarnessV1::open(temp.path(), vec![project.clone()])
+        .await
+        .expect("production composition");
+    let profile_root = harness.profile_root().to_path_buf();
+    harness.shutdown().await;
+
+    let profile_identity = crate::daemon::profile_identity::load_or_create(&profile_root)
+        .expect("reload isolated profile identity");
+    let _database_scope =
+        crate::db::enter_daemon_database_scope(&profile_root, 100, "production-composition-reopen")
+            .expect("fresh daemon election");
+    let registry =
+        crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+            profile_identity,
+        )
+        .await
+        .expect("immediately reopen profile runtime");
+    registry
+        .profile_database()
+        .await
+        .expect("immediately reopen profile authority database");
+    registry
+        .profile_sessions()
+        .await
+        .expect("immediately reopen profile session database");
+    let project_id = crate::storage::read_repository_identity_marker(&project)
+        .expect("read project identity")
+        .expect("project identity marker");
+    registry
+        .project_sessions(
+            tracedecay_store::ProjectId::new(project_id.project_id)
+                .expect("valid project identity"),
+            [project],
+        )
+        .await
+        .expect("immediately reopen project session database");
+}
+
 #[tokio::test]
 async fn production_composition_harness_rejects_live_profile_overlap() {
     let temp = TempDir::new().expect("temp dir");
