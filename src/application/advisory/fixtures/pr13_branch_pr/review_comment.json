@@ -22,6 +22,7 @@
     "author_association": "NONE",
     "created_at": "2026-07-10T06:16:13Z",
     "updated_at": "2026-07-10T06:16:13Z",
+    "body": "**<sub><sub>![P2 Badge](https://img.shields.io/badge/P2-yellow?style=flat)</sub></sub>  Schedule the catalog before generated-metadata consumers**\n\nWhen the Phase 3 ladder is followed literally, this schedules PR 22F–22H before PR 22A even though the 22F–22H checklist requires plan 08's generated `SurfaceKind` everywhere. PR 22A is the step that creates the generated capability/tool catalog and its surface/availability artifacts, so the accounting/adoption work either blocks or has to invent duplicate local surface metadata; move 22A ahead of the first generated-catalog consumer or split the dependent 22H work after it.\n\nUseful? React with 👍 / 👎.",
     "start_line": null,
     "original_start_line": 1946,
     "start_side": "RIGHT",
@@ -37,9 +38,9 @@
     }
   },
   "redacted": {
-    "body": {
-      "sha256": "sha256:ba50df4c458fcd57f99df2d01017141f0ef686cf600f2a8ff615e2fb85c2adbc"
-    },
     "diff_hunk": "omitted_source_content"
+  },
+  "integrity": {
+    "body_sha256": "sha256:ba50df4c458fcd57f99df2d01017141f0ef686cf600f2a8ff615e2fb85c2adbc"
   }
 }

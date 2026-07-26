@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
@@ -11,8 +11,8 @@ use tracedecay::application::advisory::ci_runtime::{
     GitHubCiOfficialResponseDecoderV1, ProjectCiCodeAnchorStoreV1,
 };
 use tracedecay::application::advisory::github_runtime::{
-    GitHubReviewAtomicRefreshStoreV1, GitHubReviewRefreshCoordinatorV1,
-    GitHubReviewRefreshOutcomeV1, GitHubReviewRefreshStateV1,
+    GITHUB_REVIEW_THREADS_QUERY_V1, GitHubReviewAtomicRefreshStoreV1,
+    GitHubReviewRefreshCoordinatorV1, GitHubReviewRefreshOutcomeV1, GitHubReviewRefreshStateV1,
     GitHubReviewRefreshStoreCommitOutcomeV1, GitHubReviewRefreshStoreReadOutcomeV1,
     GitHubSourceAccessAuthorityV1,
 };
@@ -44,11 +44,13 @@ use tracedecay_domain::configuration::{
     ProtectedChangePlan,
 };
 use tracedecay_domain::feedback::{
-    FeedbackScopeV1, GitHubPullRequestIdV1, GitHubReviewReadOperationV1,
+    FeedbackScopeV1, GitHubPullRequestIdV1, GitHubReviewCurrentBranchRemapV1,
+    GitHubReviewImmutableAnchorV1, GitHubReviewReadOperationV1,
 };
 use tracedecay_domain::{
-    ActorId, CanonicalObservationIdV1, CommitId, ManifestDigest, ProjectId, ProviderId, RefId,
-    RepositoryId, RetrievalAnchorId, UtcMicros, WorktreeId, canonical_sha256,
+    ActorId, CanonicalObservationIdV1, CommitId, ContentDigest, FileOccurrenceId, ManifestDigest,
+    ProjectId, ProviderId, RefId, RepositoryId, RetrievalAnchorId, UtcMicros, WorktreeId,
+    canonical_sha256,
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
@@ -63,6 +65,44 @@ impl GitHubCanonicalReviewAnchorAuthorityV1 for NoAnchors {
         _seed: &'a GitHubReviewAnchorSeedV1,
     ) -> FeedbackPortFuture<'a, Option<GitHubCanonicalReviewAnchorsV1>> {
         Box::pin(async { None })
+    }
+}
+
+#[derive(Clone, Default)]
+struct FixtureAnchors {
+    seeds: Arc<Mutex<Vec<GitHubReviewAnchorSeedV1>>>,
+}
+
+impl GitHubCanonicalReviewAnchorAuthorityV1 for FixtureAnchors {
+    fn resolve<'a>(
+        &'a self,
+        request: &'a GitHubReviewReadRequestV1,
+        seed: &'a GitHubReviewAnchorSeedV1,
+    ) -> FeedbackPortFuture<'a, Option<GitHubCanonicalReviewAnchorsV1>> {
+        Box::pin(async move {
+            self.seeds.lock().ok()?.push(seed.clone());
+            let original = GitHubReviewImmutableAnchorV1 {
+                repository_id: request.scope.repository_id.clone(),
+                commit_id: seed.original_commit_id.clone(),
+                retrieval_anchor_id: RetrievalAnchorId::new("anchor.fixture.github.original")
+                    .ok()?,
+                file: FileOccurrenceId::new("file.fixture.github.review").ok()?,
+                content_digest: ContentDigest::new(format!("sha256:{}", "c".repeat(64))).ok()?,
+                span: None,
+                symbol: None,
+            };
+            Some(GitHubCanonicalReviewAnchorsV1 {
+                initial_remap: GitHubReviewCurrentBranchRemapV1::unmapped(
+                    original.clone(),
+                    request.scope.clone(),
+                )
+                .ok()?,
+                original,
+                author_anchor: RetrievalAnchorId::new("anchor.fixture.github.author").ok()?,
+                body_anchor: RetrievalAnchorId::new("anchor.fixture.github.body").ok()?,
+                safe_url_anchor: Some(RetrievalAnchorId::new("anchor.fixture.github.url").ok()?),
+            })
+        })
     }
 }
 
@@ -208,6 +248,56 @@ async fn authentic_github_and_ci_responses_use_production_decoders() {
             )
             .await
             .is_some()
+    );
+
+    assert!(GITHUB_REVIEW_THREADS_QUERY_V1.contains("author { __typename login }"));
+    assert!(!GITHUB_REVIEW_THREADS_QUERY_V1.contains("author { __typename id }"));
+    let fixture_anchors = FixtureAnchors::default();
+    let graphql_decoder = GitHubOfficialResponseDecoderV1::new(
+        GitHubReviewProviderIdentityV1 {
+            provider: ProviderId::new("provider.github").unwrap(),
+            repository_owner: "ScriptedAlchemy".to_owned(),
+            repository_name: "tracedecay".to_owned(),
+            pull_request_number: 421,
+            base_commit_id: CommitId::new("8339371d01311289e2b7cd7b0669ea3549308b8c").unwrap(),
+            head_commit_id: request.scope.head_commit_id.clone(),
+            merge_base_commit_id: CommitId::new("8339371d01311289e2b7cd7b0669ea3549308b8c")
+                .unwrap(),
+        },
+        fixture_anchors.clone(),
+    )
+    .unwrap();
+    let thread = captured_response(include_str!(
+        "../src/application/advisory/fixtures/pr13_branch_pr/review_thread.graphql.json"
+    ));
+    let thread_request = GitHubReviewReadRequestV1 {
+        operation: GitHubReviewReadOperationV1::GraphQlQueryPullRequestReviewThreads,
+        ..request.clone()
+    };
+    let ingress = graphql_decoder
+        .decode(
+            &thread_request,
+            &metadata,
+            serde_json::to_vec(&thread).unwrap().as_slice(),
+        )
+        .await
+        .expect("authentic GraphQL review thread decodes through sanitizer");
+    assert_eq!(ingress.items.len(), 1);
+    assert_eq!(ingress.items[0].comment_id.as_str(), "3556767423");
+    assert_eq!(
+        ingress.items[0].body_anchor.as_str(),
+        "anchor.fixture.github.body"
+    );
+    let seeds = fixture_anchors.seeds.lock().unwrap();
+    assert_eq!(seeds.len(), 1);
+    assert_eq!(
+        seeds[0].body_digest.as_str(),
+        "sha256:81b743cede9ff0d124beb58731d91c556343545f71c0ba51eb2b5378fdb95652"
+    );
+    assert!(
+        seeds[0]
+            .retained_body
+            .contains("Schedule the catalog before generated-metadata consumers")
     );
 
     let ci = GitHubCiOfficialResponseDecoderV1::decode(
@@ -681,4 +771,92 @@ async fn production_host_ingest_uses_registered_project_runtime() {
         payload["status"], "committed",
         "registered daemon ingest did not commit: {response}"
     );
+
+    let mut stop: Value = serde_json::from_str(include_str!(
+        "../crates/tracedecay-hooks/fixtures/host_events/codex/stop.json"
+    ))
+    .unwrap();
+    stop["session_id"] = json!("session-pr13-proximity");
+    stop["turn_id"] = json!("turn-pr13-proximity-stop");
+    stop["cwd"] = json!(project.clone());
+    stop["model"] = json!("codex-fixture");
+    stop["permission_mode"] = json!("default");
+    stop["last_assistant_message"] = json!("Saved src/lib.rs.");
+    let stop_args = json!({
+        "action": "ingest_transcript",
+        "provider": "codex",
+        "user_scope": false,
+        "event_json": stop.to_string(),
+        "format": "json",
+    })
+    .to_string();
+    let stop_output = common::tracedecay_command_with_home(environment.home())
+        .args([
+            "tool",
+            "--project",
+            project_arg.as_str(),
+            "tracedecay_hook_runtime",
+            "--args",
+            stop_args.as_str(),
+            "--json",
+        ])
+        .current_dir(&project)
+        .output()
+        .expect("invoke registered daemon stop path");
+    assert!(
+        stop_output.status.success(),
+        "registered daemon stop ingest failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&stop_output.stdout),
+        String::from_utf8_lossy(&stop_output.stderr)
+    );
+    let stop_response: Value =
+        serde_json::from_slice(&stop_output.stdout).expect("registered daemon stop response");
+    let stop_payload: Value = serde_json::from_str(
+        stop_response["content"][0]["text"]
+            .as_str()
+            .expect("registered daemon stop response text"),
+    )
+    .expect("registered daemon stop payload");
+    assert_eq!(
+        stop_payload["status"], "committed",
+        "registered daemon stop ingest did not commit: {stop_response}"
+    );
+
+    let advisory_args = json!({
+        "document_uri": format!("file://{}", project.join("src/lib.rs").display()),
+    })
+    .to_string();
+    let advisory = common::tracedecay_command_with_home(environment.home())
+        .args([
+            "tool",
+            "--project",
+            project_arg.as_str(),
+            "tracedecay_feedback_advisory_cycle",
+            "--args",
+            advisory_args.as_str(),
+            "--json",
+        ])
+        .current_dir(&project)
+        .output()
+        .expect("invoke registered four-pillar advisory path");
+    assert!(
+        advisory.status.success(),
+        "registered advisory cycle failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&advisory.stdout),
+        String::from_utf8_lossy(&advisory.stderr)
+    );
+    let advisory: Value = serde_json::from_slice(&advisory.stdout).unwrap();
+    let advisory = advisory.to_string();
+    for required in [
+        "request_handle",
+        "diagnostics",
+        "github_review_ingest",
+        "ci_failure_localize",
+        "feedback_proximity",
+    ] {
+        assert!(
+            advisory.contains(required),
+            "advisory result omitted {required}: {advisory}"
+        );
+    }
 }
