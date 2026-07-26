@@ -80,6 +80,31 @@ pub fn git_common_dir(dir: &Path) -> Option<PathBuf> {
     Some(resolved.canonicalize().unwrap_or(resolved))
 }
 
+/// The checkout that owns `dir`'s **repository** identity, or `None` when
+/// `dir` already owns it.
+///
+/// Every linked worktree of a repository shares one git common directory and
+/// is therefore one project. Attachment is irrelevant here: whether a worktree
+/// has a branch checked out decides which *graph scope* serves it, not which
+/// repository it belongs to. Keying identity off the worktree path instead
+/// mints a second store for a repository that already has one.
+///
+/// Returns `None` — meaning "this path is its own identity" — when `dir` is
+/// the primary checkout, is not a worktree root at all (a package directory
+/// inside a monorepo is its own project), is outside git, or has a repository
+/// shape whose primary checkout cannot be derived safely.
+pub fn repository_identity_root(dir: &Path) -> Option<PathBuf> {
+    let worktree_root = git_worktree_root(dir)?;
+    // Only a worktree ROOT inherits repository identity. Without this check a
+    // subdirectory indexed as its own project would be absorbed into the
+    // enclosing repository's store.
+    if worktree_root != realpath(dir)? {
+        return None;
+    }
+    let common_dir = git_common_dir(dir)?;
+    crate::project_registry::primary_checkout_root(&worktree_root, Some(&common_dir))
+}
+
 pub fn is_detached_linked_worktree(dir: &Path) -> bool {
     let Ok(repo) = gix::discover(dir) else {
         return false;
