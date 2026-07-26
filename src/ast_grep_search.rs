@@ -166,12 +166,6 @@ fn lang_key_for_ext(ext: &str) -> Option<&'static str> {
 #[derive(Debug, Clone)]
 pub struct AstGrepSearchMatch {
     pub file: String,
-    /// Exact UTF-8 byte range minted by the bundled tree-sitter authority.
-    pub start_byte: usize,
-    pub end_byte: usize,
-    /// Tree-sitter node kind. Refactoring planners use this to reject
-    /// text-shaped matches that are not identifier syntax.
-    pub node_kind: String,
     /// 1-based line of the match start.
     pub line: u32,
     /// 1-based column (character offset) of the match start.
@@ -391,7 +385,6 @@ where
                 return Ok(result);
             }
             let start = node.start_pos();
-            let range = node.range();
             let line0 = start.line();
             let line_text = source_lines
                 .get(line0)
@@ -399,9 +392,6 @@ where
                 .unwrap_or_default();
             result.matches.push(AstGrepSearchMatch {
                 file: rel_str.clone(),
-                start_byte: range.start,
-                end_byte: range.end,
-                node_kind: node.kind().into_owned(),
                 line: (line0 as u32) + 1,
                 column: (start.column(&node) as u32) + 1,
                 matched_text: collapse_snippet(&node.text()),

@@ -6,7 +6,6 @@
 #![forbid(unsafe_code)]
 
 pub mod advisory;
-pub mod api_migration;
 pub mod authorization;
 pub mod configuration;
 pub mod context;
@@ -30,7 +29,6 @@ pub mod storage;
 mod error;
 
 pub use advisory::*;
-pub use api_migration::*;
 pub use authorization::{
     AuthorizationAdmission, AuthorizationPhase, AuthorizationPort, AuthorizationPortOutcome,
     AuthorizationRequest, AuthorizationService, ConcealedResourceCause, NonDisclosureHooks,
@@ -140,23 +138,20 @@ pub use retrieval::{
     AnchorHydrationPort, CALLABLE_CODE_OPERATION_COUNT, CallableCodeAuthorizationAdmission,
     CallableCodeAuthorizationFuture, CallableCodeAuthorizationPort, CallableCodeOperationKind,
     CallableCodeOperations, CallableCodeQueryFuture, CallableCodeQueryPort,
-    CallableCodeQueryService, CodeFacetDimension, CodeFacetRecord, CodeFacetRequest,
-    CodeHierarchyRequest, CodeImpactRequest, CodeImplementationsRequest, CodeLexicalField,
-    CodeLexicalFieldFilter, CodeNavigationRequest, CodeOccurrenceRecord, CodeQueryPage,
-    CodeQueryScope, CodeRelationRequest, CodeSignatureRequest, CodeSymbolSearchRequest,
-    CodeTimelineRecord, CodeTimelineRequest, ExactOccurrenceRecord, ExactOccurrenceRequest,
-    GraphCallersRequest, GraphImpactRequest, GraphImpactResult, GraphImpactRetrievalPort,
-    GraphRetrievalPort, HealthDeltaCoverageV1, HealthDeltaCurrentnessV1, HealthDeltaPointV1,
-    HealthDeltaRequest, HealthDeltaResult, HealthDeltaScopeV1, HealthDimensionDeltaV1,
-    HealthDimensionPointV1, HealthReadRequest, LexicalOccurrenceRecord, MAX_APPLICATION_PAGE_SIZE,
-    ModuleApiRequest, OperationalRetrievalPort, PageRequest, PhraseSearchRequest,
-    QualifiedNameRequest, ResultProjection, RetrievalOrder, RetrievalPortContext,
-    RetrievalPortOutcome, RetrievalRequestMeta, SessionLookupRequest, SourceLinesRequest,
-    SourceLinesResult, SourceMetadataRecord, SourceMetadataRequest, SourceRetrievalPort,
-    SymbolRetrievalPort, SymbolSearchRequest, SymbolSearchResult, TemporalRetrievalPort,
-    TestRetrievalPort, callable_code_catalog_contribution, callable_code_handler_descriptors,
-    callable_code_operation, callable_code_operations, callable_code_request_schema,
-    callable_code_result_schema,
+    CallableCodeQueryService, CodeFacetDimension, CodeFacetRequest, CodeHierarchyRequest,
+    CodeImpactRequest, CodeImplementationsRequest, CodeLexicalField, CodeLexicalFieldFilter,
+    CodeNavigationRequest, CodeOccurrenceRecord, CodeQueryPage, CodeQueryScope,
+    CodeRelationRequest, CodeSignatureRequest, CodeSymbolSearchRequest, CodeTimelineRequest,
+    ExactOccurrenceRecord, ExactOccurrenceRequest, GraphCallersRequest, GraphImpactRequest,
+    GraphImpactResult, GraphImpactRetrievalPort, GraphRetrievalPort, HealthReadRequest,
+    LexicalOccurrenceRecord, MAX_APPLICATION_PAGE_SIZE, ModuleApiRequest, OperationalRetrievalPort,
+    PageRequest, PhraseSearchRequest, QualifiedNameRequest, ResultProjection, RetrievalOrder,
+    RetrievalPortContext, RetrievalPortOutcome, RetrievalRequestMeta, SessionLookupRequest,
+    SourceLinesRequest, SourceLinesResult, SourceMetadataRecord, SourceMetadataRequest,
+    SourceRetrievalPort, SymbolRetrievalPort, SymbolSearchRequest, SymbolSearchResult,
+    TemporalRetrievalPort, TestRetrievalPort, callable_code_catalog_contribution,
+    callable_code_handler_descriptors, callable_code_operation, callable_code_operations,
+    callable_code_request_schema, callable_code_result_schema,
 };
 pub use source_edit::{
     SourceEditAuthorizationAdmissionV1, SourceEditAuthorizationFuture, SourceEditAuthorizationPort,
