@@ -1083,32 +1083,6 @@ pub struct RerankPolicy {
     pub deadline_micros: Option<u64>,
 }
 
-/// Deterministic fixed-point fusion surface (Plan 15/Plan 05). The promoted
-/// PR9 profile uses deterministic fixed-point contributions, complete
-/// comparator provenance, and the total order: exact class, utility, source
-/// validity, stable anchor ID, logical evidence ID, then ordered source
-/// occurrence IDs.
-pub trait FixedPointFusion {
-    /// Fuse one snapshot's lane batches into a deterministically ordered
-    /// candidate list under `profile`.
-    fn fuse(
-        &self,
-        profile: &FusionProfile,
-        batches: &[(RetrieverKind, RetrieverBatch<OccurrenceProvenance>)],
-    ) -> Result<Vec<FusedCandidate>, RetrievalError>;
-}
-
-/// Deterministic diversity-cap surface (Plan 15 pipeline step 9).
-pub trait DiversityArbiter {
-    /// Apply `policy` to an ordered fused list, recording one
-    /// [`RankingDecisionKind::DiversityCap`] decision per capped candidate.
-    fn apply(
-        &self,
-        policy: &DiversityPolicy,
-        candidates: Vec<FusedCandidate>,
-    ) -> Result<Vec<FusedCandidate>, RetrievalError>;
-}
-
 /// Ephemeral authorized rerank view (Plan 15 pipeline step 10): only approved
 /// source-local text or token features, never cached or persisted.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -1119,18 +1093,6 @@ pub struct AuthorizedRerankView {
     pub privacy_domain: PrivacyDomainId,
     pub compatibility: FreshnessCompatibilityV1,
     pub approved_features: Vec<u8>,
-}
-
-/// Bounded late hydration surface (Plan 15 pipeline step 11: recheck
-/// authorization and hydrate only the selected anchors under byte/token/
-/// deadline budgets).
-pub trait CandidateHydrator {
-    /// Hydrate the selected anchors; emit one [`HydrationReceipt`] per anchor.
-    fn hydrate(
-        &self,
-        request: &RetrievalRequest,
-        anchors: &[RetrievalAnchorId],
-    ) -> Result<Vec<HydrationReceipt>, RetrievalError>;
 }
 
 /// Per-anchor hydration receipt (Plan 15: every contribution and hydration
