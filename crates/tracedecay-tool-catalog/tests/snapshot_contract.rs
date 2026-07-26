@@ -17,16 +17,16 @@ fn snapshots_have_insertion_order_independent_canonical_digests() {
     let first_manifest = read_manifest(
         first_capability_id.clone(),
         use_case_id("use-case.source.outline"),
-        schema("schema.source.outline.request", 128),
-        schema("schema.source.outline.result", 256),
+        schema("schema.source.outline.request"),
+        schema("schema.source.outline.result"),
         Vec::new(),
         vec![profile_id.clone()],
     );
     let second_manifest = read_manifest(
         second_capability_id.clone(),
         use_case_id("use-case.symbol.search"),
-        schema("schema.symbol.search.request", 128),
-        schema("schema.symbol.search.result", 256),
+        schema("schema.symbol.search.request"),
+        schema("schema.symbol.search.result"),
         Vec::new(),
         vec![profile_id.clone()],
     );
@@ -80,8 +80,8 @@ fn snapshots_canonicalize_routing_fixture_order_before_digesting() {
     let manifest = read_manifest(
         capability_id.clone(),
         use_case_id("use-case.source.read"),
-        schema("schema.source.read.request", 128),
-        schema("schema.source.read.result", 256),
+        schema("schema.source.read.request"),
+        schema("schema.source.read.result"),
         Vec::new(),
         vec![profile_id.clone()],
     );
@@ -143,8 +143,8 @@ fn snapshot_rejects_duplicate_capability_ids() {
     let manifest = read_manifest(
         capability_id.clone(),
         use_case_id("use-case.source.read"),
-        schema("schema.source.read.request", 128),
-        schema("schema.source.read.result", 256),
+        schema("schema.source.read.request"),
+        schema("schema.source.read.result"),
         Vec::new(),
         vec![profile_id.clone()],
     );
@@ -188,8 +188,8 @@ fn snapshot_rejects_duplicate_contribution_ids_before_folding_records() {
     let manifest = read_manifest(
         capability_id.clone(),
         use_case_id("use-case.source.read"),
-        schema("schema.source.read.request", 128),
-        schema("schema.source.read.result", 256),
+        schema("schema.source.read.request"),
+        schema("schema.source.read.result"),
         Vec::new(),
         vec![profile_id.clone()],
     );
@@ -222,23 +222,23 @@ fn snapshot_rejects_duplicate_contribution_ids_before_folding_records() {
 }
 
 #[test]
-fn snapshot_rejects_conflicting_schema_sizes_for_one_revision() {
+fn snapshot_deduplicates_shared_schema_identity() {
     let profile_id = profile_id("profile.default");
     let first_capability_id = capability_id("capability.source.first");
     let second_capability_id = capability_id("capability.source.second");
     let first_manifest = read_manifest(
         first_capability_id.clone(),
         use_case_id("use-case.source.first"),
-        schema("schema.source.shared.request", 128),
-        schema("schema.source.first.result", 256),
+        schema("schema.source.shared.request"),
+        schema("schema.source.first.result"),
         Vec::new(),
         vec![profile_id.clone()],
     );
     let second_manifest = read_manifest(
         second_capability_id.clone(),
         use_case_id("use-case.source.second"),
-        schema("schema.source.shared.request", 512),
-        schema("schema.source.second.result", 256),
+        schema("schema.source.shared.request"),
+        schema("schema.source.second.result"),
         Vec::new(),
         vec![profile_id.clone()],
     );
@@ -261,13 +261,14 @@ fn snapshot_rejects_conflicting_schema_sizes_for_one_revision() {
             ProfileBudget::DEFAULT,
         ));
 
-    assert_eq!(
-        builder.build(),
-        Err(CatalogValidationError::IncompatibleSchemaReference {
-            schema_id: tracedecay_tool_catalog::SchemaId::new("schema.source.shared.request")
-                .unwrap(),
-            revision: 1,
-        })
+    let snapshot = builder.build().unwrap();
+    assert!(
+        snapshot
+            .schema(
+                &tracedecay_tool_catalog::SchemaId::new("schema.source.shared.request").unwrap(),
+                1
+            )
+            .is_some()
     );
 }
 
@@ -278,8 +279,8 @@ fn snapshot_rejects_handler_schema_drift() {
     let manifest = read_manifest(
         capability_id.clone(),
         use_case_id("use-case.source.body"),
-        schema("schema.source.body.request", 128),
-        schema("schema.source.body.result", 256),
+        schema("schema.source.body.request"),
+        schema("schema.source.body.result"),
         Vec::new(),
         vec![profile_id.clone()],
     );
@@ -295,7 +296,7 @@ fn snapshot_rejects_handler_schema_drift() {
         manifest.capability_id().clone(),
         manifest.use_case_id().clone(),
         manifest.request_schema().clone(),
-        schema("schema.source.body.result", 512),
+        schema("schema.source.body.stale-result"),
     );
     let mut builder = CatalogSnapshotBuilderV1::new();
     builder
@@ -320,8 +321,8 @@ fn snapshot_rejects_handler_capability_drift() {
     let manifest = read_manifest(
         manifest_capability_id.clone(),
         use_case_id("use-case.source.body"),
-        schema("schema.source.body.request", 128),
-        schema("schema.source.body.result", 256),
+        schema("schema.source.body.request"),
+        schema("schema.source.body.result"),
         Vec::new(),
         vec![profile_id.clone()],
     );

@@ -35,7 +35,7 @@ use crate::tracedecay::TraceDecay;
 use super::hook_events::{self, HookAgent, HookEventPlan};
 use super::tools::{
     SessionRefreshServicePort, SessionRetrievalServicePort, ToolCallRegistryOptions,
-    default_catalog_discovery_authority, explore_call_budget,
+    ToolRegistryMode, default_catalog_discovery_authority, explore_call_budget,
     get_catalog_filtered_tool_definitions_with_budget,
     handle_tool_call_with_registry_and_implicit_project, project_catalog_discovery_scope,
 };
@@ -494,6 +494,10 @@ pub struct McpServer {
     connection_identity: McpConnectionIdentityAuthority,
     /// One lazy authenticated application client retained for this server.
     application_surface_client: tokio::sync::OnceCell<crate::daemon_client::DaemonInvocationClient>,
+    /// Daemon-local executor installed by production project composition.
+    /// External/direct servers fall back to the authenticated socket client.
+    application_invocation_executor:
+        Option<Arc<dyn crate::daemon_client::DaemonInvocationExecutor>>,
     /// Live MCP cancellation tokens keyed by canonical application request id.
     application_surface_cancellations:
         std::sync::Mutex<HashMap<String, tracedecay_application::CancellationSignal>>,
@@ -711,6 +715,7 @@ impl McpServer {
             code_index_search_executor,
             code_index_search_authority,
             retained_project_graph_resolver,
+            application_invocation_executor,
             #[cfg(any(test, feature = "test-transport"))]
             host_admission_test_runtime,
         } = context;
@@ -930,6 +935,7 @@ impl McpServer {
             client_name: std::sync::Mutex::new(None),
             connection_identity: McpConnectionIdentityAuthority::from_os_entropy(),
             application_surface_client: tokio::sync::OnceCell::new(),
+            application_invocation_executor,
             application_surface_cancellations: std::sync::Mutex::new(HashMap::new()),
         });
 

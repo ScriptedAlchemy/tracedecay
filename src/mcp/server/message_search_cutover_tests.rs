@@ -605,13 +605,13 @@ async fn transport_executes_nonempty_project_and_profile_queries_read_only_acros
         );
     }
     let project_before = runtime
-        .session_database_sha256_for_test(HostAdmissionScope::Project)
+        .session_domain_sha256_for_test(HostAdmissionScope::Project)
         .await
-        .expect("project session digest");
+        .expect("project session-domain digest");
     let profile_before = runtime
-        .session_database_sha256_for_test(HostAdmissionScope::Profile)
+        .session_domain_sha256_for_test(HostAdmissionScope::Profile)
         .await
-        .expect("profile session digest");
+        .expect("profile session-domain digest");
 
     let first = message_search(
         &server,
@@ -718,16 +718,16 @@ async fn transport_executes_nonempty_project_and_profile_queries_read_only_acros
     server.shutdown().await;
     assert_eq!(
         runtime
-            .session_database_sha256_for_test(HostAdmissionScope::Project)
+            .session_domain_sha256_for_test(HostAdmissionScope::Project)
             .await
-            .expect("project session digest after reads"),
+            .expect("project session-domain digest after reads"),
         project_before
     );
     assert_eq!(
         runtime
-            .session_database_sha256_for_test(HostAdmissionScope::Profile)
+            .session_domain_sha256_for_test(HostAdmissionScope::Profile)
             .await
-            .expect("profile session digest after reads"),
+            .expect("profile session-domain digest after reads"),
         profile_before
     );
     drop(server);
@@ -750,13 +750,13 @@ async fn transport_executes_nonempty_project_and_profile_queries_read_only_acros
         .host_admission_test_runtime_for_test()
         .expect("restarted retained host-admission runtime");
     let restarted_project_before = runtime
-        .session_database_sha256_for_test(HostAdmissionScope::Project)
+        .session_domain_sha256_for_test(HostAdmissionScope::Project)
         .await
-        .expect("restarted project session digest");
+        .expect("restarted project session-domain digest");
     let restarted_profile_before = runtime
-        .session_database_sha256_for_test(HostAdmissionScope::Profile)
+        .session_domain_sha256_for_test(HostAdmissionScope::Profile)
         .await
-        .expect("restarted profile session digest");
+        .expect("restarted profile session-domain digest");
     let resumed = message_search(
         &restarted,
         json!({
@@ -773,16 +773,16 @@ async fn transport_executes_nonempty_project_and_profile_queries_read_only_acros
     restarted.shutdown().await;
     assert_eq!(
         runtime
-            .session_database_sha256_for_test(HostAdmissionScope::Project)
+            .session_domain_sha256_for_test(HostAdmissionScope::Project)
             .await
-            .expect("restarted project digest after reads"),
+            .expect("restarted project session-domain digest after reads"),
         restarted_project_before
     );
     assert_eq!(
         runtime
-            .session_database_sha256_for_test(HostAdmissionScope::Profile)
+            .session_domain_sha256_for_test(HostAdmissionScope::Profile)
             .await
-            .expect("restarted profile digest after reads"),
+            .expect("restarted profile session-domain digest after reads"),
         restarted_profile_before
     );
 }

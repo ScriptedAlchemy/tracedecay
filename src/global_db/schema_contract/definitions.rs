@@ -303,6 +303,8 @@ pub(super) const TABLES: &[Table] = &[
             column("audit_version", "INTEGER", true, None, 0),
             column("receipt_rowid", "INTEGER", true, None, 0),
             column("observation_sequence", "INTEGER", true, None, 0),
+            column("source_cursor_rowid", "INTEGER", true, Some("0"), 0),
+            column("source_advance_rowid", "INTEGER", true, Some("0"), 0),
             column("provenance_rowid", "INTEGER", true, None, 0),
             column("disposition_rowid", "INTEGER", true, None, 0),
             column("alias_rowid", "INTEGER", true, None, 0),

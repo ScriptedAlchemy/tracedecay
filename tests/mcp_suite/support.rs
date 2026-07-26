@@ -9,12 +9,16 @@ use std::ffi::OsString;
 use std::fs;
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
+#[cfg(feature = "test-transport")]
+use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tempfile::TempDir;
 use tokio::sync::{Mutex, MutexGuard};
 use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+#[cfg(feature = "test-transport")]
+use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 use tracedecay::errors::TraceDecayError;
 use tracedecay::mcp::{McpServer, McpTransport, ToolResult};
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
@@ -107,6 +111,56 @@ pub(crate) fn extract_real_server_text(result: &Value) -> &str {
     result["content"][0]["text"]
         .as_str()
         .expect("MCP text result")
+}
+
+#[cfg(feature = "test-transport")]
+pub(crate) struct ProductionCompositionFixture {
+    pub(crate) harness: ProductionProjectCompositionHarnessV1,
+    pub(crate) project_root: PathBuf,
+    _isolation: TestTempDir,
+}
+
+#[cfg(feature = "test-transport")]
+pub(crate) async fn production_composition_fixture() -> ProductionCompositionFixture {
+    let isolation = test_temp_dir();
+    let project_root = isolation.path().join("project");
+    fs::create_dir_all(&project_root).expect("production composition project");
+    fixture::write_indexed_fixture_sources(&project_root);
+    let init = Command::new(common::git_program())
+        .args(["init", "-q"])
+        .current_dir(&project_root)
+        .status()
+        .expect("git init");
+    assert!(init.success(), "git init must succeed");
+    let add = Command::new(common::git_program())
+        .args(["add", "."])
+        .current_dir(&project_root)
+        .status()
+        .expect("git add");
+    assert!(add.success(), "git add must succeed");
+    let commit = Command::new(common::git_program())
+        .args([
+            "-c",
+            "user.name=TraceDecay Test",
+            "-c",
+            "user.email=tracedecay@example.invalid",
+            "commit",
+            "-qm",
+            "production composition fixture",
+        ])
+        .current_dir(&project_root)
+        .status()
+        .expect("git commit");
+    assert!(commit.success(), "git commit must succeed");
+    let harness =
+        ProductionProjectCompositionHarnessV1::open(isolation.path(), vec![project_root.clone()])
+            .await
+            .expect("production composition harness");
+    ProductionCompositionFixture {
+        harness,
+        project_root,
+        _isolation: isolation,
+    }
 }
 
 pub(crate) struct TemporalLcmProjectionInput {

@@ -101,7 +101,11 @@ pub async fn run_doctor(agent_filter: Option<&str>) -> crate::errors::Result<()>
     check_inert_project_config(&mut dc, &project_path);
     let daemon_status = daemon_project_status(&project_path).await;
     let storage_healthy = match daemon_status.as_ref() {
-        Ok(status) => check_database(&mut dc, status),
+        Ok(status) => {
+            let healthy = check_database(&mut dc, status);
+            check_daemon_doctor_report(&mut dc, status);
+            healthy
+        }
         Err(error) => {
             report_daemon_diagnostics_unavailable(
                 &mut dc,
@@ -464,6 +468,7 @@ fn daemon_runtime_args() -> serde_json::Value {
     serde_json::json!({
         "format": "json",
         "authority_audit": true,
+        "doctor_report": true,
         "session_ingest_health": true,
     })
 }
@@ -493,6 +498,7 @@ fn daemon_runtime_status(result: &serde_json::Value) -> crate::errors::Result<se
     for key in [
         "cursor_session_ingest",
         "cursor_session_placeholder_paths",
+        "doctor_report",
         "session_temporal_health",
         "semantic_runtime",
     ] {
@@ -501,6 +507,127 @@ fn daemon_runtime_status(result: &serde_json::Value) -> crate::errors::Result<se
         }
     }
     Ok(status)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StorageGrowthDoctorLineLevel {
+    Information,
+    Warning,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct StorageGrowthDoctorLine {
+    level: StorageGrowthDoctorLineLevel,
+    message: String,
+}
+
+fn table_growth_doctor_lines(doctor_report: &serde_json::Value) -> Vec<StorageGrowthDoctorLine> {
+    let kind = doctor_report
+        .get("kind")
+        .and_then(serde_json::Value::as_str);
+    if kind != Some("observed") {
+        let state = kind.unwrap_or("unavailable");
+        return vec![StorageGrowthDoctorLine {
+            level: StorageGrowthDoctorLineLevel::Warning,
+            message: format!("Daemon Doctor report is {state}; per-table growth is unavailable"),
+        }];
+    }
+
+    let Some(evidence) = doctor_report
+        .get("table_growth_evidence")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return vec![StorageGrowthDoctorLine {
+            level: StorageGrowthDoctorLineLevel::Warning,
+            message: "Daemon Doctor report omitted typed per-table growth evidence".to_string(),
+        }];
+    };
+
+    evidence
+        .iter()
+        .map(|item| {
+            let item_kind = item
+                .get("kind")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown");
+            let store = item
+                .get("store")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unnamed store");
+            match item_kind {
+                "significant_growth" => {
+                    let table = item
+                        .get("table")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("unnamed table");
+                    match item
+                        .get("growth_bytes")
+                        .and_then(serde_json::Value::as_u64)
+                    {
+                        Some(growth) => StorageGrowthDoctorLine {
+                            level: StorageGrowthDoctorLineLevel::Information,
+                            message: format!(
+                                "{store}.{table} grew by {} since the prior baseline",
+                                format_bytes(growth)
+                            ),
+                        },
+                        None => StorageGrowthDoctorLine {
+                            level: StorageGrowthDoctorLineLevel::Warning,
+                            message: format!(
+                                "{store}.{table} reported significant growth without a byte measurement"
+                            ),
+                        },
+                    }
+                }
+                "baseline_established" => {
+                    let tables = item
+                        .get("tables_observed")
+                        .and_then(serde_json::Value::as_u64);
+                    let detail = tables.map_or_else(
+                        || "an unknown number of tables".to_string(),
+                        |count| format!("{count} tables"),
+                    );
+                    StorageGrowthDoctorLine {
+                        level: StorageGrowthDoctorLineLevel::Warning,
+                        message: format!(
+                            "{store} had no prior baseline; established one across {detail}, so growth is not yet measurable"
+                        ),
+                    }
+                }
+                "unsupported" | "denied" | "unknown" => StorageGrowthDoctorLine {
+                    level: StorageGrowthDoctorLineLevel::Warning,
+                    message: format!(
+                        "{store} per-table growth measurement is unavailable ({item_kind})"
+                    ),
+                },
+                other => StorageGrowthDoctorLine {
+                    level: StorageGrowthDoctorLineLevel::Warning,
+                    message: format!(
+                        "{store} returned an unrecognized per-table growth state ({other})"
+                    ),
+                },
+            }
+        })
+        .collect()
+}
+
+fn check_daemon_doctor_report(dc: &mut DoctorCounters, status: &serde_json::Value) {
+    eprintln!("\n\x1b[1mStorage table growth\x1b[0m");
+    let Some(report) = status.get("doctor_report") else {
+        dc.warn("Daemon did not expose its Doctor report; per-table growth is unavailable");
+        return;
+    };
+    let lines = table_growth_doctor_lines(report);
+    if lines.is_empty() {
+        dc.pass("No significant table payload growth observed since the prior baseline");
+        return;
+    }
+    for line in lines {
+        match line.level {
+            StorageGrowthDoctorLineLevel::Information => dc.info(&line.message),
+            StorageGrowthDoctorLineLevel::Warning => dc.warn(&line.message),
+        }
+    }
 }
 
 fn check_database(dc: &mut DoctorCounters, status: &serde_json::Value) -> bool {
