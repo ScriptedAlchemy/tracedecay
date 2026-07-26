@@ -976,6 +976,7 @@ pub struct LcmExternalPayloadManifestTestRecord {
 pub struct HostAdmissionTestRuntimeV1 {
     brain_id: BrainId,
     profile_id: UserProfileId,
+    profile_root: PathBuf,
     project_id: Option<ProjectId>,
     profile_database: Arc<RegisteredGlobalDb>,
     profile_registered: Arc<RegisteredGlobalDb>,
@@ -1075,6 +1076,7 @@ impl HostAdmissionTestRuntimeV1 {
         Ok(Self {
             brain_id: identity.brain_id().clone(),
             profile_id: identity.profile_id().clone(),
+            profile_root,
             project_id,
             profile_database,
             profile_registered,
@@ -2358,16 +2360,7 @@ impl HostAdmissionTestRuntimeV1 {
         cg: crate::tracedecay::TraceDecay,
         scope_prefix: Option<String>,
     ) -> crate::errors::Result<crate::mcp::server::McpServerConstructionContext> {
-        let profile_root = self
-            .profile_database
-            .db_path()
-            .parent()
-            .map(Path::to_path_buf)
-            .ok_or_else(|| crate::errors::TraceDecayError::Database {
-                operation: "bind MCP test profile authority".to_string(),
-                message: "profile database has no parent directory".to_string(),
-            })?;
-        let profile_identity = crate::daemon::profile_identity::load_or_create(&profile_root)?;
+        let profile_root = self.profile_root.clone();
         let project_sessions = self.project_registered.as_ref().cloned().ok_or_else(|| {
             crate::errors::TraceDecayError::Database {
                 operation: "bind MCP test project sessions".to_string(),
