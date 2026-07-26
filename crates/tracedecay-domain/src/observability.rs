@@ -173,7 +173,7 @@ impl ObservabilityEnvelopeV1 {
                     return Err("activity");
                 }
             }
-            ObservabilityPayloadV1::HealthSnapshot(snapshot) => {
+            ObservabilityPayloadV1::HealthSnapshot(snapshot)
                 if snapshot.scope_digest != self.scope_ref
                     || snapshot.dimensions.is_empty()
                     || snapshot.dimensions.len() > 16
@@ -187,10 +187,9 @@ impl ObservabilityEnvelopeV1 {
                                 | "modularity"
                                 | "coverage_discipline"
                         ) || dimension.score_ppm > 1_000_000
-                    })
-                {
-                    return Err("health_snapshot");
-                }
+                    }) =>
+            {
+                return Err("health_snapshot");
             }
             _ => {}
         }
