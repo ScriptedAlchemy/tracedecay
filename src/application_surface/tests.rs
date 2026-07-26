@@ -696,8 +696,8 @@ fn callable_code_operations_parse_distinct_application_requests() {
     assert_eq!(phrase.fuzzy_budget, 7);
     assert_eq!(
         phrase.field_filters,
-        [tracedecay_application::CodeLexicalFieldFilter {
-            field: tracedecay_application::CodeLexicalField::Path,
+        [tracedecay_application::retrieval::CodeLexicalFieldFilter {
+            field: tracedecay_application::retrieval::CodeLexicalField::Path,
             include: true,
         }]
     );
@@ -725,7 +725,7 @@ fn callable_code_operations_parse_distinct_application_requests() {
     assert!(matches!(
         facets,
         ApplicationSurfaceRequest::CallableCode(CallableCodeSurfaceRequest::Facets(request))
-            if request.dimension == tracedecay_application::CodeFacetDimension::Language
+            if request.dimension == tracedecay_application::retrieval::CodeFacetDimension::Language
     ));
 
     let timeline = parse_application_surface_request(
