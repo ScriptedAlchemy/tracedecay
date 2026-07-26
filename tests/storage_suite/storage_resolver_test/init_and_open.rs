@@ -130,8 +130,22 @@ async fn tracked_branch_project_memory_resolves_the_shared_project_store() {
     let initialized = init_with_maintenance(&project).await.unwrap();
     let data_root = initialized.store_layout().data_root.clone();
     let project_graph = initialized.store_layout().graph_db_path.clone();
-    initialized.checkpoint().await.unwrap();
+    let profile_root = maintenance_profile_root();
+    let lifecycle = acquire_fixture_maintenance();
+    let _database_scope = tracedecay::db::enter_maintenance_database_scope(
+        &lifecycle,
+        &profile_root,
+        "checkpoint shared project memory fixture",
+    )
+    .unwrap();
+    initialized
+        .db()
+        .truncate_wal_for_test_artifact()
+        .await
+        .unwrap();
     initialized.close();
+    drop(_database_scope);
+    drop(lifecycle);
 
     let branch_relative = "branches/feature.db";
     let branch_graph = data_root.join(branch_relative);

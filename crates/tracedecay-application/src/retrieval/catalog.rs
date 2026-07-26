@@ -395,7 +395,7 @@ pub fn symbol_search_contribution() -> Result<CatalogContributionV1, Application
         )?,
         default_page_size: 10,
         maximum_page_size: 100,
-        temporal_modes: vec![TemporalMode::Current, TemporalMode::AsOf],
+        temporal_modes: vec![TemporalMode::Current],
         cancellation_points: vec![
             CancellationPoint::BeforeAdmission,
             CancellationPoint::BeforeRead,
@@ -419,4 +419,20 @@ fn symbol_search_scope() -> Result<ScopeRequirement, ApplicationContractError> {
         ScopeDimension::Worktree,
         ScopeDimension::Resource,
     ])?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn symbol_search_advertises_only_supported_temporal_modes() {
+        let contribution = symbol_search_contribution().expect("symbol-search contribution");
+        let primitive = contribution
+            .retrieval_primitives()
+            .first()
+            .expect("symbol-search retrieval primitive");
+
+        assert_eq!(primitive.temporal_modes(), &[TemporalMode::Current]);
+    }
 }

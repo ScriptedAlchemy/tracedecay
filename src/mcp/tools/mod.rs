@@ -13,13 +13,16 @@ pub(crate) mod renderers;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
+use std::sync::OnceLock;
 
 pub use definitions::{
     ALWAYS_REGISTERED_TOOL_COUNT, ast_grep_available, ast_grep_diagnostics_json,
     ast_grep_outline_available, context_description, explore_call_budget,
     format_capable_tool_names, get_tool_definitions, get_tool_definitions_with_budget,
-    get_tool_definitions_with_warming_budget, tool_defaults_to_markdown,
+    get_tool_definitions_with_warming_budget, internal_daemon_tool_definition,
+    tool_defaults_to_markdown,
 };
 pub(crate) use dispatch_policy::tool_dispatches_registered_project_reader;
 pub(crate) use handlers::handle_user_lcm_tool_with_retained_authority;
@@ -63,6 +66,31 @@ pub struct ToolDefinition {
     /// MCP tool metadata (e.g. anthropic/alwaysLoad).
     #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
     pub meta: Option<Value>,
+}
+
+/// Explicit owner for advertised tools awaiting typed application contracts.
+///
+/// These tools retain their existing root handlers, but they are no longer an
+/// unclassified dispatch fallback: definition admission is mandatory, and any
+/// application-catalog binding is resolved before this owner is entered.
+pub struct LegacyToolCompatibilityOwner;
+
+impl LegacyToolCompatibilityOwner {
+    pub const OWNER: &'static str = "root MCP tool-dispatch migration";
+    pub const REASON: &'static str =
+        "typed ApplicationSurfaceRequest contract has not yet landed for this tool family";
+
+    pub fn admits(tool_name: &str) -> bool {
+        static ADVERTISED_TOOLS: OnceLock<BTreeSet<String>> = OnceLock::new();
+        ADVERTISED_TOOLS
+            .get_or_init(|| {
+                get_tool_definitions()
+                    .into_iter()
+                    .map(|definition| definition.name)
+                    .collect()
+            })
+            .contains(tool_name)
+    }
 }
 
 /// The result of a tool call, including the JSON response and the file
