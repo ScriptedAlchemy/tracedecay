@@ -7,6 +7,7 @@
 //! producers can reference it without embedding an on-disk path or a filesystem
 //! effect.
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::error::ApplicationContractError;
@@ -14,7 +15,7 @@ use crate::error::ApplicationContractError;
 macro_rules! storage_identifier {
     ($($(#[$meta:meta])* $name:ident => ($field:literal, $maximum_bytes:expr)),+ $(,)?) => {$(
         $(#[$meta])*
-        #[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        #[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash)]
         #[serde(transparent)]
         pub struct $name(String);
 
@@ -68,7 +69,9 @@ storage_identifier!(
 
 /// A byte size measurement. A newtype keeps sizes from being confused with
 /// counts, ratios, or timestamps in the read models and producers.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(transparent)]
 pub struct StorageByteSizeV1(pub u64);
 

@@ -3,13 +3,14 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Activity, FileSearch, RefreshCw, ShieldCheck, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type {
+  DashboardDoctorRemediationDescriptorV1,
   DoctorFindingsPayload,
-  DoctorRemediationAuthorityScope,
-  DoctorRemediationDescriptor,
   DoctorRemediationOperation,
   DoctorRemediationPayload,
+  DoctorRemediationTarget,
   DoctorReportEntry,
   DoctorReportCoverage,
+  ResolvedScope,
   WireCoverage,
   WireFreshness,
   WireLegalActionRef,
@@ -34,13 +35,13 @@ import {
   readActiveDoctorOperation,
   remediationForEntry,
   saveActiveDoctorOperation,
-  sameDoctorAuthorityScope,
   sameDoctorScope,
 } from './doctorModel.ts';
 
 type SelectedRemediation = {
   entry: DoctorReportEntry;
-  descriptor: DoctorRemediationDescriptor;
+  descriptor: DashboardDoctorRemediationDescriptorV1;
+  target: DoctorRemediationTarget;
   actions: { canPreview: boolean; canApply: boolean };
   idempotencyKey: string;
 };
@@ -69,10 +70,9 @@ export function DoctorInspector() {
     const operation = operationFromResult(result);
     if (!operation || result.outcome !== 'envelope') return;
     const active = {
-      schema_revision: 2 as const,
+      schema_revision: 3 as const,
       operation_id: operation.operation_id,
       transport_scope: result.envelope.scope,
-      authority_scope: operation.authority_scope,
     };
     setActiveOperation(active);
     saveActiveDoctorOperation(active);
@@ -100,17 +100,8 @@ export function DoctorInspector() {
   });
 
   const statusOperation = operationFromResult(status.data);
-  const statusAuthorityMatches =
-    activeOperation == null ||
-    statusOperation == null ||
-    sameDoctorAuthorityScope(
-      activeOperation.authority_scope,
-      statusOperation.authority_scope,
-    );
   const observedOperation =
-    (statusAuthorityMatches ? statusOperation : null) ??
-    operationFromResult(apply.data) ??
-    operationFromResult(preview.data);
+    statusOperation ?? operationFromResult(apply.data) ?? operationFromResult(preview.data);
 
   useEffect(() => {
     if (
@@ -126,8 +117,7 @@ export function DoctorInspector() {
 
   const selectedPreviewId = useMemo(() => {
     if (!selected) return null;
-    const statusResult = statusAuthorityMatches ? status.data : undefined;
-    for (const result of [statusResult, preview.data]) {
+    for (const result of [status.data, preview.data]) {
       const operation = operationFromResult(result);
       if (
         operation?.owning_operation === selected.descriptor.operation &&
@@ -137,24 +127,24 @@ export function DoctorInspector() {
       }
     }
     return null;
-  }, [preview.data, selected, status.data, statusAuthorityMatches]);
+  }, [preview.data, selected, status.data]);
 
   const selectedAuthorityScope = useMemo(() => {
     if (!selected) return null;
-    const statusResult = statusAuthorityMatches ? status.data : undefined;
-    for (const result of [statusResult, preview.data]) {
+    for (const result of [status.data, apply.data]) {
       const operation = operationFromResult(result);
       if (operation?.owning_operation === selected.descriptor.operation) {
-        return operation.authority_scope;
+        return operation.effect_receipt?.scope ?? null;
       }
     }
     return null;
-  }, [preview.data, selected, status.data, statusAuthorityMatches]);
+  }, [apply.data, selected, status.data]);
 
   const submitApply = () => {
     if (!selected) return;
     apply.mutate({
       operation: selected.descriptor.operation,
+      target: selected.target,
       preview_id: selectedPreviewId,
       idempotency_key: selected.idempotencyKey,
       confirmed:
@@ -178,10 +168,13 @@ export function DoctorInspector() {
         refreshing={findings.isFetching}
         onRefresh={() => void findings.refetch()}
         onInspect={(entry, descriptor, legalActions) => {
+          const target = descriptor.target;
+          if (!target) return;
           setConfirmed(false);
           setSelected({
             entry,
             descriptor,
+            target,
             actions: availableRemediationActions(descriptor, legalActions),
             idempotencyKey: newIdempotencyKey(),
           });
@@ -197,7 +190,6 @@ export function DoctorInspector() {
         transportScopeMismatch={
           activeOperation != null && currentScope != null && !activeTransportScopeMatches
         }
-        authorityScopeMismatch={!statusAuthorityMatches}
       />
 
       <RemediationDialog
@@ -237,10 +229,10 @@ function DoctorFindings({
   onRefresh: () => void;
   onInspect: (
     entry: DoctorReportEntry,
-    descriptor: DoctorRemediationDescriptor,
+    descriptor: DashboardDoctorRemediationDescriptorV1,
     legalActions: WireLegalActionRef[],
   ) => void;
-  onPreview: (operation: string) => void;
+  onPreview: (request: { operation: string; target: DoctorRemediationTarget }) => void;
 }) {
   if (pending) {
     return <DoctorState kind="loading" detail="requesting canonical Doctor findings" />;
@@ -283,7 +275,8 @@ function DoctorFindings({
       <OverviewGrid>
         {envelope.payload.entries.map((entry, index) => {
           const descriptor = remediationForEntry(entry, envelope.payload.remediations);
-          const actions = descriptor
+          const target = descriptor?.target ?? null;
+          const actions = descriptor && target
             ? availableRemediationActions(descriptor, envelope.legal_actions)
             : { canPreview: false, canApply: false };
           return (
@@ -291,6 +284,7 @@ function DoctorFindings({
               key={`${entry.finding.family}:${entry.storage_kind ?? 'general'}:${index}`}
               entry={entry}
               descriptor={descriptor}
+              target={target}
               actions={actions}
               previewing={previewing}
               onPreview={onPreview}
@@ -355,16 +349,18 @@ function consultationState(
 function FindingCard({
   entry,
   descriptor,
+  target,
   actions,
   previewing,
   onPreview,
   onInspect,
 }: {
   entry: DoctorReportEntry;
-  descriptor: DoctorRemediationDescriptor | undefined;
+  descriptor: DashboardDoctorRemediationDescriptorV1 | undefined;
+  target: DoctorRemediationTarget | null;
   actions: { canPreview: boolean; canApply: boolean };
   previewing: boolean;
-  onPreview: (operation: string) => void;
+  onPreview: (request: { operation: string; target: DoctorRemediationTarget }) => void;
   onInspect: () => void;
 }) {
   const { finding } = entry;
@@ -394,7 +390,9 @@ function FindingCard({
                 <button
                   type="button"
                   className={secondaryButtonClass}
-                  onClick={() => onPreview(descriptor.operation)}
+                  onClick={() => {
+                    if (target) onPreview({ operation: descriptor.operation, target });
+                  }}
                   disabled={previewing}
                 >
                   {previewing ? 'Previewing' : 'Preview'}
@@ -472,13 +470,11 @@ function OperationStatus({
   pending,
   operationId,
   transportScopeMismatch,
-  authorityScopeMismatch,
 }: {
   result: EnvelopeResult<DoctorRemediationPayload> | undefined;
   pending: boolean;
   operationId: string | null;
   transportScopeMismatch: boolean;
-  authorityScopeMismatch: boolean;
 }) {
   if (!operationId && !result) return null;
   if (transportScopeMismatch) {
@@ -486,14 +482,6 @@ function OperationStatus({
       <DoctorState
         kind="conflicting"
         detail="saved remediation belongs to a different dashboard scope"
-      />
-    );
-  }
-  if (authorityScopeMismatch) {
-    return (
-      <DoctorState
-        kind="conflicting"
-        detail="operation owner returned a different remediation authority scope"
       />
     );
   }
@@ -522,7 +510,9 @@ function OperationStatus({
       <span className="truncate font-mono text-2xs text-text-muted">
         {payload.operation.operation_id}
       </span>
-      <AuthorityScope scope={payload.operation.authority_scope} compact />
+      {payload.operation.effect_receipt ? (
+        <AuthorityScope scope={payload.operation.effect_receipt.scope} compact />
+      ) : null}
       {payload.operation.execution ? (
         <span className="ml-auto text-2xs text-text-muted">
           receipt {payload.operation.execution.termination.replaceAll('_', ' ')}
@@ -546,7 +536,7 @@ function RemediationDialog({
   selection: SelectedRemediation | null;
   confirmed: boolean;
   previewId: string | null;
-  authorityScope: DoctorRemediationAuthorityScope | null;
+  authorityScope: ResolvedScope | null;
   applying: boolean;
   result: EnvelopeResult<DoctorRemediationPayload> | undefined;
   onConfirmedChange: (confirmed: boolean) => void;
@@ -655,13 +645,10 @@ function AuthorityScope({
   scope,
   compact = false,
 }: {
-  scope: DoctorRemediationAuthorityScope;
+  scope: ResolvedScope;
   compact?: boolean;
 }) {
-  const label =
-    scope.scope_kind === 'profile'
-      ? `profile ${scope.profile_id}`
-      : `project ${scope.project_id}`;
+  const label = `project ${scope.project_id}`;
   if (compact) {
     return (
       <span
@@ -672,28 +659,20 @@ function AuthorityScope({
       </span>
     );
   }
-  const details =
-    scope.scope_kind === 'profile'
-      ? [
-          ['Brain', scope.brain_id],
-          ['Profile', scope.profile_id],
-          ['Profile sessions binding', scope.profile_sessions_binding_digest],
-          ['Scope digest', scope.scope_digest],
-        ]
-      : [
-          ['Project', scope.project_id],
-          ['Repository', scope.repository_id],
-          ['Worktree', scope.worktree_id],
-          ['Reference', scope.reference ?? 'none'],
-          ['Scope digest', scope.scope_digest],
-        ];
+  const details = [
+    ['Project', scope.project_id],
+    ['Repository', scope.repository_id],
+    ['Worktree', scope.worktree_id],
+    ['Reference', scope.reference ?? 'none'],
+    ['Scope digest', scope.scope_digest],
+  ];
   return (
     <div
       className="rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-2 p-3"
       aria-label="Remediation authority scope"
     >
       <p className="text-2xs font-medium uppercase tracking-wide text-text-muted">
-        {scope.scope_kind} authority
+        project authority
       </p>
       <dl className="mt-2 grid gap-1">
         {details.map(([term, value]) => (
