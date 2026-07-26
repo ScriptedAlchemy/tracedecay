@@ -14,6 +14,7 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -98,7 +99,7 @@ struct LoomReadV1 {
     latest_activated_at: Option<i64>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, JsonSchema)]
 pub(crate) struct LoomFileSessionProjectionV1 {
     pub(crate) granularity: &'static str,
     pub(crate) authority: &'static str,

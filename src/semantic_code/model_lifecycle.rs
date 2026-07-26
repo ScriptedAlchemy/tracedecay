@@ -1793,7 +1793,7 @@ mod tests {
         let imported = SemanticModelLifecycleOwnerV1::open(
             root.path(),
             catalog.clone(),
-            Arc::new(HfHubModelMemberSourceV1),
+            scoped_hub_source(root.path()),
         )
         .unwrap()
         .import_local_artifact(&model_id, &tiny_manifest(&model), fixture.path(), 10)
@@ -1804,7 +1804,7 @@ mod tests {
         let restarted = SemanticModelLifecycleOwnerV1::open(
             root.path(),
             catalog,
-            Arc::new(HfHubModelMemberSourceV1),
+            scoped_hub_source(root.path()),
         )
         .unwrap();
         let status = restarted.select_model(Some(&model_id), true).unwrap();
@@ -1823,7 +1823,7 @@ mod tests {
         let ready_restart = SemanticModelLifecycleOwnerV1::open(
             root.path(),
             tiny_catalog(fixture.path()).0,
-            Arc::new(HfHubModelMemberSourceV1),
+            scoped_hub_source(root.path()),
         )
         .unwrap();
         let ready = ready_restart.select_model(Some(&model_id), true).unwrap();
