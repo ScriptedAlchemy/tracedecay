@@ -36,12 +36,18 @@ const fn default_http_page_size() -> u32 {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum HttpApplicationOperation {
+    GitStatus,
+    GitDiff,
+    GitHistory,
+    GitBlame,
+    GitHunks,
     GitPreview,
     GitApply,
     FeedbackDiagnostics,
     FeedbackGet,
     FeedbackExpand,
     FeedbackList,
+    FeedbackAdvisoryCycle,
     FeedbackImpact,
     AffectedTests,
     TestResults,
@@ -53,6 +59,12 @@ pub enum HttpApplicationOperation {
     CodeTypeHierarchy,
     CodeCallers,
     CodeCallees,
+    CodeFacets,
+    CodeTimeline,
+    CodeDeclaration,
+    CodeDefinition,
+    CodeTypeDefinition,
+    CodeReferences,
     SessionLookup,
     QualifiedName,
     CallChain,
@@ -63,6 +75,7 @@ pub enum HttpApplicationOperation {
     ModuleApi,
     FileMetadata,
     HealthRead,
+    HealthDelta,
     StorageStatus,
     DiagnosticsRead,
     ConfigurationList,
@@ -105,12 +118,18 @@ pub enum HttpApplicationOwnerKind {
 impl HttpApplicationOperation {
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::GitStatus => "git_status",
+            Self::GitDiff => "git_diff",
+            Self::GitHistory => "git_history",
+            Self::GitBlame => "git_blame",
+            Self::GitHunks => "git_hunks",
             Self::GitPreview => "git_preview",
             Self::GitApply => "git_apply",
             Self::FeedbackDiagnostics => "feedback_diagnostics",
             Self::FeedbackGet => "feedback_get",
             Self::FeedbackExpand => "feedback_expand",
             Self::FeedbackList => "feedback_list",
+            Self::FeedbackAdvisoryCycle => "feedback_advisory_cycle",
             Self::FeedbackImpact => "feedback_impact",
             Self::AffectedTests => "affected_tests",
             Self::TestResults => "test_results",
@@ -122,6 +141,12 @@ impl HttpApplicationOperation {
             Self::CodeTypeHierarchy => "code_type_hierarchy",
             Self::CodeCallers => "code_callers",
             Self::CodeCallees => "code_callees",
+            Self::CodeFacets => "code_facets",
+            Self::CodeTimeline => "code_timeline",
+            Self::CodeDeclaration => "code_declaration",
+            Self::CodeDefinition => "code_definition",
+            Self::CodeTypeDefinition => "code_type_definition",
+            Self::CodeReferences => "code_references",
             Self::SessionLookup => "session_lookup",
             Self::QualifiedName => "qualified_name",
             Self::CallChain => "call_chain",
@@ -132,6 +157,7 @@ impl HttpApplicationOperation {
             Self::ModuleApi => "module_api",
             Self::FileMetadata => "file_metadata",
             Self::HealthRead => "health_read",
+            Self::HealthDelta => "health_delta",
             Self::StorageStatus => "storage_status",
             Self::DiagnosticsRead => "diagnostics_read",
             Self::ConfigurationList => "configuration_list",
@@ -163,15 +189,28 @@ impl HttpApplicationOperation {
 
     pub const fn owner_kind(self) -> HttpApplicationOwnerKind {
         match self {
-            Self::GitPreview | Self::GitApply => HttpApplicationOwnerKind::Git,
+            Self::GitStatus
+            | Self::GitDiff
+            | Self::GitHistory
+            | Self::GitBlame
+            | Self::GitHunks
+            | Self::GitPreview
+            | Self::GitApply => HttpApplicationOwnerKind::Git,
             Self::FeedbackDiagnostics
             | Self::FeedbackGet
             | Self::FeedbackExpand
             | Self::FeedbackList
+            | Self::FeedbackAdvisoryCycle
             | Self::FeedbackImpact => HttpApplicationOwnerKind::Feedback,
-            Self::CodeExactOccurrence | Self::CodePhraseSearch | Self::CodeCallees => {
-                HttpApplicationOwnerKind::CallableCode
-            }
+            Self::CodeExactOccurrence
+            | Self::CodePhraseSearch
+            | Self::CodeCallees
+            | Self::CodeFacets
+            | Self::CodeTimeline
+            | Self::CodeDeclaration
+            | Self::CodeDefinition
+            | Self::CodeTypeDefinition
+            | Self::CodeReferences => HttpApplicationOwnerKind::CallableCode,
             Self::AffectedTests => HttpApplicationOwnerKind::Feedback,
             Self::TestResults
             | Self::CodeSymbolSearch
@@ -189,6 +228,7 @@ impl HttpApplicationOperation {
             | Self::ModuleApi
             | Self::FileMetadata
             | Self::HealthRead
+            | Self::HealthDelta
             | Self::StorageStatus
             | Self::DiagnosticsRead => HttpApplicationOwnerKind::Primitive,
             Self::ConfigurationList
@@ -405,10 +445,15 @@ where
     Router::new()
         .route("/git/preview", post(git_preview::<O>))
         .route("/git/apply", post(git_apply::<O>))
+        .route("/git/{operation}", post(git_read::<O>))
         .route("/feedback/diagnostics", post(feedback_diagnostics::<O>))
         .route("/feedback/get", post(feedback_get::<O>))
         .route("/feedback/expand", post(feedback_expand::<O>))
         .route("/feedback/list", post(feedback_list::<O>))
+        .route(
+            "/feedback/advisory-cycle",
+            post(feedback_advisory_cycle::<O>),
+        )
         .route("/feedback/impact", post(feedback_impact::<O>))
         .route("/tests/affected", post(affected_tests::<O>))
         .route("/tests/results", post(test_results::<O>))
@@ -424,6 +469,57 @@ where
         )
         .layer(DefaultBodyLimit::max(MAX_HTTP_APPLICATION_BODY_BYTES))
         .with_state(owners)
+}
+
+/// Build only the canonical configuration routes for an adapter that does not
+/// advertise the complete HTTP application surface.
+///
+/// Dashboard mounts this router with a Dashboard-bound application invoker.
+/// Keeping the extraction path shared preserves body limits, pagination,
+/// cancellation, and canonical response semantics without falsely exposing
+/// unrelated HTTP bindings as Dashboard operations.
+pub fn configuration_application_router<O>(owners: O) -> Router
+where
+    O: HttpApplicationOwners,
+{
+    Router::new()
+        .route(
+            "/configuration/{operation}",
+            post(configuration_operation::<O>),
+        )
+        .layer(DefaultBodyLimit::max(MAX_HTTP_APPLICATION_BODY_BYTES))
+        .with_state(owners)
+}
+
+fn parse_git_read_operation(operation: &str) -> Option<HttpApplicationOperation> {
+    match operation {
+        "status" => Some(HttpApplicationOperation::GitStatus),
+        "diff" => Some(HttpApplicationOperation::GitDiff),
+        "history" => Some(HttpApplicationOperation::GitHistory),
+        "blame" => Some(HttpApplicationOperation::GitBlame),
+        "hunks" => Some(HttpApplicationOperation::GitHunks),
+        _ => None,
+    }
+}
+
+async fn git_read<O>(
+    Path(operation): Path<String>,
+    state: State<O>,
+    request_id: Extension<RequestId>,
+    cancellation: Extension<HttpApplicationControls>,
+    page: Result<Query<HttpPageQuery>, QueryRejection>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response
+where
+    O: HttpApplicationOwners,
+{
+    let Some(operation) = parse_git_read_operation(&operation) else {
+        return application_problem_response(adapter_problem(
+            request_id.0,
+            ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
+        ));
+    };
+    invoke_route(operation, state, request_id, cancellation, page, body).await
 }
 
 async fn git_preview<O>(
@@ -552,6 +648,27 @@ where
     .await
 }
 
+async fn feedback_advisory_cycle<O>(
+    state: State<O>,
+    request_id: Extension<RequestId>,
+    cancellation: Extension<HttpApplicationControls>,
+    page: Result<Query<HttpPageQuery>, QueryRejection>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response
+where
+    O: HttpApplicationOwners,
+{
+    invoke_route(
+        HttpApplicationOperation::FeedbackAdvisoryCycle,
+        state,
+        request_id,
+        cancellation,
+        page,
+        body,
+    )
+    .await
+}
+
 async fn feedback_impact<O>(
     state: State<O>,
     request_id: Extension<RequestId>,
@@ -637,6 +754,7 @@ where
         "module_api" => HttpApplicationOperation::ModuleApi,
         "file_metadata" => HttpApplicationOperation::FileMetadata,
         "health_read" => HttpApplicationOperation::HealthRead,
+        "health_delta" => HttpApplicationOperation::HealthDelta,
         "storage_status" => HttpApplicationOperation::StorageStatus,
         "diagnostics_read" => HttpApplicationOperation::DiagnosticsRead,
         _ => {
@@ -659,6 +777,12 @@ fn parse_callable_code_operation(operation: &str) -> Option<HttpApplicationOpera
         "code_type_hierarchy" => Some(HttpApplicationOperation::CodeTypeHierarchy),
         "code_callers" => Some(HttpApplicationOperation::CodeCallers),
         "code_callees" => Some(HttpApplicationOperation::CodeCallees),
+        "code_facets" => Some(HttpApplicationOperation::CodeFacets),
+        "code_timeline" => Some(HttpApplicationOperation::CodeTimeline),
+        "code_declaration" => Some(HttpApplicationOperation::CodeDeclaration),
+        "code_definition" => Some(HttpApplicationOperation::CodeDefinition),
+        "code_type_definition" => Some(HttpApplicationOperation::CodeTypeDefinition),
+        "code_references" => Some(HttpApplicationOperation::CodeReferences),
         _ => None,
     }
 }
@@ -838,7 +962,7 @@ mod tests {
     use super::{
         DEFAULT_HTTP_PAGE_SIZE, HttpApplicationOperation, HttpApplicationOwnerKind, HttpPageQuery,
         parse_callable_code_operation, parse_configuration_operation,
-        parse_context_scout_operation,
+        parse_context_scout_operation, parse_git_read_operation,
     };
 
     #[test]
@@ -847,6 +971,24 @@ mod tests {
             .expect("empty HTTP query uses adapter defaults");
         assert_eq!(query.page_size, DEFAULT_HTTP_PAGE_SIZE);
         assert!(query.cursor.is_none());
+    }
+
+    #[test]
+    fn git_read_operation_parser_is_exact_and_read_only() {
+        for (route, operation) in [
+            ("status", HttpApplicationOperation::GitStatus),
+            ("diff", HttpApplicationOperation::GitDiff),
+            ("history", HttpApplicationOperation::GitHistory),
+            ("blame", HttpApplicationOperation::GitBlame),
+            ("hunks", HttpApplicationOperation::GitHunks),
+        ] {
+            assert_eq!(parse_git_read_operation(route), Some(operation));
+            assert_eq!(operation.owner_kind(), HttpApplicationOwnerKind::Git);
+            assert_eq!(operation.as_str(), format!("git_{route}"));
+        }
+        for rejected in ["", "preview", "apply", "git_status", "status/"] {
+            assert_eq!(parse_git_read_operation(rejected), None);
+        }
     }
 
     #[test]
@@ -890,6 +1032,36 @@ mod tests {
             (
                 "code_callees",
                 HttpApplicationOperation::CodeCallees,
+                HttpApplicationOwnerKind::CallableCode,
+            ),
+            (
+                "code_facets",
+                HttpApplicationOperation::CodeFacets,
+                HttpApplicationOwnerKind::CallableCode,
+            ),
+            (
+                "code_timeline",
+                HttpApplicationOperation::CodeTimeline,
+                HttpApplicationOwnerKind::CallableCode,
+            ),
+            (
+                "code_declaration",
+                HttpApplicationOperation::CodeDeclaration,
+                HttpApplicationOwnerKind::CallableCode,
+            ),
+            (
+                "code_definition",
+                HttpApplicationOperation::CodeDefinition,
+                HttpApplicationOwnerKind::CallableCode,
+            ),
+            (
+                "code_type_definition",
+                HttpApplicationOperation::CodeTypeDefinition,
+                HttpApplicationOwnerKind::CallableCode,
+            ),
+            (
+                "code_references",
+                HttpApplicationOperation::CodeReferences,
                 HttpApplicationOwnerKind::CallableCode,
             ),
         ] {

@@ -1,17 +1,19 @@
 //! Production PR12 primitive owners over `TraceDecay` graph/query authorities.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use ignore::overrides::OverrideBuilder;
+use sha2::{Digest, Sha256};
 use tracedecay_application::retrieval::grep_analysis::{
     GrepAnalysisProblemV1, GrepHitV1, GrepRequestV1, GrepResultV1, LexicalGrepAuthorityV1,
     PrimitiveCoverageV1, PrimitiveFutureV1, PrimitiveOutcomeV1, PrimitivePageV1,
     PrimitivePortContextV1, RedundancyAuthorityV1, RedundancyRequestV1, RedundancyResultV1,
 };
 use tracedecay_application::retrieval::{
-    AffectedFileTestsPrimitiveRequest, AffectedFileTestsPrimitiveResultV1, AffectedTestsRequest,
-    AffectedTestsResult, HealthReadRequest, HealthReadResult, OperationalRetrievalPort,
+    AffectedFileTestsPrimitiveRequest, AffectedFileTestsPrimitiveResultV1,
+    AffectedTestAttributionV1, AffectedTestsRequest, AffectedTestsResult, HealthDeltaRequest,
+    HealthDeltaResult, HealthReadRequest, HealthReadResult, OperationalRetrievalPort,
     RankedAffectedTestV1, RetrievalPortContext, RetrievalPortOutcome, SessionLookupRequest,
     SessionLookupResult, SourceLinesRequest, SourceLinesResult, SourceReference,
     SourceRetrievalPort, SymbolPrimitiveRecord, TemporalRetrievalPort, TestMapCoverageV1,
@@ -19,9 +21,10 @@ use tracedecay_application::retrieval::{
     TestPrimitivePortFuture, TestPrimitivePortOutcome, TestReferenceV1, UncoveredSourceV1,
 };
 use tracedecay_application::{
-    ApplicationContractError, CoverageCompleteness, CoverageDomainState, EvidenceCoverage,
-    EvidenceDomain, FreshnessState, Omission, OmissionReason, OperationBudgetUsage, PageState,
-    RequestContext, ResolvedScope, RetrievalEvidence, TemporalState,
+    ApplicationContractError, CoverageCompleteness, CoverageDomainState, EvidenceAuthority,
+    EvidenceCoverage, EvidenceDomain, EvidenceIdentity, FreshnessState, Omission, OmissionReason,
+    OpaqueCursor, OperationBudgetUsage, PageState, RequestAdmission, RequestContext, ResolvedScope,
+    RetrievalEvidence, TemporalState,
 };
 use tracedecay_domain::{
     CodeGenerationId, CommitId, ManifestDigest, ProjectId, ProviderEvaluationStateV1,
@@ -42,8 +45,8 @@ use super::runtime::{
     Pr12OperationalPrimitiveFuture, Pr12OperationalPrimitivePort, Pr12OperationalPrimitiveRequest,
     Pr12PrimitiveProjectRuntime, QualifiedNamePrimitiveRequest, QualifiedNamePrimitiveResult,
     SourceBodyPrimitiveRequest, SourceBodyPrimitiveResult, SourceOutlinePrimitiveRequest,
-    SourceOutlinePrimitiveResult, StorageStatusPrimitiveRequest, StorageStatusPrimitiveResult,
-    open_pr12_primitive_project_runtime,
+    SourceOutlinePrimitiveResult, StorageStatusHistoryPointV1, StorageStatusPrimitiveRequest,
+    StorageStatusPrimitiveResult, open_pr12_primitive_project_runtime,
 };
 use super::symbol_graph::{SymbolGraphCursorPort, symbol_record};
 use crate::application::lsp_runtime::LspCodeIndexProjectionIdentityPort;
@@ -56,15 +59,22 @@ use crate::code_index::test_attribution::{
     GenerationTestJoinCoverageV1, GenerationTestJoinDispositionV1, GenerationTestJoinV1,
 };
 use crate::db::Database;
+use crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1;
+use crate::diagnostics_query::{
+    DiagnosticPageRequest, DiagnosticQueryCoverage, DiagnosticQueryCursor, DiagnosticsQuery,
+};
 use crate::global_db::RegisteredGlobalDb;
 use crate::global_db::session_temporal::GlobalDbCursorKeyProvider;
 use crate::mcp::tools::handlers::git::{
     affected_test_proximity, collect_affected_test_files, rank_affected_tests,
 };
 use crate::mcp::tools::handlers::grep::{ScanResult, build_matcher, scan_tree};
+use crate::query::temporal::cursor::{
+    CURSOR_LIFETIME_MICROS, StableSortKey, encode_cursor, verify_cursor,
+};
 use crate::query::temporal::ports::{
-    BindingDigest, KernelVersions, TemporalExecutionSnapshot, TemporalSnapshotRequest,
-    TemporalWatermarks,
+    BindingDigest, KernelVersions, SessionCursorAuthenticator, TemporalExecutionSnapshot,
+    TemporalSnapshotRequest, TemporalWatermarks,
 };
 use crate::query::temporal::resolution::ValidatedAuthorization;
 use crate::tracedecay::TraceDecay;
@@ -130,6 +140,215 @@ fn failed<T>(domain: EvidenceDomain, finished_at: UtcMicros) -> RetrievalPortOut
         budget: OperationBudgetUsage::default(),
         cancellation: None,
     })
+}
+
+fn diagnostics_unavailable(
+    finished_at: UtcMicros,
+    reason: OmissionReason,
+) -> RetrievalPortOutcome<DiagnosticsPrimitiveResult> {
+    RetrievalPortOutcome::Unavailable(RetrievalEvidence {
+        payload: None,
+        temporal: TemporalState {
+            freshness: if reason == OmissionReason::Stale {
+                FreshnessState::Stale
+            } else {
+                FreshnessState::Unknown
+            },
+            ..TemporalState::current(finished_at)
+        },
+        evidence_authorities: Vec::new(),
+        coverage: EvidenceCoverage {
+            requested_domains: vec![EvidenceDomain::Diagnostic],
+            visited: None,
+            eligible: None,
+            returned: 0,
+            completeness: CoverageCompleteness::Unknown,
+            domains: Vec::new(),
+        },
+        omissions: vec![Omission {
+            domain: EvidenceDomain::Diagnostic,
+            count: 0,
+            reason,
+        }],
+        scores: Vec::new(),
+        contributions: Vec::new(),
+        page: PageState::first_page(
+            SortContractId::new(PRIMITIVE_SORT).unwrap_or_else(|_| panic!("static sort")),
+            1,
+            None,
+            0,
+        )
+        .unwrap_or_else(|_| panic!("diagnostic unavailable page")),
+        finished_at,
+        budget: OperationBudgetUsage::default(),
+        cancellation: None,
+    })
+}
+
+fn diagnostics_result(
+    generation_id: CodeGenerationId,
+    watermark_digest: ManifestDigest,
+    diagnostics: Vec<DiagnosticPrimitiveRecord>,
+    total: u64,
+    next_cursor: Option<OpaqueCursor>,
+    finished_at: UtcMicros,
+) -> RetrievalPortOutcome<DiagnosticsPrimitiveResult> {
+    let returned = diagnostics.len() as u64;
+    let next_cursor_text = next_cursor
+        .as_ref()
+        .map(|cursor| cursor.as_str().to_owned());
+    let mut page = PageState::first_page(
+        SortContractId::new(PRIMITIVE_SORT).unwrap_or_else(|_| panic!("static sort")),
+        1,
+        Some(total),
+        returned,
+    )
+    .unwrap_or_else(|_| panic!("diagnostic result page"));
+    page.cursor = next_cursor;
+    page.expires_at = page.cursor.as_ref().and_then(|_| {
+        finished_at
+            .0
+            .checked_add(CURSOR_LIFETIME_MICROS)
+            .map(UtcMicros)
+    });
+    let evidence = RetrievalEvidence {
+        payload: Some(DiagnosticsPrimitiveResult {
+            generation_id: generation_id.clone(),
+            clean_generation: true,
+            findings_cleared: total == 0,
+            diagnostics,
+            next_cursor: next_cursor_text,
+        }),
+        temporal: TemporalState {
+            source_generation: Some(generation_id),
+            watermark_digest: Some(watermark_digest),
+            ..TemporalState::current(finished_at)
+        },
+        evidence_authorities: Vec::new(),
+        coverage: EvidenceCoverage {
+            requested_domains: vec![EvidenceDomain::Diagnostic],
+            visited: Some(total),
+            eligible: Some(total),
+            returned,
+            completeness: CoverageCompleteness::Complete,
+            domains: vec![CoverageDomainState {
+                domain: EvidenceDomain::Diagnostic,
+                completeness: CoverageCompleteness::Complete,
+            }],
+        },
+        omissions: Vec::new(),
+        scores: Vec::new(),
+        contributions: Vec::new(),
+        page,
+        finished_at,
+        budget: OperationBudgetUsage::default(),
+        cancellation: None,
+    };
+    RetrievalPortOutcome::Completed(evidence)
+}
+
+const DIAGNOSTIC_CURSOR_LANE_WORKSPACE: &str = "workspace";
+
+struct AuthenticatedDiagnosticCursorAuthorityV1 {
+    key: SignedCursorKeyRefV1,
+    configuration_digest: ManifestDigest,
+    authenticator: Arc<dyn SessionCursorAuthenticator>,
+}
+
+impl AuthenticatedDiagnosticCursorAuthorityV1 {
+    fn snapshot(
+        &self,
+        context: &RequestContext,
+        generation: &CodeGenerationId,
+        lane: &str,
+    ) -> Result<TemporalExecutionSnapshot, ()> {
+        if context.validate().is_err()
+            || context.admission_at(now_observed()) != RequestAdmission::Admitted
+        {
+            return Err(());
+        }
+        let request_digest = canonical_sha256(&(
+            "tracedecay.diagnostics.cursor.v1",
+            context.actor(),
+            context.grant().revision,
+            &context.grant().digest,
+            &context.grant().issuer,
+            &context.grant().allowed_capabilities,
+            &context.grant().allowed_use_cases,
+            context.grant().disclosure,
+            generation.as_str(),
+            lane,
+        ))
+        .map_err(|_| ())?;
+        let request = TemporalSnapshotRequest::new(
+            SessionId::new("session.daemon.diagnostics").map_err(|_| ())?,
+            context.scope().scope_digest.as_str(),
+            request_digest.as_str(),
+            context.grant().digest.as_str(),
+            TemporalModeV1::Current,
+            RetrievalGrainV1::Occurrence,
+        )
+        .map_err(|_| ())?;
+        TemporalExecutionSnapshot::new_authorized(
+            request,
+            TemporalWatermarks {
+                generation: 1,
+                source: 1,
+                projection: 1,
+                index: 1,
+                summary: 1,
+            },
+            KernelVersions {
+                schema: 1,
+                ranking: 1,
+                configuration_digest: BindingDigest::new(
+                    "configuration_digest",
+                    self.configuration_digest.as_str(),
+                )
+                .map_err(|_| ())?,
+            },
+            Some(self.key.clone()),
+            ValidatedAuthorization::Authorized,
+        )
+        .map_err(|_| ())
+    }
+
+    fn decode(
+        &self,
+        encoded: &str,
+        context: &RequestContext,
+        generation: &CodeGenerationId,
+        lane: &str,
+    ) -> Result<DiagnosticQueryCursor, ()> {
+        let snapshot = self.snapshot(context, generation, lane)?;
+        let sort_key =
+            verify_cursor(encoded, &snapshot, self.authenticator.as_ref()).map_err(|_| ())?;
+        if sort_key.normalized_score_micros != 0 || sort_key.knowledge_at_micros != 0 {
+            return Err(());
+        }
+        DiagnosticQueryCursor::decode(&format!("dq1:{}", sort_key.stable_id)).map_err(|_| ())
+    }
+
+    fn encode(
+        &self,
+        cursor: &DiagnosticQueryCursor,
+        context: &RequestContext,
+        generation: &CodeGenerationId,
+        lane: &str,
+    ) -> Result<OpaqueCursor, ()> {
+        let snapshot = self.snapshot(context, generation, lane)?;
+        let encoded = encode_cursor(
+            &snapshot,
+            &StableSortKey {
+                normalized_score_micros: 0,
+                knowledge_at_micros: 0,
+                stable_id: cursor.anchor().to_owned(),
+            },
+            self.authenticator.as_ref(),
+        )
+        .map_err(|_| ())?;
+        OpaqueCursor::new(encoded).map_err(|_| ())
+    }
 }
 
 fn coverage(files_scanned: u64, returned: u64, truncated: bool) -> PrimitiveCoverageV1 {
@@ -662,11 +881,196 @@ fn public_module_symbols(nodes: Vec<Node>, path: &str) -> Vec<SymbolPrimitiveRec
 
 pub struct TraceDecayExtendedPrimitivePortV1 {
     graph: Arc<TraceDecay>,
+    database: Database,
+    observation_database: Arc<RegisteredGlobalDb>,
+    code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
+    diagnostic_identity: Arc<dyn CodeIndexPublicationIdentityPortV1>,
+    diagnostic_cursors: AuthenticatedDiagnosticCursorAuthorityV1,
 }
 
 impl TraceDecayExtendedPrimitivePortV1 {
-    pub fn new(graph: Arc<TraceDecay>) -> Self {
-        Self { graph }
+    pub(crate) fn new(
+        graph: Arc<TraceDecay>,
+        database: Database,
+        observation_database: Arc<RegisteredGlobalDb>,
+        code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
+        diagnostic_identity: Arc<dyn CodeIndexPublicationIdentityPortV1>,
+        diagnostic_cursors: AuthenticatedDiagnosticCursorAuthorityV1,
+    ) -> Self {
+        Self {
+            graph,
+            database,
+            observation_database,
+            code_index,
+            diagnostic_identity,
+            diagnostic_cursors,
+        }
+    }
+}
+
+const STORAGE_STATUS_HISTORY_REVISION_V1: u32 = 1;
+const MAX_STORAGE_STATUS_HISTORY_POINTS: usize = 128;
+
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct DurableStorageStatusHistoryV1 {
+    revision: u32,
+    project_id: Option<String>,
+    store_path: String,
+    samples: Vec<StorageStatusHistoryPointV1>,
+}
+
+fn storage_status_history_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn storage_status_history_path(
+    data_root: &Path,
+    project_id: Option<&str>,
+    store_path: &str,
+) -> PathBuf {
+    let mut digest = Sha256::new();
+    digest.update(project_id.unwrap_or_default().as_bytes());
+    digest.update([0]);
+    digest.update(store_path.as_bytes());
+    data_root
+        .join("storage-status-history-v1")
+        .join(format!("{}.json", hex::encode(digest.finalize())))
+}
+
+fn update_storage_status_history(
+    history_path: &Path,
+    project_id: Option<String>,
+    store_path: String,
+    database_bytes: u64,
+    observed_at: i64,
+) -> (Vec<StorageStatusHistoryPointV1>, String) {
+    let Ok(_guard) = storage_status_history_lock().lock() else {
+        return (
+            vec![StorageStatusHistoryPointV1 {
+                observed_at,
+                database_bytes,
+            }],
+            "current_sample_only_history_lock_failed".to_owned(),
+        );
+    };
+    let stored = std::fs::read(history_path).ok();
+    let restored = stored
+        .as_deref()
+        .and_then(|bytes| serde_json::from_slice::<DurableStorageStatusHistoryV1>(bytes).ok())
+        .filter(|durable| {
+            durable.revision == STORAGE_STATUS_HISTORY_REVISION_V1
+                && durable.project_id == project_id
+                && durable.store_path == store_path
+                && durable
+                    .samples
+                    .windows(2)
+                    .all(|pair| pair[0].observed_at <= pair[1].observed_at)
+        });
+    let invalid_stored_history = stored.is_some() && restored.is_none();
+    let mut history = restored.map_or_else(Vec::new, |durable| durable.samples);
+    let clock_regressed = history
+        .last()
+        .is_some_and(|sample| sample.observed_at > observed_at);
+    if clock_regressed {
+        history.clear();
+    }
+    history.push(StorageStatusHistoryPointV1 {
+        observed_at,
+        database_bytes,
+    });
+    if history.len() > MAX_STORAGE_STATUS_HISTORY_POINTS {
+        history.drain(..history.len() - MAX_STORAGE_STATUS_HISTORY_POINTS);
+    }
+    let durable = DurableStorageStatusHistoryV1 {
+        revision: STORAGE_STATUS_HISTORY_REVISION_V1,
+        project_id,
+        store_path,
+        samples: history.clone(),
+    };
+    let persisted = serde_json::to_vec_pretty(&durable).ok().and_then(|bytes| {
+        std::fs::create_dir_all(history_path.parent().unwrap_or_else(|| Path::new("."))).ok()?;
+        let temp = history_path.with_extension(format!("tmp-{}-{observed_at}", std::process::id()));
+        crate::storage::PrivateStoreIo::write_file_atomically(history_path, &temp, &bytes).ok()
+    });
+    let coverage = if persisted.is_none() {
+        "current_sample_only_history_persistence_failed"
+    } else if invalid_stored_history {
+        "durable_project_store_history_reset_invalid"
+    } else if clock_regressed {
+        "durable_project_store_history_reset_clock_regression"
+    } else {
+        "durable_project_store_history"
+    };
+    (history, coverage.to_owned())
+}
+
+/// Canonical storage-status owner used by the application operation and its
+/// dashboard projection. History is durable and scope-bound, so growth does
+/// not reset when the daemon or dashboard restarts.
+pub(crate) async fn canonical_storage_status(
+    graph: &TraceDecay,
+    include_details: bool,
+) -> StorageStatusPrimitiveResult {
+    let branch = graph.branch_diagnostics();
+    let read_only = graph.is_read_only();
+    let store_path = graph.db_path().display().to_string();
+    let file_bytes = graph
+        .db_path()
+        .metadata()
+        .ok()
+        .map(|metadata| metadata.len());
+    let page_counts = graph.storage_page_counts().await.ok();
+    let page_size_bytes = page_counts.and_then(|(page_size, _, _)| u32::try_from(page_size).ok());
+    let page_count = page_counts.map(|(_, page_count, _)| page_count);
+    let freelist_pages = page_counts.map(|(_, _, freelist_pages)| freelist_pages);
+    let database_bytes = page_size_bytes
+        .zip(page_count)
+        .map(|(page_size, pages)| u64::from(page_size).saturating_mul(pages))
+        .or(file_bytes);
+    let project_id = graph.store_layout().identity.project_id.clone();
+    let status = if branch.serving_db_exists {
+        if branch.is_fallback { "degraded" } else { "ok" }
+    } else {
+        "missing_graph_db"
+    };
+    let mut details = Vec::new();
+    if include_details {
+        details.extend(branch.warnings);
+        if let Some(warning) = branch.fallback_warning {
+            details.push(warning);
+        }
+    }
+    let history_path = storage_status_history_path(
+        &graph.store_layout().data_root,
+        project_id.as_deref(),
+        &store_path,
+    );
+    let (history, history_coverage) = database_bytes.map_or_else(
+        || (Vec::new(), "current_sample_unavailable".to_owned()),
+        |bytes| {
+            update_storage_status_history(
+                &history_path,
+                project_id.clone(),
+                store_path.clone(),
+                bytes,
+                now_observed().0,
+            )
+        },
+    );
+    StorageStatusPrimitiveResult {
+        status: status.to_owned(),
+        read_only,
+        database_bytes,
+        page_size_bytes,
+        page_count,
+        freelist_pages,
+        details,
+        project_id,
+        store_path: Some(store_path),
+        history,
+        history_coverage: Some(history_coverage),
     }
 }
 
@@ -860,39 +1264,34 @@ impl Pr12ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
         })
     }
 
+    fn health_delta<'a>(
+        &'a self,
+        _context: RetrievalPortContext<'a>,
+        request: &'a HealthDeltaRequest,
+    ) -> Pr12ExtendedPrimitiveFuture<'a, HealthDeltaResult> {
+        Box::pin(async move {
+            match crate::mcp::tools::handlers::health::compute_health_delta_result(
+                &self.graph,
+                self.observation_database.as_ref(),
+                request.before_cursor.as_deref(),
+                request.path_prefix.as_deref(),
+            )
+            .await
+            {
+                Ok(result) => completed(result, EvidenceDomain::Operational, now_observed()),
+                Err(_) => failed(EvidenceDomain::Operational, now_observed()),
+            }
+        })
+    }
+
     fn storage_status<'a>(
         &'a self,
         _context: RetrievalPortContext<'a>,
         request: &'a StorageStatusPrimitiveRequest,
     ) -> Pr12ExtendedPrimitiveFuture<'a, StorageStatusPrimitiveResult> {
         Box::pin(async move {
-            let branch = self.graph.branch_diagnostics();
-            let read_only = self.graph.is_read_only();
-            let database_bytes = self
-                .graph
-                .db_path()
-                .metadata()
-                .ok()
-                .map(|metadata| metadata.len());
-            let status = if branch.serving_db_exists {
-                if branch.is_fallback { "degraded" } else { "ok" }
-            } else {
-                "missing_graph_db"
-            };
-            let mut details = Vec::new();
-            if request.include_details {
-                details.extend(branch.warnings);
-                if let Some(warning) = branch.fallback_warning {
-                    details.push(warning);
-                }
-            }
             completed(
-                StorageStatusPrimitiveResult {
-                    status: status.to_owned(),
-                    read_only,
-                    database_bytes,
-                    details,
-                },
+                canonical_storage_status(self.graph.as_ref(), request.include_details).await,
                 EvidenceDomain::Operational,
                 now_observed(),
             )
@@ -901,19 +1300,165 @@ impl Pr12ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
 
     fn diagnostics<'a>(
         &'a self,
-        _context: RetrievalPortContext<'a>,
-        _request: &'a DiagnosticsPrimitiveRequest,
+        context: RetrievalPortContext<'a>,
+        request: &'a DiagnosticsPrimitiveRequest,
     ) -> Pr12ExtendedPrimitiveFuture<'a, DiagnosticsPrimitiveResult> {
         Box::pin(async move {
-            // Diagnostic publication is owned by the feedback/LSP brokers; when
-            // none are mounted for this project the authoritative answer is an
-            // empty completed page, not a fabricated Unavailable problem.
-            completed(
-                DiagnosticsPrimitiveResult {
-                    diagnostics: Vec::<DiagnosticPrimitiveRecord>::new(),
+            let finished_at = now_observed();
+            if !(1..=1_000).contains(&request.maximum_diagnostics) {
+                return diagnostics_unavailable(finished_at, OmissionReason::Unsupported);
+            }
+            let Some(identity) = self
+                .diagnostic_identity
+                .resolve(self.graph.project_root().to_path_buf())
+                .await
+            else {
+                return diagnostics_unavailable(finished_at, OmissionReason::Unavailable);
+            };
+            let scope = context.request.scope();
+            if identity.repository() != &scope.repository_id
+                || identity.worktree() != Some(&scope.worktree_id)
+                || identity.reference() != scope.reference.as_ref()
+            {
+                return diagnostics_unavailable(finished_at, OmissionReason::Stale);
+            }
+            let document_path = match &request.scope {
+                super::runtime::DiagnosticsPrimitiveScope::Workspace => None,
+                super::runtime::DiagnosticsPrimitiveScope::File(path) => {
+                    let Some(path) = crate::diagnostics_publication::code_index_logical_path(
+                        self.graph.project_root(),
+                        path,
+                    ) else {
+                        return diagnostics_unavailable(finished_at, OmissionReason::Unavailable);
+                    };
+                    if identity.file(&path).is_none() {
+                        return diagnostics_unavailable(finished_at, OmissionReason::Unavailable);
+                    }
+                    Some(path)
+                }
+                super::runtime::DiagnosticsPrimitiveScope::Package(_) => {
+                    return diagnostics_unavailable(finished_at, OmissionReason::Unsupported);
+                }
+            };
+            let current_index = match self
+                .code_index
+                .current_identity(
+                    self.graph.project_root().to_path_buf(),
+                    document_path.clone(),
+                )
+                .await
+            {
+                Ok(identity) => identity,
+                Err(_) => {
+                    return diagnostics_unavailable(finished_at, OmissionReason::Unavailable);
+                }
+            };
+            if current_index.code_generation_id != *identity.generation_id() {
+                return diagnostics_unavailable(finished_at, OmissionReason::Stale);
+            }
+            let query = DiagnosticsQuery::new(self.database.conn());
+            let current = query.current_generation().await;
+            let Some(current_generation) = current.generation else {
+                return diagnostics_unavailable(finished_at, OmissionReason::Unavailable);
+            };
+            if !matches!(current.coverage, DiagnosticQueryCoverage::Complete) {
+                return diagnostics_unavailable(finished_at, OmissionReason::Unavailable);
+            }
+            if current_generation != *identity.generation_id() {
+                return diagnostics_unavailable(finished_at, OmissionReason::Stale);
+            }
+            let selected_file = document_path
+                .as_deref()
+                .and_then(|path| identity.file(path).map(|(file, _)| file));
+            let cursor_lane = selected_file
+                .map(|file| file.as_str())
+                .unwrap_or(DIAGNOSTIC_CURSOR_LANE_WORKSPACE);
+            let cursor = match request.cursor.as_deref() {
+                Some(cursor) => match self.diagnostic_cursors.decode(
+                    cursor,
+                    context.request,
+                    &current_generation,
+                    cursor_lane,
+                ) {
+                    Ok(cursor) => Some(cursor),
+                    Err(_) => {
+                        return diagnostics_unavailable(finished_at, OmissionReason::Unsupported);
+                    }
                 },
-                EvidenceDomain::Diagnostic,
-                now_observed(),
+                None => None,
+            };
+            let page_request =
+                DiagnosticPageRequest::new(request.maximum_diagnostics as usize, cursor);
+            let page = match selected_file {
+                Some(file) => {
+                    query
+                        .current_by_file(&current_generation, file, &page_request)
+                        .await
+                }
+                None => {
+                    query
+                        .current_by_generation(&current_generation, &page_request)
+                        .await
+                }
+            };
+            let Ok(page) = page else {
+                return diagnostics_unavailable(finished_at, OmissionReason::Unavailable);
+            };
+            match page.coverage {
+                DiagnosticQueryCoverage::Complete | DiagnosticQueryCoverage::Truncated => {}
+                DiagnosticQueryCoverage::StoreUnavailable { .. } => {
+                    return diagnostics_unavailable(finished_at, OmissionReason::Unavailable);
+                }
+            }
+            let next_cursor = page
+                .next_cursor
+                .as_ref()
+                .map(|cursor| {
+                    self.diagnostic_cursors.encode(
+                        cursor,
+                        context.request,
+                        &current_generation,
+                        cursor_lane,
+                    )
+                })
+                .transpose();
+            let Ok(next_cursor) = next_cursor else {
+                return diagnostics_unavailable(finished_at, OmissionReason::Unavailable);
+            };
+            let mut diagnostics = Vec::new();
+            for diagnostic in page.records {
+                if diagnostic.repository != *identity.repository()
+                    || diagnostic.worktree.as_ref() != identity.worktree()
+                    || diagnostic.reference.as_ref() != identity.reference()
+                    || diagnostic.source_revision.as_ref() != identity.source_revision()
+                    || diagnostic.generation_id != *identity.generation_id()
+                    || !diagnostic.is_current()
+                {
+                    return diagnostics_unavailable(finished_at, OmissionReason::Stale);
+                }
+                let Some((logical_path, expected_digest)) = identity
+                    .logical_path(&diagnostic.file_occurrence_id)
+                    .and_then(|path| identity.file(path).map(|(_, digest)| (path, digest)))
+                else {
+                    return diagnostics_unavailable(finished_at, OmissionReason::Stale);
+                };
+                if expected_digest != &diagnostic.content_digest {
+                    return diagnostics_unavailable(finished_at, OmissionReason::Stale);
+                }
+                if selected_file.is_none_or(|file| file == &diagnostic.file_occurrence_id) {
+                    diagnostics.push(DiagnosticPrimitiveRecord {
+                        logical_path: logical_path.to_owned(),
+                        diagnostic,
+                    });
+                }
+            }
+            diagnostics_result(
+                identity.generation_id().clone(),
+                current_index.snapshot_digest,
+                diagnostics,
+                page.total as u64,
+                next_cursor,
+                finished_at,
             )
         })
     }
@@ -1101,7 +1646,6 @@ impl SymbolGraphCursorSnapshotAuthority for ProjectSymbolGraphCursorSnapshotAuth
 
 pub struct TraceDecayAffectedTestsPortV1 {
     project_id: Option<ProjectId>,
-    generation: CodeGenerationId,
     attribution: Option<Arc<dyn GenerationTestAttributionJoinReadPort + Send + Sync>>,
 }
 
@@ -1120,12 +1664,11 @@ impl TraceDecayAffectedTestsPortV1 {
 
     fn from_binding(
         project_id: Option<ProjectId>,
-        generation: CodeGenerationId,
+        _generation: CodeGenerationId,
         attribution: Option<Arc<dyn GenerationTestAttributionJoinReadPort + Send + Sync>>,
     ) -> Self {
         Self {
             project_id,
-            generation,
             attribution,
         }
     }
@@ -1138,9 +1681,7 @@ impl tracedecay_application::AffectedTestsRetrievalPort for TraceDecayAffectedTe
         request: &AffectedTestsRequest,
     ) -> RetrievalPortOutcome<AffectedTestsResult> {
         let finished_at = now_observed();
-        if self.project_id.as_ref() != Some(&context.request.scope().project_id)
-            || request.generation != self.generation
-        {
+        if self.project_id.as_ref() != Some(&context.request.scope().project_id) {
             return affected_tests_unavailable(
                 request,
                 finished_at,
@@ -1158,6 +1699,7 @@ impl tracedecay_application::AffectedTestsRetrievalPort for TraceDecayAffectedTe
         };
         attributed_tests_outcome(
             request,
+            context.request.scope().clone(),
             attribution.read_test_attribution(&request.generation),
             finished_at,
         )
@@ -1175,6 +1717,7 @@ fn project_id_for_graph(graph: &TraceDecay) -> Option<ProjectId> {
 
 fn attributed_tests_outcome(
     request: &AffectedTestsRequest,
+    scope: ResolvedScope,
     read: GenerationProviderReadV1<GenerationTestJoinV1>,
     finished_at: UtcMicros,
 ) -> RetrievalPortOutcome<AffectedTestsResult> {
@@ -1196,6 +1739,8 @@ fn attributed_tests_outcome(
                 FreshnessState::Unknown,
                 None,
                 None,
+                None,
+                None,
                 Some(OmissionReason::Cancelled),
             ));
         }
@@ -1206,6 +1751,8 @@ fn attributed_tests_outcome(
                 finished_at,
                 CoverageCompleteness::Unknown,
                 FreshnessState::Unknown,
+                None,
+                None,
                 None,
                 None,
                 Some(OmissionReason::TimedOut),
@@ -1255,6 +1802,7 @@ fn attributed_tests_outcome(
     }
 
     let mut tests = Vec::new();
+    let mut attributions = Vec::new();
     let mut matching_incomplete = false;
     for record in &join.records {
         if record.attribution.generation_id != request.generation {
@@ -1272,10 +1820,7 @@ fn attributed_tests_outcome(
         if !covers_requested_symbol {
             continue;
         }
-        if matches!(
-            &record.disposition,
-            GenerationTestJoinDispositionV1::Current { .. }
-        ) {
+        if let GenerationTestJoinDispositionV1::Current { evidence_class } = &record.disposition {
             let Some(test_occurrence) = &record.test_occurrence else {
                 return affected_tests_unavailable(
                     request,
@@ -1293,12 +1838,32 @@ fn attributed_tests_outcome(
                 );
             }
             tests.push(test_occurrence.occurrence_id.clone());
+            attributions.push(AffectedTestAttributionV1 {
+                test: test_occurrence.occurrence_id.clone(),
+                evidence_class: *evidence_class,
+            });
         } else {
             matching_incomplete = true;
+            if matches!(
+                record.disposition,
+                GenerationTestJoinDispositionV1::StaleEvidence
+                    | GenerationTestJoinDispositionV1::UnknownUnsupported
+            ) && record.test_occurrence.as_ref().is_some_and(|occurrence| {
+                occurrence.occurrence_id == record.attribution.test_occurrence
+            }) {
+                attributions.push(AffectedTestAttributionV1 {
+                    test: record.attribution.test_occurrence.clone(),
+                    evidence_class: record.attribution.evidence_class,
+                });
+            }
         }
     }
     tests.sort();
     tests.dedup();
+    attributions.sort_by(|left, right| {
+        (&left.test, left.evidence_class).cmp(&(&right.test, right.evidence_class))
+    });
+    attributions.dedup();
 
     let complete = read.provider_state == ProviderEvaluationStateV1::SupportedCompletedComplete
         && read.coverage.is_complete()
@@ -1315,7 +1880,10 @@ fn attributed_tests_outcome(
     }
     let evidence = affected_tests_evidence(
         request,
-        Some(AffectedTestsResult { tests }),
+        Some(AffectedTestsResult {
+            tests,
+            attributions,
+        }),
         finished_at,
         if complete {
             CoverageCompleteness::Complete
@@ -1329,6 +1897,22 @@ fn attributed_tests_outcome(
         },
         visited,
         eligible,
+        Some(EvidenceAuthority {
+            evidence_id: EvidenceIdentity::new(format!(
+                "evidence.test-attribution.{}",
+                join.test_watermark
+                    .evidence_digest
+                    .as_str()
+                    .trim_start_matches("sha256:")
+            ))
+            .unwrap_or_else(|_| panic!("validated attribution digest yields evidence identity")),
+            source_kind: "test_attribution".to_owned(),
+            producer: "code_index".to_owned(),
+            scope,
+            revision: join.test_watermark.attribution_revision.clone(),
+            horizon: None,
+        }),
+        Some(join.test_watermark.evidence_digest.clone()),
         (!complete).then_some(OmissionReason::Unavailable),
     );
     if complete {
@@ -1366,6 +1950,8 @@ fn affected_tests_unavailable(
         freshness,
         None,
         None,
+        None,
+        None,
         Some(reason),
     ))
 }
@@ -1379,6 +1965,8 @@ fn affected_tests_evidence(
     freshness: FreshnessState,
     visited: Option<u64>,
     eligible: Option<u64>,
+    evidence_authority: Option<EvidenceAuthority>,
+    watermark_digest: Option<ManifestDigest>,
     omission: Option<OmissionReason>,
 ) -> RetrievalEvidence<AffectedTestsResult> {
     let returned = payload
@@ -1391,10 +1979,10 @@ fn affected_tests_evidence(
             requested_at: finished_at,
             resolved_at: finished_at,
             source_generation: Some(request.generation.clone()),
-            watermark_digest: None,
+            watermark_digest,
             freshness,
         },
-        evidence_authorities: Vec::new(),
+        evidence_authorities: evidence_authority.into_iter().collect(),
         coverage: EvidenceCoverage {
             requested_domains: vec![EvidenceDomain::Test],
             visited,
@@ -1454,6 +2042,7 @@ pub(crate) async fn open_pr12_production_primitive_runtime(
     session_db: Arc<RegisteredGlobalDb>,
     project_root: PathBuf,
     code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
+    diagnostic_identity: Arc<dyn CodeIndexPublicationIdentityPortV1>,
     scope: ResolvedScope,
     access: ProjectSourceAccessSnapshot,
     admitted_root_uri: String,
@@ -1485,18 +2074,30 @@ pub(crate) async fn open_pr12_production_primitive_runtime(
         .map_or(1, |stats| stats.node_count)
         .max(1);
     let snapshots = Arc::new(ProjectSymbolGraphCursorSnapshotAuthority {
-        key,
-        configuration_digest,
+        key: key.clone(),
+        configuration_digest: configuration_digest.clone(),
         watermark,
     });
     let cursors: Arc<dyn SymbolGraphCursorPort> = Arc::new(
-        AuthenticatedSymbolGraphCursorAdapter::new(snapshots, authenticator),
+        AuthenticatedSymbolGraphCursorAdapter::new(snapshots, Arc::clone(&authenticator)),
     );
     let test_run_scope: Arc<dyn ManagedTestRunCurrentScopePort> =
         Arc::new(ProductionManagedTestRunCurrentScope {
             project_root,
-            code_index,
+            code_index: Arc::clone(&code_index),
         });
+    let extended = Arc::new(TraceDecayExtendedPrimitivePortV1::new(
+        Arc::clone(&graph),
+        database.clone(),
+        Arc::clone(&session_db),
+        code_index,
+        diagnostic_identity,
+        AuthenticatedDiagnosticCursorAuthorityV1 {
+            key,
+            configuration_digest,
+            authenticator,
+        },
+    ));
     open_pr12_primitive_project_runtime(
         database,
         Arc::clone(&graph),
@@ -1507,7 +2108,7 @@ pub(crate) async fn open_pr12_production_primitive_runtime(
         Arc::new(TraceDecayTemporalPortV1::new(session_db)),
         Arc::new(TraceDecaySourceLinesPortV1::new(Arc::clone(&graph))),
         Arc::new(TraceDecayHealthPortV1::new(Arc::clone(&graph))),
-        Arc::new(TraceDecayExtendedPrimitivePortV1::new(Arc::clone(&graph))),
+        extended,
         Arc::new(TraceDecayOperationalPrimitivePortV1::new(graph)),
         scope,
         access,
@@ -1611,7 +2212,8 @@ mod affected_tests_tests {
     use tracedecay_domain::{
         ActorId, CodeGenerationId, ComponentVersion, ContentDigest, FileOccurrenceId,
         GenerationTestAttributionV1, ProjectId, ProviderEvaluationStateV1, RefId, RepositoryId,
-        SymbolOccurrenceId, TestAttributionEvidenceClassV1,
+        SessionCursorKeyIdV1, SessionCursorVersionV1, SymbolOccurrenceId,
+        TestAttributionEvidenceClassV1,
     };
     use tracedecay_tool_catalog::{CapabilityId, SchemaId, UseCaseId};
 
@@ -1626,6 +2228,7 @@ mod affected_tests_tests {
         TestAttributionJoinInputCoverageV1, TestAttributionOccurrenceV1,
         TestAttributionWatermarkV1,
     };
+    use crate::query::temporal::ports::InMemoryCursorAuthenticator;
 
     struct AttributionFixture {
         calls: AtomicUsize,
@@ -1639,6 +2242,29 @@ mod affected_tests_tests {
         ) -> GenerationProviderReadV1<GenerationTestJoinV1> {
             self.calls.fetch_add(1, Ordering::Relaxed);
             self.read.clone()
+        }
+    }
+
+    struct GenerationSwitchingFixture {
+        current: CodeGenerationId,
+        read: GenerationProviderReadV1<GenerationTestJoinV1>,
+    }
+
+    impl GenerationTestAttributionJoinReadPort for GenerationSwitchingFixture {
+        fn read_test_attribution(
+            &self,
+            generation: &CodeGenerationId,
+        ) -> GenerationProviderReadV1<GenerationTestJoinV1> {
+            if generation == &self.current {
+                self.read.clone()
+            } else {
+                GenerationProviderReadV1::new(
+                    ProviderEvaluationStateV1::Unavailable,
+                    GenerationProviderCoverageV1::Unavailable,
+                    None,
+                )
+                .expect("unavailable provider read")
+            }
         }
     }
 
@@ -1694,6 +2320,134 @@ mod affected_tests_tests {
             true,
         );
         (request, operation, scope)
+    }
+
+    fn cursor_context(project: &str) -> RequestContext {
+        let scope = ResolvedScope::new(
+            ProjectId::new(project).expect("project"),
+            RepositoryId::new("repository.diagnostics").expect("repository"),
+            WorktreeId::new("worktree.diagnostics").expect("worktree"),
+            Some(RefId::new("refs/heads/diagnostics").expect("reference")),
+        )
+        .expect("scope");
+        let capability = CapabilityId::new("capability.diagnostics").expect("capability");
+        let use_case = UseCaseId::new("use-case.diagnostics").expect("use case");
+        let expires_at = UtcMicros(i64::MAX / 2);
+        let grant = CapabilityGrantSnapshot::new(
+            CapabilityGrantId::new("grant.diagnostics").expect("grant"),
+            1,
+            digest('a'),
+            ActorId::new("actor.diagnostics.issuer").expect("issuer"),
+            UtcMicros(1),
+            expires_at,
+            scope.clone(),
+            BTreeSet::from([capability]),
+            BTreeSet::from([use_case]),
+            DisclosureClass::Evidence,
+        )
+        .expect("grant");
+        RequestContext::new(
+            ActorId::new("actor.diagnostics.requester").expect("actor"),
+            scope,
+            grant,
+            RequestId::new("request.diagnostics").expect("request"),
+            Deadline::new(expires_at).expect("deadline"),
+            CancellationContext::active("cancel.diagnostics").expect("cancellation"),
+        )
+        .expect("context")
+    }
+
+    #[test]
+    fn diagnostic_cursor_binds_scope_generation_and_lane() {
+        let key = SignedCursorKeyRefV1 {
+            key_id: SessionCursorKeyIdV1::new("cursor.diagnostics").expect("key"),
+            version: SessionCursorVersionV1::new(1).expect("version"),
+        };
+        let authenticator =
+            InMemoryCursorAuthenticator::new(key.clone(), vec![7_u8; 32]).expect("authenticator");
+        let authority = AuthenticatedDiagnosticCursorAuthorityV1 {
+            key,
+            configuration_digest: digest('c'),
+            authenticator: Arc::new(authenticator),
+        };
+        let context = cursor_context("project.diagnostics");
+        let current_generation = generation("generation.diagnostics.1");
+        let query_cursor =
+            DiagnosticQueryCursor::decode("dq1:anchor.diagnostic.1").expect("query cursor");
+        let encoded = authority
+            .encode(
+                &query_cursor,
+                &context,
+                &current_generation,
+                DIAGNOSTIC_CURSOR_LANE_WORKSPACE,
+            )
+            .expect("encode");
+
+        assert_eq!(
+            authority
+                .decode(
+                    encoded.as_str(),
+                    &context,
+                    &current_generation,
+                    DIAGNOSTIC_CURSOR_LANE_WORKSPACE,
+                )
+                .expect("decode"),
+            query_cursor
+        );
+        assert!(
+            authority
+                .decode(
+                    encoded.as_str(),
+                    &cursor_context("project.diagnostics.other"),
+                    &current_generation,
+                    DIAGNOSTIC_CURSOR_LANE_WORKSPACE,
+                )
+                .is_err()
+        );
+        assert!(
+            authority
+                .decode(
+                    encoded.as_str(),
+                    &context,
+                    &generation("generation.diagnostics.2"),
+                    DIAGNOSTIC_CURSOR_LANE_WORKSPACE,
+                )
+                .is_err()
+        );
+        assert!(
+            authority
+                .decode(
+                    encoded.as_str(),
+                    &context,
+                    &current_generation,
+                    "file.diagnostics",
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn diagnostic_continuation_is_complete_coverage_not_partial_evidence() {
+        let cursor = OpaqueCursor::new("opaque.diagnostics.next").expect("cursor");
+        let outcome = diagnostics_result(
+            generation("generation.diagnostics.1"),
+            digest('b'),
+            Vec::new(),
+            2,
+            Some(cursor.clone()),
+            UtcMicros(100),
+        );
+        let RetrievalPortOutcome::Completed(evidence) = outcome else {
+            panic!("bounded pagination must complete");
+        };
+        assert_eq!(
+            evidence.coverage.completeness,
+            CoverageCompleteness::Complete
+        );
+        assert_eq!(evidence.coverage.eligible, Some(2));
+        assert_eq!(evidence.page.cursor, Some(cursor));
+        assert!(evidence.page.expires_at.is_some());
+        assert!(!evidence.payload.expect("payload").findings_cleared);
     }
 
     fn request(generation: CodeGenerationId) -> AffectedTestsRequest {
@@ -1798,9 +2552,110 @@ mod affected_tests_tests {
             panic!("exact current attribution must complete");
         };
         assert_eq!(evidence.temporal.source_generation, Some(generation));
+        assert_eq!(evidence.temporal.watermark_digest, Some(digest('f')));
+        assert_eq!(evidence.evidence_authorities.len(), 1);
         assert_eq!(
-            evidence.payload.expect("payload").tests,
+            evidence.evidence_authorities[0].source_kind,
+            "test_attribution"
+        );
+        let payload = evidence.payload.expect("payload");
+        assert_eq!(
+            payload.tests,
             vec![SymbolOccurrenceId::new("symbol.test").expect("test")]
+        );
+        assert_eq!(
+            payload.attributions,
+            vec![AffectedTestAttributionV1 {
+                test: SymbolOccurrenceId::new("symbol.test").expect("test"),
+                evidence_class: TestAttributionEvidenceClassV1::ConservativeDependencyCandidates,
+            }]
+        );
+    }
+
+    #[test]
+    fn attribution_class_is_preserved_without_inference() {
+        for evidence_class in [
+            TestAttributionEvidenceClassV1::ObservedCoverageCandidates,
+            TestAttributionEvidenceClassV1::PredictiveRankedCandidates,
+        ] {
+            let project_id = ProjectId::new("project.affected-tests").expect("project");
+            let generation = generation("generation.affected-tests.1");
+            let mut read = complete_read(generation.clone());
+            let record = &mut read.evidence.as_mut().expect("join").records[0];
+            record.attribution.evidence_class = evidence_class;
+            record.disposition = GenerationTestJoinDispositionV1::Current { evidence_class };
+            let port = TraceDecayAffectedTestsPortV1::from_binding(
+                Some(project_id.clone()),
+                generation.clone(),
+                Some(Arc::new(AttributionFixture {
+                    calls: AtomicUsize::new(0),
+                    read,
+                })),
+            );
+            let (context, operation, _) = context(project_id);
+
+            let RetrievalPortOutcome::Completed(evidence) = port.affected_tests(
+                &RetrievalPortContext {
+                    request: &context,
+                    operation: &operation,
+                },
+                &request(generation),
+            ) else {
+                panic!("current attribution must complete");
+            };
+            assert_eq!(
+                evidence.payload.expect("payload").attributions[0].evidence_class,
+                evidence_class
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_attribution_remains_typed_partial() {
+        let project_id = ProjectId::new("project.affected-tests").expect("project");
+        let generation = generation("generation.affected-tests.1");
+        let mut read = complete_read(generation.clone());
+        read.provider_state = ProviderEvaluationStateV1::Partial;
+        read.coverage = GenerationProviderCoverageV1::Partial {
+            examined: 1,
+            eligible: 0,
+            excluded: 0,
+            unknown: 1,
+            capped: false,
+        };
+        let join = read.evidence.as_mut().expect("join");
+        join.coverage = GenerationTestJoinCoverageV1::Partial {
+            reasons: vec![GenerationTestJoinPartialReasonV1::UnknownUnsupported {
+                test_occurrence: SymbolOccurrenceId::new("symbol.test").expect("test"),
+            }],
+        };
+        join.records[0].attribution.evidence_class =
+            TestAttributionEvidenceClassV1::UnknownUnsupported;
+        join.records[0].disposition = GenerationTestJoinDispositionV1::UnknownUnsupported;
+        let port = TraceDecayAffectedTestsPortV1::from_binding(
+            Some(project_id.clone()),
+            generation.clone(),
+            Some(Arc::new(AttributionFixture {
+                calls: AtomicUsize::new(0),
+                read,
+            })),
+        );
+        let (context, operation, _) = context(project_id);
+
+        let RetrievalPortOutcome::Partial(evidence) = port.affected_tests(
+            &RetrievalPortContext {
+                request: &context,
+                operation: &operation,
+            },
+            &request(generation),
+        ) else {
+            panic!("unknown attribution must stay partial");
+        };
+        let payload = evidence.payload.expect("payload");
+        assert!(payload.tests.is_empty());
+        assert_eq!(
+            payload.attributions[0].evidence_class,
+            TestAttributionEvidenceClassV1::UnknownUnsupported
         );
     }
 
@@ -1848,6 +2703,32 @@ mod affected_tests_tests {
     }
 
     #[test]
+    fn port_routes_each_current_generation_instead_of_pinning_open_generation() {
+        let project_id = ProjectId::new("project.affected-tests").expect("project");
+        let opened_generation = generation("generation.affected-tests.1");
+        let current_generation = generation("generation.affected-tests.2");
+        let port = TraceDecayAffectedTestsPortV1::from_binding(
+            Some(project_id.clone()),
+            opened_generation,
+            Some(Arc::new(GenerationSwitchingFixture {
+                current: current_generation.clone(),
+                read: complete_read(current_generation.clone()),
+            })),
+        );
+        let (context, operation, _) = context(project_id);
+
+        let outcome = port.affected_tests(
+            &RetrievalPortContext {
+                request: &context,
+                operation: &operation,
+            },
+            &request(current_generation),
+        );
+
+        assert!(matches!(outcome, RetrievalPortOutcome::Completed(_)));
+    }
+
+    #[test]
     fn partial_attribution_stays_partial() {
         let project_id = ProjectId::new("project.affected-tests").expect("project");
         let generation = generation("generation.affected-tests.1");
@@ -1885,5 +2766,67 @@ mod affected_tests_tests {
         );
 
         assert!(matches!(outcome, RetrievalPortOutcome::Partial(_)));
+    }
+
+    #[test]
+    fn storage_status_history_is_reloaded_from_durable_scope_file() {
+        let directory = tempfile::tempdir().expect("history tempdir");
+        let history_path = directory.path().join("storage-status-history-v1.json");
+        let project_id = Some("project.storage-status".to_owned());
+        let store_path = "/project/.tracedecay/graph.db".to_owned();
+
+        let (first, first_coverage) = update_storage_status_history(
+            &history_path,
+            project_id.clone(),
+            store_path.clone(),
+            4096,
+            1,
+        );
+        assert_eq!(first.len(), 1);
+        assert_eq!(first_coverage, "durable_project_store_history");
+        assert!(history_path.is_file());
+
+        let (second, second_coverage) =
+            update_storage_status_history(&history_path, project_id, store_path, 8192, 2);
+        assert_eq!(second.len(), 2);
+        assert_eq!(second[0].database_bytes, 4096);
+        assert_eq!(second[1].database_bytes, 8192);
+        assert_eq!(second_coverage, "durable_project_store_history");
+    }
+
+    #[test]
+    fn storage_status_history_paths_are_store_scope_isolated() {
+        let root = Path::new("/profile/projects/project.storage-status");
+        let first = storage_status_history_path(
+            root,
+            Some("project.storage-status"),
+            "/project/branches/main/graph.db",
+        );
+        let second = storage_status_history_path(
+            root,
+            Some("project.storage-status"),
+            "/project/branches/topic/graph.db",
+        );
+
+        assert_ne!(first, second);
+        assert_eq!(first.parent(), second.parent());
+    }
+
+    #[test]
+    fn invalid_storage_status_history_is_reset_without_claiming_full_history() {
+        let directory = tempfile::tempdir().expect("history tempdir");
+        let history_path = directory.path().join("storage-status-history-v1.json");
+        std::fs::write(&history_path, b"{not-json").expect("invalid history");
+
+        let (history, coverage) = update_storage_status_history(
+            &history_path,
+            Some("project.storage-status".to_owned()),
+            "/project/.tracedecay/graph.db".to_owned(),
+            4096,
+            1,
+        );
+
+        assert_eq!(history.len(), 1);
+        assert_eq!(coverage, "durable_project_store_history_reset_invalid");
     }
 }

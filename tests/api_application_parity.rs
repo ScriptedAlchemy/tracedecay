@@ -10,9 +10,9 @@ use tower::ServiceExt;
 use tracedecay::application_surface::{
     APPLICATION_SURFACE_OPERATIONS, AffectedTestsSurfaceRequest, ApplicationSurfaceOperation,
     ApplicationSurfaceRequest, FeedbackImpactSurfaceRequest, FeedbackSurfaceRequest,
-    GitApplySurfaceRequest, GitPreviewSurfaceRequest, TestResultsSurfaceRequest,
-    resolve_application_surface_dispatch, resolve_http_application_surface,
-    resolve_http_application_surface_dispatch,
+    GitApplySurfaceRequest, GitPreviewSurfaceRequest, GitReadSurfaceRequest,
+    TestResultsSurfaceRequest, resolve_application_surface_dispatch,
+    resolve_http_application_surface, resolve_http_application_surface_dispatch,
 };
 use tracedecay::daemon::DaemonHandshake;
 use tracedecay::daemon_client::{
@@ -33,7 +33,7 @@ use tracedecay_application::{
     ResultContractRef, RetryDirective, StreamEvent,
 };
 use tracedecay_domain::{
-    GitCommitIdentityV1, GitCoverageV1, GitHeadStateV1, GitIndexCommitIntentV1,
+    GitCommitIdentityV1, GitCoverageV1, GitDiffScopeV1, GitHeadStateV1, GitIndexCommitIntentV1,
     GitIndexPreviewDispositionV1, GitIndexPreviewId, GitIndexPreviewV1, GitIndexSigningPolicyV1,
     GitIndexTransactionOperationV1, GitObjectFormatV1, GitOidV1, ManifestDigest, ProjectId,
     RepositoryId, RepositoryIndexSnapshotV1, RepositoryIndexStateV1, RepositoryStateSnapshotV1,
@@ -508,6 +508,35 @@ fn application_request(
     expected: &serde_json::Value,
 ) -> ApplicationSurfaceRequest {
     match operation {
+        ApplicationSurfaceOperation::GitStatus => {
+            git_read_request(tracedecay::application::git_reads::GitReadRequestV1::Status)
+        }
+        ApplicationSurfaceOperation::GitDiff => {
+            git_read_request(tracedecay::application::git_reads::GitReadRequestV1::Diff {
+                scope: GitDiffScopeV1::WorkingTree,
+            })
+        }
+        ApplicationSurfaceOperation::GitHistory => git_read_request(
+            tracedecay::application::git_reads::GitReadRequestV1::History {
+                max_count: 10,
+                path: None,
+                follow: false,
+                first_parent: false,
+            },
+        ),
+        ApplicationSurfaceOperation::GitBlame => git_read_request(
+            tracedecay::application::git_reads::GitReadRequestV1::Blame {
+                path: "src/lib.rs".to_owned(),
+                follow_renames: false,
+            },
+        ),
+        ApplicationSurfaceOperation::GitHunks => git_read_request(
+            tracedecay::application::git_reads::GitReadRequestV1::Hunks {
+                scope: GitDiffScopeV1::WorkingTree,
+                preview_id: "preview.transport-parity".to_owned(),
+                snapshot_digest: digest('a'),
+            },
+        ),
         ApplicationSurfaceOperation::GitPreview => git_requests().0,
         ApplicationSurfaceOperation::GitApply => git_requests().1,
         ApplicationSurfaceOperation::FeedbackImpact => {
@@ -525,6 +554,16 @@ fn application_request(
         }
         _ => feedback_request(expected["request_handle"].as_str().expect("request handle")),
     }
+}
+
+fn git_read_request(
+    request: tracedecay::application::git_reads::GitReadRequestV1,
+) -> ApplicationSurfaceRequest {
+    ApplicationSurfaceRequest::GitRead(GitReadSurfaceRequest {
+        request,
+        max_entries: 1_000,
+        max_bytes: 4_194_304,
+    })
 }
 
 fn feedback_request(request_handle: &str) -> ApplicationSurfaceRequest {

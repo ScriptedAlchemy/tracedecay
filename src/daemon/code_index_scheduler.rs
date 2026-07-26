@@ -208,6 +208,65 @@ impl DaemonCodeIndexPublicationStoreV1 {
         }
         Ok(())
     }
+
+    fn load_generation(
+        &self,
+        generation_id: &CodeGenerationId,
+    ) -> Result<Option<CodeIndexPublishedGenerationV1>, CodeIndexPublicationStoreErrorV1> {
+        if let Some(active) = self.load_active()?
+            && active.manifest().generation_id == *generation_id
+        {
+            return Ok(Some(active));
+        }
+
+        let mut paths = std::fs::read_dir(&self.generations_root)
+            .map_err(Self::unavailable)?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>();
+        paths.sort();
+        let mut matched = None;
+        for path in paths {
+            let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            let Some(encoded_digest) = file_name
+                .strip_prefix("generation-")
+                .and_then(|name| name.strip_suffix(".json"))
+            else {
+                continue;
+            };
+            if encoded_digest.len() != 64
+                || !encoded_digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+                || !path
+                    .symlink_metadata()
+                    .map_err(Self::unavailable)?
+                    .file_type()
+                    .is_file()
+            {
+                continue;
+            }
+            let bytes = std::fs::read(&path).map_err(Self::unavailable)?;
+            if Self::state_digest(&bytes) != format!("sha256:{encoded_digest}") {
+                return Err(Self::unavailable(
+                    "immutable code-generation filename does not match its sealed bytes",
+                ));
+            }
+            let generation =
+                CodeIndexPublishedGenerationV1::decode_sealed(&bytes).map_err(Self::unavailable)?;
+            if generation.manifest().generation_id != *generation_id {
+                continue;
+            }
+            if matched.replace(generation).is_some() {
+                return Err(Self::unavailable(
+                    "multiple immutable code-generation files claim one generation identity",
+                ));
+            }
+        }
+        Ok(matched)
+    }
 }
 
 impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
@@ -518,6 +577,15 @@ impl LatestCompleteCodeIndexV1 {
         &self.generation.manifest().snapshot_digest
     }
 
+    pub(in crate::daemon) fn test_attribution_authority(
+        &self,
+    ) -> Result<
+        crate::code_index::production::PublishedGenerationTestAttributionAuthorityV1,
+        crate::code_index::production::CodeIndexProductionErrorV1,
+    > {
+        self.generation.test_attribution_authority()
+    }
+
     pub fn exact(
         &self,
     ) -> Result<
@@ -632,6 +700,8 @@ pub(super) struct CodeIndexWorktreeSchedulerV1 {
     git_metadata: identity::GitMetadataFingerprintV1,
     /// Tier-2 bounded-staleness clock: when truth was last reconciled.
     last_reconciled_at: Instant,
+    /// Wall-clock companion to `last_reconciled_at` for read-model projection.
+    last_reconciled_at_micros: i64,
     /// Tier-2 cheap prefilter: stat-level (path, mtime, size) signature of the
     /// present source candidates at last reconcile. A quiet repository whose
     /// signature is unchanged resets the staleness clock without paying the
@@ -640,6 +710,7 @@ pub(super) struct CodeIndexWorktreeSchedulerV1 {
     byte_pool: Arc<SharedCodeIndexBytePoolV1>,
     /// Keeps the current snapshot's interned bytes alive in the shared pool.
     retained_snapshot_bytes: Vec<Arc<[u8]>>,
+    publication: DaemonCodeIndexPublicationStoreV1,
     owner: ProductionOwner,
     hints: Arc<Mutex<PendingHintsV1>>,
     wake: Arc<tokio::sync::Notify>,
@@ -691,7 +762,7 @@ impl CodeIndexWorktreeSchedulerV1 {
                 privacy_key_epoch: 1,
                 max_snapshot_age_micros: None,
             },
-            publication,
+            publication.clone(),
             DaemonProjectionSinkV1,
         )
         .map_err(|error| CodeIndexSchedulerErrorV1::ProductionOpen(error.to_string()))?
@@ -724,9 +795,11 @@ impl CodeIndexWorktreeSchedulerV1 {
             policy,
             git_metadata,
             last_reconciled_at: Instant::now(),
+            last_reconciled_at_micros: now_micros().0,
             last_stat_signature: None,
             byte_pool,
             retained_snapshot_bytes: Vec::new(),
+            publication,
             owner,
             hints,
             wake,
@@ -934,6 +1007,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         self.git_metadata = metadata;
         self.last_stat_signature = signature;
         self.last_reconciled_at = Instant::now();
+        self.last_reconciled_at_micros = now_micros().0;
     }
 
     /// A cheap stat-level (path, mtime, size) signature of the present source
@@ -1023,6 +1097,7 @@ impl CodeIndexWorktreeSchedulerV1 {
         match self.worktree_stat_signature() {
             Ok(signature) if self.last_stat_signature.as_ref() == Some(&signature) => {
                 self.last_reconciled_at = Instant::now();
+                self.last_reconciled_at_micros = now_micros().0;
                 Ok(false)
             }
             _ => {
@@ -1035,6 +1110,18 @@ impl CodeIndexWorktreeSchedulerV1 {
     /// The exact identity this scheduler is currently bound to.
     pub fn identity(&self) -> &identity::IndexingIdentityV1 {
         &self.identity
+    }
+
+    pub(super) const fn last_reconciled_at_micros(&self) -> i64 {
+        self.last_reconciled_at_micros
+    }
+
+    pub(super) fn pending_hint_count(&self) -> Option<u64> {
+        let hints = self
+            .hints
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (!hints.overflow).then(|| u64::try_from(hints.paths.len()).unwrap_or(u64::MAX))
     }
 
     #[cfg(test)]
@@ -1052,6 +1139,16 @@ impl CodeIndexWorktreeSchedulerV1 {
             .ok()
             .flatten()
             .map(|generation| LatestCompleteCodeIndexV1 { generation })
+    }
+
+    fn generation(
+        &self,
+        generation_id: &CodeGenerationId,
+    ) -> Result<Option<LatestCompleteCodeIndexV1>, CodeIndexSchedulerErrorV1> {
+        self.publication
+            .load_generation(generation_id)
+            .map(|generation| generation.map(|generation| LatestCompleteCodeIndexV1 { generation }))
+            .map_err(|error| CodeIndexProductionErrorV1::Publication(error).into())
     }
 
     fn capture_authoritative_snapshot(
