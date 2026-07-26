@@ -265,7 +265,6 @@ pub(crate) async fn ensure_registered_schema(conn: &Connection) -> crate::errors
     )
     .await?;
     ensure_authority_invariant_schema(&transaction).await?;
-    validate_authority_schema_contract(&transaction).await?;
 
     crate::sessions::lcm::schema::ensure_lcm_schema_in_transaction(&transaction)
         .await
@@ -297,6 +296,12 @@ pub(crate) async fn ensure_registered_schema(conn: &Connection) -> crate::errors
         .await
         .map_err(|error| {
             global_db_operation_error("initialize observation projection indexes", error)
+        })?;
+    validate_authority_schema_contract(conn).await?;
+    observation_projection::converge_v4_projection_anchor_bindings(conn)
+        .await
+        .map_err(|error| {
+            global_db_operation_error("backfill observation projection anchors", error)
         })?;
 
     // Both of these page their own progress through individually committed

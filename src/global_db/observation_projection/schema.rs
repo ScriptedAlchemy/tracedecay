@@ -2,6 +2,7 @@ use tracedecay_store::SESSION_MESSAGE_PROJECTOR_VERSION_V4;
 
 use crate::db::engine::{Error, Executor, QueryExecutor, params};
 
+const PROJECTION_ANCHOR_BACKFILL_PAGE_ROWS: i64 = 256;
 const LEGACY_PROJECTION_PROVENANCE_TABLE_SQL: &str =
     "CREATE TABLE observation_projection_provenance (
         projector_version TEXT NOT NULL,
@@ -275,37 +276,7 @@ pub(in super::super) async fn ensure_observation_projection_schema(
     migrate_legacy_projection_output_uniqueness(conn).await?;
     migrate_projection_multi_output_primary_key(conn).await?;
     ensure_projection_anchor_columns(conn).await?;
-    conn.execute_batch(
-        "CREATE INDEX IF NOT EXISTS idx_observation_projection_provenance_output
-         ON observation_projection_provenance
-            (projector_version, output_provider, output_message_id);
-         CREATE INDEX IF NOT EXISTS idx_observation_projection_provenance_global_output
-         ON observation_projection_provenance
-            (output_provider, output_message_id, projector_version);
-         CREATE INDEX IF NOT EXISTS idx_observation_workflow_facts_query
-         ON observation_workflow_facts
-            (provider, session_id, semantic_kind, status, observation_sequence);
-         CREATE INDEX IF NOT EXISTS idx_observation_workflow_facts_item
-         ON observation_workflow_facts
-            (provider, session_id, semantic_kind, item_id, provider_reference,
-             event_sequence, source_sequence, observation_sequence);
-         CREATE INDEX IF NOT EXISTS idx_projection_rebuild_provenance_output
-         ON observation_projection_rebuild_provenance
-            (projector_version, generation, output_provider, output_message_id);
-         CREATE INDEX IF NOT EXISTS idx_projection_rebuild_workflow_goal
-         ON observation_projection_rebuild_workflow_facts
-            (projector_version, generation, provider, session_id, semantic_kind,
-             provider_reference, observation_sequence);
-         CREATE INDEX IF NOT EXISTS idx_observation_projection_provenance_pending_anchor
-         ON observation_projection_provenance (projector_version, observation_id)
-            WHERE retrieval_anchor_id IS NULL;
-         CREATE INDEX IF NOT EXISTS idx_observation_workflow_facts_pending_anchor
-         ON observation_workflow_facts (projector_version, observation_id)
-            WHERE retrieval_anchor_id IS NULL;",
-    )
-    .await?;
-    ensure_v4_projection_binding_triggers(conn).await?;
-    backfill_v4_projection_anchor_bindings(conn).await
+    ensure_v4_projection_binding_triggers(conn).await
 }
 
 pub(in super::super) async fn ensure_observation_projection_performance_indexes(
@@ -314,16 +285,41 @@ pub(in super::super) async fn ensure_observation_projection_performance_indexes(
     // Install each historical-data index as its own durable schema step. These
     // cannot share the lease-bounded all-schema transaction: an interrupted
     // later build would otherwise roll back every earlier completed build.
-    conn.execute_batch(
+    for sql in [
+        "CREATE INDEX IF NOT EXISTS idx_observation_projection_provenance_output
+         ON observation_projection_provenance
+            (projector_version, output_provider, output_message_id);",
+        "CREATE INDEX IF NOT EXISTS idx_observation_projection_provenance_global_output
+         ON observation_projection_provenance
+            (output_provider, output_message_id, projector_version);",
+        "CREATE INDEX IF NOT EXISTS idx_observation_workflow_facts_query
+         ON observation_workflow_facts
+            (provider, session_id, semantic_kind, status, observation_sequence);",
+        "CREATE INDEX IF NOT EXISTS idx_observation_workflow_facts_item
+         ON observation_workflow_facts
+            (provider, session_id, semantic_kind, item_id, provider_reference,
+             event_sequence, source_sequence, observation_sequence);",
+        "CREATE INDEX IF NOT EXISTS idx_projection_rebuild_provenance_output
+         ON observation_projection_rebuild_provenance
+            (projector_version, generation, output_provider, output_message_id);",
+        "CREATE INDEX IF NOT EXISTS idx_projection_rebuild_workflow_goal
+         ON observation_projection_rebuild_workflow_facts
+            (projector_version, generation, provider, session_id, semantic_kind,
+             provider_reference, observation_sequence);",
+        "CREATE INDEX IF NOT EXISTS idx_observation_projection_provenance_pending_anchor
+         ON observation_projection_provenance (projector_version, observation_id)
+            WHERE retrieval_anchor_id IS NULL;",
+        "CREATE INDEX IF NOT EXISTS idx_observation_workflow_facts_pending_anchor
+         ON observation_workflow_facts (projector_version, observation_id)
+            WHERE retrieval_anchor_id IS NULL;",
         "CREATE INDEX IF NOT EXISTS idx_observations_identity_receipt
          ON observations (observation_id, receipt_id);",
-    )
-    .await?;
-    conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_projection_dispositions_observation_receipt
          ON observation_projection_dispositions (observation_id, receipt_id);",
-    )
-    .await
+    ] {
+        conn.execute_batch(sql).await?;
+    }
+    Ok(())
 }
 
 /// Binds the canonical retrieval anchor onto v4 projection rows that predate the
@@ -345,30 +341,46 @@ pub(in super::super) async fn ensure_observation_projection_performance_indexes(
 /// `WHERE retrieval_anchor_id IS NULL` scan below cheap in the steady state
 /// where that partial index is empty, instead of running the two `UPDATE`s as
 /// unindexed full-table scans.
-async fn backfill_v4_projection_anchor_bindings(conn: &impl Executor) -> Result<(), Error> {
+pub(in super::super) async fn converge_v4_projection_anchor_bindings(
+    conn: &impl Executor,
+) -> Result<(), Error> {
     for table in [
         "observation_projection_provenance",
         "observation_workflow_facts",
     ] {
-        conn.execute(
-            &format!(
-                "UPDATE {table}
-                 SET retrieval_anchor_id = (
-                     SELECT anchor.anchor_id
-                     FROM observation_retrieval_anchors AS anchor
-                     WHERE anchor.observation_id = {table}.observation_id
-                 )
-                 WHERE projector_version = ?1
-                   AND retrieval_anchor_id IS NULL
-                   AND EXISTS (
-                       SELECT 1
-                       FROM observation_retrieval_anchors AS anchor
-                       WHERE anchor.observation_id = {table}.observation_id
-                   )"
-            ),
-            params![SESSION_MESSAGE_PROJECTOR_VERSION_V4],
-        )
-        .await?;
+        loop {
+            let updated = conn
+                .execute(
+                    &format!(
+                        "UPDATE {table}
+                         SET retrieval_anchor_id = (
+                             SELECT anchor.anchor_id
+                             FROM observation_retrieval_anchors AS anchor
+                             WHERE anchor.observation_id = {table}.observation_id
+                         )
+                         WHERE rowid IN (
+                             SELECT candidate.rowid
+                             FROM {table} AS candidate
+                             WHERE candidate.projector_version = ?1
+                               AND candidate.retrieval_anchor_id IS NULL
+                               AND EXISTS (
+                                   SELECT 1
+                                   FROM observation_retrieval_anchors AS anchor
+                                   WHERE anchor.observation_id = candidate.observation_id
+                               )
+                             LIMIT ?2
+                         )"
+                    ),
+                    params![
+                        SESSION_MESSAGE_PROJECTOR_VERSION_V4,
+                        PROJECTION_ANCHOR_BACKFILL_PAGE_ROWS
+                    ],
+                )
+                .await?;
+            if updated == 0 {
+                break;
+            }
+        }
     }
     Ok(())
 }
@@ -1229,7 +1241,15 @@ mod tests {
         let path = temp.path().join("global.db");
         let conn = open_registered_schema(&path).await.unwrap();
         conn.execute_batch(
-            "DROP INDEX idx_observations_identity_receipt;
+            "DROP INDEX idx_observation_projection_provenance_output;
+             DROP INDEX idx_observation_projection_provenance_global_output;
+             DROP INDEX idx_observation_workflow_facts_query;
+             DROP INDEX idx_observation_workflow_facts_item;
+             DROP INDEX idx_projection_rebuild_provenance_output;
+             DROP INDEX idx_projection_rebuild_workflow_goal;
+             DROP INDEX idx_observation_projection_provenance_pending_anchor;
+             DROP INDEX idx_observation_workflow_facts_pending_anchor;
+             DROP INDEX idx_observations_identity_receipt;
              DROP INDEX idx_projection_dispositions_observation_receipt;",
         )
         .await
@@ -1246,6 +1266,14 @@ mod tests {
             .query(
                 "SELECT name FROM sqlite_schema
                  WHERE name IN (
+                    'idx_observation_projection_provenance_output',
+                    'idx_observation_projection_provenance_global_output',
+                    'idx_observation_workflow_facts_query',
+                    'idx_observation_workflow_facts_item',
+                    'idx_projection_rebuild_provenance_output',
+                    'idx_projection_rebuild_workflow_goal',
+                    'idx_observation_projection_provenance_pending_anchor',
+                    'idx_observation_workflow_facts_pending_anchor',
                     'idx_observations_identity_receipt',
                     'idx_projection_dispositions_observation_receipt'
                  )",
@@ -1257,5 +1285,65 @@ mod tests {
             rows.next().await.unwrap().is_none(),
             "large performance indexes must not be built inside the lease-bounded schema transaction"
         );
+    }
+
+    #[tokio::test]
+    async fn projection_anchor_backfill_converges_in_bounded_pages() {
+        let temp = TempDir::new().unwrap();
+        let conn = TestConnection::open(&temp.path().join("global.db"));
+        conn.execute_batch(
+            "CREATE TABLE observation_retrieval_anchors (
+                observation_id TEXT PRIMARY KEY,
+                anchor_id TEXT NOT NULL
+             );
+             CREATE TABLE observation_projection_provenance (
+                projector_version TEXT NOT NULL,
+                observation_id TEXT NOT NULL,
+                retrieval_anchor_id TEXT
+             );
+             CREATE TABLE observation_workflow_facts (
+                projector_version TEXT NOT NULL,
+                observation_id TEXT NOT NULL,
+                retrieval_anchor_id TEXT
+             );
+             WITH RECURSIVE sequence(value) AS (
+                VALUES(1) UNION ALL SELECT value + 1 FROM sequence WHERE value < 300
+             )
+             INSERT INTO observation_retrieval_anchors
+             SELECT 'observation-' || value, 'anchor-' || value FROM sequence;
+             WITH RECURSIVE sequence(value) AS (
+                VALUES(1) UNION ALL SELECT value + 1 FROM sequence WHERE value < 300
+             )
+             INSERT INTO observation_projection_provenance
+             SELECT 'claude-session-message-v4', 'observation-' || value, NULL FROM sequence;
+             WITH RECURSIVE sequence(value) AS (
+                VALUES(1) UNION ALL SELECT value + 1 FROM sequence WHERE value < 300
+             )
+             INSERT INTO observation_workflow_facts
+             SELECT 'claude-session-message-v4', 'observation-' || value, NULL FROM sequence;",
+        )
+        .await
+        .unwrap();
+
+        super::converge_v4_projection_anchor_bindings(&conn)
+            .await
+            .unwrap();
+
+        for table in [
+            "observation_projection_provenance",
+            "observation_workflow_facts",
+        ] {
+            let mut rows = conn
+                .query(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE retrieval_anchor_id IS NULL"),
+                    (),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+                0
+            );
+        }
     }
 }
