@@ -489,9 +489,6 @@ reported as verified from implementation or frontend tests alone.
   test proves route/shape behavior, not a production Settings write. Direct
   acceptance must exercise the installed production client before Settings
   mutation is called verified.
-- The five graph-structure endpoints for Plan 11b Surfaces 1–2 are registered
-  and tested but have no frontend consumer. They remain backend-only until the
-  corresponding drill-in surfaces are implemented.
 
 **Direct acceptance.** Starting from a real PR13 finding, navigate to retained
 evidence, diagnose an injected operational fault, apply an authorized

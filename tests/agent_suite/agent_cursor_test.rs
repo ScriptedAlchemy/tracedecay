@@ -14,7 +14,6 @@ use tracedecay::automation::managed_skills::{
 use tracedecay::branch_meta;
 use tracedecay::config::USER_DATA_DIR_ENV;
 use tracedecay::storage::resolve_layout_for_current_profile;
-use tracedecay::tracedecay::TraceDecay;
 
 #[test]
 fn test_cursor_plugin_bundle_files_are_valid() {
@@ -193,7 +192,16 @@ async fn test_local_install_cursor_defers_branch_tracking_without_daemon() {
         String::from_utf8_lossy(&git_commit.stdout),
         String::from_utf8_lossy(&git_commit.stderr)
     );
-    TraceDecay::init(&project_root).await.unwrap();
+    let init = tracedecay_command(&project_root, &home_root)
+        .arg("init")
+        .output()
+        .expect("TraceDecay init should run");
+    assert!(
+        init.status.success(),
+        "TraceDecay init should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&init.stdout),
+        String::from_utf8_lossy(&init.stderr)
+    );
     let checkout = Command::new("git")
         .arg("checkout")
         .arg("-b")

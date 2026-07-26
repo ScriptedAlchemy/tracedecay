@@ -1,4 +1,18 @@
-//! Compatibility fact reads, payload sanitization, and holographic mirror writes.
+//! Permanent V1 compatibility projection over the canonical V2 fact authority.
+//!
+//! Named production owner: [`crate::store::memory::DatabaseFactStore`]'s
+//! `FactCompatibilityStore` implementation. It owns every runtime projection
+//! write and keeps `memory_facts` plus its V1 entities, relations, feedback,
+//! oplog, FTS, and bank rows transactionally aligned with the V2 lineage write.
+//! Dashboard, retrieval, curation, repair, scheduler, and offline branch-union
+//! consumers may read this projection through that compatibility store; they
+//! do not make the mirror an independent write authority.
+//!
+//! The raw V1 rows remain durable compatibility data. Cutover backfills and
+//! verifies their V2 representation, but never bulk-reclaims them with the
+//! canonical fact-deletion primitive. Direct legacy-store mutation is limited
+//! to schema/data migration and tests; production fact mutations enter through
+//! `DatabaseFactStore`.
 
 use super::super::primitives::{
     COMPATIBILITY_READ_OPERATION, COMPATIBILITY_WRITE_OPERATION, OwnerKey, QUERY_OPERATION,

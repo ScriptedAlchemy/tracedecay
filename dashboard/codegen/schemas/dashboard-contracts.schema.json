@@ -538,10 +538,6 @@
         "note": {
           "type": "string"
         },
-        "required_source": {
-          "description": "The seam that must be closed to feed this route with live data.",
-          "type": "string"
-        },
         "worktrees": {
           "items": {
             "$ref": "#/$defs/CodeIndexWorktreeFreshnessV1"
@@ -551,14 +547,17 @@
       },
       "required": [
         "worktrees",
-        "required_source",
         "note"
       ],
       "type": "object"
     },
     "CodeIndexWorktreeFreshnessV1": {
-      "description": "Freshness/generation state for one mounted worktree. Unpopulated until the\nscheduler-registry read port is wired into the dashboard state.",
+      "description": "Freshness/generation state for one mounted worktree.",
       "properties": {
+        "coverage": {
+          "description": "Whether this read covers the complete mounted scheduler state.",
+          "type": "string"
+        },
         "hook_hint_count": {
           "description": "Pending hook-hint count, when cheaply available.",
           "format": "uint64",
@@ -583,8 +582,44 @@
             "null"
           ]
         },
+        "repository_id": {
+          "description": "Stable repository identity resolved by the scheduler.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sealed_at_micros": {
+          "description": "Time the complete generation was durably sealed.",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "snapshot_content_identity": {
+          "description": "Content identity of the complete source snapshot.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_reference": {
+          "description": "Exact source reference captured by the sealed generation.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "staleness_state": {
           "description": "Staleness-ladder state label (e.g. `fresh`, `stale`, `reresolving`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "worktree_id": {
+          "description": "Stable worktree identity resolved by the scheduler.",
           "type": [
             "string",
             "null"
@@ -597,10 +632,16 @@
       },
       "required": [
         "worktree_root",
+        "repository_id",
+        "worktree_id",
+        "source_reference",
         "latest_generation_id",
+        "snapshot_content_identity",
+        "sealed_at_micros",
         "last_reconcile_micros",
         "staleness_state",
-        "hook_hint_count"
+        "hook_hint_count",
+        "coverage"
       ],
       "type": "object"
     },
@@ -3399,6 +3440,31 @@
           "required": [
             "kind",
             "sample"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Canonical application `StorageStatus` observed the durable store's file\nsize without opening an adapter-owned SQLite telemetry connection.",
+          "properties": {
+            "kind": {
+              "const": "observed_bytes",
+              "type": "string"
+            },
+            "observed_at": {
+              "$ref": "#/$defs/UtcMicros"
+            },
+            "store": {
+              "$ref": "#/$defs/StoreKeyV1"
+            },
+            "total_bytes": {
+              "$ref": "#/$defs/StorageByteSizeV1"
+            }
+          },
+          "required": [
+            "kind",
+            "store",
+            "total_bytes",
+            "observed_at"
           ],
           "type": "object"
         },
