@@ -26,7 +26,8 @@ use tracedecay::agents::{
     inspect_receipt_backed_host_components,
 };
 use tracedecay_hooks::{
-    HookHostV1, OpenCodePluginSurfaceV1, decode_native_hook_event, decode_opencode_plugin_event,
+    HookHostV1, OpenCodePluginSurfaceV1, decode_native_hook_event, decode_opencode_lsp_event,
+    decode_opencode_plugin_event,
 };
 
 #[path = "../src/privacy/detector_kernel.rs"]
@@ -380,7 +381,7 @@ fn cursor_native_extension_receipt_matches_embedded_assets() {
 }
 
 #[test]
-fn component_set_dry_run_refuses_overlapping_opencode_analyzer_and_accepts_clean_host() {
+fn component_set_dry_run_retains_analyzers_but_refuses_registration_aliases() {
     let home = tempfile::tempdir().unwrap();
     let lifecycle = tempfile::tempdir().unwrap();
     let component_set =
@@ -428,6 +429,36 @@ fn component_set_dry_run_refuses_overlapping_opencode_analyzer_and_accepts_clean
         .unwrap(),
     )
     .unwrap();
+    let mut retained_registration = HostComponentRegistrationDelegate::new(
+        "opencode",
+        home.path(),
+        lifecycle.path(),
+        request.lifecycle.operation,
+    )
+    .unwrap();
+    dry_run_host_component_set_lifecycle_with_lifecycle_root_at(
+        home.path(),
+        lifecycle.path(),
+        &component_set.component_set,
+        &request,
+        &component_set,
+        &mut retained_registration,
+    )
+    .expect("an existing language analyzer is retained beside projection-only TraceDecay LSP");
+
+    fs::write(
+        &config_path,
+        serde_json::to_vec_pretty(&json!({
+            "lsp": {
+                "third-party-tracedecay": {
+                    "command": ["third-party-tracedecay"],
+                    "extensions": [".rs"]
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
     let mut conflicting_registration = HostComponentRegistrationDelegate::new(
         "opencode",
         home.path(),
@@ -445,7 +476,7 @@ fn component_set_dry_run_refuses_overlapping_opencode_analyzer_and_accepts_clean
             &mut conflicting_registration,
         ),
         Err(HostBundleError::OwnershipConflict),
-        "dry run must refuse an analyzer claiming a TraceDecay extension"
+        "dry run must refuse a third-party registration aliasing TraceDecay"
     );
 }
 
@@ -781,6 +812,16 @@ fn authentic_host_fixtures_use_production_typed_decoders() {
             .as_slice(),
     )
     .expect("OpenCode tool.execute.after decodes");
+    let lsp_updated = events
+        .iter()
+        .find(|event| event["identity"] == "lsp_updated")
+        .expect("OpenCode lsp.updated");
+    decode_opencode_lsp_event(
+        serde_json::to_vec(&lsp_updated["request"])
+            .unwrap()
+            .as_slice(),
+    )
+    .expect("OpenCode lsp.updated decodes");
 }
 
 #[test]
