@@ -1035,11 +1035,35 @@ async fn literal_workspace_placeholder_transcript_paths(
 /// Issue #80 — surface process and database telemetry so users hitting
 /// unexpected CPU/RAM pressure can attach a structured snapshot to a
 /// bug report. The MCP wrapper just delegates to `runtime_telemetry`.
+async fn attach_doctor_report(
+    value: &mut Value,
+    reader: Option<&crate::dashboard::DoctorReportReader>,
+) {
+    value["doctor_report"] = match reader {
+        Some(reader) => match reader().await {
+            Ok(admitted) => json!({
+                "kind": "observed",
+                "report": admitted.report,
+                "table_growth_evidence": admitted.table_growth_evidence,
+            }),
+            Err(_) => json!({
+                "kind": "unknown",
+                "table_growth_evidence": [],
+            }),
+        },
+        None => json!({
+            "kind": "unsupported",
+            "table_growth_evidence": [],
+        }),
+    };
+}
+
 pub(super) async fn handle_runtime(
     cg: &TraceDecay,
     args: Value,
     registry: Option<&crate::global_db::RegisteredGlobalDb>,
     project_session_db: Option<&crate::global_db::RegisteredGlobalDb>,
+    doctor_report_reader: Option<&crate::dashboard::DoctorReportReader>,
 ) -> Result<ToolResult> {
     let snap = crate::runtime_telemetry::collect(cg).await?;
     let mut value = serde_json::to_value(&snap).unwrap_or_else(|_| json!({}));
@@ -1114,6 +1138,13 @@ pub(super) async fn handle_runtime(
                 });
             }
         }
+    }
+    if args
+        .get("doctor_report")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        attach_doctor_report(&mut value, doctor_report_reader).await;
     }
     if let Some(semantic) =
         crate::application::semantic_runtime::project_semantic_application_status(cg.project_root())
@@ -1646,6 +1677,21 @@ pub(super) async fn handle_session_end(
 #[cfg(test)]
 mod health_delta_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn requested_doctor_report_is_typed_unavailable_without_reader() {
+        let mut value = json!({});
+
+        attach_doctor_report(&mut value, None).await;
+
+        assert_eq!(
+            value["doctor_report"],
+            json!({
+                "kind": "unsupported",
+                "table_growth_evidence": [],
+            })
+        );
+    }
 
     #[tokio::test]
     async fn pinned_health_delta_is_exact_scoped_and_cursor_stable() {

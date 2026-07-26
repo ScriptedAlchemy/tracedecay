@@ -230,6 +230,16 @@ struct PreparedRepetition {
     _env: IsolatedBenchmarkEnv,
 }
 
+struct RepetitionMeasurement {
+    phase_latencies: Vec<(Phase, u64)>,
+    record_count: usize,
+}
+
+struct MeasurementCapture {
+    measurement: Value,
+    records_per_repetition: usize,
+}
+
 /// Validate checked-in artifacts without Cargo mutation (also used by the bench).
 pub fn validate_contract() -> BenchResult<()> {
     let root = repository_root();
@@ -335,12 +345,58 @@ pub fn validate_contract() -> BenchResult<()> {
         json!(sha256_file(&workload_path)?),
         "workload manifest hash",
     )?;
+    let provenance = &workload["refresh_provenance"];
+    require_json_value(
+        &provenance["source_mode"],
+        json!("clean_git_worktree_v1"),
+        "refresh source mode",
+    )?;
+    require_json_value(
+        &provenance["warmup_repetitions"],
+        json!(WARMUP_REPETITIONS),
+        "refresh warmup repetitions",
+    )?;
+    require_json_value(
+        &provenance["measured_repetitions"],
+        json!(MEASURED_REPETITIONS),
+        "refresh measured repetitions",
+    )?;
+    let records_per_repetition = provenance["records_per_repetition"]
+        .as_u64()
+        .filter(|count| *count > 0)
+        .ok_or_else(|| "refresh records_per_repetition must be positive".to_owned())?;
+    require_json_value(
+        &provenance["record_count"],
+        json!(records_per_repetition),
+        "refresh record count",
+    )?;
+    require_json_value(
+        &provenance["measured_record_count"],
+        json!(records_per_repetition * MEASURED_REPETITIONS as u64),
+        "refresh measured record count",
+    )?;
+    require_json_value(
+        &result["source_identity"]["commit"],
+        provenance["source_commit"].clone(),
+        "result source commit",
+    )?;
+    require_json_value(
+        &result["measurement"]["records_per_repetition"],
+        json!(records_per_repetition),
+        "result records per repetition",
+    )?;
+    require_json_value(
+        &result["measurement"]["measured_record_count"],
+        json!(records_per_repetition * MEASURED_REPETITIONS as u64),
+        "result measured record count",
+    )?;
 
     let runner = fs::read_to_string(root.join(RUNNER_PATH))
         .map_err(|error| format!("read runner: {error}"))?;
     for token in [
         "--dry-run",
         "--run",
+        "--refresh-contract",
         "Linux-hosted",
         "CI nextest durable coverage",
         "HOME",
@@ -351,6 +407,60 @@ pub fn validate_contract() -> BenchResult<()> {
         }
     }
     Ok(())
+}
+
+fn validate_refresh_inputs(root: &Path, workload: &Value) -> BenchResult<()> {
+    require_json_value(
+        &workload["schema_version"],
+        json!(SCHEMA_VERSION),
+        "workload schema",
+    )?;
+    require_json_value(&workload["workload_id"], json!(WORKLOAD_ID), "workload id")?;
+    require_json_value(
+        &workload["status"],
+        json!("harness_ready"),
+        "workload status",
+    )?;
+    require_json_value(
+        &workload["fixture_evidence"]["independently_sourced"],
+        json!(true),
+        "fixture source status",
+    )?;
+    require_json_value(
+        &workload["fixture_evidence"]["sanitization_receipt"],
+        json!(SANITIZATION_RECEIPT_PATH),
+        "fixture sanitization receipt",
+    )?;
+    let phases = workload["measurement_contract"]["phases"]
+        .as_array()
+        .ok_or_else(|| "measurement phases must be an array".to_owned())?;
+    let actual = phases
+        .iter()
+        .filter_map(|phase| phase["phase"].as_str())
+        .collect::<Vec<_>>();
+    let expected = Phase::ALL.map(Phase::as_str);
+    if actual != expected {
+        return Err(format!(
+            "measurement phases mismatch: expected {expected:?}, got {actual:?}"
+        ));
+    }
+    require_json_value(
+        &workload["statistics"]["p95_label"],
+        json!(P95_LABEL),
+        "p95 label",
+    )?;
+    require_json_value(
+        &workload["statistics"]["p99_label"],
+        json!(P99_LABEL),
+        "p99 label",
+    )?;
+    require_json_value(
+        &workload["production_path"]["available_to_benchmark_target"],
+        json!(true),
+        "production path availability",
+    )?;
+    validate_bench_profile(root)?;
+    validate_sanitization_receipt(root)
 }
 
 /// Run the production measurement loop. Samples are informational; evidence stays provisional.
@@ -364,18 +474,76 @@ pub async fn run_measurement() -> BenchResult<Value> {
     validate_bench_profile_enforced()?;
 
     let root = repository_root();
+    let capture = capture_measurement().await?;
+    let workload_sha256 = sha256_file(&root.join(WORKLOAD_PATH))?;
+    let source_identity = current_state_identity(&root, &workload_sha256)?;
+    let result = measurement_result(source_identity, workload_sha256, capture.measurement);
+
+    write_json_atomic(&root.join(RESULT_PATH), &result)?;
+    Ok(result)
+}
+
+/// Refresh the manifest and result from one measured run over a clean commit.
+///
+/// No caller-provided measurements or hashes are accepted. Both artifacts are
+/// derived after the run and published as one consistency-checked pair.
+pub async fn refresh_contract() -> BenchResult<Value> {
+    if !cfg!(target_os = "linux") {
+        return Err("PR8 temporal contract refresh is Linux-hosted".to_owned());
+    }
+    validate_bench_profile_enforced()?;
+    let root = repository_root();
+    let workload = read_json(&root.join(WORKLOAD_PATH))?;
+    validate_refresh_inputs(&root, &workload)?;
+    let source_commit = clean_source_commit(&root)?;
+    let capture = capture_measurement().await?;
+    let commit_after = clean_source_commit(&root)?;
+    if commit_after != source_commit {
+        return Err("source commit changed during benchmark contract refresh".to_owned());
+    }
+    let refreshed_workload = refresh_workload_manifest(
+        &root,
+        workload,
+        &source_commit,
+        capture.records_per_repetition,
+    )?;
+    let workload_sha256 = hex::encode(Sha256::digest(encode_json(&refreshed_workload)?));
+    let source_identity = current_state_identity(&root, &workload_sha256)?;
+    let result = measurement_result(source_identity, workload_sha256, capture.measurement);
+    write_contract_pair_atomic(
+        &root.join(WORKLOAD_PATH),
+        &refreshed_workload,
+        &root.join(RESULT_PATH),
+        &result,
+    )?;
+    validate_contract()?;
+    Ok(result)
+}
+
+async fn capture_measurement() -> BenchResult<MeasurementCapture> {
     let mut phase_latencies: Vec<(Phase, Vec<u64>)> = Phase::ALL
         .iter()
         .copied()
         .map(|phase| (phase, Vec::new()))
         .collect();
+    let mut records_per_repetition = None;
 
     for repetition in 0..(WARMUP_REPETITIONS + MEASURED_REPETITIONS) {
-        let samples = run_one_repetition(repetition).await?;
+        let repetition_measurement = run_one_repetition(repetition).await?;
+        match records_per_repetition {
+            Some(expected) if expected != repetition_measurement.record_count => {
+                return Err(format!(
+                    "record count changed across repetitions: expected {expected}, got {}",
+                    repetition_measurement.record_count
+                ));
+            }
+            None => records_per_repetition = Some(repetition_measurement.record_count),
+            Some(_) => {}
+        }
         if repetition < WARMUP_REPETITIONS {
             continue;
         }
-        for (phase, latency_ns) in samples {
+        for (phase, latency_ns) in repetition_measurement.phase_latencies {
             let slot = phase_latencies
                 .iter_mut()
                 .find(|(candidate, _)| *candidate == phase)
@@ -403,23 +571,36 @@ pub async fn run_measurement() -> BenchResult<Value> {
         }));
     }
 
-    let source_identity = current_state_identity(&root)?;
     let measurement = json!({
         "warmup_repetitions": WARMUP_REPETITIONS,
         "measured_repetitions": MEASURED_REPETITIONS,
+        "records_per_repetition": records_per_repetition,
+        "measured_record_count": records_per_repetition
+            .unwrap_or_default()
+            .saturating_mul(MEASURED_REPETITIONS),
         "inferential_claim": false,
         "phases": phases,
     });
+    Ok(MeasurementCapture {
+        measurement,
+        records_per_repetition: records_per_repetition
+            .ok_or_else(|| "measurement produced no record count".to_owned())?,
+    })
+}
 
-    let workload_path = root.join(WORKLOAD_PATH);
-    let result = json!({
+fn measurement_result(
+    source_identity: Value,
+    workload_manifest_sha256: String,
+    measurement: Value,
+) -> Value {
+    json!({
         "schema_version": SCHEMA_VERSION,
         "workload_id": WORKLOAD_ID,
         "capture_status": "provisional",
         "acceptance_eligible": false,
         "provisional_reason": "linux_measurement_capture",
         "workload_manifest": WORKLOAD_PATH,
-        "workload_manifest_sha256": sha256_file(&workload_path)?,
+        "workload_manifest_sha256": workload_manifest_sha256,
         "source_identity": source_identity,
         "runtime": {
             "operating_system": std::env::consts::OS,
@@ -436,10 +617,7 @@ pub async fn run_measurement() -> BenchResult<Value> {
                 "reason": "descriptive nearest-rank sample quantiles only; not inferential"
             }
         }
-    });
-
-    write_json_atomic(&root.join(RESULT_PATH), &result)?;
-    Ok(result)
+    })
 }
 
 async fn prepare_repetition(repetition: usize) -> BenchResult<PreparedRepetition> {
@@ -589,9 +767,11 @@ async fn prepare_repetition(repetition: usize) -> BenchResult<PreparedRepetition
     })
 }
 
-async fn run_one_repetition(repetition: usize) -> BenchResult<Vec<(Phase, u64)>> {
+async fn run_one_repetition(repetition: usize) -> BenchResult<RepetitionMeasurement> {
     let prepared = prepare_repetition(repetition).await?;
-    if prepared.durable_progress.committed_records() == 0 {
+    let record_count = usize::try_from(prepared.durable_progress.committed_records())
+        .map_err(|error| format!("convert durable record count: {error}"))?;
+    if record_count == 0 {
         return Err("refresh must persist durable progress before measurement".to_owned());
     }
     let replay_started = Instant::now();
@@ -652,12 +832,15 @@ async fn run_one_repetition(repetition: usize) -> BenchResult<Vec<(Phase, u64)>>
     )?;
     let late_hydrate_ns = elapsed_ns(hydrate_started);
 
-    Ok(vec![
-        (Phase::RebuildActivate, prepared.rebuild_activate_ns),
-        (Phase::ExactReplay, exact_replay_ns),
-        (Phase::CompactRank, compact_rank_ns),
-        (Phase::LateHydrate, late_hydrate_ns),
-    ])
+    Ok(RepetitionMeasurement {
+        phase_latencies: vec![
+            (Phase::RebuildActivate, prepared.rebuild_activate_ns),
+            (Phase::ExactReplay, exact_replay_ns),
+            (Phase::CompactRank, compact_rank_ns),
+            (Phase::LateHydrate, late_hydrate_ns),
+        ],
+        record_count,
+    })
 }
 
 fn enroll_benchmark_project(project: &Path) -> BenchResult<ProjectId> {
@@ -764,12 +947,12 @@ fn request_context(request: &str, project_id: &ProjectId) -> RequestContext {
     )
 }
 
-fn current_state_identity(root: &Path) -> BenchResult<Value> {
+fn current_state_identity(root: &Path, workload_manifest_sha256: &str) -> BenchResult<Value> {
     let commit = current_commit(root)?;
     Ok(json!({
         "commit": commit,
         "workload_manifest": WORKLOAD_PATH,
-        "workload_manifest_sha256": sha256_file(&root.join(WORKLOAD_PATH))?,
+        "workload_manifest_sha256": workload_manifest_sha256,
         "harness": HARNESS_PATH,
         "harness_sha256": sha256_file(&root.join(HARNESS_PATH))?,
         "runner": RUNNER_PATH,
@@ -936,6 +1119,110 @@ fn write_json_atomic(path: &Path, value: &Value) -> BenchResult<()> {
     Ok(())
 }
 
+fn refresh_workload_manifest(
+    root: &Path,
+    mut workload: Value,
+    source_commit: &str,
+    records_per_repetition: usize,
+) -> BenchResult<Value> {
+    let workload_object = workload
+        .as_object_mut()
+        .ok_or_else(|| "workload manifest must be an object".to_owned())?;
+    workload_object["implementation"]["sha256"] = json!(sha256_file(&root.join(HARNESS_PATH))?);
+    workload_object["runner"]["sha256"] = json!(sha256_file(&root.join(RUNNER_PATH))?);
+    workload_object["profile"]["manifest_sha256"] = json!(sha256_file(&root.join("Cargo.toml"))?);
+    let inventory = workload_object["file_inventory"]
+        .as_array_mut()
+        .ok_or_else(|| "workload file inventory must be an array".to_owned())?;
+    for entry in inventory {
+        let path = entry["path"]
+            .as_str()
+            .ok_or_else(|| "workload inventory entry is missing its path".to_owned())?;
+        entry["sha256"] = json!(sha256_file(&root.join(path))?);
+    }
+    workload_object.insert(
+        "refresh_provenance".to_owned(),
+        json!({
+            "source_commit": source_commit,
+            "source_mode": "clean_git_worktree_v1",
+            "warmup_repetitions": WARMUP_REPETITIONS,
+            "measured_repetitions": MEASURED_REPETITIONS,
+            "record_count": records_per_repetition,
+            "records_per_repetition": records_per_repetition,
+            "measured_record_count": records_per_repetition * MEASURED_REPETITIONS,
+        }),
+    );
+    Ok(workload)
+}
+
+fn write_contract_pair_atomic(
+    workload_path: &Path,
+    workload: &Value,
+    result_path: &Path,
+    result: &Value,
+) -> BenchResult<()> {
+    if workload_path.parent() != result_path.parent() {
+        return Err("workload and result must share one artifact directory".to_owned());
+    }
+    let workload_bytes = encode_json(workload)?;
+    let workload_sha256 = hex::encode(Sha256::digest(&workload_bytes));
+    require_json_value(
+        &result["workload_manifest_sha256"],
+        json!(workload_sha256),
+        "result workload manifest hash",
+    )?;
+
+    let workload_original = fs::read(workload_path).ok();
+    let result_original = fs::read(result_path).ok();
+    let workload_temporary = temporary_artifact_path(workload_path);
+    let result_temporary = temporary_artifact_path(result_path);
+    fs::write(&workload_temporary, workload_bytes)
+        .map_err(|error| format!("write temporary workload manifest: {error}"))?;
+    if let Err(error) = fs::write(&result_temporary, encode_json(result)?) {
+        let _ = fs::remove_file(&workload_temporary);
+        return Err(format!("write temporary benchmark result: {error}"));
+    }
+    fs::rename(&workload_temporary, workload_path)
+        .map_err(|error| format!("publish workload manifest: {error}"))?;
+    if let Err(error) = fs::rename(&result_temporary, result_path) {
+        restore_artifact(workload_path, workload_original.as_deref())?;
+        restore_artifact(result_path, result_original.as_deref())?;
+        let _ = fs::remove_file(&result_temporary);
+        return Err(format!(
+            "publish benchmark result after workload manifest; restored prior pair: {error}"
+        ));
+    }
+    Ok(())
+}
+
+fn encode_json(value: &Value) -> BenchResult<Vec<u8>> {
+    serde_json::to_vec_pretty(value).map_err(|error| format!("encode benchmark artifact: {error}"))
+}
+
+fn temporary_artifact_path(path: &Path) -> PathBuf {
+    path.with_file_name(format!(
+        ".{}.refresh.tmp",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("artifact")
+    ))
+}
+
+fn restore_artifact(path: &Path, original: Option<&[u8]>) -> BenchResult<()> {
+    match original {
+        Some(bytes) => fs::write(path, bytes)
+            .map_err(|error| format!("restore benchmark artifact '{}': {error}", path.display())),
+        None => match fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(format!(
+                "remove newly published benchmark artifact '{}': {error}",
+                path.display()
+            )),
+        },
+    }
+}
+
 fn require_json_value(actual: &Value, expected: Value, label: &str) -> BenchResult<()> {
     if actual != &expected {
         return Err(format!(
@@ -968,6 +1255,27 @@ fn current_commit(root: &Path) -> BenchResult<String> {
         ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+fn clean_source_commit(root: &Path) -> BenchResult<String> {
+    let status = Command::new("git")
+        .current_dir(root)
+        .args(["status", "--porcelain=v1", "--untracked-files=no"])
+        .output()
+        .map_err(|error| format!("inspect benchmark source state: {error}"))?;
+    if !status.status.success() {
+        return Err(format!(
+            "git status failed: {}",
+            String::from_utf8_lossy(&status.stderr).trim()
+        ));
+    }
+    if !status.stdout.is_empty() {
+        return Err(
+            "benchmark contract refresh requires a clean source commit; tracked changes are present"
+                .to_owned(),
+        );
+    }
+    current_commit(root)
 }
 
 #[cfg(test)]
@@ -1005,6 +1313,97 @@ mod tests {
         assert_eq!(nearest_rank(&samples, 99), 50);
     }
 
+    #[test]
+    fn refresh_manifest_records_one_real_run_provenance() {
+        let root = repository_root();
+        let workload = read_json(&root.join(WORKLOAD_PATH)).unwrap();
+        let refreshed = refresh_workload_manifest(&root, workload, "0123456789abcdef", 2).unwrap();
+
+        assert_eq!(
+            refreshed["refresh_provenance"]["source_commit"],
+            json!("0123456789abcdef")
+        );
+        assert_eq!(
+            refreshed["refresh_provenance"]["source_mode"],
+            json!("clean_git_worktree_v1")
+        );
+        assert_eq!(
+            refreshed["refresh_provenance"]["warmup_repetitions"],
+            json!(WARMUP_REPETITIONS)
+        );
+        assert_eq!(
+            refreshed["refresh_provenance"]["measured_repetitions"],
+            json!(MEASURED_REPETITIONS)
+        );
+        assert_eq!(
+            refreshed["refresh_provenance"]["records_per_repetition"],
+            json!(2)
+        );
+        assert_eq!(
+            refreshed["refresh_provenance"]["measured_record_count"],
+            json!(2 * MEASURED_REPETITIONS)
+        );
+        assert_eq!(
+            refreshed["implementation"]["sha256"],
+            json!(sha256_file(&root.join(HARNESS_PATH)).unwrap())
+        );
+        assert_eq!(
+            refreshed["runner"]["sha256"],
+            json!(sha256_file(&root.join(RUNNER_PATH)).unwrap())
+        );
+    }
+
+    #[test]
+    fn contract_pair_writer_rejects_disagreeing_result() {
+        let temp = TempDir::new().unwrap();
+        let workload_path = temp.path().join("workload.json");
+        let result_path = temp.path().join("result.json");
+        let workload = json!({"schema_version": SCHEMA_VERSION});
+        let result = json!({
+            "workload_manifest_sha256": "not-the-workload-hash"
+        });
+
+        let error = write_contract_pair_atomic(&workload_path, &workload, &result_path, &result)
+            .unwrap_err();
+
+        assert!(error.contains("workload manifest hash"));
+        assert!(!workload_path.exists());
+        assert!(!result_path.exists());
+    }
+
+    #[test]
+    fn refresh_preflight_requires_a_clean_source_commit() {
+        let temp = TempDir::new().unwrap();
+        let run_git = |arguments: &[&str]| {
+            let status = Command::new("git")
+                .current_dir(temp.path())
+                .args(arguments)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {arguments:?}");
+        };
+        run_git(&["init", "--quiet"]);
+        fs::write(temp.path().join("source.txt"), "clean\n").unwrap();
+        run_git(&["add", "source.txt"]);
+        run_git(&[
+            "-c",
+            "user.name=TraceDecay Test",
+            "-c",
+            "user.email=tracedecay@example.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "test: seed source",
+        ]);
+
+        let commit = clean_source_commit(temp.path()).unwrap();
+        assert_eq!(commit.len(), 40);
+
+        fs::write(temp.path().join("source.txt"), "dirty\n").unwrap();
+        let error = clean_source_commit(temp.path()).unwrap_err();
+        assert!(error.contains("tracked changes"), "{error}");
+    }
+
     #[tokio::test]
     async fn fixture_refresh_persists_progress_before_measurement() {
         let prepared = prepare_repetition(0)
@@ -1022,7 +1421,11 @@ mod tests {
         let samples = run_one_repetition(0)
             .await
             .expect("fresh benchmark database must provision an authenticated cursor key");
-        let phases = samples.iter().map(|(phase, _)| *phase).collect::<Vec<_>>();
+        let phases = samples
+            .phase_latencies
+            .iter()
+            .map(|(phase, _)| *phase)
+            .collect::<Vec<_>>();
 
         assert!(phases.contains(&Phase::CompactRank));
         assert!(phases.contains(&Phase::LateHydrate));

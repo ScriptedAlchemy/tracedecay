@@ -16,8 +16,8 @@ fn manifest_serialization_preserves_stable_ids_and_contract_metadata() {
     let manifest = read_manifest(
         capability_id("capability.source.read"),
         use_case_id("use-case.source.read"),
-        schema("schema.source.read.request", 128),
-        schema("schema.source.read.result", 256),
+        schema("schema.source.read.request"),
+        schema("schema.source.read.result"),
         Vec::new(),
         vec![profile],
     );
@@ -55,8 +55,8 @@ fn index_effects_require_effect_receipt_revalidation_and_cancellation_contracts(
             vec!["Stage these selected hunks".to_owned()],
         )
         .unwrap(),
-        request_schema: schema("schema.git.stage.request", 128),
-        result_schema: schema("schema.git.stage.result", 256),
+        request_schema: schema("schema.git.stage.request"),
+        result_schema: schema("schema.git.stage.result"),
         effect: EffectClass::GitIndexStage,
         scope: ScopeRequirement::new(vec![ScopeDimension::Project]).unwrap(),
         authority: AuthorityRequirement::CapabilityGrantWithRevalidation,

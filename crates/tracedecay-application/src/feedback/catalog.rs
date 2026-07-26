@@ -408,7 +408,7 @@ fn application_operation(
 }
 
 fn schema(id: &str) -> Result<SchemaRef, ApplicationContractError> {
-    Ok(SchemaRef::new(SchemaId::new(id)?, 1, 8_192)?)
+    Ok(SchemaRef::new(SchemaId::new(id)?, 1)?)
 }
 
 #[cfg(test)]

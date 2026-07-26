@@ -361,7 +361,6 @@ fn schema(operation: &str, direction: &str) -> Result<SchemaRef, ApplicationCont
             "schema.application.configuration.{operation}.{direction}"
         ))?,
         1,
-        1_024,
     )?)
 }
 
