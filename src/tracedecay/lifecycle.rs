@@ -464,6 +464,9 @@ impl TraceDecay {
         }
 
         let mut selected = storage::resolve_persisted_layout(project_root, &profile_root)?;
+        // Every linked worktree resolves through its repository, attached or
+        // not; suppressing this for detached worktrees dropped them onto the
+        // path-hashed identity fallback and minted a duplicate store.
         let git_common_dir = crate::worktree::git_common_dir(project_root);
         if selected.is_none()
             && let Some(registry_database) = registry_database
@@ -506,20 +509,6 @@ impl TraceDecay {
         .await?;
         match selected {
             Some(layout) => Ok(layout),
-            None
-                if allow_default_identity
-                    && ephemeral_project_requires_explicit_identity(project_root, &profile_root) =>
-            {
-                Err(TraceDecayError::Config {
-                    message: format!(
-                        "refusing to enroll project '{}' from the temporary directory into \
-                         persistent profile '{}'; move the repository to persistent storage or \
-                         use an explicitly temporary TRACEDECAY_DATA_DIR",
-                        project_root.display(),
-                        profile_root.display()
-                    ),
-                })
-            }
             None if allow_default_identity => {
                 storage::default_profile_sharded_layout(project_root, &profile_root)
             }
@@ -703,13 +692,10 @@ impl TraceDecay {
         runtime_registry: Arc<DaemonSessionRuntimeRegistryV1>,
     ) -> Result<Self> {
         let active_branch = branch::current_branch(project_root);
-        let graph_scope = active_branch
-            .clone()
-            .or_else(|| crate::worktree::detached_worktree_graph_scope(project_root));
         Self::auto_track_active_branch_with_registered_configuration(
             project_root,
             &store_layout.data_root,
-            graph_scope.as_deref(),
+            active_branch.as_deref(),
             open_options.clone(),
             &store_layout,
             &configuration_database,
@@ -718,12 +704,11 @@ impl TraceDecay {
         )
         .await?;
 
-        let (db_path, mounted_graph_scope, fallback_warning) = Self::resolve_db_for_branch(
+        let (db_path, serving_branch, fallback_warning) = Self::resolve_db_for_branch(
             project_root,
             &store_layout.data_root,
-            graph_scope.as_deref(),
+            active_branch.as_deref(),
         );
-        let serving_branch = active_branch.as_ref().and(mounted_graph_scope.clone());
 
         // Sync state belongs to the concrete graph DB, not the repository-wide
         // store root. Different tracked branches have independent databases
@@ -772,7 +757,7 @@ impl TraceDecay {
                 project_root,
                 &store_layout,
                 &db_path,
-                mounted_graph_scope.as_deref(),
+                serving_branch.as_deref(),
                 "crash verification",
                 DatabaseAccessMode::ReadOnly,
             )
@@ -819,7 +804,7 @@ impl TraceDecay {
             project_root,
             &store_layout,
             &db_path,
-            mounted_graph_scope.as_deref(),
+            serving_branch.as_deref(),
             "open project store",
             DatabaseAccessMode::ReadWrite,
         )
@@ -838,7 +823,7 @@ impl TraceDecay {
                 project_root,
                 &store_layout,
                 &db_path,
-                mounted_graph_scope.as_deref(),
+                serving_branch.as_deref(),
                 "remount project store for FTS repair",
                 DatabaseAccessMode::ReadWrite,
             )
@@ -1015,16 +1000,12 @@ impl TraceDecay {
         runtime_registry: Arc<DaemonSessionRuntimeRegistryV1>,
     ) -> Result<Self> {
         let active_branch = branch::current_branch(project_root);
-        let graph_scope = active_branch
-            .clone()
-            .or_else(|| crate::worktree::detached_worktree_graph_scope(project_root));
 
-        let (db_path, mounted_graph_scope, fallback_warning) = Self::resolve_db_for_branch(
+        let (db_path, serving_branch, fallback_warning) = Self::resolve_db_for_branch(
             project_root,
             &store_layout.data_root,
-            graph_scope.as_deref(),
+            active_branch.as_deref(),
         );
-        let serving_branch = active_branch.as_ref().and(mounted_graph_scope.clone());
         let active_graph_layout = active_graph_layout(&db_path);
 
         if !db_path.exists() {
@@ -1041,7 +1022,7 @@ impl TraceDecay {
             project_root,
             &store_layout,
             &db_path,
-            mounted_graph_scope.as_deref(),
+            serving_branch.as_deref(),
             "open project store read-only",
             DatabaseAccessMode::ReadOnly,
         )
@@ -1582,9 +1563,6 @@ impl TraceDecay {
             &configuration.target,
             configuration_runtime.client(),
         );
-        let internal_detached_scope = crate::worktree::detached_worktree_graph_scope(project_root)
-            .as_deref()
-            == Some(branch_name);
         Ok(Self {
             db,
             profile_database,
@@ -1596,8 +1574,8 @@ impl TraceDecay {
             active_graph_layout,
             open_options,
             registry: LanguageRegistry::new(),
-            active_branch: (!internal_detached_scope).then(|| branch_name.to_string()),
-            serving_branch: (!internal_detached_scope).then(|| branch_name.to_string()),
+            active_branch: Some(branch_name.to_string()),
+            serving_branch: Some(branch_name.to_string()),
             fallback_warning: None,
             read_only,
             context_scout_owner: None,
@@ -1638,6 +1616,10 @@ impl TraceDecay {
 
         let meta = branch_meta::load_branch_meta(&self.store_layout.data_root);
         let default_branch = meta.as_ref().map(|meta| meta.default_branch.as_str());
+        // Registering without the git common dir leaves the row unreachable
+        // by repository identity, so the next first touch from a sibling
+        // checkout mints a fresh store. Detached worktrees are no exception:
+        // they belong to the same repository as every other checkout.
         let git_common_dir = crate::worktree::git_common_dir(&self.project_root);
         let git_remote_url = git_remote_url(&self.project_root);
 
@@ -1891,13 +1873,6 @@ fn configuration_runtime_unavailable() -> TraceDecayError {
             "configuration authority unavailable: a registered project session runtime is required"
                 .to_owned(),
     }
-}
-
-fn ephemeral_project_requires_explicit_identity(project_root: &Path, profile_root: &Path) -> bool {
-    let temp_root = crate::lifecycle_lease::canonical_or_original(&std::env::temp_dir());
-    let project_root = crate::lifecycle_lease::canonical_or_original(project_root);
-    let profile_root = crate::lifecycle_lease::canonical_or_original(profile_root);
-    project_root.starts_with(&temp_root) && !profile_root.starts_with(temp_root)
 }
 
 fn graph_sidecar_path(db_path: &Path, suffix: &str) -> PathBuf {
