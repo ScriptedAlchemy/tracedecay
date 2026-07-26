@@ -1021,9 +1021,12 @@ async fn v2_upgrade_with_broken_predecessor_lineage_falls_back_to_rebuild() {
             "DELETE FROM observation_projection_dispositions
              WHERE projector_version = ?1
                AND observation_id = (
-                   SELECT observation_id FROM observation_projection_dispositions
-                   WHERE projector_version = ?1
-                   ORDER BY observation_id LIMIT 1
+                   SELECT disposition.observation_id
+                   FROM observation_projection_dispositions AS disposition
+                   JOIN observations AS observation
+                     ON observation.observation_id = disposition.observation_id
+                   WHERE disposition.projector_version = ?1
+                   ORDER BY observation.sequence LIMIT 1
                )",
             params![SESSION_MESSAGE_PROJECTOR_VERSION_V2],
         )
@@ -1071,6 +1074,154 @@ async fn v2_upgrade_with_broken_predecessor_lineage_falls_back_to_rebuild() {
     assert!(
         superseded,
         "rebuild fallback must converge and supersede the incremental migration"
+    );
+}
+
+#[tokio::test]
+async fn schema_open_defers_rebuild_until_background_migration_advances_it() {
+    const PREDECESSOR_ROWS: usize = 513;
+
+    let tmp = TempDir::new().unwrap();
+    let profile_root = tmp.path().join(".tracedecay");
+    let runtime = registered_runtime(&profile_root).await.unwrap();
+    let db = registered_database(&runtime);
+    let store = runtime
+        .observation_store(HostAdmissionScope::Profile)
+        .unwrap();
+    let writer = db.writer_connection().unwrap();
+    for index in 0..PREDECESSOR_ROWS {
+        store
+            .persist_observation(write(checked_in_codex_session_boundary(index)))
+            .await
+            .unwrap();
+    }
+    while let Some(queued) = store.next_queued_observation().await.unwrap() {
+        store.project_observation(&queued).await.unwrap();
+    }
+    writer
+        .execute(
+            "UPDATE observation_projection_dispositions SET projector_version = ?1
+             WHERE projector_version = ?2",
+            params![
+                SESSION_MESSAGE_PROJECTOR_VERSION_V2,
+                SESSION_MESSAGE_PROJECTOR_VERSION_V4
+            ],
+        )
+        .await
+        .unwrap();
+    writer
+        .execute(
+            "UPDATE observation_projection_checkpoints SET projector_version = ?1
+             WHERE projector_version = ?2",
+            params![
+                SESSION_MESSAGE_PROJECTOR_VERSION_V2,
+                SESSION_MESSAGE_PROJECTOR_VERSION_V4
+            ],
+        )
+        .await
+        .unwrap();
+    writer
+        .execute(
+            "DELETE FROM observation_projection_dispositions
+             WHERE projector_version = ?1
+               AND observation_id = (
+                   SELECT disposition.observation_id
+                   FROM observation_projection_dispositions AS disposition
+                   JOIN observations AS observation
+                     ON observation.observation_id = disposition.observation_id
+                   WHERE disposition.projector_version = ?1
+                   ORDER BY observation.sequence LIMIT 1
+               )",
+            params![SESSION_MESSAGE_PROJECTOR_VERSION_V2],
+        )
+        .await
+        .unwrap();
+
+    drop(store);
+    drop(writer);
+    drop(runtime);
+
+    let first_open = registered_runtime(&profile_root).await.unwrap();
+    let first_writer = registered_database(&first_open)
+        .writer_connection()
+        .unwrap();
+    let mut rows = first_writer
+        .query(
+            "SELECT aliases_staged_through, staged_through
+             FROM observation_projection_rebuilds
+             WHERE projector_version = ?1",
+            params![SESSION_MESSAGE_PROJECTOR_VERSION_V4],
+        )
+        .await
+        .unwrap();
+    let before = rows
+        .next()
+        .await
+        .unwrap()
+        .map(|row| (row.get::<i64>(0).unwrap(), row.get::<i64>(1).unwrap()))
+        .expect("first fallback starts a rebuild");
+    assert_eq!(
+        before,
+        (0, 0),
+        "schema open must record, but not synchronously advance, the rebuild"
+    );
+    drop(rows);
+    first_writer
+        .execute(
+            "INSERT OR REPLACE INTO observation_projection_migrations (
+                source_projector_version, target_projector_version,
+                source_frontier, migrated_through, completed
+             ) VALUES (?1, ?2, ?3, ?3, 1)",
+            params![
+                SESSION_MESSAGE_PROJECTOR_VERSION_V2,
+                SESSION_MESSAGE_PROJECTOR_VERSION_V4,
+                PREDECESSOR_ROWS as i64,
+            ],
+        )
+        .await
+        .unwrap();
+    drop(first_writer);
+    drop(first_open);
+
+    let second_open = registered_runtime(&profile_root).await.unwrap();
+    let second_writer = registered_database(&second_open)
+        .writer_connection()
+        .unwrap();
+    let mut rows = second_writer
+        .query(
+            "SELECT aliases_staged_through, staged_through
+             FROM observation_projection_rebuilds
+             WHERE projector_version = ?1",
+            params![SESSION_MESSAGE_PROJECTOR_VERSION_V4],
+        )
+        .await
+        .unwrap();
+    let progress = rows
+        .next()
+        .await
+        .unwrap()
+        .map(|row| (row.get::<i64>(0).unwrap(), row.get::<i64>(1).unwrap()));
+    drop(rows);
+    assert_eq!(
+        progress,
+        Some(before),
+        "reopening a store must leave the rebuild for the background worker"
+    );
+    drop(second_writer);
+    let database = registered_database(&second_open);
+    let mut complete = false;
+    for _ in 0..16 {
+        complete = database
+            .advance_projection_version_migration()
+            .await
+            .unwrap();
+        if complete {
+            break;
+        }
+    }
+    assert!(
+        complete,
+        "the daemon background migration primitive must converge the rebuild"
     );
 }
 
