@@ -307,4 +307,3 @@ async fn frozen_temporal_page_returns_projected_occurrences_and_lineage() {
     assert_eq!(page.assertions().len(), 1);
     assert!(page.next_after_occurrence_id().is_none());
 }
-
