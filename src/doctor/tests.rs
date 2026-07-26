@@ -1645,7 +1645,7 @@ async fn temporal_fts_health_and_repair_are_explicit_bounded_and_idempotent() {
 }
 
 #[tokio::test]
-async fn temporal_fts_repair_refuses_ambiguous_index_damage() {
+async fn temporal_fts_repair_accepts_exact_blob_index_damage() {
     let dir = tempfile::TempDir::new().unwrap();
     let runtime = DoctorTestRuntime::open(
         &dir.path().join("profile"),
@@ -1683,13 +1683,11 @@ async fn temporal_fts_repair_refuses_ambiguous_index_damage() {
             {"kind": "occurrence_fts_corruption", "count": 1},
         ])
     );
-    let error = db
-        .repair_session_temporal_fts(true)
-        .await
-        .expect_err("ambiguous whole-database damage must not be rebuilt as FTS-only corruption");
+    assert_eq!(db.repair_session_temporal_fts(true).await.unwrap(), (1, 1));
+    db.checkpoint_result().await.unwrap();
     assert_eq!(
-        error.to_string(),
-        "whole-database quick check failed; FTS repair is unsafe"
+        serde_json::to_value(db.session_temporal_doctor_health().await).unwrap()["findings"],
+        serde_json::json!([])
     );
 }
 
