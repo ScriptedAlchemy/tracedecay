@@ -8,15 +8,17 @@ import { elideStart, splitBytes, splitCount } from '../../ui/format.ts';
 import { useLegacy } from '../../data/query/useLegacy.ts';
 import { useScope } from '../../data/scope/store.ts';
 import { relativeTime } from './BrainPage.tsx';
+import { AnalyticsOverviewPayloadSchema } from '../../contracts/uncontracted/analytics.ts';
+import {
+  GraphOverviewPayloadSchema,
+  SubgraphPayloadSchema,
+} from '../../contracts/uncontracted/graph.ts';
+import { MemoryStatusPayloadSchema } from '../../contracts/uncontracted/memory.ts';
 import {
   ProjectContextPayloadSchema,
-  ScopedAnalyticsOverviewSchema,
-  ScopedGraphOverviewSchema,
-  ScopedMemoryStatusSchema,
-  ScopedSubgraphPayloadSchema,
   type ProjectContextPayload,
   type ProjectStore,
-} from './contracts.ts';
+} from '../../contracts/uncontracted/projects.ts';
 
 /**
  * The Brain, scoped to one project: "what does TraceDecay actually know about
@@ -55,22 +57,22 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
   const subgraph = useLegacy(
     ['brain', 'subgraph'],
     '/api/plugins/graph/subgraph',
-    ScopedSubgraphPayloadSchema,
+    SubgraphPayloadSchema,
   );
   const overview = useLegacy(
     ['brain', 'graph-overview'],
     '/api/plugins/graph/overview',
-    ScopedGraphOverviewSchema,
+    GraphOverviewPayloadSchema,
   );
   const memory = useLegacy(
     ['brain', 'memory-status'],
     '/api/plugins/holographic/status',
-    ScopedMemoryStatusSchema,
+    MemoryStatusPayloadSchema,
   );
   const analytics = useLegacy(
     ['brain', 'analytics'],
     '/api/plugins/analytics/overview',
-    ScopedAnalyticsOverviewSchema,
+    AnalyticsOverviewPayloadSchema,
   );
 
   const activationRef = useRef(new ActivationField({ halfLifeMs: 3200 }));
