@@ -20,6 +20,35 @@ export const WIRE_SCHEMA_REVISION = 1 as const;
 export const ActorIdSchema = z.string();
 export type ActorId = z.infer<typeof ActorIdSchema>;
 
+export const AnalyticsOverviewPayloadV1Schema = z.object({
+  agents: z.unknown(),
+  available: z.boolean(),
+  db: z.string(),
+  diagnostics: z.unknown(),
+  hints: z.unknown(),
+  observatory: z.union([z.lazy(() => ObservatoryReadModelV1Schema), z.null()]),
+  scope: z.string(),
+  underused_tool_families: z.unknown(),
+  usage: z.lazy(() => AnalyticsUsageSummaryV1Schema),
+});
+export type AnalyticsOverviewPayloadV1 = z.infer<typeof AnalyticsOverviewPayloadV1Schema>;
+
+export const AnalyticsUsageCategoryV1Schema = z.object({
+  category: z.string(),
+  events: z.number().int(),
+  kind: z.string(),
+});
+export type AnalyticsUsageCategoryV1 = z.infer<typeof AnalyticsUsageCategoryV1Schema>;
+
+export const AnalyticsUsageSummaryV1Schema = z.object({
+  available: z.boolean(),
+  by_category: z.array(z.lazy(() => AnalyticsUsageCategoryV1Schema)),
+  event_count: z.number().int().nullable(),
+  message_count: z.number().int(),
+  source: z.string().nullable(),
+});
+export type AnalyticsUsageSummaryV1 = z.infer<typeof AnalyticsUsageSummaryV1Schema>;
+
 /** Authoritative scope of a source binding. A mutable path, label, or host
 profile cannot be represented as authority. */
 export const AuthorityRefSchema = z.discriminatedUnion("kind", [z.object({
@@ -91,6 +120,23 @@ export const AutomationSchedulerStatusV1Schema = z.object({
   tasks: z.array(z.lazy(() => AutomationTaskStatusV1Schema)),
 });
 export type AutomationSchedulerStatusV1 = z.infer<typeof AutomationSchedulerStatusV1Schema>;
+
+export const AutomationSettingsPayloadV1Schema = z.object({
+  availability: z.lazy(() => SettingsAvailabilityV1Schema),
+  backend: z.string().nullable().optional(),
+  config_endpoint: z.string(),
+  enabled: z.boolean().nullable().optional(),
+  host_mode: z.string().nullable().optional(),
+  source_coverage: z.lazy(() => AutomationSourceCoverageV1Schema),
+});
+export type AutomationSettingsPayloadV1 = z.infer<typeof AutomationSettingsPayloadV1Schema>;
+
+export const AutomationSourceCoverageV1Schema = z.object({
+  effective: z.string(),
+  global: z.string(),
+  project: z.string(),
+});
+export type AutomationSourceCoverageV1 = z.infer<typeof AutomationSourceCoverageV1Schema>;
 
 export const AutomationTaskStatusV1Schema = z.object({
   due: z.boolean(),
@@ -218,6 +264,21 @@ export const ConfigurationProtectedPreviewSurfaceRequestSchema = z.object({
   expected_revision: z.string(),
 });
 export type ConfigurationProtectedPreviewSurfaceRequest = z.infer<typeof ConfigurationProtectedPreviewSurfaceRequestSchema>;
+
+export const CostsReadModelV1Schema = z.object({
+  authorized_scope_ref: z.string(),
+  current: z.boolean(),
+  estimated_cost: z.array(z.lazy(() => MetricValueV1Schema)),
+  horizon: z.lazy(() => ObservabilityHorizonV1Schema),
+  observed_at_micros: z.number().int(),
+  pricing_revision: z.string().nullable(),
+  usage: z.array(z.lazy(() => MetricValueV1Schema)),
+  watermark: z.string(),
+});
+export type CostsReadModelV1 = z.infer<typeof CostsReadModelV1Schema>;
+
+export const CoverageStateV1Schema = z.enum(["capped", "known", "partial", "sampled", "stale", "unknown"]);
+export type CoverageStateV1 = z.infer<typeof CoverageStateV1Schema>;
 
 export const CoveringTestV1Schema = z.object({
   file_path: z.string(),
@@ -408,6 +469,220 @@ export const DeadlineSchema = z.object({
 });
 export type Deadline = z.infer<typeof DeadlineSchema>;
 
+export const DeliveryCiTimelineV1Schema = z.object({
+  items: z.array(z.unknown()),
+});
+export type DeliveryCiTimelineV1 = z.infer<typeof DeliveryCiTimelineV1Schema>;
+
+/** Bounded commit timeline shared by Delivery and Loom. */
+export const DeliveryCommitTimelineV1Schema = z.object({
+  items: z.array(z.lazy(() => DeliveryCommitV1Schema)),
+  truncated: z.boolean(),
+});
+export type DeliveryCommitTimelineV1 = z.infer<typeof DeliveryCommitTimelineV1Schema>;
+
+export const DeliveryCommitV1Schema = z.object({
+  author_at_micros: z.number().int(),
+  author_email: z.string(),
+  author_name: z.string(),
+  commit: z.string(),
+  committer_at_micros: z.number().int(),
+  subject: z.string(),
+});
+export type DeliveryCommitV1 = z.infer<typeof DeliveryCommitV1Schema>;
+
+export const DeliveryFailureLocalizationTimelineV1Schema = z.object({
+  items: z.array(z.unknown()),
+});
+export type DeliveryFailureLocalizationTimelineV1 = z.infer<typeof DeliveryFailureLocalizationTimelineV1Schema>;
+
+export const DeliveryGenerationComparisonV1Schema = z.enum(["behind", "current"]);
+export type DeliveryGenerationComparisonV1 = z.infer<typeof DeliveryGenerationComparisonV1Schema>;
+
+/** Generation comparison shared by Delivery and any timeline consumer. */
+export const DeliveryGenerationFreshnessV1Schema = z.object({
+  comparison: z.lazy(() => DeliveryGenerationComparisonV1Schema),
+  head_commit: z.string(),
+  indexed_commit: z.string(),
+});
+export type DeliveryGenerationFreshnessV1 = z.infer<typeof DeliveryGenerationFreshnessV1Schema>;
+
+export const DeliveryGitHeadV1Schema = z.discriminatedUnion("state", [z.object({
+  branch: z.string(),
+  commit: z.string(),
+  state: z.literal("attached"),
+}), z.object({
+  commit: z.string(),
+  state: z.literal("detached"),
+}), z.object({
+  branch: z.string(),
+  state: z.literal("unborn"),
+})]);
+export type DeliveryGitHeadV1 = z.infer<typeof DeliveryGitHeadV1Schema>;
+
+export const DeliveryGitStatusV1Schema = z.object({
+  changed_paths: z.array(z.string()),
+  conflicted: z.number().int(),
+  head: z.lazy(() => DeliveryGitHeadV1Schema),
+  ignored: z.number().int(),
+  operation: z.string(),
+  repository: z.string(),
+  schema_version: z.string(),
+  staged: z.number().int(),
+  unstaged: z.number().int(),
+  untracked: z.number().int(),
+});
+export type DeliveryGitStatusV1 = z.infer<typeof DeliveryGitStatusV1Schema>;
+
+export const DeliveryOverviewV1Schema = z.object({
+  changes: z.lazy(() => DeliveryProjectionV1Schema),
+  ci_checks: z.lazy(() => DeliveryProjectionV15Schema),
+  commits: z.lazy(() => DeliveryProjectionV12Schema),
+  failure_localization: z.lazy(() => DeliveryProjectionV16Schema),
+  generation_freshness: z.lazy(() => DeliveryProjectionV18Schema),
+  pull_requests: z.lazy(() => DeliveryProjectionV13Schema),
+  releases: z.lazy(() => DeliveryProjectionV17Schema),
+  review_comments: z.lazy(() => DeliveryProjectionV14Schema),
+});
+export type DeliveryOverviewV1 = z.infer<typeof DeliveryOverviewV1Schema>;
+
+/** One reusable source projection. Absence never collapses into an empty list. */
+export const DeliveryProjectionV1Schema = z.discriminatedUnion("state", [z.object({
+  state: z.literal("ready"),
+  value: z.lazy(() => DeliveryGitStatusV1Schema),
+}), z.object({
+  reason: z.string(),
+  required_authority: z.string(),
+  state: z.literal("unavailable"),
+}), z.object({
+  reason: z.string(),
+  required_authority: z.string(),
+  state: z.literal("unsupported"),
+})]);
+export type DeliveryProjectionV1 = z.infer<typeof DeliveryProjectionV1Schema>;
+
+/** One reusable source projection. Absence never collapses into an empty list. */
+export const DeliveryProjectionV12Schema = z.discriminatedUnion("state", [z.object({
+  state: z.literal("ready"),
+  value: z.lazy(() => DeliveryCommitTimelineV1Schema),
+}), z.object({
+  reason: z.string(),
+  required_authority: z.string(),
+  state: z.literal("unavailable"),
+}), z.object({
+  reason: z.string(),
+  required_authority: z.string(),
+  state: z.literal("unsupported"),
+})]);
+export type DeliveryProjectionV12 = z.infer<typeof DeliveryProjectionV12Schema>;
+
+/** One reusable source projection. Absence never collapses into an empty list. */
+export const DeliveryProjectionV13Schema = z.discriminatedUnion("state", [z.object({
+  state: z.literal("ready"),
+  value: z.lazy(() => DeliveryPullRequestTimelineV1Schema),
+}), z.object({
+  reason: z.string(),
+  required_authority: z.string(),
+  state: z.literal("unavailable"),
+}), z.object({
+  reason: z.string(),
+  required_authority: z.string(),
+  state: z.literal("unsupported"),
+})]);
+export type DeliveryProjectionV13 = z.infer<typeof DeliveryProjectionV13Schema>;
+
+/** One reusable source projection. Absence never collapses into an empty list. */
+export const DeliveryProjectionV14Schema = z.discriminatedUnion("state", [z.object({
+  state: z.literal("ready"),
+  value: z.lazy(() => DeliveryReviewTimelineV1Schema),
+}), z.object({
+  reason: z.string(),
+  required_authority: z.string(),
+  state: z.literal("unavailable"),
+}), z.object({
+  reason: z.string(),
+  required_authority: z.string(),
+  state: z.literal("unsupported"),
+})]);
+export type DeliveryProjectionV14 = z.infer<typeof DeliveryProjectionV14Schema>;
+
+/** One reusable source projection. Absence never collapses into an empty list. */
+export const DeliveryProjectionV15Schema = z.discriminatedUnion("state", [z.object({
+  state: z.literal("ready"),
+  value: z.lazy(() => DeliveryCiTimelineV1Schema),
+}), z.object({
+  reason: z.string(),
+  required_authority: z.string(),
+  state: z.literal("unavailable"),
+}), z.object({
+  reason: z.string(),
+  required_authority: z.string(),
+  state: z.literal("unsupported"),
+})]);
+export type DeliveryProjectionV15 = z.infer<typeof DeliveryProjectionV15Schema>;
+
+/** One reusable source projection. Absence never collapses into an empty list. */
+export const DeliveryProjectionV16Schema = z.discriminatedUnion("state", [z.object({
+  state: z.literal("ready"),
+  value: z.lazy(() => DeliveryFailureLocalizationTimelineV1Schema),
+}), z.object({
+  reason: z.string(),
+  required_authority: z.string(),
+  state: z.literal("unavailable"),
+}), z.object({
+  reason: z.string(),
+  required_authority: z.string(),
+  state: z.literal("unsupported"),
+})]);
+export type DeliveryProjectionV16 = z.infer<typeof DeliveryProjectionV16Schema>;
+
+/** One reusable source projection. Absence never collapses into an empty list. */
+export const DeliveryProjectionV17Schema = z.discriminatedUnion("state", [z.object({
+  state: z.literal("ready"),
+  value: z.lazy(() => DeliveryReleaseTimelineV1Schema),
+}), z.object({
+  reason: z.string(),
+  required_authority: z.string(),
+  state: z.literal("unavailable"),
+}), z.object({
+  reason: z.string(),
+  required_authority: z.string(),
+  state: z.literal("unsupported"),
+})]);
+export type DeliveryProjectionV17 = z.infer<typeof DeliveryProjectionV17Schema>;
+
+/** One reusable source projection. Absence never collapses into an empty list. */
+export const DeliveryProjectionV18Schema = z.discriminatedUnion("state", [z.object({
+  state: z.literal("ready"),
+  value: z.lazy(() => DeliveryGenerationFreshnessV1Schema),
+}), z.object({
+  reason: z.string(),
+  required_authority: z.string(),
+  state: z.literal("unavailable"),
+}), z.object({
+  reason: z.string(),
+  required_authority: z.string(),
+  state: z.literal("unsupported"),
+})]);
+export type DeliveryProjectionV18 = z.infer<typeof DeliveryProjectionV18Schema>;
+
+/** Placeholder value shapes are intentionally concrete so later authority
+mounts preserve this route rather than forcing consumers onto private APIs. */
+export const DeliveryPullRequestTimelineV1Schema = z.object({
+  items: z.array(z.unknown()),
+});
+export type DeliveryPullRequestTimelineV1 = z.infer<typeof DeliveryPullRequestTimelineV1Schema>;
+
+export const DeliveryReleaseTimelineV1Schema = z.object({
+  items: z.array(z.unknown()),
+});
+export type DeliveryReleaseTimelineV1 = z.infer<typeof DeliveryReleaseTimelineV1Schema>;
+
+export const DeliveryReviewTimelineV1Schema = z.object({
+  items: z.array(z.unknown()),
+});
+export type DeliveryReviewTimelineV1 = z.infer<typeof DeliveryReviewTimelineV1Schema>;
+
 /** Whether an owning operation requires an explicit human confirmation before it
 may perform its admitted mutating effect. */
 export const DoctorConfirmationRequirementV1Schema = z.union([z.literal("required"), z.literal("not_required")]);
@@ -522,7 +797,7 @@ export type DoctorOwningOperationRefV1 = z.infer<typeof DoctorOwningOperationRef
 
 The kernel names the owner so a transport can route confirmation and dispatch
 to the correct surface; it never dispatches itself. */
-export const DoctorOwningSurfaceV1Schema = z.union([z.literal("configuration_control_plane"), z.literal("storage_runtime"), z.literal("daemon_runtime"), z.literal("host_integration"), z.literal("semantic_index_runtime"), z.literal("feedback_read")]);
+export const DoctorOwningSurfaceV1Schema = z.union([z.literal("configuration_control_plane"), z.literal("storage_runtime"), z.literal("daemon_runtime"), z.literal("host_integration"), z.literal("semantic_index_runtime")]);
 export type DoctorOwningSurfaceV1 = z.infer<typeof DoctorOwningSurfaceV1Schema>;
 
 export const DoctorRemediationApplyRequestV1Schema = z.object({
@@ -676,6 +951,22 @@ export type EffectReceipt = z.infer<typeof EffectReceiptSchema>;
 export const EffectTerminationSchema = z.enum(["cancelled", "completed", "effect_unknown", "failed", "partial", "timed_out"]);
 export type EffectTermination = z.infer<typeof EffectTerminationSchema>;
 
+export const EnvironmentSettingsPayloadV1Schema = z.object({
+  global_accounting_enabled: z.boolean(),
+  global_accounting_mode: z.string(),
+  pricing_offline: z.boolean(),
+  variables: z.array(z.lazy(() => EnvironmentVariableV1Schema)),
+});
+export type EnvironmentSettingsPayloadV1 = z.infer<typeof EnvironmentSettingsPayloadV1Schema>;
+
+export const EnvironmentVariableV1Schema = z.object({
+  active: z.boolean(),
+  description: z.string(),
+  name: z.string(),
+  value: z.string().nullable(),
+});
+export type EnvironmentVariableV1 = z.infer<typeof EnvironmentVariableV1Schema>;
+
 export const ExplorerFinalityV1Schema = z.enum(["cancelled", "complete", "error", "partial", "pending"]);
 export type ExplorerFinalityV1 = z.infer<typeof ExplorerFinalityV1Schema>;
 
@@ -704,6 +995,21 @@ export const ExplorerQueryRunV1Schema = z.object({
 });
 export type ExplorerQueryRunV1 = z.infer<typeof ExplorerQueryRunV1Schema>;
 
+export const ExplorerReadContextV1Schema = z.object({
+  counts: z.lazy(() => ExplorerSessionCountsV1Schema),
+  has_more: z.boolean(),
+  has_more_messages: z.boolean(),
+  has_more_summary_nodes: z.boolean(),
+  limit: z.number().int(),
+  messages: z.array(z.lazy(() => LcmMessageV1Schema)),
+  offset: z.number().int(),
+  order: z.string(),
+  session_id: z.string(),
+  storage_scope: z.string(),
+  summary_nodes: z.array(z.lazy(() => LcmSummaryNodeV1Schema)),
+});
+export type ExplorerReadContextV1 = z.infer<typeof ExplorerReadContextV1Schema>;
+
 export const ExplorerResultPageV1Schema = z.object({
   limit: z.number().int(),
   metadata: z.unknown(),
@@ -716,6 +1022,22 @@ export type ExplorerResultPageV1 = z.infer<typeof ExplorerResultPageV1Schema>;
 
 export const ExplorerRunStateV1Schema = z.enum(["cancelled", "completed", "error", "partial", "pending"]);
 export type ExplorerRunStateV1 = z.infer<typeof ExplorerRunStateV1Schema>;
+
+export const ExplorerSessionCountsV1Schema = z.object({
+  message_count: z.number().int(),
+  source_token_count: z.number().int(),
+  summary_node_count: z.number().int(),
+  summary_token_count: z.number().int(),
+  token_estimate_total: z.number().int(),
+});
+export type ExplorerSessionCountsV1 = z.infer<typeof ExplorerSessionCountsV1Schema>;
+
+export const ExplorerSessionSizeV1Schema = z.object({
+  counts: z.lazy(() => ExplorerSessionCountsV1Schema),
+  session_id: z.string(),
+  storage_scope: z.string(),
+});
+export type ExplorerSessionSizeV1 = z.infer<typeof ExplorerSessionSizeV1Schema>;
 
 export const ExplorerSourceIdV1Schema = z.enum(["code_graph", "knowledge", "sessions"]);
 export type ExplorerSourceIdV1 = z.infer<typeof ExplorerSourceIdV1Schema>;
@@ -776,6 +1098,164 @@ export type FactMatchesMeasurementV1 = z.infer<typeof FactMatchesMeasurementV1Sc
 export const GitHubStackedPullRequestPolicyV1Schema = z.enum(["disabled", "probe_private_preview"]);
 export type GitHubStackedPullRequestPolicyV1 = z.infer<typeof GitHubStackedPullRequestPolicyV1Schema>;
 
+export const GraphCappedV1Schema = z.object({
+  edges: z.boolean(),
+  nodes: z.boolean(),
+});
+export type GraphCappedV1 = z.infer<typeof GraphCappedV1Schema>;
+
+export const GraphEdgeV1Schema = z.object({
+  kind: z.string(),
+  line: z.number().int().nullable(),
+  source: z.string(),
+  source_name: z.string().nullable(),
+  target: z.string(),
+  target_name: z.string().nullable(),
+});
+export type GraphEdgeV1 = z.infer<typeof GraphEdgeV1Schema>;
+
+export const GraphKindCountV1Schema = z.object({
+  count: z.number().int(),
+  kind: z.string(),
+});
+export type GraphKindCountV1 = z.infer<typeof GraphKindCountV1Schema>;
+
+export const GraphLanguageCountV1Schema = z.object({
+  count: z.number().int(),
+  language: z.string(),
+});
+export type GraphLanguageCountV1 = z.infer<typeof GraphLanguageCountV1Schema>;
+
+export const GraphLargestFileV1Schema = z.object({
+  node_count: z.number().int(),
+  path: z.string(),
+  size: z.number().int(),
+});
+export type GraphLargestFileV1 = z.infer<typeof GraphLargestFileV1Schema>;
+
+export const GraphLimitsV1Schema = z.object({
+  edges: z.number().int(),
+  nodes: z.number().int(),
+});
+export type GraphLimitsV1 = z.infer<typeof GraphLimitsV1Schema>;
+
+export const GraphNeighborsPayloadV1Schema = z.object({
+  callees: z.array(z.lazy(() => GraphNodeV1Schema)),
+  callers: z.array(z.lazy(() => GraphNodeV1Schema)),
+  depth: z.number().int(),
+  edges: z.array(z.lazy(() => GraphEdgeV1Schema)),
+  edges_by_kind: z.array(z.lazy(() => GraphKindCountV1Schema)),
+  limit: z.number().int(),
+  node_id: z.string(),
+});
+export type GraphNeighborsPayloadV1 = z.infer<typeof GraphNeighborsPayloadV1Schema>;
+
+export const GraphNodePayloadV1Schema = z.object({
+  node: z.lazy(() => GraphNodeV1Schema),
+});
+export type GraphNodePayloadV1 = z.infer<typeof GraphNodePayloadV1Schema>;
+
+export const GraphNodeV1Schema = z.object({
+  assertions: z.number().int().nullable(),
+  attrs_start_line: z.number().int().nullable(),
+  branches: z.number().int().nullable(),
+  degree: z.number().int().nullable(),
+  doc: z.string().nullable(),
+  edge_kind: z.string().nullable(),
+  edge_line: z.number().int().nullable(),
+  end_column: z.number().int().nullable(),
+  end_line: z.number().int().nullable(),
+  file_path: z.string().nullable(),
+  id: z.string(),
+  is_async: z.number().int().nullable(),
+  kind: z.string(),
+  loops: z.number().int().nullable(),
+  max_nesting: z.number().int().nullable(),
+  name: z.string().nullable(),
+  parent_id: z.string().nullable(),
+  qualified_name: z.string().nullable(),
+  returns: z.number().int().nullable(),
+  signature: z.string().nullable(),
+  span: z.union([z.lazy(() => GraphSpanV1Schema), z.null()]),
+  start_column: z.number().int().nullable(),
+  start_line: z.number().int().nullable(),
+  unchecked_calls: z.number().int().nullable(),
+  unsafe_blocks: z.number().int().nullable(),
+  updated_at: z.number().int().nullable(),
+  visibility: z.string().nullable(),
+});
+export type GraphNodeV1 = z.infer<typeof GraphNodeV1Schema>;
+
+export const GraphOverviewPayloadV1Schema = z.object({
+  edges_by_kind: z.array(z.lazy(() => GraphKindCountV1Schema)),
+  files_by_language: z.array(z.lazy(() => GraphLanguageCountV1Schema)),
+  largest_files: z.array(z.lazy(() => GraphLargestFileV1Schema)),
+  nodes_by_kind: z.array(z.lazy(() => GraphKindCountV1Schema)),
+  path: z.string(),
+  top_connected: z.array(z.lazy(() => GraphNodeV1Schema)),
+  totals: z.lazy(() => GraphTotalsV1Schema),
+});
+export type GraphOverviewPayloadV1 = z.infer<typeof GraphOverviewPayloadV1Schema>;
+
+export const GraphPathPayloadV1Schema = z.object({
+  edges: z.array(z.lazy(() => GraphEdgeV1Schema)),
+  found: z.boolean(),
+  from: z.string(),
+  max_depth: z.number().int(),
+  nodes: z.array(z.lazy(() => GraphNodeV1Schema)),
+  path: z.array(z.string()),
+  to: z.string(),
+});
+export type GraphPathPayloadV1 = z.infer<typeof GraphPathPayloadV1Schema>;
+
+export const GraphScopeRecordSchema = z.object({
+  branch_name: z.string(),
+  db_relpath: z.string(),
+  graph_scope_id: z.string(),
+  last_synced_at: z.number().int().nullable(),
+  parent_scope_id: z.string().nullable(),
+  project_id: z.string(),
+  store_id: z.string(),
+  writable: z.boolean(),
+});
+export type GraphScopeRecord = z.infer<typeof GraphScopeRecordSchema>;
+
+export const GraphSearchPayloadV1Schema = z.object({
+  count: z.number().int(),
+  limit: z.number().int(),
+  offset: z.number().int(),
+  query: z.string(),
+  results: z.array(z.lazy(() => GraphNodeV1Schema)),
+  total: z.number().int(),
+});
+export type GraphSearchPayloadV1 = z.infer<typeof GraphSearchPayloadV1Schema>;
+
+export const GraphSpanV1Schema = z.object({
+  attrs_start_line: z.number().int(),
+  end_column: z.number().int(),
+  end_line: z.number().int(),
+  start_column: z.number().int(),
+  start_line: z.number().int(),
+});
+export type GraphSpanV1 = z.infer<typeof GraphSpanV1Schema>;
+
+export const GraphSubgraphPayloadV1Schema = z.object({
+  capped: z.lazy(() => GraphCappedV1Schema),
+  edges: z.array(z.lazy(() => GraphEdgeV1Schema)),
+  limits: z.lazy(() => GraphLimitsV1Schema),
+  mode: z.string(),
+  nodes: z.array(z.lazy(() => GraphNodeV1Schema)),
+  seed_id: z.string().nullable(),
+});
+export type GraphSubgraphPayloadV1 = z.infer<typeof GraphSubgraphPayloadV1Schema>;
+
+export const GraphTotalsV1Schema = z.object({
+  edges: z.number().int(),
+  files: z.number().int(),
+  nodes: z.number().int(),
+});
+export type GraphTotalsV1 = z.infer<typeof GraphTotalsV1Schema>;
+
 export const HistoryRewritePolicyV1Schema = z.literal("forbid_force_and_rebase");
 export type HistoryRewritePolicyV1 = z.infer<typeof HistoryRewritePolicyV1Schema>;
 
@@ -796,9 +1276,133 @@ export const IncomingCallEdgeV1Schema = z.object({
 });
 export type IncomingCallEdgeV1 = z.infer<typeof IncomingCallEdgeV1Schema>;
 
+export const LcmMessageV1Schema = z.object({
+  content: z.string().nullable(),
+  message_id: z.string(),
+  metadata_json: z.string().nullable(),
+  ordinal: z.number().int().nullable(),
+  pinned: z.number().int().nullable(),
+  role: z.string().nullable(),
+  session_id: z.string(),
+  source: z.string().nullable(),
+  storage_kind: z.string().nullable(),
+  store_id: z.number().int().nullable(),
+  summary_node_ids: z.array(z.unknown()),
+  timestamp: z.number().int().nullable(),
+  token_estimate: z.number().int().nullable(),
+  tool_name: z.string().nullable(),
+});
+export type LcmMessageV1 = z.infer<typeof LcmMessageV1Schema>;
+
+export const LcmSessionCountsV1Schema = z.object({
+  message_count: z.number().int(),
+  source_token_count: z.number().int(),
+  summary_node_count: z.number().int(),
+  summary_token_count: z.number().int(),
+  token_estimate_total: z.number().int(),
+});
+export type LcmSessionCountsV1 = z.infer<typeof LcmSessionCountsV1Schema>;
+
+export const LcmSessionPayloadV1Schema = z.object({
+  counts: z.lazy(() => LcmSessionCountsV1Schema),
+  exists: z.boolean(),
+  has_more: z.boolean(),
+  has_more_messages: z.boolean(),
+  has_more_summary_nodes: z.boolean(),
+  limit: z.number().int(),
+  messages: z.array(z.lazy(() => LcmMessageV1Schema)),
+  offset: z.number().int(),
+  order: z.string(),
+  path: z.string(),
+  session_id: z.string(),
+  storage_scope: z.string(),
+  summary_nodes: z.array(z.lazy(() => LcmSummaryNodeV1Schema)),
+});
+export type LcmSessionPayloadV1 = z.infer<typeof LcmSessionPayloadV1Schema>;
+
+export const LcmSummaryNodeV1Schema = z.object({
+  category: z.string(),
+  created_at: z.number().int(),
+  depth: z.number().int(),
+  expand_hint: z.string(),
+  latest_at: z.number().int().nullable(),
+  node_id: z.string(),
+  session_id: z.string(),
+  source_token_count: z.number().int(),
+  source_type: z.string(),
+  summary: z.string(),
+  token_count: z.number().int(),
+});
+export type LcmSummaryNodeV1 = z.infer<typeof LcmSummaryNodeV1Schema>;
+
+export const LcmTimelineBucketV1Schema = z.object({
+  bucket: z.string(),
+  count: z.number().int(),
+  token_estimate: z.number().int(),
+});
+export type LcmTimelineBucketV1 = z.infer<typeof LcmTimelineBucketV1Schema>;
+
+export const LcmTimelineCoverageV1Schema = z.object({
+  limit: z.number().int(),
+  next_before_bucket: z.string().nullable(),
+  ordering: z.string(),
+  returned_buckets: z.number().int(),
+  total_dated_buckets: z.number().int(),
+  truncated: z.boolean(),
+});
+export type LcmTimelineCoverageV1 = z.infer<typeof LcmTimelineCoverageV1Schema>;
+
+export const LcmTimelinePayloadV1Schema = z.object({
+  bucket: z.string(),
+  buckets: z.array(z.lazy(() => LcmTimelineBucketV1Schema)),
+  coverage: z.union([z.lazy(() => LcmTimelineCoverageV1Schema), z.null()]),
+  exists: z.boolean(),
+  node_buckets: z.array(z.object({})),
+  path: z.string(),
+  session_id: z.string().nullable(),
+  storage_scope: z.string(),
+  undated: z.object({}),
+});
+export type LcmTimelinePayloadV1 = z.infer<typeof LcmTimelinePayloadV1Schema>;
+
 /** Strongly typed algorithm-tagged integrity digest: `LocatorDigest`. */
 export const LocatorDigestSchema = z.string();
 export type LocatorDigest = z.infer<typeof LocatorDigestSchema>;
+
+export const LoomBranchSpanV1Schema = z.object({
+  branch: z.string().nullable(),
+  event_count: z.number().int(),
+  first_at: z.number().int(),
+  last_at: z.number().int(),
+  provider: z.string(),
+  session_id: z.string(),
+  source: z.string(),
+  worktree: z.string(),
+});
+export type LoomBranchSpanV1 = z.infer<typeof LoomBranchSpanV1Schema>;
+
+export const LoomCommitV1Schema = z.object({
+  branch: z.string().nullable(),
+  commit_sha: z.string(),
+  committed_at: z.number().int(),
+  confidence: z.number(),
+  evidence: z.string(),
+  provider: z.string(),
+  relation: z.string(),
+  session_id: z.string(),
+  span_overlap_kind: z.string().nullable(),
+  worktree: z.string().nullable(),
+});
+export type LoomCommitV1 = z.infer<typeof LoomCommitV1Schema>;
+
+export const LoomEditedFileV1Schema = z.object({
+  change_type: z.string().nullable(),
+  hunks: z.number().int().nullable(),
+  path: z.string(),
+  provider: z.string(),
+  session_id: z.string(),
+});
+export type LoomEditedFileV1 = z.infer<typeof LoomEditedFileV1Schema>;
 
 export const LoomFileSessionProjectionV1Schema = z.object({
   authority: z.string(),
@@ -810,9 +1414,333 @@ export const LoomFileSessionProjectionV1Schema = z.object({
 });
 export type LoomFileSessionProjectionV1 = z.infer<typeof LoomFileSessionProjectionV1Schema>;
 
+export const LoomSessionModelV1Schema = z.object({
+  model: z.string().nullable(),
+});
+export type LoomSessionModelV1 = z.infer<typeof LoomSessionModelV1Schema>;
+
+export const LoomSessionRowV1Schema = z.object({
+  edited_files_recorded: z.boolean(),
+  ended_at: z.number().int().nullable(),
+  is_subagent: z.boolean(),
+  last_message_at: z.number().int().nullable(),
+  messages: z.number().int(),
+  models: z.array(z.lazy(() => LoomSessionModelV1Schema)),
+  provider: z.string(),
+  session_id: z.string(),
+  started_at: z.number().int().nullable(),
+  title: z.string().nullable(),
+});
+export type LoomSessionRowV1 = z.infer<typeof LoomSessionRowV1Schema>;
+
+export const LoomSourceCoverageV1Schema = z.object({
+  completeness: z.string(),
+  eligible: z.number().int().nullable(),
+  examined: z.number().int().nullable(),
+  matched: z.number().int().nullable(),
+  omitted: z.number().int().nullable(),
+  reason: z.string(),
+  unit: z.string().nullable(),
+});
+export type LoomSourceCoverageV1 = z.infer<typeof LoomSourceCoverageV1Schema>;
+
+export const LoomSourceStatusV1Schema = z.object({
+  authority: z.string().nullable(),
+  coverage: z.lazy(() => LoomSourceCoverageV1Schema),
+  granularity: z.string(),
+  id: z.string(),
+  item_count: z.number().int().nullable(),
+  label: z.string(),
+  providers: z.array(z.string()),
+  reason: z.string().nullable(),
+  required_authority: z.string().nullable(),
+  state: z.lazy(() => DashboardDomainStateV1Schema),
+});
+export type LoomSourceStatusV1 = z.infer<typeof LoomSourceStatusV1Schema>;
+
+export const LoomTemporalPayloadV1Schema = z.object({
+  available: z.boolean(),
+  branch_spans: z.array(z.lazy(() => LoomBranchSpanV1Schema)),
+  commits: z.array(z.lazy(() => LoomCommitV1Schema)),
+  edited_files: z.array(z.lazy(() => LoomEditedFileV1Schema)),
+  sessions: z.array(z.lazy(() => LoomSessionRowV1Schema)),
+  source_statuses: z.array(z.lazy(() => LoomSourceStatusV1Schema)),
+  temporal_refresh: z.lazy(() => LoomTemporalRefreshV1Schema),
+  total: z.number().int(),
+});
+export type LoomTemporalPayloadV1 = z.infer<typeof LoomTemporalPayloadV1Schema>;
+
+export const LoomTemporalRefreshV1Schema = z.object({
+  active_generations: z.number().int(),
+  authority: z.string(),
+  latest_activated_at_micros: z.number().int().nullable(),
+  state: z.lazy(() => DashboardDomainStateV1Schema),
+});
+export type LoomTemporalRefreshV1 = z.infer<typeof LoomTemporalRefreshV1Schema>;
+
 /** Strongly typed algorithm-tagged integrity digest: `ManifestDigest`. */
 export const ManifestDigestSchema = z.string();
 export type ManifestDigest = z.infer<typeof ManifestDigestSchema>;
+
+export const MemoryBankV1Schema = z.object({
+  bank_name: z.string(),
+  bundled_fact_count: z.number().int(),
+  dim: z.number().int(),
+  fact_count: z.number().int(),
+  updated_at: z.number().int().nullable(),
+});
+export type MemoryBankV1 = z.infer<typeof MemoryBankV1Schema>;
+
+export const MemoryCategoryCountV1Schema = z.object({
+  category: z.string(),
+  count: z.number().int(),
+});
+export type MemoryCategoryCountV1 = z.infer<typeof MemoryCategoryCountV1Schema>;
+
+export const MemoryEntityRowV1Schema = z.object({
+  aliases: z.array(z.string()),
+  created_at: z.number().int(),
+  entity_id: z.number().int().nullable(),
+  entity_type: z.string().nullable(),
+  fact_count: z.number().int(),
+  name: z.string(),
+});
+export type MemoryEntityRowV1 = z.infer<typeof MemoryEntityRowV1Schema>;
+
+export const MemoryEntityTypeCountV1Schema = z.object({
+  count: z.number().int(),
+  entity_type: z.string(),
+});
+export type MemoryEntityTypeCountV1 = z.infer<typeof MemoryEntityTypeCountV1Schema>;
+
+export const MemoryFactDetailPayloadV1Schema = z.object({
+  error: z.string(),
+  fact: z.union([z.lazy(() => MemoryFactRowV1Schema), z.null()]),
+});
+export type MemoryFactDetailPayloadV1 = z.infer<typeof MemoryFactDetailPayloadV1Schema>;
+
+export const MemoryFactRowV1Schema = z.object({
+  access_count: z.number().int(),
+  category: z.string().nullable(),
+  content: z.string().nullable(),
+  created_at: z.number().int(),
+  entities: z.array(z.lazy(() => MemoryEntityRowV1Schema)).nullable(),
+  fact_id: z.number().int(),
+  has_hrr: z.number().int().nullable(),
+  helpful_count: z.number().int(),
+  last_recalled_at: z.number().int().nullable(),
+  metadata: z.unknown(),
+  retrieval_count: z.number().int(),
+  tags: z.array(z.string()).nullable(),
+  trust_score: z.number(),
+  unhelpful_count: z.number().int(),
+  updated_at: z.number().int(),
+});
+export type MemoryFactRowV1 = z.infer<typeof MemoryFactRowV1Schema>;
+
+export const MemoryFactsCoverageV1Schema = z.object({
+  completeness: z.string(),
+  limit: z.number().int(),
+  query_applied_after_limit: z.boolean(),
+});
+export type MemoryFactsCoverageV1 = z.infer<typeof MemoryFactsCoverageV1Schema>;
+
+/** Fact-store adoption funnel: seen (retrieved/accessed) vs. rated
+(helpful/unhelpful). A dead funnel — facts seen many times but never
+rated — means trust scores stay entirely seed-time values, never earned. */
+export const MemoryFeedbackFunnelSchema = z.object({
+  access_count_total: z.number().int(),
+  feedback_total: z.number().int(),
+  rated_fact_count: z.number().int(),
+  retrieval_count_total: z.number().int(),
+  retrieved_fact_count: z.number().int(),
+  seen_to_feedback_ratio: z.number().int().nullable(),
+});
+export type MemoryFeedbackFunnel = z.infer<typeof MemoryFeedbackFunnelSchema>;
+
+export const MemoryFeedbackHistoryRepairV1Schema = z.object({
+  processed: z.number().int(),
+  remaining: z.number().int().nullable(),
+  state: z.string(),
+});
+export type MemoryFeedbackHistoryRepairV1 = z.infer<typeof MemoryFeedbackHistoryRepairV1Schema>;
+
+export const MemoryGrowthPointV1Schema = z.object({
+  cumulative_facts: z.number().int(),
+  date: z.string(),
+  facts: z.number().int(),
+});
+export type MemoryGrowthPointV1 = z.infer<typeof MemoryGrowthPointV1Schema>;
+
+export const MemoryHolographicPayloadV1Schema = z.object({
+  entities: z.array(z.lazy(() => MemoryEntityRowV1Schema)),
+  error: z.string(),
+  exists: z.boolean(),
+  facts: z.array(z.lazy(() => MemoryFactRowV1Schema)),
+  facts_coverage: z.lazy(() => MemoryFactsCoverageV1Schema),
+  graph: z.object({}),
+  overview: z.union([z.lazy(() => MemoryOverviewSummaryV1Schema), z.null()]),
+  path: z.string(),
+  reads: z.object({}),
+});
+export type MemoryHolographicPayloadV1 = z.infer<typeof MemoryHolographicPayloadV1Schema>;
+
+export const MemoryHrrCoverageV1Schema = z.object({
+  bank_fact_count: z.number().int().nullable(),
+  bank_name: z.string().nullable(),
+  category: z.string(),
+  coverage: z.number(),
+  dim: z.number().int().nullable(),
+  facts: z.number().int(),
+  hrr_vectors: z.number().int(),
+  status: z.string(),
+  updated_at: z.number().int().nullable(),
+});
+export type MemoryHrrCoverageV1 = z.infer<typeof MemoryHrrCoverageV1Schema>;
+
+export const MemoryOverviewPayloadV1Schema = z.object({
+  holographic: z.lazy(() => MemoryHolographicPayloadV1Schema),
+  limit: z.number().int(),
+  providers: z.object({}),
+  query: z.string(),
+});
+export type MemoryOverviewPayloadV1 = z.infer<typeof MemoryOverviewPayloadV1Schema>;
+
+export const MemoryOverviewSummaryV1Schema = z.object({
+  banks: z.number().int(),
+  categories: z.array(z.lazy(() => MemoryCategoryCountV1Schema)),
+  entities: z.number().int(),
+  entity_types: z.array(z.lazy(() => MemoryEntityTypeCountV1Schema)),
+  facts: z.number().int(),
+  growth: z.array(z.lazy(() => MemoryGrowthPointV1Schema)),
+  hrr_coverage: z.array(z.lazy(() => MemoryHrrCoverageV1Schema)),
+  memory_banks: z.array(z.lazy(() => MemoryBankV1Schema)),
+  trust_histogram: z.array(z.lazy(() => MemoryTrustBucketV1Schema)),
+});
+export type MemoryOverviewSummaryV1 = z.infer<typeof MemoryOverviewSummaryV1Schema>;
+
+export const MemoryReadStatusV1Schema = z.object({
+  error: z.string().nullable().optional(),
+  state: z.string(),
+});
+export type MemoryReadStatusV1 = z.infer<typeof MemoryReadStatusV1Schema>;
+
+export const MemoryRepairStatsSchema = z.object({
+  banks_rebuilt: z.number().int(),
+  missing_vectors_repaired: z.number().int(),
+});
+export type MemoryRepairStats = z.infer<typeof MemoryRepairStatsSchema>;
+
+export const MemoryStatusSchema = z.object({
+  algebra_name: z.string(),
+  bank_count: z.number().int(),
+  below_default_recall_threshold_count: z.number().int(),
+  entity_count: z.number().int(),
+  estimated_capacity: z.number().int(),
+  fact_count: z.number().int(),
+  feedback_funnel: z.lazy(() => MemoryFeedbackFunnelSchema),
+  helpful_count: z.number().int(),
+  hrr_dim: z.number().int(),
+  legacy_backfill_complete: z.boolean(),
+  missing_vector_count: z.number().int(),
+  repair: z.lazy(() => MemoryRepairStatsSchema),
+  trust_025_050_count: z.number().int(),
+  trust_050_075_count: z.number().int(),
+  trust_075_100_count: z.number().int(),
+  trust_0_025_count: z.number().int(),
+  unhelpful_count: z.number().int(),
+});
+export type MemoryStatus = z.infer<typeof MemoryStatusSchema>;
+
+export const MemoryStatusPayloadV1Schema = z.object({
+  error: z.string(),
+  exists: z.boolean(),
+  feedback_history_repair: z.lazy(() => MemoryFeedbackHistoryRepairV1Schema),
+  largest_bank_fact_count: z.number().int(),
+  largest_bank_utilization_pct: z.number(),
+  memory: z.lazy(() => MemoryStatusSchema),
+  path: z.string(),
+});
+export type MemoryStatusPayloadV1 = z.infer<typeof MemoryStatusPayloadV1Schema>;
+
+export const MemoryTrustBucketV1Schema = z.object({
+  bucket: z.number().int(),
+  count: z.number().int(),
+  label: z.string(),
+});
+export type MemoryTrustBucketV1 = z.infer<typeof MemoryTrustBucketV1Schema>;
+
+export const MetricCalibrationV1Schema = z.object({
+  calibration_revision: z.string(),
+  cohort_revision: z.string(),
+  drift_valid: z.boolean(),
+  estimator_revision: z.string(),
+  support: z.number().int(),
+});
+export type MetricCalibrationV1 = z.infer<typeof MetricCalibrationV1Schema>;
+
+export const MetricCohortV1Schema = z.object({
+  descriptor_revision: z.string(),
+  eligible_population: z.string(),
+});
+export type MetricCohortV1 = z.infer<typeof MetricCohortV1Schema>;
+
+export const MetricCoverageV1Schema = z.object({
+  censored: z.number().int(),
+  completed: z.number().int(),
+  eligible: z.number().int().nullable(),
+  excluded: z.number().int(),
+  observed: z.number().int(),
+  state: z.lazy(() => CoverageStateV1Schema),
+  unknown: z.number().int(),
+});
+export type MetricCoverageV1 = z.infer<typeof MetricCoverageV1Schema>;
+
+export const MetricEvidenceClassV1Schema = z.enum(["association", "calibrated_prediction", "measurement"]);
+export type MetricEvidenceClassV1 = z.infer<typeof MetricEvidenceClassV1Schema>;
+
+export const MetricProvenanceV1Schema = z.object({
+  projector_revision: z.string(),
+  source: z.lazy(() => MetricSourceV1Schema),
+  source_revision: z.string(),
+  watermark: z.string(),
+});
+export type MetricProvenanceV1 = z.infer<typeof MetricProvenanceV1Schema>;
+
+export const MetricSourceV1Schema = z.enum(["accounting_turn", "observability_envelope", "savings_ledger"]);
+export type MetricSourceV1 = z.infer<typeof MetricSourceV1Schema>;
+
+export const MetricTemporalV1Schema = z.object({
+  baseline_watermark: z.string().nullable(),
+  delta: z.number().nullable(),
+  horizon: z.lazy(() => ObservabilityHorizonV1Schema),
+});
+export type MetricTemporalV1 = z.infer<typeof MetricTemporalV1Schema>;
+
+export const MetricUncertaintyV1Schema = z.object({
+  lower: z.number().nullable(),
+  reason: z.string().nullable(),
+  upper: z.number().nullable(),
+});
+export type MetricUncertaintyV1 = z.infer<typeof MetricUncertaintyV1Schema>;
+
+export const MetricValueV1Schema = z.object({
+  calibration: z.union([z.lazy(() => MetricCalibrationV1Schema), z.null()]),
+  cohort: z.lazy(() => MetricCohortV1Schema),
+  coverage: z.lazy(() => MetricCoverageV1Schema),
+  denominator: z.string(),
+  denominator_value: z.number().int().nullable(),
+  descriptor_revision: z.string(),
+  evidence_class: z.lazy(() => MetricEvidenceClassV1Schema),
+  metric: z.string(),
+  provenance: z.lazy(() => MetricProvenanceV1Schema),
+  temporal: z.lazy(() => MetricTemporalV1Schema),
+  unavailable_reason: z.string().nullable(),
+  uncertainty: z.lazy(() => MetricUncertaintyV1Schema),
+  unit: z.string(),
+  value: z.number().nullable(),
+});
+export type MetricValueV1 = z.infer<typeof MetricValueV1Schema>;
 
 export const NodeRefV1Schema = z.object({
   file_path: z.string(),
@@ -832,6 +1760,22 @@ export const NodeSessionsMeasurementV1Schema = z.object({
   symbol_granularity_reason: z.string(),
 });
 export type NodeSessionsMeasurementV1 = z.infer<typeof NodeSessionsMeasurementV1Schema>;
+
+export const ObservabilityHorizonV1Schema = z.object({
+  since_micros: z.number().int(),
+  until_micros: z.number().int(),
+});
+export type ObservabilityHorizonV1 = z.infer<typeof ObservabilityHorizonV1Schema>;
+
+export const ObservatoryReadModelV1Schema = z.object({
+  authorized_scope_ref: z.string(),
+  current: z.boolean(),
+  horizon: z.lazy(() => ObservabilityHorizonV1Schema),
+  metrics: z.array(z.lazy(() => MetricValueV1Schema)),
+  observed_at_micros: z.number().int(),
+  watermark: z.string(),
+});
+export type ObservatoryReadModelV1 = z.infer<typeof ObservatoryReadModelV1Schema>;
 
 /** Bounded work accounting supplied by an owning port or transaction. */
 export const OperationBudgetUsageSchema = z.object({
@@ -862,9 +1806,128 @@ export type OperationReceipt = z.infer<typeof OperationReceiptSchema>;
 export const OperationTerminationSchema = z.enum(["cancelled", "completed", "effect_unknown", "failed", "partial", "timed_out"]);
 export type OperationTermination = z.infer<typeof OperationTerminationSchema>;
 
+export const PrAutoTrackEntryV1Schema = z.object({
+  branch: z.string(),
+  head_branch: z.string(),
+  pr: z.number().int(),
+});
+export type PrAutoTrackEntryV1 = z.infer<typeof PrAutoTrackEntryV1Schema>;
+
+export const PrAutoTrackPayloadV1Schema = z.object({
+  tracked: z.array(z.lazy(() => PrAutoTrackEntryV1Schema)),
+});
+export type PrAutoTrackPayloadV1 = z.infer<typeof PrAutoTrackPayloadV1Schema>;
+
+export const ProjectAliasRecordSchema = z.object({
+  alias_path: z.string(),
+  last_seen_at: z.number().int(),
+  project_id: z.string(),
+});
+export type ProjectAliasRecord = z.infer<typeof ProjectAliasRecordSchema>;
+
+export const ProjectContextPayloadV1Schema = z.object({
+  aliases: z.array(z.lazy(() => ProjectAliasRecordSchema)),
+  error: z.string().nullable().optional(),
+  is_active: z.boolean().nullable().optional(),
+  project: z.union([z.lazy(() => PublicCodeProjectSchema), z.null()]),
+  status: z.string(),
+  stores: z.array(z.lazy(() => ProjectStoreContextSchema)),
+});
+export type ProjectContextPayloadV1 = z.infer<typeof ProjectContextPayloadV1Schema>;
+
+export const ProjectEditableSettingsV1Schema = z.object({
+  exclude: z.array(z.string()),
+  extract_docstrings: z.boolean(),
+  git_ignore: z.boolean(),
+  include: z.array(z.string()),
+  max_file_size: z.number().int(),
+  sync: z.lazy(() => SyncSettingsV1Schema),
+  telemetry: z.lazy(() => TelemetrySettingsV1Schema),
+  track_call_sites: z.boolean(),
+});
+export type ProjectEditableSettingsV1 = z.infer<typeof ProjectEditableSettingsV1Schema>;
+
 /** Strongly typed canonical identity: `ProjectId`. */
 export const ProjectIdSchema = z.string();
 export type ProjectId = z.infer<typeof ProjectIdSchema>;
+
+export const ProjectRegistryEntrySchema = z.object({
+  alias_count: z.number().int(),
+  artifact_count: z.number().int(),
+  branches: z.array(z.string()),
+  canonical_root: z.string(),
+  default_branch: z.string().nullable(),
+  graph_scope_count: z.number().int(),
+  is_active: z.boolean().nullable().optional(),
+  kind: z.string(),
+  label: z.string(),
+  last_seen_at: z.number().int(),
+  project_id: z.string(),
+  project_root: z.string(),
+  store_count: z.number().int(),
+});
+export type ProjectRegistryEntry = z.infer<typeof ProjectRegistryEntrySchema>;
+
+export const ProjectRegistrySummarySchema = z.object({
+  project_count: z.number().int(),
+  repo_count: z.number().int(),
+  truncated: z.boolean(),
+});
+export type ProjectRegistrySummary = z.infer<typeof ProjectRegistrySummarySchema>;
+
+export const ProjectRepoGroupSchema = z.object({
+  branches: z.array(z.string()),
+  git_common_dir: z.string().nullable(),
+  label: z.string(),
+  project_count: z.number().int(),
+  projects: z.array(z.lazy(() => ProjectRegistryEntrySchema)),
+});
+export type ProjectRepoGroup = z.infer<typeof ProjectRepoGroupSchema>;
+
+export const ProjectSettingsPatchSchema = z.object({
+  exclude: z.array(z.string()).nullable(),
+  expected_revision_id: z.string(),
+  extract_docstrings: z.boolean().nullable(),
+  git_ignore: z.boolean().nullable(),
+  include: z.array(z.string()).nullable(),
+  max_file_size: z.number().int().nullable(),
+  sync: z.union([z.lazy(() => SyncSettingsPatchSchema), z.null()]),
+  telemetry: z.union([z.lazy(() => TelemetrySettingsPatchSchema), z.null()]),
+  track_call_sites: z.boolean().nullable(),
+});
+export type ProjectSettingsPatch = z.infer<typeof ProjectSettingsPatchSchema>;
+
+export const ProjectSettingsPayloadV1Schema = z.object({
+  config: z.lazy(() => ProjectEditableSettingsV1Schema),
+  config_path: z.string(),
+  configuration_revision_id: z.string(),
+  configuration_snapshot_id: z.string(),
+  legacy_config_path: z.string(),
+  legacy_config_read_only: z.boolean(),
+  pr_autotrack: z.lazy(() => PrAutoTrackPayloadV1Schema),
+  tracedecay_dir_gitignored: z.boolean(),
+});
+export type ProjectSettingsPayloadV1 = z.infer<typeof ProjectSettingsPayloadV1Schema>;
+
+export const ProjectsPayloadV1Schema = z.object({
+  active_project_id: z.string().nullable(),
+  active_project_root: z.string(),
+  error: z.string().nullable().optional(),
+  limit: z.number().int(),
+  project_tree: z.array(z.lazy(() => ProjectRepoGroupSchema)).nullable(),
+  projects: z.array(z.lazy(() => PublicCodeProjectSchema)).nullable(),
+  status: z.string(),
+  summary: z.union([z.lazy(() => ProjectRegistrySummarySchema), z.null()]),
+  truncated: z.boolean().nullable(),
+});
+export type ProjectsPayloadV1 = z.infer<typeof ProjectsPayloadV1Schema>;
+
+export const ProjectStoreContextSchema = z.object({
+  artifacts: z.array(z.lazy(() => StoreArtifactRecordSchema)),
+  graph_scopes: z.array(z.lazy(() => GraphScopeRecordSchema)),
+  store: z.lazy(() => StoreInstanceRecordSchema),
+});
+export type ProjectStoreContext = z.infer<typeof ProjectStoreContextSchema>;
 
 /** The protected configuration operation set. Ordinary scalar mutations are
 intentionally absent; they activate directly after validation. */
@@ -912,6 +1975,20 @@ export const ProtectedRefSelectorV1Schema = z.discriminatedUnion("kind", [z.obje
   value: z.lazy(() => CanonicalGitRefPrefixSchema),
 })]);
 export type ProtectedRefSelectorV1 = z.infer<typeof ProtectedRefSelectorV1Schema>;
+
+export const PublicCodeProjectSchema = z.object({
+  canonical_root: z.string(),
+  created_at: z.number().int(),
+  default_branch: z.string().nullable(),
+  display_root: z.string(),
+  git_common_dir: z.string().nullable(),
+  is_active: z.boolean().nullable().optional(),
+  label: z.string(),
+  last_seen_at: z.number().int(),
+  project_id: z.string(),
+  project_root: z.string(),
+});
+export type PublicCodeProject = z.infer<typeof PublicCodeProjectSchema>;
 
 /** Strongly typed canonical identity: `RefId`. */
 export const RefIdSchema = z.string();
@@ -977,6 +2054,124 @@ export type ReviewTopologyPolicyV1 = z.infer<typeof ReviewTopologyPolicyV1Schema
 export const RuleEffectSchema = z.enum(["allow", "deny"]);
 export type RuleEffect = z.infer<typeof RuleEffectSchema>;
 
+export const SavingsAccountingSummaryV1Schema = z.object({
+  available: z.boolean(),
+  db: z.string(),
+  error: z.string().nullable(),
+  ledger: z.union([z.lazy(() => SavingsLedgerSummaryV1Schema), z.null()]),
+  lifetime_counters: z.union([z.lazy(() => SavingsLifetimeCountersV1Schema), z.null()]),
+  recording: z.unknown(),
+});
+export type SavingsAccountingSummaryV1 = z.infer<typeof SavingsAccountingSummaryV1Schema>;
+
+export const SavingsLedgerSummaryV1Schema = z.object({
+  all_time: z.lazy(() => SavingsSumV1Schema),
+  last_30d: z.lazy(() => SavingsSumV1Schema),
+  last_7d: z.lazy(() => SavingsSumV1Schema),
+  today: z.lazy(() => SavingsSumV1Schema),
+});
+export type SavingsLedgerSummaryV1 = z.infer<typeof SavingsLedgerSummaryV1Schema>;
+
+export const SavingsLifetimeCountersV1Schema = z.object({
+  project_total: z.number().int(),
+  projects: z.array(z.lazy(() => SavingsLifetimeProjectV1Schema)),
+  projects_limit: z.number().int(),
+  projects_truncated: z.boolean(),
+  total_tokens_saved: z.number().int(),
+});
+export type SavingsLifetimeCountersV1 = z.infer<typeof SavingsLifetimeCountersV1Schema>;
+
+export const SavingsLifetimeProjectV1Schema = z.object({
+  path: z.string().nullable(),
+  tokens_saved: z.number().int().nullable(),
+});
+export type SavingsLifetimeProjectV1 = z.infer<typeof SavingsLifetimeProjectV1Schema>;
+
+export const SavingsOverviewPayloadV1Schema = z.object({
+  costs: z.lazy(() => CostsReadModelV1Schema),
+  pricing: z.lazy(() => SavingsPricingSummaryV1Schema),
+  savings: z.lazy(() => SavingsAccountingSummaryV1Schema),
+  sessions: z.lazy(() => SavingsSessionSummaryV1Schema),
+  turns: z.lazy(() => TurnsSummaryV1Schema),
+});
+export type SavingsOverviewPayloadV1 = z.infer<typeof SavingsOverviewPayloadV1Schema>;
+
+export const SavingsPricingSummaryV1Schema = z.object({
+  fetched_at: z.unknown(),
+  model_count: z.unknown(),
+  offline: z.unknown(),
+  source: z.unknown(),
+});
+export type SavingsPricingSummaryV1 = z.infer<typeof SavingsPricingSummaryV1Schema>;
+
+export const SavingsSessionModelV1Schema = z.object({
+  actual: z.lazy(() => TokenActualV1Schema),
+  cost_basis: z.string(),
+  estimated: z.lazy(() => TokenPairV1Schema),
+  estimated_messages: z.number().int(),
+  messages: z.number().int(),
+  model: z.string().nullable(),
+  tokenized: z.lazy(() => TokenPairV1Schema),
+  tokenized_messages: z.number().int(),
+  tokenizer: z.unknown(),
+  usage_messages: z.number().int(),
+});
+export type SavingsSessionModelV1 = z.infer<typeof SavingsSessionModelV1Schema>;
+
+export const SavingsSessionRowV1Schema = z.object({
+  cost_basis: z.string(),
+  estimated_messages: z.number().int(),
+  is_subagent: z.boolean(),
+  last_message_at: z.number().int().nullable(),
+  messages: z.number().int(),
+  models: z.array(z.lazy(() => SavingsSessionModelV1Schema)),
+  provider: z.string(),
+  session_id: z.string(),
+  started_at: z.number().int().nullable(),
+  title: z.string().nullable(),
+  tokenized_messages: z.number().int(),
+  usage_messages: z.number().int(),
+});
+export type SavingsSessionRowV1 = z.infer<typeof SavingsSessionRowV1Schema>;
+
+export const SavingsSessionsPayloadV1Schema = z.object({
+  available: z.boolean(),
+  db: z.string(),
+  range: z.string(),
+  scope: z.string().nullable(),
+  sessions: z.array(z.lazy(() => SavingsSessionRowV1Schema)),
+  since: z.number().int().nullable(),
+  total: z.number().int(),
+});
+export type SavingsSessionsPayloadV1 = z.infer<typeof SavingsSessionsPayloadV1Schema>;
+
+export const SavingsSessionSummaryV1Schema = z.object({
+  actual: z.union([z.lazy(() => TokenActualV1Schema), z.null()]),
+  available: z.boolean(),
+  cost_basis: z.string().nullable(),
+  db: z.string(),
+  error: z.string().nullable(),
+  estimated: z.union([z.lazy(() => TokenPairV1Schema), z.null()]),
+  estimated_messages: z.number().int().nullable(),
+  messages: z.number().int().nullable(),
+  model_count: z.number().int().nullable(),
+  scope: z.string().nullable(),
+  session_count: z.number().int().nullable(),
+  status: z.string().nullable(),
+  token_counting: z.boolean().nullable(),
+  tokenized: z.union([z.lazy(() => TokenPairV1Schema), z.null()]),
+  tokenized_messages: z.number().int().nullable(),
+  unknown_model_messages: z.number().int().nullable(),
+  usage_messages: z.number().int().nullable(),
+});
+export type SavingsSessionSummaryV1 = z.infer<typeof SavingsSessionSummaryV1Schema>;
+
+export const SavingsSumV1Schema = z.object({
+  calls: z.number().int(),
+  saved_tokens: z.number().int(),
+});
+export type SavingsSumV1 = z.infer<typeof SavingsSumV1Schema>;
+
 /** Restrictive policy input. An allow never grants capabilities absent from
 the independently authorized capability set passed to the resolver. */
 export const ScopeAccessRuleSchema = z.object({
@@ -1021,6 +2216,25 @@ export const SensitiveFilesystemLocatorV1Schema = z.object({
 });
 export type SensitiveFilesystemLocatorV1 = z.infer<typeof SensitiveFilesystemLocatorV1Schema>;
 
+export const SettingsAvailabilityV1Schema = z.object({
+  available: z.boolean(),
+  reason: z.string().nullable().optional(),
+  required_authority: z.string().nullable().optional(),
+});
+export type SettingsAvailabilityV1 = z.infer<typeof SettingsAvailabilityV1Schema>;
+
+export const SettingsPayloadV1Schema = z.object({
+  automation: z.lazy(() => AutomationSettingsPayloadV1Schema),
+  environment: z.lazy(() => EnvironmentSettingsPayloadV1Schema),
+  project: z.lazy(() => ProjectSettingsPayloadV1Schema),
+  restart_recommended: z.boolean().nullable().optional(),
+  resync_recommended: z.boolean().nullable().optional(),
+  storage: z.lazy(() => StorageSettingsPayloadV1Schema),
+  user: z.lazy(() => UserSettingsPayloadV1Schema),
+  version: z.lazy(() => VersionSettingsPayloadV1Schema),
+});
+export type SettingsPayloadV1 = z.infer<typeof SettingsPayloadV1Schema>;
+
 export const SourceKindV1Schema = z.enum(["claude", "codex", "cursor", "git_hub", "hermes", "kiro"]);
 export type SourceKindV1 = z.infer<typeof SourceKindV1Schema>;
 
@@ -1060,6 +2274,20 @@ export const StorageFindingsPayloadV1Schema = z.object({
 });
 export type StorageFindingsPayloadV1 = z.infer<typeof StorageFindingsPayloadV1Schema>;
 
+export const StorageSettingsPayloadV1Schema = z.object({
+  dashboard_root: z.string(),
+  graph_db: z.string(),
+  lcm_db: z.string(),
+  lcm_scope: z.string(),
+  memory_db: z.string(),
+  project_id: z.string().nullable(),
+  project_root: z.string(),
+  savings_db: z.string(),
+  storage_mode: z.string(),
+  store_root: z.string(),
+});
+export type StorageSettingsPayloadV1 = z.infer<typeof StorageSettingsPayloadV1Schema>;
+
 /** Telemetry payload: one entry per distinct store the dashboard holds a
 connection to. */
 export const StorageTelemetryPayloadV1Schema = z.object({
@@ -1094,6 +2322,16 @@ export const StorageTelemetryReadV1Schema = z.discriminatedUnion("kind", [z.obje
   store: z.lazy(() => StoreKeyV1Schema),
 })]);
 export type StorageTelemetryReadV1 = z.infer<typeof StorageTelemetryReadV1Schema>;
+
+export const StoreArtifactRecordSchema = z.object({
+  artifact_kind: z.string(),
+  relpath: z.string(),
+  schema_version: z.string().nullable(),
+  size_bytes: z.number().int().nullable(),
+  store_id: z.string(),
+  updated_at: z.number().int().nullable(),
+});
+export type StoreArtifactRecord = z.infer<typeof StoreArtifactRecordSchema>;
 
 /** The budget-evaluation dimension, sourced from owner configuration. */
 export const StoreBudgetDimensionV1Schema = z.discriminatedUnion("state", [z.object({
@@ -1147,6 +2385,19 @@ export const StoreGrowthDimensionV1Schema = z.discriminatedUnion("state", [z.obj
   state: z.literal("unknown"),
 })]);
 export type StoreGrowthDimensionV1 = z.infer<typeof StoreGrowthDimensionV1Schema>;
+
+export const StoreInstanceRecordSchema = z.object({
+  created_at: z.number().int(),
+  last_verified_at: z.number().int().nullable(),
+  last_write_at: z.number().int().nullable(),
+  manifest_relpath: z.string().nullable(),
+  project_id: z.string(),
+  storage_mode: z.string(),
+  store_id: z.string(),
+  store_kind: z.string(),
+  store_relpath: z.string(),
+});
+export type StoreInstanceRecord = z.infer<typeof StoreInstanceRecordSchema>;
 
 /** Logical name of one owner-profile store (for example `sessions.db`,
 `graph.db`, or `branches/feature-x`). Never an absolute on-disk path. */
@@ -1311,6 +2562,28 @@ export const StructureReadV15Schema = z.discriminatedUnion("status", [z.object({
 })]);
 export type StructureReadV15 = z.infer<typeof StructureReadV15Schema>;
 
+export const SyncSettingsPatchSchema = z.object({
+  auto_track_pr_branches: z.boolean().nullable(),
+  auto_track_pr_poll_secs: z.number().int().nullable(),
+});
+export type SyncSettingsPatch = z.infer<typeof SyncSettingsPatchSchema>;
+
+export const SyncSettingsV1Schema = z.object({
+  auto_track_pr_branches: z.boolean(),
+  auto_track_pr_poll_secs: z.number().int(),
+});
+export type SyncSettingsV1 = z.infer<typeof SyncSettingsV1Schema>;
+
+export const TelemetrySettingsPatchSchema = z.object({
+  timings: z.boolean().nullable(),
+});
+export type TelemetrySettingsPatch = z.infer<typeof TelemetrySettingsPatchSchema>;
+
+export const TelemetrySettingsV1Schema = z.object({
+  timings: z.boolean(),
+});
+export type TelemetrySettingsV1 = z.infer<typeof TelemetrySettingsV1Schema>;
+
 export const TestMapMeasurementV1Schema = z.object({
   algorithm: z.string(),
   applicable: z.boolean(),
@@ -1322,6 +2595,20 @@ export const TestMapMeasurementV1Schema = z.object({
   tests: z.array(z.lazy(() => CoveringTestV1Schema)),
 });
 export type TestMapMeasurementV1 = z.infer<typeof TestMapMeasurementV1Schema>;
+
+export const TokenActualV1Schema = z.object({
+  cache_read_tokens: z.number().int(),
+  cache_write_tokens: z.number().int(),
+  input_tokens: z.number().int(),
+  output_tokens: z.number().int(),
+});
+export type TokenActualV1 = z.infer<typeof TokenActualV1Schema>;
+
+export const TokenPairV1Schema = z.object({
+  input_tokens: z.number().int(),
+  output_tokens: z.number().int(),
+});
+export type TokenPairV1 = z.infer<typeof TokenPairV1Schema>;
 
 export const TopologyConcurrencyPolicyV1Schema = z.object({
   maximum_active_per_repository: z.number().int(),
@@ -1346,13 +2633,49 @@ export type TopologyGatePolicyV1 = z.infer<typeof TopologyGatePolicyV1Schema>;
 export const TopologyNotificationLevelV1Schema = z.enum(["critical_only", "lifecycle", "verbose"]);
 export type TopologyNotificationLevelV1 = z.infer<typeof TopologyNotificationLevelV1Schema>;
 
+export const TurnsSummaryV1Schema = z.object({
+  available: z.boolean(),
+  cost_basis: z.string().nullable(),
+  error: z.string().nullable(),
+  status: z.string().nullable(),
+  total_cost_usd: z.number().nullable(),
+  total_tokens: z.number().int().nullable(),
+  turn_count: z.number().int().nullable(),
+});
+export type TurnsSummaryV1 = z.infer<typeof TurnsSummaryV1Schema>;
+
 /** Stable, canonical catalog identity for `UseCaseId`. */
 export const UseCaseIdSchema = z.string();
 export type UseCaseId = z.infer<typeof UseCaseIdSchema>;
 
+export const UserSettingsPatchSchema = z.object({
+  expected_revision_id: z.string(),
+  extraction_timeout_secs: z.number().int().nullable(),
+  upload_enabled: z.boolean().nullable(),
+  watcher_debounce: z.string().nullable(),
+});
+export type UserSettingsPatch = z.infer<typeof UserSettingsPatchSchema>;
+
+export const UserSettingsPayloadV1Schema = z.object({
+  config_path: z.string(),
+  extraction_timeout_secs: z.number().int(),
+  installed_agents: z.array(z.string()),
+  upload_enabled: z.boolean(),
+  user_settings_revision_id: z.string(),
+  watcher_debounce: z.string(),
+});
+export type UserSettingsPayloadV1 = z.infer<typeof UserSettingsPayloadV1Schema>;
+
 /** UTC timestamp represented as microseconds from the Unix epoch. */
 export const UtcMicrosSchema = z.number().int();
 export type UtcMicros = z.infer<typeof UtcMicrosSchema>;
+
+export const VersionSettingsPayloadV1Schema = z.object({
+  cached_latest_version: z.string().nullable(),
+  channel: z.string(),
+  version: z.string(),
+});
+export type VersionSettingsPayloadV1 = z.infer<typeof VersionSettingsPayloadV1Schema>;
 
 /** Complete V1 policy. Partial values are intentionally impossible: callers
 must provide the entire policy and validation rejects adapter-local defaults. */
@@ -1431,6 +2754,12 @@ export const LegalActionRefSchema = DashboardLegalActionRefV1Schema;
 export type WireLegalActionRef = DashboardLegalActionRefV1;
 export const EnvelopeSchema = DashboardEnvelopeV1Schema;
 export type WireEnvelope<TPayload> = DashboardEnvelopeV1<TPayload>;
+export const AnalyticsOverviewPayloadSchema = AnalyticsOverviewPayloadV1Schema;
+export type AnalyticsOverviewPayload = AnalyticsOverviewPayloadV1;
+export const AnalyticsUsageCategorySchema = AnalyticsUsageCategoryV1Schema;
+export type AnalyticsUsageCategory = AnalyticsUsageCategoryV1;
+export const AnalyticsUsageSummarySchema = AnalyticsUsageSummaryV1Schema;
+export type AnalyticsUsageSummary = AnalyticsUsageSummaryV1;
 export const AutomaticWorktreeGcSchema = AutomaticWorktreeGcV1Schema;
 export type AutomaticWorktreeGc = AutomaticWorktreeGcV1;
 export const AutomationPendingReviewCountSchema = AutomationPendingReviewCountV1Schema;
@@ -1439,6 +2768,10 @@ export const AutomationPendingReviewSchema = AutomationPendingReviewV1Schema;
 export type AutomationPendingReview = AutomationPendingReviewV1;
 export const AutomationSchedulerStatusSchema = AutomationSchedulerStatusV1Schema;
 export type AutomationSchedulerStatus = AutomationSchedulerStatusV1;
+export const AutomationSettingsPayloadSchema = AutomationSettingsPayloadV1Schema;
+export type AutomationSettingsPayload = AutomationSettingsPayloadV1;
+export const AutomationSourceCoverageSchema = AutomationSourceCoverageV1Schema;
+export type AutomationSourceCoverage = AutomationSourceCoverageV1;
 export const AutomationTaskStatusSchema = AutomationTaskStatusV1Schema;
 export type AutomationTaskStatus = AutomationTaskStatusV1;
 export const BranchCollisionPolicySchema = BranchCollisionPolicyV1Schema;
@@ -1463,12 +2796,42 @@ export const CodeIndexFreshnessPayloadSchema = CodeIndexFreshnessPayloadV1Schema
 export type CodeIndexFreshnessPayload = CodeIndexFreshnessPayloadV1;
 export const CodeIndexWorktreeFreshnessSchema = CodeIndexWorktreeFreshnessV1Schema;
 export type CodeIndexWorktreeFreshness = CodeIndexWorktreeFreshnessV1;
+export const CostsReadModelSchema = CostsReadModelV1Schema;
+export type CostsReadModel = CostsReadModelV1;
+export const CoverageStateSchema = CoverageStateV1Schema;
+export type CoverageState = CoverageStateV1;
 export const CoveringTestSchema = CoveringTestV1Schema;
 export type CoveringTest = CoveringTestV1;
 export const CrossMergeModeSchema = CrossMergeModeV1Schema;
 export type CrossMergeMode = CrossMergeModeV1;
 export const CrossMergePolicySchema = CrossMergePolicyV1Schema;
 export type CrossMergePolicy = CrossMergePolicyV1;
+export const DeliveryCiTimelineSchema = DeliveryCiTimelineV1Schema;
+export type DeliveryCiTimeline = DeliveryCiTimelineV1;
+export const DeliveryCommitTimelineSchema = DeliveryCommitTimelineV1Schema;
+export type DeliveryCommitTimeline = DeliveryCommitTimelineV1;
+export const DeliveryCommitSchema = DeliveryCommitV1Schema;
+export type DeliveryCommit = DeliveryCommitV1;
+export const DeliveryFailureLocalizationTimelineSchema = DeliveryFailureLocalizationTimelineV1Schema;
+export type DeliveryFailureLocalizationTimeline = DeliveryFailureLocalizationTimelineV1;
+export const DeliveryGenerationComparisonSchema = DeliveryGenerationComparisonV1Schema;
+export type DeliveryGenerationComparison = DeliveryGenerationComparisonV1;
+export const DeliveryGenerationFreshnessSchema = DeliveryGenerationFreshnessV1Schema;
+export type DeliveryGenerationFreshness = DeliveryGenerationFreshnessV1;
+export const DeliveryGitHeadSchema = DeliveryGitHeadV1Schema;
+export type DeliveryGitHead = DeliveryGitHeadV1;
+export const DeliveryGitStatusSchema = DeliveryGitStatusV1Schema;
+export type DeliveryGitStatus = DeliveryGitStatusV1;
+export const DeliveryOverviewSchema = DeliveryOverviewV1Schema;
+export type DeliveryOverview = DeliveryOverviewV1;
+export const DeliveryProjectionSchema = DeliveryProjectionV1Schema;
+export type DeliveryProjection = DeliveryProjectionV1;
+export const DeliveryPullRequestTimelineSchema = DeliveryPullRequestTimelineV1Schema;
+export type DeliveryPullRequestTimeline = DeliveryPullRequestTimelineV1;
+export const DeliveryReleaseTimelineSchema = DeliveryReleaseTimelineV1Schema;
+export type DeliveryReleaseTimeline = DeliveryReleaseTimelineV1;
+export const DeliveryReviewTimelineSchema = DeliveryReviewTimelineV1Schema;
+export type DeliveryReviewTimeline = DeliveryReviewTimelineV1;
 export const DoctorConfirmationRequirementSchema = DoctorConfirmationRequirementV1Schema;
 export type DoctorConfirmationRequirement = DoctorConfirmationRequirementV1;
 export const DoctorCoverageCompletenessSchema = DoctorCoverageCompletenessV1Schema;
@@ -1521,16 +2884,26 @@ export const DoctorReportEntrySchema = DoctorReportEntryV1Schema;
 export type DoctorReportEntry = DoctorReportEntryV1;
 export const DoctorStorageFindingKindSchema = DoctorStorageFindingKindV1Schema;
 export type DoctorStorageFindingKind = DoctorStorageFindingKindV1;
+export const EnvironmentSettingsPayloadSchema = EnvironmentSettingsPayloadV1Schema;
+export type EnvironmentSettingsPayload = EnvironmentSettingsPayloadV1;
+export const EnvironmentVariableSchema = EnvironmentVariableV1Schema;
+export type EnvironmentVariable = EnvironmentVariableV1;
 export const ExplorerFinalitySchema = ExplorerFinalityV1Schema;
 export type ExplorerFinality = ExplorerFinalityV1;
 export const ExplorerQueryRequestSchema = ExplorerQueryRequestV1Schema;
 export type ExplorerQueryRequest = ExplorerQueryRequestV1;
 export const ExplorerQueryRunSchema = ExplorerQueryRunV1Schema;
 export type ExplorerQueryRun = ExplorerQueryRunV1;
+export const ExplorerReadContextSchema = ExplorerReadContextV1Schema;
+export type ExplorerReadContext = ExplorerReadContextV1;
 export const ExplorerResultPageSchema = ExplorerResultPageV1Schema;
 export type ExplorerResultPage = ExplorerResultPageV1;
 export const ExplorerRunStateSchema = ExplorerRunStateV1Schema;
 export type ExplorerRunState = ExplorerRunStateV1;
+export const ExplorerSessionCountsSchema = ExplorerSessionCountsV1Schema;
+export type ExplorerSessionCounts = ExplorerSessionCountsV1;
+export const ExplorerSessionSizeSchema = ExplorerSessionSizeV1Schema;
+export type ExplorerSessionSize = ExplorerSessionSizeV1;
 export const ExplorerSourceIdSchema = ExplorerSourceIdV1Schema;
 export type ExplorerSourceId = ExplorerSourceIdV1;
 export const ExplorerSourceOutcomeSchema = ExplorerSourceOutcomeV1Schema;
@@ -1547,6 +2920,36 @@ export const FactMatchesMeasurementSchema = FactMatchesMeasurementV1Schema;
 export type FactMatchesMeasurement = FactMatchesMeasurementV1;
 export const GitHubStackedPullRequestPolicySchema = GitHubStackedPullRequestPolicyV1Schema;
 export type GitHubStackedPullRequestPolicy = GitHubStackedPullRequestPolicyV1;
+export const GraphCappedSchema = GraphCappedV1Schema;
+export type GraphCapped = GraphCappedV1;
+export const GraphEdgeSchema = GraphEdgeV1Schema;
+export type GraphEdge = GraphEdgeV1;
+export const GraphKindCountSchema = GraphKindCountV1Schema;
+export type GraphKindCount = GraphKindCountV1;
+export const GraphLanguageCountSchema = GraphLanguageCountV1Schema;
+export type GraphLanguageCount = GraphLanguageCountV1;
+export const GraphLargestFileSchema = GraphLargestFileV1Schema;
+export type GraphLargestFile = GraphLargestFileV1;
+export const GraphLimitsSchema = GraphLimitsV1Schema;
+export type GraphLimits = GraphLimitsV1;
+export const GraphNeighborsPayloadSchema = GraphNeighborsPayloadV1Schema;
+export type GraphNeighborsPayload = GraphNeighborsPayloadV1;
+export const GraphNodePayloadSchema = GraphNodePayloadV1Schema;
+export type GraphNodePayload = GraphNodePayloadV1;
+export const GraphNodeSchema = GraphNodeV1Schema;
+export type GraphNode = GraphNodeV1;
+export const GraphOverviewPayloadSchema = GraphOverviewPayloadV1Schema;
+export type GraphOverviewPayload = GraphOverviewPayloadV1;
+export const GraphPathPayloadSchema = GraphPathPayloadV1Schema;
+export type GraphPathPayload = GraphPathPayloadV1;
+export const GraphSearchPayloadSchema = GraphSearchPayloadV1Schema;
+export type GraphSearchPayload = GraphSearchPayloadV1;
+export const GraphSpanSchema = GraphSpanV1Schema;
+export type GraphSpan = GraphSpanV1;
+export const GraphSubgraphPayloadSchema = GraphSubgraphPayloadV1Schema;
+export type GraphSubgraphPayload = GraphSubgraphPayloadV1;
+export const GraphTotalsSchema = GraphTotalsV1Schema;
+export type GraphTotals = GraphTotalsV1;
 export const HistoryRewritePolicySchema = HistoryRewritePolicyV1Schema;
 export type HistoryRewritePolicy = HistoryRewritePolicyV1;
 export const HostBundleComponentSchema = HostBundleComponentV1Schema;
@@ -1555,12 +2958,110 @@ export const HostKindSchema = HostKindV1Schema;
 export type HostKind = HostKindV1;
 export const IncomingCallEdgeSchema = IncomingCallEdgeV1Schema;
 export type IncomingCallEdge = IncomingCallEdgeV1;
+export const LcmMessageSchema = LcmMessageV1Schema;
+export type LcmMessage = LcmMessageV1;
+export const LcmSessionCountsSchema = LcmSessionCountsV1Schema;
+export type LcmSessionCounts = LcmSessionCountsV1;
+export const LcmSessionPayloadSchema = LcmSessionPayloadV1Schema;
+export type LcmSessionPayload = LcmSessionPayloadV1;
+export const LcmSummaryNodeSchema = LcmSummaryNodeV1Schema;
+export type LcmSummaryNode = LcmSummaryNodeV1;
+export const LcmTimelineBucketSchema = LcmTimelineBucketV1Schema;
+export type LcmTimelineBucket = LcmTimelineBucketV1;
+export const LcmTimelineCoverageSchema = LcmTimelineCoverageV1Schema;
+export type LcmTimelineCoverage = LcmTimelineCoverageV1;
+export const LcmTimelinePayloadSchema = LcmTimelinePayloadV1Schema;
+export type LcmTimelinePayload = LcmTimelinePayloadV1;
+export const LoomBranchSpanSchema = LoomBranchSpanV1Schema;
+export type LoomBranchSpan = LoomBranchSpanV1;
+export const LoomCommitSchema = LoomCommitV1Schema;
+export type LoomCommit = LoomCommitV1;
+export const LoomEditedFileSchema = LoomEditedFileV1Schema;
+export type LoomEditedFile = LoomEditedFileV1;
 export const LoomFileSessionProjectionSchema = LoomFileSessionProjectionV1Schema;
 export type LoomFileSessionProjection = LoomFileSessionProjectionV1;
+export const LoomSessionModelSchema = LoomSessionModelV1Schema;
+export type LoomSessionModel = LoomSessionModelV1;
+export const LoomSessionRowSchema = LoomSessionRowV1Schema;
+export type LoomSessionRow = LoomSessionRowV1;
+export const LoomSourceCoverageSchema = LoomSourceCoverageV1Schema;
+export type LoomSourceCoverage = LoomSourceCoverageV1;
+export const LoomSourceStatusSchema = LoomSourceStatusV1Schema;
+export type LoomSourceStatus = LoomSourceStatusV1;
+export const LoomTemporalPayloadSchema = LoomTemporalPayloadV1Schema;
+export type LoomTemporalPayload = LoomTemporalPayloadV1;
+export const LoomTemporalRefreshSchema = LoomTemporalRefreshV1Schema;
+export type LoomTemporalRefresh = LoomTemporalRefreshV1;
+export const MemoryBankSchema = MemoryBankV1Schema;
+export type MemoryBank = MemoryBankV1;
+export const MemoryCategoryCountSchema = MemoryCategoryCountV1Schema;
+export type MemoryCategoryCount = MemoryCategoryCountV1;
+export const MemoryEntityRowSchema = MemoryEntityRowV1Schema;
+export type MemoryEntityRow = MemoryEntityRowV1;
+export const MemoryEntityTypeCountSchema = MemoryEntityTypeCountV1Schema;
+export type MemoryEntityTypeCount = MemoryEntityTypeCountV1;
+export const MemoryFactDetailPayloadSchema = MemoryFactDetailPayloadV1Schema;
+export type MemoryFactDetailPayload = MemoryFactDetailPayloadV1;
+export const MemoryFactRowSchema = MemoryFactRowV1Schema;
+export type MemoryFactRow = MemoryFactRowV1;
+export const MemoryFactsCoverageSchema = MemoryFactsCoverageV1Schema;
+export type MemoryFactsCoverage = MemoryFactsCoverageV1;
+export const MemoryFeedbackHistoryRepairSchema = MemoryFeedbackHistoryRepairV1Schema;
+export type MemoryFeedbackHistoryRepair = MemoryFeedbackHistoryRepairV1;
+export const MemoryGrowthPointSchema = MemoryGrowthPointV1Schema;
+export type MemoryGrowthPoint = MemoryGrowthPointV1;
+export const MemoryHolographicPayloadSchema = MemoryHolographicPayloadV1Schema;
+export type MemoryHolographicPayload = MemoryHolographicPayloadV1;
+export const MemoryHrrCoverageSchema = MemoryHrrCoverageV1Schema;
+export type MemoryHrrCoverage = MemoryHrrCoverageV1;
+export const MemoryOverviewPayloadSchema = MemoryOverviewPayloadV1Schema;
+export type MemoryOverviewPayload = MemoryOverviewPayloadV1;
+export const MemoryOverviewSummarySchema = MemoryOverviewSummaryV1Schema;
+export type MemoryOverviewSummary = MemoryOverviewSummaryV1;
+export const MemoryReadStatusSchema = MemoryReadStatusV1Schema;
+export type MemoryReadStatus = MemoryReadStatusV1;
+export const MemoryStatusPayloadSchema = MemoryStatusPayloadV1Schema;
+export type MemoryStatusPayload = MemoryStatusPayloadV1;
+export const MemoryTrustBucketSchema = MemoryTrustBucketV1Schema;
+export type MemoryTrustBucket = MemoryTrustBucketV1;
+export const MetricCalibrationSchema = MetricCalibrationV1Schema;
+export type MetricCalibration = MetricCalibrationV1;
+export const MetricCohortSchema = MetricCohortV1Schema;
+export type MetricCohort = MetricCohortV1;
+export const MetricCoverageSchema = MetricCoverageV1Schema;
+export type MetricCoverage = MetricCoverageV1;
+export const MetricEvidenceClassSchema = MetricEvidenceClassV1Schema;
+export type MetricEvidenceClass = MetricEvidenceClassV1;
+export const MetricProvenanceSchema = MetricProvenanceV1Schema;
+export type MetricProvenance = MetricProvenanceV1;
+export const MetricSourceSchema = MetricSourceV1Schema;
+export type MetricSource = MetricSourceV1;
+export const MetricTemporalSchema = MetricTemporalV1Schema;
+export type MetricTemporal = MetricTemporalV1;
+export const MetricUncertaintySchema = MetricUncertaintyV1Schema;
+export type MetricUncertainty = MetricUncertaintyV1;
+export const MetricValueSchema = MetricValueV1Schema;
+export type MetricValue = MetricValueV1;
 export const NodeRefSchema = NodeRefV1Schema;
 export type NodeRef = NodeRefV1;
 export const NodeSessionsMeasurementSchema = NodeSessionsMeasurementV1Schema;
 export type NodeSessionsMeasurement = NodeSessionsMeasurementV1;
+export const ObservabilityHorizonSchema = ObservabilityHorizonV1Schema;
+export type ObservabilityHorizon = ObservabilityHorizonV1;
+export const ObservatoryReadModelSchema = ObservatoryReadModelV1Schema;
+export type ObservatoryReadModel = ObservatoryReadModelV1;
+export const PrAutoTrackEntrySchema = PrAutoTrackEntryV1Schema;
+export type PrAutoTrackEntry = PrAutoTrackEntryV1;
+export const PrAutoTrackPayloadSchema = PrAutoTrackPayloadV1Schema;
+export type PrAutoTrackPayload = PrAutoTrackPayloadV1;
+export const ProjectContextPayloadSchema = ProjectContextPayloadV1Schema;
+export type ProjectContextPayload = ProjectContextPayloadV1;
+export const ProjectEditableSettingsSchema = ProjectEditableSettingsV1Schema;
+export type ProjectEditableSettings = ProjectEditableSettingsV1;
+export const ProjectSettingsPayloadSchema = ProjectSettingsPayloadV1Schema;
+export type ProjectSettingsPayload = ProjectSettingsPayloadV1;
+export const ProjectsPayloadSchema = ProjectsPayloadV1Schema;
+export type ProjectsPayload = ProjectsPayloadV1;
 export const ProtectedRefDispositionSchema = ProtectedRefDispositionV1Schema;
 export type ProtectedRefDisposition = ProtectedRefDispositionV1;
 export const ProtectedRefRuleSchema = ProtectedRefRuleV1Schema;
@@ -1579,12 +3080,38 @@ export const ReviewTopologyKindSchema = ReviewTopologyKindV1Schema;
 export type ReviewTopologyKind = ReviewTopologyKindV1;
 export const ReviewTopologyPolicySchema = ReviewTopologyPolicyV1Schema;
 export type ReviewTopologyPolicy = ReviewTopologyPolicyV1;
+export const SavingsAccountingSummarySchema = SavingsAccountingSummaryV1Schema;
+export type SavingsAccountingSummary = SavingsAccountingSummaryV1;
+export const SavingsLedgerSummarySchema = SavingsLedgerSummaryV1Schema;
+export type SavingsLedgerSummary = SavingsLedgerSummaryV1;
+export const SavingsLifetimeCountersSchema = SavingsLifetimeCountersV1Schema;
+export type SavingsLifetimeCounters = SavingsLifetimeCountersV1;
+export const SavingsLifetimeProjectSchema = SavingsLifetimeProjectV1Schema;
+export type SavingsLifetimeProject = SavingsLifetimeProjectV1;
+export const SavingsOverviewPayloadSchema = SavingsOverviewPayloadV1Schema;
+export type SavingsOverviewPayload = SavingsOverviewPayloadV1;
+export const SavingsPricingSummarySchema = SavingsPricingSummaryV1Schema;
+export type SavingsPricingSummary = SavingsPricingSummaryV1;
+export const SavingsSessionModelSchema = SavingsSessionModelV1Schema;
+export type SavingsSessionModel = SavingsSessionModelV1;
+export const SavingsSessionRowSchema = SavingsSessionRowV1Schema;
+export type SavingsSessionRow = SavingsSessionRowV1;
+export const SavingsSessionSummarySchema = SavingsSessionSummaryV1Schema;
+export type SavingsSessionSummary = SavingsSessionSummaryV1;
+export const SavingsSessionsPayloadSchema = SavingsSessionsPayloadV1Schema;
+export type SavingsSessionsPayload = SavingsSessionsPayloadV1;
+export const SavingsSumSchema = SavingsSumV1Schema;
+export type SavingsSum = SavingsSumV1;
 export const ScopeAccessSubjectSchema = ScopeAccessSubjectV1Schema;
 export type ScopeAccessSubject = ScopeAccessSubjectV1;
 export const ScopeControlOperationSchema = ScopeControlOperationV1Schema;
 export type ScopeControlOperation = ScopeControlOperationV1;
 export const SensitiveFilesystemLocatorSchema = SensitiveFilesystemLocatorV1Schema;
 export type SensitiveFilesystemLocator = SensitiveFilesystemLocatorV1;
+export const SettingsAvailabilitySchema = SettingsAvailabilityV1Schema;
+export type SettingsAvailability = SettingsAvailabilityV1;
+export const SettingsPayloadSchema = SettingsPayloadV1Schema;
+export type SettingsPayload = SettingsPayloadV1;
 export const SourceKindSchema = SourceKindV1Schema;
 export type SourceKind = SourceKindV1;
 export const StorageByteSizeSchema = StorageByteSizeV1Schema;
@@ -1595,6 +3122,8 @@ export const StorageFindingSourceStateSchema = StorageFindingSourceStateV1Schema
 export type StorageFindingSourceState = StorageFindingSourceStateV1;
 export const StorageFindingsPayloadSchema = StorageFindingsPayloadV1Schema;
 export type StorageFindingsPayload = StorageFindingsPayloadV1;
+export const StorageSettingsPayloadSchema = StorageSettingsPayloadV1Schema;
+export type StorageSettingsPayload = StorageSettingsPayloadV1;
 export const StorageTelemetryPayloadSchema = StorageTelemetryPayloadV1Schema;
 export type StorageTelemetryPayload = StorageTelemetryPayloadV1;
 export const StorageTelemetryReadSchema = StorageTelemetryReadV1Schema;
@@ -1623,8 +3152,16 @@ export const StrataScanSchema = StrataScanV1Schema;
 export type StrataScan = StrataScanV1;
 export const StructureReadSchema = StructureReadV1Schema;
 export type StructureRead = StructureReadV1;
+export const SyncSettingsSchema = SyncSettingsV1Schema;
+export type SyncSettings = SyncSettingsV1;
+export const TelemetrySettingsSchema = TelemetrySettingsV1Schema;
+export type TelemetrySettings = TelemetrySettingsV1;
 export const TestMapMeasurementSchema = TestMapMeasurementV1Schema;
 export type TestMapMeasurement = TestMapMeasurementV1;
+export const TokenActualSchema = TokenActualV1Schema;
+export type TokenActual = TokenActualV1;
+export const TokenPairSchema = TokenPairV1Schema;
+export type TokenPair = TokenPairV1;
 export const TopologyConcurrencyPolicySchema = TopologyConcurrencyPolicyV1Schema;
 export type TopologyConcurrencyPolicy = TopologyConcurrencyPolicyV1;
 export const TopologyEscalationPolicySchema = TopologyEscalationPolicyV1Schema;
@@ -1633,6 +3170,12 @@ export const TopologyGatePolicySchema = TopologyGatePolicyV1Schema;
 export type TopologyGatePolicy = TopologyGatePolicyV1;
 export const TopologyNotificationLevelSchema = TopologyNotificationLevelV1Schema;
 export type TopologyNotificationLevel = TopologyNotificationLevelV1;
+export const TurnsSummarySchema = TurnsSummaryV1Schema;
+export type TurnsSummary = TurnsSummaryV1;
+export const UserSettingsPayloadSchema = UserSettingsPayloadV1Schema;
+export type UserSettingsPayload = UserSettingsPayloadV1;
+export const VersionSettingsPayloadSchema = VersionSettingsPayloadV1Schema;
+export type VersionSettingsPayload = VersionSettingsPayloadV1;
 export const WorkTopologyPolicySchema = WorkTopologyPolicyV1Schema;
 export type WorkTopologyPolicy = WorkTopologyPolicyV1;
 export const WorktreeCleanlinessRequirementSchema = WorktreeCleanlinessRequirementV1Schema;
