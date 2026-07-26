@@ -21,8 +21,8 @@ use tracedecay_domain::{
     EmbeddingPoolingV1, EmbeddingPrecisionV1, EmbeddingProjectionKeyV1, EmbeddingTruncationSideV1,
     FileOccurrenceId, LanguageDescriptorRevision, ManifestDigest, PolicyRevisionId,
     PrivacyDomainId, ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionKindV1,
-    ProjectionReplayReasonV1, SanitizerRevision, SemanticSearchIndexProfileV1, SensitivityDecision,
-    SensitivityLevelV1, SourceSpan,
+    ProjectionOperationV1, ProjectionOutcomeV1, ProjectionReplayReasonV1, SanitizerRevision,
+    SemanticSearchIndexProfileV1, SensitivityDecision, SensitivityLevelV1, SourceSpan,
 };
 
 fn id<T>(value: &str) -> T
@@ -723,17 +723,19 @@ fn invalid_fake_vectors_and_key_only_reuse_fail_closed() {
     );
     assert!(encoder.seen.is_empty());
 
+    let alpha_v2 = chunk("code-generation.2", "alpha", "fn alpha() {}", 0);
+    assert_eq!(alpha.content_digest, alpha_v2.content_digest);
     let explicit_model_replay = request(
         changes(
             Some("code-generation.1"),
             "code-generation.2",
+            vec![],
+            vec![],
             vec![change(
-                &alpha,
+                &alpha_v2,
                 Some(alpha.content_digest.clone()),
-                Some(alpha.content_digest.clone()),
+                Some(alpha_v2.content_digest.clone()),
             )],
-            vec![],
-            vec![],
         ),
         key_only_replay.previous_projection_key,
         key_only_replay.target_projection_key,
@@ -742,13 +744,21 @@ fn invalid_fake_vectors_and_key_only_reuse_fail_closed() {
     let prepared = prepare_vector_generation(
         &admitted_key(&replacement_key),
         explicit_model_replay,
-        std::slice::from_ref(&alpha),
+        std::slice::from_ref(&alpha_v2),
         &mut encoder,
     )
     .expect("model-key replay explicitly projects every retained chunk");
-    assert_eq!(encoder.seen, vec![alpha.id.clone()]);
+    assert_eq!(encoder.seen, vec![alpha_v2.id.clone()]);
     assert_eq!(prepared.vectors.len(), 1);
     assert_eq!(prepared.receipt.reused_count, 0);
+    assert_eq!(
+        prepared.receipt.receipts[0].operation,
+        ProjectionOperationV1::Updated
+    );
+    assert_eq!(
+        prepared.receipt.receipts[0].outcome,
+        ProjectionOutcomeV1::Applied
+    );
 }
 
 #[test]
@@ -886,6 +896,12 @@ fn one_batch_and_multi_batch_publications_have_equal_generation_identity() {
     let checkpoint = multi_store
         .commit_batch(&multi_build, None, alpha_prepared)
         .expect("first batch commit");
+    assert_eq!(
+        multi_store.publish_generation(&multi_build, None),
+        Err(VectorGenerationStoreErrorV1::IncompleteGeneration),
+        "a partial batch checkpoint must never become the active generation"
+    );
+    assert_eq!(multi_store.active_generation_id(), None);
     multi_store
         .commit_batch(&multi_build, Some(&checkpoint), beta_prepared)
         .expect("second batch commit");

@@ -25,7 +25,7 @@ use thiserror::Error;
 use tracedecay_domain::{
     ChangedCodeChunkSetV1, CodeChunkProjectionReceiptV1, CodeSearchChunkId, ContentDigest,
     DomainError, ManifestDigest, ProjectionBatchReceiptV1, ProjectionBatchRequestV1,
-    ProjectionOperationV1, ProjectionOutcomeV1, canonical_sha256,
+    ProjectionOperationV1, ProjectionOutcomeV1, ProjectionReplayReasonV1, canonical_sha256,
 };
 
 /// Domain separator for the canonical projection-batch-request digest.
@@ -176,7 +176,7 @@ pub fn build_batch_receipt(
     if request.request_digest != expected_request {
         return Err(ProjectionReceiptErrorV1::DigestMismatch);
     }
-    validate_reuse_scope(request)?;
+    let reembed_reused = reembeds_reused_chunks(request)?;
     let partitions = partitions_of(&request.changes)?;
 
     let mut seen = BTreeSet::new();
@@ -192,7 +192,7 @@ pub fn build_batch_receipt(
                 decision.chunk_id.clone(),
             ));
         }
-        check_decision(*partition, change, decision)?;
+        check_decision(*partition, change, decision, reembed_reused)?;
         receipts.push(CodeChunkProjectionReceiptV1 {
             projection_key: request.target_projection_key.clone(),
             request_digest: request.request_digest.clone(),
@@ -248,7 +248,7 @@ pub fn verify_batch_receipt(
     if request.request_digest != expected_request || batch.request_digest != expected_request {
         return Err(ProjectionReceiptErrorV1::DigestMismatch);
     }
-    validate_reuse_scope(request)?;
+    let reembed_reused = reembeds_reused_chunks(request)?;
     if batch.target_projection_key != request.target_projection_key {
         return Err(ProjectionReceiptErrorV1::WrongProjectionKey);
     }
@@ -306,7 +306,7 @@ pub fn verify_batch_receipt(
             outcome: receipt.outcome.clone(),
             output_digest: receipt.output_digest.clone(),
         };
-        check_decision(*partition, change, &decision)?;
+        check_decision(*partition, change, &decision, reembed_reused)?;
     }
     for chunk_id in partitions.keys() {
         if !seen.contains(chunk_id) {
@@ -332,15 +332,20 @@ pub fn verify_batch_receipt(
     Ok(())
 }
 
-fn validate_reuse_scope(
+fn reembeds_reused_chunks(
     request: &ProjectionBatchRequestV1,
-) -> Result<(), ProjectionReceiptErrorV1> {
-    if request.previous_projection_key.as_ref() != Some(&request.target_projection_key)
+) -> Result<bool, ProjectionReceiptErrorV1> {
+    let projection_changed =
+        request.previous_projection_key.as_ref() != Some(&request.target_projection_key);
+    if projection_changed
         && !request.changes.reused.is_empty()
+        && request.replay_reason != ProjectionReplayReasonV1::ProjectionProfileChange
     {
         return Err(ProjectionReceiptErrorV1::ProjectionKeyReplayRequiresAppliedWork);
     }
-    Ok(())
+    Ok(projection_changed
+        && !request.changes.reused.is_empty()
+        && request.replay_reason == ProjectionReplayReasonV1::ProjectionProfileChange)
 }
 
 /// Index the changed-chunk set's partitions by chunk identity, validating
@@ -405,6 +410,7 @@ fn check_decision(
     partition: Partition,
     expected: &DigestPair,
     decision: &ChunkProjectionDecisionV1,
+    reembed_reused: bool,
 ) -> Result<(), ProjectionReceiptErrorV1> {
     let inconsistent =
         || ProjectionReceiptErrorV1::InconsistentOperation(decision.chunk_id.clone());
@@ -433,9 +439,14 @@ fn check_decision(
             }
         }
         Partition::Reused => {
-            if decision.operation != ProjectionOperationV1::Reused
-                || decision.outcome != ProjectionOutcomeV1::Reused
-            {
+            let valid = if reembed_reused {
+                decision.operation == ProjectionOperationV1::Updated
+                    && decision.outcome == ProjectionOutcomeV1::Applied
+            } else {
+                decision.operation == ProjectionOperationV1::Reused
+                    && decision.outcome == ProjectionOutcomeV1::Reused
+            };
+            if !valid {
                 return Err(inconsistent());
             }
         }
