@@ -4,19 +4,14 @@
 //! on a dedicated worker thread, and every query is selected by the closed
 //! [`RuntimeReadRequestV1`] contract rather than caller-provided SQL.
 
-mod facade;
 mod locator;
 mod pool;
-mod retained;
 mod worker;
 
-pub use facade::{ReaderFacade, ReaderReadError};
 pub use locator::{ExistingReaderLocator, ReaderStartError};
 pub use pool::{
     ReaderAcquireError, ReaderLease, ReaderPool, ReaderPoolSnapshot, ReaderPoolState, SnapshotLease,
 };
-pub(crate) use retained::RetainedExecution;
-pub use retained::{RetainedSnapshotError, SqliteRetainedSnapshotRegistry};
 pub use worker::{
     ReaderQueryExecutor, ReaderWorkerError, StoreSizeTelemetrySample, TableSizeTelemetrySample,
 };

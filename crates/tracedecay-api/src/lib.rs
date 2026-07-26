@@ -26,9 +26,6 @@ pub use http::{
 };
 pub use sse::sse_response;
 
-/// Initial revision for the HTTP adapter's outbound DTOs.
-pub const HTTP_API_REVISION: u32 = 1;
-
 /// A resolved canonical invocation result ready for HTTP presentation.
 pub struct CanonicalInvocationResult<T> {
     pub binding_id: BindingId,

@@ -16,13 +16,32 @@ use tracedecay_hooks::{
     decode_bound_native_hook_event, finish_synchronous_hook,
 };
 
+use super::analytics::HookTimingSpan;
+
 pub(crate) enum HookV2Dispatch {
     NotApplicable,
     Handled {
         guidance: Option<String>,
-        #[allow(dead_code)] // Plan 07 hook transport disposition — reserved
         disposition: HookTransportDispositionV1,
     },
+}
+
+impl HookV2Dispatch {
+    pub(crate) fn into_recorded_guidance(
+        self,
+        telemetry: &HookTimingSpan,
+    ) -> Option<Option<String>> {
+        match self {
+            Self::NotApplicable => None,
+            Self::Handled {
+                guidance,
+                disposition,
+            } => {
+                telemetry.note_hook_v2_disposition(disposition);
+                Some(guidance)
+            }
+        }
+    }
 }
 
 pub(crate) const HOOK_V2_BOUND_HOSTS: &[HookHostV1] = &[
