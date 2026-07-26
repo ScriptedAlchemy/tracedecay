@@ -216,12 +216,23 @@ async fn exact_replay_rejects_missing_generation() {
         .await
         .unwrap();
 
-    db.apply_lcm_lineage_fault_for_test(LcmLineageFaultForTest::DeleteGeneration {
-        session_id: "session-missing-gen".into(),
-        generation: first.generation,
-    })
-    .await
-    .unwrap();
+    let database_path = db
+        .database_path(HostAdmissionScope::Profile)
+        .expect("profile database path")
+        .to_path_buf();
+    let fixture = rusqlite::Connection::open(database_path).unwrap();
+    fixture.pragma_update(None, "foreign_keys", "OFF").unwrap();
+    fixture
+        .execute_batch("DROP TRIGGER IF EXISTS session_temporal_generations_delete_guard_v1;")
+        .unwrap();
+    fixture
+        .execute(
+            "DELETE FROM session_temporal_generations
+             WHERE session_id = ?1 AND generation = ?2",
+            rusqlite::params!["session-missing-gen", first.generation],
+        )
+        .unwrap();
+    drop(fixture);
 
     let error = db
         .lcm_publish_immutable_summary(requested)

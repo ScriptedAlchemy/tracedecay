@@ -3,10 +3,6 @@
 #![allow(clippy::manual_async_fn)]
 use super::common::*;
 use super::*;
-use tracedecay_domain::{
-    DerivedEvidenceIdV1, DerivedEvidenceKindV1, DerivedEvidenceMemberRoleV1, HydrationStateV1,
-};
-use tracedecay_store::{DerivedEvidenceMemberPageItemV1, DerivedEvidenceMemberPageV1};
 
 #[test]
 fn frozen_snapshots_preserve_exact_session_and_reject_cross_session_reads() {
@@ -167,57 +163,6 @@ fn cursor_pagination_requires_a_key_frozen_with_the_watermarks() {
     ));
 }
 
-#[test]
-fn derived_member_pages_preserve_typed_omissions_and_ordinal_cursor() {
-    let evidence_id = DerivedEvidenceIdV1::new(
-        "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    )
-    .unwrap();
-    let page = DerivedEvidenceMemberPageV1::new(
-        evidence_id.clone(),
-        DerivedEvidenceKindV1::Span,
-        vec![
-            DerivedEvidenceMemberPageItemV1 {
-                ordinal: 3,
-                occurrence_id: Some(occurrence_id(0)),
-                member_role: DerivedEvidenceMemberRoleV1::First,
-                availability: HydrationStateV1::Available,
-            },
-            DerivedEvidenceMemberPageItemV1 {
-                ordinal: 4,
-                occurrence_id: None,
-                member_role: DerivedEvidenceMemberRoleV1::Last,
-                availability: HydrationStateV1::Unauthorized,
-            },
-        ],
-        Some(4),
-    )
-    .unwrap();
-    assert_eq!(page.members()[1].ordinal, 4);
-    assert_eq!(
-        page.members()[1].availability,
-        HydrationStateV1::Unauthorized
-    );
-    assert_eq!(page.next_after_ordinal(), Some(4));
-
-    assert!(matches!(
-        DerivedEvidenceMemberPageV1::new(
-            evidence_id,
-            DerivedEvidenceKindV1::Span,
-            vec![DerivedEvidenceMemberPageItemV1 {
-                ordinal: 3,
-                occurrence_id: Some(occurrence_id(0)),
-                member_role: DerivedEvidenceMemberRoleV1::Member,
-                availability: HydrationStateV1::Redacted,
-            }],
-            None,
-        ),
-        Err(SessionStoreError::InvalidStateTransition {
-            context: "derived evidence member availability"
-        })
-    ));
-}
-
 impl SessionRetrievalStore for InMemorySessionPorts {
     fn freeze_session_temporal_snapshot_supported(
         &self,
@@ -242,37 +187,16 @@ impl SessionRetrievalStore for InMemorySessionPorts {
     ) -> impl Future<Output = SessionStoreResult<SessionRetrievalPageV1>> + Send {
         async move {
             yield_once().await;
-            let summaries = self.state.lock().unwrap().summary.iter().cloned().collect();
             SessionRetrievalPageV1::new(
                 request.snapshot().clone(),
                 vec![],
                 vec![],
                 vec![],
-                summaries,
+                vec![],
                 TemporalCoverageCountsV1::default(),
                 None,
             )
         }
     }
 
-    fn expand_derived_members_supported(
-        &self,
-        _permit: SessionTemporalPageRetrievePermit,
-        _snapshot: SessionTemporalSnapshotV1,
-        evidence_kind: tracedecay_domain::DerivedEvidenceKindV1,
-        evidence_id: tracedecay_domain::DerivedEvidenceIdV1,
-        _after_ordinal: Option<u32>,
-        _limit: usize,
-    ) -> impl Future<Output = SessionStoreResult<tracedecay_store::DerivedEvidenceMemberPageV1>> + Send
-    {
-        async move {
-            yield_once().await;
-            tracedecay_store::DerivedEvidenceMemberPageV1::new(
-                evidence_id,
-                evidence_kind,
-                vec![],
-                None,
-            )
-        }
-    }
 }

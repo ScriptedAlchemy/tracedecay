@@ -13,6 +13,7 @@ use tracedecay_domain::{FactOwnerV1, ProjectId};
 
 use super::lcm_service::{self, SearchPayloadArgs};
 use super::*;
+use crate::application::configuration::ProductionUserSettingsDaemonClient;
 use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 use crate::db::DaemonDatabaseScope;
@@ -97,6 +98,7 @@ impl DashboardFixture {
             config_path: project_root.join("config.json"),
             dashboard_root: project_root.join("dashboard"),
             retention_config: crate::config::RetentionConfig::default(),
+            user_settings: Arc::new(ProductionUserSettingsDaemonClient),
             curation_activity: Arc::new(RwLock::new(Vec::new())),
             token_counts: Arc::new(token_count::TokenCountCache::new()),
             code_diagnostics_authority: None,
@@ -104,6 +106,7 @@ impl DashboardFixture {
             automation_writer: standalone_dashboard_automation_writer(),
             doctor_report_reader: None,
             doctor_remediation_dispatcher: None,
+            application_client: None,
         };
         Self {
             state,
