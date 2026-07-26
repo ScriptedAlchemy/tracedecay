@@ -5,7 +5,9 @@ use sha2::{Digest, Sha256};
 use tracedecay_domain::LocatorDigest;
 use tracedecay_rusqlite_runtime::{
     ExistingWriterLocator, PersistentWriter, StorageOperationExecutor,
-    migration_sql::{MigrationSqlHandle, MigrationSqlWriteAuthority},
+    migration_sql::{
+        MigrationSqlError, MigrationSqlHandle, MigrationSqlWriteAuthority, MigrationSqlWriteIntent,
+    },
     reader::{ExistingReaderLocator, ReaderPool, ReaderQueryExecutor},
 };
 use tracedecay_store::{
@@ -23,6 +25,10 @@ pub(crate) struct TestConnection {
 
 impl TestConnection {
     pub(crate) fn open(path: &Path) -> Self {
+        Self::open_inner(path, Some(Arc::new(AllowTestWrites)))
+    }
+
+    pub(crate) fn open_without_write_authority(path: &Path) -> Self {
         Self::open_inner(path, None)
     }
 
@@ -91,6 +97,14 @@ impl Deref for TestConnection {
 
     fn deref(&self) -> &Self::Target {
         &self.connection
+    }
+}
+
+struct AllowTestWrites;
+
+impl MigrationSqlWriteAuthority for AllowTestWrites {
+    fn verify(&self, _intent: MigrationSqlWriteIntent) -> Result<(), MigrationSqlError> {
+        Ok(())
     }
 }
 
