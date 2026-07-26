@@ -53,18 +53,22 @@ impl TemporalOwnedSessionFixture {
 }
 
 async fn temporal_database(path: &Path, mode: crate::db::TestDatabaseRuntimeMode) -> Database {
+    let runtime_mode = if mode == crate::db::TestDatabaseRuntimeMode::Initialize {
+        let seed = crate::db::engine::TestConnection::open(path);
+        crate::global_db::ensure_registered_schema(&seed)
+            .await
+            .expect("initialize temporal fixture through production migrations");
+        drop(seed);
+        crate::db::TestDatabaseRuntimeMode::Existing
+    } else {
+        mode
+    };
     let authority =
         DatabaseAuthority::acquire_test(path, "temporal consolidation fixture").unwrap();
-    let database = Database::publish_test_runtime(path, &authority, mode)
+    Database::publish_test_runtime(path, &authority, runtime_mode)
         .await
         .unwrap()
-        .0;
-    if mode == crate::db::TestDatabaseRuntimeMode::Initialize {
-        crate::global_db::ensure_registered_schema(database.conn())
-            .await
-            .unwrap();
-    }
-    database
+        .0
 }
 
 async fn temporal_execute_batch(path: &Path, sql: &str) {
