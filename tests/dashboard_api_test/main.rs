@@ -22,6 +22,7 @@ mod delivery;
 mod explorer;
 mod graph;
 mod lcm;
+mod loom;
 mod memory_curation;
 mod projects;
 mod savings;
