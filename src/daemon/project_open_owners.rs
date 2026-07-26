@@ -1285,7 +1285,7 @@ async fn register_production_lsp_owner(
     admitted_providers: &[AdmittedLspProvider],
     root_uri: String,
 ) -> Result<Arc<crate::daemon::lsp_gateway::Pr12LspSessionFactory>> {
-    let (language, gateway_capabilities) = production_lsp_registration(admitted_providers);
+    let (languages, gateway_capabilities) = production_lsp_registration(admitted_providers);
     invocation
         .lsp_owner_registrar()
         .build_and_register_pr12(
@@ -1294,7 +1294,7 @@ async fn register_production_lsp_owner(
             Arc::new(invocation.code_index_schedulers.clone()),
             tokio::runtime::Handle::current(),
             diagnostic_broker,
-            language,
+            &languages,
             root_uri,
             LspRefreshTimeouts::from_diagnostics_quiet_window(LSP_DIAGNOSTICS_QUIET),
             LSP_DIAGNOSTICS_QUIET,
@@ -1305,7 +1305,7 @@ async fn register_production_lsp_owner(
 
 fn production_lsp_registration(
     admitted_providers: &[AdmittedLspProvider],
-) -> (Option<&str>, GatewayCapabilities) {
+) -> (Vec<String>, GatewayCapabilities) {
     let revision = crate::daemon::lsp_gateway::TRACEDECAY_CONTEXT_REVISION;
     let gateway_capabilities = GatewayCapabilities {
         semantic: graph_semantic_capabilities(),
@@ -1317,12 +1317,11 @@ fn production_lsp_registration(
         ]),
         ..Default::default()
     };
-    let provider = admitted_providers
-        .iter()
-        .find(|provider| provider.analyzer_available)
-        .or_else(|| admitted_providers.first());
     (
-        provider.map(|provider| provider.language.as_str()),
+        admitted_providers
+            .iter()
+            .map(|provider| provider.language.clone())
+            .collect(),
         gateway_capabilities,
     )
 }
@@ -2676,9 +2675,9 @@ mod tests {
     #[test]
     fn absent_analyzer_still_mounts_graph_and_managed_lsp_capabilities() {
         let admitted = [admitted("rust", false)];
-        let (language, gateway) = production_lsp_registration(&admitted);
+        let (languages, gateway) = production_lsp_registration(&admitted);
 
-        assert_eq!(language, Some("rust"));
+        assert_eq!(languages, vec!["rust"]);
         assert!(gateway.supports_managed_diagnostics);
         assert_eq!(gateway.semantic, graph_semantic_capabilities());
     }
@@ -2728,7 +2727,7 @@ mod tests {
     }
 
     #[test]
-    fn registration_language_prefers_mounted_python_or_typescript_provider() {
+    fn registration_preserves_every_admitted_project_language() {
         for language in ["python", "typescript"] {
             let admitted = [
                 admitted("rust", false),
@@ -2737,7 +2736,7 @@ mod tests {
             ];
             let (selected, gateway) = production_lsp_registration(&admitted);
 
-            assert_eq!(selected, Some(language));
+            assert_eq!(selected, vec!["rust", language, "go"]);
             assert_eq!(gateway.semantic, graph_semantic_capabilities());
         }
     }

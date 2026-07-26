@@ -61,35 +61,159 @@ pub async fn pr12_production_semantic_authorities(
     runtime: Handle,
     diagnostic_broker: Arc<Mutex<DiagnosticBroker>>,
     graph_database: Database,
-    language: Option<&str>,
+    languages: &[String],
     workspace_root: PathBuf,
     root_uri: impl Into<String>,
     timeouts: LspRefreshTimeouts,
 ) -> Result<Pr12ProductionSemanticAuthorities> {
     let root_uri = root_uri.into();
-    let (upstream_authority, project_root) = {
+    let (upstream_routes, project_root) = {
         let mut broker = diagnostic_broker.lock().await;
         let project_root = broker.project_root().to_path_buf();
-        let authority = match language {
-            Some(language) => broker.semantic_authority_if_available(
+        let mut routes = Vec::new();
+        for language in languages {
+            let adapter = broker
+                .adapter_for(language)
+                .ok_or_else(|| TraceDecayError::Config {
+                    message: format!("no LSP adapter registered for language '{language}'"),
+                })?;
+            if let Some(authority) = broker.semantic_authority_if_available(
                 language,
-                workspace_root,
+                workspace_root.clone(),
                 root_uri.clone(),
                 timeouts,
-            )?,
-            None => None,
-        };
-        (authority, project_root)
+            )? {
+                routes.push((adapter, authority));
+            }
+        }
+        (routes, project_root)
     };
-    Ok(pr12_semantic_authorities_from_parts(
-        runtime,
-        upstream_authority,
-        Arc::new(DatabaseGraphSemanticAuthority::new(
-            graph_database,
-            project_root,
-            root_uri,
-        )),
-    ))
+    let graph = Arc::new(DatabaseGraphSemanticAuthority::new(
+        graph_database,
+        project_root,
+        root_uri,
+    ));
+    let fallback = pr12_semantic_authorities_from_parts(runtime.clone(), None, Arc::clone(&graph));
+    if upstream_routes.is_empty() {
+        return Ok(fallback);
+    }
+
+    let mut routes = Vec::with_capacity(upstream_routes.len());
+    let mut cancellation = vec![Arc::clone(&fallback.cancellation)];
+    let mut semantic_capabilities = fallback.semantic_capabilities.clone();
+    for (adapter, upstream) in upstream_routes {
+        let authority = pr12_semantic_authorities_from_parts(
+            runtime.clone(),
+            Some(upstream),
+            Arc::clone(&graph),
+        );
+        semantic_capabilities.extend(authority.semantic_capabilities.iter().copied());
+        cancellation.push(Arc::clone(&authority.cancellation));
+        routes.push(LanguageSemanticRoute::new(
+            adapter.extensions,
+            authority.semantics,
+        ));
+    }
+
+    Ok(Pr12ProductionSemanticAuthorities {
+        semantics: Arc::new(PolyglotSemanticProvider::new(routes, fallback.semantics)),
+        cancellation: Arc::new(CompositeSemanticCancellation { cancellation }),
+        analyzer_available: true,
+        semantic_capabilities,
+    })
+}
+
+struct CompositeSemanticCancellation {
+    cancellation: Vec<Arc<dyn LspAnalyzerCancellationAuthority>>,
+}
+
+impl LspAnalyzerCancellationAuthority for CompositeSemanticCancellation {
+    fn cancel_request(&self, root: &AdmittedRoot, request_id: &LspRequestId) -> bool {
+        self.cancellation
+            .iter()
+            .fold(false, |cancelled, authority| {
+                authority.cancel_request(root, request_id) | cancelled
+            })
+    }
+}
+
+struct LanguageSemanticRoute {
+    extensions: BTreeSet<String>,
+    provider: Arc<dyn SemanticProviderPort + Send + Sync>,
+}
+
+impl LanguageSemanticRoute {
+    fn new(
+        extensions: impl IntoIterator<Item = impl Into<String>>,
+        provider: Arc<dyn SemanticProviderPort + Send + Sync>,
+    ) -> Self {
+        Self {
+            extensions: extensions
+                .into_iter()
+                .map(Into::into)
+                .map(|extension: String| extension.to_ascii_lowercase())
+                .collect(),
+            provider,
+        }
+    }
+}
+
+struct PolyglotSemanticProvider {
+    routes: Vec<LanguageSemanticRoute>,
+    fallback: Arc<dyn SemanticProviderPort + Send + Sync>,
+}
+
+impl PolyglotSemanticProvider {
+    fn new(
+        routes: Vec<LanguageSemanticRoute>,
+        fallback: Arc<dyn SemanticProviderPort + Send + Sync>,
+    ) -> Self {
+        Self { routes, fallback }
+    }
+
+    fn provider_for(
+        &self,
+        request: &SemanticRequest,
+    ) -> &Arc<dyn SemanticProviderPort + Send + Sync> {
+        let Some(extension) = semantic_request_extension(request) else {
+            return &self.fallback;
+        };
+        let mut matching = self
+            .routes
+            .iter()
+            .filter(|route| route.extensions.contains(&extension));
+        let Some(route) = matching.next() else {
+            return &self.fallback;
+        };
+        if matching.next().is_some() {
+            return &self.fallback;
+        }
+        &route.provider
+    }
+}
+
+impl SemanticProviderPort for PolyglotSemanticProvider {
+    fn request(
+        &self,
+        root: &AdmittedRoot,
+        request_id: &LspRequestId,
+        request: &SemanticRequest,
+    ) -> SemanticProviderOutcome<SemanticResponse> {
+        self.provider_for(request)
+            .request(root, request_id, request)
+    }
+}
+
+fn semantic_request_extension(request: &SemanticRequest) -> Option<String> {
+    let uri = Url::parse(request.document_uri()?).ok()?;
+    if uri.scheme() != "file" {
+        return None;
+    }
+    uri.to_file_path()
+        .ok()?
+        .extension()?
+        .to_str()
+        .map(str::to_ascii_lowercase)
 }
 
 pub fn pr12_semantic_authorities_from_parts(
@@ -1216,6 +1340,35 @@ fn bounded_graph_failure(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct RecordingSemanticProvider {
+        requests: AtomicUsize,
+    }
+
+    impl RecordingSemanticProvider {
+        fn new() -> Self {
+            Self {
+                requests: AtomicUsize::new(0),
+            }
+        }
+
+        fn requests(&self) -> usize {
+            self.requests.load(Ordering::SeqCst)
+        }
+    }
+
+    impl SemanticProviderPort for RecordingSemanticProvider {
+        fn request(
+            &self,
+            _root: &AdmittedRoot,
+            _request_id: &LspRequestId,
+            _request: &SemanticRequest,
+        ) -> SemanticProviderOutcome<SemanticResponse> {
+            self.requests.fetch_add(1, Ordering::SeqCst);
+            SemanticProviderOutcome::Complete(SemanticResponse::Hover(None))
+        }
+    }
 
     fn function_node(name: &str, start_column: u32, end_column: u32) -> Node {
         Node {
@@ -1265,6 +1418,72 @@ mod tests {
             .into_iter()
             .collect()
         );
+    }
+
+    #[test]
+    fn polyglot_semantics_route_each_document_to_its_language_provider() {
+        let rust = Arc::new(RecordingSemanticProvider::new());
+        let typescript = Arc::new(RecordingSemanticProvider::new());
+        let fallback = Arc::new(RecordingSemanticProvider::new());
+        let provider = PolyglotSemanticProvider::new(
+            vec![
+                LanguageSemanticRoute::new(["rs"], rust.clone()),
+                LanguageSemanticRoute::new(["ts", "tsx"], typescript.clone()),
+            ],
+            fallback.clone(),
+        );
+        let root = AdmittedRoot::new("file:///workspace");
+
+        for document_uri in [
+            "file:///workspace/src/lib.rs",
+            "file:///workspace/dashboard/src/app.tsx",
+        ] {
+            assert!(matches!(
+                provider.request(
+                    &root,
+                    &LspRequestId::Number(1),
+                    &SemanticRequest::Hover {
+                        document_uri: document_uri.to_owned(),
+                        position: LspPosition {
+                            line: 0,
+                            character: 0,
+                        },
+                    },
+                ),
+                SemanticProviderOutcome::Complete(SemanticResponse::Hover(None))
+            ));
+        }
+
+        assert_eq!(rust.requests(), 1);
+        assert_eq!(typescript.requests(), 1);
+        assert_eq!(fallback.requests(), 0);
+    }
+
+    #[test]
+    fn polyglot_semantics_fail_closed_to_graph_for_ambiguous_extensions() {
+        let first = Arc::new(RecordingSemanticProvider::new());
+        let second = Arc::new(RecordingSemanticProvider::new());
+        let fallback = Arc::new(RecordingSemanticProvider::new());
+        let provider = PolyglotSemanticProvider::new(
+            vec![
+                LanguageSemanticRoute::new(["h"], first.clone()),
+                LanguageSemanticRoute::new(["h"], second.clone()),
+            ],
+            fallback.clone(),
+        );
+        let root = AdmittedRoot::new("file:///workspace");
+
+        let _ = provider.request(
+            &root,
+            &LspRequestId::Number(1),
+            &SemanticRequest::DocumentSymbols {
+                document_uri: "file:///workspace/include/shared.h".to_owned(),
+            },
+        );
+
+        assert_eq!(first.requests(), 0);
+        assert_eq!(second.requests(), 0);
+        assert_eq!(fallback.requests(), 1);
     }
 
     #[test]
