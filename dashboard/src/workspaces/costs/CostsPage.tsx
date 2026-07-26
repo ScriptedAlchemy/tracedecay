@@ -2,7 +2,9 @@ import { OverviewCard, OverviewGrid } from '../../ui/archetypes/OverviewGrid';
 import { LegacyBoundary } from '../../ui/LegacyStates.tsx';
 import { Meter, ReadoutBar } from '../../ui/instrument.tsx';
 import { useLegacy } from '../../data/query/useLegacy.ts';
-import { SavingsOverviewPayloadSchema } from '../../contracts/uncontracted/savings.ts';
+import {
+  SavingsOverviewPayloadSchema,
+} from '../../contracts/wire.ts';
 import {
   costPerTurn,
   logFraction,
@@ -280,7 +282,10 @@ function TokenMixPlate({
   sessions,
 }: {
   mix: TokenMix;
-  sessions: { session_count?: number | undefined; messages?: number | undefined };
+  sessions: {
+    session_count?: number | null | undefined;
+    messages?: number | null | undefined;
+  };
 }) {
   const rest = mix.dominant ? mix.classes.slice(1) : mix.classes;
   const ceiling = rest.reduce((max, entry) => Math.max(max, entry.tokens), 0);
@@ -445,7 +450,7 @@ function ShareRow({
   );
 }
 
-function ReadFailure({ label, detail }: { label: string; detail?: string | undefined }) {
+function ReadFailure({ label, detail }: { label: string; detail?: string | null | undefined }) {
   return (
     <p role="status" className="text-2xs leading-relaxed text-state-error">
       {label}

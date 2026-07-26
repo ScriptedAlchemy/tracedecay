@@ -21,12 +21,12 @@ import {
   type ConfigSection,
   type EnvOverride,
   type OriginKind,
-  type ProjectSettingsPatch,
+  type ProjectSettingsChangeSet,
   type ProjectSettingsValues,
   type SettingsChangePlan,
   type SettingsModel,
   type SettingsValidationError,
-  type UserSettingsPatch,
+  type UserSettingsChangeSet,
   type UserSettingsValues,
 } from './settingsModel.ts';
 import {
@@ -237,10 +237,10 @@ function SettingsSurface({
 }
 
 type ReadyProjectPlan = Extract<
-  SettingsChangePlan<ProjectSettingsPatch>,
+  SettingsChangePlan<ProjectSettingsChangeSet>,
   { outcome: 'ready' }
 >;
-type ReadyUserPlan = Extract<SettingsChangePlan<UserSettingsPatch>, { outcome: 'ready' }>;
+type ReadyUserPlan = Extract<SettingsChangePlan<UserSettingsChangeSet>, { outcome: 'ready' }>;
 type PendingSettingsReview =
   | { readonly scope: 'project'; readonly plan: ReadyProjectPlan }
   | { readonly scope: 'user'; readonly plan: ReadyUserPlan };
@@ -408,7 +408,7 @@ function SettingsEditorPanel({
   );
 }
 
-function openReview<T extends ProjectSettingsPatch | UserSettingsPatch>(
+function openReview<T extends ProjectSettingsChangeSet | UserSettingsChangeSet>(
   scope: SettingsMutationScope,
   plan: SettingsChangePlan<T>,
   setReview: (review: PendingSettingsReview | null) => void,

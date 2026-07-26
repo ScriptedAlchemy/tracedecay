@@ -419,9 +419,17 @@ pub(crate) async fn overview(State(state): State<DashboardState>) -> Response {
         }),
     };
     let sessions = match state.lcm_db.as_deref() {
-        Some(db) => sessions_overview(db, &state)
-            .await
-            .unwrap_or_else(read_failed_block),
+        Some(db) => sessions_overview(db, &state).await.unwrap_or_else(|error| {
+            // The session block's contract requires `db`, which the shared
+            // failure block cannot know. Without it a failed session read
+            // would fail to decode and collapse the whole route to a 500 —
+            // turning one unavailable block into a total outage, and hiding
+            // which read actually failed.
+            merge(
+                json!({ "db": state.lcm_db_path.clone() }),
+                read_failed_block(error),
+            )
+        }),
         None => json!({ "available": false, "db": state.lcm_db_path }),
     };
     let turns = match state.savings_db.as_deref() {

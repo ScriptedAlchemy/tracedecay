@@ -7,10 +7,10 @@ import {
   summarizeHoldings,
   vitalityHorizon,
 } from './field.ts';
-import type {
-  ProjectRegistryEntry,
-  ProjectRepoGroup,
-} from '../../contracts/uncontracted/projects.ts';
+import {
+  type ProjectRegistryEntry,
+  type ProjectRepoGroup,
+} from '../../contracts/wire.ts';
 
 const NOW = 1_800_000_000;
 const DAY = 86_400;

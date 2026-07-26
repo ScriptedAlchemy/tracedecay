@@ -1357,11 +1357,11 @@ export const LcmTimelinePayloadV1Schema = z.object({
   buckets: z.array(z.lazy(() => LcmTimelineBucketV1Schema)),
   coverage: z.union([z.lazy(() => LcmTimelineCoverageV1Schema), z.null()]),
   exists: z.boolean(),
-  node_buckets: z.array(z.object({})),
+  node_buckets: z.array(z.record(z.unknown())),
   path: z.string(),
   session_id: z.string().nullable(),
   storage_scope: z.string(),
-  undated: z.object({}),
+  undated: z.record(z.unknown()),
 });
 export type LcmTimelinePayloadV1 = z.infer<typeof LcmTimelinePayloadV1Schema>;
 
@@ -1578,10 +1578,10 @@ export const MemoryHolographicPayloadV1Schema = z.object({
   exists: z.boolean(),
   facts: z.array(z.lazy(() => MemoryFactRowV1Schema)),
   facts_coverage: z.lazy(() => MemoryFactsCoverageV1Schema),
-  graph: z.object({}),
+  graph: z.record(z.unknown()),
   overview: z.union([z.lazy(() => MemoryOverviewSummaryV1Schema), z.null()]),
   path: z.string(),
-  reads: z.object({}),
+  reads: z.record(z.lazy(() => MemoryReadStatusV1Schema)),
 });
 export type MemoryHolographicPayloadV1 = z.infer<typeof MemoryHolographicPayloadV1Schema>;
 
@@ -1601,7 +1601,7 @@ export type MemoryHrrCoverageV1 = z.infer<typeof MemoryHrrCoverageV1Schema>;
 export const MemoryOverviewPayloadV1Schema = z.object({
   holographic: z.lazy(() => MemoryHolographicPayloadV1Schema),
   limit: z.number().int(),
-  providers: z.object({}),
+  providers: z.record(z.unknown()),
   query: z.string(),
 });
 export type MemoryOverviewPayloadV1 = z.infer<typeof MemoryOverviewPayloadV1Schema>;
