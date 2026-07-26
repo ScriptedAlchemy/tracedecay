@@ -11,7 +11,8 @@ mod triggers;
 
 use audit::{
     AuditCheckpoint, AuditProgress, audit_checkpoint_is_plausible, ensure_audit_checkpoint_schema,
-    read_audit_checkpoint, validate_projection_authority_suffix, write_audit_checkpoint,
+    read_audit_checkpoint, validate_projection_authority_chunk,
+    validate_projection_authority_suffix, write_audit_checkpoint,
 };
 use repair::{
     repair_committed_source_cursors, repair_projection_frontier,
@@ -22,14 +23,15 @@ use rows::{
     validate_observation_authority_rows, validate_receipt_authority_rows,
     validate_source_cursor_authority_rows,
 };
+use triggers::{FOREIGN_KEY_AUDIT_QUERY, replace_trigger, trigger_contracts_intact};
 pub(super) use triggers::{INVARIANTS, Trigger};
-use triggers::{replace_trigger, trigger_contracts_intact};
 pub(in crate::global_db) use triggers::{
     restore_immutability_after_canonical_repair, suspend_immutability_for_canonical_repair,
     suspend_session_invariants_for_schema_upgrade,
 };
 
 const OPERATION: &str = "ensure global database authority invariants";
+const INCOMPLETE_EXHAUSTIVE_PASS: i64 = -1;
 
 /// Rows an authority row audit may ask the SQL channel for at once.
 ///
@@ -45,9 +47,11 @@ pub(super) const AUDIT_PAGE_ROWS: i64 = 1_000;
 /// Page size for scans that carry a full observation payload.
 ///
 /// Canonical observation records may approach the 1 MiB observation contract
-/// ceiling. Sixteen rows leave ample room under the channel's 64 MiB
-/// materialization limit for the joined receipt and cursor columns too.
-pub(super) const OBSERVATION_AUDIT_PAGE_ROWS: i64 = 16;
+/// ceiling. The audit no longer carries a duplicate receipt JSON payload, so
+/// forty-eight rows leave headroom under the channel's 64 MiB materialization
+/// limit while avoiding tens of thousands of SQL-channel round trips on a
+/// production-sized store.
+pub(super) const OBSERVATION_AUDIT_PAGE_ROWS: i64 = 48;
 const SESSION_TEMPORAL_REPAIR_AUDITS: &[&str] = &[
     "session temporal receipts or cursor keys are mutable",
     "session cursor key rotation state is invalid",
@@ -132,27 +136,96 @@ pub(crate) async fn ensure_authority_invariants(
     } else {
         None
     };
-    let exhaustive = checkpoint.is_none();
+    let exhaustive = checkpoint.is_none()
+        || checkpoint.is_some_and(|checkpoint| {
+            checkpoint.bounded_passes_since_exhaustive == INCOMPLETE_EXHAUSTIVE_PASS
+        });
     let checkpoint = checkpoint.unwrap_or_default();
     let (receipt_rowid, receipts_audited) =
         validate_receipt_authority_rows(conn, checkpoint.receipt_rowid).await?;
+    if exhaustive {
+        write_audit_checkpoint(
+            conn,
+            AuditProgress {
+                checkpoint: AuditCheckpoint {
+                    receipt_rowid,
+                    bounded_passes_since_exhaustive: INCOMPLETE_EXHAUSTIVE_PASS,
+                    ..checkpoint
+                },
+                receipts_audited,
+                observations_audited: 0,
+                provenance_audited: 0,
+                dispositions_audited: 0,
+                aliases_audited: 0,
+            },
+        )
+        .await?;
+    }
     let (observation_sequence, observations_audited) =
         validate_observation_authority_rows(conn, checkpoint.observation_sequence).await?;
+    if exhaustive {
+        write_audit_checkpoint(
+            conn,
+            AuditProgress {
+                checkpoint: AuditCheckpoint {
+                    receipt_rowid,
+                    observation_sequence,
+                    bounded_passes_since_exhaustive: INCOMPLETE_EXHAUSTIVE_PASS,
+                    ..checkpoint
+                },
+                receipts_audited,
+                observations_audited,
+                provenance_audited: 0,
+                dispositions_audited: 0,
+                aliases_audited: 0,
+            },
+        )
+        .await?;
+    }
     validate_source_cursor_authority_rows(conn).await?;
     repair_committed_source_cursors(conn, checkpoint.observation_sequence).await?;
     validate_observation_cursor_coverage(conn, checkpoint.observation_sequence).await?;
 
     repair_projection_frontier(conn, checkpoint.projection_checkpoint).await?;
-    let (mut checkpoint, provenance_audited, dispositions_audited, aliases_audited) =
-        validate_projection_authority_suffix(
-            conn,
-            AuditCheckpoint {
-                receipt_rowid,
-                observation_sequence,
-                ..checkpoint
-            },
-        )
-        .await?;
+    let projection_start = AuditCheckpoint {
+        receipt_rowid,
+        observation_sequence,
+        bounded_passes_since_exhaustive: if exhaustive {
+            INCOMPLETE_EXHAUSTIVE_PASS
+        } else {
+            checkpoint.bounded_passes_since_exhaustive
+        },
+        ..checkpoint
+    };
+    let (mut checkpoint, provenance_audited, dispositions_audited, aliases_audited) = if exhaustive
+    {
+        let mut progress = projection_start;
+        let mut audited_counts = None;
+        loop {
+            let (next, provenance, dispositions, aliases, complete) =
+                validate_projection_authority_chunk(conn, progress).await?;
+            audited_counts.get_or_insert((provenance, dispositions, aliases));
+            progress = next;
+            if complete {
+                let (provenance, dispositions, aliases) = audited_counts.unwrap_or((0, 0, 0));
+                break (progress, provenance, dispositions, aliases);
+            }
+            write_audit_checkpoint(
+                conn,
+                AuditProgress {
+                    checkpoint: progress,
+                    receipts_audited,
+                    observations_audited,
+                    provenance_audited: 0,
+                    dispositions_audited: 0,
+                    aliases_audited: 0,
+                },
+            )
+            .await?;
+        }
+    } else {
+        validate_projection_authority_suffix(conn, projection_start).await?
+    };
     if exhaustive {
         validate_invariant_rows(conn).await?;
     } else {
@@ -182,12 +255,61 @@ pub(super) async fn validate_invariant_rows(
 ) -> crate::errors::Result<()> {
     for invariant in INVARIANTS {
         if let Some(query) = invariant.audit_query
-            && query_has_rows(conn, query).await?
+            && if query == FOREIGN_KEY_AUDIT_QUERY {
+                foreign_key_violation_exists(conn).await?
+            } else {
+                query_has_rows(conn, query).await?
+            }
         {
             return Err(global_db_operation_message(OPERATION, invariant.violation));
         }
     }
     Ok(())
+}
+
+async fn foreign_key_violation_exists(conn: &impl QueryExecutor) -> crate::errors::Result<bool> {
+    let mut rows = conn
+        .query(
+            "SELECT DISTINCT schema.name
+             FROM sqlite_schema AS schema
+             JOIN pragma_foreign_key_list(schema.name) AS foreign_key
+             WHERE schema.type = 'table'
+             ORDER BY schema.name",
+            (),
+        )
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    let mut tables = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?
+    {
+        tables.push(
+            row.get::<String>(0)
+                .map_err(|error| global_db_operation_error(OPERATION, error))?,
+        );
+    }
+    drop(rows);
+
+    for table in tables {
+        let mut rows = conn
+            .query(
+                "SELECT 1 FROM pragma_foreign_key_check(?1) LIMIT 1",
+                (table,),
+            )
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        if rows
+            .next()
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?
+            .is_some()
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 pub(in crate::global_db) async fn validate_authority_rows_exhaustive(
@@ -215,4 +337,34 @@ pub(in crate::global_db) async fn validate_session_temporal_repair_authority(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::TempDir;
+
+    use super::foreign_key_violation_exists;
+    use crate::db::engine::TestConnection;
+
+    #[tokio::test]
+    async fn foreign_key_audit_finds_violations_by_child_table() {
+        let directory = TempDir::new().unwrap();
+        let database_path = directory.path().join("sessions.db");
+        let connection = rusqlite::Connection::open(&database_path).unwrap();
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys = OFF;
+                 CREATE TABLE parent (id INTEGER PRIMARY KEY);
+                 CREATE TABLE child (
+                    id INTEGER PRIMARY KEY,
+                    parent_id INTEGER NOT NULL REFERENCES parent(id)
+                 );
+                 INSERT INTO child(id, parent_id) VALUES (1, 99);",
+            )
+            .unwrap();
+        drop(connection);
+        let connection = TestConnection::open(&database_path);
+
+        assert!(foreign_key_violation_exists(&connection).await.unwrap());
+    }
 }

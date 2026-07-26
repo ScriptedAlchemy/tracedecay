@@ -214,7 +214,7 @@ pub(super) async fn validate_observation_authority_rows(
                 "SELECT observation.sequence, observation.observation_id,
                     observation.payload_digest, observation.receipt_id,
                     observation.observation_json, observation.committed_cursor_json,
-                    receipt.receipt_json
+                    receipt.receipt_id
              FROM observations AS observation
              LEFT JOIN sanitization_receipts AS receipt
                ON receipt.receipt_id = observation.receipt_id
@@ -249,7 +249,7 @@ pub(super) async fn validate_observation_authority_rows(
             let cursor_json = row
                 .get::<String>(5)
                 .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            let Some(receipt_json) = row
+            let Some(joined_receipt_id) = row
                 .get::<Option<String>>(6)
                 .map_err(|error| global_db_operation_error(OPERATION, error))?
             else {
@@ -262,13 +262,11 @@ pub(super) async fn validate_observation_authority_rows(
                 decode_authority_json(&observation_json, "committed observation authority JSON")?;
             let cursor: ObservationSourceCursorV1 =
                 decode_authority_json(&cursor_json, "committed source cursor authority JSON")?;
-            let stored_receipt: SanitizationReceiptV1 =
-                decode_authority_json(&receipt_json, "sanitization receipt authority JSON")?;
             if sequence <= 0
                 || observation.observation_id().as_str() != observation_id
                 || observation.payload_reference().digest().as_str() != payload_digest
                 || observation.receipt().receipt().receipt_id().as_str() != receipt_id
-                || observation.receipt() != &stored_receipt
+                || joined_receipt_id != receipt_id
             {
                 return Err(authority_violation(
                     "committed observation authority columns disagree with observation JSON",
