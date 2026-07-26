@@ -6,7 +6,7 @@ use tracedecay_domain::{
     HostIntegrationCatalogV1, HostIntegrationIdV1, HostKindV1, IntegrationCatalogError,
     IntegrationDaemonActionV1, IntegrationDaemonApiV1, IntegrationEffectClassV1,
     IntegrationPrivacyClassV1, TraceDecayProfileBindingV1, canonical_json_bytes,
-    host_integration_catalog_v1,
+    host_integration_catalog_v1, stock_host_capabilities,
 };
 
 const GOLDEN_CATALOG: &str = include_str!("fixtures/integration_catalog_v1.json");
@@ -312,4 +312,15 @@ fn canonical_catalog_authority_covers_every_stock_host_capability_once() {
         .collect::<BTreeSet<_>>();
     assert_eq!(capability_digests.len(), HostKindV1::ALL.len());
     assert!(!capability_digests.contains(&catalog_digest));
+}
+
+#[test]
+fn cursor_cloud_remains_discoverable_only_as_unsupported() {
+    let capabilities = stock_host_capabilities(HostKindV1::CursorCloud);
+    assert!(capabilities.iter().all(|record| {
+        matches!(
+            record.state,
+            tracedecay_domain::HostCapabilityStateV1::Unavailable(_)
+        )
+    }));
 }

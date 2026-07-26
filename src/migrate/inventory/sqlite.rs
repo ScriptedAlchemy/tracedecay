@@ -70,7 +70,6 @@ pub(super) async fn inspect_global_db(
         project_count: 0,
         session_count: 0,
         lcm_raw_message_count: 0,
-        token_cache_present: false,
         registered_project_paths: Vec::new(),
         integrity,
         warnings,
@@ -96,7 +95,6 @@ pub(super) async fn inspect_daemon_global_db(
             project_count: 0,
             session_count: 0,
             lcm_raw_message_count: 0,
-            token_cache_present: false,
             registered_project_paths: Vec::new(),
             integrity: if should_verify_integrity(integrity) {
                 SqliteIntegrityOutcome::Unavailable {
@@ -140,7 +138,6 @@ where
         project_count: table_count(conn, "projects").await,
         session_count: table_count(conn, "sessions").await,
         lcm_raw_message_count: table_count(conn, "lcm_raw_messages").await,
-        token_cache_present: table_exists(conn, "dashboard_token_counts").await,
         registered_project_paths: project_paths(conn).await,
         integrity,
         warnings,

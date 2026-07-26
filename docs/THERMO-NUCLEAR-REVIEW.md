@@ -177,8 +177,6 @@ master); storage `row_string/row_i64/...` = one generic `row_get<T>` split into 
   audited `cursor_mac` util.
 - **Three byte-budget implementations**, one of which (`git_query.rs:553`) allocates the
   entire serialized payload just to read its length while the streaming version already exists.
-- **`dashboard_token_counts` DDL copy-pasted** into the migration path
-  (`migrate/consolidate/sqlite.rs:512`) duplicating the authoritative definition — schema drift.
 - **Two parallel memory-persistence subsystems** (`src/db/memory_v2/**` +7.2k,
   `src/store/memory/**` +14.2k) both defining `repair.rs`/`cutover.rs` with overlapping
   `feedback_history_repair_progress` entry points — establish the ownership boundary before
