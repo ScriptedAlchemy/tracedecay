@@ -161,7 +161,6 @@ The following `TRACEDECAY_*` variables remain accepted as fallbacks for their
 - `TRACEDECAY_GLOBAL_DB`.
 - `TRACEDECAY_ENABLE_GLOBAL_DB` / `TRACEDECAY_DISABLE_GLOBAL_DB`.
 - `TRACEDECAY_RESEARCH_BLOCK_REASON`.
-- `TRACEDECAY_PLUGIN_SUBAGENTS`.
 - `TRACEDECAY_PROJECT_ROOT`.
 - `TRACEDECAY_DISABLE_SUBPROCESS`.
 - `TRACEDECAY_OFFLINE`.
@@ -270,7 +269,7 @@ Every audited surface maps to exactly one policy category below.
 | `DISABLE_TRACEDECAY=true` | C | Accept as clean serve opt-out; prefer `DISABLE_TRACEDECAY=true` in docs. |
 | `TRACEDECAY_GLOBAL_DB` | C | Accept fallback with warning; `TRACEDECAY_GLOBAL_DB` wins. |
 | `TRACEDECAY_ENABLE_GLOBAL_DB` / `TRACEDECAY_DISABLE_GLOBAL_DB` | C | Accept fallback with warning; keep test hermeticity for both names. |
-| Hook/extraction env fallbacks (`TRACEDECAY_RESEARCH_BLOCK_REASON`, `TRACEDECAY_PLUGIN_SUBAGENTS`, `TRACEDECAY_PROJECT_ROOT`, `TRACEDECAY_DISABLE_SUBPROCESS`) | C | Accept fallback with warning; new names win. |
+| Hook/extraction env fallbacks (`TRACEDECAY_RESEARCH_BLOCK_REASON`, `TRACEDECAY_PROJECT_ROOT`, `TRACEDECAY_DISABLE_SUBPROCESS`) | C | Accept fallback with warning; new names win. |
 | Savings pricing env fallbacks (`TRACEDECAY_OFFLINE`, `TRACEDECAY_MODEL_PRICES_PATH`) | C | Accept fallback with warning; do not leak values in logs. |
 | Hermes historical project pins | B | Read only as one-time migration provenance, then remove generated routing state; never use as a runtime fallback. |
 | Hermes plugin list, memory provider, and context-engine aliases named `tracedecay` | B | Rewrite/remove to canonical `tracedecay` behavior. |

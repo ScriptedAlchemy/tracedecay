@@ -426,13 +426,15 @@ async fn test_database_open_migrates_v1_to_latest() {
     // Create a v1 fixture on one engine-owned runtime, then release that
     // physical owner before opening through the public registered facade.
     {
+        let setup = rusqlite::Connection::open(&db_path).expect("open v1 fixture");
+        setup
+            .execute_batch(
+                "PRAGMA journal_mode = WAL;
+                 PRAGMA foreign_keys = ON;",
+            )
+            .expect("failed to apply pragmas");
+        drop(setup);
         let conn = TestConnection::open(&db_path);
-        conn.execute_batch(
-            "PRAGMA journal_mode = WAL;
-             PRAGMA foreign_keys = ON;",
-        )
-        .await
-        .expect("failed to apply pragmas");
         create_v1_schema(&conn).await;
     }
 
@@ -1276,7 +1278,8 @@ async fn test_v14_adds_access_tracking_and_oplog() {
 
 #[tokio::test]
 async fn test_v15_compacts_legacy_f64_vectors_without_open_time_vacuum() {
-    let (conn, _dir) = create_schema_db().await;
+    let (conn, dir) = create_schema_db().await;
+    let db_path = dir.path().join("test.db");
     let legacy_vector = vec![0.0_f64; crate::memory::encoding::HolographicEncoder::DIMENSIONS];
     let legacy_bytes = bincode::serialize(&legacy_vector).unwrap();
     assert_eq!(legacy_bytes.len(), 16_392);
@@ -1291,10 +1294,14 @@ async fn test_v15_compacts_legacy_f64_vectors_without_open_time_vacuum() {
     )
     .await
     .expect("failed to seed legacy f64 vector");
-    conn.execute_batch("PRAGMA auto_vacuum = NONE; VACUUM;")
-        .await
-        .expect("failed to simulate a legacy database without incremental auto-vacuum");
     set_user_version(&conn, 14).await;
+    drop(conn);
+    let setup = rusqlite::Connection::open(&db_path).expect("open legacy auto-vacuum fixture");
+    setup
+        .execute_batch("PRAGMA auto_vacuum = NONE; VACUUM;")
+        .expect("failed to simulate a legacy database without incremental auto-vacuum");
+    drop(setup);
+    let conn = TestConnection::open(&db_path);
 
     let migrated = migrate_connection(&conn)
         .await
@@ -1335,15 +1342,19 @@ async fn test_v15_compacts_legacy_f64_vectors_without_open_time_vacuum() {
 
 #[tokio::test]
 async fn test_latest_open_defers_incremental_vacuum_repair() {
-    let (conn, _dir) = create_schema_db().await;
-
-    conn.execute_batch(
-        "PRAGMA auto_vacuum = NONE;
-         VACUUM;",
-    )
-    .await
-    .expect("failed to simulate pre-repair auto_vacuum mode");
+    let (conn, dir) = create_schema_db().await;
+    let db_path = dir.path().join("test.db");
     set_user_version(&conn, 24).await;
+    drop(conn);
+    let setup = rusqlite::Connection::open(&db_path).expect("open pre-repair auto-vacuum fixture");
+    setup
+        .execute_batch(
+            "PRAGMA auto_vacuum = NONE;
+             VACUUM;",
+        )
+        .expect("failed to simulate pre-repair auto_vacuum mode");
+    drop(setup);
+    let conn = TestConnection::open(&db_path);
     assert_eq!(
         scalar_i64(&conn, "PRAGMA auto_vacuum").await,
         0,
