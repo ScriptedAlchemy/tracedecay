@@ -591,3 +591,98 @@ async fn all_unknown_inputs_compose_a_truthful_unavailable_report() {
             .all(|finding| !finding.state().is_healthy_complete())
     );
 }
+
+fn remediation_operation() -> crate::dashboard::DoctorRemediationOperationV1 {
+    crate::dashboard::DoctorRemediationOperationV1 {
+        operation_id: crate::application::operation_stream::OperationId::from_request(
+            RequestId::new("request.doctor-remediation-observation").unwrap(),
+        ),
+        owning_operation: DoctorOwningOperationRefV1::new(
+            tracedecay_application::doctor::operations::CONFIGURATION_PROTECTED_APPLY,
+        )
+        .unwrap(),
+        phase: crate::dashboard::DoctorRemediationOperationPhaseV1::Partial,
+        preview_id: None,
+        execution: None,
+        effect_receipt: None,
+        owner_effect_receipt: None,
+        owner_result_digest: None,
+        verification: crate::dashboard::DoctorRemediationVerificationV1::Pending,
+    }
+}
+
+#[tokio::test]
+async fn remediation_reobservation_uses_fresh_doctor_evidence_not_dispatch_success() {
+    let ctx = context();
+    let mut before = DoctorKernelInputsV1::all_unknown();
+    before.configuration = ConfigurationAuthorityReadV1::Resolved {
+        drift: ConfigurationDriftV1::Drifted,
+        coverage: DoctorCoverageCompletenessV1::Complete,
+    };
+    let finding_report = compose_doctor_report(&ctx, &before).await.unwrap();
+    let finding = finding_report
+        .entries()
+        .iter()
+        .find(|entry| entry.finding().family() == DoctorFindingFamilyV1::Configuration)
+        .unwrap()
+        .finding();
+    assert_eq!(finding.state(), DoctorEvidenceStateV1::Degraded);
+    assert_eq!(
+        finding.remediation().unwrap().owning_operation().as_str(),
+        tracedecay_application::doctor::operations::CONFIGURATION_PROTECTED_APPLY
+    );
+    assert!(matches!(
+        verify_doctor_remediation_observation(&finding_report, &remediation_operation()).unwrap(),
+        crate::dashboard::DoctorRemediationVerificationV1::Failed { .. }
+    ));
+
+    let mut after = DoctorKernelInputsV1::all_unknown();
+    after.configuration = ConfigurationAuthorityReadV1::Resolved {
+        drift: ConfigurationDriftV1::InSync,
+        coverage: DoctorCoverageCompletenessV1::Complete,
+    };
+    let recovered_report = compose_doctor_report(&ctx, &after).await.unwrap();
+    assert!(matches!(
+        verify_doctor_remediation_observation(&recovered_report, &remediation_operation()).unwrap(),
+        crate::dashboard::DoctorRemediationVerificationV1::Verified { .. }
+    ));
+}
+
+#[tokio::test]
+async fn remediation_reobservation_preserves_partial_denied_and_unavailable_truth() {
+    let ctx = context();
+    let operation = remediation_operation();
+
+    let mut partial = DoctorKernelInputsV1::all_unknown();
+    partial.configuration = ConfigurationAuthorityReadV1::Resolved {
+        drift: ConfigurationDriftV1::InSync,
+        coverage: DoctorCoverageCompletenessV1::Partial,
+    };
+    assert!(matches!(
+        verify_doctor_remediation_observation(
+            &compose_doctor_report(&ctx, &partial).await.unwrap(),
+            &operation,
+        )
+        .unwrap(),
+        crate::dashboard::DoctorRemediationVerificationV1::Partial { .. }
+    ));
+
+    let mut denied = DoctorKernelInputsV1::all_unknown();
+    denied.configuration = ConfigurationAuthorityReadV1::Denied;
+    assert_eq!(
+        verify_doctor_remediation_observation(
+            &compose_doctor_report(&ctx, &denied).await.unwrap(),
+            &operation,
+        )
+        .unwrap(),
+        crate::dashboard::DoctorRemediationVerificationV1::Denied
+    );
+
+    let unavailable = compose_doctor_report(&ctx, &DoctorKernelInputsV1::all_unknown())
+        .await
+        .unwrap();
+    assert_eq!(
+        verify_doctor_remediation_observation(&unavailable, &operation).unwrap(),
+        crate::dashboard::DoctorRemediationVerificationV1::Unavailable
+    );
+}
