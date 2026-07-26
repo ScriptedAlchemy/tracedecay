@@ -258,6 +258,7 @@ fn query_authority(privacy_domain: PrivacyDomainId) -> Arc<Pr9QueryAuthorityV1> 
         per_source_namespace: None,
         per_source_instance: None,
         per_repository: None,
+        per_file: None,
         per_session_or_thread: None,
         per_copy_cluster: None,
         per_evidence_role: None,

@@ -944,6 +944,7 @@ fn compact_candidate_cmp(left: &CompactCandidate, right: &CompactCandidate) -> O
 fn occurrence_from(candidate: &CompactCandidate) -> OccurrenceProvenance {
     OccurrenceProvenance {
         source_occurrence_id: candidate.source_occurrence_id.clone(),
+        file_occurrence_id: candidate.file_occurrence_id.clone(),
         retriever_evidence_anchor: candidate.retriever_evidence_anchor.clone(),
         source_namespace: candidate.source_namespace.clone(),
         repository_id: candidate.repository_id.clone(),

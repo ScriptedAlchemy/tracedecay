@@ -526,6 +526,7 @@ impl CodeLexicalProjectionAdapterV1 {
                 "code-chunk:{generation}:{chunk_id}"
             ))
             .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
+            file_occurrence_id: Some(row.chunk.anchor.file_occurrence_id.clone()),
             source_namespace: self.metadata.freshness.source_namespace.clone(),
             repository_id: self.metadata.repository_id.clone(),
             session_or_thread_id: None,

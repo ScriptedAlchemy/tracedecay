@@ -246,6 +246,7 @@ impl CodeGraphEvidenceAdapterV1 {
                         logical_evidence_id,
                         source_occurrence_id: SourceOccurrenceId::new(occurrence.clone())
                             .map_err(|error| RetrievalPortError::Contract(error.to_string()))?,
+                        file_occurrence_id: Some(binding_meta.file.clone()),
                         source_namespace: self.freshness.source_namespace.clone(),
                         repository_id: self.repository_id.clone(),
                         session_or_thread_id: None,

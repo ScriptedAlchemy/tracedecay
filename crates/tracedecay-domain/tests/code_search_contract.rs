@@ -54,6 +54,7 @@ fn candidate(
         anchor_id: RetrievalAnchorId::new("anchor.contract").unwrap(),
         logical_evidence_id: id("logical.contract"),
         source_occurrence_id: id("occurrence.contract"),
+        file_occurrence_id: None,
         source_namespace: id("ns.contract"),
         repository_id: None,
         session_or_thread_id: None,
@@ -74,6 +75,7 @@ fn candidate(
 fn provenance(candidate: &CompactCandidate) -> OccurrenceProvenance {
     OccurrenceProvenance {
         source_occurrence_id: candidate.source_occurrence_id.clone(),
+        file_occurrence_id: candidate.file_occurrence_id.clone(),
         retriever_evidence_anchor: candidate.retriever_evidence_anchor.clone(),
         source_namespace: candidate.source_namespace.clone(),
         repository_id: candidate.repository_id.clone(),

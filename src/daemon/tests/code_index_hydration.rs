@@ -84,6 +84,7 @@ fn ranked() -> RankedCandidate {
                 source_occurrence_id: id::<SourceOccurrenceId>(
                     "code-chunk:generation.hydration:chunk.hydration",
                 ),
+                file_occurrence_id: Some(id("file.hydration")),
                 retriever_evidence_anchor: id::<RetrievalAnchorId>("evidence.code-index-hydration"),
                 source_namespace: freshness.source_namespace.clone(),
                 repository_id: Some(id::<RepositoryId>("repository.code-index-hydration")),
@@ -344,6 +345,7 @@ fn production_semantic_chunk_candidate_hydrates_from_frozen_generation() {
                 .expect("logical evidence"),
             occurrences: vec![OccurrenceProvenance {
                 source_occurrence_id: source_occurrence.clone(),
+                file_occurrence_id: Some(chunk.anchor.file_occurrence_id.clone()),
                 retriever_evidence_anchor: RetrievalAnchorId::new(format!(
                     "code-semantic:{}",
                     chunk_id.as_str()
