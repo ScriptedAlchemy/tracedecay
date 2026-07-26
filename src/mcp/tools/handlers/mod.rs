@@ -463,6 +463,7 @@ pub struct ToolCallRegistryOptions<'a> {
     pub doctor_remediation_dispatcher: Option<crate::dashboard::DoctorRemediationDispatcherV1>,
     pub code_index_freshness_reader:
         Option<crate::dashboard::code_index_freshness_api::CodeIndexFreshnessReader>,
+    pub feedback_status_reader: Option<crate::dashboard::feedback_api::FeedbackStatusReader>,
     pub diagnostics_cache: Option<&'a crate::diagnostics::DiagnosticsCache>,
     pub diagnostics_lsp:
         Option<Arc<tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>>>,
@@ -497,6 +498,7 @@ impl Default for ToolCallRegistryOptions<'_> {
             doctor_report_reader: None,
             doctor_remediation_dispatcher: None,
             code_index_freshness_reader: None,
+            feedback_status_reader: None,
             diagnostics_cache: None,
             diagnostics_lsp: None,
             application_invocation_client: None,
@@ -670,7 +672,16 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
     if let Some(result) = dispatch_admin_tools(tool_name, cg, &args, &options).await {
         return result;
     }
-    if let Some(result) = dispatch_analysis_tools(tool_name, cg, &args, scope_prefix).await {
+    if let Some(result) = dispatch_analysis_tools(
+        tool_name,
+        cg,
+        &args,
+        scope_prefix,
+        active_project_session_db,
+        &options,
+    )
+    .await
+    {
         return result;
     }
     if let Some(result) = dispatch_git_tools(tool_name, cg, &args, &options).await {
@@ -1142,6 +1153,8 @@ async fn dispatch_analysis_tools(
     cg: &TraceDecay,
     args: &Value,
     scope_prefix: Option<&str>,
+    active_project_session_db: Option<&Arc<RegisteredGlobalDb>>,
+    options: &ToolCallRegistryOptions<'_>,
 ) -> Option<Result<ToolResult>> {
     let result = match tool_name {
         "tracedecay_dead_code" => analysis::handle_dead_code(cg, args.clone(), scope_prefix).await,
@@ -1175,6 +1188,16 @@ async fn dispatch_analysis_tools(
         }
         "tracedecay_field_sites" => {
             analysis::handle_field_sites(cg, args.clone(), scope_prefix).await
+        }
+        "tracedecay_diagnostics" => {
+            analysis::handle_diagnostics(
+                cg,
+                args.clone(),
+                options.diagnostics_cache,
+                options.diagnostics_lsp.as_deref(),
+                active_project_session_db.map(Arc::as_ref),
+            )
+            .await
         }
         _ => return None,
     };
@@ -1476,6 +1499,7 @@ async fn dispatch_session_workflow_tools(
                 options.doctor_report_reader.clone(),
                 options.doctor_remediation_dispatcher.clone(),
                 options.code_index_freshness_reader.clone(),
+                options.feedback_status_reader.clone(),
                 options.diagnostics_lsp.clone(),
             )
             .await
@@ -1687,6 +1711,9 @@ mod tests {
                 .into_iter()
                 .map(|operation| format!("tracedecay_{}", operation.as_str())),
         );
+        for hidden in super::super::definitions::UNADVERTISED_HANDLE_GATED_TOOL_NAMES {
+            handler_names.remove(*hidden);
+        }
         for operation in RetainedSurfaceOperation::ALL {
             let tool_name = format!("tracedecay_{}", operation.as_str());
             let composition = retained_mcp_composition()
@@ -2173,7 +2200,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             compatibility_tools.len(),
-            106 + usize::from(super::super::definitions::ast_grep_available())
+            100 + usize::from(super::super::definitions::ast_grep_available())
         );
         for tool in compatibility_tools {
             assert!(
@@ -2347,10 +2374,15 @@ mod tests {
     }
 
     #[test]
-    fn every_application_surface_advertises_canonical_markdown_and_json() {
+    fn every_advertised_application_surface_uses_canonical_output_formats() {
         let tools = get_tool_definitions();
         for operation in APPLICATION_SURFACE_OPERATIONS {
             let tool_name = format!("tracedecay_{}", operation.as_str());
+            if super::super::definitions::UNADVERTISED_HANDLE_GATED_TOOL_NAMES
+                .contains(&tool_name.as_str())
+            {
+                continue;
+            }
             let tool = tools
                 .iter()
                 .find(|tool| tool.name == tool_name)
@@ -2405,6 +2437,18 @@ mod tests {
             "tracedecay_fact_feedback",
             "tracedecay_memory_status",
             "tracedecay_session_refresh",
+            "tracedecay_configuration_set",
+            "tracedecay_configuration_unset",
+            "tracedecay_configuration_batch",
+            "tracedecay_configuration_write_credential",
+            "tracedecay_configuration_protected_apply",
+            "tracedecay_configuration_rollback_apply",
+            "tracedecay_context_scout_pause",
+            "tracedecay_context_scout_resume",
+            "tracedecay_context_scout_cancel",
+            "tracedecay_context_scout_claim",
+            "tracedecay_context_scout_delivery",
+            "tracedecay_context_scout_feedback",
             "tracedecay_lcm_doctor",
             "tracedecay_lcm_preflight",
             "tracedecay_lcm_compress",

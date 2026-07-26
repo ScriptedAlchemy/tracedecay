@@ -131,6 +131,7 @@ pub struct CandidateWorkloadV1 {
     pub profile_matrix: Vec<ProfileSpecV1>,
     pub resource_budgets: ResourceBudgetsV1,
     pub decision_policy: DecisionPolicySliceV1,
+    pub expected_pr9_fallback_digests: BTreeMap<String, String>,
     pub queries: Vec<WorkloadQueryV1>,
 }
 
@@ -199,6 +200,20 @@ pub struct ProfileSpecV1 {
     pub semantic_weight_ppm: u32,
     pub rerank_weight_ppm: u32,
     pub calibration_threshold_ppm: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rerank_policy: Option<EvaluationRerankPolicyV1>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct EvaluationRerankPolicyV1 {
+    pub policy_id: String,
+    pub max_candidates: u32,
+    pub max_input_bytes: u64,
+    pub max_input_tokens: u64,
+    pub max_work_units: u64,
+    pub max_model_invocations: u32,
+    pub deadline_micros: Option<u64>,
 }
 
 /// Exact domain material exercised by the direct evaluator for one checked-in
@@ -333,6 +348,8 @@ pub struct ProductionCandidateOutputV1 {
     pub profile_material_digest: String,
     pub fallback_digest: String,
     pub pr9_fallback_digest: String,
+    pub expected_pr9_fallback_digest: String,
+    pub pr9_fallback_matches_expected: bool,
     pub cancellation: String,
     pub offline: String,
     pub optional_stages: OptionalStageMeasurementsV1,
@@ -365,6 +382,7 @@ pub struct ProductionCandidateNativeQueryContextV1<'a> {
     pub code: &'a CodeIndexPublishedGenerationV1,
     pub code_generation: &'a CodeGenerationId,
     pub semantic_allowed_chunks: &'a BTreeSet<CodeSearchChunkId>,
+    pub rerank_policy: Option<&'a RerankPolicy>,
 }
 
 /// Genuine optional runtime inputs borrowed only for the evaluator call.
@@ -948,6 +966,25 @@ pub fn validate_workload_for_tuning(
                 profile.profile_id
             )));
         }
+        if (profile.rerank_weight_ppm == 0) != profile.rerank_policy.is_none() {
+            return Err(CandidateOutputError::Contract(format!(
+                "profile {} must bind rerank weight and policy together",
+                profile.profile_id
+            )));
+        }
+        if let Some(policy) = &profile.rerank_policy
+            && (policy.policy_id.trim().is_empty()
+                || policy.max_candidates == 0
+                || policy.max_input_bytes == 0
+                || policy.max_input_tokens == 0
+                || policy.max_work_units == 0
+                || policy.max_model_invocations == 0)
+        {
+            return Err(CandidateOutputError::Contract(format!(
+                "profile {} has an invalid bounded rerank policy",
+                profile.profile_id
+            )));
+        }
     }
     if profile_ids.is_empty() {
         return Err(CandidateOutputError::Contract(
@@ -998,6 +1035,32 @@ pub fn validate_workload_for_tuning(
                 "partition {partition} has no queries"
             )));
         }
+    }
+    if workload.expected_pr9_fallback_digests.len() != 2
+        || !["train", "validation"].into_iter().all(|partition| {
+            workload
+                .expected_pr9_fallback_digests
+                .contains_key(partition)
+        })
+    {
+        return Err(CandidateOutputError::Contract(
+            "expected PR9 fallback digests must bind train and validation".to_owned(),
+        ));
+    }
+    if workload
+        .expected_pr9_fallback_digests
+        .values()
+        .any(|digest| {
+            digest.len() != 71
+                || !digest.starts_with("sha256:")
+                || !digest[7..]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+    {
+        return Err(CandidateOutputError::Contract(
+            "expected PR9 fallback digest is not canonical".to_owned(),
+        ));
     }
     Ok(())
 }
@@ -1344,6 +1407,7 @@ fn retrieve_one_native_query(
             code: &published.generation,
             code_generation: &prepared.code_generation,
             semantic_allowed_chunks: &semantic_allowed_chunks,
+            rerank_policy: prepared.rerank_policy.as_ref(),
         },
         &mut evaluate,
     )?;
@@ -1626,15 +1690,10 @@ pub fn direct_evaluated_profile_material(
         .ok_or_else(|| {
             CandidateOutputError::Contract(format!("unknown requested profile_id {profile_id}"))
         })?;
-    if profile.rerank_weight_ppm != 0 {
-        return Err(CandidateOutputError::Contract(format!(
-            "profile {profile_id} requires the exact bounded rerank policy from native evaluation"
-        )));
-    }
     Ok(DirectEvaluatedProfileMaterialV1 {
         profile: fusion_profile(profile, &retrieval_budget(), true)?,
-        diversity: no_caps()?,
-        rerank: None,
+        diversity: evaluated_diversity_policy()?,
+        rerank: evaluated_rerank_policy(profile)?,
     })
 }
 
@@ -1748,6 +1807,16 @@ fn generate_partition_output(
         "tracedecay.search-eval.partition-fallbacks.v1",
         &pr9_digests,
     ))?;
+    let expected_pr9_fallback_digest = workload
+        .expected_pr9_fallback_digests
+        .get(partition)
+        .cloned()
+        .ok_or_else(|| {
+            CandidateOutputError::Contract(format!(
+                "missing expected PR9 fallback digest for {partition}"
+            ))
+        })?;
+    let pr9_fallback_matches_expected = pr9_digest == expected_pr9_fallback_digest;
 
     let mut resources = BTreeMap::new();
     resources.insert("current".to_owned(), current);
@@ -1768,6 +1837,8 @@ fn generate_partition_output(
         profile_material_digest: compute_profile_material_digest(profile)?,
         fallback_digest,
         pr9_fallback_digest: pr9_digest,
+        expected_pr9_fallback_digest,
+        pr9_fallback_matches_expected,
         cancellation: REQUIRED_CANCELLATION.to_owned(),
         offline: REQUIRED_OFFLINE.to_owned(),
         optional_stages: optional_stage_measurements(profile),
@@ -1873,6 +1944,7 @@ struct PreparedProductionQueryV1 {
     pr9_output: CompositionOutputV1,
     fallback: Pr9FallbackSubpayload,
     diversity: DiversityPolicy,
+    rerank_policy: Option<RerankPolicy>,
 }
 
 fn prepare_production_query(
@@ -2015,7 +2087,7 @@ fn prepare_production_query(
         CompositionLaneInput::new(RetrieverKind::Graph, graph_outcome)
             .map_err(|error| CandidateOutputError::Contract(error.to_string()))?,
     ];
-    let diversity = no_caps()?;
+    let diversity = evaluated_diversity_policy()?;
     let pr9_output = kernel
         .compose(
             &FusionStageInput {
@@ -2026,6 +2098,7 @@ fn prepare_production_query(
         )
         .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
     let fallback = pr9_fallback_from_composition(&pr9_output)?;
+    let rerank_policy = evaluated_rerank_policy(profile)?;
     Ok(PreparedProductionQueryV1 {
         code_generation: generation_id,
         request,
@@ -2040,6 +2113,7 @@ fn prepare_production_query(
         pr9_output,
         fallback,
         diversity,
+        rerank_policy,
     })
 }
 
@@ -3162,7 +3236,11 @@ fn fusion_profile(
         score_domain_calibrations,
         weights_micros: weights,
         diversity_policy_id: id::<DiversityPolicyId>("diversity.candidate.v1")?,
-        rerank_policy_id: None,
+        rerank_policy_id: profile
+            .rerank_policy
+            .as_ref()
+            .map(|policy| id(&policy.policy_id))
+            .transpose()?,
         retrieval_budget: retrieval_budget(),
     })
 }
@@ -3221,17 +3299,41 @@ fn retrieval_budget() -> RetrievalBudget {
     }
 }
 
-fn no_caps() -> Result<DiversityPolicy, CandidateOutputError> {
+fn evaluated_diversity_policy() -> Result<DiversityPolicy, CandidateOutputError> {
     Ok(DiversityPolicy {
         policy_id: id("diversity.candidate.v1")?,
         evaluation_result_anchor: Some(id("evaluation.candidate.v1")?),
         per_source_namespace: None,
         per_source_instance: None,
         per_repository: None,
+        per_file: Some(2),
         per_session_or_thread: None,
         per_copy_cluster: None,
         per_evidence_role: None,
     })
+}
+
+fn evaluated_rerank_policy(
+    profile: &ProfileSpecV1,
+) -> Result<Option<RerankPolicy>, CandidateOutputError> {
+    let evaluation_result_anchor =
+        id::<RetrievalAnchorId>(&format!("evaluation.{}", profile.profile_id))?;
+    profile
+        .rerank_policy
+        .as_ref()
+        .map(|policy| {
+            Ok(RerankPolicy {
+                policy_id: id(&policy.policy_id)?,
+                evaluation_result_anchor,
+                max_candidates: policy.max_candidates,
+                max_input_bytes: policy.max_input_bytes,
+                max_input_tokens: policy.max_input_tokens,
+                max_work_units: policy.max_work_units,
+                max_model_invocations: policy.max_model_invocations,
+                deadline_micros: policy.deadline_micros,
+            })
+        })
+        .transpose()
 }
 
 fn id<T>(value: &str) -> Result<T, CandidateOutputError>
@@ -3419,9 +3521,18 @@ mod tests {
                 .weights_micros
                 .contains_key(&RetrieverKind::Semantic)
         );
-        let error = load_direct_evaluated_profile_material(&repo_root(), None, "hybrid-reranked")
-            .expect_err("rerank policy must come from native evaluation");
-        assert!(error.to_string().contains("exact bounded rerank policy"));
+        let reranked =
+            load_direct_evaluated_profile_material(&repo_root(), None, "hybrid-reranked")
+                .expect("rerank material");
+        assert_eq!(
+            reranked.profile.rerank_policy_id.as_ref(),
+            reranked.rerank.as_ref().map(|policy| &policy.policy_id)
+        );
+        assert_eq!(reranked.diversity.per_file, Some(2));
+        assert_eq!(
+            reranked.rerank.as_ref().map(|policy| policy.max_candidates),
+            Some(16)
+        );
     }
 
     #[test]
@@ -3588,6 +3699,32 @@ mod tests {
     }
 
     #[test]
+    fn workload_requires_immutable_pr9_fallback_digests_for_both_partitions() {
+        let mut missing = workload();
+        missing.expected_pr9_fallback_digests.remove("validation");
+        let error =
+            validate_workload_for_tuning(&missing).expect_err("missing validation fallback digest");
+        assert!(
+            error
+                .to_string()
+                .contains("expected PR9 fallback digests must bind train and validation")
+        );
+
+        let mut malformed = workload();
+        malformed.expected_pr9_fallback_digests.insert(
+            "train".to_owned(),
+            "sha256:not-a-canonical-digest".to_owned(),
+        );
+        let error =
+            validate_workload_for_tuning(&malformed).expect_err("malformed fallback digest");
+        assert!(
+            error
+                .to_string()
+                .contains("expected PR9 fallback digest is not canonical")
+        );
+    }
+
+    #[test]
     fn candidate_generation_rejects_partially_unknown_profile_selection() {
         let error = generate_candidate_outputs(&GenerateCandidateOutputsOptions {
             repo_root: &repo_root(),
@@ -3619,6 +3756,14 @@ mod tests {
             assert_eq!(output.cancellation, REQUIRED_CANCELLATION);
             assert_eq!(output.offline, REQUIRED_OFFLINE);
             assert_eq!(output.fallback_digest, output.pr9_fallback_digest);
+            assert_eq!(
+                output.expected_pr9_fallback_digest,
+                workload.expected_pr9_fallback_digests[&output.partition]
+            );
+            assert_eq!(
+                output.pr9_fallback_matches_expected,
+                output.pr9_fallback_digest == output.expected_pr9_fallback_digest
+            );
             assert_eq!(output.corpus_digest, expected_corpus_digest);
             assert_eq!(output.seed, EVALUATION_SEED);
             assert_eq!(output.cache_state, EVALUATION_CACHE_STATE);

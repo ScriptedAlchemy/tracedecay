@@ -370,6 +370,66 @@ fn logical_copies_and_file_caps_preserve_contradictions_deterministically() {
 }
 
 #[test]
+fn file_diversity_caps_non_exact_hits_and_refills_from_other_files() {
+    let mut first = candidate(RetrieverKind::Lexical, "file-a-first", 900_000, 0);
+    first.file_occurrence_id = Some(id("file.a"));
+    let mut second = candidate(RetrieverKind::Lexical, "file-a-second", 800_000, 1);
+    second.file_occurrence_id = Some(id("file.a"));
+    let mut capped = candidate(RetrieverKind::Lexical, "file-a-capped", 700_000, 2);
+    capped.file_occurrence_id = Some(id("file.a"));
+    let mut refill = candidate(RetrieverKind::Lexical, "file-b-refill", 600_000, 3);
+    refill.file_occurrence_id = Some(id("file.b"));
+
+    let policy = DiversityPolicy {
+        per_file: Some(2),
+        ..no_caps()
+    };
+    let output = CompositionKernel::new(id("ranking.fixture.v1"))
+        .compose(
+            &FusionStageInput {
+                profile: profile(),
+                lanes: composition_lanes(vec![
+                    (
+                        RetrieverKind::ExactLiteral,
+                        RetrieverOutcome::Complete(batch(Vec::new(), "empty")),
+                    ),
+                    (
+                        RetrieverKind::Lexical,
+                        RetrieverOutcome::Complete(batch(
+                            vec![first, second, capped, refill],
+                            "lexical",
+                        )),
+                    ),
+                    (
+                        RetrieverKind::Graph,
+                        RetrieverOutcome::Complete(batch(Vec::new(), "empty")),
+                    ),
+                ]),
+            },
+            &policy,
+        )
+        .expect("file cap applies");
+
+    assert_eq!(
+        output
+            .ranked_candidates
+            .iter()
+            .map(|ranked| ranked.candidate.anchor_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "anchor.file-a-first",
+            "anchor.file-a-second",
+            "anchor.file-b-refill"
+        ]
+    );
+    assert_eq!(output.diversity_decisions.len(), 1);
+    assert_eq!(
+        output.diversity_decisions[0].decision.detail,
+        "capped by file"
+    );
+}
+
+#[test]
 fn logical_copy_collapse_requires_relation_evidence_and_retains_every_copy_provenance() {
     let mut unproven_primary = candidate(RetrieverKind::Lexical, "unproven-primary", 900_000, 0);
     unproven_primary.logical_copy_cluster_id = Some(id("copy.unproven"));

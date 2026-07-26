@@ -183,17 +183,15 @@ async fn analytics_reports_tool_tiers_top_tools_and_zero_call_tools() {
 #[tokio::test]
 async fn analytics_section_filter_returns_only_the_requested_section() {
     let (cg, _env) = crate::mcp_handler_test::setup_project().await;
+    let server = crate::support::real_mcp_server(cg).await;
 
-    let res = handle_tool_call(
-        &cg,
+    let res = handle_real_server_tool_call(
+        &server,
         "tracedecay_analytics",
         json!({"section": "facts", "format": "json"}),
-        None,
-        None,
     )
-    .await
-    .expect("tracedecay_analytics with section=facts should succeed");
-    let payload = extract_json(&res.value);
+    .await;
+    let payload = extract_json(&res);
     assert!(payload.get("facts").is_some(), "facts section missing");
     assert!(
         payload.get("tools").is_none(),
@@ -242,17 +240,12 @@ async fn analytics_rejects_unknown_scope_and_section() {
 #[tokio::test]
 async fn analytics_degrades_gracefully_for_a_zero_data_project() {
     let (cg, _env) = crate::mcp_handler_test::setup_project().await;
+    let server = crate::support::real_mcp_server(cg).await;
 
-    let res = handle_tool_call(
-        &cg,
-        "tracedecay_analytics",
-        json!({"format": "json"}),
-        None,
-        None,
-    )
-    .await
-    .expect("tracedecay_analytics should succeed even with no recorded activity");
-    let payload = extract_json(&res.value);
+    let res =
+        handle_real_server_tool_call(&server, "tracedecay_analytics", json!({"format": "json"}))
+            .await;
+    let payload = extract_json(&res);
 
     assert_eq!(payload["event_count"].as_i64(), Some(0));
     assert_eq!(payload["tools"]["available"].as_bool(), Some(false));
@@ -277,10 +270,17 @@ async fn analytics_degrades_gracefully_for_a_zero_data_project() {
     assert_eq!(payload["automation"]["available"].as_bool(), Some(true));
     assert_eq!(payload["automation"]["records_in_window"].as_i64(), Some(0));
 
-    let md_res = handle_tool_call(&cg, "tracedecay_analytics", json!({}), None, None)
-        .await
-        .expect("markdown format should also succeed with no data");
-    let text = extract_text(&md_res.value);
+    drop(server);
+    drop(_env);
+    let (markdown_cg, _markdown_env) = crate::mcp_handler_test::setup_project().await;
+    let markdown_server = crate::support::real_mcp_server(markdown_cg).await;
+    let md_res = handle_real_server_tool_call(
+        &markdown_server,
+        "tracedecay_analytics",
+        json!({"format": "markdown"}),
+    )
+    .await;
+    let text = extract_text(&md_res);
     assert!(
         text.contains("No MCP tool calls recorded"),
         "expected an empty-state note in markdown: {text}"

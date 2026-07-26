@@ -416,7 +416,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalog_advertises_every_registered_feedback_operation() {
+    fn catalog_advertises_every_transport_exposed_feedback_operation() {
         let contribution = feedback_surface_catalog_contribution().expect("contribution");
         let mut names: Vec<_> = contribution
             .bindings()
@@ -427,6 +427,7 @@ mod tests {
         names.dedup();
         let mut expected = FEEDBACK_SPECS
             .iter()
+            .filter(|spec| !spec.surfaces.is_empty())
             .map(|spec| spec.operation.to_owned())
             .collect::<Vec<_>>();
         expected.sort();

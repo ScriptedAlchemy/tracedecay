@@ -199,16 +199,14 @@ async fn fact_search_ranks_exact_operational_evidence_and_tracks_once() {
     assert_eq!(after_rare.retrieval_count, 2);
     assert_eq!(after_rare.access_count, 2);
 
-    let analytics = handle_tool_call(
-        &cg,
+    let server = real_mcp_server(cg).await;
+    let analytics = handle_real_server_tool_call(
+        &server,
         "tracedecay_analytics",
         json!({"section": "facts", "format": "json"}),
-        None,
-        None,
     )
-    .await
-    .unwrap();
-    let analytics: Value = serde_json::from_str(extract_text(&analytics.value)).unwrap();
+    .await;
+    let analytics: Value = serde_json::from_str(extract_real_server_text(&analytics)).unwrap();
     assert_eq!(
         analytics["facts"]["facts"].as_i64(),
         Some(contents.len() as i64)

@@ -2664,7 +2664,7 @@ mod tests {
     }
 
     #[test]
-    fn kimi_canonical_component_set_uses_deployed_registration_lifecycle() {
+    fn kimi_canonical_component_set_fails_before_direct_host_mutation() {
         let _env_lock = HOST_ENV_LOCK.lock().unwrap();
         let home = tempfile::tempdir().unwrap();
         let lifecycle = tempfile::tempdir().unwrap();
@@ -2694,7 +2694,7 @@ mod tests {
             HostBundleCliOperation::Update,
             HostBundleCliOperation::Repair,
         ] {
-            apply_canonical_component_set(
+            let error = apply_canonical_component_set(
                 "kimi",
                 operation,
                 &component_set,
@@ -2702,64 +2702,31 @@ mod tests {
                 home.path(),
                 lifecycle.path(),
             )
-            .unwrap();
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains("host capability is unsupported"));
         }
 
-        let installed: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&installed_path).unwrap()).unwrap();
-        assert_eq!(installed["unrelated"], "keep");
-        assert!(
-            installed["plugins"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|plugin| plugin["id"] == "foreign")
+        assert_eq!(
+            std::fs::read(&installed_path).unwrap(),
+            br#"{"version":1,"plugins":[{"id":"foreign","enabled":true}],"unrelated":"keep"}
+"#
         );
         assert!(
-            installed["plugins"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|plugin| plugin["id"] == "tracedecay")
+            !code_home.join("plugins/managed/tracedecay").exists(),
+            "preflight must fail before deploying managed plugin bytes"
         );
-        assert!(
-            code_home
-                .join("plugins/managed/tracedecay/.kimi-plugin/plugin.json")
-                .is_file()
-        );
-        assert!(
-            !home
-                .path()
-                .join(".tracedecay/host-bundle-stage/kimi")
-                .exists(),
-            "the component transaction deploys assets directly; registration must not rerun the legacy installer"
-        );
-
-        apply_canonical_component_set(
-            "kimi",
-            HostBundleCliOperation::Uninstall,
-            &component_set,
-            &options,
-            home.path(),
-            lifecycle.path(),
-        )
-        .unwrap();
-        let installed: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&installed_path).unwrap()).unwrap();
-        assert_eq!(installed["unrelated"], "keep");
-        assert_eq!(installed["plugins"].as_array().unwrap().len(), 1);
-        assert_eq!(installed["plugins"][0]["id"], "foreign");
         for artifact in &component_set.component_set.components[0].manifest.artifacts {
             assert!(
                 !home.path().join(&artifact.relative_path).exists(),
-                "uninstall must remove owned Kimi artifact {}",
+                "failed Kimi preflight must not create artifact {}",
                 artifact.relative_path
             );
         }
     }
 
     #[test]
-    fn kimi_registration_rollback_survives_delegate_restart() {
+    fn kimi_registration_preflight_creates_no_backup_for_unavailable_api() {
         use tracedecay::agents::host_bundle_v2::HostComponentSetRegistrationV1;
 
         let _env_lock = HOST_ENV_LOCK.lock().unwrap();
@@ -2787,29 +2754,17 @@ mod tests {
             request.lifecycle.operation,
         )
         .unwrap();
-        registration
-            .preflight(&component_set.component_set, &request)
-            .unwrap();
-        registration
-            .stage(&component_set.component_set, &request)
-            .unwrap();
-        registration
-            .apply(&component_set.component_set, &request)
-            .unwrap();
-        drop(registration);
-
-        let mut restarted = CompatibilityAgentRegistrationDelegate::new(
-            "kimi",
-            home.path(),
-            lifecycle.path(),
-            request.lifecycle.operation,
-        )
-        .unwrap();
-        restarted
-            .rollback(&component_set.component_set, &request)
-            .unwrap();
-
+        assert_eq!(
+            registration.preflight(&component_set.component_set, &request),
+            Err(tracedecay::agents::host_bundle_v2::HostBundleError::UnsupportedCapability)
+        );
         assert_eq!(std::fs::read(installed_path).unwrap(), original);
+        assert!(
+            !lifecycle
+                .path()
+                .join(".tracedecay-host-registration-v1")
+                .exists()
+        );
     }
 
     #[test]

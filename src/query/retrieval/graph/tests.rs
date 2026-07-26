@@ -127,6 +127,7 @@ fn graph_pair(
         anchor_id: id(&format!("anchor.{occurrence}")),
         logical_evidence_id: id(&format!("logical.{occurrence}")),
         source_occurrence_id: id(occurrence),
+        file_occurrence_id: None,
         source_namespace: id("ns.code.fixture"),
         repository_id: None,
         session_or_thread_id: None,

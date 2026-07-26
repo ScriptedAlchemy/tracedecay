@@ -2,12 +2,16 @@
 
 ## Status / Role
 
-PR5 production **session-observation** persistence is complete. That completion
-statement does not include the external-source persistence section below:
-`apply_source_commit` remains a contract helper with no production caller, and
-no production adapter or migration backs that path. The external-source block
-is a retained future seam, neither delivered PR5/PR6 behavior nor PR8–PR14 work
-to implement or delete (status corrected 2026-07-26).
+PR5 production **session-observation** persistence is complete. External-source
+persistence is split (status corrected again 2026-07-26): host observations
+reach the daemon-owned `RuntimeExternalSourceStore`, dispatch a
+`RepositoryWritePayloadV1::ExternalSource`, and execute `apply_source_commit`
+through `ExternalSourceExecutor` before persisting `external_source_states_v1`.
+`EXTERNAL_SOURCE_SCHEMA_V1` is installed by the database migration path. The
+earlier claim that this reducer had no production caller, adapter, or migration
+was wrong for the host-observation specialization. The broader acquisition and
+canonical-refetch surface remains without production composition and is still
+a retained future seam, not PR8–PR14 work to duplicate.
 
 `tracedecay-store` owns persistence contracts and DTOs; the daemon-owned
 `GlobalDb` adapter owns live connections and transactions. This boundary

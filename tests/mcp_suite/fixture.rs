@@ -34,7 +34,7 @@ use crate::common::GLOBAL_DB_ENV;
 
 /// Bump when the template layout or fixture sources change, so stale
 /// templates from previous revisions in a cached target dir are ignored.
-const TEMPLATE_DIR_NAME: &str = "mcp-suite-store-template-v2";
+const TEMPLATE_DIR_NAME: &str = "mcp-suite-store-template-v4";
 
 const EMPTY_FLAVOR: &str = "empty";
 const INDEXED_FLAVOR: &str = "indexed";
@@ -291,9 +291,11 @@ async fn build_template(dest: &Path) -> io::Result<()> {
         if indexed {
             cg.index_all().await.map_err(io_other)?;
         }
+        let sessions_db_path = cg.store_layout().sessions_db_path.clone();
         cg.checkpoint().await.map_err(io_other)?;
         cg.close();
 
+        purge_configuration(&sessions_db_path)?;
         purge_global_registry(&global_db_path).await?;
         copy_tree(&root, &dest.join(flavor))?;
     }
@@ -307,6 +309,7 @@ async fn build_template(dest: &Path) -> io::Result<()> {
 /// each test's `TraceDecay::open` re-registers its own project cleanly.
 async fn purge_global_registry(global_db_path: &Path) -> io::Result<()> {
     let conn = Connection::open(global_db_path).map_err(io_other)?;
+    purge_configuration_rows(&conn)?;
     conn.execute_batch(
         "DELETE FROM store_artifacts;
          DELETE FROM graph_scopes;
@@ -315,6 +318,57 @@ async fn purge_global_registry(global_db_path: &Path) -> io::Result<()> {
          DELETE FROM code_projects;
          DELETE FROM projects;
          PRAGMA wal_checkpoint(TRUNCATE);",
+    )
+    .map_err(io_other)?;
+    Ok(())
+}
+
+fn purge_configuration(database_path: &Path) -> io::Result<()> {
+    let conn = Connection::open(database_path).map_err(io_other)?;
+    purge_configuration_rows(&conn)?;
+    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+        .map_err(io_other)
+}
+
+fn purge_configuration_rows(conn: &Connection) -> io::Result<()> {
+    let configuration_triggers = {
+        let mut statement = conn
+            .prepare(
+                "SELECT name FROM sqlite_master
+                 WHERE type = 'trigger' AND tbl_name LIKE 'configuration_%'",
+            )
+            .map_err(io_other)?;
+        statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(io_other)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(io_other)?
+    };
+    for trigger in configuration_triggers {
+        let quoted = trigger.replace('"', "\"\"");
+        conn.execute_batch(&format!("DROP TRIGGER IF EXISTS \"{quoted}\";"))
+            .map_err(io_other)?;
+    }
+    conn.execute_batch(
+        "PRAGMA foreign_keys = OFF;
+         DELETE FROM configuration_component_activation_events;
+         DELETE FROM configuration_credential_references;
+         DELETE FROM configuration_migration_receipts;
+         DELETE FROM configuration_migration_quarantine;
+         DELETE FROM configuration_audit_redaction_keys;
+         DELETE FROM configuration_audit_events;
+         DELETE FROM configuration_mutation_receipts;
+         DELETE FROM configuration_change_plan_events;
+         DELETE FROM configuration_change_plan_operations;
+         DELETE FROM configuration_change_plans;
+         DELETE FROM configuration_access_rules;
+         DELETE FROM configuration_source_bindings;
+         DELETE FROM configuration_topology_protected_refs;
+         DELETE FROM configuration_topology_roots;
+         DELETE FROM configuration_topology_policies;
+         DELETE FROM configuration_entries;
+         DELETE FROM configuration_revisions;
+         PRAGMA foreign_keys = ON;",
     )
     .map_err(io_other)?;
     Ok(())

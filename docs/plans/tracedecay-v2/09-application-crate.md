@@ -21,6 +21,14 @@ cannot satisfy this plan's scope contract. Convergence on the scope-carrying
 application context remains PR11/PR12 application work, not a frontend
 `ResolvedScope` invention or a PR14-only gap.
 
+**Source-access correction (2026-07-26).** Temporal snapshot composition no
+longer hard-codes a participant as `Authorized`. Authorization is a separate,
+fail-closed field derived from the authenticated `TemporalAuthorizedRoot` and
+the exact participant project. Persisted source metadata and retention expiry
+independently produce `Available`, `Locked`, `RetentionWithheld`, `Deleted`,
+`Redacted`, or `Unavailable`; invalid or ambiguous source state denies the
+snapshot instead of becoming a clean unavailable result.
+
 PR11 requires this boundary to be the canonical owner of typed operation
 semantics. Root composition and surface adapters may wire those operations but
 do not become alternate use-case owners. Feedback-read, retrieval,
@@ -76,6 +84,12 @@ and healthy-with-complete-coverage states, and returns only remediation
 previews/actions owned by the responsible application operation. Doctor never
 repairs directly, invents a generic health score, treats dispatch as recovery,
 or collapses unknown/partial evidence into healthy or clean.
+
+**Doctor catalog correction (2026-07-26).** The default remediation registry
+contains nine dispatchable owning operations. Advisory feedback findings no
+longer advertise `feedback_get_finding` as remediation: that read requires a
+handle a generic Doctor action cannot construct. Removing the tenth
+advertisement is truthful narrowing, not a missing remediation implementation.
 
 Direct tests start from a real PR13 finding, inject source disagreements and
 operational failures, call the canonical Doctor use case, execute one

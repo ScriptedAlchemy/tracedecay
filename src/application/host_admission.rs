@@ -976,6 +976,7 @@ pub struct LcmExternalPayloadManifestTestRecord {
 pub struct HostAdmissionTestRuntimeV1 {
     brain_id: BrainId,
     profile_id: UserProfileId,
+    profile_root: PathBuf,
     project_id: Option<ProjectId>,
     profile_database: Arc<RegisteredGlobalDb>,
     profile_registered: Arc<RegisteredGlobalDb>,
@@ -990,6 +991,12 @@ pub struct HostAdmissionTestRuntimeV1 {
 pub struct HostAdmissionDatabaseIdentityV1([u8; 32]);
 
 impl HostAdmissionTestRuntimeV1 {
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-transport"))]
+    pub fn profile_root_for_test(&self) -> &Path {
+        &self.profile_root
+    }
+
     #[doc(hidden)]
     pub async fn call_user_lcm_tool_for_test(
         &self,
@@ -1075,6 +1082,7 @@ impl HostAdmissionTestRuntimeV1 {
         Ok(Self {
             brain_id: identity.brain_id().clone(),
             profile_id: identity.profile_id().clone(),
+            profile_root,
             project_id,
             profile_database,
             profile_registered,
@@ -2358,16 +2366,7 @@ impl HostAdmissionTestRuntimeV1 {
         cg: crate::tracedecay::TraceDecay,
         scope_prefix: Option<String>,
     ) -> crate::errors::Result<crate::mcp::server::McpServerConstructionContext> {
-        let profile_root = self
-            .profile_database
-            .db_path()
-            .parent()
-            .map(Path::to_path_buf)
-            .ok_or_else(|| crate::errors::TraceDecayError::Database {
-                operation: "bind MCP test profile authority".to_string(),
-                message: "profile database has no parent directory".to_string(),
-            })?;
-        let profile_identity = crate::daemon::profile_identity::load_or_create(&profile_root)?;
+        let profile_root = self.profile_root.clone();
         let project_sessions = self.project_registered.as_ref().cloned().ok_or_else(|| {
             crate::errors::TraceDecayError::Database {
                 operation: "bind MCP test project sessions".to_string(),
@@ -2667,17 +2666,24 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-transport"))]
     pub async fn inject_lcm_orphan_summary_source_for_test(
         &self,
         scope: HostAdmissionScope,
         store_id: i64,
     ) -> crate::errors::Result<()> {
-        let connection = self.session_database_for_test(scope)?.writer_connection()?;
+        let database = self.session_database_for_test(scope)?;
+        let connection = rusqlite::Connection::open(database.db_path()).map_err(|error| {
+            crate::errors::TraceDecayError::Database {
+                operation: "open out-of-band orphan summary fixture".to_string(),
+                message: error.to_string(),
+            }
+        })?;
         connection
-            .execute("PRAGMA foreign_keys = OFF", ())
-            .await
+            .pragma_update(None, "foreign_keys", "OFF")
             .map_err(|error| crate::errors::TraceDecayError::Database {
-                operation: "disable foreign keys for orphan summary fixture".to_string(),
+                operation: "disable foreign keys out of band for orphan summary fixture"
+                    .to_string(),
                 message: error.to_string(),
             })?;
         connection
@@ -2686,7 +2692,6 @@ impl HostAdmissionTestRuntimeV1 {
                  VALUES ('missing-summary-owner', 'raw_message', ?1, 0)",
                 [store_id.to_string()],
             )
-            .await
             .map_err(|error| crate::errors::TraceDecayError::Database {
                 operation: "insert orphan summary source fixture".to_string(),
                 message: error.to_string(),
@@ -2695,16 +2700,22 @@ impl HostAdmissionTestRuntimeV1 {
     }
 
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-transport"))]
     pub async fn inject_lcm_foreign_orphan_debt_for_test(
         &self,
         scope: HostAdmissionScope,
     ) -> crate::errors::Result<()> {
-        let connection = self.session_database_for_test(scope)?.writer_connection()?;
+        let database = self.session_database_for_test(scope)?;
+        let connection = rusqlite::Connection::open(database.db_path()).map_err(|error| {
+            crate::errors::TraceDecayError::Database {
+                operation: "open out-of-band orphan debt fixture".to_string(),
+                message: error.to_string(),
+            }
+        })?;
         connection
-            .execute("PRAGMA foreign_keys = OFF", ())
-            .await
+            .pragma_update(None, "foreign_keys", "OFF")
             .map_err(|error| crate::errors::TraceDecayError::Database {
-                operation: "disable foreign keys for orphan debt fixture".to_string(),
+                operation: "disable foreign keys out of band for orphan debt fixture".to_string(),
                 message: error.to_string(),
             })?;
         connection
@@ -2715,7 +2726,6 @@ impl HostAdmissionTestRuntimeV1 {
                  VALUES ('cursor', 'lcm-doctor-debt-other', 'orphan-debt', 'raw_backlog', 1, 2)",
                 (),
             )
-            .await
             .map_err(|error| crate::errors::TraceDecayError::Database {
                 operation: "insert foreign orphan debt fixture".to_string(),
                 message: error.to_string(),
