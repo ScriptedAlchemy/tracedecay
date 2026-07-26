@@ -38,6 +38,7 @@ for name, workflow in [
         "name: dashboard-app-dist",
         "actions/download-artifact@",
         "path: dashboard/app-dist",
+        'TRACEDECAY_SKIP_DASHBOARD_BUILD: "1"',
     ]:
         if required not in workflow:
             raise SystemExit(f"{name} workflow is missing dashboard artifact contract {required!r}")
