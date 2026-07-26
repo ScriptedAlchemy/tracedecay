@@ -337,6 +337,7 @@ fn production_readers_join_exact_authorities_and_reject_foreign_generation() {
     });
     let tests = complete(AffectedTestsResult {
         tests: vec![id("symbol.test")],
+        attributions: Vec::new(),
     });
     let occurrences = vec![
         GenerationOccurrenceBindingV1 {
