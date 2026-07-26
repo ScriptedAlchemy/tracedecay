@@ -135,53 +135,61 @@ pub(crate) async fn list(
         return Json(json!({
             "status": "missing_registry",
             "limit": limit,
-            "truncated": false,
-            "projects": [],
+            "truncated": null,
+            "projects": null,
             "active_project_id": runtime.active_project_id(),
             "active_project_root": runtime.active_project_root(),
             "summary": {
-                "project_count": 0,
-                "repo_count": 0,
-                "truncated": false,
+                "project_count": null,
+                "repo_count": null,
+                "truncated": null,
             },
-            "project_tree": [],
+            "project_tree": null,
         }));
     };
 
-    let Ok(mut projects) = db.list_code_projects(limit + 1).await else {
-        return Json(json!({
-            "status": "registry_unavailable",
-            "limit": limit,
-            "truncated": false,
-            "projects": [],
-            "active_project_id": runtime.active_project_id(),
-            "active_project_root": runtime.active_project_root(),
-            "summary": {
-                "project_count": 0,
-                "repo_count": 0,
-                "truncated": false,
-            },
-            "project_tree": [],
-        }));
+    let mut projects = match db.list_code_projects(limit + 1).await {
+        Ok(projects) => projects,
+        Err(error) => {
+            return Json(json!({
+                "status": "registry_unavailable",
+                "error": error.to_string(),
+                "limit": limit,
+                "truncated": null,
+                "projects": null,
+                "active_project_id": runtime.active_project_id(),
+                "active_project_root": runtime.active_project_root(),
+                "summary": {
+                    "project_count": null,
+                    "repo_count": null,
+                    "truncated": null,
+                },
+                "project_tree": null,
+            }));
+        }
     };
     let truncated = projects.len() > limit;
     projects.truncate(limit);
     let active_project_id = runtime.active_project_id().map(str::to_string);
-    let Ok(contexts) = db.project_registry_contexts_for_projects(&projects).await else {
-        return Json(json!({
-            "status": "registry_unavailable",
-            "limit": limit,
-            "truncated": truncated,
-            "projects": [],
-            "active_project_id": active_project_id,
-            "active_project_root": runtime.active_project_root(),
-            "summary": {
-                "project_count": 0,
-                "repo_count": 0,
-                "truncated": truncated,
-            },
-            "project_tree": [],
-        }));
+    let contexts = match db.project_registry_contexts_for_projects(&projects).await {
+        Ok(contexts) => contexts,
+        Err(error) => {
+            return Json(json!({
+                "status": "registry_unavailable",
+                "error": error.to_string(),
+                "limit": limit,
+                "truncated": null,
+                "projects": null,
+                "active_project_id": active_project_id,
+                "active_project_root": runtime.active_project_root(),
+                "summary": {
+                    "project_count": null,
+                    "repo_count": null,
+                    "truncated": null,
+                },
+                "project_tree": null,
+            }));
+        }
     };
     let view = build_project_registry_view(&contexts, runtime.active_project_id(), truncated);
     let rows = projects
