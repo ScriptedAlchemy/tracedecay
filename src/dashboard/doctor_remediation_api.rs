@@ -75,6 +75,23 @@ pub(crate) enum DoctorRemediationTargetV1 {
 }
 
 impl DoctorRemediationTargetV1 {
+    pub(crate) fn for_operation(operation: &DoctorOwningOperationRefV1) -> Option<Self> {
+        use tracedecay_application::doctor::operations;
+        match operation.as_str() {
+            operations::STORAGE_RETENTION_COLLECT => Some(Self::StorageRetentionCollect),
+            operations::STORAGE_COLLECT_ORPHAN_STORE => Some(Self::StorageCollectOrphanStore),
+            operations::STORAGE_BRANCH_GC => Some(Self::StorageBranchGc),
+            operations::STORAGE_QUARANTINE_AND_COLLECT_DEBRIS => {
+                Some(Self::StorageQuarantineAndCollectDebris)
+            }
+            operations::CONFIGURATION_PIN_AUTHORITY => Some(Self::ConfigurationPinAuthority),
+            operations::RUNTIME_RECOVER_DAEMON => Some(Self::RuntimeRecoverDaemon),
+            operations::CODE_INDEX_REMOUNT => Some(Self::CodeIndexRemount),
+            operations::CONFIGURATION_PROTECTED_APPLY | operations::HOST_REPAIR_INTEGRATION => None,
+            _ => None,
+        }
+    }
+
     fn operation(&self) -> &'static str {
         use tracedecay_application::doctor::operations;
         match self {
@@ -946,6 +963,18 @@ mod tests {
             tracedecay_application::doctor::operations::RUNTIME_RECOVER_DAEMON,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn doctor_surface_only_exports_targets_it_can_bind_exactly() {
+        assert_eq!(
+            DoctorRemediationTargetV1::for_operation(&runtime_recovery_operation()),
+            Some(DoctorRemediationTargetV1::RuntimeRecoverDaemon)
+        );
+        assert_eq!(
+            DoctorRemediationTargetV1::for_operation(&configuration_operation()),
+            None
+        );
     }
 
     fn configuration_preview_target() -> DoctorRemediationTargetV1 {
