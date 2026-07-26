@@ -343,7 +343,7 @@ pub struct Pr13AdvisoryDaemonStartupRegistrationV1<GR, GA, CS, CE, PE, PC> {
 impl<GR, GA, CS, CE, PE, PC> Pr13AdvisoryDaemonStartupRegistrationV1<GR, GA, CS, CE, PE, PC>
 where
     GR: super::GitHubCurrentBranchRemapper + Sync,
-    GA: super::GitHubCanonicalReviewAnchorAuthorityV1 + Sync,
+    GA: super::GitHubCanonicalReviewAnchorAuthorityV1 + Clone + Sync,
     CS: super::CiReadOnlyProviderArchiveV1 + Sync,
     CE: super::CiExactEvidenceAuthorityV1<CS::Record> + Sync,
     PE: super::CanonicalProximityEvidenceAuthorityV1 + Sync,
@@ -671,7 +671,7 @@ pub fn register_pr13_advisory_daemon_startup<GR, GA, CS, CE, PE, PC>(
 >
 where
     GR: super::GitHubCurrentBranchRemapper + Sync,
-    GA: super::GitHubCanonicalReviewAnchorAuthorityV1 + Sync,
+    GA: super::GitHubCanonicalReviewAnchorAuthorityV1 + Clone + Sync,
     CS: super::CiReadOnlyProviderArchiveV1 + Sync,
     CE: super::CiExactEvidenceAuthorityV1<CS::Record> + Sync,
     PE: super::CanonicalProximityEvidenceAuthorityV1 + Sync,

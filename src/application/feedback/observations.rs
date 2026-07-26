@@ -6,6 +6,7 @@
 
 use std::collections::BTreeMap;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracedecay_application::feedback::FeedbackObservationPort;
 use tracedecay_domain::feedback::{
@@ -168,7 +169,9 @@ pub enum Plan26CiProviderV1 {
     ExactCodeEvidence,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Plan26CoverageV1 {
     Known,
@@ -177,6 +180,33 @@ pub enum Plan26CoverageV1 {
     Unknown,
     Sampled,
     Capped,
+}
+
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum Plan26RelevanceDispositionV1 {
+    Helpful,
+    Stale,
+    Irrelevant,
+    Contradictory,
+    Unknown,
+}
+
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum Plan26StackTransitionV1 {
+    DependencyReady,
+    ConflictDetected,
+    ConflictCleared,
+    UpstreamTipChanged,
+    BaseDrifted,
+    HeadDrifted,
+    MergeBaseDrifted,
+    Revoked,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -329,6 +359,14 @@ pub enum Plan26FeedbackSourceEventV1 {
         returned_count: u32,
         omitted_count: u32,
     },
+    RelevanceFeedback {
+        disposition: Plan26RelevanceDispositionV1,
+    },
+    EvidenceDiversity {
+        eligible_source_families: u32,
+        represented_source_families: u32,
+        selected_count: u32,
+    },
     AnchorExpansion {
         operation: Plan26AnchorOperationV1,
         outcome: Plan26FeedbackOutcomeV1,
@@ -390,6 +428,15 @@ pub enum Plan26FeedbackSourceEventV1 {
         operation: Plan26FeedbackOperationV1,
         outcome: Plan26FeedbackOutcomeV1,
     },
+    AuthorizationRevoked {
+        operation: Plan26FeedbackOperationV1,
+        outcome: Plan26FeedbackOutcomeV1,
+        propagation_micros: u64,
+    },
+    StackTransition {
+        transition: Plan26StackTransitionV1,
+        outcome: Plan26FeedbackOutcomeV1,
+    },
     SseLifecycle {
         lifecycle: Plan26SseLifecycleV1,
         sequence: Option<u64>,
@@ -413,6 +460,8 @@ impl Plan26FeedbackSourceEventV1 {
             Self::Dispatch { .. } => "feedback.dispatch.observed.v1",
             Self::Delivery { .. } => "feedback.delivery.observed.v1",
             Self::Truncation { .. } => "feedback.truncation.observed.v1",
+            Self::RelevanceFeedback { .. } => "feedback.relevance.observed.v1",
+            Self::EvidenceDiversity { .. } => "feedback.diversity.observed.v1",
             Self::AnchorExpansion { .. } => "feedback.expansion.observed.v1",
             Self::GitHubLifecycle { .. } => "feedback.github.lifecycle.observed.v1",
             Self::GitHubIngress { .. } => "feedback.github.ingress.observed.v1",
@@ -424,6 +473,8 @@ impl Plan26FeedbackSourceEventV1 {
             Self::HostDelivery { .. } => "feedback.host_delivery.observed.v1",
             Self::HookScout { .. } => "feedback.hook_scout.observed.v1",
             Self::Cancellation { .. } => "feedback.cancellation.observed.v1",
+            Self::AuthorizationRevoked { .. } => "feedback.authorization_revocation.observed.v1",
+            Self::StackTransition { .. } => "feedback.stack_transition.observed.v1",
             Self::SseLifecycle { .. } => "feedback.sse.lifecycle.observed.v1",
             Self::TelemetryDropObserved { .. } => "telemetry.drop.observed.v1",
         }
@@ -451,6 +502,14 @@ impl Plan26FeedbackSourceEventV1 {
                 candidate_count,
                 ..
             } => (localized_count <= candidate_count).then_some(()),
+            Self::EvidenceDiversity {
+                eligible_source_families,
+                represented_source_families,
+                selected_count,
+            } => (represented_source_families <= eligible_source_families
+                && (*eligible_source_families == 0
+                    || (*represented_source_families > 0 && *selected_count > 0)))
+                .then_some(()),
             Self::TelemetryDropObserved {
                 dropped_count,
                 terminal,
@@ -573,7 +632,7 @@ impl FeedbackObservationEnvelopeV1 {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct FeedbackObservationReadModelV1 {
     pub schema_version: u16,
@@ -584,9 +643,10 @@ pub struct FeedbackObservationReadModelV1 {
     pub coverage: Plan26CoverageV1,
     pub watermark: FeedbackObservationWatermarkV1,
     pub denominators: FeedbackObservationDenominatorsV1,
+    pub system_quality: FeedbackSystemQualityReadModelV1,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FeedbackObservationWatermarkV1 {
     pub producer_boot_id: Option<ManifestDigest>,
@@ -594,7 +654,7 @@ pub struct FeedbackObservationWatermarkV1 {
     pub observed_through: Option<UtcMicros>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct FeedbackObservationDenominatorsV1 {
     pub eligible: u64,
@@ -604,6 +664,76 @@ pub struct FeedbackObservationDenominatorsV1 {
     pub dropped: u64,
     pub retention_dropped: u64,
     pub incomplete_boots: u64,
+}
+
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum FeedbackSystemMetricKindV1 {
+    Coverage,
+    Relevance,
+    Diversity,
+    Latency,
+    Omission,
+    Denial,
+    Staleness,
+    RevocationPropagation,
+    StackTransitions,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FeedbackSystemMetricUnitV1 {
+    Ratio,
+    Microseconds,
+    Transitions,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FeedbackSystemMetricDenominatorV1 {
+    EligibleObservations,
+    RelevanceLabels,
+    EligibleSourceFamilies,
+    LatencySamples,
+    ReturnedAndOmittedItems,
+    OutcomeObservations,
+    RevocationObservations,
+    StackTransitionObservations,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FeedbackSystemMetricUnavailableReasonV1 {
+    NoEligibleObservations,
+    NoRelevanceLabels,
+    NoDiversityObservations,
+    NoLatencySamples,
+    NoTruncationObservations,
+    NoOutcomeObservations,
+    NoRevocationObservations,
+    NoStackTransitionObservations,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct FeedbackSystemMetricV1 {
+    pub metric: FeedbackSystemMetricKindV1,
+    pub value: Option<f64>,
+    pub unit: FeedbackSystemMetricUnitV1,
+    pub numerator: Option<u64>,
+    pub denominator: Option<u64>,
+    pub denominator_population: FeedbackSystemMetricDenominatorV1,
+    pub coverage: Plan26CoverageV1,
+    pub unavailable_reason: Option<FeedbackSystemMetricUnavailableReasonV1>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct FeedbackSystemQualityReadModelV1 {
+    pub schema_version: u16,
+    pub metrics: Vec<FeedbackSystemMetricV1>,
 }
 
 impl FeedbackObservationReadModelV1 {
@@ -675,6 +805,8 @@ impl FeedbackObservationReadModelV1 {
         } else {
             Plan26CoverageV1::Unknown
         };
+        let system_quality =
+            FeedbackSystemQualityReadModelV1::project(observations, eligible, persisted, coverage);
         Some(Self {
             schema_version: 1,
             total_count: persisted,
@@ -692,7 +824,292 @@ impl FeedbackObservationReadModelV1 {
                 retention_dropped,
                 incomplete_boots,
             },
+            system_quality,
         })
+    }
+}
+
+impl FeedbackSystemQualityReadModelV1 {
+    fn project(
+        observations: &[FeedbackObservationEnvelopeV1],
+        eligible_observations: u64,
+        persisted_observations: u64,
+        observation_coverage: Plan26CoverageV1,
+    ) -> Self {
+        let mut relevance_helpful = 0u64;
+        let mut relevance_total = 0u64;
+        let mut relevance_unknown = 0u64;
+        let mut diversity_represented = 0u64;
+        let mut diversity_eligible = 0u64;
+        let mut latency_samples = Vec::new();
+        let mut returned_items = 0u64;
+        let mut omitted_items = 0u64;
+        let mut outcome_total = 0u64;
+        let mut denied_outcomes = 0u64;
+        let mut stale_outcomes = 0u64;
+        let mut revocation_samples = Vec::new();
+        let mut stack_transitions = 0u64;
+
+        for envelope in observations {
+            if let Some(observation) = &envelope.observation
+                && let Some(latency) = observation.latency_micros
+            {
+                latency_samples.push(latency);
+            }
+            let Some(event) = envelope.source_event.as_ref() else {
+                continue;
+            };
+            if let Some(duration) = source_event_duration_micros(event) {
+                latency_samples.push(duration);
+            }
+            if let Some(outcome) = source_event_outcome(event) {
+                outcome_total = outcome_total.saturating_add(1);
+                denied_outcomes = denied_outcomes
+                    .saturating_add(u64::from(outcome == Plan26FeedbackOutcomeV1::Denied));
+                stale_outcomes = stale_outcomes
+                    .saturating_add(u64::from(outcome == Plan26FeedbackOutcomeV1::Stale));
+            }
+            match event {
+                Plan26FeedbackSourceEventV1::RelevanceFeedback { disposition } => {
+                    relevance_total = relevance_total.saturating_add(1);
+                    match disposition {
+                        Plan26RelevanceDispositionV1::Helpful => {
+                            relevance_helpful = relevance_helpful.saturating_add(1);
+                        }
+                        Plan26RelevanceDispositionV1::Unknown => {
+                            relevance_unknown = relevance_unknown.saturating_add(1);
+                        }
+                        Plan26RelevanceDispositionV1::Stale
+                        | Plan26RelevanceDispositionV1::Irrelevant
+                        | Plan26RelevanceDispositionV1::Contradictory => {}
+                    }
+                }
+                Plan26FeedbackSourceEventV1::EvidenceDiversity {
+                    eligible_source_families,
+                    represented_source_families,
+                    ..
+                } => {
+                    diversity_eligible =
+                        diversity_eligible.saturating_add(u64::from(*eligible_source_families));
+                    diversity_represented = diversity_represented
+                        .saturating_add(u64::from(*represented_source_families));
+                }
+                Plan26FeedbackSourceEventV1::Truncation {
+                    returned_count,
+                    omitted_count,
+                    ..
+                } => {
+                    returned_items = returned_items.saturating_add(u64::from(*returned_count));
+                    omitted_items = omitted_items.saturating_add(u64::from(*omitted_count));
+                }
+                Plan26FeedbackSourceEventV1::GitHubStale { item_count } => {
+                    outcome_total = outcome_total.saturating_add(u64::from(*item_count));
+                    stale_outcomes = stale_outcomes.saturating_add(u64::from(*item_count));
+                }
+                Plan26FeedbackSourceEventV1::AuthorizationRevoked {
+                    propagation_micros, ..
+                } => revocation_samples.push(*propagation_micros),
+                Plan26FeedbackSourceEventV1::StackTransition { .. } => {
+                    stack_transitions = stack_transitions.saturating_add(1);
+                }
+                _ => {}
+            }
+        }
+
+        let metric_coverage = |has_support: bool| {
+            if !has_support {
+                Plan26CoverageV1::Unknown
+            } else {
+                observation_coverage
+            }
+        };
+        let ratio =
+            |metric, numerator: u64, denominator: u64, population, unavailable_reason, coverage| {
+                let supported = denominator > 0;
+                FeedbackSystemMetricV1 {
+                    metric,
+                    value: supported.then(|| numerator as f64 / denominator as f64),
+                    unit: FeedbackSystemMetricUnitV1::Ratio,
+                    numerator: supported.then_some(numerator),
+                    denominator: supported.then_some(denominator),
+                    denominator_population: population,
+                    coverage: metric_coverage(supported && coverage),
+                    unavailable_reason: (!supported).then_some(unavailable_reason),
+                }
+            };
+        let latency_p95 = percentile_95(&mut latency_samples);
+        let revocation_p95 = percentile_95(&mut revocation_samples);
+        let total_items = returned_items.saturating_add(omitted_items);
+        let stack_supported = stack_transitions > 0;
+        let metrics = vec![
+            ratio(
+                FeedbackSystemMetricKindV1::Coverage,
+                persisted_observations,
+                eligible_observations,
+                FeedbackSystemMetricDenominatorV1::EligibleObservations,
+                FeedbackSystemMetricUnavailableReasonV1::NoEligibleObservations,
+                true,
+            ),
+            ratio(
+                FeedbackSystemMetricKindV1::Relevance,
+                relevance_helpful,
+                relevance_total,
+                FeedbackSystemMetricDenominatorV1::RelevanceLabels,
+                FeedbackSystemMetricUnavailableReasonV1::NoRelevanceLabels,
+                relevance_unknown == 0,
+            ),
+            ratio(
+                FeedbackSystemMetricKindV1::Diversity,
+                diversity_represented,
+                diversity_eligible,
+                FeedbackSystemMetricDenominatorV1::EligibleSourceFamilies,
+                FeedbackSystemMetricUnavailableReasonV1::NoDiversityObservations,
+                true,
+            ),
+            scalar_metric(
+                FeedbackSystemMetricKindV1::Latency,
+                latency_p95,
+                FeedbackSystemMetricUnitV1::Microseconds,
+                latency_samples.len().try_into().unwrap_or(u64::MAX),
+                FeedbackSystemMetricDenominatorV1::LatencySamples,
+                FeedbackSystemMetricUnavailableReasonV1::NoLatencySamples,
+                observation_coverage,
+            ),
+            ratio(
+                FeedbackSystemMetricKindV1::Omission,
+                omitted_items,
+                total_items,
+                FeedbackSystemMetricDenominatorV1::ReturnedAndOmittedItems,
+                FeedbackSystemMetricUnavailableReasonV1::NoTruncationObservations,
+                true,
+            ),
+            ratio(
+                FeedbackSystemMetricKindV1::Denial,
+                denied_outcomes,
+                outcome_total,
+                FeedbackSystemMetricDenominatorV1::OutcomeObservations,
+                FeedbackSystemMetricUnavailableReasonV1::NoOutcomeObservations,
+                true,
+            ),
+            ratio(
+                FeedbackSystemMetricKindV1::Staleness,
+                stale_outcomes,
+                outcome_total,
+                FeedbackSystemMetricDenominatorV1::OutcomeObservations,
+                FeedbackSystemMetricUnavailableReasonV1::NoOutcomeObservations,
+                true,
+            ),
+            scalar_metric(
+                FeedbackSystemMetricKindV1::RevocationPropagation,
+                revocation_p95,
+                FeedbackSystemMetricUnitV1::Microseconds,
+                revocation_samples.len().try_into().unwrap_or(u64::MAX),
+                FeedbackSystemMetricDenominatorV1::RevocationObservations,
+                FeedbackSystemMetricUnavailableReasonV1::NoRevocationObservations,
+                observation_coverage,
+            ),
+            FeedbackSystemMetricV1 {
+                metric: FeedbackSystemMetricKindV1::StackTransitions,
+                value: stack_supported.then_some(stack_transitions as f64),
+                unit: FeedbackSystemMetricUnitV1::Transitions,
+                numerator: stack_supported.then_some(stack_transitions),
+                denominator: stack_supported.then_some(stack_transitions),
+                denominator_population:
+                    FeedbackSystemMetricDenominatorV1::StackTransitionObservations,
+                coverage: metric_coverage(stack_supported),
+                unavailable_reason: (!stack_supported).then_some(
+                    FeedbackSystemMetricUnavailableReasonV1::NoStackTransitionObservations,
+                ),
+            },
+        ];
+        Self {
+            schema_version: 1,
+            metrics,
+        }
+    }
+}
+
+fn scalar_metric(
+    metric: FeedbackSystemMetricKindV1,
+    value: Option<u64>,
+    unit: FeedbackSystemMetricUnitV1,
+    support: u64,
+    denominator_population: FeedbackSystemMetricDenominatorV1,
+    unavailable_reason: FeedbackSystemMetricUnavailableReasonV1,
+    coverage: Plan26CoverageV1,
+) -> FeedbackSystemMetricV1 {
+    FeedbackSystemMetricV1 {
+        metric,
+        value: value.map(|value| value as f64),
+        unit,
+        numerator: value,
+        denominator: (support > 0).then_some(support),
+        denominator_population,
+        coverage: if support > 0 {
+            coverage
+        } else {
+            Plan26CoverageV1::Unknown
+        },
+        unavailable_reason: (support == 0).then_some(unavailable_reason),
+    }
+}
+
+fn percentile_95(samples: &mut [u64]) -> Option<u64> {
+    if samples.is_empty() {
+        return None;
+    }
+    samples.sort_unstable();
+    let rank = samples.len().saturating_mul(95).div_ceil(100);
+    samples.get(rank.saturating_sub(1)).copied()
+}
+
+fn source_event_duration_micros(event: &Plan26FeedbackSourceEventV1) -> Option<u64> {
+    match event {
+        Plan26FeedbackSourceEventV1::LspState {
+            duration_micros, ..
+        }
+        | Plan26FeedbackSourceEventV1::Delivery {
+            duration_micros, ..
+        }
+        | Plan26FeedbackSourceEventV1::AnchorExpansion {
+            duration_micros, ..
+        }
+        | Plan26FeedbackSourceEventV1::GitHubIngress {
+            duration_micros, ..
+        }
+        | Plan26FeedbackSourceEventV1::CiLocalization {
+            duration_micros, ..
+        }
+        | Plan26FeedbackSourceEventV1::HostDelivery {
+            duration_micros, ..
+        }
+        | Plan26FeedbackSourceEventV1::HookScout {
+            duration_micros, ..
+        }
+        | Plan26FeedbackSourceEventV1::SseLifecycle {
+            duration_micros, ..
+        } => *duration_micros,
+        Plan26FeedbackSourceEventV1::GitHubRateLimit { duration_micros } => *duration_micros,
+        _ => None,
+    }
+}
+
+fn source_event_outcome(event: &Plan26FeedbackSourceEventV1) -> Option<Plan26FeedbackOutcomeV1> {
+    match event {
+        Plan26FeedbackSourceEventV1::ArgumentRejected { outcome, .. }
+        | Plan26FeedbackSourceEventV1::SurfaceArgumentRejected { outcome, .. }
+        | Plan26FeedbackSourceEventV1::LspState { outcome, .. }
+        | Plan26FeedbackSourceEventV1::Dispatch { outcome, .. }
+        | Plan26FeedbackSourceEventV1::Delivery { outcome, .. }
+        | Plan26FeedbackSourceEventV1::AnchorExpansion { outcome, .. }
+        | Plan26FeedbackSourceEventV1::GitHubIngress { outcome, .. }
+        | Plan26FeedbackSourceEventV1::CiLocalization { outcome, .. }
+        | Plan26FeedbackSourceEventV1::HostDelivery { outcome, .. }
+        | Plan26FeedbackSourceEventV1::HookScout { outcome, .. }
+        | Plan26FeedbackSourceEventV1::Cancellation { outcome, .. }
+        | Plan26FeedbackSourceEventV1::AuthorizationRevoked { outcome, .. }
+        | Plan26FeedbackSourceEventV1::StackTransition { outcome, .. } => Some(*outcome),
+        _ => None,
     }
 }
 
@@ -1405,6 +1822,98 @@ mod tests {
         assert_eq!(model.denominators.retention_dropped, 3);
         assert_eq!(model.denominators.incomplete_boots, 1);
         assert_eq!(model.denominators.eligible, 6);
+    }
+
+    #[test]
+    fn system_quality_projection_is_denominator_safe_and_complete() {
+        let input = saved_input();
+        let source = |event| plan26_feedback_source_event_envelope(&input, event).unwrap();
+        let observations = vec![
+            source(Plan26FeedbackSourceEventV1::RelevanceFeedback {
+                disposition: Plan26RelevanceDispositionV1::Helpful,
+            }),
+            source(Plan26FeedbackSourceEventV1::EvidenceDiversity {
+                eligible_source_families: 3,
+                represented_source_families: 2,
+                selected_count: 4,
+            }),
+            source(Plan26FeedbackSourceEventV1::Delivery {
+                operation: Plan26FeedbackOperationV1::FeedbackList,
+                route: Plan26DeliveryRouteV1::Http,
+                outcome: Plan26FeedbackOutcomeV1::Denied,
+                item_count: 0,
+                duration_micros: Some(90),
+            }),
+            source(Plan26FeedbackSourceEventV1::Truncation {
+                operation: Plan26FeedbackOperationV1::FeedbackList,
+                returned_count: 8,
+                omitted_count: 2,
+            }),
+            source(Plan26FeedbackSourceEventV1::AuthorizationRevoked {
+                operation: Plan26FeedbackOperationV1::FeedbackGet,
+                outcome: Plan26FeedbackOutcomeV1::Completed,
+                propagation_micros: 40,
+            }),
+            source(Plan26FeedbackSourceEventV1::StackTransition {
+                transition: Plan26StackTransitionV1::BaseDrifted,
+                outcome: Plan26FeedbackOutcomeV1::Completed,
+            }),
+            source(Plan26FeedbackSourceEventV1::GitHubStale { item_count: 1 }),
+        ];
+
+        let projected = FeedbackObservationReadModelV1::project(&observations).unwrap();
+        assert_eq!(projected.system_quality.metrics.len(), 9);
+        let metric = |kind| {
+            projected
+                .system_quality
+                .metrics
+                .iter()
+                .find(|metric| metric.metric == kind)
+                .unwrap()
+        };
+        assert_eq!(
+            metric(FeedbackSystemMetricKindV1::Relevance).value,
+            Some(1.0)
+        );
+        assert_eq!(
+            metric(FeedbackSystemMetricKindV1::Diversity).value,
+            Some(2.0 / 3.0)
+        );
+        assert_eq!(
+            metric(FeedbackSystemMetricKindV1::Latency).value,
+            Some(90.0)
+        );
+        assert_eq!(
+            metric(FeedbackSystemMetricKindV1::Omission).value,
+            Some(0.2)
+        );
+        assert_eq!(metric(FeedbackSystemMetricKindV1::Denial).value, Some(0.25));
+        assert_eq!(
+            metric(FeedbackSystemMetricKindV1::Staleness).value,
+            Some(0.25)
+        );
+        assert_eq!(
+            metric(FeedbackSystemMetricKindV1::RevocationPropagation).value,
+            Some(40.0)
+        );
+        assert_eq!(
+            metric(FeedbackSystemMetricKindV1::StackTransitions).value,
+            Some(1.0)
+        );
+    }
+
+    #[test]
+    fn unsupported_system_metrics_never_fabricate_zero() {
+        let model = FeedbackObservationReadModelV1::project(&[]).unwrap();
+        assert!(
+            model
+                .system_quality
+                .metrics
+                .iter()
+                .all(|metric| metric.value.is_none()
+                    && metric.denominator.is_none()
+                    && metric.coverage == Plan26CoverageV1::Unknown)
+        );
     }
 
     #[test]
