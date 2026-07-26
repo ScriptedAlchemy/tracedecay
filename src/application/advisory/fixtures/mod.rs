@@ -1,8 +1,9 @@
 //! Checked-in source captures for the PR13 composite acceptance scenario.
 //!
-//! Provider prose and log text are deliberately absent. The captures retain
-//! only official GitHub/TraceDecay fields plus SHA-256 digests for redacted
-//! bodies and annotation text.
+//! GitHub review prose is retained because the production decoder and
+//! authorized expansion path must prove lossless body evidence. CI log and
+//! source text remain absent; their checked-in captures retain only official
+//! fields plus SHA-256 digests for redacted text.
 
 use std::collections::BTreeSet;
 
@@ -539,7 +540,7 @@ pub fn load_pr13_source_backed_composite_fixture_v1()
             lifecycle: GitHubReviewLifecycleV1::Outdated,
             author_class: GitHubReviewAuthorClassV1::Bot,
             review_state: GitHubReviewStateV1::Commented,
-            body_digest: digest_at(&comment, "/redacted/body/sha256")?,
+            body_digest: digest_at(&comment, "/integrity/body_sha256")?,
             original_commit_id: CommitId::new(str_at(&comment, "/response/original_commit_id")?)
                 .map_err(|_| inconsistent("review original commit"))?,
             observed_commit_id: CommitId::new(str_at(&comment, "/response/commit_id")?)

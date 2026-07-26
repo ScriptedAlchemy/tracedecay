@@ -32,15 +32,38 @@
                       "id": "PRRC_kwDOSzKG2s7T__a_",
                       "databaseId": 3556767423,
                       "url": "https://github.com/ScriptedAlchemy/tracedecay/pull/421#discussion_r3556767423",
+                      "bodyText": "Schedule the catalog before generated-metadata consumers\nWhen the Phase 3 ladder is followed literally, this schedules PR 22F–22H before PR 22A even though the 22F–22H checklist requires plan 08's generated SurfaceKind everywhere. PR 22A is the step that creates the generated capability/tool catalog and its surface/availability artifacts, so the accounting/adoption work either blocks or has to invent duplicate local surface metadata; move 22A ahead of the first generated-catalog consumer or split the dependent 22H work after it.\nUseful? React with 👍 / 👎.",
                       "createdAt": "2026-07-10T06:16:13Z",
                       "updatedAt": "2026-07-10T06:16:13Z",
                       "authorAssociation": "NONE",
-                      "replyTo": null
+                      "replyTo": null,
+                      "author": {
+                        "__typename": "Bot",
+                        "login": "chatgpt-codex-connector"
+                      },
+                      "pullRequestReview": {
+                        "databaseId": 4669021204,
+                        "state": "COMMENTED",
+                        "commit": {
+                          "oid": "986f25cca6d2e703e889fb57326696b0d92c965f"
+                        }
+                      },
+                      "originalCommit": {
+                        "oid": "986f25cca6d2e703e889fb57326696b0d92c965f"
+                      }
                     }
-                  ]
+                  ],
+                  "pageInfo": {
+                    "hasNextPage": false,
+                    "endCursor": null
+                  }
                 }
               }
-            ]
+            ],
+            "pageInfo": {
+              "hasNextPage": false,
+              "endCursor": null
+            }
           }
         }
       }
