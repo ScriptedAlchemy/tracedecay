@@ -205,6 +205,55 @@ pub(super) async fn handle_search(
     // the tool return nothing for the whole session (any serve launched from a
     // subdirectory sets a scope), so run the search and report below that the
     // scope was not honored rather than silently implying it was.
+    if search_executor.is_none() {
+        let mut legacy_results = cg.search(query, limit).await?;
+        if let Some(scope) = scope_prefix {
+            let prefix = scope.trim_end_matches('/');
+            legacy_results.retain(|result| {
+                result.node.file_path == prefix
+                    || result
+                        .node
+                        .file_path
+                        .strip_prefix(prefix)
+                        .is_some_and(|suffix| suffix.starts_with('/'))
+            });
+        }
+        let results = legacy_results
+            .into_iter()
+            .map(|result| {
+                let kind = result.node.kind.as_str();
+                let mut value = serde_json::to_value(result.node)?;
+                value["kind"] = json!(kind);
+                value["score"] = json!(result.score);
+                Ok(value)
+            })
+            .collect::<serde_json::Result<Vec<_>>>()?;
+        let result_count = results.len();
+        let mut output = json!({
+            "results": results,
+            "code_generation": Value::Null,
+            "pr9_fallback_digest": Value::Null,
+            "semantic": {
+                "mode": "fallback_allowed",
+                "status": "unavailable",
+                "reason": "retained semantic search authority was not constructed",
+            },
+            "status": "lexical_fallback",
+        });
+        if let Some(scope) = scope_prefix {
+            output["scope_prefix"] = json!(scope);
+            output["scope_prefix_applied"] = json!(true);
+        }
+        if dependency_hints::should_check_ignored_dependency_hint(result_count, limit)
+            && let Some(hint) =
+                dependency_hints::ignored_dependency_hint(cg, query, limit, scope_prefix).await?
+        {
+            output["ignored_dependency_hint"] = hint;
+        }
+        return Ok(rendered_tool_result(cg, &args, &output, Vec::new(), || {
+            render_search_md(&output)
+        }));
+    }
     let outcome = execute_code_index_search(
         search_executor,
         crate::mcp::server::CodeIndexSearchRequestV1 {
@@ -238,6 +287,7 @@ pub(super) async fn handle_search(
                     result
                 })
                 .collect::<Vec<_>>();
+            let result_count = results.len();
             let mut output = json!({
                 "results": results,
                 "code_generation": complete.code_generation,
@@ -251,6 +301,13 @@ pub(super) async fn handle_search(
             if let Some(scope) = scope_prefix {
                 output["scope_prefix"] = json!(scope);
                 output["scope_prefix_applied"] = json!(false);
+            }
+            if dependency_hints::should_check_ignored_dependency_hint(result_count, limit)
+                && let Some(hint) =
+                    dependency_hints::ignored_dependency_hint(cg, query, limit, scope_prefix)
+                        .await?
+            {
+                output["ignored_dependency_hint"] = hint;
             }
             let output = output;
             Ok(rendered_tool_result(cg, &args, &output, Vec::new(), || {

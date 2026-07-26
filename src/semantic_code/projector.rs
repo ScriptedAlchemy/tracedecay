@@ -14,7 +14,7 @@ use tracedecay_domain::{
     AdmittedEmbeddingProjectionKeyV1, CodeGenerationId, CodeSearchChunkId, CodeSearchChunkV1,
     ContentDigest, EmbeddingProjectionKeyV1, ManifestDigest, ProjectionBatchReceiptV1,
     ProjectionBatchRequestV1, ProjectionKeyV1, ProjectionOperationV1, ProjectionOutcomeV1,
-    canonical_sha256,
+    ProjectionReplayReasonV1, canonical_sha256,
 };
 
 use crate::code_index::projection::{
@@ -141,9 +141,10 @@ pub struct PreparedVectorGenerationV1 {
 }
 
 /// Project one bounded request from canonical chunks. Only
-/// `added_or_changed` chunks are supplied to the encoder. Deleted chunks
-/// become tombstones and reused chunks are represented by the canonical Plan
-/// 25 receipt so the store can copy their prior immutable vectors.
+/// `added_or_changed` chunks are supplied to the encoder. A projection-profile
+/// change also embeds content-identical `reused` chunks into the new profile's
+/// generation. Deleted chunks become tombstones; ordinary reused chunks remain
+/// receipt-only so the store can copy their compatible prior vectors.
 pub fn prepare_vector_generation<E: CanonicalChunkVectorEncoderV1>(
     admitted_projection: &AdmittedEmbeddingProjectionKeyV1,
     request: ProjectionBatchRequestV1,
@@ -164,16 +165,24 @@ pub fn prepare_vector_generation<E: CanonicalChunkVectorEncoderV1>(
         .changes
         .validate()
         .map_err(|error| SemanticProjectionErrorV1::Contract(error.to_string()))?;
-    if !request.changes.reused.is_empty()
-        && request.previous_projection_key.as_ref() != Some(&request.target_projection_key)
-    {
+    let projection_changed =
+        request.previous_projection_key.as_ref() != Some(&request.target_projection_key);
+    let reembed_reused = projection_changed
+        && request.replay_reason == ProjectionReplayReasonV1::ProjectionProfileChange;
+    if projection_changed && !request.changes.reused.is_empty() && !reembed_reused {
         return Err(SemanticProjectionErrorV1::KeyReplayRequiresExplicitEmbeds);
     }
 
+    let reembedded_changes = if reembed_reused {
+        request.changes.reused.as_slice()
+    } else {
+        &[]
+    };
     let expected_chunks = request
         .changes
         .added_or_changed
         .iter()
+        .chain(reembedded_changes)
         .map(|change| (change.chunk_id.clone(), change.current_digest.clone()))
         .collect::<BTreeMap<_, _>>();
     let mut chunks = BTreeMap::new();
@@ -203,12 +212,19 @@ pub fn prepare_vector_generation<E: CanonicalChunkVectorEncoderV1>(
         .keys()
         .find(|chunk_id| !chunks.contains_key(*chunk_id))
     {
+        if reembedded_changes
+            .iter()
+            .any(|change| &change.chunk_id == missing)
+        {
+            return Err(SemanticProjectionErrorV1::KeyReplayRequiresExplicitEmbeds);
+        }
         return Err(SemanticProjectionErrorV1::CanonicalChunkSetMismatch(
             missing.clone(),
         ));
     }
 
-    let mut vectors = Vec::with_capacity(request.changes.added_or_changed.len());
+    let mut vectors =
+        Vec::with_capacity(request.changes.added_or_changed.len() + reembedded_changes.len());
     let mut decisions = Vec::with_capacity(
         request.changes.added_or_changed.len()
             + request.changes.deleted.len()
@@ -268,14 +284,43 @@ pub fn prepare_vector_generation<E: CanonicalChunkVectorEncoderV1>(
         });
     }
     for change in &request.changes.reused {
-        decisions.push(ChunkProjectionDecisionV1 {
-            chunk_id: change.chunk_id.clone(),
-            prior_chunk_digest: change.prior_digest.clone(),
-            current_chunk_digest: change.current_digest.clone(),
-            operation: ProjectionOperationV1::Reused,
-            outcome: ProjectionOutcomeV1::Reused,
-            output_digest: None,
-        });
+        if reembed_reused {
+            let chunk = chunks
+                .get(&change.chunk_id)
+                .ok_or_else(|| SemanticProjectionErrorV1::KeyReplayRequiresExplicitEmbeds)?;
+            let values = encoder.encode(embedding_key, chunk).map_err(|reason| {
+                SemanticProjectionErrorV1::Encoder {
+                    chunk_id: chunk.id.clone(),
+                    reason,
+                }
+            })?;
+            let vector = ProjectedChunkVectorV1::new(
+                target_key.clone(),
+                request.changes.to_generation.clone(),
+                request.changes.manifest_digest.clone(),
+                chunk,
+                values,
+                embedding_key.dimensions,
+            )?;
+            decisions.push(ChunkProjectionDecisionV1 {
+                chunk_id: change.chunk_id.clone(),
+                prior_chunk_digest: change.prior_digest.clone(),
+                current_chunk_digest: change.current_digest.clone(),
+                operation: ProjectionOperationV1::Updated,
+                outcome: ProjectionOutcomeV1::Applied,
+                output_digest: Some(vector.output_digest.clone()),
+            });
+            vectors.push(vector);
+        } else {
+            decisions.push(ChunkProjectionDecisionV1 {
+                chunk_id: change.chunk_id.clone(),
+                prior_chunk_digest: change.prior_digest.clone(),
+                current_chunk_digest: change.current_digest.clone(),
+                operation: ProjectionOperationV1::Reused,
+                outcome: ProjectionOutcomeV1::Reused,
+                output_digest: None,
+            });
+        }
     }
 
     let receipt = build_batch_receipt(&request, &decisions)?;
