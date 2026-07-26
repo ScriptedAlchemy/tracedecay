@@ -992,6 +992,12 @@ pub struct HostAdmissionDatabaseIdentityV1([u8; 32]);
 
 impl HostAdmissionTestRuntimeV1 {
     #[doc(hidden)]
+    #[cfg(any(test, feature = "test-transport"))]
+    pub fn profile_root_for_test(&self) -> &Path {
+        &self.profile_root
+    }
+
+    #[doc(hidden)]
     pub async fn call_user_lcm_tool_for_test(
         &self,
         tool_name: &str,

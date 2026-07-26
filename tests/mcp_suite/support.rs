@@ -18,7 +18,6 @@ use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionT
 use tracedecay::errors::TraceDecayError;
 use tracedecay::mcp::{McpServer, McpTransport, ToolResult};
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
-use tracedecay::storage::default_profile_root;
 use tracedecay::tracedecay::TraceDecay;
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
@@ -773,13 +772,17 @@ pub(crate) async fn open_active_project_session_db(cg: &TraceDecay) -> HostAdmis
         .as_deref()
         .and_then(|project_id| ProjectId::new(project_id.to_string()).ok())
         .expect("active project identity should be available");
-    HostAdmissionTestRuntimeV1::project(
-        default_profile_root().expect("active test profile root"),
-        cg.project_root(),
-        project_id,
-    )
-    .await
-    .expect("active registered project-local session runtime should open")
+    let profile_root = cg
+        .store_layout()
+        .data_root
+        .parent()
+        .filter(|parent| parent.file_name().is_some_and(|name| name == "projects"))
+        .and_then(Path::parent)
+        .expect("active test profile root")
+        .to_path_buf();
+    HostAdmissionTestRuntimeV1::project(profile_root, cg.project_root(), project_id)
+        .await
+        .expect("active registered project-local session runtime should open")
 }
 
 /// Creates a small Rust library with an integration-style test that calls a

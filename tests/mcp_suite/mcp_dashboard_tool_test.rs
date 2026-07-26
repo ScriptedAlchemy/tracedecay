@@ -7,11 +7,13 @@ use std::time::Duration;
 
 use crate::common::http_agent;
 use serde_json::{Value, json};
+use std::sync::Arc;
 use tempfile::TempDir;
-use tracedecay::mcp::handle_tool_call;
+use tracedecay::mcp::{McpServer, handle_tool_call};
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
 use crate::common::canonical_existing_path;
+use crate::support::{handle_real_server_tool_call, open_active_project_session_db};
 
 /// The dashboard manager is process-global (one dashboard per MCP server
 /// process), so these tests must not run concurrently: serialize them.
@@ -40,6 +42,11 @@ fn main() { println!("hi"); }
         .unwrap();
     cg.index_all().await.unwrap();
     (cg, dir, home)
+}
+
+async fn dashboard_test_server(cg: TraceDecay) -> Arc<McpServer> {
+    let runtime = open_active_project_session_db(&cg).await;
+    McpServer::new_with_host_admission_test_runtime_for_test(cg, None, runtime).await
 }
 
 // Multi-thread runtime: the blocking ureq probe must not starve the spawned
@@ -82,20 +89,17 @@ async fn tracedecay_dashboard_tool_rejects_wildcard_host_without_starting() {
 async fn tracedecay_dashboard_tool_starts_and_returns_url_and_serves_capabilities() {
     let _guard = TEST_LOCK.lock().await;
     let (cg, _tmp, _home) = setup_minimal_project().await;
+    let server = dashboard_test_server(cg).await;
 
     // Start via the MCP dispatch (uses current cg's project)
-    let res = handle_tool_call(
-        &cg,
+    let res = handle_real_server_tool_call(
+        &server,
         "tracedecay_dashboard",
         json!({ "host": "127.0.0.1", "port": 0, "format": "json" }),
-        None,
-        None,
     )
-    .await
-    .expect("dashboard start should succeed");
+    .await;
 
     let content_text = res
-        .value
         .get("content")
         .and_then(|c| c.as_array())
         .and_then(|a| a.first())
@@ -131,12 +135,10 @@ async fn tracedecay_dashboard_tool_starts_and_returns_url_and_serves_capabilitie
             assert_eq!(body.get("name"), Some(&json!("tracedecay-dashboard")));
             assert!(body.get("features").is_some());
             // success — now stop it via tool for cleanup
-            let _stop = handle_tool_call(
-                &cg,
+            let _stop = handle_real_server_tool_call(
+                &server,
                 "tracedecay_dashboard",
                 json!({ "action": "stop" }),
-                None,
-                None,
             )
             .await;
             return;
@@ -153,18 +155,17 @@ async fn tracedecay_dashboard_tool_starts_and_returns_url_and_serves_capabilitie
 async fn tracedecay_dashboard_tool_is_idempotent_and_supports_stop() {
     let _guard = TEST_LOCK.lock().await;
     let (cg, _tmp, _home) = setup_minimal_project().await;
+    let server = dashboard_test_server(cg).await;
 
-    let res1 = handle_tool_call(&cg, "tracedecay_dashboard", json!({"port": 0}), None, None)
-        .await
-        .unwrap();
-    let text1 = extract_text(&res1.value);
+    let res1 =
+        handle_real_server_tool_call(&server, "tracedecay_dashboard", json!({"port": 0})).await;
+    let text1 = extract_text(&res1);
     let url1 = extract_url(&text1);
 
     // second start returns same (already)
-    let res2 = handle_tool_call(&cg, "tracedecay_dashboard", json!({"port": 0}), None, None)
-        .await
-        .unwrap();
-    let text2 = extract_text(&res2.value);
+    let res2 =
+        handle_real_server_tool_call(&server, "tracedecay_dashboard", json!({"port": 0})).await;
+    let text2 = extract_text(&res2);
     assert!(
         text2.contains("already_running"),
         "second should be already: {}",
@@ -174,16 +175,10 @@ async fn tracedecay_dashboard_tool_is_idempotent_and_supports_stop() {
     assert_eq!(url1, url2, "idempotent url");
 
     // stop
-    let stop_res = handle_tool_call(
-        &cg,
-        "tracedecay_dashboard",
-        json!({"action": "stop"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let stop_text = extract_text(&stop_res.value);
+    let stop_res =
+        handle_real_server_tool_call(&server, "tracedecay_dashboard", json!({"action": "stop"}))
+            .await;
+    let stop_text = extract_text(&stop_res);
     assert!(
         stop_text.contains("stopped"),
         "stop should report stopped: {}",
@@ -191,16 +186,10 @@ async fn tracedecay_dashboard_tool_is_idempotent_and_supports_stop() {
     );
 
     // stop again is not_running
-    let stop2 = handle_tool_call(
-        &cg,
-        "tracedecay_dashboard",
-        json!({"action": "stop"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    assert!(extract_text(&stop2.value).contains("not_running"));
+    let stop2 =
+        handle_real_server_tool_call(&server, "tracedecay_dashboard", json!({"action": "stop"}))
+            .await;
+    assert!(extract_text(&stop2).contains("not_running"));
 }
 
 fn extract_text(v: &Value) -> String {

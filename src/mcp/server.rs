@@ -592,9 +592,29 @@ impl McpServer {
         scope_prefix: Option<String>,
         runtime: crate::application::host_admission::HostAdmissionTestRuntimeV1,
     ) -> Arc<Self> {
+        let retained_root = cg.project_root().to_path_buf();
+        let profile_root = runtime.profile_root_for_test().to_path_buf();
+        let retained_graph = Arc::new(
+            runtime
+                .open_project_graph_for_test(
+                    &retained_root,
+                    crate::tracedecay::TraceDecayOpenOptions {
+                        global_db_path: Some(profile_root.join("global.db")),
+                        profile_root: Some(profile_root),
+                    },
+                )
+                .await
+                .expect("MCP test runtime retained project graph"),
+        );
+        let retained_project_graph_resolver: RetainedProjectGraphResolver =
+            Arc::new(move |requested_root| {
+                let graph = (requested_root == retained_root).then(|| Arc::clone(&retained_graph));
+                Box::pin(async move { graph })
+            });
         let context = runtime
             .into_mcp_server_context_for_test(cg, scope_prefix)
-            .expect("MCP test runtime must retain exact profile and session authorities");
+            .expect("MCP test runtime must retain exact profile and session authorities")
+            .with_retained_project_graph_resolver(retained_project_graph_resolver);
         Self::new_with_context(context).await
     }
 
