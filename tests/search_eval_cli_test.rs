@@ -38,9 +38,9 @@ fn validate_reports_the_direct_checked_in_workload() {
     let payload = stdout_json(&output);
     assert_eq!(payload["command"], "validate");
     assert_eq!(payload["status"], "pass");
-    assert_eq!(payload["query_count"], 24);
-    assert_eq!(payload["partition_counts"]["train"], 12);
-    assert_eq!(payload["partition_counts"]["validation"], 12);
+    assert_eq!(payload["query_count"], 28);
+    assert_eq!(payload["partition_counts"]["train"], 14);
+    assert_eq!(payload["partition_counts"]["validation"], 14);
     assert_eq!(payload["profile_count"], 3);
     assert!(
         payload["workload_digest"]
