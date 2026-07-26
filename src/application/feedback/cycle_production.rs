@@ -26,7 +26,7 @@ use tracedecay_application::{
     ApplicationOperation, CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot,
     Deadline, DisclosureClass, PolicyDecisionRef, PolicyEvaluationContextV1,
     PolicyEvidenceAgreementV1, PolicyEvidenceFrontierV1, PolicyEvidenceHorizonV1, RequestContext,
-    RequestId, ResolvedScope,
+    ResolvedScope,
 };
 use tracedecay_domain::configuration::{
     AnalyzerExecutableId, AnalyzerExecutableReferenceV1, AnalyzerLanguageId,
@@ -65,6 +65,7 @@ use crate::daemon::lsp_gateway::{
 use crate::diagnostics::lsp::broker::MountedLspProvider;
 use crate::global_db::RegisteredGlobalDb;
 use crate::global_db::configuration::OwnedGlobalDbConfigurationControlStore;
+use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use crate::tracedecay::TraceDecay;
 
 const POLICY_REVISION_V1: u64 = 1;
@@ -955,13 +956,17 @@ fn daemon_request_context(
         use_cases,
         DisclosureClass::Evidence,
     )?;
+    let request_id = mint_global_request_id(GlobalRequestSurface::ProjectOpenFeedbackCycle)
+        .map_err(|_| ApplicationContractError::Inconsistent {
+            field: "feedback-cycle request identity",
+        })?;
     RequestContext::new(
         requester.clone(),
         scope.clone(),
         grant,
-        RequestId::new(format!("request.project-open.cycle.{}", observed_at.0))?,
+        request_id.clone(),
         Deadline::new(grant_expires_at)?,
-        CancellationContext::active(format!("cancel.project-open.cycle.{}", observed_at.0))?,
+        CancellationContext::active(format!("cancel.project-open.cycle.{}", request_id.as_str()))?,
     )
 }
 

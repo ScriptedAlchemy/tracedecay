@@ -252,7 +252,11 @@ impl McpServer {
                 .expect("failed to register SIGTERM handler")
         });
 
-        let mut connection_route = self.new_connection_route_state();
+        let mut connection_route =
+            self.new_connection_route_state()
+                .map_err(|error| TraceDecayError::Config {
+                    message: format!("MCP connection identity unavailable: {error}"),
+                })?;
         let mut pending_lines = VecDeque::new();
         let mut pending_cancellations = HashSet::new();
 

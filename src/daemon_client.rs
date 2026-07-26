@@ -22,6 +22,9 @@ use tracedecay_tool_catalog::{
 };
 
 use crate::application::feedback::observations::Plan26FeedbackSourceEventV1;
+use crate::request_identity::{
+    ConnectionLocalRequestSequence, GlobalRequestSurface, mint_global_request_id,
+};
 
 /// A path-free project selector accepted by adapters before daemon resolution.
 ///
@@ -517,10 +520,14 @@ impl DaemonInvocationClient {
         observed_at: UtcMicros,
         event: Plan26FeedbackSourceEventV1,
     ) -> crate::errors::Result<()> {
+        let request_id = mint_global_request_id(GlobalRequestSurface::FeedbackObservation)
+            .map_err(|error| crate::errors::TraceDecayError::Config {
+                message: error.to_string(),
+            })?;
         let response = self
             .invoke(
                 crate::daemon::DaemonInvocationRequest::feedback_observation(
-                    format!("request.feedback-observe.{}", observed_at.0.max(1)),
+                    request_id.as_str(),
                     subject_digest,
                     observed_at,
                     event,
@@ -543,13 +550,16 @@ impl DaemonInvocationClient {
         &self,
         candidate: crate::application::semantic_runtime::SemanticEvaluationProfileCandidateV1,
     ) -> crate::errors::Result<SemanticEvaluationPublicationResultV1> {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(1_u128, |duration| duration.as_micros().max(1));
+        let request_id =
+            mint_global_request_id(GlobalRequestSurface::SemanticEvaluation).map_err(|error| {
+                crate::errors::TraceDecayError::Config {
+                    message: error.to_string(),
+                }
+            })?;
         let response = self
             .invoke(
                 crate::daemon::DaemonInvocationRequest::semantic_evaluate_and_publish(
-                    format!("request.semantic-evaluation.{now}"),
+                    request_id.as_str(),
                     candidate,
                 ),
             )
@@ -670,7 +680,7 @@ async fn wait_for_cancellation(cancellation: CancellationSignal) {
 pub struct DaemonLspSessionClient {
     invocation: DaemonInvocationClient,
     session: crate::daemon::DaemonLspSessionAccess,
-    next_request: u64,
+    next_request: ConnectionLocalRequestSequence,
     detached: bool,
 }
 
@@ -696,7 +706,7 @@ impl DaemonLspSessionClient {
         Ok(Self {
             invocation,
             session,
-            next_request: 2,
+            next_request: ConnectionLocalRequestSequence::starting_at(2),
             detached: false,
         })
     }
@@ -705,7 +715,7 @@ impl DaemonLspSessionClient {
         &mut self,
         frame: &str,
     ) -> crate::errors::Result<crate::lsp_bridge::FrameSend> {
-        let request_id = self.next_request_id();
+        let request_id = self.next_request_id()?;
         let response = self
             .invoke(crate::daemon::DaemonInvocationRequest::lsp_frame(
                 request_id,
@@ -731,7 +741,7 @@ impl DaemonLspSessionClient {
     pub async fn poll_daemon_frame(
         &mut self,
     ) -> crate::errors::Result<crate::lsp_bridge::FramePoll> {
-        let request_id = self.next_request_id();
+        let request_id = self.next_request_id()?;
         let response = self
             .invoke(crate::daemon::DaemonInvocationRequest::lsp_poll(
                 request_id,
@@ -751,7 +761,7 @@ impl DaemonLspSessionClient {
     }
 
     pub async fn acknowledge_daemon_frame(&mut self) -> crate::errors::Result<()> {
-        let request_id = self.next_request_id();
+        let request_id = self.next_request_id()?;
         let response = self
             .invoke(crate::daemon::DaemonInvocationRequest::lsp_acknowledge(
                 request_id,
@@ -765,7 +775,7 @@ impl DaemonLspSessionClient {
     }
 
     pub async fn reconnect(&mut self) -> crate::errors::Result<()> {
-        let request_id = self.next_request_id();
+        let request_id = self.next_request_id()?;
         let response = self
             .invoke(crate::daemon::DaemonInvocationRequest::lsp_reconnect(
                 request_id,
@@ -782,7 +792,7 @@ impl DaemonLspSessionClient {
     }
 
     pub async fn detach(&mut self) -> crate::errors::Result<()> {
-        let request_id = self.next_request_id();
+        let request_id = self.next_request_id()?;
         let response = self
             .invoke(crate::daemon::DaemonInvocationRequest::lsp_detach(
                 request_id,
@@ -805,10 +815,12 @@ impl DaemonLspSessionClient {
         self.invocation.invoke(request).await
     }
 
-    fn next_request_id(&mut self) -> String {
-        let request_id = format!("lsp.{}", self.next_request);
-        self.next_request = self.next_request.saturating_add(1);
-        request_id
+    fn next_request_id(&mut self) -> crate::errors::Result<String> {
+        self.next_request.next_string("lsp.").map_err(|error| {
+            crate::errors::TraceDecayError::Config {
+                message: error.to_string(),
+            }
+        })
     }
 }
 
@@ -822,7 +834,9 @@ impl Drop for DaemonLspSessionClient {
         };
         let invocation = self.invocation.clone();
         let session = self.session.clone();
-        let request_id = self.next_request_id();
+        let Ok(request_id) = self.next_request_id() else {
+            return;
+        };
         runtime.spawn(async move {
             let _ = invocation
                 .invoke(crate::daemon::DaemonInvocationRequest::lsp_detach(
