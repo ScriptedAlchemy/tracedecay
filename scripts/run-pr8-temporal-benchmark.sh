@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Usage: scripts/run-pr8-temporal-benchmark.sh --dry-run|--run
+Usage: scripts/run-pr8-temporal-benchmark.sh --dry-run|--run|--refresh-contract
 
   --dry-run  Read-only, Cargo-free validation of harness artifacts and
              Codex fixture provenance. Does not mutate the checkout.
@@ -11,6 +11,9 @@ Usage: scripts/run-pr8-temporal-benchmark.sh --dry-run|--run
              Isolates HOME and TRACEDECAY_DATA_DIR for the child process.
              Windows/macOS CI prove temporal durability via nextest; this
              measurement entrypoint remains Linux-hosted for bench tooling.
+  --refresh-contract
+             Run the same real measurement from a clean source commit, then
+             regenerate the workload manifest and result together.
 EOF
 }
 
@@ -140,6 +143,23 @@ require("TRACEDECAY_DATA_DIR" in storage.get("required_environment", []),
 PY
 }
 
+run_benchmark() {
+  local mode="$1"
+  if [[ "$(uname -s)" != "Linux" ]]; then
+    printf '%s\n' "PR8 temporal ${mode} measurement harness is Linux-hosted; use CI nextest durable coverage on Windows/macOS" >&2
+    exit 64
+  fi
+  isolation_root="$(mktemp -d "${TMPDIR:-/tmp}/pr8-temporal-bench.XXXXXX")"
+  cleanup() {
+    rm -rf "$isolation_root"
+  }
+  trap cleanup EXIT
+  export HOME="$isolation_root/home"
+  export TRACEDECAY_DATA_DIR="$isolation_root/tracedecay-data"
+  mkdir -p "$HOME" "$TRACEDECAY_DATA_DIR"
+  cargo bench --bench session_temporal --all-features -- "$mode"
+}
+
 if [[ $# -ne 1 ]]; then
   usage >&2
   exit 2
@@ -154,19 +174,10 @@ case "$1" in
     printf 'OK: PR8 temporal dry-run validated harness_ready evidence (Cargo-free, no mutation)\n'
     ;;
   --run)
-    if [[ "$(uname -s)" != "Linux" ]]; then
-      printf '%s\n' "PR8 temporal --run measurement harness is Linux-hosted; use CI nextest durable coverage on Windows/macOS" >&2
-      exit 64
-    fi
-    isolation_root="$(mktemp -d "${TMPDIR:-/tmp}/pr8-temporal-bench.XXXXXX")"
-    cleanup() {
-      rm -rf "$isolation_root"
-    }
-    trap cleanup EXIT
-    export HOME="$isolation_root/home"
-    export TRACEDECAY_DATA_DIR="$isolation_root/tracedecay-data"
-    mkdir -p "$HOME" "$TRACEDECAY_DATA_DIR"
-    cargo bench --bench session_temporal --all-features -- --run
+    run_benchmark --run
+    ;;
+  --refresh-contract)
+    run_benchmark --refresh-contract
     ;;
   -h|--help)
     usage
