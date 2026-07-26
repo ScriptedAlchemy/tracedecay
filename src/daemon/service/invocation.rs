@@ -8491,8 +8491,8 @@ mod tests {
         let phrase = crate::application_surface::CodePhraseSearchSurfaceRequest {
             query: "daemon invocation".to_owned(),
             phrases: vec!["daemon invocation".to_owned()],
-            field_filters: vec![tracedecay_application::CodeLexicalFieldFilter {
-                field: tracedecay_application::CodeLexicalField::Path,
+            field_filters: vec![tracedecay_application::retrieval::CodeLexicalFieldFilter {
+                field: tracedecay_application::retrieval::CodeLexicalField::Path,
                 include: true,
             }],
             fuzzy_budget: 7,
@@ -8527,8 +8527,8 @@ mod tests {
         );
         assert_eq!(
             canonical.field_filters,
-            [tracedecay_application::CodeLexicalFieldFilter {
-                field: tracedecay_application::CodeLexicalField::Path,
+            [tracedecay_application::retrieval::CodeLexicalFieldFilter {
+                field: tracedecay_application::retrieval::CodeLexicalField::Path,
                 include: true,
             }]
         );
@@ -8587,7 +8587,7 @@ mod tests {
         };
         let request = crate::application_surface::CallableCodeSurfaceRequest::Facets(
             crate::application_surface::CodeFacetSurfaceRequest {
-                dimension: tracedecay_application::CodeFacetDimension::Kind,
+                dimension: tracedecay_application::retrieval::CodeFacetDimension::Kind,
                 scope,
                 meta,
             },
