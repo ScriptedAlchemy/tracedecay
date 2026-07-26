@@ -359,6 +359,7 @@ async fn feedback_reads_are_callable_and_conceal_unknown_handles() {
     let expected_kind = fixture["authorization_concealment"]["problem_kind"]
         .as_str()
         .expect("concealed problem kind");
+    wait_for_feedback_owner(&client).await;
 
     for operation in [
         ApplicationSurfaceOperation::FeedbackDiagnostics,
@@ -438,6 +439,38 @@ async fn feedback_reads_are_callable_and_conceal_unknown_handles() {
         let value: serde_json::Value =
             serde_json::from_slice(&output.stdout).expect("canonical CLI JSON");
         assert_eq!(value["problem"]["kind"], expected_kind);
+    }
+}
+
+async fn wait_for_feedback_owner(client: &DaemonInvocationClient) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let result = resolve_mcp_application_surface(
+            ApplicationSurfaceOperation::FeedbackDiagnostics,
+            request_id(
+                ApplicationSurfaceOperation::FeedbackDiagnostics,
+                "owner-readiness",
+            ),
+            feedback_request("rh_missing-pr12-owner-readiness"),
+            RequestedOutputFormat::Json,
+            Some(client),
+        )
+        .await
+        .expect("feedback owner readiness call");
+        match result.result {
+            Err(problem)
+                if problem.problem.kind() == ApplicationProblemKind::NotFoundOrNotAuthorized =>
+            {
+                return;
+            }
+            Err(problem)
+                if problem.problem.kind() == ApplicationProblemKind::Unavailable
+                    && tokio::time::Instant::now() < deadline =>
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+            other => panic!("feedback owner did not become ready: {other:?}"),
+        }
     }
 }
 
