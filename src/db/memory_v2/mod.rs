@@ -39,7 +39,9 @@ pub(crate) use types::{
 };
 use types::{CurrentFactState, OwnerKey, Progress};
 pub(crate) use writers::MemoryV2LegacyPurgeReceipt;
+#[cfg(test)]
 pub(super) use writers::purge_memory_v2_fact;
+pub(super) use writers::purge_memory_v2_fact_in_transaction;
 pub(super) use writers::{
     clear_memory_v2_compatibility_bank_dirty_in_transaction,
     delete_memory_v2_compatibility_bank_in_transaction,
@@ -539,6 +541,7 @@ fn cutover_replay_identity(receipt_json: &str) -> Result<String> {
             "stored cutover receipt lacks its completion timestamp",
         ));
     }
+    object.remove("coverage");
     json_text(&receipt)
 }
 
