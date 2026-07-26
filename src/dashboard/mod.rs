@@ -1317,9 +1317,12 @@ mod authority_tests {
         let project = tempfile::tempdir().expect("project tempdir");
         std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
             .expect("fixture source");
-        let cg = TraceDecay::init(project.path())
-            .await
-            .expect("project init");
+        let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+            project.path(),
+            "project.dashboard-project-memory",
+        )
+        .await
+        .expect("project init");
         let raw = cg
             .store_layout()
             .identity
@@ -1342,9 +1345,12 @@ mod authority_tests {
         let project = tempfile::tempdir().expect("project tempdir");
         std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
             .expect("fixture source");
-        let cg = TraceDecay::init(project.path())
-            .await
-            .expect("project init");
+        let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+            project.path(),
+            "project.dashboard-state",
+        )
+        .await
+        .expect("project init");
 
         let expected_path = cg.dashboard_db_path().display().to_string();
         let state = build_state(&cg).await.expect("dashboard state");
@@ -1363,11 +1369,13 @@ mod authority_tests {
         let project = tempfile::tempdir().expect("project tempdir");
         std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
             .expect("fixture source");
-        let cg = Arc::new(
-            TraceDecay::init(project.path())
-                .await
-                .expect("project init"),
-        );
+        let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+            project.path(),
+            "project.daemon-dashboard",
+        )
+        .await
+        .expect("project init");
+        let cg = Arc::new(cg);
         let doctor_reader: DoctorReportReader = Arc::new(|| {
             Box::pin(async {
                 Err(
@@ -1429,9 +1437,12 @@ mod authority_tests {
         let project = tempfile::tempdir().expect("project tempdir");
         std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
             .expect("fixture source");
-        let cg = TraceDecay::init(project.path())
-            .await
-            .expect("project init");
+        let (cg, _graph_runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+            project.path(),
+            "project.retained-session",
+        )
+        .await
+        .expect("project init");
         let project_id = ProjectId::new(
             cg.store_layout()
                 .identity
@@ -1470,9 +1481,12 @@ mod authority_tests {
         let project = tempfile::tempdir().expect("project tempdir");
         std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
             .expect("fixture source");
-        let cg = TraceDecay::init(project.path())
-            .await
-            .expect("project init");
+        let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+            project.path(),
+            "project.dashboard-session-unavailable",
+        )
+        .await
+        .expect("project init");
         let selected = resolve_lcm_store(&cg, None).await;
 
         // A display path is not read authority.
@@ -1490,9 +1504,12 @@ mod authority_tests {
         let project = tempfile::tempdir().expect("project tempdir");
         std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
             .expect("fixture source");
-        let cg = TraceDecay::init(project.path())
-            .await
-            .expect("project init");
+        let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+            project.path(),
+            "project.dashboard-session-read-only",
+        )
+        .await
+        .expect("project init");
         let selected = resolve_lcm_store(&cg, None).await;
 
         assert!(selected.lcm_db.is_none());
@@ -1522,9 +1539,12 @@ mod authority_tests {
         let project = tempfile::tempdir().expect("project tempdir");
         std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
             .expect("fixture source");
-        let cg = TraceDecay::init(project.path())
-            .await
-            .expect("project init");
+        let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+            project.path(),
+            "project.dashboard-application-route",
+        )
+        .await
+        .expect("project init");
         let state = build_state(&cg).await.expect("dashboard state");
         let project_id = state.project_id.clone().expect("active project id");
         let application = ActiveProjectApplicationRoutes {
@@ -1581,9 +1601,12 @@ mod authority_tests {
         let project = tempfile::tempdir().expect("project tempdir");
         std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
             .expect("fixture source");
-        let cg = TraceDecay::init(project.path())
-            .await
-            .expect("project init");
+        let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+            project.path(),
+            "project.dashboard-read-model-route",
+        )
+        .await
+        .expect("project init");
         let state = build_state(&cg).await.expect("dashboard state");
         let project_id = state.project_id.clone().expect("active project id");
         let app = router_with_active_application(state, None);
