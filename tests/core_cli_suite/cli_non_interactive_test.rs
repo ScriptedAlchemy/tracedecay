@@ -1870,6 +1870,10 @@ fn init_refuses_ephemeral_project_in_persistent_profile() {
         "stderr should explain the ephemeral-root guard\nstderr:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    assert!(
+        !profile.path().join("projects").exists(),
+        "rejected ephemeral project must not mint a profile store"
+    );
 
     let projects = create_runtime().block_on(async {
         HostAdmissionTestRuntimeV1::profile(profile.path())
@@ -1881,10 +1885,6 @@ fn init_refuses_ephemeral_project_in_persistent_profile() {
     assert!(
         projects.is_empty(),
         "rejected ephemeral project must not enter the persistent registry"
-    );
-    assert!(
-        !profile.path().join("projects").exists(),
-        "rejected ephemeral project must not mint a profile store"
     );
 }
 
