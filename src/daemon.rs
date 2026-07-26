@@ -5151,6 +5151,13 @@ async fn open_project_for_handshake(
                 message: format!("registered project identity is invalid: {error}"),
             }
         })?;
+    // An explicit first-touch-capable route must not turn an existing malformed
+    // legacy input into a successful open merely because durable configuration
+    // was already migrated. Validate the compatibility file without applying
+    // it; the registered configuration database remains the sole authority.
+    if handshake.allow_init && store_layout.config_path.exists() {
+        crate::config::load_config_from_path(project_path, &store_layout.config_path)?;
+    }
     // First-touch enrollment: the daemon's registered session runtime resolves
     // a project's store through its on-disk enrollment marker, which a
     // never-seen project does not yet have. Persist it now — under the same
