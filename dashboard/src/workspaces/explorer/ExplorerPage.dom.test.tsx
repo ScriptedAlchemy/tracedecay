@@ -355,6 +355,116 @@ describe('ExplorerPage no-falsified-UI invariant', () => {
     expect(screen.queryByText(/completed with known coverage/)).toBeNull();
   });
 
+  /**
+   * These two shapes both declared `completeness: 'complete'` over a real
+   * denominator, which was everything the absence gate inspected — so both
+   * earned "Every required source completed with known coverage" while the
+   * source's own numbers on the same object said it knew the status of nothing,
+   * or had examined nothing. They are separate cases because they are separate
+   * facts, and the copy has to be able to tell a reader which one happened.
+   */
+  it('refuses absence when every unit a source counted is unknown', async () => {
+    const allUnitsUnknown = {
+      ...source('knowledge', [], 5),
+      coverage: {
+        ...source('knowledge', [], 5).coverage,
+        completeness: 'complete',
+        eligible: 5,
+        examined: 5,
+        matched: 0,
+        excluded: 0,
+        omitted: 0,
+        unknown: 5,
+        denominator: 5,
+        unit: 'facts',
+        omission_reasons: ['every unit resolved to unknown status'],
+      },
+      page: { offset: 0, limit: 50, total: 0, next_offset: null, rows: [], metadata: {} },
+    };
+    renderExplorer({
+      ...SEARCH_ROUTES,
+      '/api/explorer/queries': {
+        status: 200,
+        body: plannerEnvelope(
+          [source('code_graph', [], 0), source('sessions', [], 0), allUnitsUnknown],
+          'completed',
+          'missing',
+        ),
+      },
+    });
+    const user = userEvent.setup();
+    await user.type(screen.getByRole('searchbox'), 'missing');
+    await user.keyboard('{Enter}');
+
+    expect(await screen.findByText(/No rows loaded for/)).toBeTruthy();
+    expect(screen.queryByText(/No source matched/)).toBeNull();
+    expect(screen.queryByText(/completed with known coverage/)).toBeNull();
+    expect(
+      screen.getByText(/could not determine the status of any of its 5 facts/),
+    ).toBeTruthy();
+  });
+
+  it('refuses absence when a source examined none of its units', async () => {
+    const examinedNothing = {
+      ...source('code_graph', [], 400),
+      coverage: {
+        ...source('code_graph', [], 400).coverage,
+        completeness: 'complete',
+        eligible: 400,
+        examined: 0,
+        matched: 0,
+        excluded: 0,
+        omitted: 400,
+        unknown: 0,
+        denominator: 400,
+        unit: 'symbols',
+        omission_reasons: ['result cap reached before any unit was examined'],
+      },
+      page: { offset: 0, limit: 50, total: 0, next_offset: null, rows: [], metadata: {} },
+    };
+    renderExplorer({
+      ...SEARCH_ROUTES,
+      '/api/explorer/queries': {
+        status: 200,
+        body: plannerEnvelope(
+          [examinedNothing, source('sessions', [], 0), source('knowledge', [], 0)],
+          'completed',
+          'missing',
+        ),
+      },
+    });
+    const user = userEvent.setup();
+    await user.type(screen.getByRole('searchbox'), 'missing');
+    await user.keyboard('{Enter}');
+
+    expect(await screen.findByText(/No rows loaded for/)).toBeTruthy();
+    expect(screen.queryByText(/completed with known coverage/)).toBeNull();
+    expect(screen.getByText(/examined none of its 400 symbols/)).toBeTruthy();
+  });
+
+  it('still confirms absence when every source examined its full denominator', async () => {
+    // The counterweight to the two refusals above: the claim must remain
+    // reachable, or the fix would have replaced a false statement with no
+    // statement at all.
+    renderExplorer({
+      ...SEARCH_ROUTES,
+      '/api/explorer/queries': {
+        status: 200,
+        body: plannerEnvelope(
+          [source('code_graph', [], 0), source('sessions', [], 0), source('knowledge', [], 0)],
+          'completed',
+          'missing',
+        ),
+      },
+    });
+    const user = userEvent.setup();
+    await user.type(screen.getByRole('searchbox'), 'missing');
+    await user.keyboard('{Enter}');
+
+    expect(await screen.findByText(/No source matched/)).toBeTruthy();
+    expect(screen.getByText(/examined its full denominator/)).toBeTruthy();
+  });
+
   it('never renders a count for a source that did not answer', async () => {
     renderExplorer({
       ...SEARCH_ROUTES,
@@ -558,9 +668,10 @@ describe('ExplorerPage', () => {
     await user.keyboard('{Enter}');
 
     expect(await screen.findByText('No rows loaded for “missing”')).toBeTruthy();
-    expect(
-      screen.getByText(/do not report complete coverage or planner finality/),
-    ).toBeTruthy();
+    // Names the source and the coverage it declared, rather than a generic
+    // sentence about incomplete coverage that applies to every refusal alike.
+    expect(screen.getByText(/Knowledge reports unknown coverage/)).toBeTruthy();
+    expect(screen.getByText(/cannot establish global absence/)).toBeTruthy();
     expect(screen.queryByText(/genuinely absent from/)).toBeNull();
   });
 

@@ -52,11 +52,17 @@
    * fallback for mono, which is the default voice of every technical dashboard
    * ever shipped and left the display tier and the mono tier undesigned.
    *
-   * `Inter Variable` stays in the sans chain on purpose, and is not dead
-   * weight: the Plex faces are vendored Latin + Latin-Extended only, so Inter
-   * (which ships every subset) is what actually renders Cyrillic, Greek and
-   * Vietnamese session text. */
-  --font-sans: 'IBM Plex Sans Variable', 'Inter Variable', system-ui, sans-serif;
+   * Inter was kept behind Plex for a while to cover the scripts the vendored
+   * Latin subsets do not, but it earned its place in the bundle rather than on
+   * the screen: all seven of its faces measured `unloaded` at runtime, because
+   * a `@font-face` is only fetched when a glyph in its unicode-range is
+   * actually needed and Plex answered every one. What it did do was keep a
+   * fourth typeface in a three-face system and sit between the designed face
+   * and the system fallback, where it could quietly cover a gap in Plex instead
+   * of letting that gap show. Non-Latin now resolves to `system-ui`, which
+   * carries Cyrillic, Greek and Vietnamese on every platform this ships to and
+   * costs nothing to deliver. */
+  --font-sans: 'IBM Plex Sans Variable', system-ui, sans-serif;
   --font-mono: 'IBM Plex Mono', ui-monospace, 'SFMono-Regular', 'Cascadia Mono', monospace;
   /* The engraved tier. Only ever reached through this token — never a
    * hard-coded family in a component. */
