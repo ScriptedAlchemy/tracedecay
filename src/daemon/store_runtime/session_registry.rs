@@ -48,6 +48,24 @@ pub(crate) struct DaemonSessionRuntimeRegistryV1 {
 }
 
 impl DaemonSessionRuntimeRegistryV1 {
+    pub(crate) async fn close_code_graph_paths(
+        &self,
+        database_paths: impl IntoIterator<Item = PathBuf>,
+    ) -> Result<()> {
+        for database_path in database_paths {
+            self.registry
+                .close_path(&database_path)
+                .await
+                .map_err(|error| {
+                    session_registry_error(
+                        "close registered code-shard runtime",
+                        format!("{error:?}"),
+                    )
+                })?;
+        }
+        Ok(())
+    }
+
     pub(crate) async fn open(identity: LocalProfileIdentityAuthorityV1) -> Result<Self> {
         let incarnation = runtime_incarnation(&identity)?;
         let resolver = Arc::new(LocalStoreRuntimeResolverV1::new(
