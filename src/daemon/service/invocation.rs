@@ -5033,7 +5033,7 @@ impl DaemonLspOwnerRegistrar {
         code_index: Arc<dyn LspCodeIndexProjectionIdentityPort>,
         runtime: tokio::runtime::Handle,
         diagnostic_broker: Arc<Mutex<DiagnosticBroker>>,
-        language: Option<&str>,
+        languages: &[String],
         root_uri: String,
         timeouts: LspRefreshTimeouts,
         diagnostics_quiet_window: Duration,
@@ -5058,7 +5058,7 @@ impl DaemonLspOwnerRegistrar {
             runtime.clone(),
             diagnostic_broker.clone(),
             database.clone(),
-            language,
+            languages,
             project_root.clone(),
             root_uri,
             timeouts,
@@ -6353,7 +6353,13 @@ impl DaemonInvocationService {
         project_root: Option<&Path>,
     ) -> Option<DaemonLspInvocationOwner> {
         let project_root = project_root?;
-        self.lsp_owners.lock().await.get(project_root).cloned()
+        let canonical_root = project_root.canonicalize().ok();
+        let owners = self.lsp_owners.lock().await;
+        owners.get(project_root).cloned().or_else(|| {
+            canonical_root
+                .as_deref()
+                .and_then(|root| owners.get(root).cloned())
+        })
     }
 
     async fn execute_semantic_evaluation(
