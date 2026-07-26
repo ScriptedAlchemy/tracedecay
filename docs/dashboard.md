@@ -430,12 +430,11 @@ per message:
   approximation, marked `≈` in the UI and `"exact": false` in the API's
   per-row `tokenizer` block. This is the primary tier for Cursor (whose
   transcripts carry **no** token counters at all), cline, and vibe stores.
-  Counts are cached per message — in process memory and in a
-  `dashboard_token_counts` sidecar table in the global accounting DB — so
-  large stores (15k+ messages) only pay the counting cost once; a background
-  warm task runs at dashboard startup. Built behind the `token-counting`
-  cargo feature (on by default; ~4 MB of embedded vocabularies, decoded
-  lazily on first use).
+  Counts are cached per message for the lifetime of the dashboard process.
+  The cache is derived acceleration and is never persisted as an independent
+  storage authority; a background warm task runs at dashboard startup. Built
+  behind the `token-counting` cargo feature (on by default; ~4 MB of embedded
+  vocabularies, decoded lazily on first use).
 - **`estimated`** — the fallback ~4 chars/token heuristic the LCM views use
   (`(LENGTH(text)+3)/4`), attributing non-assistant text to input and
   assistant text to output. Applies when the binary was built without
