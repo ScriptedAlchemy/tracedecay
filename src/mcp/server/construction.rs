@@ -59,6 +59,8 @@ pub(crate) struct McpServerConstructionContext {
         Option<crate::dashboard::DoctorRemediationDispatcherV1>,
     pub(crate) dashboard_code_index_freshness_reader:
         Option<crate::dashboard::code_index_freshness_api::CodeIndexFreshnessReader>,
+    pub(crate) dashboard_feedback_status_reader:
+        Option<crate::dashboard::feedback_api::FeedbackStatusReader>,
     pub(crate) diagnostics_lsp:
         Option<Arc<tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>>>,
     pub(crate) hook_branch_writer: HookBranchWriter,
@@ -140,6 +142,7 @@ impl McpServerConstructionContext {
             dashboard_doctor_report_reader: None,
             dashboard_doctor_remediation_dispatcher: None,
             dashboard_code_index_freshness_reader: None,
+            dashboard_feedback_status_reader: None,
             diagnostics_lsp: None,
             hook_branch_writer: direct_hook_branch_writer(),
             background_refresh_writer: direct_background_refresh_writer(),
@@ -211,6 +214,7 @@ impl McpServerConstructionContext {
             dashboard_doctor_report_reader: None,
             dashboard_doctor_remediation_dispatcher: None,
             dashboard_code_index_freshness_reader: None,
+            dashboard_feedback_status_reader: None,
             diagnostics_lsp: None,
             hook_branch_writer: writers.hook_branch,
             background_refresh_writer: writers.background_refresh,
@@ -295,6 +299,14 @@ impl McpServerConstructionContext {
         reader: crate::dashboard::code_index_freshness_api::CodeIndexFreshnessReader,
     ) -> Self {
         self.dashboard_code_index_freshness_reader = Some(reader);
+        self
+    }
+
+    pub(crate) fn with_dashboard_feedback_status_reader(
+        mut self,
+        reader: crate::dashboard::feedback_api::FeedbackStatusReader,
+    ) -> Self {
+        self.dashboard_feedback_status_reader = Some(reader);
         self
     }
 

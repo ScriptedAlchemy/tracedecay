@@ -49,6 +49,7 @@ pub(crate) use doctor_remediation_api::{
 };
 mod events_api;
 mod explorer_api;
+pub(crate) mod feedback_api;
 mod graph_api;
 mod graph_queries;
 mod graph_service;
@@ -91,7 +92,8 @@ use tokio::sync::RwLock;
 use tower::ServiceExt;
 
 use crate::application_surface::{
-    dashboard_configuration_application_router, http_application_router,
+    dashboard_configuration_application_router, dashboard_feedback_application_router,
+    http_application_router,
 };
 use crate::automation::backend;
 use crate::automation::config::{self, AutomationBackend, AutomationHostMode};
@@ -224,6 +226,10 @@ pub(crate) struct DashboardState {
     /// Live read port over the daemon-owned code-index scheduler registry.
     pub(crate) code_index_freshness_reader:
         Option<code_index_freshness_api::CodeIndexFreshnessReader>,
+    /// Root-addressed read over the daemon-mounted canonical feedback
+    /// observation owner. Selected projects reuse the resolver but resolve
+    /// their own exact project root on every call.
+    pub(crate) feedback_status_reader: Option<feedback_api::FeedbackStatusReader>,
     /// Storage mode resolved for the active project store.
     pub(crate) storage_mode: String,
     /// Resolved active project store root.
@@ -402,6 +408,7 @@ async fn build_state_inner(
     doctor_report_reader: Option<DoctorReportReader>,
     doctor_remediation_dispatcher: Option<doctor_remediation_api::DoctorRemediationDispatcherV1>,
     code_index_freshness_reader: Option<code_index_freshness_api::CodeIndexFreshnessReader>,
+    feedback_status_reader: Option<feedback_api::FeedbackStatusReader>,
     code_diagnostics_broker: Option<
         Arc<tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>>,
     >,
@@ -443,6 +450,7 @@ async fn build_state_inner(
         savings_db_path,
         project_root: cg.project_root().to_path_buf(),
         code_index_freshness_reader,
+        feedback_status_reader,
         storage_mode,
         store_root,
         config_path,
@@ -483,6 +491,7 @@ pub(crate) async fn build_state(cg: &TraceDecay) -> Result<DashboardState> {
         None,
         None,
         None,
+        None,
     )
     .await
 }
@@ -497,6 +506,7 @@ pub(crate) async fn build_state_with_automation_reconciler(
     doctor_report_reader: Option<DoctorReportReader>,
     doctor_remediation_dispatcher: Option<doctor_remediation_api::DoctorRemediationDispatcherV1>,
     code_index_freshness_reader: Option<code_index_freshness_api::CodeIndexFreshnessReader>,
+    feedback_status_reader: Option<feedback_api::FeedbackStatusReader>,
     code_diagnostics_broker: Option<
         Arc<tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>>,
     >,
@@ -513,6 +523,7 @@ pub(crate) async fn build_state_with_automation_reconciler(
         doctor_report_reader,
         doctor_remediation_dispatcher,
         code_index_freshness_reader,
+        feedback_status_reader,
         code_diagnostics_broker,
     )
     .await
@@ -541,6 +552,7 @@ pub(crate) async fn build_selected_project_state(
         None,
         None,
         active.code_index_freshness_reader.clone(),
+        active.feedback_status_reader.clone(),
         None,
     )
     .await
@@ -678,6 +690,7 @@ where
         None,
         None,
         None,
+        None,
     )
     .await?;
     let app = router(cg, state).await?;
@@ -737,13 +750,14 @@ pub(crate) fn validate_dashboard_host(host: &str) -> Result<&str> {
     )))
 }
 
-/// PR12 application routes are intentionally bound to the active project
-/// daemon. They are not part of the selected-project dashboard gateway; PR14
-/// must add explicit selected-project and Hermes adapters before that scope
-/// can change.
+/// Canonical application routes bound to one exact project daemon.
+///
+/// The active project mounts every route below. The selected-project gateway
+/// constructs only the PR14 feedback read subset from its retained graph.
 struct ActiveProjectApplicationRoutes {
     http_router: Router,
     dashboard_configuration_router: Router,
+    dashboard_feedback_router: Router,
     client: Option<DaemonInvocationClient>,
 }
 
@@ -778,9 +792,14 @@ impl ActiveProjectApplicationRoutes {
                     message: format!("could not mount dashboard configuration routes: {error}"),
                 }
             })?;
+        let dashboard_feedback_router = dashboard_feedback_application_router(client.clone())
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("could not mount dashboard feedback routes: {error}"),
+            })?;
         Ok(Self {
             http_router,
             dashboard_configuration_router,
+            dashboard_feedback_router,
             client: Some(client),
         })
     }
@@ -855,6 +874,7 @@ fn router_with_active_application(
         .route("/api/doctor/{*tail}", any(active_api_gateway))
         .route("/api/storage/{*tail}", any(active_api_gateway))
         .route("/api/code-index/{*tail}", any(active_api_gateway))
+        .route("/api/feedback/status", any(active_api_gateway))
         .route("/api/events", any(active_api_gateway))
         // SPA fallback: unmatched non-API paths are client routes
         // (/brain?scope=… deep links) and receive the embedded app index.
@@ -863,6 +883,7 @@ fn router_with_active_application(
     match application {
         Some(application) => router
             .nest("/api/application", application.http_router)
+            .nest("/api/feedback", application.dashboard_feedback_router)
             .nest(
                 "/api/dashboard/application",
                 application.dashboard_configuration_router,
@@ -874,6 +895,7 @@ fn router_with_active_application(
 fn project_api_router() -> Router<DashboardState> {
     Router::new()
         .route("/api/capabilities", get(capabilities))
+        .route("/api/feedback/status", get(feedback_api::status))
         // Holographic memory plugin API (mirrors holographic_plus plugin_api.py)
         .route("/api/plugins/holographic/", get(memory_api::overview))
         .route("/api/plugins/holographic", get(memory_api::overview))
@@ -1175,6 +1197,7 @@ async fn project_scoped_api_gateway(
 ) -> Response {
     if runtime.active_project_id() != Some(project_id.as_str())
         && !matches!(req.method(), &Method::GET | &Method::HEAD)
+        && !is_feedback_read_request(req.method(), &tail)
     {
         return (
             StatusCode::METHOD_NOT_ALLOWED,
@@ -1210,6 +1233,61 @@ async fn project_scoped_api_gateway(
         .query()
         .map(|query| format!("?{query}"))
         .unwrap_or_default();
+    if is_feedback_read_request(req.method(), &tail) {
+        let Some(project_graph) = selected.state.project_graph.as_deref() else {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({
+                    "status": "unavailable",
+                    "detail": "selected project feedback authority is unavailable",
+                    "project_id": project_id,
+                })),
+            )
+                .into_response();
+        };
+        let application = match ActiveProjectApplicationRoutes::for_active_project(project_graph) {
+            Ok(application) => application,
+            Err(err) => {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(json!({
+                        "status": "unavailable",
+                        "detail": format!("selected project feedback authority is unavailable: {err}"),
+                        "project_id": project_id,
+                    })),
+                )
+                    .into_response();
+            }
+        };
+        let operation = tail
+            .strip_prefix("feedback/")
+            .expect("feedback read path was validated");
+        let rewritten = format!("/{operation}{query}");
+        return match rewritten.parse::<Uri>() {
+            Ok(uri) => {
+                *req.uri_mut() = uri;
+                match application.dashboard_feedback_router.oneshot(req).await {
+                    Ok(response) => response,
+                    Err(err) => (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({
+                            "status": "error",
+                            "detail": format!("dashboard feedback route failed: {err}"),
+                        })),
+                    )
+                        .into_response(),
+                }
+            }
+            Err(err) => (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "status": "bad_request",
+                    "detail": format!("invalid project-scoped feedback path: {err}"),
+                })),
+            )
+                .into_response(),
+        };
+    }
     let rewritten = format!("/api/{tail}{query}");
     match rewritten.parse::<Uri>() {
         Ok(uri) => {
@@ -1225,6 +1303,10 @@ async fn project_scoped_api_gateway(
         )
             .into_response(),
     }
+}
+
+fn is_feedback_read_request(method: &Method, tail: &str) -> bool {
+    method == Method::POST && matches!(tail, "feedback/get" | "feedback/expand" | "feedback/list")
 }
 
 async fn forward_project_request(
@@ -1293,6 +1375,7 @@ async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
             "lcm_payload_health": has_lcm,
             "graph": true,
             "analytics": true,
+            "feedback": state.feedback_status_reader.is_some(),
             "code_diagnostics": state.code_diagnostics_authority.is_some(),
             // Memory curation/refinement is served by the configured
             // standalone automation backend. Explicit agent ops apply through
@@ -1421,6 +1504,7 @@ mod authority_tests {
             standalone_dashboard_automation_writer(),
             Some(Arc::clone(&doctor_reader)),
             Some(doctor_dispatcher),
+            None,
             None,
             Some(diagnostic_broker),
         )
@@ -1565,6 +1649,8 @@ mod authority_tests {
             http_router: Router::new().route("/probe", get(|| async { StatusCode::NO_CONTENT })),
             dashboard_configuration_router: Router::new()
                 .route("/probe", get(|| async { StatusCode::ACCEPTED })),
+            dashboard_feedback_router: Router::new()
+                .route("/probe", get(|| async { StatusCode::OK })),
             client: None,
         };
         let app = router_with_active_application(state, Some(application));
@@ -1580,6 +1666,18 @@ mod authority_tests {
             .await
             .expect("active application response");
         assert_eq!(active.status(), StatusCode::NO_CONTENT);
+
+        let feedback = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/feedback/probe")
+                    .body(Body::empty())
+                    .expect("active dashboard feedback request"),
+            )
+            .await
+            .expect("active dashboard feedback response");
+        assert_eq!(feedback.status(), StatusCode::OK);
 
         let dashboard_configuration = app
             .clone()
@@ -1632,6 +1730,7 @@ mod authority_tests {
             "storage/telemetry",
             "storage/findings",
             "code-index/freshness",
+            "feedback/status",
         ] {
             let active = app
                 .clone()
@@ -1674,5 +1773,18 @@ mod authority_tests {
                 "project-scoped gateway route for /api/{tail} should resolve"
             );
         }
+    }
+
+    #[test]
+    fn selected_project_feedback_queries_are_the_only_read_only_posts() {
+        for tail in ["feedback/get", "feedback/expand", "feedback/list"] {
+            assert!(is_feedback_read_request(&Method::POST, tail));
+            assert!(!is_feedback_read_request(&Method::GET, tail));
+        }
+        assert!(!is_feedback_read_request(
+            &Method::POST,
+            "doctor/remediations/apply"
+        ));
+        assert!(!is_feedback_read_request(&Method::POST, "feedback/status"));
     }
 }

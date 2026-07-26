@@ -623,7 +623,7 @@ where
 {
     Router::new()
         .route("/git/{operation}", post(git_read::<O>))
-        .route("/feedback/{operation}", post(feedback_read::<O>))
+        .route("/feedback/{operation}", post(feedback_operation::<O>))
         .route("/tests/affected", post(affected_tests::<O>))
         .route("/tests/results", post(test_results::<O>))
         .route("/code/{operation}", post(callable_code_read::<O>))
@@ -636,6 +636,21 @@ where
             "/context-scout/{operation}",
             post(context_scout_operation::<O>),
         )
+        .layer(DefaultBodyLimit::max(MAX_HTTP_APPLICATION_BODY_BYTES))
+        .with_state(owners)
+}
+
+/// Build the PR14 dashboard bindings for canonical feedback reads.
+///
+/// This is a route subset only. It uses the same handlers, request envelopes,
+/// dispatcher, and application owner as the complete HTTP application router;
+/// the dashboard does not deserialize or reconstruct feedback results.
+pub fn feedback_application_router<O>(owners: O) -> Router
+where
+    O: HttpApplicationOwners,
+{
+    Router::new()
+        .route("/{operation}", post(feedback_read::<O>))
         .layer(DefaultBodyLimit::max(MAX_HTTP_APPLICATION_BODY_BYTES))
         .with_state(owners)
 }
@@ -671,6 +686,35 @@ fn parse_git_read_operation(operation: &str) -> Option<HttpApplicationOperation>
     }
 }
 
+fn parse_feedback_read_operation(operation: &str) -> Option<HttpApplicationOperation> {
+    match operation {
+        "get" => Some(HttpApplicationOperation::FeedbackGet),
+        "expand" => Some(HttpApplicationOperation::FeedbackExpand),
+        "list" => Some(HttpApplicationOperation::FeedbackList),
+        _ => None,
+    }
+}
+
+async fn feedback_read<O>(
+    Path(operation): Path<String>,
+    state: State<O>,
+    request_id: Extension<RequestId>,
+    cancellation: Extension<HttpApplicationControls>,
+    page: Result<Query<HttpPageQuery>, QueryRejection>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response
+where
+    O: HttpApplicationOwners,
+{
+    let Some(operation) = parse_feedback_read_operation(&operation) else {
+        return application_problem_response(adapter_problem(
+            request_id.0,
+            ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
+        ));
+    };
+    invoke_route(operation, state, request_id, cancellation, page, body).await
+}
+
 async fn git_read<O>(
     Path(operation): Path<String>,
     state: State<O>,
@@ -703,7 +747,7 @@ fn parse_feedback_operation(operation: &str) -> Option<HttpApplicationOperation>
     }
 }
 
-async fn feedback_read<O>(
+async fn feedback_operation<O>(
     Path(operation): Path<String>,
     state: State<O>,
     request_id: Extension<RequestId>,
@@ -957,7 +1001,8 @@ mod tests {
     use super::{
         DEFAULT_HTTP_PAGE_SIZE, HttpApplicationOperation, HttpApplicationOwnerKind, HttpPageQuery,
         parse_callable_code_operation, parse_configuration_operation,
-        parse_context_scout_operation, parse_feedback_operation, parse_git_read_operation,
+        parse_context_scout_operation, parse_feedback_operation, parse_feedback_read_operation,
+        parse_git_read_operation,
     };
 
     #[test]
@@ -1004,6 +1049,22 @@ mod tests {
         }
         for rejected in ["", "feedback_diagnostics", "preview", "apply"] {
             assert_eq!(parse_feedback_operation(rejected), None);
+        }
+    }
+
+    #[test]
+    fn feedback_read_operation_parser_is_exact_and_separately_owned() {
+        for (route, operation) in [
+            ("get", HttpApplicationOperation::FeedbackGet),
+            ("expand", HttpApplicationOperation::FeedbackExpand),
+            ("list", HttpApplicationOperation::FeedbackList),
+        ] {
+            assert_eq!(parse_feedback_read_operation(route), Some(operation));
+            assert_eq!(operation.owner_kind(), HttpApplicationOwnerKind::Feedback);
+            assert_eq!(operation.as_str(), format!("feedback_{route}"));
+        }
+        for rejected in ["", "status", "get/", "feedback_get"] {
+            assert_eq!(parse_feedback_read_operation(rejected), None);
         }
     }
 

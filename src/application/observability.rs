@@ -13,6 +13,10 @@ use tracedecay_domain::{
     CoverageStateV1, ObservabilityEnvelopeV1, ObservabilityPayloadV1, ObservabilityTerminalResultV1,
 };
 
+use crate::application::feedback::observations::{
+    FeedbackObservationReadModelV1, FeedbackSystemMetricDenominatorV1, FeedbackSystemMetricKindV1,
+    FeedbackSystemMetricUnitV1, Plan26CoverageV1,
+};
 use crate::global_db::{AnalyticsEventInsert, AnalyticsEventQuery, RegisteredGlobalDb};
 
 const EVENT_LIMIT: usize = 10_000;
@@ -20,6 +24,7 @@ const OBSERVABILITY_SCAN_PAGE: usize = 64;
 const OBSERVABILITY_PROVIDER: &str = "tracedecay-observability";
 const ANALYTICS_DESCRIPTOR: &str = "analytics-events.v1";
 const COST_DESCRIPTOR: &str = "provider-costs.v1";
+const FEEDBACK_DESCRIPTOR: &str = "feedback-system-quality.v1";
 
 /// Canonical wire projection used by every PR14 surface. Adapters may wrap the
 /// value in their transport framing but may not recompute metrics or coverage.
@@ -610,6 +615,179 @@ pub(crate) async fn observatory_read_model(
     }
 }
 
+/// Adds Plan 37 feedback-system quality measurements to the canonical
+/// Observatory model. Adapters call this composer instead of re-deriving
+/// values, denominators, coverage, or unavailable states.
+pub(crate) fn attach_feedback_system_quality(
+    read_model: &mut ObservatoryReadModelV1,
+    feedback: Option<&FeedbackObservationReadModelV1>,
+    unavailable_reason: Option<&str>,
+) {
+    let Some(feedback) = feedback else {
+        let coverage = coverage(None, 0, 1, CoverageStateV1::Unknown);
+        for (kind, unit, denominator) in feedback_metric_descriptors() {
+            read_model.metrics.push(measurement(
+                FEEDBACK_DESCRIPTOR,
+                kind,
+                None,
+                unit,
+                denominator,
+                coverage.clone(),
+                MetricSourceV1::FeedbackObservations,
+                "feedback-observations.v1",
+                "feedback-system-quality-projector.v1",
+                "feedback:unavailable",
+                &read_model.horizon,
+                unavailable_reason.or(Some("feedback_observations_unavailable")),
+            ));
+        }
+        read_model.current = false;
+        return;
+    };
+
+    let watermark = feedback.watermark.producer_sequence.map_or_else(
+        || "feedback:empty".to_string(),
+        |value| format!("feedback:{value}"),
+    );
+    let unknown = feedback
+        .denominators
+        .delayed
+        .saturating_add(feedback.denominators.dropped)
+        .saturating_add(feedback.denominators.retention_dropped)
+        .saturating_add(feedback.denominators.incomplete_boots);
+    for metric in &feedback.system_quality.metrics {
+        let state = feedback_coverage_state(metric.coverage);
+        let complete = state == CoverageStateV1::Known;
+        let observed = metric.denominator.unwrap_or(0);
+        let coverage = coverage(
+            complete.then_some(observed),
+            observed,
+            if complete { 0 } else { unknown.max(1) },
+            state,
+        );
+        let unavailable = metric
+            .unavailable_reason
+            .map(feedback_unavailable_reason)
+            .or((!complete).then_some("incomplete_feedback_coverage"));
+        read_model.metrics.push(measurement(
+            FEEDBACK_DESCRIPTOR,
+            feedback_metric_name(metric.metric),
+            complete.then_some(metric.value).flatten(),
+            feedback_metric_unit(metric.unit),
+            feedback_denominator_name(metric.denominator_population),
+            coverage,
+            MetricSourceV1::FeedbackObservations,
+            "feedback-observations.v1",
+            "feedback-system-quality-projector.v1",
+            &watermark,
+            &read_model.horizon,
+            unavailable,
+        ));
+    }
+    read_model.current &= feedback.coverage == Plan26CoverageV1::Known;
+    read_model.watermark = format!("{};{watermark}", read_model.watermark);
+}
+
+fn feedback_metric_descriptors() -> [(&'static str, &'static str, &'static str); 9] {
+    [
+        ("feedback_coverage", "ratio", "eligible_observations"),
+        ("feedback_relevance", "ratio", "relevance_labels"),
+        ("feedback_diversity", "ratio", "eligible_source_families"),
+        ("feedback_latency_p95", "microseconds", "latency_samples"),
+        (
+            "feedback_omission_rate",
+            "ratio",
+            "returned_and_omitted_items",
+        ),
+        ("feedback_denial_rate", "ratio", "outcome_observations"),
+        ("feedback_staleness_rate", "ratio", "outcome_observations"),
+        (
+            "feedback_revocation_propagation_p95",
+            "microseconds",
+            "revocation_observations",
+        ),
+        (
+            "feedback_stack_transitions",
+            "transitions",
+            "stack_transition_observations",
+        ),
+    ]
+}
+
+const fn feedback_metric_name(kind: FeedbackSystemMetricKindV1) -> &'static str {
+    match kind {
+        FeedbackSystemMetricKindV1::Coverage => "feedback_coverage",
+        FeedbackSystemMetricKindV1::Relevance => "feedback_relevance",
+        FeedbackSystemMetricKindV1::Diversity => "feedback_diversity",
+        FeedbackSystemMetricKindV1::Latency => "feedback_latency_p95",
+        FeedbackSystemMetricKindV1::Omission => "feedback_omission_rate",
+        FeedbackSystemMetricKindV1::Denial => "feedback_denial_rate",
+        FeedbackSystemMetricKindV1::Staleness => "feedback_staleness_rate",
+        FeedbackSystemMetricKindV1::RevocationPropagation => "feedback_revocation_propagation_p95",
+        FeedbackSystemMetricKindV1::StackTransitions => "feedback_stack_transitions",
+    }
+}
+
+const fn feedback_metric_unit(unit: FeedbackSystemMetricUnitV1) -> &'static str {
+    match unit {
+        FeedbackSystemMetricUnitV1::Ratio => "ratio",
+        FeedbackSystemMetricUnitV1::Microseconds => "microseconds",
+        FeedbackSystemMetricUnitV1::Transitions => "transitions",
+    }
+}
+
+const fn feedback_denominator_name(denominator: FeedbackSystemMetricDenominatorV1) -> &'static str {
+    match denominator {
+        FeedbackSystemMetricDenominatorV1::EligibleObservations => "eligible_observations",
+        FeedbackSystemMetricDenominatorV1::RelevanceLabels => "relevance_labels",
+        FeedbackSystemMetricDenominatorV1::EligibleSourceFamilies => "eligible_source_families",
+        FeedbackSystemMetricDenominatorV1::LatencySamples => "latency_samples",
+        FeedbackSystemMetricDenominatorV1::ReturnedAndOmittedItems => "returned_and_omitted_items",
+        FeedbackSystemMetricDenominatorV1::OutcomeObservations => "outcome_observations",
+        FeedbackSystemMetricDenominatorV1::RevocationObservations => "revocation_observations",
+        FeedbackSystemMetricDenominatorV1::StackTransitionObservations => {
+            "stack_transition_observations"
+        }
+    }
+}
+
+const fn feedback_coverage_state(coverage: Plan26CoverageV1) -> CoverageStateV1 {
+    match coverage {
+        Plan26CoverageV1::Known => CoverageStateV1::Known,
+        Plan26CoverageV1::Partial => CoverageStateV1::Partial,
+        Plan26CoverageV1::Stale => CoverageStateV1::Stale,
+        Plan26CoverageV1::Unknown => CoverageStateV1::Unknown,
+        Plan26CoverageV1::Sampled => CoverageStateV1::Sampled,
+        Plan26CoverageV1::Capped => CoverageStateV1::Capped,
+    }
+}
+
+const fn feedback_unavailable_reason(
+    reason: crate::application::feedback::observations::FeedbackSystemMetricUnavailableReasonV1,
+) -> &'static str {
+    use crate::application::feedback::observations::FeedbackSystemMetricUnavailableReasonV1;
+    match reason {
+        FeedbackSystemMetricUnavailableReasonV1::NoEligibleObservations => {
+            "no_eligible_observations"
+        }
+        FeedbackSystemMetricUnavailableReasonV1::NoRelevanceLabels => "no_relevance_labels",
+        FeedbackSystemMetricUnavailableReasonV1::NoDiversityObservations => {
+            "no_diversity_observations"
+        }
+        FeedbackSystemMetricUnavailableReasonV1::NoLatencySamples => "no_latency_samples",
+        FeedbackSystemMetricUnavailableReasonV1::NoTruncationObservations => {
+            "no_truncation_observations"
+        }
+        FeedbackSystemMetricUnavailableReasonV1::NoOutcomeObservations => "no_outcome_observations",
+        FeedbackSystemMetricUnavailableReasonV1::NoRevocationObservations => {
+            "no_revocation_observations"
+        }
+        FeedbackSystemMetricUnavailableReasonV1::NoStackTransitionObservations => {
+            "no_stack_transition_observations"
+        }
+    }
+}
+
 pub(crate) fn costs_unavailable_read_model(
     scope_ref: Option<&str>,
     since_seconds: i64,
@@ -853,6 +1031,30 @@ mod tests {
         assert_eq!(value.state, CoverageStateV1::Partial);
         assert_eq!(value.unknown, 2);
         assert_eq!(value.eligible, None);
+    }
+
+    #[test]
+    fn feedback_quality_metrics_are_typed_and_never_fabricate_empty_zeroes() {
+        let mut observatory =
+            observatory_unavailable_read_model(Some("scope:test"), 1, "store_unavailable");
+        let feedback = FeedbackObservationReadModelV1::project(&[]).unwrap();
+        attach_feedback_system_quality(&mut observatory, Some(&feedback), None);
+
+        let feedback_metrics = observatory
+            .metrics
+            .iter()
+            .filter(|metric| metric.descriptor_revision == FEEDBACK_DESCRIPTOR)
+            .collect::<Vec<_>>();
+        assert_eq!(feedback_metrics.len(), 9);
+        assert!(
+            feedback_metrics.iter().all(|metric| {
+                metric.value.is_none()
+                    && metric.denominator_value.is_none()
+                    && metric.coverage.state == CoverageStateV1::Unknown
+                    && metric.unavailable_reason.is_some()
+            }),
+            "unsupported feedback measurements remain explicitly unknown"
+        );
     }
 
     #[test]
