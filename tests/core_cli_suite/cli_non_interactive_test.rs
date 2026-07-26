@@ -1242,6 +1242,8 @@ async fn status_json_reads_readonly_project_database() {
     db.insert_node(&sample_node("node-1", "process_data", "src/lib.rs"))
         .await
         .unwrap();
+    let expected_node_count = db.get_stats().await.unwrap().node_count;
+    assert_eq!(expected_node_count, 3);
     db.checkpoint().await.unwrap();
     db.close();
     let mut permissions = std::fs::metadata(&db_path).unwrap().permissions();
@@ -1259,7 +1261,7 @@ async fn status_json_reads_readonly_project_database() {
         String::from_utf8_lossy(&output.stderr)
     );
     let payload: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(payload["node_count"], 1);
+    assert_eq!(payload["node_count"], expected_node_count);
 }
 
 #[tokio::test]
