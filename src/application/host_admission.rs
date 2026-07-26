@@ -2,10 +2,10 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-transport"))]
 use rusqlite::{Connection as RusqliteConnection, OpenFlags, types::ValueRef};
 use serde::Serialize;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-transport"))]
 use sha2::{Digest as _, Sha256};
 use tracedecay_domain::{
     BrainId, FactOwnerV1, ObservationScopeV1, ObservationSourceCursorV1,
@@ -994,7 +994,7 @@ pub struct HostAdmissionTestRuntimeV1 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HostAdmissionDatabaseIdentityV1([u8; 32]);
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-transport"))]
 fn canonical_session_domain_sha256(path: &Path) -> crate::errors::Result<[u8; 32]> {
     let connection = RusqliteConnection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|error| session_domain_digest_error("open session database", error))?;
@@ -1069,13 +1069,13 @@ fn canonical_session_domain_sha256(path: &Path) -> crate::errors::Result<[u8; 32
     Ok(digest.finalize().into())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-transport"))]
 fn digest_len_prefixed(digest: &mut Sha256, value: &[u8]) {
     digest.update(u64::try_from(value.len()).unwrap_or(u64::MAX).to_le_bytes());
     digest.update(value);
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-transport"))]
 fn session_domain_digest_error(
     operation: &str,
     error: rusqlite::Error,
