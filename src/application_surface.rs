@@ -3315,6 +3315,9 @@ fn application_operation_for_http(
         HttpApplicationOperation::GitHunks => ApplicationSurfaceOperation::GitHunks,
         HttpApplicationOperation::GitPreview => ApplicationSurfaceOperation::GitPreview,
         HttpApplicationOperation::GitApply => ApplicationSurfaceOperation::GitApply,
+        HttpApplicationOperation::FeedbackGet => ApplicationSurfaceOperation::FeedbackGet,
+        HttpApplicationOperation::FeedbackExpand => ApplicationSurfaceOperation::FeedbackExpand,
+        HttpApplicationOperation::FeedbackList => ApplicationSurfaceOperation::FeedbackList,
         HttpApplicationOperation::TestResults => ApplicationSurfaceOperation::TestResults,
         HttpApplicationOperation::CodeExactOccurrence => {
             ApplicationSurfaceOperation::CodeExactOccurrence

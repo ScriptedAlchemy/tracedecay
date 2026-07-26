@@ -43,6 +43,9 @@ pub enum HttpApplicationOperation {
     GitHunks,
     GitPreview,
     GitApply,
+    FeedbackGet,
+    FeedbackExpand,
+    FeedbackList,
     TestResults,
     CodeExactOccurrence,
     CodePhraseSearch,
@@ -101,6 +104,7 @@ pub enum HttpApplicationOperation {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum HttpApplicationOwnerKind {
     Git,
+    Feedback,
     CallableCode,
     Primitive,
     Configuration,
@@ -117,6 +121,9 @@ impl HttpApplicationOperation {
             Self::GitHunks => "git_hunks",
             Self::GitPreview => "git_preview",
             Self::GitApply => "git_apply",
+            Self::FeedbackGet => "feedback_get",
+            Self::FeedbackExpand => "feedback_expand",
+            Self::FeedbackList => "feedback_list",
             Self::TestResults => "test_results",
             Self::CodeExactOccurrence => "code_exact_occurrence",
             Self::CodePhraseSearch => "code_phrase_search",
@@ -181,6 +188,9 @@ impl HttpApplicationOperation {
             | Self::GitHunks
             | Self::GitPreview
             | Self::GitApply => HttpApplicationOwnerKind::Git,
+            Self::FeedbackGet | Self::FeedbackExpand | Self::FeedbackList => {
+                HttpApplicationOwnerKind::Feedback
+            }
             Self::CodeExactOccurrence
             | Self::CodePhraseSearch
             | Self::CodeCallees
@@ -263,6 +273,8 @@ pub type HttpApplicationInvocationFuture =
 pub trait HttpApplicationOwners: Clone + Send + Sync + 'static {
     fn invoke_git(&self, request: HttpApplicationRequest) -> HttpApplicationInvocationFuture;
 
+    fn invoke_feedback(&self, request: HttpApplicationRequest) -> HttpApplicationInvocationFuture;
+
     fn invoke_callable_code(
         &self,
         request: HttpApplicationRequest,
@@ -287,6 +299,10 @@ where
     Fut: Future<Output = CanonicalInvocationResult<Value>> + Send + 'static,
 {
     fn invoke_git(&self, request: HttpApplicationRequest) -> HttpApplicationInvocationFuture {
+        Box::pin((self)(request))
+    }
+
+    fn invoke_feedback(&self, request: HttpApplicationRequest) -> HttpApplicationInvocationFuture {
         Box::pin((self)(request))
     }
 
@@ -443,9 +459,7 @@ where
     O: HttpApplicationOwners,
 {
     Router::new()
-        .route("/get", post(feedback_get::<O>))
-        .route("/expand", post(feedback_expand::<O>))
-        .route("/list", post(feedback_list::<O>))
+        .route("/{operation}", post(feedback_read::<O>))
         .layer(DefaultBodyLimit::max(MAX_HTTP_APPLICATION_BODY_BYTES))
         .with_state(owners)
 }
@@ -479,6 +493,35 @@ fn parse_git_read_operation(operation: &str) -> Option<HttpApplicationOperation>
         "hunks" => Some(HttpApplicationOperation::GitHunks),
         _ => None,
     }
+}
+
+fn parse_feedback_read_operation(operation: &str) -> Option<HttpApplicationOperation> {
+    match operation {
+        "get" => Some(HttpApplicationOperation::FeedbackGet),
+        "expand" => Some(HttpApplicationOperation::FeedbackExpand),
+        "list" => Some(HttpApplicationOperation::FeedbackList),
+        _ => None,
+    }
+}
+
+async fn feedback_read<O>(
+    Path(operation): Path<String>,
+    state: State<O>,
+    request_id: Extension<RequestId>,
+    cancellation: Extension<HttpApplicationControls>,
+    page: Result<Query<HttpPageQuery>, QueryRejection>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response
+where
+    O: HttpApplicationOwners,
+{
+    let Some(operation) = parse_feedback_read_operation(&operation) else {
+        return application_problem_response(adapter_problem(
+            request_id.0,
+            ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
+        ));
+    };
+    invoke_route(operation, state, request_id, cancellation, page, body).await
 }
 
 async fn git_read<O>(
@@ -780,6 +823,7 @@ where
     };
     let invocation = match owner_kind {
         HttpApplicationOwnerKind::Git => owners.invoke_git(request),
+        HttpApplicationOwnerKind::Feedback => owners.invoke_feedback(request),
         HttpApplicationOwnerKind::CallableCode => owners.invoke_callable_code(request),
         HttpApplicationOwnerKind::Primitive => owners.invoke_primitive(request),
         HttpApplicationOwnerKind::Configuration => owners.invoke_configuration(request),
@@ -793,7 +837,7 @@ mod tests {
     use super::{
         DEFAULT_HTTP_PAGE_SIZE, HttpApplicationOperation, HttpApplicationOwnerKind, HttpPageQuery,
         parse_callable_code_operation, parse_configuration_operation,
-        parse_context_scout_operation, parse_git_read_operation,
+        parse_context_scout_operation, parse_feedback_read_operation, parse_git_read_operation,
     };
 
     #[test]
@@ -819,6 +863,22 @@ mod tests {
         }
         for rejected in ["", "preview", "apply", "git_status", "status/"] {
             assert_eq!(parse_git_read_operation(rejected), None);
+        }
+    }
+
+    #[test]
+    fn feedback_read_operation_parser_is_exact_and_separately_owned() {
+        for (route, operation) in [
+            ("get", HttpApplicationOperation::FeedbackGet),
+            ("expand", HttpApplicationOperation::FeedbackExpand),
+            ("list", HttpApplicationOperation::FeedbackList),
+        ] {
+            assert_eq!(parse_feedback_read_operation(route), Some(operation));
+            assert_eq!(operation.owner_kind(), HttpApplicationOwnerKind::Feedback);
+            assert_eq!(operation.as_str(), format!("feedback_{route}"));
+        }
+        for rejected in ["", "status", "get/", "feedback_get"] {
+            assert_eq!(parse_feedback_read_operation(rejected), None);
         }
     }
 
