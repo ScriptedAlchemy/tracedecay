@@ -345,7 +345,13 @@ describe('LoomPage', () => {
     await userEvent.click(row);
     expect(await screen.findByText('src/runtime.rs')).toBeTruthy();
     expect(screen.getByText('abc123def456')).toBeTruthy();
-    expect(screen.getAllByText('30m').length).toBeGreaterThanOrEqual(1);
+    // The extent is a formatted duration, so `getAllByText('30m').length >= 1`
+    // would pass on any '30m' anywhere on the page — including one printed
+    // against a different term. Read it through the term it belongs to, which
+    // is also what pins `formatDurationSeconds` to Loom's epoch-second clock.
+    expect(screen.getByText('extent', { selector: 'dt' }).nextElementSibling?.textContent).toBe(
+      '30m',
+    );
     expect(screen.getByText(/1 active temporal generations/)).toBeTruthy();
     expect(screen.getByText(/complete coverage · 3 examined/)).toBeTruthy();
     expect(
@@ -411,9 +417,11 @@ describe('LoomPage', () => {
       screen.getByText(/The store served no timestamp on any turn/),
     ).toBeTruthy();
     // The measured tools leg of the chain renders from real tool names — in
-    // the histogram and again against the turn that invoked it.
-    expect(screen.getAllByText('Read').length).toBeGreaterThanOrEqual(1);
-    expect(screen.getAllByText('Bash').length).toBeGreaterThanOrEqual(1);
+    // the histogram and again against the turn that invoked it. Two each, so
+    // the count is asserted rather than merely "at least one": a name that
+    // reached the histogram but never the turn would otherwise pass.
+    expect(screen.getAllByText('Read')).toHaveLength(2);
+    expect(screen.getAllByText('Bash')).toHaveLength(2);
   });
 
   it('continues the chain through durable causal rows', async () => {

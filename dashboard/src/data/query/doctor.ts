@@ -7,6 +7,7 @@ import {
   type DoctorFindingsPayload,
   type DoctorRemediationApplyRequest,
   type DoctorRemediationPayload,
+  type DoctorRemediationPreviewRequest,
 } from '../../contracts/wire.ts';
 import { fetchEnvelope, type EnvelopeResult } from './envelope.ts';
 
@@ -22,13 +23,13 @@ export function fetchDoctorFindings(
 }
 
 export function previewDoctorRemediation(
-  operation: string,
+  request: DoctorRemediationPreviewRequest,
 ): Promise<EnvelopeResult<DoctorRemediationPayload>> {
-  const request = DoctorRemediationPreviewRequestSchema.parse({ operation });
+  const body = DoctorRemediationPreviewRequestSchema.parse(request);
   return fetchEnvelope('/api/doctor/remediations/preview', DoctorRemediationPayloadSchema, {
     method: 'POST',
     headers: jsonHeaders,
-    body: JSON.stringify(request),
+    body: JSON.stringify(body),
   });
 }
 

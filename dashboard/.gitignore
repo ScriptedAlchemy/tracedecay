@@ -11,7 +11,7 @@ topography-audit/
 # artifact as audit-gallery/: regenerate it, never commit it.
 .explorer-axe/
 .governance-axe/
-.ui-truth-axe/
+.axe-audit/
 # Playwright browser download markers / test output.
 test-results/
 playwright-report/

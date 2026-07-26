@@ -91,9 +91,10 @@ tracedecay init [path]              # initialize a project store
 tracedecay sync [path]              # incremental index update
 tracedecay sync --force [path]      # full re-index
 tracedecay status [path]            # graph stats, freshness, savings, cost
-tracedecay query <search> [path]    # CLI symbol search
-tracedecay files                    # indexed files
-tracedecay affected <files...>      # impacted tests/files
+tracedecay tool                     # list every MCP tool
+tracedecay tool search "<query>"    # CLI symbol search
+tracedecay tool files               # indexed files
+tracedecay tool affected --args -   # impacted tests/files ({"files":[...]})
 tracedecay serve                    # MCP server
 tracedecay doctor [--agent NAME]    # installation health check
 tracedecay dashboard [--open]       # local dashboard
@@ -101,6 +102,10 @@ tracedecay monitor                  # live MCP savings/cost TUI
 tracedecay update                   # refresh binary, plugins, daemon
 tracedecay upgrade                  # self-upgrade current channel
 ```
+
+Every MCP tool is reachable from the shell as `tracedecay tool <name>`; there
+are no separate per-tool subcommands. Run `tracedecay tool` for the grouped
+list and `tracedecay tool <name> --help` for one tool's parameters.
 
 ## Agent Tools
 
@@ -174,6 +179,12 @@ Common fixes:
 - Slow first index: use normal incremental `tracedecay sync` after the first run.
 
 ## Build
+
+Building from a source checkout requires Node.js 22+ and npm in addition to
+Rust: `dashboard/app-dist/` is generated output and is not committed, so
+`build.rs` runs `npm ci` and `npm run build` in `dashboard/` before embedding
+the UI. Published crates ship a prebuilt `app-dist`, so `cargo install
+tracedecay` needs no Node toolchain.
 
 ```bash
 cargo build --release

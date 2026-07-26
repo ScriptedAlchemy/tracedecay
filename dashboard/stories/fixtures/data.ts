@@ -371,7 +371,7 @@ const ENTITY_NAMES: ReadonlyArray<readonly [string, string, number]> = [
   ['Rspeedy', 'tool', 21],
   ['tracedecay', 'project', 58],
   ['ForceAtlas2', 'algorithm', 6],
-  ['libsql', 'dependency', 14],
+  ['rusqlite', 'dependency', 14],
   ['axum', 'dependency', 19],
   ['GitHub Actions', 'tool', 27],
   ['LCM store', 'component', 31],
@@ -1737,10 +1737,17 @@ const capabilities: Record<string, unknown> = {
     enabled: true,
     mode: 'standalone_backend',
     backend: 'codex_app_server',
-    host_mode: 'standalone_backend',
-    availability: { available: true },
+    // `host_mode` is an `AutomationHostMode` — `standalone` or
+    // `delegated_host`. `standalone_backend` belongs to the sibling `mode`
+    // field and is not a value this key can hold.
+    host_mode: 'standalone',
+    // `AgentBackendAvailability` always carries `backend`; `executable` and
+    // `reason` are skipped when unset rather than sent as null.
+    availability: { backend: 'codex_app_server', available: true, executable: 'codex' },
   },
-  dashboards: ['graph', 'holographic', 'hermes-lcm', 'savings', 'analytics'],
+  // One canonical embedded dashboard. The five entries here were the legacy
+  // plugin bundles that `44ef9e182` deleted.
+  dashboards: ['tracedecay'],
 };
 
 /* ==========================================================================

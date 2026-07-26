@@ -173,7 +173,7 @@ Risk B/D) add little discrimination.
 ## 3. Proposed follow-ups (≥3, prioritized)
 
 ### F1 — Add a retrieval-ranking eval scenario family (highest value, lowest risk)
-The existing `tests/memory_eval_test.rs` + `eval/scenarios/*.json` harness covers **hygiene
+The existing `tests/memory_suite/memory_eval_test.rs` + `eval/scenarios/*.json` harness covers **hygiene
 contracts only** (secrets, transient, supersession, dedup). It has **no ranking-quality
 scenarios**. Add scenarios that assert ordering, e.g. `memory-ranking-trust-bias.json`:
 seed an on-topic low-trust fact and an off-topic high-trust fact sharing one token, assert

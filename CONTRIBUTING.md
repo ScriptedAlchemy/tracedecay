@@ -11,7 +11,22 @@ cargo build
 cargo nextest run --workspace --all-features --no-fail-fast
 ```
 
-Requires **Rust 1.85+** (edition 2024).
+Requires **Rust 1.85+** (edition 2024) and **Node.js 22+ with npm**.
+
+The dashboard bundle at `dashboard/app-dist/` is generated output and is
+git-ignored, so a fresh clone has none. `build.rs` therefore runs `npm ci`
+(when `dashboard/node_modules` is absent) and `npm run build` before embedding
+the UI, and fails the Rust build if npm is missing. `TRACEDECAY_SKIP_DASHBOARD_BUILD`
+only helps when an `app-dist` already exists but is stale — in a fresh clone it
+skips the build and then trips the "`dashboard/app-dist/index.html` is missing
+after build" assertion. CI builds the bundle once in the `dashboard-assets`
+job and every Rust job downloads it as an artifact; published crates ship a
+prebuilt `app-dist` through the `package.include` whitelist, so `cargo install`
+needs no Node toolchain.
+
+The full `cargo nextest run --workspace --all-features` suite has not yet had a
+clean end-to-end run in this checkout. Run it and read the failures rather than
+assuming a green baseline; treat new failures in code you touched as yours.
 
 ## Project Structure
 
@@ -60,7 +75,7 @@ cargo nextest run --no-default-features --features lite
    Cargo-launched test processes are isolated from your real `~/.tracedecay`
    profile: `.cargo/config.toml` pins `TRACEDECAY_DATA_DIR` to
    `target/test-profile/.tracedecay` (enforced by
-   `tests/test_profile_isolation_test.rs`). Tests that need a private profile
+   `tests/core_cli_suite/test_profile_isolation_test.rs`). Tests that need a private profile
    should still override it per-test, e.g. via
    `common::TraceDecayStorageEnvGuard` or `common::apply_tracedecay_home_env`.
 4. **Format your code** with the standard Rust toolchain:
@@ -125,6 +140,27 @@ cargo nextest run -E 'binary(=agent_suite)'
 See [`docs/PLUGIN-VALIDATION.md`](docs/PLUGIN-VALIDATION.md) for the full
 layer breakdown, schema refresh procedure, and how to add a skill or a new
 ecosystem bundle correctly.
+
+## Changing the Rust-to-Dashboard Wire Contract
+
+`dashboard/src/contracts/generated.ts`, `dashboard/src/contracts/index.ts`, and
+`dashboard/codegen/schemas/dashboard-contracts.schema.json` are generated, not
+hand-written. The Rust `schemars` output is authoritative: the codegen CLI
+shells out to `cargo test --test dashboard_contract_schema_export -- --ignored
+writes_dashboard_contract_schema`, regenerates all three files, and compares
+them byte-for-byte with what is committed.
+
+After changing any Rust type that crosses the dashboard API boundary:
+
+```bash
+cd dashboard
+npm run contracts:generate   # rewrite the generated files
+npm run contracts:check      # what CI runs; exits 1 on any drift
+```
+
+`contracts:check` is a blocking CI step in the `dashboard` job of `ci.yml`, not
+an advisory one. Do not hand-edit the generated files — the check will fail and
+the fix is to regenerate and commit.
 
 ## Running Specific Tests
 
