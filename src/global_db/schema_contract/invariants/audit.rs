@@ -24,6 +24,8 @@ const PROJECTION_PROGRESS_PAGE_INTERVAL: i64 = 1;
 pub(super) struct AuditCheckpoint {
     pub(super) receipt_rowid: i64,
     pub(super) observation_sequence: i64,
+    pub(super) source_cursor_rowid: i64,
+    pub(super) source_advance_rowid: i64,
     pub(super) provenance_rowid: i64,
     pub(super) disposition_rowid: i64,
     pub(super) alias_rowid: i64,
@@ -49,6 +51,8 @@ pub(super) async fn ensure_audit_checkpoint_schema(
             audit_version INTEGER NOT NULL,
             receipt_rowid INTEGER NOT NULL,
             observation_sequence INTEGER NOT NULL,
+            source_cursor_rowid INTEGER NOT NULL DEFAULT 0,
+            source_advance_rowid INTEGER NOT NULL DEFAULT 0,
             provenance_rowid INTEGER NOT NULL,
             disposition_rowid INTEGER NOT NULL,
             alias_rowid INTEGER NOT NULL,
@@ -86,6 +90,50 @@ pub(super) async fn ensure_audit_checkpoint_schema(
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
     }
+    let mut rows = conn
+        .query(
+            "SELECT name FROM pragma_table_xinfo('authority_audit_checkpoints')
+             WHERE name IN ('source_cursor_rowid', 'source_advance_rowid')",
+            (),
+        )
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    let mut has_source_cursor_rowid = false;
+    let mut has_source_advance_rowid = false;
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?
+    {
+        match row
+            .get::<String>(0)
+            .map_err(|error| global_db_operation_error(OPERATION, error))?
+            .as_str()
+        {
+            "source_cursor_rowid" => has_source_cursor_rowid = true,
+            "source_advance_rowid" => has_source_advance_rowid = true,
+            _ => {}
+        }
+    }
+    drop(rows);
+    if !has_source_cursor_rowid {
+        conn.execute(
+            "ALTER TABLE authority_audit_checkpoints
+             ADD COLUMN source_cursor_rowid INTEGER NOT NULL DEFAULT 0",
+            (),
+        )
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    }
+    if !has_source_advance_rowid {
+        conn.execute(
+            "ALTER TABLE authority_audit_checkpoints
+             ADD COLUMN source_advance_rowid INTEGER NOT NULL DEFAULT 0",
+            (),
+        )
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    }
     Ok(())
 }
 
@@ -94,8 +142,9 @@ pub(super) async fn read_audit_checkpoint(
 ) -> crate::errors::Result<Option<AuditCheckpoint>> {
     let mut rows = conn
         .query(
-            "SELECT receipt_rowid, observation_sequence, provenance_rowid,
-                    disposition_rowid, alias_rowid, projection_checkpoint,
+            "SELECT receipt_rowid, observation_sequence,
+                    source_cursor_rowid, source_advance_rowid,
+                    provenance_rowid, disposition_rowid, alias_rowid, projection_checkpoint,
                     bounded_passes_since_exhaustive
              FROM authority_audit_checkpoints
              WHERE audit_name = ?1 AND audit_version = ?2",
@@ -117,20 +166,26 @@ pub(super) async fn read_audit_checkpoint(
         observation_sequence: row
             .get(1)
             .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        provenance_rowid: row
+        source_cursor_rowid: row
             .get(2)
             .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        disposition_rowid: row
+        source_advance_rowid: row
             .get(3)
             .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        alias_rowid: row
+        provenance_rowid: row
             .get(4)
             .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        projection_checkpoint: row
+        disposition_rowid: row
             .get(5)
             .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        bounded_passes_since_exhaustive: row
+        alias_rowid: row
             .get(6)
+            .map_err(|error| global_db_operation_error(OPERATION, error))?,
+        projection_checkpoint: row
+            .get(7)
+            .map_err(|error| global_db_operation_error(OPERATION, error))?,
+        bounded_passes_since_exhaustive: row
+            .get(8)
             .map_err(|error| global_db_operation_error(OPERATION, error))?,
     }))
 }
@@ -141,6 +196,8 @@ pub(super) async fn audit_checkpoint_is_plausible(
 ) -> crate::errors::Result<bool> {
     if checkpoint.receipt_rowid < 0
         || checkpoint.observation_sequence < 0
+        || checkpoint.source_cursor_rowid < 0
+        || checkpoint.source_advance_rowid < 0
         || checkpoint.provenance_rowid < 0
         || checkpoint.disposition_rowid < 0
         || checkpoint.alias_rowid < 0
@@ -154,6 +211,8 @@ pub(super) async fn audit_checkpoint_is_plausible(
             "SELECT
                 COALESCE((SELECT MAX(rowid) FROM sanitization_receipts), 0),
                 COALESCE((SELECT MAX(sequence) FROM observations), 0),
+                COALESCE((SELECT MAX(rowid) FROM source_cursors), 0),
+                COALESCE((SELECT MAX(rowid) FROM source_cursor_advances), 0),
                 COALESCE((SELECT MAX(rowid) FROM observation_projection_provenance), 0),
                 COALESCE((SELECT MAX(rowid) FROM observation_projection_dispositions), 0),
                 COALESCE((SELECT MAX(rowid) FROM observation_projection_aliases), 0),
@@ -177,22 +236,30 @@ pub(super) async fn audit_checkpoint_is_plausible(
         observation_sequence: row
             .get(1)
             .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        provenance_rowid: row
+        source_cursor_rowid: row
             .get(2)
             .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        disposition_rowid: row
+        source_advance_rowid: row
             .get(3)
             .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        alias_rowid: row
+        provenance_rowid: row
             .get(4)
             .map_err(|error| global_db_operation_error(OPERATION, error))?,
-        projection_checkpoint: row
+        disposition_rowid: row
             .get(5)
+            .map_err(|error| global_db_operation_error(OPERATION, error))?,
+        alias_rowid: row
+            .get(6)
+            .map_err(|error| global_db_operation_error(OPERATION, error))?,
+        projection_checkpoint: row
+            .get(7)
             .map_err(|error| global_db_operation_error(OPERATION, error))?,
         ..AuditCheckpoint::default()
     };
     Ok(checkpoint.receipt_rowid <= frontiers.receipt_rowid
         && checkpoint.observation_sequence <= frontiers.observation_sequence
+        && checkpoint.source_cursor_rowid <= frontiers.source_cursor_rowid
+        && checkpoint.source_advance_rowid <= frontiers.source_advance_rowid
         && checkpoint.provenance_rowid <= frontiers.provenance_rowid
         && checkpoint.disposition_rowid <= frontiers.disposition_rowid
         && checkpoint.alias_rowid <= frontiers.alias_rowid
@@ -1176,15 +1243,21 @@ pub(super) async fn write_audit_checkpoint(
     conn.execute(
         "INSERT INTO authority_audit_checkpoints (
             audit_name, audit_version, receipt_rowid, observation_sequence,
+            source_cursor_rowid, source_advance_rowid,
             provenance_rowid, disposition_rowid, alias_rowid, projection_checkpoint,
             last_receipts_audited, last_observations_audited,
             last_provenance_audited, last_dispositions_audited, last_aliases_audited,
             bounded_passes_since_exhaustive
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+         ) VALUES (
+            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8,
+            ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16
+         )
          ON CONFLICT(audit_name) DO UPDATE SET
             audit_version = excluded.audit_version,
             receipt_rowid = excluded.receipt_rowid,
             observation_sequence = excluded.observation_sequence,
+            source_cursor_rowid = excluded.source_cursor_rowid,
+            source_advance_rowid = excluded.source_advance_rowid,
             provenance_rowid = excluded.provenance_rowid,
             disposition_rowid = excluded.disposition_rowid,
             alias_rowid = excluded.alias_rowid,
@@ -1200,6 +1273,8 @@ pub(super) async fn write_audit_checkpoint(
             AUDIT_VERSION,
             checkpoint.receipt_rowid,
             checkpoint.observation_sequence,
+            checkpoint.source_cursor_rowid,
+            checkpoint.source_advance_rowid,
             checkpoint.provenance_rowid,
             checkpoint.disposition_rowid,
             checkpoint.alias_rowid,
@@ -1234,8 +1309,8 @@ mod tests {
 
     use super::{
         AuditCheckpoint, MAX_DETAILED_OBSERVATIONS_PER_PAGE, PROJECTION_PROGRESS_PAGE_INTERVAL,
-        historical_projection_delta_required, projection_audit_checkpoint_through_sequence,
-        validate_projection_authority_suffix,
+        ensure_audit_checkpoint_schema, historical_projection_delta_required,
+        projection_audit_checkpoint_through_sequence, validate_projection_authority_suffix,
     };
     use crate::db::engine::{
         Executor, IntoParams, QueryExecutor, Result as EngineResult, Rows, TestConnection, params,
@@ -1274,6 +1349,87 @@ mod tests {
     fn exhaustive_projection_audit_bounds_detailed_work() {
         assert_eq!(MAX_DETAILED_OBSERVATIONS_PER_PAGE, 1);
         assert_eq!(PROJECTION_PROGRESS_PAGE_INTERVAL, 1);
+    }
+
+    #[tokio::test]
+    async fn audit_checkpoint_schema_tracks_source_cursor_progress() {
+        let directory = TempDir::new().unwrap();
+        let connection = TestConnection::open(&directory.path().join("sessions.db"));
+        connection
+            .execute_batch(
+                "CREATE TABLE authority_audit_checkpoints (
+                    audit_name TEXT PRIMARY KEY,
+                    audit_version INTEGER NOT NULL,
+                    receipt_rowid INTEGER NOT NULL,
+                    observation_sequence INTEGER NOT NULL,
+                    provenance_rowid INTEGER NOT NULL,
+                    disposition_rowid INTEGER NOT NULL,
+                    alias_rowid INTEGER NOT NULL,
+                    projection_checkpoint INTEGER NOT NULL,
+                    last_receipts_audited INTEGER NOT NULL,
+                    last_observations_audited INTEGER NOT NULL,
+                    last_provenance_audited INTEGER NOT NULL,
+                    last_dispositions_audited INTEGER NOT NULL,
+                    last_aliases_audited INTEGER NOT NULL,
+                    bounded_passes_since_exhaustive INTEGER NOT NULL DEFAULT 0
+                );",
+            )
+            .await
+            .unwrap();
+        ensure_audit_checkpoint_schema(&connection).await.unwrap();
+
+        let mut rows = connection
+            .query(
+                "SELECT name FROM pragma_table_xinfo('authority_audit_checkpoints')
+                 WHERE name IN ('source_cursor_rowid', 'source_advance_rowid')
+                 ORDER BY name",
+                (),
+            )
+            .await
+            .unwrap();
+        let mut columns = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            columns.push(row.get::<String>(0).unwrap());
+        }
+
+        assert_eq!(
+            columns,
+            ["source_advance_rowid", "source_cursor_rowid"],
+            "source authority scans need durable seek positions"
+        );
+    }
+
+    #[tokio::test]
+    async fn invariant_receipt_probes_have_covering_indexes() {
+        let directory = TempDir::new().unwrap();
+        let connection = TestConnection::open(&directory.path().join("sessions.db"));
+        ensure_registered_schema(&connection).await.unwrap();
+
+        let mut rows = connection
+            .query(
+                "SELECT name FROM sqlite_master
+                 WHERE type = 'index'
+                   AND name IN (
+                       'idx_observations_identity_receipt',
+                       'idx_projection_dispositions_observation_receipt'
+                   )
+                 ORDER BY name",
+                (),
+            )
+            .await
+            .unwrap();
+        let mut indexes = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            indexes.push(row.get::<String>(0).unwrap());
+        }
+
+        assert_eq!(
+            indexes,
+            [
+                "idx_observations_identity_receipt",
+                "idx_projection_dispositions_observation_receipt"
+            ]
+        );
     }
 
     #[test]
