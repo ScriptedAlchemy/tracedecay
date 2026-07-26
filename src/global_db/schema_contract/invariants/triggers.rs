@@ -1343,6 +1343,8 @@ const SESSION_TEMPORAL_FTS: &[Trigger] = &[
     },
 ];
 
+pub(super) const FOREIGN_KEY_AUDIT_QUERY: &str = "SELECT * FROM pragma_foreign_key_check";
+
 pub(in crate::global_db::schema_contract) const INVARIANTS: &[Invariant] = &[
     Invariant {
         triggers: OBSERVATION_IMMUTABILITY,
@@ -1468,7 +1470,7 @@ pub(in crate::global_db::schema_contract) const INVARIANTS: &[Invariant] = &[
     },
     Invariant {
         triggers: &[],
-        audit_query: Some("SELECT * FROM pragma_foreign_key_check"),
+        audit_query: Some(FOREIGN_KEY_AUDIT_QUERY),
         violation: "global database contains a foreign-key violation",
     },
     Invariant {

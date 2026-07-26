@@ -175,7 +175,7 @@ impl ProjectGitHubAnchorAuthorityV1 {
         if original.retrieval_anchor_id != existing_id {
             return None;
         }
-        let initial_remap = self.remap_original(&original, &self.scope).await?;
+        let initial_remap = self.remap_seed(&original, &self.scope, seed).await?;
         let anchors = GitHubCanonicalReviewAnchorsV1 {
             original,
             initial_remap,
@@ -207,7 +207,16 @@ impl ProjectGitHubAnchorAuthorityV1 {
         if stored.anchors.original != *original {
             return None;
         }
-        let current_file = self.database.get_file(&stored.seed.path).await.ok()?;
+        self.remap_seed(original, current_scope, &stored.seed).await
+    }
+
+    async fn remap_seed(
+        &self,
+        original: &GitHubReviewImmutableAnchorV1,
+        current_scope: &FeedbackScopeV1,
+        seed: &GitHubReviewAnchorSeedV1,
+    ) -> Option<GitHubReviewCurrentBranchRemapV1> {
+        let current_file = self.database.get_file(&seed.path).await.ok()?;
         let Some(current_file) = current_file else {
             return remap_state(original.clone(), current_scope.clone(), None, true);
         };
@@ -218,7 +227,7 @@ impl ProjectGitHubAnchorAuthorityV1 {
         let mut current = immutable_anchor(
             current_scope,
             &current_scope.head_commit_id,
-            &stored.seed.path,
+            &seed.path,
             &current_digest,
             original.span,
             None,
@@ -228,7 +237,7 @@ impl ProjectGitHubAnchorAuthorityV1 {
             if identity.source_revision() != Some(&current_scope.head_commit_id) {
                 return remap_state(original.clone(), current_scope.clone(), None, true);
             }
-            let Some((file, indexed_digest)) = identity.file(&stored.seed.path) else {
+            let Some((file, indexed_digest)) = identity.file(&seed.path) else {
                 return remap_state(original.clone(), current_scope.clone(), None, true);
             };
             if indexed_digest != &current_digest {

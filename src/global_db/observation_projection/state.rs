@@ -657,6 +657,13 @@ async fn verify_rows(
     Ok(())
 }
 
+pub(in crate::global_db) async fn verify_projection_rows(
+    conn: &impl QueryExecutor,
+    projection: &SessionMessageProjection,
+) -> ProjectionStoreResult<()> {
+    verify_rows(conn, projection).await
+}
+
 pub(super) fn same_projection_lineage(
     candidate: &DurableObservationV1,
     owner: &DurableObservationV1,
@@ -811,6 +818,47 @@ pub(super) fn canonicalize_session_project_paths(
     }
     normalized.project_path = canonical;
     normalized
+}
+
+/// Converge path spellings persisted before ingest-side canonicalization.
+///
+/// Distinct paths are resolved before any write, then each verified alias is
+/// updated idempotently. Updating `project_key` only when it matched the old
+/// path preserves provider-native keys while keeping path-shaped keys aligned.
+pub(in crate::global_db) async fn converge_session_project_paths(
+    conn: &impl Executor,
+) -> ProjectionStoreResult<()> {
+    let mut rows = conn
+        .query("SELECT DISTINCT project_path FROM sessions", ())
+        .await
+        .map_err(|error| storage("list session project paths", error))?;
+    let mut repairs = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage("read session project paths", error))?
+    {
+        let project_path = row
+            .get::<String>(0)
+            .map_err(|error| storage("decode session project path", error))?;
+        if let Some(canonical) = canonical_project_path(&project_path) {
+            repairs.push((project_path, canonical));
+        }
+    }
+    drop(rows);
+
+    for (project_path, canonical) in repairs {
+        conn.execute(
+            "UPDATE sessions
+             SET project_key = CASE WHEN project_key = ?1 THEN ?2 ELSE project_key END,
+                 project_path = ?2
+             WHERE project_path = ?1",
+            (&project_path, &canonical),
+        )
+        .await
+        .map_err(|error| storage("converge session project path", error))?;
+    }
+    Ok(())
 }
 
 /// Resolve a project-path string to its canonical on-disk form, returning
@@ -1085,9 +1133,11 @@ pub(super) async fn protected_message_rows_compatible(
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod reconcile_tests {
-    #[cfg(unix)]
-    use super::canonicalize_session_project_paths;
     use super::reconcile_session_rows;
+    #[cfg(unix)]
+    use super::{canonicalize_session_project_paths, converge_session_project_paths};
+    #[cfg(unix)]
+    use crate::db::engine::{Executor, QueryExecutor, TestConnection};
 
     fn record(project_path: &str) -> crate::sessions::SessionRecord {
         crate::sessions::SessionRecord {
@@ -1148,6 +1198,66 @@ mod reconcile_tests {
             )
             .is_none(),
             "reconcile must not canonicalize; family identity is an ingest concern"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn legacy_session_paths_converge_without_rewriting_native_keys() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let real = tmp.path().join("fast-projects").join("repo");
+        std::fs::create_dir_all(&real).unwrap();
+        let alias_parent = tmp.path().join("home-projects");
+        std::os::unix::fs::symlink(tmp.path().join("fast-projects"), &alias_parent).unwrap();
+        let aliased = alias_parent.join("repo");
+        let connection = TestConnection::open(&tmp.path().join("sessions.db"));
+        connection
+            .execute_batch(
+                "CREATE TABLE sessions (
+                    provider TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    project_key TEXT NOT NULL,
+                    project_path TEXT NOT NULL
+                 );",
+            )
+            .await
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO sessions (provider, session_id, project_key, project_path)
+                 VALUES ('codex', 'path-key', ?1, ?1),
+                        ('codex', 'native-key', 'project-id', ?1)",
+                (aliased.to_string_lossy().as_ref(),),
+            )
+            .await
+            .unwrap();
+
+        converge_session_project_paths(&connection).await.unwrap();
+
+        let mut rows = connection
+            .query(
+                "SELECT session_id, project_key, project_path
+                 FROM sessions ORDER BY session_id",
+                (),
+            )
+            .await
+            .unwrap();
+        let native = rows.next().await.unwrap().unwrap();
+        assert_eq!(native.get::<String>(0).unwrap(), "native-key");
+        assert_eq!(native.get::<String>(1).unwrap(), "project-id");
+        assert_eq!(
+            native.get::<String>(2).unwrap(),
+            real.to_string_lossy().as_ref()
+        );
+        let path = rows.next().await.unwrap().unwrap();
+        assert_eq!(path.get::<String>(0).unwrap(), "path-key");
+        assert_eq!(
+            path.get::<String>(1).unwrap(),
+            real.to_string_lossy().as_ref()
+        );
+        assert_eq!(
+            path.get::<String>(2).unwrap(),
+            real.to_string_lossy().as_ref()
         );
     }
 

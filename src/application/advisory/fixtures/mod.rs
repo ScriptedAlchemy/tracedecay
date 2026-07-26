@@ -566,7 +566,7 @@ pub fn load_pr13_source_backed_composite_fixture_v1()
                 GitHubReviewCommentIdV1::new(comment_id.to_string())
                     .map_err(|_| inconsistent("review comment version id"))?,
                 str_at(&comment, "/response/updated_at")?,
-                digest_at(&comment, "/redacted/body/sha256")?,
+                digest_at(&comment, "/integrity/body_sha256")?,
                 CommitId::new(str_at(&comment, "/response/commit_id")?)
                     .map_err(|_| inconsistent("review comment version commit"))?,
             ))
