@@ -2,7 +2,7 @@ import { OverviewCard, OverviewGrid } from '../../ui/archetypes/OverviewGrid';
 import { LegacyBoundary } from '../../ui/LegacyStates.tsx';
 import { Meter, ReadoutBar } from '../../ui/instrument.tsx';
 import { useLegacy } from '../../data/query/useLegacy.ts';
-import { SavingsOverviewPayloadSchema } from './contracts.ts';
+import { SavingsOverviewPayloadSchema } from '../../contracts/uncontracted/savings.ts';
 import {
   costPerTurn,
   logFraction,

@@ -16,11 +16,11 @@ import { useLegacy } from '../../data/query/useLegacy.ts';
 import {
   FactDetailPayloadSchema,
   MemoryOverviewPayloadSchema,
-  MemoryStatusSchema,
+  MemoryStatusPayloadSchema,
   type CategoryCount,
   type FactRow,
   type HrrCoverageRow,
-} from './contracts.ts';
+} from '../../contracts/uncontracted/memory.ts';
 import {
   composeTrustDistribution,
   factsBelow,
@@ -49,7 +49,7 @@ export function KnowledgePage() {
   // store (see trust.ts). This route reports the same distribution in four
   // coarser bands and is correct, so it is read as the fallback source rather
   // than leaving the plate empty. Cheap — ~0.1s against a live daemon.
-  const status = useLegacy(['memory', 'status'], `${BASE}/status`, MemoryStatusSchema);
+  const status = useLegacy(['memory', 'status'], `${BASE}/status`, MemoryStatusPayloadSchema);
   const statusBands =
     status.data?.outcome === 'ok' ? status.data.data.memory : undefined;
   const [selected, setSelected] = useState<FactRow | null>(null);

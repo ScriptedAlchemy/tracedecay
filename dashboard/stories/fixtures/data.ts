@@ -6,7 +6,7 @@
  * fixtures stay consistent across test transports.
  *
  * Shapes are hand-matched, endpoint by endpoint, to the Rust producers in
- * `src/dashboard/*` and gated against each consuming workspace's `contracts.ts`
+ * `src/dashboard/*` and gated against each route's single decoding schema
  * zod schema by `data.test.ts`. Every route the 12 workspaces read is modeled
  * with data-dense, wire-true payloads so audited surfaces render populated
  * content rather than empty / "unsupported schema" states.
@@ -168,8 +168,9 @@ function syntheticGroup(repo: {
   };
 }
 
-/** GET /api/projects — brain/delivery registry (contracts.ts ProjectsPayloadSchema,
- * DeliveryProjectsPayloadSchema; src/dashboard/projects.rs `list`). */
+/** GET /api/projects — brain/delivery registry (one shared
+ * `contracts/uncontracted/projects.ts` ProjectsPayloadSchema;
+ * src/dashboard/projects.rs `list`). */
 const projects: Record<string, unknown> = {
   status: 'ok',
   truncated: false,
