@@ -15,7 +15,9 @@ use tracedecay_domain::feedback::{
 };
 use tracedecay_domain::{ManifestDigest, UtcMicros, canonical_sha256};
 
-use crate::request_identity::{LogicalEffectIdempotencyDomain, derive_logical_effect_idempotency};
+use crate::request_identity::{
+    derive_feedback_observation_idempotency, derive_feedback_source_event_idempotency,
+};
 
 const OBSERVATION_ENVELOPE_DOMAIN: &str = "tracedecay.feedback.observation.plan26.v1";
 const SOURCE_EVENT_ENVELOPE_DOMAIN: &str = "tracedecay.feedback.source-event.plan26.v1";
@@ -1139,11 +1141,8 @@ fn observation_envelope(
     observation: FeedbackCycleObservationV1,
 ) -> Option<FeedbackObservationEnvelopeV1> {
     let saved_evaluation_digest = canonical_sha256(&(SAVED_EVALUATION_DOMAIN, saved)).ok()?;
-    let idempotency_key = derive_logical_effect_idempotency(
-        LogicalEffectIdempotencyDomain::FeedbackObservation,
-        &(&saved_evaluation_digest, &observation),
-    )
-    .ok()?;
+    let idempotency_key =
+        derive_feedback_observation_idempotency(&saved_evaluation_digest, &observation).ok()?;
     let envelope = FeedbackObservationEnvelopeV1 {
         schema_version: 1,
         producer: "feedback_cycle".to_owned(),
@@ -1184,11 +1183,9 @@ pub fn plan26_feedback_source_event_envelope_for_subject(
 ) -> Option<FeedbackObservationEnvelopeV1> {
     subject_digest.validate().ok()?;
     source_event.validate()?;
-    let idempotency_key = derive_logical_effect_idempotency(
-        LogicalEffectIdempotencyDomain::FeedbackSourceEvent,
-        &(&subject_digest, observed_at, &source_event),
-    )
-    .ok()?;
+    let idempotency_key =
+        derive_feedback_source_event_idempotency(&subject_digest, observed_at, &source_event)
+            .ok()?;
     let envelope = FeedbackObservationEnvelopeV1 {
         schema_version: 1,
         producer: "feedback_source".to_owned(),
