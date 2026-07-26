@@ -1083,6 +1083,12 @@ const DASHBOARD_CONFIGURATION_OPERATIONS: [ApplicationSurfaceOperation; 13] = [
     ApplicationSurfaceOperation::ConfigurationAudit,
 ];
 
+const DASHBOARD_FEEDBACK_OPERATIONS: [ApplicationSurfaceOperation; 3] = [
+    ApplicationSurfaceOperation::FeedbackGet,
+    ApplicationSurfaceOperation::FeedbackExpand,
+    ApplicationSurfaceOperation::FeedbackList,
+];
+
 pub fn dashboard_configuration_application_invoker(
     client: crate::daemon_client::DaemonInvocationClient,
 ) -> Result<
@@ -1129,6 +1135,20 @@ pub fn dashboard_configuration_application_router(
         cancellations,
         application_http_context,
     )))
+}
+
+pub fn dashboard_feedback_application_router(
+    client: crate::daemon_client::DaemonInvocationClient,
+) -> Result<axum::Router, ApplicationSurfaceAdapterError> {
+    let cancellations = Arc::new(Mutex::new(BTreeMap::new()));
+    let invoker = application_invoker_for_surface(
+        client,
+        BindingSurface::Dashboard,
+        &DASHBOARD_FEEDBACK_OPERATIONS,
+    )?;
+    Ok(tracedecay_api::feedback_application_router(invoker).layer(
+        axum::middleware::from_fn_with_state(cancellations, application_http_context),
+    ))
 }
 
 type HttpCancellationRegistry = Arc<Mutex<BTreeMap<RequestId, CancellationSignal>>>;

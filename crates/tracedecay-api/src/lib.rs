@@ -22,6 +22,7 @@ pub use http::{
     HttpApplicationControls, HttpApplicationInvocationFuture, HttpApplicationOperation,
     HttpApplicationOwnerKind, HttpApplicationOwners, HttpApplicationRequest,
     application_problem_response, application_router, configuration_application_router,
+    feedback_application_router,
 };
 pub use sse::sse_response;
 
