@@ -56,6 +56,7 @@ const UNRESOLVED_REFS_PERSISTED_KEY: &str = "unresolved_refs_persisted";
 /// Marker value for [`UNRESOLVED_REFS_PERSISTED_KEY`]. Bump this string if a
 /// future change requires the ref set to be repopulated again on upgrade.
 const UNRESOLVED_REFS_PERSISTED_VALUE: &str = "1";
+const BRANCH_SYNC_WRITE_PAGE_ROWS: usize = 256;
 
 /// The final `::`-separated segment of a reference name. Every resolver
 /// strategy ultimately binds a reference to a target whose short name equals
@@ -808,6 +809,25 @@ impl TraceDecay {
         F: Fn(usize, usize, &str),
         V: Fn(&str),
     {
+        self.sync_with_progress_verbose_mode(on_progress, on_verbose, false)
+            .await
+    }
+
+    pub(super) async fn sync_checkpointed(&self) -> Result<SyncResult> {
+        self.sync_with_progress_verbose_mode(|_, _, _| {}, |_| {}, true)
+            .await
+    }
+
+    async fn sync_with_progress_verbose_mode<F, V>(
+        &self,
+        on_progress: F,
+        on_verbose: V,
+        checkpoint_writes: bool,
+    ) -> Result<SyncResult>
+    where
+        F: Fn(usize, usize, &str),
+        V: Fn(&str),
+    {
         debug_assert!(
             self.project_root.exists(),
             "sync: project root does not exist"
@@ -961,71 +981,115 @@ impl TraceDecay {
         // so the user can see them in `tracedecay sync --doctor`.
         skipped.extend(sync_skipped);
 
-        let transaction = self.db.begin_write_transaction("sync index").await?;
-
-        // Update mtime for false-positive files so future syncs skip them
-        for path in &mtime_only_changed {
-            if let (Some(record), Some(&(mtime, size))) = (db_map.get(path), stat_map.get(path)) {
-                let updated = FileRecord {
-                    modified_at: mtime,
-                    size,
-                    ..record.clone()
-                };
-                self.db
-                    .upsert_file_unguarded(&transaction, &updated)
-                    .await?;
-            }
-        }
-
-        // Remove deleted files
-        for path in &removed {
-            on_progress(0, 0, &format!("removing {path}"));
-            self.db.delete_file_unguarded(&transaction, path).await?;
-        }
-
-        // Re-index stale and new files. Phase 1 inserts all nodes (and
-        // metadata) so cross-file edges can reference them. Edges are queued
-        // for phase 2 (#58).
         let total = sync_extractions.len();
-        let mut total_nodes = 0usize;
-        let mut total_edges = 0usize;
-        let mut queued_edges: Vec<&Edge> = Vec::new();
+        let mut total_nodes = 0;
+        let mut queued_edges = Vec::new();
+        let mut file_records = Vec::with_capacity(total);
         for (idx, (file_path, result, hash, size, mtime)) in sync_extractions.iter().enumerate() {
             on_progress(idx + 1, total, file_path);
-
             total_nodes += result.nodes.len();
-            total_edges += result.edges.len();
-
-            self.db
-                .delete_nodes_by_file_unguarded(&transaction, file_path)
-                .await?;
-            self.db
-                .insert_nodes_unguarded(&transaction, &result.nodes)
-                .await?;
-            queued_edges.extend(&result.edges);
-            if !result.unresolved_refs.is_empty() {
-                self.db
-                    .insert_unresolved_refs_unguarded(&transaction, &result.unresolved_refs)
-                    .await?;
-            }
-
-            let file_record = FileRecord {
+            queued_edges.extend(result.edges.iter().cloned());
+            file_records.push(FileRecord {
                 path: file_path.clone(),
                 content_hash: hash.clone(),
                 size: *size,
                 modified_at: *mtime,
                 indexed_at: current_timestamp(),
                 node_count: result.nodes.len() as u32,
-            };
-            self.db
-                .upsert_file_unguarded(&transaction, &file_record)
-                .await?;
+            });
         }
+        let total_edges = queued_edges.len();
 
-        // Phase 2: insert all queued edges now that every node is present.
-        if !queued_edges.is_empty() {
-            let owned: Vec<Edge> = queued_edges.into_iter().cloned().collect();
-            self.db.insert_edges_unguarded(&transaction, &owned).await?;
+        if checkpoint_writes {
+            for path in &mtime_only_changed {
+                if let (Some(record), Some(&(mtime, size))) = (db_map.get(path), stat_map.get(path))
+                {
+                    self.db
+                        .upsert_file(&FileRecord {
+                            modified_at: mtime,
+                            size,
+                            ..record.clone()
+                        })
+                        .await?;
+                }
+            }
+            for path in &removed {
+                on_progress(0, 0, &format!("removing {path}"));
+                self.db.delete_file(path).await?;
+            }
+            for (file_path, _, _, _, _) in &sync_extractions {
+                self.db.delete_nodes_by_file(file_path).await?;
+            }
+            for ((_, result, _, _, _), file_record) in sync_extractions.iter().zip(&file_records) {
+                for page in result.nodes.chunks(BRANCH_SYNC_WRITE_PAGE_ROWS) {
+                    self.db.insert_nodes(page).await?;
+                }
+                self.db
+                    .insert_unresolved_refs(&result.unresolved_refs)
+                    .await?;
+                self.db.upsert_file(file_record).await?;
+            }
+            for page in queued_edges.chunks(BRANCH_SYNC_WRITE_PAGE_ROWS) {
+                self.db.insert_edges(page).await?;
+            }
+            if built_from_empty {
+                self.db
+                    .set_metadata(
+                        UNRESOLVED_REFS_PERSISTED_KEY,
+                        UNRESOLVED_REFS_PERSISTED_VALUE,
+                    )
+                    .await?;
+            }
+        } else {
+            let transaction = self.db.begin_write_transaction("sync index").await?;
+            for path in &mtime_only_changed {
+                if let (Some(record), Some(&(mtime, size))) = (db_map.get(path), stat_map.get(path))
+                {
+                    self.db
+                        .upsert_file_unguarded(
+                            &transaction,
+                            &FileRecord {
+                                modified_at: mtime,
+                                size,
+                                ..record.clone()
+                            },
+                        )
+                        .await?;
+                }
+            }
+            for path in &removed {
+                on_progress(0, 0, &format!("removing {path}"));
+                self.db.delete_file_unguarded(&transaction, path).await?;
+            }
+            for ((file_path, result, _, _, _), file_record) in
+                sync_extractions.iter().zip(&file_records)
+            {
+                self.db
+                    .delete_nodes_by_file_unguarded(&transaction, file_path)
+                    .await?;
+                self.db
+                    .insert_nodes_unguarded(&transaction, &result.nodes)
+                    .await?;
+                self.db
+                    .insert_unresolved_refs_unguarded(&transaction, &result.unresolved_refs)
+                    .await?;
+                self.db
+                    .upsert_file_unguarded(&transaction, file_record)
+                    .await?;
+            }
+            self.db
+                .insert_edges_unguarded(&transaction, &queued_edges)
+                .await?;
+            if built_from_empty {
+                self.db
+                    .set_metadata_unguarded(
+                        &transaction,
+                        UNRESOLVED_REFS_PERSISTED_KEY,
+                        UNRESOLVED_REFS_PERSISTED_VALUE,
+                    )
+                    .await?;
+            }
+            transaction.commit().await?;
         }
 
         if !to_index.is_empty() {
@@ -1037,21 +1101,6 @@ impl TraceDecay {
                 phase_start.elapsed().as_secs_f64()
             ));
         }
-
-        // If this sync built the index from an empty DB, the persisted ref set
-        // is now complete; mark it so the self-heal does not redundantly
-        // re-extract every file on this first sync (#1).
-        if built_from_empty {
-            self.db
-                .set_metadata_unguarded(
-                    &transaction,
-                    UNRESOLVED_REFS_PERSISTED_KEY,
-                    UNRESOLVED_REFS_PERSISTED_VALUE,
-                )
-                .await?;
-        }
-
-        transaction.commit().await?;
 
         // Resolve references (call edges, uses, etc.) across all files.
         // This must run after all files are indexed so cross-file references

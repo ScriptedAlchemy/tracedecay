@@ -7,6 +7,8 @@ use super::sql::collect_rows;
 use crate::errors::{Result, TraceDecayError};
 use crate::types::*;
 
+const UNRESOLVED_REF_WRITE_PAGE_ROWS: usize = 256;
+
 impl Database {
     /// Inserts a single unresolved reference.
     pub async fn insert_unresolved_ref(&self, uref: &UnresolvedRef) -> Result<()> {
@@ -47,16 +49,35 @@ impl Database {
 
     /// Inserts a batch of unresolved references using a prepared statement.
     pub async fn insert_unresolved_refs(&self, refs: &[UnresolvedRef]) -> Result<()> {
+        self.insert_unresolved_refs_paged_with_pause(refs, std::future::ready(()))
+            .await
+    }
+
+    async fn insert_unresolved_refs_paged_with_pause<F>(
+        &self,
+        refs: &[UnresolvedRef],
+        after_first_page: F,
+    ) -> Result<()>
+    where
+        F: std::future::Future<Output = ()>,
+    {
         if refs.is_empty() {
             return Ok(());
         }
 
-        let transaction = self
-            .begin_write_transaction("insert_unresolved_refs")
-            .await?;
-        self.insert_unresolved_refs_unguarded(&transaction, refs)
-            .await?;
-        transaction.commit().await
+        let mut after_first_page = Some(after_first_page);
+        for page in refs.chunks(UNRESOLVED_REF_WRITE_PAGE_ROWS) {
+            let transaction = self
+                .begin_write_transaction("insert_unresolved_refs")
+                .await?;
+            self.insert_unresolved_refs_unguarded(&transaction, page)
+                .await?;
+            transaction.commit().await?;
+            if let Some(pause) = after_first_page.take() {
+                pause.await;
+            }
+        }
+        Ok(())
     }
 
     pub(crate) async fn insert_unresolved_refs_unguarded(
@@ -140,5 +161,83 @@ impl Database {
                 operation: "clear_unresolved_refs".to_string(),
             })?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::{DatabaseAuthority, TestDatabaseRuntimeMode};
+
+    #[tokio::test]
+    async fn unresolved_ref_batch_commits_durable_pages() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("graph.db");
+        let authority =
+            DatabaseAuthority::acquire_test(&path, "unresolved ref batch test").unwrap();
+        let (db, _) =
+            Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
+                .await
+                .unwrap();
+        db.insert_node(&Node {
+            id: "source".to_string(),
+            kind: NodeKind::Function,
+            name: "source".to_string(),
+            qualified_name: "crate::source".to_string(),
+            file_path: "src/lib.rs".to_string(),
+            start_line: 1,
+            attrs_start_line: 1,
+            end_line: 1,
+            start_column: 0,
+            end_column: 1,
+            signature: None,
+            docstring: None,
+            visibility: Visibility::Private,
+            is_async: false,
+            branches: 0,
+            loops: 0,
+            returns: 0,
+            max_nesting: 0,
+            unsafe_blocks: 0,
+            unchecked_calls: 0,
+            assertions: 0,
+            updated_at: 1,
+            parent_id: None,
+        })
+        .await
+        .unwrap();
+        let refs: Vec<_> = (0..UNRESOLVED_REF_WRITE_PAGE_ROWS as u32 + 1)
+            .map(|index| UnresolvedRef {
+                from_node_id: "source".to_string(),
+                reference_name: format!("target_{index}"),
+                reference_kind: EdgeKind::Calls,
+                line: index,
+                column: 0,
+                file_path: "src/lib.rs".to_string(),
+            })
+            .collect();
+
+        let (page_committed_tx, page_committed_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let insert_db = db.clone();
+        let insert_refs = refs.clone();
+        let insert = tokio::spawn(async move {
+            insert_db
+                .insert_unresolved_refs_paged_with_pause(&insert_refs, async move {
+                    page_committed_tx.send(()).unwrap();
+                    release_rx.await.unwrap();
+                })
+                .await
+        });
+
+        page_committed_rx.await.unwrap();
+        assert_eq!(
+            db.get_unresolved_refs().await.unwrap().len(),
+            UNRESOLVED_REF_WRITE_PAGE_ROWS
+        );
+
+        release_tx.send(()).unwrap();
+        insert.await.unwrap().unwrap();
+        assert_eq!(db.get_unresolved_refs().await.unwrap().len(), refs.len());
     }
 }
