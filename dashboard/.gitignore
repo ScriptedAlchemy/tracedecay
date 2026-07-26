@@ -7,6 +7,11 @@ __pycache__/
 audit-gallery/
 # Generated interaction-state capture from stories/topography-audit.ts.
 topography-audit/
+# Ad-hoc axe/screenshot output from targeted accessibility passes. Same kind of
+# artifact as audit-gallery/: regenerate it, never commit it.
+.explorer-axe/
+.governance-axe/
+.ui-truth-axe/
 # Playwright browser download markers / test output.
 test-results/
 playwright-report/
