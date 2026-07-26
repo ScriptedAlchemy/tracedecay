@@ -290,9 +290,9 @@ async fn test_move_symbol_apply_moves_and_rerun_errors_cleanly() {
     let p2 = move_payload(&result2);
     assert_eq!(p2["success"], false, "re-run should refuse: {p2}");
     assert_eq!(
-        result2.semantic_error(),
-        Some(true),
-        "re-run should mark a semantic error"
+        result2.value["isError"], true,
+        "re-run should mark the transported MCP result as an error: {}",
+        result2.value
     );
 }
 
@@ -620,24 +620,24 @@ async fn test_move_symbol_symlink_escape_refuses() {
     cg.index_all().await.unwrap();
 
     let before = fs::read_to_string(project.join("src/pricing.rs")).unwrap();
-    let error = expect_tool_error(
-        handle_tool_call(
-            &cg,
-            "tracedecay_move_symbol",
-            json!({
-                "symbol": "compute_grand_total",
-                "dest_file": "src/escape/grand_total.rs",
-                "dry_run": false
-            }),
-            None,
-            None,
-        )
-        .await,
-    );
-    assert!(
-        error.contains("escapes project root"),
-        "unexpected error: {error}"
-    );
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_move_symbol",
+        json!({
+            "symbol": "compute_grand_total",
+            "dest_file": "src/escape/grand_total.rs",
+            "dry_run": false
+        }),
+        None,
+        None,
+    )
+    .await
+    .expect("containment refusal should return a durable failed effect");
+    let payload = move_payload(&result);
+    assert_eq!(payload["success"], false, "payload: {payload}");
+    assert_eq!(payload["failed"], true, "payload: {payload}");
+    assert_eq!(payload["replayed"], false, "payload: {payload}");
+    assert_eq!(result.value["isError"], true, "result: {}", result.value);
     assert_eq!(
         fs::read_to_string(project.join("src/pricing.rs")).unwrap(),
         before
