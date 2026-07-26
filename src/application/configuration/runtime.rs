@@ -142,11 +142,8 @@ impl ProjectConfigurationRuntime {
         &self,
         runtime: Arc<ProductionSemanticActivationCoordinatorV1>,
     ) -> Result<()> {
-        self.semantic_runtime
-            .set(runtime)
-            .map_err(|_| TraceDecayError::Config {
-                message: "semantic configuration runtime is already installed".to_owned(),
-            })
+        let _ = self.semantic_runtime.set(runtime);
+        Ok(())
     }
 
     #[allow(dead_code)]
