@@ -417,10 +417,17 @@ pub fn remove_enrollment_marker(project_root: &Path, project_id: &str) -> Result
     Ok(true)
 }
 
+/// The repository-wide identity marker shared by every checkout of a
+/// repository, including detached linked worktrees.
+///
+/// Detached worktrees were once excluded here so they could not be served
+/// another checkout's index. That protection belongs to the graph-scope axis,
+/// not the identity axis: a detached HEAD in the *primary* checkout already
+/// shares the repository store and is served the default-branch index with an
+/// explicit fallback warning (see `TraceDecay::resolve_db_for_branch`).
+/// Excluding only the worktree case bought no extra safety and cost a
+/// duplicate project store per detached worktree.
 pub fn repository_identity_path(project_root: &Path) -> Option<PathBuf> {
-    if crate::worktree::is_detached_linked_worktree(project_root) {
-        return None;
-    }
     crate::worktree::git_common_dir(project_root)
         .map(|common_dir| common_dir.join(REPOSITORY_IDENTITY_FILENAME))
 }
@@ -584,14 +591,54 @@ pub fn profile_sharded_data_root(profile_root: &Path, project_id: &str) -> PathB
     profile_root.join("projects").join(project_id)
 }
 
-pub fn default_profile_project_id(project_root: &Path) -> String {
-    let canonical = project_root
-        .canonicalize()
-        .unwrap_or_else(|_| project_root.to_path_buf());
+fn project_id_for_identity_root(identity_root: &Path) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(canonical.to_string_lossy().as_bytes());
+    hasher.update(identity_root.to_string_lossy().as_bytes());
     let digest = hex::encode(hasher.finalize());
     format!("proj_{}", &digest[..16])
+}
+
+/// The id a store keyed to this exact directory would use, ignoring any
+/// repository it belongs to.
+///
+/// Only discovery wants this. Discovery asks a narrower question than identity
+/// resolution — not "which repository owns this checkout" but "was a store
+/// ever minted for this exact directory" — and answering it with the
+/// repository id would report every linked worktree of an initialized
+/// repository as independently initialized.
+pub(crate) fn path_local_profile_project_id(project_root: &Path) -> String {
+    project_id_for_identity_root(
+        &project_root
+            .canonicalize()
+            .unwrap_or_else(|_| project_root.to_path_buf()),
+    )
+}
+
+/// The default identity for a project root.
+///
+/// This is the only place a project id is minted, so a linked worktree cannot
+/// acquire a store of its own even when every marker and registry lookup has
+/// missed: the fallback itself resolves to the repository. A primary checkout
+/// resolves to itself, so every id minted before repository collapse existed
+/// is byte-identical and no live store is orphaned.
+pub fn default_profile_project_id(project_root: &Path) -> String {
+    match crate::worktree::repository_identity_root(project_root) {
+        Some(repository_root) => project_id_for_identity_root(&repository_root),
+        None => path_local_profile_project_id(project_root),
+    }
+}
+
+/// Whether a profile shard keyed to this exact path already holds a graph.
+///
+/// See [`path_local_profile_project_id`] for why discovery must not consult
+/// the repository-collapsed identity here.
+pub(crate) fn has_path_local_profile_store(project_root: &Path) -> bool {
+    let Ok(profile_root) = default_profile_root() else {
+        return false;
+    };
+    let data_root =
+        profile_sharded_data_root(&profile_root, &path_local_profile_project_id(project_root));
+    data_root.join(config::db_filename(&data_root)).exists()
 }
 
 pub fn default_profile_sharded_layout(
