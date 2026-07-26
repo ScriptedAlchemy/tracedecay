@@ -1086,6 +1086,52 @@ fn native_identity_fixture() -> ClaudeObservationIdentityMaterialV1 {
     .unwrap()
 }
 
+/// A decoded row must report the identity it is stored under.
+///
+/// The storage audit compares `observations.observation_id` against the id on
+/// the decoded observation, and rows that join to an observation carry that
+/// same column value. Re-deriving the current form on decode makes a legacy row
+/// disagree with its own column, which is the
+/// "committed observation authority columns disagree with observation JSON"
+/// violation. Accepting a legacy digest is only correct if the object then
+/// carries it.
+#[test]
+fn decoded_observations_report_the_identity_they_are_stored_under() {
+    let material = native_identity_fixture();
+    let observation = durable(material.clone(), json!({"text": "sanitized"}));
+    let wire: Value = serde_json::from_slice(&serde_json::to_vec(&observation).unwrap())
+        .expect("durable observation serializes to an object");
+
+    for stored_id in [
+        observation.observation_id().as_str().to_string(),
+        domain_digest_id(b"tracedecay.claude.observation.v1\0", &material),
+        domain_digest_id(b"tracedecay.claude.idempotency.v1\0", &material),
+    ] {
+        let mut row = wire.clone();
+        row["observation_id"] = json!(stored_id);
+        row["idempotency_key"] = json!(stored_id);
+        let decoded: DurableClaudeObservationV1 =
+            serde_json::from_value(row).expect("a row under any accepted derivation must decode");
+
+        assert_eq!(
+            decoded.observation_id().as_str(),
+            stored_id,
+            "the decoded id must equal the stored column, or the audit rejects the row"
+        );
+        assert_eq!(
+            decoded.idempotency_key().as_str(),
+            stored_id,
+            "the aliased key must follow the stored id"
+        );
+
+        // Re-encoding must not restate the row's identity.
+        let reencoded: Value = serde_json::from_slice(&serde_json::to_vec(&decoded).unwrap())
+            .expect("a decoded observation re-serializes");
+        assert_eq!(reencoded["observation_id"], json!(stored_id));
+        assert_eq!(reencoded["idempotency_key"], json!(stored_id));
+    }
+}
+
 fn domain_digest_id(domain: &[u8], material: &ClaudeObservationIdentityMaterialV1) -> String {
     let mut hasher = Sha256::new();
     hasher.update(domain);
