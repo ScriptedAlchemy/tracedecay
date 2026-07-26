@@ -8,15 +8,18 @@ TraceDecay store. It is grounded in measured dogfood evidence from
 
 ## Status
 
-The prior blanket claim that all seven sections are implemented is withdrawn
-(2026-07-26). Sections 3 and 4 are **partially engaged**: the daemon schedules
-the retention engine and its default 30-day projected-message dedupe can run,
-but raw LCM offload/drop both default to `None`, the older session-message/raw
-windows also default to unlimited, and observation-evidence retention defaults
-disabled with no release windows. `source_cursor_advances` is outside those
-passes and its immutable update/delete triggers prevent reclamation. The
-mechanisms exist; the full raw/evidence-retention and one-content-copy outcomes
-do not.
+The prior blanket claim that all seven sections are implemented remains
+withdrawn (2026-07-26); status is recorded per mechanism. Sections 3 and 4 are
+now **engaged**: projection-durable raw LCM payloads default to offload after 30
+days and drop after 180 days, projected copies default to dedupe after 30 days,
+and the legacy session/raw windows default to 180 days while still requiring
+durable summary lineage. Superseded/deleted observation payloads default to a
+30-day release window. Superseded `source_cursor_advances` are reclaimed by the
+daemon-authorized observation-retention transaction, which preserves the exact
+receipt supporting the current frontier and atomically restores the immutable
+delete trigger before commit. Direct tests cover dry-run/apply, live-evidence
+preservation, current-frontier preservation, authority-loss rollback, and
+trigger restoration.
 
 Size evidence is currently file- and directory-level only:
 `StoreSizeTelemetryPort` has no implementation, so TraceDecay has no supported
@@ -115,14 +118,16 @@ measurements, not inferred table sizes.
   remains pending as recorded above.
 - Branch lifecycle and registry orphan collection are implemented through
   daemon-owned storage runtime work.
-- Session retention is daemon-wired. Projected-message dedupe has a default
-  window, while raw offload/drop and disposition-scoped observation-evidence
-  release require owner configuration and are inactive by default.
+- Session retention is daemon-wired. Projected-message dedupe and raw
+  offload/drop have bounded defaults; legacy session/raw pruning additionally
+  requires durable summary lineage. Disposition-scoped observation-evidence
+  release is active by default with a 30-day recovery horizon.
 - Code-index generation retention is not implemented; publication advances the
   active pointer without collecting superseded immutable generation files.
-- Reclaiming `source_cursor_advances` is not implemented; its immutable
-  update/delete triggers must be versioned or the rows relocated before a
-  retention pass can own them.
+- Superseded `source_cursor_advances` are reclaimed in bounded batches by the
+  daemon-authorized retention owner. The exact receipt supporting the current
+  source frontier is retained; the delete trigger is suspended and restored
+  inside one immediate transaction, with rollback on authority loss.
 - `StoreSizeTelemetryPort` has no implementation. Per-store/per-table growth
   telemetry remains a required §7 seam, not a delivered measurement source.
 - Direct tests only: seeded stores with stale branches/orphans/debris must

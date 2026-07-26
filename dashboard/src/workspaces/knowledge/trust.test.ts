@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { HrrCoverageRow } from './contracts.ts';
+import type { HrrCoverageRow } from '../../contracts/uncontracted/memory.ts';
 import {
   composeTrustDistribution,
   factsBelow,

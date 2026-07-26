@@ -1,5 +1,5 @@
 import type { EvidenceQuality } from '../../ui/EvidencePattern.tsx';
-import type { ExplorerQueryRun, ExplorerSourceProgress } from './contracts.ts';
+import type { ExplorerQueryRun, ExplorerSourceProgress } from '../../contracts/wire.ts';
 
 /**
  * Whether Explorer has earned the right to say a term is absent from the index.

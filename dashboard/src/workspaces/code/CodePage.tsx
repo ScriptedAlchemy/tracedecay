@@ -25,7 +25,7 @@ import {
   GraphSearchPayloadSchema,
   SubgraphPayloadSchema,
   type GraphNode,
-} from './contracts.ts';
+} from '../../contracts/uncontracted/graph.ts';
 
 const BASE = '/api/plugins/graph';
 

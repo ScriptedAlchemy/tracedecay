@@ -69,7 +69,14 @@ const CONTEXT = {
   ],
 };
 
+/** Wire-true unseeded slice. `graph_service.rs::subgraph_payload` writes
+ * `seed_id`, `mode`, `nodes`, `edges` and `capped` on every one of its three
+ * return paths, so a body missing `seed_id`/`mode` is one the daemon cannot
+ * produce — which is what this fixture used to be, back when Brain read the
+ * scoped gateway through its own all-optional copy of the subgraph shape. */
 const SUBGRAPH = {
+  seed_id: null,
+  mode: 'default',
   nodes: [
     { id: 'a', kind: 'function', name: 'alpha', degree: 4 },
     { id: 'b', kind: 'struct', name: 'Beta', degree: 2 },
@@ -181,7 +188,13 @@ describe('ScopedBrain', () => {
       serve({
         '/api/projects/proj_x/plugins/graph/subgraph': {
           status: 200,
-          body: { nodes: [], edges: [], capped: { nodes: false, edges: false } },
+          body: {
+            seed_id: null,
+            mode: 'default',
+            nodes: [],
+            edges: [],
+            capped: { nodes: false, edges: false },
+          },
         },
         '/api/projects/proj_x': { status: 200, body: CONTEXT },
       }),

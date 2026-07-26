@@ -2,8 +2,11 @@ import { useQuery } from '@tanstack/react-query';
 import { RefreshCw } from 'lucide-react';
 import type { ReactNode } from 'react';
 import {
+  assertNever,
+  StorageFindingsPayloadSchema,
   StorageTelemetryPayloadSchema,
   type DoctorReportEntry,
+  type StorageFindingKindStatus,
   type StorageTelemetryRead,
   type StoreTelemetryEntry,
   type WireCoverage,
@@ -16,10 +19,10 @@ import { CapacityBar } from '../../ui/ActivityColumns.tsx';
 import { EvidenceTruthStrip } from '../../ui/EvidenceTruthStrip.tsx';
 import { OverviewCard, OverviewGrid } from '../../ui/archetypes/OverviewGrid';
 import { StateChip, type DomainStateKind } from '../../ui/StateChip';
+import { doctorEvidencePresentation } from './doctorModel.ts';
 import {
   budgetPresentation,
   dimensionDotClass,
-  doctorEvidencePresentation,
   formatBytes,
   growthPresentation,
   refreshOperation,
@@ -29,10 +32,6 @@ import {
   type DimensionPresentation,
 } from './storageModel.ts';
 import { DoctorInspector } from './DoctorInspector.tsx';
-import {
-  ObservatoryStorageFindingsPayloadSchema,
-  type StorageFindingSourceStatus,
-} from './contracts.ts';
 
 /** Observatory storage health: independent typed telemetry and Doctor finding
  * read models. A failed source never hides the other source or becomes empty. */
@@ -49,7 +48,7 @@ export function ObservatoryPage() {
     queryFn: () =>
       fetchEnvelope(
         scopedUrl(scope, '/api/storage/findings'),
-        ObservatoryStorageFindingsPayloadSchema,
+        StorageFindingsPayloadSchema,
       ),
     refetchInterval: 30_000,
   });
@@ -160,7 +159,7 @@ function FindingsReadModel({
   refreshing,
   onRefresh,
 }: {
-  result: EnvelopeResult<ReturnType<typeof ObservatoryStorageFindingsPayloadSchema.parse>>;
+  result: EnvelopeResult<ReturnType<typeof StorageFindingsPayloadSchema.parse>>;
   refreshing: boolean;
   onRefresh: () => void;
 }) {
@@ -196,7 +195,7 @@ function FindingsReadModel({
   );
 }
 
-function StorageSourceStatuses({ statuses }: { statuses: StorageFindingSourceStatus[] }) {
+function StorageSourceStatuses({ statuses }: { statuses: StorageFindingKindStatus[] }) {
   return (
     <ul
       className="mx-4 mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-5"
@@ -278,7 +277,14 @@ function EnvelopeTruth({
 }
 
 function StoreCard({ entry }: { entry: StoreTelemetryEntry }) {
-  const observed = entry.read.kind === 'observed';
+  // `observed` is a full page-level sample. `observed_bytes` is a real total
+  // size with no page sample behind it, so free pages are UNKNOWN rather than
+  // zero — and `CapacityBar` reads a null `freeBytes` as zero free space, which
+  // would draw a full bar and announce "0.0% free pages" for a store nobody
+  // measured. So a byte-only read gets the figures it actually has and says
+  // what it is missing.
+  const sampled = entry.read.kind === 'observed';
+  const sized = sampled || entry.read.kind === 'observed_bytes';
   return (
     <OverviewCard title={entry.store}>
       <div className="flex flex-col gap-2">
@@ -288,9 +294,11 @@ function StoreCard({ entry }: { entry: StoreTelemetryEntry }) {
             {storeRolesLabel(entry.roles, entry.role)}
           </span>
         </div>
-        {observed ? (
+        {sized ? (
           <>
-            <CapacityBar usedBytes={entry.total_bytes} freeBytes={entry.free_bytes} />
+            {sampled ? (
+              <CapacityBar usedBytes={entry.total_bytes} freeBytes={entry.free_bytes} />
+            ) : null}
             <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs tabular">
               <dt className="text-text-muted">size</dt>
               <dd data-cell="numeric">{formatBytes(entry.total_bytes)}</dd>
@@ -303,6 +311,12 @@ function StoreCard({ entry }: { entry: StoreTelemetryEntry }) {
                   : '—'}
               </dd>
             </dl>
+            {sampled ? null : (
+              <p className="text-2xs text-text-muted">
+                total size only · this store reported no page-level sample, so free pages are
+                unmeasured rather than zero
+              </p>
+            )}
           </>
         ) : (
           <p className="text-xs text-text-muted">
@@ -438,18 +452,25 @@ function readKindToState(kind: StorageTelemetryRead['kind']): DomainStateKind {
   switch (kind) {
     case 'observed':
       return 'ready';
+    // A real measurement with less of it: a total with no page-level sample is
+    // partial coverage, not a clean read and not a failed one.
+    case 'observed_bytes':
+      return 'partial';
     case 'unsupported':
       return 'unsupported';
     case 'denied':
       return 'denied';
     case 'unknown':
       return 'unknown';
+    default:
+      return assertNever(kind);
   }
 }
 
 function readUnavailableMessage(read: StorageTelemetryRead): string {
   switch (read.kind) {
     case 'observed':
+    case 'observed_bytes':
       return '';
     case 'unsupported':
       return 'telemetry is unsupported for this store';
@@ -457,6 +478,8 @@ function readUnavailableMessage(read: StorageTelemetryRead): string {
       return 'telemetry access was denied for this store';
     case 'unknown':
       return 'telemetry could not be determined for this store';
+    default:
+      return assertNever(read);
   }
 }
 
