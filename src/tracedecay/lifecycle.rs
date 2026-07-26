@@ -43,6 +43,41 @@ impl TraceDecay {
         })
     }
 
+    #[cfg(any(test, feature = "test-transport"))]
+    fn standalone_test_open_options(
+        project_root: &Path,
+        mut open_options: TraceDecayOpenOptions,
+    ) -> TraceDecayOpenOptions {
+        if open_options.profile_root.is_none() && open_options.global_db_path.is_none() {
+            let project_id = storage::default_profile_project_id(project_root);
+            let parent = project_root.parent().unwrap_or(project_root);
+            open_options.profile_root =
+                Some(parent.join(format!(".tracedecay-test-profile-{project_id}")));
+        }
+        open_options
+    }
+
+    #[cfg(any(test, feature = "test-transport"))]
+    async fn standalone_test_runtime(
+        project_root: &Path,
+        open_options: &TraceDecayOpenOptions,
+    ) -> Result<Arc<crate::application::host_admission::HostAdmissionTestRuntimeV1>> {
+        let profile_root = open_options.resolved_profile_root()?;
+        let project_id = storage::read_enrollment_marker(project_root)?
+            .map(|marker| marker.project_id)
+            .unwrap_or_else(|| storage::default_profile_project_id(project_root));
+        let project_id = ProjectId::new(project_id).map_err(|error| TraceDecayError::Config {
+            message: format!("invalid standalone test project identity: {error}"),
+        })?;
+        crate::application::host_admission::HostAdmissionTestRuntimeV1::project(
+            profile_root,
+            project_root,
+            project_id,
+        )
+        .await
+        .map(Arc::new)
+    }
+
     async fn mount_worktree_graph(
         runtime_registry: &DaemonSessionRuntimeRegistryV1,
         project_root: &Path,
@@ -87,10 +122,24 @@ impl TraceDecay {
     }
 
     pub async fn init_with_options(
-        _project_root: &Path,
-        _open_options: TraceDecayOpenOptions,
+        project_root: &Path,
+        open_options: TraceDecayOpenOptions,
     ) -> Result<Self> {
-        Err(configuration_runtime_unavailable())
+        #[cfg(any(test, feature = "test-transport"))]
+        {
+            let open_options = Self::standalone_test_open_options(project_root, open_options);
+            let runtime = Self::standalone_test_runtime(project_root, &open_options).await?;
+            let mut graph = runtime
+                .initialize_project_graph_for_test(project_root, open_options)
+                .await?;
+            graph.test_runtime_guard = Some(runtime);
+            return Ok(graph);
+        }
+        #[cfg(not(any(test, feature = "test-transport")))]
+        {
+            let _ = (project_root, open_options);
+            Err(configuration_runtime_unavailable())
+        }
     }
 
     /// Initializes a first-touch project while the caller holds the exact
@@ -209,6 +258,8 @@ impl TraceDecay {
             read_only: false,
             context_scout_owner: None,
             context_scout_claim_authorities: Default::default(),
+            #[cfg(any(test, feature = "test-transport"))]
+            test_runtime_guard: None,
         };
         // First-touch parity with the registered open path: daemon warm-up
         // refuses to advertise an identity-bearing project whose Context
@@ -630,10 +681,24 @@ impl TraceDecay {
     }
 
     pub async fn open_with_options(
-        _project_root: &Path,
-        _open_options: TraceDecayOpenOptions,
+        project_root: &Path,
+        open_options: TraceDecayOpenOptions,
     ) -> Result<Self> {
-        Err(configuration_runtime_unavailable())
+        #[cfg(any(test, feature = "test-transport"))]
+        {
+            let open_options = Self::standalone_test_open_options(project_root, open_options);
+            let runtime = Self::standalone_test_runtime(project_root, &open_options).await?;
+            let mut graph = runtime
+                .open_project_graph_for_test(project_root, open_options)
+                .await?;
+            graph.test_runtime_guard = Some(runtime);
+            return Ok(graph);
+        }
+        #[cfg(not(any(test, feature = "test-transport")))]
+        {
+            let _ = (project_root, open_options);
+            Err(configuration_runtime_unavailable())
+        }
     }
 
     /// Opens an initialized project through the canonical registered runtime
@@ -940,6 +1005,8 @@ impl TraceDecay {
             read_only: false,
             context_scout_owner: None,
             context_scout_claim_authorities: Default::default(),
+            #[cfg(any(test, feature = "test-transport"))]
+            test_runtime_guard: None,
         };
 
         crate::hooks::publish_hook_v2_bindings(&ts.store_layout)?;
@@ -984,10 +1051,24 @@ impl TraceDecay {
     }
 
     pub async fn open_read_only_with_options(
-        _project_root: &Path,
-        _open_options: TraceDecayOpenOptions,
+        project_root: &Path,
+        open_options: TraceDecayOpenOptions,
     ) -> Result<Self> {
-        Err(configuration_runtime_unavailable())
+        #[cfg(any(test, feature = "test-transport"))]
+        {
+            let open_options = Self::standalone_test_open_options(project_root, open_options);
+            let runtime = Self::standalone_test_runtime(project_root, &open_options).await?;
+            let mut graph = runtime
+                .open_project_graph_read_only_for_test(project_root, open_options)
+                .await?;
+            graph.test_runtime_guard = Some(runtime);
+            return Ok(graph);
+        }
+        #[cfg(not(any(test, feature = "test-transport")))]
+        {
+            let _ = (project_root, open_options);
+            Err(configuration_runtime_unavailable())
+        }
     }
 
     pub(crate) async fn open_read_only_with_registered_configuration(
@@ -1057,6 +1138,8 @@ impl TraceDecay {
             read_only: true,
             context_scout_owner: None,
             context_scout_claim_authorities: Default::default(),
+            #[cfg(any(test, feature = "test-transport"))]
+            test_runtime_guard: None,
         })
     }
 
@@ -1192,6 +1275,8 @@ impl TraceDecay {
             read_only: false,
             context_scout_owner: None,
             context_scout_claim_authorities: Default::default(),
+            #[cfg(any(test, feature = "test-transport"))]
+            test_runtime_guard: self.test_runtime_guard.clone(),
         };
 
         let mut attempts = 0;
@@ -1425,11 +1510,25 @@ impl TraceDecay {
     }
 
     pub async fn open_branch_with_options(
-        _project_root: &Path,
-        _branch_name: &str,
-        _open_options: TraceDecayOpenOptions,
+        project_root: &Path,
+        branch_name: &str,
+        open_options: TraceDecayOpenOptions,
     ) -> Result<Self> {
-        Err(configuration_runtime_unavailable())
+        #[cfg(any(test, feature = "test-transport"))]
+        {
+            let open_options = Self::standalone_test_open_options(project_root, open_options);
+            let runtime = Self::standalone_test_runtime(project_root, &open_options).await?;
+            let mut graph = runtime
+                .open_project_branch_for_test(project_root, branch_name, open_options)
+                .await?;
+            graph.test_runtime_guard = Some(runtime);
+            return Ok(graph);
+        }
+        #[cfg(not(any(test, feature = "test-transport")))]
+        {
+            let _ = (project_root, branch_name, open_options);
+            Err(configuration_runtime_unavailable())
+        }
     }
 
     /// Opens a tracked branch through the canonical registered runtime while
@@ -1579,6 +1678,8 @@ impl TraceDecay {
             read_only,
             context_scout_owner: None,
             context_scout_claim_authorities: Default::default(),
+            #[cfg(any(test, feature = "test-transport"))]
+            test_runtime_guard: None,
         })
     }
 
