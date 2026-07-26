@@ -314,7 +314,7 @@ migrate command's cutover, not as an ordinary retention or deletion operation.
 The docstring at `purge.rs:31-33` describing "the production purge path" is
 accurate but easy to misread as a general-purpose path.
 
-### P1-c · Project identity keys on repository, not path — with one hole
+### P1-c · Project identity resolves by repository but *mints* by path
 
 Identity resolution at HEAD does key on repository identity: the registry looks
 up `code_projects` by `git_common_dir` (`src/global_db/project_registry.rs:36`)
