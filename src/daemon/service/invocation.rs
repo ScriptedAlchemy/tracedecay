@@ -137,6 +137,10 @@ use crate::diagnostics::lsp::client::LspRefreshTimeouts;
 use crate::diagnostics::lsp::pr12_production_semantic_authorities;
 use crate::errors::TraceDecayError;
 use crate::lsp_bridge::MAX_LSP_FRAME_BYTES;
+use crate::request_identity::{
+    GlobalOpaqueIdentityKind, LogicalEffectIdempotencyDomain, derive_logical_effect_idempotency,
+    mint_global_opaque_id,
+};
 use crate::tracedecay::TraceDecay;
 use tracedecay_hooks::{
     HookBoundaryV1, HookEventEnvelopeV2, HookEventV2, HookFeedbackDeliveryPortV1,
@@ -3659,7 +3663,26 @@ fn configuration_effect(
             .ok_or_else(|| {
                 ConfigurationError::validation_message("unknown configuration operation")
             })?;
-    let idempotency_key = IdempotencyKey::new(format!("configuration.effect.{request_id}"))
+    let idempotency_digest = derive_logical_effect_idempotency(
+        LogicalEffectIdempotencyDomain::ConfigurationEffect,
+        &(
+            actor,
+            scope,
+            operation.as_str(),
+            expected_revision,
+            &operation_digest,
+        ),
+    )
+    .map_err(|error| ConfigurationError::validation_message(error.to_string()))?;
+    let idempotency_suffix = idempotency_digest
+        .as_str()
+        .strip_prefix("sha256:")
+        .ok_or_else(|| {
+            ConfigurationError::validation_message(
+                "configuration effect idempotency digest is malformed",
+            )
+        })?;
+    let idempotency_key = IdempotencyKey::new(format!("configuration.effect.{idempotency_suffix}"))
         .map_err(ConfigurationError::validation)?;
     let expected_state = canonical_sha256(&(
         "tracedecay.configuration.expected-revision.v1",
@@ -3699,7 +3722,7 @@ fn configuration_effect(
         external_proof: None,
     };
     let effect = EffectResult::new(
-        EffectId::new(format!("effect.configuration.{request_id}"))
+        EffectId::new(format!("effect.configuration.{idempotency_suffix}"))
             .map_err(ConfigurationError::validation)?,
         EffectClass::ConfigurationWrite,
         idempotency_key,
@@ -5987,14 +6010,14 @@ fn build_git_preview_request(
 }
 
 fn mint_git_preview_id() -> Result<GitIndexPreviewId, ApplicationProblem> {
-    let mut bytes = [0_u8; 16];
-    getrandom::getrandom(&mut bytes).map_err(|_| {
-        ApplicationProblem::unavailable(SafeDiagnostic {
-            code: "git_index.preview_identity_unavailable".to_owned(),
-            message: "The daemon could not mint a Git preview identity".to_owned(),
-        })
-    })?;
-    GitIndexPreviewId::new(format!("preview.{}", hex::encode(bytes))).map_err(|_| {
+    let identity =
+        mint_global_opaque_id(GlobalOpaqueIdentityKind::GitIndexPreview).map_err(|_| {
+            ApplicationProblem::unavailable(SafeDiagnostic {
+                code: "git_index.preview_identity_unavailable".to_owned(),
+                message: "The daemon could not mint a Git preview identity".to_owned(),
+            })
+        })?;
+    GitIndexPreviewId::new(identity).map_err(|_| {
         ApplicationProblem::unavailable(SafeDiagnostic {
             code: "git_index.preview_identity_unavailable".to_owned(),
             message: "The daemon could not mint a Git preview identity".to_owned(),

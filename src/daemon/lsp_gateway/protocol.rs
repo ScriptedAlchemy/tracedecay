@@ -61,6 +61,7 @@ use super::session::{
 use crate::lsp_bridge::{
     DaemonLspSessionTransport, FramePoll, FrameSend, LspFrame, MAX_LSP_FRAME_BYTES,
 };
+use crate::request_identity::ConnectionLocalRequestSequence;
 
 /// A protocol actor allows bounded synchronous work before returning a typed
 /// cancellation response. Long-running adapters receive the same deadline via
@@ -302,7 +303,7 @@ where
     native_upstream: BTreeMap<String, NativeDiagnosticSnapshot>,
     cursor_native_mode: bool,
     request_deadline_ms: u64,
-    next_server_request_id: u64,
+    next_server_request_id: ConnectionLocalRequestSequence,
     diagnostic_refresh_request: Option<LspRequestId>,
     diagnostic_refresh_needed: bool,
     active_diagnostic_refreshes: BTreeMap<String, PendingDiagnosticRefresh>,
@@ -480,7 +481,7 @@ where
             native_upstream: BTreeMap::new(),
             cursor_native_mode: false,
             request_deadline_ms: DEFAULT_LSP_REQUEST_DEADLINE_MS,
-            next_server_request_id: 1,
+            next_server_request_id: ConnectionLocalRequestSequence::starting_at(1),
             diagnostic_refresh_request: None,
             diagnostic_refresh_needed: false,
             active_diagnostic_refreshes: BTreeMap::new(),
@@ -2483,11 +2484,13 @@ where
         if self.diagnostic_refresh_request.is_some() {
             return;
         }
-        let id = LspRequestId::String(format!(
-            "tracedecay-diagnostic-refresh-{}",
-            self.next_server_request_id
-        ));
-        self.next_server_request_id = self.next_server_request_id.saturating_add(1);
+        let Ok(id) = self
+            .next_server_request_id
+            .next_string("tracedecay-diagnostic-refresh-")
+        else {
+            return;
+        };
+        let id = LspRequestId::String(id);
         if self.enqueue_value(json!({
             "jsonrpc": "2.0",
             "id": request_id_value(id.clone()),

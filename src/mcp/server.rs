@@ -12,7 +12,6 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 
 use crate::application::host_admission::{
     HostAdmissionOutcome, HostAdmissionStatus, TerminalReason, is_wire_oversized_io_error,
@@ -1228,15 +1227,8 @@ fn json_rpc_request_id_string(id: &Value) -> Option<String> {
 }
 
 fn application_surface_request_id(id: &Value, connection_scope: &str) -> Option<String> {
-    if !matches!(id, Value::String(_) | Value::Number(_)) {
-        return None;
-    }
-    let canonical_id = serde_json::to_vec(id).ok()?;
-    let digest = Sha256::digest(&canonical_id);
-    Some(format!(
-        "request.mcp.{connection_scope}.{}",
-        hex::encode(&digest[..16])
-    ))
+    crate::request_identity::mcp_connection_request_id(id, connection_scope)
+        .map(|request_id| request_id.as_str().to_owned())
 }
 
 #[cfg(test)]

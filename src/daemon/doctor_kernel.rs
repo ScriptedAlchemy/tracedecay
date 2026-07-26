@@ -30,7 +30,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -53,11 +53,11 @@ use tracedecay_application::{
 use tracedecay_domain::ManifestDigest;
 
 use crate::config::PinnedRuntimeConfiguration;
+use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
 const DOCTOR_REPORT_CAPABILITY: &str = "capability.application.doctor.report";
 const DOCTOR_REPORT_USE_CASE: &str = "use-case.application.doctor.report";
 const DOCTOR_CONTEXT_HORIZON_MICROS: i64 = 30_000_000;
-static DOCTOR_REQUEST_NONCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone)]
 pub(super) struct ProductionDoctorRemediationOwnersV1 {
@@ -2309,8 +2309,12 @@ fn doctor_report_request_context(
     let observed_at = now_micros();
     let expires_at =
         tracedecay_domain::UtcMicros(observed_at.0.saturating_add(DOCTOR_CONTEXT_HORIZON_MICROS));
-    let nonce = DOCTOR_REQUEST_NONCE.fetch_add(1, Ordering::Relaxed);
-    let suffix = format!("{}.{}.{}", std::process::id(), observed_at.0.max(0), nonce);
+    let request_id = mint_global_request_id(GlobalRequestSurface::DaemonDoctor).map_err(|_| {
+        ApplicationContractError::Inconsistent {
+            field: "doctor report request identity",
+        }
+    })?;
+    let suffix = request_id.as_str().to_owned();
     let actor = tracedecay_domain::ActorId::new("actor.tracedecay-daemon")?;
     let capability =
         tracedecay_tool_catalog::CapabilityId::new(DOCTOR_REPORT_CAPABILITY.to_owned())?;
@@ -2337,7 +2341,7 @@ fn doctor_report_request_context(
         actor,
         scope,
         grant,
-        RequestId::new(format!("request.daemon.doctor.{suffix}"))?,
+        request_id,
         Deadline::new(expires_at)?,
         CancellationContext::active(format!("cancel.daemon.doctor.{suffix}"))?,
     )
