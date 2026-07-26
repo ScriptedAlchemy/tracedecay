@@ -929,23 +929,69 @@ pub fn default_profile_root() -> Result<PathBuf> {
     })
 }
 
+/// Synchronous store resolution for callers that cannot await the registry:
+/// hooks, MCP response handles, config resolution, the agent command, Doctor,
+/// and diagnostics.
+///
+/// This used to read only the enrollment marker and otherwise derive a project
+/// id from the checkout path, so it disagreed with the async registry resolver
+/// about the same directory and split one repository across shards. It now
+/// consults every authority available without awaiting — the same enrollment
+/// marker and repository identity marker via [`resolve_persisted_layout`], then
+/// legacy manifest recovery — and treats an ambiguous recovery as a failure
+/// rather than minting a fresh path-derived identity.
 pub fn resolve_layout_for_current_profile(project_root: &Path) -> Result<StoreLayout> {
-    match read_enrollment_marker(project_root)? {
-        Some(marker) if marker.storage_mode == StorageMode::ProfileSharded => {
-            let profile_root = default_profile_root()?;
-            profile_sharded_layout(project_root, &profile_root, &marker)
-        }
-        Some(marker) => Err(TraceDecayError::Config {
-            message: format!(
-                "unsupported storage_mode={:?} in enrollment marker for '{}'; \
-                 run TraceDecay migration to move this project into the user profile store",
-                marker.storage_mode,
-                project_root.display()
-            ),
-        }),
-        None => {
-            let profile_root = default_profile_root()?;
-            default_profile_sharded_layout(project_root, &profile_root)
+    let profile_root = default_profile_root()?;
+    match resolve_enrolled_layout(project_root, &profile_root)? {
+        Some(layout) => Ok(layout),
+        None => default_profile_sharded_layout(project_root, &profile_root),
+    }
+}
+
+/// Resolves this checkout's store only when an authority already names it, and
+/// reports `Ok(None)` when the answer would be a path-derived guess.
+///
+/// Callers that merely want somewhere to put a file — hook analytics is the
+/// motivating one — must not enroll a directory as a side effect. Every
+/// directory this resolver declines is a store shard that never gets minted for
+/// a path that was never a project.
+pub fn resolve_enrolled_layout_for_current_profile(
+    project_root: &Path,
+) -> Result<Option<StoreLayout>> {
+    let profile_root = default_profile_root()?;
+    resolve_enrolled_layout(project_root, &profile_root)
+}
+
+fn resolve_enrolled_layout(
+    project_root: &Path,
+    profile_root: &Path,
+) -> Result<Option<StoreLayout>> {
+    if let Some(layout) = resolve_persisted_layout(project_root, profile_root)? {
+        return Ok(Some(layout));
+    }
+    let (mut candidates, _) =
+        matching_legacy_profile_layouts(project_root, profile_root, None, false)?;
+    match candidates.len() {
+        0 => Ok(None),
+        1 => Ok(Some(candidates.remove(0))),
+        _ => {
+            // Choosing between several pre-identity stores needs the repair
+            // path the async resolver owns. Deriving an id from the path here
+            // would answer with a shard that holds none of this project's
+            // history, so report the ambiguity instead.
+            let ids = candidates
+                .iter()
+                .filter_map(|layout| layout.identity.project_id.as_deref())
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(TraceDecayError::Config {
+                message: format!(
+                    "project '{}' matches several profile stores ({ids}) and has no enrollment or \
+                     repository identity marker; open it through the daemon so the registry can \
+                     resolve and repair its identity",
+                    project_root.display()
+                ),
+            })
         }
     }
 }
@@ -2137,5 +2183,130 @@ mod tests {
         // The file must still be openable for a further append after the cycle.
         PrivateStoreIo::append_line(&path, "{\"a\":3}").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 3);
+    }
+}
+
+/// The Bugbot review asked whether the two id paths can disagree about one
+/// repository: `default_profile_project_id` hashes what
+/// `repository_identity_root` returns, while the primary-checkout fallback
+/// hashes an explicitly canonicalized path. These exercise the ways a caller
+/// can hand in a path that is spelled differently from its canonical form.
+#[cfg(test)]
+mod identity_root_canonicalization_tests {
+    use super::*;
+
+    fn git(dir: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("run git");
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    /// A repository with one linked worktree, returned as (primary, linked).
+    fn repository(temp: &Path) -> (PathBuf, PathBuf) {
+        let primary = temp.join("primary");
+        fs::create_dir_all(&primary).expect("create primary");
+        git(&primary, &["init", "--initial-branch=main"]);
+        git(&primary, &["config", "user.email", "test@example.com"]);
+        git(&primary, &["config", "user.name", "test"]);
+        fs::write(primary.join("file.txt"), "x").expect("seed file");
+        git(&primary, &["add", "file.txt"]);
+        git(&primary, &["commit", "-m", "seed"]);
+
+        let linked = temp.join("linked");
+        git(
+            &primary,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "linked",
+                linked.to_str().expect("utf-8 path"),
+            ],
+        );
+        (primary, linked)
+    }
+
+    #[test]
+    fn a_linked_worktree_and_its_primary_checkout_agree() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (primary, linked) = repository(temp.path());
+        assert_eq!(
+            default_profile_project_id(&primary),
+            default_profile_project_id(&linked),
+        );
+    }
+
+    #[test]
+    fn a_trailing_separator_does_not_change_the_id() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (primary, linked) = repository(temp.path());
+        let expected = default_profile_project_id(&primary);
+
+        for root in [&primary, &linked] {
+            let mut spelled = root.as_os_str().to_os_string();
+            spelled.push("/");
+            assert_eq!(
+                default_profile_project_id(Path::new(&spelled)),
+                expected,
+                "trailing separator changed the id for {}",
+                root.display()
+            );
+        }
+    }
+
+    #[test]
+    fn a_dot_dot_segment_does_not_change_the_id() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (primary, linked) = repository(temp.path());
+        let expected = default_profile_project_id(&primary);
+
+        for root in [&primary, &linked] {
+            let name = root.file_name().expect("checkout name");
+            let indirect = root.join("..").join(name);
+            assert_eq!(
+                default_profile_project_id(&indirect),
+                expected,
+                "a .. segment changed the id for {}",
+                root.display()
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_checkout_does_not_change_the_id() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (primary, linked) = repository(temp.path());
+        let expected = default_profile_project_id(&primary);
+
+        for (root, link_name) in [(&primary, "primary-link"), (&linked, "linked-link")] {
+            let link = temp.path().join(link_name);
+            std::os::unix::fs::symlink(root, &link).expect("create symlink");
+            assert_eq!(
+                default_profile_project_id(&link),
+                expected,
+                "a symlinked spelling changed the id for {}",
+                root.display()
+            );
+        }
+    }
+
+    #[test]
+    fn a_subdirectory_is_not_absorbed_into_the_repository() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let (primary, _linked) = repository(temp.path());
+        let nested = primary.join("nested");
+        fs::create_dir_all(&nested).expect("create nested");
+        assert_ne!(
+            default_profile_project_id(&nested),
+            default_profile_project_id(&primary),
+        );
     }
 }

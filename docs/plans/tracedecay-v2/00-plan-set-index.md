@@ -477,6 +477,22 @@ Delivery, Explorer routes, Doctor, storage telemetry, Loom, and asset serving
 must retain that status until the suite executes successfully; none may be
 reported as verified from implementation or frontend tests alone.
 
+**Verification qualifications (2026-07-26).**
+
+- Loom's only dedicated backend test,
+  `tests/dashboard_api_test/loom.rs`, is not declared by that suite's
+  `main.rs`; it cannot compile or run and therefore cannot contribute to a
+  Loom verification claim.
+- The Settings suite injects a working `InjectedConfigurationClient`, while
+  the installed production `ConfigurationDaemonClient::mutate_direct` returns
+  authority-unavailable for every matching target. A green injected-client
+  test proves route/shape behavior, not a production Settings write. Direct
+  acceptance must exercise the installed production client before Settings
+  mutation is called verified.
+- The five graph-structure endpoints for Plan 11b Surfaces 1–2 are registered
+  and tested but have no frontend consumer. They remain backend-only until the
+  corresponding drill-in surfaces are implemented.
+
 **Direct acceptance.** Starting from a real PR13 finding, navigate to retained
 evidence, diagnose an injected operational fault, apply an authorized
 remediation or setting change, observe the resulting state, and verify

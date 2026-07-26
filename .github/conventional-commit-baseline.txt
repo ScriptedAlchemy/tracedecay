@@ -66,3 +66,4 @@ f47e24e88bb2661bb12b74d38c7fabc298db8b34 # fix(dashboard): drop Code's module co
 4eb052a8bac25d44dd3bfba86ebf39d465f5bf61 # feat(dashboard-api): wire storage telemetry budget, growth, and store identity
 355f6ebaf0353703da2fdbd55afff163b725b155 # docs(diagnostics): record the code-index identity gap at the compiler wiring site
 c6d4304ea01e1297c4c756b9a822e3292bf69199 # Revert "docs: drop the thermo review scratch document"
+e6e973f9446166ac01fef7eae6e08d1f69a13556 # refactor(sessions): delete ingest entrypoints that laundered read failures; 74 chars, merged under two merge commits before the lint ran
