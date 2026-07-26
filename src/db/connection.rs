@@ -1594,7 +1594,14 @@ impl Database {
         transaction: &DatabaseWriteTransaction<'_>,
     ) -> Result<()> {
         transaction
-            .execute("INSERT INTO nodes_fts(nodes_fts) VALUES('rebuild')", ())
+            .execute_batch(
+                "DROP TABLE nodes_fts;
+                 CREATE VIRTUAL TABLE nodes_fts USING fts5(
+                     name, qualified_name, docstring, signature,
+                     content='nodes', content_rowid='rowid'
+                 );
+                 INSERT INTO nodes_fts(nodes_fts) VALUES('rebuild');",
+            )
             .await
             .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to rebuild FTS index: {e}"),
@@ -1815,10 +1822,11 @@ where
 }
 
 fn is_nodes_fts_only_corruption(problem: &str) -> bool {
+    let problem = problem.trim();
     matches!(
-        problem.trim(),
+        problem,
         NODES_FTS_CORRUPTION | "malformed inverted index for FTS5 table nodes_fts"
-    )
+    ) || (problem.contains("fts5: corruption found") && problem.contains("nodes_fts"))
 }
 
 #[cfg(test)]

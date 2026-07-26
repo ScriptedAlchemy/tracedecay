@@ -21,6 +21,66 @@ const OBSERVABILITY_PROVIDER: &str = "tracedecay-observability";
 const ANALYTICS_DESCRIPTOR: &str = "analytics-events.v1";
 const COST_DESCRIPTOR: &str = "provider-costs.v1";
 
+/// Canonical wire projection used by every PR14 surface. Adapters may wrap the
+/// value in their transport framing but may not recompute metrics or coverage.
+fn canonical_observatory_value(
+    model: &ObservatoryReadModelV1,
+) -> Result<serde_json::Value, serde_json::Error> {
+    serde_json::to_value(model)
+}
+
+pub(crate) fn observatory_cli_value(
+    model: &ObservatoryReadModelV1,
+) -> Result<serde_json::Value, serde_json::Error> {
+    canonical_observatory_value(model)
+}
+
+pub(crate) fn observatory_mcp_value(
+    model: &ObservatoryReadModelV1,
+) -> Result<serde_json::Value, serde_json::Error> {
+    canonical_observatory_value(model)
+}
+
+pub(crate) fn observatory_http_value(
+    model: &ObservatoryReadModelV1,
+) -> Result<serde_json::Value, serde_json::Error> {
+    canonical_observatory_value(model)
+}
+
+/// Bounded public JSON export. It is the same canonical model as interactive
+/// surfaces, including absent values, exact denominator, and coverage state.
+pub(crate) fn observatory_export_bytes(
+    model: &ObservatoryReadModelV1,
+) -> Result<Vec<u8>, serde_json::Error> {
+    serde_json::to_vec(model)
+}
+
+fn canonical_costs_value(model: &CostsReadModelV1) -> Result<serde_json::Value, serde_json::Error> {
+    serde_json::to_value(model)
+}
+
+pub(crate) fn costs_cli_value(
+    model: &CostsReadModelV1,
+) -> Result<serde_json::Value, serde_json::Error> {
+    canonical_costs_value(model)
+}
+
+pub(crate) fn costs_mcp_value(
+    model: &CostsReadModelV1,
+) -> Result<serde_json::Value, serde_json::Error> {
+    canonical_costs_value(model)
+}
+
+pub(crate) fn costs_http_value(
+    model: &CostsReadModelV1,
+) -> Result<serde_json::Value, serde_json::Error> {
+    canonical_costs_value(model)
+}
+
+pub(crate) fn costs_export_bytes(model: &CostsReadModelV1) -> Result<Vec<u8>, serde_json::Error> {
+    serde_json::to_vec(model)
+}
+
 /// Production adapter for the canonical application record/query boundary.
 /// The complete versioned envelope is retained as JSON while indexed columns
 /// provide bounded scope/kind/time queries.
@@ -793,6 +853,59 @@ mod tests {
         assert_eq!(value.state, CoverageStateV1::Partial);
         assert_eq!(value.unknown, 2);
         assert_eq!(value.eligible, None);
+    }
+
+    #[test]
+    fn pr14_surface_serializers_preserve_values_denominators_and_coverage() {
+        let observatory = observatory_unavailable_read_model(
+            Some("scope:parity"),
+            10,
+            "fixture_source_unavailable",
+        );
+        let cli = observatory_cli_value(&observatory).expect("CLI JSON");
+        let mcp = observatory_mcp_value(&observatory).expect("MCP JSON");
+        let http = observatory_http_value(&observatory).expect("HTTP JSON");
+        let dashboard = serde_json::to_value(&observatory).expect("dashboard payload");
+        let export: serde_json::Value =
+            serde_json::from_slice(&observatory_export_bytes(&observatory).expect("export JSON"))
+                .expect("decode export JSON");
+        assert_eq!(cli, mcp);
+        assert_eq!(cli, http);
+        assert_eq!(cli, dashboard);
+        assert_eq!(cli, export);
+        assert_eq!(cli["metrics"][0]["value"], serde_json::Value::Null);
+        assert_eq!(
+            cli["metrics"][0]["denominator_value"],
+            serde_json::Value::Null
+        );
+        assert_eq!(cli["metrics"][0]["coverage"]["state"], "unknown");
+        assert_eq!(
+            cli["metrics"][0]["unavailable_reason"],
+            "fixture_source_unavailable"
+        );
+
+        let costs =
+            costs_unavailable_read_model(Some("scope:parity"), 10, "fixture_cost_unavailable");
+        let cli = costs_cli_value(&costs).expect("CLI costs JSON");
+        let mcp = costs_mcp_value(&costs).expect("MCP costs JSON");
+        let http = costs_http_value(&costs).expect("HTTP costs JSON");
+        let dashboard = serde_json::to_value(&costs).expect("dashboard costs payload");
+        let export: serde_json::Value =
+            serde_json::from_slice(&costs_export_bytes(&costs).expect("costs export JSON"))
+                .expect("decode costs export JSON");
+        assert_eq!(cli, mcp);
+        assert_eq!(cli, http);
+        assert_eq!(cli, dashboard);
+        assert_eq!(cli, export);
+        assert_eq!(cli["usage"][0]["coverage"]["state"], "unknown");
+        assert_eq!(
+            cli["usage"][0]["denominator_value"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            cli["usage"][0]["unavailable_reason"],
+            "fixture_cost_unavailable"
+        );
     }
 
     #[tokio::test]

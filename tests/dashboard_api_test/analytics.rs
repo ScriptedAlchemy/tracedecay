@@ -612,3 +612,60 @@ fn analytics_api_uses_recent_durable_events_when_window_is_capped() {
         );
     });
 }
+
+#[test]
+fn observatory_and_costs_http_dashboard_export_preserve_value_and_coverage() {
+    let _lock = ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let runtime = create_runtime();
+    runtime.block_on(async {
+        let fixture = start_fixture(true).await;
+        let agent = http_agent();
+
+        let (status, observatory_dashboard) =
+            get_json(&agent, &format!("{}/api/observatory", fixture.base_url));
+        assert_eq!(status, 200);
+        assert_eq!(observatory_dashboard["schema_revision"], 1);
+        let (status, observatory_http) = get_json(
+            &agent,
+            &format!("{}/api/plugins/analytics/observatory", fixture.base_url),
+        );
+        assert_eq!(status, 200);
+        let (status, observatory_export) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/analytics/observatory/export",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(
+            observatory_dashboard["payload"]["metrics"],
+            observatory_http["metrics"]
+        );
+        assert_eq!(observatory_http["metrics"], observatory_export["metrics"]);
+
+        let (status, costs_dashboard) =
+            get_json(&agent, &format!("{}/api/costs", fixture.base_url));
+        assert_eq!(status, 200);
+        assert_eq!(costs_dashboard["schema_revision"], 1);
+        let (status, costs_http) = get_json(
+            &agent,
+            &format!("{}/api/plugins/savings/costs", fixture.base_url),
+        );
+        assert_eq!(status, 200);
+        let (status, costs_export) = get_json(
+            &agent,
+            &format!("{}/api/plugins/savings/costs/export", fixture.base_url),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(costs_dashboard["payload"]["usage"], costs_http["usage"]);
+        assert_eq!(
+            costs_dashboard["payload"]["estimated_cost"],
+            costs_http["estimated_cost"]
+        );
+        assert_eq!(costs_http["usage"], costs_export["usage"]);
+        assert_eq!(costs_http["estimated_cost"], costs_export["estimated_cost"]);
+    });
+}
