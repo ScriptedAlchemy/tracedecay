@@ -17,6 +17,12 @@ import { ObservatoryPage } from './ObservatoryPage.tsx';
 const SETTING_KEY = 'sync.retention.v1 store_soft_budgets_bytes';
 const COVERAGE =
   'since-daemon-start: bounded in-process watermark ring recorded on each telemetry sample, not a persisted historical series';
+/** Two watermarks an hour apart, so the rendered pair is a real UTC instant
+ * rather than the epoch and the two ends are distinguishable. */
+const SAMPLE_PREVIOUS_MICROS = 1_753_000_000_000_000;
+const SAMPLE_CURRENT_MICROS = 1_753_003_600_000_000;
+const SAMPLE_PREVIOUS_ISO = '2025-07-20T08:26:40.000Z';
+const SAMPLE_CURRENT_ISO = '2025-07-20T09:26:40.000Z';
 
 describe('ObservatoryPage store telemetry', () => {
   beforeEach(() => {
@@ -95,6 +101,117 @@ describe('ObservatoryPage store telemetry', () => {
     expect(unset?.tone).not.toBe(unknown?.tone);
   });
 
+  it('renders table-growth unavailable states distinctly without zero measurements', async () => {
+    stubTelemetry(telemetryPayload());
+    renderObservatory();
+
+    await screen.findByText('graph · memory (shared store file)');
+    for (const [state, label] of [
+      ['unknown', 'Unknown'],
+      ['denied', 'Denied'],
+      ['unsupported', 'Unsupported'],
+    ] as const) {
+      const panel = document.querySelector(`[data-table-growth-state="${state}"]`);
+      expect(panel).toBeTruthy();
+      expect(panel?.textContent).toContain(label);
+      expect(panel?.querySelector('[data-table-growth-sample]')).toBeNull();
+      expect(panel?.textContent).not.toContain('+0 B');
+    }
+  });
+
+  it('renders an observed significant table row with its measured bytes and window', async () => {
+    stubTelemetry(telemetryPayload());
+    renderObservatory();
+
+    await screen.findByText('graph · memory (shared store file)');
+    const row = document.querySelector('[data-table-growth-sample="messages"]');
+    expect(row).toBeTruthy();
+    // The whole point of the observed state: a real delta, the byte window it
+    // was measured over, and the two watermarks it spans. If any of it stops
+    // rendering, observed growth has silently disappeared.
+    expect(row?.textContent).toContain('+1.0 MiB');
+    expect(row?.textContent).toContain('10.0 MiB → 11.0 MiB');
+    expect(row?.textContent).toContain(`${SAMPLE_PREVIOUS_ISO} → ${SAMPLE_CURRENT_ISO}`);
+    expect(row?.textContent).not.toContain('NaN');
+    expect(row?.textContent).not.toContain('Invalid Date');
+  });
+
+  it('keeps an observed read with baseline-pending tables visibly partial', async () => {
+    stubTelemetry(telemetryPayload());
+    renderObservatory();
+
+    await screen.findByText('graph · memory (shared store file)');
+    const panel = document.querySelector('[data-table-growth-state="observed"]');
+    expect(panel).toBeTruthy();
+    expect(panel?.textContent).toContain('partial table coverage');
+    expect(panel?.textContent).toContain('2 of 3 current_tables compared');
+
+    // A table with no previous watermark reports its current size and says the
+    // baseline is pending — it never reports a delta, not even zero.
+    const pending = panel?.querySelector('[data-table-growth-omission="baseline_pending"]');
+    expect(pending?.textContent).toContain('embeddings');
+    expect(pending?.textContent).toContain('4.0 MiB now');
+    expect(pending?.textContent).toContain('no previous watermark');
+    expect(pending?.textContent).not.toContain('+0 B');
+    expect(
+      screen.getByText('embeddings: no previous table watermark exists; baseline pending'),
+    ).toBeTruthy();
+
+    // Below-threshold tables keep their measured window, formatted in the same
+    // units as the significant rows, and stay informational.
+    const below = panel?.querySelector('[data-table-growth-omission="below_threshold"]');
+    expect(below?.textContent).toContain('+512.0 KiB');
+    expect(below?.textContent).toContain('100.0 MiB → 100.5 MiB');
+    expect(panel?.getAttribute('data-table-growth-tone')).toBe('ready');
+  });
+
+  it('states table-growth coverage across all stores separately from each store', async () => {
+    stubTelemetry(telemetryPayload());
+    renderObservatory();
+
+    const fleet = await screen.findByLabelText('Table growth coverage across all stores');
+    expect(fleet.getAttribute('data-table-growth-coverage')).toBe('partial');
+    expect(fleet.textContent).toContain('1 of 5 store_table_growth_reads fully compared');
+    for (const reason of [
+      'lcm.db: denied',
+      'savings.db: no baseline yet',
+      'sessions.db: unsupported',
+      'incident.db: unavailable',
+    ]) {
+      expect(fleet.textContent).toContain(reason);
+    }
+    // Aggregate scope and per-store scope are separate regions, so a partial
+    // fleet cannot hide behind one healthy-looking store card.
+    expect(fleet.querySelector('[data-table-growth-state]')).toBeNull();
+    expect(
+      document.querySelector('[data-table-growth-state="observed"]')?.textContent,
+    ).toContain('Coverage · this store');
+  });
+
+  it('gives every per-store table-growth region a distinct accessible name', async () => {
+    stubTelemetry(telemetryPayload());
+    renderObservatory();
+
+    await screen.findByText('graph · memory (shared store file)');
+    const labels = Array.from(document.querySelectorAll('[data-table-growth-state]')).map(
+      (region) => region.getAttribute('aria-label'),
+    );
+    expect(labels.length).toBeGreaterThan(1);
+    expect(new Set(labels).size).toBe(labels.length);
+    expect(labels).toContain('Per-table growth · graph.db');
+  });
+
+  it('renders no baseline yet and surfaces every table omission reason', async () => {
+    stubTelemetry(telemetryPayload());
+    renderObservatory();
+
+    expect((await screen.findAllByText(/no baseline yet/i)).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/no growth/i)).toBeNull();
+    expect(
+      screen.getByText(/observed growth was below the informational significance threshold/i),
+    ).toBeTruthy();
+  });
+
   it('renders the canonical Doctor storage family with typed kinds and provenance', async () => {
     stubTelemetry(telemetryPayload(), storageFindingsPayload());
     renderObservatory();
@@ -105,6 +222,7 @@ describe('ObservatoryPage store telemetry', () => {
       'Stale branch databases',
       'Incident debris',
       'Retention backlog',
+      'Table growth',
     ]) {
       expect(screen.getAllByText(label).length).toBeGreaterThan(0);
     }
@@ -399,6 +517,7 @@ function sourceStatuses(overrides: Partial<Record<string, SourceStatus>> = {}) {
     'stale_branch_dbs',
     'incident_debris_present',
     'retention_backlog',
+    'table_growth',
   ].map((kind) => ({
     kind,
     ...(overrides[kind] ?? {
@@ -410,6 +529,78 @@ function sourceStatuses(overrides: Partial<Record<string, SourceStatus>> = {}) {
 }
 
 function telemetryPayload() {
+  const tableGrowth = [
+    {
+      state: 'observed',
+      // Two of the three current tables had a previous watermark to compare
+      // against, so this observed read is deliberately partial.
+      coverage: partialCoverage(3, 2, 'current_tables', [
+        'embeddings: no previous table watermark exists; baseline pending',
+      ]),
+      significant_samples: [
+        {
+          table: 'messages',
+          previous_bytes: 10_485_760,
+          current_bytes: 11_534_336,
+          growth_bytes: 1_048_576,
+          previous_observed_at: SAMPLE_PREVIOUS_MICROS,
+          current_observed_at: SAMPLE_CURRENT_MICROS,
+        },
+      ],
+      omissions: [
+        {
+          kind: 'below_threshold',
+          table: 'metadata',
+          previous_bytes: 104_857_600,
+          current_bytes: 105_381_888,
+          growth_bytes: 524_288,
+          previous_observed_at: SAMPLE_PREVIOUS_MICROS,
+          current_observed_at: SAMPLE_CURRENT_MICROS,
+          reason: 'observed growth was below the informational significance threshold',
+        },
+        {
+          kind: 'baseline_pending',
+          table: 'embeddings',
+          current_bytes: 4_194_304,
+          observed_at: SAMPLE_CURRENT_MICROS,
+          reason: 'embeddings: no previous table watermark exists; baseline pending',
+        },
+      ],
+      omission_reasons: [
+        'metadata: observed growth was below the informational significance threshold',
+        'embeddings: no previous table watermark exists; baseline pending',
+      ],
+    },
+    {
+      state: 'denied',
+      coverage: partialTableGrowthCoverage('per-table payload growth measurement was denied'),
+      omission_reasons: ['per-table payload growth measurement was denied for this store'],
+    },
+    {
+      state: 'baseline_established',
+      coverage: partialTableGrowthCoverage('no baseline yet'),
+      observed_at: 100,
+      tables_observed: 7,
+      omission_reasons: [
+        'no baseline yet; this read established the first per-table payload watermark',
+      ],
+    },
+    {
+      state: 'unsupported',
+      coverage: partialTableGrowthCoverage(
+        'per-table payload growth measurement is unsupported',
+      ),
+      omission_reasons: ['per-table payload growth measurement is unsupported for this store'],
+    },
+    {
+      state: 'unknown',
+      coverage: partialTableGrowthCoverage(
+        'per-table payload growth measurement is unavailable',
+      ),
+      omission_reasons: ['per-table payload growth measurement is unavailable for this store'],
+    },
+  ];
+  let tableGrowthIndex = 0;
   return {
     stores: [
       {
@@ -574,9 +765,66 @@ function telemetryPayload() {
           reason: 'no watermark could be recorded because the store size read did not produce a sample',
         },
       },
-    ],
+    ].map((store) => ({ ...store, table_growth: tableGrowth[tableGrowthIndex++] })),
     budget_note: 'budgets are owner configuration: sync.retention.v1 store_soft_budgets_bytes',
     growth_note: 'growth is measured over the watermarks this daemon has recorded since it started',
+    table_growth_threshold: {
+      absolute_bytes: 67_108_864,
+      relative_floor_bytes: 1_048_576,
+      relative_percent: 10,
+    },
+    table_growth_coverage: {
+      completeness: 'partial',
+      eligible: 5,
+      examined: 1,
+      matched: null,
+      excluded: null,
+      omitted: 4,
+      unknown: null,
+      denominator: 5,
+      unit: 'store_table_growth_reads',
+      omission_reasons: [
+        'lcm.db: denied',
+        'savings.db: no baseline yet',
+        'sessions.db: unsupported',
+        'incident.db: unavailable',
+      ],
+    },
+  };
+}
+
+function partialCoverage(
+  denominator: number,
+  examined: number,
+  unit: string,
+  omissionReasons: string[],
+) {
+  return {
+    completeness: 'partial',
+    eligible: denominator,
+    examined,
+    matched: null,
+    excluded: null,
+    omitted: denominator - examined,
+    unknown: null,
+    denominator,
+    unit,
+    omission_reasons: omissionReasons,
+  };
+}
+
+function partialTableGrowthCoverage(reason: string) {
+  return {
+    completeness: 'partial',
+    eligible: 1,
+    examined: 0,
+    matched: null,
+    excluded: null,
+    omitted: 1,
+    unknown: null,
+    denominator: 1,
+    unit: 'store_table_growth_reads',
+    omission_reasons: [reason],
   };
 }
 
