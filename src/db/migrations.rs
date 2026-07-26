@@ -90,13 +90,7 @@ async fn repair_incremental_auto_vacuum(
         return Ok(());
     }
 
-    conn.execute_batch("PRAGMA auto_vacuum = INCREMENTAL;")
-        .await
-        .map_err(|e| TraceDecayError::Database {
-            message: format!("{operation}: failed to enable incremental auto_vacuum: {e}"),
-            operation: operation.to_string(),
-        })?;
-    conn.execute_batch("VACUUM;")
+    conn.repair_incremental_auto_vacuum()
         .await
         .map_err(|e| TraceDecayError::Database {
             message: format!("{operation}: failed to rebuild database for auto_vacuum: {e}"),
@@ -349,9 +343,20 @@ pub(crate) async fn migrate_connection(conn: &Connection) -> Result<bool> {
 /// Runs schema migrations and completes any whole-file auto-vacuum repair.
 ///
 /// Callers must hold exclusive maintenance authority. Ordinary opens use
-/// [`migrate`] so startup latency never grows with the database file size.
-pub(crate) async fn migrate_with_exclusive_maintenance(conn: &Connection) -> Result<bool> {
-    migrate_inner(conn, true).await
+/// [`migrate`] so startup latency never grows with the database file size. The
+/// maintenance runtime is consumed because a whole-file rebuild invalidates
+/// reader connections opened against the previous file image.
+pub(crate) async fn migrate_with_exclusive_maintenance(
+    database: crate::db::Database,
+) -> Result<bool> {
+    let result = {
+        let writer = database
+            .writer_connection("migrate schema under exclusive maintenance")
+            .await?;
+        migrate_inner(writer.engine_connection(), true).await
+    };
+    database.close();
+    result
 }
 
 async fn migrate_inner(conn: &Connection, exclusive_maintenance: bool) -> Result<bool> {
