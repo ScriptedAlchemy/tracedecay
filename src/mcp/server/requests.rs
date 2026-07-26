@@ -851,7 +851,7 @@ impl McpServer {
                 doctor_remediation_dispatcher: self.dashboard_doctor_remediation_dispatcher.clone(),
                 code_index_freshness_reader: self.dashboard_code_index_freshness_reader.clone(),
                 diagnostics_cache: Some(&self.diagnostics_cache),
-                diagnostics_lsp: Some(self.diagnostics_lsp.as_ref()),
+                diagnostics_lsp: Some(Arc::clone(&self.diagnostics_lsp)),
                 application_invocation_client,
                 application_request_id,
                 application_deadline,

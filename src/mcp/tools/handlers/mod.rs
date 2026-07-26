@@ -466,7 +466,7 @@ pub struct ToolCallRegistryOptions<'a> {
         Option<crate::dashboard::code_index_freshness_api::CodeIndexFreshnessReader>,
     pub diagnostics_cache: Option<&'a crate::diagnostics::DiagnosticsCache>,
     pub diagnostics_lsp:
-        Option<&'a tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>>,
+        Option<Arc<tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>>>,
     pub application_invocation_client: Option<&'a crate::daemon_client::DaemonInvocationClient>,
     pub application_request_id: Option<tracedecay_application::RequestId>,
     pub application_deadline: Option<tracedecay_application::Deadline>,
@@ -1481,6 +1481,7 @@ async fn dispatch_session_workflow_tools(
                 options.doctor_report_reader.clone(),
                 options.doctor_remediation_dispatcher.clone(),
                 options.code_index_freshness_reader.clone(),
+                options.diagnostics_lsp.clone(),
             )
             .await
         }
