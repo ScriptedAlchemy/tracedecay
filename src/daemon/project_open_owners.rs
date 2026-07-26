@@ -7,7 +7,7 @@
 //! closed and placeholder owners are never installed.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -25,16 +25,15 @@ use tracedecay_application::{
 };
 use tracedecay_domain::configuration::{
     ACCESS_RULES_SETTING_KEY, AuthorityRef, CapabilityResolutionContextV1, ConfigurationValueV1,
-    SOURCE_BINDINGS_SETTING_KEY, ScopeSourceBinding, SettingKey, SourceBindingId, SourceKindV1,
-    resolve_restrictive_capabilities,
+    SOURCE_BINDINGS_SETTING_KEY, SettingKey, SourceKindV1, resolve_restrictive_capabilities,
 };
 use tracedecay_domain::feedback::{
     CiFailureParserIdentityV1, FeedbackScopeV1, FeedbackTriggerV1, GitHubPullRequestIdV1,
     GitHubReviewReadOperationV1,
 };
 use tracedecay_domain::{
-    ActorId, CapabilityId as DomainCapabilityId, CommitId, LocatorDigest, ProjectId, ProviderId,
-    RefId, RepositoryId, UtcMicros, canonical_sha256,
+    ActorId, CapabilityId as DomainCapabilityId, CommitId, ProjectId, ProviderId, RefId,
+    RepositoryId, UtcMicros, canonical_sha256,
 };
 use tracedecay_hooks::{HookFeedbackDeliveryRouteV1, HookFeedbackRollbackSwitchV1, HookHostV1};
 use tracedecay_tool_catalog::CapabilityId;
@@ -87,8 +86,7 @@ use crate::application::feedback::{
 };
 use crate::application::operation_stream::OperationKind;
 use crate::application::primitives::{
-    admitted_root_uri_for_project, locator_digest_for_project,
-    open_pr12_production_primitive_runtime,
+    admitted_root_uri_for_project, open_pr12_production_primitive_runtime,
 };
 use crate::application::source_authorization::ProjectSourceAccessSnapshot;
 use crate::daemon::git_transactions::DaemonGitIndexTransactionServiceRegistry;
@@ -107,7 +105,6 @@ use crate::global_db::configuration::OwnedGlobalDbConfigurationControlStore;
 use crate::mcp::McpServer;
 
 const DAEMON_REQUESTER: &str = "actor.tracedecay-daemon.project-open";
-const DAEMON_BINDING: &str = "binding.tracedecay-daemon.project-open";
 const GRANT_HORIZON: Duration = Duration::from_hours(24);
 const POLICY_REVISION_V1: u64 = 1;
 const LSP_DIAGNOSTICS_QUIET: Duration = Duration::from_secs(2);
@@ -850,21 +847,11 @@ pub(crate) async fn register_project_open_production_owners(
             });
         }
     };
-    let source_binding_root = graph
-        .profile_database()
-        .project_registry_context_by_id(project_id.as_str())
-        .await?
-        .map(|context| PathBuf::from(context.project.canonical_root))
-        .unwrap_or_else(|| project_root.to_path_buf());
-    let access = daemon_owned_project_source_access_at(
-        &scope,
-        &source_binding_root,
-        &configuration,
-        now_micros(),
-    )
-    .map_err(|error| TraceDecayError::Config {
-        message: format!("project-open source access denied: {error}"),
-    })?;
+    let access =
+        daemon_owned_project_source_access_at(&scope, project_root, &configuration, now_micros())
+            .map_err(|error| TraceDecayError::Config {
+            message: format!("project-open source access denied: {error}"),
+        })?;
     let source_edit_authorization = ProjectOpenSourceEditAuthorizationV1 {
         project_root: project_root.to_path_buf(),
         scope: scope.clone(),
@@ -2308,29 +2295,10 @@ fn resolve_production_github_identity(
 
 pub(super) fn daemon_owned_project_source_access_at(
     scope: &ResolvedScope,
-    project_root: &Path,
+    _project_root: &Path,
     configuration: &crate::config::PinnedRuntimeConfiguration,
     observed_at: UtcMicros,
 ) -> std::result::Result<ProjectSourceAccessSnapshot, ApplicationContractError> {
-    let locator = locator_digest_for_project(project_root)?;
-    let locator = LocatorDigest::new(locator.as_str().to_owned()).map_err(|_| {
-        ApplicationContractError::Inconsistent {
-            field: "project-open locator digest",
-        }
-    })?;
-    let binding = ScopeSourceBinding::new(
-        SourceBindingId::new(DAEMON_BINDING.to_owned()).map_err(|_| {
-            ApplicationContractError::Inconsistent {
-                field: "project-open source binding id",
-            }
-        })?,
-        SourceKindV1::Cursor,
-        locator,
-        AuthorityRef::Project(scope.project_id.clone()),
-    )
-    .map_err(|_| ApplicationContractError::Inconsistent {
-        field: "project-open source binding",
-    })?;
     if configuration.target.project_id != scope.project_id {
         return Err(ApplicationContractError::Inconsistent {
             field: "project-open configuration project",
@@ -2360,17 +2328,17 @@ pub(super) fn daemon_owned_project_source_access_at(
             field: "project-open source bindings",
         });
     };
+    // ResolvedScope already proves the live project/repository/worktree route.
+    // The source locator is durable configuration authority and must survive a
+    // repository move, so consume that exact binding instead of replacing its
+    // locator with a digest of mutable routing metadata.
     let configured_bindings = bindings
         .iter()
         .filter(|candidate| {
-            candidate.source_kind == binding.source_kind && candidate.authority == authority
+            candidate.source_kind == SourceKindV1::Cursor && candidate.authority == authority
         })
         .collect::<Vec<_>>();
-    if configured_bindings.len() != 1
-        || configured_bindings.first().is_none_or(|candidate| {
-            candidate.source_locator_digest != binding.source_locator_digest
-        })
-    {
+    if configured_bindings.len() != 1 {
         return Err(ApplicationContractError::Inconsistent {
             field: "project-open source binding authority",
         });
