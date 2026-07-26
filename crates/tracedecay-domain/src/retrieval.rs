@@ -321,9 +321,9 @@ impl From<DomainError> for RetrievalContractError {
     }
 }
 
-/// The independent retrieval lanes (Plan 15). Each lane is independently
-/// testable, disableable, budgeted, and attributable; one lane is never an
-/// alias over another.
+/// Runtime-backed retrieval lanes. Each lane is independently testable,
+/// disableable, budgeted, and attributable; one lane is never an alias over
+/// another.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum RetrieverKind {
@@ -331,9 +331,6 @@ pub enum RetrieverKind {
     Lexical,
     Semantic,
     Graph,
-    Temporal,
-    TaskSession,
-    Diagnostic,
 }
 
 impl RetrieverKind {
@@ -346,9 +343,6 @@ impl RetrieverKind {
             Self::Lexical => "lexical",
             Self::Semantic => "semantic",
             Self::Graph => "graph",
-            Self::Temporal => "temporal",
-            Self::TaskSession => "task_session",
-            Self::Diagnostic => "diagnostic",
         }
     }
 
@@ -1537,17 +1531,22 @@ mod tests {
         ]);
         accepted.validate().expect("PR9 lanes are admissible");
 
-        for lane in [
-            RetrieverKind::Semantic,
-            RetrieverKind::Temporal,
-            RetrieverKind::TaskSession,
-            RetrieverKind::Diagnostic,
-        ] {
+        for lane in [RetrieverKind::Semantic] {
             let rejected = subpayload(&[lane]);
             assert_eq!(
                 rejected.validate(),
                 Err(RetrievalContractError::FallbackLaneViolation),
                 "lane {lane:?} must not enter the PR9 fallback subpayload"
+            );
+        }
+    }
+
+    #[test]
+    fn retriever_contract_rejects_lanes_without_runtime_adapters() {
+        for unsupported in ["temporal", "task_session", "diagnostic"] {
+            assert!(
+                serde_json::from_str::<RetrieverKind>(&format!("\"{unsupported}\"")).is_err(),
+                "{unsupported} must not be advertised without a runtime adapter"
             );
         }
     }

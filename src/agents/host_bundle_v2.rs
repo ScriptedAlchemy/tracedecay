@@ -108,7 +108,7 @@ pub struct HostRegistrationEvidenceV1 {
 pub fn stock_host_registration_evidence(host: HostKindV1) -> Vec<HostRegistrationEvidenceV1> {
     use HostCapabilityStateV1::{Degraded, Supported, Unavailable};
     use HostCapabilityUnavailableReasonV1::{
-        CheckedInEvidenceMissing, HostApiAbsent, NativeFixtureLimited,
+        CheckedInEvidenceMissing, HostApiAbsent, HostRegistrationUnsupported, NativeFixtureLimited,
     };
     use HostRegistrationRouteV1::{
         ClaudeConfiguredLanguageLsp, Cli, CursorNativeDiagnostics, Hook, Mcp, OpenCodeCustomLsp,
@@ -116,7 +116,11 @@ pub fn stock_host_registration_evidence(host: HostKindV1) -> Vec<HostRegistratio
 
     let mut evidence = vec![HostRegistrationEvidenceV1 {
         route: Cli,
-        state: Supported,
+        state: if host == HostKindV1::CursorCloud {
+            Unavailable(HostRegistrationUnsupported)
+        } else {
+            Supported
+        },
         evidence_ref: "src/tool_command.rs",
         starts_analyzer: false,
     }];
@@ -170,8 +174,8 @@ pub fn stock_host_registration_evidence(host: HostKindV1) -> Vec<HostRegistratio
             },
             HostRegistrationEvidenceV1 {
                 route: Mcp,
-                state: Supported,
-                evidence_ref: "plugin/mcp-cursor.json",
+                state: Unavailable(HostRegistrationUnsupported),
+                evidence_ref: "cursor_cloud_host_registration_absent_v1",
                 starts_analyzer: false,
             },
         ]),
@@ -333,7 +337,7 @@ pub fn cline_family_evidence(provider: ClineFamilyProviderV1) -> Option<ClineFam
     };
     let transcript_manifest_path = "tests/fixtures/transcript_golden/cline_like/manifest.json";
     let manifest =
-        fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join(transcript_manifest_path)).ok()?;
+        include_bytes!("../../tests/fixtures/transcript_golden/cline_like/manifest.json");
     Some(ClineFamilyEvidenceV1 {
         provider,
         registration: HostRegistrationEvidenceV1 {
@@ -343,7 +347,7 @@ pub fn cline_family_evidence(provider: ClineFamilyProviderV1) -> Option<ClineFam
             starts_analyzer: false,
         },
         transcript_manifest_path,
-        transcript_manifest_digest: Sha256::digest(&manifest).into(),
+        transcript_manifest_digest: Sha256::digest(manifest).into(),
         edit: Unavailable(CheckedInEvidenceMissing),
         stop: Unavailable(CheckedInEvidenceMissing),
     })
@@ -357,45 +361,68 @@ pub fn stock_host_native_fixture_evidence(host: HostKindV1) -> Option<HostNative
     use HostCapabilityUnavailableReasonV1::{CheckedInEvidenceMissing, NativeFixtureLimited};
 
     let unavailable = Unavailable(CheckedInEvidenceMissing);
-    let (provider, source_path, evidenced_event, edit, stop) = match host {
+    let (provider, source_path, bytes, evidenced_event, edit, stop): (
+        &'static str,
+        &'static str,
+        &'static [u8],
+        &'static str,
+        HostCapabilityStateV1,
+        HostCapabilityStateV1,
+    ) = match host {
         HostKindV1::ClaudeCode => (
             "claude",
-            "tests/fixtures/host_events/claude/baseline.json",
-            "SessionStart",
-            unavailable,
-            unavailable,
+            "crates/tracedecay-hooks/fixtures/host_events/claude.json",
+            include_bytes!("../../crates/tracedecay-hooks/fixtures/host_events/claude.json"),
+            "PostToolUse,Stop",
+            Supported,
+            Supported,
         ),
         HostKindV1::Codex => (
             "codex",
-            "tests/fixtures/host_events/codex/baseline.json",
-            "SessionStart",
+            "crates/tracedecay-hooks/fixtures/host_events/codex.json",
+            include_bytes!("../../crates/tracedecay-hooks/fixtures/host_events/codex.json"),
+            "Stop",
             unavailable,
-            unavailable,
+            Supported,
         ),
         HostKindV1::CursorDesktop => (
             "cursor",
-            "tests/fixtures/host_events/cursor/baseline.json",
-            "sessionStart",
-            unavailable,
+            "crates/tracedecay-hooks/fixtures/host_events/cursor.json",
+            include_bytes!("../../crates/tracedecay-hooks/fixtures/host_events/cursor.json"),
+            "afterFileEdit",
+            Supported,
             unavailable,
         ),
         HostKindV1::Hermes => (
             "hermes",
             "crates/tracedecay-hooks/fixtures/host_events/hermes.json",
+            include_bytes!("../../crates/tracedecay-hooks/fixtures/host_events/hermes.json"),
             "post_tool_call,on_session_end",
             Supported,
             Supported,
         ),
         HostKindV1::Kiro => (
             "kiro",
-            "tests/fixtures/host_events/kiro/baseline.json",
+            "crates/tracedecay-hooks/fixtures/host_events/kiro.json",
+            include_bytes!("../../crates/tracedecay-hooks/fixtures/host_events/kiro.json"),
             "userPromptSubmit",
             unavailable,
             unavailable,
         ),
+        HostKindV1::KimiCode => (
+            "kimi_code",
+            "crates/tracedecay-hooks/fixtures/host_events/kimi-code.json",
+            include_bytes!("../../crates/tracedecay-hooks/fixtures/host_events/kimi-code.json"),
+            "PostToolUse,Stop",
+            Supported,
+            Supported,
+        ),
         HostKindV1::OpenCode => (
             "opencode",
-            "crates/tracedecay-hooks/fixtures/host_events/opencode.json",
+            "crates/tracedecay-hooks/fixtures/host_events/opencode/baseline.json",
+            include_bytes!(
+                "../../crates/tracedecay-hooks/fixtures/host_events/opencode/baseline.json"
+            ),
             "file.edited,session.idle",
             Degraded(NativeFixtureLimited),
             Degraded(NativeFixtureLimited),
@@ -404,15 +431,13 @@ pub fn stock_host_native_fixture_evidence(host: HostKindV1) -> Option<HostNative
         | HostKindV1::ClineFamily
         | HostKindV1::Cline
         | HostKindV1::RooCode
-        | HostKindV1::Kilo
-        | HostKindV1::KimiCode => return None,
+        | HostKindV1::Kilo => return None,
     };
-    let bytes = fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join(source_path)).ok()?;
     Some(HostNativeFixtureEvidenceV1 {
         host,
         provider,
         source_path,
-        fixture_digest: Sha256::digest(&bytes).into(),
+        fixture_digest: Sha256::digest(bytes).into(),
         evidenced_event,
         edit,
         stop,
@@ -426,6 +451,7 @@ pub fn native_host_edit_stop_conformance_evidence() -> Vec<HostNativeFixtureEvid
         HostKindV1::CursorDesktop,
         HostKindV1::Hermes,
         HostKindV1::Kiro,
+        HostKindV1::KimiCode,
         HostKindV1::OpenCode,
     ]
     .into_iter()
@@ -745,6 +771,66 @@ pub fn require_capability(
     } else {
         Err(HostBundleError::UnsupportedCapability)
     }
+}
+
+/// Refuse a component whose host capabilities or binding fixture evidence do
+/// not justify the native surfaces that component would install.
+pub fn require_component_capabilities(
+    host: HostKindV1,
+    component: HostBundleComponentV1,
+) -> Result<(), HostBundleError> {
+    use HostBundleComponentV1::{Agent, ContextMcp, Core, OperatorMcp};
+    use HostCapabilityV1::{Cli, Hooks, Lsp, Mcp, NativeDiagnostics};
+
+    let required: &[HostCapabilityV1] = match (host, component) {
+        (HostKindV1::ClaudeCode, Core) => &[Lsp, Hooks],
+        (HostKindV1::CursorDesktop | HostKindV1::Codex, Core) => &[Hooks],
+        (
+            HostKindV1::Hermes | HostKindV1::Kiro | HostKindV1::KimiCode | HostKindV1::OpenCode,
+            Core,
+        ) => &[Hooks, Mcp],
+        (
+            HostKindV1::CursorCloud
+            | HostKindV1::ClineFamily
+            | HostKindV1::Cline
+            | HostKindV1::RooCode
+            | HostKindV1::Kilo,
+            Core,
+        ) => &[Mcp],
+        (_, ContextMcp | OperatorMcp) => &[Mcp],
+        (HostKindV1::CursorDesktop, Agent) => &[NativeDiagnostics],
+        (HostKindV1::OpenCode, Agent) => &[Cli],
+        (_, Agent) => return Err(HostBundleError::UnsupportedCapability),
+    };
+    for capability in required {
+        require_capability(host, *capability)?;
+    }
+    if required
+        .iter()
+        .any(|capability| matches!(capability, Lsp | NativeDiagnostics | Hooks))
+        && stock_host_native_fixture_evidence(host).is_none()
+    {
+        return Err(HostBundleError::UnsupportedCapability);
+    }
+
+    let cline_provider = match host {
+        HostKindV1::Cline => Some(ClineFamilyProviderV1::Cline),
+        HostKindV1::RooCode => Some(ClineFamilyProviderV1::RooCode),
+        HostKindV1::Kilo => Some(ClineFamilyProviderV1::Kilo),
+        HostKindV1::ClineFamily => return Err(HostBundleError::UnsupportedCapability),
+        _ => None,
+    };
+    if let Some(provider) = cline_provider {
+        let evidence =
+            cline_family_evidence(provider).ok_or(HostBundleError::UnsupportedCapability)?;
+        if evidence.registration.state != HostCapabilityStateV1::Supported
+            || evidence.edit != HostCapabilityStateV1::Supported
+            || evidence.stop != HostCapabilityStateV1::Supported
+        {
+            return Err(HostBundleError::UnsupportedCapability);
+        }
+    }
+    Ok(())
 }
 
 /// Validate the compiled catalog entry before producing a mutation-only plan.

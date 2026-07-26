@@ -43,6 +43,7 @@ use super::types::{
     ConfigurationRollbackRequest, DirectConfigurationMutation, ResolvedSetting, SettingSummary,
     WriteOnlyCredentialMutation,
 };
+use super::user_settings::{ProductionUserSettingsDaemonClient, UserSettingsDaemonClient};
 
 type SharedConfigurationControlPlane = Arc<dyn ConfigurationControlPlane + Send + Sync>;
 
@@ -59,6 +60,7 @@ pub struct ProjectConfigurationRuntime {
     control_plane: SharedConfigurationControlPlane,
     client: Arc<ProductionConfigurationDaemonClient>,
     semantic_runtime: OnceLock<Arc<ProductionSemanticActivationCoordinatorV1>>,
+    user_settings: Arc<ProductionUserSettingsDaemonClient>,
 }
 
 impl ProjectConfigurationRuntime {
@@ -134,6 +136,7 @@ impl ProjectConfigurationRuntime {
                 control_plane,
                 client,
                 semantic_runtime: OnceLock::new(),
+                user_settings: Arc::new(ProductionUserSettingsDaemonClient),
             },
             configuration,
         ))
@@ -165,6 +168,12 @@ impl ProjectConfigurationRuntime {
 
     pub(crate) fn client(&self) -> Arc<ProductionConfigurationDaemonClient> {
         Arc::clone(&self.client)
+    }
+
+    /// Daemon-owned user-profile settings authority. Dashboard and other
+    /// adapters receive this narrow client rather than loading `config.toml`.
+    pub(crate) fn user_settings_client(&self) -> Arc<dyn UserSettingsDaemonClient> {
+        Arc::clone(&self.user_settings) as Arc<dyn UserSettingsDaemonClient>
     }
 
     pub(crate) fn dyn_client(&self) -> Arc<dyn crate::config::ConfigurationDaemonClient> {
