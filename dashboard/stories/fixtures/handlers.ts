@@ -6,7 +6,7 @@
  * data backs the Playwright route interceptor used by the visual audit
  * (`route.ts`), so both transports stay in lockstep.
  */
-import { http, HttpResponse } from 'msw';
+import { http, HttpResponse, type JsonBodyType } from 'msw';
 import { resolveFixture } from './data.ts';
 
 /** Catch-all GET for /api/** — resolves the pathname to its fixture payload. */
@@ -21,6 +21,6 @@ export const handlers = [
   ),
   http.get('*/api/*', ({ request }) => {
     const url = new URL(request.url);
-    return HttpResponse.json(resolveFixture(url.pathname, url.search));
+    return HttpResponse.json(resolveFixture(url.pathname, url.search) as JsonBodyType);
   }),
 ];
