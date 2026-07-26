@@ -11,7 +11,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
 use serde::Deserialize;
-use serde_json::Value;
+use serde::Serialize;
 
 use super::DashboardState;
 use super::graph_service;
@@ -135,7 +135,7 @@ pub(crate) async fn path(
     )
 }
 
-fn graph_response(result: Result<Value, String>) -> Response {
+fn graph_response<T: Serialize>(result: Result<T, String>) -> Response {
     match result {
         Ok(payload) => Json(payload).into_response(),
         Err(error) => graph_read_failed(error),
