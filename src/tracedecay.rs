@@ -64,6 +64,7 @@ pub struct TraceDecay {
     context_scout_claim_authorities: tokio::sync::RwLock<Vec<MountedContextScoutClaimAuthorityV1>>,
     #[cfg(any(test, feature = "test-transport"))]
     test_runtime_guard: Option<Arc<crate::application::host_admission::HostAdmissionTestRuntimeV1>>,
+    standalone_maintenance_scope: Option<Arc<crate::db::OwnedMaintenanceDatabaseScope>>,
 }
 
 const MAX_MOUNTED_CONTEXT_SCOUT_CLAIM_AUTHORITIES: usize = 256;

@@ -1050,24 +1050,31 @@ fn participant_access_state(
     if !snapshot.has_authoritative_participant_manifest() {
         return None;
     }
-    let access = snapshot
+    let Some(participant) = snapshot
         .participant_manifest()
         .entries()
         .iter()
         .find(|participant| {
             participant.session_id().as_str() == session_id && participant.source_id() == source_id
         })
-        .map_or(TemporalSourceAccess::Unauthorized, |participant| {
-            participant.access()
-        });
+    else {
+        return Some(HydrationStateV1::Unauthorized);
+    };
+    if !participant.is_authorized_for_snapshot() {
+        return Some(HydrationStateV1::Unauthorized);
+    }
+    source_access_hydration_state(participant.access())
+}
+
+fn source_access_hydration_state(access: TemporalSourceAccess) -> Option<HydrationStateV1> {
     match access {
-        TemporalSourceAccess::Authorized => None,
+        TemporalSourceAccess::Available => None,
         TemporalSourceAccess::Unavailable => Some(HydrationStateV1::RetainedButUnavailable),
         TemporalSourceAccess::Locked => Some(HydrationStateV1::Locked),
         TemporalSourceAccess::RetentionWithheld => Some(HydrationStateV1::RetentionExpired),
         TemporalSourceAccess::Deleted => Some(HydrationStateV1::Deleted),
         TemporalSourceAccess::Redacted => Some(HydrationStateV1::Redacted),
-        TemporalSourceAccess::Unauthorized => Some(HydrationStateV1::Unauthorized),
+        TemporalSourceAccess::LegacyUnauthorized => Some(HydrationStateV1::Unauthorized),
     }
 }
 
@@ -2326,6 +2333,25 @@ mod tests {
             ),
             Some(HydrationStateV1::RetentionExpired)
         );
+    }
+
+    #[test]
+    fn participant_lifecycle_states_surface_without_hydrating_payloads() {
+        for (access, expected) in [
+            (TemporalSourceAccess::Locked, HydrationStateV1::Locked),
+            (
+                TemporalSourceAccess::RetentionWithheld,
+                HydrationStateV1::RetentionExpired,
+            ),
+            (TemporalSourceAccess::Deleted, HydrationStateV1::Deleted),
+            (TemporalSourceAccess::Redacted, HydrationStateV1::Redacted),
+            (
+                TemporalSourceAccess::Unavailable,
+                HydrationStateV1::RetainedButUnavailable,
+            ),
+        ] {
+            assert_eq!(source_access_hydration_state(access), Some(expected));
+        }
     }
 
     #[test]

@@ -153,9 +153,9 @@ const TIERS: &[(&str, &[&str])] = &[
     ("admin", ADMIN_TOOLS),
 ];
 
-fn config_error(message: impl Into<String>) -> TraceDecayError {
+fn config_error(message: impl std::fmt::Display) -> TraceDecayError {
     TraceDecayError::Config {
-        message: message.into(),
+        message: message.to_string(),
     }
 }
 
