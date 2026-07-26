@@ -1,12 +1,11 @@
 //! Trusted operation identity for V1-facing memory use cases.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-
 use tracedecay_domain::{ActorId, FactOwnerV1, ProvenanceId};
 
 use crate::sessions::source::canonical_framed_sha256;
 
 use super::error::MemoryApplicationError;
+use crate::request_identity::{GlobalOpaqueIdentityKind, mint_global_opaque_id};
 
 /// Trusted daemon-issued identity for one V1-facing operation. The raw
 /// JSON-RPC identifier is never retained: it is domain-separated and hashed
@@ -61,16 +60,12 @@ impl MemoryOperationContext {
         action: &str,
         actor: Option<ActorId>,
     ) -> Result<Self, MemoryApplicationError> {
-        static NONCE: AtomicU64 = AtomicU64::new(0);
-        let mut bytes = [0_u8; 16];
-        let raw = match getrandom::getrandom(&mut bytes) {
-            Ok(()) => format!("generated:{}", hex::encode(bytes)),
-            Err(_) => format!(
-                "generated:{}:{}",
-                crate::runtime_identity::process_run_id(),
-                NONCE.fetch_add(1, Ordering::Relaxed)
-            ),
-        };
+        let raw =
+            mint_global_opaque_id(GlobalOpaqueIdentityKind::MemoryOperation).map_err(|_| {
+                MemoryApplicationError::InvalidCompatibilityInput {
+                    invariant: "generated memory operation identity",
+                }
+            })?;
         Self::from_trusted_request_id(owner, action, &raw, actor)
     }
 

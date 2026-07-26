@@ -27,6 +27,7 @@ use tracedecay_store::{
 };
 
 use crate::daemon::store_runtime::registry::StoreRuntimeHandle;
+use crate::request_identity::{LogicalEffectIdempotencyDomain, derive_logical_effect_idempotency};
 
 #[derive(Debug, Error)]
 pub(crate) enum RuntimeExternalSourceErrorV1 {
@@ -202,10 +203,10 @@ impl RuntimeExternalSourceStore {
             ))
             .map_err(invalid)?,
         );
-        let idempotency_key = canonical_sha256(&(
-            "tracedecay.host-observation.idempotency.v1",
+        let idempotency_key = derive_logical_effect_idempotency(
+            LogicalEffectIdempotencyDomain::HostObservation,
             observation.observation_id(),
-        ))
+        )
         .map_err(invalid)?;
         let native_object = SourceNativeObjectIdV1::new(
             canonical_sha256(&(
@@ -398,10 +399,10 @@ impl RuntimeExternalSourceStore {
                 .clone(),
             self.runtime.binding(),
         )?;
-        let idempotency_key = canonical_sha256(&(
-            "tracedecay.host-observation.idempotency.v1",
+        let idempotency_key = derive_logical_effect_idempotency(
+            LogicalEffectIdempotencyDomain::HostObservation,
             observation.observation_id(),
-        ))
+        )
         .map_err(invalid)?;
         Ok(self
             .read_state(binding.immutable_identity().map_err(invalid)?)

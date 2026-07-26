@@ -23,6 +23,7 @@ import {
   fetchDoctorRemediationStatus,
   previewDoctorRemediation,
 } from '../../data/query/doctor.ts';
+import { mintBrowserIdempotencyKey } from '../../data/identity.ts';
 import type { EnvelopeResult } from '../../data/query/envelope.ts';
 import { EvidenceTruthStrip } from '../../ui/EvidenceTruthStrip.tsx';
 import { StateChip, type DomainStateKind } from '../../ui/StateChip.tsx';
@@ -176,7 +177,7 @@ export function DoctorInspector() {
             descriptor,
             target,
             actions: availableRemediationActions(descriptor, legalActions),
-            idempotencyKey: newIdempotencyKey(),
+            idempotencyKey: mintBrowserIdempotencyKey('dashboard-doctor'),
           });
         }}
         onPreview={(operation) => preview.mutate(operation)}
@@ -764,14 +765,6 @@ function operationPhaseState(
     case 'effect_unknown':
       return 'error';
   }
-}
-
-function newIdempotencyKey(): string {
-  const suffix =
-    typeof globalThis.crypto?.randomUUID === 'function'
-      ? globalThis.crypto.randomUUID()
-      : `${Date.now()}`;
-  return `idempotency.dashboard-doctor.${suffix}`;
 }
 
 const secondaryButtonClass =
