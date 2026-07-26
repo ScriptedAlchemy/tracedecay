@@ -186,7 +186,10 @@ async fn proxy_host_input_to_daemon(
     }
 
     loop {
-        if *eof.borrow() {
+        while let Ok(line) = input.try_recv() {
+            pending.push_back(line);
+        }
+        if *eof.borrow() && pending.is_empty() {
             return Ok(());
         }
         let line = match pending.pop_front() {
@@ -198,7 +201,12 @@ async fn proxy_host_input_to_daemon(
                             message: format!("host EOF monitor closed unexpectedly: {error}"),
                         })?;
                         if *eof.borrow() {
-                            return Ok(());
+                            while let Ok(line) = input.try_recv() {
+                                pending.push_back(line);
+                            }
+                            if pending.is_empty() {
+                                return Ok(());
+                            }
                         }
                         continue;
                     }
@@ -224,6 +232,9 @@ async fn proxy_host_input_to_daemon(
             );
             tokio::pin!(daemon_request);
             loop {
+                if *eof.borrow() && !pending.is_empty() {
+                    break daemon_request.await;
+                }
                 tokio::select! {
                     result = &mut daemon_request => break result,
                     changed = eof.changed() => {
@@ -231,7 +242,12 @@ async fn proxy_host_input_to_daemon(
                             message: format!("host EOF monitor closed unexpectedly: {error}"),
                         })?;
                         if *eof.borrow() {
-                            return Ok(());
+                            while let Ok(line) = input.try_recv() {
+                                pending.push_back(line);
+                            }
+                            if pending.is_empty() {
+                                return Ok(());
+                            }
                         }
                     }
                     next = input.recv() => {

@@ -684,7 +684,7 @@ fn database_owner_registry_evicts_lru_idle_and_protects_active_leases() {
     registry.bind_route(route("idle"), idle.clone());
     let active_lease = Arc::clone(registry.get(&oldest).expect("oldest server"));
 
-    let (server, was_inserted) = registry
+    let (server, was_inserted, evicted_roots) = registry
         .bind_or_insert_route_bounded(
             route("inserted"),
             inserted.clone(),
@@ -695,6 +695,7 @@ fn database_owner_registry_evicts_lru_idle_and_protects_active_leases() {
         .expect("idle entry should be evicted");
     assert!(was_inserted);
     assert_eq!(*server, 3);
+    assert_eq!(evicted_roots, vec![PathBuf::from("/project/idle")]);
     assert!(registry.get(&idle).is_none());
     assert!(registry.get_route(&route("idle")).is_none());
     assert!(registry.get(&oldest).is_some());
