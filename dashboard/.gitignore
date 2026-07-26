@@ -3,11 +3,15 @@ __pycache__/
 # The Hermes wrapper's dist/ is generated at install time by
 # src/agents/hermes/dashboard_wrapper.rs, so it stays out of git.
 /hermes-wrapper/dist/
-app-dist/
 # Generated visual-audit output (baselines in audit-baselines/ stay tracked).
 audit-gallery/
 # Generated interaction-state capture from stories/topography-audit.ts.
 topography-audit/
+# Ad-hoc axe/screenshot output from targeted accessibility passes. Same kind of
+# artifact as audit-gallery/: regenerate it, never commit it.
+.explorer-axe/
+.governance-axe/
+.ui-truth-axe/
 # Playwright browser download markers / test output.
 test-results/
 playwright-report/

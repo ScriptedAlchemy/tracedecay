@@ -1,7 +1,7 @@
 //! Hermes dashboard plugin-page deployment tests.
 //!
-//! `tracedecay install --agent hermes` deploys the dashboard wrapper
-//! (manifest.json + plugin_api.py + dist bundles) into the generated
+//! `tracedecay install --agent hermes` deploys the dashboard host adapter
+//! (manifest.json + plugin_api.py + the required mount entry) into the generated
 //! plugin's `dashboard/` subdirectory, where Hermes' dashboard-plugin
 //! discovery (`plugins/*/dashboard/manifest.json`) picks it up. These tests
 //! cover the deploy itself, idempotent reinstall with pin preservation, the
@@ -34,6 +34,16 @@ fn dashboard_dir(home: &Path) -> PathBuf {
 fn read(path: &Path) -> String {
     std::fs::read_to_string(path)
         .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()))
+}
+
+fn is_mountable_dashboard_entry(entry: &str) -> bool {
+    entry.len() > 512
+        && entry.contains("__HERMES_PLUGINS__")
+        && entry.contains(".register(")
+        && entry.contains("iframe")
+        && entry.contains("/api/plugins/tracedecay/dashboard-url")
+        && !entry.contains("placeholder")
+        && !entry.contains("rewrite in progress")
 }
 
 #[tokio::test]
@@ -79,15 +89,6 @@ async fn install_and_update_reconcile_active_managed_skills() {
     assert!(skill_path.is_file());
 }
 
-const DIST_FILES: &[&str] = &[
-    "index.js",
-    "holographic.js",
-    "lcm.js",
-    "graph.js",
-    "savings.js",
-    "style.css",
-];
-
 #[test]
 fn install_deploys_dashboard_plugin_page() {
     let home = tempfile::tempdir().unwrap();
@@ -96,10 +97,21 @@ fn install_deploys_dashboard_plugin_page() {
         .unwrap();
 
     let dash = dashboard_dir(home.path());
-    for file in DIST_FILES {
+    let entry = read(&dash.join("dist/index.js"));
+    assert!(
+        is_mountable_dashboard_entry(&entry),
+        "Hermes dashboard entry is not a real mount adapter"
+    );
+    for retired in [
+        "holographic.js",
+        "lcm.js",
+        "graph.js",
+        "savings.js",
+        "style.css",
+    ] {
         assert!(
-            dash.join("dist").join(file).is_file(),
-            "missing deployed dist file {file}"
+            !dash.join("dist").join(retired).exists(),
+            "retired Hermes UI asset was deployed: {retired}"
         );
     }
 
@@ -110,10 +122,31 @@ fn install_deploys_dashboard_plugin_page() {
     assert_eq!(manifest["label"], "TraceDecay");
     assert_eq!(manifest["version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(manifest["entry"], "dist/index.js");
-    assert_eq!(manifest["css"], "dist/style.css");
+    assert!(manifest.get("css").is_none());
     // `api` must stay a relative path inside dashboard/ — Hermes rejects
     // absolute/traversal api paths (GHSA-5qr3-c538-wm9j).
     assert_eq!(manifest["api"], "plugin_api.py");
+    let description = manifest["description"].as_str().unwrap();
+    for workspace in [
+        "Brain",
+        "Explorer",
+        "Loom",
+        "Sessions",
+        "Agents",
+        "Code",
+        "Knowledge",
+        "Delivery",
+        "Automations",
+        "Observatory",
+        "Costs",
+        "Settings",
+    ] {
+        assert!(
+            description.contains(workspace),
+            "manifest omits the {workspace} workspace"
+        );
+    }
+    assert!(!description.split_whitespace().any(|word| word == "Work"));
 
     // The proxy backend bakes in the installing binary (env still wins).
     let api = read(&dash.join("plugin_api.py"));
@@ -121,6 +154,7 @@ fn install_deploys_dashboard_plugin_page() {
     assert!(!api.contains("DEPLOYED_PROJECT_ROOT"));
     assert!(!api.contains(home.path().to_string_lossy().as_ref()));
     assert!(api.contains("router = APIRouter()"));
+    assert!(api.contains(r#"@router.get("/dashboard-url")"#));
 }
 
 #[test]
@@ -231,34 +265,23 @@ fn uninstall_leaves_foreign_files_in_dashboard_dir() {
 }
 
 #[test]
-fn deployed_bundles_match_embedded_standalone_assets() {
-    // The wrapper must serve the exact same UI the standalone dashboard
-    // embeds — byte-identical bundles, no fork.
+fn deployed_entry_mounts_the_daemon_dashboard_without_copying_ui() {
     let home = tempfile::tempdir().unwrap();
     HermesIntegration
         .install(&make_ctx(home.path(), true))
         .unwrap();
 
     let dist = dashboard_dir(home.path()).join("dist");
-    let holographic = read(&dist.join("holographic.js"));
     let entry = read(&dist.join("index.js"));
-    let css = read(&dist.join("style.css"));
-
-    // "Byte-identical, no fork" is the contract: the deployed child bundle
-    // must match the exact standalone asset the crate embeds
-    // (`crate::dashboard::assets::HOLOGRAPHIC_JS` == the dist source), so this
-    // holds through the in-progress dashboard rewrite instead of pinning
-    // specific UI strings that a placeholder rebuild legitimately drops.
-    let embedded_holographic =
-        read(&Path::new(env!("CARGO_MANIFEST_DIR")).join("dashboard/holographic/dist/index.js"));
+    assert!(is_mountable_dashboard_entry(&entry));
     assert_eq!(
-        holographic, embedded_holographic,
-        "deployed holographic.js must be byte-identical to the embedded standalone bundle"
+        std::fs::read_dir(&dist).unwrap().count(),
+        1,
+        "Hermes must receive only the required host mount entry, never a copied dashboard"
     );
-    assert!(entry.contains("\"tracedecay\""));
-    // Wrapper chrome first, then the child stylesheets concatenated.
-    assert!(css.starts_with("/* Wrapper chrome"));
-    assert!(css.contains(".tsiw-tab"));
+    assert!(!is_mountable_dashboard_entry(
+        "/* tracedecay dashboard placeholder — rewrite in progress. */"
+    ));
 }
 
 #[test]
@@ -273,6 +296,8 @@ fn deployed_wrapper_preserves_canonical_api_proxy_surface() {
 
     let api = read(&dashboard_dir(home.path()).join("plugin_api.py"));
     for required in [
+        r#"@router.get("/dashboard-url")"#,
+        r#"return JSONResponse({"url": f"{base}/"})"#,
         r#"@router.get("/capabilities")"#,
         r#"_proxy("GET", "/api/capabilities", _DummyRequest(), None)"#,
         r#"@router.get("/holographic")"#,

@@ -16,9 +16,9 @@ import {
 import { NavLink } from 'react-router';
 import { useQuery } from '@tanstack/react-query';
 import {
-  StorageFindingsPayloadSchema,
-  type DoctorEvidenceState,
-} from '../../contracts/wire.ts';
+  ObservatoryStorageFindingsPayloadSchema,
+  type StorageFindingSourceStatus,
+} from '../../workspaces/observatory/contracts.ts';
 import { fetchEnvelope } from '../../data/query/envelope.ts';
 import { scopeKey, scopedUrl, useScope } from '../../data/scope/store.ts';
 import { cn } from '../../ui/cn';
@@ -77,25 +77,26 @@ const DOCTOR_HEALTH: Record<
   },
 };
 
-/** How one producer's evidence state reads for the global dot. Only a
- * `healthy_complete_coverage` reading is health; a state that carries no
- * evidence at all (unsupported, absent, unknown) is not a finding AND not a
- * clean result, so it lands in `unknown` rather than either extreme. */
-function kindHealth(state: DoctorEvidenceState): DoctorHealth {
-  switch (state) {
-    case 'healthy_complete_coverage':
+/**
+ * How one storage-finding producer reads for the global dot.
+ *
+ * A producer only counts as health when it actually looked (`real`) and found
+ * nothing. Anything it did observe is a finding. Everything else — a source the
+ * owner never configured, a partial sweep, a producer unsupported on this store
+ * — established nothing either way, and reporting "no evidence" as a clean bill
+ * of health is the whole defect this dot exists to avoid.
+ */
+function kindHealth(status: StorageFindingSourceStatus): DoctorHealth {
+  if (status.observed_entries > 0) return 'attention';
+  switch (status.state) {
+    case 'real':
       return 'healthy';
-    case 'degraded':
     case 'partial':
-    case 'stale':
-    case 'denied':
-      return 'attention';
+    case 'unset':
     case 'unsupported':
-    case 'absent':
-    case 'unknown':
       return 'unknown';
     default: {
-      const unhandled: never = state;
+      const unhandled: never = status.state;
       return unhandled;
     }
   }
@@ -184,22 +185,32 @@ function DoctorDot({ health }: { health: DoctorHealth }) {
  * read is broken" and "the system is verified healthy" rendered as the same
  * pixels on the app-wide indicator. A read that failed, has not landed, or came
  * back with nothing to read is `unknown`; only a resolved report whose every
- * producer measured complete coverage is `healthy`.
+ * producer looked and found nothing is `healthy`.
+ *
+ * Parsed with Observatory's route contract, not the generated
+ * `StorageFindingsPayloadSchema`. That generated shape describes a `{ kinds }`
+ * payload this route does not serve — `storage_findings_api.rs` sets
+ * `payload.kind_statuses` — so validating against it fails on every real
+ * response and pins the dot to `unknown` forever. Wrong in the safe direction,
+ * but it makes `healthy` unreachable and the indicator meaningless.
  */
 function useDoctorHealth(): DoctorHealth {
   const scope = useScope((s) => s.scope);
   const findings = useQuery({
     queryKey: ['storage', 'findings', scopeKey(scope)],
     queryFn: () =>
-      fetchEnvelope(scopedUrl(scope, '/api/storage/findings'), StorageFindingsPayloadSchema),
+      fetchEnvelope(
+        scopedUrl(scope, '/api/storage/findings'),
+        ObservatoryStorageFindingsPayloadSchema,
+      ),
     refetchInterval: 60_000,
   });
   const result = findings.data;
   if (!result || result.outcome === 'transport') return 'unknown';
-  const kinds = result.envelope.payload.kinds;
+  const statuses = result.envelope.payload.kind_statuses;
   // A report naming no producers has established nothing about this store.
-  if (kinds.length === 0) return 'unknown';
-  const readings = kinds.map((kind) => kindHealth(kind.state));
+  if (statuses.length === 0) return 'unknown';
+  const readings = statuses.map(kindHealth);
   if (readings.includes('attention')) return 'attention';
   if (readings.includes('unknown')) return 'unknown';
   return 'healthy';

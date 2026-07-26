@@ -381,16 +381,19 @@ export function InstrumentReadout({
        * grey ribbon. Setting the figures on the display tier and the names on
        * the legend tier puts the two ends of the scale side by side, so the
        * numbers carry from across the room and the labels stay quiet. */}
+      {/* Term before description in the DOM; `flex-col-reverse` keeps the figure
+        * above its name on screen, so the reading order is fixed without moving
+        * a pixel. */}
       <dl className="flex min-w-0 flex-wrap items-end gap-x-5 gap-y-2 bg-surface-0/75 px-3.5 py-2 backdrop-blur-sm">
         {items.map((item) => (
-          <div key={item.label} className="flex flex-col gap-1">
+          <div key={item.label} className="flex flex-col-reverse gap-1">
+            <dt className="td-legend">{item.label}</dt>
             <dd
               className="td-display text-lg text-text-primary"
               data-cell="numeric"
             >
               {item.value.toLocaleString()}
             </dd>
-            <dt className="td-legend">{item.label}</dt>
           </div>
         ))}
       </dl>

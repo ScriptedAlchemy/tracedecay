@@ -41,10 +41,11 @@ mod code_index_freshness_api;
 pub mod contract_schema;
 mod delivery_api;
 mod doctor_findings_api;
-mod doctor_remediation_api;
+pub(crate) mod doctor_remediation_api;
 pub(crate) use doctor_remediation_api::{
     DoctorRemediationDispatchCommandV1, DoctorRemediationDispatchErrorV1,
     DoctorRemediationDispatcherV1, DoctorRemediationOperationPhaseV1, DoctorRemediationOperationV1,
+    DoctorRemediationTargetV1,
 };
 mod events_api;
 mod explorer_api;
@@ -791,13 +792,6 @@ fn router_with_active_application(
     let router = Router::new()
         .route("/", get(assets::app_index))
         .route("/static/{*tail}", get(assets::app_static))
-        .route("/legacy", get(assets::index_html))
-        .route("/shell/{file}", get(assets::shell_asset))
-        .route(
-            "/dashboard-plugins/{plugin}/dist/{file}",
-            get(assets::plugin_asset),
-        )
-        .route("/api/dashboard/plugins", get(plugins_list))
         .route("/api/projects", get(projects::list))
         .route("/api/projects/{project_id}", get(projects::context))
         .route(
@@ -1030,6 +1024,10 @@ fn project_api_router() -> Router<DashboardState> {
         .route(
             "/api/plugins/graph/node/{node_id}/tests",
             get(graph_structure_api::node_tests),
+        )
+        .route(
+            "/api/plugins/graph/node/{node_id}/sessions",
+            get(graph_structure_api::node_sessions),
         )
         // Durable analytics API (hint lifecycle scaffolds + session usage rollups)
         .route(
@@ -1272,33 +1270,8 @@ async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
             "host_mode": automation_host_mode,
             "availability": backend_availability,
         },
-        "dashboards": assets::DASHBOARD_PLUGINS
-            .iter()
-            .map(|plugin| plugin.name)
-            .collect::<Vec<_>>(),
+        "dashboards": ["tracedecay"],
     }))
-}
-
-/// Plugin manifest list, mirroring the Hermes `/api/dashboard/plugins`
-/// endpoint shape closely enough for the standalone shell.
-async fn plugins_list() -> Json<Value> {
-    Json(json!(
-        assets::DASHBOARD_PLUGINS
-            .iter()
-            .map(|plugin| {
-                json!({
-                    "name": plugin.name,
-                    "label": plugin.label,
-                    "description": plugin.description,
-                    "icon": plugin.icon,
-                    "entry": "dist/index.js",
-                    "css": "dist/style.css",
-                    "has_api": true,
-                    "source": "tracedecay",
-                })
-            })
-            .collect::<Vec<_>>()
-    ))
 }
 
 #[cfg(test)]

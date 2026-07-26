@@ -605,7 +605,7 @@ pub(super) async fn handle_project_search(
         return Ok(registry_result(&args, &payload));
     };
     let active_id = active_project_id(cg, db).await?;
-    let mut projects = db.search_code_projects(query, limit + 1).await;
+    let mut projects = db.try_search_code_projects(query, limit + 1).await?;
     let truncated = projects.len() > limit;
     projects.truncate(limit);
     let contexts = db.project_registry_contexts_for_projects(&projects).await?;

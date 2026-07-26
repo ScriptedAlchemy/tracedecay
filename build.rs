@@ -2,56 +2,6 @@ use std::hash::{Hash, Hasher};
 use std::process::Command;
 use std::{collections::hash_map::DefaultHasher, fmt::Write as _, fs, path::Path};
 
-// Legacy plugin bundles embedded by `src/dashboard/assets.rs` for `/legacy`
-// and Hermes wrapper compatibility. The production `/` route uses the
-// single-app `dashboard/app-dist` manifest generated below. These committed
-// legacy bundles are only verified and hashed here; the source-backed
-// single-app build is handled by `build_and_embed_dashboard_app`.
-const DASHBOARD_ASSET_FILES: &[&str] = &[
-    "dashboard/shell/dist/shell.js",
-    "dashboard/shell/dist/shell.css",
-    "dashboard/holographic/dist/index.js",
-    "dashboard/holographic/dist/style.css",
-    "dashboard/lcm/dist/index.js",
-    "dashboard/lcm/dist/style.css",
-    "dashboard/graph/dist/index.js",
-    "dashboard/graph/dist/style.css",
-    "dashboard/code-diagnostics/dist/index.js",
-    "dashboard/code-diagnostics/dist/style.css",
-    "dashboard/savings/dist/index.js",
-    "dashboard/savings/dist/style.css",
-    "dashboard/settings/dist/index.js",
-    "dashboard/settings/dist/style.css",
-];
-
-/// Hashes the committed dashboard placeholder bundles into a stable asset stamp
-/// (used for HTTP `ETag`/cache validation in `src/dashboard/assets.rs`). Fails
-/// fast with a clear message if any placeholder bundle is missing — the
-/// bundles are tracked in git, so a missing file means a corrupt checkout, not
-/// a skipped frontend build.
-fn emit_dashboard_asset_inputs() -> String {
-    let mut hasher = DefaultHasher::new();
-    let mut missing = Vec::new();
-    for relative in DASHBOARD_ASSET_FILES {
-        println!("cargo::rerun-if-changed={relative}");
-        relative.hash(&mut hasher);
-        match fs::read(relative) {
-            Ok(bytes) => bytes.hash(&mut hasher),
-            Err(_) => missing.push(*relative),
-        }
-    }
-    if !missing.is_empty() {
-        panic!(
-            "\n\ndashboard placeholder bundles are missing:\n  {}\n\n\
-             These are committed to git (dashboard/*/dist/**). A missing file\n\
-             means the checkout is incomplete; restore them with `git checkout\n\
-             -- dashboard`.\n",
-            missing.join("\n  ")
-        );
-    }
-    format!("{:016x}", hasher.finish())
-}
-
 /// Recursively collects every file under `root`, relative to `root`, using
 /// forward-slash separators. Returns sorted paths so codegen is deterministic.
 fn collect_files_relative(root: &Path) -> Vec<String> {
@@ -280,7 +230,7 @@ fn generate_plugin_bundle() {
 /// keeps a content stamp over the frontend sources; when stale (or app-dist is
 /// missing) it shells out to `npm run build` (npm ci first when node_modules
 /// is absent) and fails fast on error. In a packaged crate the frontend
-/// sources are absent, so the committed app-dist is used as-is and npm is
+/// sources are absent, so the packaged app-dist is used as-is and npm is
 /// never invoked. The dist is then embedded via a
 /// generated manifest in OUT_DIR so the installed binary serves the UI with
 /// zero filesystem dependency.
@@ -322,7 +272,7 @@ fn build_and_embed_dashboard_app() {
     // A packaged crate ships the prebuilt app-dist but none of the frontend
     // sources the stamp is computed from, so the stamp can never match there
     // and `fresh` is always false. Rebuilding is impossible in that tree — npm
-    // would run in a directory with no package.json — so treat the committed
+    // would run in a directory with no package.json — so treat the packaged
     // dist as authoritative whenever the sources are absent.
     let sources_present = Path::new("dashboard/package.json").exists();
     if !fresh && !sources_present {
@@ -423,8 +373,6 @@ fn main() {
         panic!("failed to write {}: {e}", out_path.display());
     }
     println!("cargo::rerun-if-changed=src/resources/logo.png");
-    let asset_stamp = emit_dashboard_asset_inputs();
-    println!("cargo::rustc-env=TRACEDECAY_DASHBOARD_ASSET_STAMP={asset_stamp}");
 
     // Generator provenance: baked into generated agent plugins (manifest +
     // module header) so a stale installed plugin is distinguishable from

@@ -304,11 +304,9 @@ fn graph_api_returns_seeded_overview_search_detail_and_subgraph() {
             get_json(&agent, &format!("{}/api/capabilities", fixture.base_url));
         assert_eq!(status, 200);
         assert_eq!(capabilities["features"]["graph"], true);
-        assert!(
-            capabilities["dashboards"]
-                .as_array()
-                .is_some_and(|dashboards| dashboards.iter().any(|name| name == "graph")),
-            "capabilities should advertise the graph dashboard"
+        assert_eq!(
+            capabilities["dashboards"],
+            serde_json::json!(["tracedecay"])
         );
 
         let (status, overview) = get_json(
@@ -708,6 +706,27 @@ fn structure_visualization_endpoints_report_measured_data() {
                     test["id"] == "n-route-test" && test["file_path"] == "tests/dashboard_graph.rs"
                 })),
             "test map should report the covering test: {tests}"
+        );
+        let (status, sessions) = get_json(
+            &agent,
+            &format!(
+                "{}/api/plugins/graph/node/n-route/sessions",
+                fixture.base_url
+            ),
+        );
+        assert_eq!(status, 200, "{sessions}");
+        assert_eq!(sessions["payload"]["status"], "measured");
+        assert_eq!(
+            sessions["payload"]["measurement"]["available_granularities"],
+            serde_json::json!(["file"])
+        );
+        assert_eq!(
+            sessions["payload"]["measurement"]["linkage"]["providers"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            sessions["payload"]["measurement"]["symbol_granularity_available"],
+            false
         );
     });
 }
