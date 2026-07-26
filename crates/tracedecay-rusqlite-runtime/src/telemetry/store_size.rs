@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -8,8 +8,8 @@ use tracedecay_application::{
     RequestAdmission, RequestContext, ResolvedScope,
     storage::{
         StorageByteSizeV1, StorageTelemetryFuture, StorageTelemetryReadV1, StoreKeyV1,
-        StoreSizeSampleV1, StoreSizeTelemetryPort, TableGrowthSampleV1, TableGrowthTelemetryReadV1,
-        TableNameV1,
+        StoreSizeSampleV1, StoreSizeTelemetryPort, TableGrowthBaselinePendingV1,
+        TableGrowthSampleV1, TableGrowthTelemetryReadV1, TableNameV1,
     },
 };
 use tracedecay_domain::UtcMicros;
@@ -143,30 +143,33 @@ impl StoreSizeTelemetryPort for SqliteStoreSizeTelemetryPort {
                 };
             };
 
-            let tables: BTreeSet<_> = previous_watermarks
-                .keys()
-                .chain(current_tables.keys())
-                .cloned()
-                .collect();
-            let growth = tables
-                .into_iter()
-                .filter_map(|table| {
-                    let previous = previous_watermarks.get(&table)?;
-                    let current_bytes = current_tables
-                        .get(&table)
-                        .copied()
-                        .unwrap_or(StorageByteSizeV1::ZERO);
+            let mut growth = Vec::new();
+            let mut baseline_pending = Vec::new();
+            for (table, current_bytes) in &current_tables {
+                if let Some(previous) = previous_watermarks.get(table) {
                     let sample = TableGrowthSampleV1 {
                         store: store.clone(),
-                        table,
+                        table: table.clone(),
                         previous_bytes: previous.bytes,
-                        current_bytes,
+                        current_bytes: *current_bytes,
                         previous_observed_at: previous.observed_at,
                         current_observed_at: observed_at,
                     };
-                    sample.validate().ok().map(|_| sample)
-                })
-                .collect();
+                    if sample.validate().is_err() {
+                        return TableGrowthTelemetryReadV1::Unknown {
+                            store: store.clone(),
+                        };
+                    }
+                    growth.push(sample);
+                } else {
+                    baseline_pending.push(TableGrowthBaselinePendingV1 {
+                        store: store.clone(),
+                        table: table.clone(),
+                        current_bytes: *current_bytes,
+                        observed_at,
+                    });
+                }
+            }
             *watermarks = Some(
                 current_tables
                     .into_iter()
@@ -176,6 +179,7 @@ impl StoreSizeTelemetryPort for SqliteStoreSizeTelemetryPort {
             TableGrowthTelemetryReadV1::Observed {
                 store: store.clone(),
                 samples: growth,
+                baseline_pending,
             }
         })
     }
