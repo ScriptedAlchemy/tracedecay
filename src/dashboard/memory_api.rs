@@ -151,12 +151,45 @@ struct MemoryFactsCoverageV1 {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub(super) struct MemoryFactRowV1 {
+    fact_id: i64,
+    trust_score: f64,
+    retrieval_count: i64,
+    access_count: i64,
+    helpful_count: i64,
+    unhelpful_count: i64,
+    created_at: i64,
+    updated_at: i64,
+    last_recalled_at: Option<i64>,
+    has_hrr: Option<i64>,
+    content: Option<String>,
+    category: Option<String>,
+    tags: Option<Vec<String>>,
+    metadata: Option<Value>,
+    entities: Option<Vec<MemoryEntityRowV1>>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub(super) struct MemoryEntityRowV1 {
+    entity_id: Option<i64>,
+    name: String,
+    entity_type: Option<String>,
+    aliases: Vec<String>,
+    created_at: i64,
+    fact_count: u64,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 struct MemoryHolographicPayloadV1 {
     path: String,
     exists: bool,
     overview: Option<MemoryOverviewSummaryV1>,
-    facts: Vec<BTreeMap<String, Value>>,
-    entities: Vec<BTreeMap<String, Value>>,
+    facts: Vec<MemoryFactRowV1>,
+    entities: Vec<MemoryEntityRowV1>,
     graph: BTreeMap<String, Value>,
     error: String,
     reads: BTreeMap<String, MemoryReadStatusV1>,
@@ -191,7 +224,7 @@ pub(super) struct MemoryStatusPayloadV1 {
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 pub(super) struct MemoryFactDetailPayloadV1 {
-    fact: Option<BTreeMap<String, Value>>,
+    fact: Option<MemoryFactRowV1>,
     error: String,
 }
 
