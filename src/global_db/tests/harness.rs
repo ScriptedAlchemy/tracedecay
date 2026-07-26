@@ -9,15 +9,15 @@ use crate::global_db::RegisteredGlobalDb;
 
 static TEST_RUNTIME_NONCE: AtomicU64 = AtomicU64::new(1);
 
-pub(in crate::global_db) struct RegisteredGlobalDbHarness {
-    pub(in crate::global_db) registered: Arc<RegisteredGlobalDb>,
+pub(crate) struct RegisteredGlobalDbHarness {
+    pub(crate) registered: Arc<RegisteredGlobalDb>,
     _directory: TempDir,
     scope: Option<DaemonDatabaseScope>,
     registry: DaemonSessionRuntimeRegistryV1,
 }
 
 impl RegisteredGlobalDbHarness {
-    pub(in crate::global_db) async fn open(label: &str) -> Self {
+    pub(crate) async fn open(label: &str) -> Self {
         let directory = tempfile::tempdir().expect("temporary registered global database");
         let profile_root = directory.path().join("profile");
         let identity = crate::daemon::profile_identity::load_or_create(&profile_root)

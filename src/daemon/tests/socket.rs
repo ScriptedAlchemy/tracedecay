@@ -27,6 +27,327 @@ fn closed_feedback_list_request(
     )
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn dropping_lsp_client_sends_immediate_session_detach() {
+    let (listener, endpoint) = super::super::transport::BrokerListener::bind(
+        &super::super::transport::default_loopback_endpoint(),
+    )
+    .await
+    .expect("loopback listener");
+    let server = tokio::spawn(async move {
+        let stream = listener.accept().await.expect("accept client");
+        let (reader, mut writer) = stream.into_split();
+        let mut lines = tokio::io::BufReader::new(reader).lines();
+        lines
+            .next_line()
+            .await
+            .expect("read handshake")
+            .expect("handshake");
+        let open: Value = serde_json::from_str(
+            &lines
+                .next_line()
+                .await
+                .expect("read open")
+                .expect("open request"),
+        )
+        .expect("open json");
+        assert_eq!(open["operation"], "lsp_open");
+        let response = serde_json::json!({
+            "protocol": super::super::DAEMON_INVOCATION_PROTOCOL,
+            "revision": super::super::DAEMON_INVOCATION_REVISION,
+            "request_id": "lsp.1",
+            "status": "lsp_opened",
+            "session": {
+                "session_id": "lsp-drop-test",
+                "credential": "0000000000000000000000000000000000000000000000000000000000000000"
+            },
+            "expires_at_ms": 1000
+        });
+        writer
+            .write_all(serde_json::to_string(&response).unwrap().as_bytes())
+            .await
+            .expect("write open response");
+        writer.write_all(b"\n").await.expect("response newline");
+        writer.flush().await.expect("flush response");
+
+        let detach: Value = serde_json::from_str(
+            &tokio::time::timeout(std::time::Duration::from_secs(2), lines.next_line())
+                .await
+                .expect("drop must not wait for TTL")
+                .expect("read detach")
+                .expect("detach request"),
+        )
+        .expect("detach json");
+        assert_eq!(detach["operation"], "lsp_detach");
+        assert_eq!(detach["session"]["session_id"], "lsp-drop-test");
+    });
+    let profile = TempDir::new().expect("profile");
+    let handshake = DaemonHandshake {
+        project_path: Some(profile.path().to_path_buf()),
+        scope_prefix: None,
+        timings: false,
+        allow_init: false,
+        allow_initialize_root_routing: false,
+        client_identity: test_client_identity_for(profile.path().to_path_buf()),
+        client_version: env!("CARGO_PKG_VERSION").to_owned(),
+        client_instance_id: "client.drop-test".to_owned(),
+        tool_list_changed_capable: false,
+        catalog_version: String::new(),
+    };
+    let invocation = crate::daemon_client::DaemonInvocationClient::for_connection_for_test(
+        super::super::DaemonConnection {
+            endpoint,
+            auth_token: None,
+            authority_record: None,
+        },
+        handshake,
+    );
+    let session = crate::daemon_client::DaemonLspSessionClient::open(
+        invocation,
+        env!("CARGO_PKG_VERSION"),
+        None,
+        Vec::new(),
+    )
+    .await
+    .expect("open LSP session");
+
+    drop(session);
+    server.await.expect("server task");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn stdio_bridge_session_reconnects_on_a_fresh_socket_and_resumes_frames() {
+    let (listener, endpoint) = super::super::transport::BrokerListener::bind(
+        &super::super::transport::default_loopback_endpoint(),
+    )
+    .await
+    .expect("loopback listener");
+    let server = tokio::spawn(async move {
+        let first = listener.accept().await.expect("accept first connection");
+        let (reader, mut writer) = first.into_split();
+        let mut lines = tokio::io::BufReader::new(reader).lines();
+        lines
+            .next_line()
+            .await
+            .expect("read first handshake")
+            .expect("first handshake");
+        let open: Value = serde_json::from_str(
+            &lines
+                .next_line()
+                .await
+                .expect("read open")
+                .expect("open request"),
+        )
+        .expect("open json");
+        assert_eq!(open["operation"], "lsp_open");
+        let open_response = serde_json::json!({
+            "protocol": super::super::DAEMON_INVOCATION_PROTOCOL,
+            "revision": super::super::DAEMON_INVOCATION_REVISION,
+            "request_id": "lsp.1",
+            "status": "lsp_opened",
+            "session": {
+                "session_id": "lsp-reconnect-test",
+                "credential": "0000000000000000000000000000000000000000000000000000000000000000"
+            },
+            "expires_at_ms": 1000
+        });
+        writer
+            .write_all(serde_json::to_string(&open_response).unwrap().as_bytes())
+            .await
+            .expect("write open response");
+        writer.write_all(b"\n").await.expect("response newline");
+        writer.flush().await.expect("flush response");
+
+        let interrupted_poll: Value = serde_json::from_str(
+            &lines
+                .next_line()
+                .await
+                .expect("read interrupted poll")
+                .expect("interrupted poll request"),
+        )
+        .expect("poll json");
+        assert_eq!(interrupted_poll["operation"], "lsp_poll");
+        drop(lines);
+        drop(writer);
+
+        let second = listener.accept().await.expect("accept fresh connection");
+        let (reader, mut writer) = second.into_split();
+        let mut lines = tokio::io::BufReader::new(reader).lines();
+        lines
+            .next_line()
+            .await
+            .expect("read second handshake")
+            .expect("second handshake");
+        let reconnect: Value = serde_json::from_str(
+            &lines
+                .next_line()
+                .await
+                .expect("read reconnect")
+                .expect("reconnect request"),
+        )
+        .expect("reconnect json");
+        assert_eq!(reconnect["operation"], "lsp_reconnect");
+        assert_eq!(
+            reconnect["session"]["credential"],
+            "0000000000000000000000000000000000000000000000000000000000000000"
+        );
+        let reconnect_response = serde_json::json!({
+            "protocol": super::super::DAEMON_INVOCATION_PROTOCOL,
+            "revision": super::super::DAEMON_INVOCATION_REVISION,
+            "request_id": reconnect["request_id"],
+            "status": "lsp_reconnected",
+            "session": {
+                "session_id": "lsp-reconnect-test",
+                "credential": "1111111111111111111111111111111111111111111111111111111111111111"
+            }
+        });
+        writer
+            .write_all(
+                serde_json::to_string(&reconnect_response)
+                    .unwrap()
+                    .as_bytes(),
+            )
+            .await
+            .expect("write reconnect response");
+        writer.write_all(b"\n").await.expect("response newline");
+        writer.flush().await.expect("flush response");
+
+        let resumed_poll: Value = serde_json::from_str(
+            &lines
+                .next_line()
+                .await
+                .expect("read resumed poll")
+                .expect("resumed poll request"),
+        )
+        .expect("resumed poll json");
+        assert_eq!(resumed_poll["operation"], "lsp_poll");
+        assert_eq!(
+            resumed_poll["session"]["credential"],
+            "1111111111111111111111111111111111111111111111111111111111111111"
+        );
+        let poll_response = serde_json::json!({
+            "protocol": super::super::DAEMON_INVOCATION_PROTOCOL,
+            "revision": super::super::DAEMON_INVOCATION_REVISION,
+            "request_id": resumed_poll["request_id"],
+            "status": "lsp_frame",
+            "frame": "{\"jsonrpc\":\"2.0\",\"method\":\"window/logMessage\",\"params\":{\"type\":3,\"message\":\"resumed\"}}",
+            "closed": false
+        });
+        writer
+            .write_all(serde_json::to_string(&poll_response).unwrap().as_bytes())
+            .await
+            .expect("write resumed frame");
+        writer.write_all(b"\n").await.expect("response newline");
+        writer.flush().await.expect("flush response");
+
+        let client_frame: Value = serde_json::from_str(
+            &lines
+                .next_line()
+                .await
+                .expect("read resumed client frame")
+                .expect("resumed client frame request"),
+        )
+        .expect("client frame json");
+        assert_eq!(client_frame["operation"], "lsp_frame");
+        assert_eq!(
+            client_frame["session"]["credential"],
+            "1111111111111111111111111111111111111111111111111111111111111111"
+        );
+        let frame_response = serde_json::json!({
+            "protocol": super::super::DAEMON_INVOCATION_PROTOCOL,
+            "revision": super::super::DAEMON_INVOCATION_REVISION,
+            "request_id": client_frame["request_id"],
+            "status": "lsp_frame_accepted",
+            "backpressured": false,
+            "closed": false
+        });
+        writer
+            .write_all(serde_json::to_string(&frame_response).unwrap().as_bytes())
+            .await
+            .expect("write frame response");
+        writer.write_all(b"\n").await.expect("response newline");
+        writer.flush().await.expect("flush response");
+
+        let detach: Value = serde_json::from_str(
+            &lines
+                .next_line()
+                .await
+                .expect("read detach")
+                .expect("detach request"),
+        )
+        .expect("detach json");
+        assert_eq!(detach["operation"], "lsp_detach");
+        assert_eq!(
+            detach["session"]["credential"],
+            "1111111111111111111111111111111111111111111111111111111111111111"
+        );
+        let detach_response = serde_json::json!({
+            "protocol": super::super::DAEMON_INVOCATION_PROTOCOL,
+            "revision": super::super::DAEMON_INVOCATION_REVISION,
+            "request_id": detach["request_id"],
+            "status": "lsp_detached"
+        });
+        writer
+            .write_all(serde_json::to_string(&detach_response).unwrap().as_bytes())
+            .await
+            .expect("write detach response");
+        writer.write_all(b"\n").await.expect("response newline");
+        writer.flush().await.expect("flush response");
+    });
+    let profile = TempDir::new().expect("profile");
+    let handshake = DaemonHandshake {
+        project_path: Some(profile.path().to_path_buf()),
+        scope_prefix: None,
+        timings: false,
+        allow_init: false,
+        allow_initialize_root_routing: false,
+        client_identity: test_client_identity_for(profile.path().to_path_buf()),
+        client_version: env!("CARGO_PKG_VERSION").to_owned(),
+        client_instance_id: "client.reconnect-test".to_owned(),
+        tool_list_changed_capable: false,
+        catalog_version: String::new(),
+    };
+    let invocation = crate::daemon_client::DaemonInvocationClient::for_connection_for_test(
+        super::super::DaemonConnection {
+            endpoint,
+            auth_token: None,
+            authority_record: None,
+        },
+        handshake,
+    );
+    let mut session = crate::daemon_client::DaemonLspSessionClient::open(
+        invocation,
+        env!("CARGO_PKG_VERSION"),
+        None,
+        Vec::new(),
+    )
+    .await
+    .expect("open LSP session");
+
+    assert!(session.poll_daemon_frame().await.is_err());
+    session
+        .reconnect()
+        .await
+        .expect("reconnect over fresh daemon connection");
+    assert!(matches!(
+        session.poll_daemon_frame().await.expect("resumed poll"),
+        crate::lsp_bridge::FramePoll::Frame(frame) if frame.ends_with(b"\"resumed\"}}")
+    ));
+    assert_eq!(
+        session
+            .try_send_client_frame(
+                "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didSave\",\"params\":{}}"
+            )
+            .await
+            .expect("resumed client frame"),
+        crate::lsp_bridge::FrameSend::Sent
+    );
+    session.detach().await.expect("detach resumed session");
+    server.await.expect("server task");
+}
+
 #[test]
 fn tool_json_payload_requires_exactly_one_json_block() {
     let valid = serde_json::json!({
