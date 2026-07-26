@@ -4,6 +4,10 @@
 SDK names for the same callable operations; it does not add a second runtime or
 defer missing lifecycle semantics.
 
+**Active-band disposition (2026-07-26): SCOPE-OUT.** This plan is exclusively
+PR17 runtime work under `00-plan-set-index.md`. Its unimplemented requirements
+must not be filed as unmet PR8–PR14 or PR14-dashboard work.
+
 Earlier runtime type/file inventories, operation registries, fixture corpora,
 phase names, and packet gates are historical evidence, not prerequisites or
 features that PR17 must recreate. Published operations and persisted

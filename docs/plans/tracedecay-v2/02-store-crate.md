@@ -2,13 +2,20 @@
 
 ## Status / Role
 
-PR5 production observation persistence is complete. `tracedecay-store` owns persistence
-contracts and DTOs; the daemon-owned `GlobalDb` adapter owns live connections
-and transactions. This boundary participates in vertical PRs and does not grow
-into a second database implementation. See [the plan index](00-plan-set-index.md)
-and [global ownership rules](README.md). Production store paths emit the
-database and write-amplification measurements consumed by the end-to-end
-performance journey; this plan does not create a separate benchmark milestone.
+PR5 production **session-observation** persistence is complete. That completion
+statement does not include the external-source persistence section below:
+`apply_source_commit` remains a contract helper with no production caller, and
+no production adapter or migration backs that path. The external-source block
+is a retained future seam, neither delivered PR5/PR6 behavior nor PR8–PR14 work
+to implement or delete (status corrected 2026-07-26).
+
+`tracedecay-store` owns persistence contracts and DTOs; the daemon-owned
+`GlobalDb` adapter owns live connections and transactions. This boundary
+participates in vertical PRs and does not grow into a second database
+implementation. See [the plan index](00-plan-set-index.md) and
+[global ownership rules](README.md). Production store paths emit the database
+and write-amplification measurements consumed by the end-to-end performance
+journey; this plan does not create a separate benchmark milestone.
 
 ## Outcome
 

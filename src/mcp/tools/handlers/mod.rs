@@ -1588,7 +1588,7 @@ mod tests {
         fn new(root: &Path) -> Self {
             let home = root.join("home");
             let profile_root = home.join(".tracedecay");
-            fs::create_dir_all(&profile_root).unwrap();
+            crate::storage::PrivateStoreIo::create_dir_all(&profile_root).unwrap();
             let home = home.canonicalize().unwrap();
             let profile_root = home.join(".tracedecay");
             let global_db_path = profile_root.join("global.db");
