@@ -1834,7 +1834,8 @@ impl<'de> Deserialize<'de> for DurableObservationV1 {
         )
         .map_err(serde::de::Error::custom)?;
         let accepted =
-            accepted_identity_digests(&observation.identity).map_err(serde::de::Error::custom)?;
+            accepted_identity_digests(&observation.observation_id, &observation.identity)
+                .map_err(serde::de::Error::custom)?;
         if !accepted.contains(&expected_observation_id) {
             return Err(serde::de::Error::custom(
                 ObservationContractError::ObservationIdentityMismatch,
@@ -1927,7 +1928,12 @@ fn domain_digest(
 /// nothing downstream can quarantine a row that will not decode.
 ///
 /// A new derivation goes at the front of this list and nowhere else.
+///
+/// `current` is the caller's already-derived id rather than a re-derivation,
+/// because the warm-up authority audit runs this once per row over the whole
+/// `observations` table.
 fn accepted_identity_digests(
+    current: &CanonicalObservationIdV1,
     material: &ClaudeObservationIdentityMaterialV1,
 ) -> Result<[CanonicalObservationIdV1; 3], ObservationContractError> {
     let provider_domain = if is_default_observation_provider(material.source().provider()) {
@@ -1936,7 +1942,7 @@ fn accepted_identity_digests(
         OBSERVATION_ID_DOMAIN
     };
     Ok([
-        CanonicalObservationIdV1::derive(material)?,
+        current.clone(),
         CanonicalObservationIdV1::new(domain_digest(provider_domain, material)?)?,
         CanonicalObservationIdV1::new(domain_digest(LEGACY_IDEMPOTENCY_KEY_DOMAIN, material)?)?,
     ])
