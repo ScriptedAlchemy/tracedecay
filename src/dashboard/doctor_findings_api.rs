@@ -446,17 +446,24 @@ mod tests {
 
     use crate::tracedecay::TraceDecay;
 
-    async fn state_for_test() -> (tempfile::TempDir, DashboardState) {
+    async fn state_for_test() -> (
+        tempfile::TempDir,
+        Arc<crate::application::host_admission::HostAdmissionTestRuntimeV1>,
+        DashboardState,
+    ) {
         let project = tempfile::tempdir().expect("project tempdir");
         std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
             .expect("fixture source");
-        let cg = TraceDecay::init(project.path())
-            .await
-            .expect("project init");
+        let (cg, runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+            project.path(),
+            "project.dashboard-doctor-findings",
+        )
+        .await
+        .expect("project init");
         let state = crate::dashboard::build_state(&cg)
             .await
             .expect("dashboard state");
-        (project, state)
+        (project, runtime, state)
     }
 
     fn context() -> RequestContext {
@@ -494,8 +501,12 @@ mod tests {
 
     async fn state_with_inputs(
         inputs: crate::daemon::doctor_kernel::DoctorKernelInputsV1,
-    ) -> (tempfile::TempDir, DashboardState) {
-        let (project, mut state) = state_for_test().await;
+    ) -> (
+        tempfile::TempDir,
+        Arc<crate::application::host_admission::HostAdmissionTestRuntimeV1>,
+        DashboardState,
+    ) {
+        let (project, runtime, mut state) = state_for_test().await;
         let report = crate::daemon::doctor_kernel::compose_doctor_report(&context(), &inputs)
             .await
             .unwrap();
@@ -503,7 +514,7 @@ mod tests {
             let report = report.clone();
             Box::pin(async move { Ok(crate::dashboard::AdmittedDoctorReportV1::new(report)) })
         }));
-        (project, state)
+        (project, runtime, state)
     }
 
     #[test]
@@ -524,7 +535,7 @@ mod tests {
     #[tokio::test]
     async fn findings_route_is_typed_unsupported_not_empty_or_healthy() {
         let _pin = crate::config::PinnedUserDataDir::new();
-        let (_project, state) = state_for_test().await;
+        let (_project, _runtime, state) = state_for_test().await;
         let Json(envelope) = findings(State(state), Query(FindingsParams { family: None })).await;
 
         assert_eq!(envelope.schema_revision, 1);
@@ -538,7 +549,7 @@ mod tests {
     #[tokio::test]
     async fn findings_route_echoes_valid_family_filter() {
         let _pin = crate::config::PinnedUserDataDir::new();
-        let (_project, state) = state_for_test().await;
+        let (_project, _runtime, state) = state_for_test().await;
         let Json(envelope) = findings(
             State(state),
             Query(FindingsParams {
@@ -556,7 +567,7 @@ mod tests {
     #[tokio::test]
     async fn findings_route_rejects_unknown_family_with_error_state() {
         let _pin = crate::config::PinnedUserDataDir::new();
-        let (_project, state) = state_for_test().await;
+        let (_project, _runtime, state) = state_for_test().await;
         let Json(envelope) = findings(
             State(state),
             Query(FindingsParams {
@@ -569,32 +580,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn findings_route_preserves_canonical_unknown_and_unsupported_entries() {
+    async fn findings_route_preserves_canonical_unknown_entries() {
         let _pin = crate::config::PinnedUserDataDir::new();
-        let (_project, state) =
+        let (_project, _runtime, state) =
             state_with_inputs(crate::daemon::doctor_kernel::DoctorKernelInputsV1::all_unknown())
                 .await;
 
         let Json(envelope) = findings(State(state), Query(FindingsParams { family: None })).await;
 
         assert_eq!(envelope.domain_state, DashboardDomainStateV1::Partial);
-        assert_eq!(envelope.payload.entries.len(), 7);
-        assert!(
-            envelope
-                .payload
-                .entries
-                .iter()
-                .any(|entry| entry.finding().state()
-                    == tracedecay_application::doctor::DoctorEvidenceStateV1::Unknown)
-        );
-        assert!(
-            envelope
-                .payload
-                .entries
-                .iter()
-                .any(|entry| entry.finding().state()
-                    == tracedecay_application::doctor::DoctorEvidenceStateV1::Unsupported)
-        );
+        // Advisory has both host-integration and feedback-owner findings.
+        assert_eq!(envelope.payload.entries.len(), 8);
+        assert!(envelope.payload.entries.iter().all(|entry| {
+            entry.finding().state()
+                == tracedecay_application::doctor::DoctorEvidenceStateV1::Unknown
+        }));
         assert_eq!(
             envelope
                 .payload
@@ -615,7 +615,7 @@ mod tests {
             drift: ConfigurationDriftV1::Drifted,
             coverage: DoctorCoverageCompletenessV1::Complete,
         };
-        let (_project, state) = state_with_inputs(inputs).await;
+        let (_project, _runtime, state) = state_with_inputs(inputs).await;
 
         let Json(envelope) = findings(
             State(state),
@@ -648,7 +648,7 @@ mod tests {
             drift: ConfigurationDriftV1::Drifted,
             coverage: DoctorCoverageCompletenessV1::Complete,
         };
-        let (_project, mut state) = state_with_inputs(inputs).await;
+        let (_project, _runtime, mut state) = state_with_inputs(inputs).await;
         state.doctor_remediation_dispatcher = Some(
             super::super::doctor_remediation_api::DoctorRemediationDispatcherV1::new(
                 Arc::new(|_| Box::pin(async { vec![DashboardLegalActionKindV1::RequestApply] })),

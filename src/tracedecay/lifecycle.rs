@@ -27,6 +27,24 @@ use super::locking::{
 };
 use super::{TraceDecay, TraceDecayOpenOptions, current_timestamp};
 
+#[cfg(test)]
+fn test_fixture_runtime_registry() -> &'static std::sync::Mutex<
+    std::collections::BTreeMap<
+        PathBuf,
+        std::sync::Weak<crate::application::host_admission::HostAdmissionTestRuntimeV1>,
+    >,
+> {
+    static REGISTRY: std::sync::OnceLock<
+        std::sync::Mutex<
+            std::collections::BTreeMap<
+                PathBuf,
+                std::sync::Weak<crate::application::host_admission::HostAdmissionTestRuntimeV1>,
+            >,
+        >,
+    > = std::sync::OnceLock::new();
+    REGISTRY.get_or_init(|| std::sync::Mutex::new(std::collections::BTreeMap::new()))
+}
+
 impl TraceDecay {
     fn registered_project_id(store_layout: &StoreLayout) -> Result<ProjectId> {
         let project_id =
@@ -143,6 +161,47 @@ impl TraceDecay {
             runtime_registry,
         )
         .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn init_test_fixture_with_registered_runtime(
+        project_root: &Path,
+        project_id: &str,
+    ) -> Result<(
+        Self,
+        Arc<crate::application::host_admission::HostAdmissionTestRuntimeV1>,
+    )> {
+        let profile_root = crate::storage::default_profile_root()?;
+        let project_id = tracedecay_domain::ProjectId::new(project_id).map_err(|error| {
+            TraceDecayError::Config {
+                message: format!("invalid test fixture project identity: {error}"),
+            }
+        })?;
+        let runtime = Arc::new(
+            crate::application::host_admission::HostAdmissionTestRuntimeV1::project(
+                &profile_root,
+                project_root,
+                project_id,
+            )
+            .await?,
+        );
+        let graph = runtime
+            .initialize_project_graph_for_test(
+                project_root,
+                TraceDecayOpenOptions {
+                    profile_root: Some(profile_root),
+                    global_db_path: None,
+                },
+            )
+            .await?;
+        let project_root = project_root
+            .canonicalize()
+            .unwrap_or_else(|_| project_root.to_path_buf());
+        test_fixture_runtime_registry()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert(project_root, Arc::downgrade(&runtime));
+        Ok((graph, runtime))
     }
 
     pub(crate) async fn init_with_registered_configuration(
@@ -630,9 +689,26 @@ impl TraceDecay {
     }
 
     pub async fn open_with_options(
-        _project_root: &Path,
-        _open_options: TraceDecayOpenOptions,
+        project_root: &Path,
+        open_options: TraceDecayOpenOptions,
     ) -> Result<Self> {
+        #[cfg(test)]
+        {
+            let project_key = project_root
+                .canonicalize()
+                .unwrap_or_else(|_| project_root.to_path_buf());
+            let runtime = test_fixture_runtime_registry()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .get(&project_key)
+                .and_then(std::sync::Weak::upgrade);
+            if let Some(runtime) = runtime {
+                return runtime
+                    .open_project_graph_for_test(project_root, open_options)
+                    .await;
+            }
+        }
+        let _ = (project_root, open_options);
         Err(configuration_runtime_unavailable())
     }
 
