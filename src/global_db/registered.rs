@@ -193,6 +193,17 @@ impl RegisteredGlobalDb {
         )
     }
 
+    pub(crate) fn storage_telemetry_handle(
+        &self,
+    ) -> crate::errors::Result<tracedecay_rusqlite_runtime::migration_sql::MigrationSqlHandle> {
+        self.runtime.telemetry_read_handle().map_err(|error| {
+            registered_error(
+                "attach registered storage telemetry reader",
+                format!("{error:?}"),
+            )
+        })
+    }
+
     pub(crate) fn external_source_store(
         &self,
     ) -> Result<

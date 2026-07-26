@@ -15,7 +15,8 @@ use tracedecay_domain::{
     EphemeralSanitizedQueryViewV1, FixedPointScore, FreshnessCompatibilityV1, ManifestDigest,
     ProjectionKeyV1, QueryDigest, RetrievalBudget, RetrievalBudgetUsage, RetrievalError,
     RetrievalFailure, RetrievalRequest, Retriever, RetrieverBatch, RetrieverContinuation,
-    RetrieverCoverage, RetrieverKind, RetrieverOutcome, VectorGenerationIdV1,
+    RetrieverCoverage, RetrieverKind, RetrieverOutcome, SemanticSearchIndexKeyV1,
+    VectorGenerationIdV1,
 };
 
 use super::ports::{CodeCandidateBindingV1, CompactCandidateLane, RetrievalPortError};
@@ -58,6 +59,7 @@ impl CanonicalSemanticDistanceV1 {
 #[serde(deny_unknown_fields)]
 pub struct CodeSemanticEvidenceV1 {
     pub projection_key: EmbeddingProjectionKeyV1,
+    pub search_index_key: SemanticSearchIndexKeyV1,
     pub vector_generation: VectorGenerationIdV1,
     pub chunk_id: CodeSearchChunkId,
     pub distance: CanonicalSemanticDistanceV1,
@@ -72,6 +74,7 @@ pub struct SemanticRetrievalRequestV1<'a> {
     pub query_digest: QueryDigest,
     pub query_view: &'a EphemeralSanitizedQueryViewV1,
     pub projection: &'a AdmittedEmbeddingProjectionKeyV1,
+    pub search_index_key: &'a SemanticSearchIndexKeyV1,
     pub capability_manifest_digest: ManifestDigest,
     pub vector_generation: VectorGenerationIdV1,
     pub code_generation: CodeGenerationId,
@@ -95,6 +98,7 @@ impl SemanticRetrievalRequestV1<'_> {
             .embedding_key()
             .validate()
             .map_err(contract_error)?;
+        self.search_index_key.validate().map_err(contract_error)?;
 
         if self.base.scope.privacy_domain != *self.projection.privacy_domain()
             || self.query_digest.privacy_domain != *self.projection.privacy_domain()
@@ -172,6 +176,7 @@ pub trait SemanticQueryEmbeddingPort {
 pub struct SemanticVectorReadRequestV1<'a> {
     pub vector_generation: &'a VectorGenerationIdV1,
     pub projection_key: &'a ProjectionKeyV1,
+    pub search_index_key: &'a SemanticSearchIndexKeyV1,
     pub source_generation: &'a CodeGenerationId,
     pub capability_manifest_digest: &'a ManifestDigest,
     pub search_kind: SemanticSearchKindV1,
@@ -302,6 +307,7 @@ where
             candidate,
             CodeSemanticEvidenceV1 {
                 projection_key: request.projection.embedding_key().clone(),
+                search_index_key: request.search_index_key.clone(),
                 vector_generation: request.vector_generation.clone(),
                 chunk_id: record.chunk_id.clone(),
                 distance,
@@ -324,6 +330,7 @@ where
         let scan_request = SemanticVectorReadRequestV1 {
             vector_generation: &request.vector_generation,
             projection_key: request.projection.projection_key(),
+            search_index_key: request.search_index_key,
             source_generation: &request.code_generation,
             capability_manifest_digest: &request.capability_manifest_digest,
             search_kind: SemanticSearchKindV1::ExactFlat,
