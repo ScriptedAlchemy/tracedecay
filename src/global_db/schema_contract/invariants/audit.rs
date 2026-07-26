@@ -11,12 +11,14 @@ use crate::db::engine::{Executor, QueryExecutor, params};
 use crate::global_db::global_db_operation_error;
 
 use super::rows::{authority_violation, decode_authority_json};
-use super::{AUDIT_PAGE_ROWS, OPERATION, projection_checkpoint};
+use super::{AUDIT_PAGE_ROWS, INCOMPLETE_EXHAUSTIVE_PASS, OPERATION, projection_checkpoint};
 const AUDIT_NAME: &str = "observation-authority";
 
 const AUDIT_VERSION: i64 = 2;
 pub(super) const MAX_BOUNDED_AUDIT_PASSES: i64 = 64;
 const DETAILED_AUDIT_CONCURRENCY: usize = 32;
+const MAX_DETAILED_OBSERVATIONS_PER_PAGE: usize = 4;
+const PROJECTION_PROGRESS_PAGE_INTERVAL: i64 = 1;
 
 #[derive(Clone, Copy, Default)]
 pub(super) struct AuditCheckpoint {
@@ -143,7 +145,7 @@ pub(super) async fn audit_checkpoint_is_plausible(
         || checkpoint.disposition_rowid < 0
         || checkpoint.alias_rowid < 0
         || checkpoint.projection_checkpoint < 0
-        || !(0..MAX_BOUNDED_AUDIT_PASSES).contains(&checkpoint.bounded_passes_since_exhaustive)
+        || !(-1..MAX_BOUNDED_AUDIT_PASSES).contains(&checkpoint.bounded_passes_since_exhaustive)
     {
         return Ok(false);
     }
@@ -504,13 +506,20 @@ async fn validate_message_projection_row(
     ProjectionOutputOwnership::load(conn, &message.provider, &message.message_id)
         .await?
         .validate()?;
-    crate::global_db::observation_projection::verify_output_authority(conn, projection)
-        .await
-        .map_err(|error| {
-            authority_violation(format!(
-                "projection output rows disagree with deterministic output: {error}"
-            ))
-        })?;
+    let verification = if provenance.message_created == 1 {
+        // This observation is the canonical creator and its provenance was
+        // compared above, so looking the owner up and re-deriving this same
+        // projection only adds several SQL-channel round trips. Duplicate
+        // observations still take the full canonical-owner path below.
+        crate::global_db::observation_projection::verify_projection_rows(conn, projection).await
+    } else {
+        crate::global_db::observation_projection::verify_output_authority(conn, projection).await
+    };
+    verification.map_err(|error| {
+        authority_violation(format!(
+            "projection output rows disagree with deterministic output: {error}"
+        ))
+    })?;
     Ok(true)
 }
 
@@ -827,10 +836,81 @@ async fn collect_projection_suffix_ids(
     }
 }
 
-pub(super) async fn validate_projection_authority_suffix(
+async fn projection_rowid_through_sequence(
+    conn: &impl QueryExecutor,
+    table: &str,
+    through_observation_sequence: i64,
+) -> crate::errors::Result<i64> {
+    let query = format!(
+        "SELECT COALESCE(MAX(projection.rowid), 0)
+         FROM {table} AS projection
+         JOIN observations AS observation
+           ON observation.observation_id = projection.observation_id
+         WHERE projection.projector_version = ?1
+           AND observation.sequence <= ?2"
+    );
+    let mut rows = conn
+        .query(
+            &query,
+            params![
+                SESSION_MESSAGE_PROJECTOR_VERSION,
+                through_observation_sequence
+            ],
+        )
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    rows.next()
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?
+        .ok_or_else(|| authority_violation("projection progress query returned no row"))?
+        .get(0)
+        .map_err(|error| global_db_operation_error(OPERATION, error))
+}
+
+async fn projection_audit_checkpoint_through_sequence(
     conn: &impl QueryExecutor,
     checkpoint: AuditCheckpoint,
-) -> crate::errors::Result<(AuditCheckpoint, i64, i64, i64)> {
+    observation_sequence: i64,
+) -> crate::errors::Result<AuditCheckpoint> {
+    if checkpoint.bounded_passes_since_exhaustive == INCOMPLETE_EXHAUSTIVE_PASS {
+        return Ok(AuditCheckpoint {
+            projection_checkpoint: observation_sequence,
+            ..checkpoint
+        });
+    }
+    Ok(AuditCheckpoint {
+        provenance_rowid: projection_rowid_through_sequence(
+            conn,
+            "observation_projection_provenance",
+            observation_sequence,
+        )
+        .await?,
+        disposition_rowid: projection_rowid_through_sequence(
+            conn,
+            "observation_projection_dispositions",
+            observation_sequence,
+        )
+        .await?,
+        alias_rowid: projection_rowid_through_sequence(
+            conn,
+            "observation_projection_aliases",
+            observation_sequence,
+        )
+        .await?,
+        projection_checkpoint: observation_sequence,
+        ..checkpoint
+    })
+}
+
+fn historical_projection_delta_required(checkpoint: AuditCheckpoint) -> bool {
+    checkpoint.bounded_passes_since_exhaustive != INCOMPLETE_EXHAUSTIVE_PASS
+}
+
+async fn validate_projection_authority_suffix_pages(
+    conn: &impl QueryExecutor,
+    mut checkpoint: AuditCheckpoint,
+    page_limit: Option<i64>,
+) -> crate::errors::Result<(AuditCheckpoint, i64, i64, i64, bool)> {
     let (provenance_rowid, provenance_audited) = count_suffix_rows(
         conn,
         "observation_projection_provenance",
@@ -861,6 +941,7 @@ pub(super) async fn validate_projection_authority_suffix(
     // round-trips per row. The page query carries that state together so a
     // common skip is validated without any per-row database request.
     let mut scan_cursor = coverage_start;
+    let mut pages_audited = 0_i64;
     loop {
         let mut rows = conn
             .query(
@@ -899,6 +980,7 @@ pub(super) async fn validate_projection_authority_suffix(
             .map_err(|error| global_db_operation_error(OPERATION, error))?;
         let mut page_rows = 0_i64;
         let mut detailed_observations = Vec::<DurableObservationV1>::new();
+        let mut detailed_limit_reached = false;
         while let Some(row) = rows
             .next()
             .await
@@ -975,6 +1057,10 @@ pub(super) async fn validate_projection_authority_suffix(
                 validate_skipped_projection_row(&observation, disposition, reason)?;
             } else {
                 detailed_observations.push(observation);
+                if detailed_observations.len() >= MAX_DETAILED_OBSERVATIONS_PER_PAGE {
+                    detailed_limit_reached = true;
+                    break;
+                }
             }
         }
         drop(rows);
@@ -986,51 +1072,65 @@ pub(super) async fn validate_projection_authority_suffix(
             )
             .await?;
         }
-        if page_rows < AUDIT_PAGE_ROWS {
+        pages_audited += 1;
+        if page_rows < AUDIT_PAGE_ROWS && !detailed_limit_reached {
             break;
+        }
+        if page_limit.is_some_and(|limit| pages_audited >= limit) {
+            checkpoint =
+                projection_audit_checkpoint_through_sequence(conn, checkpoint, scan_cursor).await?;
+            return Ok((
+                checkpoint,
+                provenance_audited,
+                dispositions_audited,
+                aliases_audited,
+                false,
+            ));
         }
     }
     // Projection rows added for an already-audited observation have rowids
     // beyond the table checkpoints even though their observation sequence is
     // at or below `coverage_start`. Validate only that historical delta; the
     // frontier suffix above already covered every newer observation.
-    let mut observation_ids = BTreeSet::new();
-    collect_projection_suffix_ids(
-        conn,
-        "observation_projection_provenance",
-        checkpoint.provenance_rowid,
-        coverage_start,
-        &mut observation_ids,
-    )
-    .await?;
-    collect_projection_suffix_ids(
-        conn,
-        "observation_projection_dispositions",
-        checkpoint.disposition_rowid,
-        coverage_start,
-        &mut observation_ids,
-    )
-    .await?;
-    collect_projection_suffix_ids(
-        conn,
-        "observation_projection_aliases",
-        checkpoint.alias_rowid,
-        coverage_start,
-        &mut observation_ids,
-    )
-    .await?;
-    let mut historical_observations = Vec::with_capacity(observation_ids.len());
-    for observation_id in observation_ids {
-        let observation = observation_by_id(conn, &observation_id).await?;
-        historical_observations.push(observation);
-    }
-    for chunk in historical_observations.chunks(DETAILED_AUDIT_CONCURRENCY) {
-        try_join_all(
-            chunk
-                .iter()
-                .map(|observation| validate_projection_effect(conn, observation)),
+    if historical_projection_delta_required(checkpoint) {
+        let mut observation_ids = BTreeSet::new();
+        collect_projection_suffix_ids(
+            conn,
+            "observation_projection_provenance",
+            checkpoint.provenance_rowid,
+            coverage_start,
+            &mut observation_ids,
         )
         .await?;
+        collect_projection_suffix_ids(
+            conn,
+            "observation_projection_dispositions",
+            checkpoint.disposition_rowid,
+            coverage_start,
+            &mut observation_ids,
+        )
+        .await?;
+        collect_projection_suffix_ids(
+            conn,
+            "observation_projection_aliases",
+            checkpoint.alias_rowid,
+            coverage_start,
+            &mut observation_ids,
+        )
+        .await?;
+        let mut historical_observations = Vec::with_capacity(observation_ids.len());
+        for observation_id in observation_ids {
+            let observation = observation_by_id(conn, &observation_id).await?;
+            historical_observations.push(observation);
+        }
+        for chunk in historical_observations.chunks(DETAILED_AUDIT_CONCURRENCY) {
+            try_join_all(
+                chunk
+                    .iter()
+                    .map(|observation| validate_projection_effect(conn, observation)),
+            )
+            .await?;
+        }
     }
     Ok((
         AuditCheckpoint {
@@ -1043,7 +1143,29 @@ pub(super) async fn validate_projection_authority_suffix(
         provenance_audited,
         dispositions_audited,
         aliases_audited,
+        true,
     ))
+}
+
+pub(super) async fn validate_projection_authority_suffix(
+    conn: &impl QueryExecutor,
+    checkpoint: AuditCheckpoint,
+) -> crate::errors::Result<(AuditCheckpoint, i64, i64, i64)> {
+    let (checkpoint, provenance, dispositions, aliases, _) =
+        validate_projection_authority_suffix_pages(conn, checkpoint, None).await?;
+    Ok((checkpoint, provenance, dispositions, aliases))
+}
+
+pub(super) async fn validate_projection_authority_chunk(
+    conn: &impl QueryExecutor,
+    checkpoint: AuditCheckpoint,
+) -> crate::errors::Result<(AuditCheckpoint, i64, i64, i64, bool)> {
+    validate_projection_authority_suffix_pages(
+        conn,
+        checkpoint,
+        Some(PROJECTION_PROGRESS_PAGE_INTERVAL),
+    )
+    .await
 }
 
 pub(super) async fn write_audit_checkpoint(
@@ -1110,9 +1232,13 @@ mod tests {
     };
     use tracedecay_store::{ObservationProjection, SESSION_MESSAGE_PROJECTOR_VERSION};
 
-    use super::{AuditCheckpoint, validate_projection_authority_suffix};
+    use super::{
+        AuditCheckpoint, MAX_DETAILED_OBSERVATIONS_PER_PAGE, PROJECTION_PROGRESS_PAGE_INTERVAL,
+        historical_projection_delta_required, projection_audit_checkpoint_through_sequence,
+        validate_projection_authority_suffix,
+    };
     use crate::db::engine::{
-        IntoParams, QueryExecutor, Result as EngineResult, Rows, TestConnection, params,
+        Executor, IntoParams, QueryExecutor, Result as EngineResult, Rows, TestConnection, params,
     };
     use crate::global_db::ensure_registered_schema;
 
@@ -1129,6 +1255,64 @@ mod tests {
             self.queries.fetch_add(1, Ordering::Relaxed);
             self.inner.query(sql, params).await
         }
+    }
+
+    impl Executor for CountingQuery<'_> {
+        async fn execute<P>(&self, sql: &str, params: P) -> EngineResult<u64>
+        where
+            P: IntoParams,
+        {
+            self.inner.execute(sql, params).await
+        }
+
+        async fn execute_batch(&self, sql: &str) -> EngineResult<()> {
+            self.inner.execute_batch(sql).await
+        }
+    }
+
+    #[test]
+    fn exhaustive_projection_audit_bounds_detailed_work() {
+        assert_eq!(MAX_DETAILED_OBSERVATIONS_PER_PAGE, 4);
+        assert_eq!(PROJECTION_PROGRESS_PAGE_INTERVAL, 1);
+    }
+
+    #[test]
+    fn incomplete_exhaustive_pass_does_not_repeat_historical_projection_audit() {
+        assert!(!historical_projection_delta_required(AuditCheckpoint {
+            bounded_passes_since_exhaustive: -1,
+            ..AuditCheckpoint::default()
+        }));
+        assert!(historical_projection_delta_required(
+            AuditCheckpoint::default()
+        ));
+    }
+
+    #[tokio::test]
+    async fn incomplete_exhaustive_checkpoint_does_not_rescan_projection_tables() {
+        let directory = TempDir::new().unwrap();
+        let connection = TestConnection::open(&directory.path().join("sessions.db"));
+        ensure_registered_schema(&connection).await.unwrap();
+        let counting = CountingQuery {
+            inner: &connection,
+            queries: AtomicUsize::new(0),
+        };
+        let checkpoint = AuditCheckpoint {
+            provenance_rowid: 11,
+            disposition_rowid: 22,
+            alias_rowid: 33,
+            bounded_passes_since_exhaustive: -1,
+            ..AuditCheckpoint::default()
+        };
+
+        let checkpoint = projection_audit_checkpoint_through_sequence(&counting, checkpoint, 44)
+            .await
+            .unwrap();
+
+        assert_eq!(checkpoint.provenance_rowid, 11);
+        assert_eq!(checkpoint.disposition_rowid, 22);
+        assert_eq!(checkpoint.alias_rowid, 33);
+        assert_eq!(checkpoint.projection_checkpoint, 44);
+        assert_eq!(counting.queries.load(Ordering::Relaxed), 0);
     }
 
     fn skipped_observation(index: usize) -> DurableObservationV1 {

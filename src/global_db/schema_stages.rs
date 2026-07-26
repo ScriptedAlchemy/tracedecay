@@ -304,6 +304,9 @@ pub(crate) async fn ensure_registered_schema(conn: &Connection) -> crate::errors
     observation_projection::prepare_projection_version_migration_with_engine(conn)
         .await
         .map_err(|error| global_db_operation_error("prepare observation projection", error))?;
+    observation_projection::converge_session_project_paths(conn)
+        .await
+        .map_err(|error| global_db_operation_error("converge session project paths", error))?;
 
     // The invariant pass pages historical authority rows and can legitimately
     // outlive the runtime's ordinary transaction lease on a large store. The
@@ -406,6 +409,21 @@ mod tests {
             rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
             0,
             "an idempotent repair completed before a later audit failure must remain committed"
+        );
+        drop(rows);
+        let mut rows = connection
+            .query(
+                "SELECT bounded_passes_since_exhaustive
+                 FROM authority_audit_checkpoints
+                 WHERE audit_name = 'observation-authority'",
+                (),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+            -1,
+            "validated exhaustive-audit frontiers must remain resumable after a late failure"
         );
     }
 }
