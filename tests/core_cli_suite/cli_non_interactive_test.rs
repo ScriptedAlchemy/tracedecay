@@ -1847,7 +1847,8 @@ fn migrate_registry_gc_cleans_stale_storage_metadata_and_preserves_live_and_bloc
     let live_project = home.path().join("live-project");
     std::fs::create_dir_all(&live_project).expect("live project dir");
     std::fs::write(live_project.join("lib.rs"), "pub fn live() {}\n").expect("live source");
-    let global_db_path = home.path().join("database-override/global.db");
+    let profile_root_path = profile_root(home.path());
+    let global_db_path = profile_root_path.join("global.db");
     std::fs::create_dir_all(global_db_path.parent().unwrap()).expect("global db parent");
 
     let daemon = crate::common::spawn_tracedecay_daemon_with(home.path(), |command| {
@@ -1869,9 +1870,10 @@ fn migrate_registry_gc_cleans_stale_storage_metadata_and_preserves_live_and_bloc
 
     let stale_fixture = TempDir::new_in(ephemeral_safe_fixture_base()).expect("stale fixture root");
     let stale_project = canonical_temp_path(stale_fixture.path()).join("gone-project");
+    std::fs::create_dir_all(&stale_project).expect("stale project fixture");
     create_runtime().block_on(async {
         let runtime =
-            HostAdmissionTestRuntimeV1::profile(global_db_path.parent().expect("global db parent"))
+            HostAdmissionTestRuntimeV1::profile(&profile_root_path)
                 .await
                 .expect("open registered global runtime");
         runtime.upsert(&live_project, 1).await;
@@ -1894,6 +1896,7 @@ fn migrate_registry_gc_cleans_stale_storage_metadata_and_preserves_live_and_bloc
     let daemon = crate::common::spawn_tracedecay_daemon_with(home.path(), |command| {
         command.env("TRACEDECAY_GLOBAL_DB", &global_db_path);
     });
+    std::fs::remove_dir(&stale_project).expect("remove stale project fixture");
     let mut preview = tracedecay_command_without_daemon(home.path(), &live_project);
     let preview = preview
         .env("TRACEDECAY_GLOBAL_DB", &global_db_path)
@@ -1951,7 +1954,7 @@ fn migrate_registry_gc_cleans_stale_storage_metadata_and_preserves_live_and_bloc
     assert_eq!(offline_apply["deleted_count"], 0);
 
     let remaining = create_runtime().block_on(async {
-        HostAdmissionTestRuntimeV1::profile(global_db_path.parent().expect("global db parent"))
+        HostAdmissionTestRuntimeV1::profile(&profile_root_path)
             .await
             .expect("reopen registered global runtime")
             .list_project_paths_compat()
