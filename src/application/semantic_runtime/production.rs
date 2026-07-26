@@ -17,8 +17,9 @@ use tracedecay_domain::{
     CompactCandidate, ComponentRevision, EvidenceRole, FixedPointScore, LogicalEvidenceId,
     ManifestDigest, Pr9FallbackSubpayload, ProjectionBatchRequestV1, ProjectionOperationV1,
     ProjectionReplayReasonV1, RetrievalAnchorId, RetrievalCursorKeyId, RetrieverBatch,
-    RetrieverKind, RetrieverOutcome, ScoreDomainId, SourceOccurrenceId, UtcMicros,
-    VectorGenerationIdV1, WorktreeId, canonical_sha256,
+    RetrieverKind, RetrieverOutcome, ScoreDomainId, SemanticSearchIndexKeyV1,
+    SemanticSearchIndexProfileV1, SourceOccurrenceId, UtcMicros, VectorGenerationIdV1, WorktreeId,
+    canonical_sha256,
 };
 
 use crate::code_index::production::CodeIndexPublishedGenerationV1;
@@ -63,8 +64,9 @@ use crate::semantic_code::{
     prepare_semantic_evaluation_projection,
 };
 use crate::store::vector_generations::{
-    DatabaseLegacyVectorInventoryV1, DatabaseVectorGenerationStoreV1, FakeVectorGenerationStoreV1,
-    PublishedVectorGenerationV1, VectorGenerationPlanV1,
+    DatabaseLegacyVectorInventoryV1, DatabaseVectorEvaluationStoreV1,
+    DatabaseVectorGenerationStoreV1, FakeVectorGenerationStoreV1, PublishedVectorGenerationV1,
+    VectorGenerationPlanV1,
 };
 
 #[cfg(test)]
@@ -548,7 +550,45 @@ impl ProductionSemanticRuntimeV1 {
         BTreeMap<Pr10ProjectionCaseV1, Pr10ProjectionCaseSampleV1>,
         SemanticRuntimeScheduleFailureV1,
     > {
-        let mut store = FakeVectorGenerationStoreV1::new();
+        block_on_semantic_evaluation(
+            self.measure_evaluation_projection_cases_sqlite(clean, sources),
+        )
+    }
+
+    async fn measure_evaluation_projection_cases_sqlite(
+        &self,
+        clean: &PreparedSemanticEvaluationGenerationV1,
+        sources: &ProductionCandidateSemanticProjectionSourcesV1<'_>,
+    ) -> Result<
+        BTreeMap<Pr10ProjectionCaseV1, Pr10ProjectionCaseSampleV1>,
+        SemanticRuntimeScheduleFailureV1,
+    > {
+        let store =
+            DatabaseVectorEvaluationStoreV1::open(self.database.as_ref(), evaluation_state_id())
+                .await
+                .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication)?;
+        let measured = self
+            .measure_evaluation_projection_cases_in_store(&store, clean, sources)
+            .await;
+        let closed = store
+            .close()
+            .await
+            .map_err(|_| SemanticRuntimeScheduleFailureV1::Publication);
+        match (measured, closed) {
+            (Ok(samples), Ok(())) => Ok(samples),
+            (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+        }
+    }
+
+    async fn measure_evaluation_projection_cases_in_store(
+        &self,
+        store: &DatabaseVectorEvaluationStoreV1<'_>,
+        clean: &PreparedSemanticEvaluationGenerationV1,
+        sources: &ProductionCandidateSemanticProjectionSourcesV1<'_>,
+    ) -> Result<
+        BTreeMap<Pr10ProjectionCaseV1, Pr10ProjectionCaseSampleV1>,
+        SemanticRuntimeScheduleFailureV1,
+    > {
         let clean_prepared = &clean.prepared_projection;
         if clean_prepared.request.changes.to_generation != clean.source_generation
             || clean_prepared.request.changes.from_generation.is_some()
@@ -568,14 +608,22 @@ impl ProductionSemanticRuntimeV1 {
         };
         let clean_build = store
             .rebuild_generation(clean_plan)
+            .await
             .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
         let clean_checkpoint = store
             .commit_batch(&clean_build, None, clean_prepared.clone())
+            .await
             .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
         let clean_publication = store
             .publish_generation(&clean_build, None)
+            .await
             .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
-        if store.active_generation_id() != Some(&clean_publication.generation_id) {
+        if store
+            .active_generation_id()
+            .await
+            .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?
+            != Some(clean_publication.generation_id.clone())
+        {
             return Err(SemanticRuntimeScheduleFailureV1::Projection);
         }
 
@@ -597,9 +645,14 @@ impl ProductionSemanticRuntimeV1 {
                 Some(&clean_checkpoint),
                 clean_prepared.clone(),
             )
+            .await
             .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
         if replay_checkpoint != clean_checkpoint
-            || store.active_generation_id() != Some(&clean_publication.generation_id)
+            || store
+                .active_generation_id()
+                .await
+                .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?
+                != Some(clean_publication.generation_id.clone())
         {
             return Err(SemanticRuntimeScheduleFailureV1::Projection);
         }
@@ -623,13 +676,14 @@ impl ProductionSemanticRuntimeV1 {
         };
         let (one_symbol, one_symbol_elapsed, one_symbol_input) =
             self.prepare_projection_case(sources.one_symbol, Some(&clean_pointer))?;
-        let one_symbol_publication = publish_evaluation_projection_case(
-            &mut store,
+        let one_symbol_publication = publish_evaluation_projection_case_sqlite(
+            store,
             sources.one_symbol,
             one_symbol.clone(),
             Some(clean_publication.generation_id.clone()),
             Some(&clean_publication.generation_id),
-        )?;
+        )
+        .await?;
         samples.insert(
             Pr10ProjectionCaseV1::OneSymbol,
             projection_case_sample_from_prepared(
@@ -647,13 +701,14 @@ impl ProductionSemanticRuntimeV1 {
         };
         let (no_op, no_op_elapsed, no_op_input) =
             self.prepare_projection_case(sources.no_op, Some(&one_symbol_pointer))?;
-        let no_op_publication = publish_evaluation_projection_case(
-            &mut store,
+        let no_op_publication = publish_evaluation_projection_case_sqlite(
+            store,
             sources.no_op,
             no_op.clone(),
             Some(one_symbol_publication.generation_id.clone()),
             Some(&one_symbol_publication.generation_id),
-        )?;
+        )
+        .await?;
         samples.insert(
             Pr10ProjectionCaseV1::NoOp,
             projection_case_sample_from_prepared(
@@ -671,13 +726,14 @@ impl ProductionSemanticRuntimeV1 {
         };
         let (deletion, deletion_elapsed, deletion_input) =
             self.prepare_projection_case(sources.deletion, Some(&no_op_pointer))?;
-        let deletion_publication = publish_evaluation_projection_case(
-            &mut store,
+        let deletion_publication = publish_evaluation_projection_case_sqlite(
+            store,
             sources.deletion,
             deletion.clone(),
             Some(no_op_publication.generation_id.clone()),
             Some(&no_op_publication.generation_id),
-        )?;
+        )
+        .await?;
         samples.insert(
             Pr10ProjectionCaseV1::Deletion,
             projection_case_sample_from_prepared(
@@ -697,9 +753,17 @@ impl ProductionSemanticRuntimeV1 {
         )?;
         let cancellation_build = store
             .rebuild_generation(cancellation_plan)
+            .await
             .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
-        if !store.cancel_generation(&cancellation_build)
-            || store.active_generation_id() != Some(&active_before_cancellation)
+        if !store
+            .cancel_generation(&cancellation_build)
+            .await
+            .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?
+            || store
+                .active_generation_id()
+                .await
+                .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?
+                != Some(active_before_cancellation.clone())
         {
             return Err(SemanticRuntimeScheduleFailureV1::Projection);
         }
@@ -729,9 +793,11 @@ impl ProductionSemanticRuntimeV1 {
             evaluation_projection_plan(sources.one_symbol, &incompatible, None)?;
         let incompatible_build = store
             .rebuild_generation(incompatible_plan)
+            .await
             .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
         store
             .commit_batch(&incompatible_build, None, incompatible.clone())
+            .await
             .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
         if store
             .active_generation_for(
@@ -739,9 +805,18 @@ impl ProductionSemanticRuntimeV1 {
                 &incompatible.request.changes.to_generation,
                 &incompatible.request.changes.manifest_digest,
             )
+            .await
+            .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?
             .is_some()
-            || !store.cancel_generation(&incompatible_build)
-            || store.active_generation_id() != Some(&active_before_cancellation)
+            || !store
+                .cancel_generation(&incompatible_build)
+                .await
+                .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?
+            || store
+                .active_generation_id()
+                .await
+                .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?
+                != Some(active_before_cancellation)
         {
             return Err(SemanticRuntimeScheduleFailureV1::Projection);
         }
@@ -1106,13 +1181,18 @@ impl ProductionSemanticRuntimeV1 {
         };
         let complete = CompleteSemanticGenerationV1::new(
             active.projection_key().clone(),
+            request.search_index_key.clone(),
             active.generation_id().clone(),
             active.source_generation().clone(),
             code_generation.capability().manifest_digest.clone(),
         )
         .map_err(|_| SemanticQueryServiceError::InvalidFallback)?;
-        let vectors = PublishedSemanticVectorReadPortV1::new(active, code_generation)
-            .map_err(|_| SemanticQueryServiceError::InvalidFallback)?;
+        let vectors = PublishedSemanticVectorReadPortV1::new(
+            active,
+            request.search_index_key.clone(),
+            code_generation,
+        )
+        .map_err(|_| SemanticQueryServiceError::InvalidFallback)?;
         compose_application_semantic_search(
             &self.handle,
             request,
@@ -1181,6 +1261,7 @@ impl ProductionSemanticRuntimeV1 {
 pub(crate) struct PreparedSemanticEvaluationGenerationV1 {
     source_generation: CodeGenerationId,
     projection: tracedecay_domain::AdmittedEmbeddingProjectionKeyV1,
+    search_index_key: SemanticSearchIndexKeyV1,
     vector_generation: VectorGenerationIdV1,
     prepared_projection: PreparedVectorGenerationV1,
     projection_input_bytes: u64,
@@ -1248,9 +1329,13 @@ impl PreparedSemanticEvaluationGenerationV1 {
             projection_cases: BTreeMap::new(),
         };
         let projection = prepared.prepared.embedding_key.clone();
+        let search_index_key = SemanticSearchIndexProfileV1::exact_flat_v1()
+            .and_then(|profile| profile.index_key())
+            .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
         let vectors = PublishedSemanticVectorReadPortV1::from_prepared(
             &prepared.prepared,
             vector_generation.clone(),
+            search_index_key.clone(),
             &code,
         )
         .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
@@ -1275,6 +1360,7 @@ impl PreparedSemanticEvaluationGenerationV1 {
         Ok(Self {
             source_generation,
             projection,
+            search_index_key,
             vector_generation,
             prepared_projection: prepared.prepared,
             projection_input_bytes,
@@ -1325,6 +1411,7 @@ impl PreparedSemanticEvaluationGenerationV1 {
             query_digest,
             query_view: context.query_view,
             projection: &self.projection,
+            search_index_key: &self.search_index_key,
             capability_manifest_digest: self.capability_manifest_digest.clone(),
             vector_generation: self.vector_generation.clone(),
             code_generation: self.source_generation.clone(),
@@ -1468,6 +1555,25 @@ fn installed_artifact_member_bytes(
         .ok_or(SemanticRuntimeScheduleFailureV1::Artifact)
 }
 
+fn evaluation_state_id() -> String {
+    static NEXT_EVALUATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let sequence = NEXT_EVALUATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("pr10-native-evaluation:{}:{sequence}", std::process::id())
+}
+
+fn block_on_semantic_evaluation<Output>(
+    future: impl Future<Output = Result<Output, SemanticRuntimeScheduleFailureV1>>,
+) -> Result<Output, SemanticRuntimeScheduleFailureV1> {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => handle.block_on(future),
+        Err(_) => tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|_| SemanticRuntimeScheduleFailureV1::Runtime)?
+            .block_on(future),
+    }
+}
+
 fn elapsed_micros(started: std::time::Instant) -> u64 {
     u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
 }
@@ -1475,6 +1581,7 @@ fn elapsed_micros(started: std::time::Instant) -> u64 {
 struct PublishedSemanticVectorReadPortV1 {
     generation: VectorGenerationIdV1,
     projection_key: tracedecay_domain::ProjectionKeyV1,
+    search_index_key: SemanticSearchIndexKeyV1,
     source_generation: CodeGenerationId,
     capability_manifest_digest: ManifestDigest,
     rows: Vec<SemanticVectorRecordV1>,
@@ -1531,6 +1638,7 @@ impl PublishedSemanticVectorReadPortV1 {
     fn from_prepared(
         prepared: &PreparedVectorGenerationV1,
         generation: VectorGenerationIdV1,
+        search_index_key: SemanticSearchIndexKeyV1,
         code: &CodeIndexPublishedGenerationV1,
     ) -> Result<Self, RetrievalPortError> {
         if prepared.request.changes.to_generation != code.manifest().generation_id {
@@ -1604,6 +1712,7 @@ impl PublishedSemanticVectorReadPortV1 {
         Ok(Self {
             generation,
             projection_key: prepared.request.target_projection_key.clone(),
+            search_index_key,
             source_generation: prepared.request.changes.to_generation.clone(),
             capability_manifest_digest: code.capability().manifest_digest.clone(),
             rows,
@@ -1612,6 +1721,7 @@ impl PublishedSemanticVectorReadPortV1 {
 
     fn new(
         vectors: PublishedVectorGenerationV1,
+        search_index_key: SemanticSearchIndexKeyV1,
         code: &CodeIndexPublishedGenerationV1,
     ) -> Result<Self, RetrievalPortError> {
         if vectors.source_generation() != &code.manifest().generation_id {
@@ -1684,6 +1794,7 @@ impl PublishedSemanticVectorReadPortV1 {
         Ok(Self {
             generation: vectors.generation_id().clone(),
             projection_key: vectors.projection_key().clone(),
+            search_index_key,
             source_generation: vectors.source_generation().clone(),
             capability_manifest_digest: code.capability().manifest_digest.clone(),
             rows,
@@ -1700,6 +1811,7 @@ impl SemanticVectorReadPort for PublishedSemanticVectorReadPortV1 {
         if request.search_kind != SemanticSearchKindV1::ExactFlat
             || request.vector_generation != &self.generation
             || request.projection_key != &self.projection_key
+            || request.search_index_key != &self.search_index_key
             || request.source_generation != &self.source_generation
             || request.capability_manifest_digest != &self.capability_manifest_digest
         {
@@ -1807,8 +1919,8 @@ fn evaluation_projection_plan(
     })
 }
 
-fn publish_evaluation_projection_case(
-    store: &mut FakeVectorGenerationStoreV1,
+async fn publish_evaluation_projection_case_sqlite(
+    store: &DatabaseVectorEvaluationStoreV1<'_>,
     generation: &CodeIndexPublishedGenerationV1,
     prepared: PreparedVectorGenerationV1,
     base_generation: Option<VectorGenerationIdV1>,
@@ -1820,14 +1932,22 @@ fn publish_evaluation_projection_case(
     let plan = evaluation_projection_plan(generation, &prepared, base_generation)?;
     let build = store
         .rebuild_generation(plan)
+        .await
         .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
     store
         .commit_batch(&build, None, prepared)
+        .await
         .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
     let publication = store
         .publish_generation(&build, expected_active)
+        .await
         .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?;
-    if store.active_generation_id() != Some(&publication.generation_id) {
+    if store
+        .active_generation_id()
+        .await
+        .map_err(|_| SemanticRuntimeScheduleFailureV1::Projection)?
+        != Some(publication.generation_id.clone())
+    {
         return Err(SemanticRuntimeScheduleFailureV1::Projection);
     }
     Ok(publication)
@@ -2528,6 +2648,15 @@ mod tests {
             .clone()
     }
 
+    fn search_index_key() -> &'static SemanticSearchIndexKeyV1 {
+        static KEY: std::sync::OnceLock<SemanticSearchIndexKeyV1> = std::sync::OnceLock::new();
+        KEY.get_or_init(|| {
+            SemanticSearchIndexProfileV1::exact_flat_v1()
+                .and_then(|profile| profile.index_key())
+                .expect("exact-flat search index key")
+        })
+    }
+
     fn pointer(vector: char, source: char) -> SemanticGenerationPointerV1 {
         SemanticGenerationPointerV1 {
             generation: vector_generation(vector),
@@ -2603,6 +2732,7 @@ mod tests {
             query_digest,
             query_view,
             projection,
+            search_index_key: search_index_key(),
             capability_manifest_digest: ManifestDigest::new(format!("sha256:{}", "b".repeat(64)))
                 .expect("capability"),
             vector_generation: vector,
@@ -3132,6 +3262,7 @@ mod tests {
         let request = composition_request(&query_view, authority.projection(), source, vector);
         let complete = CompleteSemanticGenerationV1::new(
             request.projection.projection_key().clone(),
+            request.search_index_key.clone(),
             request.vector_generation.clone(),
             request.code_generation.clone(),
             request.capability_manifest_digest.clone(),
@@ -3301,6 +3432,7 @@ mod tests {
         let request = composition_request(&query_view, authority.projection(), source, vector);
         let complete = CompleteSemanticGenerationV1::new(
             request.projection.projection_key().clone(),
+            request.search_index_key.clone(),
             request.vector_generation.clone(),
             request.code_generation.clone(),
             request.capability_manifest_digest.clone(),

@@ -488,6 +488,11 @@ pub(super) fn def_lcm_expand_query() -> ToolDefinition {
                     "minimum": 1,
                     "maximum": 65536,
                     "description": "Maximum retrieval context budget (tokens of LCM material assembled before synthesis). Defaults to 32000. Independent of max_tokens, which governs the synthesis output size."
+                },
+                "cursor": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Opaque continuation cursor returned by the same expand-query request. The original provider, session, query or single node id, limits, and context budget must remain unchanged."
                 }
             },
             "required": ["provider", "session_id", "prompt"]

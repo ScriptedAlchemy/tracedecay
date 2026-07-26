@@ -37,7 +37,7 @@ use crate::{
         languages::{LanguageRegistry, StaticLanguageRegistry},
         production::{
             CodeIndexAtomicPublicationPort, CodeIndexBuildRequestV1, CodeIndexCapturedFileV1,
-            CodeIndexProductionConfigV1, CodeIndexProductionErrorV1,
+            CodeIndexInputErrorV1, CodeIndexProductionConfigV1, CodeIndexProductionErrorV1,
             CodeIndexPublicationStoreErrorV1, CodeIndexPublishedGenerationV1,
             SharedPhysicalCodeArtifactPoolV1,
         },
@@ -918,6 +918,16 @@ impl CodeIndexWorktreeSchedulerV1 {
                 {
                     std::thread::sleep(SUPERSEDED_RECONCILE_RETRY_BACKOFF);
                     continue;
+                }
+                Err(CodeIndexProductionErrorV1::Input(
+                    CodeIndexInputErrorV1::NoExtractableFiles,
+                )) => {
+                    self.latest_content_identity = Some(captured.snapshot.content_identity.clone());
+                    self.mark_reconciled(sampled_metadata, sampled_signature);
+                    return Ok(CodeIndexReconcileOutcomeV1::Noop(CodeIndexNoopEvidenceV1 {
+                        snapshot_content_identity: captured.snapshot.content_identity,
+                        overflow_reconciled,
+                    }));
                 }
                 Err(error) => return Err(error.into()),
             };

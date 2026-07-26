@@ -692,28 +692,6 @@ impl<E: ReaderQueryExecutor> ReaderLease<E> {
         Ok(SnapshotLease { lease: self })
     }
 
-    pub(crate) fn begin_pinned_snapshot(
-        &mut self,
-        probe: &dyn RuntimeRequestProbeV1,
-    ) -> Result<(), ReaderAcquireError> {
-        if self.snapshot_active {
-            return Err(ReaderAcquireError::Worker(
-                ReaderWorkerError::SnapshotAlreadyActive,
-            ));
-        }
-        self.checkout
-            .worker
-            .client
-            .begin()
-            .map_err(ReaderAcquireError::Worker)?;
-        self.snapshot_active = true;
-        self.checkout
-            .worker
-            .client
-            .pin(probe)
-            .map_err(map_worker_error)
-    }
-
     pub(crate) fn execute_active_raw(
         &mut self,
         request: RuntimeReadRequestV1,

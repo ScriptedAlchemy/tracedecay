@@ -94,10 +94,8 @@ impl StorageOperationExecutor for ConcreteRepositoryWriteExecutor {
             RepositoryWritePayloadV1::SessionProjection(batch) => {
                 self.session.execute_projection_write(savepoint, batch)
             }
-            RepositoryWritePayloadV1::SessionSummary(request) => {
-                self.session.execute_summary_write(savepoint, request)
-            }
-            RepositoryWritePayloadV1::GitIndexTransaction(_)
+            RepositoryWritePayloadV1::SessionSummary(_)
+            | RepositoryWritePayloadV1::GitIndexTransaction(_)
             | RepositoryWritePayloadV1::EnqueueOutbox(_)
             | RepositoryWritePayloadV1::ApplyInbox(_)
             | RepositoryWritePayloadV1::AcknowledgeOutbox(_) => {
