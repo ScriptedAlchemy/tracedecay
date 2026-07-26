@@ -118,6 +118,7 @@ describe('Doctor frontend contracts', () => {
           termination: 'completed',
         },
         effect_receipt: null,
+        verification: { state: 'not_required' },
       },
     });
 
@@ -165,6 +166,7 @@ describe('Doctor frontend contracts', () => {
           committed_state: `sha256:${'4'.repeat(64)}`,
           external_proof: null,
         },
+        verification: { state: 'unavailable' },
       },
     });
 
