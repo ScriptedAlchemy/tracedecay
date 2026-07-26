@@ -134,8 +134,13 @@ pub(crate) async fn activate_test_temporal_generation(
         .saturating_add(1);
     let active_generation = SessionProjectionGenerationV1::new(1).unwrap();
     let candidate_generation = SessionProjectionGenerationV1::new(2).unwrap();
+    let cursor_key = runtime
+        .ensure_session_cursor_key_for_test(HostAdmissionScope::Project)
+        .await
+        .expect("registered project cursor key");
     let watermarks =
-        SessionFrozenWatermarksV1::new(active_generation, source_frontier, source_frontier, 0);
+        SessionFrozenWatermarksV1::new(active_generation, source_frontier, source_frontier, 0)
+            .with_cursor_key(cursor_key);
     let snapshot = SessionTemporalSnapshotV1::new(
         session_id.clone(),
         UtcMicros(snapshot_at),
@@ -260,6 +265,24 @@ pub(crate) async fn handle_tool_call(
         return Ok(ToolResult::new(response["result"].clone(), Vec::new()));
     }
     tracedecay::mcp::handle_tool_call(cg, tool_name, args, server_stats, scope_prefix).await
+}
+
+pub(crate) async fn handle_tool_call_with_runtime(
+    cg: &TraceDecay,
+    runtime: &HostAdmissionTestRuntimeV1,
+    tool_name: &str,
+    mut args: serde_json::Value,
+    server_stats: Option<serde_json::Value>,
+    scope_prefix: Option<&str>,
+) -> tracedecay::errors::Result<ToolResult> {
+    let owns_format = tracedecay::mcp::tools::tool_defaults_to_markdown(tool_name);
+    if !owns_format && let Some(obj) = args.as_object_mut() {
+        obj.entry("format".to_string())
+            .or_insert_with(|| serde_json::json!("json"));
+    }
+    runtime
+        .call_mcp_tool_for_test(cg, tool_name, args, server_stats, scope_prefix)
+        .await
 }
 
 #[cfg(feature = "test-transport")]
@@ -764,25 +787,11 @@ pub(crate) fn project_session_db_path(cg: &TraceDecay) -> PathBuf {
     cg.store_layout().sessions_db_path.clone()
 }
 
-pub(crate) async fn open_active_project_session_db(cg: &TraceDecay) -> HostAdmissionTestRuntimeV1 {
-    let project_id = cg
-        .store_layout()
-        .identity
-        .project_id
-        .as_deref()
-        .and_then(|project_id| ProjectId::new(project_id.to_string()).ok())
-        .expect("active project identity should be available");
-    let profile_root = cg
-        .store_layout()
-        .data_root
-        .parent()
-        .filter(|parent| parent.file_name().is_some_and(|name| name == "projects"))
-        .and_then(Path::parent)
-        .expect("active test profile root")
-        .to_path_buf();
-    HostAdmissionTestRuntimeV1::project(profile_root, cg.project_root(), project_id)
-        .await
-        .expect("active registered project-local session runtime should open")
+pub(crate) async fn open_active_project_session_db(
+    cg: &TraceDecay,
+) -> Arc<HostAdmissionTestRuntimeV1> {
+    cg.test_runtime_for_test()
+        .expect("test graph should retain its registered project-local session runtime")
 }
 
 /// Creates a small Rust library with an integration-style test that calls a
@@ -1085,7 +1094,10 @@ pub(crate) fn expect_tool_error<T>(result: tracedecay::errors::Result<T>) -> Str
     }
 }
 
-pub(crate) async fn seed_project_registry(db_path: &Path, project_root: &Path) {
+pub(crate) async fn seed_project_registry(
+    db_path: &Path,
+    project_root: &Path,
+) -> HostAdmissionTestRuntimeV1 {
     let profile_root = db_path
         .parent()
         .expect("test registry path should have a profile root");
@@ -1160,6 +1172,7 @@ pub(crate) async fn seed_project_registry(db_path: &Path, project_root: &Path) {
         )
         .await
         .unwrap();
+    runtime
 }
 
 /// Searches the indexed fixture for `name` and returns its exact node id.
@@ -1731,7 +1744,7 @@ pub(crate) async fn seed_lcm_session_message_in_db(
     );
 }
 
-pub(crate) async fn project_lcm_conn(cg: &TraceDecay) -> HostAdmissionTestRuntimeV1 {
+pub(crate) async fn project_lcm_conn(cg: &TraceDecay) -> Arc<HostAdmissionTestRuntimeV1> {
     open_active_project_session_db(cg).await
 }
 

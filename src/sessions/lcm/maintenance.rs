@@ -215,19 +215,21 @@ pub(super) async fn payload_metadata_refs_for_scope(
 mod tests {
     use super::*;
     use crate::db::engine::TestConnection;
+    use rusqlite::Connection as RusqliteConnection;
 
     #[tokio::test]
     async fn gc_backups_are_unique_verified_and_non_destructive() {
         let root = tempfile::tempdir().unwrap();
         let source_path = root.path().join("sessions.db");
+        RusqliteConnection::open(&source_path)
+            .unwrap()
+            .execute_batch(
+                "PRAGMA journal_mode = WAL;
+                 CREATE TABLE messages(id INTEGER PRIMARY KEY, body TEXT NOT NULL);
+                 INSERT INTO messages(body) VALUES ('retained');",
+            )
+            .unwrap();
         let conn = TestConnection::open(&source_path);
-        conn.execute_batch(
-            "PRAGMA journal_mode = WAL;
-             CREATE TABLE messages(id INTEGER PRIMARY KEY, body TEXT NOT NULL);
-             INSERT INTO messages(body) VALUES ('retained');",
-        )
-        .await
-        .unwrap();
         checkpoint_wal_for_backup(&*conn, BackupKind::Gc)
             .await
             .unwrap();

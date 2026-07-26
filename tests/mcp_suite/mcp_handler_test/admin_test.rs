@@ -13,11 +13,12 @@ async fn project_registry_tools_are_bounded_read_only_and_contextual() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let registry_dir = test_temp_dir();
     let registry_path = registry_dir.path().join("global.db");
-    seed_project_registry(&registry_path, cg.project_root()).await;
+    let registry_runtime = seed_project_registry(&registry_path, cg.project_root()).await;
     let _env_guard = GlobalDbEnvGuard::set(&registry_path);
 
-    let list = handle_tool_call(
+    let list = handle_tool_call_with_runtime(
         &cg,
+        &registry_runtime,
         "tracedecay_project_list",
         json!({"limit": 1, "format": "json"}),
         None,
@@ -43,8 +44,9 @@ async fn project_registry_tools_are_bounded_read_only_and_contextual() {
         !list_text.contains("secret") && !list_text.contains("git_remote_url"),
         "project list must not expose credential-bearing remotes: {list_text}"
     );
-    let list_markdown = handle_tool_call(
+    let list_markdown = handle_tool_call_with_runtime(
         &cg,
+        &registry_runtime,
         "tracedecay_project_list",
         json!({"limit": 2, "format": "markdown"}),
         None,
@@ -59,8 +61,9 @@ async fn project_registry_tools_are_bounded_read_only_and_contextual() {
         "project list should render compact grouped markdown: {list_markdown_text}"
     );
 
-    let search = handle_tool_call(
+    let search = handle_tool_call_with_runtime(
         &cg,
+        &registry_runtime,
         "tracedecay_project_search",
         json!({"query": "alpha", "limit": 10, "format": "json"}),
         None,
@@ -83,8 +86,9 @@ async fn project_registry_tools_are_bounded_read_only_and_contextual() {
         "project search must not expose credential-bearing remotes: {search_text}"
     );
 
-    let multi_term_search = handle_tool_call(
+    let multi_term_search = handle_tool_call_with_runtime(
         &cg,
+        &registry_runtime,
         "tracedecay_project_search",
         json!({"query": "alpha beta", "limit": 10, "format": "json"}),
         None,
@@ -105,8 +109,9 @@ async fn project_registry_tools_are_bounded_read_only_and_contextual() {
         "multi-term project search should match either term: {multi_term_payload}"
     );
 
-    let remote_secret_search = handle_tool_call(
+    let remote_secret_search = handle_tool_call_with_runtime(
         &cg,
+        &registry_runtime,
         "tracedecay_project_search",
         json!({"query": "secret", "limit": 10, "format": "json"}),
         None,
@@ -122,8 +127,9 @@ async fn project_registry_tools_are_bounded_read_only_and_contextual() {
         "project search must not match credential-bearing remote URL text: {remote_secret_payload}"
     );
 
-    let context = handle_tool_call(
+    let context = handle_tool_call_with_runtime(
         &cg,
+        &registry_runtime,
         "tracedecay_project_context",
         json!({"project_id": "proj_alpha", "format": "json"}),
         None,
@@ -156,8 +162,9 @@ async fn project_registry_tools_are_bounded_read_only_and_contextual() {
         "graph_db"
     );
 
-    let alias_context = handle_tool_call(
+    let alias_context = handle_tool_call_with_runtime(
         &cg,
+        &registry_runtime,
         "tracedecay_project_context",
         json!({"path": "registered-alias", "format": "json"}),
         None,
@@ -173,8 +180,9 @@ async fn project_registry_tools_are_bounded_read_only_and_contextual() {
         cg.project_root().to_string_lossy().as_ref()
     );
 
-    let unknown_alias = handle_tool_call(
+    let unknown_alias = handle_tool_call_with_runtime(
         &cg,
+        &registry_runtime,
         "tracedecay_project_context",
         json!({"path": "unknown-alias", "format": "json"}),
         None,
