@@ -18,7 +18,9 @@ use std::fmt;
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
-use crate::code_intelligence::{CodeGenerationId, ProjectionKeyV1, VectorGenerationIdV1};
+use crate::code_intelligence::{
+    CodeGenerationId, ProjectionKeyV1, SemanticSearchIndexKeyV1, VectorGenerationIdV1,
+};
 use crate::research::id::{ManifestDigest, PrivacyDomainId, RetrievalAnchorId};
 use crate::research::time::UtcMicros;
 use crate::research::watermark::VectorWatermark;
@@ -1158,6 +1160,7 @@ pub struct SemanticRetrievalContinuationV1 {
     pub code_generation: CodeGenerationId,
     pub vector_generation: VectorGenerationIdV1,
     pub projection_key: ProjectionKeyV1,
+    pub search_index_key: SemanticSearchIndexKeyV1,
     pub candidate_set_digest: CandidateSetDigest,
     pub public_lane_statuses: BTreeMap<RetrieverKind, PublicRetrieverStatus>,
     pub lane_checkpoints: Vec<RetrieverContinuation>,
@@ -1169,6 +1172,11 @@ pub struct SemanticRetrievalContinuationV1 {
 
 impl SemanticRetrievalContinuationV1 {
     pub fn validate(&self) -> Result<(), RetrievalContractError> {
+        self.search_index_key.validate().map_err(|_| {
+            RetrievalContractError::InvalidCursorBinding {
+                field: "semantic search index key",
+            }
+        })?;
         if !self
             .public_lane_statuses
             .contains_key(&RetrieverKind::Semantic)

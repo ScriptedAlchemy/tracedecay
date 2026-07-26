@@ -2,7 +2,7 @@ use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use tracedecay_domain::{
     AdmittedEmbeddingProjectionKeyV1, CalibrationProfileId, ChunkerRevision, CodeGenerationId,
@@ -14,7 +14,8 @@ use tracedecay_domain::{
     QueryMac, QueryNormalizationRevision, RetrievalAnchorId, RetrievalBudget, RetrievalCursorKeyId,
     RetrievalRequest, RetrievalScope, RetrievalSnapshot, Retriever, RetrieverBatch,
     RetrieverCoverage, RetrieverKind, RetrieverOutcome, SanitizerRevision,
-    ScoreDomainCalibrationV1, ScoreDomainId, SingleRootScopeV1, SourceFreshness, SourceNamespace,
+    ScoreDomainCalibrationV1, ScoreDomainId, SemanticSearchIndexKeyV1,
+    SemanticSearchIndexProfileV1, SingleRootScopeV1, SourceFreshness, SourceNamespace,
     SourceOccurrenceId, TemporalModeV1, UtcMicros, VectorGenerationIdV1, VectorWatermark,
 };
 
@@ -70,6 +71,15 @@ fn projection() -> AdmittedEmbeddingProjectionKeyV1 {
     }
     .admit()
     .expect("valid admitted projection")
+}
+
+fn search_index_key() -> &'static SemanticSearchIndexKeyV1 {
+    static KEY: OnceLock<SemanticSearchIndexKeyV1> = OnceLock::new();
+    KEY.get_or_init(|| {
+        SemanticSearchIndexProfileV1::exact_flat_v1()
+            .and_then(|profile| profile.index_key())
+            .expect("exact-flat search index key")
+    })
 }
 
 fn budget(max_candidates_per_lane: u32) -> RetrievalBudget {
@@ -133,6 +143,7 @@ fn request<'a>(
         query_digest: query_digest('1'),
         query_view,
         projection,
+        search_index_key: search_index_key(),
         capability_manifest_digest: digest('9'),
         vector_generation: VectorGenerationIdV1::new(digest('8')),
         code_generation: id("generation.1"),
@@ -232,6 +243,7 @@ struct FakeVectorReadPort {
     after_scan_elapsed: Option<(Rc<Cell<u64>>, u64)>,
     vector_generation: VectorGenerationIdV1,
     projection_key: ProjectionKeyV1,
+    search_index_key: SemanticSearchIndexKeyV1,
     source_generation: CodeGenerationId,
     capability_manifest_digest: ManifestDigest,
 }
@@ -246,6 +258,7 @@ impl FakeVectorReadPort {
             after_scan_elapsed: None,
             vector_generation: request.vector_generation.clone(),
             projection_key: request.projection.projection_key().clone(),
+            search_index_key: request.search_index_key.clone(),
             source_generation: request.code_generation.clone(),
             capability_manifest_digest: request.capability_manifest_digest.clone(),
         }
@@ -261,6 +274,7 @@ impl SemanticVectorReadPort for FakeVectorReadPort {
         self.scans.set(self.scans.get() + 1);
         assert_eq!(request.vector_generation, &self.vector_generation);
         assert_eq!(request.projection_key, &self.projection_key);
+        assert_eq!(request.search_index_key, &self.search_index_key);
         assert_eq!(request.source_generation, &self.source_generation);
         assert_eq!(
             request.capability_manifest_digest,
@@ -855,6 +869,7 @@ fn calibration(
 fn complete_generation(request: &SemanticRetrievalRequestV1<'_>) -> CompleteSemanticGenerationV1 {
     CompleteSemanticGenerationV1::new(
         request.projection.projection_key().clone(),
+        request.search_index_key.clone(),
         request.vector_generation.clone(),
         request.code_generation.clone(),
         request.capability_manifest_digest.clone(),
@@ -1305,6 +1320,7 @@ fn mismatched_complete_generation_bypasses_semantic_authorities() {
     let lane = SemanticCodeRetriever::new(&embedder, &vectors, &control);
     let generation = CompleteSemanticGenerationV1::new(
         request.projection.projection_key().clone(),
+        request.search_index_key.clone(),
         VectorGenerationIdV1::new(digest('6')),
         request.code_generation.clone(),
         request.capability_manifest_digest.clone(),
