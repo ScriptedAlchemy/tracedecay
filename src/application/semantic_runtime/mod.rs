@@ -15,6 +15,7 @@ mod owner;
 mod ports;
 mod production;
 mod redundancy;
+mod retrieval_selection_policy;
 
 pub(crate) use accepted_profile_authority::{
     RegisteredSemanticAcceptedProfileAuthorityV1, SemanticAcceptedProfileAuthorityErrorV1,
@@ -78,6 +79,7 @@ pub(crate) use redundancy::{
     unregister_project_semantic_redundancy_authority,
     unregister_project_semantic_redundancy_generation,
 };
+pub(crate) use retrieval_selection_policy::PRODUCTION_SEMANTIC_RETRIEVAL_SELECTION_POLICY;
 
 #[cfg(test)]
 mod tests;

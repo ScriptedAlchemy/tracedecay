@@ -21,6 +21,7 @@ use tracedecay_domain::{
     VectorGenerationIdV1, WorktreeId, canonical_sha256,
 };
 
+use super::PRODUCTION_SEMANTIC_RETRIEVAL_SELECTION_POLICY;
 use crate::code_index::production::CodeIndexPublishedGenerationV1;
 use crate::code_index::projection::expected_request_digest;
 use crate::config::SemanticResourceCeilings;
@@ -1073,7 +1074,11 @@ impl ProductionSemanticRuntimeV1 {
         {
             Ok(active) => active,
             Err(_) => {
-                return CalibratedSemanticQueryService::new(&NeverCalledSemanticLane).execute(
+                return CalibratedSemanticQueryService::new(
+                    &NeverCalledSemanticLane,
+                    &PRODUCTION_SEMANTIC_RETRIEVAL_SELECTION_POLICY,
+                )
+                .execute(
                     SemanticLaneReadinessV1::Unavailable(SemanticIndexStateV1::Failed),
                     mode,
                     fallback,
@@ -1098,7 +1103,11 @@ impl ProductionSemanticRuntimeV1 {
             }
         }
         let Some(active) = active else {
-            return CalibratedSemanticQueryService::new(&NeverCalledSemanticLane).execute(
+            return CalibratedSemanticQueryService::new(
+                &NeverCalledSemanticLane,
+                &PRODUCTION_SEMANTIC_RETRIEVAL_SELECTION_POLICY,
+            )
+            .execute(
                 SemanticLaneReadinessV1::Unavailable(SemanticIndexStateV1::Unavailable),
                 mode,
                 fallback,
@@ -1931,7 +1940,11 @@ where
                 request.projection.projection_key(),
             ) else {
                 // Atomically current generation is the only admission path.
-                return CalibratedSemanticQueryService::new(&NeverCalledSemanticLane).execute(
+                return CalibratedSemanticQueryService::new(
+                    &NeverCalledSemanticLane,
+                    &PRODUCTION_SEMANTIC_RETRIEVAL_SELECTION_POLICY,
+                )
+                .execute(
                     SemanticLaneReadinessV1::Unavailable(SemanticIndexStateV1::Incompatible),
                     mode,
                     fallback,
@@ -1939,7 +1952,11 @@ where
             };
             let embedder = factory.create(control);
             let lane = SemanticCodeRetriever::new(&embedder, vectors, control);
-            CalibratedSemanticQueryService::new(&lane).execute(
+            CalibratedSemanticQueryService::new(
+                &lane,
+                &PRODUCTION_SEMANTIC_RETRIEVAL_SELECTION_POLICY,
+            )
+            .execute(
                 SemanticLaneReadinessV1::Ready {
                     request,
                     generation,
@@ -1950,11 +1967,11 @@ where
             )
         }
         unavailable @ SemanticLaneReadinessV1::Unavailable(_) => {
-            CalibratedSemanticQueryService::new(&NeverCalledSemanticLane).execute(
-                unavailable,
-                mode,
-                fallback,
+            CalibratedSemanticQueryService::new(
+                &NeverCalledSemanticLane,
+                &PRODUCTION_SEMANTIC_RETRIEVAL_SELECTION_POLICY,
             )
+            .execute(unavailable, mode, fallback)
         }
     }
 }
@@ -1974,7 +1991,11 @@ where
     C: SemanticExecutionControl + Sync,
 {
     let Some(runtime) = project_semantic_production_runtime(project_root) else {
-        return CalibratedSemanticQueryService::new(&NeverCalledSemanticLane).execute(
+        return CalibratedSemanticQueryService::new(
+            &NeverCalledSemanticLane,
+            &PRODUCTION_SEMANTIC_RETRIEVAL_SELECTION_POLICY,
+        )
+        .execute(
             SemanticLaneReadinessV1::Unavailable(SemanticIndexStateV1::Unavailable),
             mode,
             fallback,
