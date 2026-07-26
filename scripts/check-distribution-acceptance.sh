@@ -102,6 +102,9 @@ assert_required_assets() {
     "src/query/retrieval/semantic/tests.rs"
     "src/semantic_code/fastembed_adapter.rs"
     "src/semantic_code/model_lifecycle.rs"
+    "tests/fixtures/packaged_host_events/claude/post_tool_use_write.json"
+    "tests/fixtures/packaged_host_events/kimi/post-tool-use-edit.json"
+    "tests/fixtures/packaged_host_events/opencode/baseline.json"
     # Packaged fixture/workload pins (PR5 harness embeds its workload via
     # include_str!; PR7 keeps a workload pin for distribution completeness).
     "tests/fixtures/provider_normalization/codex/session_meta.input.json"
@@ -315,6 +318,9 @@ run_self_test() {
     src/query/retrieval/semantic/tests.rs \
     src/semantic_code/fastembed_adapter.rs \
     src/semantic_code/model_lifecycle.rs \
+    tests/fixtures/packaged_host_events/claude/post_tool_use_write.json \
+    tests/fixtures/packaged_host_events/kimi/post-tool-use-edit.json \
+    tests/fixtures/packaged_host_events/opencode/baseline.json \
     tests/fixtures/provider_normalization/codex/session_meta.input.json \
     tests/fixtures/provider_normalization/codex/agent_message.input.json \
     tests/fixtures/analytics/codex_skill_prose.txt \
@@ -505,12 +511,22 @@ while (($#)); do
 done
 
 require_command cargo
+require_command cmp
 require_command curl
 require_command python3
 require_command tar
 
 repo=$(cd -- "$repo" && pwd -P)
 [[ -f "$repo/Cargo.toml" ]] || die "Cargo.toml not found under $repo"
+for fixture in \
+  claude/post_tool_use_write.json \
+  kimi/post-tool-use-edit.json \
+  opencode/baseline.json; do
+  cmp -s \
+    "$repo/crates/tracedecay-hooks/fixtures/host_events/$fixture" \
+    "$repo/tests/fixtures/packaged_host_events/$fixture" ||
+    die "packaged host-event fixture copy differs from its authority: $fixture"
+done
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/tracedecay-distribution.XXXXXX")
 cleanup() {
@@ -793,6 +809,12 @@ mkdir -p -- "$root_package/examples"
 cp -- \
   "$repo/tests/distribution/fastembed/acceptance.rs" \
   "$root_package/examples/fastembed_distribution_acceptance.rs"
+cat >>"$root_package/Cargo.toml" <<'TOML'
+
+[[example]]
+name = "fastembed_distribution_acceptance"
+path = "examples/fastembed_distribution_acceptance.rs"
+TOML
 echo "distribution acceptance: building packaged FastEmbed and bundled ORT smoke"
 fastembed_build_messages="$work/fastembed-build.jsonl"
 cargo build \
@@ -840,15 +862,20 @@ binary="$install_root/bin/tracedecay"
 tool_list="$work/tool-list.txt"
 "$binary" tool >"$tool_list"
 for required_tool in \
-  tracedecay_diagnostics \
-  tracedecay_impact \
-  tracedecay_affected \
-  tracedecay_test_map; do
+  diagnostics \
+  impact \
+  affected \
+  test_map; do
   if ! python3 - "$tool_list" "$required_tool" <<'PY'
 from pathlib import Path
 import sys
 
-raise SystemExit(0 if sys.argv[2] in Path(sys.argv[1]).read_text(encoding="utf-8") else 1)
+names = {
+    line.split()[0]
+    for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+    if line.startswith("  ") and line.split()
+}
+raise SystemExit(0 if sys.argv[2] in names else 1)
 PY
   then
     die "installed CLI tool catalog omitted $required_tool"
@@ -864,8 +891,28 @@ import sys
 from pathlib import Path
 
 value = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-if not isinstance(value, (dict, list)):
-    raise SystemExit("distribution acceptance: lsp servers returned an invalid JSON shape")
+if not isinstance(value, list) or not value:
+    raise SystemExit("distribution acceptance: lsp servers returned an empty or invalid inventory")
+required_languages = {"rust", "typescript", "javascript", "python", "go", "c", "cpp"}
+languages = set()
+for server in value:
+    if (
+        not isinstance(server, dict)
+        or not isinstance(server.get("language"), str)
+        or not isinstance(server.get("language_id"), str)
+        or not isinstance(server.get("command"), str)
+        or not isinstance(server.get("available"), bool)
+        or not isinstance(server.get("extensions"), list)
+        or not server["extensions"]
+    ):
+        raise SystemExit("distribution acceptance: lsp servers returned an invalid server entry")
+    languages.add(server["language"])
+missing = sorted(required_languages - languages)
+if missing:
+    raise SystemExit(
+        "distribution acceptance: lsp server inventory omitted required languages: "
+        + ", ".join(missing)
+    )
 PY
 "$binary" lsp bridge --help >/dev/null
 
