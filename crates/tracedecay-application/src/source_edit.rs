@@ -17,6 +17,7 @@ use tracedecay_tool_catalog::{
     SurfaceBindingV1, SurfaceOperationName, TerminalState, TerminalStateContract, UseCaseId,
 };
 
+use crate::api_migration::ApiMigrationPlanV1;
 use crate::error::ApplicationContractError;
 use crate::handlers::{ApplicationHandlerDescriptor, ApplicationOperation};
 use crate::result::{
@@ -40,6 +41,7 @@ pub enum SourceEditKind {
     ReplaceSymbol,
     InsertAtSymbol,
     MoveSymbol,
+    ApiMigrationApply,
 }
 
 impl SourceEditKind {
@@ -52,6 +54,7 @@ impl SourceEditKind {
             Self::ReplaceSymbol => "replace_symbol",
             Self::InsertAtSymbol => "insert_at_symbol",
             Self::MoveSymbol => "move_symbol",
+            Self::ApiMigrationApply => "api_migration_apply",
         }
     }
 }
@@ -106,6 +109,12 @@ pub enum SourceEditRequest {
         dry_run: bool,
         update_references: bool,
     },
+    ApiMigrationApply {
+        plan: ApiMigrationPlanV1,
+        plan_digest: ManifestDigest,
+        dry_run: bool,
+        verify: bool,
+    },
 }
 
 impl SourceEditRequest {
@@ -118,6 +127,7 @@ impl SourceEditRequest {
             Self::ReplaceSymbol { .. } => SourceEditKind::ReplaceSymbol,
             Self::InsertAtSymbol { .. } => SourceEditKind::InsertAtSymbol,
             Self::MoveSymbol { .. } => SourceEditKind::MoveSymbol,
+            Self::ApiMigrationApply { .. } => SourceEditKind::ApiMigrationApply,
         }
     }
 
@@ -129,7 +139,8 @@ impl SourceEditRequest {
             | Self::AstGrepRewrite { dry_run, .. }
             | Self::ReplaceSymbol { dry_run, .. }
             | Self::InsertAtSymbol { dry_run, .. }
-            | Self::MoveSymbol { dry_run, .. } => *dry_run,
+            | Self::MoveSymbol { dry_run, .. }
+            | Self::ApiMigrationApply { dry_run, .. } => *dry_run,
         }
     }
 
@@ -142,6 +153,7 @@ impl SourceEditRequest {
             | Self::ReplaceSymbol { verify, .. }
             | Self::InsertAtSymbol { verify, .. } => *verify,
             Self::MoveSymbol { .. } => false,
+            Self::ApiMigrationApply { verify, .. } => *verify,
         }
     }
 
@@ -153,7 +165,8 @@ impl SourceEditRequest {
             | Self::AstGrepRewrite { dry_run: value, .. }
             | Self::ReplaceSymbol { dry_run: value, .. }
             | Self::InsertAtSymbol { dry_run: value, .. }
-            | Self::MoveSymbol { dry_run: value, .. } => *value = dry_run,
+            | Self::MoveSymbol { dry_run: value, .. }
+            | Self::ApiMigrationApply { dry_run: value, .. } => *value = dry_run,
         }
         self
     }
@@ -270,6 +283,18 @@ impl SourceEditEffectRequestV1 {
         self.authority.validate_for(self.context.scope())?;
         self.expected_state.validate()?;
         self.proof.validate_for(&self.authority)?;
+        if let SourceEditRequest::ApiMigrationApply {
+            plan, plan_digest, ..
+        } = &self.edit
+        {
+            plan.validate()?;
+            plan_digest.validate()?;
+            if plan.blocked || plan.plan_digest != *plan_digest {
+                return Err(ApplicationContractError::Inconsistent {
+                    field: "API migration applicable plan digest",
+                });
+            }
+        }
         let operation = source_edit_operation(self.edit.kind())?;
         if self.context.admission_at(self.observed_at) != RequestAdmission::Admitted {
             return Err(ApplicationContractError::Inconsistent {
@@ -433,7 +458,7 @@ pub struct SourceEditVerificationV1 {
     pub message: Option<String>,
 }
 
-const SOURCE_EDIT_KINDS: [SourceEditKind; 7] = [
+const SOURCE_EDIT_KINDS: [SourceEditKind; 8] = [
     SourceEditKind::StrReplace,
     SourceEditKind::MultiStrReplace,
     SourceEditKind::InsertAt,
@@ -441,6 +466,7 @@ const SOURCE_EDIT_KINDS: [SourceEditKind; 7] = [
     SourceEditKind::ReplaceSymbol,
     SourceEditKind::InsertAtSymbol,
     SourceEditKind::MoveSymbol,
+    SourceEditKind::ApiMigrationApply,
 ];
 
 const SOURCE_EDIT_SURFACES: [BindingSurface; 2] = [BindingSurface::Cli, BindingSurface::Mcp];
