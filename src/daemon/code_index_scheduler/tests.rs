@@ -9,10 +9,10 @@ use tracedecay_application::{
     CallableCodeOperationKind, CallableCodeQueryPort, CancellationContext, CapabilityGrantSnapshot,
     CodeFacetDimension, CodeFacetRequest, CodeNavigationRequest, CodeQueryScope,
     CodeRelationRequest, CodeSymbolSearchRequest, CodeTimelineRequest, Deadline, DisclosureClass,
-    ExactOccurrenceRequest, OmissionReason, PageRequest, PhraseSearchRequest, QualifiedNameRequest,
-    RequestContext, RequestId, ResolvedScope, ResultProjection, RetrievalOrder,
-    RetrievalPortContext, RetrievalPortOutcome, RetrievalRequestMeta, SourceMetadataRequest,
-    callable_code_operation,
+    ExactOccurrenceRequest, OmissionReason, OpaqueCursor, PageRequest, PhraseSearchRequest,
+    QualifiedNameRequest, RequestContext, RequestId, ResolvedScope, ResultProjection,
+    RetrievalOrder, RetrievalPortContext, RetrievalPortOutcome, RetrievalRequestMeta,
+    SourceMetadataRequest, callable_code_operation,
 };
 use tracedecay_domain::{
     ActorId, AuthorizationRevision, CalibrationProfileId, CommitId, ComponentRevision,
@@ -2661,6 +2661,47 @@ async fn unpinned_cursor_continues_on_its_immutable_generation() {
     };
     let cursor = first_page.next_cursor.clone().expect("continuation cursor");
     let original_generation = first_page.generation.clone();
+
+    let encoded = cursor
+        .as_str()
+        .strip_prefix("ccq1.")
+        .expect("callable cursor prefix");
+    let mut tampered: serde_json::Value =
+        serde_json::from_slice(&hex::decode(encoded).expect("cursor hex")).expect("cursor JSON");
+    tampered["payload"]["expires_at"] = serde_json::json!(0);
+    let tampered = OpaqueCursor::new(format!(
+        "ccq1.{}",
+        hex::encode(serde_json::to_vec(&tampered).expect("tampered cursor JSON"))
+    ))
+    .expect("tampered cursor");
+    let tampered_request = ExactOccurrenceRequest::new(
+        "shared",
+        None,
+        scope.clone(),
+        RetrievalRequestMeta::current(
+            PageRequest::new(1, Some(tampered)).expect("tampered continuation page"),
+            ResultProjection::Evidence,
+            RetrievalOrder::Relevance,
+        ),
+    )
+    .expect("tampered continuation request");
+    let tampered_outcome = registry
+        .exact_occurrence(
+            RetrievalPortContext {
+                request: &context,
+                operation: &operation,
+            },
+            &tampered_request,
+        )
+        .await;
+    let RetrievalPortOutcome::Unavailable(tampered_evidence) = tampered_outcome else {
+        panic!("tampered cursor must be rejected");
+    };
+    assert_eq!(
+        tampered_evidence.omissions[0].reason,
+        OmissionReason::Failed,
+        "MAC verification must precede expiry and other binding diagnostics"
+    );
 
     fixture.edit(
         "src/lib.rs",
