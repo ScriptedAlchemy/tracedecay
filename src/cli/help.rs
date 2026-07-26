@@ -211,13 +211,14 @@ Related: tracedecay doctor (surfaces restart-safe rollback state), tracedecay
 install / update-plugin (refresh Core feedback routes).";
 
 pub(crate) const HOST_BUNDLE_LONG_ABOUT: &str = "\
-Inspects and recovers an interrupted first-party host component lifecycle \
-transaction. Each host keeps its own recovery journal; a host whose journal is \
-pending refuses further mutation until it is rolled back. Recovery converges \
-automatically whenever the deployed bytes already equal the pre-transaction \
-backup or this transaction's own cataloged output. Use status to see which \
-hosts are pending, recover to roll them back, and --quarantine only when \
-foreign content blocks convergence.";
+Inspects and recovers interrupted first-party host component lifecycle \
+transactions, and snapshots or restores one component's managed artifact files. \
+Artifact backup/restore never captures or changes host registration and refuses \
+components whose lifecycle depends on registration state. Each host keeps its \
+own recovery journal; a host whose journal is pending refuses further mutation \
+until it is rolled back. Recovery converges automatically whenever deployed \
+bytes already equal the pre-transaction backup or this transaction's cataloged \
+output.";
 
 pub(crate) const HOST_BUNDLE_AFTER_HELP: &str = "\
 Examples:
@@ -225,9 +226,14 @@ Examples:
   tracedecay host-bundle recover --dry-run
   tracedecay host-bundle recover --agent opencode --yes
   tracedecay host-bundle recover --agent opencode --quarantine --yes
+  tracedecay host-bundle artifact-backup --agent opencode --component agent --yes
+  tracedecay host-bundle artifact-restore --agent opencode --component agent --backup-id <32-hex-id> --yes
 
 Quarantine moves the journal aside into the lifecycle control directory and
 leaves every rollback backup on disk; nothing is deleted.
+
+Artifact restore changes only catalog-verified managed files. It fails closed
+when native registration is part of the selected component lifecycle.
 
 Related: tracedecay doctor (surfaces the pending recovery boundary),
 tracedecay reinstall (re-applies each host component set).";

@@ -163,6 +163,16 @@ impl HostComponentRegistrationDelegate {
         }
     }
 
+    /// Whether managed artifact bytes are the component set's complete host
+    /// lifecycle. Artifact backup/restore must refuse every other mode because
+    /// it intentionally does not snapshot or reconcile native registration.
+    pub fn supports_artifact_only_backup_restore(
+        &self,
+        component_set: &crate::agents::host_bundle_v2::HostComponentSetV1,
+    ) -> bool {
+        self.registration_mode(component_set) == CompatibilityRegistrationMode::ArtifactOnly
+    }
+
     fn requires_competing_analyzer_preflight(
         &self,
         component_set: &crate::agents::host_bundle_v2::HostComponentSetV1,
