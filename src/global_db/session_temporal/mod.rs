@@ -29,9 +29,9 @@ use crate::query::temporal::context::VersionedTokenEstimator;
 use crate::query::temporal::cursor::{CursorError, StableSortKey, encode_cursor, verify_cursor};
 use crate::query::temporal::execute_temporal_kernel;
 use crate::query::temporal::ports::{
-    BindingDigest, KernelVersions, MAX_TEMPORAL_PARTICIPANTS, TemporalExecutionSnapshot,
-    TemporalParticipantGeneration, TemporalParticipantManifest, TemporalRetrievalScope,
-    TemporalSourceAccess, TemporalWatermarks,
+    BindingDigest, KernelVersions, MAX_TEMPORAL_PARTICIPANTS, TemporalAuthorizedRoot,
+    TemporalExecutionSnapshot, TemporalParticipantGeneration, TemporalParticipantManifest,
+    TemporalRetrievalScope, TemporalSourceAccess, TemporalWatermarks,
 };
 use crate::query::temporal::resolution::ValidatedAuthorization;
 use crate::sessions::SessionMessageRecord;
@@ -254,6 +254,28 @@ impl<'db> RegisteredGlobalDbSessionTemporalExecution<'db> {
     }
 }
 
+/// Decides what a request is actually allowed to see of one participant source.
+///
+/// This used to be the literal `Authorized`, so every source claimed authority
+/// regardless of which project owned it and the manifest could not express
+/// anything else. The session-scoped query in particular does not filter on
+/// `project_key`, so a session belonging to another project reaches this point
+/// and must be denied here.
+///
+/// An absent authorized root is a missing authority, not a permissive one, so
+/// it denies rather than reporting the source as merely unavailable.
+fn participant_access(
+    authorized_root: Option<&TemporalAuthorizedRoot>,
+    participant_project_key: &str,
+) -> TemporalSourceAccess {
+    match authorized_root {
+        Some(root) if root.project_key() == participant_project_key => {
+            TemporalSourceAccess::Authorized
+        }
+        _ => TemporalSourceAccess::Unauthorized,
+    }
+}
+
 async fn freeze_participants(
     read: &TemporalSqlRead<'_>,
     request: &AuthorizedTemporalExecutionRequest,
@@ -271,7 +293,7 @@ async fn freeze_participants(
         TemporalRetrievalScope::Session(session_id) => {
             read.query(
                 "SELECT generation.session_id, source.provider, generation.generation,
-                        generation.frozen_watermarks_json
+                        generation.frozen_watermarks_json, source.project_key
                  FROM session_temporal_generations AS generation
                  JOIN sessions AS source ON source.session_id = generation.session_id
                  WHERE generation.session_id = ?1
@@ -294,7 +316,7 @@ async fn freeze_participants(
                 .project_key();
             read.query(
                 "SELECT generation.session_id, source.provider, generation.generation,
-                        generation.frozen_watermarks_json
+                        generation.frozen_watermarks_json, source.project_key
                  FROM sessions AS source
                  JOIN session_temporal_generations AS generation
                    ON generation.session_id = source.session_id
@@ -351,6 +373,9 @@ async fn freeze_participants(
         let encoded = row
             .get::<String>(3)
             .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        let participant_project_key = row
+            .get::<String>(4)
+            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
         let frozen: FrozenWatermarksWire = serde_json::from_str(&encoded)
             .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
         if frozen.active_generation > generation {
@@ -383,7 +408,7 @@ async fn freeze_participants(
                 watermarks.projection,
                 &configuration_digest,
                 snapshot_request.access_digest(),
-                TemporalSourceAccess::Authorized,
+                participant_access(snapshot_request.authorized_root(), &participant_project_key),
             )
             .map_err(map_control_error)?,
         );
@@ -539,5 +564,58 @@ fn map_lcm_cursor_error(error: CursorError) -> SessionTemporalExecutionError {
         | CursorError::KeyVersionMismatch
         | CursorError::KeyUnavailable
         | CursorError::InvalidKeyMaterial => SessionTemporalExecutionError::Unavailable,
+    }
+}
+
+#[cfg(test)]
+mod participant_access_tests {
+    use super::*;
+
+    fn root(project_id: Option<&str>) -> TemporalAuthorizedRoot {
+        match project_id {
+            Some(project_id) => {
+                TemporalAuthorizedRoot::project("profile", project_id, "store", "root")
+            }
+            None => TemporalAuthorizedRoot::profile("profile", "store", "root"),
+        }
+        .expect("valid authorized root")
+    }
+
+    #[test]
+    fn a_source_owned_by_the_authorized_project_is_authorized() {
+        assert_eq!(
+            participant_access(Some(&root(Some("proj_a"))), "proj_a"),
+            TemporalSourceAccess::Authorized
+        );
+    }
+
+    #[test]
+    fn a_source_owned_by_another_project_is_denied() {
+        // The session-scoped participant query does not filter on project_key,
+        // so this row really does reach the manifest builder.
+        assert_eq!(
+            participant_access(Some(&root(Some("proj_a"))), "proj_b"),
+            TemporalSourceAccess::Unauthorized
+        );
+    }
+
+    #[test]
+    fn a_profile_root_does_not_authorize_project_owned_sources() {
+        assert_eq!(
+            participant_access(Some(&root(None)), "proj_a"),
+            TemporalSourceAccess::Unauthorized
+        );
+        assert_eq!(
+            participant_access(Some(&root(None)), "user"),
+            TemporalSourceAccess::Authorized
+        );
+    }
+
+    #[test]
+    fn a_missing_authorized_root_denies_rather_than_permits() {
+        assert_eq!(
+            participant_access(None, "proj_a"),
+            TemporalSourceAccess::Unauthorized
+        );
     }
 }
