@@ -792,6 +792,15 @@ pub(crate) async fn register_project_open_production_owners(
         })?;
     let graph = server.cg().await;
     let database = graph.db().clone();
+    // A read-only mount can serve graph/status queries, but production owner
+    // registration includes write-backed feedback and advisory runtimes.
+    // Mounting those against a read-only facade makes otherwise read-only
+    // commands fail before dispatch.
+    let backing_file_is_read_only = std::fs::metadata(database.database_path())
+        .is_ok_and(|metadata| metadata.permissions().readonly());
+    if !database.is_writable() || backing_file_is_read_only {
+        return Ok(());
+    }
     let session_db = server
         .project_session_db()
         .ok_or_else(|| TraceDecayError::Config {
