@@ -144,15 +144,6 @@ impl WorkerClient {
         Ok(())
     }
 
-    pub fn pin(&self, probe: &dyn RuntimeRequestProbeV1) -> Result<(), ReaderWorkerError> {
-        let sender = self.snapshot_sender()?;
-        let (reply, receive) = mpsc::sync_channel(1);
-        sender
-            .send(SnapshotCommand::Pin { reply })
-            .map_err(|_| ReaderWorkerError::WorkerClosed)?;
-        self.receive_with_probe(receive, probe)
-    }
-
     pub fn pin_migration(&self) -> Result<(), MigrationSqlError> {
         let sender = self
             .snapshot_sender()
