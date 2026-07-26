@@ -5,10 +5,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tempfile::TempDir;
+use tracedecay_application::retrieval::{
+    CodeFacetDimension, CodeFacetRequest, CodeNavigationRequest, CodeTimelineRequest,
+};
 use tracedecay_application::{
     CallableCodeOperationKind, CallableCodeQueryPort, CancellationContext, CapabilityGrantSnapshot,
-    CodeFacetDimension, CodeFacetRequest, CodeNavigationRequest, CodeQueryScope,
-    CodeRelationRequest, CodeSymbolSearchRequest, CodeTimelineRequest, Deadline, DisclosureClass,
+    CodeQueryScope, CodeRelationRequest, CodeSymbolSearchRequest, Deadline, DisclosureClass,
     ExactOccurrenceRequest, OmissionReason, OpaqueCursor, PageRequest, PhraseSearchRequest,
     QualifiedNameRequest, RequestContext, RequestId, ResolvedScope, ResultProjection,
     RetrievalOrder, RetrievalPortContext, RetrievalPortOutcome, RetrievalRequestMeta,

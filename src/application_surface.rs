@@ -29,17 +29,18 @@ use tracedecay_application::handlers::CanonicalApplicationDispatcher;
 use tracedecay_application::retrieval::{
     CodeFacetDimension, CodeFacetRequest, CodeLexicalFieldFilter, CodeNavigationRequest,
     CodeQueryScope, CodeRelationRequest, CodeTimelineRequest, ExactOccurrenceRequest,
-    GraphRelationRequest, ImplementationSelector, ImplementationsRequest, PhraseSearchRequest,
-    SignatureSearchRequest, SymbolGraphScope, SymbolSearchPrimitiveRequest, TypeHierarchyRequest,
+    GraphRelationRequest, HealthDeltaRequest, ImplementationSelector, ImplementationsRequest,
+    PhraseSearchRequest, SignatureSearchRequest, SymbolGraphScope, SymbolSearchPrimitiveRequest,
+    TypeHierarchyRequest,
 };
 use tracedecay_application::{
     APPLICATION_DEFAULT_PROFILE_ID, ApplicationContractError, ApplicationEnvelope,
     ApplicationOperation, ApplicationProblem, ApplicationProblemEnvelope, ApplicationProblemKind,
-    ApplicationResult, CancellationContext, CancellationSignal, Deadline, HealthDeltaRequest,
-    HealthReadRequest, IdempotencyKey, LegalAction, OperationTermination, PageRequest,
-    ProblemOwningLayer, RequestContext, RequestId, ResultContractRef, ResultProjection,
-    ResumeToken, RetrievalOrder, RetrievalRequestMeta, RetryDirective, SafeDiagnostic,
-    SessionLookupRequest, SourceLinesRequest, StreamEvent, StreamEventKind,
+    ApplicationResult, CancellationContext, CancellationSignal, Deadline, HealthReadRequest,
+    IdempotencyKey, LegalAction, OperationTermination, PageRequest, ProblemOwningLayer,
+    RequestContext, RequestId, ResultContractRef, ResultProjection, ResumeToken, RetrievalOrder,
+    RetrievalRequestMeta, RetryDirective, SafeDiagnostic, SessionLookupRequest, SourceLinesRequest,
+    StreamEvent, StreamEventKind,
 };
 use tracedecay_domain::configuration::{
     ChangePlanId, ConfigurationAuditEventId, ConfigurationIdempotencyKey, ConfigurationLayerIdV1,
