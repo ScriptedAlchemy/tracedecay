@@ -30,7 +30,27 @@ const FAMILY_LABELS: Record<DoctorFindingFamily, string> = {
   observability: 'Observability',
 };
 
-const EVIDENCE_PRESENTATION: Record<
+/** How one Doctor evidence state is presented, in every place it is presented.
+ *
+ * This used to be two tables. `doctorModel.ts` carried `label`/`tokenClass`/
+ * `domainState` for the Doctor inspector and `storageModel.ts` carried
+ * `label`/`tokenClass`/`dotClass` for the storage cards, both exported as
+ * `doctorEvidencePresentation` from sibling files in this directory — so which
+ * fields a caller got depended on which of the two it happened to import, and
+ * the shared `label`/`tokenClass` columns were maintained twice by hand. */
+export interface DoctorEvidencePresentation {
+  label: string;
+  /** Foreground token for chip text. */
+  tokenClass: string;
+  /** The same token as a background, for the chip's dot. Derived rather than
+   * listed: one state has one colour, and a dot that disagrees with its label
+   * is the only bug this field could have. */
+  dotClass: string;
+  /** The `StateChip` kind this evidence state maps to. */
+  domainState: DomainStateKind;
+}
+
+const EVIDENCE_TOKENS: Record<
   DoctorEvidenceState,
   { label: string; tokenClass: string; domainState: DomainStateKind }
 > = {
@@ -56,8 +76,11 @@ export function doctorFamilyLabel(family: DoctorFindingFamily): string {
   return FAMILY_LABELS[family];
 }
 
-export function doctorEvidencePresentation(state: DoctorEvidenceState) {
-  return EVIDENCE_PRESENTATION[state];
+export function doctorEvidencePresentation(
+  state: DoctorEvidenceState,
+): DoctorEvidencePresentation {
+  const tokens = EVIDENCE_TOKENS[state];
+  return { ...tokens, dotClass: tokens.tokenClass.replace('text-', 'bg-') };
 }
 
 export function remediationForEntry(

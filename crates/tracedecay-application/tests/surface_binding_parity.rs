@@ -15,6 +15,7 @@ fn git_and_feedback_bindings_have_declared_surface_parity() {
         BindingSurface::Mcp,
         BindingSurface::Http,
     ];
+    const CLI_MCP_SURFACES: [BindingSurface; 2] = [BindingSurface::Cli, BindingSurface::Mcp];
     const DASHBOARD_READ_SURFACES: [BindingSurface; 4] = [
         BindingSurface::Cli,
         BindingSurface::Mcp,
@@ -33,7 +34,17 @@ fn git_and_feedback_bindings_have_declared_surface_parity() {
     let git_handlers = git_surface_handler_descriptors().expect("git handlers");
     let feedback_handlers = feedback_surface_handler_descriptors().expect("feedback handlers");
 
-    assert_surface_contract_parity(&git, &git_handlers, &TRANSPORT_SURFACES, &[]);
+    let git_overrides = [
+        (
+            "capability.application.git.preview",
+            CLI_MCP_SURFACES.as_slice(),
+        ),
+        (
+            "capability.application.git.apply",
+            CLI_MCP_SURFACES.as_slice(),
+        ),
+    ];
+    assert_surface_contract_parity(&git, &git_handlers, &TRANSPORT_SURFACES, &git_overrides);
     let advisory_overrides = [
         (
             "capability.application.feedback.advisory-cycle",
@@ -89,7 +100,12 @@ fn assert_surface_contract_parity(
         let handler = handlers
             .iter()
             .find(|handler| handler.operation().capability_id() == capability.capability_id())
-            .expect("capability has one application handler descriptor");
+            .unwrap_or_else(|| {
+                panic!(
+                    "{} has one application handler descriptor",
+                    capability.capability_id()
+                )
+            });
         assert_eq!(handler.request_schema(), capability.request_schema());
         assert_eq!(handler.result_schema(), capability.result_schema());
 
