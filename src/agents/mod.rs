@@ -232,6 +232,19 @@ pub trait AgentIntegration {
         Box::pin(std::future::ready(()))
     }
 
+    /// Prepare an install requested from a non-interactive orchestration path.
+    ///
+    /// Most integrations are immediately ready. Hosts whose official lifecycle
+    /// requires user interaction may stage verified artifacts and return a
+    /// typed deferral instead. Explicit install commands still surface that
+    /// deferral as an error, while maintenance can warn and continue.
+    fn prepare_non_interactive_install(
+        &self,
+        _ctx: &InstallContext,
+    ) -> Result<NonInteractiveInstallOutcome> {
+        Ok(NonInteractiveInstallOutcome::Ready)
+    }
+
     /// Refresh tracedecay-generated artifacts (plugin code, baked binary
     /// paths, embedded assets) for every *detected* existing installation,
     /// without writing to any agent config file. Pins, MCP registrations,
@@ -388,7 +401,27 @@ pub trait AgentIntegration {
     }
 }
 
+/// User action required to finish a lifecycle operation that TraceDecay cannot
+/// safely perform through a non-interactive host API.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeferredUserAction {
+    /// Exact operator-facing remediation.
+    pub remediation: String,
+    /// Verified artifacts staged for the user to apply through the host.
+    pub staged_paths: Vec<PathBuf>,
+}
+
+/// Result of preparing an install for a non-interactive caller.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NonInteractiveInstallOutcome {
+    /// The caller may continue through the ordinary install path.
+    Ready,
+    /// Verified work was staged, but the host requires explicit user action.
+    DeferredUserAction(DeferredUserAction),
+}
+
 /// Outcome of [`AgentIntegration::update_plugin`].
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UpdatePluginOutcome {
     /// Generated artifacts were refreshed at these locations.
     Refreshed(Vec<PathBuf>),
@@ -398,6 +431,9 @@ pub enum UpdatePluginOutcome {
     /// The integration only writes shared config files; there are no
     /// tracedecay-generated artifacts to refresh without touching config.
     ConfigOnly,
+    /// Verified artifacts were staged, but the host requires explicit user
+    /// action before it can activate them.
+    DeferredUserAction(DeferredUserAction),
 }
 
 /// Context passed to [`AgentIntegration::install`] and [`AgentIntegration::uninstall`].

@@ -102,6 +102,17 @@ assert_required_assets() {
     "src/query/retrieval/semantic/tests.rs"
     "src/semantic_code/fastembed_adapter.rs"
     "src/semantic_code/model_lifecycle.rs"
+    "tests/fixtures/packaged_host_events/claude.json"
+    "tests/fixtures/packaged_host_events/claude/post_tool_use_write.json"
+    "tests/fixtures/packaged_host_events/codex.json"
+    "tests/fixtures/packaged_host_events/cursor.json"
+    "tests/fixtures/packaged_host_events/hermes.json"
+    "tests/fixtures/packaged_host_events/hermes/saved-edit.json"
+    "tests/fixtures/packaged_host_events/hermes/terminal-receipt.json"
+    "tests/fixtures/packaged_host_events/kiro.json"
+    "tests/fixtures/packaged_host_events/kimi-code.json"
+    "tests/fixtures/packaged_host_events/kimi/post-tool-use-edit.json"
+    "tests/fixtures/packaged_host_events/opencode/baseline.json"
     # Packaged fixture/workload pins (PR5 harness embeds its workload via
     # include_str!; PR7 keeps a workload pin for distribution completeness).
     "tests/fixtures/provider_normalization/codex/session_meta.input.json"
@@ -138,27 +149,23 @@ assert_required_assets() {
   python3 "$repo/scripts/check-dashboard-bundle.py" \
     "$root_package/dashboard/app-dist"
 
-  python3 - \
-    "$root_package/plugin/.lsp.json" \
-    "$root_package/plugin/.claude-plugin/plugin.json" \
-    "$root_package/plugin/.codex-plugin/plugin.json" \
-    "$root_package/plugin/.cursor-plugin/plugin.json" \
-    "$root_package/plugin/.kimi-plugin/plugin.json" <<'PY'
+  python3 - "$root_package/plugin/.lsp.json" <<'PY'
 import json
 import pathlib
 import sys
 
-for raw_path in sys.argv[1:]:
-    path = pathlib.Path(raw_path)
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise SystemExit(f"distribution acceptance: invalid packaged JSON {path}: {error}")
-    if not isinstance(value, dict) or not value:
-        raise SystemExit(
-            f"distribution acceptance: packaged JSON must be a non-empty object: {path}"
-        )
+path = pathlib.Path(sys.argv[1])
+try:
+    value = json.loads(path.read_text(encoding="utf-8"))
+except (OSError, json.JSONDecodeError) as error:
+    raise SystemExit(f"distribution acceptance: invalid packaged JSON {path}: {error}")
+if not isinstance(value, dict) or not value:
+    raise SystemExit(
+        f"distribution acceptance: packaged JSON must be a non-empty object: {path}"
+    )
 PY
+  python3 "$repo/scripts/check-packaged-plugin-manifests.py" \
+    "$root_package/plugin"
 }
 
 verify_feature_wiring() {
@@ -292,14 +299,17 @@ run_self_test() {
   local application="$fixture/application"
   local api="$fixture/api"
   local path
+  for path in plugin/.lsp.json; do
+    mkdir -p -- "$root/$(dirname -- "$path")"
+    printf '{"fixture":true}\n' >"$root/$path"
+  done
   for path in \
-    plugin/.lsp.json \
     plugin/.claude-plugin/plugin.json \
     plugin/.codex-plugin/plugin.json \
     plugin/.cursor-plugin/plugin.json \
     plugin/.kimi-plugin/plugin.json; do
     mkdir -p -- "$root/$(dirname -- "$path")"
-    printf '{"fixture":true}\n' >"$root/$path"
+    cp -- "$repo/$path" "$root/$path"
   done
   for path in \
     plugin/cursor-native-extension/dist/extension.js \
@@ -315,6 +325,17 @@ run_self_test() {
     src/query/retrieval/semantic/tests.rs \
     src/semantic_code/fastembed_adapter.rs \
     src/semantic_code/model_lifecycle.rs \
+    tests/fixtures/packaged_host_events/claude.json \
+    tests/fixtures/packaged_host_events/claude/post_tool_use_write.json \
+    tests/fixtures/packaged_host_events/codex.json \
+    tests/fixtures/packaged_host_events/cursor.json \
+    tests/fixtures/packaged_host_events/hermes.json \
+    tests/fixtures/packaged_host_events/hermes/saved-edit.json \
+    tests/fixtures/packaged_host_events/hermes/terminal-receipt.json \
+    tests/fixtures/packaged_host_events/kiro.json \
+    tests/fixtures/packaged_host_events/kimi-code.json \
+    tests/fixtures/packaged_host_events/kimi/post-tool-use-edit.json \
+    tests/fixtures/packaged_host_events/opencode/baseline.json \
     tests/fixtures/provider_normalization/codex/session_meta.input.json \
     tests/fixtures/provider_normalization/codex/agent_message.input.json \
     tests/fixtures/analytics/codex_skill_prose.txt \
@@ -505,12 +526,30 @@ while (($#)); do
 done
 
 require_command cargo
+require_command cmp
 require_command curl
 require_command python3
 require_command tar
 
 repo=$(cd -- "$repo" && pwd -P)
 [[ -f "$repo/Cargo.toml" ]] || die "Cargo.toml not found under $repo"
+for fixture in \
+  claude.json \
+  claude/post_tool_use_write.json \
+  codex.json \
+  cursor.json \
+  hermes.json \
+  hermes/saved-edit.json \
+  hermes/terminal-receipt.json \
+  kiro.json \
+  kimi-code.json \
+  kimi/post-tool-use-edit.json \
+  opencode/baseline.json; do
+  cmp -s \
+    "$repo/crates/tracedecay-hooks/fixtures/host_events/$fixture" \
+    "$repo/tests/fixtures/packaged_host_events/$fixture" ||
+    die "packaged host-event fixture copy differs from its authority: $fixture"
+done
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/tracedecay-distribution.XXXXXX")
 cleanup() {
@@ -727,7 +766,7 @@ use tracedecay::agents::host_bundle_registry::{
     default_components, verified_embedded_default_host_component_set,
     verified_embedded_host_bundle,
 };
-use tracedecay::agents::host_bundle_v2::stock_host_kinds;
+use tracedecay::agents::host_bundle_v2::{HostKindV1, stock_host_kinds};
 use tracedecay::catalog_composition::build_application_catalog_snapshot;
 use tracedecay_tool_catalog::{AvailabilityContract, CapabilityId};
 
@@ -744,6 +783,15 @@ const REQUIRED_CAPABILITIES: [&str; 10] = [
     "capability.application.feedback.proximity",
 ];
 
+const REQUIRED_HOSTS: [HostKindV1; 6] = [
+    HostKindV1::ClaudeCode,
+    HostKindV1::CursorDesktop,
+    HostKindV1::Codex,
+    HostKindV1::Hermes,
+    HostKindV1::KimiCode,
+    HostKindV1::OpenCode,
+];
+
 fn main() {
     let snapshot = build_application_catalog_snapshot()
         .expect("packaged application catalog must compose");
@@ -758,13 +806,17 @@ fn main() {
         );
     }
 
-    let mut supported_hosts = 0;
-    for host in stock_host_kinds() {
+    let supported_hosts = stock_host_kinds()
+        .into_iter()
+        .filter(|host| !default_components(*host).is_empty())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        supported_hosts,
+        REQUIRED_HOSTS.to_vec(),
+        "packaged default host bundle inventory changed"
+    );
+    for host in REQUIRED_HOSTS {
         let components = default_components(host);
-        if components.is_empty() {
-            continue;
-        }
-        supported_hosts += 1;
         let component_set = verified_embedded_default_host_component_set(host, 0)
             .expect("default packaged host component set must verify");
         assert_eq!(component_set.component_set.components.len(), components.len());
@@ -778,7 +830,6 @@ fn main() {
             assert!(!bundle.contents.is_empty(), "packaged host bundle has no assets");
         }
     }
-    assert!(supported_hosts >= 8, "required host bundles are missing");
 }
 RS
 
@@ -793,6 +844,12 @@ mkdir -p -- "$root_package/examples"
 cp -- \
   "$repo/tests/distribution/fastembed/acceptance.rs" \
   "$root_package/examples/fastembed_distribution_acceptance.rs"
+cat >>"$root_package/Cargo.toml" <<'TOML'
+
+[[example]]
+name = "fastembed_distribution_acceptance"
+path = "examples/fastembed_distribution_acceptance.rs"
+TOML
 echo "distribution acceptance: building packaged FastEmbed and bundled ORT smoke"
 fastembed_build_messages="$work/fastembed-build.jsonl"
 cargo build \
@@ -840,15 +897,20 @@ binary="$install_root/bin/tracedecay"
 tool_list="$work/tool-list.txt"
 "$binary" tool >"$tool_list"
 for required_tool in \
-  tracedecay_diagnostics \
-  tracedecay_impact \
-  tracedecay_affected \
-  tracedecay_test_map; do
+  diagnostics \
+  impact \
+  affected \
+  test_map; do
   if ! python3 - "$tool_list" "$required_tool" <<'PY'
 from pathlib import Path
 import sys
 
-raise SystemExit(0 if sys.argv[2] in Path(sys.argv[1]).read_text(encoding="utf-8") else 1)
+names = {
+    line.split()[0]
+    for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+    if line.startswith("  ") and line.split()
+}
+raise SystemExit(0 if sys.argv[2] in names else 1)
 PY
   then
     die "installed CLI tool catalog omitted $required_tool"
@@ -864,9 +926,31 @@ import sys
 from pathlib import Path
 
 value = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-if not isinstance(value, (dict, list)):
-    raise SystemExit("distribution acceptance: lsp servers returned an invalid JSON shape")
+if not isinstance(value, list) or not value:
+    raise SystemExit("distribution acceptance: lsp servers returned an empty or invalid inventory")
+required_languages = {"rust", "typescript", "javascript", "python", "go", "c", "cpp"}
+languages = set()
+for server in value:
+    if (
+        not isinstance(server, dict)
+        or not isinstance(server.get("language"), str)
+        or not isinstance(server.get("language_id"), str)
+        or not isinstance(server.get("command"), str)
+        or not isinstance(server.get("available"), bool)
+        or not isinstance(server.get("extensions"), list)
+        or not server["extensions"]
+    ):
+        raise SystemExit("distribution acceptance: lsp servers returned an invalid server entry")
+    languages.add(server["language"])
+missing = sorted(required_languages - languages)
+if missing:
+    raise SystemExit(
+        "distribution acceptance: lsp server inventory omitted required languages: "
+        + ", ".join(missing)
+    )
 PY
-"$binary" lsp bridge --help >/dev/null
+python3 "$repo/scripts/check-packaged-lsp-bridge.py" \
+  "$binary" \
+  "$work/lsp-bridge"
 
 echo "distribution acceptance passed"
