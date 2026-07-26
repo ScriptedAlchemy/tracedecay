@@ -565,8 +565,7 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
             .project_key();
         for participant in snapshot.participant_manifest().entries() {
             control.checkpoint()?;
-            if participant.access()
-                != crate::query::temporal::ports::TemporalSourceAccess::Authorized
+            if !participant.is_authorized_for_snapshot()
                 || participant.configuration_digest()
                     != snapshot.versions().configuration_digest.as_str()
                 || participant.authorization_digest() != snapshot.access_digest().as_str()

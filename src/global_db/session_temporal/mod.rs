@@ -18,6 +18,7 @@ mod tests;
 
 use crate::db::engine::params;
 use serde::Deserialize;
+use serde_json::Value;
 use tracedecay_domain::{RetrievalAnchorId, SessionId, SignedCursorKeyRefV1};
 
 use crate::application::session::{
@@ -30,8 +31,8 @@ use crate::query::temporal::cursor::{CursorError, StableSortKey, encode_cursor, 
 use crate::query::temporal::execute_temporal_kernel;
 use crate::query::temporal::ports::{
     BindingDigest, KernelVersions, MAX_TEMPORAL_PARTICIPANTS, TemporalAuthorizedRoot,
-    TemporalExecutionSnapshot, TemporalParticipantGeneration, TemporalParticipantManifest,
-    TemporalRetrievalScope, TemporalSourceAccess, TemporalWatermarks,
+    TemporalExecutionSnapshot, TemporalParticipantAuthorization, TemporalParticipantGeneration,
+    TemporalParticipantManifest, TemporalRetrievalScope, TemporalSourceAccess, TemporalWatermarks,
 };
 use crate::query::temporal::resolution::ValidatedAuthorization;
 use crate::sessions::SessionMessageRecord;
@@ -264,15 +265,53 @@ impl<'db> RegisteredGlobalDbSessionTemporalExecution<'db> {
 ///
 /// An absent authorized root is a missing authority, not a permissive one, so
 /// it denies rather than reporting the source as merely unavailable.
-fn participant_access(
+fn participant_authorization(
     authorized_root: Option<&TemporalAuthorizedRoot>,
     participant_project_key: &str,
-) -> TemporalSourceAccess {
+) -> TemporalParticipantAuthorization {
     match authorized_root {
         Some(root) if root.project_key() == participant_project_key => {
-            TemporalSourceAccess::Authorized
+            TemporalParticipantAuthorization::Authorized
         }
-        _ => TemporalSourceAccess::Unauthorized,
+        _ => TemporalParticipantAuthorization::Denied,
+    }
+}
+
+fn participant_source_access(
+    metadata_json: Option<&str>,
+    now: i64,
+) -> Option<TemporalSourceAccess> {
+    let metadata = match metadata_json {
+        Some(encoded) => serde_json::from_str::<Value>(encoded).ok()?,
+        None => Value::Null,
+    };
+    if metadata
+        .get("retention_expires_at")
+        .and_then(Value::as_i64)
+        .is_some_and(|expires_at| expires_at <= now)
+    {
+        return Some(TemporalSourceAccess::RetentionWithheld);
+    }
+    let state = [
+        "source_access",
+        "payload_access",
+        "hydration_state",
+        "availability",
+    ]
+    .iter()
+    .find_map(|key| metadata.get(*key).and_then(Value::as_str));
+    match state {
+        None | Some("authorized" | "available" | "eligible") => {
+            Some(TemporalSourceAccess::Available)
+        }
+        Some("locked" | "quarantined") => Some(TemporalSourceAccess::Locked),
+        Some("retention_withheld" | "retention_expired") => {
+            Some(TemporalSourceAccess::RetentionWithheld)
+        }
+        Some("deleted") => Some(TemporalSourceAccess::Deleted),
+        Some("redacted") => Some(TemporalSourceAccess::Redacted),
+        Some("unavailable") => Some(TemporalSourceAccess::Unavailable),
+        Some(_) => None,
     }
 }
 
@@ -293,7 +332,8 @@ async fn freeze_participants(
         TemporalRetrievalScope::Session(session_id) => {
             read.query(
                 "SELECT generation.session_id, source.provider, generation.generation,
-                        generation.frozen_watermarks_json, source.project_key
+                        generation.frozen_watermarks_json, source.project_key,
+                        source.metadata_json, unixepoch()
                  FROM session_temporal_generations AS generation
                  JOIN sessions AS source ON source.session_id = generation.session_id
                  WHERE generation.session_id = ?1
@@ -316,7 +356,8 @@ async fn freeze_participants(
                 .project_key();
             read.query(
                 "SELECT generation.session_id, source.provider, generation.generation,
-                        generation.frozen_watermarks_json, source.project_key
+                        generation.frozen_watermarks_json, source.project_key,
+                        source.metadata_json, unixepoch()
                  FROM sessions AS source
                  JOIN session_temporal_generations AS generation
                    ON generation.session_id = source.session_id
@@ -376,6 +417,19 @@ async fn freeze_participants(
         let participant_project_key = row
             .get::<String>(4)
             .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        let participant_metadata = row
+            .get::<Option<String>>(5)
+            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        let snapshot_time = row
+            .get::<i64>(6)
+            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        let mut authorization =
+            participant_authorization(snapshot_request.authorized_root(), &participant_project_key);
+        let access = participant_source_access(participant_metadata.as_deref(), snapshot_time)
+            .unwrap_or_else(|| {
+                authorization = TemporalParticipantAuthorization::Denied;
+                TemporalSourceAccess::Available
+            });
         let frozen: FrozenWatermarksWire = serde_json::from_str(&encoded)
             .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
         if frozen.active_generation > generation {
@@ -408,7 +462,8 @@ async fn freeze_participants(
                 watermarks.projection,
                 &configuration_digest,
                 snapshot_request.access_digest(),
-                participant_access(snapshot_request.authorized_root(), &participant_project_key),
+                authorization,
+                access,
             )
             .map_err(map_control_error)?,
         );
@@ -584,8 +639,8 @@ mod participant_access_tests {
     #[test]
     fn a_source_owned_by_the_authorized_project_is_authorized() {
         assert_eq!(
-            participant_access(Some(&root(Some("proj_a"))), "proj_a"),
-            TemporalSourceAccess::Authorized
+            participant_authorization(Some(&root(Some("proj_a"))), "proj_a"),
+            TemporalParticipantAuthorization::Authorized
         );
     }
 
@@ -594,28 +649,76 @@ mod participant_access_tests {
         // The session-scoped participant query does not filter on project_key,
         // so this row really does reach the manifest builder.
         assert_eq!(
-            participant_access(Some(&root(Some("proj_a"))), "proj_b"),
-            TemporalSourceAccess::Unauthorized
+            participant_authorization(Some(&root(Some("proj_a"))), "proj_b"),
+            TemporalParticipantAuthorization::Denied
         );
     }
 
     #[test]
     fn a_profile_root_does_not_authorize_project_owned_sources() {
         assert_eq!(
-            participant_access(Some(&root(None)), "proj_a"),
-            TemporalSourceAccess::Unauthorized
+            participant_authorization(Some(&root(None)), "proj_a"),
+            TemporalParticipantAuthorization::Denied
         );
         assert_eq!(
-            participant_access(Some(&root(None)), "user"),
-            TemporalSourceAccess::Authorized
+            participant_authorization(Some(&root(None)), "user"),
+            TemporalParticipantAuthorization::Authorized
         );
     }
 
     #[test]
     fn a_missing_authorized_root_denies_rather_than_permits() {
         assert_eq!(
-            participant_access(None, "proj_a"),
-            TemporalSourceAccess::Unauthorized
+            participant_authorization(None, "proj_a"),
+            TemporalParticipantAuthorization::Denied
         );
+    }
+
+    #[test]
+    fn persisted_source_lifecycle_states_are_preserved() {
+        for (metadata, expected) in [
+            (
+                r#"{"payload_access":"quarantined"}"#,
+                TemporalSourceAccess::Locked,
+            ),
+            (
+                r#"{"payload_access":"retention_expired"}"#,
+                TemporalSourceAccess::RetentionWithheld,
+            ),
+            (
+                r#"{"payload_access":"deleted"}"#,
+                TemporalSourceAccess::Deleted,
+            ),
+            (
+                r#"{"payload_access":"redacted"}"#,
+                TemporalSourceAccess::Redacted,
+            ),
+            (
+                r#"{"payload_access":"unavailable"}"#,
+                TemporalSourceAccess::Unavailable,
+            ),
+        ] {
+            assert_eq!(
+                participant_source_access(Some(metadata), 100),
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn expired_source_retention_is_withheld_at_snapshot_time() {
+        assert_eq!(
+            participant_source_access(Some(r#"{"retention_expires_at":99}"#), 100),
+            Some(TemporalSourceAccess::RetentionWithheld)
+        );
+    }
+
+    #[test]
+    fn invalid_or_ambiguous_source_access_never_becomes_unavailable() {
+        assert_eq!(
+            participant_source_access(Some(r#"{"payload_access":"ambiguous"}"#), 100),
+            None
+        );
+        assert_eq!(participant_source_access(Some("{"), 100), None);
     }
 }
