@@ -20,7 +20,7 @@ use crate::errors::{Result, TraceDecayError};
 use crate::mcp::ReplayTransport;
 use crate::mcp::server::{McpMethod, SERVER_INSTRUCTIONS, classify_mcp_method, initialize_result};
 use crate::mcp::tools::{
-    default_catalog_discovery_authority, explore_call_budget,
+    ToolRegistryMode, default_catalog_discovery_authority, explore_call_budget,
     get_catalog_filtered_tool_definitions_with_budget, project_catalog_discovery_scope,
 };
 use crate::mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
@@ -3602,6 +3602,7 @@ fn daemon_bootstrap_response(
                         &profile_id,
                         &authority,
                         &project_catalog_discovery_scope(),
+                        ToolRegistryMode::HostAvailable,
                     ) {
                         Ok(tools) => JsonRpcResponse::success(id, json!({ "tools": tools })),
                         Err(_) => JsonRpcResponse::error(

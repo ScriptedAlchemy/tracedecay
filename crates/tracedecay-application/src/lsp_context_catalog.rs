@@ -77,8 +77,8 @@ pub fn lsp_context_catalog_contribution() -> Result<CatalogContributionV1, Appli
                 spec.description,
                 vec![spec.summary.to_owned()],
             )?,
-            request_schema: schema(spec, "request", 65_536)?,
-            result_schema: schema(spec, "result", 1_048_576)?,
+            request_schema: schema(spec, "request")?,
+            result_schema: schema(spec, "result")?,
             effect: EffectClass::Read,
             scope: ScopeRequirement::new(vec![
                 ScopeDimension::Project,
@@ -138,7 +138,7 @@ pub fn lsp_context_handler_descriptors()
     LSP_CONTEXT_SPECS
         .iter()
         .map(|spec| {
-            let result = schema(spec, "result", 1_048_576)?;
+            let result = schema(spec, "result")?;
             ApplicationHandlerDescriptor::new(
                 ApplicationOperation::new(
                     capability_id(spec)?,
@@ -146,7 +146,7 @@ pub fn lsp_context_handler_descriptors()
                     ResultContractRef::from_schema(&result),
                     true,
                 ),
-                schema(spec, "request", 65_536)?,
+                schema(spec, "request")?,
                 result,
             )
         })
@@ -167,17 +167,12 @@ fn use_case_id(spec: &LspContextSpec) -> Result<UseCaseId, ApplicationContractEr
     ))?)
 }
 
-fn schema(
-    spec: &LspContextSpec,
-    direction: &str,
-    maximum_bytes: u32,
-) -> Result<SchemaRef, ApplicationContractError> {
+fn schema(spec: &LspContextSpec, direction: &str) -> Result<SchemaRef, ApplicationContractError> {
     Ok(SchemaRef::new(
         SchemaId::new(format!(
             "schema.application.lsp.{}.{}",
             spec.suffix, direction
         ))?,
         1,
-        maximum_bytes,
     )?)
 }

@@ -21,10 +21,10 @@ fn source_retrieval(
         retriever_id: RetrieverId::new("retriever.source.lines").unwrap(),
         request_schema,
         evidence_packet_schema: result_schema,
-        coverage_contract: CoverageContractRef::new(schema("schema.coverage.v1", 96)),
-        omission_contract: OmissionContractRef::new(schema("schema.omission.v1", 96)),
-        scoring_contract: ScoringContractRef::new(schema("schema.scoring.v1", 96)),
-        contribution_contract: ContributionContractRef::new(schema("schema.contribution.v1", 96)),
+        coverage_contract: CoverageContractRef::new(schema("schema.coverage.v1")),
+        omission_contract: OmissionContractRef::new(schema("schema.omission.v1")),
+        scoring_contract: ScoringContractRef::new(schema("schema.scoring.v1")),
+        contribution_contract: ContributionContractRef::new(schema("schema.contribution.v1")),
         deterministic_order: SortContract::new(
             SortContractId::new("sort.source.path-offset.v1").unwrap(),
             1,
@@ -46,8 +46,8 @@ fn source_retrieval(
 fn retrieval_primitives_canonicalize_temporal_and_cancellation_metadata() {
     let profile_id = profile_id("profile.default");
     let capability_id = capability_id("capability.source.lines");
-    let request_schema = schema("schema.source.lines.request", 128);
-    let result_schema = schema("schema.source.lines.result", 256);
+    let request_schema = schema("schema.source.lines.request");
+    let result_schema = schema("schema.source.lines.result");
     let manifest = read_manifest(
         capability_id.clone(),
         use_case_id("use-case.source.lines"),
@@ -97,15 +97,12 @@ fn retrieval_primitive_rejects_unbounded_page_metadata() {
         capability_id: capability_id("capability.source.invalid"),
         family: RetrievalFamily::Source,
         retriever_id: RetrieverId::new("retriever.source.invalid").unwrap(),
-        request_schema: schema("schema.invalid.request", 128),
-        evidence_packet_schema: schema("schema.invalid.result", 128),
-        coverage_contract: CoverageContractRef::new(schema("schema.invalid.coverage", 64)),
-        omission_contract: OmissionContractRef::new(schema("schema.invalid.omission", 64)),
-        scoring_contract: ScoringContractRef::new(schema("schema.invalid.scoring", 64)),
-        contribution_contract: ContributionContractRef::new(schema(
-            "schema.invalid.contribution",
-            64,
-        )),
+        request_schema: schema("schema.invalid.request"),
+        evidence_packet_schema: schema("schema.invalid.result"),
+        coverage_contract: CoverageContractRef::new(schema("schema.invalid.coverage")),
+        omission_contract: OmissionContractRef::new(schema("schema.invalid.omission")),
+        scoring_contract: ScoringContractRef::new(schema("schema.invalid.scoring")),
+        contribution_contract: ContributionContractRef::new(schema("schema.invalid.contribution")),
         deterministic_order: SortContract::new(SortContractId::new("sort.invalid.v1").unwrap(), 1)
             .unwrap(),
         default_page_size: 101,
