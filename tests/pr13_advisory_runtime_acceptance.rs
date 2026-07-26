@@ -48,7 +48,7 @@ use tracedecay_domain::feedback::{
 };
 use tracedecay_domain::{
     ActorId, CanonicalObservationIdV1, CommitId, ManifestDigest, ProjectId, ProviderId, RefId,
-    RepositoryId, RetrievalAnchorId, UtcMicros, WorktreeId,
+    RepositoryId, RetrievalAnchorId, UtcMicros, WorktreeId, canonical_sha256,
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
@@ -509,7 +509,13 @@ async fn ci_localization_resolves_generation_symbol_callers_and_tests_from_canon
     let retained = CiRetainedProviderRecordV1 {
         provider_record,
         observation: CiRetainedProviderObservationV1 {
-            observation_id: CanonicalObservationIdV1::new("observation.pr13.ci.graph").unwrap(),
+            observation_id: CanonicalObservationIdV1::new(
+                canonical_sha256(&"observation.pr13.ci.graph")
+                    .unwrap()
+                    .as_str()
+                    .to_owned(),
+            )
+            .unwrap(),
             failure_anchor: RetrievalAnchorId::new("anchor.pr13.ci.graph").unwrap(),
             provider_head_commit_id: scope.head_commit_id.clone(),
             failure_kind: tracedecay_domain::feedback::CiFailureKindV1::TestFailure,
