@@ -1151,7 +1151,7 @@ fn describe_execution_error(error: SessionTemporalExecutionError) -> LcmDescribe
         SessionTemporalExecutionError::Cancelled => LcmDescribeServiceOutcome::Cancelled,
         SessionTemporalExecutionError::Stale { .. }
         | SessionTemporalExecutionError::Unavailable
-        | SessionTemporalExecutionError::Empty
+        | SessionTemporalExecutionError::Empty { .. }
         | SessionTemporalExecutionError::Kernel(_) => {
             LcmDescribeServiceOutcome::Unavailable(SessionRetrievalUnavailable::without_worker(
                 SessionRetrievalUnavailableReason::TemporalStoreUnavailable,
@@ -1171,7 +1171,7 @@ fn expand_execution_error(error: SessionTemporalExecutionError) -> LcmExpandServ
         SessionTemporalExecutionError::Cancelled => LcmExpandServiceOutcome::Cancelled,
         SessionTemporalExecutionError::Stale { .. }
         | SessionTemporalExecutionError::Unavailable
-        | SessionTemporalExecutionError::Empty
+        | SessionTemporalExecutionError::Empty { .. }
         | SessionTemporalExecutionError::Kernel(_) => {
             LcmExpandServiceOutcome::Unavailable(SessionRetrievalUnavailable::without_worker(
                 SessionRetrievalUnavailableReason::TemporalStoreUnavailable,
