@@ -230,6 +230,9 @@ pub(crate) struct DashboardState {
     /// Retention policy resolved with the owning runtime configuration.
     /// Dashboard reads must not re-open mutable config input per request.
     pub(crate) retention_config: crate::config::RetentionConfig,
+    /// Daemon-owned user-profile settings authority. Dashboard routes never
+    /// load or mutate `config.toml` directly.
+    pub(crate) user_settings: Arc<dyn crate::application::configuration::UserSettingsDaemonClient>,
     /// Recent deterministic curation activity emitted by the standalone dashboard.
     pub(crate) curation_activity: Arc<RwLock<Vec<Value>>>,
     /// Process-local derived BPE token-count cache for the Savings & Cost tab.
@@ -436,6 +439,7 @@ async fn build_state_inner(
         config_path,
         dashboard_root,
         retention_config: cg.get_config().sync.retention.clone(),
+        user_settings: cg.configuration_runtime().user_settings_client(),
         curation_activity: Arc::new(RwLock::new(Vec::new())),
         token_counts: Arc::new(token_count::TokenCountCache::new()),
         code_diagnostics_authority,
@@ -825,6 +829,8 @@ fn router_with_active_application(
         )
         .route("/api/capabilities", any(active_api_gateway))
         .route("/api/plugins/{*tail}", any(active_api_gateway))
+        .route("/api/observatory", any(active_api_gateway))
+        .route("/api/costs", any(active_api_gateway))
         .route("/api/automation/{*tail}", any(active_api_gateway))
         .route("/api/settings", any(active_api_gateway))
         .route("/api/settings/{*tail}", any(active_api_gateway))
@@ -1046,6 +1052,14 @@ fn project_api_router() -> Router<DashboardState> {
             get(analytics_api::overview),
         )
         .route("/api/observatory", get(analytics_api::observatory))
+        .route(
+            "/api/plugins/analytics/observatory",
+            get(analytics_api::observatory_http),
+        )
+        .route(
+            "/api/plugins/analytics/observatory/export",
+            get(analytics_api::observatory_export),
+        )
         .route("/api/plugins/analytics/hints", get(analytics_api::hints))
         .route("/api/plugins/analytics/usage", get(analytics_api::usage))
         .route(
@@ -1072,6 +1086,11 @@ fn project_api_router() -> Router<DashboardState> {
         // Savings & Cost API (savings ledger + session cost accounting)
         .route("/api/plugins/savings/overview", get(savings_api::overview))
         .route("/api/costs", get(savings_api::costs))
+        .route("/api/plugins/savings/costs", get(savings_api::costs_http))
+        .route(
+            "/api/plugins/savings/costs/export",
+            get(savings_api::costs_export),
+        )
         .route("/api/plugins/savings/ledger", get(savings_api::ledger))
         .route("/api/plugins/savings/sessions", get(savings_api::sessions))
         .route("/api/plugins/savings/models", get(savings_api::models))

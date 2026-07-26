@@ -2,6 +2,7 @@
 
 use schemars::JsonSchema;
 use schemars::generate::SchemaSettings;
+use tracedecay_application::{CostsReadModelV1, ObservatoryReadModelV1};
 
 use super::automation_scheduler_api::AutomationSchedulerStatusV1;
 use super::code_index_freshness_api::CodeIndexFreshnessPayloadV1;
@@ -15,6 +16,7 @@ use super::graph_structure_api::{
     StrataMeasurementV1, StructureReadV1, TestMapMeasurementV1, registered_route_contracts,
 };
 use super::read_model::{DASHBOARD_SCHEMA_REVISION_V1, DashboardEnvelopeV1};
+use super::settings_api::{ProjectSettingsPatch, SettingsPayloadV1, UserSettingsPatch};
 use super::storage_findings_api::StorageFindingsPayloadV1;
 use super::storage_telemetry_api::StorageTelemetryPayloadV1;
 
@@ -30,6 +32,11 @@ struct DashboardContractCatalogV1 {
     doctor_remediation: DoctorRemediationPayloadV1,
     explorer_query_run: ExplorerQueryRunV1,
     code_index_freshness: CodeIndexFreshnessPayloadV1,
+    settings: SettingsPayloadV1,
+    settings_project_patch: ProjectSettingsPatch,
+    settings_user_patch: UserSettingsPatch,
+    observatory: ObservatoryReadModelV1,
+    costs: CostsReadModelV1,
     graph_call_chain: StructureReadV1<CallChainMeasurementV1>,
     graph_strata: StructureReadV1<StrataMeasurementV1>,
     graph_fact_matches: StructureReadV1<FactMatchesMeasurementV1>,

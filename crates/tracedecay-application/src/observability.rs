@@ -3,6 +3,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::{CoverageStateV1, ObservabilityEnvelopeV1};
 
@@ -11,7 +12,7 @@ use crate::ApplicationContractError;
 pub type ObservabilityFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, ApplicationContractError>> + Send + 'a>>;
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 pub struct ObservabilityHorizonV1 {
     pub since_micros: i64,
     pub until_micros: i64,
@@ -77,7 +78,7 @@ where
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 pub struct MetricCoverageV1 {
     /// Exact denominator cardinality. `None` means the denominator is unknown.
     pub eligible: Option<u64>,
@@ -89,7 +90,7 @@ pub struct MetricCoverageV1 {
     pub state: CoverageStateV1,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MetricEvidenceClassV1 {
     Measurement,
@@ -97,7 +98,7 @@ pub enum MetricEvidenceClassV1 {
     CalibratedPrediction,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MetricSourceV1 {
     ObservabilityEnvelope,
@@ -105,7 +106,7 @@ pub enum MetricSourceV1 {
     SavingsLedger,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 pub struct MetricProvenanceV1 {
     pub source: MetricSourceV1,
     pub source_revision: String,
@@ -113,27 +114,27 @@ pub struct MetricProvenanceV1 {
     pub watermark: String,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 pub struct MetricCohortV1 {
     pub descriptor_revision: String,
     pub eligible_population: String,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 pub struct MetricTemporalV1 {
     pub horizon: ObservabilityHorizonV1,
     pub baseline_watermark: Option<String>,
     pub delta: Option<f64>,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 pub struct MetricUncertaintyV1 {
     pub lower: Option<f64>,
     pub upper: Option<f64>,
     pub reason: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 pub struct MetricCalibrationV1 {
     pub estimator_revision: String,
     pub calibration_revision: String,
@@ -142,7 +143,7 @@ pub struct MetricCalibrationV1 {
     pub drift_valid: bool,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 pub struct MetricValueV1 {
     pub descriptor_revision: String,
     pub metric: String,
@@ -162,7 +163,7 @@ pub struct MetricValueV1 {
     pub unavailable_reason: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 pub struct ObservatoryReadModelV1 {
     pub authorized_scope_ref: String,
     pub horizon: ObservabilityHorizonV1,
@@ -172,7 +173,7 @@ pub struct ObservatoryReadModelV1 {
     pub metrics: Vec<MetricValueV1>,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 pub struct CostsReadModelV1 {
     pub authorized_scope_ref: String,
     pub horizon: ObservabilityHorizonV1,
