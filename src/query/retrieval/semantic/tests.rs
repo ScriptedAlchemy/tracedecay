@@ -30,6 +30,27 @@ use crate::query::retrieval::ports::{
     CodeCandidateBindingV1, CodeOccurrenceRefV1, RetrievalPortError,
 };
 
+struct TestSemanticRetrievalSelectionPolicyV1;
+
+impl SemanticRetrievalSelectionPolicyV1 for TestSemanticRetrievalSelectionPolicyV1 {
+    fn select(
+        &self,
+        availability: SemanticRetrievalAvailabilityV1,
+        requirement: SemanticRetrievalRequirementV1,
+    ) -> SemanticRetrievalSelectionV1 {
+        if availability == SemanticRetrievalAvailabilityV1::Ready {
+            SemanticRetrievalSelectionV1::Semantic
+        } else if requirement == SemanticRetrievalRequirementV1::FallbackAllowed {
+            SemanticRetrievalSelectionV1::FrozenFallback
+        } else {
+            SemanticRetrievalSelectionV1::Unavailable
+        }
+    }
+}
+
+const TEST_SEMANTIC_RETRIEVAL_SELECTION_POLICY: TestSemanticRetrievalSelectionPolicyV1 =
+    TestSemanticRetrievalSelectionPolicyV1;
+
 fn id<T>(value: &str) -> T
 where
     T: TryFrom<String>,
@@ -990,17 +1011,18 @@ fn calibrated_semantic_service_augments_without_mutating_fallback() {
     let generation = complete_generation(&request);
     let calibration = calibration(&request, 100_000_000, 100_000_000);
 
-    let outcome = CalibratedSemanticQueryService::new(&lane)
-        .execute(
-            SemanticLaneReadinessV1::Ready {
-                request: &request,
-                generation: &generation,
-                calibration: Some(&calibration),
-            },
-            SemanticQueryModeV1::FallbackAllowed,
-            Arc::clone(&fallback),
-        )
-        .expect("calibrated semantic query");
+    let outcome =
+        CalibratedSemanticQueryService::new(&lane, &TEST_SEMANTIC_RETRIEVAL_SELECTION_POLICY)
+            .execute(
+                SemanticLaneReadinessV1::Ready {
+                    request: &request,
+                    generation: &generation,
+                    calibration: Some(&calibration),
+                },
+                SemanticQueryModeV1::FallbackAllowed,
+                Arc::clone(&fallback),
+            )
+            .expect("calibrated semantic query");
 
     let SemanticQueryServiceOutcomeV1::Augmented {
         semantic_lane,
@@ -1035,17 +1057,18 @@ fn admitted_semantic_lane_uses_shared_fusion_cursor_and_hydration_stages() {
     let lane = SemanticCodeRetriever::new(&embedder, &vectors, &control);
     let generation = complete_generation(&request);
     let calibration = calibration(&request, 2_000_000_000, 0);
-    let outcome = CalibratedSemanticQueryService::new(&lane)
-        .execute(
-            SemanticLaneReadinessV1::Ready {
-                request: &request,
-                generation: &generation,
-                calibration: Some(&calibration),
-            },
-            SemanticQueryModeV1::FallbackAllowed,
-            fallback(),
-        )
-        .expect("semantic lane admission");
+    let outcome =
+        CalibratedSemanticQueryService::new(&lane, &TEST_SEMANTIC_RETRIEVAL_SELECTION_POLICY)
+            .execute(
+                SemanticLaneReadinessV1::Ready {
+                    request: &request,
+                    generation: &generation,
+                    calibration: Some(&calibration),
+                },
+                SemanticQueryModeV1::FallbackAllowed,
+                fallback(),
+            )
+            .expect("semantic lane admission");
     let SemanticQueryServiceOutcomeV1::Augmented { semantic_lane, .. } = outcome else {
         panic!("complete calibrated semantic generation must be admitted");
     };
@@ -1143,17 +1166,18 @@ fn missing_or_shifted_calibration_abstains_and_preserves_exact_fallback() {
     let fallback_identity = Arc::as_ptr(&fallback);
     let generation = complete_generation(&request);
 
-    let permissive = CalibratedSemanticQueryService::new(&lane)
-        .execute(
-            SemanticLaneReadinessV1::Ready {
-                request: &request,
-                generation: &generation,
-                calibration: None,
-            },
-            SemanticQueryModeV1::FallbackAllowed,
-            Arc::clone(&fallback),
-        )
-        .expect("missing calibration uses the declared fallback");
+    let permissive =
+        CalibratedSemanticQueryService::new(&lane, &TEST_SEMANTIC_RETRIEVAL_SELECTION_POLICY)
+            .execute(
+                SemanticLaneReadinessV1::Ready {
+                    request: &request,
+                    generation: &generation,
+                    calibration: None,
+                },
+                SemanticQueryModeV1::FallbackAllowed,
+                Arc::clone(&fallback),
+            )
+            .expect("missing calibration uses the declared fallback");
     assert!(matches!(
         &permissive,
         SemanticQueryServiceOutcomeV1::Fallback {
@@ -1172,15 +1196,16 @@ fn missing_or_shifted_calibration_abstains_and_preserves_exact_fallback() {
     let mut shifted = calibration(&request, 100_000_000, 0);
     shifted.vector_generation = VectorGenerationIdV1::new(digest('6'));
     assert!(matches!(
-        CalibratedSemanticQueryService::new(&lane).execute(
-            SemanticLaneReadinessV1::Ready {
-                request: &request,
-                generation: &generation,
-                calibration: Some(&shifted),
-            },
-            SemanticQueryModeV1::StrictSemantic,
-            fallback,
-        ),
+        CalibratedSemanticQueryService::new(&lane, &TEST_SEMANTIC_RETRIEVAL_SELECTION_POLICY)
+            .execute(
+                SemanticLaneReadinessV1::Ready {
+                    request: &request,
+                    generation: &generation,
+                    calibration: Some(&shifted),
+                },
+                SemanticQueryModeV1::StrictSemantic,
+                fallback,
+            ),
         Err(SemanticQueryServiceError::StrictUnavailable(
             SemanticAbstentionV1::CalibrationShifted
         ))
@@ -1205,17 +1230,18 @@ fn calibrated_distance_and_margin_thresholds_abstain_without_relabeling_scores()
     let generation = complete_generation(&request);
     let calibration = calibration(&request, 2_000_000_000, 1);
 
-    let outcome = CalibratedSemanticQueryService::new(&lane)
-        .execute(
-            SemanticLaneReadinessV1::Ready {
-                request: &request,
-                generation: &generation,
-                calibration: Some(&calibration),
-            },
-            SemanticQueryModeV1::FallbackAllowed,
-            fallback(),
-        )
-        .expect("ambiguous semantic result falls back");
+    let outcome =
+        CalibratedSemanticQueryService::new(&lane, &TEST_SEMANTIC_RETRIEVAL_SELECTION_POLICY)
+            .execute(
+                SemanticLaneReadinessV1::Ready {
+                    request: &request,
+                    generation: &generation,
+                    calibration: Some(&calibration),
+                },
+                SemanticQueryModeV1::FallbackAllowed,
+                fallback(),
+            )
+            .expect("ambiguous semantic result falls back");
 
     assert!(matches!(
         outcome,
@@ -1265,13 +1291,14 @@ fn every_non_ready_state_bypasses_semantic_authorities_and_preserves_pr9_bytes()
             SemanticAbstentionV1::IndexIncompatible,
         ),
     ] {
-        let outcome = CalibratedSemanticQueryService::new(&lane)
-            .execute(
-                SemanticLaneReadinessV1::Unavailable(state),
-                SemanticQueryModeV1::FallbackAllowed,
-                Arc::clone(&fallback),
-            )
-            .expect("ordinary search bypasses a non-ready semantic lane");
+        let outcome =
+            CalibratedSemanticQueryService::new(&lane, &TEST_SEMANTIC_RETRIEVAL_SELECTION_POLICY)
+                .execute(
+                    SemanticLaneReadinessV1::Unavailable(state),
+                    SemanticQueryModeV1::FallbackAllowed,
+                    Arc::clone(&fallback),
+                )
+                .expect("ordinary search bypasses a non-ready semantic lane");
         let SemanticQueryServiceOutcomeV1::Fallback { abstention, .. } = &outcome else {
             panic!("non-ready semantic state must preserve the PR9 fallback");
         };
@@ -1281,7 +1308,8 @@ fn every_non_ready_state_bypasses_semantic_authorities_and_preserves_pr9_bytes()
             fallback_bytes
         );
         assert!(matches!(
-            CalibratedSemanticQueryService::new(&lane).execute(
+            CalibratedSemanticQueryService::new(&lane, &TEST_SEMANTIC_RETRIEVAL_SELECTION_POLICY)
+                .execute(
                 SemanticLaneReadinessV1::Unavailable(state),
                 SemanticQueryModeV1::StrictSemantic,
                 Arc::clone(&fallback),
@@ -1312,17 +1340,18 @@ fn mismatched_complete_generation_bypasses_semantic_authorities() {
     .expect("well-formed but incompatible generation");
     let calibration = calibration(&request, 100_000_000, 0);
 
-    let outcome = CalibratedSemanticQueryService::new(&lane)
-        .execute(
-            SemanticLaneReadinessV1::Ready {
-                request: &request,
-                generation: &generation,
-                calibration: Some(&calibration),
-            },
-            SemanticQueryModeV1::FallbackAllowed,
-            fallback(),
-        )
-        .expect("ordinary search bypasses a shifted complete generation");
+    let outcome =
+        CalibratedSemanticQueryService::new(&lane, &TEST_SEMANTIC_RETRIEVAL_SELECTION_POLICY)
+            .execute(
+                SemanticLaneReadinessV1::Ready {
+                    request: &request,
+                    generation: &generation,
+                    calibration: Some(&calibration),
+                },
+                SemanticQueryModeV1::FallbackAllowed,
+                fallback(),
+            )
+            .expect("ordinary search bypasses a shifted complete generation");
 
     assert!(matches!(
         outcome,
@@ -1381,17 +1410,18 @@ fn partial_cancelled_and_failed_semantic_attempts_preserve_pr9_bytes() {
             calls: Cell::new(0),
             outcome: lane_outcome,
         };
-        let outcome = CalibratedSemanticQueryService::new(&lane)
-            .execute(
-                SemanticLaneReadinessV1::Ready {
-                    request: &request,
-                    generation: &generation,
-                    calibration: Some(&calibration),
-                },
-                SemanticQueryModeV1::FallbackAllowed,
-                Arc::clone(&fallback),
-            )
-            .expect("ordinary search falls back on any incomplete semantic attempt");
+        let outcome =
+            CalibratedSemanticQueryService::new(&lane, &TEST_SEMANTIC_RETRIEVAL_SELECTION_POLICY)
+                .execute(
+                    SemanticLaneReadinessV1::Ready {
+                        request: &request,
+                        generation: &generation,
+                        calibration: Some(&calibration),
+                    },
+                    SemanticQueryModeV1::FallbackAllowed,
+                    Arc::clone(&fallback),
+                )
+                .expect("ordinary search falls back on any incomplete semantic attempt");
         let SemanticQueryServiceOutcomeV1::Fallback { abstention, .. } = &outcome else {
             panic!("incomplete semantic attempts must never enter ranking");
         };

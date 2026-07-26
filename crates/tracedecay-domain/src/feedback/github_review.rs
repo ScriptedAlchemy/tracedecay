@@ -17,7 +17,7 @@ use crate::research::{
     CommitId, DomainError, ManifestDigest, ProviderId, RepositoryId, RetrievalAnchorId, UtcMicros,
 };
 
-use super::FeedbackScopeV1;
+use super::{FeedbackScopeV1, safe_github_https_url};
 
 macro_rules! github_review_id {
     ($name:ident, $field:literal) => {
@@ -396,18 +396,7 @@ impl GitHubReviewItemV1 {
 }
 
 fn safe_github_url(value: &str) -> bool {
-    if value.len() > 2_048 {
-        return false;
-    }
-    let Ok(url) = url::Url::parse(value) else {
-        return false;
-    };
-    url.scheme() == "https"
-        && url.host_str() == Some("github.com")
-        && url.username().is_empty()
-        && url.password().is_none()
-        && url.port().is_none()
-        && url.query().is_none()
+    safe_github_https_url(value)
 }
 
 /// Read-only connector output. Partial and stale outcomes may still include

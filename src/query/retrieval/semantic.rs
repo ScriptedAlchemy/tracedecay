@@ -25,7 +25,8 @@ pub use service::{
     CalibratedSemanticQueryService, CompleteSemanticGenerationV1, SemanticAbstentionV1,
     SemanticCalibrationEvidenceV1, SemanticCalibrationProfileV1, SemanticIndexStateV1,
     SemanticLaneReadinessV1, SemanticQueryModeV1, SemanticQueryServiceError,
-    SemanticQueryServiceOutcomeV1,
+    SemanticQueryServiceOutcomeV1, SemanticRetrievalAvailabilityV1, SemanticRetrievalRequirementV1,
+    SemanticRetrievalSelectionPolicyV1, SemanticRetrievalSelectionV1,
 };
 
 const SEMANTIC_DISTANCE_SCALE: f64 = 1_000_000_000.0;

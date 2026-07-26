@@ -1,5 +1,22 @@
 #[test]
 fn distribution_missing_or_invalid_artifacts_use_typed_fallback_and_strict_unavailable() {
+    struct TestSemanticRetrievalSelectionPolicyV1;
+    impl SemanticRetrievalSelectionPolicyV1 for TestSemanticRetrievalSelectionPolicyV1 {
+        fn select(
+            &self,
+            availability: SemanticRetrievalAvailabilityV1,
+            requirement: SemanticRetrievalRequirementV1,
+        ) -> SemanticRetrievalSelectionV1 {
+            if availability == SemanticRetrievalAvailabilityV1::Ready {
+                SemanticRetrievalSelectionV1::Semantic
+            } else if requirement == SemanticRetrievalRequirementV1::FallbackAllowed {
+                SemanticRetrievalSelectionV1::FrozenFallback
+            } else {
+                SemanticRetrievalSelectionV1::Unavailable
+            }
+        }
+    }
+
     for (state, expected) in [
         (
             SemanticIndexStateV1::Unavailable,
@@ -20,7 +37,8 @@ fn distribution_missing_or_invalid_artifacts_use_typed_fallback_and_strict_unava
         let fallback = fallback();
         let fallback_identity = Arc::as_ptr(&fallback);
 
-        let permissive = CalibratedSemanticQueryService::new(&lane)
+        let permissive =
+            CalibratedSemanticQueryService::new(&lane, &TestSemanticRetrievalSelectionPolicyV1)
             .execute(
                 SemanticLaneReadinessV1::Unavailable(state),
                 SemanticQueryModeV1::FallbackAllowed,
@@ -43,7 +61,7 @@ fn distribution_missing_or_invalid_artifacts_use_typed_fallback_and_strict_unava
         assert_eq!(vectors.scans.get(), 0, "unavailable artifacts cannot scan");
 
         assert_eq!(
-            CalibratedSemanticQueryService::new(&lane)
+            CalibratedSemanticQueryService::new(&lane, &TestSemanticRetrievalSelectionPolicyV1)
                 .execute(
                     SemanticLaneReadinessV1::Unavailable(state),
                     SemanticQueryModeV1::StrictSemantic,
