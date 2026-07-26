@@ -26,6 +26,7 @@ use crate::query::retrieval::rerank::{
     EphemeralRerankViewSourceV1, LocalRerankFailureV1, LocalRerankInputV1, LocalRerankPermitV1,
     RerankExecutionControlV1, RerankViewOutcomeV1, RerankViewPermitV1,
 };
+use crate::search_eval::pr10_native::AdmittedNativeRerankExecutorV1;
 
 pub(super) const RERANK_IMPLEMENTATION_REVISION_V1: &str = "rerank.fastembed.production.v1";
 pub(super) const RERANK_RUNTIME_DIGEST_DOMAIN_V1: &str =
@@ -198,6 +199,12 @@ impl DeterministicLocalRerankExecutorV1 for FastEmbedRerankExecutorV1 {
             inputs,
             self.authority.max_batch_size,
         )
+    }
+}
+
+impl AdmittedNativeRerankExecutorV1 for FastEmbedRerankExecutorV1 {
+    fn artifact_manifest_digest(&self) -> &ManifestDigest {
+        &self.authority.pins.artifact_manifest_digest
     }
 }
 
@@ -463,11 +470,11 @@ fn decode_views<'a>(
 /// Mounted production authority: exact compatibility pins plus the admitted
 /// executor that [`BoundedRerankRuntimeV1`] invokes after fusion.
 pub(crate) trait MountedRerankExecutorV1:
-    DeterministicLocalRerankExecutorV1 + Send + Sync
+    AdmittedNativeRerankExecutorV1 + Send + Sync
 {
 }
 
-impl<T> MountedRerankExecutorV1 for T where T: DeterministicLocalRerankExecutorV1 + Send + Sync {}
+impl<T> MountedRerankExecutorV1 for T where T: AdmittedNativeRerankExecutorV1 + Send + Sync {}
 
 #[derive(Clone)]
 pub(crate) struct ProductionCodeRerankAuthorityV1 {
@@ -497,6 +504,10 @@ impl ProductionCodeRerankAuthorityV1 {
 
     pub(crate) fn compatibility(&self) -> &RerankCompatibilityPinsV1 {
         &self.pins
+    }
+
+    pub(crate) fn executor(&self) -> &dyn AdmittedNativeRerankExecutorV1 {
+        self.executor.as_ref()
     }
 
     pub(crate) fn execute(
