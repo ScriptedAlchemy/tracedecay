@@ -878,6 +878,11 @@ pub(crate) async fn register_project_open_production_owners(
     )
     .await?;
 
+    // Hook V2 envelopes that missed their synchronous budget are durable in the
+    // per-host transport spool. Replay depends on the admitted project graph,
+    // not on exact Git identity, so non-Git and unborn projects must also drain.
+    crate::daemon::hook_v2_replay::register_hook_v2_replay_consumer(Arc::clone(&graph));
+
     let Some((feedback_cycle, feedback_scope, feedback_lsp_input)) =
         register_production_feedback_cycle(
             invocation,
@@ -916,11 +921,6 @@ pub(crate) async fn register_project_open_production_owners(
         indexed_files,
     )
     .await?;
-
-    // Hook V2 envelopes that missed their synchronous budget are durable in the
-    // per-host transport spool. Nothing drains them until this consumer runs,
-    // so start it once the bindings and admission owners above are mounted.
-    crate::daemon::hook_v2_replay::register_hook_v2_replay_consumer(graph);
 
     Ok(())
 }
