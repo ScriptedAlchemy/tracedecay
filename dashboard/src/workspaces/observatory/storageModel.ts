@@ -4,6 +4,7 @@ import type {
   StorageFindingSourceState,
   StoreBudgetDimension,
   StoreGrowthDimension,
+  TableGrowthDimension,
   WireLegalActionRef,
 } from '../../contracts/wire.ts';
 
@@ -13,6 +14,7 @@ const FINDING_LABELS: Record<DoctorStorageFindingKind, string> = {
   stale_branch_dbs: 'Stale branch databases',
   incident_debris_present: 'Incident debris',
   retention_backlog: 'Retention backlog',
+  table_growth: 'Table growth',
 };
 
 export function storageFindingLabel(kind: DoctorStorageFindingKind): string {
@@ -170,6 +172,52 @@ export function growthPresentation(growth: StoreGrowthDimension): DimensionPrese
         summary: 'growth could not be determined',
         notes: [growth.reason],
       };
+  }
+}
+
+export function tableGrowthPresentation(growth: TableGrowthDimension): DimensionPresentation {
+  switch (growth.state) {
+    case 'observed':
+      return {
+        state: 'observed',
+        tone: 'ready',
+        summary: `${growth.significant_samples.length} significant table ${
+          growth.significant_samples.length === 1 ? 'change' : 'changes'
+        } · ${growth.omissions.length} below threshold`,
+        notes: [],
+      };
+    case 'baseline_established':
+      return {
+        state: 'baseline_established',
+        tone: 'baseline',
+        summary: `no baseline yet · captured ${growth.tables_observed} ${
+          growth.tables_observed === 1 ? 'table' : 'tables'
+        }`,
+        notes: growth.omission_reasons,
+      };
+    case 'unknown':
+      return {
+        state: 'unknown',
+        tone: 'unknown',
+        summary: 'Unknown · table growth could not be determined',
+        notes: growth.omission_reasons,
+      };
+    case 'denied':
+      return {
+        state: 'denied',
+        tone: 'unset',
+        summary: 'Denied · table growth access was not authorized',
+        notes: growth.omission_reasons,
+      };
+    case 'unsupported':
+      return {
+        state: 'unsupported',
+        tone: 'baseline',
+        summary: 'Unsupported · this store cannot measure table growth',
+        notes: growth.omission_reasons,
+      };
+    default:
+      return assertNever(growth);
   }
 }
 

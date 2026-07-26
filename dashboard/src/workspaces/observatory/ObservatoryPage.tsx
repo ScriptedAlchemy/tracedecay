@@ -9,6 +9,8 @@ import {
   type StorageFindingKindStatus,
   type StorageTelemetryRead,
   type StoreTelemetryEntry,
+  type TableGrowthDimension,
+  type TableGrowthThreshold,
   type WireCoverage,
   type WireFreshness,
   type WireLegalActionRef,
@@ -29,6 +31,7 @@ import {
   storageFindingLabel,
   storageSourcePresentation,
   storeRolesLabel,
+  tableGrowthPresentation,
   type DimensionPresentation,
 } from './storageModel.ts';
 import { DoctorInspector } from './DoctorInspector.tsx';
@@ -142,7 +145,11 @@ function TelemetryReadModel({
           {/* One card per distinct store *file*: roles that share a database
               are merged server-side, so the path is the stable identity. */}
           {envelope.payload.stores.map((store) => (
-            <StoreCard key={store.path} entry={store} />
+            <StoreCard
+              key={store.path}
+              entry={store}
+              tableGrowthThreshold={envelope.payload.table_growth_threshold}
+            />
           ))}
         </OverviewGrid>
       )}
@@ -276,7 +283,13 @@ function EnvelopeTruth({
   );
 }
 
-function StoreCard({ entry }: { entry: StoreTelemetryEntry }) {
+function StoreCard({
+  entry,
+  tableGrowthThreshold,
+}: {
+  entry: StoreTelemetryEntry;
+  tableGrowthThreshold: TableGrowthThreshold;
+}) {
   // `observed` is a full page-level sample. `observed_bytes` is a real total
   // size with no page sample behind it, so free pages are UNKNOWN rather than
   // zero — and `CapacityBar` reads a null `freeBytes` as zero free space, which
@@ -325,12 +338,103 @@ function StoreCard({ entry }: { entry: StoreTelemetryEntry }) {
         )}
         <DimensionRow label="Budget" presentation={budgetPresentation(entry.budget)} />
         <DimensionRow label="Growth" presentation={growthPresentation(entry.growth)} />
+        <TableGrowthPanel growth={entry.table_growth} threshold={tableGrowthThreshold} />
         <p className="truncate font-mono text-2xs text-text-muted" title={entry.path}>
           {entry.path}
         </p>
       </div>
     </OverviewCard>
   );
+}
+
+function TableGrowthPanel({
+  growth,
+  threshold,
+}: {
+  growth: TableGrowthDimension;
+  threshold: TableGrowthThreshold;
+}) {
+  const presentation = tableGrowthPresentation(growth);
+  return (
+    <section
+      className="rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-2 p-2.5"
+      data-table-growth-state={growth.state}
+      data-table-growth-tone={presentation.tone}
+      aria-label="Per-table growth"
+    >
+      <div className="flex items-center gap-1.5 text-2xs">
+        <span
+          aria-hidden
+          className={`size-1.5 shrink-0 rounded-full ${dimensionDotClass(presentation.tone)}`}
+        />
+        <span className="font-medium text-text-secondary">Table growth</span>
+        <span className="text-text-primary">· {presentation.summary}</span>
+      </div>
+
+      {growth.state === 'observed' && growth.significant_samples.length > 0 ? (
+        <ul className="mt-2 space-y-1.5" aria-label="Significant table growth samples">
+          {growth.significant_samples.map((sample) => (
+            <li
+              key={`${sample.table}:${sample.previous_observed_at}:${sample.current_observed_at}`}
+              className="rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-1 p-2 text-2xs"
+              data-table-growth-sample={sample.table}
+            >
+              <p className="flex flex-wrap items-baseline justify-between gap-2">
+                <code className="text-text-secondary">{sample.table}</code>
+                <span className="tabular text-text-primary">
+                  +{formatBytes(sample.growth_bytes)}
+                </span>
+              </p>
+              <p className="mt-1 text-text-muted tabular">
+                {formatBytes(sample.previous_bytes)} → {formatBytes(sample.current_bytes)}
+              </p>
+              <p className="mt-1 text-3xs text-text-muted">
+                {formatUtcMicros(sample.previous_observed_at)} →{' '}
+                {formatUtcMicros(sample.current_observed_at)}
+              </p>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+
+      {growth.state === 'observed' && growth.omissions.length > 0 ? (
+        <div className="mt-2">
+          <p className="text-3xs font-medium uppercase tracking-wide text-text-muted">
+            Omitted from significant list
+          </p>
+          <ul className="mt-1 space-y-1 text-2xs text-text-muted">
+            {growth.omissions.map((omission) => (
+              <li key={omission.table}>
+                <code>{omission.table}</code> · {omission.reason}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
+      {presentation.notes.length > 0 ? (
+        <ul className="mt-2 space-y-1 text-2xs text-text-muted">
+          {presentation.notes.map((note) => (
+            <li key={note}>{note}</li>
+          ))}
+        </ul>
+      ) : null}
+
+      <p className="mt-2 text-3xs text-text-muted">
+        Informational threshold · {formatBytes(threshold.absolute_bytes)} absolute, or{' '}
+        {formatBytes(threshold.relative_floor_bytes)} and {threshold.relative_percent}% of previous
+        size
+      </p>
+      <p className="mt-1 text-3xs text-text-muted">
+        Coverage · {growth.coverage.examined ?? 'unknown'} /{' '}
+        {growth.coverage.denominator ?? 'unknown'} {growth.coverage.unit}
+      </p>
+    </section>
+  );
+}
+
+function formatUtcMicros(micros: number): string {
+  return new Date(Math.floor(micros / 1000)).toISOString();
 }
 
 /** `/api/storage/findings` is the storage-family projection of the admitted

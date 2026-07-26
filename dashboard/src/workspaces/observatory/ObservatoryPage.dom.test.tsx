@@ -95,6 +95,37 @@ describe('ObservatoryPage store telemetry', () => {
     expect(unset?.tone).not.toBe(unknown?.tone);
   });
 
+  it('renders table-growth unavailable states distinctly without zero measurements', async () => {
+    stubTelemetry(telemetryPayload());
+    renderObservatory();
+
+    await screen.findByText('graph · memory (shared store file)');
+    for (const [state, label] of [
+      ['unknown', 'Unknown'],
+      ['denied', 'Denied'],
+      ['unsupported', 'Unsupported'],
+    ] as const) {
+      const panel = document.querySelector(`[data-table-growth-state="${state}"]`);
+      expect(panel).toBeTruthy();
+      expect(panel?.textContent).toContain(label);
+      expect(panel?.querySelector('[data-table-growth-sample]')).toBeNull();
+      expect(panel?.textContent).not.toContain('+0 B');
+    }
+  });
+
+  it('renders no baseline yet and surfaces every table omission reason', async () => {
+    stubTelemetry(telemetryPayload());
+    renderObservatory();
+
+    expect((await screen.findAllByText(/no baseline yet/i)).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/no growth/i)).toBeNull();
+    expect(
+      screen.getByText(
+        /observed growth of 524288 bytes was below the informational threshold/i,
+      ),
+    ).toBeTruthy();
+  });
+
   it('renders the canonical Doctor storage family with typed kinds and provenance', async () => {
     stubTelemetry(telemetryPayload(), storageFindingsPayload());
     renderObservatory();
@@ -105,6 +136,7 @@ describe('ObservatoryPage store telemetry', () => {
       'Stale branch databases',
       'Incident debris',
       'Retention backlog',
+      'Table growth',
     ]) {
       expect(screen.getAllByText(label).length).toBeGreaterThan(0);
     }
@@ -399,6 +431,7 @@ function sourceStatuses(overrides: Partial<Record<string, SourceStatus>> = {}) {
     'stale_branch_dbs',
     'incident_debris_present',
     'retention_backlog',
+    'table_growth',
   ].map((kind) => ({
     kind,
     ...(overrides[kind] ?? {
@@ -410,6 +443,58 @@ function sourceStatuses(overrides: Partial<Record<string, SourceStatus>> = {}) {
 }
 
 function telemetryPayload() {
+  const tableGrowth = [
+    {
+      state: 'observed',
+      coverage: completeCoverage(2, 'observed_table_growth_samples'),
+      significant_samples: [
+        {
+          table: 'messages',
+          previous_bytes: 10_485_760,
+          current_bytes: 11_534_336,
+          growth_bytes: 1_048_576,
+          previous_observed_at: 10,
+          current_observed_at: 100,
+        },
+      ],
+      omissions: [
+        {
+          table: 'metadata',
+          reason:
+            'observed growth of 524288 bytes was below the informational threshold (at least 67108864 bytes, or at least 1048576 bytes and 10% of the previous size)',
+        },
+      ],
+    },
+    {
+      state: 'denied',
+      coverage: partialTableGrowthCoverage('per-table payload growth measurement was denied'),
+      omission_reasons: ['per-table payload growth measurement was denied for this store'],
+    },
+    {
+      state: 'baseline_established',
+      coverage: partialTableGrowthCoverage('no baseline yet'),
+      observed_at: 100,
+      tables_observed: 7,
+      omission_reasons: [
+        'no baseline yet; this read established the first per-table payload watermark',
+      ],
+    },
+    {
+      state: 'unsupported',
+      coverage: partialTableGrowthCoverage(
+        'per-table payload growth measurement is unsupported',
+      ),
+      omission_reasons: ['per-table payload growth measurement is unsupported for this store'],
+    },
+    {
+      state: 'unknown',
+      coverage: partialTableGrowthCoverage(
+        'per-table payload growth measurement is unavailable',
+      ),
+      omission_reasons: ['per-table payload growth measurement is unavailable for this store'],
+    },
+  ];
+  let tableGrowthIndex = 0;
   return {
     stores: [
       {
@@ -574,9 +659,61 @@ function telemetryPayload() {
           reason: 'no watermark could be recorded because the store size read did not produce a sample',
         },
       },
-    ],
+    ].map((store) => ({ ...store, table_growth: tableGrowth[tableGrowthIndex++] })),
     budget_note: 'budgets are owner configuration: sync.retention.v1 store_soft_budgets_bytes',
     growth_note: 'growth is measured over the watermarks this daemon has recorded since it started',
+    table_growth_threshold: {
+      absolute_bytes: 67_108_864,
+      relative_floor_bytes: 1_048_576,
+      relative_percent: 10,
+    },
+    table_growth_coverage: {
+      completeness: 'partial',
+      eligible: 5,
+      examined: 1,
+      matched: null,
+      excluded: null,
+      omitted: 4,
+      unknown: null,
+      denominator: 5,
+      unit: 'store_table_growth_reads',
+      omission_reasons: [
+        'lcm.db: denied',
+        'savings.db: no baseline yet',
+        'sessions.db: unsupported',
+        'incident.db: unavailable',
+      ],
+    },
+  };
+}
+
+function completeCoverage(denominator: number, unit: string) {
+  return {
+    completeness: 'complete',
+    eligible: denominator,
+    examined: denominator,
+    matched: null,
+    excluded: null,
+    omitted: 0,
+    unknown: null,
+    denominator,
+    unit,
+    omission_reasons: [],
+  };
+}
+
+function partialTableGrowthCoverage(reason: string) {
+  return {
+    completeness: 'partial',
+    eligible: 1,
+    examined: 0,
+    matched: null,
+    excluded: null,
+    omitted: 1,
+    unknown: null,
+    denominator: 1,
+    unit: 'store_table_growth_reads',
+    omission_reasons: [reason],
   };
 }
 
