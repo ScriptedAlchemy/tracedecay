@@ -377,11 +377,12 @@ fn receipt_json_with_coverage(
             "stored cutover receipt is not an object",
         )
     })?;
-    object.insert(
-        "coverage".to_owned(),
-        serde_json::to_value(coverage)
-            .map_err(|_| db_message("memory_v2_cutover", "cutover coverage encoding failed"))?,
-    );
+    let coverage = serde_json::to_value(coverage)
+        .map_err(|_| db_message("memory_v2_cutover", "cutover coverage encoding failed"))?;
+    if object.get("coverage") == Some(&coverage) {
+        return Ok(receipt_json.to_owned());
+    }
+    object.insert("coverage".to_owned(), coverage);
     json_text(&receipt)
 }
 
