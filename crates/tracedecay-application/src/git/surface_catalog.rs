@@ -34,12 +34,12 @@ struct SurfaceSpec {
     surfaces: &'static [BindingSurface],
 }
 
+const CLI_MCP_SURFACES: [BindingSurface; 2] = [BindingSurface::Cli, BindingSurface::Mcp];
 const TRANSPORT_SURFACES: [BindingSurface; 3] = [
     BindingSurface::Cli,
     BindingSurface::Mcp,
     BindingSurface::Http,
 ];
-
 const SURFACE_SPECS: [SurfaceSpec; 7] = [
     SurfaceSpec {
         capability: "capability.application.git.status",
@@ -111,7 +111,7 @@ const SURFACE_SPECS: [SurfaceSpec; 7] = [
         summary: "Preview Git index mutations",
         description: "Build an immutable preview for selected index mutations with CAS evidence.",
         example: "Preview staging these hunks",
-        surfaces: &TRANSPORT_SURFACES,
+        surfaces: &CLI_MCP_SURFACES,
     },
     SurfaceSpec {
         capability: "capability.application.git.apply",
@@ -125,7 +125,7 @@ const SURFACE_SPECS: [SurfaceSpec; 7] = [
         summary: "Apply a Git index preview",
         description: "Apply one exact preview identity through daemon-serialized index transactions.",
         example: "Apply the previewed Git index mutation",
-        surfaces: &TRANSPORT_SURFACES,
+        surfaces: &CLI_MCP_SURFACES,
     },
 ];
 
@@ -347,6 +347,10 @@ mod tests {
             name.contains("stage_hunks")
                 || name.contains("unstage_hunks")
                 || name.contains("commit_index")
+        }));
+        assert!(contribution.bindings().iter().all(|binding| {
+            binding.surface() != BindingSurface::Http
+                || !matches!(binding.operation().as_str(), "git_preview" | "git_apply")
         }));
         for operation in [
             "git_status",
