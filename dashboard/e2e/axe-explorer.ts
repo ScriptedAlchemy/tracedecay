@@ -17,7 +17,7 @@ import { chromium, type Page } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
 import { installApiFixtures } from '../stories/fixtures/route.ts';
 import { STILLNESS_INIT, startStaticServer } from './axe-harness.ts';
-import { ExplorerQueryRunSchema } from '../src/workspaces/explorer/contracts.ts';
+import { ExplorerQueryRunSchema } from '../src/contracts/wire.ts';
 
 const LABEL = process.argv[2] ?? 'current';
 const OUT = path.join(process.cwd(), '.explorer-axe', LABEL);

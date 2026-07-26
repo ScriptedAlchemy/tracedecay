@@ -16,21 +16,14 @@ use tracedecay_application::{
 };
 use tracedecay_domain::{ActorId, ManifestDigest, ProjectId, RepositoryId, UtcMicros, WorktreeId};
 use tracedecay_store::{
-    AdmissionConfigV1, CommitSequenceV1, LocatorDigest, OperationPriorityV1,
-    RuntimeCancellationIdentityV1, RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeReadCoverageV1,
-    RuntimeReadOutcomeV1, RuntimeReadRequestV1, RuntimeReadResultV1, RuntimeRequestProbeV1,
-    SnapshotLeaseV1, StorageRuntimeErrorV1, StoreRuntimeBindingV1, VerifiedStoreLocatorV1,
+    AdmissionConfigV1, LocatorDigest, OperationPriorityV1, RuntimeCancellationIdentityV1,
+    RuntimeDeadlineV1, RuntimeInterruptionV1, RuntimeReadCoverageV1, RuntimeReadOutcomeV1,
+    RuntimeReadRequestV1, RuntimeReadResultV1, RuntimeRequestProbeV1, StorageRuntimeErrorV1,
+    StoreRuntimeBindingV1, VerifiedStoreLocatorV1,
 };
 
 use super::*;
-use crate::{
-    SqliteStoreSizeTelemetryPort,
-    read_consistency::{
-        ReadConsistencyConfig, ReadConsistencyCoordinator, RetainedSnapshotRegistry,
-        RetainedSnapshotState,
-    },
-    watermark::CommittedWatermarkPublisher,
-};
+use crate::SqliteStoreSizeTelemetryPort;
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
 #[derive(Clone)]
@@ -210,91 +203,6 @@ fn request(binding: &StoreRuntimeBindingV1, priority: OperationPriorityV1) -> Ru
         }
     }))
     .unwrap()
-}
-
-fn exact_request(binding: &StoreRuntimeBindingV1, lease: &SnapshotLeaseV1) -> RuntimeReadRequestV1 {
-    serde_json::from_value(serde_json::json!({
-        "binding": binding,
-        "consistency": { "kind": "exact_snapshot", "lease": lease },
-        "operation": { "kind": "graph_quick_check" },
-        "priority": "foreground",
-        "admission_bytes": 64,
-        "control": {
-            "requested_at": 1,
-            "deadline": { "deadline_id": "deadline.reader" },
-            "cancellation": { "cancellation_id": "cancellation.reader", "generation": 1 }
-        }
-    }))
-    .unwrap()
-}
-
-fn at_least_request(binding: &StoreRuntimeBindingV1, commit_sequence: u64) -> RuntimeReadRequestV1 {
-    serde_json::from_value(serde_json::json!({
-        "binding": binding,
-        "consistency": { "kind": "at_least", "commit_sequence": commit_sequence },
-        "operation": { "kind": "graph_quick_check" },
-        "priority": "foreground",
-        "admission_bytes": 64,
-        "control": {
-            "requested_at": 1,
-            "deadline": { "deadline_id": "deadline.reader" },
-            "cancellation": { "cancellation_id": "cancellation.reader", "generation": 1 }
-        }
-    }))
-    .unwrap()
-}
-
-fn snapshot_lease(binding: &StoreRuntimeBindingV1) -> SnapshotLeaseV1 {
-    serde_json::from_value(serde_json::json!({
-        "lease_id": "lease.reader",
-        "snapshot_id": "snapshot.reader",
-        "watermark": {
-            "shard_id": binding.shard_id,
-            "incarnation": binding.incarnation,
-            "authority_epoch": binding.authority_epoch,
-            "commit_sequence": 8
-        },
-        "acquired_at": 1,
-        "expires_at": 4_102_444_800_000_000_i64
-    }))
-    .unwrap()
-}
-
-fn expiring_snapshot_lease(
-    binding: &StoreRuntimeBindingV1,
-    lease_id: &str,
-    snapshot_id: &str,
-    expires_at: i64,
-) -> SnapshotLeaseV1 {
-    serde_json::from_value(serde_json::json!({
-        "lease_id": lease_id,
-        "snapshot_id": snapshot_id,
-        "watermark": {
-            "shard_id": binding.shard_id,
-            "incarnation": binding.incarnation,
-            "authority_epoch": binding.authority_epoch,
-            "commit_sequence": 8
-        },
-        "acquired_at": expires_at - 1_000_000,
-        "expires_at": expires_at
-    }))
-    .unwrap()
-}
-
-fn utc_now_micros() -> i64 {
-    let micros = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_micros();
-    i64::try_from(micros).unwrap()
-}
-
-fn run<T>(future: impl std::future::Future<Output = T>) -> T {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_time()
-        .build()
-        .unwrap()
-        .block_on(future)
 }
 
 fn healthy(outcome: &RuntimeReadOutcomeV1) -> bool {
@@ -502,43 +410,6 @@ fn drain_rejects_new_general_acquisitions_but_preserves_existing_and_health_leas
 }
 
 #[test]
-fn facade_reports_drain_truthfully_while_reserved_health_remains_usable() {
-    let store = TestStore::new();
-    let pool = ReaderPool::start(store.locator(), two_reader_budget(), CountExecutor).unwrap();
-    let registry = SqliteRetainedSnapshotRegistry::new(pool.clone());
-    let mut observed = snapshot_lease(&store.binding).watermark;
-    observed.commit_sequence = CommitSequenceV1(0);
-    let commits = CommittedWatermarkPublisher::with_initial_watermarks([observed]).unwrap();
-    pool.begin_drain();
-    let facade = ReaderFacade::new(
-        pool,
-        ReadConsistencyCoordinator::new(ReadConsistencyConfig {
-            max_wait: Duration::ZERO,
-            cancellation_poll_interval: Duration::from_millis(1),
-        }),
-        commits.subscribe(),
-        registry,
-        Duration::ZERO,
-    );
-
-    let regular = request(&store.binding, OperationPriorityV1::Foreground);
-    let regular_probe = Probe::for_request(&regular);
-    let regular_outcome = run(facade.read(regular, &regular_probe)).unwrap();
-    assert!(matches!(
-        regular_outcome.coverage(),
-        RuntimeReadCoverageV1::Unavailable {
-            reason: tracedecay_store::UnavailableReasonV1::Draining,
-            ..
-        }
-    ));
-
-    let health = request(&store.binding, OperationPriorityV1::Health);
-    let health_probe = Probe::for_request(&health);
-    let health_outcome = run(facade.read(health, &health_probe)).unwrap();
-    assert!(health_outcome.value().is_some());
-}
-
-#[test]
 fn cancellation_preempts_acquisition_without_changing_accounting() {
     let store = TestStore::new();
     let pool = ReaderPool::start(store.locator(), two_reader_budget(), CountExecutor).unwrap();
@@ -591,145 +462,6 @@ fn dropping_snapshot_and_reader_lease_restores_capacity() {
     let state = pool.snapshot();
     assert_eq!(state.leased_general, 0);
     assert_eq!(state.available_general, 2);
-}
-
-#[test]
-fn retained_snapshot_uses_a_pool_connection_and_facade_executes_that_exact_view() {
-    let store = TestStore::new();
-    Connection::open(&store.path)
-        .unwrap()
-        .execute("INSERT INTO markers(value) VALUES (1)", [])
-        .unwrap();
-    let pool = ReaderPool::start(store.locator(), two_reader_budget(), CountExecutor).unwrap();
-    let lease = snapshot_lease(&store.binding);
-    let exact = exact_request(&store.binding, &lease);
-    let probe = Probe::for_request(&exact);
-    let registry = SqliteRetainedSnapshotRegistry::new(pool.clone());
-    let worker_count = pool.snapshot().general_workers;
-
-    registry
-        .retain(lease.clone(), &exact, &probe, Duration::ZERO)
-        .unwrap();
-    assert_eq!(pool.snapshot().general_workers, worker_count);
-    assert!(matches!(
-        registry.lookup(&lease.lease_id),
-        RetainedSnapshotState::Retained(found) if *found == lease
-    ));
-
-    Connection::open(&store.path)
-        .unwrap()
-        .execute("INSERT INTO markers(value) VALUES (2)", [])
-        .unwrap();
-    let commits =
-        CommittedWatermarkPublisher::with_initial_watermarks([lease.watermark.clone()]).unwrap();
-    let facade = ReaderFacade::new(
-        pool,
-        ReadConsistencyCoordinator::new(ReadConsistencyConfig {
-            max_wait: Duration::ZERO,
-            cancellation_poll_interval: Duration::from_millis(1),
-        }),
-        commits.subscribe(),
-        registry,
-        Duration::ZERO,
-    );
-    let outcome = run(facade.read(exact, &probe)).unwrap();
-
-    assert!(healthy(&outcome));
-    assert!(matches!(
-        outcome.coverage(),
-        RuntimeReadCoverageV1::Complete { .. }
-    ));
-}
-
-#[test]
-fn retain_reclaims_expired_capacity_without_stale_release_of_reused_id() {
-    let store = TestStore::new();
-    let pool = ReaderPool::start(store.locator(), two_reader_budget(), CountExecutor).unwrap();
-    let registry = SqliteRetainedSnapshotRegistry::new(pool.clone());
-    let expires_at = utc_now_micros() + 250_000;
-    let expired = expiring_snapshot_lease(
-        &store.binding,
-        "lease.reused",
-        "snapshot.expired",
-        expires_at,
-    );
-    let other_expired =
-        expiring_snapshot_lease(&store.binding, "lease.other", "snapshot.other", expires_at);
-    for lease in [&expired, &other_expired] {
-        let exact = exact_request(&store.binding, lease);
-        registry
-            .retain(
-                lease.clone(),
-                &exact,
-                &Probe::for_request(&exact),
-                Duration::ZERO,
-            )
-            .unwrap();
-    }
-    assert_eq!(pool.snapshot().leased_general, 2);
-    std::thread::sleep(Duration::from_millis(300));
-
-    let replacement = expiring_snapshot_lease(
-        &store.binding,
-        "lease.reused",
-        "snapshot.replacement",
-        4_102_444_800_000_000,
-    );
-    let exact = exact_request(&store.binding, &replacement);
-    registry
-        .retain(
-            replacement.clone(),
-            &exact,
-            &Probe::for_request(&exact),
-            Duration::ZERO,
-        )
-        .unwrap();
-
-    assert_eq!(pool.snapshot().leased_general, 1);
-    assert!(!registry.release(&expired));
-    let stale_exact = exact_request(&store.binding, &expired);
-    let stale_probe = Probe::for_request(&stale_exact);
-    assert!(matches!(
-        registry.execute_exact(&expired.lease_id, stale_exact, &stale_probe),
-        Ok(RetainedExecution::Unavailable(
-            tracedecay_store::UnavailableReasonV1::SnapshotNotRetained
-        ))
-    ));
-    assert!(matches!(
-        registry.lookup(&replacement.lease_id),
-        RetainedSnapshotState::Retained(found) if *found == replacement
-    ));
-    assert!(registry.release(&replacement));
-}
-
-#[test]
-fn facade_does_not_query_when_at_least_coverage_is_stale() {
-    let store = TestStore::new();
-    let pool = ReaderPool::start(store.locator(), two_reader_budget(), CountExecutor).unwrap();
-    let mut observed = snapshot_lease(&store.binding).watermark;
-    observed.commit_sequence = CommitSequenceV1(4);
-    let commits = CommittedWatermarkPublisher::with_initial_watermarks([observed]).unwrap();
-    let registry = SqliteRetainedSnapshotRegistry::new(pool.clone());
-    let facade = ReaderFacade::new(
-        pool,
-        ReadConsistencyCoordinator::new(ReadConsistencyConfig {
-            max_wait: Duration::ZERO,
-            cancellation_poll_interval: Duration::from_millis(1),
-        }),
-        commits.subscribe(),
-        registry,
-        Duration::ZERO,
-    );
-    let read = at_least_request(&store.binding, 5);
-    let probe = Probe::for_request(&read);
-
-    let outcome = run(facade.read(read, &probe)).unwrap();
-
-    assert!(outcome.value().is_none());
-    assert!(matches!(
-        outcome.coverage(),
-        RuntimeReadCoverageV1::Stale { .. }
-    ));
 }
 
 #[test]

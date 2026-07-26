@@ -919,6 +919,7 @@ async fn collision_summary(
         differing_artifact_paths: differing,
         semantics: vec![
             "facts: union by content; tags/entities/metadata are merged, counters take maxima, newest trust/category wins, feedback events are deduplicated".to_string(),
+            "external-source reducer state: union by immutable binding identity; byte-equivalent rows deduplicate and divergent histories abort without choosing a winner".to_string(),
             "sessions: union by provider/session id; time bounds widen and non-null target fields win".to_string(),
             "session-message projections: the selected target row remains canonical; divergent source rows and their overlapping parent-linked session family are preserved as active consolidated/<source-project-id>/<message-id> variants".to_string(),
             "LCM raw messages: the selected target row remains canonical; source rows receive active variants only for content-hash divergence, while equal-content representation drift deduplicates to the target raw family".to_string(),

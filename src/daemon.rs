@@ -20,7 +20,8 @@ use crate::errors::{Result, TraceDecayError};
 use crate::mcp::ReplayTransport;
 use crate::mcp::server::{McpMethod, SERVER_INSTRUCTIONS, classify_mcp_method, initialize_result};
 use crate::mcp::tools::{
-    explore_call_budget, get_tool_definitions_with_budget, get_tool_definitions_with_warming_budget,
+    default_catalog_discovery_authority, explore_call_budget,
+    get_catalog_filtered_tool_definitions_with_budget, project_catalog_discovery_scope,
 };
 use crate::mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
 use branch_add::{branch_add_response, coordinated_hook_branch_writer, parse_branch_add_request};
@@ -3740,14 +3741,35 @@ fn daemon_bootstrap_response(
         })),
         McpMethod::InitializedAck => Some(None),
         McpMethod::ToolsList => Some(request.id.clone().map(|id| {
-            let tools = project_node_count.map_or_else(
-                || get_tool_definitions_with_warming_budget(10),
-                |node_count| {
-                    let budget = explore_call_budget(node_count);
-                    get_tool_definitions_with_budget(node_count, budget)
-                },
+            let node_count = project_node_count.unwrap_or(0);
+            let budget = explore_call_budget(node_count);
+            let profile_id = tracedecay_tool_catalog::ProfileId::new(
+                tracedecay_application::APPLICATION_DEFAULT_PROFILE_ID,
             );
-            JsonRpcResponse::success(id, json!({ "tools": tools }))
+            let authority = default_catalog_discovery_authority();
+            match (profile_id, authority) {
+                (Ok(profile_id), Ok(authority)) => {
+                    match get_catalog_filtered_tool_definitions_with_budget(
+                        node_count,
+                        budget,
+                        &profile_id,
+                        &authority,
+                        &project_catalog_discovery_scope(),
+                    ) {
+                        Ok(tools) => JsonRpcResponse::success(id, json!({ "tools": tools })),
+                        Err(_) => JsonRpcResponse::error(
+                            id,
+                            ErrorCode::InternalError,
+                            "MCP catalog discovery unavailable".to_owned(),
+                        ),
+                    }
+                }
+                _ => JsonRpcResponse::error(
+                    id,
+                    ErrorCode::InternalError,
+                    "MCP catalog discovery unavailable".to_owned(),
+                ),
+            }
         })),
         _ => None,
     }

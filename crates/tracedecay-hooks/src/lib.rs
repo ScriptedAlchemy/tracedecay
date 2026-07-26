@@ -28,20 +28,19 @@ pub use config::{
     hook_configuration_path,
 };
 pub use native::{
-    DecodedNativeHookEventV1, NativeEnvelopeMaterialV1, NativeHookDecodeError, NativeHookSignalV1,
-    OpenCodePluginSurfaceV1, decode_bound_native_hook_event, decode_native_hook_event,
+    DecodedNativeHookEventV1, DecodedOpenCodeLspEventV1, NativeEnvelopeMaterialV1,
+    NativeHookDecodeError, NativeHookSignalV1, OpenCodePluginSurfaceV1,
+    decode_bound_native_hook_event, decode_native_hook_event, decode_opencode_lsp_event,
     decode_opencode_plugin_event,
 };
 pub use runtime::{
     AsyncHookAdmissionPortV1, HOOK_SYNCHRONOUS_BUDGET_MICROS, HookAdmissionFutureV1,
-    HookAdmissionPortV1, HookAdmissionReceiptV1, HookFeedbackDeliveryOutcomeV1,
-    HookFeedbackDeliveryPortV1, HookFeedbackDeliveryRouteV1, HookFeedbackRollbackSwitchV1,
-    HookGuidanceDispositionV1, HookGuidanceLookupOutcomeV1, HookGuidanceLookupPortV1,
-    HookGuidanceLookupRequestV1, HookGuidanceStateV1, HookImmediateAdmissionStateV1,
-    HookImmediateAdmissionV1, HookReadyGuidanceV1, HookReplaySpoolPortV1, HookRuntimeControlV1,
-    HookRuntimeErrorV1, HookRuntimeStatusV1, HookSynchronousDeadlineV1, HookSynchronousResultV1,
-    MAX_GUIDANCE_LOOKUP_ITEMS, admit_async_exact_scope, deliver_feedback_with_rollback,
-    finish_synchronous_hook,
+    HookAdmissionReceiptV1, HookFeedbackDeliveryOutcomeV1, HookFeedbackDeliveryPortV1,
+    HookFeedbackDeliveryRouteV1, HookFeedbackRollbackSwitchV1, HookGuidanceDispositionV1,
+    HookGuidanceStateV1, HookImmediateAdmissionStateV1, HookImmediateAdmissionV1,
+    HookReadyGuidanceV1, HookRuntimeControlV1, HookRuntimeErrorV1, HookRuntimeStatusV1,
+    HookSynchronousDeadlineV1, HookSynchronousResultV1, admit_async_exact_scope,
+    deliver_feedback_with_rollback, finish_synchronous_hook,
 };
 pub use spool::{
     HookReplayBatchV1, HookSpoolAckDispositionV1, HookSpoolAckV1, HookSpoolConfigV1,

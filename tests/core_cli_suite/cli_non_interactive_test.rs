@@ -1203,7 +1203,7 @@ async fn status_json_reads_readonly_project_database() {
     .unwrap();
     let home_path = home.path().to_path_buf();
     let init_root = project_root.clone();
-    std::thread::spawn(move || init_project_in_process(&home_path, &init_root))
+    std::thread::spawn(move || init_project_fixture(&home_path, &init_root))
         .join()
         .unwrap();
     let marker = read_enrollment_marker(&project_root)

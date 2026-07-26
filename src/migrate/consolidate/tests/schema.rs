@@ -2,6 +2,9 @@
 
 use super::*;
 
+const EXTERNAL_SOURCE_DISPOSITION: &str =
+    "unioned by binding identity; divergent collisions rejected";
+
 #[tokio::test]
 async fn current_schema_tables_have_an_explicit_consolidation_disposition() {
     let fixture = fixture().await;
@@ -27,6 +30,25 @@ async fn current_schema_tables_have_an_explicit_consolidation_disposition() {
         unknown_sessions.is_empty(),
         "session schema tables need an explicit consolidation disposition: {unknown_sessions:?}"
     );
+
+    for (store, disposition) in [
+        (
+            "graph",
+            graph_table_disposition("external_source_states_v1"),
+        ),
+        (
+            "session",
+            session_table_disposition("external_source_states_v1"),
+        ),
+    ] {
+        assert_eq!(
+            disposition,
+            Some(EXTERNAL_SOURCE_DISPOSITION),
+            "{store} external_source_states_v1 disposition must select its executable \
+             consolidation witness; a generic label does not substantiate merge SQL"
+        );
+    }
+    external_source::assert_executable_union_witness().await;
 }
 
 async fn unknown_tables(path: &Path, classify: fn(&str) -> Option<&'static str>) -> Vec<String> {
@@ -54,6 +76,10 @@ async fn unknown_tables(path: &Path, classify: fn(&str) -> Option<&'static str>)
 
 fn graph_table_disposition(table: &str) -> Option<&'static str> {
     match table {
+        // Reducer state is copied by immutable binding identity. Equal rows
+        // deduplicate; divergent histories fail closed because choosing either
+        // state would discard durable receipts and projection effects.
+        "external_source_states_v1" => Some(EXTERNAL_SOURCE_DISPOSITION),
         "memory_entities"
         | "memory_fact_entities"
         | "memory_fact_relations"
@@ -132,13 +158,16 @@ fn graph_table_disposition(table: &str) -> Option<&'static str> {
 
 fn session_table_disposition(table: &str) -> Option<&'static str> {
     match table {
+        "external_source_states_v1" => Some(EXTERNAL_SOURCE_DISPOSITION),
         "analytics_events"
         | "commit_sessions"
         | "configuration_access_rules"
         | "configuration_audit_events"
+        | "configuration_audit_redaction_keys"
         | "configuration_change_plan_events"
         | "configuration_change_plan_operations"
         | "configuration_change_plans"
+        | "configuration_component_activation_events"
         | "configuration_credential_references"
         | "configuration_entries"
         | "configuration_migration_quarantine"
@@ -150,6 +179,11 @@ fn session_table_disposition(table: &str) -> Option<&'static str> {
         | "configuration_topology_protected_refs"
         | "configuration_topology_roots"
         | "git_correlation_meta"
+        | "git_index_preview_commitments"
+        | "git_index_repository_quarantines"
+        | "git_index_transaction_inputs"
+        | "git_index_transaction_journals"
+        | "git_index_transaction_receipts"
         | "lcm_external_payloads"
         | "lcm_gc_marks"
         | "lcm_gc_meta"
@@ -168,6 +202,9 @@ fn session_table_disposition(table: &str) -> Option<&'static str> {
         | "projects"
         | "retrieval_anchor_aliases"
         | "retrieval_anchors"
+        | "retrieval_anchor_derivative_tombstones"
+        | "retrieval_anchor_dispositions"
+        | "retrieval_anchor_reverse_lineage"
         | "sanitization_receipts"
         | "savings_ledger"
         | "session_backfill_meta"
@@ -186,6 +223,8 @@ fn session_table_disposition(table: &str) -> Option<&'static str> {
         | "session_assertions"
         | "session_assertion_supersession"
         | "session_current_entities"
+        | "session_derived_evidence"
+        | "session_derived_evidence_members"
         | "session_external_payload_manifests"
         | "session_logical_copy_edges"
         | "session_occurrences"

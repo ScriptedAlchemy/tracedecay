@@ -320,8 +320,6 @@ pub enum RetrievalGrainV1 {
     Thread,
     Agent,
     Summary,
-    EvidenceSpan,
-    EvidenceBurst,
 }
 
 impl RetrievalGrainV1 {
@@ -334,8 +332,6 @@ impl RetrievalGrainV1 {
             Self::Thread => "thread",
             Self::Agent => "agent",
             Self::Summary => "summary",
-            Self::EvidenceSpan => "evidence_span",
-            Self::EvidenceBurst => "evidence_burst",
         }
     }
 }

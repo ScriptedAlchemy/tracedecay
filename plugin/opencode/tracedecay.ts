@@ -29,6 +29,7 @@ export const TraceDecayPlugin: Plugin = async ({ client }) => {
     event: async ({ event }) => {
       if (
         event.type === "file.edited" ||
+        event.type === "lsp.updated" ||
         event.type === "session.idle" ||
         (event.type === "session.status" && event.properties.status.type === "idle")
       ) {

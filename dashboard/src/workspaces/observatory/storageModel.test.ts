@@ -5,10 +5,10 @@ import {
   LegalActionRefSchema,
   StorageTelemetryPayloadSchema,
 } from '../../contracts/wire.ts';
+import { doctorEvidencePresentation } from './doctorModel.ts';
 import {
   budgetPresentation,
   dimensionDotClass,
-  doctorEvidencePresentation,
   formatSignedBytes,
   growthPresentation,
   refreshOperation,
@@ -140,6 +140,7 @@ describe('Observatory storage read models', () => {
       label: 'Degraded',
       tokenClass: 'text-state-error',
       dotClass: 'bg-state-error',
+      domainState: 'error',
     });
   });
 
