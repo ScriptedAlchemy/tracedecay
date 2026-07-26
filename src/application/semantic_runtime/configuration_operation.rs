@@ -235,6 +235,7 @@ impl ProductionSemanticConfigurationOperationV1 {
             per_source_namespace: evaluated_diversity.per_source_namespace,
             per_source_instance: evaluated_diversity.per_source_instance,
             per_repository: evaluated_diversity.per_repository,
+            per_file: evaluated_diversity.per_file,
             per_session_or_thread: evaluated_diversity.per_session_or_thread,
             per_copy_cluster: evaluated_diversity.per_copy_cluster,
             per_evidence_role: evaluated_diversity.per_evidence_role,

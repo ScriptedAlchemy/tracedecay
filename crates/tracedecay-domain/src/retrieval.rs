@@ -749,6 +749,9 @@ pub struct CompactCandidate {
     pub anchor_id: RetrievalAnchorId,
     pub logical_evidence_id: LogicalEvidenceId,
     pub source_occurrence_id: SourceOccurrenceId,
+    /// Stable file occurrence when the owning lane is file-backed. `None`
+    /// for non-file authorities; never inferred from a source-instance label.
+    pub file_occurrence_id: Option<crate::code_intelligence::FileOccurrenceId>,
     pub source_namespace: SourceNamespace,
     pub repository_id: Option<crate::research::id::RepositoryId>,
     pub session_or_thread_id: Option<SessionOrThreadId>,
@@ -943,6 +946,7 @@ pub struct CandidateContribution {
 #[serde(deny_unknown_fields)]
 pub struct OccurrenceProvenance {
     pub source_occurrence_id: SourceOccurrenceId,
+    pub file_occurrence_id: Option<crate::code_intelligence::FileOccurrenceId>,
     pub retriever_evidence_anchor: RetrievalAnchorId,
     pub source_namespace: SourceNamespace,
     pub repository_id: Option<crate::research::id::RepositoryId>,
@@ -1063,6 +1067,7 @@ pub struct DiversityPolicy {
     pub per_source_namespace: Option<u32>,
     pub per_source_instance: Option<u32>,
     pub per_repository: Option<u32>,
+    pub per_file: Option<u32>,
     pub per_session_or_thread: Option<u32>,
     pub per_copy_cluster: Option<u32>,
     pub per_evidence_role: Option<u32>,
@@ -1532,6 +1537,7 @@ mod tests {
                 .unwrap(),
             logical_evidence_id: id(&format!("evidence.{occurrence}")),
             source_occurrence_id: id(occurrence),
+            file_occurrence_id: None,
             source_namespace: id("ns.fixture"),
             repository_id: None,
             session_or_thread_id: None,
@@ -1555,6 +1561,7 @@ mod tests {
     fn provenance(candidate: &CompactCandidate) -> OccurrenceProvenance {
         OccurrenceProvenance {
             source_occurrence_id: candidate.source_occurrence_id.clone(),
+            file_occurrence_id: candidate.file_occurrence_id.clone(),
             retriever_evidence_anchor: candidate.retriever_evidence_anchor.clone(),
             source_namespace: candidate.source_namespace.clone(),
             repository_id: candidate.repository_id.clone(),
