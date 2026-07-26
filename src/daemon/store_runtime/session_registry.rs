@@ -698,6 +698,12 @@ mod tests {
         let first_authority =
             crate::daemon::authority::DaemonAuthority::acquire(&profile_root, &endpoint, "test")
                 .expect("first daemon authority");
+        let first_database_scope = crate::db::enter_daemon_database_scope(
+            &profile_root,
+            first_authority.record().epoch,
+            "first session runtime registry",
+        )
+        .expect("first daemon database scope");
         let identity = first_authority.profile_identity().clone();
         let first_registry = DaemonSessionRuntimeRegistryV1::open(identity.clone())
             .await
@@ -709,11 +715,18 @@ mod tests {
             "the durable daemon generation must own the store incarnation"
         );
         drop(first_registry);
+        drop(first_database_scope);
         drop(first_authority);
 
         let second_authority =
             crate::daemon::authority::DaemonAuthority::acquire(&profile_root, &endpoint, "test")
                 .expect("successor daemon authority");
+        let _second_database_scope = crate::db::enter_daemon_database_scope(
+            &profile_root,
+            second_authority.record().epoch,
+            "successor session runtime registry",
+        )
+        .expect("successor daemon database scope");
         let second_registry = DaemonSessionRuntimeRegistryV1::open(identity)
             .await
             .expect("successor session runtime registry");

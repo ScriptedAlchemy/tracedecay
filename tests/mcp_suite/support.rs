@@ -210,12 +210,10 @@ pub(crate) async fn handle_tool_call(
     if matches!(
         tool_name,
         "tracedecay_message_search"
-            | "tracedecay_lcm_load_session"
-            | "tracedecay_lcm_grep"
-            | "tracedecay_lcm_describe"
-            | "tracedecay_lcm_expand"
-            | "tracedecay_lcm_expand_query"
-    ) {
+            | "tracedecay_session_start"
+            | "tracedecay_session_end"
+    ) || tool_name.starts_with("tracedecay_lcm_")
+    {
         let session_db_path = project_session_db_path(cg);
         let server = if session_db_path.is_file() {
             let runtime = open_active_project_session_db(cg).await;
