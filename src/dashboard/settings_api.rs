@@ -1,11 +1,14 @@
 //! Dashboard endpoints for project and user settings.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tracedecay_application::{ApplicationProblemKind, RequestId};
 
 use super::DashboardState;
 use super::read_model::{
@@ -14,15 +17,27 @@ use super::read_model::{
 };
 use super::util::{JsonError, http_detail};
 use crate::application::configuration::{
-    UserSettingsAuthorityError, UserSettingsMutationV1, UserSettingsSnapshotV1,
+    DirectConfigurationMutation, UserSettingsAuthorityError, UserSettingsMutationV1,
+    UserSettingsSnapshotV1,
+};
+use crate::application::settings_control::{
+    ProjectSettingsPatchV1, ProjectSettingsPreviewErrorV1, SyncSettingsPatchV1,
+    TelemetrySettingsPatchV1, preview_project_settings,
+};
+use crate::application_surface::{
+    ApplicationSurfaceOperation, ApplicationSurfaceRequest, ConfigurationBatchSurfaceRequest,
+    ConfigurationDirectMutationSurfaceRequest, ConfigurationSurfaceRequest,
+    resolve_dashboard_application_surface,
 };
 use crate::automation::config as automation_config;
-use crate::config::{TelemetryConfig, TraceDecayConfig};
+use crate::config::TraceDecayConfig;
+use crate::daemon_client::RequestedOutputFormat;
 use crate::user_config;
 
 type ApiResult = std::result::Result<Json<DashboardEnvelopeV1<SettingsPayloadV1>>, JsonError>;
 
 const AUTOMATION_CONFIG_ENDPOINT: &str = "/api/plugins/holographic/curation/config";
+static NEXT_SETTINGS_REQUEST: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, Deserialize, JsonSchema, Default)]
 #[serde(deny_unknown_fields)]
@@ -241,88 +256,79 @@ pub(crate) async fn patch_project_settings(
 ) -> ApiResult {
     let patch = serde_json::from_value::<ProjectSettingsPatch>(patch)
         .map_err(|err| patch_shape_error("project settings", &err))?;
-
-    let mut errors = Vec::new();
-    if let Some(globs) = &patch.include {
-        validate_globs("include", globs, &mut errors);
-    }
-    if let Some(globs) = &patch.exclude {
-        validate_globs("exclude", globs, &mut errors);
-    }
-    if patch.max_file_size == Some(0) {
-        errors.push(validation_error(
-            "max_file_size",
-            "max_file_size must be at least 1 byte",
-        ));
-    }
-    if let Some(sync) = &patch.sync
-        && let Some(secs) = sync.auto_track_pr_poll_secs
-        && secs < crate::config::MIN_AUTO_TRACK_PR_POLL_SECS
-    {
-        errors.push(validation_error(
-            "auto_track_pr_poll_secs",
-            &format!(
-                "auto_track_pr_poll_secs must be at least {} seconds",
-                crate::config::MIN_AUTO_TRACK_PR_POLL_SECS
-            ),
-        ));
-    }
-    if !errors.is_empty() {
-        return Err(validation_failed(&errors));
-    }
-
     let current = crate::config::cached_runtime_configuration(&state.project_root)
         .map_err(|err| configuration_unavailable(&err))?;
-    ensure_expected_revision(&patch.expected_revision_id, current.revision_id.as_str())?;
-    let current_config = &current.config;
-    let sync = patch.sync.as_ref().map_or_else(
-        || current_config.sync.clone(),
-        |sync| crate::config::SyncConfig {
-            auto_track_pr_branches: sync
-                .auto_track_pr_branches
-                .unwrap_or(current_config.sync.auto_track_pr_branches),
-            auto_track_pr_poll_secs: sync
-                .auto_track_pr_poll_secs
-                .unwrap_or(current_config.sync.auto_track_pr_poll_secs),
-            ..current_config.sync.clone()
+    let project_id = state
+        .project_id
+        .as_deref()
+        .ok_or_else(|| configuration_unavailable(&"project authority is unavailable"))
+        .and_then(|project_id| {
+            tracedecay_domain::ProjectId::new(project_id)
+                .map_err(|error| configuration_unavailable(&error))
+        })?;
+    let preview = preview_project_settings(
+        &project_id,
+        &current,
+        ProjectSettingsPatchV1 {
+            expected_revision_id: patch.expected_revision_id,
+            include: patch.include,
+            exclude: patch.exclude,
+            max_file_size: patch.max_file_size,
+            extract_docstrings: patch.extract_docstrings,
+            track_call_sites: patch.track_call_sites,
+            git_ignore: patch.git_ignore,
+            telemetry: patch.telemetry.map(|telemetry| TelemetrySettingsPatchV1 {
+                timings: telemetry.timings,
+            }),
+            sync: patch.sync.map(|sync| SyncSettingsPatchV1 {
+                auto_track_pr_branches: sync.auto_track_pr_branches,
+                auto_track_pr_poll_secs: sync.auto_track_pr_poll_secs,
+            }),
         },
-    );
-    let telemetry = patch.telemetry.map_or_else(
-        || current_config.telemetry.clone(),
-        |telemetry| TelemetryConfig {
-            timings: telemetry
-                .timings
-                .unwrap_or(current_config.telemetry.timings),
-        },
-    );
-    let updated = TraceDecayConfig {
-        include: patch
-            .include
-            .unwrap_or_else(|| current_config.include.clone()),
-        exclude: patch
-            .exclude
-            .unwrap_or_else(|| current_config.exclude.clone()),
-        max_file_size: patch.max_file_size.unwrap_or(current_config.max_file_size),
-        extract_docstrings: patch
-            .extract_docstrings
-            .unwrap_or(current_config.extract_docstrings),
-        track_call_sites: patch
-            .track_call_sites
-            .unwrap_or(current_config.track_call_sites),
-        git_ignore: patch.git_ignore.unwrap_or(current_config.git_ignore),
-        telemetry,
-        sync,
-        ..current_config.clone()
-    };
-    let resync_recommended = updated != *current_config;
-    if resync_recommended {
-        crate::config::mutate_pinned_runtime_configuration(&current, updated)
-            .await
-            .map_err(|err| configuration_unavailable(&err))?;
+    )
+    .map_err(project_preview_error)?;
+    if preview.changed {
+        let client = state
+            .application_client
+            .as_ref()
+            .ok_or_else(|| configuration_unavailable(&"application transport is unavailable"))?;
+        let DirectConfigurationMutation::Batch { mutations } = preview.mutation else {
+            return Err(configuration_unavailable(
+                &"project settings preview is invalid",
+            ));
+        };
+        let mutations = mutations
+            .into_iter()
+            .map(surface_mutation)
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let sequence = NEXT_SETTINGS_REQUEST.fetch_add(1, Ordering::Relaxed);
+        let request_id = RequestId::new(format!(
+            "request.dashboard.settings.{}.{}",
+            crate::tracedecay::current_timestamp(),
+            sequence
+        ))
+        .map_err(|error| configuration_unavailable(&error))?;
+        let outcome = resolve_dashboard_application_surface(
+            ApplicationSurfaceOperation::ConfigurationBatch,
+            request_id,
+            ApplicationSurfaceRequest::Configuration(ConfigurationSurfaceRequest::Batch(
+                ConfigurationBatchSurfaceRequest {
+                    mutations,
+                    expected_revision: preview.expected_revision,
+                },
+            )),
+            RequestedOutputFormat::Json,
+            Some(client),
+        )
+        .await
+        .map_err(|error| configuration_unavailable(&error))?;
+        if let Err(problem) = outcome.result {
+            return Err(application_problem(problem));
+        }
     }
 
     Ok(Json(
-        settings_envelope(&state, Some(resync_recommended), None).await?,
+        settings_envelope(&state, Some(preview.resync_recommended), None).await?,
     ))
 }
 
@@ -642,19 +648,60 @@ fn validation_failed(errors: &[Value]) -> JsonError {
     )
 }
 
-fn ensure_expected_revision(expected: &str, actual: &str) -> std::result::Result<(), JsonError> {
-    if expected == actual {
-        return Ok(());
+fn surface_mutation(
+    mutation: DirectConfigurationMutation,
+) -> std::result::Result<ConfigurationDirectMutationSurfaceRequest, JsonError> {
+    match mutation {
+        DirectConfigurationMutation::Set { layer, key, value } => {
+            Ok(ConfigurationDirectMutationSurfaceRequest::Set { layer, key, value })
+        }
+        DirectConfigurationMutation::Unset { layer, key } => {
+            Ok(ConfigurationDirectMutationSurfaceRequest::Unset { layer, key })
+        }
+        DirectConfigurationMutation::Batch { .. } => Err(configuration_unavailable(
+            &"nested settings batch is invalid",
+        )),
     }
-    Err((
-        StatusCode::CONFLICT,
-        Json(json!({
-            "code": "configuration_revision_conflict",
-            "detail": "settings changed after this edit began; refresh and retry",
-            "expected_revision_id": expected,
-            "actual_revision_id": actual,
-        })),
-    ))
+}
+
+fn project_preview_error(error: ProjectSettingsPreviewErrorV1) -> JsonError {
+    match error {
+        ProjectSettingsPreviewErrorV1::Validation(issues) => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "detail": "settings validation failed",
+                "validation_errors": issues,
+            })),
+        ),
+        ProjectSettingsPreviewErrorV1::RevisionConflict { expected, actual } => (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "code": "configuration_revision_conflict",
+                "detail": "settings changed after this edit began; refresh and retry",
+                "expected_revision_id": expected,
+                "actual_revision_id": actual,
+            })),
+        ),
+        ProjectSettingsPreviewErrorV1::InvalidAuthority => {
+            configuration_unavailable(&"project settings authority is unavailable")
+        }
+    }
+}
+
+fn application_problem(problem: tracedecay_application::ApplicationProblemEnvelope) -> JsonError {
+    let status = match problem.problem.kind {
+        ApplicationProblemKind::InvalidRequest => StatusCode::BAD_REQUEST,
+        ApplicationProblemKind::NotFoundOrNotAuthorized => StatusCode::NOT_FOUND,
+        ApplicationProblemKind::Conflict | ApplicationProblemKind::Stale => StatusCode::CONFLICT,
+        ApplicationProblemKind::Unsupported => StatusCode::UNPROCESSABLE_ENTITY,
+        ApplicationProblemKind::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+        ApplicationProblemKind::Saturated => StatusCode::TOO_MANY_REQUESTS,
+        ApplicationProblemKind::Cancelled => StatusCode::CONFLICT,
+        ApplicationProblemKind::TimedOut => StatusCode::GATEWAY_TIMEOUT,
+    };
+    let payload = serde_json::to_value(problem)
+        .unwrap_or_else(|_| json!({ "detail": "configuration mutation was rejected" }));
+    (status, Json(payload))
 }
 
 fn user_revision_conflict(expected: &str, actual: &str) -> JsonError {

@@ -644,16 +644,14 @@ fn code_index_search_executor(
                         error = %error,
                         "code_index_search_failed"
                     );
-                    if let Pr9SemanticSearchExecutionErrorV1::Semantic(
-                        crate::query::retrieval::semantic::SemanticQueryServiceError::StrictUnavailable(
-                            abstention,
-                        ),
-                    ) = &error
+                    if let Pr9SemanticSearchExecutionErrorV1::StrictSemanticUnavailable {
+                        generation,
+                        abstention,
+                    } = &error
                     {
-                        let status = schedulers.semantic_mcp_abstention(&project_root).await;
                         return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
                             crate::mcp::server::CodeIndexSearchUnavailableV1 {
-                                code_generation: status.code_generation,
+                                code_generation: Some(generation.as_str().to_owned()),
                                 reason: crate::mcp::server::CodeIndexSearchUnavailableReasonV1::SemanticUnavailable,
                                 semantic: crate::mcp::server::CodeIndexSemanticStatusV1::Unavailable {
                                     reason: code_index_scheduler::semantic_query_runtime::semantic_abstention_reason(abstention),
@@ -681,6 +679,9 @@ fn code_index_search_executor(
                         },
                         Pr9SemanticSearchExecutionErrorV1::Semantic(_) => {
                             crate::mcp::server::CodeIndexSearchUnavailableReasonV1::Internal
+                        }
+                        Pr9SemanticSearchExecutionErrorV1::StrictSemanticUnavailable { .. } => {
+                            crate::mcp::server::CodeIndexSearchUnavailableReasonV1::SemanticUnavailable
                         }
                     };
                     return crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(
