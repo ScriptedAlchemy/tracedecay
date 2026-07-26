@@ -2204,7 +2204,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             compatibility_tools.len(),
-            100 + usize::from(super::super::definitions::ast_grep_available())
+            102 + usize::from(super::super::definitions::ast_grep_available())
         );
         for tool in compatibility_tools {
             assert!(
