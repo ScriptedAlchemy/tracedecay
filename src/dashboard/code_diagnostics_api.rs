@@ -1,7 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
-use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::collections::BTreeMap;
 
 use axum::Json;
 use axum::extract::{Path as AxumPath, State};
@@ -11,10 +8,11 @@ use serde_json::{Value, json};
 
 use super::DashboardState;
 use super::util::{JsonError, http_detail};
-use crate::diagnostics::lsp::activity::{active_languages_for_files, documents_for_adapter};
+use crate::application::dashboard_diagnostics::{
+    DashboardDiagnosticsAuthorityV1, DashboardDiagnosticsErrorV1,
+};
 use crate::diagnostics::lsp::adapters::LspAdapterDefinition;
-use crate::diagnostics::lsp::broker::{DiagnosticsSnapshot, EngineState, NodeSpan};
-use crate::diagnostics::lsp::settings::{IdleBackfillMode, save_settings};
+use crate::diagnostics::lsp::settings::IdleBackfillMode;
 
 type ApiResult = std::result::Result<Json<Value>, JsonError>;
 
@@ -45,8 +43,10 @@ enum CommandOverridePatch {
 }
 
 pub(crate) async fn overview(State(state): State<DashboardState>) -> ApiResult {
-    let snapshot = diagnostics_snapshot(&state).await?;
-    maybe_spawn_idle_backfill(&state, &snapshot);
+    let snapshot = authority(&state)?
+        .overview()
+        .await
+        .map_err(authority_error)?;
     Ok(Json(json!(snapshot)))
 }
 
@@ -54,9 +54,15 @@ pub(crate) async fn patch_settings(
     State(state): State<DashboardState>,
     Json(patch): Json<Value>,
 ) -> ApiResult {
-    let patch = serde_json::from_value::<SettingsPatch>(patch)
-        .map_err(|err| bad_request(&format!("invalid code diagnostics settings patch: {err}")))?;
-    let mut settings = state.code_diagnostics.read().await.snapshot().settings;
+    let patch = serde_json::from_value::<SettingsPatch>(patch).map_err(|error| {
+        bad_request(&format!("invalid code diagnostics settings patch: {error}"))
+    })?;
+    let authority = authority(&state)?;
+    let mut settings = authority
+        .snapshot()
+        .await
+        .map_err(authority_error)?
+        .settings;
     if let Some(mode) = patch.idle_backfill {
         settings.idle_backfill = mode;
     }
@@ -67,9 +73,7 @@ pub(crate) async fn patch_settings(
         }
         match language_patch.command_override {
             CommandOverridePatch::Missing => {}
-            CommandOverridePatch::Null => {
-                language_settings.command_override = None;
-            }
+            CommandOverridePatch::Null => language_settings.command_override = None,
             CommandOverridePatch::Value(command_override) => {
                 language_settings.command_override = Some(command_override);
             }
@@ -78,25 +82,18 @@ pub(crate) async fn patch_settings(
     if let Some(custom_adapters) = patch.custom_adapters {
         settings.custom_adapters = custom_adapters;
     }
-    save_settings(&state.dashboard_root, &settings)
+    let snapshot = authority
+        .update_settings(settings)
         .await
-        .map_err(|err| internal_error(&err))?;
-    let mut adapters = crate::diagnostics::lsp::adapters::builtin_adapters();
-    adapters.extend(settings.custom_adapters.clone());
-    let mut broker = state.code_diagnostics.write().await;
-    broker.update_adapters(adapters);
-    broker.update_settings(settings);
-    drop(broker);
-    let snapshot = diagnostics_snapshot(&state).await?;
+        .map_err(authority_error)?;
     Ok(Json(json!(snapshot)))
 }
 
 pub(crate) async fn refresh_all(State(state): State<DashboardState>) -> ApiResult {
-    let languages = refreshable_languages(&state).await?;
-    for language in languages {
-        refresh_one_reconciled(&state, &language).await?;
-    }
-    let snapshot = diagnostics_snapshot(&state).await?;
+    let snapshot = authority(&state)?
+        .refresh_all()
+        .await
+        .map_err(authority_error)?;
     Ok(Json(json!(snapshot)))
 }
 
@@ -104,243 +101,24 @@ pub(crate) async fn refresh_language(
     State(state): State<DashboardState>,
     AxumPath(language): AxumPath<String>,
 ) -> ApiResult {
-    refresh_one(&state, &language).await?;
-    let snapshot = diagnostics_snapshot(&state).await?;
+    let snapshot = authority(&state)?
+        .refresh_language(&language)
+        .await
+        .map_err(authority_error)?;
     Ok(Json(json!(snapshot)))
 }
 
-async fn refresh_one(state: &DashboardState, language: &str) -> std::result::Result<(), JsonError> {
-    reconcile_project_language_activity(state).await?;
-    refresh_one_reconciled(state, language).await
-}
-
-async fn refresh_one_reconciled(
+fn authority(
     state: &DashboardState,
-    language: &str,
-) -> std::result::Result<(), JsonError> {
-    let snapshot = state.code_diagnostics.read().await.snapshot();
-    if !snapshot.settings.language_enabled(language) {
-        state
-            .code_diagnostics
-            .write()
-            .await
-            .set_language_enabled(language, false);
-        return Ok(());
-    }
-    let Some(adapter) = state.code_diagnostics.read().await.adapter_for(language) else {
-        return Err(bad_request(&format!(
-            "no code diagnostics adapter registered for language '{language}'"
-        )));
-    };
-    let files = indexed_files(&state.mem_db)
-        .await
-        .map_err(|err| internal_error(&err))?;
-    let documents = documents_for_adapter(&state.project_root, &adapter, files)
-        .await
-        .map_err(|err| internal_error(&err))?;
-    let document_count = documents.len();
-    state
-        .code_diagnostics
-        .write()
-        .await
-        .record_backfill_progress(language, document_count, document_count, 0, None);
-    if documents.is_empty() {
-        state
-            .code_diagnostics
-            .write()
-            .await
-            .record_backfill_progress(
-                language,
-                0,
-                0,
-                0,
-                Some(crate::tracedecay::current_timestamp()),
-            );
-        return Ok(());
-    }
-    let prepared = state
-        .code_diagnostics
-        .write()
-        .await
-        .prepare_refresh(language, documents);
-    let mut progress_recorded_in_task = false;
-    let refresh_ok = match prepared {
-        Ok(Some(prepared)) => {
-            progress_recorded_in_task = true;
-            let state_for_refresh = state.clone();
-            let language_for_refresh = language.to_string();
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            tokio::spawn(async move {
-                let completed = prepared.collect_diagnostics(Duration::from_secs(5)).await;
-                let refresh_ok = completed.is_ok();
-                {
-                    let mut broker = state_for_refresh.code_diagnostics.write().await;
-                    let _ = broker.finish_refresh(completed);
-                    let graph_db = Arc::clone(&state_for_refresh.mem_db);
-                    broker
-                        .resolve_enclosing_nodes(move |file| {
-                            let graph_db = Arc::clone(&graph_db);
-                            async move { node_spans_for_file(&graph_db, &file).await }
-                        })
-                        .await;
-                    let snapshot = broker.snapshot();
-                    let files_with_diagnostics =
-                        files_with_diagnostics(&snapshot, &language_for_refresh);
-                    broker.record_backfill_progress(
-                        &language_for_refresh,
-                        document_count,
-                        document_count,
-                        files_with_diagnostics,
-                        refresh_ok.then(crate::tracedecay::current_timestamp),
-                    );
-                }
-                let _ = tx.send(refresh_ok);
-            });
-            rx.await.unwrap_or(false)
-        }
-        Ok(None) => true,
-        Err(_) => false,
-    };
-    if !progress_recorded_in_task {
-        let snapshot = state.code_diagnostics.read().await.snapshot();
-        let files_with_diagnostics = files_with_diagnostics(&snapshot, language);
-        state
-            .code_diagnostics
-            .write()
-            .await
-            .record_backfill_progress(
-                language,
-                document_count,
-                document_count,
-                files_with_diagnostics,
-                refresh_ok.then(crate::tracedecay::current_timestamp),
-            );
-    }
-    Ok(())
-}
-
-fn files_with_diagnostics(snapshot: &DiagnosticsSnapshot, language: &str) -> usize {
-    snapshot
-        .diagnostics
-        .iter()
-        .filter(|diagnostic| diagnostic.language == language)
-        .map(|diagnostic| diagnostic.file.as_str())
-        .collect::<BTreeSet<_>>()
-        .len()
-}
-
-fn maybe_spawn_idle_backfill(state: &DashboardState, snapshot: &DiagnosticsSnapshot) {
-    if snapshot.settings.idle_backfill != IdleBackfillMode::Idle {
-        return;
-    }
-    let languages = backfill_languages(snapshot);
-    if languages.is_empty() {
-        return;
-    }
-    if state
-        .code_diagnostics_backfill_started
-        .swap(true, Ordering::AcqRel)
-    {
-        return;
-    }
-    let state = state.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_millis(750)).await;
-        for language in languages {
-            let _ = refresh_one(&state, &language).await;
-            tokio::task::yield_now().await;
-        }
-    });
-}
-
-async fn diagnostics_snapshot(
-    state: &DashboardState,
-) -> std::result::Result<DiagnosticsSnapshot, JsonError> {
-    reconcile_project_language_activity(state).await?;
-    Ok(state.code_diagnostics.read().await.snapshot())
-}
-
-async fn refreshable_languages(
-    state: &DashboardState,
-) -> std::result::Result<Vec<String>, JsonError> {
-    let snapshot = diagnostics_snapshot(state).await?;
-    Ok(backfill_languages(&snapshot))
-}
-
-fn backfill_languages(snapshot: &DiagnosticsSnapshot) -> Vec<String> {
-    snapshot
-        .engines
-        .iter()
-        .filter(|engine| {
-            engine.enabled
-                && !matches!(
-                    engine.state,
-                    EngineState::Disabled | EngineState::Inactive | EngineState::Unavailable
-                )
-        })
-        .map(|engine| engine.language.clone())
-        .collect()
-}
-
-async fn reconcile_project_language_activity(
-    state: &DashboardState,
-) -> std::result::Result<(), JsonError> {
-    let files = indexed_files(&state.mem_db)
-        .await
-        .map_err(|err| internal_error(&err))?;
-    let adapters = {
-        let broker = state.code_diagnostics.read().await;
-        broker
-            .snapshot()
-            .engines
-            .into_iter()
-            .filter_map(|engine| broker.adapter_for(&engine.language))
-            .collect::<Vec<_>>()
-    };
-    let active_languages = active_languages_for_files(&state.project_root, &adapters, &files);
-    state
-        .code_diagnostics
-        .write()
-        .await
-        .update_project_languages(active_languages);
-    Ok(())
-}
-
-/// Loads the indexed symbol spans for a file so a diagnostic can be attributed
-/// to its smallest enclosing node. Returns an empty vec (leaving the diagnostic
-/// unattributed) when the file isn't indexed or the query fails — the enclosing
-/// node is a best-effort annotation, never a hard dependency of a refresh.
-async fn node_spans_for_file(db: &crate::db::Database, file: &str) -> Vec<NodeSpan> {
-    db.get_nodes_by_file(file)
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .map(|node| NodeSpan {
-            start_line: node.start_line,
-            end_line: node.end_line,
-            qualified_name: node.qualified_name,
-        })
-        .collect()
-}
-
-async fn indexed_files(db: &crate::db::Database) -> crate::errors::Result<Vec<String>> {
-    let mut files = db
-        .get_all_files()
-        .await?
-        .into_iter()
-        .map(|file| file.path)
-        .collect::<Vec<_>>();
-    files.sort();
-    Ok(files)
-}
-
-fn bad_request(err: &impl ToString) -> JsonError {
-    (
-        StatusCode::BAD_REQUEST,
-        Json(json!({
-            "detail": err.to_string(),
-        })),
-    )
+) -> std::result::Result<&DashboardDiagnosticsAuthorityV1, JsonError> {
+    state.code_diagnostics_authority.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(http_detail(
+                "canonical daemon diagnostics authority is unavailable",
+            )),
+        )
+    })
 }
 
 fn deserialize_command_override_patch<'de, D>(
@@ -355,9 +133,109 @@ where
     })
 }
 
-fn internal_error(err: &impl ToString) -> JsonError {
+fn bad_request(error: &impl ToString) -> JsonError {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({
+            "detail": error.to_string(),
+        })),
+    )
+}
+
+fn internal_error(error: impl ToString) -> JsonError {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
-        Json(http_detail(&err.to_string())),
+        Json(http_detail(&error.to_string())),
     )
+}
+
+fn authority_error(error: DashboardDiagnosticsErrorV1) -> JsonError {
+    match &error {
+        DashboardDiagnosticsErrorV1::AdapterUnavailable { .. } => bad_request(&error),
+        DashboardDiagnosticsErrorV1::Runtime(_) => internal_error(error),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::application::dashboard_diagnostics::diagnostic_broker;
+    use crate::application::host_admission::HostAdmissionTestRuntimeV1;
+    use crate::diagnostics::lsp::settings::CodeDiagnosticsSettings;
+    use tracedecay_domain::ProjectId;
+
+    async fn state_for_test() -> (
+        tempfile::TempDir,
+        HostAdmissionTestRuntimeV1,
+        DashboardState,
+    ) {
+        let project = tempfile::tempdir().expect("project tempdir");
+        std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
+            .expect("fixture source");
+        let runtime = HostAdmissionTestRuntimeV1::project(
+            crate::storage::default_profile_root().expect("profile root"),
+            project.path(),
+            ProjectId::new("project.dashboard-code-diagnostics").expect("project id"),
+        )
+        .await
+        .expect("registered test runtime");
+        let cg = runtime
+            .initialize_project_graph_for_test(
+                project.path(),
+                crate::tracedecay::TraceDecayOpenOptions::default(),
+            )
+            .await
+            .expect("project init");
+        let state = crate::dashboard::build_state(&cg)
+            .await
+            .expect("dashboard state");
+        (project, runtime, state)
+    }
+
+    #[tokio::test]
+    async fn overview_delegates_to_the_exact_mounted_diagnostics_authority() {
+        let _pin = crate::config::PinnedUserDataDir::new();
+        let (_project, _runtime, mut state) = state_for_test().await;
+        let mut settings = CodeDiagnosticsSettings {
+            idle_backfill: IdleBackfillMode::Off,
+            ..CodeDiagnosticsSettings::default()
+        };
+        settings.set_language_enabled("rust", false);
+        let authority = DashboardDiagnosticsAuthorityV1::new(
+            state.project_root.clone(),
+            state.dashboard_root.clone(),
+            Arc::clone(&state.mem_db),
+            Arc::new(tokio::sync::Mutex::new(diagnostic_broker(
+                state.project_root.clone(),
+                settings,
+            ))),
+        );
+        let expected = authority.snapshot().await.expect("authority snapshot");
+        state.code_diagnostics_authority = Some(authority);
+
+        let Json(actual) = overview(State(state)).await.expect("diagnostics overview");
+
+        assert_eq!(actual, json!(expected));
+        assert_eq!(actual["settings"]["idle_backfill"], json!("off"));
+        assert_eq!(actual["settings"]["languages"]["rust"]["enabled"], false);
+    }
+
+    #[tokio::test]
+    async fn overview_returns_service_unavailable_without_mounted_authority() {
+        let _pin = crate::config::PinnedUserDataDir::new();
+        let (_project, _runtime, state) = state_for_test().await;
+
+        let (status, Json(body)) = overview(State(state))
+            .await
+            .expect_err("unmounted authority must fail closed");
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            body["detail"],
+            "canonical daemon diagnostics authority is unavailable"
+        );
+    }
 }

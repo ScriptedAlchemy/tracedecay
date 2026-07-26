@@ -588,7 +588,7 @@ fn lsp_servers_command_parses_json_flag() {
 }
 
 #[test]
-fn lsp_bridge_requires_explicit_stdio_and_project() {
+fn lsp_bridge_accepts_explicit_project_or_initialize_root() {
     let cli = Cli::try_parse_from([
         "tracedecay",
         "lsp",
@@ -606,9 +606,19 @@ fn lsp_bridge_requires_explicit_stdio_and_project() {
                 stdio: true,
                 project,
             }
-        }) if project == "/workspace/project"
+        }) if project.as_deref() == Some("/workspace/project")
     ));
-    assert!(Cli::try_parse_from(["tracedecay", "lsp", "bridge", "--stdio"]).is_err());
+    let initialize_routed = Cli::try_parse_from(["tracedecay", "lsp", "bridge", "--stdio"])
+        .expect("initialize-routed LSP bridge should parse");
+    assert!(matches!(
+        initialize_routed.command,
+        Some(Commands::Lsp {
+            action: LspAction::Bridge {
+                stdio: true,
+                project: None,
+            }
+        })
+    ));
 }
 
 #[test]

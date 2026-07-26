@@ -56,7 +56,7 @@ pub(crate) struct HookEvent {
     pub(crate) agent: HookAgent,
     pub(crate) kind: HookEventKind,
     pub(crate) rel_paths: Vec<String>,
-    pub(crate) command: Option<String>,
+    pub(crate) had_command: bool,
     pub(crate) cwd: Option<PathBuf>,
     pub(crate) route: Option<crate::daemon::HookRouteMetadata>,
     pub(crate) receipt: Option<crate::daemon::HookTerminalReceipt>,
@@ -118,9 +118,6 @@ impl HookEvent {
             push_admission_identity_part(&mut identity, "event", self.kind.as_key().as_bytes());
             for path in &self.rel_paths {
                 push_admission_identity_part(&mut identity, "path", path.as_bytes());
-            }
-            if let Some(command) = self.command.as_deref() {
-                push_admission_identity_part(&mut identity, "command", command.as_bytes());
             }
         }
         format!(
@@ -508,7 +505,13 @@ pub(crate) fn parse_hook_event(params: Option<&Value>) -> Option<HookEvent> {
         agent: HookAgent::from_wire(&event.agent)?,
         kind: HookEventKind::from_wire(&event.event)?,
         rel_paths: safe_hook_rel_paths(&event.rel_paths),
-        command: event.command.filter(|command| !command.is_empty()),
+        // Shell text is an untyped observation. Keep only a content-free
+        // presence bit for telemetry; discard the text before admission or
+        // planning.
+        had_command: event
+            .command
+            .as_deref()
+            .is_some_and(|command| !command.is_empty()),
         cwd: event.cwd,
         route: event.route,
         receipt: event.receipt,
@@ -528,7 +531,9 @@ pub(crate) fn plan_hook_event(
                 HookEventPlan::SyncFiles(event.rel_paths.clone())
             }
         }
-        HookEventKind::Shell => plan_shell_hook_event(event, project_root, current_branch),
+        // Shell observations cannot mint branch/worktree/sync authority.
+        // Native Git reconciliation and typed host records own those effects.
+        HookEventKind::Shell => HookEventPlan::Noop,
         HookEventKind::WorkspaceOpen => current_branch
             .filter(|branch| !branch.is_empty())
             .map(|branch| HookEventPlan::SyncCurrentBranch {
@@ -595,62 +600,6 @@ fn safe_hook_rel_paths(paths: &[String]) -> Vec<String> {
         .collect()
 }
 
-fn plan_shell_hook_event(
-    event: &HookEvent,
-    project_root: &Path,
-    current_branch: Option<&str>,
-) -> HookEventPlan {
-    let Some(command) = event.command.as_deref() else {
-        return HookEventPlan::Noop;
-    };
-    let cwd = event.cwd.as_deref().unwrap_or(project_root);
-    let Some(hook_project_root) = hook_project_root(cwd, project_root) else {
-        return HookEventPlan::Noop;
-    };
-    if !crate::hooks::cursor_shell_command_targets_project(command, cwd, &hook_project_root) {
-        return HookEventPlan::Noop;
-    }
-    let same_project = paths_same(&hook_project_root, project_root);
-    let hook_current_branch;
-    let current_branch = if same_project {
-        current_branch
-    } else {
-        hook_current_branch = crate::branch::current_branch(&hook_project_root);
-        hook_current_branch.as_deref()
-    };
-    match crate::hooks::cursor_shell_sync_plan_with_current_branch(command, current_branch) {
-        crate::hooks::CursorShellSyncPlan::BranchAdd(branch) => {
-            branch_plan_for_root(project_root, hook_project_root, branch, event.agent)
-        }
-        crate::hooks::CursorShellSyncPlan::WorktreeBranchAdd {
-            branch,
-            worktree_path,
-        } => HookEventPlan::AddBranchAt {
-            root: crate::hooks::resolve_worktree_add_root(command, cwd, &worktree_path),
-            branch,
-            agent: event.agent,
-        },
-        crate::hooks::CursorShellSyncPlan::IncrementalSync => {
-            HookEventPlan::DebouncedIncrementalSync(event.agent)
-        }
-        crate::hooks::CursorShellSyncPlan::CurrentBranchSync(branch) => {
-            if same_project {
-                HookEventPlan::SyncCurrentBranch {
-                    branch,
-                    agent: event.agent,
-                }
-            } else {
-                HookEventPlan::AddBranchAt {
-                    root: hook_project_root,
-                    branch,
-                    agent: event.agent,
-                }
-            }
-        }
-        crate::hooks::CursorShellSyncPlan::Noop => HookEventPlan::Noop,
-    }
-}
-
 /// Plans the sync for a `sessionStart` hook.
 ///
 /// In the main checkout this mirrors `WorkspaceOpen`: sync the current branch,
@@ -710,40 +659,6 @@ fn plan_linked_worktree_branch_add(
         branch,
         agent: event.agent,
     })
-}
-
-fn hook_project_root(cwd: &Path, project_root: &Path) -> Option<PathBuf> {
-    if let Some(root) = crate::config::discover_project_root(cwd) {
-        if root_belongs_to_project(&root, project_root) {
-            return Some(root);
-        }
-        return None;
-    }
-    let Some(worktree_root) = crate::worktree::git_worktree_root(cwd) else {
-        return path_is_inside(cwd, project_root).then(|| project_root.to_path_buf());
-    };
-    if git_roots_share_common_dir(&worktree_root, project_root) {
-        Some(worktree_root)
-    } else {
-        None
-    }
-}
-
-fn branch_plan_for_root(
-    project_root: &Path,
-    hook_project_root: PathBuf,
-    branch: String,
-    agent: HookAgent,
-) -> HookEventPlan {
-    if paths_same(&hook_project_root, project_root) {
-        HookEventPlan::AddBranch(branch)
-    } else {
-        HookEventPlan::AddBranchAt {
-            root: hook_project_root,
-            branch,
-            agent,
-        }
-    }
 }
 
 /// Effect-time authorization failure for durable branch-write plans
@@ -1031,16 +946,6 @@ mod tests {
         assert_eq!(agent, HookAgent::Codex);
     }
 
-    fn write_project_marker(root: &Path) {
-        let db_path = crate::config::get_project_db_path(root);
-        let Some(parent) = db_path.parent() else {
-            panic!("db path should have parent");
-        };
-        std::fs::create_dir_all(parent)
-            .unwrap_or_else(|e| panic!("project marker dir should create: {e}"));
-        std::fs::write(db_path, b"").unwrap_or_else(|e| panic!("project marker should write: {e}"));
-    }
-
     #[test]
     fn parses_agent_and_event_kind_from_hook_notification() {
         let params = json!({
@@ -1074,9 +979,23 @@ mod tests {
 
         assert_eq!(shell.agent, HookAgent::Codex);
         assert_eq!(shell.kind, HookEventKind::Shell);
-        assert_eq!(shell.command.as_deref(), Some("git pull --rebase"));
+        assert!(shell.had_command);
         assert_eq!(workspace.agent, HookAgent::Kiro);
         assert_eq!(workspace.kind, HookEventKind::WorkspaceOpen);
+    }
+
+    #[test]
+    fn shell_emitters_do_not_put_command_text_on_the_wire() {
+        for event in [
+            crate::daemon::DaemonHookEvent::cursor_after_shell_execution(PathBuf::from("/project")),
+            crate::daemon::DaemonHookEvent::post_tool_use_shell(
+                HookAgent::Codex,
+                PathBuf::from("/project"),
+            ),
+        ] {
+            let wire = serde_json::to_value(event).unwrap();
+            assert!(wire.get("command").is_none());
+        }
     }
 
     #[test]
@@ -1184,141 +1103,29 @@ mod tests {
     }
 
     #[test]
-    fn plans_shell_branch_add() {
-        let params = json!({
-            "agent": "codex",
-            "event": "postToolUseShell",
-            "command": "git switch feature/daemon-hooks",
-            "cwd": "/tmp/project"
-        });
-        let event = parse_or_panic(&params);
-
-        assert_eq!(
-            plan_hook_event(
-                &event,
-                Path::new("/tmp/project"),
-                Some("feature/daemon-hooks")
-            ),
-            HookEventPlan::AddBranch("feature/daemon-hooks".to_string())
-        );
-    }
-
-    #[test]
-    fn ignores_shell_branch_add_from_unrelated_project_root() {
-        let base = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir should create: {e}"));
-        let project_root = base.path().join("project");
-        let unrelated_root = base.path().join("unrelated");
-        std::fs::create_dir_all(&project_root)
-            .unwrap_or_else(|e| panic!("project root should create: {e}"));
-        std::fs::create_dir_all(&unrelated_root)
-            .unwrap_or_else(|e| panic!("unrelated root should create: {e}"));
-        write_project_marker(&project_root);
-        write_project_marker(&unrelated_root);
-
-        let params = json!({
-            "agent": "codex",
-            "event": "postToolUseShell",
-            "command": "git switch feature/unrelated",
-            "cwd": unrelated_root
-        });
-        let event = parse_or_panic(&params);
-
-        assert_eq!(
-            plan_hook_event(&event, &project_root, Some("feature/unrelated")),
-            HookEventPlan::Noop
-        );
-    }
-
-    #[test]
-    fn plans_worktree_add_against_new_worktree_root() {
-        let params = json!({
-            "agent": "codex",
-            "event": "postToolUseShell",
-            "command": "git worktree add ../wt feature/daemon-hooks",
-            "cwd": "/tmp/project"
-        });
-        let event = parse_or_panic(&params);
-
-        assert_eq!(
-            plan_hook_event(&event, Path::new("/tmp/project"), Some("main")),
-            HookEventPlan::AddBranchAt {
-                root: Path::new("/tmp/wt").to_path_buf(),
-                branch: "feature/daemon-hooks".to_string(),
-                agent: HookAgent::Codex,
-            }
-        );
-    }
-
-    #[test]
-    fn plans_worktree_add_resolving_path_against_git_dash_c_dir() {
-        // `git -C <dir>` makes git resolve the worktree path against <dir>,
-        // not the shell cwd: from <base>/project/src, `-C ..` targets the
-        // project root, so `../wt` lands beside the project at <base>/wt.
-        let base = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir should create: {e}"));
-        let base_root = base
-            .path()
-            .canonicalize()
-            .unwrap_or_else(|e| panic!("tempdir should canonicalize: {e}"));
-        let project_root = base_root.join("project");
-        std::fs::create_dir_all(project_root.join("src"))
-            .unwrap_or_else(|e| panic!("project dirs should create: {e}"));
-        std::fs::create_dir_all(base_root.join("wt"))
-            .unwrap_or_else(|e| panic!("worktree dir should create: {e}"));
-
-        let params = json!({
-            "agent": "codex",
-            "event": "postToolUseShell",
-            "command": "git -C .. worktree add ../wt feature/daemon-hooks",
-            "cwd": project_root.join("src")
-        });
-        let event = parse_or_panic(&params);
-
-        assert_eq!(
-            plan_hook_event(&event, &project_root, Some("main")),
-            HookEventPlan::AddBranchAt {
-                root: base_root.join("wt"),
-                branch: "feature/daemon-hooks".to_string(),
-                agent: HookAgent::Codex,
-            }
-        );
-    }
-
-    #[test]
-    fn plans_branch_switch_from_session_worktree_against_worktree_root() {
-        let (_base, project_root, worktree_root) = setup_linked_session_worktree();
-
-        let params = json!({
-            "agent": "codex",
-            "event": "postToolUseShell",
-            "command": "git switch feature/session",
-            "cwd": worktree_root
-        });
-        let event = parse_or_panic(&params);
-
-        assert_add_branch_at(
-            plan_hook_event(&event, &project_root, Some("main")),
-            &worktree_root,
-            "feature/session",
-        );
-    }
-
-    #[test]
-    fn plans_ambiguous_git_change_from_session_worktree_with_worktree_branch() {
-        let (_base, project_root, worktree_root) = setup_linked_session_worktree();
-
-        let params = json!({
-            "agent": "codex",
-            "event": "postToolUseShell",
-            "command": "git pull --rebase",
-            "cwd": worktree_root
-        });
-        let event = parse_or_panic(&params);
-
-        assert_add_branch_at(
-            plan_hook_event(&event, &project_root, Some("main")),
-            &worktree_root,
-            "feature/session",
-        );
+    fn shell_command_text_cannot_mint_git_or_sync_authority() {
+        let mut admission_source = None;
+        for command in [
+            "git switch feature/daemon-hooks",
+            "git worktree add ../wt feature/daemon-hooks",
+            "git -C /foreign/repo reset --hard",
+            "git pull --rebase",
+        ] {
+            let event = parse_or_panic(&json!({
+                "agent": "codex",
+                "event": "postToolUseShell",
+                "command": command,
+                "cwd": "/tmp/project"
+            }));
+            assert!(event.had_command);
+            let source = event.admission_source();
+            assert_eq!(admission_source.get_or_insert(source.clone()), &source);
+            assert_eq!(
+                plan_hook_event(&event, Path::new("/tmp/project"), Some("feature/claimed")),
+                HookEventPlan::Noop,
+                "{command}"
+            );
+        }
     }
 
     #[test]

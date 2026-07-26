@@ -40,6 +40,26 @@ use scheduler::{
 };
 use transport::{BrokerListener, BrokerStream, DaemonAuthPreface, DaemonEndpoint};
 
+/// Captures the daemon's exact native Git transaction precondition for
+/// transport-parity tests. This is not compiled into production builds.
+#[cfg(all(unix, feature = "test-transport"))]
+#[doc(hidden)]
+pub fn capture_exact_git_snapshot_for_test(
+    repository_root: &Path,
+    project_id: tracedecay_domain::ProjectId,
+    repository_id: tracedecay_domain::RepositoryId,
+    worktree_id: tracedecay_domain::WorktreeId,
+    captured_at: tracedecay_domain::UtcMicros,
+) -> tracedecay_domain::RepositoryStateSnapshotV1 {
+    git_transactions::capture_exact_snapshot_for_test(
+        repository_root,
+        project_id,
+        repository_id,
+        worktree_id,
+        captured_at,
+    )
+}
+
 pub const SERVICE_NAME: &str = "tracedecay.service";
 pub const SOCKET_ENV: &str = "TRACEDECAY_DAEMON_SOCKET";
 pub(crate) const PROJECT_WARMING_RETRY_HINT: &str =
@@ -1032,175 +1052,6 @@ fn code_index_search_executor(
     })
 }
 
-fn git_read_executor(
-    project_id: tracedecay_domain::ProjectId,
-    admission_provider: pr9_mcp_admission::Pr9McpReadAdmissionProviderV1,
-) -> crate::mcp::server::GitReadExecutor {
-    Arc::new(move |request| {
-        let project_id = project_id.clone();
-        let admission_provider = admission_provider.clone();
-        Box::pin(async move {
-            let scope = match project_open_owners::resolved_scope_for_project(
-                &request.project_root,
-                &project_id,
-            ) {
-                Ok(scope) => scope,
-                Err(_) => {
-                    return crate::application::git_reads::GitReadOutcomeV1::Unavailable {
-                        reason: crate::application::git_reads::GitReadUnavailableReasonV1::AuthorityAbsent,
-                    };
-                }
-            };
-            let admission = match admission_provider.admit_current(&scope) {
-                Ok(admission) => admission,
-                Err(_) => {
-                    return crate::application::git_reads::GitReadOutcomeV1::Unavailable {
-                        reason: crate::application::git_reads::GitReadUnavailableReasonV1::AuthorityAbsent,
-                    };
-                }
-            };
-            let authority_receipt = admission.search_authority();
-            if admission
-                .authorize_git_read(&scope, Some(&authority_receipt), &request.request)
-                .is_err()
-            {
-                return crate::application::git_reads::GitReadOutcomeV1::Unavailable {
-                    reason:
-                        crate::application::git_reads::GitReadUnavailableReasonV1::AuthorityAbsent,
-                };
-            }
-            let now_micros = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .ok()
-                .and_then(|duration| u64::try_from(duration.as_micros()).ok())
-                .unwrap_or(u64::MAX);
-            let deadline_micros = request
-                .deadline
-                .as_ref()
-                .and_then(|deadline| u64::try_from(deadline.expires_at.0).ok())
-                .unwrap_or_else(|| now_micros.saturating_add(30_000_000));
-            if deadline_micros <= now_micros {
-                return crate::application::git_reads::GitReadOutcomeV1::Unavailable {
-                    reason: crate::application::git_reads::GitReadUnavailableReasonV1::TimedOut,
-                };
-            }
-
-            let cancellation = request.cancellation;
-            let cancel =
-                Arc::new(AtomicBool::new(cancellation.as_ref().is_some_and(
-                    tracedecay_application::CancellationSignal::is_cancelled,
-                )));
-            let mut bounds = request.bounds;
-            let deadline_at =
-                Instant::now() + Duration::from_micros(deadline_micros.saturating_sub(now_micros));
-            bounds.deadline = Some(deadline_at);
-            bounds.cancel = Some(Arc::clone(&cancel));
-            let project_root = request.project_root;
-            let git_request = request.request;
-            let revalidation_request = git_request.clone();
-            let selected_scope = scope.clone();
-            let authority =
-                crate::application::git_reads::GitReadAuthorityV1::new(project_root.clone(), scope);
-            let mut execution = tokio::task::spawn_blocking(move || {
-                crate::application::git_reads::execute_git_read(
-                    Some(&authority),
-                    &selected_scope,
-                    &git_request,
-                    &bounds,
-                )
-            });
-            let outcome = loop {
-                tokio::select! {
-                    result = &mut execution => {
-                        break result.unwrap_or(
-                            crate::application::git_reads::GitReadOutcomeV1::Unavailable {
-                                reason: crate::application::git_reads::GitReadUnavailableReasonV1::ReadFailed,
-                            },
-                        );
-                    }
-                    () = tokio::time::sleep(Duration::from_millis(1)) => {
-                        if !admission_provider.route_is_registered() {
-                            cancel.store(true, Ordering::Release);
-                            return crate::application::git_reads::GitReadOutcomeV1::Unavailable {
-                                reason: crate::application::git_reads::GitReadUnavailableReasonV1::AuthorityAbsent,
-                            };
-                        }
-                        if cancellation
-                            .as_ref()
-                            .is_some_and(tracedecay_application::CancellationSignal::is_cancelled)
-                        {
-                            cancel.store(true, Ordering::Release);
-                            return crate::application::git_reads::GitReadOutcomeV1::Unavailable {
-                                reason: crate::application::git_reads::GitReadUnavailableReasonV1::Cancelled,
-                            };
-                        }
-                        if Instant::now() >= deadline_at {
-                            cancel.store(true, Ordering::Release);
-                            return crate::application::git_reads::GitReadOutcomeV1::Unavailable {
-                                reason: crate::application::git_reads::GitReadUnavailableReasonV1::TimedOut,
-                            };
-                        }
-                    }
-                }
-            };
-            if !admission_provider.route_is_registered() {
-                return crate::application::git_reads::GitReadOutcomeV1::Unavailable {
-                    reason:
-                        crate::application::git_reads::GitReadUnavailableReasonV1::AuthorityAbsent,
-                };
-            }
-            if cancellation
-                .as_ref()
-                .is_some_and(tracedecay_application::CancellationSignal::is_cancelled)
-            {
-                return crate::application::git_reads::GitReadOutcomeV1::Unavailable {
-                    reason: crate::application::git_reads::GitReadUnavailableReasonV1::Cancelled,
-                };
-            }
-            if Instant::now() >= deadline_at {
-                return crate::application::git_reads::GitReadOutcomeV1::Unavailable {
-                    reason: crate::application::git_reads::GitReadUnavailableReasonV1::TimedOut,
-                };
-            }
-            let current_scope = match project_open_owners::resolved_scope_for_project(
-                &project_root,
-                &project_id,
-            ) {
-                Ok(scope) => scope,
-                Err(_) => {
-                    return crate::application::git_reads::GitReadOutcomeV1::Unavailable {
-                        reason: crate::application::git_reads::GitReadUnavailableReasonV1::AuthorityAbsent,
-                    };
-                }
-            };
-            let terminal_admission = match admission_provider.admit_current(&current_scope) {
-                Ok(admission) => admission,
-                Err(_) => {
-                    return crate::application::git_reads::GitReadOutcomeV1::Unavailable {
-                        reason: crate::application::git_reads::GitReadUnavailableReasonV1::AuthorityAbsent,
-                    };
-                }
-            };
-            let terminal_authority = terminal_admission.search_authority();
-            if terminal_authority != authority_receipt
-                || terminal_admission
-                    .authorize_git_read(
-                        &current_scope,
-                        Some(&terminal_authority),
-                        &revalidation_request,
-                    )
-                    .is_err()
-            {
-                return crate::application::git_reads::GitReadOutcomeV1::Unavailable {
-                    reason:
-                        crate::application::git_reads::GitReadUnavailableReasonV1::AuthorityAbsent,
-                };
-            }
-            outcome
-        })
-    })
-}
-
 mod authority;
 mod branch_add;
 mod branch_admin;
@@ -1254,6 +1105,40 @@ pub(crate) mod store_runtime;
 pub fn mark_process_long_lived_for_session_maintenance() {
     store_runtime::session_registry::mark_process_long_lived_for_session_maintenance();
 }
+
+const SEMANTIC_ARTIFACT_GC_PERIOD: Duration = Duration::from_secs(24 * 60 * 60);
+
+struct SemanticArtifactGcMaintenanceTask(JoinHandle<()>);
+
+impl Drop for SemanticArtifactGcMaintenanceTask {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+fn spawn_semantic_artifact_gc_maintenance() -> SemanticArtifactGcMaintenanceTask {
+    SemanticArtifactGcMaintenanceTask(tokio::spawn(async {
+        let mut interval = tokio::time::interval(SEMANTIC_ARTIFACT_GC_PERIOD);
+        loop {
+            interval.tick().await;
+            let Some(owner) = crate::semantic_code::SemanticModelLifecycleOwnerV1::mounted_shared()
+            else {
+                continue;
+            };
+            let now_unix = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            if owner.run_daemon_artifact_gc(now_unix).is_err() {
+                log_daemon_event(
+                    "semantic_artifact_gc",
+                    &[("outcome", "retry_next_interval".to_owned())],
+                );
+            }
+        }
+    }))
+}
+
 pub(crate) mod transport;
 pub(crate) use service::invocation::{
     BoundedPr13HookOrchestratorV1, DAEMON_INVOCATION_PROTOCOL, DAEMON_INVOCATION_REVISION,
@@ -1264,10 +1149,11 @@ pub(crate) use service::invocation::{
     DaemonInvocationRequest, DaemonInvocationResponse, DaemonInvocationService,
     DaemonLspOwnerRegistrar, DaemonLspSessionAccess, DaemonPrimitiveRuntimeRegistrar,
     DaemonPrimitiveRuntimeRegistrationError, DaemonSemanticRuntimeRegistrar,
-    DaemonSemanticRuntimeRegistrationError, Pr13HookOrchestrationAdmissionV1,
-    Pr13HookOrchestrationRequestV1, Pr13HookOrchestrationTriggerV1,
-    admit_registered_pr13_hook_orchestration, daemon_operation_event_authority,
-    parse_daemon_invocation_request,
+    DaemonSemanticRuntimeRegistrationError, Pr13AdvisoryCycleInvocationFutureV1,
+    Pr13AdvisoryCycleInvocationPortV1, Pr13AdvisoryCycleInvocationRequestV1,
+    Pr13HookOrchestrationAdmissionV1, Pr13HookOrchestrationRequestV1,
+    Pr13HookOrchestrationTriggerV1, admit_registered_pr13_hook_orchestration,
+    daemon_operation_event_authority, parse_daemon_invocation_request,
 };
 pub use service::{
     DaemonServiceSpec, DaemonServiceState, QuiescedDaemonLifecycle, daemon_reachable,
@@ -1324,6 +1210,7 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
         "daemon_http_application_listening",
         &[("endpoint", http_application_service.endpoint().to_string())],
     );
+    let _semantic_artifact_gc = spawn_semantic_artifact_gc_maintenance();
 
     let lifecycle = DaemonLifecycle::default();
     let project_open_gates = Arc::new(tokio::sync::Mutex::new(ProjectOpenGates::default()));
@@ -1476,6 +1363,7 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
         "daemon_http_application_listening",
         &[("endpoint", http_application_service.endpoint().to_string())],
     );
+    let _semantic_artifact_gc = spawn_semantic_artifact_gc_maintenance();
     // Install the git-metadata watcher (design D3/D5). The daemon has no single
     // project root, so it uses the default `[sync]` config plus env overrides.
     // When `auto_watch` is off the watcher is inert. The watcher shares the
@@ -3233,16 +3121,12 @@ impl DaemonEngine {
             code_search_project_id.clone(),
             Arc::clone(&route_registered),
         );
-        let git_read_executor = git_read_executor(
-            code_search_project_id.clone(),
-            read_admission_provider.clone(),
-        );
         let diagnostic_settings =
             crate::diagnostics::lsp::settings::load_settings(&cg.store_layout().dashboard_root)
                 .await
                 .unwrap_or_default();
         let diagnostic_broker = Arc::new(tokio::sync::Mutex::new(
-            crate::dashboard::code_diagnostics_broker(
+            crate::application::dashboard_diagnostics::diagnostic_broker(
                 canonical_project_path.clone(),
                 diagnostic_settings,
             ),
@@ -3287,6 +3171,13 @@ impl DaemonEngine {
             code_search_project_id,
             read_admission_provider,
         );
+        let dashboard_code_index_schedulers = self.invocation.code_index_schedulers.clone();
+        let dashboard_code_index_freshness_reader:
+            crate::dashboard::code_index_freshness_api::CodeIndexFreshnessReader =
+            Arc::new(move |project_root| {
+                let schedulers = dashboard_code_index_schedulers.clone();
+                Box::pin(async move { schedulers.dashboard_freshness(&project_root).await })
+            });
         let context = crate::mcp::server::McpServerConstructionContext::daemon_owned(
             cg,
             handshake.scope_prefix.clone(),
@@ -3314,11 +3205,11 @@ impl DaemonEngine {
         .with_automation_scheduler_reconciler(reconciler)
         .with_dashboard_doctor_report_reader(doctor_report_reader)
         .with_dashboard_doctor_remediation_dispatcher(doctor_remediation_dispatcher)
+        .with_dashboard_code_index_freshness_reader(dashboard_code_index_freshness_reader)
         .with_diagnostics_lsp(diagnostic_broker)
         .with_code_index_hook_sink(code_index_hook_sink)
         .with_code_index_publication_identity(code_index_publication_identity)
         .with_code_index_search_executor(code_index_search_executor)
-        .with_git_read_executor(git_read_executor)
         .with_code_index_search_authority(code_search_authority)
         .with_retained_project_graph_resolver(retained_project_graph_resolver(
             self.store_administration.clone(),
@@ -3680,6 +3571,10 @@ async fn shutdown_project_servers(store_administration: &StoreAdministration) {
         })
         .await;
     for server in servers {
+        let graph = server.cg().await;
+        hook_v2_replay::shutdown_hook_v2_replay_consumer(&graph.hook_store_layout().data_root)
+            .await;
+        drop(graph);
         server.shutdown().await;
     }
 }
@@ -4298,16 +4193,12 @@ async fn portable_project_server(
         code_search_project_id.clone(),
         Arc::clone(&route_registered),
     );
-    let git_read_executor = git_read_executor(
-        code_search_project_id.clone(),
-        read_admission_provider.clone(),
-    );
     let diagnostic_settings =
         crate::diagnostics::lsp::settings::load_settings(&cg.store_layout().dashboard_root)
             .await
             .unwrap_or_default();
     let diagnostic_broker = Arc::new(tokio::sync::Mutex::new(
-        crate::dashboard::code_diagnostics_broker(
+        crate::application::dashboard_diagnostics::diagnostic_broker(
             canonical_project_path.to_path_buf(),
             diagnostic_settings,
         ),
@@ -4352,6 +4243,13 @@ async fn portable_project_server(
         code_search_project_id,
         read_admission_provider,
     );
+    let dashboard_code_index_schedulers = invocation.code_index_schedulers.clone();
+    let dashboard_code_index_freshness_reader:
+        crate::dashboard::code_index_freshness_api::CodeIndexFreshnessReader =
+        Arc::new(move |project_root| {
+            let schedulers = dashboard_code_index_schedulers.clone();
+            Box::pin(async move { schedulers.dashboard_freshness(&project_root).await })
+        });
     let context = crate::mcp::server::McpServerConstructionContext::daemon_owned(
         cg,
         handshake.scope_prefix.clone(),
@@ -4378,11 +4276,11 @@ async fn portable_project_server(
     )
     .with_dashboard_doctor_report_reader(doctor_report_reader)
     .with_dashboard_doctor_remediation_dispatcher(doctor_remediation_dispatcher)
+    .with_dashboard_code_index_freshness_reader(dashboard_code_index_freshness_reader)
     .with_diagnostics_lsp(diagnostic_broker)
     .with_code_index_hook_sink(code_index_hook_sink)
     .with_code_index_publication_identity(code_index_publication_identity)
     .with_code_index_search_executor(code_index_search_executor)
-    .with_git_read_executor(git_read_executor)
     .with_code_index_search_authority(code_search_authority)
     .with_retained_project_graph_resolver(retained_project_graph_resolver(
         store_administration.clone(),
@@ -4585,24 +4483,39 @@ async fn serve_broker_socket_client(
     }
     if let Some(invocation) = parse_daemon_invocation_request(&first_request_line) {
         let mut invocation = invocation;
-        loop {
-            let response = match invocation {
-                Ok(request) => execute_daemon_invocation(&engine, &handshake, request).await,
-                Err(response) => response,
-            };
-            write_daemon_invocation_response(&mut transport, &response).await?;
-            let next_line = tokio::select! {
-                result = read_line_handling_wire_oversized(&mut transport) => result?,
-                () = engine.lifecycle.wait_for_draining() => return Ok(()),
-            };
-            let Some(next_line) = next_line else {
-                return Ok(());
-            };
-            let Some(next_invocation) = parse_daemon_invocation_request(&next_line) else {
-                return Ok(());
-            };
-            invocation = next_invocation;
+        let mut owned_lsp_sessions = HashMap::new();
+        let result = async {
+            loop {
+                let session_transition = invocation
+                    .as_ref()
+                    .ok()
+                    .and_then(invocation_lsp_session_transition);
+                let response = match invocation {
+                    Ok(request) => execute_daemon_invocation(&engine, &handshake, request).await,
+                    Err(response) => response,
+                };
+                update_connection_lsp_sessions(
+                    &mut owned_lsp_sessions,
+                    session_transition.as_ref(),
+                    &response,
+                );
+                write_daemon_invocation_response(&mut transport, &response).await?;
+                let next_line = tokio::select! {
+                    result = read_line_handling_wire_oversized(&mut transport) => result?,
+                    () = engine.lifecycle.wait_for_draining() => return Ok(()),
+                };
+                let Some(next_line) = next_line else {
+                    return Ok(());
+                };
+                let Some(next_invocation) = parse_daemon_invocation_request(&next_line) else {
+                    return Ok(());
+                };
+                invocation = next_invocation;
+            }
         }
+        .await;
+        cleanup_connection_lsp_sessions(&engine.invocation, owned_lsp_sessions).await;
+        return result;
     }
     if let Ok(request) = serde_json::from_str::<JsonRpcRequest>(first_request_line.trim()) {
         let project_node_count =
@@ -4879,37 +4792,52 @@ async fn serve_windows_broker_client_with_class_and_invocation(
     }
     if let Some(invocation_request) = parse_daemon_invocation_request(&first_request_line) {
         let mut invocation_request = invocation_request;
-        loop {
-            let response = match invocation_request {
-                Ok(request) => {
-                    execute_portable_daemon_invocation(
-                        lifecycle.clone(),
-                        store_administration.clone(),
-                        Arc::clone(&project_open_gates),
-                        &handshake,
-                        &invocation,
-                        http_application_registry.clone(),
-                        request,
-                        #[cfg(test)]
-                        project_open_attempts.clone(),
-                    )
-                    .await
-                }
-                Err(response) => response,
-            };
-            write_daemon_invocation_response(&mut transport, &response).await?;
-            let next_line = tokio::select! {
-                result = read_line_handling_wire_oversized(&mut transport) => result?,
-                () = lifecycle.wait_for_draining() => return Ok(()),
-            };
-            let Some(next_line) = next_line else {
-                return Ok(());
-            };
-            let Some(next_invocation) = parse_daemon_invocation_request(&next_line) else {
-                return Ok(());
-            };
-            invocation_request = next_invocation;
+        let mut owned_lsp_sessions = HashMap::new();
+        let result = async {
+            loop {
+                let session_transition = invocation_request
+                    .as_ref()
+                    .ok()
+                    .and_then(invocation_lsp_session_transition);
+                let response = match invocation_request {
+                    Ok(request) => {
+                        execute_portable_daemon_invocation(
+                            lifecycle.clone(),
+                            store_administration.clone(),
+                            Arc::clone(&project_open_gates),
+                            &handshake,
+                            &invocation,
+                            http_application_registry.clone(),
+                            request,
+                            #[cfg(test)]
+                            project_open_attempts.clone(),
+                        )
+                        .await
+                    }
+                    Err(response) => response,
+                };
+                update_connection_lsp_sessions(
+                    &mut owned_lsp_sessions,
+                    session_transition.as_ref(),
+                    &response,
+                );
+                write_daemon_invocation_response(&mut transport, &response).await?;
+                let next_line = tokio::select! {
+                    result = read_line_handling_wire_oversized(&mut transport) => result?,
+                    () = lifecycle.wait_for_draining() => return Ok(()),
+                };
+                let Some(next_line) = next_line else {
+                    return Ok(());
+                };
+                let Some(next_invocation) = parse_daemon_invocation_request(&next_line) else {
+                    return Ok(());
+                };
+                invocation_request = next_invocation;
+            }
         }
+        .await;
+        cleanup_connection_lsp_sessions(&invocation, owned_lsp_sessions).await;
+        return result;
     }
     if let Ok(request) = serde_json::from_str::<JsonRpcRequest>(first_request_line.trim()) {
         let project_node_count =
@@ -5040,7 +4968,12 @@ async fn execute_portable_daemon_invocation(
     let request_id = request.request_id.clone();
     let git_operation = matches!(
         request.operation(),
-        service::invocation::DaemonInvocationOperation::GitPreview
+        service::invocation::DaemonInvocationOperation::GitStatus
+            | service::invocation::DaemonInvocationOperation::GitDiff
+            | service::invocation::DaemonInvocationOperation::GitHistory
+            | service::invocation::DaemonInvocationOperation::GitBlame
+            | service::invocation::DaemonInvocationOperation::GitHunks
+            | service::invocation::DaemonInvocationOperation::GitPreview
             | service::invocation::DaemonInvocationOperation::GitApply
     );
     let mut project_path = None;
@@ -5371,6 +5304,51 @@ async fn write_daemon_invocation_response(
     Ok(())
 }
 
+fn invocation_lsp_session_transition(
+    request: &DaemonInvocationRequest,
+) -> Option<service::invocation::DaemonLspSessionAccess> {
+    match &request.payload {
+        service::invocation::DaemonInvocationPayload::LspReconnect { session }
+        | service::invocation::DaemonInvocationPayload::LspDetach { session } => {
+            Some(session.clone())
+        }
+        _ => None,
+    }
+}
+
+fn update_connection_lsp_sessions(
+    sessions: &mut HashMap<String, service::invocation::DaemonLspSessionAccess>,
+    transitioned: Option<&service::invocation::DaemonLspSessionAccess>,
+    response: &DaemonInvocationResponse,
+) {
+    match &response.outcome {
+        service::invocation::DaemonInvocationOutcome::LspOpened { session, .. } => {
+            sessions.insert(session.session_id.clone(), session.clone());
+        }
+        service::invocation::DaemonInvocationOutcome::LspReconnected { session } => {
+            sessions.insert(session.session_id.clone(), session.clone());
+        }
+        service::invocation::DaemonInvocationOutcome::LspDetached => {
+            if let Some(detached) = transitioned {
+                sessions.remove(&detached.session_id);
+            }
+        }
+        _ => {}
+    }
+}
+
+async fn cleanup_connection_lsp_sessions(
+    invocation: &DaemonInvocationState,
+    sessions: HashMap<String, service::invocation::DaemonLspSessionAccess>,
+) {
+    for session in sessions.into_values() {
+        invocation
+            .service
+            .disconnect_lsp_session(&invocation.lsp_session_registry, session)
+            .await;
+    }
+}
+
 fn admitted_lsp_root_for_project_path(project_path: &Path) -> Option<lsp_gateway::AdmittedRoot> {
     url::Url::from_file_path(project_path)
         .ok()
@@ -5386,7 +5364,12 @@ async fn execute_daemon_invocation(
     let request_id = request.request_id.clone();
     let git_operation = matches!(
         request.operation(),
-        service::invocation::DaemonInvocationOperation::GitPreview
+        service::invocation::DaemonInvocationOperation::GitStatus
+            | service::invocation::DaemonInvocationOperation::GitDiff
+            | service::invocation::DaemonInvocationOperation::GitHistory
+            | service::invocation::DaemonInvocationOperation::GitBlame
+            | service::invocation::DaemonInvocationOperation::GitHunks
+            | service::invocation::DaemonInvocationOperation::GitPreview
             | service::invocation::DaemonInvocationOperation::GitApply
     );
     let mut project_path = None;

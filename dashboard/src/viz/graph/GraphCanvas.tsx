@@ -226,6 +226,19 @@ export function GraphCanvas({
    * its workspace was navigated away from.
    */
   const [box, setBox] = useState<{ width: number; height: number }>({ width: 0, height: 0 });
+  /**
+   * Whether the container has a box at all — the only distinction the renderer's
+   * lifetime turns on.
+   *
+   * Sigma reads `offsetWidth` in `resize()` and throws on a 0×0 or detached
+   * container, so a renderer may exist exactly while this is true. How large the
+   * box is does not affect that, which is why the mount effect depends on this
+   * boolean and the dimensions drive `resize()` instead.
+   */
+  const hasBox = box.width > 0 && box.height > 0;
+  /** Bumped whenever a collapse killed a live renderer, so the mount effect can
+   * rebuild even when the box it measures never appeared to change. */
+  const [teardownGeneration, setTeardownGeneration] = useState(0);
 
   /**
    * Attach the observer as the container mounts rather than in an effect: an
@@ -250,7 +263,14 @@ export function GraphCanvas({
         // Synchronous, before React re-renders: a scheduled Sigma frame would
         // otherwise reach `resize()` first and throw. Killing here also
         // removes Sigma's own window-resize listener.
-        teardownRef.current?.();
+        const teardown = teardownRef.current;
+        teardown?.();
+        // This teardown is imperative, so the mount effect cannot infer it from
+        // the box alone: a collapse and a re-expansion that land in one commit
+        // leave the measured box non-zero at both ends, and the effect would
+        // see no change to react to and never rebuild the renderer it no longer
+        // has. The generation makes the teardown itself observable.
+        if (teardown) setTeardownGeneration((generation) => generation + 1);
       }
       setBox((previous) =>
         previous.width === width && previous.height === height
@@ -305,9 +325,10 @@ export function GraphCanvas({
   useEffect(() => {
     const container = containerRef.current;
     if (!container || nodes.length === 0 || !webglRef.current) return;
-    // Not a retry: `box` is the observed measurement, so this effect re-runs
-    // by itself once the container has one, and unwinds again if it loses it.
-    if (box.width === 0 || box.height === 0) return;
+    // Not a retry: `hasBox` is derived from the observed measurement, so this
+    // effect re-runs by itself once the container has one, and unwinds again if
+    // it loses it.
+    if (!hasBox) return;
 
     const graph = new Graph({ multi: true, type: 'directed' });
     const knownDegrees = nodes.flatMap((node) =>
@@ -1019,7 +1040,23 @@ export function GraphCanvas({
     teardownRef.current = teardown;
 
     return teardown;
-  }, [nodes, edges, extent, box.width, box.height]);
+  }, [nodes, edges, extent, hasBox, teardownGeneration]);
+
+  /**
+   * A resize of a container that still has a box is a resize, not a remount.
+   *
+   * The renderer's lifetime is bound to `hasBox` above rather than to the
+   * measured numbers, because depending on the numbers made every drag of a
+   * window edge or opening of a side panel kill the renderer, rebuild the whole
+   * graphology graph and re-run the 200-iteration ForceAtlas2 settle — a
+   * layout per resize frame. Only the zero/non-zero transition changes what
+   * Sigma can legally do; every other change is something Sigma resizes itself
+   * into. `resize()` is also what Sigma's own window listener would call.
+   */
+  useEffect(() => {
+    if (!hasBox) return;
+    sigmaRef.current?.resize();
+  }, [hasBox, box.width, box.height]);
 
   // Turning motion off has to take effect on the field the reader is looking at,
   // not merely on the next one they open: a loop already running keeps running
