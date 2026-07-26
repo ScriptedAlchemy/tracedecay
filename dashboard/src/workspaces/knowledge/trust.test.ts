@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import type { HrrCoverageRow } from '../../contracts/uncontracted/memory.ts';
+import {
+  type MemoryHrrCoverage,
+} from '../../contracts/wire.ts';
 import {
   composeTrustDistribution,
   factsBelow,
@@ -133,9 +135,9 @@ describe('summarizeHrrCoverage', () => {
   const row = (
     category: string,
     coverage: number,
-    status: HrrCoverageRow['status'],
-  ): HrrCoverageRow =>
-    ({ category, coverage, status, facts: 10, hrr_vectors: 10 }) as HrrCoverageRow;
+    status: MemoryHrrCoverage['status'],
+  ): MemoryHrrCoverage =>
+    ({ category, coverage, status, facts: 10, hrr_vectors: 10 }) as MemoryHrrCoverage;
 
   /** The live six: uniformly near-total coverage, four banks not ready. */
   const LIVE = [

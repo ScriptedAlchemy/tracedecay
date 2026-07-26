@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AgentsPage } from './AgentsPage.tsx';
+import type { AnalyticsUsageSummary } from '../../contracts/wire.ts';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -10,7 +11,7 @@ afterEach(() => {
 describe('AgentsPage read coverage', () => {
   it('keeps an unavailable usage count distinct from a measured zero', async () => {
     stubAnalytics({
-      usage: { available: true, message_count: 8, by_category: [] },
+      usage: usageSummary({ message_count: 8 }),
       diagnostics: { available: false, hook_call_count: 0, by_mcp_tool: [] },
       underused: { available: false, families: [] },
     });
@@ -27,11 +28,12 @@ describe('AgentsPage read coverage', () => {
 
   it('discloses that hook counts come from a truncated recent suffix', async () => {
     stubAnalytics({
-      usage: {
-        available: true,
+      usage: usageSummary({
+        source: 'analytics_events',
+        message_count: 2,
         event_count: 2,
         by_category: [{ kind: 'tool', category: 'shell', events: 2 }],
-      },
+      }),
       diagnostics: {
         available: true,
         event_count: 2,
@@ -54,6 +56,23 @@ describe('AgentsPage read coverage', () => {
     expect(screen.queryByText(/all time, hook log/i)).toBeNull();
   });
 });
+
+/**
+ * The usage summary as `analytics_api` sends it: every field present, with an
+ * unmeasured event count arriving as an explicit null rather than an absent key.
+ */
+function usageSummary(
+  overrides: Partial<AnalyticsUsageSummary> = {},
+): AnalyticsUsageSummary {
+  return {
+    available: true,
+    source: null,
+    message_count: 0,
+    event_count: null,
+    by_category: [],
+    ...overrides,
+  };
+}
 
 function stubAnalytics(payloads: Record<string, unknown>) {
   vi.stubGlobal(

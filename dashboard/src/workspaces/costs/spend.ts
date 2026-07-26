@@ -181,11 +181,11 @@ export interface LedgerCoverage {
  * page printed it as a header annotation with no way to see what the mix was.
  */
 export function summarizeCoverage(sessions: {
-  messages?: number | undefined;
-  usage_messages?: number | undefined;
-  tokenized_messages?: number | undefined;
-  estimated_messages?: number | undefined;
-  unknown_model_messages?: number | undefined;
+  messages?: number | null | undefined;
+  usage_messages?: number | null | undefined;
+  tokenized_messages?: number | null | undefined;
+  estimated_messages?: number | null | undefined;
+  unknown_model_messages?: number | null | undefined;
 }): LedgerCoverage | null {
   const messages = sessions.messages ?? 0;
   if (!Number.isFinite(messages) || messages <= 0) return null;

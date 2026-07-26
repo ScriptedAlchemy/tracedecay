@@ -7,6 +7,25 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+/** `lcm_service::timeline_payload` seeds these seven fields before it touches
+ * the store and returns them unchanged when there is no store to read, so an
+ * unavailable timeline still arrives fully shaped — `exists: false` beside
+ * empty buckets, not a body missing its scope and bucket width. */
+function timeline(over: Record<string, unknown> = {}) {
+  return {
+    path: '/home/zack/.tracedecay/sessions.db',
+    storage_scope: 'profile_sharded',
+    exists: true,
+    bucket: 'day',
+    session_id: null,
+    buckets: [],
+    node_buckets: [],
+    undated: { count: 0, token_estimate: 0 },
+    coverage: null,
+    ...over,
+  };
+}
+
 describe('SessionsPage degraded states', () => {
   it('does not turn an unavailable LCM store into zero sessions and zero tracked messages', async () => {
     vi.stubGlobal(
@@ -15,7 +34,7 @@ describe('SessionsPage degraded states', () => {
         const url = String(input);
         return jsonResponse(
           url.includes('/timeline')
-            ? { exists: false, buckets: [] }
+            ? timeline({ exists: false })
             : { exists: false, latest_sessions: [] },
         );
       }),
@@ -43,8 +62,7 @@ describe('SessionsPage degraded states', () => {
         const url = String(input);
         return jsonResponse(
           url.includes('/timeline')
-            ? {
-                exists: true,
+            ? timeline({
                 buckets: [
                   { bucket: '2026-07-24', count: 4, token_estimate: 40 },
                   { bucket: '2026-07-25', count: 6, token_estimate: 60 },
@@ -56,8 +74,9 @@ describe('SessionsPage degraded states', () => {
                   total_dated_buckets: 500,
                   truncated: true,
                   ordering: 'most_recent',
+                  next_before_bucket: '2026-07-24',
                 },
-              }
+              })
             : { exists: true, latest_sessions: [] },
         );
       }),

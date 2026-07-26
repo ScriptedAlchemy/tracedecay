@@ -29,6 +29,7 @@ export interface JsonSchema {
   properties?: Record<string, JsonSchema>;
   required?: string[];
   items?: JsonSchema;
+  additionalProperties?: JsonSchema | boolean;
   enum?: unknown[];
   const?: unknown;
   oneOf?: JsonSchema[];
@@ -199,6 +200,17 @@ function resolveObject(schema: JsonSchema, ctx: ResolveCtx): { ts: string; zod: 
   const props = schema.properties ?? {};
   const required = new Set(schema.required ?? []);
   const keys = Object.keys(props).sort();
+
+  // A Rust map (`BTreeMap`/`HashMap`) reaches us as an object with no declared
+  // properties and an `additionalProperties` value schema. It must become a
+  // `z.record`, never a `z.object({})`: zod strips unknown keys, so an empty
+  // object schema parses every entry of the map away and hands the surface an
+  // empty map that is indistinguishable from one the daemon really sent empty.
+  const extra = schema.additionalProperties;
+  if (keys.length === 0 && extra !== undefined && extra !== false) {
+    const value = extra === true ? { ts: "unknown", zod: "z.unknown()" } : resolveType(extra, ctx);
+    return { ts: `Record<string, ${value.ts}>`, zod: `z.record(${value.zod})` };
+  }
 
   const tsFields: string[] = [];
   const zodFields: string[] = [];

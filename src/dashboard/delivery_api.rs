@@ -7,9 +7,10 @@
 
 use axum::Json;
 use axum::extract::State;
+use schemars::JsonSchema;
 use serde::Serialize;
 use tracedecay_domain::ProjectId;
-use tracedecay_domain::git::{GitHeadStateV1, GitHistoryV1};
+use tracedecay_domain::git::{GitHeadStateV1, GitHistoryV1, GitOperationStateV1};
 
 use crate::application::git_reads::{
     GitReadAuthorityV1, GitReadOutcomeV1, GitReadRequestV1, GitReadResultV1, execute_git_read,
@@ -34,7 +35,7 @@ const RELEASE_AUTHORITY: &str =
     "read-only GitHub release projection authority mounted in DashboardState";
 
 /// One reusable source projection. Absence never collapses into an empty list.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(tag = "state", rename_all = "snake_case")]
 pub(crate) enum DeliveryProjectionV1<T> {
     Ready {
@@ -74,14 +75,78 @@ impl<T> DeliveryProjectionV1<T> {
     }
 }
 
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub(crate) enum DeliveryGitHeadV1 {
+    Attached { branch: String, commit: String },
+    Detached { commit: String },
+    Unborn { branch: String },
+}
+
+impl From<GitHeadStateV1> for DeliveryGitHeadV1 {
+    fn from(head: GitHeadStateV1) -> Self {
+        match head {
+            GitHeadStateV1::Attached { branch, commit } => Self::Attached {
+                branch,
+                commit: commit.as_str().to_owned(),
+            },
+            GitHeadStateV1::Detached { commit } => Self::Detached {
+                commit: commit.as_str().to_owned(),
+            },
+            GitHeadStateV1::Unborn { branch } => Self::Unborn { branch },
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub(crate) struct DeliveryGitStatusV1 {
+    pub repository: String,
+    pub head: DeliveryGitHeadV1,
+    pub operation: String,
+    pub staged: u32,
+    pub unstaged: u32,
+    pub conflicted: u32,
+    pub untracked: u32,
+    pub ignored: u32,
+    pub changed_paths: Vec<String>,
+    pub schema_version: String,
+}
+
+impl From<GitStatusSummaryV1> for DeliveryGitStatusV1 {
+    fn from(status: GitStatusSummaryV1) -> Self {
+        let operation = match status.operation {
+            GitOperationStateV1::None => "none",
+            GitOperationStateV1::Merge => "merge",
+            GitOperationStateV1::Rebase => "rebase",
+            GitOperationStateV1::CherryPick => "cherry_pick",
+            GitOperationStateV1::Revert => "revert",
+            GitOperationStateV1::Bisect => "bisect",
+            GitOperationStateV1::Sequencer => "sequencer",
+            GitOperationStateV1::Unknown => "unknown",
+        };
+        Self {
+            repository: status.repository.to_string(),
+            head: status.head.into(),
+            operation: operation.to_owned(),
+            staged: status.staged,
+            unstaged: status.unstaged,
+            conflicted: status.conflicted,
+            untracked: status.untracked,
+            ignored: status.ignored,
+            changed_paths: status.changed_paths,
+            schema_version: status.schema_version,
+        }
+    }
+}
+
 /// Bounded commit timeline shared by Delivery and Loom.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, JsonSchema)]
 pub(crate) struct DeliveryCommitTimelineV1 {
     pub items: Vec<DeliveryCommitV1>,
     pub truncated: bool,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, JsonSchema)]
 pub(crate) struct DeliveryCommitV1 {
     pub commit: String,
     pub subject: String,
@@ -112,14 +177,14 @@ impl From<GitHistoryV1> for DeliveryCommitTimelineV1 {
 }
 
 /// Generation comparison shared by Delivery and any timeline consumer.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, JsonSchema)]
 pub(crate) struct DeliveryGenerationFreshnessV1 {
     pub comparison: DeliveryGenerationComparisonV1,
     pub head_commit: String,
     pub indexed_commit: String,
 }
 
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum DeliveryGenerationComparisonV1 {
     Current,
@@ -128,34 +193,34 @@ pub(crate) enum DeliveryGenerationComparisonV1 {
 
 /// Placeholder value shapes are intentionally concrete so later authority
 /// mounts preserve this route rather than forcing consumers onto private APIs.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, JsonSchema)]
 pub(crate) struct DeliveryPullRequestTimelineV1 {
     pub items: Vec<serde_json::Value>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, JsonSchema)]
 pub(crate) struct DeliveryReviewTimelineV1 {
     pub items: Vec<serde_json::Value>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, JsonSchema)]
 pub(crate) struct DeliveryCiTimelineV1 {
     pub items: Vec<serde_json::Value>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, JsonSchema)]
 pub(crate) struct DeliveryFailureLocalizationTimelineV1 {
     pub items: Vec<serde_json::Value>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, JsonSchema)]
 pub(crate) struct DeliveryReleaseTimelineV1 {
     pub items: Vec<serde_json::Value>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, JsonSchema)]
 pub(crate) struct DeliveryOverviewV1 {
-    pub changes: DeliveryProjectionV1<GitStatusSummaryV1>,
+    pub changes: DeliveryProjectionV1<DeliveryGitStatusV1>,
     pub commits: DeliveryProjectionV1<DeliveryCommitTimelineV1>,
     pub pull_requests: DeliveryProjectionV1<DeliveryPullRequestTimelineV1>,
     pub review_comments: DeliveryProjectionV1<DeliveryReviewTimelineV1>,
@@ -256,7 +321,7 @@ pub(crate) async fn overview(
 async fn read_git_projections(
     state: &DashboardState,
 ) -> (
-    DeliveryProjectionV1<GitStatusSummaryV1>,
+    DeliveryProjectionV1<DeliveryGitStatusV1>,
     DeliveryProjectionV1<DeliveryCommitTimelineV1>,
 ) {
     let Some(project_id) = state
@@ -313,12 +378,12 @@ async fn read_git_projections(
     })
 }
 
-fn status_projection(outcome: GitReadOutcomeV1) -> DeliveryProjectionV1<GitStatusSummaryV1> {
+fn status_projection(outcome: GitReadOutcomeV1) -> DeliveryProjectionV1<DeliveryGitStatusV1> {
     match outcome {
         GitReadOutcomeV1::Complete {
             result: GitReadResultV1::Status(result),
             ..
-        } => DeliveryProjectionV1::ready(result.value),
+        } => DeliveryProjectionV1::ready(result.value.into()),
         GitReadOutcomeV1::Complete { .. } => DeliveryProjectionV1::unavailable(
             "GitReadAuthorityV1 status",
             "the Git authority returned a different result variant",
@@ -348,7 +413,7 @@ fn history_projection(outcome: GitReadOutcomeV1) -> DeliveryProjectionV1<Deliver
 }
 
 fn generation_projection(
-    changes: &DeliveryProjectionV1<GitStatusSummaryV1>,
+    changes: &DeliveryProjectionV1<DeliveryGitStatusV1>,
     indexed_commit: Option<String>,
 ) -> DeliveryProjectionV1<DeliveryGenerationFreshnessV1> {
     let Some(indexed_commit) = indexed_commit else {
@@ -364,10 +429,10 @@ fn generation_projection(
         );
     };
     let head_commit = match &value.head {
-        GitHeadStateV1::Attached { commit, .. } | GitHeadStateV1::Detached { commit } => {
-            commit.as_str().to_owned()
+        DeliveryGitHeadV1::Attached { commit, .. } | DeliveryGitHeadV1::Detached { commit } => {
+            commit.clone()
         }
-        GitHeadStateV1::Unborn { .. } => {
+        DeliveryGitHeadV1::Unborn { .. } => {
             return DeliveryProjectionV1::unavailable(
                 "Git HEAD commit",
                 "the checkout has an unborn branch and no commit identity",
