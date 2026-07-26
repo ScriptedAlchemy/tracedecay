@@ -258,17 +258,16 @@ fn use_case_id(spec: &ContextScoutOperationSpec) -> Result<UseCaseId, Applicatio
 }
 
 fn request_schema(spec: &ContextScoutOperationSpec) -> Result<SchemaRef, ApplicationContractError> {
-    schema(spec, "request", 64 * 1024)
+    schema(spec, "request")
 }
 
 fn result_schema(spec: &ContextScoutOperationSpec) -> Result<SchemaRef, ApplicationContractError> {
-    schema(spec, "result", 512 * 1024)
+    schema(spec, "result")
 }
 
 fn schema(
     spec: &ContextScoutOperationSpec,
     suffix: &str,
-    maximum_bytes: u32,
 ) -> Result<SchemaRef, ApplicationContractError> {
     Ok(SchemaRef::new(
         SchemaId::new(format!(
@@ -277,7 +276,6 @@ fn schema(
             suffix
         ))?,
         1,
-        maximum_bytes,
     )?)
 }
 
