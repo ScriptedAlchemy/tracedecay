@@ -18,10 +18,7 @@ use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionT
 use tracedecay::errors::TraceDecayError;
 use tracedecay::mcp::{McpServer, McpTransport, ToolResult};
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
-use tracedecay::storage::{
-    default_profile_root, resolve_layout_for_current_profile, resolve_lcm_payload_root,
-    resolve_response_handle_root,
-};
+use tracedecay::storage::default_profile_root;
 use tracedecay::tracedecay::TraceDecay;
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
@@ -749,25 +746,19 @@ pub(crate) async fn setup_cross_project_memory_projects()
 }
 
 pub(crate) fn project_data_dir(cg: &TraceDecay) -> PathBuf {
-    resolve_layout_for_current_profile(cg.project_root())
-        .unwrap_or_else(|err| panic!("failed to resolve test project storage layout: {err}"))
-        .data_root
+    cg.store_layout().data_root.clone()
 }
 
 pub(crate) fn project_graph_db(cg: &TraceDecay) -> PathBuf {
-    resolve_layout_for_current_profile(cg.project_root())
-        .unwrap_or_else(|err| panic!("failed to resolve test project storage layout: {err}"))
-        .graph_db_path
+    cg.store_layout().graph_db_path.clone()
 }
 
 pub(crate) fn response_handle_dir(cg: &TraceDecay) -> PathBuf {
-    resolve_response_handle_root(cg.project_root())
-        .unwrap_or_else(|err| panic!("failed to resolve test response handle root: {err}"))
+    cg.store_layout().response_handle_root.clone()
 }
 
 pub(crate) fn lcm_payload_dir(cg: &TraceDecay) -> PathBuf {
-    resolve_lcm_payload_root(cg.project_root())
-        .unwrap_or_else(|err| panic!("failed to resolve test LCM payload root: {err}"))
+    cg.store_layout().lcm_payload_root.clone()
 }
 
 pub(crate) fn project_session_db_path(cg: &TraceDecay) -> PathBuf {
