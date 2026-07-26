@@ -558,7 +558,7 @@ fn verify_forward_only_binary_version(binary: &Path) -> tracedecay::errors::Resu
             ),
         })?;
     let version = String::from_utf8_lossy(&output.stdout);
-    let expected = format!("tracedecay {}", env!("CARGO_PKG_VERSION"));
+    let expected = format!("tracedecay {}", tracedecay::version::build_version());
     if output.status.success() && version.trim() == expected {
         return Ok(());
     }
