@@ -21,53 +21,37 @@ fn git_and_feedback_bindings_have_declared_surface_parity() {
         BindingSurface::Http,
         BindingSurface::Dashboard,
     ];
-    const CLI_MCP_SURFACES: [BindingSurface; 2] = [BindingSurface::Cli, BindingSurface::Mcp];
     const ADVISORY_SURFACES: [BindingSurface; 4] = [
         BindingSurface::Cli,
         BindingSurface::Mcp,
         BindingSurface::Http,
         BindingSurface::Lsp,
     ];
-    const ADVISORY_CAPABILITIES: [&str; 3] = [
-        "capability.application.feedback.github-review-ingest",
-        "capability.application.feedback.ci-failure-localize",
-        "capability.application.feedback.proximity",
-    ];
+    const NO_SURFACES: [BindingSurface; 0] = [];
     let git = git_surface_catalog_contribution().expect("git");
     let feedback = feedback_surface_catalog_contribution().expect("feedback");
     let git_handlers = git_surface_handler_descriptors().expect("git handlers");
     let feedback_handlers = feedback_surface_handler_descriptors().expect("feedback handlers");
 
-    let git_read_overrides = [
+    assert_surface_contract_parity(&git, &git_handlers, &TRANSPORT_SURFACES, &[]);
+    let advisory_overrides = [
         (
-            "capability.application.git.status",
-            CLI_MCP_SURFACES.as_slice(),
+            "capability.application.feedback.advisory-cycle",
+            ADVISORY_SURFACES.as_slice(),
         ),
         (
-            "capability.application.git.diff",
-            CLI_MCP_SURFACES.as_slice(),
+            "capability.application.feedback.github-review-ingest",
+            NO_SURFACES.as_slice(),
         ),
         (
-            "capability.application.git.history",
-            CLI_MCP_SURFACES.as_slice(),
+            "capability.application.feedback.ci-failure-localize",
+            NO_SURFACES.as_slice(),
         ),
         (
-            "capability.application.git.blame",
-            CLI_MCP_SURFACES.as_slice(),
-        ),
-        (
-            "capability.application.git.hunks",
-            CLI_MCP_SURFACES.as_slice(),
+            "capability.application.feedback.proximity",
+            NO_SURFACES.as_slice(),
         ),
     ];
-    assert_surface_contract_parity(
-        &git,
-        &git_handlers,
-        &TRANSPORT_SURFACES,
-        &git_read_overrides,
-    );
-    let advisory_overrides =
-        ADVISORY_CAPABILITIES.map(|capability_id| (capability_id, ADVISORY_SURFACES.as_slice()));
     assert_surface_contract_parity(
         &feedback,
         &feedback_handlers,
@@ -120,6 +104,9 @@ fn assert_surface_contract_parity(
             .map_or(default_surfaces, |(_, surfaces)| *surfaces);
         assert_eq!(bindings.len(), surfaces.len());
         assert_eq!(capability.binding_ids().len(), surfaces.len());
+        if surfaces.is_empty() {
+            continue;
+        }
 
         let operation = bindings[0].operation();
         for surface in surfaces {
