@@ -643,13 +643,31 @@ fn validate_provider_envelope(
 mod tests {
     use super::*;
     use tracedecay_domain::{
-        LocatorDigest, PrivacyDomainId, ProjectId, ProviderId, SourceBindingOwnerV1,
-        SourceCoverageV1, SourceDeletionSemanticsV1, SourceEnvelopeKindV1, SourceInstanceId,
-        SourceNativeObjectIdV1, SourceObjectRevisionV1, SourcePartitionIdV1, SourceSnapshotIdV1,
+        LocatorDigest, PrivacyDomainId, ProjectId, ProviderId, SourceAcquisitionCapabilitiesV1,
+        SourceAcquisitionContractV1, SourceBindingOwnerV1, SourceCoverageV1,
+        SourceDeletionSemanticsV1, SourceEnvelopeKindV1, SourceInstanceId, SourceNativeObjectIdV1,
+        SourceObjectRevisionV1, SourcePartitionIdV1, SourceSnapshotIdV1,
     };
 
     fn digest(seed: char) -> ManifestDigest {
         ManifestDigest::new(format!("sha256:{}", seed.to_string().repeat(64))).unwrap()
+    }
+
+    fn acquisition_contract(
+        capture_mode: SourceCaptureModeV1,
+        refetch_strategy: SourceRefetchStrategyV1,
+        deletion_semantics: SourceDeletionSemanticsV1,
+    ) -> SourceAcquisitionContractV1 {
+        SourceAcquisitionContractV1::new(
+            ProviderId::new("fixture-provider").unwrap(),
+            SourceAcquisitionCapabilitiesV1::new(
+                BTreeSet::from([capture_mode]),
+                BTreeSet::from([refetch_strategy]),
+                BTreeSet::from([deletion_semantics]),
+            )
+            .unwrap(),
+        )
+        .unwrap()
     }
 
     struct EventFixture {
@@ -672,8 +690,12 @@ mod tests {
         fn new() -> Self {
             let definition = SourceDefinitionV1::new(
                 SourceInstanceId::new("source.capture-fixture").unwrap(),
-                ProviderId::new("fixture-provider").unwrap(),
                 1,
+                acquisition_contract(
+                    SourceCaptureModeV1::Poll,
+                    SourceRefetchStrategyV1::WholeRoot,
+                    SourceDeletionSemanticsV1::CompleteSnapshotAbsence,
+                ),
                 SourceCaptureModeV1::Poll,
                 SourceRefetchStrategyV1::WholeRoot,
                 SourceDeletionSemanticsV1::CompleteSnapshotAbsence,
@@ -794,8 +816,12 @@ mod tests {
         fn new() -> Self {
             let definition = SourceDefinitionV1::new(
                 SourceInstanceId::new("source.event-fixture").unwrap(),
-                ProviderId::new("fixture-provider").unwrap(),
                 1,
+                acquisition_contract(
+                    SourceCaptureModeV1::Event,
+                    SourceRefetchStrategyV1::WholeRoot,
+                    SourceDeletionSemanticsV1::ExplicitOnly,
+                ),
                 SourceCaptureModeV1::Event,
                 SourceRefetchStrategyV1::WholeRoot,
                 SourceDeletionSemanticsV1::ExplicitOnly,
@@ -863,8 +889,12 @@ mod tests {
     fn poll_only_definition_rejects_event_before_refresh_scheduling() {
         let definition = SourceDefinitionV1::new(
             SourceInstanceId::new("source.poll-fixture").unwrap(),
-            ProviderId::new("fixture-provider").unwrap(),
             1,
+            acquisition_contract(
+                SourceCaptureModeV1::Poll,
+                SourceRefetchStrategyV1::WholeRoot,
+                SourceDeletionSemanticsV1::ExplicitOnly,
+            ),
             SourceCaptureModeV1::Poll,
             SourceRefetchStrategyV1::WholeRoot,
             SourceDeletionSemanticsV1::ExplicitOnly,

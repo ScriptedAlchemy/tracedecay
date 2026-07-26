@@ -47,6 +47,21 @@ struct HintCounts {
 /// `GET /api/plugins/analytics/overview`
 pub(crate) async fn overview(State(state): State<DashboardState>) -> Json<Value> {
     let durable_events = durable_analytics_rows_for_state(&state).await;
+    let scope_ref = RegisteredGlobalDb::canonical_project_key(&state.project_root);
+    let since = crate::tracedecay::current_timestamp().saturating_sub(30 * 86_400);
+    let observatory = match state.savings_db.as_deref() {
+        Some(db) => Some(
+            crate::application::observability::observatory_read_model(db, Some(&scope_ref), since)
+                .await,
+        ),
+        None => Some(
+            crate::application::observability::observatory_unavailable_read_model(
+                Some(&scope_ref),
+                since,
+                "observability_store_unavailable",
+            ),
+        ),
+    };
     let hints = hint_summary(state.lcm_db.as_deref(), durable_events.as_deref()).await;
     let usage = usage_summary(state.lcm_db.as_deref(), durable_events.as_deref()).await;
     let agents = agent_usage_summary(state.lcm_db.as_deref()).await;
@@ -62,7 +77,31 @@ pub(crate) async fn overview(State(state): State<DashboardState>) -> Json<Value>
         "agents": agents,
         "diagnostics": diagnostics,
         "underused_tool_families": underused,
+        "observatory": observatory,
     }))
+}
+
+/// Canonical Plan 26 Observatory read model. CLI/MCP call the same application
+/// composer instead of re-deriving these values in their adapters.
+pub(crate) async fn observatory(State(state): State<DashboardState>) -> Json<Value> {
+    let scope_ref = RegisteredGlobalDb::canonical_project_key(&state.project_root);
+    let since = crate::tracedecay::current_timestamp().saturating_sub(30 * 86_400);
+    let value = match state.savings_db.as_deref() {
+        Some(db) => serde_json::to_value(
+            crate::application::observability::observatory_read_model(db, Some(&scope_ref), since)
+                .await,
+        )
+        .unwrap_or(Value::Null),
+        None => serde_json::to_value(
+            crate::application::observability::observatory_unavailable_read_model(
+                Some(&scope_ref),
+                since,
+                "observability_store_unavailable",
+            ),
+        )
+        .unwrap_or(Value::Null),
+    };
+    Json(value)
 }
 
 async fn agent_usage_summary(db: Option<&RegisteredGlobalDb>) -> Value {
@@ -184,6 +223,8 @@ async fn durable_analytics_rows(
                 session_id: None,
                 event_kind: None,
                 since: None,
+                until: None,
+                before_id: None,
                 limit: ANALYTICS_EVENT_LIMIT,
             })
             .await

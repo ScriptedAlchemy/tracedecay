@@ -717,13 +717,34 @@ impl<'a> HostAdmissionFacade<'a> {
         &self,
         request: CaptureObservationRequest,
     ) -> Result<CaptureObservationOutcome, HostAdmissionOutcome> {
-        let application = self.application(request.provider(), request.scope())?;
-        application
+        let provider = request.provider().to_owned();
+        let scope = request.scope().clone();
+        let database = self
+            .authorities
+            .registered_database(host_scope(&scope))?
+            .ok_or_else(HostAdmissionOutcome::registered_authority_unavailable)?;
+        let application = self.application(&provider, &scope)?;
+        let outcome = application
             .capture_observation(
                 request.with_repository_provenance(self.authorities.repository_provenance.clone()),
             )
             .await
-            .map_err(|error| classify_error(&error))
+            .map_err(|error| classify_error(&error))?;
+        if let CaptureObservationOutcome::Persisted { outcome, .. } = &outcome {
+            database
+                .external_source_store()
+                .map_err(|error| {
+                    tracing::warn!(%error, "registered external-source adapter is unavailable");
+                    HostAdmissionOutcome::registered_authority_unavailable()
+                })?
+                .capture_host_observation(outcome.receipt())
+                .await
+                .map_err(|error| {
+                    tracing::warn!(%error, "registered external-source commit failed");
+                    HostAdmissionOutcome::retained_unavailable("external_source_commit_failed")
+                })?;
+        }
+        Ok(outcome)
     }
 
     pub async fn capture(&self, request: CaptureObservationRequest) -> HostAdmissionOutcome {
@@ -1153,6 +1174,52 @@ impl HostAdmissionTestRuntimeV1 {
         .await
     }
 
+    /// Opens one tracked branch through this retained registered runtime.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-transport"))]
+    pub async fn open_project_branch_for_test(
+        &self,
+        project_root: &Path,
+        branch_name: &str,
+        open_options: crate::tracedecay::TraceDecayOpenOptions,
+    ) -> crate::errors::Result<crate::tracedecay::TraceDecay> {
+        let project_id =
+            self.project_id
+                .as_ref()
+                .ok_or_else(|| crate::errors::TraceDecayError::Config {
+                    message: "project branch open requires project-scoped test authority"
+                        .to_owned(),
+                })?;
+        let project_database = self.project_registered.as_ref().cloned().ok_or_else(|| {
+            crate::errors::TraceDecayError::Config {
+                message: "project branch open requires a registered project session".to_owned(),
+            }
+        })?;
+        let store_layout = crate::tracedecay::TraceDecay::resolve_registered_configuration_layout(
+            project_root,
+            &open_options,
+            self.profile_database.as_ref(),
+            true,
+        )
+        .await?;
+        if store_layout.identity.project_id.as_deref() != Some(project_id.as_str()) {
+            return Err(crate::errors::TraceDecayError::Config {
+                message: "project branch identity differs from registered test authority"
+                    .to_owned(),
+            });
+        }
+        crate::tracedecay::TraceDecay::open_branch_with_registered_configuration(
+            project_root,
+            branch_name,
+            open_options,
+            store_layout,
+            project_database,
+            Arc::clone(&self.profile_database),
+            Arc::clone(&self._session_registry),
+        )
+        .await
+    }
+
     /// Reopens an existing project graph read-only through the retained
     /// registered runtime without inferring configuration authority.
     #[doc(hidden)]
@@ -1498,11 +1565,6 @@ impl HostAdmissionTestRuntimeV1 {
         since: i64,
     ) -> Vec<crate::global_db::SavingsDay> {
         self.profile_database.savings_history(project, since).await
-    }
-
-    #[doc(hidden)]
-    pub async fn ensure_token_count_cache_for_test(&self) -> bool {
-        self.profile_database.ensure_token_count_cache().await
     }
 
     #[doc(hidden)]
@@ -2113,6 +2175,13 @@ impl HostAdmissionTestRuntimeV1 {
             })
     }
 
+    #[doc(hidden)]
+    pub(crate) fn project_observation_database_for_test(
+        &self,
+    ) -> crate::errors::Result<&RegisteredGlobalDb> {
+        self.project_database_for_test()
+    }
+
     fn session_database_for_test(
         &self,
         scope: HostAdmissionScope,
@@ -2306,6 +2375,7 @@ impl HostAdmissionTestRuntimeV1 {
         })?;
         let profile_database = Arc::clone(&self.profile_database);
         let profile_sessions = Arc::clone(&self.profile_registered);
+        let profile_identity = crate::daemon::profile_identity::load_or_create(&profile_root)?;
         let mut context =
             crate::mcp::server::McpServerConstructionContext::direct(cg, scope_prefix)
                 .with_direct_databases(
@@ -2316,6 +2386,7 @@ impl HostAdmissionTestRuntimeV1 {
                     false,
                 );
         context.profile_root = Some(profile_root);
+        context.profile_identity = Some(profile_identity);
         context.host_admission_test_runtime = Some(Arc::new(self));
         Ok(context)
     }
@@ -5037,6 +5108,25 @@ impl HostAdmissionTestRuntimeV1 {
                     )),
                 })?;
         store.replay_observations(request).await
+    }
+
+    #[doc(hidden)]
+    pub async fn external_source_receipt_for_test(
+        &self,
+        scope: HostAdmissionScope,
+        observation: &tracedecay_store::ObservationCommitReceipt,
+    ) -> Result<Option<tracedecay_store::SourceCommitReceiptV1>, HostAdmissionOutcome> {
+        let database = match scope {
+            HostAdmissionScope::Project => self.project_registered.as_deref(),
+            HostAdmissionScope::Profile => Some(self.profile_registered.as_ref()),
+        }
+        .ok_or_else(HostAdmissionOutcome::registered_authority_unavailable)?;
+        database
+            .external_source_store()
+            .map_err(|_| HostAdmissionOutcome::registered_authority_unavailable())?
+            .read_host_observation_receipt(observation)
+            .await
+            .map_err(|_| HostAdmissionOutcome::retained_unavailable("external_source_read_failed"))
     }
 }
 

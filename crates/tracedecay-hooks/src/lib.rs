@@ -131,9 +131,9 @@ pub const fn stock_event_support(host: HookHostV1, family: HookEventFamily) -> H
     use HookEventSupportV1::{Native, ReceiptDerived, Unavailable};
 
     match (host, family) {
-        (HookHostV1::ClaudeCode, SessionBoundary | SavedEdit) => Native,
-        (HookHostV1::ClaudeCode, TestLifecycle) => ReceiptDerived,
-        (HookHostV1::ClaudeCode, PromptBoundary | ToolLifecycle) => Unavailable,
+        (HookHostV1::ClaudeCode, SessionBoundary | ToolLifecycle) => Native,
+        (HookHostV1::ClaudeCode, SavedEdit | TestLifecycle) => ReceiptDerived,
+        (HookHostV1::ClaudeCode, PromptBoundary) => Unavailable,
         (HookHostV1::Codex, SessionBoundary) => Native,
         (HookHostV1::Codex, SavedEdit | TestLifecycle) => ReceiptDerived,
         (HookHostV1::Codex, PromptBoundary | ToolLifecycle) => Unavailable,
@@ -142,9 +142,9 @@ pub const fn stock_event_support(host: HookHostV1, family: HookEventFamily) -> H
         (HookHostV1::CursorDesktop | HookHostV1::CursorCloud, TestLifecycle) => ReceiptDerived,
         (HookHostV1::CursorDesktop, PromptBoundary | ToolLifecycle) => Unavailable,
         (HookHostV1::CursorCloud, PromptBoundary | ToolLifecycle | SavedEdit) => Unavailable,
-        (HookHostV1::Hermes, SessionBoundary | SavedEdit) => Native,
-        (HookHostV1::Hermes, TestLifecycle) => ReceiptDerived,
-        (HookHostV1::Hermes, PromptBoundary | ToolLifecycle) => Unavailable,
+        (HookHostV1::Hermes, SessionBoundary | ToolLifecycle) => Native,
+        (HookHostV1::Hermes, SavedEdit | TestLifecycle) => ReceiptDerived,
+        (HookHostV1::Hermes, PromptBoundary) => Unavailable,
         (HookHostV1::Kiro, PromptBoundary) => Native,
         (HookHostV1::Kiro, SessionBoundary | ToolLifecycle | SavedEdit | TestLifecycle) => {
             Unavailable
@@ -587,6 +587,21 @@ mod tests {
         assert_eq!(
             stock_event_support(HookHostV1::Hermes, HookEventFamily::TestLifecycle),
             HookEventSupportV1::ReceiptDerived
+        );
+        assert_eq!(
+            stock_event_support(HookHostV1::ClaudeCode, HookEventFamily::ToolLifecycle),
+            HookEventSupportV1::Native,
+            "the checked-in Claude PostToolUse capture proves this native family"
+        );
+        assert_eq!(
+            stock_event_support(HookHostV1::Hermes, HookEventFamily::ToolLifecycle),
+            HookEventSupportV1::Native,
+            "the checked-in Hermes post_tool_call capture proves this native family"
+        );
+        assert_eq!(
+            stock_event_support(HookHostV1::Codex, HookEventFamily::ToolLifecycle),
+            HookEventSupportV1::Unavailable,
+            "Codex has no checked-in authentic PostToolUse capture"
         );
         assert_eq!(
             stock_event_support(HookHostV1::CursorDesktop, HookEventFamily::SavedEdit),

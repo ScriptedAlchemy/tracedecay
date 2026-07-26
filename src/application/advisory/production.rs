@@ -128,13 +128,6 @@ pub fn open_pr13_advisory_production_authorities(
     let configuration = OwnedGlobalDbConfigurationControlStore::from_registered_project_runtime_db(
         project_runtime_db,
     );
-    if ci_config.as_ref().is_some_and(|config| {
-        github_source_access
-            .as_ref()
-            .is_none_or(|source_access| !Arc::ptr_eq(source_access, &config.source_access))
-    }) {
-        return Err(Pr13AdvisoryProductionOpenErrorV1::CiAuthorityUnavailable);
-    }
     let ci = match ci_config {
         Some(config) => {
             open_production_ci_provider_authorities_v1(config, ci_retained, ci_code_anchors)
