@@ -255,7 +255,13 @@ pub fn verify_branch_removal_receipts(
             )));
         }
     };
-    for original in original_paths {
+    // Callers select branch families from unordered sets. Verification refuses
+    // on the first uncovered family, so a stable order is what makes the
+    // refusal itself deterministic; sorting here keeps that property at the
+    // chokepoint instead of at every call site.
+    let mut original_paths = original_paths.to_vec();
+    original_paths.sort();
+    for original in &original_paths {
         let relative = original.strip_prefix(data_root).map_err(|_| {
             migration_error(format!(
                 "branch database '{}' escapes its project store",
@@ -538,5 +544,230 @@ fn migration_error(message: impl Into<String>) -> TraceDecayError {
     TraceDecayError::Database {
         message: message.into(),
         operation: "project_memory_cutover".to_owned(),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+    use crate::branch::{
+        BranchAdminAction, BranchAdminOutcome, BranchAdminReport, prepare_branch_admin_mutation,
+    };
+
+    /// A project store holding one tracked branch whose SQLite family carries a
+    /// durable fact that exists nowhere else.
+    struct BranchStoreFixture {
+        _temp: tempfile::TempDir,
+        project_root: PathBuf,
+        data_root: PathBuf,
+    }
+
+    impl BranchStoreFixture {
+        fn new(branches: &[&str]) -> Self {
+            let temp = tempfile::tempdir().unwrap();
+            let project_root = temp.path().join("repo");
+            let data_root = temp.path().join("store");
+            fs::create_dir_all(&project_root).unwrap();
+            fs::create_dir_all(data_root.join("branches")).unwrap();
+            let mut meta = branch_meta::BranchMeta::new("main");
+            for branch in branches {
+                meta.add_branch(branch, &format!("branches/{branch}.db"), "main");
+            }
+            branch_meta::save_branch_meta(&data_root, &meta).unwrap();
+            let fixture = Self {
+                _temp: temp,
+                project_root,
+                data_root,
+            };
+            for branch in branches {
+                fixture.seed_branch_only_fact(branch);
+            }
+            fixture
+        }
+
+        fn database_path(&self, branch: &str) -> PathBuf {
+            self.data_root.join(format!("branches/{branch}.db"))
+        }
+
+        /// Writes a fact that lives only in this branch store, mirroring the two
+        /// damaged branch stores whose facts existed nowhere else.
+        fn seed_branch_only_fact(&self, branch: &str) {
+            let connection = rusqlite::Connection::open(self.database_path(branch)).unwrap();
+            connection
+                .execute_batch(&format!(
+                    "CREATE TABLE memory_facts(
+                         fact_id INTEGER PRIMARY KEY,
+                         content TEXT NOT NULL
+                     );
+                     INSERT INTO memory_facts(fact_id, content)
+                     VALUES(1, 'branch-exclusive durable fact for {branch}');"
+                ))
+                .unwrap();
+        }
+
+        fn branch_only_fact_count(&self, branch: &str) -> i64 {
+            let connection = rusqlite::Connection::open_with_flags(
+                self.database_path(branch),
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .unwrap();
+            connection
+                .query_row("SELECT COUNT(*) FROM memory_facts", [], |row| row.get(0))
+                .unwrap()
+        }
+
+        fn write_receipt(&self, sources: Vec<BranchMemoryCutoverReceiptSource>) {
+            let receipt = BranchMemoryCutoverReceipt {
+                version: 1,
+                project_id: "fixture-project".to_owned(),
+                completed_at: 1,
+                sources,
+            };
+            fs::write(
+                self.data_root.join(RECEIPT_FILENAME),
+                serde_json::to_vec_pretty(&receipt).unwrap(),
+            )
+            .unwrap();
+        }
+
+        fn covering_source(&self, branch: &str) -> BranchMemoryCutoverReceiptSource {
+            BranchMemoryCutoverReceiptSource {
+                relative_path: PathBuf::from(format!("branches/{branch}.db")),
+                generation: source_generation(&self.database_path(branch)).unwrap(),
+            }
+        }
+
+        /// Drives the production removal transaction with the same receipt
+        /// verification the daemon installs as its pre-commit validator.
+        fn remove_branch(&self, branch: &str) -> Result<BranchAdminReport> {
+            let prepared = prepare_branch_admin_mutation(
+                &self.project_root,
+                &self.data_root,
+                BranchAdminAction::Remove {
+                    branch: branch.to_owned(),
+                },
+                0,
+                0,
+            )?;
+            let mut canonical_paths = prepared.database_paths().to_vec();
+            canonical_paths.sort();
+            let fence = crate::db::DatabaseDeletionFence::acquire(
+                &canonical_paths,
+                "test branch store removal",
+            )?;
+            prepared.commit_with_transaction(
+                fence.transaction_id(),
+                || fence.publish_deleting(),
+                |validation_paths| {
+                    verify_branch_removal_receipts(
+                        &self.data_root,
+                        &canonical_paths,
+                        validation_paths,
+                    )
+                },
+                || fence.rollback_deleting(),
+                || fence.promote_deleted(),
+            )
+        }
+    }
+
+    #[test]
+    fn branch_removal_without_receipt_refuses_and_preserves_branch_only_fact() {
+        let fixture = BranchStoreFixture::new(&["feature"]);
+
+        let error = fixture
+            .remove_branch("feature")
+            .expect_err("removal must refuse without a covering cutover receipt");
+
+        assert!(
+            error
+                .to_string()
+                .contains("no completed project-memory cutover receipt"),
+            "{error}"
+        );
+        assert!(fixture.database_path("feature").exists());
+        assert_eq!(fixture.branch_only_fact_count("feature"), 1);
+        assert!(
+            branch_meta::load_branch_meta(&fixture.data_root)
+                .unwrap()
+                .is_tracked("feature")
+        );
+    }
+
+    #[test]
+    fn branch_removal_with_generation_bound_receipt_proceeds() {
+        let fixture = BranchStoreFixture::new(&["feature"]);
+        fixture.write_receipt(vec![fixture.covering_source("feature")]);
+
+        let report = fixture
+            .remove_branch("feature")
+            .expect("a generation-bound receipt must authorize removal");
+
+        assert_eq!(report.outcome, BranchAdminOutcome::Removed);
+        assert!(!fixture.database_path("feature").exists());
+        assert!(
+            !branch_meta::load_branch_meta(&fixture.data_root)
+                .unwrap()
+                .is_tracked("feature")
+        );
+    }
+
+    #[test]
+    fn branch_removal_refuses_a_receipt_bound_to_a_stale_generation() {
+        let fixture = BranchStoreFixture::new(&["feature"]);
+        fixture.write_receipt(vec![BranchMemoryCutoverReceiptSource {
+            relative_path: PathBuf::from("branches/feature.db"),
+            generation: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                .to_owned(),
+        }]);
+
+        let error = fixture
+            .remove_branch("feature")
+            .expect_err("a receipt from a different generation must not authorize removal");
+
+        assert!(
+            error
+                .to_string()
+                .contains("changed after project-memory cutover"),
+            "{error}"
+        );
+        assert_eq!(fixture.branch_only_fact_count("feature"), 1);
+    }
+
+    #[test]
+    fn receipt_verification_is_deterministic_regardless_of_path_order() {
+        let fixture = BranchStoreFixture::new(&["alpha", "zeta"]);
+        // `alpha` sorts first and fails on a stale generation; `zeta` fails on a
+        // missing receipt. Whichever path is inspected first decides the
+        // reported refusal, so an unordered caller would report either one.
+        fixture.write_receipt(vec![BranchMemoryCutoverReceiptSource {
+            relative_path: PathBuf::from("branches/alpha.db"),
+            generation: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+                .to_owned(),
+        }]);
+        let alpha = fixture.database_path("alpha");
+        let zeta = fixture.database_path("zeta");
+
+        let forward = verify_branch_removal_receipts(
+            &fixture.data_root,
+            &[alpha.clone(), zeta.clone()],
+            &[alpha.clone(), zeta.clone()],
+        )
+        .expect_err("uncovered branch families must refuse removal");
+        let reversed = verify_branch_removal_receipts(
+            &fixture.data_root,
+            &[zeta.clone(), alpha.clone()],
+            &[zeta, alpha],
+        )
+        .expect_err("uncovered branch families must refuse removal");
+
+        assert_eq!(forward.to_string(), reversed.to_string());
+        assert!(
+            forward
+                .to_string()
+                .contains("changed after project-memory cutover"),
+            "{forward}"
+        );
     }
 }

@@ -12,6 +12,7 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -34,7 +35,7 @@ const STRATA_MAX_FILES: usize = 50_000;
 const STRATA_MAX_DEPENDENCY_EDGES: usize = 250_000;
 const STRATA_SCAN_BUDGET: Duration = Duration::from_secs(5);
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 pub(crate) struct CallChainParamsV1 {
     #[serde(default)]
     from: String,
@@ -43,9 +44,9 @@ pub(crate) struct CallChainParamsV1 {
     max_depth: Option<usize>,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(tag = "status", rename_all = "snake_case")]
-enum StructureReadV1<T> {
+pub(super) enum StructureReadV1<T> {
     Measured {
         measurement: T,
     },
@@ -60,8 +61,8 @@ enum StructureReadV1<T> {
     },
 }
 
-#[derive(Clone, Debug, Serialize)]
-struct NodeRefV1 {
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub(super) struct NodeRefV1 {
     id: String,
     name: String,
     qualified_name: String,
@@ -83,8 +84,8 @@ impl From<&Node> for NodeRefV1 {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
-struct IncomingCallEdgeV1 {
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub(super) struct IncomingCallEdgeV1 {
     source: String,
     target: String,
     kind: &'static str,
@@ -102,14 +103,14 @@ impl From<&Edge> for IncomingCallEdgeV1 {
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
-struct CallChainStepV1 {
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub(super) struct CallChainStepV1 {
     node: NodeRefV1,
     incoming_edge: Option<IncomingCallEdgeV1>,
 }
 
-#[derive(Clone, Debug, Serialize)]
-struct CallChainMeasurementV1 {
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub(super) struct CallChainMeasurementV1 {
     from_node_id: String,
     to_node_id: String,
     max_depth: usize,
@@ -121,16 +122,16 @@ struct CallChainMeasurementV1 {
     steps: Vec<CallChainStepV1>,
 }
 
-#[derive(Clone, Debug, Serialize)]
-struct StrataFileV1 {
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub(super) struct StrataFileV1 {
     path: String,
     depth: usize,
     scc_size: usize,
     chain: Vec<String>,
 }
 
-#[derive(Clone, Debug, Serialize)]
-struct StrataClusterV1 {
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub(super) struct StrataClusterV1 {
     order: usize,
     directory: String,
     file_count: usize,
@@ -140,8 +141,8 @@ struct StrataClusterV1 {
     boundary_edges: usize,
 }
 
-#[derive(Clone, Debug, Serialize)]
-struct StrataScanV1 {
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub(super) struct StrataScanV1 {
     cache_scope: &'static str,
     cache_state: &'static str,
     budget_ms: u64,
@@ -151,8 +152,8 @@ struct StrataScanV1 {
     dependency_edges_examined: usize,
 }
 
-#[derive(Clone, Debug, Serialize)]
-struct StrataMeasurementV1 {
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub(super) struct StrataMeasurementV1 {
     graph_generation: String,
     granularity: &'static str,
     dependency_edge_kinds: [&'static str; 2],
@@ -179,16 +180,16 @@ struct CachedStrataV1 {
 static STRATA_CACHE: OnceLock<tokio::sync::Mutex<HashMap<String, Arc<CachedStrataV1>>>> =
     OnceLock::new();
 
-#[derive(Clone, Debug, Serialize)]
-struct FactArmCoverageV1 {
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub(super) struct FactArmCoverageV1 {
     completeness: &'static str,
     returned: usize,
     truncated: bool,
     limit: usize,
 }
 
-#[derive(Clone, Debug, Serialize)]
-struct FactMatchArmV1 {
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub(super) struct FactMatchArmV1 {
     match_basis: &'static str,
     strength: &'static str,
     collision_warning: &'static str,
@@ -196,8 +197,8 @@ struct FactMatchArmV1 {
     facts: Vec<Value>,
 }
 
-#[derive(Clone, Debug, Serialize)]
-struct FactMatchesMeasurementV1 {
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub(super) struct FactMatchesMeasurementV1 {
     node: NodeRefV1,
     name: String,
     normalized_name: String,
@@ -210,8 +211,8 @@ struct FactMatchesMeasurementV1 {
     arms: Vec<FactMatchArmV1>,
 }
 
-#[derive(Clone, Debug, Serialize)]
-struct CoveringTestV1 {
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub(super) struct CoveringTestV1 {
     id: String,
     name: String,
     file_path: String,
@@ -219,8 +220,8 @@ struct CoveringTestV1 {
     qualification: &'static str,
 }
 
-#[derive(Clone, Debug, Serialize)]
-struct TestMapMeasurementV1 {
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub(super) struct TestMapMeasurementV1 {
     node: NodeRefV1,
     granularity: &'static str,
     algorithm: &'static str,
@@ -229,6 +230,15 @@ struct TestMapMeasurementV1 {
     reason: Option<&'static str>,
     tests: Vec<CoveringTestV1>,
     test_files: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct NodeSessionsMeasurementV1 {
+    node: NodeRefV1,
+    linkage: super::loom_api::LoomFileSessionProjectionV1,
+    available_granularities: Vec<&'static str>,
+    symbol_granularity_available: bool,
+    symbol_granularity_reason: &'static str,
 }
 
 /// `GET /api/plugins/graph/call-chain`
@@ -714,6 +724,85 @@ pub(crate) async fn node_tests(
         },
         1,
         "source symbols",
+        None,
+    )
+}
+
+/// `GET /api/plugins/graph/node/{node_id}/sessions`
+pub(crate) async fn node_sessions(
+    State(state): State<DashboardState>,
+    JsonPath(node_id): JsonPath<String>,
+) -> Response {
+    let Some(graph) = state.project_graph.as_deref() else {
+        return unmeasured_response::<NodeSessionsMeasurementV1>(
+            &state,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "graph_authority_unavailable",
+            "the retained project graph is unavailable",
+        );
+    };
+    let node = match graph.get_node(&node_id).await {
+        Ok(Some(node)) => node,
+        Ok(None) => {
+            return unmeasured_response::<NodeSessionsMeasurementV1>(
+                &state,
+                StatusCode::NOT_FOUND,
+                "node_not_found",
+                &format!("node not found: {node_id}"),
+            );
+        }
+        Err(error) => {
+            return failed_response::<NodeSessionsMeasurementV1>(
+                &state,
+                "session_node_read_failed",
+                error.to_string(),
+                true,
+            );
+        }
+    };
+    let Some(database) = state.lcm_db.as_deref() else {
+        return unmeasured_response::<NodeSessionsMeasurementV1>(
+            &state,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "session_authority_unavailable",
+            "the resolved project session authority is unavailable",
+        );
+    };
+    let snapshot = match database.read_snapshot().await {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            return failed_response::<NodeSessionsMeasurementV1>(
+                &state,
+                "session_snapshot_read_failed",
+                error.to_string(),
+                true,
+            );
+        }
+    };
+    let linkage = match super::loom_api::sessions_for_edited_file(&snapshot, &node.file_path).await
+    {
+        Ok(linkage) => linkage,
+        Err(error) => {
+            return failed_response::<NodeSessionsMeasurementV1>(
+                &state,
+                "session_linkage_read_failed",
+                error,
+                true,
+            );
+        }
+    };
+    let eligible = linkage.eligible_sessions;
+    measured_response(
+        &state,
+        NodeSessionsMeasurementV1 {
+            node: NodeRefV1::from(&node),
+            linkage,
+            available_granularities: vec!["file"],
+            symbol_granularity_available: false,
+            symbol_granularity_reason: "exact-source-occurrence anchors exist, but no indexed graph-node-to-session join is mounted",
+        },
+        eligible,
+        "sessions with provider-native edited-file metadata",
         None,
     )
 }

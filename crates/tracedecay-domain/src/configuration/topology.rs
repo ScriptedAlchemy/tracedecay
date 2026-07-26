@@ -7,6 +7,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::num::{NonZeroU8, NonZeroU16, NonZeroU32, NonZeroU64};
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::research::{
@@ -15,7 +16,7 @@ use crate::research::{
 
 const TOPOLOGY_DIGEST_DOMAIN: &str = "tracedecay.work-topology-policy.v1";
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(transparent)]
 pub struct WorktreePlacementRootId(String);
 
@@ -71,7 +72,7 @@ fn validate_ref_fragment(value: &str, field: &'static str) -> Result<(), DomainE
 }
 
 /// A validated full native Git ref name, such as `refs/heads/main`.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(transparent)]
 pub struct CanonicalGitRefNameV1(String);
 
@@ -122,7 +123,7 @@ impl fmt::Display for CanonicalGitRefNameV1 {
 /// A validated ref/branch prefix. Branch naming accepts a short branch prefix
 /// (for example `tracedecay/`) while protected-ref selectors use full
 /// `refs/.../` prefixes.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, Serialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(transparent)]
 pub struct CanonicalGitRefPrefix(String);
 
@@ -173,7 +174,7 @@ impl fmt::Display for CanonicalGitRefPrefix {
 /// Reference-only filesystem locator. The raw path is sealed outside this
 /// contract; only the privacy-bound locator digest and sealed-value digest are
 /// representable here.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SensitiveFilesystemLocatorV1 {
     pub locator_digest: LocatorDigest,
@@ -187,7 +188,7 @@ impl SensitiveFilesystemLocatorV1 {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "repositories")]
 pub enum RepositoryPlacementScopeV1 {
     AllAuthorized,
@@ -213,7 +214,7 @@ impl RepositoryPlacementScopeV1 {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct WorktreeRootPolicyV1 {
     pub root_id: WorktreePlacementRootId,
@@ -230,7 +231,7 @@ impl WorktreeRootPolicyV1 {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "root_id")]
 pub enum WorktreePlacementModeV1 {
     ExistingWorktreeOnly,
@@ -239,7 +240,9 @@ pub enum WorktreePlacementModeV1 {
     ConfiguredRoot(WorktreePlacementRootId),
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum BranchTopologyKindV1 {
     NoBranches,
@@ -248,7 +251,7 @@ pub enum BranchTopologyKindV1 {
     LocalStack,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct BranchTopologyPolicyV1 {
     pub allowed: BTreeSet<BranchTopologyKindV1>,
@@ -265,7 +268,9 @@ impl BranchTopologyPolicyV1 {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ReviewTopologyKindV1 {
     NoReview,
@@ -274,14 +279,16 @@ pub enum ReviewTopologyKindV1 {
     GitHubStackedPullRequests,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum GitHubStackedPullRequestPolicyV1 {
     Disabled,
     ProbePrivatePreview,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ReviewTopologyPolicyV1 {
     pub allowed: BTreeSet<ReviewTopologyKindV1>,
@@ -311,7 +318,7 @@ impl ReviewTopologyPolicyV1 {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum BranchNameComponentV1 {
     TaskIdDigestPrefix { bytes: NonZeroU8 },
@@ -320,7 +327,9 @@ pub enum BranchNameComponentV1 {
     MonotonicCollisionOrdinal,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum BranchNameSeparatorV1 {
     Hyphen,
@@ -338,14 +347,14 @@ impl BranchNameSeparatorV1 {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum BranchCollisionPolicyV1 {
     Reject,
     AppendMonotonicOrdinal { maximum_attempts: NonZeroU16 },
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct BranchNamingPolicyV1 {
     pub prefix: CanonicalGitRefPrefix,
@@ -403,7 +412,7 @@ impl BranchNamingPolicyV1 {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct TopologyConcurrencyPolicyV1 {
     pub maximum_active_per_repository: NonZeroU16,
@@ -425,7 +434,9 @@ impl TopologyConcurrencyPolicyV1 {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum CrossMergeModeV1 {
     Disabled,
@@ -435,7 +446,7 @@ pub enum CrossMergeModeV1 {
     CherryPickExactCommits,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CrossMergePolicyV1 {
     pub allowed_modes: BTreeSet<CrossMergeModeV1>,
@@ -473,7 +484,9 @@ impl CrossMergePolicyV1 {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum WorktreeCleanlinessRequirementV1 {
     RequireClean,
@@ -481,7 +494,7 @@ pub enum WorktreeCleanlinessRequirementV1 {
     ReadOnlyPreflightOnly,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RequiredCheckV1 {
     pub capability_id: CapabilityId,
@@ -495,13 +508,15 @@ impl RequiredCheckV1 {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum RequiredCheckExpectationV1 {
     SuccessfulTerminal,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "count")]
 pub enum ReviewRequirementV1 {
     None,
@@ -509,7 +524,7 @@ pub enum ReviewRequirementV1 {
     CodeOwnerAndIndependentReview,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct TopologyGatePolicyV1 {
     pub cleanliness: WorktreeCleanlinessRequirementV1,
@@ -539,7 +554,9 @@ impl TopologyGatePolicyV1 {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "value")]
 pub enum ProtectedRefSelectorV1 {
     NativeDefaultBranch,
@@ -557,14 +574,16 @@ impl ProtectedRefSelectorV1 {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ProtectedRefDispositionV1 {
     Reject,
     RequireHumanApprovalAndIndependentReview,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ProtectedRefRuleV1 {
     pub selector: ProtectedRefSelectorV1,
@@ -577,13 +596,17 @@ impl ProtectedRefRuleV1 {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum HistoryRewritePolicyV1 {
     ForbidForceAndRebase,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum TopologyEscalationPolicyV1 {
     Reject,
@@ -591,7 +614,7 @@ pub enum TopologyEscalationPolicyV1 {
     RequireHumanApprovalAndIndependentReview,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum AutomaticWorktreeGcV1 {
     Disabled,
@@ -601,7 +624,7 @@ pub enum AutomaticWorktreeGcV1 {
     },
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct WorktreeRetentionPolicyV1 {
     pub terminal_retention_seconds: Option<NonZeroU64>,
@@ -610,7 +633,9 @@ pub struct WorktreeRetentionPolicyV1 {
     pub automatic_gc: AutomaticWorktreeGcV1,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Clone, Copy, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum TopologyNotificationLevelV1 {
     CriticalOnly,
@@ -620,7 +645,7 @@ pub enum TopologyNotificationLevelV1 {
 
 /// Complete V1 policy. Partial values are intentionally impossible: callers
 /// must provide the entire policy and validation rejects adapter-local defaults.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct WorkTopologyPolicyV1 {
     pub schema_version: u16,
@@ -639,7 +664,7 @@ pub struct WorkTopologyPolicyV1 {
     pub notifications: TopologyNotificationLevelV1,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(transparent)]
 pub struct TopologyPolicyDigestV1(pub ManifestDigest);
 

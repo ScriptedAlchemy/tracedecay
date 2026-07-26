@@ -1842,6 +1842,55 @@ fn migrate_verify_text_reports_actual_apply_supported_state() {
 }
 
 #[test]
+fn init_refuses_ephemeral_project_in_persistent_profile() {
+    let home = TempDir::new().expect("home tempdir");
+    let project = TempDir::new().expect("ephemeral project");
+    std::fs::write(project.path().join("lib.rs"), "pub fn transient() {}\n")
+        .expect("ephemeral source");
+    let profile = tempfile::Builder::new()
+        .prefix("persistent-profile-")
+        .tempdir_in(ephemeral_safe_fixture_base())
+        .expect("persistent profile");
+    #[cfg(unix)]
+    std::fs::set_permissions(profile.path(), std::fs::Permissions::from_mode(0o700))
+        .expect("secure persistent profile permissions");
+
+    let mut command = tracedecay_command_without_daemon(home.path(), project.path());
+    let output = command
+        .env("TRACEDECAY_DATA_DIR", profile.path())
+        .env("TRACEDECAY_GLOBAL_DB", profile.path().join("global.db"))
+        .args(["init", "."])
+        .output()
+        .expect("init ephemeral project");
+
+    assert!(
+        !output.status.success(),
+        "an ephemeral project must not be enrolled in a persistent profile"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("temporary directory"),
+        "stderr should explain the ephemeral-root guard\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let projects = create_runtime().block_on(async {
+        HostAdmissionTestRuntimeV1::profile(profile.path())
+            .await
+            .expect("open persistent profile registry")
+            .list_code_projects(usize::MAX)
+            .await
+    });
+    assert!(
+        projects.is_empty(),
+        "rejected ephemeral project must not enter the persistent registry"
+    );
+    assert!(
+        !profile.path().join("projects").exists(),
+        "rejected ephemeral project must not mint a profile store"
+    );
+}
+
+#[test]
 fn migrate_registry_gc_cleans_stale_storage_metadata_and_preserves_live_and_blocked_stores() {
     let home = TempDir::new().expect("home tempdir");
     let live_project = home.path().join("live-project");

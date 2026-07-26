@@ -77,7 +77,7 @@ for item in [
 
 for job_name, next_job in [("build", "package-workspace")]:
     job = stable.split(f"  {job_name}:", 1)[1].split(f"\n  {next_job}:", 1)[0]
-    if "needs: validate-stable-release" not in job:
+    if "validate-stable-release" not in job:
         raise SystemExit(
             f"stable {job_name} must wait for manual release validation before checkout/build"
         )
@@ -86,10 +86,16 @@ if "  package-workspace:" in stable:
     package_job = stable.split("  package-workspace:", 1)[1].split(
         "\n  publish-assets:", 1
     )[0]
-    if "needs: validate-stable-release" not in package_job:
+    if "validate-stable-release" not in package_job:
         raise SystemExit(
             "stable package-workspace must wait for manual release validation before checkout/build"
         )
+
+dashboard_job = stable.split("  dashboard-assets:", 1)[1].split("\n  build:", 1)[0]
+if "needs: validate-stable-release" not in dashboard_job:
+    raise SystemExit(
+        "stable dashboard-assets must wait for manual release validation before checkout/build"
+    )
 
 for item in [
     "Validate manual prerelease rebuild",

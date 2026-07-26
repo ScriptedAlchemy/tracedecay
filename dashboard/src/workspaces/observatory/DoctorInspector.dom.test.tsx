@@ -5,15 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { DoctorInspector } from './DoctorInspector.tsx';
 import { saveActiveDoctorOperation } from './doctorModel.ts';
 
-const operation = 'use-case.application.configuration.protected-apply';
-const projectAuthorityScope = {
-  scope_kind: 'project' as const,
-  project_id: 'project.doctor-test',
-  repository_id: 'repository.doctor-test',
-  worktree_id: 'worktree.doctor-test',
-  reference: null,
-  scope_digest: `sha256:${'a'.repeat(64)}`,
-};
+const operation = 'use-case.application.configuration.pin-authority';
 
 describe('DoctorInspector', () => {
   beforeEach(() => {
@@ -113,10 +105,16 @@ describe('DoctorInspector', () => {
 
     await user.click(await screen.findByRole('button', { name: 'Preview' }));
     expect(await screen.findByText('Remediation previewed')).toBeTruthy();
+    const previewCall = calls.find(({ url }) => url === '/api/doctor/remediations/preview');
+    expect(JSON.parse(String(previewCall?.init?.body))).toMatchObject({
+      operation,
+      target: { owner_operation: 'configuration_pin_authority' },
+    });
 
     await user.click(screen.getByRole('button', { name: 'Review remediation' }));
-    expect(screen.getByLabelText('Remediation authority scope')).toBeTruthy();
-    expect(screen.getByText('project.doctor-test')).toBeTruthy();
+    expect(
+      screen.getByText(/authority scope will be resolved and rechecked by the owner/),
+    ).toBeTruthy();
     const apply = screen.getByRole('button', { name: 'Apply remediation' });
     expect((apply as HTMLButtonElement).disabled).toBe(true);
 
@@ -132,6 +130,7 @@ describe('DoctorInspector', () => {
     const applyCall = calls.find(({ url }) => url === '/api/doctor/remediations/apply');
     expect(JSON.parse(String(applyCall?.init?.body))).toMatchObject({
       operation,
+      target: { owner_operation: 'configuration_pin_authority' },
       preview_id: 'preview.doctor.preview',
       confirmed: true,
     });
@@ -192,6 +191,7 @@ describe('DoctorInspector', () => {
     const applyCall = calls.find(({ url }) => url === '/api/doctor/remediations/apply');
     expect(JSON.parse(String(applyCall?.init?.body))).toMatchObject({
       operation,
+      target: { owner_operation: 'configuration_pin_authority' },
       preview_id: null,
       confirmed: true,
     });
@@ -199,14 +199,13 @@ describe('DoctorInspector', () => {
 
   it('resumes the durable owner status identity after a reload', async () => {
     saveActiveDoctorOperation({
-      schema_revision: 2,
+      schema_revision: 3,
       operation_id: 'request.doctor.resume',
       transport_scope: {
         project_id: 'project.doctor-test',
         storage_mode: 'project_local',
         store_root: '/project',
       },
-      authority_scope: projectAuthorityScope,
     });
     const calls: string[] = [];
     vi.stubGlobal(
@@ -243,64 +242,14 @@ describe('DoctorInspector', () => {
     expect(calls).toContain('/api/doctor/remediations/request.doctor.resume');
   });
 
-  it('rejects a resumed status response with a different authority scope', async () => {
-    saveActiveDoctorOperation({
-      schema_revision: 2,
-      operation_id: 'request.doctor.authority-mismatch',
-      transport_scope: {
-        project_id: 'project.doctor-test',
-        storage_mode: 'project_local',
-        store_root: '/project',
-      },
-      authority_scope: projectAuthorityScope,
-    });
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async (input: RequestInfo | URL) => {
-        const url = String(input);
-        if (url === '/api/doctor/findings') {
-          return jsonResponse(findingsEnvelope());
-        }
-        if (url === '/api/doctor/remediations/request.doctor.authority-mismatch') {
-          return jsonResponse(
-            operationEnvelope('failed', 'request.doctor.authority-mismatch', {
-              ...projectAuthorityScope,
-              project_id: 'project.other',
-              scope_digest: `sha256:${'d'.repeat(64)}`,
-            }),
-          );
-        }
-        throw new Error(`unexpected fetch ${url}`);
-      }),
-    );
-
-    renderDoctor();
-
-    expect(
-      await screen.findByText(/owner returned a different remediation authority scope/),
-    ).toBeTruthy();
-
-    const user = userEvent.setup();
-    await user.click(screen.getByRole('button', { name: 'Review remediation' }));
-    expect(screen.queryByText('project.other')).toBeNull();
-    expect(
-      screen.getByText(/authority scope will be resolved and rechecked by the owner/),
-    ).toBeTruthy();
-  });
-
   it('does not query a saved operation through a different project scope', async () => {
     saveActiveDoctorOperation({
-      schema_revision: 2,
+      schema_revision: 3,
       operation_id: 'request.doctor.other-project',
       transport_scope: {
         project_id: 'project.other',
         storage_mode: 'project_local',
         store_root: '/other',
-      },
-      authority_scope: {
-        ...projectAuthorityScope,
-        project_id: 'project.other',
-        scope_digest: `sha256:${'b'.repeat(64)}`,
       },
     });
     const calls: string[] = [];
@@ -446,6 +395,7 @@ function findingsEnvelope() {
           preview_available: true,
           action_confirmation: 'required',
           summary: 'apply the admitted configuration revision',
+          target: { owner_operation: 'configuration_pin_authority' },
         },
       ],
       known_families: ['configuration'],
@@ -472,7 +422,6 @@ function directActionFindingsEnvelope() {
 function operationEnvelope(
   phase: 'previewed' | 'failed',
   operationId: string,
-  authorityScope = projectAuthorityScope,
 ) {
   return envelope(
     {
@@ -480,7 +429,6 @@ function operationEnvelope(
       operation: {
         operation_id: operationId,
         owning_operation: operation,
-        authority_scope: authorityScope,
         phase,
         preview_id: 'preview.doctor.preview',
         idempotency_key:

@@ -66,7 +66,7 @@ pub(crate) struct DashboardFixture {
     pub(crate) _home_guard: EnvVarGuard,
     pub(crate) _userprofile_guard: EnvVarGuard,
     pub(crate) home: std::path::PathBuf,
-    pub(crate) registry_db_path: std::path::PathBuf,
+    pub(crate) global_db_path: std::path::PathBuf,
     pub(crate) base_url: String,
     pub(crate) project_root: std::path::PathBuf,
     pub(crate) host_runtime: Arc<HostAdmissionTestRuntimeV1>,
@@ -708,8 +708,8 @@ async fn start_dashboard_fixture_with_options(
         .canonicalize()
         .unwrap_or_else(|err| panic!("failed to canonicalize temp root: {err}"));
     let project_root = tmp_root.join("project");
-    let global_db_path = tmp_root.join("global").join("global.db");
     let profile_root = tmp_root.join("profile").join(".tracedecay");
+    let global_db_path = profile_root.join("global.db");
     // Skill lifecycle endpoints re-export managed skills into agent configs
     // under the process home; point HOME at the fixture so tests never touch
     // the developer's real agent installations.
@@ -763,7 +763,7 @@ async fn start_dashboard_fixture_with_options(
         _home_guard: home_guard,
         _userprofile_guard: userprofile_guard,
         home,
-        registry_db_path: profile_root.join("global.db"),
+        global_db_path,
         base_url,
         project_root,
         host_runtime,

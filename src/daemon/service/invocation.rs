@@ -3330,20 +3330,13 @@ async fn apply_configuration_or_semantic_transition(
             .mutate_direct(authority, mutation, expected_revision)
             .await?
     };
-    match registered.runtime.client().current().await {
-        Ok(current) => {
-            if let Err(error) = crate::config::install_pinned_runtime_configuration(current) {
-                tracing::warn!(
-                    "committed configuration could not refresh the runtime cache: {error}"
-                );
-            }
-        }
-        Err(error) => {
-            tracing::warn!(
-                "committed configuration could not reload the retained snapshot: {error}"
-            );
-        }
-    }
+    let current = registered.runtime.client().current().await?;
+    crate::config::install_pinned_runtime_configuration(current.clone())
+        .map_err(|_| ConfigurationError::Unavailable)?;
+    registered
+        .runtime
+        .record_runtime_activation(Some(current.revision_id), None, now)
+        .await?;
     Ok(receipt)
 }
 
@@ -5000,6 +4993,19 @@ impl DaemonConfigurationRuntimeRegistrar {
             direct_layers: Arc::new(direct_layers),
             grants: Arc::new(RwLock::new(BTreeMap::new())),
         };
+        let current = runtime.client().current().await.map_err(|error| {
+            TraceDecayError::Config {
+                message: format!(
+                    "configuration runtime activation could not read the current revision: {error}"
+                ),
+            }
+        })?;
+        runtime
+            .record_runtime_activation(Some(current.revision_id), None, current_micros())
+            .await
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("configuration runtime activation could not be recorded: {error}"),
+            })?;
         let mut runtimes = self.service.configuration_runtimes.lock().await;
         if runtimes.contains_key(&project_root) {
             return Ok(());

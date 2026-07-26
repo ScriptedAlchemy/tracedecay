@@ -35,7 +35,10 @@ cd /path/to/your/project
 tracedecay init
 ```
 
-This creates a `.tracedecay/` directory and indexes all supported files (15 languages). After the initial index, `tracedecay sync` picks up only changed files. To force a full re-index, use `tracedecay sync --force`.
+This creates a `.tracedecay/` directory and indexes all supported files. The
+default `full` feature set covers 50+ languages; `Cargo.toml` is the source of
+truth for exact membership of the `lite` / `medium` / `full` tiers. After the
+initial index, `tracedecay sync` picks up only changed files. To force a full re-index, use `tracedecay sync --force`.
 
 Check what was indexed:
 

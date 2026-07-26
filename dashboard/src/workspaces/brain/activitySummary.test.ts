@@ -3,7 +3,7 @@ import type { LiveActivityPulse } from '../../data/sse/connect.ts';
 import {
   ageTickIntervalMs,
   familyLabel,
-  formatDuration,
+  formatDurationMs,
   summarizeActivity,
   RATE_WINDOW_MS,
 } from './activitySummary.ts';
@@ -89,18 +89,26 @@ describe('familyLabel', () => {
   });
 });
 
-describe('formatDuration', () => {
+describe('formatDurationMs', () => {
   it('renders an em dash rather than inventing a zero', () => {
-    expect(formatDuration(null)).toBe('—');
-    expect(formatDuration(Number.NaN)).toBe('—');
-    expect(formatDuration(-1)).toBe('—');
+    expect(formatDurationMs(null)).toBe('—');
+    expect(formatDurationMs(Number.NaN)).toBe('—');
+    expect(formatDurationMs(-1)).toBe('—');
   });
 
   it('coarsens as the reading grows', () => {
-    expect(formatDuration(400)).toBe('<1s');
-    expect(formatDuration(4_000)).toBe('4s');
-    expect(formatDuration(240_000)).toBe('4m');
-    expect(formatDuration(4 * 3_600_000)).toBe('4h');
+    expect(formatDurationMs(400)).toBe('<1s');
+    expect(formatDurationMs(4_000)).toBe('4s');
+    expect(formatDurationMs(240_000)).toBe('4m');
+    expect(formatDurationMs(4 * 3_600_000)).toBe('4h');
+  });
+
+  // The name carries the unit because Loom's `tracks.ts` has a same-named
+  // seconds formatter. Passing seconds to this one is a 1000x understatement,
+  // and these are the readings that would print if a caller mixed them up.
+  it('reads a seconds-valued argument as the near-zero it would be in ms', () => {
+    expect(formatDurationMs(45)).toBe('<1s');
+    expect(formatDurationMs(600)).toBe('<1s');
   });
 });
 

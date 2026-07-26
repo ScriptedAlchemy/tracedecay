@@ -34,7 +34,7 @@ drift apart.
 
 ### Deterministic layer (no LLM, runs in CI)
 
-`tests/memory_eval_test.rs` replays scripted tool-call sequences through the
+`tests/memory_suite/memory_eval_test.rs` replays scripted tool-call sequences through the
 real `tracedecay` binary — the same code path MCP tool calls hit — and runs in
 the normal `cargo nextest run --workspace --all-features --no-fail-fast` suite (so it is part
 of the existing CI test job on Linux/macOS/Windows; CI never calls a model).
@@ -102,7 +102,7 @@ usage claims can be audited.
 
 1. Drop a new `eval/scenarios/<id>.json` (copy an existing one; keep
    `schema_version: 1`).
-2. Wire a `#[test]` for it in `tests/memory_eval_test.rs` — the
+2. Wire a `#[test]` for it in `tests/memory_suite/memory_eval_test.rs` — the
    `every_scenario_file_is_wired` test fails until you do.
 3. If it has a `real_model` block it is automatically runnable through
    `eval/run_real_model.py`.

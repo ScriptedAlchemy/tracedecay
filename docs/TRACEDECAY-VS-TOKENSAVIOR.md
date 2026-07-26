@@ -160,18 +160,28 @@ lives" without needing to know the project root.
 
 ### 1.9 First-class CLI on top of the MCP
 
-Every MCP tool has a parallel CLI subcommand. Useful for one-off inspection
-or shell pipelines without spinning up an MCP client:
+Every MCP tool is dispatchable from the shell through the single `tracedecay
+tool <name>` entry point. Useful for one-off inspection or shell pipelines
+without spinning up an MCP client:
 
 ```bash
-tracedecay query handle_body
-tracedecay body  handle_body
-tracedecay impact handle_body --max-depth 3
-tracedecay callers extract_lines
-tracedecay files --pattern '**/*.rs'
-tracedecay affected src/cli.rs
+tracedecay tool search handle_body
+tracedecay tool body --symbol handle_body
+tracedecay tool find_exact_symbol --name extract_lines   # resolve a node_id
+tracedecay tool impact --node-id <node_id> --max-depth 3
+tracedecay tool callers --node-id <node_id>
+tracedecay tool files --pattern '**/*.rs'
+tracedecay tool affected --args '{"files":["src/cli.rs"]}'
 tracedecay bench       # built-in retrieval benchmark
 ```
+
+Graph-traversal tools such as `impact` and `callers` take a `node_id`, not a
+bare symbol name — resolve one with `search` or `find_exact_symbol` first.
+
+There are no per-tool top-level subcommands (`tracedecay query`,
+`tracedecay files`, `tracedecay affected` and friends do not exist); run
+`tracedecay tool` for the list and `tracedecay tool <name> --help` for one
+tool's parameters.
 
 ### 1.10 Reproducible benchmark harness
 

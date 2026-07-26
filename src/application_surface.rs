@@ -16,6 +16,7 @@ use axum::http::{Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Json, Response};
 use axum::routing::{get, post};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -750,14 +751,14 @@ pub struct ConfigurationWriteCredentialSurfaceRequest {
 #[serde(deny_unknown_fields)]
 pub struct ConfigurationObservedStateSurfaceRequest {}
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigurationProtectedPreviewSurfaceRequest {
     pub change: ProtectedChange,
     pub expected_revision: ConfigurationRevisionId,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigurationProtectedApplySurfaceRequest {
     pub plan_id: ChangePlanId,

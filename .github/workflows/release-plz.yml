@@ -10,6 +10,7 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  TRACEDECAY_SKIP_DASHBOARD_BUILD: "1"
 
 # Publishing mutates crates.io and GitHub release state. Serialize master
 # updates, but never cancel a publication after it has started.
@@ -18,9 +19,44 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  dashboard-assets:
+    name: Build dashboard artifact
+    if: github.repository == 'ScriptedAlchemy/tracedecay'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Install dashboard dependencies
+        working-directory: dashboard
+        run: npm ci
+
+      - name: Build dashboard
+        working-directory: dashboard
+        run: npm run build
+
+      - name: Validate dashboard bundle
+        run: python3 scripts/check-dashboard-bundle.py dashboard/app-dist
+
+      - name: Upload dashboard artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dashboard-app-dist
+          path: dashboard/app-dist
+          if-no-files-found: error
+          include-hidden-files: true
+
   release-plz-release:
     name: Publish crate and create GitHub release
     if: github.repository == 'ScriptedAlchemy/tracedecay'
+    needs: dashboard-assets
     runs-on: ubuntu-latest
     environment: crates-io
     permissions:
@@ -34,6 +70,15 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.ref_name }}
           persist-credentials: false
+
+      - name: Download dashboard artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dashboard-app-dist
+          path: dashboard/app-dist
+
+      - name: Validate downloaded dashboard bundle
+        run: python3 scripts/check-dashboard-bundle.py dashboard/app-dist
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -81,7 +126,7 @@ jobs:
   release-plz-pr:
     name: Open or update release PR
     if: github.repository == 'ScriptedAlchemy/tracedecay'
-    needs: release-plz-release
+    needs: [dashboard-assets, release-plz-release]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -93,6 +138,15 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.ref_name }}
           persist-credentials: false
+
+      - name: Download dashboard artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dashboard-app-dist
+          path: dashboard/app-dist
+
+      - name: Validate downloaded dashboard bundle
+        run: python3 scripts/check-dashboard-bundle.py dashboard/app-dist
 
       - uses: dtolnay/rust-toolchain@stable
 
