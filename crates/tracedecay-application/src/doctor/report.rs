@@ -455,12 +455,8 @@ impl<'a> DoctorReportComposerV1<'a> {
             let read = port.advisory_feedback(context).await;
             use super::sources::AdvisoryFeedbackReadV1 as Read;
             let consultation = match &read {
-                Read::Observed { findings } if !findings.is_empty() => {
-                    DoctorFamilyConsultationV1::Consulted
-                }
-                Read::Observed { .. } | Read::Absent => {
-                    unavailable(DoctorFamilyUnavailableReasonV1::Absent)
-                }
+                Read::Observed { .. } => DoctorFamilyConsultationV1::Consulted,
+                Read::Absent => unavailable(DoctorFamilyUnavailableReasonV1::Absent),
                 Read::Unsupported => unavailable(DoctorFamilyUnavailableReasonV1::Unsupported),
                 Read::Denied => unavailable(DoctorFamilyUnavailableReasonV1::Denied),
                 Read::Unknown => unavailable(DoctorFamilyUnavailableReasonV1::Unknown),

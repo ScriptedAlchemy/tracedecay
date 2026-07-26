@@ -9,6 +9,7 @@ mod git_joins;
 mod impact_joins;
 mod language_registry;
 mod lineage;
+mod production_join_readers;
 mod production_orchestration;
 mod projection_receipts;
 mod sanitized_intake;

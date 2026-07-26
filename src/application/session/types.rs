@@ -1,8 +1,9 @@
 use std::fmt;
 
 use tracedecay_domain::{
-    ActorId, RetrievalGrainV1, SessionId, SessionSourceCoverageAggregateStateV1,
-    SessionSourceCoverageReceiptV1, TemporalModeV1,
+    ActorId, CursorManifestLimitKindV1, RetrievalGrainV1, SESSION_TEMPORAL_CURSOR_MAX_PARTICIPANTS,
+    SessionId, SessionSourceCoverageAggregateStateV1, SessionSourceCoverageReceiptV1,
+    TemporalModeV1,
 };
 
 use crate::application::context::{
@@ -540,6 +541,11 @@ pub enum SessionRetrievalOutcome<T> {
     Deleted,
     Denied,
     Unavailable,
+    CursorManifestLimitExceeded {
+        kind: CursorManifestLimitKindV1,
+        observed: usize,
+        maximum: usize,
+    },
     BudgetExhausted,
     Cancelled,
 }
@@ -1132,7 +1138,7 @@ mod tests {
 
     #[test]
     fn retrieval_terminal_states_never_collapse_to_complete_zero() {
-        let states: [SessionRetrievalOutcome<()>; 11] = [
+        let states: [SessionRetrievalOutcome<()>; 12] = [
             SessionRetrievalOutcome::CompleteZero {
                 freshness: SessionDataFreshness::Fresh,
             },
@@ -1150,6 +1156,11 @@ mod tests {
             SessionRetrievalOutcome::Deleted,
             SessionRetrievalOutcome::Denied,
             SessionRetrievalOutcome::Unavailable,
+            SessionRetrievalOutcome::CursorManifestLimitExceeded {
+                kind: CursorManifestLimitKindV1::Participants,
+                observed: 257,
+                maximum: SESSION_TEMPORAL_CURSOR_MAX_PARTICIPANTS,
+            },
             SessionRetrievalOutcome::BudgetExhausted,
             SessionRetrievalOutcome::Cancelled,
         ];

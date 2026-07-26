@@ -484,10 +484,13 @@ fn map_control_error(
         crate::query::temporal::ports::TemporalPortError::BudgetExceeded { .. } => {
             SessionTemporalExecutionError::BudgetExhausted
         }
-        crate::query::temporal::ports::TemporalPortError::ParticipantLimitExceeded { .. }
-        | crate::query::temporal::ports::TemporalPortError::ParticipantManifestBytesExceeded {
+        error @ (crate::query::temporal::ports::TemporalPortError::ParticipantLimitExceeded {
             ..
-        } => SessionTemporalExecutionError::BudgetExhausted,
+        } | crate::query::temporal::ports::TemporalPortError::ParticipantManifestBytesExceeded {
+            ..
+        }) => SessionTemporalExecutionError::Kernel(
+            crate::query::temporal::TemporalKernelError::Port(error),
+        ),
         // An authorized root with no active generations is empty, not broken:
         // freshly ingested sessions become searchable only after an explicit
         // refresh, and reads must stay side-effect free.

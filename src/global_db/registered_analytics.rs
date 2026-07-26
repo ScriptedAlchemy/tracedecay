@@ -24,6 +24,70 @@ impl RegisteredGlobalDb {
         Ok(id)
     }
 
+    /// Canonical observability append with replay-safe idempotency.
+    ///
+    /// The registered writer serializes the lookup and insert; the partial
+    /// unique index remains the cross-process backstop. Reusing a key with
+    /// changed canonical input is an explicit conflict.
+    pub(crate) async fn append_observability_event(
+        &self,
+        event: &AnalyticsEventInsert,
+    ) -> Result<i64, String> {
+        if event.provider != "tracedecay-observability"
+            || event.hint_id.as_deref().is_none_or(str::is_empty)
+            || event.metadata_json.is_none()
+        {
+            return Err("invalid canonical observability event".to_string());
+        }
+        let transaction = self
+            .begin_write_transaction()
+            .await
+            .map_err(|error| format!("failed to begin observability transaction: {error}"))?;
+        let mut rows = transaction
+            .query(
+                "SELECT id, metadata_json
+                 FROM analytics_events
+                 WHERE provider = ?1 AND project_id = ?2 AND hint_id = ?3
+                 LIMIT 1",
+                crate::db::engine::params![
+                    event.provider.as_str(),
+                    event.project_id.as_str(),
+                    event.hint_id.as_deref()
+                ],
+            )
+            .await
+            .map_err(|error| format!("failed to read observability idempotency key: {error}"))?;
+        if let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| format!("failed to decode observability idempotency row: {error}"))?
+        {
+            let id = row
+                .get::<i64>(0)
+                .map_err(|error| format!("failed to decode observability event id: {error}"))?;
+            let stored = row.get::<Option<String>>(1).map_err(|error| {
+                format!("failed to decode observability canonical input: {error}")
+            })?;
+            if stored.as_deref() != event.metadata_json.as_deref() {
+                return Err("observability idempotency conflict".to_string());
+            }
+            drop(row);
+            drop(rows);
+            transaction
+                .commit()
+                .await
+                .map_err(|error| format!("failed to close observability replay: {error}"))?;
+            return Ok(id);
+        }
+        drop(rows);
+        let id = append_analytics_event_in_existing_tx(&transaction, event).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| format!("failed to commit observability event: {error}"))?;
+        Ok(id)
+    }
+
     pub(crate) async fn append_analytics_events(
         &self,
         events: &[AnalyticsEventInsert],
@@ -101,6 +165,14 @@ impl RegisteredGlobalDb {
             values.push(Value::Integer(since));
             clauses.push(format!("timestamp >= ?{}", values.len()));
         }
+        if let Some(until) = query.until {
+            values.push(Value::Integer(until));
+            clauses.push(format!("timestamp < ?{}", values.len()));
+        }
+        if let Some(before_id) = query.before_id {
+            values.push(Value::Integer(before_id));
+            clauses.push(format!("id < ?{}", values.len()));
+        }
         if !clauses.is_empty() {
             sql.push_str(" WHERE ");
             sql.push_str(&clauses.join(" AND "));
@@ -109,10 +181,14 @@ impl RegisteredGlobalDb {
             i64::try_from(query.limit).unwrap_or(i64::MAX),
         ));
         let limit_param = values.len();
-        let _ = write!(
-            sql,
-            " ORDER BY timestamp DESC, id DESC LIMIT ?{limit_param}"
-        );
+        if query.provider.as_deref() == Some("tracedecay-observability") {
+            let _ = write!(sql, " ORDER BY id DESC LIMIT ?{limit_param}");
+        } else {
+            let _ = write!(
+                sql,
+                " ORDER BY timestamp DESC, id DESC LIMIT ?{limit_param}"
+            );
+        }
 
         let snapshot = self
             .read_snapshot()

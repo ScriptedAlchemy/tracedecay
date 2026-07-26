@@ -12,16 +12,14 @@
 //!    the `token-counting` feature is compiled out (or a count failed).
 //!
 //! Counting 15k+ stored messages per request would be far too slow, so
-//! counts are cached at two levels keyed by `(provider, message_id)` with a
-//! `text_len` guard: an in-process map on [`TokenCountCache`], persisted in
-//! the `dashboard_token_counts` sidecar table of the **global accounting
-//! DB** (dashboard scope — the session-store schema is never touched).
+//! counts are cached in process keyed by `(provider, message_id)` with a
+//! `text_len` guard. The cache is derived dashboard acceleration only; it
+//! never creates a dashboard-owned persistence authority.
 //! A background warm task runs at dashboard startup so the first paint of
 //! the Savings tab doesn't pay the initial counting cost.
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
@@ -29,7 +27,6 @@ use serde_json::Value;
 use super::DashboardState;
 use super::util::{qmarks, query_rows};
 use crate::db::engine::{QueryExecutor, Value as DbValue, params_from_iter};
-use crate::global_db::TokenCountUpsert;
 
 #[cfg(feature = "token-counting")]
 use tiktoken_rs::{cl100k_base_singleton, o200k_base_singleton};
@@ -160,7 +157,6 @@ type OverlayFingerprint = (i64, i64, u64);
 /// Process-lifetime token-count cache shared by all savings endpoints.
 pub(crate) struct TokenCountCache {
     map: Mutex<HashMap<(String, String), CachedCount>>,
-    hydrated: AtomicBool,
     /// Last built non-usage overlay; `/overview`, `/sessions`, and `/models`
     /// all need it, so without this every Savings-tab interaction re-ran the
     /// full `session_messages` scan + fold three times.
@@ -171,10 +167,17 @@ impl TokenCountCache {
     pub(crate) fn new() -> Self {
         Self {
             map: Mutex::new(HashMap::new()),
-            hydrated: AtomicBool::new(false),
             overlay: tokio::sync::Mutex::new(None),
         }
     }
+}
+
+#[derive(Debug, Clone)]
+struct ComputedTokenCount {
+    provider: String,
+    message_id: String,
+    text_len: i64,
+    token_count: i64,
 }
 
 /// One stored message without transcript usage data, carrying its
@@ -269,8 +272,6 @@ async fn build_overlay(
     );
     let rows = query_rows(conn, &sql, ()).await.ok()?;
 
-    hydrate_cache(state).await;
-
     // Resolve cache hits and collect misses without holding the lock
     // across any await point.
     let mut misses: Vec<(String, String, String, i64)> = Vec::new();
@@ -324,30 +325,8 @@ async fn build_overlay(
     Some(overlay)
 }
 
-/// One-time hydrate of the in-memory map from the sidecar table.
-async fn hydrate_cache(state: &DashboardState) {
-    if state.token_counts.hydrated.swap(true, Ordering::SeqCst) {
-        return;
-    }
-    let Some(gdb) = state.savings_db.as_deref() else {
-        return;
-    };
-    if !gdb.ensure_token_count_cache().await {
-        return;
-    }
-    let persisted = gdb.load_token_counts(&state.lcm_db_path).await;
-    let mut map = state
-        .token_counts
-        .map
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    for (provider, message_id, text_len, tokens) in persisted {
-        map.insert((provider, message_id), CachedCount { text_len, tokens });
-    }
-}
-
 /// Fetches the text of `misses` in per-provider chunks, counts off the async
-/// runtime, then updates both cache levels.
+/// runtime, then updates the process-local derived cache.
 ///
 /// Chunks are keyed `(provider, message_id)` so the lookup can use the
 /// table's composite primary key — a `message_id IN (…)` filter alone cannot,
@@ -359,7 +338,7 @@ async fn count_and_store(
     mut misses: Vec<(String, String, String, i64)>,
 ) {
     const CHUNK: usize = 200;
-    let mut computed: Vec<TokenCountUpsert> = Vec::with_capacity(misses.len());
+    let mut computed: Vec<ComputedTokenCount> = Vec::with_capacity(misses.len());
 
     misses.sort_by(|a, b| a.0.cmp(&b.0));
     for chunk in misses
@@ -413,9 +392,8 @@ async fn count_and_store(
             batch
                 .into_iter()
                 .map(
-                    |(provider, message_id, model, len, text)| TokenCountUpsert {
+                    |(provider, message_id, model, len, text)| ComputedTokenCount {
                         token_count: count_text_tokens(&text, &model),
-                        encoder: encoder_for_model(&model).name,
                         provider,
                         message_id,
                         text_len: len,
@@ -430,9 +408,6 @@ async fn count_and_store(
 
     if computed.is_empty() {
         return;
-    }
-    if let Some(gdb) = state.savings_db.as_deref() {
-        gdb.save_token_counts(&state.lcm_db_path, &computed).await;
     }
     let mut map = state
         .token_counts

@@ -21,7 +21,8 @@ use tracedecay_tool_catalog::BindingId;
 pub use http::{
     HttpApplicationControls, HttpApplicationInvocationFuture, HttpApplicationOperation,
     HttpApplicationOwnerKind, HttpApplicationOwners, HttpApplicationRequest, HttpRouteDocumentV1,
-    application_problem_response, application_router, http_route_documents,
+    application_problem_response, application_router, configuration_application_router,
+    http_route_documents,
 };
 pub use sse::sse_response;
 

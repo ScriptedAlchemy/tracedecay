@@ -1060,6 +1060,8 @@ pub enum GitIndexUnsupportedStateV1 {
     DetachedHead,
     UnbornBranch,
     IndexLockPresent,
+    ApplicableCommitHooks,
+    SigningKeyUnavailable,
     UnmergedIndex,
     IntentToAdd,
     SplitIndex,

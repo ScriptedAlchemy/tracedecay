@@ -154,10 +154,11 @@ pub const CONFIGURATION_SURFACE_OPERATION_NAMES: [&str; 13] = [
     "configuration_audit",
 ];
 
-const CONFIGURATION_SURFACES: [BindingSurface; 3] = [
+const CONFIGURATION_SURFACES: [BindingSurface; 4] = [
     BindingSurface::Cli,
     BindingSurface::Mcp,
     BindingSurface::Http,
+    BindingSurface::Dashboard,
 ];
 
 pub fn configuration_surface_catalog_contribution()
@@ -232,7 +233,10 @@ fn capability(
         request_schema: schema(spec.name, "request")?,
         result_schema: schema(spec.name, "result")?,
         effect,
-        scope: ScopeRequirement::new(vec![ScopeDimension::Project])?,
+        scope: ScopeRequirement::new(vec![
+            ScopeDimension::ConfigurationLayer,
+            ScopeDimension::Project,
+        ])?,
         authority: AuthorityRequirement::CapabilityGrantWithRevalidation,
         denied_disclosure: DeniedDisclosurePolicy::Indistinguishable,
         privacy: PrivacyClass::ScopedMetadata,
@@ -412,7 +416,7 @@ mod tests {
     }
 
     #[test]
-    fn configuration_surface_exposes_only_pre_dashboard_transports() {
+    fn configuration_surface_exposes_the_pr14_dashboard_transport() {
         let contribution = configuration_surface_catalog_contribution().expect("contribution");
         let surfaces = contribution
             .bindings()
@@ -426,14 +430,29 @@ mod tests {
                 BindingSurface::Cli,
                 BindingSurface::Mcp,
                 BindingSurface::Http,
+                BindingSurface::Dashboard,
             ])
         );
-        assert!(
-            contribution
-                .bindings()
-                .iter()
-                .all(|binding| binding.surface() != BindingSurface::Dashboard)
-        );
+    }
+
+    #[test]
+    fn configuration_surface_requires_mounted_project_and_exact_layer_routes() {
+        let contribution = configuration_surface_catalog_contribution().expect("contribution");
+
+        for capability in contribution.capabilities() {
+            assert!(
+                capability
+                    .scope()
+                    .requires(ScopeDimension::ConfigurationLayer),
+                "{} must route through an exact configuration-layer authority",
+                capability.capability_id()
+            );
+            assert!(
+                capability.scope().requires(ScopeDimension::Project),
+                "{} must not advertise a nonexistent projectless profile route",
+                capability.capability_id()
+            );
+        }
     }
 
     #[test]

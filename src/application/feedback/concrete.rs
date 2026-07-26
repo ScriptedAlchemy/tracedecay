@@ -53,8 +53,8 @@ use super::owner::{
     FeedbackReadRequestAuthorityFuture, FeedbackReadRequestResolutionV1, FeedbackReadRequestV1,
 };
 use crate::application::source_authorization::ProjectSourceAccessSnapshot;
-use crate::db::Database;
 use crate::db::engine::params;
+use crate::db::{Database, DatabaseWriteTransaction};
 use crate::diagnostics_store::DiagnosticsStore;
 use crate::mcp::response_handles::{
     ResponseHandleLookup, is_valid_response_handle, retrieve_response_handle, store_response_handle,
@@ -63,7 +63,7 @@ use crate::mcp::response_handles::{
 const PUBLICATION_LEDGER_METADATA_KEY: &str = "feedback.completed-publications.v1";
 const OBSERVATION_LEDGER_METADATA_KEY: &str = "feedback.plan26-observations.v1";
 const PUBLICATION_LEDGER_SCHEMA_VERSION: u16 = 1;
-const OBSERVATION_LEDGER_SCHEMA_VERSION: u16 = 2;
+const OBSERVATION_LEDGER_SCHEMA_VERSION: u16 = 3;
 const REQUEST_HANDLE_SCHEMA_VERSION: u16 = 1;
 const REQUEST_HANDLE_TTL_MICROS: i64 = 15_000_000;
 const DEFAULT_EXPANSION_PAGE_SIZE: u32 = 100;
@@ -151,6 +151,8 @@ struct StoredFeedbackObservationLedgerV1 {
     retention_dropped: u64,
     #[serde(default)]
     producer_boots: Vec<StoredFeedbackProducerBootV1>,
+    #[serde(default)]
+    retained_incomplete_boots: u64,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -159,6 +161,8 @@ struct StoredFeedbackProducerBootV1 {
     boot_id: ManifestDigest,
     last_sequence: u64,
     terminal: bool,
+    #[serde(default)]
+    last_observed_at: Option<UtcMicros>,
 }
 
 struct ProjectFeedbackObservationSinkV1 {
@@ -166,17 +170,27 @@ struct ProjectFeedbackObservationSinkV1 {
     control_sender: mpsc::Sender<FeedbackObservationEnvelopeV1>,
     boot_id: ManifestDigest,
     next_sequence: AtomicU64,
-    dropped_count: AtomicU64,
+    dropped_count: Arc<AtomicU64>,
     admission: Mutex<()>,
 }
 
 impl ProjectFeedbackObservationSinkV1 {
-    fn start(database: Database) -> Result<Self, Pr12FeedbackRuntimeError> {
+    async fn start(database: Database) -> Result<Self, Pr12FeedbackRuntimeError> {
         static BOOT_NONCE: AtomicU64 = AtomicU64::new(0);
         let runtime =
             tokio::runtime::Handle::try_current().map_err(|_| Pr12FeedbackRuntimeError::Store)?;
+        let boot_id = canonical_sha256(&(
+            "tracedecay.feedback.producer-boot.v1",
+            std::process::id(),
+            now_micros(),
+            BOOT_NONCE.fetch_add(1, Ordering::Relaxed),
+        ))
+        .map_err(|_| Pr12FeedbackRuntimeError::Corrupt)?;
+        persist_feedback_producer_boot(&database, boot_id.clone()).await?;
         let (sender, mut receiver) = mpsc::channel(OBSERVATION_QUEUE_CAPACITY);
         let (control_sender, mut control_receiver) = mpsc::channel(1);
+        let dropped_count = Arc::new(AtomicU64::new(0));
+        let worker_dropped_count = Arc::clone(&dropped_count);
         runtime.spawn(async move {
             let mut data_open = true;
             let mut control_open = true;
@@ -196,25 +210,25 @@ impl ProjectFeedbackObservationSinkV1 {
                         envelope
                     },
                 };
-                let Some(envelope) = envelope else {
+                let Some(mut envelope) = envelope else {
                     continue;
                 };
-                let _ = persist_feedback_observation(&database, envelope).await;
+                let reported_drops =
+                    apply_pending_worker_drops(&mut envelope, &worker_dropped_count);
+                if persist_feedback_observation(&database, envelope)
+                    .await
+                    .is_err()
+                {
+                    saturating_add(&worker_dropped_count, reported_drops.saturating_add(1));
+                }
             }
         });
-        let boot_id = canonical_sha256(&(
-            "tracedecay.feedback.producer-boot.v1",
-            std::process::id(),
-            now_micros(),
-            BOOT_NONCE.fetch_add(1, Ordering::Relaxed),
-        ))
-        .map_err(|_| Pr12FeedbackRuntimeError::Corrupt)?;
         Ok(Self {
             sender,
             control_sender,
             boot_id,
             next_sequence: AtomicU64::new(0),
-            dropped_count: AtomicU64::new(0),
+            dropped_count,
             admission: Mutex::new(()),
         })
     }
@@ -226,11 +240,7 @@ impl ProjectFeedbackObservationSinkV1 {
     }
 
     fn record_drop(&self) {
-        let _ = self
-            .dropped_count
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
-                Some(count.saturating_add(1))
-            });
+        saturating_increment(&self.dropped_count);
     }
 
     fn restore_drops(&self, dropped: u64) {
@@ -326,17 +336,17 @@ struct StoredFeedbackRequestV1 {
 
 /// Concrete factory central daemon integration mounts for one admitted
 /// project root.
-pub fn open_pr12_feedback_runtime(
+pub async fn open_pr12_feedback_runtime(
     database: Database,
     project_root: impl Into<PathBuf>,
     scope: ResolvedScope,
     access: ProjectSourceAccessSnapshot,
 ) -> Result<Pr12FeedbackRuntime, Pr12FeedbackRuntimeError> {
-    Pr12FeedbackRuntime::open(database, project_root, scope, access)
+    Pr12FeedbackRuntime::open(database, project_root, scope, access).await
 }
 
 impl Pr12FeedbackRuntime {
-    pub fn open(
+    pub async fn open(
         database: Database,
         project_root: impl Into<PathBuf>,
         scope: ResolvedScope,
@@ -364,7 +374,7 @@ impl Pr12FeedbackRuntime {
             access: access.clone(),
         };
         let durable_observations = DurablePlan26FeedbackObservationQueueAdapterV1::new(
-            ProjectFeedbackObservationSinkV1::start(publications.database.clone())?,
+            ProjectFeedbackObservationSinkV1::start(publications.database.clone()).await?,
         );
         let observation_adapter =
             Arc::new(Plan26FeedbackObservationAdapter::new(durable_observations));
@@ -1367,8 +1377,15 @@ pub(crate) async fn plan26_feedback_observation_read_model(
             observations: Vec::new(),
             retention_dropped: 0,
             producer_boots: Vec::new(),
+            retained_incomplete_boots: 0,
         },
     };
+    project_observation_ledger(&ledger)
+}
+
+fn project_observation_ledger(
+    ledger: &StoredFeedbackObservationLedgerV1,
+) -> Result<FeedbackObservationReadModelV1, Pr12FeedbackRuntimeError> {
     let latest_boot = ledger.producer_boots.last().map(|boot| &boot.boot_id);
     let incomplete_boots = ledger
         .producer_boots
@@ -1376,13 +1393,24 @@ pub(crate) async fn plan26_feedback_observation_read_model(
         .filter(|boot| !boot.terminal && Some(&boot.boot_id) != latest_boot)
         .count()
         .try_into()
-        .unwrap_or(u64::MAX);
-    FeedbackObservationReadModelV1::project_with_accounting(
+        .unwrap_or(u64::MAX)
+        .saturating_add(ledger.retained_incomplete_boots);
+    let mut model = FeedbackObservationReadModelV1::project_with_accounting(
         &ledger.observations,
         ledger.retention_dropped,
         incomplete_boots,
     )
-    .ok_or(Pr12FeedbackRuntimeError::Corrupt)
+    .ok_or(Pr12FeedbackRuntimeError::Corrupt)?;
+    if let Some(boot) = ledger.producer_boots.last() {
+        model.watermark.producer_boot_id = Some(boot.boot_id.clone());
+        model.watermark.producer_sequence = (boot.last_sequence > 0).then_some(boot.last_sequence);
+        model.watermark.observed_through = boot.last_observed_at;
+        if ledger.observations.is_empty() && ledger.retention_dropped == 0 && incomplete_boots == 0
+        {
+            model.coverage = super::observations::Plan26CoverageV1::Known;
+        }
+    }
+    Ok(model)
 }
 
 fn request_record(
@@ -1473,31 +1501,7 @@ async fn persist_feedback_observation(
         .begin_write_transaction("record plan26 feedback observation")
         .await
         .map_err(|_| Pr12FeedbackRuntimeError::Store)?;
-    let mut rows = transaction
-        .query_engine(
-            "SELECT value FROM metadata WHERE key = ?1",
-            params![OBSERVATION_LEDGER_METADATA_KEY],
-        )
-        .await
-        .map_err(|_| Pr12FeedbackRuntimeError::Store)?;
-    let encoded = rows
-        .next()
-        .await
-        .map_err(|_| Pr12FeedbackRuntimeError::Store)?
-        .map(|row| row.get::<String>(0))
-        .transpose()
-        .map_err(|_| Pr12FeedbackRuntimeError::Store)?;
-    drop(rows);
-    let mut ledger = encoded
-        .as_deref()
-        .map(decode_observation_ledger)
-        .transpose()?
-        .unwrap_or(StoredFeedbackObservationLedgerV1 {
-            schema_version: OBSERVATION_LEDGER_SCHEMA_VERSION,
-            observations: Vec::new(),
-            retention_dropped: 0,
-            producer_boots: Vec::new(),
-        });
+    let mut ledger = load_observation_ledger(&transaction).await?;
     if ledger
         .observations
         .iter()
@@ -1535,11 +1539,18 @@ async fn persist_feedback_observation(
             }
             boot.last_sequence = producer_sequence;
             boot.terminal |= terminal;
+            boot.last_observed_at = Some(
+                boot.last_observed_at
+                    .map_or(envelope.observed_at, |observed_at| {
+                        observed_at.max(envelope.observed_at)
+                    }),
+            );
         }
         None => ledger.producer_boots.push(StoredFeedbackProducerBootV1 {
             boot_id,
             last_sequence: producer_sequence,
             terminal,
+            last_observed_at: Some(envelope.observed_at),
         }),
     }
     ledger.observations.push(envelope);
@@ -1560,13 +1571,94 @@ async fn persist_feedback_observation(
         .map_err(|_| Pr12FeedbackRuntimeError::Store)
 }
 
+async fn persist_feedback_producer_boot(
+    database: &Database,
+    boot_id: ManifestDigest,
+) -> Result<(), Pr12FeedbackRuntimeError> {
+    boot_id
+        .validate()
+        .map_err(|_| Pr12FeedbackRuntimeError::Corrupt)?;
+    let transaction = database
+        .begin_write_transaction("record plan26 feedback producer boot")
+        .await
+        .map_err(|_| Pr12FeedbackRuntimeError::Store)?;
+    let mut ledger = load_observation_ledger(&transaction).await?;
+    if ledger
+        .producer_boots
+        .iter()
+        .any(|boot| boot.boot_id == boot_id)
+    {
+        transaction
+            .rollback()
+            .await
+            .map_err(|_| Pr12FeedbackRuntimeError::Store)?;
+        return Ok(());
+    }
+    ledger.producer_boots.push(StoredFeedbackProducerBootV1 {
+        boot_id,
+        last_sequence: 0,
+        terminal: false,
+        last_observed_at: None,
+    });
+    ledger.schema_version = OBSERVATION_LEDGER_SCHEMA_VERSION;
+    let encoded = encode_bounded_observation_ledger(
+        &mut ledger,
+        MAX_STORED_OBSERVATIONS,
+        MAX_STORED_OBSERVATION_BOOTS,
+        MAX_OBSERVATION_LEDGER_BYTES,
+    )?;
+    database
+        .set_metadata_unguarded(&transaction, OBSERVATION_LEDGER_METADATA_KEY, &encoded)
+        .await
+        .map_err(|_| Pr12FeedbackRuntimeError::Store)?;
+    transaction
+        .commit()
+        .await
+        .map_err(|_| Pr12FeedbackRuntimeError::Store)
+}
+
+async fn load_observation_ledger(
+    transaction: &DatabaseWriteTransaction<'_>,
+) -> Result<StoredFeedbackObservationLedgerV1, Pr12FeedbackRuntimeError> {
+    let mut rows = transaction
+        .query_engine(
+            "SELECT value FROM metadata WHERE key = ?1",
+            params![OBSERVATION_LEDGER_METADATA_KEY],
+        )
+        .await
+        .map_err(|_| Pr12FeedbackRuntimeError::Store)?;
+    let encoded = rows
+        .next()
+        .await
+        .map_err(|_| Pr12FeedbackRuntimeError::Store)?
+        .map(|row| row.get::<String>(0))
+        .transpose()
+        .map_err(|_| Pr12FeedbackRuntimeError::Store)?;
+    drop(rows);
+    encoded
+        .as_deref()
+        .map(decode_observation_ledger)
+        .transpose()
+        .map(|ledger| {
+            ledger.unwrap_or(StoredFeedbackObservationLedgerV1 {
+                schema_version: OBSERVATION_LEDGER_SCHEMA_VERSION,
+                observations: Vec::new(),
+                retention_dropped: 0,
+                producer_boots: Vec::new(),
+                retained_incomplete_boots: 0,
+            })
+        })
+}
+
 fn decode_observation_ledger(
     encoded: &str,
 ) -> Result<StoredFeedbackObservationLedgerV1, Pr12FeedbackRuntimeError> {
     let ledger: StoredFeedbackObservationLedgerV1 =
         serde_json::from_str(encoded).map_err(|_| Pr12FeedbackRuntimeError::Corrupt)?;
-    if !matches!(ledger.schema_version, 1 | OBSERVATION_LEDGER_SCHEMA_VERSION)
-        || ledger.observations.len() > MAX_STORED_OBSERVATIONS
+    if !matches!(
+        ledger.schema_version,
+        1 | 2 | OBSERVATION_LEDGER_SCHEMA_VERSION
+    ) || ledger.observations.len() > MAX_STORED_OBSERVATIONS
         || ledger
             .observations
             .iter()
@@ -1578,7 +1670,6 @@ fn decode_observation_ledger(
             .enumerate()
             .any(|(index, boot)| {
                 boot.boot_id.validate().is_err()
-                    || boot.last_sequence == 0
                     || ledger.producer_boots[..index]
                         .iter()
                         .any(|prior| prior.boot_id == boot.boot_id)
@@ -1600,7 +1691,7 @@ fn encode_bounded_observation_ledger(
         ledger.retention_dropped = ledger.retention_dropped.saturating_add(1);
     }
     while ledger.producer_boots.len() > max_boots {
-        ledger.producer_boots.remove(0);
+        retain_removed_boot_accounting(ledger, 0);
     }
     loop {
         let encoded =
@@ -1612,11 +1703,40 @@ fn encode_bounded_observation_ledger(
             ledger.observations.remove(0);
             ledger.retention_dropped = ledger.retention_dropped.saturating_add(1);
         } else if ledger.producer_boots.len() > 1 {
-            ledger.producer_boots.remove(0);
+            retain_removed_boot_accounting(ledger, 0);
         } else {
             return Err(Pr12FeedbackRuntimeError::Store);
         }
     }
+}
+
+fn retain_removed_boot_accounting(ledger: &mut StoredFeedbackObservationLedgerV1, index: usize) {
+    let boot = ledger.producer_boots.remove(index);
+    if !boot.terminal {
+        ledger.retained_incomplete_boots = ledger.retained_incomplete_boots.saturating_add(1);
+    }
+}
+
+fn saturating_increment(counter: &AtomicU64) {
+    saturating_add(counter, 1);
+}
+
+fn saturating_add(counter: &AtomicU64, increment: u64) {
+    let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+        Some(count.saturating_add(increment))
+    });
+}
+
+fn apply_pending_worker_drops(
+    envelope: &mut FeedbackObservationEnvelopeV1,
+    dropped_count: &AtomicU64,
+) -> u64 {
+    let pending = dropped_count.swap(0, Ordering::Relaxed);
+    envelope.delivery.dropped = envelope.delivery.dropped.saturating_add(pending);
+    if envelope.delivery.dropped > 0 {
+        envelope.delivery.coverage = super::observations::Plan26CoverageV1::Partial;
+    }
+    envelope.delivery.dropped
 }
 
 fn publication_matches_context(
@@ -1844,7 +1964,7 @@ mod tests {
             control_sender,
             boot_id: boot_id.clone(),
             next_sequence: AtomicU64::new(0),
-            dropped_count: AtomicU64::new(0),
+            dropped_count: Arc::new(AtomicU64::new(0)),
             admission: Mutex::new(()),
         };
 
@@ -1884,6 +2004,7 @@ mod tests {
         let first = sequenced_source_envelope(&boot_id, 1);
         let second = sequenced_source_envelope(&boot_id, 2);
         let expected = second.idempotency_key.clone();
+        let last_observed_at = second.observed_at;
         let mut ledger = StoredFeedbackObservationLedgerV1 {
             schema_version: OBSERVATION_LEDGER_SCHEMA_VERSION,
             observations: vec![first, second],
@@ -1892,7 +2013,9 @@ mod tests {
                 boot_id,
                 last_sequence: 2,
                 terminal: false,
+                last_observed_at: Some(last_observed_at),
             }],
+            retained_incomplete_boots: 0,
         };
 
         let encoded = encode_bounded_observation_ledger(&mut ledger, 1, 1, usize::MAX).unwrap();
@@ -1900,5 +2023,64 @@ mod tests {
         assert_eq!(decoded.observations.len(), 1);
         assert_eq!(decoded.observations[0].idempotency_key, expected);
         assert_eq!(decoded.retention_dropped, 1);
+    }
+
+    #[test]
+    fn retained_incomplete_boot_and_latest_watermark_survive_bounded_history() {
+        let old_boot = canonical_sha256(&"feedback-old-incomplete-boot").unwrap();
+        let latest_boot = canonical_sha256(&"feedback-latest-boot").unwrap();
+        let observed_at = UtcMicros(42);
+        let mut ledger = StoredFeedbackObservationLedgerV1 {
+            schema_version: OBSERVATION_LEDGER_SCHEMA_VERSION,
+            observations: Vec::new(),
+            retention_dropped: 1,
+            producer_boots: vec![
+                StoredFeedbackProducerBootV1 {
+                    boot_id: old_boot,
+                    last_sequence: 0,
+                    terminal: false,
+                    last_observed_at: None,
+                },
+                StoredFeedbackProducerBootV1 {
+                    boot_id: latest_boot.clone(),
+                    last_sequence: 7,
+                    terminal: true,
+                    last_observed_at: Some(observed_at),
+                },
+            ],
+            retained_incomplete_boots: 0,
+        };
+
+        let encoded = encode_bounded_observation_ledger(&mut ledger, 0, 1, usize::MAX).unwrap();
+        let decoded = decode_observation_ledger(&encoded).unwrap();
+        assert_eq!(decoded.retained_incomplete_boots, 1);
+        let model = project_observation_ledger(&decoded).unwrap();
+        assert_eq!(
+            model.coverage,
+            super::super::observations::Plan26CoverageV1::Unknown
+        );
+        assert_eq!(model.denominators.retention_dropped, 1);
+        assert_eq!(model.denominators.incomplete_boots, 1);
+        assert_eq!(model.watermark.producer_boot_id, Some(latest_boot));
+        assert_eq!(model.watermark.producer_sequence, Some(7));
+        assert_eq!(model.watermark.observed_through, Some(observed_at));
+    }
+
+    #[test]
+    fn worker_persistence_drops_are_carried_into_the_next_envelope() {
+        let boot_id = canonical_sha256(&"feedback-worker-drop-boot").unwrap();
+        let mut envelope = sequenced_source_envelope(&boot_id, 1);
+        envelope.delivery = super::super::observations::FeedbackObservationDeliveryV1::delivered(2);
+        let dropped_count = AtomicU64::new(3);
+
+        assert_eq!(apply_pending_worker_drops(&mut envelope, &dropped_count), 5);
+        assert_eq!(dropped_count.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            envelope.delivery.coverage,
+            super::super::observations::Plan26CoverageV1::Partial
+        );
+
+        saturating_add(&dropped_count, envelope.delivery.dropped.saturating_add(1));
+        assert_eq!(dropped_count.load(Ordering::Relaxed), 6);
     }
 }

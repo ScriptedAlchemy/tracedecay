@@ -5,10 +5,11 @@
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, TryLockError};
+use std::time::Duration;
 
 use thiserror::Error;
-use tracedecay_domain::RepositoryId;
+use tracedecay_domain::{RepositoryId, UtcMicros};
 
 #[derive(Debug, Error)]
 pub(crate) enum RepositoryMutationQueueError {
@@ -61,6 +62,15 @@ impl RepositoryMutationQueue {
         repository_id: &RepositoryId,
         operation: impl FnOnce() -> T,
     ) -> Result<T, RepositoryMutationQueueError> {
+        self.with_repository_cancellable(repository_id, || None, |_| operation())
+    }
+
+    pub(crate) fn with_repository_cancellable<T>(
+        &self,
+        repository_id: &RepositoryId,
+        cancellation_requested: impl Fn() -> Option<UtcMicros>,
+        operation: impl FnOnce(Option<UtcMicros>) -> T,
+    ) -> Result<T, RepositoryMutationQueueError> {
         self.pending
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |pending| {
                 (pending < self.capacity).then_some(pending + 1)
@@ -80,9 +90,20 @@ impl RepositoryMutationQueue {
                     .or_insert_with(|| Arc::new(Mutex::new(()))),
             )
         };
-        let _guard = gate
-            .lock()
-            .map_err(|_| RepositoryMutationQueueError::Unavailable)?;
-        Ok(operation())
+        let mut cancellation_observed = cancellation_requested();
+        let _guard = loop {
+            match gate.try_lock() {
+                Ok(guard) => break guard,
+                Err(TryLockError::Poisoned(_)) => {
+                    return Err(RepositoryMutationQueueError::Unavailable);
+                }
+                Err(TryLockError::WouldBlock) => {
+                    cancellation_observed = cancellation_observed.or_else(&cancellation_requested);
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            }
+        };
+        cancellation_observed = cancellation_observed.or_else(cancellation_requested);
+        Ok(operation(cancellation_observed))
     }
 }

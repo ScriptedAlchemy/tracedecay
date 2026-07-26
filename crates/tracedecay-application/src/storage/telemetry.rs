@@ -203,6 +203,13 @@ impl StoreBudgetEvaluationV1 {
 pub enum StorageTelemetryReadV1 {
     /// A size sample was observed.
     Observed { sample: StoreSizeSampleV1 },
+    /// Canonical application `StorageStatus` observed the durable store's file
+    /// size without opening an adapter-owned SQLite telemetry connection.
+    ObservedBytes {
+        store: StoreKeyV1,
+        total_bytes: StorageByteSizeV1,
+        observed_at: UtcMicros,
+    },
     /// The runtime cannot expose page-count telemetry on this build/platform.
     Unsupported { store: StoreKeyV1 },
     /// Authorization to read the store's telemetry was denied.
@@ -216,6 +223,7 @@ impl StorageTelemetryReadV1 {
     pub fn store(&self) -> &StoreKeyV1 {
         match self {
             Self::Observed { sample } => &sample.store,
+            Self::ObservedBytes { store, .. } => store,
             Self::Unsupported { store } | Self::Denied { store } | Self::Unknown { store } => store,
         }
     }

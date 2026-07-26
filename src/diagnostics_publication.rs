@@ -178,6 +178,21 @@ impl CodeIndexPublicationIdentityV1 {
     }
 
     #[must_use]
+    pub const fn repository(&self) -> &RepositoryId {
+        &self.repository
+    }
+
+    #[must_use]
+    pub const fn worktree(&self) -> Option<&WorktreeId> {
+        self.worktree.as_ref()
+    }
+
+    #[must_use]
+    pub const fn reference(&self) -> Option<&RefId> {
+        self.reference.as_ref()
+    }
+
+    #[must_use]
     pub const fn source_revision(&self) -> Option<&CommitId> {
         self.source_revision.as_ref()
     }
@@ -189,6 +204,13 @@ impl CodeIndexPublicationIdentityV1 {
         self.files
             .get(logical_path)
             .map(|(file, digest)| (file, digest))
+    }
+
+    #[must_use]
+    pub fn logical_path(&self, occurrence: &FileOccurrenceId) -> Option<&str> {
+        self.files
+            .iter()
+            .find_map(|(path, (file, _))| (file == occurrence).then_some(path.as_str()))
     }
 
     /// The clean-generation scope a producer publishes under. The generation

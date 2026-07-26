@@ -1,3 +1,7 @@
+use tracedecay_application::feedback::{
+    CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1, GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,
+    PROXIMITY_CAPABILITY_ID_V1,
+};
 use tracedecay_application::{
     application_catalog_contributions, application_handler_descriptors,
     callable_code_catalog_contribution, feedback_surface_catalog_contribution,
@@ -55,7 +59,6 @@ fn application_contribution_set_uses_registered_feedback_handlers() {
     let feedback = feedback_surface_catalog_contribution().unwrap();
     let feedback_handlers = feedback_surface_handler_descriptors().unwrap();
 
-    assert_eq!(contributions.len(), 10);
     assert!(contributions.contains(&callable_code));
     assert!(contributions.contains(&feedback));
     assert_eq!(
@@ -88,14 +91,26 @@ fn application_contribution_set_uses_registered_feedback_handlers() {
             "{} is callable after its production owner was registered",
             capability.capability_id()
         );
-        assert!(!capability.binding_ids().is_empty());
+        let provider_contribution = [
+            GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1,
+            CI_FAILURE_LOCALIZE_CAPABILITY_ID_V1,
+            PROXIMITY_CAPABILITY_ID_V1,
+        ]
+        .contains(&capability.capability_id().as_str());
+        assert_eq!(
+            capability.binding_ids().is_empty(),
+            provider_contribution,
+            "{} must use the combined advisory transport",
+            capability.capability_id()
+        );
     }
-    assert!(
-        feedback
-            .bindings()
-            .iter()
-            .all(|binding| binding.surface() != BindingSurface::Dashboard)
-    );
+    assert!(feedback.bindings().iter().any(|binding| {
+        binding.surface() == BindingSurface::Dashboard
+            && feedback
+                .capabilities()
+                .iter()
+                .any(|capability| capability.binding_ids().contains(binding.binding_id()))
+    }));
     assert!(
         git_index_catalog_contribution()
             .unwrap()

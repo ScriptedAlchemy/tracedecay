@@ -193,6 +193,18 @@ impl RegisteredGlobalDb {
         )
     }
 
+    pub(crate) fn external_source_store(
+        &self,
+    ) -> Result<
+        crate::application::external_source_store::RuntimeExternalSourceStore,
+        crate::application::external_source_store::RuntimeExternalSourceErrorV1,
+    > {
+        crate::application::external_source_store::RuntimeExternalSourceStore::new(
+            self.runtime.clone(),
+            self.authority.clone(),
+        )
+    }
+
     pub(crate) fn storage_page_counts(&self) -> crate::errors::Result<(u64, u64, u64)> {
         self.runtime
             .storage_page_counts(std::time::Duration::from_secs(5))

@@ -19,17 +19,18 @@ pub(crate) type DashboardAutomationWriter = Arc<
         + 'static,
 >;
 
-pub(crate) fn execute_dashboard_automation_run_direct(
-    operation: DashboardAutomationWriteOperation,
-) -> DashboardAutomationWriteFuture {
-    operation()
+pub(crate) fn standalone_dashboard_automation_writer() -> DashboardAutomationWriter {
+    let writer = Arc::new(tokio::sync::Mutex::new(()));
+    Arc::new(move |operation| {
+        let writer = Arc::clone(&writer);
+        Box::pin(async move {
+            let _guard = writer.lock().await;
+            operation().await
+        })
+    })
 }
 
-pub(crate) fn direct_dashboard_automation_writer() -> DashboardAutomationWriter {
-    Arc::new(execute_dashboard_automation_run_direct)
-}
-
-async fn execute_dashboard_automation_run<Operation, OperationFuture>(
+pub(crate) async fn execute_dashboard_automation_write<Operation, OperationFuture>(
     state: &DashboardState,
     operation: Operation,
 ) -> Result<Value, String>
@@ -52,7 +53,7 @@ pub(crate) async fn memory_curator_run_payload_with_run_id(
     request: MemoryCuratorRunRequest,
     run_id: Option<String>,
 ) -> Result<Value, String> {
-    execute_dashboard_automation_run(state, move |state| async move {
+    execute_dashboard_automation_write(state, move |state| async move {
         Box::pin(memory_curator_run_payload_with_run_id_direct(
             &state, request, run_id,
         ))
@@ -290,7 +291,7 @@ pub(crate) async fn session_reflection_run_payload_with_run_id(
     request: SessionReflectionRunRequest,
     run_id: Option<String>,
 ) -> Result<Value, String> {
-    execute_dashboard_automation_run(state, move |state| async move {
+    execute_dashboard_automation_write(state, move |state| async move {
         Box::pin(session_reflection_run_payload_with_run_id_direct(
             &state, request, run_id,
         ))
@@ -403,7 +404,7 @@ pub(crate) async fn skill_writing_run_payload_with_run_id(
     request: SkillWritingRunRequest,
     run_id: Option<String>,
 ) -> Result<Value, String> {
-    execute_dashboard_automation_run(state, move |state| async move {
+    execute_dashboard_automation_write(state, move |state| async move {
         Box::pin(skill_writing_run_payload_with_run_id_direct(
             &state, request, run_id,
         ))
@@ -689,10 +690,10 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn direct_writer_executes_operation_once() {
+    async fn standalone_writer_executes_operation_once() {
         let calls = Arc::new(AtomicUsize::new(0));
         let observed = Arc::clone(&calls);
-        let writer = direct_dashboard_automation_writer();
+        let writer = standalone_dashboard_automation_writer();
 
         let result = writer(Box::new(move || {
             Box::pin(async move {
@@ -701,9 +702,35 @@ mod tests {
             })
         }))
         .await
-        .expect("direct dashboard automation write should succeed");
+        .expect("standalone dashboard automation write should succeed");
 
         assert_eq!(result, json!({ "status": "ok" }));
         assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn standalone_writer_serializes_operations() {
+        let writer = standalone_dashboard_automation_writer();
+        let active = Arc::new(AtomicUsize::new(0));
+        let maximum = Arc::new(AtomicUsize::new(0));
+        let operation = |active: Arc<AtomicUsize>, maximum: Arc<AtomicUsize>| {
+            Box::new(move || {
+                Box::pin(async move {
+                    let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    maximum.fetch_max(current, Ordering::SeqCst);
+                    tokio::task::yield_now().await;
+                    active.fetch_sub(1, Ordering::SeqCst);
+                    Ok(Value::Null)
+                }) as DashboardAutomationWriteFuture
+            }) as DashboardAutomationWriteOperation
+        };
+
+        let first = writer(operation(Arc::clone(&active), Arc::clone(&maximum)));
+        let second = writer(operation(active, Arc::clone(&maximum)));
+        let (first, second) = tokio::join!(first, second);
+
+        first.expect("first standalone write");
+        second.expect("second standalone write");
+        assert_eq!(maximum.load(Ordering::SeqCst), 1);
     }
 }

@@ -270,6 +270,7 @@ fn pr13_pull_request_and_ci_findings_keep_exact_commit_and_generation_identity()
         },
         state: CiFailureLocalizationStateV1::Complete,
         coverage: CiFailureCoverageV1::Complete,
+        source_degradation: None,
         failure_kind: CiFailureKindV1::InfrastructureFailure,
         failure_anchor: id("anchor.ci.failure"),
         branch: CiFailureBranchEvidenceV1 {

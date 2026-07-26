@@ -134,6 +134,25 @@ fn root_snapshot_validates_every_application_contribution_against_declared_descr
             "capability.application.primitive.source-lines",
             "capability.application.primitive.source-outline",
             "capability.application.primitive.storage-status",
+            "capability.application.retained.fact-feedback",
+            "capability.application.retained.fact-store",
+            "capability.application.retained.lcm-compress",
+            "capability.application.retained.lcm-describe",
+            "capability.application.retained.lcm-doctor",
+            "capability.application.retained.lcm-expand",
+            "capability.application.retained.lcm-expand-query",
+            "capability.application.retained.lcm-grep",
+            "capability.application.retained.lcm-load-session",
+            "capability.application.retained.lcm-preflight",
+            "capability.application.retained.lcm-session-boundary",
+            "capability.application.retained.lcm-status",
+            "capability.application.retained.memory-status",
+            "capability.application.retained.message-search",
+            "capability.application.retained.session-end",
+            "capability.application.retained.session-refresh",
+            "capability.application.retained.session-start",
+            "capability.application.retained.sessions-for",
+            "capability.application.retained.workflows",
             "capability.application.source-edit.ast-grep-rewrite",
             "capability.application.source-edit.insert-at",
             "capability.application.source-edit.insert-at-symbol",
@@ -154,7 +173,7 @@ fn root_snapshot_composes_every_explicit_profile_without_widening_eligibility() 
         (
             "profile.default",
             ProfileKind::Default,
-            ProfileBudget::new(192, 70_000_000, 18_000).unwrap(),
+            ProfileBudget::new(256, 80_000_000, 18_000).unwrap(),
         ),
         (
             "profile.compact",
@@ -281,8 +300,17 @@ fn http_route_documents_follow_the_catalog_and_exclude_git_mutation_facades() {
         &BTreeSet::new(),
         1,
     );
+    let visible_http_bindings = snapshot.visible_bindings(
+        &profile,
+        BindingSurface::Http,
+        1,
+        &BTreeSet::new(),
+        &authorized,
+        &scope,
+    );
 
     assert!(!documents.is_empty());
+    assert_eq!(documents.len(), visible_http_bindings.len());
     assert!(documents.iter().all(|document| {
         HttpApplicationOperation::from_catalog_name(&document.operation)
             .is_some_and(|operation| operation.route_path() == document.path)

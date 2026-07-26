@@ -23,7 +23,7 @@ pub use definitions::{
     explore_call_budget, format_capable_tool_names,
     get_catalog_filtered_tool_definitions_with_budget, get_tool_definitions,
     get_tool_definitions_with_budget, get_tool_definitions_with_warming_budget,
-    project_catalog_discovery_scope, tool_defaults_to_markdown,
+    internal_daemon_tool_definition, project_catalog_discovery_scope, tool_defaults_to_markdown,
 };
 pub(crate) use dispatch_policy::tool_dispatches_registered_project_reader;
 pub(crate) use handlers::handle_user_lcm_tool_with_retained_authority;

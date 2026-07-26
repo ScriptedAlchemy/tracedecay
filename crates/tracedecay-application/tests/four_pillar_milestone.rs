@@ -132,6 +132,7 @@ fn four_pillars_share_one_cycle_result_and_canonical_anchors() {
         },
         state: CiFailureLocalizationStateV1::Complete,
         coverage: CiFailureCoverageV1::Complete,
+        source_degradation: None,
         failure_kind: CiFailureKindV1::TestFailure,
         failure_anchor: ci_anchor.clone(),
         branch: CiFailureBranchEvidenceV1 {
@@ -201,6 +202,9 @@ fn four_pillars_share_one_cycle_result_and_canonical_anchors() {
             body_digest: digest(SHA_B),
             body_anchor: github_anchor.clone(),
             safe_url_anchor: Some(anchor("anchor.pr13.github-url")),
+            safe_url: Some(
+                "https://github.com/ScriptedAlchemy/tracedecay/pull/13#discussion_r1".to_owned(),
+            ),
             lifecycle: GitHubReviewLifecycleV1::Current,
             provider_outcome: GitHubReviewIngressProviderOutcomeV1::Complete,
             remap: GitHubReviewCurrentBranchRemapV1 {
@@ -214,6 +218,10 @@ fn four_pillars_share_one_cycle_result_and_canonical_anchors() {
         fetched_at: UtcMicros(2),
     };
     github.validate().unwrap();
+    let mut unsafe_github = github.clone();
+    unsafe_github.items[0].safe_url =
+        Some("https://user:secret@github.com/ScriptedAlchemy/tracedecay/pull/13".to_owned());
+    assert!(unsafe_github.validate().is_err());
     let github_request = GitHubReviewReadRequestV1 {
         operation: github.operation,
         scope: scope.clone(),
@@ -328,6 +336,13 @@ fn four_pillars_share_one_cycle_result_and_canonical_anchors() {
             .map(|projection| projection.producer),
         Some(FeedbackDiagnosticProducerV1::GitHubReview)
     );
+    assert_eq!(
+        github_finding
+            .diagnostic_projection
+            .as_ref()
+            .and_then(|projection| projection.code_description_uri.as_deref()),
+        Some("https://github.com/ScriptedAlchemy/tracedecay/pull/13#discussion_r1")
+    );
     let ci_finding = ci
         .advisory_findings(validity)
         .unwrap()
@@ -383,9 +398,10 @@ fn four_pillars_share_one_cycle_result_and_canonical_anchors() {
         .map(|binding| binding.operation().as_str())
         .collect();
     assert!(operations.contains("feedback_diagnostics"));
-    assert!(operations.contains("github_review_ingest"));
-    assert!(operations.contains("ci_failure_localize"));
-    assert!(operations.contains("feedback_proximity"));
+    assert!(operations.contains("feedback_advisory_cycle"));
+    assert!(!operations.contains("github_review_ingest"));
+    assert!(!operations.contains("ci_failure_localize"));
+    assert!(!operations.contains("feedback_proximity"));
     for capability in catalog.capabilities() {
         assert!(capability.availability().is_callable());
     }

@@ -57,6 +57,8 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) dashboard_doctor_report_reader: Option<crate::dashboard::DoctorReportReader>,
     pub(crate) dashboard_doctor_remediation_dispatcher:
         Option<crate::dashboard::DoctorRemediationDispatcherV1>,
+    pub(crate) dashboard_code_index_freshness_reader:
+        Option<crate::dashboard::code_index_freshness_api::CodeIndexFreshnessReader>,
     pub(crate) diagnostics_lsp:
         Option<Arc<tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>>>,
     pub(crate) hook_branch_writer: HookBranchWriter,
@@ -64,7 +66,6 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) code_index_hook_sink: Option<super::CodeIndexHookSink>,
     pub(crate) code_index_publication_identity: Option<super::CodeIndexPublicationIdentityResolver>,
     pub(crate) code_index_search_executor: Option<super::CodeIndexSearchExecutor>,
-    pub(crate) git_read_executor: Option<super::GitReadExecutor>,
     pub(crate) code_index_search_authority: Option<super::CodeIndexSearchAuthorityV1>,
     pub(crate) retained_project_graph_resolver: Option<super::RetainedProjectGraphResolver>,
     #[cfg(any(test, feature = "test-transport"))]
@@ -135,16 +136,16 @@ impl McpServerConstructionContext {
             allow_default_registry_fallback: true,
             automation_scheduler_reconciler: None,
             database_owner_reconciler: None,
-            dashboard_automation_writer: crate::dashboard::direct_dashboard_automation_writer(),
+            dashboard_automation_writer: crate::dashboard::standalone_dashboard_automation_writer(),
             dashboard_doctor_report_reader: None,
             dashboard_doctor_remediation_dispatcher: None,
+            dashboard_code_index_freshness_reader: None,
             diagnostics_lsp: None,
             hook_branch_writer: direct_hook_branch_writer(),
             background_refresh_writer: direct_background_refresh_writer(),
             code_index_hook_sink: None,
             code_index_publication_identity: None,
             code_index_search_executor: None,
-            git_read_executor: None,
             code_index_search_authority: None,
             retained_project_graph_resolver: None,
             #[cfg(any(test, feature = "test-transport"))]
@@ -209,13 +210,13 @@ impl McpServerConstructionContext {
             dashboard_automation_writer: writers.dashboard_automation,
             dashboard_doctor_report_reader: None,
             dashboard_doctor_remediation_dispatcher: None,
+            dashboard_code_index_freshness_reader: None,
             diagnostics_lsp: None,
             hook_branch_writer: writers.hook_branch,
             background_refresh_writer: writers.background_refresh,
             code_index_hook_sink: None,
             code_index_publication_identity: None,
             code_index_search_executor: None,
-            git_read_executor: None,
             code_index_search_authority: None,
             retained_project_graph_resolver: None,
             #[cfg(any(test, feature = "test-transport"))]
@@ -245,11 +246,6 @@ impl McpServerConstructionContext {
         executor: super::CodeIndexSearchExecutor,
     ) -> Self {
         self.code_index_search_executor = Some(executor);
-        self
-    }
-
-    pub(crate) fn with_git_read_executor(mut self, executor: super::GitReadExecutor) -> Self {
-        self.git_read_executor = Some(executor);
         self
     }
 
@@ -291,6 +287,14 @@ impl McpServerConstructionContext {
         dispatcher: crate::dashboard::DoctorRemediationDispatcherV1,
     ) -> Self {
         self.dashboard_doctor_remediation_dispatcher = Some(dispatcher);
+        self
+    }
+
+    pub(crate) fn with_dashboard_code_index_freshness_reader(
+        mut self,
+        reader: crate::dashboard::code_index_freshness_api::CodeIndexFreshnessReader,
+    ) -> Self {
+        self.dashboard_code_index_freshness_reader = Some(reader);
         self
     }
 

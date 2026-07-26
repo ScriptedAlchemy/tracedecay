@@ -386,7 +386,7 @@ impl EphemeralRerankViewSourceV1 for GenerationBoundCodeRerankViewsV1<'_> {
     }
 }
 
-fn resolve_generation_chunk<'a>(
+pub(crate) fn resolve_generation_chunk<'a>(
     generation: &'a CodeIndexPublishedGenerationV1,
     anchor: &str,
 ) -> Option<&'a CodeSearchChunkV1> {

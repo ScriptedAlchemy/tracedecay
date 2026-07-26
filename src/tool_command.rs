@@ -43,12 +43,13 @@ use tokio::time::{Instant, timeout_at};
 
 use tracedecay::application_surface::{
     ApplicationSurfaceInvocationResult, ApplicationSurfaceOperation,
-    observe_surface_argument_rejection, parse_application_surface_request,
-    resolve_catalog_tool_binding,
+    normalize_application_tool_args, observe_surface_argument_rejection,
+    parse_application_surface_request, resolve_catalog_tool_binding,
 };
 use tracedecay::daemon::{DaemonHandshake, call_default_tool_within};
 use tracedecay::daemon_client::{DaemonInvocationClient, RequestedOutputFormat};
 use tracedecay::errors::{Result, TraceDecayError};
+use tracedecay::mcp::tools::internal_daemon_tool_definition;
 use tracedecay::mcp::tools::{
     LegacyToolCompatibilityOwner, RESERVED_FLAGS_FOOTER, ToolDefinition, get_tool_definitions,
     render_tool_cli_help, short_tool_name,
@@ -172,7 +173,12 @@ pub(crate) async fn run(
     };
 
     let canonical = canonical_tool_name(&raw_name);
-    let Some(def) = defs.iter().find(|d| d.name == canonical) else {
+    let internal_def = internal_daemon_tool_definition(&canonical);
+    let Some(def) = defs
+        .iter()
+        .find(|definition| definition.name == canonical)
+        .or(internal_def.as_ref())
+    else {
         let suggestion = nearest_tool_name(&canonical, &defs)
             .map(|name| format!(" Did you mean '{name}'?"))
             .unwrap_or_default();
@@ -209,6 +215,11 @@ pub(crate) async fn run(
         .checked_add(tool_command_deadline()?)
         .ok_or_else(tool_deadline_range_error)?;
     if let Some(operation) = ApplicationSurfaceOperation::from_tool_name(&def.name) {
+        let tool_args = normalize_application_tool_args(&def.name, tool_args).map_err(|error| {
+            TraceDecayError::Config {
+                message: error.to_string(),
+            }
+        })?;
         return dispatch_cli_application_surface(
             operation,
             tool_args,

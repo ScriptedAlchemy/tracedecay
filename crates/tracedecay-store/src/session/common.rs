@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracedecay_domain::{
     DataVersionDigest, SessionContractError, SessionId, SessionProjectionGenerationV1,
-    SessionRefreshOperationIdV1, SessionSummaryIdV1, SignedCursorKeyRefV1, UtcMicros,
+    SessionRefreshOperationIdV1, SignedCursorKeyRefV1, UtcMicros,
 };
 
 /// Features a session-temporal adapter can support without opening storage.
@@ -21,7 +21,6 @@ pub enum SessionTemporalCapabilityV1 {
     RefreshJoin,
     RefreshProgressPersistence,
     RefreshCancellation,
-    MigrationReceipts,
 }
 
 /// Declares the session-temporal capabilities enforced by store ports.
@@ -272,8 +271,6 @@ pub enum SessionStoreError {
     IdempotencyConflict { context: &'static str },
     #[error("invalid session temporal state transition in {context}")]
     InvalidStateTransition { context: &'static str },
-    #[error("immutable summary {summary_id:?} conflicts with an existing publication")]
-    ImmutableSummaryConflict { summary_id: SessionSummaryIdV1 },
     #[error("session temporal capability {capability:?} is unsupported")]
     UnsupportedCapability {
         capability: SessionTemporalCapabilityV1,
@@ -373,18 +370,6 @@ pub type SessionStoreResult<T> = Result<T, SessionStoreError>;
 ///     persist_progress(permit);
 /// }
 /// ```
-///
-/// ```compile_fail,E0308
-/// use tracedecay_store::{
-///     SessionRefreshCancelPermit, SessionTemporalMigrationBatchApplyPermit,
-/// };
-///
-/// fn apply_migration(_permit: SessionTemporalMigrationBatchApplyPermit) {}
-///
-/// fn cross_use_capability_permit(permit: SessionRefreshCancelPermit) {
-///     apply_migration(permit);
-/// }
-/// ```
 #[derive(Debug)]
 pub struct SessionTemporalOperationPermit<Operation> {
     _operation: PhantomData<fn() -> Operation>,
@@ -451,11 +436,6 @@ declare_session_temporal_operation!(
     SessionTemporalCapabilityV1::GenerationRebuild
 );
 declare_session_temporal_operation!(
-    SessionSummaryPublishOrReplayOperation,
-    SessionSummaryPublishOrReplayPermit,
-    SessionTemporalCapabilityV1::ImmutableSummaryPublication
-);
-declare_session_temporal_operation!(
     SessionRefreshBeginOrJoinOperation,
     SessionRefreshBeginOrJoinPermit,
     SessionTemporalCapabilityV1::RefreshJoin
@@ -490,17 +470,6 @@ declare_session_temporal_operation!(
     SessionRefreshReceiptReadPermit,
     SessionTemporalCapabilityV1::RefreshProgressPersistence
 );
-declare_session_temporal_operation!(
-    SessionTemporalMigrationBatchApplyOperation,
-    SessionTemporalMigrationBatchApplyPermit,
-    SessionTemporalCapabilityV1::MigrationReceipts
-);
-declare_session_temporal_operation!(
-    SessionTemporalMigrationReceiptReadOperation,
-    SessionTemporalMigrationReceiptReadPermit,
-    SessionTemporalCapabilityV1::MigrationReceipts
-);
-
 pub(super) fn require_snapshot_session(
     session_id: &SessionId,
     snapshot: &SessionTemporalSnapshotV1,

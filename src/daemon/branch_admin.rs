@@ -264,9 +264,18 @@ impl Drop for RetirementReaperRegistrationBarrier {
 #[derive(Clone)]
 pub(super) struct StoreAdministration {
     profile_identity: Option<crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1>,
-    session_runtime_registry: Arc<
-        tokio::sync::OnceCell<
-            Arc<crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1>,
+    session_runtime_registries: Arc<
+        tokio::sync::Mutex<
+            HashMap<
+                PathBuf,
+                Arc<
+                    tokio::sync::OnceCell<
+                        Arc<
+                            crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1,
+                        >,
+                    >,
+                >,
+            >,
         >,
     >,
     gate: Arc<tokio::sync::Mutex<()>>,
@@ -296,7 +305,7 @@ impl Default for StoreAdministration {
     fn default() -> Self {
         Self {
             profile_identity: None,
-            session_runtime_registry: Arc::new(tokio::sync::OnceCell::new()),
+            session_runtime_registries: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             gate: Arc::new(tokio::sync::Mutex::new(())),
             project_servers: Arc::new(tokio::sync::Mutex::new(DatabaseOwnerRegistry::default())),
             host_admission_brokers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
@@ -341,10 +350,19 @@ impl StoreAdministration {
 
     async fn session_runtime_registry(
         &self,
-    ) -> Result<&Arc<crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1>>
+    ) -> Result<Arc<crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1>>
     {
         let identity = self.profile_identity()?.clone();
-        self.session_runtime_registry
+        let profile_root = authority::canonical_identity_path(identity.profile_root())?;
+        let registry = {
+            let mut registries = self.session_runtime_registries.lock().await;
+            Arc::clone(
+                registries
+                    .entry(profile_root)
+                    .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new())),
+            )
+        };
+        registry
             .get_or_try_init(|| async move {
                 crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
                     identity,
@@ -353,20 +371,21 @@ impl StoreAdministration {
                 .map(Arc::new)
             })
             .await
+            .map(Arc::clone)
     }
 
     pub(super) async fn retained_runtime_registry(
         &self,
     ) -> Result<Arc<crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1>>
     {
-        self.session_runtime_registry().await.map(Arc::clone)
+        self.session_runtime_registry().await
     }
 
     pub(super) async fn registered_runtime_registry(
         &self,
     ) -> Result<Arc<crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1>>
     {
-        Ok(Arc::clone(self.session_runtime_registry().await?))
+        self.session_runtime_registry().await
     }
 
     pub(super) async fn registered_profile_session_database(
@@ -390,16 +409,37 @@ impl StoreAdministration {
     pub(super) async fn mounted_registered_session_databases(
         &self,
     ) -> Vec<Arc<crate::global_db::RegisteredGlobalDb>> {
-        let Some(registry) = self.session_runtime_registry.get() else {
+        let Ok(profile_root) = self
+            .profile_identity()
+            .and_then(|identity| authority::canonical_identity_path(identity.profile_root()))
+        else {
+            return Vec::new();
+        };
+        let registry = {
+            let registries = self.session_runtime_registries.lock().await;
+            registries.get(&profile_root).cloned()
+        };
+        let Some(registry) = registry.and_then(|registry| registry.get().cloned()) else {
             return Vec::new();
         };
         registry.mounted_session_databases().await
     }
 
     pub(super) async fn mounted_project_graphs(&self) -> Vec<Arc<crate::tracedecay::TraceDecay>> {
+        let Ok(profile_root) = self
+            .profile_identity()
+            .and_then(|identity| authority::canonical_identity_path(identity.profile_root()))
+        else {
+            return Vec::new();
+        };
         let servers = {
             let servers = self.project_servers.lock().await;
-            servers.values().cloned().collect::<Vec<_>>()
+            servers
+                .servers
+                .iter()
+                .filter(|(key, _)| key.owner.profile_root == profile_root)
+                .map(|(_, entry)| Arc::clone(&entry.server))
+                .collect::<Vec<_>>()
         };
         let mut graphs = Vec::with_capacity(servers.len());
         for server in servers {

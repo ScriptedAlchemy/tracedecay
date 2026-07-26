@@ -11,7 +11,9 @@ mod sanitize;
 mod structural_id;
 
 pub use detect::{
-    DetectionConfidenceV1, PrivacyDetectorV1, SanitizationActionV1, SanitizationFindingV1,
+    DetectionConfidenceV1, PrivacyDetectorV1, SanitizationActionV1, SanitizationDetectorOriginV1,
+    SanitizationDetectorRevisionV1, SanitizationEvidenceAnchorV1, SanitizationFindingV1,
+    SanitizationRemediationClassV1, SanitizationScanBoundaryV1, SanitizationScannedCoverageV1,
 };
 pub(crate) use detect::{
     MemoryFactSanitizationV1, sanitize_memory_fact_payload, sanitize_provider_metadata_text,

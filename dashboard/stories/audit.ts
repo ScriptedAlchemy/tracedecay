@@ -304,20 +304,37 @@ async function main(): Promise<void> {
   console.log(
     `[audit] axe violations=${axeTotals.violations} byImpact=${JSON.stringify(axeTotals.byImpact)}`,
   );
+  // Hoisted out of the `DIFF_MODE` block so the gate below can consult it.
+  // Outside diff mode no shot carries a `diff`, so this is empty and the gate
+  // is unaffected.
+  const diffs = surfaces.flatMap((s) => s.shots).filter((sh) => sh.diff?.status === 'diff');
   if (DIFF_MODE) {
-    const diffs = surfaces.flatMap((s) => s.shots).filter((sh) => sh.diff?.status === 'diff');
     const noBaseline = surfaces
       .flatMap((s) => s.shots)
       .filter((sh) => sh.diff?.status === 'no-baseline');
     console.log(
       `[audit] diff: changed=${diffs.length} no-baseline=${noBaseline.length} (baselines in ${path.relative(ROOT, BASELINE_DIR)}/)`,
     );
+    if (noBaseline.length > 0) {
+      // Not a failure: a surface added since the baselines were written has
+      // nothing to drift from. It is still an uncompared shot, so it is said
+      // out loud rather than folded into the changed count.
+      console.warn(
+        `[audit] ${noBaseline.length} shot(s) had no baseline and were not compared`,
+      );
+    }
   }
 
   // THE GATE. This used to fail only on shots that could not be rendered, so a
   // run could report accessibility violations in its own summary and still exit
   // 0 — which is what every CI runner and every reviewer reads. Recording a
   // violation is not the same as failing on one.
+  //
+  // Pixel drift was left behind by that same fix: every baseline really is
+  // compared with pixelmatch, the changed count really is printed, and then the
+  // exit code ignored it — so a visual regression was measured, reported, and
+  // waved through. It counts now, which is what `11a-dashboard-design.md` has
+  // been claiming all along.
   const failed = surfaces.flatMap((s) => s.shots).filter((sh) => sh.error);
   if (failed.length > 0) {
     console.error(`[audit] ${failed.length} shot(s) failed to render`);
@@ -325,7 +342,15 @@ async function main(): Promise<void> {
   if (pageErrors.length > 0) {
     console.error(`[audit] ${pageErrors.length} page error(s)`);
   }
-  if (failed.length > 0 || pageErrors.length > 0 || axeTotals.violations > 0) {
+  if (diffs.length > 0) {
+    console.error(`[audit] ${diffs.length} shot(s) drifted from their baseline`);
+  }
+  if (
+    failed.length > 0 ||
+    pageErrors.length > 0 ||
+    axeTotals.violations > 0 ||
+    diffs.length > 0
+  ) {
     process.exitCode = 1;
   }
 }

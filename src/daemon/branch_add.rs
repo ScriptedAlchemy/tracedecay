@@ -103,14 +103,19 @@ pub(super) async fn branch_add_response(
             .canonicalize()
             .unwrap_or_else(|_| project_root.to_path_buf());
         let active_branch = crate::branch::current_branch(&canonical_root);
-        let cg = administration
-            .mounted_project_graphs()
-            .await
-            .into_iter()
+        let mounted = administration.mounted_project_graphs().await;
+        let cg = mounted
+            .iter()
             .find(|graph| {
                 graph.project_root() == canonical_root
                     && graph.active_branch() == active_branch.as_deref()
             })
+            .or_else(|| {
+                mounted
+                    .iter()
+                    .find(|graph| graph.project_root() == canonical_root)
+            })
+            .cloned()
             .ok_or_else(|| TraceDecayError::Config {
                 message: "retained branch-add graph is unavailable".to_string(),
             })?;

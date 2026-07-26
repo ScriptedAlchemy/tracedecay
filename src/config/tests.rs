@@ -2026,7 +2026,7 @@ mod runtime_configuration_cutover {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod retention_config_tests {
-    use crate::config::{RetentionConfig, SyncConfig};
+    use crate::config::{CompactionThresholdConfig, RetentionConfig, SyncConfig};
 
     #[test]
     fn default_retention_runs_only_safe_bounded_maintenance() {
@@ -2049,6 +2049,7 @@ mod retention_config_tests {
         assert!((compaction.free_page_ratio_threshold - 0.25).abs() < f64::EPSILON);
         assert_eq!(compaction.minimum_reclaimable_bytes, 64 * 1024 * 1024);
         assert_eq!(compaction.max_pages_per_tick, 1024);
+        assert_eq!(compaction, CompactionThresholdConfig::default());
         assert!(retention.store_soft_budgets_bytes.is_empty());
         // A default SyncConfig carries the same bounded retention tree.
         assert_eq!(SyncConfig::default().retention, retention);
