@@ -239,7 +239,7 @@ pub(crate) async fn run(
                 message: error.to_string(),
             }
         })?;
-    if !LegacyToolCompatibilityOwner::admits(&def.name) {
+    if internal_def.is_none() && !LegacyToolCompatibilityOwner::admits(&def.name) {
         return Err(TraceDecayError::Config {
             message: format!(
                 "{} does not own {}: {}",
@@ -268,8 +268,9 @@ async fn dispatch_cli_application_surface(
 ) -> Result<()> {
     let sequence = NEXT_APPLICATION_SURFACE_REQUEST.fetch_add(1, Ordering::Relaxed);
     let request_id = RequestId::new(format!(
-        "request.cli.{}.{}",
+        "request.cli.{}.{}.{}",
         tracedecay::tracedecay::current_timestamp(),
+        std::process::id(),
         sequence
     ))
     .map_err(|_| TraceDecayError::Config {
