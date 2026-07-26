@@ -32,6 +32,19 @@ impl AdmittedRoot {
         &self.uri
     }
 
+    pub(crate) fn matches_root_uri(&self, candidate: &str) -> bool {
+        match (
+            strict_file_uri_path(&self.uri),
+            strict_file_uri_path(candidate),
+        ) {
+            (Some((admitted_url, admitted_path)), Some((candidate_url, candidate_path))) => {
+                admitted_url.host_str() == candidate_url.host_str()
+                    && admitted_path == candidate_path
+            }
+            _ => false,
+        }
+    }
+
     /// Presentation-level containment guard. Root admission itself remains a
     /// daemon authorization decision; this rejects non-file and ambiguous URI
     /// forms, then compares decoded filesystem path components rather than raw
@@ -1649,6 +1662,14 @@ mod tests {
                 "unexpectedly admitted {document_uri}"
             );
         }
+    }
+
+    #[test]
+    fn admitted_root_matches_equivalent_directory_uri() {
+        let root = AdmittedRoot::new("file:///root/project");
+
+        assert!(root.matches_root_uri("file:///root/project/"));
+        assert!(!root.matches_root_uri("file:///root/project-other/"));
     }
 
     #[test]

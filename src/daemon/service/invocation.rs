@@ -6353,7 +6353,13 @@ impl DaemonInvocationService {
         project_root: Option<&Path>,
     ) -> Option<DaemonLspInvocationOwner> {
         let project_root = project_root?;
-        self.lsp_owners.lock().await.get(project_root).cloned()
+        let canonical_root = project_root.canonicalize().ok();
+        let owners = self.lsp_owners.lock().await;
+        owners.get(project_root).cloned().or_else(|| {
+            canonical_root
+                .as_deref()
+                .and_then(|root| owners.get(root).cloned())
+        })
     }
 
     async fn execute_semantic_evaluation(
