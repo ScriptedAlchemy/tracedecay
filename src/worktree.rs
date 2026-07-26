@@ -19,8 +19,6 @@
 
 use std::path::{Path, PathBuf};
 
-use sha2::{Digest, Sha256};
-
 /// A mismatch between the caller's git working tree and the resolved
 /// tracedecay index root.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,6 +78,31 @@ pub fn git_common_dir(dir: &Path) -> Option<PathBuf> {
     Some(resolved.canonicalize().unwrap_or(resolved))
 }
 
+/// The checkout that owns `dir`'s **repository** identity, or `None` when
+/// `dir` already owns it.
+///
+/// Every linked worktree of a repository shares one git common directory and
+/// is therefore one project. Attachment is irrelevant here: whether a worktree
+/// has a branch checked out decides which *graph scope* serves it, not which
+/// repository it belongs to. Keying identity off the worktree path instead
+/// mints a second store for a repository that already has one.
+///
+/// Returns `None` — meaning "this path is its own identity" — when `dir` is
+/// the primary checkout, is not a worktree root at all (a package directory
+/// inside a monorepo is its own project), is outside git, or has a repository
+/// shape whose primary checkout cannot be derived safely.
+pub fn repository_identity_root(dir: &Path) -> Option<PathBuf> {
+    let worktree_root = git_worktree_root(dir)?;
+    // Only a worktree ROOT inherits repository identity. Without this check a
+    // subdirectory indexed as its own project would be absorbed into the
+    // enclosing repository's store.
+    if worktree_root != realpath(dir)? {
+        return None;
+    }
+    let common_dir = git_common_dir(dir)?;
+    crate::project_registry::primary_checkout_root(&worktree_root, Some(&common_dir))
+}
+
 pub fn is_detached_linked_worktree(dir: &Path) -> bool {
     let Ok(repo) = gix::discover(dir) else {
         return false;
@@ -93,36 +116,6 @@ pub fn is_detached_linked_worktree(dir: &Path) -> bool {
         .canonicalize()
         .unwrap_or_else(|_| repo.common_dir().to_path_buf());
     git_dir != common_dir && crate::branch::current_branch(dir).is_none()
-}
-
-/// Stable internal graph scope for a detached linked worktree.
-///
-/// Detached worktrees share repository identity and storage with their primary
-/// checkout, but cannot use the repository's default graph DB: indexing their
-/// branchless files there would overwrite the primary checkout's graph. Git's
-/// per-worktree metadata directory is unique within the common directory, so a
-/// digest of that relative path provides an isolated branch-like graph scope
-/// without minting another project or store.
-pub fn detached_worktree_graph_scope(dir: &Path) -> Option<String> {
-    if !is_detached_linked_worktree(dir) {
-        return None;
-    }
-    let repo = gix::discover(dir).ok()?;
-    let git_dir = repo
-        .git_dir()
-        .canonicalize()
-        .unwrap_or_else(|_| repo.git_dir().to_path_buf());
-    let common_dir = repo
-        .common_dir()
-        .canonicalize()
-        .unwrap_or_else(|_| repo.common_dir().to_path_buf());
-    let identity = git_dir.strip_prefix(&common_dir).unwrap_or(&git_dir);
-    let mut hasher = Sha256::new();
-    hasher.update(crate::os_str_bytes::native_os_str_bytes(
-        identity.as_os_str(),
-    ));
-    let digest = hex::encode(hasher.finalize());
-    Some(format!("detached-worktree/{}", &digest[..16]))
 }
 
 /// Cheap pre-flight for the `git` subprocess fallbacks in this crate: `git`
