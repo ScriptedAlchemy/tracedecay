@@ -269,7 +269,6 @@ impl McpServerConstructionContext {
         self
     }
 
-    #[cfg(unix)]
     pub(crate) fn with_automation_scheduler_reconciler(
         mut self,
         reconciler: crate::dashboard::AutomationSchedulerReconciler,
