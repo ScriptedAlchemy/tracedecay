@@ -42,8 +42,10 @@ pub use context::{
 pub use diagnostics::{
     DiagnosticMerge, DiagnosticSeverity, DiagnosticSource, DocumentDiagnosticReport,
     GatewayDiagnostic, GatewayDiagnosticCoverage, GatewayDiagnosticData, GatewayDiagnosticIdentity,
-    GatewayDiagnosticLifecycle, GatewayDiagnosticProviderState, LspPosition, LspRange,
-    MAX_DIAGNOSTIC_MESSAGE_BYTES, MAX_DOCUMENT_DIAGNOSTICS, PositionError,
+    GatewayDiagnosticLifecycle, GatewayDiagnosticProviderState,
+    GatewayDiagnosticRelatedInformation, LspPosition, LspRange, MAX_DIAGNOSTIC_MESSAGE_BYTES,
+    MAX_DIAGNOSTIC_RELATED_INFORMATION, MAX_DIAGNOSTIC_RELATED_MESSAGE_BYTES,
+    MAX_DIAGNOSTIC_URI_BYTES, MAX_DOCUMENT_DIAGNOSTICS, PositionError,
     TRACEDECAY_DIAGNOSTIC_DATA_REVISION, byte_offset_to_utf16_position, merge_diagnostics,
     utf16_position_to_byte_offset,
 };

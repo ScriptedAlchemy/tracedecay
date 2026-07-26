@@ -327,8 +327,13 @@ impl HookAdmissionLedgerV1 {
         if !self.completed_work.insert(identity) {
             return Ok(false);
         }
-        self.write_work_completions()?;
-        Ok(true)
+        match self.write_work_completions() {
+            Ok(()) => Ok(true),
+            Err(error) => {
+                self.completed_work.remove(&identity);
+                Err(error)
+            }
+        }
     }
 
     /// Drop entries older than the age bound. Returns how many were removed.
@@ -703,6 +708,32 @@ mod tests {
             .unwrap();
         assert!(duplicate.work_completed);
         assert!(!completed.mark_work_completed(&admitted).unwrap());
+    }
+
+    #[test]
+    fn failed_completion_persistence_keeps_work_pending_in_memory() {
+        let root = TestDir::new("ledger-work-completion-failure");
+        let admitted = envelope(9, 5);
+        let mut ledger = open(root.path(), UtcMicros(1));
+        ledger.admit_with_receipt(&admitted, UtcMicros(2)).unwrap();
+
+        let completions = completions_path(root.path());
+        fs::remove_file(&completions).unwrap();
+        fs::create_dir(&completions).unwrap();
+        assert_eq!(
+            ledger.mark_work_completed(&admitted),
+            Err(HookAdmissionLedgerError::Io)
+        );
+        assert!(
+            !ledger
+                .admit_with_receipt(&admitted, UtcMicros(3))
+                .unwrap()
+                .work_completed,
+            "failed completion fsync must not suppress in-process redrive"
+        );
+
+        fs::remove_dir(&completions).unwrap();
+        assert!(ledger.mark_work_completed(&admitted).unwrap());
     }
 
     #[test]
