@@ -12,7 +12,9 @@ mod structural_id;
 
 pub use detect::{
     CODE_SOURCE_SANITIZER_VERSION_V1, DetectionConfidenceV1, PrivacyDetectorV1,
-    SanitizationActionV1, SanitizationFindingV1,
+    SanitizationActionV1, SanitizationDetectorOriginV1,
+    SanitizationDetectorRevisionV1, SanitizationEvidenceAnchorV1, SanitizationFindingV1,
+    SanitizationRemediationClassV1, SanitizationScanBoundaryV1, SanitizationScannedCoverageV1,
 };
 pub(crate) use detect::{
     CodeSourceSanitizationV1, MemoryFactSanitizationV1, sanitize_code_source_bytes,

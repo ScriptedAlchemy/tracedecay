@@ -3,43 +3,110 @@
 //! Split out of the former single-file `writers` module as a pure mechanical
 //! move; contents are unchanged.
 
+use serde::Serialize;
 use tracedecay_domain::{
-    FactEventId, FactId, FactLineageEventKindV1, FactLineageEventV1, FactOwnerV1,
+    ActorId, FactEventId, FactId, FactLineageEventKindV1, FactLineageEventV1, FactOwnerV1,
     PayloadAccessState, SourceStoreId, UtcMicros,
 };
 
-#[cfg(test)]
-use crate::db::engine;
 use crate::db::engine::params;
 use crate::errors::Result;
 use crate::tracedecay::current_timestamp;
 
+use self::legacy_reclamation::LegacyReclamationAuthorization;
 use super::super::types::OwnerKey;
 use super::super::{
     MemoryV2Executor, OPERATION, canonical_replay, current_fact_state, db_error, db_message,
-    load_legacy_entity_ids, optional_i64, optional_string, row_exists,
+    load_legacy_entity_ids, optional_i64, optional_string, owner_key, row_exists, validate_scope,
+    validate_v1_compatibility_source,
 };
 #[cfg(test)]
-use super::super::{
-    begin, finish_transaction, owner_key, validate_scope, validate_v1_compatibility_source,
-};
+use super::super::{begin, finish_transaction};
 use super::lineage::insert_event;
+
+/// Why a fact's payload is being purged. The variant, not an incidental
+/// `Option`, decides whether the legacy compatibility row may be reclaimed.
+#[derive(Clone, Copy)]
+pub(in crate::db::memory_v2) enum PurgeIntent<'a> {
+    /// Backfill replaying a historical legacy tombstone. Backfill has not yet
+    /// proven the payload was copied, so the legacy row is always retained.
+    ReplayLegacyTombstone,
+    /// Live purge that also reclaims the legacy compatibility row. Carries the
+    /// lineage CAS expectation and requires a verified completed backfill.
+    ReclaimLegacyPayload {
+        expected_last_event_id: &'a FactEventId,
+        actor: Option<&'a ActorId>,
+    },
+}
+
+/// Type-level authority to destroy legacy compatibility payloads.
+///
+/// The struct's only field is private to this module, so
+/// [`LegacyReclamationAuthorization::authorize`] is the sole way to obtain a
+/// value, and it fails unless the backfill for that exact owner/store reached
+/// `cutover_complete`. Legacy reclamation takes the token by reference, so a
+/// purge path that skips the cutover gate does not compile.
+mod legacy_reclamation {
+    use tracedecay_domain::SourceStoreId;
+
+    use super::{MemoryV2Executor, OwnerKey, Result};
+
+    pub(super) struct LegacyReclamationAuthorization {
+        _verified: (),
+    }
+
+    impl LegacyReclamationAuthorization {
+        pub(super) async fn authorize(
+            conn: &impl MemoryV2Executor,
+            owner_key: &OwnerKey,
+            source_store_id: &SourceStoreId,
+        ) -> Result<Self> {
+            super::super::super::cutover::verify_memory_v2_cutover_complete(
+                conn,
+                owner_key,
+                source_store_id,
+            )
+            .await?;
+            Ok(Self { _verified: () })
+        }
+    }
+}
+
+/// Observable record of one live legacy-payload purge, so a caller can report
+/// exactly what a destructive reclamation did rather than a bare boolean.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct MemoryV2LegacyPurgeReceipt {
+    owner: FactOwnerV1,
+    source_store_id: SourceStoreId,
+    fact_id: FactId,
+    expected_last_event_id: FactEventId,
+    occurred_at: UtcMicros,
+    payload_purged: bool,
+}
+
+impl MemoryV2LegacyPurgeReceipt {
+    pub(crate) fn payload_purged(&self) -> bool {
+        self.payload_purged
+    }
+}
 
 /// Purges payload, FTS, and vector material for one exact owner/store/fact.
 /// Immutable identity, assertion headers, mapping, and typed lineage remain.
 ///
-/// Standalone transaction wrapper retained for owner-bound purge tests; the
-/// production purge path drives `purge_memory_v2_fact_inner` inside a
-/// caller-owned authority transaction.
+/// This is the single live purge chokepoint: it opens the authority
+/// transaction, drives `purge_memory_v2_fact_inner` with a CAS expectation, and
+/// therefore always mints the `cutover_complete` authorization before any
+/// legacy row can be reclaimed. Production and tests share this exact code so
+/// the gate cannot be proven only in a test build.
 #[cfg(test)]
-pub(in crate::db::memory_v2) async fn purge_memory_v2_fact(
-    conn: &engine::Connection,
+pub(in crate::db) async fn purge_memory_v2_fact(
+    conn: &crate::db::engine::Connection,
     owner: &FactOwnerV1,
     source_store_id: &SourceStoreId,
     fact_id: &FactId,
     expected_last_event_id: &FactEventId,
     occurred_at: UtcMicros,
-) -> Result<bool> {
+) -> Result<MemoryV2LegacyPurgeReceipt> {
     validate_scope(owner, source_store_id)?;
     validate_v1_compatibility_source(source_store_id)?;
     fact_id
@@ -56,17 +123,66 @@ pub(in crate::db::memory_v2) async fn purge_memory_v2_fact(
         &owner_key,
         source_store_id,
         fact_id,
-        Some(expected_last_event_id),
+        PurgeIntent::ReclaimLegacyPayload {
+            expected_last_event_id,
+            actor: None,
+        },
         occurred_at,
     )
     .await;
-    let purged = finish_transaction(transaction, result, "memory_v2_purge").await?;
-    if purged {
+    let payload_purged = finish_transaction(transaction, result, "memory_v2_purge").await?;
+    if payload_purged {
         conn.execute_batch("PRAGMA incremental_vacuum(64)")
             .await
             .map_err(|error| db_error("memory_v2_purge", error))?;
     }
-    Ok(purged)
+    Ok(MemoryV2LegacyPurgeReceipt {
+        owner: owner.clone(),
+        source_store_id: source_store_id.clone(),
+        fact_id: fact_id.clone(),
+        expected_last_event_id: expected_last_event_id.clone(),
+        occurred_at,
+        payload_purged,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::db) async fn purge_memory_v2_fact_in_transaction(
+    conn: &impl MemoryV2Executor,
+    owner: &FactOwnerV1,
+    source_store_id: &SourceStoreId,
+    fact_id: &FactId,
+    expected_last_event_id: &FactEventId,
+    actor: Option<&ActorId>,
+    occurred_at: UtcMicros,
+) -> Result<MemoryV2LegacyPurgeReceipt> {
+    validate_scope(owner, source_store_id)?;
+    validate_v1_compatibility_source(source_store_id)?;
+    fact_id
+        .validate()
+        .map_err(|_| db_message("memory_v2_purge", "fact identity is invalid"))?;
+    let owner_key = owner_key(owner)?;
+    let payload_purged = purge_memory_v2_fact_inner(
+        conn,
+        owner,
+        &owner_key,
+        source_store_id,
+        fact_id,
+        PurgeIntent::ReclaimLegacyPayload {
+            expected_last_event_id,
+            actor,
+        },
+        occurred_at,
+    )
+    .await?;
+    Ok(MemoryV2LegacyPurgeReceipt {
+        owner: owner.clone(),
+        source_store_id: source_store_id.clone(),
+        fact_id: fact_id.clone(),
+        expected_last_event_id: expected_last_event_id.clone(),
+        occurred_at,
+        payload_purged,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -139,7 +255,7 @@ pub(in crate::db::memory_v2) async fn purge_memory_v2_fact_inner(
     owner_key: &OwnerKey,
     source_store_id: &SourceStoreId,
     fact_id: &FactId,
-    expected_last_event_id: Option<&FactEventId>,
+    intent: PurgeIntent<'_>,
     occurred_at: UtcMicros,
 ) -> Result<bool> {
     let legacy_fact_id = optional_i64(
@@ -184,28 +300,23 @@ pub(in crate::db::memory_v2) async fn purge_memory_v2_fact_inner(
     {
         return Ok(false);
     }
-    if expected_last_event_id.is_some()
-        && legacy_fact_id.is_some()
-        && !row_exists(
-            conn,
-            "SELECT 1 FROM memory_v2_backfill_progress
-             WHERE owner_kind = ?1 AND project_id = ?2 AND source_store_id = ?3
-               AND phase = 'cutover_complete'",
-            params![
-                owner_key.kind,
-                owner_key.project_id.as_str(),
-                source_store_id.as_str()
-            ],
-        )
-        .await?
-    {
-        return Err(db_message(
-            "memory_v2_purge",
-            "legacy payload purge requires a verified completed backfill",
-        ));
-    }
+    // Reclaiming the legacy row is the only step here that can destroy the last
+    // surviving copy of a payload. Mint its authorization before any mutation
+    // so the cutover gate is proven up front and cannot be routed around.
+    let reclamation = match (intent, legacy_fact_id) {
+        (PurgeIntent::ReclaimLegacyPayload { .. }, Some(legacy_fact_id)) => Some((
+            LegacyReclamationAuthorization::authorize(conn, owner_key, source_store_id).await?,
+            legacy_fact_id,
+        )),
+        _ => None,
+    };
     let current = current_fact_state(conn, owner_key, fact_id).await?;
-    if expected_last_event_id.is_some_and(|expected| expected != &current.last_event_id) {
+    if let PurgeIntent::ReclaimLegacyPayload {
+        expected_last_event_id,
+        ..
+    } = intent
+        && expected_last_event_id != &current.last_event_id
+    {
         return Err(db_message(
             "memory_v2_purge",
             "fact lineage changed before payload purge",
@@ -214,6 +325,10 @@ pub(in crate::db::memory_v2) async fn purge_memory_v2_fact_inner(
     if current.access == PayloadAccessState::Deleted {
         return Ok(false);
     }
+    let actor = match intent {
+        PurgeIntent::ReplayLegacyTombstone => None,
+        PurgeIntent::ReclaimLegacyPayload { actor, .. } => actor.cloned(),
+    };
     let event = FactLineageEventV1::new(
         fact_id.clone(),
         owner.clone(),
@@ -222,7 +337,7 @@ pub(in crate::db::memory_v2) async fn purge_memory_v2_fact_inner(
             current: PayloadAccessState::Deleted,
         },
         occurred_at,
-        None,
+        actor,
     )
     .map_err(|_| {
         db_message(
@@ -234,12 +349,9 @@ pub(in crate::db::memory_v2) async fn purge_memory_v2_fact_inner(
     purge_payload_rows(conn, owner_key, fact_id).await?;
     // Backfill replays historical tombstones before snapshot facts. It must
     // never erase the source snapshot while migration is still proving
-    // completeness. Only an explicit live purge carrying a CAS event may
-    // remove the compatibility row.
-    if expected_last_event_id.is_some()
-        && let Some(legacy_fact_id) = legacy_fact_id
-    {
-        purge_legacy_fact(conn, legacy_fact_id).await?;
+    // completeness, so only an authorized live reclamation reaches this.
+    if let Some((authorization, legacy_fact_id)) = &reclamation {
+        purge_legacy_fact(conn, *legacy_fact_id, authorization).await?;
     }
     conn.execute(
         "UPDATE memory_v2_current_facts SET
@@ -299,7 +411,14 @@ pub(in crate::db::memory_v2) async fn purge_payload_rows(
     Ok(())
 }
 
-async fn purge_legacy_fact(conn: &impl MemoryV2Executor, legacy_fact_id: i64) -> Result<()> {
+/// Destroys the legacy compatibility row backing one V2 fact. The
+/// authorization argument is the type-level cutover proof; it exists so this
+/// function is unreachable without passing the `cutover_complete` gate.
+async fn purge_legacy_fact(
+    conn: &impl MemoryV2Executor,
+    legacy_fact_id: i64,
+    _authorization: &LegacyReclamationAuthorization,
+) -> Result<()> {
     conn.execute(
         "INSERT INTO memory_bank_dirty(bank_name, updated_at)
          SELECT bank_name, ?1 FROM memory_banks

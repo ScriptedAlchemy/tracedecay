@@ -59,17 +59,6 @@ fn mcp_now_micros() -> tracedecay_domain::UtcMicros {
     )
 }
 
-fn is_mcp_git_read(tool_name: &str) -> bool {
-    matches!(
-        tool_name,
-        "tracedecay_git_status"
-            | "tracedecay_git_diff"
-            | "tracedecay_git_history"
-            | "tracedecay_git_blame"
-            | "tracedecay_git_hunks"
-    )
-}
-
 fn is_source_edit_tool(tool_name: &str) -> bool {
     matches!(
         tool_name,
@@ -86,7 +75,6 @@ fn is_source_edit_tool(tool_name: &str) -> bool {
 
 pub(super) fn tool_supports_live_cancellation(tool_name: &str) -> bool {
     crate::application_surface::ApplicationSurfaceOperation::from_tool_name(tool_name).is_some()
-        || is_mcp_git_read(tool_name)
         || is_source_edit_tool(tool_name)
         || matches!(
             tool_name,
@@ -387,18 +375,23 @@ impl McpServer {
         let root = cg.project_root().to_path_buf();
         // Live-activity tap: a host hook arriving here IS an agent working in
         // this project, so publish it at the observation point carrying this
-        // project's own registered id. Free when no dashboard is connected; the
-        // dashboard coalesces the burst.
-        let activity_project_id = crate::dashboard::activity_bus::enabled()
-            .then(|| cg.store_layout().identity.project_id.clone())
-            .flatten();
-        crate::dashboard::activity_bus::publish(
-            crate::dashboard::activity_bus::ActivityFamilyV1::Hook,
-            &root,
-            activity_project_id.as_deref(),
-            1,
-            Some(event.kind.as_key()),
-        );
+        // project's own registered id. The application lane retains it even
+        // without a connected dashboard; the SSE adapter coalesces the burst.
+        let activity_project_id =
+            crate::application::event_lane::enabled(self.session_db.as_deref())
+                .then(|| cg.store_layout().identity.project_id.clone())
+                .flatten();
+        if let Some(activity_db) = self.session_db.as_deref() {
+            crate::application::event_lane::publish(
+                activity_db,
+                crate::application::event_lane::ActivityFamilyV1::Hook,
+                &root,
+                activity_project_id.as_deref(),
+                1,
+                Some(event.kind.as_key()),
+            )
+            .await;
+        }
         // Primary incremental-index hint: deliver the exact touched paths into
         // the daemon-owned code-index scheduler queue as soon as the routing
         // event is observed. Independent of host-admission durability so an
@@ -411,13 +404,17 @@ impl McpServer {
             // worktree's incremental queue — the exact moment indexing work is
             // created for this project, and the only condition worth lighting.
             if sink(root.clone(), event.rel_paths.clone()).await {
-                crate::dashboard::activity_bus::publish(
-                    crate::dashboard::activity_bus::ActivityFamilyV1::CodeIndex,
-                    &root,
-                    activity_project_id.as_deref(),
-                    event.rel_paths.len() as u64,
-                    Some(event.kind.as_key()),
-                );
+                if let Some(activity_db) = self.session_db.as_deref() {
+                    crate::application::event_lane::publish(
+                        activity_db,
+                        crate::application::event_lane::ActivityFamilyV1::CodeIndex,
+                        &root,
+                        activity_project_id.as_deref(),
+                        event.rel_paths.len() as u64,
+                        Some(event.kind.as_key()),
+                    )
+                    .await;
+                }
             }
         }
         let current_branch = crate::branch::current_branch(&root);
@@ -852,15 +849,15 @@ impl McpServer {
                 automation_writer: self.dashboard_automation_writer.clone(),
                 doctor_report_reader: self.dashboard_doctor_report_reader.clone(),
                 doctor_remediation_dispatcher: self.dashboard_doctor_remediation_dispatcher.clone(),
+                code_index_freshness_reader: self.dashboard_code_index_freshness_reader.clone(),
                 diagnostics_cache: Some(&self.diagnostics_cache),
-                diagnostics_lsp: Some(self.diagnostics_lsp.as_ref()),
+                diagnostics_lsp: Some(Arc::clone(&self.diagnostics_lsp)),
                 application_invocation_client,
                 application_request_id,
                 application_deadline,
                 application_cancellation,
                 code_index_publication_identity: self.code_index_publication_identity.clone(),
                 code_index_search_executor: self.code_index_search_executor.clone(),
-                git_read_executor: self.git_read_executor.clone(),
                 source_edit_executor: self.source_edit_executor.get().cloned(),
                 source_edit_reconciliation_executor: self
                     .source_edit_reconciliation_executor
@@ -1032,7 +1029,16 @@ impl McpServer {
         let application_surface =
             crate::application_surface::ApplicationSurfaceOperation::from_tool_name(tool_name);
         let source_edit = is_source_edit_tool(tool_name);
-        let controlled_read = is_mcp_git_read(tool_name) || tool_name == "tracedecay_search";
+        let controlled_read = matches!(
+            application_surface,
+            Some(
+                crate::application_surface::ApplicationSurfaceOperation::GitStatus
+                    | crate::application_surface::ApplicationSurfaceOperation::GitDiff
+                    | crate::application_surface::ApplicationSurfaceOperation::GitHistory
+                    | crate::application_surface::ApplicationSurfaceOperation::GitBlame
+                    | crate::application_surface::ApplicationSurfaceOperation::GitHunks
+            )
+        ) || tool_name == "tracedecay_search";
         let request_id = tool_supports_live_cancellation(tool_name)
             .then(|| application_surface_request_id(id, memory_request_scope))
             .flatten()
@@ -1542,18 +1548,22 @@ impl McpServer {
             Err(response) => return response,
         };
 
-        // Live-activity tap: one pulse per dispatched tool call, scoped to the
-        // project this server serves. Gated so an unwatched daemon never pays
-        // the snapshot read.
-        if crate::dashboard::activity_bus::enabled() {
+        // Durable activity record: one per dispatched tool call, scoped to the
+        // project this server serves. Gate the snapshot read when no profile
+        // event authority can be mounted.
+        if crate::application::event_lane::enabled(self.session_db.as_deref())
+            && let Some(activity_db) = self.session_db.as_deref()
+        {
             let cg = self.cg_snapshot().await;
-            crate::dashboard::activity_bus::publish(
-                crate::dashboard::activity_bus::ActivityFamilyV1::ToolCall,
+            crate::application::event_lane::publish(
+                activity_db,
+                crate::application::event_lane::ActivityFamilyV1::ToolCall,
                 cg.project_root(),
                 cg.store_layout().identity.project_id.as_deref(),
                 1,
                 Some(&tool_name),
-            );
+            )
+            .await;
         }
 
         let dispatch = self
@@ -1597,15 +1607,26 @@ mod git_read_control_tests {
             "tracedecay_git_blame",
             "tracedecay_git_hunks",
         ] {
-            assert!(is_mcp_git_read(tool_name));
             assert!(tool_supports_live_cancellation(tool_name));
+            let application_surface =
+                crate::application_surface::ApplicationSurfaceOperation::from_tool_name(tool_name);
             assert!(
-                crate::application_surface::ApplicationSurfaceOperation::from_tool_name(tool_name)
-                    .is_none(),
-                "Git reads must remain MCP-only rather than entering the shared transport surface"
+                application_surface.is_some(),
+                "Git reads must enter the catalog-owned application surface",
             );
+            let controlled_read = matches!(
+                application_surface,
+                Some(
+                    crate::application_surface::ApplicationSurfaceOperation::GitStatus
+                        | crate::application_surface::ApplicationSurfaceOperation::GitDiff
+                        | crate::application_surface::ApplicationSurfaceOperation::GitHistory
+                        | crate::application_surface::ApplicationSurfaceOperation::GitBlame
+                        | crate::application_surface::ApplicationSurfaceOperation::GitHunks
+                )
+            );
+            assert!(controlled_read);
             assert_eq!(
-                dispatch_deadline_horizon_micros(false, is_mcp_git_read(tool_name)),
+                dispatch_deadline_horizon_micros(application_surface.is_some(), controlled_read),
                 Some(30_000_000)
             );
         }

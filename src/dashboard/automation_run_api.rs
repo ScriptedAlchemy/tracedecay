@@ -557,12 +557,20 @@ async fn append_dashboard_job_record(
     status: AutomationRunStatus,
     error: Option<String>,
 ) -> Result<AutomationRunLedgerRecord, String> {
-    let config = load_effective_dashboard_config(state).await?;
-    let record = dashboard_job_record(run_id, task, status, error, &config);
-    append_run_record(&state.dashboard_root, &record)
-        .await
-        .map_err(|err| err.to_string())?;
-    Ok(record)
+    let run_id = run_id.to_string();
+    let payload = super::automation_run_service::execute_dashboard_automation_write(
+        state,
+        move |state| async move {
+            let config = load_effective_dashboard_config(&state).await?;
+            let record = dashboard_job_record(&run_id, task, status, error, &config);
+            append_run_record(&state.dashboard_root, &record)
+                .await
+                .map_err(|err| err.to_string())?;
+            serde_json::to_value(record).map_err(|err| err.to_string())
+        },
+    )
+    .await?;
+    serde_json::from_value(payload).map_err(|err| err.to_string())
 }
 
 async fn load_effective_dashboard_config(

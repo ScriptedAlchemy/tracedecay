@@ -2807,6 +2807,27 @@ impl OwnedGlobalDbConfigurationControlStore {
     fn database(&self) -> Arc<RegisteredGlobalDb> {
         Arc::clone(&self.db)
     }
+
+    pub(crate) fn record_component_activation(
+        &self,
+        component: String,
+        observed_revision_id: Option<ConfigurationRevisionId>,
+        activation_error_code: Option<String>,
+        occurred_at: UtcMicros,
+    ) -> ConfigurationOperationFuture<'_, ()> {
+        let db = self.database();
+        Box::pin(async move {
+            let store = GlobalDbConfigurationControlStore::new_registered(db.as_ref());
+            store
+                .record_component_activation(
+                    component,
+                    observed_revision_id,
+                    activation_error_code,
+                    occurred_at,
+                )
+                .await
+        })
+    }
 }
 
 impl ConfigurationControlStore for OwnedGlobalDbConfigurationControlStore {

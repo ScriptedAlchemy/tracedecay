@@ -19,6 +19,14 @@ Cursor desktop native diagnostics, duplicate-analyzer handling, Plan 37
 finding projection, and one-root worktree feedback. Plan 27 owns installation
 and repair; this plan owns protocol and provider behavior.
 
+**Shipped-design clarification (2026-07-26).** The supported local design is
+the daemon gateway plus transport bridge in `src/lsp_bridge.rs`, analyzer
+broker/adapters under `src/diagnostics/lsp/`, and the explicit
+`tracedecay lsp servers|bridge` commands. The historical documentation design
+for a top-level `src/lsp/` module, global `--no-lsp`, `TRACEDECAY_LSP`,
+`TRACEDECAY_LSP_TIMEOUT`, or a generic `[lsp]` configuration block did not
+ship and is not a missing requirement of this plan.
+
 ## PR13 user outcome
 
 A user editing in an LSP-capable host receives current analyzer and TraceDecay

@@ -3,39 +3,31 @@ import { CircleCheck, CirclePause, CirclePlay } from 'lucide-react';
 import { OverviewCard, OverviewGrid } from '../../ui/archetypes/OverviewGrid';
 import { LegacyBoundary, StatTile } from '../../ui/LegacyStates.tsx';
 import { EvidencePattern } from '../../ui/EvidencePattern.tsx';
-import { AnyObject } from '../../data/query/legacy.ts';
+import { AnyObject, type LegacyResult } from '../../data/query/legacy.ts';
 import { useLegacy } from '../../data/query/useLegacy.ts';
+import {
+  automationSchedulerKey,
+  schedulerStatusUrl,
+  useSchedulerControl,
+} from '../../data/query/automation.ts';
+import {
+  AutomationSchedulerStatusV1Schema,
+  type AutomationSchedulerStatusV1,
+} from '../../contracts/generated.ts';
 import { cn } from '../../ui/cn';
 
-/** One human-review queue as `automation_scheduler_api.rs` reports it: either a
- * measured count, or the reason the queue could not be read. */
-const PendingReviewSchema = z
-  .object({
-    state: z.enum(['measured', 'unreadable']),
-    count: z.number().nullable().optional(),
-    reason: z.string().nullable().optional(),
-  })
-  .passthrough();
-
-/** Wire-true shapes from automation_scheduler_api.rs / automation_jobs_api.rs. */
-const SchedulerStatusSchema = z
-  .object({
-    status: z.string(),
-    paused: z.boolean(),
-    enabled: z.boolean().optional(),
-    scheduler_tick_secs: z.number().optional(),
-    // Nullable, not optional-with-a-zero-default: the daemon sends null for a
-    // queue it could not read, and null must never round down to 0 here.
-    pending_fact_proposals: z.number().nullable().optional(),
-    pending_skills: z.number().nullable().optional(),
-    pending_review: z
-      .object({ fact_proposals: PendingReviewSchema, skills: PendingReviewSchema })
-      .optional(),
-    last_session_activity: z.number().nullable().optional(),
-  })
-  .passthrough();
-
-type SchedulerStatus = z.infer<typeof SchedulerStatusSchema>;
+/**
+ * The scheduler shape is the generated one.
+ *
+ * It used to be declared here by hand, because `automation_scheduler_api.rs`
+ * built its response with `json!` and so had no Rust type for the contract
+ * generator to export — the whole automation surface sat outside the generated
+ * boundary. That handler is typed now, so this reads the real contract, and the
+ * pending-review union comes across as a discriminated union rather than the
+ * looser `state` enum with two independently-optional fields that a hand
+ * transcription could only approximate.
+ */
+type SchedulerStatus = AutomationSchedulerStatusV1;
 
 /** What this dashboard can actually say about one review queue. */
 type ReviewQueueReading =
@@ -56,15 +48,22 @@ function reviewQueue(
   queue: 'fact_proposals' | 'skills',
   legacyCount: number | null | undefined,
 ): ReviewQueueReading {
-  const reported = data.pending_review?.[queue];
-  if (reported?.state === 'unreadable') {
-    return { quality: 'unknown', reason: reported.reason ?? 'the daemon did not say why' };
+  const reported = data.pending_review[queue];
+  switch (reported.state) {
+    case 'unreadable':
+      return { quality: 'unknown', reason: reported.reason };
+    case 'measured':
+      return { quality: 'measured', count: reported.count };
+    default: {
+      const exhaustive: never = reported;
+      void exhaustive;
+      // Only reachable against a daemon predating `pending_review`, whose bare
+      // flat count is still a real measurement.
+      return typeof legacyCount === 'number'
+        ? { quality: 'measured', count: legacyCount }
+        : { quality: 'unknown', reason: 'the daemon reported no reading for this queue' };
+    }
   }
-  const count = reported?.state === 'measured' ? reported.count : legacyCount;
-  if (typeof count !== 'number') {
-    return { quality: 'unknown', reason: 'the daemon reported no reading for this queue' };
-  }
-  return { quality: 'measured', count };
 }
 
 /** A review queue as a tile. An unread queue prints an em dash under the
@@ -102,14 +101,17 @@ const SkillsPayloadSchema = z
   .passthrough();
 
 /** Automations: scheduler health, jobs, managed skills, fact proposals — all
- * real /api/automation surfaces. Bounded controls land with the actions
- * phase; this ships the truthful read layer. */
+ * real /api/automation surfaces. The actions phase begins here with the
+ * scheduler's pause and resume, the two controls whose route is typed; the
+ * remaining bounded controls follow as their handlers enter the generated
+ * contract boundary, and until then those surfaces stay read-only. */
 export function AutomationsPage() {
   const scheduler = useLegacy(
-    ['automation', 'scheduler'],
-    '/api/automation/scheduler/status',
-    SchedulerStatusSchema,
+    automationSchedulerKey,
+    schedulerStatusUrl,
+    AutomationSchedulerStatusV1Schema,
   );
+  const control = useSchedulerControl();
   const jobs = useLegacy(['automation', 'jobs'], '/api/automation/jobs', JobsPayloadSchema);
   const skills = useLegacy(
     ['automation', 'skills'],
@@ -132,10 +134,18 @@ export function AutomationsPage() {
       <div className="flex items-center gap-3 border-b border-edge-subtle px-4 py-2">
         <h1 className="text-sm font-semibold tracking-tight">Automations</h1>
         {scheduler.data?.outcome === 'ok' ? (
-          <SchedulerBadge
-            status={scheduler.data.data.status}
-            paused={scheduler.data.data.paused}
-          />
+          <>
+            <SchedulerBadge
+              status={scheduler.data.data.status}
+              paused={scheduler.data.data.paused}
+            />
+            <SchedulerControl
+              paused={scheduler.data.data.paused}
+              pending={control.isPending}
+              failure={controlFailure(control.data)}
+              onToggle={(paused) => control.mutate(paused)}
+            />
+          </>
         ) : null}
       </div>
       <LegacyBoundary title="Scheduler" pending={scheduler.isPending} result={scheduler.data}>
@@ -281,6 +291,78 @@ export function AutomationsPage() {
           </LegacyBoundary>
         </OverviewCard>
       </OverviewGrid>
+    </div>
+  );
+}
+
+/** Why the last control attempt did not produce a reading, or null if it did.
+ *
+ * A control that failed must not read as a control that did nothing, so every
+ * non-`ok` outcome gets words. `unsupported_schema` is called out separately
+ * because it means the request very likely *did* take effect and only the reply
+ * was unreadable — the opposite advice from `offline`. */
+function controlFailure(result: LegacyResult<SchedulerStatus> | undefined): string | null {
+  if (result === undefined) return null;
+  switch (result.outcome) {
+    case 'ok':
+      return null;
+    case 'offline':
+      return 'The daemon did not answer, so the scheduler was not changed.';
+    case 'error':
+      return `The daemon refused the change (${result.detail}).`;
+    case 'unsupported_schema':
+      return 'The daemon answered in a shape this dashboard cannot read, so whether the scheduler changed is unknown — reload to re-read it.';
+    default: {
+      const exhaustive: never = result;
+      return exhaustive;
+    }
+  }
+}
+
+/**
+ * Pause and resume, the first two bounded controls on this page.
+ *
+ * No confirmation step, and that is a deliberate reading of the product's
+ * existing rule rather than an omission: the Doctor inspector gates on a
+ * remediation descriptor's declared `action_confirmation`, which exists because
+ * owner remediations mutate stores and can be lossy. Pausing the scheduler is
+ * reversible by the adjacent button, destroys nothing, and is idempotent on the
+ * server, so adding a checkbox here would be new confirmation machinery for a
+ * toggle rather than the established treatment of a destructive act.
+ *
+ * The label always names the action against the *server's* reported state, and
+ * the button is disabled while a control is in flight, so it can never be read
+ * as "already paused" before the daemon has said so.
+ */
+function SchedulerControl({
+  paused,
+  pending,
+  failure,
+  onToggle,
+}: {
+  paused: boolean;
+  pending: boolean;
+  failure: string | null;
+  onToggle: (paused: boolean) => void;
+}) {
+  return (
+    <div className="flex items-center gap-2">
+      <button
+        type="button"
+        disabled={pending}
+        onClick={() => onToggle(!paused)}
+        className={cn(
+          'inline-flex h-5 items-center gap-1 rounded-[var(--radius-chip)] border border-edge-subtle px-1.5 text-2xs',
+          'hover:bg-surface-2 disabled:opacity-50',
+        )}
+      >
+        {pending ? 'working…' : paused ? 'Resume scheduler' : 'Pause scheduler'}
+      </button>
+      {failure ? (
+        <span role="status" className="text-2xs text-text-secondary">
+          {failure}
+        </span>
+      ) : null}
     </div>
   );
 }

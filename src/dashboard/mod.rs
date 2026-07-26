@@ -21,7 +21,6 @@
 //! `/api/capabilities` advertises which features are live so hosts (or a
 //! richer Hermes wrapper) can extend the surface without forking the UI.
 
-pub(crate) mod activity_bus;
 pub(crate) mod analytics_api;
 pub(crate) mod assets;
 mod automation_config_api;
@@ -31,12 +30,12 @@ mod automation_outcomes_api;
 mod automation_run_api;
 mod automation_run_service;
 pub(crate) use automation_run_service::{
-    DashboardAutomationWriter, direct_dashboard_automation_writer,
+    DashboardAutomationWriter, standalone_dashboard_automation_writer,
 };
 mod automation_scheduler_api;
 mod automation_skills_api;
 mod code_diagnostics_api;
-mod code_index_freshness_api;
+pub(crate) mod code_index_freshness_api;
 #[doc(hidden)]
 pub mod contract_schema;
 mod delivery_api;
@@ -79,7 +78,6 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 
 use axum::Router;
 use axum::body::Body;
@@ -91,13 +89,14 @@ use serde_json::{Value, json};
 use tokio::sync::RwLock;
 use tower::ServiceExt;
 
-use crate::application_surface::http_application_router;
+use crate::application_surface::{
+    dashboard_configuration_application_router, http_application_router,
+};
 use crate::automation::backend;
 use crate::automation::config::{self, AutomationBackend, AutomationHostMode};
 use crate::daemon::{DaemonHandshake, daemon_operation_event_authority};
 use crate::daemon_client::DaemonInvocationClient;
 use crate::db::{Database, DatabaseEngineConnection};
-use crate::diagnostics::lsp;
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::RegisteredGlobalDb;
 use crate::storage::StorageMode;
@@ -217,6 +216,9 @@ pub(crate) struct DashboardState {
     /// Display path of the global accounting DB.
     pub(crate) savings_db_path: String,
     pub(crate) project_root: PathBuf,
+    /// Live read port over the daemon-owned code-index scheduler registry.
+    pub(crate) code_index_freshness_reader:
+        Option<code_index_freshness_api::CodeIndexFreshnessReader>,
     /// Storage mode resolved for the active project store.
     pub(crate) storage_mode: String,
     /// Resolved active project store root.
@@ -230,15 +232,13 @@ pub(crate) struct DashboardState {
     pub(crate) retention_config: crate::config::RetentionConfig,
     /// Recent deterministic curation activity emitted by the standalone dashboard.
     pub(crate) curation_activity: Arc<RwLock<Vec<Value>>>,
-    /// In-process BPE token-count cache for the Savings & Cost tab (backed
-    /// by the `dashboard_token_counts` sidecar in the global accounting DB).
+    /// Process-local derived BPE token-count cache for the Savings & Cost tab.
     pub(crate) token_counts: Arc<token_count::TokenCountCache>,
-    /// Dashboard-owned LSP diagnostics broker. This is deliberately not
-    /// exposed to hooks or model-context paths in Phase 1.
-    pub(crate) code_diagnostics: Arc<RwLock<lsp::broker::DiagnosticBroker>>,
-    /// Ensures the dashboard-opened idle backfill pass is scheduled once per
-    /// dashboard server lifetime.
-    pub(crate) code_diagnostics_backfill_started: Arc<AtomicBool>,
+    /// Admitted daemon/application diagnostics authority. `None` keeps all
+    /// diagnostics controls typed unavailable; the dashboard never constructs
+    /// a broker or analyzer runtime.
+    pub(crate) code_diagnostics_authority:
+        Option<crate::application::dashboard_diagnostics::DashboardDiagnosticsAuthorityV1>,
     pub(crate) automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
     /// Lifetime-owning capability for complete dashboard automation writes.
     pub(crate) automation_writer: DashboardAutomationWriter,
@@ -354,15 +354,6 @@ pub(crate) fn storage_mode_label(mode: &StorageMode) -> &'static str {
     }
 }
 
-pub(crate) fn code_diagnostics_broker(
-    project_root: PathBuf,
-    settings: lsp::settings::CodeDiagnosticsSettings,
-) -> lsp::broker::DiagnosticBroker {
-    let mut adapters = lsp::adapters::builtin_adapters();
-    adapters.extend(settings.custom_adapters.clone());
-    lsp::broker::DiagnosticBroker::new(project_root, adapters, settings)
-}
-
 pub(crate) fn resolve_project_memory_store(cg: &TraceDecay) -> (String, Arc<Database>) {
     (
         cg.dashboard_db_path().display().to_string(),
@@ -398,6 +389,10 @@ async fn build_state_inner(
     automation_writer: DashboardAutomationWriter,
     doctor_report_reader: Option<DoctorReportReader>,
     doctor_remediation_dispatcher: Option<doctor_remediation_api::DoctorRemediationDispatcherV1>,
+    code_index_freshness_reader: Option<code_index_freshness_api::CodeIndexFreshnessReader>,
+    code_diagnostics_broker: Option<
+        Arc<tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>>,
+    >,
 ) -> Result<DashboardState> {
     let (mem_db_path, mem_db) = resolve_project_memory_store(cg);
     let memory_owner = project_memory_owner(cg)?;
@@ -406,11 +401,14 @@ async fn build_state_inner(
     let store_root = cg.store_layout().data_root.clone();
     let config_path = cg.store_layout().config_path.clone();
     let storage_mode = storage_mode_label(&cg.store_layout().storage_mode).to_string();
-    let code_diagnostics_settings = lsp::settings::load_settings(&dashboard_root)
-        .await
-        .unwrap_or_default();
-    let code_diagnostics =
-        code_diagnostics_broker(cg.project_root().to_path_buf(), code_diagnostics_settings);
+    let code_diagnostics_authority = code_diagnostics_broker.map(|broker| {
+        crate::application::dashboard_diagnostics::DashboardDiagnosticsAuthorityV1::new(
+            cg.project_root().to_path_buf(),
+            dashboard_root.clone(),
+            Arc::clone(&mem_db),
+            broker,
+        )
+    });
     let savings_db_path = registered_savings_db
         .as_ref()
         .map(|db| db.db_path().display().to_string())
@@ -432,6 +430,7 @@ async fn build_state_inner(
         savings_db: registered_savings_db,
         savings_db_path,
         project_root: cg.project_root().to_path_buf(),
+        code_index_freshness_reader,
         storage_mode,
         store_root,
         config_path,
@@ -439,8 +438,7 @@ async fn build_state_inner(
         retention_config: cg.get_config().sync.retention.clone(),
         curation_activity: Arc::new(RwLock::new(Vec::new())),
         token_counts: Arc::new(token_count::TokenCountCache::new()),
-        code_diagnostics: Arc::new(RwLock::new(code_diagnostics)),
-        code_diagnostics_backfill_started: Arc::new(AtomicBool::new(false)),
+        code_diagnostics_authority,
         automation_scheduler_reconciler,
         automation_writer,
         doctor_report_reader,
@@ -466,7 +464,9 @@ pub(crate) async fn build_state(cg: &TraceDecay) -> Result<DashboardState> {
         None,
         true,
         None,
-        direct_dashboard_automation_writer(),
+        standalone_dashboard_automation_writer(),
+        None,
+        None,
         None,
         None,
     )
@@ -482,6 +482,10 @@ pub(crate) async fn build_state_with_automation_reconciler(
     automation_writer: DashboardAutomationWriter,
     doctor_report_reader: Option<DoctorReportReader>,
     doctor_remediation_dispatcher: Option<doctor_remediation_api::DoctorRemediationDispatcherV1>,
+    code_index_freshness_reader: Option<code_index_freshness_api::CodeIndexFreshnessReader>,
+    code_diagnostics_broker: Option<
+        Arc<tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>>,
+    >,
 ) -> Result<DashboardState> {
     build_state_inner(
         cg.as_ref(),
@@ -494,6 +498,8 @@ pub(crate) async fn build_state_with_automation_reconciler(
         automation_writer,
         doctor_report_reader,
         doctor_remediation_dispatcher,
+        code_index_freshness_reader,
+        code_diagnostics_broker,
     )
     .await
 }
@@ -514,10 +520,13 @@ pub(crate) async fn build_selected_project_state(
         false,
         None,
         Arc::clone(&active.automation_writer),
-        // The active reader is bound to the active project's exact scope.
-        // Never reuse it for a selected project without a separately admitted
-        // daemon owner for that project's identity.
+        // Doctor authority is bound to the active project's exact scope.
+        // Freshness is different: its daemon registry reader resolves the
+        // selected state's exact canonical root and returns only a mounted
+        // scheduler, so the root-addressed read port is safe to reuse.
         None,
+        None,
+        active.code_index_freshness_reader.clone(),
         None,
     )
     .await
@@ -650,7 +659,9 @@ where
         test_authority.map(|authority| Arc::clone(&authority.profile_database)),
         options.warm_token_counts,
         None,
-        direct_dashboard_automation_writer(),
+        standalone_dashboard_automation_writer(),
+        None,
+        None,
         None,
         None,
     )
@@ -716,7 +727,11 @@ pub(crate) fn validate_dashboard_host(host: &str) -> Result<&str> {
 /// daemon. They are not part of the selected-project dashboard gateway; PR14
 /// must add explicit selected-project and Hermes adapters before that scope
 /// can change.
-struct ActiveProjectApplicationRoutes(Router);
+struct ActiveProjectApplicationRoutes {
+    http_router: Router,
+    dashboard_configuration_router: Router,
+    client: Option<DaemonInvocationClient>,
+}
 
 impl ActiveProjectApplicationRoutes {
     fn for_active_project(cg: &TraceDecay) -> Result<Self> {
@@ -735,15 +750,25 @@ impl ActiveProjectApplicationRoutes {
                 ));
             }
         };
-        let router = http_application_router(
-            client,
+        let http_router = http_application_router(
+            client.clone(),
             daemon_operation_event_authority(),
             active_project_id,
         )
         .map_err(|error| TraceDecayError::Config {
             message: format!("could not mount application HTTP routes: {error}"),
         })?;
-        Ok(Self(router))
+        let dashboard_configuration_router =
+            dashboard_configuration_application_router(client.clone()).map_err(|error| {
+                TraceDecayError::Config {
+                    message: format!("could not mount dashboard configuration routes: {error}"),
+                }
+            })?;
+        Ok(Self {
+            http_router,
+            dashboard_configuration_router,
+            client: Some(client),
+        })
     }
 }
 
@@ -817,7 +842,12 @@ fn router_with_active_application(
         .fallback(get(assets::app_spa_fallback))
         .with_state(runtime);
     match application {
-        Some(application) => router.nest("/api/application", application.0),
+        Some(application) => router
+            .nest("/api/application", application.http_router)
+            .nest(
+                "/api/dashboard/application",
+                application.dashboard_configuration_router,
+            ),
         None => router,
     }
 }
@@ -1034,6 +1064,7 @@ fn project_api_router() -> Router<DashboardState> {
             "/api/plugins/analytics/overview",
             get(analytics_api::overview),
         )
+        .route("/api/observatory", get(analytics_api::observatory))
         .route("/api/plugins/analytics/hints", get(analytics_api::hints))
         .route("/api/plugins/analytics/usage", get(analytics_api::usage))
         .route(
@@ -1059,6 +1090,7 @@ fn project_api_router() -> Router<DashboardState> {
         )
         // Savings & Cost API (savings ledger + session cost accounting)
         .route("/api/plugins/savings/overview", get(savings_api::overview))
+        .route("/api/costs", get(savings_api::costs))
         .route("/api/plugins/savings/ledger", get(savings_api::ledger))
         .route("/api/plugins/savings/sessions", get(savings_api::sessions))
         .route("/api/plugins/savings/models", get(savings_api::models))
@@ -1230,7 +1262,7 @@ async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
     let standalone_automation = automation_mode == "standalone_backend";
     Json(json!({
         "name": "tracedecay-dashboard",
-        "version": env!("CARGO_PKG_VERSION"),
+        "version": crate::version::build_version(),
         "mode": "standalone",
         "project_id": state.project_id,
         "project_root": state.project_root.display().to_string(),
@@ -1248,7 +1280,7 @@ async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
             "lcm_payload_health": has_lcm,
             "graph": true,
             "analytics": true,
-            "code_diagnostics": true,
+            "code_diagnostics": state.code_diagnostics_authority.is_some(),
             // Memory curation/refinement is served by the configured
             // standalone automation backend. Explicit agent ops apply through
             // /curate/apply.
@@ -1285,9 +1317,12 @@ mod authority_tests {
         let project = tempfile::tempdir().expect("project tempdir");
         std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
             .expect("fixture source");
-        let cg = TraceDecay::init(project.path())
-            .await
-            .expect("project init");
+        let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+            project.path(),
+            "project.dashboard-project-memory",
+        )
+        .await
+        .expect("project init");
         let raw = cg
             .store_layout()
             .identity
@@ -1310,15 +1345,22 @@ mod authority_tests {
         let project = tempfile::tempdir().expect("project tempdir");
         std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
             .expect("fixture source");
-        let cg = TraceDecay::init(project.path())
-            .await
-            .expect("project init");
+        let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+            project.path(),
+            "project.dashboard-state",
+        )
+        .await
+        .expect("project init");
 
         let expected_path = cg.dashboard_db_path().display().to_string();
         let state = build_state(&cg).await.expect("dashboard state");
 
         assert_eq!(state.mem_db_path, expected_path);
         assert_eq!(state._database_guards.len(), 1);
+        assert!(
+            state.code_diagnostics_authority.is_none(),
+            "direct dashboard must not construct an analyzer authority"
+        );
     }
 
     #[tokio::test]
@@ -1327,11 +1369,13 @@ mod authority_tests {
         let project = tempfile::tempdir().expect("project tempdir");
         std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
             .expect("fixture source");
-        let cg = Arc::new(
-            TraceDecay::init(project.path())
-                .await
-                .expect("project init"),
-        );
+        let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+            project.path(),
+            "project.daemon-dashboard",
+        )
+        .await
+        .expect("project init");
+        let cg = Arc::new(cg);
         let doctor_reader: DoctorReportReader = Arc::new(|| {
             Box::pin(async {
                 Err(
@@ -1347,6 +1391,12 @@ mod authority_tests {
                 Box::pin(async { Err(DoctorRemediationDispatchErrorV1::OwnerUnavailable) })
             }),
         );
+        let diagnostic_broker = Arc::new(tokio::sync::Mutex::new(
+            crate::application::dashboard_diagnostics::diagnostic_broker(
+                cg.project_root().to_path_buf(),
+                crate::diagnostics::lsp::settings::CodeDiagnosticsSettings::default(),
+            ),
+        ));
 
         let state = build_state_with_automation_reconciler(
             Arc::clone(&cg),
@@ -1354,9 +1404,11 @@ mod authority_tests {
             None,
             None,
             None,
-            direct_dashboard_automation_writer(),
+            standalone_dashboard_automation_writer(),
             Some(Arc::clone(&doctor_reader)),
             Some(doctor_dispatcher),
+            None,
+            Some(diagnostic_broker),
         )
         .await
         .expect("dashboard state");
@@ -1373,6 +1425,10 @@ mod authority_tests {
             &doctor_reader,
         ));
         assert!(state.doctor_remediation_dispatcher.is_some());
+        assert!(
+            state.code_diagnostics_authority.is_some(),
+            "daemon dashboard must retain the admitted diagnostics authority"
+        );
     }
 
     #[tokio::test]
@@ -1381,9 +1437,12 @@ mod authority_tests {
         let project = tempfile::tempdir().expect("project tempdir");
         std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
             .expect("fixture source");
-        let cg = TraceDecay::init(project.path())
-            .await
-            .expect("project init");
+        let (cg, _graph_runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+            project.path(),
+            "project.retained-session",
+        )
+        .await
+        .expect("project init");
         let project_id = ProjectId::new(
             cg.store_layout()
                 .identity
@@ -1422,9 +1481,12 @@ mod authority_tests {
         let project = tempfile::tempdir().expect("project tempdir");
         std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
             .expect("fixture source");
-        let cg = TraceDecay::init(project.path())
-            .await
-            .expect("project init");
+        let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+            project.path(),
+            "project.dashboard-session-unavailable",
+        )
+        .await
+        .expect("project init");
         let selected = resolve_lcm_store(&cg, None).await;
 
         // A display path is not read authority.
@@ -1442,9 +1504,12 @@ mod authority_tests {
         let project = tempfile::tempdir().expect("project tempdir");
         std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
             .expect("fixture source");
-        let cg = TraceDecay::init(project.path())
-            .await
-            .expect("project init");
+        let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+            project.path(),
+            "project.dashboard-session-read-only",
+        )
+        .await
+        .expect("project init");
         let selected = resolve_lcm_store(&cg, None).await;
 
         assert!(selected.lcm_db.is_none());
@@ -1474,14 +1539,20 @@ mod authority_tests {
         let project = tempfile::tempdir().expect("project tempdir");
         std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
             .expect("fixture source");
-        let cg = TraceDecay::init(project.path())
-            .await
-            .expect("project init");
+        let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+            project.path(),
+            "project.dashboard-application-route",
+        )
+        .await
+        .expect("project init");
         let state = build_state(&cg).await.expect("dashboard state");
         let project_id = state.project_id.clone().expect("active project id");
-        let application = ActiveProjectApplicationRoutes(
-            Router::new().route("/probe", get(|| async { StatusCode::NO_CONTENT })),
-        );
+        let application = ActiveProjectApplicationRoutes {
+            http_router: Router::new().route("/probe", get(|| async { StatusCode::NO_CONTENT })),
+            dashboard_configuration_router: Router::new()
+                .route("/probe", get(|| async { StatusCode::ACCEPTED })),
+            client: None,
+        };
         let app = router_with_active_application(state, Some(application));
 
         let active = app
@@ -1495,6 +1566,18 @@ mod authority_tests {
             .await
             .expect("active application response");
         assert_eq!(active.status(), StatusCode::NO_CONTENT);
+
+        let dashboard_configuration = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/dashboard/application/probe")
+                    .body(Body::empty())
+                    .expect("dashboard application request"),
+            )
+            .await
+            .expect("dashboard application response");
+        assert_eq!(dashboard_configuration.status(), StatusCode::ACCEPTED);
 
         let selected = app
             .oneshot(
@@ -1518,9 +1601,12 @@ mod authority_tests {
         let project = tempfile::tempdir().expect("project tempdir");
         std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
             .expect("fixture source");
-        let cg = TraceDecay::init(project.path())
-            .await
-            .expect("project init");
+        let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+            project.path(),
+            "project.dashboard-read-model-route",
+        )
+        .await
+        .expect("project init");
         let state = build_state(&cg).await.expect("dashboard state");
         let project_id = state.project_id.clone().expect("active project id");
         let app = router_with_active_application(state, None);

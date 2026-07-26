@@ -16,14 +16,16 @@ use tracedecay::{
             ChunkProjectionDecisionV1, CodeChunkProjectionSink, ProjectionSinkErrorV1,
             build_batch_receipt,
         },
+        provider::GenerationTestAttributionJoinReadPort,
     },
 };
 use tracedecay_domain::{
     ChunkerRevision, CodeGenerationId, FileOccurrenceId, LanguageId, ManifestDigest,
     PolicyRevisionId, PrivacyDomainId, ProjectionBatchReceiptV1, ProjectionBatchRequestV1,
-    ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1, ProjectionOutcomeV1, RepositoryId,
-    SanitizationReceiptId, SanitizedCodeFileV1, SanitizedCodeSnapshotV1, SanitizerRevision,
-    SnapshotFileDispositionV1, UtcMicros,
+    ProjectionKeyV1, ProjectionKindV1, ProjectionOperationV1, ProjectionOutcomeV1,
+    ProviderEvaluationStateV1, RepositoryId, SanitizationReceiptId, SanitizedCodeFileV1,
+    SanitizedCodeSnapshotV1, SanitizerRevision, SnapshotFileDispositionV1,
+    TestAttributionEvidenceClassV1, UtcMicros,
 };
 
 use crate::support::{RUST_SOURCE, id};
@@ -164,10 +166,18 @@ fn projection_key() -> ProjectionKeyV1 {
 }
 
 fn request(file_occurrence: &str, sealed_at: i64) -> CodeIndexBuildRequestV1 {
+    request_at_path(file_occurrence, "src/lib.rs", sealed_at)
+}
+
+fn request_at_path(
+    file_occurrence: &str,
+    logical_path: &str,
+    sealed_at: i64,
+) -> CodeIndexBuildRequestV1 {
     let source = RUST_SOURCE.as_bytes();
     let file = SanitizedCodeFileV1 {
         file_occurrence_id: id::<FileOccurrenceId>(file_occurrence),
-        logical_path: "src/lib.rs".to_owned(),
+        logical_path: logical_path.to_owned(),
         language: Some(id::<LanguageId>("rust")),
         content_digest: tracedecay::code_index::chunks::content_digest(source),
         disposition: SnapshotFileDispositionV1::Present,
@@ -196,6 +206,40 @@ fn request(file_occurrence: &str, sealed_at: i64) -> CodeIndexBuildRequestV1 {
         sealed_at: UtcMicros(sealed_at),
         target_projection_key: projection_key(),
     }
+}
+
+#[test]
+fn published_generation_serves_current_conservative_test_attribution() {
+    let store = SharedPublicationStore::default();
+    let mut owner = open_production_code_index_owner_v1(config(), store, ApplyingProjectionSink)
+        .expect("production owner");
+    let generation = owner
+        .build_and_publish(
+            request_at_path("file.production.test", "tests/production.rs", 1_100_000),
+            &ActiveControl,
+        )
+        .expect("test generation publishes");
+    let authority = generation
+        .test_attribution_authority()
+        .expect("attribution authority");
+
+    let read = authority.read_test_attribution(&generation.manifest().generation_id);
+
+    assert!(matches!(
+        read.provider_state,
+        ProviderEvaluationStateV1::SupportedCompletedComplete | ProviderEvaluationStateV1::Partial
+    ));
+    let join = read.evidence.expect("generation attribution");
+    assert_eq!(join.generation_id, generation.manifest().generation_id);
+    assert_eq!(
+        join.test_watermark.snapshot_digest,
+        generation.manifest().snapshot_digest
+    );
+    assert!(!join.records.is_empty());
+    assert!(join.records.iter().all(|record| {
+        record.attribution.evidence_class
+            == TestAttributionEvidenceClassV1::ConservativeDependencyCandidates
+    }));
 }
 
 #[test]

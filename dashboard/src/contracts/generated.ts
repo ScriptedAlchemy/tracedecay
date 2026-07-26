@@ -40,6 +40,66 @@ export const AutomaticWorktreeGcV1Schema = z.discriminatedUnion("kind", [z.objec
 })]);
 export type AutomaticWorktreeGcV1 = z.infer<typeof AutomaticWorktreeGcV1Schema>;
 
+/** One human-review queue: a count, or the reason there is no count.
+
+Kept as a tagged reading rather than a bare number because these two queues
+are the entire human-approval step of the automation pipeline. A queue whose
+authority is unmounted must not report `0`, which reads as "checked, nothing
+waiting" — the precise false zero this shape exists to prevent. */
+export const AutomationPendingReviewCountV1Schema = z.discriminatedUnion("state", [z.object({
+  count: z.number().int(),
+  reason: z.string().nullable(),
+  state: z.literal("measured"),
+}), z.object({
+  count: z.number().int().nullable(),
+  reason: z.string(),
+  state: z.literal("unreadable"),
+})]);
+export type AutomationPendingReviewCountV1 = z.infer<typeof AutomationPendingReviewCountV1Schema>;
+
+export const AutomationPendingReviewV1Schema = z.object({
+  fact_proposals: z.lazy(() => AutomationPendingReviewCountV1Schema),
+  skills: z.lazy(() => AutomationPendingReviewCountV1Schema),
+});
+export type AutomationPendingReviewV1 = z.infer<typeof AutomationPendingReviewV1Schema>;
+
+/** The scheduler reading served by all three of `status`, `pause`, and
+`resume`.
+
+The two control routes return this same payload rather than an
+acknowledgement because the pause flag is the thing a caller is actually
+asking about, and a bare `{"ok":true}` would leave the dashboard to assume
+the new state instead of observing it. Returning the re-read means a client
+never has to optimistically flip a control it has not seen take effect.
+
+Typed here, rather than assembled with `json!`, so the shape reaches
+`contract_schema.rs` and the dashboard consumes a generated contract. The
+field set is deliberately identical to the `json!` literal it replaces: this
+is the same wire, described, not a new one. */
+export const AutomationSchedulerStatusV1Schema = z.object({
+  control_path: z.string(),
+  enabled: z.boolean(),
+  last_session_activity: z.number().int().nullable(),
+  now: z.number().int(),
+  paused: z.boolean(),
+  pending_fact_proposals: z.number().int().nullable(),
+  pending_review: z.lazy(() => AutomationPendingReviewV1Schema),
+  pending_skills: z.number().int().nullable(),
+  project_config_path: z.string(),
+  scheduler_tick_secs: z.number().int(),
+  status: z.string(),
+  tasks: z.array(z.lazy(() => AutomationTaskStatusV1Schema)),
+});
+export type AutomationSchedulerStatusV1 = z.infer<typeof AutomationSchedulerStatusV1Schema>;
+
+export const AutomationTaskStatusV1Schema = z.object({
+  due: z.boolean(),
+  last_scheduler_run: z.unknown(),
+  skip_reason: z.string().nullable(),
+  task: z.string(),
+});
+export type AutomationTaskStatusV1 = z.infer<typeof AutomationTaskStatusV1Schema>;
+
 export const BranchCollisionPolicyV1Schema = z.discriminatedUnion("kind", [z.object({
   kind: z.literal("append_monotonic_ordinal"),
   maximum_attempts: z.number().int(),
@@ -736,6 +796,16 @@ export type IncomingCallEdgeV1 = z.infer<typeof IncomingCallEdgeV1Schema>;
 export const LocatorDigestSchema = z.string();
 export type LocatorDigest = z.infer<typeof LocatorDigestSchema>;
 
+export const LoomFileSessionProjectionV1Schema = z.object({
+  authority: z.string(),
+  eligible_sessions: z.number().int(),
+  granularity: z.string(),
+  matched_sessions: z.number().int(),
+  providers: z.array(z.string()),
+  sessions: z.array(z.unknown()),
+});
+export type LoomFileSessionProjectionV1 = z.infer<typeof LoomFileSessionProjectionV1Schema>;
+
 /** Strongly typed algorithm-tagged integrity digest: `ManifestDigest`. */
 export const ManifestDigestSchema = z.string();
 export type ManifestDigest = z.infer<typeof ManifestDigestSchema>;
@@ -749,6 +819,15 @@ export const NodeRefV1Schema = z.object({
   start_line: z.number().int(),
 });
 export type NodeRefV1 = z.infer<typeof NodeRefV1Schema>;
+
+export const NodeSessionsMeasurementV1Schema = z.object({
+  available_granularities: z.array(z.string()),
+  linkage: z.lazy(() => LoomFileSessionProjectionV1Schema),
+  node: z.lazy(() => NodeRefV1Schema),
+  symbol_granularity_available: z.boolean(),
+  symbol_granularity_reason: z.string(),
+});
+export type NodeSessionsMeasurementV1 = z.infer<typeof NodeSessionsMeasurementV1Schema>;
 
 /** Bounded work accounting supplied by an owning port or transaction. */
 export const OperationBudgetUsageSchema = z.object({
@@ -1208,6 +1287,21 @@ export const StructureReadV14Schema = z.discriminatedUnion("status", [z.object({
 })]);
 export type StructureReadV14 = z.infer<typeof StructureReadV14Schema>;
 
+export const StructureReadV15Schema = z.discriminatedUnion("status", [z.object({
+  code: z.string(),
+  detail: z.string(),
+  retryable: z.boolean(),
+  status: z.literal("failed"),
+}), z.object({
+  measurement: z.lazy(() => NodeSessionsMeasurementV1Schema),
+  status: z.literal("measured"),
+}), z.object({
+  detail: z.string(),
+  reason: z.string(),
+  status: z.literal("unmeasured"),
+})]);
+export type StructureReadV15 = z.infer<typeof StructureReadV15Schema>;
+
 export const TestMapMeasurementV1Schema = z.object({
   algorithm: z.string(),
   applicable: z.boolean(),
@@ -1330,6 +1424,14 @@ export const EnvelopeSchema = DashboardEnvelopeV1Schema;
 export type WireEnvelope<TPayload> = DashboardEnvelopeV1<TPayload>;
 export const AutomaticWorktreeGcSchema = AutomaticWorktreeGcV1Schema;
 export type AutomaticWorktreeGc = AutomaticWorktreeGcV1;
+export const AutomationPendingReviewCountSchema = AutomationPendingReviewCountV1Schema;
+export type AutomationPendingReviewCount = AutomationPendingReviewCountV1;
+export const AutomationPendingReviewSchema = AutomationPendingReviewV1Schema;
+export type AutomationPendingReview = AutomationPendingReviewV1;
+export const AutomationSchedulerStatusSchema = AutomationSchedulerStatusV1Schema;
+export type AutomationSchedulerStatus = AutomationSchedulerStatusV1;
+export const AutomationTaskStatusSchema = AutomationTaskStatusV1Schema;
+export type AutomationTaskStatus = AutomationTaskStatusV1;
 export const BranchCollisionPolicySchema = BranchCollisionPolicyV1Schema;
 export type BranchCollisionPolicy = BranchCollisionPolicyV1;
 export const BranchNameComponentSchema = BranchNameComponentV1Schema;
@@ -1444,8 +1546,12 @@ export const HostKindSchema = HostKindV1Schema;
 export type HostKind = HostKindV1;
 export const IncomingCallEdgeSchema = IncomingCallEdgeV1Schema;
 export type IncomingCallEdge = IncomingCallEdgeV1;
+export const LoomFileSessionProjectionSchema = LoomFileSessionProjectionV1Schema;
+export type LoomFileSessionProjection = LoomFileSessionProjectionV1;
 export const NodeRefSchema = NodeRefV1Schema;
 export type NodeRef = NodeRefV1;
+export const NodeSessionsMeasurementSchema = NodeSessionsMeasurementV1Schema;
+export type NodeSessionsMeasurement = NodeSessionsMeasurementV1;
 export const ProtectedRefDispositionSchema = ProtectedRefDispositionV1Schema;
 export type ProtectedRefDisposition = ProtectedRefDispositionV1;
 export const ProtectedRefRuleSchema = ProtectedRefRuleV1Schema;

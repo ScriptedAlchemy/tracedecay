@@ -947,7 +947,10 @@ impl Database {
         };
         let database = Self::publish_runtime(runtime, access).await?;
         let migrated = match mode {
-            TestDatabaseRuntimeMode::Initialize => false,
+            TestDatabaseRuntimeMode::Initialize => {
+                crate::db::migrations::migrate(&database).await?;
+                false
+            }
             TestDatabaseRuntimeMode::Existing => crate::db::migrations::migrate(&database).await?,
             TestDatabaseRuntimeMode::ReadOnly => false,
         };
@@ -1408,6 +1411,13 @@ impl Database {
         Ok(())
     }
 
+    /// Produces a standalone checkpointed fixture artifact.
+    #[cfg(any(test, feature = "test-transport"))]
+    #[doc(hidden)]
+    pub async fn truncate_wal_for_test_artifact(&self) -> Result<()> {
+        self.truncate_wal_for_offline_maintenance().await
+    }
+
     pub(crate) async fn checkpoint_unguarded(&self) -> Result<()> {
         let authority = self.write_authority()?;
         let request = CheckpointRequest::new(
@@ -1584,7 +1594,14 @@ impl Database {
         transaction: &DatabaseWriteTransaction<'_>,
     ) -> Result<()> {
         transaction
-            .execute("INSERT INTO nodes_fts(nodes_fts) VALUES('rebuild')", ())
+            .execute_batch(
+                "DROP TABLE nodes_fts;
+                 CREATE VIRTUAL TABLE nodes_fts USING fts5(
+                     name, qualified_name, docstring, signature,
+                     content='nodes', content_rowid='rowid'
+                 );
+                 INSERT INTO nodes_fts(nodes_fts) VALUES('rebuild');",
+            )
             .await
             .map_err(|e| TraceDecayError::Database {
                 message: format!("failed to rebuild FTS index: {e}"),
@@ -1805,10 +1822,11 @@ where
 }
 
 fn is_nodes_fts_only_corruption(problem: &str) -> bool {
+    let problem = problem.trim();
     matches!(
-        problem.trim(),
+        problem,
         NODES_FTS_CORRUPTION | "malformed inverted index for FTS5 table nodes_fts"
-    )
+    ) || (problem.contains("fts5: corruption found") && problem.contains("nodes_fts"))
 }
 
 #[cfg(test)]

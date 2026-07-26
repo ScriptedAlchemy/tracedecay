@@ -36,10 +36,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use tracedecay_application::doctor::{
     AdvisoryFeedbackDoctorPort, AdvisoryFeedbackFindingReadV1, AdvisoryFeedbackReadV1,
-    CodeIndexMountDoctorPort, CodeIndexMountReadV1, CodeIndexMountStateV1,
-    ConfigurationAuthorityDoctorPort, ConfigurationAuthorityReadV1, ConfigurationDriftV1,
-    DoctorCoverageCompletenessV1, DoctorReportComposerV1, DoctorReportV1, DoctorSourceFuture,
-    DoctorStorageFamilyReadV1, DoctorStorageFindingV1, HostConformanceV1,
+    AdvisoryFeedbackSummaryReadV1, CodeIndexMountDoctorPort, CodeIndexMountReadV1,
+    CodeIndexMountStateV1, ConfigurationAuthorityDoctorPort, ConfigurationAuthorityReadV1,
+    ConfigurationDriftV1, DoctorCoverageCompletenessV1, DoctorReportComposerV1, DoctorReportV1,
+    DoctorSourceFuture, DoctorStorageFamilyReadV1, DoctorStorageFindingV1, HostConformanceV1,
     HostIntegrationDoctorPort, HostIntegrationReadV1, LanguageServerDoctorPort,
     LanguageServerReadV1, LanguageServerStateV1, ObservabilityDoctorPort, ObservabilityReadV1,
     ObservabilityStateV1, RuntimeHealthDoctorPort, RuntimeHealthReadV1, RuntimeLivenessV1,
@@ -388,6 +388,7 @@ impl HostIntegrationDoctorPort for HostIntegrationDoctorAdapterV1 {
 #[must_use]
 pub fn advisory_feedback_read_from_publication(
     publication: Option<&tracedecay_application::feedback::FeedbackCompletedPublicationV1>,
+    current_generation: Option<&tracedecay_domain::CodeGenerationId>,
 ) -> AdvisoryFeedbackReadV1 {
     let Some(publication) = publication else {
         return AdvisoryFeedbackReadV1::Absent;
@@ -398,9 +399,19 @@ pub fn advisory_feedback_read_from_publication(
     let Some(generation_id) = publication.input.target.generation_id.clone() else {
         return AdvisoryFeedbackReadV1::Unknown;
     };
-    if publication.result.findings.is_empty() {
-        return AdvisoryFeedbackReadV1::Absent;
-    }
+    let generation_current = current_generation == Some(&generation_id);
+    let summary = AdvisoryFeedbackSummaryReadV1 {
+        result_id: publication.result.result_id.clone(),
+        cycle_id: publication.result.cycle_id.clone(),
+        scope: publication.result.scope.clone(),
+        generation_id: generation_id.clone(),
+        generation_current,
+        termination: publication.result.termination,
+        provider_states: publication.result.provider_states.clone(),
+        total_findings: publication.result.total_findings,
+        returned_findings: publication.result.returned_findings,
+        omitted_findings: publication.result.omitted_findings,
+    };
     let impact_anchors = publication
         .result
         .impact
@@ -426,6 +437,7 @@ pub fn advisory_feedback_read_from_publication(
                 finding_id: finding.finding_id.clone(),
                 scope: publication.result.scope.clone(),
                 generation_id: generation_id.clone(),
+                generation_current,
                 lifecycle: finding.lifecycle,
                 provider_state: finding.provider_state,
                 evidence_anchors,
@@ -435,7 +447,7 @@ pub fn advisory_feedback_read_from_publication(
             }
         })
         .collect();
-    AdvisoryFeedbackReadV1::Observed { findings }
+    AdvisoryFeedbackReadV1::Observed { summary, findings }
 }
 
 /// Adapter over the mounted feedback owner's canonical read store.
@@ -618,7 +630,14 @@ pub fn observability_read_from_model(
     >,
 ) -> ObservabilityReadV1 {
     match model {
-        Ok(model) if model.total_count == 0 => ObservabilityReadV1::Absent,
+        Ok(model)
+            if model.total_count == 0
+                && model.denominators.eligible == 0
+                && model.denominators.incomplete_boots == 0
+                && model.watermark.producer_boot_id.is_none() =>
+        {
+            ObservabilityReadV1::Absent
+        }
         Ok(model) => {
             use crate::application::feedback::observations::Plan26CoverageV1;
             let (state, coverage) = match model.coverage {
@@ -1203,11 +1222,16 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                 )
                 .await,
             );
+            let current_generation = schedulers
+                .latest_complete_fresh(&project_root)
+                .await
+                .map(|latest| latest.generation().manifest().generation_id.clone());
             let advisory_feedback = match feedback_runtimes.doctor_read_store(&project_root).await {
                 Some(store) => match store.doctor_latest_publication(&context).await {
-                    Ok(publication) => {
-                        advisory_feedback_read_from_publication(publication.as_ref())
-                    }
+                    Ok(publication) => advisory_feedback_read_from_publication(
+                        publication.as_ref(),
+                        current_generation.as_ref(),
+                    ),
                     Err(_) => AdvisoryFeedbackReadV1::Unknown,
                 },
                 None => AdvisoryFeedbackReadV1::Absent,
@@ -1999,7 +2023,7 @@ fn execute_host_repair(
         .map_err(|_| DoctorRemediationDispatchErrorV1::OwnerUnavailable)?;
     let mut transaction = HostComponentSetTransactionV1::new(&mut writer);
     let mut registration =
-        crate::agents::host_registration::CompatibilityAgentRegistrationDelegate::new(
+        crate::agents::host_component_registration::HostComponentRegistrationDelegate::new(
             crate::agents::integration_id_for_host(host),
             &home,
             &lifecycle_root,

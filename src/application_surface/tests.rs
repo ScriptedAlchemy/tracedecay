@@ -3,29 +3,31 @@ use std::sync::Arc;
 
 use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
-use serde_json::Value;
+use serde_json::{Value, json};
 use tower::ServiceExt;
 use tracedecay_application::{
-    CancellationContext, CancellationSignal, CancellationState, CapabilityGrantId,
-    CapabilityGrantSnapshot, Deadline, DisclosureClass, OperationBudgetUsage, OperationReceipt,
-    PageRequest, RequestContext, RequestId, ResolvedScope, StreamEvent,
+    ApplicationProblem, ApplicationProblemEnvelope, CancellationContext, CancellationSignal,
+    CancellationState, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
+    OpaqueCursor, OperationBudgetUsage, OperationReceipt, PageRequest, RequestContext, RequestId,
+    ResolvedScope, ResultContractRef, SafeDiagnostic, StreamEvent,
 };
 use tracedecay_domain::configuration::ConfigurationRevisionId;
 use tracedecay_domain::{
     ActorId, ManifestDigest, ProjectId, QueryNormalizationRevision, RefId, RepositoryId,
     SanitizerRevision, UtcMicros, WorktreeId,
 };
-use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
+use tracedecay_tool_catalog::{BindingId, CapabilityId, SchemaId, UseCaseId};
 
 use super::{
     APPLICATION_PROTOCOL_REVISION, APPLICATION_SURFACE_OPERATIONS, ApplicationSurfaceAdapterError,
     ApplicationSurfaceOperation, ApplicationSurfaceRequest, CallableCodeSurfaceRequest,
-    ContextScoutClaimSurfaceRequest, ContextScoutClaimWindowSurfaceV1,
-    ContextScoutControlSurfaceRequest, ContextScoutSurfaceRequest, FeedbackSurfaceRequest,
-    HttpCancellationRegistry, HttpDisconnectCancellation, HttpOperationEventState,
-    PrimitiveCodeSurfaceRequest, application_negotiated_features,
-    application_surface_dispatch_input_with_controls, current_micros, execute_application_surface,
-    http_operation_event_router, parse_application_surface_request, plan26_sse_stream_event,
+    ConfigurationListSurfaceRequest, ConfigurationSurfaceRequest, ContextScoutClaimSurfaceRequest,
+    ContextScoutClaimWindowSurfaceV1, ContextScoutControlSurfaceRequest,
+    ContextScoutSurfaceRequest, FeedbackSurfaceRequest, HttpCancellationRegistry,
+    HttpDisconnectCancellation, HttpOperationEventState, PrimitiveCodeSurfaceRequest,
+    application_negotiated_features, application_surface_dispatch_input_with_controls,
+    current_micros, execute_application_surface, http_operation_event_router,
+    normalize_application_tool_args, parse_application_surface_request, plan26_sse_stream_event,
     resolve_application_surface_dispatch, resolve_authenticated_http_request_context,
     surface_rejection_metadata,
 };
@@ -159,7 +161,48 @@ fn every_configuration_operation_enters_the_canonical_dispatch_catalog() {
 }
 
 #[test]
-fn cli_and_mcp_resolve_every_operation_through_the_current_catalog_gate() {
+fn dashboard_configuration_dispatch_preserves_http_application_semantics() {
+    let operation = ApplicationSurfaceOperation::ConfigurationList;
+    let request = || {
+        ApplicationSurfaceRequest::Configuration(ConfigurationSurfaceRequest::List(
+            ConfigurationListSurfaceRequest::default(),
+        ))
+    };
+    let http = resolve_application_surface_dispatch(
+        tracedecay_tool_catalog::BindingSurface::Http,
+        operation,
+        RequestId::new("request.configuration.http").expect("HTTP request"),
+        request(),
+        RequestedOutputFormat::Json,
+    )
+    .expect("HTTP configuration dispatch");
+    let dashboard = resolve_application_surface_dispatch(
+        tracedecay_tool_catalog::BindingSurface::Dashboard,
+        operation,
+        RequestId::new("request.configuration.dashboard").expect("Dashboard request"),
+        request(),
+        RequestedOutputFormat::Json,
+    )
+    .expect("Dashboard configuration dispatch");
+
+    assert_eq!(
+        http.invocation.request_schema,
+        dashboard.invocation.request_schema
+    );
+    assert_eq!(
+        http.invocation.result_schema,
+        dashboard.invocation.result_schema
+    );
+    assert_ne!(http.invocation.binding_id, dashboard.invocation.binding_id);
+    assert_eq!(
+        serde_json::to_value(&http.invocation.invocation.request).expect("HTTP request value"),
+        serde_json::to_value(&dashboard.invocation.invocation.request)
+            .expect("Dashboard request value")
+    );
+}
+
+#[test]
+fn cli_mcp_and_http_resolve_every_operation_through_the_current_catalog_gate() {
     let catalog = super::application_surface_catalog().expect("application catalog");
     let resolver = crate::daemon_client::CatalogBindingResolver::new(&catalog);
     let profile_id = tracedecay_tool_catalog::ProfileId::new(
@@ -173,6 +216,7 @@ fn cli_and_mcp_resolve_every_operation_through_the_current_catalog_gate() {
         for (surface, surface_name) in [
             (tracedecay_tool_catalog::BindingSurface::Cli, "cli"),
             (tracedecay_tool_catalog::BindingSurface::Mcp, "mcp"),
+            (tracedecay_tool_catalog::BindingSurface::Http, "http"),
         ] {
             let binding = crate::daemon_client::BindingResolver::resolve_binding(
                 &resolver,
@@ -198,6 +242,301 @@ fn cli_and_mcp_resolve_every_operation_through_the_current_catalog_gate() {
             assert_eq!(binding.result_schema.revision(), 1);
         }
     }
+}
+
+#[test]
+fn health_delta_has_cli_mcp_http_parity_and_one_typed_request() {
+    let catalog = super::application_surface_catalog().expect("application catalog");
+    let resolver = crate::daemon_client::CatalogBindingResolver::new(&catalog);
+    let profile_id = tracedecay_tool_catalog::ProfileId::new(
+        tracedecay_application::APPLICATION_DEFAULT_PROFILE_ID,
+    )
+    .expect("application profile");
+    for (surface, name) in [
+        (tracedecay_tool_catalog::BindingSurface::Cli, "cli"),
+        (tracedecay_tool_catalog::BindingSurface::Mcp, "mcp"),
+        (tracedecay_tool_catalog::BindingSurface::Http, "http"),
+    ] {
+        let binding = crate::daemon_client::BindingResolver::resolve_binding(
+            &resolver,
+            surface,
+            &crate::daemon_client::BindingResolution {
+                profile_id: profile_id.clone(),
+                operation: tracedecay_tool_catalog::SurfaceOperationName::new("health_delta")
+                    .expect("operation"),
+                protocol_revision: APPLICATION_PROTOCOL_REVISION,
+                negotiated_features: application_negotiated_features(),
+            },
+        )
+        .unwrap_or_else(|| panic!("health_delta must resolve on {surface:?}"));
+        assert_eq!(
+            binding.binding_id.as_str(),
+            format!("binding.{name}.health_delta.v1")
+        );
+    }
+
+    let parsed = parse_application_surface_request(
+        ApplicationSurfaceOperation::HealthDelta,
+        serde_json::json!({
+            "before_cursor": "health-delta.v1.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "path_prefix": "src",
+            "meta": {
+                "temporal": {"kind": "current"},
+                "page": {"page_size": 10, "cursor": null},
+                "projection": "summary",
+                "order": "stable_identity"
+            }
+        }),
+    )
+    .expect("typed health delta request");
+    assert!(matches!(
+        parsed,
+        ApplicationSurfaceRequest::Primitive(Pr12PrimitiveRequest::HealthDelta(_))
+    ));
+}
+
+#[test]
+fn git_reads_parse_the_existing_mcp_shapes_into_catalog_owned_requests() {
+    let fixtures = [
+        (
+            ApplicationSurfaceOperation::GitStatus,
+            serde_json::json!({}),
+            "capability.application.git.status",
+        ),
+        (
+            ApplicationSurfaceOperation::GitDiff,
+            serde_json::json!({
+                "scope": "commit_range",
+                "base": "a".repeat(40),
+                "head": "b".repeat(40),
+            }),
+            "capability.application.git.diff",
+        ),
+        (
+            ApplicationSurfaceOperation::GitHistory,
+            serde_json::json!({
+                "count": 1_000,
+                "path": "src/lib.rs",
+                "follow": true,
+                "first_parent": true,
+            }),
+            "capability.application.git.history",
+        ),
+        (
+            ApplicationSurfaceOperation::GitBlame,
+            serde_json::json!({"path": "src/lib.rs", "follow_renames": true}),
+            "capability.application.git.blame",
+        ),
+        (
+            ApplicationSurfaceOperation::GitHunks,
+            serde_json::json!({
+                "scope": "staged",
+                "preview_id": "preview.catalog-owned",
+                "snapshot_digest": format!("sha256:{}", "c".repeat(64)),
+            }),
+            "capability.application.git.hunks",
+        ),
+    ];
+
+    for (operation, args, capability) in fixtures {
+        assert_eq!(
+            ApplicationSurfaceOperation::from_tool_name(&format!(
+                "tracedecay_{}",
+                operation.as_str()
+            )),
+            Some(operation)
+        );
+        let ApplicationSurfaceRequest::GitRead(request) =
+            parse_application_surface_request(operation, args).expect("Git read request")
+        else {
+            panic!("Git reads must use the catalog-owned request")
+        };
+        assert_eq!(request.request.capability_id(), capability);
+        assert_eq!(request.max_entries, 1_000);
+        assert_eq!(request.max_bytes, 4 * 1024 * 1024);
+    }
+}
+
+#[test]
+fn git_read_parser_rejects_values_outside_the_catalog_schema() {
+    for (operation, args) in [
+        (
+            ApplicationSurfaceOperation::GitStatus,
+            serde_json::json!({"max_entries": 0}),
+        ),
+        (
+            ApplicationSurfaceOperation::GitStatus,
+            serde_json::json!({"max_bytes": 4_194_305}),
+        ),
+        (
+            ApplicationSurfaceOperation::GitHistory,
+            serde_json::json!({"count": 1_001}),
+        ),
+        (
+            ApplicationSurfaceOperation::GitDiff,
+            serde_json::json!({"scope": "working_tree", "base": "a".repeat(40)}),
+        ),
+    ] {
+        assert!(matches!(
+            parse_application_surface_request(operation, args),
+            Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+        ));
+    }
+}
+
+#[tokio::test]
+async fn http_git_read_routes_preserve_the_canonical_typed_request() {
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let owner_seen = Arc::clone(&seen);
+    let app = tracedecay_api::application_router(
+        move |request: tracedecay_api::HttpApplicationRequest| {
+            owner_seen.lock().expect("capture Git read").push((
+                request.operation,
+                request.request_id.clone(),
+                request.page.clone(),
+                request.cancellation.clone(),
+                request.body.clone(),
+            ));
+            async move {
+                tracedecay_api::CanonicalInvocationResult::new(
+                    BindingId::new(format!("binding.http.{}.v1", request.operation.as_str()))
+                        .expect("binding"),
+                    Err(ApplicationProblemEnvelope::new(
+                        ResultContractRef::new(
+                            SchemaId::new("schema.application.git.fixture.result").expect("schema"),
+                            1,
+                        )
+                        .expect("contract"),
+                        request.request_id,
+                        ApplicationProblem::unavailable(
+                            SafeDiagnostic::new(
+                                "git.fixture.unavailable",
+                                "Fixture Git owner is unavailable",
+                            )
+                            .expect("diagnostic"),
+                        ),
+                    )),
+                )
+            }
+        },
+    );
+
+    for (index, (route, operation)) in [
+        (
+            "/git/status?page_size=7",
+            tracedecay_api::HttpApplicationOperation::GitStatus,
+        ),
+        (
+            "/git/diff?page_size=7",
+            tracedecay_api::HttpApplicationOperation::GitDiff,
+        ),
+        (
+            "/git/history?page_size=7",
+            tracedecay_api::HttpApplicationOperation::GitHistory,
+        ),
+        (
+            "/git/blame?page_size=7",
+            tracedecay_api::HttpApplicationOperation::GitBlame,
+        ),
+        (
+            "/git/hunks?page_size=7",
+            tracedecay_api::HttpApplicationOperation::GitHunks,
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let request_id = RequestId::new(format!("request.http.git-read.{index}")).expect("request");
+        let cancellation =
+            CancellationSignal::active(format!("cancellation.http.git-read.{index}"))
+                .expect("cancellation");
+        let deadline = Deadline::new(UtcMicros(9_999_999)).expect("deadline");
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post(route)
+                    .header("content-type", "application/json")
+                    .extension(request_id.clone())
+                    .extension(tracedecay_api::HttpApplicationControls {
+                        deadline,
+                        cancellation: cancellation.clone(),
+                    })
+                    .body(Body::from("{}"))
+                    .expect("HTTP request"),
+            )
+            .await
+            .expect("HTTP response");
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let captured = seen.lock().expect("captured Git reads");
+        let (actual_operation, actual_request_id, page, actual_cancellation, body) =
+            captured.last().expect("one captured Git read");
+        assert_eq!(*actual_operation, operation);
+        assert_eq!(actual_request_id, &request_id);
+        assert_eq!(page.page_size, 7);
+        assert!(page.cursor.is_none());
+        assert_eq!(
+            actual_cancellation.context().token_id,
+            cancellation.context().token_id
+        );
+        assert_eq!(body, &serde_json::json!({}));
+    }
+}
+
+#[test]
+fn catalog_bound_compatibility_tools_resolve_before_retained_dispatch() {
+    let catalog = super::application_surface_catalog().expect("application catalog");
+    let mut compatibility_operations = std::collections::BTreeSet::new();
+    let mut resolved_bindings = 0;
+
+    for capability in catalog.capabilities() {
+        if !capability.availability().is_callable() {
+            continue;
+        }
+        for binding_id in capability.binding_ids() {
+            let binding = catalog.binding(binding_id).expect("catalog binding");
+            if !matches!(
+                binding.surface(),
+                tracedecay_tool_catalog::BindingSurface::Cli
+                    | tracedecay_tool_catalog::BindingSurface::Mcp
+            ) || ApplicationSurfaceOperation::from_tool_name(binding.operation().as_str())
+                .is_some()
+            {
+                continue;
+            }
+
+            let tool_name = format!("tracedecay_{}", binding.operation().as_str());
+            let resolved = super::resolve_catalog_tool_binding(binding.surface(), &tool_name)
+                .expect("compatibility binding resolution")
+                .unwrap_or_else(|| panic!("{tool_name} must resolve before retained dispatch"));
+            assert_eq!(resolved.binding_id, *binding_id);
+            compatibility_operations.insert(binding.operation().as_str().to_owned());
+            resolved_bindings += 1;
+        }
+    }
+
+    assert_eq!(resolved_bindings, 26);
+    assert_eq!(
+        compatibility_operations,
+        [
+            "ast_grep_rewrite",
+            "git_blame",
+            "git_diff",
+            "git_history",
+            "git_hunks",
+            "git_status",
+            "insert_at",
+            "insert_at_symbol",
+            "move_symbol",
+            "multi_str_replace",
+            "replace_symbol",
+            "source_edit_reconcile",
+            "str_replace",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+    );
 }
 
 #[test]
@@ -334,7 +673,9 @@ fn callable_code_operations_parse_distinct_application_requests() {
         ApplicationSurfaceOperation::CodePhraseSearch,
         callable_code_request_body(serde_json::json!({
             "query": "callable application surface",
-            "phrases": ["callable application", "surface"]
+            "phrases": ["callable application", "surface"],
+            "field_filters": [{"field": "path", "include": true}],
+            "fuzzy_budget": 7
         })),
     )
     .expect("phrase search request");
@@ -352,6 +693,14 @@ fn callable_code_operations_parse_distinct_application_requests() {
         )
         .expect("validated phrase request");
     assert_eq!(phrase.query.as_str(), "callable application surface");
+    assert_eq!(phrase.fuzzy_budget, 7);
+    assert_eq!(
+        phrase.field_filters,
+        [tracedecay_application::CodeLexicalFieldFilter {
+            field: tracedecay_application::CodeLexicalField::Path,
+            include: true,
+        }]
+    );
 
     let callees = parse_application_surface_request(
         ApplicationSurfaceOperation::CodeCallees,
@@ -367,6 +716,43 @@ fn callable_code_operations_parse_distinct_application_requests() {
         ApplicationSurfaceRequest::CallableCode(CallableCodeSurfaceRequest::Callees(request))
             if request.node_id == "node.application-surface"
     ));
+
+    let facets = parse_application_surface_request(
+        ApplicationSurfaceOperation::CodeFacets,
+        callable_code_request_body(serde_json::json!({"dimension": "language"})),
+    )
+    .expect("facets request");
+    assert!(matches!(
+        facets,
+        ApplicationSurfaceRequest::CallableCode(CallableCodeSurfaceRequest::Facets(request))
+            if request.dimension == tracedecay_application::CodeFacetDimension::Language
+    ));
+
+    let timeline = parse_application_surface_request(
+        ApplicationSurfaceOperation::CodeTimeline,
+        callable_code_request_body(serde_json::json!({})),
+    )
+    .expect("timeline request");
+    assert!(matches!(
+        timeline,
+        ApplicationSurfaceRequest::CallableCode(CallableCodeSurfaceRequest::Timeline(_))
+    ));
+
+    for operation in [
+        ApplicationSurfaceOperation::CodeDeclaration,
+        ApplicationSurfaceOperation::CodeDefinition,
+        ApplicationSurfaceOperation::CodeTypeDefinition,
+        ApplicationSurfaceOperation::CodeReferences,
+    ] {
+        let request = parse_application_surface_request(
+            operation,
+            callable_code_request_body(
+                serde_json::json!({"node_id": "symbol.application-surface"}),
+            ),
+        )
+        .expect("navigation request");
+        assert!(request.matches(operation));
+    }
 }
 
 #[test]
@@ -511,6 +897,31 @@ fn feedback_cycle_projections_require_the_canonical_handle() {
 }
 
 #[test]
+fn explicit_feedback_cycle_accepts_only_a_document_uri() {
+    let request = parse_application_surface_request(
+        ApplicationSurfaceOperation::FeedbackAdvisoryCycle,
+        serde_json::json!({"document_uri": "file:///project/src/lib.rs"}),
+    )
+    .expect("explicit feedback-cycle request");
+    assert!(matches!(
+        request,
+        ApplicationSurfaceRequest::FeedbackAdvisoryCycle(request)
+            if request.document_uri == "file:///project/src/lib.rs"
+    ));
+
+    assert!(matches!(
+        parse_application_surface_request(
+            ApplicationSurfaceOperation::FeedbackAdvisoryCycle,
+            serde_json::json!({
+                "document_uri": "file:///project/src/lib.rs",
+                "request_handle": "rh.client.selected"
+            }),
+        ),
+        Err(ApplicationSurfaceAdapterError::InvalidSurfaceRequest)
+    ));
+}
+
+#[test]
 fn callable_code_page_is_transport_owned() {
     let rejected = parse_application_surface_request(
         ApplicationSurfaceOperation::CodeExactOccurrence,
@@ -587,6 +998,24 @@ fn callable_code_operation_names_are_exact_and_not_primitive_aliases() {
         ),
         (ApplicationSurfaceOperation::CodeCallers, "code_callers"),
         (ApplicationSurfaceOperation::CodeCallees, "code_callees"),
+        (ApplicationSurfaceOperation::CodeFacets, "code_facets"),
+        (ApplicationSurfaceOperation::CodeTimeline, "code_timeline"),
+        (
+            ApplicationSurfaceOperation::CodeDeclaration,
+            "code_declaration",
+        ),
+        (
+            ApplicationSurfaceOperation::CodeDefinition,
+            "code_definition",
+        ),
+        (
+            ApplicationSurfaceOperation::CodeTypeDefinition,
+            "code_type_definition",
+        ),
+        (
+            ApplicationSurfaceOperation::CodeReferences,
+            "code_references",
+        ),
     ] {
         assert_eq!(operation.as_str(), name);
         assert_eq!(
@@ -603,6 +1032,12 @@ fn callable_code_operation_names_are_exact_and_not_primitive_aliases() {
         "type_hierarchy",
         "callers",
         "callees",
+        "facets",
+        "timeline",
+        "declaration",
+        "definition",
+        "type_definition",
+        "references",
     ] {
         assert_eq!(
             ApplicationSurfaceOperation::from_tool_name(primitive_alias),
@@ -1036,5 +1471,60 @@ fn surface_rejection_metadata_distinguishes_invalid_input_from_authorization() {
     assert_eq!(
         surface_rejection_metadata(&ApplicationSurfaceAdapterError::DaemonUnavailable),
         None
+    );
+}
+
+#[test]
+fn legacy_diagnostics_name_routes_to_canonical_read_surface() {
+    assert_eq!(
+        ApplicationSurfaceOperation::from_tool_name("tracedecay_diagnostics"),
+        Some(ApplicationSurfaceOperation::DiagnosticsRead)
+    );
+    assert_eq!(
+        ApplicationSurfaceOperation::from_tool_name("tracedecay_diagnostics_read"),
+        Some(ApplicationSurfaceOperation::DiagnosticsRead)
+    );
+    assert_eq!(
+        normalize_application_tool_args("tracedecay_diagnostics", json!({})).unwrap(),
+        json!({"scope": "workspace", "maximum_diagnostics": 1000, "cursor": null})
+    );
+    assert_eq!(
+        normalize_application_tool_args(
+            "tracedecay_diagnostics",
+            json!({"scope": "file", "path": "src/lib.rs"}),
+        )
+        .unwrap(),
+        json!({"scope": {"file": "src/lib.rs"}, "maximum_diagnostics": 1000, "cursor": null})
+    );
+    assert_eq!(
+        normalize_application_tool_args(
+            "tracedecay_diagnostics",
+            json!({"maximum_diagnostics": 25, "cursor": "opaque"}),
+        )
+        .unwrap(),
+        json!({"scope": "workspace", "maximum_diagnostics": 25, "cursor": "opaque"})
+    );
+    assert!(
+        normalize_application_tool_args("tracedecay_diagnostics", json!({"scope": "package"}),)
+            .is_err()
+    );
+
+    let page = PageRequest::new(25, Some(OpaqueCursor::new("opaque-http").expect("cursor")))
+        .expect("page");
+    assert_eq!(
+        super::apply_http_page_to_surface_body(
+            ApplicationSurfaceOperation::DiagnosticsRead,
+            json!({
+                "scope": "workspace",
+                "maximum_diagnostics": 999,
+                "cursor": "body-cursor"
+            }),
+            &page,
+        ),
+        json!({
+            "scope": "workspace",
+            "maximum_diagnostics": 25,
+            "cursor": "opaque-http"
+        })
     );
 }

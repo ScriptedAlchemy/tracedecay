@@ -187,13 +187,12 @@ impl SessionRetrievalStore for InMemorySessionPorts {
     ) -> impl Future<Output = SessionStoreResult<SessionRetrievalPageV1>> + Send {
         async move {
             yield_once().await;
-            let summaries = self.state.lock().unwrap().summary.iter().cloned().collect();
             SessionRetrievalPageV1::new(
                 request.snapshot().clone(),
                 vec![],
                 vec![],
                 vec![],
-                summaries,
+                vec![],
                 TemporalCoverageCountsV1::default(),
                 None,
             )

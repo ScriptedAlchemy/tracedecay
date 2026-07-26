@@ -6,12 +6,10 @@ use crate::config::PinnedUserDataDir;
 use crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1;
 use crate::global_db::RegisteredGlobalDb;
 use crate::tracedecay::TraceDecay;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tempfile::TempDir;
-
-static FRESHNESS_RUNTIME_NONCE: AtomicU64 = AtomicU64::new(1);
 
 struct FreshnessRuntime {
     registry: DaemonSessionRuntimeRegistryV1,
@@ -21,13 +19,14 @@ struct FreshnessRuntime {
 impl FreshnessRuntime {
     async fn open(profile_root: &std::path::Path) -> Self {
         std::fs::create_dir_all(profile_root).expect("freshness profile root");
+        crate::storage::set_private_dir_permissions(profile_root)
+            .expect("restrict freshness profile root");
         let identity = crate::daemon::profile_identity::load_or_create(profile_root)
             .expect("freshness profile identity");
-        let nonce = FRESHNESS_RUNTIME_NONCE.fetch_add(1, Ordering::Relaxed);
         let scope = crate::db::enter_daemon_database_scope(
             identity.profile_root(),
-            nonce,
-            "mcp-freshness-test",
+            1,
+            "host-admission-test-runtime",
         )
         .expect("freshness daemon database scope");
         let registry = DaemonSessionRuntimeRegistryV1::open(identity)
@@ -73,7 +72,12 @@ fn git(root: &std::path::Path, args: &[&str]) {
     assert!(ok, "git {args:?} failed");
 }
 
-async fn init_indexed_repo() -> (TraceDecay, TempDir, PinnedUserDataDir) {
+struct FreshnessFixtureAuthority {
+    _pin: PinnedUserDataDir,
+    _runtime: Arc<crate::application::host_admission::HostAdmissionTestRuntimeV1>,
+}
+
+async fn init_indexed_repo() -> (TraceDecay, TempDir, FreshnessFixtureAuthority) {
     let pin = PinnedUserDataDir::new();
     let dir = TempDir::new().unwrap();
     let root = dir.path();
@@ -85,14 +89,24 @@ async fn init_indexed_repo() -> (TraceDecay, TempDir, PinnedUserDataDir) {
     std::fs::write(root.join("src/a.rs"), "pub fn a() {}\n").unwrap();
     git(root, &["add", "."]);
     git(root, &["commit", "-q", "-m", "initial"]);
-    let cg = TraceDecay::init(root).await.expect("init");
+    let (cg, runtime) =
+        TraceDecay::init_test_fixture_with_registered_runtime(root, "project.mcp-freshness")
+            .await
+            .expect("init");
     cg.index_all().await.expect("index");
-    (cg, dir, pin)
+    (
+        cg,
+        dir,
+        FreshnessFixtureAuthority {
+            _pin: pin,
+            _runtime: runtime,
+        },
+    )
 }
 
 #[tokio::test]
 async fn branch_drift_reconciles_database_owner_before_returning() {
-    let (cg, dir, _pin) = init_indexed_repo().await;
+    let (cg, dir, fixture_authority) = init_indexed_repo().await;
     let root = dir.path();
     cg.checkpoint().await.unwrap();
     let layout = cg.store_layout().clone();
@@ -110,7 +124,11 @@ async fn branch_drift_reconciles_database_owner_before_returning() {
 
     git(root, &["checkout", "-q", "-b", "feature"]);
     git(root, &["checkout", "-q", "main"]);
-    let main = TraceDecay::open(root).await.unwrap();
+    let main = fixture_authority
+        ._runtime
+        .open_project_graph_for_test(root, crate::tracedecay::TraceDecayOpenOptions::default())
+        .await
+        .unwrap();
     let observed = Arc::new(Mutex::new(Vec::new()));
     let callback: DatabaseOwnerReconciler = {
         let observed = Arc::clone(&observed);
