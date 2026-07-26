@@ -567,7 +567,11 @@ impl PersistentWriter {
         let watermark_publisher = CommittedWatermarkPublisher::new(binding.clone());
         let watermark_source = watermark_publisher.subscribe();
         let (sender, receiver) = mpsc::channel(capacity);
-        let (migration_sql_sender, migration_sql_receiver) = mpsc::channel(1);
+        // Migration-SQL transactions are serialized by the writer actor. Keep
+        // the same bounded admission depth as ordinary writes so a second
+        // transaction can queue behind the active one instead of observing a
+        // spurious Busy error from the transport's single-slot channel.
+        let (migration_sql_sender, migration_sql_receiver) = mpsc::channel(capacity);
         let (incremental_vacuum_sender, incremental_vacuum_receiver) = mpsc::channel(1);
         let (online_backup_sender, online_backup_receiver) = mpsc::channel(1);
         let (checkpoint_sender, checkpoint_receiver) = mpsc::channel(1);

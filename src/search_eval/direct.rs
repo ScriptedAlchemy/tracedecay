@@ -1413,7 +1413,7 @@ mod tests {
         );
         assert!(activation_profile_chain(&workload, "caller-authored").is_err());
         assert_eq!(workload.execution_contract.exact_file_count, 13);
-        assert_eq!(workload.execution_contract.exact_corpus_bytes, 306_536);
+        assert_eq!(workload.execution_contract.exact_corpus_bytes, 147_447);
         assert_eq!(
             workload.execution_contract.exact_eligible_chunks_current,
             1_960

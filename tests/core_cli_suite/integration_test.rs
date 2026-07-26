@@ -1079,7 +1079,7 @@ async fn test_concurrent_sync_is_rejected() {
 
     let cg = TraceDecay::init(project).await.unwrap();
 
-    let guard = tracedecay::tracedecay::try_acquire_sync_lock(project)
+    let guard = tracedecay::tracedecay::try_acquire_sync_lock_at(&cg.store_layout().sync_lock_path)
         .expect("hold an in-progress sync lease");
 
     let err = cg.sync().await.unwrap_err();
