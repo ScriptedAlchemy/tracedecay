@@ -3,6 +3,7 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 
 use serde_json::{Value, json};
 use tracedecay::agents::host_bundle_registry::{
@@ -148,6 +149,22 @@ fn public_host_contracts_are_compiler_referenced() {
     assert_agent_integration::<OpenCodeIntegration>();
     let _native_decoder = decode_native_hook_event;
     let _opencode_decoder = decode_opencode_plugin_event;
+}
+
+#[test]
+fn kimi_lifecycle_truth_tracks_the_real_cli_surface_when_available() {
+    let Ok(output) = Command::new("kimi").arg("--help").output() else {
+        return;
+    };
+    assert!(output.status.success());
+    let help = String::from_utf8(output.stdout).expect("Kimi help is UTF-8");
+    assert!(
+        !help.lines().any(|line| {
+            line.trim_start().starts_with("plugin ") || line.trim_start().starts_with("plugins ")
+        }),
+        "Kimi now exposes a non-interactive plugin API; implement that official \
+         lifecycle before claiming the integration unavailable:\n{help}"
+    );
 }
 
 #[test]

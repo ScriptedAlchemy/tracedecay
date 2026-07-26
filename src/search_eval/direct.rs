@@ -27,7 +27,7 @@ pub use candidate_output::{
 
 const DEFAULT_WORKLOAD: &str = "tests/fixtures/search_quality/pr9-pr10-candidate-workload-v1.json";
 const DEFAULT_WORKLOAD_SHA256: &str =
-    "e6f03514533fa71cf0237006e6018a4c82e90d407e117637d8eb86dda3d839a9";
+    "c16b9c8e9a9cfadcf6d63c70dc58766d3ffa0aab78563b175402d97132a4098e";
 const PR9_BASELINE_PROFILE: &str = "pr9-fallback";
 const SEMANTIC_PROFILE: &str = "hybrid-conservative";
 const RERANK_PROFILE: &str = "hybrid-reranked";
@@ -43,6 +43,7 @@ const PROTECTED_STRATA: &[&str] = &[
     "qualified_name",
     "quoted_phrase",
     "tool_name",
+    "commit_identifier",
 ];
 
 #[derive(Debug, Error)]
@@ -147,6 +148,7 @@ pub struct DirectProfileEvaluationV1 {
     pub query_count: usize,
     pub failed_queries: usize,
     pub fallback_stable: bool,
+    pub fallback_matches_expected: bool,
     pub cancellation_bounded: bool,
     pub offline: bool,
     pub resource_status: DirectEvaluationStatusV1,
@@ -543,7 +545,25 @@ fn evaluate_profile(
         )));
     }
     results.sort_by(|left, right| left.query_id.cmp(&right.query_id));
-    let fallback_stable = output.fallback_digest == output.pr9_fallback_digest;
+    let expected_fallback_digest = workload
+        .expected_pr9_fallback_digests
+        .get(&output.partition)
+        .ok_or_else(|| {
+            SearchEvalError::Contract(format!(
+                "missing expected PR9 fallback digest for {}",
+                output.partition
+            ))
+        })?;
+    if output.expected_pr9_fallback_digest != *expected_fallback_digest {
+        return Err(SearchEvalError::Contract(format!(
+            "{}:{} does not bind the checked-in expected PR9 fallback digest",
+            output.profile_id, output.partition
+        )));
+    }
+    let fallback_matches_expected = output.pr9_fallback_matches_expected
+        && output.pr9_fallback_digest == *expected_fallback_digest;
+    let fallback_stable =
+        output.fallback_digest == output.pr9_fallback_digest && fallback_matches_expected;
     let cancellation_bounded =
         output.cancellation == workload.decision_policy.required_cancellation;
     let offline = output.offline == workload.decision_policy.required_offline;
@@ -576,6 +596,7 @@ fn evaluate_profile(
         query_count: results.len(),
         failed_queries,
         fallback_stable,
+        fallback_matches_expected,
         cancellation_bounded,
         offline,
         resource_status,
@@ -1332,6 +1353,7 @@ mod tests {
             query_count: 2,
             failed_queries: 0,
             fallback_stable: true,
+            fallback_matches_expected: true,
             cancellation_bounded: true,
             offline: true,
             resource_status: super::DirectEvaluationStatusV1::Pass,

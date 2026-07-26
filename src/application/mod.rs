@@ -6,6 +6,7 @@ pub mod code_index;
 pub mod configuration;
 pub mod context;
 pub mod dashboard_diagnostics;
+pub mod doctor_remediation;
 pub mod edit;
 pub(crate) mod event_lane;
 pub mod evidence_assembly;

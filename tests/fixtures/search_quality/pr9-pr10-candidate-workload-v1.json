@@ -10,7 +10,7 @@
     "exact_eligible_chunks_10x": 19600,
     "exact_eligible_chunks_current": 1960,
     "exact_file_count": 13,
-    "exact_query_count": 24,
+    "exact_query_count": 28,
     "fusion_revision": "CompositionKernel::compose",
     "model_revision": "JinaEmbeddingsV2BaseCode@516f4baf13dec4ddddda8631e019b5737c8bc250",
     "projection_revision": "retriever.semantic-flat.evaluation.v1",
@@ -132,6 +132,10 @@
     "required_fallback_byte_stability": true,
     "required_offline": "no_network_and_pr9_fallback_available"
   },
+  "expected_pr9_fallback_digests": {
+    "train": "sha256:80fd668d9b7b6dfabd1977c7b8e0f5605225a33a26081cc2e8e22f4801815cd4",
+    "validation": "sha256:105bb59aa0e537b99d2f71db234cc9c2722213209692b4d168351d424a42f7c7"
+  },
   "profile_matrix": [
     {
       "calibration_threshold_ppm": 0,
@@ -154,6 +158,15 @@
       "graph_weight_ppm": 250000,
       "lexical_weight_ppm": 1000000,
       "profile_id": "hybrid-reranked",
+      "rerank_policy": {
+        "deadline_micros": 5000000,
+        "max_candidates": 16,
+        "max_input_bytes": 1048576,
+        "max_input_tokens": 262144,
+        "max_model_invocations": 16,
+        "max_work_units": 16,
+        "policy_id": "rerank.hybrid-reranked.v1"
+      },
       "rerank_weight_ppm": 125000,
       "semantic_weight_ppm": 250000
     }
@@ -380,6 +393,42 @@
       ],
       "label": {
         "anchors": [
+          "error::DomainError::InvalidTimeInterval"
+        ],
+        "document_id": "error",
+        "literal": "time interval start must not be after its end"
+      },
+      "partition": "train",
+      "query": "\"time interval start must not be after its end\"",
+      "query_id": "train-013",
+      "strata": [
+        "quoted_phrase"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "container_fixture"
+      ],
+      "label": {
+        "anchors": [
+          "dockerfile::cargo"
+        ],
+        "document_id": "dockerfile",
+        "literal": "cargo"
+      },
+      "partition": "train",
+      "query": "cargo",
+      "query_id": "train-014",
+      "strata": [
+        "tool_name"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "research"
+      ],
+      "label": {
+        "anchors": [
           "watermark::VectorWatermark"
         ],
         "document_id": "watermark",
@@ -470,7 +519,9 @@
       ],
       "label": {
         "anchors": [
-          "repository::RepositoryDirtyStateV1"
+          "repository::RepositoryDirtyStateV1",
+          "repository::RepositoryRemoteIdentityV1",
+          "repository::evidence"
         ],
         "document_id": "repository",
         "literal": "pub enum RepositoryDirtyStateV1"
@@ -590,6 +641,42 @@
       "query_id": "validation-012",
       "strata": [
         "natural_language"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "project"
+      ],
+      "label": {
+        "anchors": [
+          "repository::COMMIT"
+        ],
+        "document_id": "repository",
+        "literal": "0123456789abcdef0123456789abcdef01234567"
+      },
+      "partition": "validation",
+      "query": "COMMIT",
+      "query_id": "validation-013",
+      "strata": [
+        "commit_identifier"
+      ]
+    },
+    {
+      "allowed_scopes": [
+        "research"
+      ],
+      "label": {
+        "anchors": [
+          "error::DomainError::InvalidTimeInterval"
+        ],
+        "document_id": "error",
+        "literal": "time interval start must not be after its end"
+      },
+      "partition": "validation",
+      "query": "time interval start must not be after its end",
+      "query_id": "validation-014",
+      "strata": [
+        "exact_error"
       ]
     }
   ],
