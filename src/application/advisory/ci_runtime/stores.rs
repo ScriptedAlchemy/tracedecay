@@ -249,8 +249,12 @@ impl CiCodeAnchorStoreV1 for ProjectCiCodeAnchorStoreV1 {
             let Ok(mut nodes) = self.graph.get_nodes_by_file(&path).await else {
                 return Some(partial_code_evidence());
             };
+            // GitHub annotation lines are one-based; graph node spans retain
+            // tree-sitter's zero-based rows.
+            let graph_start_line = annotation.start_line.saturating_sub(1);
+            let graph_end_line = annotation.end_line.saturating_sub(1);
             nodes.retain(|node| {
-                node.start_line <= annotation.start_line && node.end_line >= annotation.end_line
+                node.start_line <= graph_start_line && node.end_line >= graph_end_line
             });
             nodes.sort_by(|left, right| {
                 left.end_line

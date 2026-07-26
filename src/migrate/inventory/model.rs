@@ -128,7 +128,6 @@ pub struct GlobalDbInventory {
     pub project_count: u64,
     pub session_count: u64,
     pub lcm_raw_message_count: u64,
-    pub token_cache_present: bool,
     pub registered_project_paths: Vec<PathBuf>,
     #[serde(default)]
     pub integrity: SqliteIntegrityOutcome,

@@ -59,7 +59,7 @@ fn advisory_feedback_preserves_canonical_identity_lifecycle_and_coverage() {
         omitted_findings: 3,
     };
     let port = StaticFeedback(AdvisoryFeedbackReadV1::Observed {
-        summary,
+        summary: Box::new(summary),
         findings: vec![AdvisoryFeedbackFindingReadV1 {
             result_id: FeedbackResultId::new("feedback.result.1").expect("result"),
             cycle_id: FeedbackCycleId::new("feedback.cycle.1").expect("cycle"),
@@ -143,7 +143,7 @@ fn advisory_feedback_keeps_omitted_only_result_distinct_from_absence() {
         head_commit_id: CommitId::new("commit-1").expect("commit"),
     };
     let port = StaticFeedback(AdvisoryFeedbackReadV1::Observed {
-        summary: AdvisoryFeedbackSummaryReadV1 {
+        summary: Box::new(AdvisoryFeedbackSummaryReadV1 {
             result_id: FeedbackResultId::new("feedback.result.omitted").expect("result"),
             cycle_id: FeedbackCycleId::new("feedback.cycle.omitted").expect("cycle"),
             scope,
@@ -154,7 +154,7 @@ fn advisory_feedback_keeps_omitted_only_result_distinct_from_absence() {
             total_findings: 3,
             returned_findings: 0,
             omitted_findings: 3,
-        },
+        }),
         findings: Vec::new(),
     });
     let report = block_on(
@@ -196,7 +196,7 @@ fn advisory_feedback_rejects_summary_row_identity_disagreement() {
         head_commit_id: CommitId::new("commit-1").expect("commit"),
     };
     let port = StaticFeedback(AdvisoryFeedbackReadV1::Observed {
-        summary: AdvisoryFeedbackSummaryReadV1 {
+        summary: Box::new(AdvisoryFeedbackSummaryReadV1 {
             result_id: FeedbackResultId::new("feedback.result.expected").expect("result"),
             cycle_id: FeedbackCycleId::new("feedback.cycle.1").expect("cycle"),
             scope: scope.clone(),
@@ -207,7 +207,7 @@ fn advisory_feedback_rejects_summary_row_identity_disagreement() {
             total_findings: 1,
             returned_findings: 1,
             omitted_findings: 0,
-        },
+        }),
         findings: vec![AdvisoryFeedbackFindingReadV1 {
             result_id: FeedbackResultId::new("feedback.result.foreign").expect("result"),
             cycle_id: FeedbackCycleId::new("feedback.cycle.1").expect("cycle"),
