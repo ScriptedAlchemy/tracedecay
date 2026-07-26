@@ -8,7 +8,7 @@ use serde::Serialize;
 
 use crate::branch;
 use crate::branch_meta;
-use crate::db::Database;
+use crate::db::{Database, DatabaseAccessMode};
 use crate::errors::{Result, TraceDecayError};
 use crate::storage::{self, StoreLayout};
 
@@ -207,7 +207,11 @@ impl TraceDecay {
 
     pub async fn open_project_store_db_read_only(&self) -> Result<Database> {
         if self.db_path() == self.store_layout.graph_db_path {
-            return Ok(self.db.clone());
+            return Database::publish_runtime(
+                self.db.retained_runtime().clone(),
+                DatabaseAccessMode::ReadOnly,
+            )
+            .await;
         }
         let (project_id, enrollment_roots) = self.project_memory_mount().await?;
         self.store_runtime_registry

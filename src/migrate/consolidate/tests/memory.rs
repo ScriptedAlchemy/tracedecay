@@ -16,10 +16,11 @@ async fn branch_legacy_cutover_accepts_v17_and_preserves_latest_full_fact_state(
             "INSERT INTO memory_facts(
                  fact_id, content, category, tags, trust_score, retrieval_count,
                  access_count, helpful_count, unhelpful_count, created_at, updated_at,
-                 source, metadata, hrr_vector, hrr_algebra, hrr_dim, hrr_precision
+                 last_recalled_at, source, metadata, hrr_vector, hrr_algebra,
+                 hrr_dim, hrr_precision
              ) VALUES(
                  1, 'shared', 'general', '[\"target\"]', 0.4, 2, 3, 1, 0,
-                 10, 10, 'target-source', '{\"target\":true,\"winner\":\"target\"}',
+                 10, 10, 11, 'target-source', '{\"target\":true,\"winner\":\"target\"}',
                  X'01', 'amari_fhrr', 2048, 'f32'
              );",
         )
@@ -33,15 +34,15 @@ async fn branch_legacy_cutover_accepts_v17_and_preserves_latest_full_fact_state(
              INSERT INTO memory_facts(
                  fact_id, content, category, tags, trust_score, retrieval_count,
                  access_count, helpful_count, unhelpful_count, created_at, updated_at,
-                 last_feedback_at, source, metadata, hrr_vector, hrr_algebra,
-                 hrr_dim, hrr_precision
+                 last_recalled_at, last_feedback_at, source, metadata, hrr_vector,
+                 hrr_algebra, hrr_dim, hrr_precision
              ) VALUES
                  (1, 'shared', 'decision', '[\"source\"]', 0.9, 5, 7, 2, 1,
-                  5, 20, 20, 'source-source',
+                  5, 20, 19, 20, 'source-source',
                   '{\"source\":true,\"winner\":\"source\"}',
                   X'0203', 'amari_fhrr', 2048, 'f64'),
                  (2, 'branch exclusive', 'project', '[]', 0.8, 0, 0, 0, 0,
-                  20, 20, NULL, 'branch', '{}', NULL, 'amari_fhrr', 2048, 'f32');",
+                  20, 20, NULL, NULL, 'branch', '{}', NULL, 'amari_fhrr', 2048, 'f32');",
         )
         .await
         .unwrap();
@@ -59,8 +60,8 @@ async fn branch_legacy_cutover_accepts_v17_and_preserves_latest_full_fact_state(
         .conn()
         .query(
             "SELECT category, tags, trust_score, retrieval_count, access_count,
-                    helpful_count, unhelpful_count, created_at, updated_at, source,
-                    metadata, hex(hrr_vector), hrr_precision
+                    helpful_count, unhelpful_count, created_at, updated_at,
+                    last_recalled_at, source, metadata, hex(hrr_vector), hrr_precision
              FROM memory_facts WHERE content='shared'",
             (),
         )
@@ -77,14 +78,15 @@ async fn branch_legacy_cutover_accepts_v17_and_preserves_latest_full_fact_state(
     assert_eq!(row.get::<i64>(6).unwrap(), 1);
     assert_eq!(row.get::<i64>(7).unwrap(), 5);
     assert_eq!(row.get::<i64>(8).unwrap(), 20);
-    assert_eq!(row.get::<String>(9).unwrap(), "source-source");
+    assert_eq!(row.get::<i64>(9).unwrap(), 19);
+    assert_eq!(row.get::<String>(10).unwrap(), "source-source");
     let metadata: serde_json::Value =
-        serde_json::from_str(&row.get::<String>(10).unwrap()).unwrap();
+        serde_json::from_str(&row.get::<String>(11).unwrap()).unwrap();
     assert_eq!(metadata["target"], true);
     assert_eq!(metadata["source"], true);
     assert_eq!(metadata["winner"], "source");
-    assert_eq!(row.get::<String>(11).unwrap(), "0203");
-    assert_eq!(row.get::<String>(12).unwrap(), "f64");
+    assert_eq!(row.get::<String>(12).unwrap(), "0203");
+    assert_eq!(row.get::<String>(13).unwrap(), "f64");
     drop(rows);
     let mut rows = target
         .conn()

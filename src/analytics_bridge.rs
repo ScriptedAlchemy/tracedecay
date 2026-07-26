@@ -274,18 +274,18 @@ async fn registered_diagnostics_message_count(
     project_sessions: Option<&RegisteredGlobalDb>,
     user_sessions: Option<&RegisteredGlobalDb>,
     all_projects: bool,
-) -> i64 {
+) -> crate::errors::Result<i64> {
     let mut total = match project_sessions {
-        Some(database) => database.session_message_count().await.unwrap_or(0),
+        Some(database) => database.session_message_count().await.map_err(cli_error)?,
         None => 0,
     };
     if all_projects
         && let Some(database) = user_sessions
         && project_sessions.is_none_or(|project| project.db_path() != database.db_path())
     {
-        total += database.session_message_count().await.unwrap_or(0);
+        total += database.session_message_count().await.map_err(cli_error)?;
     }
-    total
+    Ok(total)
 }
 
 /// `tracedecay analytics sync`: import hook JSONL rows into the durable
@@ -391,7 +391,7 @@ pub(crate) async fn analytics_diagnostics_with_db(
     );
 
     let message_count =
-        registered_diagnostics_message_count(project_sessions, user_sessions, all_projects).await;
+        registered_diagnostics_message_count(project_sessions, user_sessions, all_projects).await?;
 
     let durable = if event_rows.is_empty() {
         None

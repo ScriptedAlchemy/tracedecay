@@ -308,8 +308,8 @@ pub(crate) async fn collect_database(
             error: error.to_string(),
         },
     };
-    let source_total_bytes = read_source_total_bytes(cg).await.unwrap_or(0);
-    let (node_count, edge_count) = read_graph_counts(cg).await.unwrap_or((0, 0));
+    let source_total_bytes = read_source_total_bytes(cg).await?;
+    let (node_count, edge_count) = read_graph_counts(cg).await?;
     Ok(DatabaseSnapshot {
         project_root,
         db_path,

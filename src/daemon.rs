@@ -3236,6 +3236,27 @@ impl DaemonEngine {
             Arc::clone(&diagnostic_broker),
             self.invocation.feedback_runtime_registrar(),
         );
+        let doctor_remediation_dispatcher = doctor_kernel::production_doctor_remediation_dispatcher(
+            doctor_kernel::ProductionDoctorRemediationOwnersV1 {
+                project_root: canonical_project_path.clone(),
+                project_id: code_search_project_id.clone(),
+                layout: cg.store_layout().clone(),
+                registry: Arc::clone(&registry_db),
+                profile_sessions: Arc::clone(&user_session_db),
+                project_sessions: Arc::clone(&session_db),
+                profile_root: profile_identity.profile_root().to_path_buf(),
+                config: cg.get_config().clone(),
+                global_retention: crate::user_config::UserConfig::load().automation.retention,
+                store_administration: self.store_administration.clone(),
+                invocation: self.invocation.clone(),
+                code_index_store_root: code_index_store_root.clone(),
+                semantic_runtime: semantic_runtime.clone(),
+                semantic_database: Arc::clone(&semantic_database),
+                semantic_lifecycle: semantic_lifecycle.clone(),
+                semantic_resources: *semantic_resources,
+                route_registered: Arc::clone(&route_registered),
+            },
+        );
         let code_index_search_executor = code_index_search_executor(
             self.invocation.code_index_schedulers.clone(),
             code_search_project_id,
@@ -3267,6 +3288,7 @@ impl DaemonEngine {
         )
         .with_automation_scheduler_reconciler(reconciler)
         .with_dashboard_doctor_report_reader(doctor_report_reader)
+        .with_dashboard_doctor_remediation_dispatcher(doctor_remediation_dispatcher)
         .with_diagnostics_lsp(diagnostic_broker)
         .with_code_index_hook_sink(code_index_hook_sink)
         .with_code_index_publication_identity(code_index_publication_identity)
@@ -4279,6 +4301,27 @@ async fn portable_project_server(
         Arc::clone(&diagnostic_broker),
         invocation.feedback_runtime_registrar(),
     );
+    let doctor_remediation_dispatcher = doctor_kernel::production_doctor_remediation_dispatcher(
+        doctor_kernel::ProductionDoctorRemediationOwnersV1 {
+            project_root: canonical_project_path.to_path_buf(),
+            project_id: code_search_project_id.clone(),
+            layout: cg.store_layout().clone(),
+            registry: Arc::clone(&registry_db),
+            profile_sessions: Arc::clone(&user_session_db),
+            project_sessions: Arc::clone(&session_db),
+            profile_root: profile_identity.profile_root().to_path_buf(),
+            config: cg.get_config().clone(),
+            global_retention: crate::user_config::UserConfig::load().automation.retention,
+            store_administration: store_administration.clone(),
+            invocation: invocation.clone(),
+            code_index_store_root: code_index_store_root.clone(),
+            semantic_runtime: semantic_runtime.clone(),
+            semantic_database: Arc::clone(&semantic_database),
+            semantic_lifecycle: semantic_lifecycle.clone(),
+            semantic_resources: *semantic_resources,
+            route_registered: Arc::clone(&route_registered),
+        },
+    );
     let code_index_search_executor = code_index_search_executor(
         invocation.code_index_schedulers.clone(),
         code_search_project_id,
@@ -4309,6 +4352,7 @@ async fn portable_project_server(
         },
     )
     .with_dashboard_doctor_report_reader(doctor_report_reader)
+    .with_dashboard_doctor_remediation_dispatcher(doctor_remediation_dispatcher)
     .with_diagnostics_lsp(diagnostic_broker)
     .with_code_index_hook_sink(code_index_hook_sink)
     .with_code_index_publication_identity(code_index_publication_identity)

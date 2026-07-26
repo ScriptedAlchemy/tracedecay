@@ -232,6 +232,15 @@ pub(super) struct TestMapMeasurementV1 {
     test_files: Vec<String>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+struct NodeSessionsMeasurementV1 {
+    node: NodeRefV1,
+    linkage: super::loom_api::LoomFileSessionProjectionV1,
+    available_granularities: Vec<&'static str>,
+    symbol_granularity_available: bool,
+    symbol_granularity_reason: &'static str,
+}
+
 /// `GET /api/plugins/graph/call-chain`
 pub(crate) async fn call_chain(
     State(state): State<DashboardState>,
@@ -414,14 +423,17 @@ pub(crate) async fn strata(State(state): State<DashboardState>) -> Response {
         let clusters = dsm_clusters(&scan.adjacency)
             .into_iter()
             .enumerate()
-            .map(|(index, cluster)| StrataClusterV1 {
-                order: index,
-                directory: cluster.directory,
-                file_count: cluster.file_count,
-                internal_edges: cluster.internal_edges,
-                outgoing_edges: cluster.outgoing_edges,
-                incoming_edges: cluster.incoming_edges,
-                boundary_edges: cluster.boundary_edges(),
+            .map(|(index, cluster)| {
+                let boundary_edges = cluster.boundary_edges();
+                StrataClusterV1 {
+                    order: index,
+                    directory: cluster.directory,
+                    file_count: cluster.file_count,
+                    internal_edges: cluster.internal_edges,
+                    outgoing_edges: cluster.outgoing_edges,
+                    incoming_edges: cluster.incoming_edges,
+                    boundary_edges,
+                }
             })
             .collect();
         let computed = Arc::new(CachedStrataV1 {
@@ -712,6 +724,85 @@ pub(crate) async fn node_tests(
         },
         1,
         "source symbols",
+        None,
+    )
+}
+
+/// `GET /api/plugins/graph/node/{node_id}/sessions`
+pub(crate) async fn node_sessions(
+    State(state): State<DashboardState>,
+    JsonPath(node_id): JsonPath<String>,
+) -> Response {
+    let Some(graph) = state.project_graph.as_deref() else {
+        return unmeasured_response::<NodeSessionsMeasurementV1>(
+            &state,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "graph_authority_unavailable",
+            "the retained project graph is unavailable",
+        );
+    };
+    let node = match graph.get_node(&node_id).await {
+        Ok(Some(node)) => node,
+        Ok(None) => {
+            return unmeasured_response::<NodeSessionsMeasurementV1>(
+                &state,
+                StatusCode::NOT_FOUND,
+                "node_not_found",
+                &format!("node not found: {node_id}"),
+            );
+        }
+        Err(error) => {
+            return failed_response::<NodeSessionsMeasurementV1>(
+                &state,
+                "session_node_read_failed",
+                error.to_string(),
+                true,
+            );
+        }
+    };
+    let Some(database) = state.lcm_db.as_deref() else {
+        return unmeasured_response::<NodeSessionsMeasurementV1>(
+            &state,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "session_authority_unavailable",
+            "the resolved project session authority is unavailable",
+        );
+    };
+    let snapshot = match database.read_snapshot().await {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            return failed_response::<NodeSessionsMeasurementV1>(
+                &state,
+                "session_snapshot_read_failed",
+                error.to_string(),
+                true,
+            );
+        }
+    };
+    let linkage = match super::loom_api::sessions_for_edited_file(&snapshot, &node.file_path).await
+    {
+        Ok(linkage) => linkage,
+        Err(error) => {
+            return failed_response::<NodeSessionsMeasurementV1>(
+                &state,
+                "session_linkage_read_failed",
+                error,
+                true,
+            );
+        }
+    };
+    let eligible = linkage.eligible_sessions;
+    measured_response(
+        &state,
+        NodeSessionsMeasurementV1 {
+            node: NodeRefV1::from(&node),
+            linkage,
+            available_granularities: vec!["file"],
+            symbol_granularity_available: false,
+            symbol_granularity_reason: "exact-source-occurrence anchors exist, but no indexed graph-node-to-session join is mounted",
+        },
+        eligible,
+        "sessions with provider-native edited-file metadata",
         None,
     )
 }

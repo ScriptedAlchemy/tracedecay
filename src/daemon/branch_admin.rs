@@ -894,7 +894,8 @@ impl StoreAdministration {
                     )?;
                 }
 
-                let canonical_paths = database_paths.iter().cloned().collect::<Vec<_>>();
+                let mut canonical_paths = database_paths.iter().cloned().collect::<Vec<_>>();
+                canonical_paths.sort();
                 let (fence, states) = crate::db::DatabaseDeletionFence::reacquire(
                     &canonical_paths,
                     recovery.transaction_id(),
@@ -918,7 +919,7 @@ impl StoreAdministration {
                         self.prove_no_external_branch_store_holders(paths)?;
                         crate::migrate::memory_cutover::verify_branch_removal_receipts(
                             data_root,
-                            &database_paths,
+                            &canonical_paths,
                             paths,
                         )
                     },
@@ -968,7 +969,8 @@ impl StoreAdministration {
                 )?;
             }
 
-            let canonical_paths = database_paths.iter().cloned().collect::<Vec<_>>();
+            let mut canonical_paths = database_paths.iter().cloned().collect::<Vec<_>>();
+            canonical_paths.sort();
             let fence = crate::db::DatabaseDeletionFence::acquire(
                 &canonical_paths,
                 "delete branch SQLite families",
@@ -992,7 +994,7 @@ impl StoreAdministration {
                     self.prove_no_external_branch_store_holders(paths)?;
                     crate::migrate::memory_cutover::verify_branch_removal_receipts(
                         data_root,
-                        &database_paths,
+                        &canonical_paths,
                         paths,
                     )
                 },
