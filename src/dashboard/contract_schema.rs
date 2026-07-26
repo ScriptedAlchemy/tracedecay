@@ -3,6 +3,7 @@
 use schemars::JsonSchema;
 use schemars::generate::SchemaSettings;
 
+use super::automation_scheduler_api::AutomationSchedulerStatusV1;
 use super::code_index_freshness_api::CodeIndexFreshnessPayloadV1;
 use super::doctor_findings_api::DoctorFindingsPayloadV1;
 use super::doctor_remediation_api::{
@@ -34,6 +35,9 @@ struct DashboardContractCatalogV1 {
     graph_fact_matches: StructureReadV1<FactMatchesMeasurementV1>,
     graph_test_map: StructureReadV1<TestMapMeasurementV1>,
     graph_node_sessions: StructureReadV1<NodeSessionsMeasurementV1>,
+    /// Served identically by `GET /api/automation/scheduler/status` and by the
+    /// `pause`/`resume` controls, which re-read rather than acknowledge.
+    automation_scheduler_status: AutomationSchedulerStatusV1,
 }
 
 #[derive(JsonSchema)]
