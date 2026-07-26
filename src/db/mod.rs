@@ -46,7 +46,7 @@ pub use memory_connection::SqliteDriverError;
 pub(crate) use memory_v2::{
     CapturedMemoryV2Frontiers, MemoryV2BackfillBatchOutcome, MemoryV2CutoverOutcome,
     MemoryV2CutoverReceipt, MemoryV2FeedbackHistoryRepairBatchOutcome,
-    MemoryV2FeedbackHistoryRepairProgress,
+    MemoryV2FeedbackHistoryRepairProgress, MemoryV2LegacyPurgeReceipt,
 };
 pub use redundancy_pairs::{RedundancyPairRow, RedundancyPairWrite};
 pub(crate) use retrieval_anchor_authority::{
