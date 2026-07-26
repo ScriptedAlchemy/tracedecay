@@ -53,7 +53,8 @@ impl DaemonSessionRuntimeRegistryV1 {
         database_paths: impl IntoIterator<Item = PathBuf>,
     ) -> Result<()> {
         for database_path in database_paths {
-            self.registry
+            let closed = self
+                .registry
                 .close_path(&database_path)
                 .await
                 .map_err(|error| {
@@ -62,6 +63,16 @@ impl DaemonSessionRuntimeRegistryV1 {
                         format!("{error:?}"),
                     )
                 })?;
+            if let Some(closed) = closed {
+                self.resolver
+                    .retire_code_authority(&closed.binding().shard_id, closed.path())
+                    .map_err(|error| {
+                        session_registry_error(
+                            "retire registered code-shard authority",
+                            format!("{error:?}"),
+                        )
+                    })?;
+            }
         }
         Ok(())
     }

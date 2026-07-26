@@ -150,6 +150,7 @@ pub(crate) enum LocalStoreRuntimeResolverConfigurationErrorV1 {
     DuplicateProjectAuthority { project_id: ProjectId },
     DuplicateCodeAuthority { shard_id: StoreShardIdV1 },
     CodeAuthorityIsNotCodeShard { shard_id: StoreShardIdV1 },
+    CodeAuthorityRetirementMismatch { shard_id: StoreShardIdV1 },
 }
 
 /// Infrastructure-only resolver for the local profile-sharded layout.
@@ -230,6 +231,28 @@ impl LocalStoreRuntimeResolverV1 {
         }
         code_authorities.insert(shard_id, authority);
         Ok(())
+    }
+
+    pub(crate) fn retire_code_authority(
+        &self,
+        shard_id: &StoreShardIdV1,
+        database_path: &Path,
+    ) -> Result<(), LocalStoreRuntimeResolverConfigurationErrorV1> {
+        let expected =
+            LocalCodeStoreAuthorityV1::new(shard_id.clone(), database_path.to_path_buf())?;
+        let mut code_authorities = self.code_authorities_write();
+        match code_authorities.get(shard_id) {
+            None => Ok(()),
+            Some(existing) if existing == &expected => {
+                code_authorities.remove(shard_id);
+                Ok(())
+            }
+            Some(_) => Err(
+                LocalStoreRuntimeResolverConfigurationErrorV1::CodeAuthorityRetirementMismatch {
+                    shard_id: shard_id.clone(),
+                },
+            ),
+        }
     }
 
     fn project_authorities_read(
@@ -1686,7 +1709,7 @@ mod tests {
         let first_path = fixture.profile_root.join("first.db");
         let second_path = fixture.profile_root.join("second.db");
         let resolver = LocalStoreRuntimeResolverV1::new(fixture.profile_authority());
-        let first = LocalCodeStoreAuthorityV1::new(code_shard.clone(), first_path)
+        let first = LocalCodeStoreAuthorityV1::new(code_shard.clone(), first_path.clone())
             .expect("first authority");
 
         resolver
@@ -1697,11 +1720,26 @@ mod tests {
             .expect("identical registration is idempotent");
         assert!(matches!(
             resolver.register_code_authority(
-                LocalCodeStoreAuthorityV1::new(code_shard, second_path)
+                LocalCodeStoreAuthorityV1::new(code_shard.clone(), second_path.clone())
                     .expect("conflicting authority")
             ),
             Err(LocalStoreRuntimeResolverConfigurationErrorV1::DuplicateCodeAuthority { .. })
         ));
+        assert!(matches!(
+            resolver.retire_code_authority(&code_shard, &second_path),
+            Err(
+                LocalStoreRuntimeResolverConfigurationErrorV1::CodeAuthorityRetirementMismatch { .. }
+            )
+        ));
+        resolver
+            .retire_code_authority(&code_shard, &first_path)
+            .expect("retire exact authority");
+        resolver
+            .register_code_authority(
+                LocalCodeStoreAuthorityV1::new(code_shard, second_path)
+                    .expect("replacement authority"),
+            )
+            .expect("retired shard may bind its next physical generation");
     }
 
     #[cfg(target_os = "linux")]

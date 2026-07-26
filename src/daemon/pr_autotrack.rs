@@ -822,6 +822,15 @@ async fn remove_pr_store(
     label: &str,
     administration: PrStoreAdministration<'_>,
 ) -> std::result::Result<(), String> {
+    if let Some(graph) = administration.graph {
+        administration
+            .daemon
+            .with_writer(|| async {
+                crate::migrate::memory_cutover::apply_for_retained_project(graph).await
+            })
+            .await
+            .map_err(|error| format!("project-memory cutover failed: {error}"))?;
+    }
     let report = administration
         .daemon
         .execute_branch_admin_in_layout(
