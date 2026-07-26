@@ -1192,16 +1192,24 @@ async fn status_json_reads_readonly_project_database() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     let project_root = canonical_temp_path(project.path());
-    write_enrollment_marker(
-        &project_root,
-        &EnrollmentMarker {
-            project_id: "proj_cli".to_string(),
-            storage_mode: StorageMode::ProfileSharded,
-        },
+    std::fs::create_dir_all(project_root.join("src")).unwrap();
+    std::fs::write(
+        project_root.join("src/lib.rs"),
+        "pub fn process_data() {}\n",
     )
     .unwrap();
-    let db_path = profile_shard_root(home.path()).join("tracedecay.db");
-    let (db, _) = crate::common::initialize_test_database(&db_path)
+    let home_path = home.path().to_path_buf();
+    let init_root = project_root.clone();
+    std::thread::spawn(move || init_project_in_process(&home_path, &init_root))
+        .join()
+        .unwrap();
+    let marker = read_enrollment_marker(&project_root)
+        .unwrap()
+        .expect("fixture init writes enrollment");
+    let db_path = profile_sharded_layout(&project_root, &profile_root(home.path()), &marker)
+        .unwrap()
+        .graph_db_path;
+    let (db, _) = crate::common::open_test_database(&db_path)
         .await
         .unwrap();
     db.insert_node(&sample_node("node-1", "process_data", "src/lib.rs"))

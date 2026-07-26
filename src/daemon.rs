@@ -5094,6 +5094,14 @@ async fn open_project_for_handshake(
                 .await?,
                 true,
             ),
+            Err(err) if is_unregistered_identity_error(&err) => {
+                return Err(TraceDecayError::Config {
+                    message: format!(
+                        "no TraceDecay index found at '{}'; run 'tracedecay init' first",
+                        project_path.display()
+                    ),
+                });
+            }
             Err(err) => return Err(err),
         };
     let project_id =

@@ -692,6 +692,10 @@ impl Database {
         self.inner.opened_file_identity
     }
 
+    pub(crate) fn is_writable(&self) -> bool {
+        self.inner.writable
+    }
+
     /// Clones the originating revocable write capability for actor-time checks.
     pub(crate) fn write_authority(&self) -> Result<DatabaseAuthority> {
         if !self.inner.writable {
