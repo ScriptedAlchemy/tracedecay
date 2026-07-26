@@ -50,6 +50,7 @@ use tracedecay_domain::feedback::{
 use tracedecay_domain::{
     ActorId, CanonicalObservationIdV1, CommitId, ContentDigest, FileOccurrenceId, ManifestDigest,
     ProjectId, ProviderId, RefId, RepositoryId, RetrievalAnchorId, UtcMicros, WorktreeId,
+    canonical_sha256,
 };
 use tracedecay_tool_catalog::{CapabilityId, UseCaseId};
 
@@ -215,6 +216,7 @@ async fn authentic_github_and_ci_responses_use_production_decoders() {
     )
     .unwrap();
     let metadata = GitHubReadNetworkMetadataV1 {
+        retry_at: None,
         status: GitHubReadNetworkStatusV1::Ok,
         etag: None,
         next_cursor: None,
@@ -339,6 +341,7 @@ async fn corrupt_provider_identity_fails_production_decoder() {
             .decode(
                 &request,
                 &GitHubReadNetworkMetadataV1 {
+                    retry_at: None,
                     status: GitHubReadNetworkStatusV1::Ok,
                     etag: None,
                     next_cursor: None,
@@ -596,7 +599,13 @@ async fn ci_localization_resolves_generation_symbol_callers_and_tests_from_canon
     let retained = CiRetainedProviderRecordV1 {
         provider_record,
         observation: CiRetainedProviderObservationV1 {
-            observation_id: CanonicalObservationIdV1::new("observation.pr13.ci.graph").unwrap(),
+            observation_id: CanonicalObservationIdV1::new(
+                canonical_sha256(&"observation.pr13.ci.graph")
+                    .unwrap()
+                    .as_str()
+                    .to_owned(),
+            )
+            .unwrap(),
             failure_anchor: RetrievalAnchorId::new("anchor.pr13.ci.graph").unwrap(),
             provider_head_commit_id: scope.head_commit_id.clone(),
             failure_kind: tracedecay_domain::feedback::CiFailureKindV1::TestFailure,
@@ -750,10 +759,17 @@ async fn production_host_ingest_uses_registered_project_runtime() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("\"status\":\"committed\"") || stdout.contains("\"status\": \"committed\""),
-        "registered daemon ingest did not commit: {stdout}"
+    let response: Value =
+        serde_json::from_slice(&output.stdout).expect("registered daemon ingest response");
+    let payload: Value = serde_json::from_str(
+        response["content"][0]["text"]
+            .as_str()
+            .expect("registered daemon ingest response text"),
+    )
+    .expect("registered daemon ingest payload");
+    assert_eq!(
+        payload["status"], "committed",
+        "registered daemon ingest did not commit: {response}"
     );
 
     let mut stop: Value = serde_json::from_str(include_str!(
@@ -793,11 +809,17 @@ async fn production_host_ingest_uses_registered_project_runtime() {
         String::from_utf8_lossy(&stop_output.stdout),
         String::from_utf8_lossy(&stop_output.stderr)
     );
-    let stop_stdout = String::from_utf8_lossy(&stop_output.stdout);
-    assert!(
-        stop_stdout.contains("\"status\":\"committed\"")
-            || stop_stdout.contains("\"status\": \"committed\""),
-        "registered daemon stop ingest did not commit: {stop_stdout}"
+    let stop_response: Value =
+        serde_json::from_slice(&stop_output.stdout).expect("registered daemon stop response");
+    let stop_payload: Value = serde_json::from_str(
+        stop_response["content"][0]["text"]
+            .as_str()
+            .expect("registered daemon stop response text"),
+    )
+    .expect("registered daemon stop payload");
+    assert_eq!(
+        stop_payload["status"], "committed",
+        "registered daemon stop ingest did not commit: {stop_response}"
     );
 
     let advisory_args = json!({
