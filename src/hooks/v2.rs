@@ -1347,11 +1347,10 @@ mod tests {
 
     #[test]
     fn kimi_rendered_hook_fixture_queues_only_native_session_and_call_identity() {
-        let fixture = include_str!(
-            "../../crates/tracedecay-hooks/fixtures/host_events/kimi/post-tool-use-edit.json"
-        )
-        .replace("<SESSION_ID>", "session.kimi.native")
-        .replace("<TOOL_CALL_ID>", "call.kimi.native");
+        let fixture =
+            include_str!("../../tests/fixtures/packaged_host_events/kimi/post-tool-use-edit.json")
+                .replace("<SESSION_ID>", "session.kimi.native")
+                .replace("<TOOL_CALL_ID>", "call.kimi.native");
         let fields = serde_json::from_str::<NativeIdentityFields>(&fixture).unwrap();
 
         let lifecycle = native_context_scout_lifecycle(HookHostV1::KimiCode, &fields).unwrap();
@@ -1401,7 +1400,7 @@ mod tests {
     #[test]
     fn opencode_rendered_plugin_queues_only_tool_after_lifecycle_identity() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
-            "../../crates/tracedecay-hooks/fixtures/host_events/opencode/baseline.json"
+            "../../tests/fixtures/packaged_host_events/opencode/baseline.json"
         ))
         .unwrap();
         let tool_after = fixture["events"]
