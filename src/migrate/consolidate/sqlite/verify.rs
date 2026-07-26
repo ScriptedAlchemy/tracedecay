@@ -4,8 +4,8 @@ use crate::db::engine::Executor;
 
 use super::{
     SessionMergeOffsets, attach_snapshot_as, build_consolidation_message_map, db_error, db_message,
-    mapped_parent_metadata, mapped_turn_message_id, observation, projection, query_i64,
-    table_exists,
+    external_source, mapped_parent_metadata, mapped_turn_message_id, observation, projection,
+    query_i64, table_exists,
 };
 use crate::errors::Result;
 
@@ -76,6 +76,7 @@ async fn verify_attached_tables(conn: &impl Executor, offsets: &SessionMergeOffs
     for spec in verification_specs(offsets, target_has_session_backfill_meta) {
         verify_table(conn, &spec).await?;
     }
+    external_source::verify_union(conn, "main", "target_input", "source_input").await?;
     observation::verify_observation_union(conn, "target_input", "source_input").await?;
     projection::verify(conn).await?;
     if query_i64(
