@@ -7,7 +7,9 @@ use std::time::UNIX_EPOCH;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tracedecay_domain::{FactOwnerV1, ProjectId, RefId, SourceStoreId};
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+use tracedecay_domain::{FactOwnerV1, ProjectId, SourceStoreId};
 use tracedecay_store::CompatibilityLegacyMemoryCutoverProgressV1;
 
 use crate::branch_meta;
@@ -156,9 +158,8 @@ pub async fn apply(
         &resolved.profile_root,
         "project-wide branch memory cutover",
     )?;
-    let graph = TraceDecay::open_branch_with_exclusive_maintenance(
+    let graph = TraceDecay::open_with_exclusive_maintenance(
         &resolved.project_root,
-        &resolved.default_branch,
         TraceDecayOpenOptions {
             profile_root: Some(resolved.profile_root.clone()),
             global_db_path: None,
@@ -212,6 +213,7 @@ pub async fn apply(
             break;
         }
     }
+    verify_source_generations(&planned.sources)?;
     write_cutover_receipt(&resolved, &planned.sources)?;
 
     Ok(MemoryCutoverReport {
@@ -360,7 +362,6 @@ struct ResolvedMemoryCutover {
     data_root: PathBuf,
     graph_db_path: PathBuf,
     project_id: String,
-    default_branch: String,
 }
 
 fn resolve(options: &MemoryCutoverOptions) -> Result<ResolvedMemoryCutover> {
@@ -379,7 +380,7 @@ fn resolve(options: &MemoryCutoverOptions) -> Result<ResolvedMemoryCutover> {
         ))
     })?;
     let layout = storage::profile_sharded_layout(&project_root, &profile_root, &marker)?;
-    let branch_meta = branch_meta::load_branch_meta(&layout.data_root)
+    branch_meta::load_branch_meta(&layout.data_root)
         .ok_or_else(|| migration_error("branch metadata is required for memory cutover"))?;
     Ok(ResolvedMemoryCutover {
         project_root,
@@ -387,7 +388,6 @@ fn resolve(options: &MemoryCutoverOptions) -> Result<ResolvedMemoryCutover> {
         data_root: layout.data_root,
         graph_db_path: layout.graph_db_path,
         project_id: marker.project_id,
-        default_branch: branch_meta.default_branch,
     })
 }
 
@@ -432,7 +432,10 @@ fn confirmation_token(
 fn source_generation(path: &Path) -> Result<String> {
     let mut hasher = Sha256::new();
     hasher.update(b"tracedecay.sqlite-family-generation.v1\0");
-    for suffix in ["", "-wal", "-shm"] {
+    // The database and WAL are durable state. SHM is a rebuildable coordination
+    // file whose bytes can change during a read-only snapshot; binding it would
+    // invalidate a confirmation token without any durable memory change.
+    for suffix in ["", "-wal"] {
         let member = PathBuf::from(format!("{}{suffix}", path.display()));
         hasher.update(suffix.as_bytes());
         match fs::metadata(&member) {
@@ -448,24 +451,39 @@ fn source_generation(path: &Path) -> Result<String> {
                 hasher.update(modified.subsec_nanos().to_le_bytes());
                 #[cfg(unix)]
                 {
-                    use std::os::unix::fs::MetadataExt;
                     hasher.update(metadata.dev().to_le_bytes());
                     hasher.update(metadata.ino().to_le_bytes());
                 }
                 let mut file =
                     fs::File::open(&member).map_err(|error| migration_error(error.to_string()))?;
-                let mut header = [0_u8; 128];
-                let read = file
-                    .read(&mut header)
-                    .map_err(|error| migration_error(error.to_string()))?;
-                hasher.update((read as u64).to_le_bytes());
-                hasher.update(&header[..read]);
+                let mut buffer = [0_u8; 64 * 1024];
+                loop {
+                    let read = file
+                        .read(&mut buffer)
+                        .map_err(|error| migration_error(error.to_string()))?;
+                    if read == 0 {
+                        break;
+                    }
+                    hasher.update(&buffer[..read]);
+                }
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => hasher.update([0]),
             Err(error) => return Err(migration_error(error.to_string())),
         }
     }
     Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
+}
+
+fn verify_source_generations(sources: &[MemoryCutoverSource]) -> Result<()> {
+    for source in sources {
+        if source_generation(&source.path)? != source.generation {
+            return Err(migration_error(format!(
+                "branch memory source '{}' changed during cutover",
+                source.path.display()
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn write_cutover_receipt(
