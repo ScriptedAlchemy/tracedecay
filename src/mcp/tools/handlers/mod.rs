@@ -54,12 +54,13 @@ use serde_json::{Value, json};
 
 #[cfg(test)]
 use crate::application_surface::APPLICATION_SURFACE_OPERATIONS;
-use crate::application_surface::ApplicationSurfaceOperation;
+use crate::application_surface::{ApplicationSurfaceOperation, resolve_catalog_tool_binding};
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::RegisteredGlobalDb;
 use crate::mcp::response_handles::{ResponseHandleLookup, retrieve_response_handle};
 use crate::tracedecay::TraceDecay;
 use crate::tracedecay::current_timestamp;
+use tracedecay_tool_catalog::BindingSurface;
 
 pub async fn handle_user_lcm_tool(
     tool_name: &str,
@@ -240,11 +241,11 @@ impl<'a> SessionAuthorities<'a> {
     }
 }
 
-use super::ToolResult;
 use super::dispatch_policy::{
     tool_accepts_registered_project_selector, tool_dispatches_registered_project_reader,
 };
 use super::render;
+use super::{LegacyToolCompatibilityOwner, ToolResult};
 use support::{project_registry_context, project_selector_present};
 
 pub(super) fn text_tool_result(text: &str) -> ToolResult {
@@ -267,7 +268,6 @@ pub(super) fn json_result(value: &Value) -> ToolResult {
     text_tool_result(&serde_json::to_string(value).unwrap_or_default())
 }
 
-#[cfg(test)]
 const INTERNAL_DAEMON_TOOL_NAMES: &[&str] = &[
     "tracedecay_admin_branch_add",
     "tracedecay_admin_cli",
@@ -605,8 +605,21 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
     if let Some(result) = dispatch_application_surface_tools(tool_name, cg, &args, &options).await {
         return result;
     }
-    if let Some(result) = dispatch_context_scout_read_tools(tool_name, cg, &args).await {
-        return result;
+    // Catalog-declared compatibility operations must resolve the MCP binding
+    // before reaching their retained typed handler. Operations without an
+    // application-catalog contract remain under the explicit root MCP
+    // migration owner until their family receives one.
+    if let Err(error) = resolve_catalog_tool_binding(BindingSurface::Mcp, tool_name) {
+        return Err(TraceDecayError::Config {
+            message: error.to_string(),
+        });
+    }
+    if !LegacyToolCompatibilityOwner::admits(tool_name)
+        && !INTERNAL_DAEMON_TOOL_NAMES.contains(&tool_name)
+    {
+        return Err(TraceDecayError::Config {
+            message: format!("unknown tool: {tool_name}"),
+        });
     }
     if let Some(result) = dispatch_graph_tools(
         tool_name,
@@ -879,23 +892,6 @@ async fn dispatch_application_surface_tools(
         )
         .await,
     )
-}
-
-async fn dispatch_context_scout_read_tools(
-    tool_name: &str,
-    cg: &TraceDecay,
-    args: &Value,
-) -> Option<Result<ToolResult>> {
-    if !matches!(
-        tool_name,
-        "tracedecay_context_scout_recent"
-            | "tracedecay_context_scout_explain"
-            | "tracedecay_context_scout_capability"
-            | "tracedecay_context_scout_budget"
-    ) {
-        return None;
-    }
-    Some(hook_runtime::handle_context_scout_read_surface(cg, args.clone(), tool_name).await)
 }
 
 /// Dispatch static-analysis report tools (`tracedecay_dead_code`,
@@ -1819,6 +1815,21 @@ mod tests {
         let expected_total = super::super::definitions::ALWAYS_REGISTERED_TOOL_COUNT
             + usize::from(super::super::definitions::ast_grep_available());
         assert_eq!(tools.len(), expected_total);
+        let compatibility_tools = tools
+            .iter()
+            .filter(|tool| ApplicationSurfaceOperation::from_tool_name(&tool.name).is_none())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            compatibility_tools.len(),
+            106 + usize::from(super::super::definitions::ast_grep_available())
+        );
+        for tool in compatibility_tools {
+            assert!(
+                LegacyToolCompatibilityOwner::admits(&tool.name),
+                "{} must have an explicit compatibility owner",
+                tool.name
+            );
+        }
 
         let tool_names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
         assert!(tool_names.contains(&"tracedecay_search"));

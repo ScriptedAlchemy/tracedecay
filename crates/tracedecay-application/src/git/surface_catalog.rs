@@ -326,23 +326,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn application_catalog_advertises_only_canonical_git_surfaces() {
+    fn public_git_bindings_include_reads_and_exclude_internal_index_steps() {
         let contribution = git_surface_catalog_contribution().expect("contribution");
         let operations: Vec<_> = contribution
             .bindings()
             .iter()
             .map(|binding| binding.operation().as_str().to_owned())
             .collect();
-        assert_eq!(
-            operations,
-            vec![
-                "git_preview".to_owned(),
-                "git_preview".to_owned(),
-                "git_preview".to_owned(),
-                "git_apply".to_owned(),
-                "git_apply".to_owned(),
-                "git_apply".to_owned(),
-            ]
-        );
+        for expected in [
+            "git_status",
+            "git_diff",
+            "git_history",
+            "git_blame",
+            "git_hunks",
+            "git_preview",
+            "git_apply",
+        ] {
+            assert!(operations.iter().any(|name| name == expected), "{expected}");
+        }
+        assert!(!operations.iter().any(|name| {
+            name.contains("stage_hunks")
+                || name.contains("unstage_hunks")
+                || name.contains("commit_index")
+        }));
     }
 }

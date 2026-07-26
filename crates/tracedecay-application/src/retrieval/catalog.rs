@@ -370,7 +370,7 @@ pub fn symbol_search_contribution() -> Result<CatalogContributionV1, Application
         )?,
         default_page_size: 10,
         maximum_page_size: 100,
-        temporal_modes: vec![TemporalMode::Current, TemporalMode::AsOf],
+        temporal_modes: vec![TemporalMode::Current],
         cancellation_points: vec![
             CancellationPoint::BeforeAdmission,
             CancellationPoint::BeforeRead,

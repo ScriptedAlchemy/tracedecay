@@ -340,13 +340,6 @@ impl DoctorRemediationRegistryV1 {
                 DoctorConfirmationRequirementV1::Required,
                 "remount or rebuild a code/semantic index that is unmounted or stale",
             ),
-            (
-                operations::FEEDBACK_GET_FINDING,
-                DoctorOwningSurfaceV1::FeedbackRead,
-                false,
-                DoctorConfirmationRequirementV1::NotRequired,
-                "read the canonical advisory finding and its expandable evidence",
-            ),
         ];
         let descriptors = seed
             .iter()

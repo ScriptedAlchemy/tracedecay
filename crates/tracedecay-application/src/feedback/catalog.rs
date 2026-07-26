@@ -184,10 +184,11 @@ const FEEDBACK_SPECS: [FeedbackSurfaceSpec; 10] = [
     },
 ];
 
-/// Specs with concrete owners in the production application registrar.
+/// Specs with concrete internal application owners.
 ///
-/// Indices avoid duplicating operation names while keeping registration
-/// explicit: adding catalog metadata alone cannot advertise a callable route.
+/// Registration proves the handler exists; it does not prove that a host can
+/// construct the request. Transport availability is narrowed independently
+/// below.
 const REGISTERED_FEEDBACK_HANDLER_SPECS: [usize; 10] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
 
 pub fn feedback_surface_catalog_contribution()
@@ -206,7 +207,8 @@ fn feedback_surface_catalog_contribution_for_handlers(
     for spec in &FEEDBACK_SPECS {
         let capability_id = CapabilityId::new(spec.capability)?;
         let mut binding_ids = Vec::new();
-        let callable = handlers.contains(&handler_descriptor(spec)?);
+        let callable =
+            spec.operation == "test_results" && handlers.contains(&handler_descriptor(spec)?);
         if callable {
             binding_ids.reserve(spec.surfaces.len());
             for &surface in spec.surfaces {
