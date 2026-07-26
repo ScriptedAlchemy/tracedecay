@@ -1981,17 +1981,22 @@ enum ProjectOpenTaskClaim {
     Saturated,
 }
 
-/// Whether a global-database authority failure is a persisted row that cannot
-/// be decoded, rather than a transient condition.
+/// Whether the authority audit failed because it could not read the database,
+/// rather than because it judged what it read.
 ///
-/// `decode_authority_json` formats every persisted-authority decode failure as
-/// `invalid <label> JSON: <cause>`, covering committed observations, source
-/// cursors, cursor advances, projected observations, and sanitization
-/// receipts. A row that fails to decode fails identically on every open — for
-/// example when a stored `observation_id` no longer matches the derivation the
-/// running binary applies to its identity material.
-fn is_persisted_authority_decode_defect(message: &str) -> bool {
-    message.starts_with("invalid ") && message.contains(" JSON: ")
+/// These are the only failures under that audit whose answer can differ on the
+/// next open without anything being repaired.
+fn is_database_read_failure(message: &str) -> bool {
+    const DRIVER_FAILURES: [&str; 5] = [
+        "database is locked",
+        "database is busy",
+        "disk I/O error",
+        "unable to open database file",
+        "interrupted",
+    ];
+    DRIVER_FAILURES
+        .iter()
+        .any(|failure| message.contains(failure))
 }
 
 /// How long a failed project-open route declines reopening, or `None` when the
@@ -2002,16 +2007,26 @@ fn project_open_retry_backoff(error: &TraceDecayError) -> Option<Duration> {
             || message.contains("ambiguous legacy profile stores")
             || message.contains("enrollment marker did not resolve a profile store"))
         .then_some(PROJECT_OPEN_FAILURE_RETRY_BACKOFF),
+        // This audit's whole job is to read persisted rows and judge them, so
+        // its verdict is a property of the stored data: a row rejected now is
+        // rejected identically 250ms from now. Back off for the whole family
+        // and name the exceptions, rather than listing the failures that
+        // deserve a backoff — that ordering meant every newly surfaced
+        // invariant message spun warm-up at the debounce cadence until someone
+        // noticed the CPU. Decode failures and column-versus-JSON
+        // disagreements both land here without being enumerated.
         TraceDecayError::Database { message, operation } => {
             if operation != "ensure global database authority invariants" {
                 return None;
             }
-            if is_persisted_authority_decode_defect(message) {
-                return Some(PROJECT_OPEN_UNREPAIRABLE_RETRY_BACKOFF);
+            if is_database_read_failure(message) {
+                return None;
             }
-            message
-                .contains("session temporal receipts or cursor keys are mutable")
-                .then_some(PROJECT_OPEN_FAILURE_RETRY_BACKOFF)
+            // A migration still in flight can be what leaves these mutable.
+            if message.contains("session temporal receipts or cursor keys are mutable") {
+                return Some(PROJECT_OPEN_FAILURE_RETRY_BACKOFF);
+            }
+            Some(PROJECT_OPEN_UNREPAIRABLE_RETRY_BACKOFF)
         }
         _ => None,
     }
