@@ -22,15 +22,57 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.event.release.tag_name }}
+  TRACEDECAY_SKIP_DASHBOARD_BUILD: "1"
 
 concurrency:
   group: release-beta-${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.event.release.tag_name }}
   cancel-in-progress: false
 
 jobs:
+  dashboard-assets:
+    name: Build dashboard artifact
+    if: vars.BETA_CHANNEL_ENABLED == 'true' && (github.event_name == 'workflow_dispatch' || github.event.release.prerelease)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Checkout release automation
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: .release-automation
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Install dashboard dependencies
+        working-directory: dashboard
+        run: npm ci
+
+      - name: Build dashboard
+        working-directory: dashboard
+        run: npm run build
+
+      - name: Validate dashboard bundle
+        run: python3 .release-automation/scripts/check-dashboard-bundle.py dashboard/app-dist
+
+      - name: Upload dashboard artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dashboard-app-dist
+          path: dashboard/app-dist
+          if-no-files-found: error
+          include-hidden-files: true
+
   build:
     name: Build ${{ matrix.name }}
     if: vars.BETA_CHANNEL_ENABLED == 'true' && (github.event_name == 'workflow_dispatch' || github.event.release.prerelease)
+    needs: dashboard-assets
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -67,6 +109,21 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.RELEASE_TAG }}
+
+      - name: Checkout release automation
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: .release-automation
+
+      - name: Download dashboard artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dashboard-app-dist
+          path: dashboard/app-dist
+
+      - name: Validate downloaded dashboard bundle
+        run: python3 .release-automation/scripts/check-dashboard-bundle.py dashboard/app-dist
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -253,11 +310,27 @@ jobs:
   package-workspace:
     name: Validate workspace packages
     if: vars.BETA_CHANNEL_ENABLED == 'true' && (github.event_name == 'workflow_dispatch' || github.event.release.prerelease)
+    needs: dashboard-assets
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.RELEASE_TAG }}
+
+      - name: Checkout release automation
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          path: .release-automation
+
+      - name: Download dashboard artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dashboard-app-dist
+          path: dashboard/app-dist
+
+      - name: Validate downloaded dashboard bundle
+        run: python3 .release-automation/scripts/check-dashboard-bundle.py dashboard/app-dist
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -299,7 +372,13 @@ jobs:
           root_archive="target/package/tracedecay-${version}.crate"
           test -s "$root_archive"
           tar tzf "$root_archive" > root-archive-contents.txt
-          grep -q "/dashboard/graph/dist/" root-archive-contents.txt
+          grep -q "/dashboard/app-dist/" root-archive-contents.txt
+          package_root="${RUNNER_TEMP}/tracedecay-package"
+          rm -rf "$package_root"
+          mkdir -p "$package_root"
+          tar xzf "$root_archive" -C "$package_root"
+          python3 .release-automation/scripts/check-dashboard-bundle.py \
+            "$package_root/tracedecay-${version}/dashboard/app-dist"
 
   publish-assets:
     name: Publish beta release assets
