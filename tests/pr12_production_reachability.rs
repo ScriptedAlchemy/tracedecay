@@ -62,7 +62,13 @@ fn collect_call_offsets(
         && node
             .child_by_field_name("function")
             .and_then(|function| function.utf8_text(source).ok())
-            .is_some_and(|function| function.ends_with(callee))
+            .is_some_and(|function| {
+                function
+                    .chars()
+                    .filter(|character| !character.is_whitespace())
+                    .collect::<String>()
+                    .ends_with(callee)
+            })
     {
         offsets.push(node.start_byte());
     }
@@ -142,7 +148,7 @@ fn project_open_mounts_concrete_cycle_lsp_advisory_and_hook_owners() {
             "ProductionFeedbackRuntimeStateV1",
             "ProjectCiRetainedObservationStoreV1",
             "ProjectCiCodeAnchorStoreV1",
-            "AuthorizationPortOutcome::Absent",
+            "ConfiguredGitHubSourceAccessAuthorityV1",
         ],
     );
     assert!(
@@ -156,7 +162,7 @@ fn project_open_mounts_concrete_cycle_lsp_advisory_and_hook_owners() {
     let feedback = call_offsets(
         PROJECT_OPEN_OWNERS_SOURCE,
         "register_project_open_production_owners",
-        "open_and_register",
+        "feedback_runtime_registrar().open_and_register",
     );
     let cycle = call_offsets(
         PROJECT_OPEN_OWNERS_SOURCE,
