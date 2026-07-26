@@ -310,7 +310,24 @@ pub(super) async fn compatibility_memory_status_tx(
         .await
         .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?
     {
-        None => true,
+        None => {
+            drop(backfill_rows);
+            let mut source_rows = transaction
+                .query("SELECT EXISTS(SELECT 1 FROM memory_facts LIMIT 1)", ())
+                .await
+                .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?;
+            let row = source_rows
+                .next()
+                .await
+                .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?
+                .ok_or_else(|| {
+                    storage_message(
+                        COMPATIBILITY_READ_OPERATION,
+                        "compatibility source-presence result is missing",
+                    )
+                })?;
+            row_i64(&row, 0, COMPATIBILITY_READ_OPERATION)? == 0
+        }
         Some(row) => {
             row_string(&row, 1, COMPATIBILITY_READ_OPERATION)? == key.json
                 && row_string(&row, 0, COMPATIBILITY_READ_OPERATION)? == "cutover_complete"
