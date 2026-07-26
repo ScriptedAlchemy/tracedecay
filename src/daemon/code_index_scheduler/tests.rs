@@ -373,14 +373,20 @@ fn capture_sanitizes_code_and_propagates_scan_evidence() {
         snapshot.sanitizer_revision.as_str(),
         crate::privacy::CODE_SOURCE_SANITIZER_VERSION_V1
     );
-    assert!(snapshot.sanitization_receipts.iter().all(|receipt| {
-        receipt
-            .as_str()
-            .starts_with("privacy.code-source.v1.")
-    }));
-    assert!(latest.generation.chunks().chunks().iter().all(|chunk| {
-        !chunk.sanitized_text.as_str().contains(&secret)
-    }));
+    assert!(
+        snapshot
+            .sanitization_receipts
+            .iter()
+            .all(|receipt| { receipt.as_str().starts_with("privacy.code-source.v1.") })
+    );
+    assert!(
+        latest
+            .generation
+            .chunks()
+            .chunks()
+            .iter()
+            .all(|chunk| { !chunk.sanitized_text.as_str().contains(&secret) })
+    );
     assert!(
         latest
             .generation
