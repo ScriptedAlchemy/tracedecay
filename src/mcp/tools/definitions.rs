@@ -17,7 +17,7 @@ use super::dispatch_policy::REGISTERED_PROJECT_READER_TOOL_NAMES;
 /// Tools registered on every host before optional external capabilities.
 /// Count-contract tests share this source of truth so branch rebases cannot
 /// leave independent stale literals on the unit and integration surfaces.
-pub const ALWAYS_REGISTERED_TOOL_COUNT: usize = 166;
+pub const ALWAYS_REGISTERED_TOOL_COUNT: usize = 168;
 
 mod admin;
 mod analysis;
@@ -419,6 +419,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         def_hotspots(),
         def_similar(),
         def_rename_preview(),
+        def_api_migration_plan(),
         def_unused_imports(),
         def_rank(),
         def_largest(),
@@ -497,6 +498,7 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         def_replace_symbol(),
         def_insert_at_symbol(),
         def_move_symbol(),
+        def_api_migration_apply(),
         def_source_edit_reconcile(),
         def_find_exact_symbol(),
     ];
@@ -718,6 +720,8 @@ const FORMAT_CAPABLE_TOOL_NAMES: &[&str] = &[
     "tracedecay_replace_symbol",
     "tracedecay_move_symbol",
     "tracedecay_ast_grep_rewrite",
+    "tracedecay_api_migration_plan",
+    "tracedecay_api_migration_apply",
     // git & info
     "tracedecay_branch_list",
     "tracedecay_active_project",
