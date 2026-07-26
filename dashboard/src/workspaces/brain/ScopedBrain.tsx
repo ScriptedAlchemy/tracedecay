@@ -8,17 +8,15 @@ import { elideStart, splitBytes, splitCount } from '../../ui/format.ts';
 import { useLegacy } from '../../data/query/useLegacy.ts';
 import { useScope } from '../../data/scope/store.ts';
 import { relativeTime } from './BrainPage.tsx';
-import { AnalyticsOverviewPayloadSchema } from '../../contracts/uncontracted/analytics.ts';
 import {
+  AnalyticsOverviewPayloadSchema,
   GraphOverviewPayloadSchema,
-  SubgraphPayloadSchema,
-} from '../../contracts/uncontracted/graph.ts';
-import { MemoryStatusPayloadSchema } from '../../contracts/uncontracted/memory.ts';
-import {
-  ProjectContextPayloadSchema,
+  GraphSubgraphPayloadSchema,
+  MemoryStatusPayloadSchema,
   type ProjectContextPayload,
-  type ProjectStore,
-} from '../../contracts/uncontracted/projects.ts';
+  ProjectContextPayloadSchema,
+  type ProjectStoreContext,
+} from '../../contracts/wire.ts';
 
 /**
  * The Brain, scoped to one project: "what does TraceDecay actually know about
@@ -57,7 +55,7 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
   const subgraph = useLegacy(
     ['brain', 'subgraph'],
     '/api/plugins/graph/subgraph',
-    SubgraphPayloadSchema,
+    GraphSubgraphPayloadSchema,
   );
   const overview = useLegacy(
     ['brain', 'graph-overview'],
@@ -338,7 +336,7 @@ function ProjectHoldings({ data }: { data: ProjectContextPayload }) {
   );
 }
 
-function StoreCard({ store }: { store: ProjectStore }) {
+function StoreCard({ store }: { store: ProjectStoreContext }) {
   const scopes = store.graph_scopes ?? [];
   const artifacts = store.artifacts ?? [];
   const bytes = artifacts.reduce((sum, a) => sum + (a.size_bytes ?? 0), 0);

@@ -3,25 +3,31 @@ import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CodePage } from './CodePage.tsx';
+import { resolveFixture } from '../../../stories/fixtures/data.ts';
 
 vi.mock('../../viz/graph/GraphCanvas.tsx', () => ({
   GraphCanvas: () => <div data-testid="graph-canvas" />,
 }));
 
+/** Wire-true bodies from the shared fixture module — gated against the
+ * generated contracts by `endpoint-fixtures.test.ts` — emptied of the rows a
+ * collapsed backend read would have dropped. The point of this suite is that a
+ * WELL-FORMED response reporting zeros is still not a measurement, so the
+ * envelope around those zeros has to be the one the daemon really sends. */
+const wire = (path: string) => resolveFixture(path) as Record<string, unknown>;
+
 function serveLegacyGraphZeros() {
   return vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
     const body = url.includes('/overview')
-      ? { totals: { nodes: 0, edges: 0, files: 0 }, top_connected: [] }
+      ? {
+          ...wire('/api/plugins/graph/overview'),
+          totals: { nodes: 0, edges: 0, files: 0 },
+          top_connected: [],
+        }
       : url.includes('/subgraph')
-        ? {
-            seed_id: null,
-            mode: 'default',
-            nodes: [],
-            edges: [],
-            capped: { nodes: false, edges: false },
-          }
-        : { total: 0, results: [] };
+        ? { ...wire('/api/plugins/graph/subgraph'), nodes: [], edges: [] }
+        : { ...wire('/api/plugins/graph/search'), total: 0, count: 0, results: [] };
     return {
       ok: true,
       status: 200,

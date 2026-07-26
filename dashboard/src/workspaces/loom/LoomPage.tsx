@@ -28,11 +28,11 @@ import {
   type PlacedThread,
 } from './weave.ts';
 import {
-  LoomTemporalPayloadSchema,
-  TimelinePayloadSchema,
+  LcmTimelinePayloadSchema,
   type LoomSourceStatus,
   type LoomTemporalPayload,
-} from '../../contracts/uncontracted/sessions.ts';
+  LoomTemporalPayloadSchema,
+} from '../../contracts/wire.ts';
 
 /**
  * Loom — time and causality.
@@ -42,8 +42,7 @@ import {
  * commits, PRs, and outcomes". The daemon serves the first half of that
  * sentence. The temporal read now serves its persisted causal half with
  * provider-qualified rows; only Delivery-owned outcomes remain a named shared
- * dependency. The reasoning, in full, is in
- * `contracts/uncontracted/sessions.ts` and `weave.ts`:
+ * dependency. The reasoning, in full, is in `weave.ts`:
  *
  *   - Threads are real. Every mark is one session at its real start time, as
  *     thick as its real message count, in its host's column.
@@ -69,7 +68,7 @@ export function LoomPage() {
   const timeline = useLegacy(
     ['loom', 'timeline'],
     '/api/plugins/hermes-lcm/timeline',
-    TimelinePayloadSchema,
+    LcmTimelinePayloadSchema,
   );
   const [selectedId, setSelectedId] = useState<string | null>(null);
 

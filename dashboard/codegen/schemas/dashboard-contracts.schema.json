@@ -4,6 +4,108 @@
       "description": "Strongly typed canonical identity: `ActorId`.",
       "type": "string"
     },
+    "AnalyticsOverviewPayloadV1": {
+      "properties": {
+        "agents": true,
+        "available": {
+          "type": "boolean"
+        },
+        "db": {
+          "type": "string"
+        },
+        "diagnostics": true,
+        "hints": true,
+        "observatory": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ObservatoryReadModelV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "scope": {
+          "type": "string"
+        },
+        "underused_tool_families": true,
+        "usage": {
+          "$ref": "#/$defs/AnalyticsUsageSummaryV1"
+        }
+      },
+      "required": [
+        "available",
+        "db",
+        "scope",
+        "hints",
+        "usage",
+        "agents",
+        "diagnostics",
+        "underused_tool_families",
+        "observatory"
+      ],
+      "type": "object"
+    },
+    "AnalyticsUsageCategoryV1": {
+      "properties": {
+        "category": {
+          "type": "string"
+        },
+        "events": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "kind": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "category",
+        "events"
+      ],
+      "type": "object"
+    },
+    "AnalyticsUsageSummaryV1": {
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "by_category": {
+          "items": {
+            "$ref": "#/$defs/AnalyticsUsageCategoryV1"
+          },
+          "type": "array"
+        },
+        "event_count": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "message_count": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "source": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "available",
+        "source",
+        "message_count",
+        "event_count",
+        "by_category"
+      ],
+      "type": "object"
+    },
     "AuthorityRef": {
       "description": "Authoritative scope of a source binding. A mutable path, label, or host\nprofile cannot be represented as authority.",
       "oneOf": [
@@ -227,6 +329,62 @@
         "project_config_path",
         "control_path",
         "tasks"
+      ],
+      "type": "object"
+    },
+    "AutomationSettingsPayloadV1": {
+      "properties": {
+        "availability": {
+          "$ref": "#/$defs/SettingsAvailabilityV1"
+        },
+        "backend": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "config_endpoint": {
+          "type": "string"
+        },
+        "enabled": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "host_mode": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_coverage": {
+          "$ref": "#/$defs/AutomationSourceCoverageV1"
+        }
+      },
+      "required": [
+        "config_endpoint",
+        "availability",
+        "source_coverage"
+      ],
+      "type": "object"
+    },
+    "AutomationSourceCoverageV1": {
+      "properties": {
+        "effective": {
+          "type": "string"
+        },
+        "global": {
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "global",
+        "project",
+        "effective"
       ],
       "type": "object"
     },
@@ -684,6 +842,66 @@
         "expected_revision"
       ],
       "type": "object"
+    },
+    "CostsReadModelV1": {
+      "properties": {
+        "authorized_scope_ref": {
+          "type": "string"
+        },
+        "current": {
+          "type": "boolean"
+        },
+        "estimated_cost": {
+          "items": {
+            "$ref": "#/$defs/MetricValueV1"
+          },
+          "type": "array"
+        },
+        "horizon": {
+          "$ref": "#/$defs/ObservabilityHorizonV1"
+        },
+        "observed_at_micros": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "pricing_revision": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "usage": {
+          "items": {
+            "$ref": "#/$defs/MetricValueV1"
+          },
+          "type": "array"
+        },
+        "watermark": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "authorized_scope_ref",
+        "horizon",
+        "watermark",
+        "observed_at_micros",
+        "current",
+        "usage",
+        "estimated_cost",
+        "pricing_revision"
+      ],
+      "type": "object"
+    },
+    "CoverageStateV1": {
+      "enum": [
+        "known",
+        "partial",
+        "stale",
+        "unknown",
+        "sampled",
+        "capped"
+      ],
+      "type": "string"
     },
     "CoveringTestV1": {
       "properties": {
@@ -1206,6 +1424,789 @@
       ],
       "type": "object"
     },
+    "DeliveryCiTimelineV1": {
+      "properties": {
+        "items": {
+          "items": true,
+          "type": "array"
+        }
+      },
+      "required": [
+        "items"
+      ],
+      "type": "object"
+    },
+    "DeliveryCommitTimelineV1": {
+      "description": "Bounded commit timeline shared by Delivery and Loom.",
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/DeliveryCommitV1"
+          },
+          "type": "array"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "items",
+        "truncated"
+      ],
+      "type": "object"
+    },
+    "DeliveryCommitV1": {
+      "properties": {
+        "author_at_micros": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "author_email": {
+          "type": "string"
+        },
+        "author_name": {
+          "type": "string"
+        },
+        "commit": {
+          "type": "string"
+        },
+        "committer_at_micros": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "subject": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "commit",
+        "subject",
+        "author_name",
+        "author_email",
+        "author_at_micros",
+        "committer_at_micros"
+      ],
+      "type": "object"
+    },
+    "DeliveryFailureLocalizationTimelineV1": {
+      "properties": {
+        "items": {
+          "items": true,
+          "type": "array"
+        }
+      },
+      "required": [
+        "items"
+      ],
+      "type": "object"
+    },
+    "DeliveryGenerationComparisonV1": {
+      "enum": [
+        "current",
+        "behind"
+      ],
+      "type": "string"
+    },
+    "DeliveryGenerationFreshnessV1": {
+      "description": "Generation comparison shared by Delivery and any timeline consumer.",
+      "properties": {
+        "comparison": {
+          "$ref": "#/$defs/DeliveryGenerationComparisonV1"
+        },
+        "head_commit": {
+          "type": "string"
+        },
+        "indexed_commit": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "comparison",
+        "head_commit",
+        "indexed_commit"
+      ],
+      "type": "object"
+    },
+    "DeliveryGitHeadV1": {
+      "oneOf": [
+        {
+          "properties": {
+            "branch": {
+              "type": "string"
+            },
+            "commit": {
+              "type": "string"
+            },
+            "state": {
+              "const": "attached",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "branch",
+            "commit"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "commit": {
+              "type": "string"
+            },
+            "state": {
+              "const": "detached",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "commit"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "branch": {
+              "type": "string"
+            },
+            "state": {
+              "const": "unborn",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "branch"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DeliveryGitStatusV1": {
+      "properties": {
+        "changed_paths": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "conflicted": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "head": {
+          "$ref": "#/$defs/DeliveryGitHeadV1"
+        },
+        "ignored": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "operation": {
+          "type": "string"
+        },
+        "repository": {
+          "type": "string"
+        },
+        "schema_version": {
+          "type": "string"
+        },
+        "staged": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "unstaged": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "untracked": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "repository",
+        "head",
+        "operation",
+        "staged",
+        "unstaged",
+        "conflicted",
+        "untracked",
+        "ignored",
+        "changed_paths",
+        "schema_version"
+      ],
+      "type": "object"
+    },
+    "DeliveryOverviewV1": {
+      "properties": {
+        "changes": {
+          "$ref": "#/$defs/DeliveryProjectionV1"
+        },
+        "ci_checks": {
+          "$ref": "#/$defs/DeliveryProjectionV15"
+        },
+        "commits": {
+          "$ref": "#/$defs/DeliveryProjectionV12"
+        },
+        "failure_localization": {
+          "$ref": "#/$defs/DeliveryProjectionV16"
+        },
+        "generation_freshness": {
+          "$ref": "#/$defs/DeliveryProjectionV18"
+        },
+        "pull_requests": {
+          "$ref": "#/$defs/DeliveryProjectionV13"
+        },
+        "releases": {
+          "$ref": "#/$defs/DeliveryProjectionV17"
+        },
+        "review_comments": {
+          "$ref": "#/$defs/DeliveryProjectionV14"
+        }
+      },
+      "required": [
+        "changes",
+        "commits",
+        "pull_requests",
+        "review_comments",
+        "ci_checks",
+        "failure_localization",
+        "releases",
+        "generation_freshness"
+      ],
+      "type": "object"
+    },
+    "DeliveryProjectionV1": {
+      "description": "One reusable source projection. Absence never collapses into an empty list.",
+      "oneOf": [
+        {
+          "properties": {
+            "state": {
+              "const": "ready",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/DeliveryGitStatusV1"
+            }
+          },
+          "required": [
+            "state",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "required_authority": {
+              "type": "string"
+            },
+            "state": {
+              "const": "unavailable",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "required_authority",
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "required_authority": {
+              "type": "string"
+            },
+            "state": {
+              "const": "unsupported",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "required_authority",
+            "reason"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DeliveryProjectionV12": {
+      "description": "One reusable source projection. Absence never collapses into an empty list.",
+      "oneOf": [
+        {
+          "properties": {
+            "state": {
+              "const": "ready",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/DeliveryCommitTimelineV1"
+            }
+          },
+          "required": [
+            "state",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "required_authority": {
+              "type": "string"
+            },
+            "state": {
+              "const": "unavailable",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "required_authority",
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "required_authority": {
+              "type": "string"
+            },
+            "state": {
+              "const": "unsupported",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "required_authority",
+            "reason"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DeliveryProjectionV13": {
+      "description": "One reusable source projection. Absence never collapses into an empty list.",
+      "oneOf": [
+        {
+          "properties": {
+            "state": {
+              "const": "ready",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/DeliveryPullRequestTimelineV1"
+            }
+          },
+          "required": [
+            "state",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "required_authority": {
+              "type": "string"
+            },
+            "state": {
+              "const": "unavailable",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "required_authority",
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "required_authority": {
+              "type": "string"
+            },
+            "state": {
+              "const": "unsupported",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "required_authority",
+            "reason"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DeliveryProjectionV14": {
+      "description": "One reusable source projection. Absence never collapses into an empty list.",
+      "oneOf": [
+        {
+          "properties": {
+            "state": {
+              "const": "ready",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/DeliveryReviewTimelineV1"
+            }
+          },
+          "required": [
+            "state",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "required_authority": {
+              "type": "string"
+            },
+            "state": {
+              "const": "unavailable",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "required_authority",
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "required_authority": {
+              "type": "string"
+            },
+            "state": {
+              "const": "unsupported",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "required_authority",
+            "reason"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DeliveryProjectionV15": {
+      "description": "One reusable source projection. Absence never collapses into an empty list.",
+      "oneOf": [
+        {
+          "properties": {
+            "state": {
+              "const": "ready",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/DeliveryCiTimelineV1"
+            }
+          },
+          "required": [
+            "state",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "required_authority": {
+              "type": "string"
+            },
+            "state": {
+              "const": "unavailable",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "required_authority",
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "required_authority": {
+              "type": "string"
+            },
+            "state": {
+              "const": "unsupported",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "required_authority",
+            "reason"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DeliveryProjectionV16": {
+      "description": "One reusable source projection. Absence never collapses into an empty list.",
+      "oneOf": [
+        {
+          "properties": {
+            "state": {
+              "const": "ready",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/DeliveryFailureLocalizationTimelineV1"
+            }
+          },
+          "required": [
+            "state",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "required_authority": {
+              "type": "string"
+            },
+            "state": {
+              "const": "unavailable",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "required_authority",
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "required_authority": {
+              "type": "string"
+            },
+            "state": {
+              "const": "unsupported",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "required_authority",
+            "reason"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DeliveryProjectionV17": {
+      "description": "One reusable source projection. Absence never collapses into an empty list.",
+      "oneOf": [
+        {
+          "properties": {
+            "state": {
+              "const": "ready",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/DeliveryReleaseTimelineV1"
+            }
+          },
+          "required": [
+            "state",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "required_authority": {
+              "type": "string"
+            },
+            "state": {
+              "const": "unavailable",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "required_authority",
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "required_authority": {
+              "type": "string"
+            },
+            "state": {
+              "const": "unsupported",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "required_authority",
+            "reason"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DeliveryProjectionV18": {
+      "description": "One reusable source projection. Absence never collapses into an empty list.",
+      "oneOf": [
+        {
+          "properties": {
+            "state": {
+              "const": "ready",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/DeliveryGenerationFreshnessV1"
+            }
+          },
+          "required": [
+            "state",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "required_authority": {
+              "type": "string"
+            },
+            "state": {
+              "const": "unavailable",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "required_authority",
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "reason": {
+              "type": "string"
+            },
+            "required_authority": {
+              "type": "string"
+            },
+            "state": {
+              "const": "unsupported",
+              "type": "string"
+            }
+          },
+          "required": [
+            "state",
+            "required_authority",
+            "reason"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "DeliveryPullRequestTimelineV1": {
+      "description": "Placeholder value shapes are intentionally concrete so later authority\nmounts preserve this route rather than forcing consumers onto private APIs.",
+      "properties": {
+        "items": {
+          "items": true,
+          "type": "array"
+        }
+      },
+      "required": [
+        "items"
+      ],
+      "type": "object"
+    },
+    "DeliveryReleaseTimelineV1": {
+      "properties": {
+        "items": {
+          "items": true,
+          "type": "array"
+        }
+      },
+      "required": [
+        "items"
+      ],
+      "type": "object"
+    },
+    "DeliveryReviewTimelineV1": {
+      "properties": {
+        "items": {
+          "items": true,
+          "type": "array"
+        }
+      },
+      "required": [
+        "items"
+      ],
+      "type": "object"
+    },
     "DoctorConfirmationRequirementV1": {
       "description": "Whether an owning operation requires an explicit human confirmation before it\nmay perform its admitted mutating effect.",
       "oneOf": [
@@ -1566,11 +2567,6 @@
         {
           "const": "semantic_index_runtime",
           "description": "The semantic/code index runtime (Plan 35 / semantic index).",
-          "type": "string"
-        },
-        {
-          "const": "feedback_read",
-          "description": "The canonical advisory feedback read owner (PR11–PR13).",
           "type": "string"
         }
       ]
@@ -2116,6 +3112,58 @@
       ],
       "type": "string"
     },
+    "EnvironmentSettingsPayloadV1": {
+      "properties": {
+        "global_accounting_enabled": {
+          "type": "boolean"
+        },
+        "global_accounting_mode": {
+          "type": "string"
+        },
+        "pricing_offline": {
+          "type": "boolean"
+        },
+        "variables": {
+          "items": {
+            "$ref": "#/$defs/EnvironmentVariableV1"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "global_accounting_mode",
+        "global_accounting_enabled",
+        "pricing_offline",
+        "variables"
+      ],
+      "type": "object"
+    },
+    "EnvironmentVariableV1": {
+      "properties": {
+        "active": {
+          "type": "boolean"
+        },
+        "description": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "value": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "active",
+        "value",
+        "description"
+      ],
+      "type": "object"
+    },
     "ExplorerFinalityV1": {
       "enum": [
         "pending",
@@ -2227,6 +3275,65 @@
       ],
       "type": "object"
     },
+    "ExplorerReadContextV1": {
+      "properties": {
+        "counts": {
+          "$ref": "#/$defs/ExplorerSessionCountsV1"
+        },
+        "has_more": {
+          "type": "boolean"
+        },
+        "has_more_messages": {
+          "type": "boolean"
+        },
+        "has_more_summary_nodes": {
+          "type": "boolean"
+        },
+        "limit": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "messages": {
+          "items": {
+            "$ref": "#/$defs/LcmMessageV1"
+          },
+          "type": "array"
+        },
+        "offset": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "order": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "storage_scope": {
+          "type": "string"
+        },
+        "summary_nodes": {
+          "items": {
+            "$ref": "#/$defs/LcmSummaryNodeV1"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "session_id",
+        "storage_scope",
+        "limit",
+        "offset",
+        "order",
+        "counts",
+        "messages",
+        "summary_nodes",
+        "has_more",
+        "has_more_messages",
+        "has_more_summary_nodes"
+      ],
+      "type": "object"
+    },
     "ExplorerResultPageV1": {
       "properties": {
         "limit": {
@@ -2277,6 +3384,57 @@
         "error"
       ],
       "type": "string"
+    },
+    "ExplorerSessionCountsV1": {
+      "properties": {
+        "message_count": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "source_token_count": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "summary_node_count": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "summary_token_count": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "token_estimate_total": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "message_count",
+        "summary_node_count",
+        "token_estimate_total",
+        "summary_token_count",
+        "source_token_count"
+      ],
+      "type": "object"
+    },
+    "ExplorerSessionSizeV1": {
+      "properties": {
+        "counts": {
+          "$ref": "#/$defs/ExplorerSessionCountsV1"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "storage_scope": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "session_id",
+        "storage_scope",
+        "counts"
+      ],
+      "type": "object"
     },
     "ExplorerSourceIdV1": {
       "enum": [
@@ -2500,6 +3658,680 @@
       ],
       "type": "string"
     },
+    "GraphCappedV1": {
+      "properties": {
+        "edges": {
+          "type": "boolean"
+        },
+        "nodes": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "nodes",
+        "edges"
+      ],
+      "type": "object"
+    },
+    "GraphEdgeV1": {
+      "properties": {
+        "kind": {
+          "type": "string"
+        },
+        "line": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "source": {
+          "type": "string"
+        },
+        "source_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "target": {
+          "type": "string"
+        },
+        "target_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "source",
+        "target",
+        "kind",
+        "line",
+        "source_name",
+        "target_name"
+      ],
+      "type": "object"
+    },
+    "GraphKindCountV1": {
+      "properties": {
+        "count": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "kind": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "count"
+      ],
+      "type": "object"
+    },
+    "GraphLanguageCountV1": {
+      "properties": {
+        "count": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "language": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "language",
+        "count"
+      ],
+      "type": "object"
+    },
+    "GraphLargestFileV1": {
+      "properties": {
+        "node_count": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "path": {
+          "type": "string"
+        },
+        "size": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "path",
+        "node_count",
+        "size"
+      ],
+      "type": "object"
+    },
+    "GraphLimitsV1": {
+      "properties": {
+        "edges": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "nodes": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "nodes",
+        "edges"
+      ],
+      "type": "object"
+    },
+    "GraphNeighborsPayloadV1": {
+      "properties": {
+        "callees": {
+          "items": {
+            "$ref": "#/$defs/GraphNodeV1"
+          },
+          "type": "array"
+        },
+        "callers": {
+          "items": {
+            "$ref": "#/$defs/GraphNodeV1"
+          },
+          "type": "array"
+        },
+        "depth": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "edges": {
+          "items": {
+            "$ref": "#/$defs/GraphEdgeV1"
+          },
+          "type": "array"
+        },
+        "edges_by_kind": {
+          "items": {
+            "$ref": "#/$defs/GraphKindCountV1"
+          },
+          "type": "array"
+        },
+        "limit": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "node_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "node_id",
+        "depth",
+        "limit",
+        "callers",
+        "callees",
+        "edges",
+        "edges_by_kind"
+      ],
+      "type": "object"
+    },
+    "GraphNodePayloadV1": {
+      "properties": {
+        "node": {
+          "$ref": "#/$defs/GraphNodeV1"
+        }
+      },
+      "required": [
+        "node"
+      ],
+      "type": "object"
+    },
+    "GraphNodeV1": {
+      "properties": {
+        "assertions": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "attrs_start_line": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "branches": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "degree": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "doc": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "edge_kind": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "edge_line": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "end_column": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "end_line": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "file_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "is_async": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "kind": {
+          "type": "string"
+        },
+        "loops": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_nesting": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "parent_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "qualified_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "returns": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "signature": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "span": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GraphSpanV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "start_column": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "start_line": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "unchecked_calls": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "unsafe_blocks": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "updated_at": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "visibility": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "name",
+        "qualified_name",
+        "file_path",
+        "start_line",
+        "end_line",
+        "start_column",
+        "end_column",
+        "attrs_start_line",
+        "doc",
+        "signature",
+        "visibility",
+        "is_async",
+        "branches",
+        "loops",
+        "returns",
+        "max_nesting",
+        "unsafe_blocks",
+        "unchecked_calls",
+        "assertions",
+        "updated_at",
+        "parent_id",
+        "degree",
+        "span",
+        "edge_kind",
+        "edge_line"
+      ],
+      "type": "object"
+    },
+    "GraphOverviewPayloadV1": {
+      "properties": {
+        "edges_by_kind": {
+          "items": {
+            "$ref": "#/$defs/GraphKindCountV1"
+          },
+          "type": "array"
+        },
+        "files_by_language": {
+          "items": {
+            "$ref": "#/$defs/GraphLanguageCountV1"
+          },
+          "type": "array"
+        },
+        "largest_files": {
+          "items": {
+            "$ref": "#/$defs/GraphLargestFileV1"
+          },
+          "type": "array"
+        },
+        "nodes_by_kind": {
+          "items": {
+            "$ref": "#/$defs/GraphKindCountV1"
+          },
+          "type": "array"
+        },
+        "path": {
+          "type": "string"
+        },
+        "top_connected": {
+          "items": {
+            "$ref": "#/$defs/GraphNodeV1"
+          },
+          "type": "array"
+        },
+        "totals": {
+          "$ref": "#/$defs/GraphTotalsV1"
+        }
+      },
+      "required": [
+        "totals",
+        "nodes_by_kind",
+        "edges_by_kind",
+        "files_by_language",
+        "largest_files",
+        "path",
+        "top_connected"
+      ],
+      "type": "object"
+    },
+    "GraphPathPayloadV1": {
+      "properties": {
+        "edges": {
+          "items": {
+            "$ref": "#/$defs/GraphEdgeV1"
+          },
+          "type": "array"
+        },
+        "found": {
+          "type": "boolean"
+        },
+        "from": {
+          "type": "string"
+        },
+        "max_depth": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "nodes": {
+          "items": {
+            "$ref": "#/$defs/GraphNodeV1"
+          },
+          "type": "array"
+        },
+        "path": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "to": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "from",
+        "to",
+        "found",
+        "path",
+        "nodes",
+        "edges",
+        "max_depth"
+      ],
+      "type": "object"
+    },
+    "GraphScopeRecord": {
+      "properties": {
+        "branch_name": {
+          "type": "string"
+        },
+        "db_relpath": {
+          "type": "string"
+        },
+        "graph_scope_id": {
+          "type": "string"
+        },
+        "last_synced_at": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "parent_scope_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "project_id": {
+          "type": "string"
+        },
+        "store_id": {
+          "type": "string"
+        },
+        "writable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "graph_scope_id",
+        "project_id",
+        "store_id",
+        "branch_name",
+        "db_relpath",
+        "parent_scope_id",
+        "last_synced_at",
+        "writable"
+      ],
+      "type": "object"
+    },
+    "GraphSearchPayloadV1": {
+      "properties": {
+        "count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "limit": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "offset": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "query": {
+          "type": "string"
+        },
+        "results": {
+          "items": {
+            "$ref": "#/$defs/GraphNodeV1"
+          },
+          "type": "array"
+        },
+        "total": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "query",
+        "limit",
+        "offset",
+        "total",
+        "count",
+        "results"
+      ],
+      "type": "object"
+    },
+    "GraphSpanV1": {
+      "properties": {
+        "attrs_start_line": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "end_column": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "end_line": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "start_column": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "start_line": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "start_line",
+        "end_line",
+        "start_column",
+        "end_column",
+        "attrs_start_line"
+      ],
+      "type": "object"
+    },
+    "GraphSubgraphPayloadV1": {
+      "properties": {
+        "capped": {
+          "$ref": "#/$defs/GraphCappedV1"
+        },
+        "edges": {
+          "items": {
+            "$ref": "#/$defs/GraphEdgeV1"
+          },
+          "type": "array"
+        },
+        "limits": {
+          "$ref": "#/$defs/GraphLimitsV1"
+        },
+        "mode": {
+          "type": "string"
+        },
+        "nodes": {
+          "items": {
+            "$ref": "#/$defs/GraphNodeV1"
+          },
+          "type": "array"
+        },
+        "seed_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "seed_id",
+        "mode",
+        "nodes",
+        "edges",
+        "capped",
+        "limits"
+      ],
+      "type": "object"
+    },
+    "GraphTotalsV1": {
+      "properties": {
+        "edges": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "files": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "nodes": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "nodes",
+        "edges",
+        "files"
+      ],
+      "type": "object"
+    },
     "HistoryRewritePolicyV1": {
       "enum": [
         "forbid_force_and_rebase"
@@ -2561,9 +4393,528 @@
       ],
       "type": "object"
     },
+    "LcmMessageV1": {
+      "additionalProperties": true,
+      "properties": {
+        "content": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message_id": {
+          "type": "string"
+        },
+        "metadata_json": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ordinal": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "pinned": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "role": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "source": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "storage_kind": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "store_id": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "summary_node_ids": {
+          "items": true,
+          "type": "array"
+        },
+        "timestamp": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "token_estimate": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "tool_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "store_id",
+        "session_id",
+        "role",
+        "source",
+        "timestamp",
+        "token_estimate",
+        "content",
+        "message_id",
+        "ordinal",
+        "storage_kind",
+        "metadata_json",
+        "tool_name",
+        "pinned",
+        "summary_node_ids"
+      ],
+      "type": "object"
+    },
+    "LcmSessionCountsV1": {
+      "properties": {
+        "message_count": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "source_token_count": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "summary_node_count": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "summary_token_count": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "token_estimate_total": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "message_count",
+        "summary_node_count",
+        "token_estimate_total",
+        "summary_token_count",
+        "source_token_count"
+      ],
+      "type": "object"
+    },
+    "LcmSessionPayloadV1": {
+      "properties": {
+        "counts": {
+          "$ref": "#/$defs/LcmSessionCountsV1"
+        },
+        "exists": {
+          "type": "boolean"
+        },
+        "has_more": {
+          "type": "boolean"
+        },
+        "has_more_messages": {
+          "type": "boolean"
+        },
+        "has_more_summary_nodes": {
+          "type": "boolean"
+        },
+        "limit": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "messages": {
+          "items": {
+            "$ref": "#/$defs/LcmMessageV1"
+          },
+          "type": "array"
+        },
+        "offset": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "order": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "storage_scope": {
+          "type": "string"
+        },
+        "summary_nodes": {
+          "items": {
+            "$ref": "#/$defs/LcmSummaryNodeV1"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "path",
+        "storage_scope",
+        "exists",
+        "session_id",
+        "limit",
+        "offset",
+        "order",
+        "counts",
+        "messages",
+        "summary_nodes",
+        "has_more",
+        "has_more_messages",
+        "has_more_summary_nodes"
+      ],
+      "type": "object"
+    },
+    "LcmSummaryNodeV1": {
+      "additionalProperties": true,
+      "properties": {
+        "category": {
+          "type": "string"
+        },
+        "created_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "depth": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "expand_hint": {
+          "type": "string"
+        },
+        "latest_at": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "node_id": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "source_token_count": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "source_type": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "token_count": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "node_id",
+        "session_id",
+        "depth",
+        "category",
+        "source_type",
+        "token_count",
+        "source_token_count",
+        "latest_at",
+        "created_at",
+        "expand_hint",
+        "summary"
+      ],
+      "type": "object"
+    },
+    "LcmTimelineBucketV1": {
+      "properties": {
+        "bucket": {
+          "type": "string"
+        },
+        "count": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "token_estimate": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "bucket",
+        "count",
+        "token_estimate"
+      ],
+      "type": "object"
+    },
+    "LcmTimelineCoverageV1": {
+      "properties": {
+        "limit": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "next_before_bucket": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ordering": {
+          "type": "string"
+        },
+        "returned_buckets": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "total_dated_buckets": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "limit",
+        "returned_buckets",
+        "total_dated_buckets",
+        "truncated",
+        "ordering",
+        "next_before_bucket"
+      ],
+      "type": "object"
+    },
+    "LcmTimelinePayloadV1": {
+      "properties": {
+        "bucket": {
+          "type": "string"
+        },
+        "buckets": {
+          "items": {
+            "$ref": "#/$defs/LcmTimelineBucketV1"
+          },
+          "type": "array"
+        },
+        "coverage": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LcmTimelineCoverageV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "exists": {
+          "type": "boolean"
+        },
+        "node_buckets": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "path": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "storage_scope": {
+          "type": "string"
+        },
+        "undated": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "required": [
+        "path",
+        "storage_scope",
+        "exists",
+        "bucket",
+        "session_id",
+        "buckets",
+        "node_buckets",
+        "undated",
+        "coverage"
+      ],
+      "type": "object"
+    },
     "LocatorDigest": {
       "description": "Strongly typed algorithm-tagged integrity digest: `LocatorDigest`.",
       "type": "string"
+    },
+    "LoomBranchSpanV1": {
+      "properties": {
+        "branch": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "event_count": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "first_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "last_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "worktree": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider",
+        "session_id",
+        "branch",
+        "worktree",
+        "first_at",
+        "last_at",
+        "event_count",
+        "source"
+      ],
+      "type": "object"
+    },
+    "LoomCommitV1": {
+      "properties": {
+        "branch": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "commit_sha": {
+          "type": "string"
+        },
+        "committed_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "confidence": {
+          "format": "double",
+          "type": "number"
+        },
+        "evidence": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "relation": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "span_overlap_kind": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "worktree": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "provider",
+        "session_id",
+        "commit_sha",
+        "committed_at",
+        "branch",
+        "worktree",
+        "relation",
+        "evidence",
+        "confidence",
+        "span_overlap_kind"
+      ],
+      "type": "object"
+    },
+    "LoomEditedFileV1": {
+      "properties": {
+        "change_type": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "hunks": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "path": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider",
+        "session_id",
+        "path",
+        "change_type",
+        "hunks"
+      ],
+      "type": "object"
     },
     "LoomFileSessionProjectionV1": {
       "properties": {
@@ -2604,9 +4955,1325 @@
       ],
       "type": "object"
     },
+    "LoomSessionModelV1": {
+      "properties": {
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "model"
+      ],
+      "type": "object"
+    },
+    "LoomSessionRowV1": {
+      "properties": {
+        "edited_files_recorded": {
+          "type": "boolean"
+        },
+        "ended_at": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "is_subagent": {
+          "type": "boolean"
+        },
+        "last_message_at": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "messages": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "models": {
+          "items": {
+            "$ref": "#/$defs/LoomSessionModelV1"
+          },
+          "type": "array"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "started_at": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "provider",
+        "session_id",
+        "title",
+        "started_at",
+        "ended_at",
+        "last_message_at",
+        "is_subagent",
+        "messages",
+        "edited_files_recorded",
+        "models"
+      ],
+      "type": "object"
+    },
+    "LoomSourceCoverageV1": {
+      "properties": {
+        "completeness": {
+          "type": "string"
+        },
+        "eligible": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "examined": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "matched": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "omitted": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "reason": {
+          "type": "string"
+        },
+        "unit": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "completeness",
+        "eligible",
+        "examined",
+        "matched",
+        "omitted",
+        "unit",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "LoomSourceStatusV1": {
+      "properties": {
+        "authority": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "coverage": {
+          "$ref": "#/$defs/LoomSourceCoverageV1"
+        },
+        "granularity": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "item_count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "label": {
+          "type": "string"
+        },
+        "providers": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "required_authority": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/DashboardDomainStateV1"
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "state",
+        "authority",
+        "granularity",
+        "providers",
+        "item_count",
+        "reason",
+        "required_authority",
+        "coverage"
+      ],
+      "type": "object"
+    },
+    "LoomTemporalPayloadV1": {
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "branch_spans": {
+          "items": {
+            "$ref": "#/$defs/LoomBranchSpanV1"
+          },
+          "type": "array"
+        },
+        "commits": {
+          "items": {
+            "$ref": "#/$defs/LoomCommitV1"
+          },
+          "type": "array"
+        },
+        "edited_files": {
+          "items": {
+            "$ref": "#/$defs/LoomEditedFileV1"
+          },
+          "type": "array"
+        },
+        "sessions": {
+          "items": {
+            "$ref": "#/$defs/LoomSessionRowV1"
+          },
+          "type": "array"
+        },
+        "source_statuses": {
+          "items": {
+            "$ref": "#/$defs/LoomSourceStatusV1"
+          },
+          "type": "array"
+        },
+        "temporal_refresh": {
+          "$ref": "#/$defs/LoomTemporalRefreshV1"
+        },
+        "total": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "available",
+        "total",
+        "sessions",
+        "source_statuses",
+        "commits",
+        "edited_files",
+        "branch_spans",
+        "temporal_refresh"
+      ],
+      "type": "object"
+    },
+    "LoomTemporalRefreshV1": {
+      "properties": {
+        "active_generations": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "authority": {
+          "type": "string"
+        },
+        "latest_activated_at_micros": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "state": {
+          "$ref": "#/$defs/DashboardDomainStateV1"
+        }
+      },
+      "required": [
+        "state",
+        "active_generations",
+        "latest_activated_at_micros",
+        "authority"
+      ],
+      "type": "object"
+    },
     "ManifestDigest": {
       "description": "Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.",
       "type": "string"
+    },
+    "MemoryBankV1": {
+      "properties": {
+        "bank_name": {
+          "type": "string"
+        },
+        "bundled_fact_count": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "dim": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "fact_count": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "updated_at": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "bank_name",
+        "dim",
+        "fact_count",
+        "bundled_fact_count",
+        "updated_at"
+      ],
+      "type": "object"
+    },
+    "MemoryCategoryCountV1": {
+      "properties": {
+        "category": {
+          "type": "string"
+        },
+        "count": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "category",
+        "count"
+      ],
+      "type": "object"
+    },
+    "MemoryEntityRowV1": {
+      "additionalProperties": true,
+      "properties": {
+        "aliases": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "created_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "entity_id": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "entity_type": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "fact_count": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "entity_id",
+        "name",
+        "entity_type",
+        "aliases",
+        "created_at",
+        "fact_count"
+      ],
+      "type": "object"
+    },
+    "MemoryEntityTypeCountV1": {
+      "properties": {
+        "count": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "entity_type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "entity_type",
+        "count"
+      ],
+      "type": "object"
+    },
+    "MemoryFactDetailPayloadV1": {
+      "properties": {
+        "error": {
+          "type": "string"
+        },
+        "fact": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MemoryFactRowV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "fact",
+        "error"
+      ],
+      "type": "object"
+    },
+    "MemoryFactRowV1": {
+      "additionalProperties": true,
+      "properties": {
+        "access_count": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "category": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "content": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "created_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "entities": {
+          "items": {
+            "$ref": "#/$defs/MemoryEntityRowV1"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "fact_id": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "has_hrr": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "helpful_count": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "last_recalled_at": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "metadata": true,
+        "retrieval_count": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "tags": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "trust_score": {
+          "format": "double",
+          "type": "number"
+        },
+        "unhelpful_count": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "updated_at": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "fact_id",
+        "trust_score",
+        "retrieval_count",
+        "access_count",
+        "helpful_count",
+        "unhelpful_count",
+        "created_at",
+        "updated_at",
+        "last_recalled_at",
+        "has_hrr",
+        "content",
+        "category",
+        "tags",
+        "metadata",
+        "entities"
+      ],
+      "type": "object"
+    },
+    "MemoryFactsCoverageV1": {
+      "properties": {
+        "completeness": {
+          "type": "string"
+        },
+        "limit": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "query_applied_after_limit": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "completeness",
+        "limit",
+        "query_applied_after_limit"
+      ],
+      "type": "object"
+    },
+    "MemoryFeedbackFunnel": {
+      "description": "Fact-store adoption funnel: seen (retrieved/accessed) vs. rated\n(helpful/unhelpful). A dead funnel — facts seen many times but never\nrated — means trust scores stay entirely seed-time values, never earned.",
+      "properties": {
+        "access_count_total": {
+          "description": "Sum of `memory_facts.access_count` across all facts — total\nrecall-search-return accesses (see [`crate::memory::types::FactRecord::access_count`]).",
+          "format": "int64",
+          "type": "integer"
+        },
+        "feedback_total": {
+          "description": "`helpful_count + unhelpful_count` summed across all facts — total\nfeedback events recorded.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "rated_fact_count": {
+          "description": "Facts that have ever received at least one helpful or unhelpful\nrating via `tracedecay_fact_feedback`.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "retrieval_count_total": {
+          "description": "Sum of `memory_facts.retrieval_count` across all facts — total times\nany fact was returned by a recall/search query.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "retrieved_fact_count": {
+          "description": "Facts that have ever been retrieved at least once\n(`retrieval_count > 0`).",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "seen_to_feedback_ratio": {
+          "description": "`(retrieval_count_total + access_count_total) / feedback_total`,\nrounded down. `None` when `feedback_total` is zero (undefined ratio;\nthe loop is entirely dead rather than merely sparse).",
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "retrieval_count_total",
+        "access_count_total",
+        "retrieved_fact_count",
+        "rated_fact_count",
+        "feedback_total",
+        "seen_to_feedback_ratio"
+      ],
+      "type": "object"
+    },
+    "MemoryFeedbackHistoryRepairV1": {
+      "properties": {
+        "processed": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "remaining": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "state": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "state",
+        "processed",
+        "remaining"
+      ],
+      "type": "object"
+    },
+    "MemoryGrowthPointV1": {
+      "properties": {
+        "cumulative_facts": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "date": {
+          "type": "string"
+        },
+        "facts": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "date",
+        "facts",
+        "cumulative_facts"
+      ],
+      "type": "object"
+    },
+    "MemoryHolographicPayloadV1": {
+      "properties": {
+        "entities": {
+          "items": {
+            "$ref": "#/$defs/MemoryEntityRowV1"
+          },
+          "type": "array"
+        },
+        "error": {
+          "type": "string"
+        },
+        "exists": {
+          "type": "boolean"
+        },
+        "facts": {
+          "items": {
+            "$ref": "#/$defs/MemoryFactRowV1"
+          },
+          "type": "array"
+        },
+        "facts_coverage": {
+          "$ref": "#/$defs/MemoryFactsCoverageV1"
+        },
+        "graph": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "overview": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MemoryOverviewSummaryV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "path": {
+          "type": "string"
+        },
+        "reads": {
+          "additionalProperties": {
+            "$ref": "#/$defs/MemoryReadStatusV1"
+          },
+          "type": "object"
+        }
+      },
+      "required": [
+        "path",
+        "exists",
+        "overview",
+        "facts",
+        "entities",
+        "graph",
+        "error",
+        "reads",
+        "facts_coverage"
+      ],
+      "type": "object"
+    },
+    "MemoryHrrCoverageV1": {
+      "properties": {
+        "bank_fact_count": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "bank_name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "category": {
+          "type": "string"
+        },
+        "coverage": {
+          "format": "double",
+          "type": "number"
+        },
+        "dim": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "facts": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "hrr_vectors": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "status": {
+          "type": "string"
+        },
+        "updated_at": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "category",
+        "facts",
+        "hrr_vectors",
+        "coverage",
+        "bank_name",
+        "bank_fact_count",
+        "dim",
+        "updated_at",
+        "status"
+      ],
+      "type": "object"
+    },
+    "MemoryOverviewPayloadV1": {
+      "properties": {
+        "holographic": {
+          "$ref": "#/$defs/MemoryHolographicPayloadV1"
+        },
+        "limit": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "providers": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "query": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "providers",
+        "query",
+        "limit",
+        "holographic"
+      ],
+      "type": "object"
+    },
+    "MemoryOverviewSummaryV1": {
+      "properties": {
+        "banks": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "categories": {
+          "items": {
+            "$ref": "#/$defs/MemoryCategoryCountV1"
+          },
+          "type": "array"
+        },
+        "entities": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "entity_types": {
+          "items": {
+            "$ref": "#/$defs/MemoryEntityTypeCountV1"
+          },
+          "type": "array"
+        },
+        "facts": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "growth": {
+          "items": {
+            "$ref": "#/$defs/MemoryGrowthPointV1"
+          },
+          "type": "array"
+        },
+        "hrr_coverage": {
+          "items": {
+            "$ref": "#/$defs/MemoryHrrCoverageV1"
+          },
+          "type": "array"
+        },
+        "memory_banks": {
+          "items": {
+            "$ref": "#/$defs/MemoryBankV1"
+          },
+          "type": "array"
+        },
+        "trust_histogram": {
+          "items": {
+            "$ref": "#/$defs/MemoryTrustBucketV1"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "facts",
+        "entities",
+        "banks",
+        "categories",
+        "entity_types",
+        "hrr_coverage",
+        "memory_banks",
+        "trust_histogram",
+        "growth"
+      ],
+      "type": "object"
+    },
+    "MemoryReadStatusV1": {
+      "properties": {
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "state"
+      ],
+      "type": "object"
+    },
+    "MemoryRepairStats": {
+      "properties": {
+        "banks_rebuilt": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "missing_vectors_repaired": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "missing_vectors_repaired",
+        "banks_rebuilt"
+      ],
+      "type": "object"
+    },
+    "MemoryStatus": {
+      "properties": {
+        "algebra_name": {
+          "type": "string"
+        },
+        "bank_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "below_default_recall_threshold_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "entity_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "estimated_capacity": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "fact_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "feedback_funnel": {
+          "$ref": "#/$defs/MemoryFeedbackFunnel",
+          "description": "Adoption-funnel numbers for the fact store's feedback loop: how many\nfacts get seen (retrieved) vs. how many ever get rated. Surfaced so a\nmodel or user can see funnel health in one call instead of running\nad-hoc SQL against `memory_facts` / `memory_feedback_events`."
+        },
+        "helpful_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "hrr_dim": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "legacy_backfill_complete": {
+          "type": "boolean"
+        },
+        "missing_vector_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "repair": {
+          "$ref": "#/$defs/MemoryRepairStats"
+        },
+        "trust_025_050_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "trust_050_075_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "trust_075_100_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "trust_0_025_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "unhelpful_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "fact_count",
+        "entity_count",
+        "bank_count",
+        "algebra_name",
+        "hrr_dim",
+        "estimated_capacity",
+        "trust_0_025_count",
+        "trust_025_050_count",
+        "trust_050_075_count",
+        "trust_075_100_count",
+        "below_default_recall_threshold_count",
+        "helpful_count",
+        "unhelpful_count",
+        "missing_vector_count",
+        "legacy_backfill_complete",
+        "repair",
+        "feedback_funnel"
+      ],
+      "type": "object"
+    },
+    "MemoryStatusPayloadV1": {
+      "properties": {
+        "error": {
+          "type": "string"
+        },
+        "exists": {
+          "type": "boolean"
+        },
+        "feedback_history_repair": {
+          "$ref": "#/$defs/MemoryFeedbackHistoryRepairV1"
+        },
+        "largest_bank_fact_count": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "largest_bank_utilization_pct": {
+          "format": "double",
+          "type": "number"
+        },
+        "memory": {
+          "$ref": "#/$defs/MemoryStatus"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "exists",
+        "memory",
+        "largest_bank_fact_count",
+        "largest_bank_utilization_pct",
+        "feedback_history_repair",
+        "error"
+      ],
+      "type": "object"
+    },
+    "MemoryTrustBucketV1": {
+      "properties": {
+        "bucket": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "count": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "label": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "bucket",
+        "label",
+        "count"
+      ],
+      "type": "object"
+    },
+    "MetricCalibrationV1": {
+      "properties": {
+        "calibration_revision": {
+          "type": "string"
+        },
+        "cohort_revision": {
+          "type": "string"
+        },
+        "drift_valid": {
+          "type": "boolean"
+        },
+        "estimator_revision": {
+          "type": "string"
+        },
+        "support": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "estimator_revision",
+        "calibration_revision",
+        "cohort_revision",
+        "support",
+        "drift_valid"
+      ],
+      "type": "object"
+    },
+    "MetricCohortV1": {
+      "properties": {
+        "descriptor_revision": {
+          "type": "string"
+        },
+        "eligible_population": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "descriptor_revision",
+        "eligible_population"
+      ],
+      "type": "object"
+    },
+    "MetricCoverageV1": {
+      "properties": {
+        "censored": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "completed": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "eligible": {
+          "description": "Exact denominator cardinality. `None` means the denominator is unknown.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "excluded": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "observed": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "state": {
+          "$ref": "#/$defs/CoverageStateV1"
+        },
+        "unknown": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "eligible",
+        "observed",
+        "completed",
+        "censored",
+        "unknown",
+        "excluded",
+        "state"
+      ],
+      "type": "object"
+    },
+    "MetricEvidenceClassV1": {
+      "enum": [
+        "measurement",
+        "association",
+        "calibrated_prediction"
+      ],
+      "type": "string"
+    },
+    "MetricProvenanceV1": {
+      "properties": {
+        "projector_revision": {
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/MetricSourceV1"
+        },
+        "source_revision": {
+          "type": "string"
+        },
+        "watermark": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "source_revision",
+        "projector_revision",
+        "watermark"
+      ],
+      "type": "object"
+    },
+    "MetricSourceV1": {
+      "enum": [
+        "observability_envelope",
+        "accounting_turn",
+        "savings_ledger"
+      ],
+      "type": "string"
+    },
+    "MetricTemporalV1": {
+      "properties": {
+        "baseline_watermark": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "delta": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "horizon": {
+          "$ref": "#/$defs/ObservabilityHorizonV1"
+        }
+      },
+      "required": [
+        "horizon",
+        "baseline_watermark",
+        "delta"
+      ],
+      "type": "object"
+    },
+    "MetricUncertaintyV1": {
+      "properties": {
+        "lower": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "upper": {
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "lower",
+        "upper",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "MetricValueV1": {
+      "properties": {
+        "calibration": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MetricCalibrationV1"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cohort": {
+          "$ref": "#/$defs/MetricCohortV1"
+        },
+        "coverage": {
+          "$ref": "#/$defs/MetricCoverageV1"
+        },
+        "denominator": {
+          "type": "string"
+        },
+        "denominator_value": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "descriptor_revision": {
+          "type": "string"
+        },
+        "evidence_class": {
+          "$ref": "#/$defs/MetricEvidenceClassV1"
+        },
+        "metric": {
+          "type": "string"
+        },
+        "provenance": {
+          "$ref": "#/$defs/MetricProvenanceV1"
+        },
+        "temporal": {
+          "$ref": "#/$defs/MetricTemporalV1"
+        },
+        "unavailable_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "uncertainty": {
+          "$ref": "#/$defs/MetricUncertaintyV1"
+        },
+        "unit": {
+          "type": "string"
+        },
+        "value": {
+          "description": "Aggregate value. It is absent whenever its denominator or coverage is\ninsufficient; observed lower bounds remain available in `coverage`.",
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "descriptor_revision",
+        "metric",
+        "value",
+        "unit",
+        "denominator",
+        "denominator_value",
+        "coverage",
+        "evidence_class",
+        "provenance",
+        "cohort",
+        "temporal",
+        "uncertainty",
+        "calibration",
+        "unavailable_reason"
+      ],
+      "type": "object"
     },
     "NodeRefV1": {
       "properties": {
@@ -2668,6 +6335,58 @@
         "available_granularities",
         "symbol_granularity_available",
         "symbol_granularity_reason"
+      ],
+      "type": "object"
+    },
+    "ObservabilityHorizonV1": {
+      "properties": {
+        "since_micros": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "until_micros": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "since_micros",
+        "until_micros"
+      ],
+      "type": "object"
+    },
+    "ObservatoryReadModelV1": {
+      "properties": {
+        "authorized_scope_ref": {
+          "type": "string"
+        },
+        "current": {
+          "type": "boolean"
+        },
+        "horizon": {
+          "$ref": "#/$defs/ObservabilityHorizonV1"
+        },
+        "metrics": {
+          "items": {
+            "$ref": "#/$defs/MetricValueV1"
+          },
+          "type": "array"
+        },
+        "observed_at_micros": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "watermark": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "authorized_scope_ref",
+        "horizon",
+        "watermark",
+        "observed_at_micros",
+        "current",
+        "metrics"
       ],
       "type": "object"
     },
@@ -2754,9 +6473,522 @@
       ],
       "type": "string"
     },
+    "PrAutoTrackEntryV1": {
+      "properties": {
+        "branch": {
+          "type": "string"
+        },
+        "head_branch": {
+          "type": "string"
+        },
+        "pr": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "branch",
+        "pr",
+        "head_branch"
+      ],
+      "type": "object"
+    },
+    "PrAutoTrackPayloadV1": {
+      "properties": {
+        "tracked": {
+          "items": {
+            "$ref": "#/$defs/PrAutoTrackEntryV1"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "tracked"
+      ],
+      "type": "object"
+    },
+    "ProjectAliasRecord": {
+      "properties": {
+        "alias_path": {
+          "type": "string"
+        },
+        "last_seen_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "project_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "alias_path",
+        "project_id",
+        "last_seen_at"
+      ],
+      "type": "object"
+    },
+    "ProjectContextPayloadV1": {
+      "properties": {
+        "aliases": {
+          "items": {
+            "$ref": "#/$defs/ProjectAliasRecord"
+          },
+          "type": "array"
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "is_active": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "project": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PublicCodeProject"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "type": "string"
+        },
+        "stores": {
+          "items": {
+            "$ref": "#/$defs/ProjectStoreContext"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "status",
+        "project",
+        "aliases",
+        "stores"
+      ],
+      "type": "object"
+    },
+    "ProjectEditableSettingsV1": {
+      "properties": {
+        "exclude": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "extract_docstrings": {
+          "type": "boolean"
+        },
+        "git_ignore": {
+          "type": "boolean"
+        },
+        "include": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "max_file_size": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sync": {
+          "$ref": "#/$defs/SyncSettingsV1"
+        },
+        "telemetry": {
+          "$ref": "#/$defs/TelemetrySettingsV1"
+        },
+        "track_call_sites": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "include",
+        "exclude",
+        "max_file_size",
+        "extract_docstrings",
+        "track_call_sites",
+        "git_ignore",
+        "telemetry",
+        "sync"
+      ],
+      "type": "object"
+    },
     "ProjectId": {
       "description": "Strongly typed canonical identity: `ProjectId`.",
       "type": "string"
+    },
+    "ProjectRegistryEntry": {
+      "properties": {
+        "alias_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "artifact_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "branches": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "canonical_root": {
+          "type": "string"
+        },
+        "default_branch": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "graph_scope_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "is_active": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "kind": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "last_seen_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "project_id": {
+          "type": "string"
+        },
+        "project_root": {
+          "type": "string"
+        },
+        "store_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "project_id",
+        "label",
+        "project_root",
+        "canonical_root",
+        "kind",
+        "default_branch",
+        "branches",
+        "store_count",
+        "graph_scope_count",
+        "artifact_count",
+        "alias_count",
+        "last_seen_at"
+      ],
+      "type": "object"
+    },
+    "ProjectRegistrySummary": {
+      "properties": {
+        "project_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "repo_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "project_count",
+        "repo_count",
+        "truncated"
+      ],
+      "type": "object"
+    },
+    "ProjectRepoGroup": {
+      "properties": {
+        "branches": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "git_common_dir": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "label": {
+          "type": "string"
+        },
+        "project_count": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "projects": {
+          "items": {
+            "$ref": "#/$defs/ProjectRegistryEntry"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "label",
+        "git_common_dir",
+        "project_count",
+        "branches",
+        "projects"
+      ],
+      "type": "object"
+    },
+    "ProjectSettingsPatch": {
+      "additionalProperties": false,
+      "properties": {
+        "exclude": {
+          "default": null,
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "expected_revision_id": {
+          "type": "string"
+        },
+        "extract_docstrings": {
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "git_ignore": {
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "include": {
+          "default": null,
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "max_file_size": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "sync": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SyncSettingsPatch"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "telemetry": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TelemetrySettingsPatch"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "track_call_sites": {
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "expected_revision_id",
+        "include",
+        "exclude",
+        "max_file_size",
+        "extract_docstrings",
+        "track_call_sites",
+        "git_ignore",
+        "telemetry",
+        "sync"
+      ],
+      "type": "object"
+    },
+    "ProjectSettingsPayloadV1": {
+      "properties": {
+        "config": {
+          "$ref": "#/$defs/ProjectEditableSettingsV1"
+        },
+        "config_path": {
+          "type": "string"
+        },
+        "configuration_revision_id": {
+          "type": "string"
+        },
+        "configuration_snapshot_id": {
+          "type": "string"
+        },
+        "legacy_config_path": {
+          "type": "string"
+        },
+        "legacy_config_read_only": {
+          "type": "boolean"
+        },
+        "pr_autotrack": {
+          "$ref": "#/$defs/PrAutoTrackPayloadV1"
+        },
+        "tracedecay_dir_gitignored": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "config_path",
+        "legacy_config_path",
+        "legacy_config_read_only",
+        "configuration_snapshot_id",
+        "configuration_revision_id",
+        "config",
+        "tracedecay_dir_gitignored",
+        "pr_autotrack"
+      ],
+      "type": "object"
+    },
+    "ProjectStoreContext": {
+      "properties": {
+        "artifacts": {
+          "items": {
+            "$ref": "#/$defs/StoreArtifactRecord"
+          },
+          "type": "array"
+        },
+        "graph_scopes": {
+          "items": {
+            "$ref": "#/$defs/GraphScopeRecord"
+          },
+          "type": "array"
+        },
+        "store": {
+          "$ref": "#/$defs/StoreInstanceRecord"
+        }
+      },
+      "required": [
+        "store",
+        "graph_scopes",
+        "artifacts"
+      ],
+      "type": "object"
+    },
+    "ProjectsPayloadV1": {
+      "properties": {
+        "active_project_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "active_project_root": {
+          "type": "string"
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "project_tree": {
+          "items": {
+            "$ref": "#/$defs/ProjectRepoGroup"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "projects": {
+          "items": {
+            "$ref": "#/$defs/PublicCodeProject"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "status": {
+          "type": "string"
+        },
+        "summary": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ProjectRegistrySummary"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "truncated": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "status",
+        "limit",
+        "truncated",
+        "projects",
+        "active_project_id",
+        "active_project_root",
+        "summary",
+        "project_tree"
+      ],
+      "type": "object"
     },
     "ProtectedChange": {
       "description": "The protected configuration operation set. Ordinary scalar mutations are\nintentionally absent; they activate directly after validation.",
@@ -2945,6 +7177,63 @@
           "type": "object"
         }
       ]
+    },
+    "PublicCodeProject": {
+      "properties": {
+        "canonical_root": {
+          "type": "string"
+        },
+        "created_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "default_branch": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "display_root": {
+          "type": "string"
+        },
+        "git_common_dir": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "is_active": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "label": {
+          "type": "string"
+        },
+        "last_seen_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "project_id": {
+          "type": "string"
+        },
+        "project_root": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "project_id",
+        "label",
+        "project_root",
+        "display_root",
+        "canonical_root",
+        "git_common_dir",
+        "default_branch",
+        "created_at",
+        "last_seen_at"
+      ],
+      "type": "object"
     },
     "RefId": {
       "description": "Strongly typed canonical identity: `RefId`.",
@@ -3141,6 +7430,519 @@
       ],
       "type": "string"
     },
+    "SavingsAccountingSummaryV1": {
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "db": {
+          "type": "string"
+        },
+        "error": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ledger": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SavingsLedgerSummaryV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "lifetime_counters": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SavingsLifetimeCountersV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "recording": true
+      },
+      "required": [
+        "available",
+        "db",
+        "recording",
+        "error",
+        "ledger",
+        "lifetime_counters"
+      ],
+      "type": "object"
+    },
+    "SavingsLedgerSummaryV1": {
+      "properties": {
+        "all_time": {
+          "$ref": "#/$defs/SavingsSumV1"
+        },
+        "last_30d": {
+          "$ref": "#/$defs/SavingsSumV1"
+        },
+        "last_7d": {
+          "$ref": "#/$defs/SavingsSumV1"
+        },
+        "today": {
+          "$ref": "#/$defs/SavingsSumV1"
+        }
+      },
+      "required": [
+        "today",
+        "last_7d",
+        "last_30d",
+        "all_time"
+      ],
+      "type": "object"
+    },
+    "SavingsLifetimeCountersV1": {
+      "properties": {
+        "project_total": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "projects": {
+          "items": {
+            "$ref": "#/$defs/SavingsLifetimeProjectV1"
+          },
+          "type": "array"
+        },
+        "projects_limit": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "projects_truncated": {
+          "type": "boolean"
+        },
+        "total_tokens_saved": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "total_tokens_saved",
+        "project_total",
+        "projects_limit",
+        "projects_truncated",
+        "projects"
+      ],
+      "type": "object"
+    },
+    "SavingsLifetimeProjectV1": {
+      "properties": {
+        "path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tokens_saved": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "path",
+        "tokens_saved"
+      ],
+      "type": "object"
+    },
+    "SavingsOverviewPayloadV1": {
+      "properties": {
+        "costs": {
+          "$ref": "#/$defs/CostsReadModelV1"
+        },
+        "pricing": {
+          "$ref": "#/$defs/SavingsPricingSummaryV1"
+        },
+        "savings": {
+          "$ref": "#/$defs/SavingsAccountingSummaryV1"
+        },
+        "sessions": {
+          "$ref": "#/$defs/SavingsSessionSummaryV1"
+        },
+        "turns": {
+          "$ref": "#/$defs/TurnsSummaryV1"
+        }
+      },
+      "required": [
+        "savings",
+        "sessions",
+        "turns",
+        "pricing",
+        "costs"
+      ],
+      "type": "object"
+    },
+    "SavingsPricingSummaryV1": {
+      "properties": {
+        "fetched_at": true,
+        "model_count": true,
+        "offline": true,
+        "source": true
+      },
+      "required": [
+        "source",
+        "fetched_at",
+        "offline",
+        "model_count"
+      ],
+      "type": "object"
+    },
+    "SavingsSessionModelV1": {
+      "properties": {
+        "actual": {
+          "$ref": "#/$defs/TokenActualV1"
+        },
+        "cost_basis": {
+          "type": "string"
+        },
+        "estimated": {
+          "$ref": "#/$defs/TokenPairV1"
+        },
+        "estimated_messages": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "messages": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tokenized": {
+          "$ref": "#/$defs/TokenPairV1"
+        },
+        "tokenized_messages": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "tokenizer": true,
+        "usage_messages": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "model",
+        "tokenizer",
+        "messages",
+        "usage_messages",
+        "tokenized_messages",
+        "estimated_messages",
+        "cost_basis",
+        "actual",
+        "tokenized",
+        "estimated"
+      ],
+      "type": "object"
+    },
+    "SavingsSessionRowV1": {
+      "properties": {
+        "cost_basis": {
+          "type": "string"
+        },
+        "estimated_messages": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "is_subagent": {
+          "type": "boolean"
+        },
+        "last_message_at": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "messages": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "models": {
+          "items": {
+            "$ref": "#/$defs/SavingsSessionModelV1"
+          },
+          "type": "array"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "started_at": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tokenized_messages": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "usage_messages": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "provider",
+        "session_id",
+        "title",
+        "started_at",
+        "last_message_at",
+        "is_subagent",
+        "messages",
+        "usage_messages",
+        "tokenized_messages",
+        "estimated_messages",
+        "cost_basis",
+        "models"
+      ],
+      "type": "object"
+    },
+    "SavingsSessionSummaryV1": {
+      "properties": {
+        "actual": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TokenActualV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "available": {
+          "type": "boolean"
+        },
+        "cost_basis": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "db": {
+          "type": "string"
+        },
+        "error": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "estimated": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TokenPairV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "estimated_messages": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "messages": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "model_count": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "scope": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "session_count": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "status": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "token_counting": {
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "tokenized": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TokenPairV1"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "tokenized_messages": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "unknown_model_messages": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "usage_messages": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "available",
+        "db",
+        "scope",
+        "status",
+        "error",
+        "messages",
+        "usage_messages",
+        "tokenized_messages",
+        "estimated_messages",
+        "cost_basis",
+        "actual",
+        "tokenized",
+        "estimated",
+        "session_count",
+        "model_count",
+        "unknown_model_messages",
+        "token_counting"
+      ],
+      "type": "object"
+    },
+    "SavingsSessionsPayloadV1": {
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "db": {
+          "type": "string"
+        },
+        "range": {
+          "type": "string"
+        },
+        "scope": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sessions": {
+          "items": {
+            "$ref": "#/$defs/SavingsSessionRowV1"
+          },
+          "type": "array"
+        },
+        "since": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "total": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "available",
+        "db",
+        "scope",
+        "range",
+        "since",
+        "total",
+        "sessions"
+      ],
+      "type": "object"
+    },
+    "SavingsSumV1": {
+      "properties": {
+        "calls": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "saved_tokens": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "saved_tokens",
+        "calls"
+      ],
+      "type": "object"
+    },
     "ScopeAccessRule": {
       "additionalProperties": false,
       "description": "Restrictive policy input. An allow never grants capabilities absent from\nthe independently authorized capability set passed to the resolver.",
@@ -3283,6 +8085,72 @@
       ],
       "type": "object"
     },
+    "SettingsAvailabilityV1": {
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "required_authority": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "available"
+      ],
+      "type": "object"
+    },
+    "SettingsPayloadV1": {
+      "properties": {
+        "automation": {
+          "$ref": "#/$defs/AutomationSettingsPayloadV1"
+        },
+        "environment": {
+          "$ref": "#/$defs/EnvironmentSettingsPayloadV1"
+        },
+        "project": {
+          "$ref": "#/$defs/ProjectSettingsPayloadV1"
+        },
+        "restart_recommended": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "resync_recommended": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "storage": {
+          "$ref": "#/$defs/StorageSettingsPayloadV1"
+        },
+        "user": {
+          "$ref": "#/$defs/UserSettingsPayloadV1"
+        },
+        "version": {
+          "$ref": "#/$defs/VersionSettingsPayloadV1"
+        }
+      },
+      "required": [
+        "project",
+        "user",
+        "automation",
+        "environment",
+        "storage",
+        "version"
+      ],
+      "type": "object"
+    },
     "SourceKindV1": {
       "enum": [
         "claude",
@@ -3395,6 +8263,56 @@
         "known_families",
         "note",
         "kind_statuses"
+      ],
+      "type": "object"
+    },
+    "StorageSettingsPayloadV1": {
+      "properties": {
+        "dashboard_root": {
+          "type": "string"
+        },
+        "graph_db": {
+          "type": "string"
+        },
+        "lcm_db": {
+          "type": "string"
+        },
+        "lcm_scope": {
+          "type": "string"
+        },
+        "memory_db": {
+          "type": "string"
+        },
+        "project_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "project_root": {
+          "type": "string"
+        },
+        "savings_db": {
+          "type": "string"
+        },
+        "storage_mode": {
+          "type": "string"
+        },
+        "store_root": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "project_id",
+        "project_root",
+        "storage_mode",
+        "store_root",
+        "dashboard_root",
+        "graph_db",
+        "memory_db",
+        "lcm_db",
+        "lcm_scope",
+        "savings_db"
       ],
       "type": "object"
     },
@@ -3520,6 +8438,48 @@
           "type": "object"
         }
       ]
+    },
+    "StoreArtifactRecord": {
+      "properties": {
+        "artifact_kind": {
+          "type": "string"
+        },
+        "relpath": {
+          "type": "string"
+        },
+        "schema_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "size_bytes": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "store_id": {
+          "type": "string"
+        },
+        "updated_at": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "store_id",
+        "artifact_kind",
+        "relpath",
+        "size_bytes",
+        "schema_version",
+        "updated_at"
+      ],
+      "type": "object"
     },
     "StoreBudgetDimensionV1": {
       "description": "The budget-evaluation dimension, sourced from owner configuration.",
@@ -3751,6 +8711,61 @@
           "type": "object"
         }
       ]
+    },
+    "StoreInstanceRecord": {
+      "properties": {
+        "created_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "last_verified_at": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "last_write_at": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "manifest_relpath": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "project_id": {
+          "type": "string"
+        },
+        "storage_mode": {
+          "type": "string"
+        },
+        "store_id": {
+          "type": "string"
+        },
+        "store_kind": {
+          "type": "string"
+        },
+        "store_relpath": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "store_id",
+        "project_id",
+        "store_kind",
+        "storage_mode",
+        "store_relpath",
+        "manifest_relpath",
+        "created_at",
+        "last_verified_at",
+        "last_write_at"
+      ],
+      "type": "object"
     },
     "StoreKeyV1": {
       "description": "Logical name of one owner-profile store (for example `sessions.db`,\n`graph.db`, or `branches/feature-x`). Never an absolute on-disk path.",
@@ -4391,6 +9406,76 @@
         }
       ]
     },
+    "SyncSettingsPatch": {
+      "additionalProperties": false,
+      "properties": {
+        "auto_track_pr_branches": {
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "auto_track_pr_poll_secs": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "auto_track_pr_branches",
+        "auto_track_pr_poll_secs"
+      ],
+      "type": "object"
+    },
+    "SyncSettingsV1": {
+      "properties": {
+        "auto_track_pr_branches": {
+          "type": "boolean"
+        },
+        "auto_track_pr_poll_secs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "auto_track_pr_branches",
+        "auto_track_pr_poll_secs"
+      ],
+      "type": "object"
+    },
+    "TelemetrySettingsPatch": {
+      "additionalProperties": false,
+      "properties": {
+        "timings": {
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "timings"
+      ],
+      "type": "object"
+    },
+    "TelemetrySettingsV1": {
+      "properties": {
+        "timings": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "timings"
+      ],
+      "type": "object"
+    },
     "TestMapMeasurementV1": {
       "properties": {
         "algorithm": {
@@ -4438,6 +9523,50 @@
         "reason",
         "tests",
         "test_files"
+      ],
+      "type": "object"
+    },
+    "TokenActualV1": {
+      "properties": {
+        "cache_read_tokens": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "cache_write_tokens": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "input_tokens": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "output_tokens": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "input_tokens",
+        "output_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens"
+      ],
+      "type": "object"
+    },
+    "TokenPairV1": {
+      "properties": {
+        "input_tokens": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "output_tokens": {
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "input_tokens",
+        "output_tokens"
       ],
       "type": "object"
     },
@@ -4526,14 +9655,172 @@
       ],
       "type": "string"
     },
+    "TurnsSummaryV1": {
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "cost_basis": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "error": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "total_cost_usd": {
+          "default": null,
+          "format": "double",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "total_tokens": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "turn_count": {
+          "default": null,
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "available",
+        "status",
+        "error",
+        "turn_count",
+        "total_cost_usd",
+        "total_tokens",
+        "cost_basis"
+      ],
+      "type": "object"
+    },
     "UseCaseId": {
       "description": "Stable, canonical catalog identity for `UseCaseId`.",
       "type": "string"
+    },
+    "UserSettingsPatch": {
+      "additionalProperties": false,
+      "properties": {
+        "expected_revision_id": {
+          "type": "string"
+        },
+        "extraction_timeout_secs": {
+          "default": null,
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "upload_enabled": {
+          "default": null,
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "watcher_debounce": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "expected_revision_id",
+        "upload_enabled",
+        "watcher_debounce",
+        "extraction_timeout_secs"
+      ],
+      "type": "object"
+    },
+    "UserSettingsPayloadV1": {
+      "properties": {
+        "config_path": {
+          "type": "string"
+        },
+        "extraction_timeout_secs": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "installed_agents": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "upload_enabled": {
+          "type": "boolean"
+        },
+        "user_settings_revision_id": {
+          "type": "string"
+        },
+        "watcher_debounce": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "config_path",
+        "user_settings_revision_id",
+        "upload_enabled",
+        "watcher_debounce",
+        "extraction_timeout_secs",
+        "installed_agents"
+      ],
+      "type": "object"
     },
     "UtcMicros": {
       "description": "UTC timestamp represented as microseconds from the Unix epoch.",
       "format": "int64",
       "type": "integer"
+    },
+    "VersionSettingsPayloadV1": {
+      "properties": {
+        "cached_latest_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "channel": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "version",
+        "channel",
+        "cached_latest_version"
+      ],
+      "type": "object"
     },
     "WorkTopologyPolicyV1": {
       "additionalProperties": false,
@@ -4747,12 +10034,21 @@
   },
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "properties": {
+    "analytics_overview": {
+      "$ref": "#/$defs/AnalyticsOverviewPayloadV1"
+    },
     "automation_scheduler_status": {
       "$ref": "#/$defs/AutomationSchedulerStatusV1",
       "description": "Served identically by `GET /api/automation/scheduler/status` and by the\n`pause`/`resume` controls, which re-read rather than acknowledge."
     },
     "code_index_freshness": {
       "$ref": "#/$defs/CodeIndexFreshnessPayloadV1"
+    },
+    "costs": {
+      "$ref": "#/$defs/CostsReadModelV1"
+    },
+    "delivery_overview": {
+      "$ref": "#/$defs/DeliveryOverviewV1"
     },
     "doctor_findings": {
       "$ref": "#/$defs/DoctorFindingsPayloadV1"
@@ -4772,20 +10068,86 @@
     "explorer_query_run": {
       "$ref": "#/$defs/ExplorerQueryRunV1"
     },
+    "explorer_read_context": {
+      "$ref": "#/$defs/ExplorerReadContextV1"
+    },
+    "explorer_session_size": {
+      "$ref": "#/$defs/ExplorerSessionSizeV1"
+    },
     "graph_call_chain": {
       "$ref": "#/$defs/StructureReadV1"
     },
     "graph_fact_matches": {
       "$ref": "#/$defs/StructureReadV13"
     },
+    "graph_neighbors": {
+      "$ref": "#/$defs/GraphNeighborsPayloadV1"
+    },
+    "graph_node": {
+      "$ref": "#/$defs/GraphNodePayloadV1"
+    },
     "graph_node_sessions": {
       "$ref": "#/$defs/StructureReadV15"
+    },
+    "graph_overview": {
+      "$ref": "#/$defs/GraphOverviewPayloadV1"
+    },
+    "graph_path": {
+      "$ref": "#/$defs/GraphPathPayloadV1"
+    },
+    "graph_search": {
+      "$ref": "#/$defs/GraphSearchPayloadV1"
     },
     "graph_strata": {
       "$ref": "#/$defs/StructureReadV12"
     },
+    "graph_subgraph": {
+      "$ref": "#/$defs/GraphSubgraphPayloadV1"
+    },
     "graph_test_map": {
       "$ref": "#/$defs/StructureReadV14"
+    },
+    "lcm_session": {
+      "$ref": "#/$defs/LcmSessionPayloadV1"
+    },
+    "lcm_timeline": {
+      "$ref": "#/$defs/LcmTimelinePayloadV1"
+    },
+    "loom_temporal": {
+      "$ref": "#/$defs/LoomTemporalPayloadV1"
+    },
+    "memory_fact_detail": {
+      "$ref": "#/$defs/MemoryFactDetailPayloadV1"
+    },
+    "memory_overview": {
+      "$ref": "#/$defs/MemoryOverviewPayloadV1"
+    },
+    "memory_status": {
+      "$ref": "#/$defs/MemoryStatusPayloadV1"
+    },
+    "observatory": {
+      "$ref": "#/$defs/ObservatoryReadModelV1"
+    },
+    "project_context": {
+      "$ref": "#/$defs/ProjectContextPayloadV1"
+    },
+    "projects": {
+      "$ref": "#/$defs/ProjectsPayloadV1"
+    },
+    "savings_overview": {
+      "$ref": "#/$defs/SavingsOverviewPayloadV1"
+    },
+    "savings_sessions": {
+      "$ref": "#/$defs/SavingsSessionsPayloadV1"
+    },
+    "settings": {
+      "$ref": "#/$defs/SettingsPayloadV1"
+    },
+    "settings_project_patch": {
+      "$ref": "#/$defs/ProjectSettingsPatch"
+    },
+    "settings_user_patch": {
+      "$ref": "#/$defs/UserSettingsPatch"
     },
     "storage_findings": {
       "$ref": "#/$defs/StorageFindingsPayloadV1"
@@ -4803,7 +10165,32 @@
     "doctor_remediation_apply_request",
     "doctor_remediation",
     "explorer_query_run",
+    "explorer_session_size",
+    "explorer_read_context",
+    "projects",
+    "project_context",
+    "graph_overview",
+    "graph_search",
+    "graph_node",
+    "graph_neighbors",
+    "graph_subgraph",
+    "graph_path",
+    "memory_overview",
+    "memory_status",
+    "memory_fact_detail",
+    "analytics_overview",
+    "savings_overview",
+    "savings_sessions",
+    "lcm_session",
+    "lcm_timeline",
+    "loom_temporal",
+    "delivery_overview",
     "code_index_freshness",
+    "settings",
+    "settings_project_patch",
+    "settings_user_patch",
+    "observatory",
+    "costs",
     "graph_call_chain",
     "graph_strata",
     "graph_fact_matches",

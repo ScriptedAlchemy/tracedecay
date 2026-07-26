@@ -38,7 +38,9 @@ use std::collections::HashMap;
 use axum::extract::State;
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Json, Response};
-use serde::Deserialize;
+use schemars::JsonSchema;
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracedecay_application::CostsReadModelV1;
 use tracedecay_domain::CoverageStateV1;
@@ -79,6 +81,180 @@ pub(crate) struct SessionsParams {
     range: Option<String>,
     limit: Option<i64>,
     offset: Option<i64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct SavingsSumV1 {
+    saved_tokens: i64,
+    calls: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct SavingsLedgerSummaryV1 {
+    today: SavingsSumV1,
+    last_7d: SavingsSumV1,
+    last_30d: SavingsSumV1,
+    all_time: SavingsSumV1,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct SavingsLifetimeProjectV1 {
+    path: Option<String>,
+    tokens_saved: Option<i64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct SavingsLifetimeCountersV1 {
+    total_tokens_saved: i64,
+    project_total: i64,
+    projects_limit: i64,
+    projects_truncated: bool,
+    projects: Vec<SavingsLifetimeProjectV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct SavingsAccountingSummaryV1 {
+    available: bool,
+    db: String,
+    recording: Value,
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    ledger: Option<SavingsLedgerSummaryV1>,
+    #[serde(default)]
+    lifetime_counters: Option<SavingsLifetimeCountersV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct TokenActualV1 {
+    input_tokens: i64,
+    output_tokens: i64,
+    cache_read_tokens: i64,
+    cache_write_tokens: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct TokenPairV1 {
+    input_tokens: i64,
+    output_tokens: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct SavingsSessionSummaryV1 {
+    available: bool,
+    db: String,
+    #[serde(default)]
+    scope: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    messages: Option<i64>,
+    #[serde(default)]
+    usage_messages: Option<i64>,
+    #[serde(default)]
+    tokenized_messages: Option<i64>,
+    #[serde(default)]
+    estimated_messages: Option<i64>,
+    #[serde(default)]
+    cost_basis: Option<String>,
+    #[serde(default)]
+    actual: Option<TokenActualV1>,
+    #[serde(default)]
+    tokenized: Option<TokenPairV1>,
+    #[serde(default)]
+    estimated: Option<TokenPairV1>,
+    #[serde(default)]
+    session_count: Option<i64>,
+    #[serde(default)]
+    model_count: Option<i64>,
+    #[serde(default)]
+    unknown_model_messages: Option<i64>,
+    #[serde(default)]
+    token_counting: Option<bool>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct TurnsSummaryV1 {
+    available: bool,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
+    #[serde(default)]
+    turn_count: Option<i64>,
+    #[serde(default)]
+    total_cost_usd: Option<f64>,
+    #[serde(default)]
+    total_tokens: Option<i64>,
+    #[serde(default)]
+    cost_basis: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct SavingsPricingSummaryV1 {
+    source: Value,
+    fetched_at: Value,
+    offline: Value,
+    model_count: Value,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub(super) struct SavingsOverviewPayloadV1 {
+    savings: SavingsAccountingSummaryV1,
+    sessions: SavingsSessionSummaryV1,
+    turns: TurnsSummaryV1,
+    pricing: SavingsPricingSummaryV1,
+    costs: CostsReadModelV1,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct SavingsSessionModelV1 {
+    model: Option<String>,
+    tokenizer: Option<Value>,
+    messages: i64,
+    usage_messages: i64,
+    tokenized_messages: i64,
+    estimated_messages: i64,
+    cost_basis: String,
+    actual: TokenActualV1,
+    tokenized: TokenPairV1,
+    estimated: TokenPairV1,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct SavingsSessionRowV1 {
+    provider: String,
+    session_id: String,
+    title: Option<String>,
+    started_at: Option<i64>,
+    last_message_at: Option<i64>,
+    is_subagent: bool,
+    messages: i64,
+    usage_messages: i64,
+    tokenized_messages: i64,
+    estimated_messages: i64,
+    cost_basis: String,
+    models: Vec<SavingsSessionModelV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub(super) struct SavingsSessionsPayloadV1 {
+    available: bool,
+    db: String,
+    #[serde(default)]
+    scope: Option<String>,
+    range: String,
+    #[serde(default)]
+    since: Option<i64>,
+    total: i64,
+    sessions: Vec<SavingsSessionRowV1>,
+}
+
+fn decode_contract<T: DeserializeOwned>(payload: Value, label: &str) -> Result<T, String> {
+    serde_json::from_value(payload)
+        .map_err(|error| format!("{label} did not match its response contract: {error}"))
 }
 
 fn range_since(range: Option<&str>) -> (String, i64) {
@@ -231,7 +407,7 @@ fn merge(base: Value, extra: Value) -> Value {
 }
 
 /// GET `/api/plugins/savings/overview`
-pub(crate) async fn overview(State(state): State<DashboardState>) -> Json<Value> {
+pub(crate) async fn overview(State(state): State<DashboardState>) -> Response {
     savings_pricing::ensure_background_refresh();
 
     let savings = match state.savings_db.as_deref() {
@@ -243,9 +419,17 @@ pub(crate) async fn overview(State(state): State<DashboardState>) -> Json<Value>
         }),
     };
     let sessions = match state.lcm_db.as_deref() {
-        Some(db) => sessions_overview(db, &state)
-            .await
-            .unwrap_or_else(read_failed_block),
+        Some(db) => sessions_overview(db, &state).await.unwrap_or_else(|error| {
+            // The session block's contract requires `db`, which the shared
+            // failure block cannot know. Without it a failed session read
+            // would fail to decode and collapse the whole route to a 500 —
+            // turning one unavailable block into a total outage, and hiding
+            // which read actually failed.
+            merge(
+                json!({ "db": state.lcm_db_path.clone() }),
+                read_failed_block(error),
+            )
+        }),
         None => json!({ "available": false, "db": state.lcm_db_path }),
     };
     let turns = match state.savings_db.as_deref() {
@@ -259,28 +443,31 @@ pub(crate) async fn overview(State(state): State<DashboardState>) -> Json<Value>
         "offline": pricing_full.get("offline"),
         "model_count": pricing_full.get("model_count"),
     });
-    let costs = state.savings_db.as_deref().map(|db| async move {
-        crate::application::observability::costs_read_model(db, None, 0).await
-    });
-    let costs = match costs {
-        Some(costs) => serde_json::to_value(costs.await).unwrap_or(Value::Null),
-        None => serde_json::to_value(
-            crate::application::observability::costs_unavailable_read_model(
-                None,
-                0,
-                "accounting_store_unavailable",
-            ),
-        )
-        .unwrap_or(Value::Null),
+    let costs = match state.savings_db.as_deref() {
+        Some(db) => crate::application::observability::costs_read_model(db, None, 0).await,
+        None => crate::application::observability::costs_unavailable_read_model(
+            None,
+            0,
+            "accounting_store_unavailable",
+        ),
     };
-
-    Json(json!({
-        "savings": savings,
-        "sessions": sessions,
-        "turns": turns,
-        "pricing": pricing,
-        "costs": costs,
-    }))
+    let payload: Result<SavingsOverviewPayloadV1, String> = (|| {
+        Ok(SavingsOverviewPayloadV1 {
+            savings: decode_contract(savings, "savings summary")?,
+            sessions: decode_contract(sessions, "session savings summary")?,
+            turns: decode_contract(turns, "turns summary")?,
+            pricing: decode_contract(pricing, "pricing summary")?,
+            costs,
+        })
+    })();
+    match payload {
+        Ok(payload) => Json(payload).into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"status": "contract_invalid", "error": error})),
+        )
+            .into_response(),
+    }
 }
 
 /// Canonical Plan 26 Costs projection; all dollar values were priced at ingest.
@@ -579,18 +766,28 @@ pub(crate) async fn ledger(
 pub(crate) async fn sessions(
     State(state): State<DashboardState>,
     JsonQuery(params): JsonQuery<SessionsParams>,
-) -> Json<Value> {
+) -> Response {
     let (range, since) = range_since(params.range.as_deref());
     let limit = coerce_limit(params.limit, 25, 100);
     let offset = params.offset.unwrap_or(0).max(0);
     let Some(db) = state.lcm_db.as_deref() else {
-        return Json(json!({
+        return match decode_contract::<SavingsSessionsPayloadV1>(
+            json!({
             "available": false,
             "db": state.lcm_db_path,
             "range": range,
             "sessions": [],
             "total": 0,
-        }));
+            }),
+            "savings sessions",
+        ) {
+            Ok(payload) => Json(payload).into_response(),
+            Err(error) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"status": "contract_invalid", "error": error})),
+            )
+                .into_response(),
+        };
     };
     let conn = db.read_connection();
 
@@ -719,15 +916,25 @@ pub(crate) async fn sessions(
         }));
     }
 
-    Json(json!({
-        "available": true,
-        "db": state.lcm_db_path,
-        "scope": state.lcm_scope,
-        "range": range,
-        "since": since,
-        "total": total,
-        "sessions": sessions_json,
-    }))
+    match decode_contract::<SavingsSessionsPayloadV1>(
+        json!({
+            "available": true,
+            "db": state.lcm_db_path,
+            "scope": state.lcm_scope,
+            "range": range,
+            "since": since,
+            "total": total,
+            "sessions": sessions_json,
+        }),
+        "savings sessions",
+    ) {
+        Ok(payload) => Json(payload).into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"status": "contract_invalid", "error": error})),
+        )
+            .into_response(),
+    }
 }
 
 /// GET `/api/plugins/savings/models?range=`

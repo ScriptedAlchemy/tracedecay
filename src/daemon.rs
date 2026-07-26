@@ -1736,6 +1736,13 @@ impl DaemonInvocationState {
             );
             return Ok(());
         }
+        let canonical_project_root = project_root
+            .canonicalize()
+            .unwrap_or_else(|_| project_root.to_path_buf());
+        let scoped_code_index_store_root = code_index_scheduler::scoped_code_index_store_root(
+            &store_root,
+            &canonical_project_root,
+        );
         let semantic_schedule = semantic_runtime
             .zip(semantic_database)
             .zip(semantic_lifecycle)
@@ -1745,6 +1752,7 @@ impl DaemonInvocationState {
                 |((((handle, database), lifecycle), resources), worktree_id)| {
                     crate::application::semantic_runtime::production_saved_generation_schedule_hook(
                         project_root.to_path_buf(),
+                        scoped_code_index_store_root.clone(),
                         worktree_id,
                         handle.clone(),
                         database,

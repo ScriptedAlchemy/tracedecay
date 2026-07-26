@@ -9,6 +9,8 @@ use std::collections::BTreeMap;
 use axum::extract::State;
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Json, Response};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracedecay_application::ObservatoryReadModelV1;
 use tracedecay_domain::CoverageStateV1;
@@ -40,6 +42,37 @@ const HINT_CATEGORIES: &[&str] = &[
 ];
 const ANALYTICS_EVENT_LIMIT: usize = 10_000;
 
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct AnalyticsUsageCategoryV1 {
+    kind: String,
+    category: String,
+    events: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+struct AnalyticsUsageSummaryV1 {
+    available: bool,
+    #[serde(default)]
+    source: Option<String>,
+    message_count: i64,
+    #[serde(default)]
+    event_count: Option<i64>,
+    by_category: Vec<AnalyticsUsageCategoryV1>,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub(super) struct AnalyticsOverviewPayloadV1 {
+    available: bool,
+    db: String,
+    scope: String,
+    hints: Value,
+    usage: AnalyticsUsageSummaryV1,
+    agents: Value,
+    diagnostics: Value,
+    underused_tool_families: Value,
+    observatory: Option<ObservatoryReadModelV1>,
+}
+
 #[derive(Default)]
 struct HintCounts {
     emitted: i64,
@@ -49,7 +82,7 @@ struct HintCounts {
 }
 
 /// `GET /api/plugins/analytics/overview`
-pub(crate) async fn overview(State(state): State<DashboardState>) -> Json<Value> {
+pub(crate) async fn overview(State(state): State<DashboardState>) -> Response {
     let durable_events = durable_analytics_rows_for_state(&state).await;
     let scope_ref = RegisteredGlobalDb::canonical_project_key(&state.project_root);
     let since = crate::tracedecay::current_timestamp().saturating_sub(30 * 86_400);
@@ -67,22 +100,27 @@ pub(crate) async fn overview(State(state): State<DashboardState>) -> Json<Value>
         ),
     };
     let hints = hint_summary(state.lcm_db.as_deref(), durable_events.as_deref()).await;
-    let usage = usage_summary(state.lcm_db.as_deref(), durable_events.as_deref()).await;
+    let usage = match typed_usage_summary(state.lcm_db.as_deref(), durable_events.as_deref()).await
+    {
+        Ok(usage) => usage,
+        Err(response) => return response,
+    };
     let agents = agent_usage_summary(state.lcm_db.as_deref()).await;
     let diagnostics = diagnostics_summary(&state, durable_events.as_deref()).await;
     let underused = underused_tool_families(state.lcm_db.as_deref()).await;
 
-    Json(json!({
-        "available": state.lcm_db.is_some() || durable_events.is_some(),
-        "db": state.lcm_db_path,
-        "scope": state.lcm_scope,
-        "hints": hints,
-        "usage": usage,
-        "agents": agents,
-        "diagnostics": diagnostics,
-        "underused_tool_families": underused,
-        "observatory": observatory,
-    }))
+    Json(AnalyticsOverviewPayloadV1 {
+        available: state.lcm_db.is_some() || durable_events.is_some(),
+        db: state.lcm_db_path,
+        scope: state.lcm_scope,
+        hints,
+        usage,
+        agents,
+        diagnostics,
+        underused_tool_families: underused,
+        observatory,
+    })
+    .into_response()
 }
 
 /// Canonical Plan 26 Observatory read model. CLI/MCP call the same application
@@ -227,9 +265,12 @@ pub(crate) async fn hints(State(state): State<DashboardState>) -> Json<Value> {
 }
 
 /// `GET /api/plugins/analytics/usage`
-pub(crate) async fn usage(State(state): State<DashboardState>) -> Json<Value> {
+pub(crate) async fn usage(State(state): State<DashboardState>) -> Response {
     let durable_events = durable_analytics_rows_for_state(&state).await;
-    Json(usage_summary(state.lcm_db.as_deref(), durable_events.as_deref()).await)
+    match typed_usage_summary(state.lcm_db.as_deref(), durable_events.as_deref()).await {
+        Ok(usage) => Json(usage).into_response(),
+        Err(response) => response,
+    }
 }
 
 /// `GET /api/plugins/analytics/diagnostics`
@@ -646,6 +687,31 @@ fn increment_usage_count(counts: &mut BTreeMap<(String, String), i64>, kind: &st
     *counts
         .entry((kind.to_string(), category.to_string()))
         .or_default() += 1;
+}
+
+/// The contract form of the usage summary, shared by `GET .../usage` and the
+/// `usage` member of the overview payload.
+///
+/// `usage_summary` builds two different literals — the unavailable branch omits
+/// `source` and `event_count` rather than sending them null — so serving that
+/// value raw would put a shape on the wire that the declared contract rejects.
+/// Round-tripping through the struct is what makes the absent count arrive as an
+/// explicit null, which is the distinction the readers depend on.
+async fn typed_usage_summary(
+    db: Option<&RegisteredGlobalDb>,
+    durable_events: Option<&[Value]>,
+) -> Result<AnalyticsUsageSummaryV1, Response> {
+    let usage = usage_summary(db, durable_events).await;
+    serde_json::from_value::<AnalyticsUsageSummaryV1>(usage).map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "status": "contract_invalid",
+                "error": format!("analytics usage summary did not match its contract: {error}"),
+            })),
+        )
+            .into_response()
+    })
 }
 
 async fn usage_summary(db: Option<&RegisteredGlobalDb>, durable_events: Option<&[Value]>) -> Value {

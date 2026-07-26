@@ -132,16 +132,17 @@ describe("generated wire names are not shadowed", () => {
     // The convention that produced the shadows: a file in each workspace whose
     // only job was declaring wire shapes, sitting at a shorter import path than
     // the generated barrel with nothing to stop it reusing a generated name.
-    // Contracted routes are read from `src/contracts/wire.ts`; the routes Rust
-    // does not model are declared once each, by route family, under
-    // `src/contracts/uncontracted/` where the gap is countable.
+    // Every route these declared is now modelled in Rust, so they are read from
+    // `src/contracts/wire.ts` and there is nowhere else for a wire shape to
+    // live. A route Rust does not model yet is a backend gap to report, not a
+    // shape to hand-write.
     const strays = sourceFiles("src/workspaces").filter((file) =>
       /\/contracts\.tsx?$/.test(file),
     );
     expect(
       strays,
-      "Per-workspace contracts modules are not a thing any more; see " +
-        "src/contracts/uncontracted/README.md",
+      "Per-workspace contracts modules are not a thing any more. Import the " +
+        "generated schema from src/contracts/wire.ts.",
     ).toEqual([]);
   });
 });

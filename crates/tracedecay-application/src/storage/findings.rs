@@ -27,7 +27,10 @@ use crate::error::ApplicationContractError;
 
 use super::debris::IncidentDebrisScanV1;
 use super::identity::StoreKeyV1;
-use super::inventory::{OrphanStoreRecordV1, RetentionBacklogRecordV1, StaleBranchDbRecordV1};
+use super::inventory::{
+    CodeGenerationRetentionRecordV1, OrphanStoreRecordV1, RetentionBacklogRecordV1,
+    StaleBranchDbRecordV1,
+};
 use super::telemetry::{StorageTelemetryReadV1, StoreBudgetEvaluationV1, StoreSizeBudgetV1};
 
 /// Stable slug for a storage finding subclass, embedded in the evidence
@@ -410,6 +413,42 @@ pub fn retention_backlog_finding(
     DoctorStorageFindingV1::new(kind, finding)
 }
 
+/// Report immutable code-generation retention with both the total superseded
+/// footprint and the exact liveness-based collectable subset.
+pub fn code_generation_retention_finding(
+    record: &CodeGenerationRetentionRecordV1,
+    completeness: DoctorCoverageCompletenessV1,
+) -> Result<DoctorStorageFindingV1, ApplicationContractError> {
+    record.validate()?;
+    let kind = DoctorStorageFindingKindV1::RetentionBacklog;
+    let detail = format!(
+        "superseded-{}.bytes-{}b.collectable-{}.collectable-bytes-{}b",
+        record.superseded_generation_count,
+        record.superseded_generation_bytes.get(),
+        record.collectable_generation_count,
+        record.collectable_generation_bytes.get(),
+    );
+    let finding = if record.has_collectable_generations() {
+        problem_finding(
+            kind,
+            &record.store,
+            DoctorEvidenceStateV1::Stale,
+            completeness,
+            &detail,
+            "superseded code generations outside active, vector-readable, and rollback-floor liveness await collection",
+        )?
+    } else {
+        clean_finding(
+            kind,
+            &record.store,
+            completeness,
+            &detail,
+            "superseded code generations are bounded by exact liveness and rollback floor",
+        )?
+    };
+    DoctorStorageFindingV1::new(kind, finding)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -680,6 +719,27 @@ mod tests {
         let finding = retention_backlog_finding(&record, DoctorCoverageCompletenessV1::Complete)
             .expect("finding");
         assert!(finding.finding().state().is_healthy_complete());
+    }
+
+    #[test]
+    fn code_generation_retention_reports_superseded_count_and_bytes() {
+        let record = super::super::inventory::CodeGenerationRetentionRecordV1 {
+            store: StoreKeyV1::new("code-index-v1").expect("valid"),
+            superseded_generation_count: 27,
+            superseded_generation_bytes: StorageByteSizeV1(22_980_254_208),
+            collectable_generation_count: 24,
+            collectable_generation_bytes: StorageByteSizeV1(20_600_000_000),
+        };
+
+        let finding =
+            code_generation_retention_finding(&record, DoctorCoverageCompletenessV1::Complete)
+                .expect("finding");
+
+        assert_eq!(finding.kind(), DoctorStorageFindingKindV1::RetentionBacklog);
+        assert_eq!(finding.finding().state(), DoctorEvidenceStateV1::Stale);
+        assert!(only_evidence(&finding).contains("superseded-27"));
+        assert!(only_evidence(&finding).contains("bytes-22980254208b"));
+        assert!(only_evidence(&finding).contains("collectable-24"));
     }
 
     // --- Cross-cutting -------------------------------------------------------

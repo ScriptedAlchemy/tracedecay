@@ -6,7 +6,9 @@ import { WORKSPACES } from '../routes';
 import { cn } from '../../ui/cn';
 import { useLegacy } from '../../data/query/useLegacy.ts';
 import { useScope } from '../../data/scope/store.ts';
-import { ProjectsPayloadSchema } from '../../contracts/uncontracted/projects.ts';
+import {
+  ProjectsPayloadSchema,
+} from '../../contracts/wire.ts';
 
 interface PaletteEntry {
   id: string;

@@ -75,6 +75,37 @@ impl StaleBranchDbRecordV1 {
     }
 }
 
+/// Exact code-generation retention census. `superseded_*` reports every sealed
+/// generation except the active pointer target; `collectable_*` is the subset
+/// outside the vector-readable live set and rollback floor.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CodeGenerationRetentionRecordV1 {
+    pub store: StoreKeyV1,
+    pub superseded_generation_count: u64,
+    pub superseded_generation_bytes: StorageByteSizeV1,
+    pub collectable_generation_count: u64,
+    pub collectable_generation_bytes: StorageByteSizeV1,
+}
+
+impl CodeGenerationRetentionRecordV1 {
+    pub fn validate(&self) -> Result<(), ApplicationContractError> {
+        if self.collectable_generation_count > self.superseded_generation_count
+            || self.collectable_generation_bytes.get() > self.superseded_generation_bytes.get()
+        {
+            return Err(ApplicationContractError::Inconsistent {
+                field: "code generation retention totals",
+            });
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub fn has_collectable_generations(&self) -> bool {
+        self.collectable_generation_count > 0 || self.collectable_generation_bytes.get() > 0
+    }
+}
+
 /// A retention-eligible slice of a store: rows or tables past their configured
 /// window awaiting offload/collection (Plan 38 §3).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -181,6 +212,19 @@ mod tests {
             oldest_past_window_at: UtcMicros(200),
             window_watermark_at: UtcMicros(100),
         };
+        assert!(record.validate().is_err());
+    }
+
+    #[test]
+    fn code_generation_retention_rejects_collectable_totals_above_superseded_totals() {
+        let record = CodeGenerationRetentionRecordV1 {
+            store: StoreKeyV1::new("code-index-v1").expect("valid"),
+            superseded_generation_count: 3,
+            superseded_generation_bytes: StorageByteSizeV1(3_000),
+            collectable_generation_count: 4,
+            collectable_generation_bytes: StorageByteSizeV1(2_000),
+        };
+
         assert!(record.validate().is_err());
     }
 }

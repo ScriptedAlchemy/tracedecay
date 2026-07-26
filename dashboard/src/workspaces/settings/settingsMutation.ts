@@ -1,9 +1,9 @@
 import {
   buildSettingsEditor,
   settingsRevisionConflict,
-  type ProjectSettingsPatch,
+  type ProjectSettingsChangeSet,
   type SettingsValidationError,
-  type UserSettingsPatch,
+  type UserSettingsChangeSet,
 } from './settingsModel.ts';
 
 export type SettingsMutationScope = 'project' | 'user';
@@ -42,7 +42,7 @@ export interface SettingsMutationRequest {
   readonly expectedRevisionId: string;
   readonly readUrl: string;
   readonly patchUrl: string;
-  readonly patch: ProjectSettingsPatch | UserSettingsPatch;
+  readonly patch: ProjectSettingsChangeSet | UserSettingsChangeSet;
 }
 
 export async function applySettingsMutation(
