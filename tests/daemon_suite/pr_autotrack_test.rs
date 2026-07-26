@@ -61,6 +61,22 @@ fn project_data_dir(graph: &TraceDecay) -> PathBuf {
     graph.store_layout().data_root.clone()
 }
 
+fn seed_branch_only_fact(database_path: &Path, content: &str) -> i64 {
+    let connection = rusqlite::Connection::open(database_path).unwrap();
+    connection
+        .execute(
+            "INSERT INTO memory_facts(
+                 content, category, tags, trust_score, access_count,
+                 created_at, updated_at, source, metadata, hrr_precision
+             ) VALUES(?1, 'project', '[\"branch-cutover\"]', 0.9, 1,
+                      42, 42, 'legacy-pr-branch', '{\"fixture\":\"production-pr-autotrack\"}',
+                      'f32')",
+            [content],
+        )
+        .unwrap();
+    connection.last_insert_rowid()
+}
+
 /// Fixture: an indexed project on `main` with a local bare `origin` it has been
 /// pushed to. Returns `(env, project, origin_bare, retained_graph)`.
 async fn indexed_repo_with_origin() -> (IsolatedEnv, PathBuf, PathBuf, Arc<TraceDecay>) {
@@ -193,6 +209,7 @@ async fn production_reconciliation_publishes_managed_pr_ref() {
 #[tokio::test]
 async fn tracks_same_repo_pr_indexes_its_content_and_untracks_on_close() {
     let (_env, project, origin, graph) = indexed_repo_with_origin().await;
+    let branch_only_content = "PR branch retirement preserves this project-memory fact identity";
     let head_branch = add_same_repo_pr(&project, &origin, 1, "pr_one_symbol");
     add_fork_pr(&project, 2, "fork_symbol");
     git(&project, &["branch", "pr/1", "main"]);
@@ -237,16 +254,50 @@ async fn tracks_same_repo_pr_indexes_its_content_and_untracks_on_close() {
             .to_string();
     assert_eq!(user_branch_after_track, user_branch_sha);
 
-    // The PR branch DB indexed the PR's OWN content, not main's working tree.
-    let branch_cg = TraceDecay::open_branch(&project, tracking_label)
-        .await
-        .unwrap();
-    let hits = branch_cg.search("pr_one_symbol", 10).await.unwrap();
-    assert!(
-        !hits.is_empty(),
+    // Seed a legacy-only row into the real production-created branch database,
+    // matching the checked-in pre-cutover fixtures. It exists nowhere in the
+    // project store before the head-update cleanup.
+    let tracked_entry = meta.branches.get(tracking_label).unwrap();
+    let tracked_database = data_root.join(&tracked_entry.db_file);
+    assert_eq!(
+        rusqlite::Connection::open_with_flags(
+            &tracked_database,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM nodes WHERE name = 'pr_one_symbol'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap(),
+        1,
         "pr/1 store should contain the PR head's symbol (indexed from its worktree)"
     );
-    drop(branch_cg);
+    let branch_fact_id = seed_branch_only_fact(&tracked_database, branch_only_content);
+    let branch_fact = rusqlite::Connection::open_with_flags(
+        &tracked_database,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap()
+    .query_row(
+        "SELECT fact_id, content FROM memory_facts WHERE content = ?1",
+        [branch_only_content],
+        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+    )
+    .unwrap();
+    assert_eq!(
+        branch_fact,
+        (branch_fact_id, branch_only_content.to_owned())
+    );
+    assert!(
+        graph
+            .list_facts(None, Some(0.0), 100)
+            .await
+            .unwrap()
+            .iter()
+            .all(|fact| fact.content != branch_only_content)
+    );
 
     // Idempotent: a second reconcile with the same discovery changes nothing.
     let again =
@@ -300,20 +351,41 @@ async fn tracks_same_repo_pr_indexes_its_content_and_untracks_on_close() {
     )
     .await;
     assert_eq!(refreshed.tracked, vec![tracking_label.to_string()]);
-    let refreshed_cg = TraceDecay::open_branch(&project, tracking_label)
-        .await
-        .unwrap();
-    assert!(
-        !refreshed_cg
-            .search("pr_one_updated_symbol", 10)
-            .await
-            .unwrap()
-            .is_empty(),
-        "changed PR head must replace the stale branch graph"
+    let refreshed_database =
+        data_root.join(&load_branch_meta(&data_root).unwrap().branches[tracking_label].db_file);
+    assert_eq!(
+        rusqlite::Connection::open_with_flags(
+            refreshed_database,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM nodes WHERE name = 'pr_one_updated_symbol'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap(),
+        1,
+        "changed PR head must replace the stale branch graph",
     );
-    drop(refreshed_cg);
+    let restored = graph
+        .list_facts(None, Some(0.0), 100)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|fact| fact.content == branch_only_content)
+        .expect("head refresh must cut branch-only memory over before retirement");
+    assert_eq!(restored.content, branch_only_content);
+    let restored_fact_id = restored.fact_id;
 
     // Close PR 1 (delete its pull ref) → discovery no longer lists it → untrack.
+    let canonical_branch_paths = load_branch_meta(&data_root)
+        .unwrap()
+        .branches
+        .values()
+        .filter(|entry| entry.db_file.starts_with("branches/"))
+        .map(|entry| entry.db_file.clone())
+        .collect::<std::collections::BTreeSet<_>>();
     git(&origin, &["update-ref", "-d", "refs/pull/1/head"]);
     let after_close = pr_autotrack::discover_open_prs(&project).expect("PR discovery succeeds");
     assert!(
@@ -338,6 +410,33 @@ async fn tracks_same_repo_pr_indexes_its_content_and_untracks_on_close() {
             .trim()
             .to_string();
     assert_eq!(user_branch_after_close, user_branch_sha);
+    let retired_fact = graph
+        .get_fact(restored_fact_id)
+        .await
+        .unwrap()
+        .expect("branch retirement must preserve the fact's canonical identity");
+    assert_eq!(retired_fact.content, branch_only_content);
+
+    let receipt: serde_json::Value =
+        serde_json::from_slice(&fs::read(data_root.join("memory-branch-cutover.json")).unwrap())
+            .unwrap();
+    let covered = receipt["sources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|source| {
+            assert!(
+                source["generation"]
+                    .as_str()
+                    .is_some_and(|generation| generation.starts_with("sha256:"))
+            );
+            source["relative_path"].as_str().unwrap().to_owned()
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        covered, canonical_branch_paths,
+        "the production receipt must cover every canonical branch family"
+    );
 }
 
 /// A contended coordinator removal must leave every owned artifact in place so
@@ -346,6 +445,7 @@ async fn tracks_same_repo_pr_indexes_its_content_and_untracks_on_close() {
 #[tokio::test]
 async fn busy_untrack_retains_managed_state_until_a_later_poll_succeeds() {
     let (_env, project, origin, graph) = indexed_repo_with_origin().await;
+    let retry_content = "Retried PR cleanup merges this fact exactly once";
     add_same_repo_pr(&project, &origin, 6, "pr_six_symbol");
     let data_root = project_data_dir(&graph);
     let label = "tracedecay/autotrack/pr/6";
@@ -355,6 +455,8 @@ async fn busy_untrack_retains_managed_state_until_a_later_poll_succeeds() {
         pr_autotrack::reconcile_project(Arc::clone(&graph), &project, &data_root, &discovery, 10)
             .await;
     assert_eq!(tracked.tracked, vec![label.to_string()]);
+    let branch_entry = load_branch_meta(&data_root).unwrap().branches[label].clone();
+    seed_branch_only_fact(&data_root.join(branch_entry.db_file), retry_content);
 
     // The branch-administration coordinator takes this same metadata lock. It
     // must fail closed while another mutation owns it, not delete Git artifacts
@@ -402,6 +504,13 @@ async fn busy_untrack_retains_managed_state_until_a_later_poll_succeeds() {
             .success(),
         "busy removal must retain its owned fetch ref"
     );
+    let restored_on_busy = graph
+        .list_facts(None, Some(0.0), 100)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|fact| fact.content == retry_content)
+        .expect("the cutover completes before fail-closed branch cleanup");
 
     lock.unlock().unwrap();
 
@@ -436,6 +545,19 @@ async fn busy_untrack_retains_managed_state_until_a_later_poll_succeeds() {
             .success(),
         "successful retry removes the owned fetch ref"
     );
+    let matching_facts = graph
+        .list_facts(None, Some(0.0), 100)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|fact| fact.content == retry_content)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        matching_facts.len(),
+        1,
+        "cutover retries must be idempotent"
+    );
+    assert_eq!(matching_facts[0].fact_id, restored_on_busy.fact_id);
 }
 
 #[tokio::test]

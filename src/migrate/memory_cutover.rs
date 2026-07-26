@@ -66,6 +66,10 @@ struct BranchMemoryCutoverReceiptSource {
 
 pub async fn plan(options: &MemoryCutoverOptions) -> Result<MemoryCutoverReport> {
     let resolved = resolve(options)?;
+    plan_resolved(&resolved).await
+}
+
+async fn plan_resolved(resolved: &ResolvedMemoryCutover) -> Result<MemoryCutoverReport> {
     let scratch = resolved.data_root.join("scratch").join("memory-cutover");
     storage::PrivateStoreIo::create_dir_all(&scratch)?;
     let mut sources = Vec::new();
@@ -116,8 +120,8 @@ pub async fn plan(options: &MemoryCutoverOptions) -> Result<MemoryCutoverReport>
     let confirmation_token =
         confirmation_token(&resolved.project_id, &resolved.graph_db_path, &sources);
     Ok(MemoryCutoverReport {
-        project_id: resolved.project_id,
-        project_graph: resolved.graph_db_path,
+        project_id: resolved.project_id.clone(),
+        project_graph: resolved.graph_db_path.clone(),
         sources,
         confirmation_token,
         applied: false,
@@ -129,26 +133,15 @@ pub async fn apply(
     options: &MemoryCutoverOptions,
     expected_confirmation_token: &str,
 ) -> Result<MemoryCutoverReport> {
-    let planned = plan(options).await?;
+    let resolved = resolve(options)?;
+    let planned = plan_resolved(&resolved).await?;
     if planned.confirmation_token != expected_confirmation_token {
         return Err(migration_error(
             "memory cutover confirmation token does not match the current branch-store generation",
         ));
     }
-    if let Some(source) = planned
-        .sources
-        .iter()
-        .find(|source| source.unmapped_memory_v2_facts > 0)
-    {
-        return Err(migration_error(format!(
-            "branch memory source '{}' has {} Memory V2 fact(s) without a legacy mirror; \
-             refusing a lossy cutover",
-            source.path.display(),
-            source.unmapped_memory_v2_facts
-        )));
-    }
+    validate_planned_sources(&planned)?;
 
-    let resolved = resolve(options)?;
     let lifecycle = crate::lifecycle_lease::acquire_exclusive_for_profile(
         &resolved.profile_root,
         "project-wide branch memory cutover",
@@ -167,6 +160,53 @@ pub async fn apply(
         &lifecycle,
     )
     .await?;
+    apply_planned(&resolved, &graph, planned).await
+}
+
+/// Runs the same generation-bound cutover as the offline migration command
+/// against a daemon-retained project graph. The caller must exclude branch and
+/// project-store writers for the duration; source generations are still
+/// verified before the receipt is published, so external or ambiguous changes
+/// fail closed.
+pub(crate) async fn apply_for_retained_project(graph: &TraceDecay) -> Result<MemoryCutoverReport> {
+    let options = MemoryCutoverOptions {
+        project_root: graph.project_root().to_path_buf(),
+        profile_root: graph.retained_profile_root()?,
+    };
+    let resolved = resolve(&options)?;
+    if graph.store_layout().data_root != resolved.data_root
+        || graph.store_layout().graph_db_path != resolved.graph_db_path
+    {
+        return Err(migration_error(
+            "retained project graph does not match the resolved project-memory cutover store",
+        ));
+    }
+    let planned = plan_resolved(&resolved).await?;
+    validate_planned_sources(&planned)?;
+    apply_planned(&resolved, graph, planned).await
+}
+
+fn validate_planned_sources(planned: &MemoryCutoverReport) -> Result<()> {
+    if let Some(source) = planned
+        .sources
+        .iter()
+        .find(|source| source.unmapped_memory_v2_facts > 0)
+    {
+        return Err(migration_error(format!(
+            "branch memory source '{}' has {} Memory V2 fact(s) without a legacy mirror; \
+             refusing a lossy cutover",
+            source.path.display(),
+            source.unmapped_memory_v2_facts
+        )));
+    }
+    Ok(())
+}
+
+async fn apply_planned(
+    resolved: &ResolvedMemoryCutover,
+    graph: &TraceDecay,
+    planned: MemoryCutoverReport,
+) -> Result<MemoryCutoverReport> {
     let target = graph.open_project_store_db().await?;
     let scratch = resolved.data_root.join("scratch").join("memory-cutover");
     storage::PrivateStoreIo::create_dir_all(&scratch)?;
