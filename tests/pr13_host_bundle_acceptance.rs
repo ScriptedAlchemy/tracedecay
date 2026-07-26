@@ -20,7 +20,7 @@ use tracedecay::agents::host_bundle_v2::{
     inspect_installed_host_bundle_components_at, native_host_edit_stop_conformance_evidence,
     stock_host_kinds, stock_host_registration_evidence,
 };
-use tracedecay::agents::host_registration::CompatibilityAgentRegistrationDelegate;
+use tracedecay::agents::host_component_registration::HostComponentRegistrationDelegate;
 use tracedecay::agents::{
     AgentIntegration, HealthcheckContext, KimiIntegration, OpenCodeIntegration,
     inspect_receipt_backed_host_components,
@@ -345,7 +345,7 @@ fn component_set_dry_run_refuses_overlapping_opencode_analyzer_and_accepts_clean
         operation_id: [31; 16],
     };
 
-    let mut clean_registration = CompatibilityAgentRegistrationDelegate::new(
+    let mut clean_registration = HostComponentRegistrationDelegate::new(
         "opencode",
         home.path(),
         lifecycle.path(),
@@ -377,7 +377,7 @@ fn component_set_dry_run_refuses_overlapping_opencode_analyzer_and_accepts_clean
         .unwrap(),
     )
     .unwrap();
-    let mut conflicting_registration = CompatibilityAgentRegistrationDelegate::new(
+    let mut conflicting_registration = HostComponentRegistrationDelegate::new(
         "opencode",
         home.path(),
         lifecycle.path(),
