@@ -3914,9 +3914,8 @@ async fn shutdown_portable_project_open_tasks(
 enum ProductionProjectCompositionRuntime {
     #[cfg(unix)]
     Unix(DaemonEngine),
-    Portable {
-        semantic_auto_download: bool,
-    },
+    #[cfg(any(not(unix), test, feature = "test-transport"))]
+    Portable { semantic_auto_download: bool },
 }
 
 impl ProductionProjectCompositionRuntime {
@@ -3936,6 +3935,7 @@ impl ProductionProjectCompositionRuntime {
                 route_registered,
                 handshake,
             ),
+            #[cfg(any(not(unix), test, feature = "test-transport"))]
             Self::Portable { .. } => portable_database_owner_reconciler(
                 store_administration.clone(),
                 current_key,
@@ -3958,6 +3958,7 @@ impl ProductionProjectCompositionRuntime {
                 current_project_path,
                 handshake,
             )),
+            #[cfg(any(not(unix), test, feature = "test-transport"))]
             Self::Portable { .. } => None,
         }
     }
@@ -3966,6 +3967,7 @@ impl ProductionProjectCompositionRuntime {
         match self {
             #[cfg(unix)]
             Self::Unix(_) => true,
+            #[cfg(any(not(unix), test, feature = "test-transport"))]
             Self::Portable {
                 semantic_auto_download,
             } => *semantic_auto_download,
