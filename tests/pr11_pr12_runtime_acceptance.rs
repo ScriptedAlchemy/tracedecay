@@ -86,6 +86,46 @@ async fn runtime_fixture() -> RuntimeFixture {
     }
 }
 
+async fn lsp_runtime_fixture() -> RuntimeFixture {
+    let (environment, project) = common::IsolatedEnv::acquire().await;
+    copy_dir(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/context_eval_project"),
+        &project,
+    );
+    copy_dir(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/pr12_managed_run_overlay"),
+        &project,
+    );
+    git(&project, &["init", "--quiet"]);
+    git(&project, &["config", "user.name", "TraceDecay Test"]);
+    git(
+        &project,
+        &["config", "user.email", "tracedecay@example.com"],
+    );
+    git(&project, &["add", "."]);
+    git(&project, &["commit", "--quiet", "-m", "base"]);
+    let daemon = common::spawn_tracedecay_daemon(environment.home());
+    let output = common::tracedecay_command_with_home(environment.home())
+        .arg("init")
+        .current_dir(&project)
+        .stdin(Stdio::null())
+        .output()
+        .expect("initialize indexed LSP fixture");
+    assert_command_success("tracedecay init", &output);
+    let storage = run_storage_status(environment.home(), &project, true);
+    assert_command_success("open indexed LSP project", &storage);
+    let handshake = DaemonHandshake::for_current_client(Some(project.clone()), None, false, false)
+        .expect("daemon handshake");
+    let client = DaemonInvocationClient::for_current(handshake.clone()).expect("daemon client");
+    RuntimeFixture {
+        _daemon: daemon,
+        client,
+        handshake,
+        project,
+        _environment: environment,
+    }
+}
+
 #[cfg(unix)]
 async fn git_runtime_fixture() -> RuntimeFixture {
     let (environment, project) = common::IsolatedEnv::acquire().await;
@@ -189,13 +229,68 @@ async fn send_lsp(session: &mut DaemonLspSessionClient, value: Value) {
     );
 }
 
+async fn shutdown_lsp(session: &mut DaemonLspSessionClient, request_id: u64) {
+    send_lsp(
+        session,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "shutdown",
+            "params": {},
+        }),
+    )
+    .await;
+    let shutdown = poll_lsp_response(session, request_id).await;
+    assert_eq!(shutdown["result"], Value::Null);
+    send_lsp(
+        session,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "exit",
+            "params": {},
+        }),
+    )
+    .await;
+    for _ in 0..100 {
+        match session
+            .poll_daemon_frame()
+            .await
+            .expect("poll closed daemon LSP session")
+        {
+            FramePoll::Closed => return,
+            FramePoll::Pending => {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            FramePoll::Frame(frame) => {
+                panic!(
+                    "daemon LSP session emitted a frame after exit: {}",
+                    String::from_utf8_lossy(&frame)
+                );
+            }
+        }
+    }
+    panic!("daemon LSP session did not close after shutdown and exit")
+}
+
 async fn poll_lsp_context(
     session: &mut DaemonLspSessionClient,
     document_uri: &str,
     kind: &str,
     first_request_id: u64,
 ) -> Value {
-    for request_id in first_request_id..first_request_id.saturating_add(100) {
+    let mut last_response = Value::Null;
+    for request_id in first_request_id..first_request_id.saturating_add(500) {
+        if kind == "diagnostics" && request_id.saturating_sub(first_request_id) % 25 == 0 {
+            send_lsp(
+                session,
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "method": "textDocument/didSave",
+                    "params": { "textDocument": { "uri": document_uri } },
+                }),
+            )
+            .await;
+        }
         send_lsp(
             session,
             serde_json::json!({
@@ -213,9 +308,10 @@ async fn poll_lsp_context(
         if response.get("result").is_some() {
             return response;
         }
+        last_response = response;
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
-    panic!("production {kind} context projection did not become ready")
+    panic!("production {kind} context projection did not become ready: {last_response}")
 }
 
 fn initialize_project(home: &Path, project: &Path) {
@@ -857,7 +953,7 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn production_lsp_negotiates_and_projects_canonical_context() {
-    let fixture = runtime_fixture().await;
+    let fixture = lsp_runtime_fixture().await;
     let root_uri = url::Url::from_directory_path(&fixture.project)
         .expect("project root URI")
         .to_string();
@@ -913,8 +1009,8 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
     .await;
     let initialized = poll_lsp_response(&mut session, 1).await;
     assert_eq!(
-        initialized["result"]["capabilities"]["positionEncoding"],
-        "utf-16"
+        initialized["result"]["capabilities"]["positionEncoding"], "utf-16",
+        "unexpected initialize response: {initialized}"
     );
     let negotiated = &initialized["result"]["capabilities"]["experimental"]["tracedecay"];
     assert_eq!(negotiated["revision"], TRACEDECAY_CONTEXT_REVISION);
@@ -981,6 +1077,70 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
             .as_str()
             .is_some()
     );
+    for (request_id, method, params) in [
+        (
+            403,
+            "textDocument/documentSymbol",
+            serde_json::json!({ "textDocument": { "uri": document_uri } }),
+        ),
+        (
+            404,
+            "textDocument/hover",
+            serde_json::json!({
+                "textDocument": { "uri": document_uri },
+                "position": { "line": 0, "character": 0 },
+            }),
+        ),
+    ] {
+        send_lsp(
+            &mut session,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "method": method,
+                "params": params,
+            }),
+        )
+        .await;
+        let navigation = poll_lsp_response(&mut session, request_id).await;
+        assert!(
+            navigation.get("result").is_some(),
+            "{method} must return a standard LSP result: {navigation}"
+        );
+    }
+
+    send_lsp(
+        &mut session,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 405,
+            "method": "tracedecay/arbitrary",
+            "params": {},
+        }),
+    )
+    .await;
+    let arbitrary_method = poll_lsp_response(&mut session, 405).await;
+    assert_eq!(arbitrary_method["error"]["code"], -32601);
+    assert_eq!(
+        arbitrary_method["error"]["data"]["reason"],
+        "capabilityNotNegotiated"
+    );
+
+    send_lsp(
+        &mut session,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 406,
+            "method": "tracedecay/context",
+            "params": {
+                "kind": "diagnostics",
+                "arbitraryPayload": { "command": "run" },
+            },
+        }),
+    )
+    .await;
+    let arbitrary_payload = poll_lsp_response(&mut session, 406).await;
+    assert_eq!(arbitrary_payload["error"]["code"], -32602);
     let mut related_lsp_handles = Vec::new();
     for (kind, first_request_id) in [("postEditImpact", 102), ("affectedTests", 202)] {
         let related = poll_lsp_context(&mut session, &document_uri, kind, first_request_id).await;
@@ -1237,6 +1397,178 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
         expanded["result"]["evidence"]["Ok"]["outcome"]["value"]["payload"],
         *mcp_payload
     );
+
+    let mut incompatible = DaemonLspSessionClient::open(
+        fixture.client.clone(),
+        "3.17",
+        Some(root_uri.clone()),
+        Vec::new(),
+    )
+    .await
+    .expect("open incompatible-version daemon LSP session");
+    send_lsp(
+        &mut incompatible,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 501,
+            "method": "initialize",
+            "params": {
+                "rootUri": root_uri,
+                "capabilities": {
+                    "general": { "positionEncodings": ["utf-16"] },
+                    "experimental": {
+                        "tracedecay": {
+                            "revision": TRACEDECAY_CONTEXT_REVISION + 1,
+                            "opaqueExpansion": true,
+                            "projections": [{
+                                "kind": "diagnostics",
+                                "revision": TRACEDECAY_CONTEXT_REVISION + 1,
+                            }],
+                        }
+                    }
+                }
+            }
+        }),
+    )
+    .await;
+    let incompatible_initialize = poll_lsp_response(&mut incompatible, 501).await;
+    assert!(
+        incompatible_initialize["result"]["capabilities"]["experimental"]["tracedecay"].is_null(),
+        "an incompatible revision must not be negotiated"
+    );
+    send_lsp(
+        &mut incompatible,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "initialized",
+            "params": {},
+        }),
+    )
+    .await;
+    send_lsp(
+        &mut incompatible,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 502,
+            "method": "tracedecay/context",
+            "params": {
+                "kind": "diagnostics",
+                "documentUri": document_uri,
+            },
+        }),
+    )
+    .await;
+    let incompatible_context = poll_lsp_response(&mut incompatible, 502).await;
+    assert_eq!(incompatible_context["error"]["code"], -32601);
+    assert_eq!(
+        incompatible_context["error"]["data"]["reason"],
+        "capabilityNotNegotiated"
+    );
+    shutdown_lsp(&mut incompatible, 503).await;
+
+    let other_project = TempDir::new().expect("cross-scope project");
+    initialize_project(fixture.home(), other_project.path());
+    let other_root_uri = url::Url::from_directory_path(other_project.path())
+        .expect("cross-scope project root URI")
+        .to_string();
+    let other_handshake = DaemonHandshake::for_current_client(
+        Some(other_project.path().to_path_buf()),
+        None,
+        false,
+        false,
+    )
+    .expect("cross-scope daemon handshake");
+    let other_client =
+        DaemonInvocationClient::for_current(other_handshake).expect("cross-scope daemon client");
+    let mut cross_scope = DaemonLspSessionClient::open(
+        other_client,
+        "3.17",
+        Some(other_root_uri.clone()),
+        Vec::new(),
+    )
+    .await
+    .expect("open cross-scope daemon LSP session");
+    send_lsp(
+        &mut cross_scope,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 601,
+            "method": "initialize",
+            "params": {
+                "rootUri": other_root_uri,
+                "capabilities": {
+                    "general": { "positionEncodings": ["utf-16"] },
+                    "experimental": {
+                        "tracedecay": {
+                            "revision": TRACEDECAY_CONTEXT_REVISION,
+                            "opaqueExpansion": true,
+                            "projections": [{
+                                "kind": "diagnostics",
+                                "revision": TRACEDECAY_CONTEXT_REVISION,
+                            }],
+                        }
+                    }
+                }
+            }
+        }),
+    )
+    .await;
+    let cross_scope_initialize = poll_lsp_response(&mut cross_scope, 601).await;
+    assert_eq!(
+        cross_scope_initialize["result"]["capabilities"]["experimental"]["tracedecay"]["revision"],
+        TRACEDECAY_CONTEXT_REVISION
+    );
+    send_lsp(
+        &mut cross_scope,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "initialized",
+            "params": {},
+        }),
+    )
+    .await;
+    send_lsp(
+        &mut cross_scope,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 602,
+            "method": "tracedecay/context/expand",
+            "params": { "retrievalHandle": lsp_handle },
+        }),
+    )
+    .await;
+    let cross_scope_expansion = poll_lsp_response(&mut cross_scope, 602).await;
+    assert_eq!(cross_scope_expansion["error"]["code"], -32601);
+    assert!(
+        cross_scope_expansion.get("result").is_none(),
+        "cross-project handles must not reveal evidence"
+    );
+    shutdown_lsp(&mut cross_scope, 603).await;
+
+    session
+        .detach()
+        .await
+        .expect("detach production LSP session");
+    session
+        .reconnect()
+        .await
+        .expect("reconnect production LSP session");
+    send_lsp(
+        &mut session,
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 701,
+            "method": "workspace/symbol",
+            "params": { "query": "login" },
+        }),
+    )
+    .await;
+    let after_reconnect = poll_lsp_response(&mut session, 701).await;
+    assert!(
+        after_reconnect.get("result").is_some(),
+        "reconnected client must retain standard navigation"
+    );
+    shutdown_lsp(&mut session, 702).await;
 }
 
 #[tokio::test]
