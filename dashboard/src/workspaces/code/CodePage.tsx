@@ -18,6 +18,7 @@ import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { GraphCanvas } from '../../viz/graph/GraphCanvas.tsx';
 import { kindColorVars } from '../../viz/graph/kindColor.ts';
 import { ActivationField } from '../../viz/graph/activation.ts';
+import { Strata } from './Strata.tsx';
 import { TraceView } from './TraceView.tsx';
 import {
   GraphOverviewPayloadSchema,
@@ -178,6 +179,11 @@ export function CodePage() {
               );
             }}
           </LegacyBoundary>
+          {/* Connectedness is the spine's subject; layering is the other
+           * structural reading of the same graph, and it belongs beside the
+           * totals rather than inside the canvas — it is a property of the
+           * whole index, not of the slice currently drawn. */}
+          <Strata />
         </div>
       }
       list={
