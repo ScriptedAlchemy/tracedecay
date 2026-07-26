@@ -5,7 +5,7 @@
 //! cross-source rank. Query cancellation is bound to the opaque run identity
 //! stored here and reaches the live Tokio work through `CancellationToken`.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use axum::extract::{Path, Query, State};
@@ -17,6 +17,7 @@ use serde_json::{Map, Value, json};
 use tokio::sync::RwLock;
 use tokio::task::JoinSet;
 
+use super::lcm_api::{LcmMessageV1, LcmSummaryNodeV1};
 use super::lcm_service::{self, SearchPayloadArgs};
 use super::read_model::{
     DashboardCoverageV1, DashboardDomainStateV1, DashboardEnvelopeV1, DashboardFreshnessV1,
@@ -842,8 +843,8 @@ pub(super) struct ExplorerReadContextV1 {
     offset: i64,
     order: String,
     counts: ExplorerSessionCountsV1,
-    messages: Vec<BTreeMap<String, Value>>,
-    summary_nodes: Vec<BTreeMap<String, Value>>,
+    messages: Vec<LcmMessageV1>,
+    summary_nodes: Vec<LcmSummaryNodeV1>,
     has_more: bool,
     has_more_messages: bool,
     has_more_summary_nodes: bool,

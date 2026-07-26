@@ -1001,12 +1001,12 @@ export const ExplorerReadContextV1Schema = z.object({
   has_more_messages: z.boolean(),
   has_more_summary_nodes: z.boolean(),
   limit: z.number().int(),
-  messages: z.array(z.object({})),
+  messages: z.array(z.lazy(() => LcmMessageV1Schema)),
   offset: z.number().int(),
   order: z.string(),
   session_id: z.string(),
   storage_scope: z.string(),
-  summary_nodes: z.array(z.object({})),
+  summary_nodes: z.array(z.lazy(() => LcmSummaryNodeV1Schema)),
 });
 export type ExplorerReadContextV1 = z.infer<typeof ExplorerReadContextV1Schema>;
 
@@ -1276,6 +1276,24 @@ export const IncomingCallEdgeV1Schema = z.object({
 });
 export type IncomingCallEdgeV1 = z.infer<typeof IncomingCallEdgeV1Schema>;
 
+export const LcmMessageV1Schema = z.object({
+  content: z.string().nullable(),
+  message_id: z.string(),
+  metadata_json: z.string().nullable(),
+  ordinal: z.number().int().nullable(),
+  pinned: z.number().int().nullable(),
+  role: z.string().nullable(),
+  session_id: z.string(),
+  source: z.string().nullable(),
+  storage_kind: z.string().nullable(),
+  store_id: z.number().int().nullable(),
+  summary_node_ids: z.array(z.unknown()),
+  timestamp: z.number().int().nullable(),
+  token_estimate: z.number().int().nullable(),
+  tool_name: z.string().nullable(),
+});
+export type LcmMessageV1 = z.infer<typeof LcmMessageV1Schema>;
+
 export const LcmSessionCountsV1Schema = z.object({
   message_count: z.number().int(),
   source_token_count: z.number().int(),
@@ -1292,15 +1310,30 @@ export const LcmSessionPayloadV1Schema = z.object({
   has_more_messages: z.boolean(),
   has_more_summary_nodes: z.boolean(),
   limit: z.number().int(),
-  messages: z.array(z.object({})),
+  messages: z.array(z.lazy(() => LcmMessageV1Schema)),
   offset: z.number().int(),
   order: z.string(),
   path: z.string(),
   session_id: z.string(),
   storage_scope: z.string(),
-  summary_nodes: z.array(z.object({})),
+  summary_nodes: z.array(z.lazy(() => LcmSummaryNodeV1Schema)),
 });
 export type LcmSessionPayloadV1 = z.infer<typeof LcmSessionPayloadV1Schema>;
+
+export const LcmSummaryNodeV1Schema = z.object({
+  category: z.string(),
+  created_at: z.number().int(),
+  depth: z.number().int(),
+  expand_hint: z.string(),
+  latest_at: z.number().int().nullable(),
+  node_id: z.string(),
+  session_id: z.string(),
+  source_token_count: z.number().int(),
+  source_type: z.string(),
+  summary: z.string(),
+  token_count: z.number().int(),
+});
+export type LcmSummaryNodeV1 = z.infer<typeof LcmSummaryNodeV1Schema>;
 
 export const LcmTimelineBucketV1Schema = z.object({
   bucket: z.string(),
@@ -1464,6 +1497,16 @@ export const MemoryCategoryCountV1Schema = z.object({
 });
 export type MemoryCategoryCountV1 = z.infer<typeof MemoryCategoryCountV1Schema>;
 
+export const MemoryEntityRowV1Schema = z.object({
+  aliases: z.array(z.string()),
+  created_at: z.number().int(),
+  entity_id: z.number().int().nullable(),
+  entity_type: z.string().nullable(),
+  fact_count: z.number().int(),
+  name: z.string(),
+});
+export type MemoryEntityRowV1 = z.infer<typeof MemoryEntityRowV1Schema>;
+
 export const MemoryEntityTypeCountV1Schema = z.object({
   count: z.number().int(),
   entity_type: z.string(),
@@ -1472,9 +1515,28 @@ export type MemoryEntityTypeCountV1 = z.infer<typeof MemoryEntityTypeCountV1Sche
 
 export const MemoryFactDetailPayloadV1Schema = z.object({
   error: z.string(),
-  fact: z.object({}).nullable(),
+  fact: z.union([z.lazy(() => MemoryFactRowV1Schema), z.null()]),
 });
 export type MemoryFactDetailPayloadV1 = z.infer<typeof MemoryFactDetailPayloadV1Schema>;
+
+export const MemoryFactRowV1Schema = z.object({
+  access_count: z.number().int(),
+  category: z.string().nullable(),
+  content: z.string().nullable(),
+  created_at: z.number().int(),
+  entities: z.array(z.lazy(() => MemoryEntityRowV1Schema)).nullable(),
+  fact_id: z.number().int(),
+  has_hrr: z.number().int().nullable(),
+  helpful_count: z.number().int(),
+  last_recalled_at: z.number().int().nullable(),
+  metadata: z.unknown(),
+  retrieval_count: z.number().int(),
+  tags: z.array(z.string()).nullable(),
+  trust_score: z.number(),
+  unhelpful_count: z.number().int(),
+  updated_at: z.number().int(),
+});
+export type MemoryFactRowV1 = z.infer<typeof MemoryFactRowV1Schema>;
 
 export const MemoryFactsCoverageV1Schema = z.object({
   completeness: z.string(),
@@ -1511,10 +1573,10 @@ export const MemoryGrowthPointV1Schema = z.object({
 export type MemoryGrowthPointV1 = z.infer<typeof MemoryGrowthPointV1Schema>;
 
 export const MemoryHolographicPayloadV1Schema = z.object({
-  entities: z.array(z.object({})),
+  entities: z.array(z.lazy(() => MemoryEntityRowV1Schema)),
   error: z.string(),
   exists: z.boolean(),
-  facts: z.array(z.object({})),
+  facts: z.array(z.lazy(() => MemoryFactRowV1Schema)),
   facts_coverage: z.lazy(() => MemoryFactsCoverageV1Schema),
   graph: z.object({}),
   overview: z.union([z.lazy(() => MemoryOverviewSummaryV1Schema), z.null()]),
@@ -2896,10 +2958,14 @@ export const HostKindSchema = HostKindV1Schema;
 export type HostKind = HostKindV1;
 export const IncomingCallEdgeSchema = IncomingCallEdgeV1Schema;
 export type IncomingCallEdge = IncomingCallEdgeV1;
+export const LcmMessageSchema = LcmMessageV1Schema;
+export type LcmMessage = LcmMessageV1;
 export const LcmSessionCountsSchema = LcmSessionCountsV1Schema;
 export type LcmSessionCounts = LcmSessionCountsV1;
 export const LcmSessionPayloadSchema = LcmSessionPayloadV1Schema;
 export type LcmSessionPayload = LcmSessionPayloadV1;
+export const LcmSummaryNodeSchema = LcmSummaryNodeV1Schema;
+export type LcmSummaryNode = LcmSummaryNodeV1;
 export const LcmTimelineBucketSchema = LcmTimelineBucketV1Schema;
 export type LcmTimelineBucket = LcmTimelineBucketV1;
 export const LcmTimelineCoverageSchema = LcmTimelineCoverageV1Schema;
@@ -2930,10 +2996,14 @@ export const MemoryBankSchema = MemoryBankV1Schema;
 export type MemoryBank = MemoryBankV1;
 export const MemoryCategoryCountSchema = MemoryCategoryCountV1Schema;
 export type MemoryCategoryCount = MemoryCategoryCountV1;
+export const MemoryEntityRowSchema = MemoryEntityRowV1Schema;
+export type MemoryEntityRow = MemoryEntityRowV1;
 export const MemoryEntityTypeCountSchema = MemoryEntityTypeCountV1Schema;
 export type MemoryEntityTypeCount = MemoryEntityTypeCountV1;
 export const MemoryFactDetailPayloadSchema = MemoryFactDetailPayloadV1Schema;
 export type MemoryFactDetailPayload = MemoryFactDetailPayloadV1;
+export const MemoryFactRowSchema = MemoryFactRowV1Schema;
+export type MemoryFactRow = MemoryFactRowV1;
 export const MemoryFactsCoverageSchema = MemoryFactsCoverageV1Schema;
 export type MemoryFactsCoverage = MemoryFactsCoverageV1;
 export const MemoryFeedbackHistoryRepairSchema = MemoryFeedbackHistoryRepairV1Schema;

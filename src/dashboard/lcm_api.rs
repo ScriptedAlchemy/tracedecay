@@ -56,6 +56,43 @@ struct LcmSessionCountsV1 {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub(super) struct LcmMessageV1 {
+    store_id: Option<i64>,
+    session_id: String,
+    role: Option<String>,
+    source: Option<String>,
+    timestamp: Option<i64>,
+    token_estimate: Option<i64>,
+    content: Option<String>,
+    message_id: String,
+    ordinal: Option<i64>,
+    storage_kind: Option<String>,
+    metadata_json: Option<String>,
+    tool_name: Option<String>,
+    pinned: Option<i64>,
+    summary_node_ids: Vec<Value>,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
+pub(super) struct LcmSummaryNodeV1 {
+    node_id: String,
+    session_id: String,
+    depth: i64,
+    category: String,
+    source_type: String,
+    token_count: i64,
+    source_token_count: i64,
+    latest_at: Option<i64>,
+    created_at: i64,
+    expand_hint: String,
+    summary: String,
+    #[serde(flatten)]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 pub(super) struct LcmSessionPayloadV1 {
     path: String,
     storage_scope: String,
@@ -65,8 +102,8 @@ pub(super) struct LcmSessionPayloadV1 {
     offset: i64,
     order: String,
     counts: LcmSessionCountsV1,
-    messages: Vec<BTreeMap<String, Value>>,
-    summary_nodes: Vec<BTreeMap<String, Value>>,
+    messages: Vec<LcmMessageV1>,
+    summary_nodes: Vec<LcmSummaryNodeV1>,
     has_more: bool,
     has_more_messages: bool,
     has_more_summary_nodes: bool,
