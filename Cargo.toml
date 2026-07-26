@@ -320,6 +320,7 @@ lsp-types = "0.97.0"
 yaml-edit = { version = "0.2.3", default-features = false }
 notify-debouncer-full = "0.7.0"
 schemars = "1.2.1"
+futures-util = "0.3.33"
 
 [target.'cfg(not(windows))'.dependencies]
 flate2 = "1"

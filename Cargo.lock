@@ -5445,6 +5445,7 @@ dependencies = [
  "flate2",
  "fs2",
  "fsys",
+ "futures-util",
  "getrandom 0.2.17",
  "gix",
  "glob",
