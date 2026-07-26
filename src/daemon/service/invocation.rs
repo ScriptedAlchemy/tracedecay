@@ -5133,7 +5133,7 @@ impl DaemonAdvisoryRuntimeRegistrar {
     >
     where
         GR: GitHubCurrentBranchRemapper + Send + Sync + 'static,
-        GA: GitHubCanonicalReviewAnchorAuthorityV1 + Send + Sync + 'static,
+        GA: GitHubCanonicalReviewAnchorAuthorityV1 + Clone + Send + Sync + 'static,
         CS: CiReadOnlyProviderArchiveV1 + Send + Sync + 'static,
         CE: CiExactEvidenceAuthorityV1<CS::Record> + Send + Sync + 'static,
         PE: CanonicalProximityEvidenceAuthorityV1 + Send + Sync + 'static,
