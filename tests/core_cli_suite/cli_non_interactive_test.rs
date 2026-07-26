@@ -316,6 +316,13 @@ fn write_sqlite_placeholder(path: &Path) {
     .unwrap();
 }
 
+fn write_empty_sqlite_fixture(path: &Path) {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    drop(rusqlite::Connection::open(path).expect("empty SQLite fixture"));
+}
+
 async fn register_profile_sharded_store(
     runtime: &HostAdmissionTestRuntimeV1,
     project_root: &std::path::Path,
@@ -351,7 +358,7 @@ fn write_branch_meta(
         meta.add_branch(name, rel_db_path, "main");
         if create_branch_dbs {
             let db_path = shard_root.join(rel_db_path);
-            write_sqlite_placeholder(&db_path);
+            write_empty_sqlite_fixture(&db_path);
         }
     }
     std::fs::write(
