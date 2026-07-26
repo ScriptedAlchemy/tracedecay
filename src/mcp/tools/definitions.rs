@@ -17,7 +17,7 @@ use super::dispatch_policy::REGISTERED_PROJECT_READER_TOOL_NAMES;
 /// Tools registered on every host before optional external capabilities.
 /// Count-contract tests share this source of truth so branch rebases cannot
 /// leave independent stale literals on the unit and integration surfaces.
-pub const ALWAYS_REGISTERED_TOOL_COUNT: usize = 166;
+pub const ALWAYS_REGISTERED_TOOL_COUNT: usize = 161;
 
 mod admin;
 mod analysis;
@@ -372,18 +372,11 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         def_git_hunks(),
         def_git_preview(),
         def_git_apply(),
-        def_feedback_diagnostics(),
-        def_feedback_get(),
-        def_feedback_expand(),
-        def_feedback_list(),
-        def_feedback_advisory_cycle(),
         def_context_scout_status(),
         def_context_scout_recent(),
         def_context_scout_explain(),
         def_context_scout_capability(),
         def_context_scout_budget(),
-        def_feedback_impact(),
-        def_affected_tests(),
         def_test_results(),
         def_code_exact_occurrence(),
         def_code_phrase_search(),
@@ -588,6 +581,7 @@ const FORMAT_CAPABLE_TOOL_NAMES: &[&str] = &[
     "tracedecay_project_list",
     "tracedecay_project_search",
     "tracedecay_project_context",
+    "tracedecay_files",
     "tracedecay_body",
     "tracedecay_todos",
     "tracedecay_read",
@@ -598,6 +592,11 @@ const FORMAT_CAPABLE_TOOL_NAMES: &[&str] = &[
     "tracedecay_port_order",
     "tracedecay_simplify_scan",
     // git
+    "tracedecay_git_status",
+    "tracedecay_git_diff",
+    "tracedecay_git_history",
+    "tracedecay_git_blame",
+    "tracedecay_git_hunks",
     "tracedecay_affected",
     "tracedecay_diff_context",
     "tracedecay_changelog",
@@ -656,6 +655,17 @@ const FORMAT_CAPABLE_TOOL_NAMES: &[&str] = &[
     "tracedecay_configuration_rollback_preview",
     "tracedecay_configuration_rollback_apply",
     "tracedecay_configuration_audit",
+    "tracedecay_context_scout_status",
+    "tracedecay_context_scout_recent",
+    "tracedecay_context_scout_explain",
+    "tracedecay_context_scout_capability",
+    "tracedecay_context_scout_budget",
+    "tracedecay_context_scout_pause",
+    "tracedecay_context_scout_resume",
+    "tracedecay_context_scout_cancel",
+    "tracedecay_context_scout_claim",
+    "tracedecay_context_scout_delivery",
+    "tracedecay_context_scout_feedback",
     // analysis
     "tracedecay_dead_code",
     "tracedecay_circular",
@@ -694,6 +704,8 @@ const FORMAT_CAPABLE_TOOL_NAMES: &[&str] = &[
     "tracedecay_run_affected_tests",
     // session / LCM
     "tracedecay_message_search",
+    "tracedecay_sessions_for",
+    "tracedecay_workflows",
     "tracedecay_lcm_status",
     "tracedecay_lcm_doctor",
     "tracedecay_lcm_load_session",
@@ -718,6 +730,7 @@ const FORMAT_CAPABLE_TOOL_NAMES: &[&str] = &[
     "tracedecay_replace_symbol",
     "tracedecay_move_symbol",
     "tracedecay_ast_grep_rewrite",
+    "tracedecay_source_edit_reconcile",
     // git & info
     "tracedecay_branch_list",
     "tracedecay_active_project",
@@ -725,6 +738,7 @@ const FORMAT_CAPABLE_TOOL_NAMES: &[&str] = &[
     "tracedecay_dashboard",
     "tracedecay_retrieve",
     "tracedecay_analytics",
+    "tracedecay_type_hierarchy",
 ];
 
 pub fn format_capable_tool_names() -> &'static [&'static str] {
@@ -817,6 +831,24 @@ mod tests {
                     .and_then(|annotations| annotations.get("readOnlyHint"))
                     .and_then(Value::as_bool),
                 Some(true)
+            );
+        }
+    }
+
+    #[test]
+    fn feedback_tools_without_client_constructible_requests_are_not_advertised() {
+        let definitions = get_tool_definitions();
+        for name in [
+            "tracedecay_feedback_diagnostics",
+            "tracedecay_feedback_get",
+            "tracedecay_feedback_expand",
+            "tracedecay_feedback_list",
+            "tracedecay_feedback_impact",
+            "tracedecay_affected_tests",
+        ] {
+            assert!(
+                definitions.iter().all(|definition| definition.name != name),
+                "{name} must not be advertised until its request authority is reachable"
             );
         }
     }
