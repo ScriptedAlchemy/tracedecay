@@ -77,7 +77,7 @@ use crate::catalog_composition::{
 use crate::daemon_client::{
     BindingResolution, BindingResolver, CatalogBindingResolver, DaemonInvocationError,
     DispatchError, DispatchInput, DispatchedInvocation, InvocationCancellationPolicy,
-    InvocationControls, RequestedOutputFormat, ScopeSelector, resolve_dispatch,
+    InvocationControls, RequestedOutputFormat, ResolvedBinding, ScopeSelector, resolve_dispatch,
 };
 
 const DEFAULT_PAGE_SIZE: u32 = 10;
@@ -145,15 +145,9 @@ pub enum ApplicationSurfaceOperation {
     ContextScoutFeedback,
 }
 
-pub const APPLICATION_SURFACE_OPERATIONS: [ApplicationSurfaceOperation; 53] = [
+pub const APPLICATION_SURFACE_OPERATIONS: [ApplicationSurfaceOperation; 47] = [
     ApplicationSurfaceOperation::GitPreview,
     ApplicationSurfaceOperation::GitApply,
-    ApplicationSurfaceOperation::FeedbackDiagnostics,
-    ApplicationSurfaceOperation::FeedbackGet,
-    ApplicationSurfaceOperation::FeedbackExpand,
-    ApplicationSurfaceOperation::FeedbackList,
-    ApplicationSurfaceOperation::FeedbackImpact,
-    ApplicationSurfaceOperation::AffectedTests,
     ApplicationSurfaceOperation::TestResults,
     ApplicationSurfaceOperation::CodeExactOccurrence,
     ApplicationSurfaceOperation::CodePhraseSearch,
@@ -2750,14 +2744,6 @@ fn application_operation_for_http(
     match operation {
         HttpApplicationOperation::GitPreview => ApplicationSurfaceOperation::GitPreview,
         HttpApplicationOperation::GitApply => ApplicationSurfaceOperation::GitApply,
-        HttpApplicationOperation::FeedbackDiagnostics => {
-            ApplicationSurfaceOperation::FeedbackDiagnostics
-        }
-        HttpApplicationOperation::FeedbackGet => ApplicationSurfaceOperation::FeedbackGet,
-        HttpApplicationOperation::FeedbackExpand => ApplicationSurfaceOperation::FeedbackExpand,
-        HttpApplicationOperation::FeedbackList => ApplicationSurfaceOperation::FeedbackList,
-        HttpApplicationOperation::FeedbackImpact => ApplicationSurfaceOperation::FeedbackImpact,
-        HttpApplicationOperation::AffectedTests => ApplicationSurfaceOperation::AffectedTests,
         HttpApplicationOperation::TestResults => ApplicationSurfaceOperation::TestResults,
         HttpApplicationOperation::CodeExactOccurrence => {
             ApplicationSurfaceOperation::CodeExactOccurrence
@@ -2863,8 +2849,16 @@ fn resolve_application_binding(
     surface: BindingSurface,
     operation: ApplicationSurfaceOperation,
 ) -> Option<crate::daemon_client::ResolvedBinding> {
+    resolve_named_binding(resolver, surface, operation.as_str())
+}
+
+fn resolve_named_binding(
+    resolver: &impl BindingResolver,
+    surface: BindingSurface,
+    operation: &str,
+) -> Option<ResolvedBinding> {
     let profile_id = ProfileId::new(APPLICATION_DEFAULT_PROFILE_ID).ok()?;
-    let operation = SurfaceOperationName::new(operation.as_str()).ok()?;
+    let operation = SurfaceOperationName::new(operation).ok()?;
     resolver.resolve_binding(
         surface,
         &BindingResolution {
@@ -2874,6 +2868,25 @@ fn resolve_application_binding(
             negotiated_features: application_negotiated_features(),
         },
     )
+}
+
+/// Resolve any application-catalog transport binding by its public tool name.
+///
+/// Typed application surfaces continue through [`ApplicationSurfaceOperation`].
+/// Catalog bindings whose typed adapters are still being migrated use this
+/// gate before entering their retained compatibility owner.
+/// Resolves a public tool name through the application catalog for one host surface.
+///
+/// Compatibility-owned tools use this boundary before entering their retained
+/// execution adapter, so catalog metadata remains the single binding authority.
+pub fn resolve_catalog_tool_binding(
+    surface: BindingSurface,
+    tool_name: &str,
+) -> Result<Option<ResolvedBinding>, ApplicationSurfaceAdapterError> {
+    let operation = tool_name.strip_prefix("tracedecay_").unwrap_or(tool_name);
+    let catalog = application_surface_catalog()?;
+    let resolver = CatalogBindingResolver::new(&catalog);
+    Ok(resolve_named_binding(&resolver, surface, operation))
 }
 
 fn application_negotiated_features() -> BTreeSet<FeatureId> {

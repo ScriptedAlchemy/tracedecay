@@ -89,22 +89,6 @@ pub async fn handle_hook_runtime(
     Ok(rendered_tool_json(Some(cg.project_root()), &args, &output))
 }
 
-pub(crate) async fn handle_context_scout_read_surface(
-    cg: &TraceDecay,
-    args: Value,
-    tool_name: &str,
-) -> Result<ToolResult> {
-    let action = match tool_name {
-        "tracedecay_context_scout_recent" => "hook_v2_scout_recent",
-        "tracedecay_context_scout_explain" => "hook_v2_scout_explain",
-        "tracedecay_context_scout_capability" => "hook_v2_scout_capability",
-        "tracedecay_context_scout_budget" => "hook_v2_scout_budget",
-        _ => return Err(config_error("unknown Context Scout read tool")),
-    };
-    let output = hook_v2_scout_read(cg, &args, action).await?;
-    Ok(rendered_tool_json(Some(cg.project_root()), &args, &output))
-}
-
 pub(crate) async fn handle_projectless_hook_runtime(
     args: Value,
     profile_root: &Path,

@@ -3,6 +3,8 @@
 //! Composition validates metadata against the closed application handler
 //! descriptors and binds them to one caller-supplied canonical dispatcher.
 
+use std::collections::BTreeMap;
+
 use thiserror::Error;
 use tracedecay_application::handlers::BoundApplicationHandler;
 use tracedecay_application::{
@@ -125,7 +127,7 @@ fn application_profiles(
         (
             APPLICATION_DEFAULT_PROFILE_ID,
             ProfileKind::Default,
-            ProfileBudget::new(192, 64_000_000, 18_000)?,
+            ProfileBudget::new(192, 70_000_000, 18_000)?,
             true,
         ),
         (
@@ -180,23 +182,45 @@ fn application_profile(
         .iter()
         .map(|capability| capability.capability_id().clone())
         .collect::<Vec<_>>();
-    let mut routing_fixtures = capabilities
-        .iter()
-        .map(|capability| {
-            let query = capability
-                .routing()
-                .examples()
-                .first()
-                .cloned()
-                .unwrap_or_else(|| capability.routing().name().to_owned());
-            RoutingFixtureV1::new(
+    let mut fixture_capabilities = BTreeMap::<String, Vec<CapabilityId>>::new();
+    for capability in &capabilities {
+        let query = capability
+            .routing()
+            .examples()
+            .first()
+            .cloned()
+            .unwrap_or_else(|| capability.routing().name().to_owned());
+        fixture_capabilities
+            .entry(query)
+            .or_default()
+            .push(capability.capability_id().clone());
+    }
+    let mut routing_fixtures = Vec::new();
+    for (query, fixture_ids) in fixture_capabilities {
+        if fixture_ids.len() == 1 {
+            routing_fixtures.push(RoutingFixtureV1::new(
                 query,
                 RoutingFixtureExpectation::Select {
-                    capability_id: capability.capability_id().clone(),
+                    capability_id: fixture_ids
+                        .into_iter()
+                        .next()
+                        .expect("one capability was counted"),
                 },
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+            )?);
+            continue;
+        }
+
+        routing_fixtures.push(RoutingFixtureV1::new(
+            query.clone(),
+            RoutingFixtureExpectation::ambiguous(fixture_ids.clone())?,
+        )?);
+        for capability_id in fixture_ids {
+            routing_fixtures.push(RoutingFixtureV1::new(
+                format!("{query} ({})", capability_id.as_str()),
+                RoutingFixtureExpectation::Select { capability_id },
+            )?);
+        }
+    }
     if !capability_ids.is_empty() {
         let git_preview = CapabilityId::new("capability.application.git.preview")?;
         let git_apply = CapabilityId::new("capability.application.git.apply")?;
