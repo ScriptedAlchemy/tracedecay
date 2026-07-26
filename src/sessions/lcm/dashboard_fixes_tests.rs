@@ -104,6 +104,7 @@ impl DashboardFixture {
             automation_writer: standalone_dashboard_automation_writer(),
             doctor_report_reader: None,
             doctor_remediation_dispatcher: None,
+            application_client: None,
         };
         Self {
             state,
