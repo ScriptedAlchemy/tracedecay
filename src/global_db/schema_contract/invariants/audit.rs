@@ -16,8 +16,12 @@ const AUDIT_NAME: &str = "observation-authority";
 
 const AUDIT_VERSION: i64 = 2;
 pub(super) const MAX_BOUNDED_AUDIT_PASSES: i64 = 64;
-const DETAILED_AUDIT_CONCURRENCY: usize = 32;
-const MAX_DETAILED_OBSERVATIONS_PER_PAGE: usize = 1;
+const DETAILED_AUDIT_CONCURRENCY: usize = 4;
+// Amortize the page query across several bounded validation chunks while
+// checkpointing often enough to stay below one ordinary statement deadline.
+const DETAILED_AUDIT_CHUNKS_PER_PAGE: usize = 24;
+const MAX_DETAILED_OBSERVATIONS_PER_PAGE: usize =
+    DETAILED_AUDIT_CONCURRENCY * DETAILED_AUDIT_CHUNKS_PER_PAGE;
 const PROJECTION_PROGRESS_PAGE_INTERVAL: i64 = 1;
 
 #[derive(Clone, Copy, Default)]
@@ -1046,7 +1050,7 @@ async fn validate_projection_authority_suffix_pages(
             .await
             .map_err(|error| global_db_operation_error(OPERATION, error))?;
         let mut page_rows = 0_i64;
-        let mut detailed_observations = Vec::<DurableObservationV1>::new();
+        let mut detailed_observations = Vec::<(i64, DurableObservationV1)>::new();
         let mut detailed_limit_reached = false;
         while let Some(row) = rows
             .next()
@@ -1123,7 +1127,7 @@ async fn validate_projection_authority_suffix_pages(
                     .ok_or_else(|| authority_violation("projection disposition disappeared"))?;
                 validate_skipped_projection_row(&observation, disposition, reason)?;
             } else {
-                detailed_observations.push(observation);
+                detailed_observations.push((scan_cursor, observation));
                 if detailed_observations.len() >= MAX_DETAILED_OBSERVATIONS_PER_PAGE {
                     detailed_limit_reached = true;
                     break;
@@ -1135,9 +1139,16 @@ async fn validate_projection_authority_suffix_pages(
             try_join_all(
                 chunk
                     .iter()
-                    .map(|observation| validate_projection_effect(conn, observation)),
+                    .map(|(_, observation)| validate_projection_effect(conn, observation)),
             )
             .await?;
+            let validated_through = chunk
+                .last()
+                .map(|(sequence, _)| *sequence)
+                .unwrap_or(scan_cursor);
+            checkpoint =
+                projection_audit_checkpoint_through_sequence(conn, checkpoint, validated_through)
+                    .await?;
         }
         pages_audited += 1;
         if page_rows < AUDIT_PAGE_ROWS && !detailed_limit_reached {
@@ -1308,7 +1319,8 @@ mod tests {
     use tracedecay_store::{ObservationProjection, SESSION_MESSAGE_PROJECTOR_VERSION};
 
     use super::{
-        AuditCheckpoint, MAX_DETAILED_OBSERVATIONS_PER_PAGE, PROJECTION_PROGRESS_PAGE_INTERVAL,
+        AuditCheckpoint, DETAILED_AUDIT_CHUNKS_PER_PAGE, DETAILED_AUDIT_CONCURRENCY,
+        MAX_DETAILED_OBSERVATIONS_PER_PAGE, PROJECTION_PROGRESS_PAGE_INTERVAL,
         ensure_audit_checkpoint_schema, historical_projection_delta_required,
         projection_audit_checkpoint_through_sequence, validate_projection_authority_suffix,
     };
@@ -1347,7 +1359,10 @@ mod tests {
 
     #[test]
     fn exhaustive_projection_audit_bounds_detailed_work() {
-        assert_eq!(MAX_DETAILED_OBSERVATIONS_PER_PAGE, 1);
+        assert_eq!(
+            MAX_DETAILED_OBSERVATIONS_PER_PAGE,
+            DETAILED_AUDIT_CONCURRENCY * DETAILED_AUDIT_CHUNKS_PER_PAGE
+        );
         assert_eq!(PROJECTION_PROGRESS_PAGE_INTERVAL, 1);
     }
 
