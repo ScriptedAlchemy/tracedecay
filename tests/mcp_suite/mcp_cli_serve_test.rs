@@ -548,7 +548,7 @@ async fn serve_with_reachable_daemon_proxies_before_opening_explicit_project() {
                     "capabilities": { "tools": {} },
                     "serverInfo": {
                         "name": "sentinel-proxy-first-daemon",
-                        "version": env!("CARGO_PKG_VERSION")
+                        "version": tracedecay::version::build_version()
                     }
                 }
             });
