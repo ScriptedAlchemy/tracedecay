@@ -264,6 +264,9 @@ fn build_and_embed_dashboard_app() {
     }
     let source_stamp = format!("{:016x}", hasher.finish());
     let stamp_path = app_dist.join(".source-stamp");
+    println!("cargo::rerun-if-env-changed=TRACEDECAY_DASHBOARD_CONTRACT_SCHEMA_OUT");
+    let contract_schema_export =
+        std::env::var_os("TRACEDECAY_DASHBOARD_CONTRACT_SCHEMA_OUT").is_some();
     let fresh = fs::read_to_string(&stamp_path)
         .map(|current| current.trim() == source_stamp)
         .unwrap_or(false)
@@ -282,7 +285,9 @@ fn build_and_embed_dashboard_app() {
              the published crate must ship a prebuilt dashboard/app-dist"
         );
     } else if !fresh {
-        if std::env::var_os("TRACEDECAY_SKIP_DASHBOARD_BUILD").is_some() {
+        if contract_schema_export {
+            println!("cargo::warning=skipping dashboard asset build for contract schema export");
+        } else if std::env::var_os("TRACEDECAY_SKIP_DASHBOARD_BUILD").is_some() {
             println!(
                 "cargo::warning=dashboard app-dist is stale but TRACEDECAY_SKIP_DASHBOARD_BUILD is set; embedding existing dist"
             );
@@ -296,7 +301,7 @@ fn build_and_embed_dashboard_app() {
         }
     }
     assert!(
-        app_dist.join("index.html").exists(),
+        contract_schema_export || app_dist.join("index.html").exists(),
         "dashboard/app-dist/index.html is missing after build; the dashboard frontend build failed"
     );
 
