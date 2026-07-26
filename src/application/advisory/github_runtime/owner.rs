@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use tracedecay_application::feedback::{FeedbackPortFuture, GitHubReviewReadRequestV1};
 use tracedecay_application::{RequestContext, ResolvedScope};
+use tracedecay_domain::RetrievalAnchorId;
 use tracedecay_domain::feedback::{FeedbackScopeV1, GitHubReviewReadOperationV1};
 
 use super::decoder::{
@@ -14,8 +15,9 @@ use super::network::{
 };
 use super::store::ProjectGitHubReviewStoreV1;
 use super::{
-    GitHubReadOnlyRuntimeTransportV1, GitHubReviewRefreshCoordinatorV1,
-    GitHubReviewRefreshOutcomeV1, GitHubSourceAccessAuthorityV1,
+    GitHubReadOnlyRuntimeTransportV1, GitHubReviewBodyEvidenceAuthorityV1,
+    GitHubReviewBodyReadOutcomeV1, GitHubReviewRefreshCoordinatorV1, GitHubReviewRefreshOutcomeV1,
+    GitHubSourceAccessAuthorityV1,
 };
 use crate::application::advisory::{
     GitHubCurrentBranchRemapper, GitHubReadOnlyAdmissionError, GitHubReadOnlyConnector,
@@ -56,6 +58,8 @@ pub struct GitHubReviewRuntimeOwnerV1<R, A> {
         ProjectGitHubReviewStoreV1,
         Arc<dyn GitHubSourceAccessAuthorityV1>,
     >,
+    anchors: A,
+    source_access: Arc<dyn GitHubSourceAccessAuthorityV1>,
 }
 
 impl<R, A> GitHubReviewRuntimeOwnerV1<R, A>
@@ -70,6 +74,19 @@ where
     ) -> FeedbackPortFuture<'a, GitHubReviewRefreshOutcomeV1> {
         self.coordinator.refresh(context, request)
     }
+
+    pub fn expand_retained_body<'a>(
+        &'a self,
+        context: &'a RequestContext,
+        request: &'a GitHubReviewReadRequestV1,
+        body_anchor: &'a RetrievalAnchorId,
+    ) -> FeedbackPortFuture<'a, GitHubReviewBodyReadOutcomeV1>
+    where
+        A: GitHubReviewBodyEvidenceAuthorityV1,
+    {
+        self.anchors
+            .read_retained_body(context, request, body_anchor, self.source_access.as_ref())
+    }
 }
 
 pub fn build_github_review_runtime_owner_v1<R, A>(
@@ -80,7 +97,7 @@ pub fn build_github_review_runtime_owner_v1<R, A>(
 ) -> Result<GitHubReviewRuntimeOwnerV1<R, A>, GitHubReviewRuntimeOwnerBuildErrorV1>
 where
     R: GitHubCurrentBranchRemapper + Sync,
-    A: GitHubCanonicalReviewAnchorAuthorityV1 + Sync,
+    A: GitHubCanonicalReviewAnchorAuthorityV1 + Clone + Sync,
 {
     if !scope_matches(&config.resolved_scope, &config.feedback_scope) {
         return Err(GitHubReviewRuntimeOwnerBuildErrorV1::InvalidScope);
@@ -95,13 +112,19 @@ where
         .ok_or(GitHubReviewRuntimeOwnerBuildErrorV1::StoreUnavailable)?;
     let client = GitHubReadOnlyClientV1::new(config.target, config.credential, config.http)
         .ok_or(GitHubReviewRuntimeOwnerBuildErrorV1::InvalidNetworkConfiguration)?;
-    let decoder = GitHubOfficialResponseDecoderV1::new(config.identity, anchors)
+    let decoder = GitHubOfficialResponseDecoderV1::new(config.identity, anchors.clone())
         .ok_or(GitHubReviewRuntimeOwnerBuildErrorV1::InvalidDecoderConfiguration)?;
     let transport = GitHubReadOnlyRuntimeTransportV1::new(store.clone(), client.clone(), decoder);
     let connector = GitHubReadOnlyConnector::new(descriptors, transport, remapper)
         .map_err(map_admission_error)?;
     Ok(GitHubReviewRuntimeOwnerV1 {
-        coordinator: GitHubReviewRefreshCoordinatorV1::new(connector, store, source_access),
+        coordinator: GitHubReviewRefreshCoordinatorV1::new(
+            connector,
+            store,
+            Arc::clone(&source_access),
+        ),
+        anchors,
+        source_access,
     })
 }
 

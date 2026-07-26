@@ -51,7 +51,7 @@ query TraceDecayPR13ReviewThreads(
             nodes {
               databaseId url bodyText createdAt updatedAt authorAssociation
               replyTo { databaseId }
-              author { __typename id }
+              author { __typename login }
               pullRequestReview { databaseId state commit { oid } }
               originalCommit { oid }
             }
@@ -68,7 +68,7 @@ query TraceDecayPR13ReviewThreads(
         nodes {
           databaseId url bodyText createdAt updatedAt authorAssociation
           replyTo { databaseId }
-          author { __typename id }
+          author { __typename login }
           pullRequestReview { databaseId state commit { oid } }
           originalCommit { oid }
         }

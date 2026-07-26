@@ -153,7 +153,7 @@ pub(crate) struct GraphQlReplyV1 {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct GraphQlActorV1 {
-    pub(crate) id: String,
+    pub(crate) login: String,
     #[serde(rename = "__typename")]
     pub(crate) kind: Option<String>,
 }

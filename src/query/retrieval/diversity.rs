@@ -8,9 +8,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use thiserror::Error;
 use tracedecay_domain::{
-    DiversityPolicy, EvidenceRole, ExactClass, FusedCandidate, LogicalCopyClusterId,
-    RankedCandidate, RankingDecision, RankingDecisionKind, RepositoryId, SessionOrThreadId,
-    SourceInstanceKey, SourceNamespace,
+    DiversityPolicy, EvidenceRole, ExactClass, FileOccurrenceId, FusedCandidate,
+    LogicalCopyClusterId, RankedCandidate, RankingDecision, RankingDecisionKind, RepositoryId,
+    SessionOrThreadId, SourceInstanceKey, SourceNamespace,
 };
 
 /// Failures of the diversity stage.
@@ -56,6 +56,7 @@ impl DeterministicDiversity {
             policy.per_source_namespace,
             policy.per_source_instance,
             policy.per_repository,
+            policy.per_file,
             policy.per_session_or_thread,
             policy.per_copy_cluster,
             policy.per_evidence_role,
@@ -133,6 +134,7 @@ struct CapCounters {
     namespaces: BTreeMap<SourceNamespace, u32>,
     instances: BTreeMap<SourceInstanceKey, u32>,
     repositories: BTreeMap<RepositoryId, u32>,
+    files: BTreeMap<FileOccurrenceId, u32>,
     sessions: BTreeMap<SessionOrThreadId, u32>,
     copy_clusters: BTreeMap<LogicalCopyClusterId, u32>,
     evidence_roles: BTreeMap<EvidenceRole, u32>,
@@ -163,6 +165,9 @@ impl CapCounters {
         ) {
             dimensions.push("repository");
         }
+        if any_reached(&self.files, &keys.files, policy.per_file) {
+            dimensions.push("file");
+        }
         if any_reached(&self.sessions, &keys.sessions, policy.per_session_or_thread) {
             dimensions.push("session_or_thread");
         }
@@ -188,6 +193,7 @@ impl CapCounters {
         increment_all(&mut self.namespaces, keys.namespaces);
         increment_all(&mut self.instances, keys.instances);
         increment_all(&mut self.repositories, keys.repositories);
+        increment_all(&mut self.files, keys.files);
         increment_all(&mut self.sessions, keys.sessions);
         increment_all(&mut self.copy_clusters, keys.copy_clusters);
         increment_all(&mut self.evidence_roles, keys.evidence_roles);
@@ -198,6 +204,7 @@ struct CandidateCapKeys {
     namespaces: BTreeSet<SourceNamespace>,
     instances: BTreeSet<SourceInstanceKey>,
     repositories: BTreeSet<RepositoryId>,
+    files: BTreeSet<FileOccurrenceId>,
     sessions: BTreeSet<SessionOrThreadId>,
     copy_clusters: BTreeSet<LogicalCopyClusterId>,
     evidence_roles: BTreeSet<EvidenceRole>,
@@ -220,6 +227,11 @@ impl CandidateCapKeys {
                 .occurrences
                 .iter()
                 .filter_map(|occurrence| occurrence.repository_id.clone())
+                .collect(),
+            files: candidate
+                .occurrences
+                .iter()
+                .filter_map(|occurrence| occurrence.file_occurrence_id.clone())
                 .collect(),
             sessions: candidate
                 .occurrences

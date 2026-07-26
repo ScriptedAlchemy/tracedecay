@@ -1088,7 +1088,7 @@ fn kiro_update_plugin_leaves_user_managed_agent_files_alone() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn kimi_update_plugin_refreshes_bundle_and_preserves_user_config() {
+fn kimi_update_plugin_stages_bundle_and_preserves_official_host_state() {
     let home = TempDir::new().unwrap();
     let _agent_env = AgentEnvLock::pin(&home);
     let kimi_code_home = home.path().join("kimi-code-home");
@@ -1098,8 +1098,6 @@ fn kimi_update_plugin_refreshes_bundle_and_preserves_user_config() {
     );
     let kimi = get_integration("kimi").unwrap();
 
-    // User-owned MCP config in the Kimi Code home that install/update-plugin
-    // must never write (no tracedecay key, so the install migration skips it).
     std::fs::create_dir_all(&kimi_code_home).unwrap();
     let user_mcp = kimi_code_home.join("mcp.json");
     std::fs::write(
@@ -1109,41 +1107,40 @@ fn kimi_update_plugin_refreshes_bundle_and_preserves_user_config() {
     .unwrap();
     let user_mcp_before = bytes(&user_mcp);
 
-    kimi.install(&ctx(home.path(), OLD_BIN)).unwrap();
-
-    let managed_dir = kimi_code_home.join("plugins/managed/tracedecay");
     let installed_path = kimi_code_home.join("plugins/installed.json");
-
-    // A user-disabled registry entry keeps its flag through the refresh.
-    let mut installed = read_json(&installed_path);
-    installed["plugins"][0]["enabled"] = json!(false);
+    std::fs::create_dir_all(installed_path.parent().unwrap()).unwrap();
+    let installed = json!({
+        "version": 1,
+        "plugins": [{
+            "id": "tracedecay",
+            "enabled": false,
+            "installedAt": "2020-01-01T00:00:00Z"
+        }]
+    });
     std::fs::write(
         &installed_path,
         serde_json::to_string_pretty(&installed).unwrap(),
     )
     .unwrap();
-    let entry_before = read_json(&installed_path)["plugins"][0].clone();
+    let registry_before = bytes(&installed_path);
 
-    let outcome = kimi.update_plugin(&ctx(home.path(), NEW_BIN)).unwrap();
-    let UpdatePluginOutcome::Refreshed(paths) = outcome else {
-        panic!("expected kimi update_plugin to refresh the deployed bundle");
-    };
-    assert_eq!(paths, vec![managed_dir.clone()]);
-
-    // User config byte-identical; bundle re-baked with the new bin + version.
+    let error = kimi
+        .update_plugin(&ctx(home.path(), NEW_BIN))
+        .err()
+        .expect("Kimi update must require the official host API")
+        .to_string();
+    assert!(error.contains("interactive `/plugins` host API"));
+    assert!(error.contains("made no Kimi host-state changes"));
     assert_eq!(bytes(&user_mcp), user_mcp_before);
-    let manifest = text(&managed_dir.join(".kimi-plugin/plugin.json"));
+    assert_eq!(bytes(&installed_path), registry_before);
+    assert!(!kimi_code_home.join("plugins/managed/tracedecay").exists());
+
+    let staged = home
+        .path()
+        .join(".tracedecay/host-bundle-stage/kimi/tracedecay");
+    let manifest = text(&staged.join(".kimi-plugin/plugin.json"));
     assert!(manifest.contains(NEW_BIN));
     assert!(manifest.contains(env!("CARGO_PKG_VERSION")));
-
-    // Registry entry refreshed: enabled/installedAt preserved, updatedAt moved.
-    let entry_after = read_json(&installed_path)["plugins"][0].clone();
-    assert_eq!(entry_after["enabled"], json!(false));
-    assert_eq!(entry_after["installedAt"], entry_before["installedAt"]);
-    assert!(
-        entry_after["updatedAt"].as_str().unwrap() >= entry_before["updatedAt"].as_str().unwrap(),
-        "update_plugin must not move updatedAt backwards: {entry_after}"
-    );
 }
 
 #[test]

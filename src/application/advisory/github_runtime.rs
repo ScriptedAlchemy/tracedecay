@@ -32,12 +32,14 @@ use super::{GitHubReadOnlyTransport, GitHubRestDescriptorV1, context_allows_feed
 
 pub(crate) use access::ConfiguredGitHubSourceAccessAuthorityV1;
 pub use anchors::{
+    GitHubReviewBodyEvidenceAuthorityV1, GitHubReviewBodyEvidenceV1, GitHubReviewBodyReadOutcomeV1,
     ProjectGitHubAnchorAuthorityV1, ProjectGitHubRegistrarAuthoritiesV1,
     github_anchor_authorities_arc_v1, github_anchor_authorities_v1,
 };
 pub use decoder::{
     GitHubCanonicalReviewAnchorAuthorityV1, GitHubCanonicalReviewAnchorsV1,
     GitHubOfficialResponseDecoderV1, GitHubReviewAnchorSeedV1, GitHubReviewProviderIdentityV1,
+    MAX_GITHUB_REVIEW_BODY_BYTES_V1,
 };
 pub(crate) use discovery::{
     GitHubExactCommitDiscoveryOutcomeV1, GitHubExactCommitPullRequestV1,
