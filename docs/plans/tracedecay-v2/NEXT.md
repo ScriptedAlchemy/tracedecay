@@ -164,11 +164,14 @@ unverified.
    reauthorizes each retention transaction; exact registry relink/retirement,
    durable incident-debris quarantine/collection, and real stale-branch and
    retention-backlog Doctor sources are wired.
-   `SqliteStoreSizeTelemetryPort` implements `StoreSizeTelemetryPort` through
-   the retained read-only SQLite health reader; Doctor consumes its store-size
-   and `dbstat` table-growth reads. That product path does not validate
-   historical ad hoc per-table byte estimates. Owner-configured soft budgets
-   remain inert when absent.)*
+   `SqliteStoreSizeTelemetryPort` at
+   `crates/tracedecay-rusqlite-runtime/src/telemetry/store_size.rs` implements
+   `StoreSizeTelemetryPort` through the retained read-only SQLite health
+   reader. The dashboard exposes per-store size/free ratio and whole-store
+   history; the daemon Doctor kernel emits `dbstat` table-growth samples only
+   as tracing. They are not Doctor findings, dashboard payloads, or CLI Doctor
+   output, so this path does not validate historical ad hoc per-table byte
+   estimates. Owner-configured soft budgets remain inert when absent.)*
 7. Run focused crate tests, all-feature workspace checks, release builds,
    package/install checks, and normal Linux/macOS/Windows CI. *(Ongoing. The
    SQLite session-store parity harness proves 27 session-store tables across
