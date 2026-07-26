@@ -2350,6 +2350,45 @@
       "description": "Strongly typed algorithm-tagged integrity digest: `LocatorDigest`.",
       "type": "string"
     },
+    "LoomFileSessionProjectionV1": {
+      "properties": {
+        "authority": {
+          "type": "string"
+        },
+        "eligible_sessions": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "granularity": {
+          "type": "string"
+        },
+        "matched_sessions": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "providers": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "sessions": {
+          "items": true,
+          "type": "array"
+        }
+      },
+      "required": [
+        "granularity",
+        "authority",
+        "providers",
+        "eligible_sessions",
+        "matched_sessions",
+        "sessions"
+      ],
+      "type": "object"
+    },
     "ManifestDigest": {
       "description": "Strongly typed algorithm-tagged integrity digest: `ManifestDigest`.",
       "type": "string"
@@ -2384,6 +2423,36 @@
         "kind",
         "file_path",
         "start_line"
+      ],
+      "type": "object"
+    },
+    "NodeSessionsMeasurementV1": {
+      "properties": {
+        "available_granularities": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "linkage": {
+          "$ref": "#/$defs/LoomFileSessionProjectionV1"
+        },
+        "node": {
+          "$ref": "#/$defs/NodeRefV1"
+        },
+        "symbol_granularity_available": {
+          "type": "boolean"
+        },
+        "symbol_granularity_reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "node",
+        "linkage",
+        "available_granularities",
+        "symbol_granularity_available",
+        "symbol_granularity_reason"
       ],
       "type": "object"
     },
@@ -4018,6 +4087,70 @@
         }
       ]
     },
+    "StructureReadV15": {
+      "oneOf": [
+        {
+          "properties": {
+            "measurement": {
+              "$ref": "#/$defs/NodeSessionsMeasurementV1"
+            },
+            "status": {
+              "const": "measured",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "measurement"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "detail": {
+              "type": "string"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "status": {
+              "const": "unmeasured",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "reason",
+            "detail"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "detail": {
+              "type": "string"
+            },
+            "retryable": {
+              "type": "boolean"
+            },
+            "status": {
+              "const": "failed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "status",
+            "code",
+            "detail",
+            "retryable"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "TestMapMeasurementV1": {
       "properties": {
         "algorithm": {
@@ -4401,6 +4534,9 @@
     "graph_fact_matches": {
       "$ref": "#/$defs/StructureReadV13"
     },
+    "graph_node_sessions": {
+      "$ref": "#/$defs/StructureReadV15"
+    },
     "graph_strata": {
       "$ref": "#/$defs/StructureReadV12"
     },
@@ -4427,7 +4563,8 @@
     "graph_call_chain",
     "graph_strata",
     "graph_fact_matches",
-    "graph_test_map"
+    "graph_test_map",
+    "graph_node_sessions"
   ],
   "schemaRevision": 1,
   "title": "DashboardContractCatalogV1",

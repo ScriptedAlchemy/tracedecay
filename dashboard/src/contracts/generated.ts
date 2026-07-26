@@ -736,6 +736,16 @@ export type IncomingCallEdgeV1 = z.infer<typeof IncomingCallEdgeV1Schema>;
 export const LocatorDigestSchema = z.string();
 export type LocatorDigest = z.infer<typeof LocatorDigestSchema>;
 
+export const LoomFileSessionProjectionV1Schema = z.object({
+  authority: z.string(),
+  eligible_sessions: z.number().int(),
+  granularity: z.string(),
+  matched_sessions: z.number().int(),
+  providers: z.array(z.string()),
+  sessions: z.array(z.unknown()),
+});
+export type LoomFileSessionProjectionV1 = z.infer<typeof LoomFileSessionProjectionV1Schema>;
+
 /** Strongly typed algorithm-tagged integrity digest: `ManifestDigest`. */
 export const ManifestDigestSchema = z.string();
 export type ManifestDigest = z.infer<typeof ManifestDigestSchema>;
@@ -749,6 +759,15 @@ export const NodeRefV1Schema = z.object({
   start_line: z.number().int(),
 });
 export type NodeRefV1 = z.infer<typeof NodeRefV1Schema>;
+
+export const NodeSessionsMeasurementV1Schema = z.object({
+  available_granularities: z.array(z.string()),
+  linkage: z.lazy(() => LoomFileSessionProjectionV1Schema),
+  node: z.lazy(() => NodeRefV1Schema),
+  symbol_granularity_available: z.boolean(),
+  symbol_granularity_reason: z.string(),
+});
+export type NodeSessionsMeasurementV1 = z.infer<typeof NodeSessionsMeasurementV1Schema>;
 
 /** Bounded work accounting supplied by an owning port or transaction. */
 export const OperationBudgetUsageSchema = z.object({
@@ -1208,6 +1227,21 @@ export const StructureReadV14Schema = z.discriminatedUnion("status", [z.object({
 })]);
 export type StructureReadV14 = z.infer<typeof StructureReadV14Schema>;
 
+export const StructureReadV15Schema = z.discriminatedUnion("status", [z.object({
+  code: z.string(),
+  detail: z.string(),
+  retryable: z.boolean(),
+  status: z.literal("failed"),
+}), z.object({
+  measurement: z.lazy(() => NodeSessionsMeasurementV1Schema),
+  status: z.literal("measured"),
+}), z.object({
+  detail: z.string(),
+  reason: z.string(),
+  status: z.literal("unmeasured"),
+})]);
+export type StructureReadV15 = z.infer<typeof StructureReadV15Schema>;
+
 export const TestMapMeasurementV1Schema = z.object({
   algorithm: z.string(),
   applicable: z.boolean(),
@@ -1444,8 +1478,12 @@ export const HostKindSchema = HostKindV1Schema;
 export type HostKind = HostKindV1;
 export const IncomingCallEdgeSchema = IncomingCallEdgeV1Schema;
 export type IncomingCallEdge = IncomingCallEdgeV1;
+export const LoomFileSessionProjectionSchema = LoomFileSessionProjectionV1Schema;
+export type LoomFileSessionProjection = LoomFileSessionProjectionV1;
 export const NodeRefSchema = NodeRefV1Schema;
 export type NodeRef = NodeRefV1;
+export const NodeSessionsMeasurementSchema = NodeSessionsMeasurementV1Schema;
+export type NodeSessionsMeasurement = NodeSessionsMeasurementV1;
 export const ProtectedRefDispositionSchema = ProtectedRefDispositionV1Schema;
 export type ProtectedRefDisposition = ProtectedRefDispositionV1;
 export const ProtectedRefRuleSchema = ProtectedRefRuleV1Schema;
