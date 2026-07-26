@@ -60,7 +60,7 @@ use crate::query::retrieval::graph::{
     production_code_index_freshness,
 };
 use crate::query::retrieval::hydrate::{
-    DeterministicLateHydration, HydrationAuthorizationV1, HydrationPreflightOutcomeV1,
+    CanonicalLateHydration, HydrationAuthorizationV1, HydrationPreflightOutcomeV1,
     HydrationReadOutcomeV1, HydrationUnavailableV1, HydrationWorkPermitV1, LateHydrationSource,
 };
 use crate::query::retrieval::lexical::{
@@ -2224,7 +2224,7 @@ fn measure_late_hydration(
         source_fetches: 0,
     };
     let started = Instant::now();
-    let page = DeterministicLateHydration::new(&mut source)
+    let page = CanonicalLateHydration::new(&mut source)
         .hydrate(request, ranked, budget)
         .map_err(|error| CandidateOutputError::Contract(error.to_string()))?;
     let bytes_hydrated = page
@@ -2498,6 +2498,7 @@ fn publish_corpus_with_scale(
                 captured.push(CodeIndexCapturedFileV1 {
                     file_occurrence_id,
                     sanitized_bytes: bytes,
+                    sensitivity_level: tracedecay_domain::SensitivityLevelV1::Public,
                 });
             }
         }
@@ -2980,6 +2981,7 @@ fn prove_cancellation(
     captured.push(CodeIndexCapturedFileV1 {
         file_occurrence_id,
         sanitized_bytes: bytes.clone(),
+        sensitivity_level: tracedecay_domain::SensitivityLevelV1::Public,
     });
     let snapshot = SanitizedCodeSnapshotV1 {
         repository: id::<RepositoryId>("repository.candidate.cancel")?,
@@ -3576,6 +3578,7 @@ mod tests {
 
         let mut missing = workload();
         missing.queries.retain(|query| query.partition == "train");
+        missing.execution_contract.exact_query_count = missing.queries.len() as u64;
         let error = validate_workload_for_tuning(&missing).expect_err("empty validation partition");
         assert!(
             error

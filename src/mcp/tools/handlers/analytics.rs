@@ -153,9 +153,9 @@ const TIERS: &[(&str, &[&str])] = &[
     ("admin", ADMIN_TOOLS),
 ];
 
-fn config_error(message: impl Into<String>) -> TraceDecayError {
+fn config_error(message: impl std::fmt::Display) -> TraceDecayError {
     TraceDecayError::Config {
-        message: message.into(),
+        message: message.to_string(),
     }
 }
 
@@ -297,6 +297,12 @@ pub(super) async fn handle_analytics(
         since,
     )
     .await;
+    let observatory = crate::application::observability::observatory_mcp_value(&observatory)
+        .map_err(config_error)?;
+    let costs =
+        crate::application::observability::costs_read_model(gdb, scope.filter.as_deref(), since)
+            .await;
+    let costs = crate::application::observability::costs_mcp_value(&costs).map_err(config_error)?;
 
     let mut value = json!({
         "status": "ok",
@@ -308,6 +314,7 @@ pub(super) async fn handle_analytics(
         "event_count": event_count,
         "event_count_truncated": false,
         "observatory": observatory,
+        "costs": costs,
     });
 
     if wants_section(section, "tools") {

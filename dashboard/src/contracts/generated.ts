@@ -185,18 +185,22 @@ export type CapabilityId = z.infer<typeof CapabilityIdSchema>;
 
 export const CodeIndexFreshnessPayloadV1Schema = z.object({
   note: z.string(),
-  required_source: z.string(),
   worktrees: z.array(z.lazy(() => CodeIndexWorktreeFreshnessV1Schema)),
 });
 export type CodeIndexFreshnessPayloadV1 = z.infer<typeof CodeIndexFreshnessPayloadV1Schema>;
 
-/** Freshness/generation state for one mounted worktree. Unpopulated until the
-scheduler-registry read port is wired into the dashboard state. */
+/** Freshness/generation state for one mounted worktree. */
 export const CodeIndexWorktreeFreshnessV1Schema = z.object({
+  coverage: z.string(),
   hook_hint_count: z.number().int().nullable(),
   last_reconcile_micros: z.number().int().nullable(),
   latest_generation_id: z.string().nullable(),
+  repository_id: z.string().nullable(),
+  sealed_at_micros: z.number().int().nullable(),
+  snapshot_content_identity: z.string().nullable(),
+  source_reference: z.string().nullable(),
   staleness_state: z.string().nullable(),
+  worktree_id: z.string().nullable(),
   worktree_root: z.string(),
 });
 export type CodeIndexWorktreeFreshnessV1 = z.infer<typeof CodeIndexWorktreeFreshnessV1Schema>;
@@ -1077,6 +1081,11 @@ export const StorageTelemetryReadV1Schema = z.discriminatedUnion("kind", [z.obje
 }), z.object({
   kind: z.literal("observed"),
   sample: z.lazy(() => StoreSizeSampleV1Schema),
+}), z.object({
+  kind: z.literal("observed_bytes"),
+  observed_at: z.lazy(() => UtcMicrosSchema),
+  store: z.lazy(() => StoreKeyV1Schema),
+  total_bytes: z.lazy(() => StorageByteSizeV1Schema),
 }), z.object({
   kind: z.literal("unknown"),
   store: z.lazy(() => StoreKeyV1Schema),
