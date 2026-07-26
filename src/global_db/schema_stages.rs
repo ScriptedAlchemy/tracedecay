@@ -304,17 +304,19 @@ pub(crate) async fn ensure_registered_schema(conn: &Connection) -> crate::errors
     observation_projection::prepare_projection_version_migration_with_engine(conn)
         .await
         .map_err(|error| global_db_operation_error("prepare observation projection", error))?;
-
-    let transaction = conn
-        .transaction_with_behavior(TransactionBehavior::Immediate)
+    observation_projection::converge_session_project_paths(conn)
         .await
-        .map_err(|error| {
-            global_db_operation_error("begin observation authority validation", error)
-        })?;
-    ensure_authority_invariants(&transaction, force_exhaustive, is_fresh).await?;
-    transaction.commit().await.map_err(|error| {
-        global_db_operation_error("commit observation authority validation", error)
-    })
+        .map_err(|error| global_db_operation_error("converge session project paths", error))?;
+
+    // The invariant pass pages historical authority rows and can legitimately
+    // outlive the runtime's ordinary transaction lease on a large store. The
+    // schema transaction above has already installed and validated its guard
+    // triggers, and this runtime is not published until open completes, so no
+    // concurrent authorized writer can race the pass. Run each bounded query
+    // and idempotent repair through the connection instead: completed repairs
+    // survive interruption, while the trusted checkpoint is still written only
+    // after every audit succeeds.
+    ensure_authority_invariants(conn, force_exhaustive, is_fresh).await
 }
 
 async fn table_exists(conn: &impl QueryExecutor, table: &str) -> crate::errors::Result<bool> {
@@ -348,4 +350,80 @@ pub(crate) async fn finish_observation_authority_canonical_repair(
     conn: &impl Executor,
 ) -> crate::errors::Result<()> {
     restore_immutability_after_canonical_repair(conn).await
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::TempDir;
+
+    use super::ensure_registered_schema;
+    use crate::db::engine::TestConnection;
+
+    #[tokio::test]
+    async fn late_audit_failure_preserves_completed_idempotent_repairs() {
+        let directory = TempDir::new().unwrap();
+        let database_path = directory.path().join("sessions.db");
+        {
+            let connection = TestConnection::open(&database_path);
+            ensure_registered_schema(&connection)
+                .await
+                .expect("initialize authority schema");
+        }
+        {
+            let connection = rusqlite::Connection::open(&database_path).unwrap();
+            connection
+                .execute_batch(
+                    "PRAGMA foreign_keys = OFF;
+                 DROP TRIGGER IF EXISTS projection_queue_identity_insert_v1;
+                 DROP TRIGGER IF EXISTS session_query_cursor_keys_insert_guard_v1;
+                 DROP TRIGGER IF EXISTS session_query_cursor_keys_retire_update_v1;
+                 DROP TRIGGER IF EXISTS session_query_cursor_keys_rotate_insert_v1;
+                 INSERT INTO projection_queue(observation_id, observation_sequence)
+                 VALUES ('orphaned-observation', 1);
+                 INSERT INTO session_query_cursor_keys (
+                    key_id, key_version, key_material, created_at, retired_at
+                 ) VALUES
+                    ('cursor-a', 1, X'01', 100, NULL),
+                    ('cursor-b', 2, X'02', 200, NULL);
+                 DELETE FROM authority_audit_checkpoints;",
+                )
+                .expect("seed a repair followed by a late audit failure");
+        }
+
+        let connection = TestConnection::open(&database_path);
+        let error = ensure_registered_schema(&connection)
+            .await
+            .expect_err("corrupt cursor keys must fail the exhaustive audit");
+        assert!(
+            error
+                .to_string()
+                .contains("session cursor key rotation state is invalid"),
+            "unexpected audit failure: {error}"
+        );
+
+        let mut rows = connection
+            .query("SELECT COUNT(*) FROM projection_queue", ())
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+            0,
+            "an idempotent repair completed before a later audit failure must remain committed"
+        );
+        drop(rows);
+        let mut rows = connection
+            .query(
+                "SELECT bounded_passes_since_exhaustive
+                 FROM authority_audit_checkpoints
+                 WHERE audit_name = 'observation-authority'",
+                (),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+            -1,
+            "validated exhaustive-audit frontiers must remain resumable after a late failure"
+        );
+    }
 }
