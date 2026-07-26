@@ -69,6 +69,8 @@ pub async fn ingest_project_analytics_events(
             session_id: None,
             event_kind: None,
             since: None,
+            until: None,
+            before_id: None,
             limit,
         })
         .await

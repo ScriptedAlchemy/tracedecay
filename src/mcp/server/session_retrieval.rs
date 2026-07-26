@@ -109,7 +109,7 @@ impl DaemonSessionRetrievalRoot {
         }
         let (store_id, graph_scope_id) = selected?;
 
-        let project_key = ProjectId::new(context.project.canonical_root.clone()).ok()?;
+        let project_key = ProjectId::new(context.project.project_id.clone()).ok()?;
         let repository_id = context
             .project
             .git_common_dir
@@ -659,6 +659,46 @@ impl DaemonSessionRetrievalService {
                     && hydrated.state() == HydrationStateV1::Available
             })?
             .content()?;
+        if ranked.evidence_role.as_deref() == Some("summary") {
+            let provider = ranked.source.as_deref()?;
+            let session_id = ranked.session.as_deref()?;
+            let summary_id = ranked
+                .contributions
+                .iter()
+                .find(|contribution| {
+                    contribution.channel
+                        == crate::query::temporal::candidates::CandidateChannel::Summary
+                })?
+                .retriever_record_id
+                .clone();
+            let text = std::str::from_utf8(content).ok()?.to_string();
+            let session = registered_session(self.database.as_ref(), provider, session_id).await?;
+            return Some(SessionMessageSearchResult {
+                session,
+                message: crate::sessions::SessionMessageRecord {
+                    provider: provider.to_string(),
+                    message_id: summary_id,
+                    session_id: session_id.to_string(),
+                    role: "summary".to_string(),
+                    timestamp: Some(ranked.knowledge_at_micros),
+                    ordinal: 0,
+                    text,
+                    kind: Some("summary".to_string()),
+                    model: None,
+                    tool_names: None,
+                    source_path: None,
+                    source_offset: None,
+                    metadata_json: Some(
+                        json!({
+                            "retrieval_anchor_id": ranked.anchor_id,
+                            "retrieval_kind": "summary_node",
+                        })
+                        .to_string(),
+                    ),
+                },
+                score: ranked.normalized_score_micros as f64 / 1_000_000.0,
+            });
+        }
         let message = self
             .registered_execution()
             .ok()?

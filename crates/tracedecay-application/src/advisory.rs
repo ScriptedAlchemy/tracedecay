@@ -126,6 +126,7 @@ impl AdvisoryFindingContributorV1 for GitHubReviewIngressResultV1 {
                             severity: DiagnosticSeverityV1::Information,
                             safe_bounded_message: "Unresolved GitHub review comment".to_owned(),
                             producer: FeedbackDiagnosticProducerV1::GitHubReview,
+                            code_description_uri: item.safe_url.clone(),
                         })
                     }),
             });
@@ -179,6 +180,7 @@ impl AdvisoryFindingContributorV1 for CiFailureLocalizationResultV1 {
                         severity: DiagnosticSeverityV1::Error,
                         safe_bounded_message: "CI failure localized to this symbol".to_owned(),
                         producer: FeedbackDiagnosticProducerV1::CiLocalization,
+                        code_description_uri: None,
                     }),
             }],
         )
@@ -229,6 +231,7 @@ impl AdvisoryFindingContributorV1 for ProximityContributionV1 {
                         safe_bounded_message: "Concurrent agent activity overlaps this code"
                             .to_owned(),
                         producer: FeedbackDiagnosticProducerV1::Proximity,
+                        code_description_uri: None,
                     })
                 }),
             }],

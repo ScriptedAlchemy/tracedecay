@@ -478,13 +478,8 @@ impl ProductionProximityEvidenceAuthorityV1 {
             {
                 partial = true;
             }
-            let warning_class = if exact_address.is_some()
-                && candidate.warning_class == ProximityWarningClassV1::SameFile
-            {
-                ProximityWarningClassV1::SameSymbol
-            } else {
-                candidate.warning_class
-            };
+            let warning_class =
+                exact_warning_class(candidate.warning_class, exact_address.is_some());
             let relation_anchor = selected
                 .first()
                 .map(|observation| observation.anchor.clone());
@@ -780,6 +775,17 @@ fn exact_graph_address(
     Some((span, SymbolOccurrenceId::new(candidate.id.clone()).ok()?))
 }
 
+const fn exact_warning_class(
+    candidate: ProximityWarningClassV1,
+    has_exact_current_symbol: bool,
+) -> ProximityWarningClassV1 {
+    match (candidate, has_exact_current_symbol) {
+        (ProximityWarningClassV1::SameFile, true) => ProximityWarningClassV1::SameSymbol,
+        (ProximityWarningClassV1::SameSymbol, false) => ProximityWarningClassV1::SameFile,
+        _ => candidate,
+    }
+}
+
 fn resolve_edit_range_symbol<'a>(
     source_path: &Path,
     edit_range: &SourceSpan,
@@ -1021,6 +1027,14 @@ mod tests {
             .is_none()
         );
         assert!(exact_graph_address(root.path(), "src/lib.rs", &nodes, &[&[], &[]]).is_none());
+        assert_eq!(
+            exact_warning_class(ProximityWarningClassV1::SameFile, true),
+            ProximityWarningClassV1::SameSymbol
+        );
+        assert_eq!(
+            exact_warning_class(ProximityWarningClassV1::SameSymbol, false),
+            ProximityWarningClassV1::SameFile
+        );
     }
 
     #[test]
