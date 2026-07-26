@@ -1562,6 +1562,25 @@ impl McpServer {
         }
     }
 
+    async fn publish_tool_call_activity(&self, tool_name: &str) {
+        if !crate::application::event_lane::enabled(self.session_db.as_deref()) {
+            return;
+        }
+        let Some(activity_db) = self.session_db.as_deref() else {
+            return;
+        };
+        let cg = self.cg_snapshot().await;
+        crate::application::event_lane::publish(
+            activity_db,
+            crate::application::event_lane::ActivityFamilyV1::ToolCall,
+            cg.project_root(),
+            cg.store_layout().identity.project_id.as_deref(),
+            1,
+            Some(tool_name),
+        )
+        .await;
+    }
+
     /// Handles the `tools/call` method, dispatching to the appropriate tool handler.
     pub(crate) async fn handle_tools_call(
         &self,
@@ -1583,23 +1602,7 @@ impl McpServer {
             Err(response) => return response,
         };
 
-        // Durable activity record: one per dispatched tool call, scoped to the
-        // project this server serves. Gate the snapshot read when no profile
-        // event authority can be mounted.
-        if crate::application::event_lane::enabled(self.session_db.as_deref())
-            && let Some(activity_db) = self.session_db.as_deref()
-        {
-            let cg = self.cg_snapshot().await;
-            crate::application::event_lane::publish(
-                activity_db,
-                crate::application::event_lane::ActivityFamilyV1::ToolCall,
-                cg.project_root(),
-                cg.store_layout().identity.project_id.as_deref(),
-                1,
-                Some(&tool_name),
-            )
-            .await;
-        }
+        self.publish_tool_call_activity(&tool_name).await;
 
         let dispatch = self
             .dispatch_tool_call(

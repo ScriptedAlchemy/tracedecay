@@ -18,10 +18,7 @@ use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionT
 use tracedecay::errors::TraceDecayError;
 use tracedecay::mcp::{McpServer, McpTransport, ToolResult};
 use tracedecay::sessions::{SessionMessageRecord, SessionRecord};
-use tracedecay::storage::{
-    default_profile_root, resolve_layout_for_current_profile, resolve_lcm_payload_root,
-    resolve_response_handle_root,
-};
+use tracedecay::storage::default_profile_root;
 use tracedecay::tracedecay::TraceDecay;
 use tracedecay_domain::{
     CanonicalMessageRoleV1, CanonicalObservationEnvelopeV1, CanonicalObservationEvidenceV1,
@@ -209,31 +206,32 @@ pub(crate) async fn handle_tool_call(
     #[cfg(feature = "test-transport")]
     if matches!(
         tool_name,
-        "tracedecay_message_search"
-            | "tracedecay_lcm_load_session"
-            | "tracedecay_lcm_grep"
-            | "tracedecay_lcm_describe"
-            | "tracedecay_lcm_expand"
-            | "tracedecay_lcm_expand_query"
-    ) {
+        "tracedecay_message_search" | "tracedecay_session_start" | "tracedecay_session_end"
+    ) || tool_name.starts_with("tracedecay_lcm_")
+    {
         let session_db_path = project_session_db_path(cg);
-        let server = if session_db_path.is_file() {
-            let runtime = open_active_project_session_db(cg).await;
-            let server = McpServer::new_with_host_admission_test_runtime_for_test(
-                TraceDecay::open(cg.project_root()).await?,
-                None,
-                runtime,
+        if !session_db_path.is_file() {
+            return tracedecay::mcp::handle_tool_call(
+                cg,
+                tool_name,
+                args,
+                server_stats,
+                scope_prefix,
             )
             .await;
-            if !server.has_project_session_retrieval_service_for_test() {
-                return Err(TraceDecayError::Config {
-                    message: format!("{tool_name} project retrieval service was not constructed"),
-                });
-            }
-            server
-        } else {
-            McpServer::new(TraceDecay::open(cg.project_root()).await?, None).await
-        };
+        }
+        let runtime = open_active_project_session_db(cg).await;
+        let server = McpServer::new_with_host_admission_test_runtime_for_test(
+            TraceDecay::open(cg.project_root()).await?,
+            None,
+            runtime,
+        )
+        .await;
+        if !server.has_project_session_retrieval_service_for_test() {
+            return Err(TraceDecayError::Config {
+                message: format!("{tool_name} project retrieval service was not constructed"),
+            });
+        }
         let request = json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -748,25 +746,19 @@ pub(crate) async fn setup_cross_project_memory_projects()
 }
 
 pub(crate) fn project_data_dir(cg: &TraceDecay) -> PathBuf {
-    resolve_layout_for_current_profile(cg.project_root())
-        .unwrap_or_else(|err| panic!("failed to resolve test project storage layout: {err}"))
-        .data_root
+    cg.store_layout().data_root.clone()
 }
 
 pub(crate) fn project_graph_db(cg: &TraceDecay) -> PathBuf {
-    resolve_layout_for_current_profile(cg.project_root())
-        .unwrap_or_else(|err| panic!("failed to resolve test project storage layout: {err}"))
-        .graph_db_path
+    cg.store_layout().graph_db_path.clone()
 }
 
 pub(crate) fn response_handle_dir(cg: &TraceDecay) -> PathBuf {
-    resolve_response_handle_root(cg.project_root())
-        .unwrap_or_else(|err| panic!("failed to resolve test response handle root: {err}"))
+    cg.store_layout().response_handle_root.clone()
 }
 
 pub(crate) fn lcm_payload_dir(cg: &TraceDecay) -> PathBuf {
-    resolve_lcm_payload_root(cg.project_root())
-        .unwrap_or_else(|err| panic!("failed to resolve test LCM payload root: {err}"))
+    cg.store_layout().lcm_payload_root.clone()
 }
 
 pub(crate) fn project_session_db_path(cg: &TraceDecay) -> PathBuf {

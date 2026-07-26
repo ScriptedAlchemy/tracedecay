@@ -753,17 +753,18 @@ impl McpServer {
         let project_session_retrieval_root = match registry_db.as_deref() {
             Some(registry) => DaemonSessionRetrievalRoot::project(&cg, registry).await,
             None => None,
-        }
-        .and_then(|root| match profile_identity.as_ref() {
-            Some(identity) => root.with_project_runtime_shard(identity),
-            None => Some(root),
-        });
+        };
         #[cfg(any(test, feature = "test-transport"))]
         let project_session_retrieval_root = project_session_retrieval_root.or_else(|| {
             session_db
                 .as_ref()
                 .map(|_| DaemonSessionRetrievalRoot::project_for_test(&cg))
         });
+        let project_session_retrieval_root =
+            project_session_retrieval_root.and_then(|root| match profile_identity.as_ref() {
+                Some(identity) => root.with_project_runtime_shard(identity),
+                None => Some(root),
+            });
         let profile_session_retrieval_root =
             DaemonSessionRetrievalRoot::profile().and_then(|root| {
                 match profile_identity.as_ref() {
