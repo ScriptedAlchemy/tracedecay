@@ -12,7 +12,9 @@ use rusqlite::{Connection, Transaction};
 use tracedecay_application::{
     CancellationContext, CapabilityGrantId, CapabilityGrantSnapshot, Deadline, DisclosureClass,
     RequestContext, RequestId, ResolvedScope,
-    storage::{StorageTelemetryReadV1, StoreKeyV1, StoreSizeTelemetryPort},
+    storage::{
+        StorageTelemetryReadV1, StoreKeyV1, StoreSizeTelemetryPort, TableGrowthTelemetryReadV1,
+    },
 };
 use tracedecay_domain::{ActorId, ManifestDigest, ProjectId, RepositoryId, UtcMicros, WorktreeId};
 use tracedecay_store::{
@@ -302,11 +304,17 @@ fn application_telemetry_port_compares_table_payload_watermarks() {
         .build()
         .unwrap();
 
+    let baseline =
+        runtime.block_on(port.table_growth(&context, &StoreKeyV1::new("reader.db").unwrap()));
     assert!(
-        runtime
-            .block_on(port.table_growth(&context, &StoreKeyV1::new("reader.db").unwrap()))
-            .is_empty(),
-        "the first read establishes a baseline"
+        matches!(
+            baseline,
+            TableGrowthTelemetryReadV1::BaselineEstablished {
+                tables_observed,
+                ..
+            } if tables_observed > 0
+        ),
+        "the first read must report baseline establishment, got {baseline:?}"
     );
     let connection = Connection::open(&store.path).unwrap();
     for value in 0..256 {
@@ -317,11 +325,45 @@ fn application_telemetry_port_compares_table_payload_watermarks() {
 
     let growth =
         runtime.block_on(port.table_growth(&context, &StoreKeyV1::new("reader.db").unwrap()));
-    let markers = growth
+    let TableGrowthTelemetryReadV1::Observed { samples, .. } = growth else {
+        panic!("the second read must compare table watermarks");
+    };
+    let markers = samples
         .iter()
         .find(|sample| sample.table.as_str() == "markers")
         .expect("markers growth sample");
     assert!(markers.current_bytes > markers.previous_bytes);
+}
+
+#[test]
+fn application_telemetry_port_reports_denied_table_growth_without_zero() {
+    let store = TestStore::new();
+    let pool = ReaderPool::start(
+        store.locator(),
+        AdmissionConfigV1::default().readers,
+        CountExecutor,
+    )
+    .unwrap();
+    let scope = telemetry_scope();
+    let context = telemetry_context(scope.clone());
+    let port = SqliteStoreSizeTelemetryPort::new(
+        crate::migration_sql::MigrationSqlHandle::attach_read_only(&pool),
+        StoreKeyV1::new("reader.db").unwrap(),
+        scope,
+        Duration::from_millis(100),
+    );
+
+    let read = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap()
+        .block_on(port.table_growth(&context, &StoreKeyV1::new("other.db").unwrap()));
+
+    assert_eq!(
+        read,
+        TableGrowthTelemetryReadV1::Denied {
+            store: StoreKeyV1::new("other.db").unwrap(),
+        }
+    );
 }
 
 #[test]

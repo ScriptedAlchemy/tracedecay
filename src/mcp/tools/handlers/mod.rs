@@ -1296,6 +1296,7 @@ async fn dispatch_health_tools(
                 args.clone(),
                 options.global_db,
                 active_project_session_db.map(Arc::as_ref),
+                options.doctor_report_reader.as_ref(),
             )
             .await
         }
