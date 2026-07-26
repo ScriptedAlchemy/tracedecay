@@ -98,6 +98,11 @@ impl TraceDecay {
         open_options: &TraceDecayOpenOptions,
     ) -> Result<Arc<crate::application::host_admission::HostAdmissionTestRuntimeV1>> {
         let profile_root = open_options.resolved_profile_root()?;
+        if !crate::db::is_isolated_test_path(project_root)
+            || !crate::db::is_isolated_test_path(&profile_root)
+        {
+            return Err(configuration_runtime_unavailable());
+        }
         let project_id = storage::read_enrollment_marker(project_root)?
             .map(|marker| marker.project_id)
             .unwrap_or_else(|| storage::default_profile_project_id(project_root));
@@ -520,7 +525,7 @@ impl TraceDecay {
         .await
     }
 
-    pub(super) async fn registered_enrollment_roots(
+    pub(crate) async fn registered_enrollment_roots(
         project_root: &Path,
         store_layout: &StoreLayout,
         project_id: &ProjectId,

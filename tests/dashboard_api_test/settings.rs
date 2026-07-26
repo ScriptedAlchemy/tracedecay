@@ -295,6 +295,11 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
         );
         let upload_only = upload_only_envelope["payload"].clone();
         assert_eq!(upload_only["restart_recommended"], false);
+        let final_user_revision = upload_only["user"]["user_settings_revision_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("upload mutation omitted revision: {upload_only}"))
+            .to_owned();
+        assert_ne!(final_user_revision, next_user_revision);
 
         let (status, absent_user_revision) =
             patch_json_body(&agent, &user_url, &json!({ "upload_enabled": false }));
@@ -311,7 +316,7 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
             &agent,
             &user_url,
             &json!({
-                "expected_revision_id": next_user_revision,
+                "expected_revision_id": final_user_revision,
                 "watcher_debounce": "1h"
             }),
         );

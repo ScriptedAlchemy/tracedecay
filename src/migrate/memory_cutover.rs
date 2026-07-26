@@ -323,43 +323,16 @@ pub fn verify_branch_removal_receipts(
 }
 
 fn branch_has_no_durable_memory(path: &Path) -> bool {
-    let wal = PathBuf::from(format!("{}-wal", path.display()));
-    if fs::metadata(&wal).is_ok_and(|metadata| metadata.len() > 0) {
-        return false;
-    }
-    let Ok(connection) = rusqlite::Connection::open_with_flags(
+    crate::sqlite_read_snapshot::checkpointed_database_has_any_rows(
         path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    ) else {
-        return false;
-    };
-    for table in [
-        "memory_facts",
-        "memory_feedback_events",
-        "memory_oplog",
-        "memory_v2_facts",
-    ] {
-        let exists = connection
-            .query_row(
-                "SELECT EXISTS(
-                     SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1
-                 )",
-                [table],
-                |row| row.get::<_, bool>(0),
-            )
-            .unwrap_or(true);
-        if !exists {
-            continue;
-        }
-        let sql = format!("SELECT EXISTS(SELECT 1 FROM \"{table}\" LIMIT 1)");
-        if connection
-            .query_row(&sql, [], |row| row.get::<_, bool>(0))
-            .unwrap_or(true)
-        {
-            return false;
-        }
-    }
-    true
+        &[
+            "memory_facts",
+            "memory_feedback_events",
+            "memory_oplog",
+            "memory_v2_facts",
+        ],
+    )
+    .is_ok_and(|has_rows| !has_rows)
 }
 
 struct ResolvedMemoryCutover {
