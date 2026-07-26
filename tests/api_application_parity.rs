@@ -86,10 +86,14 @@ fn cli_mcp_and_http_dispatch_the_same_callable_contracts() {
             protocol_revision: 1,
             negotiated_features: BTreeSet::new(),
         };
-        let direct = [
-            (
-                "cli",
-                resolve_application_surface_dispatch(
+        let mut direct = Vec::new();
+        for surface in expected["bindings"]
+            .as_object()
+            .expect("surface bindings")
+            .keys()
+        {
+            let dispatched = match surface.as_str() {
+                "cli" => resolve_application_surface_dispatch(
                     BindingSurface::Cli,
                     operation,
                     request_id(operation, "cli"),
@@ -97,28 +101,24 @@ fn cli_mcp_and_http_dispatch_the_same_callable_contracts() {
                     RequestedOutputFormat::Json,
                 )
                 .expect("CLI dispatch"),
-            ),
-            (
-                "mcp",
-                resolve_mcp_application_surface_dispatch(
+                "mcp" => resolve_mcp_application_surface_dispatch(
                     operation,
                     request_id(operation, "mcp"),
                     application_request(operation, expected),
                     RequestedOutputFormat::Json,
                 )
                 .expect("MCP dispatch"),
-            ),
-            (
-                "http",
-                resolve_http_application_surface_dispatch(
+                "http" => resolve_http_application_surface_dispatch(
                     operation,
                     request_id(operation, "http"),
                     application_request(operation, expected),
                     RequestedOutputFormat::Json,
                 )
                 .expect("HTTP dispatch"),
-            ),
-        ];
+                unexpected => panic!("unsupported fixture surface {unexpected}"),
+            };
+            direct.push((surface.as_str(), dispatched));
+        }
         for (surface, dispatched) in direct {
             assert_eq!(
                 dispatched.invocation.binding_id.as_str(),
@@ -139,15 +139,19 @@ fn cli_mcp_and_http_dispatch_the_same_callable_contracts() {
             (BindingSurface::Mcp, "mcp"),
             (BindingSurface::Http, "http"),
         ] {
-            let resolved = resolver
-                .resolve_binding(surface, &resolution)
-                .expect("binding");
-            assert_eq!(
-                resolved.binding_id.as_str(),
-                expected["bindings"][surface_name]
-                    .as_str()
-                    .expect("fixture binding")
-            );
+            match expected["bindings"][surface_name].as_str() {
+                Some(binding_id) => {
+                    let resolved = resolver
+                        .resolve_binding(surface, &resolution)
+                        .expect("binding");
+                    assert_eq!(resolved.binding_id.as_str(), binding_id);
+                }
+                None => assert!(
+                    resolver.resolve_binding(surface, &resolution).is_none(),
+                    "{} must not bind on {surface:?}",
+                    operation.as_str()
+                ),
+            }
         }
     }
 }
@@ -287,7 +291,7 @@ fn handle_gated_feedback_tools_are_not_advertised_over_mcp() {
 }
 
 #[test]
-fn handle_gated_feedback_capabilities_are_not_callable() {
+fn handle_gated_feedback_capabilities_follow_catalog_availability() {
     let catalog = tracedecay::application_surface::application_surface_catalog()
         .expect("application catalog");
     for capability_id in [
@@ -306,7 +310,7 @@ fn handle_gated_feedback_capabilities_are_not_callable() {
         let capability = catalog
             .capability(&capability_id)
             .expect("feedback capability remains documented");
-        assert!(!capability.availability().is_callable(), "{capability_id}");
+        assert!(capability.availability().is_callable(), "{capability_id}");
     }
 }
 

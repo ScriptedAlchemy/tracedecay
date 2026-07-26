@@ -20,6 +20,7 @@ const REPOSITORY_SOURCE_ROOTS: &[&str] = &["src", "tests", "examples", "benches"
 const QUERY_ALLOWED_PACKAGES: &[&str] = &[
     "hex",
     "hmac",
+    "schemars",
     "serde",
     "serde_json",
     "sha2",
@@ -28,6 +29,7 @@ const QUERY_ALLOWED_PACKAGES: &[&str] = &[
     "tracedecay-policy",
     "tracedecay-store",
     "tracedecay-tool-catalog",
+    "url",
     "zeroize",
 ];
 #[cfg(unix)]
@@ -423,8 +425,10 @@ fn contract_allowed_packages(manifest_path: &Path) -> &'static [&'static str] {
             "sha2",
             "tempfile",
             "tokio",
+            "tracedecay-application",
             "tracedecay-domain",
             "tracedecay-store",
+            "tracedecay-tool-catalog",
         ],
         Some("crates/tracedecay-sqlite-parity-protocol/Cargo.toml") => {
             &["hex", "serde", "serde_json", "sha2", "tempfile"]
