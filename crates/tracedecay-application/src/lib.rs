@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 pub mod advisory;
+pub mod api_migration;
 pub mod authorization;
 pub mod configuration;
 pub mod context;
@@ -28,6 +29,7 @@ pub mod storage;
 mod error;
 
 pub use advisory::*;
+pub use api_migration::*;
 pub use authorization::{
     AuthorizationAdmission, AuthorizationPhase, AuthorizationPort, AuthorizationPortOutcome,
     AuthorizationRequest, AuthorizationService, ConcealedResourceCause, NonDisclosureHooks,
