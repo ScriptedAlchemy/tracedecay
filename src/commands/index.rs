@@ -72,6 +72,12 @@ pub(crate) async fn handle_init(
     include_folders: Vec<String>,
 ) -> tracedecay::errors::Result<()> {
     let project_path = tracedecay::config::resolve_path(path);
+    let profile_root = tracedecay::storage::default_profile_root()?;
+    if let Some(message) =
+        tracedecay::project_registry::ephemeral_root_rejection(&project_path, &profile_root)
+    {
+        return Err(tracedecay::errors::TraceDecayError::Config { message });
+    }
     let handshake = tracedecay::daemon::DaemonHandshake::for_current_client(
         Some(project_path.clone()),
         None,

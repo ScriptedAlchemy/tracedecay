@@ -99,8 +99,11 @@ async fn source_edit_preview_apply_and_retry_use_daemon_owned_cas_authority() {
         None,
         None,
     )
-    .await;
-    assert!(stale_apply.is_err());
+    .await
+    .unwrap();
+    let stale_apply: Value = serde_json::from_str(extract_text(&stale_apply.value)).unwrap();
+    assert_eq!(stale_apply["success"], false);
+    assert_eq!(stale_apply["replayed"], false);
     assert_eq!(fs::read(project.join("src/main.rs")).unwrap(), concurrent);
 }
 
