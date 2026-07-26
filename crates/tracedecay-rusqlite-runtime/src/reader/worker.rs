@@ -144,15 +144,6 @@ impl WorkerClient {
         Ok(())
     }
 
-    pub fn pin(&self, probe: &dyn RuntimeRequestProbeV1) -> Result<(), ReaderWorkerError> {
-        let sender = self.snapshot_sender()?;
-        let (reply, receive) = mpsc::sync_channel(1);
-        sender
-            .send(SnapshotCommand::Pin { reply })
-            .map_err(|_| ReaderWorkerError::WorkerClosed)?;
-        self.receive_with_probe(receive, probe)
-    }
-
     pub fn pin_migration(&self) -> Result<(), MigrationSqlError> {
         let sender = self
             .snapshot_sender()
@@ -454,10 +445,13 @@ fn run_snapshot<E: ReaderQueryExecutor>(
             SnapshotCommand::TableSizes { reply } => {
                 let read = || -> Result<Vec<TableSizeTelemetrySample>, rusqlite::Error> {
                     let mut statement = transaction.prepare(
-                        "SELECT name, SUM(pgsize) \
-                         FROM dbstat \
-                         GROUP BY name \
-                         ORDER BY name",
+                        "SELECT schema_entry.name, COALESCE(SUM(dbstat.payload), 0) \
+                         FROM sqlite_schema AS schema_entry \
+                         LEFT JOIN dbstat ON dbstat.name = schema_entry.name \
+                         WHERE schema_entry.type = 'table' \
+                           AND schema_entry.name NOT LIKE 'sqlite_%' \
+                         GROUP BY schema_entry.name \
+                         ORDER BY schema_entry.name",
                     )?;
                     statement
                         .query_map([], |row| {
