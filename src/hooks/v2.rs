@@ -1230,7 +1230,7 @@ mod tests {
     async fn opencode_lsp_updated_uses_project_scoped_daemon_action() {
         let project = tempfile::tempdir().unwrap();
         let fixture: serde_json::Value = serde_json::from_str(include_str!(
-            "../../crates/tracedecay-hooks/fixtures/host_events/opencode/baseline.json"
+            "../../tests/fixtures/packaged_host_events/opencode/baseline.json"
         ))
         .unwrap();
         let event = fixture["events"]
@@ -1361,9 +1361,8 @@ mod tests {
 
     #[test]
     fn hermes_real_tool_fixture_uses_terminal_receipt_identity() {
-        let fixture = include_str!(
-            "../../crates/tracedecay-hooks/fixtures/host_events/hermes/saved-edit.json"
-        );
+        let fixture =
+            include_str!("../../tests/fixtures/packaged_host_events/hermes/saved-edit.json");
         let material = native_material(
             fixture,
             tracedecay_hooks::HookEventFamily::ToolLifecycle,
@@ -1380,9 +1379,8 @@ mod tests {
 
     #[test]
     fn hermes_adapter_fixture_preserves_native_terminal_identity() {
-        let fixture = include_str!(
-            "../../crates/tracedecay-hooks/fixtures/host_events/hermes/terminal-receipt.json"
-        );
+        let fixture =
+            include_str!("../../tests/fixtures/packaged_host_events/hermes/terminal-receipt.json");
         let material = native_material(
             fixture,
             tracedecay_hooks::HookEventFamily::ToolLifecycle,
