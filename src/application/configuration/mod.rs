@@ -6,6 +6,7 @@ pub mod operations;
 pub mod ports;
 pub mod runtime;
 pub mod types;
+pub mod user_settings;
 
 pub use authorization::{
     ConfigurationMutationGrantAuthority, ConfigurationMutationGrantAuthorityError,
@@ -24,4 +25,8 @@ pub use types::{
     ConfigurationMutationAuthority, ConfigurationMutationReceipt, ConfigurationPlanContext,
     ConfigurationRollbackRequest, CredentialWriteHandleV1, DirectConfigurationMutation,
     ResolvedSetting, SettingSummary, WriteOnlyCredentialMutation, configuration_layer_scope_digest,
+};
+pub use user_settings::{
+    ProductionUserSettingsDaemonClient, UserSettingsAuthorityError, UserSettingsDaemonClient,
+    UserSettingsMutationReceiptV1, UserSettingsMutationV1, UserSettingsSnapshotV1,
 };

@@ -38,7 +38,10 @@ fn session_reflector_evidence_uses_fresh_authorized_forensic_retrieval() {
     assert!(source.contains("TemporalModeV1::Forensic"));
     assert!(source.contains("production_project_automation_retrieval(cg).await"));
     assert!(source.contains("production_user_automation_retrieval(profile_root).await"));
-    assert!(source.contains("project_registry_db_path(cg)"));
+    assert!(source.contains("registered_project_automation_retrieval("));
+    assert!(source.contains("registered_profile_automation_retrieval("));
+    assert!(!source.contains("project_registry_db_path(cg)"));
+    assert!(!source.contains("open_read_only_at("));
     assert!(source.contains("RequireFresh.accepts(freshness)"));
     assert!(!include_str!("support.rs").contains(".lcm_grep("));
     assert!(!include_str!("support.rs").contains("LcmGrepRequest"));

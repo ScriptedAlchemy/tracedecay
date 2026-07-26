@@ -1981,9 +1981,12 @@ where
         let valid_payload = !envelope.stable_id.is_empty()
             && envelope.stable_id.len() <= MAX_CONTEXT_RETRIEVAL_HANDLE_BYTES
             && envelope.expires_at > 0
+            && valid_retrieval_handle(envelope.next_retrieval_handle.as_deref())
             && match envelope.coverage {
                 ContextCoverage::Complete => {
-                    envelope.evidence.is_some() && envelope.omission_reason.is_none()
+                    envelope.evidence.is_some()
+                        && envelope.omission_reason.is_none()
+                        && envelope.next_retrieval_handle.is_none()
                 }
                 ContextCoverage::Partial => envelope.omission_reason.is_some(),
                 ContextCoverage::Unavailable | ContextCoverage::Failed => false,
@@ -2513,19 +2516,17 @@ where
             let key = (change.kind.clone(), change.document_uri.clone());
             let identity_drift_clear = match self.context_currentness.get(&key) {
                 Some(current) if current.generation > change.generation => continue,
-                Some(current)
-                    if current.generation == change.generation
-                        && current.identity == change.identity =>
-                {
-                    continue;
-                }
                 Some(current) if current.generation == change.generation => {
-                    change.identity = current.identity.clone();
-                    change.freshness = ContextFreshness::Unknown;
-                    change.producer_state = ContextProducerState::Unavailable;
-                    change.coverage = ContextCoverage::Unavailable;
-                    change.retrieval_handle = None;
-                    true
+                    if current.identity == change.identity {
+                        false
+                    } else {
+                        change.identity = current.identity.clone();
+                        change.freshness = ContextFreshness::Unknown;
+                        change.producer_state = ContextProducerState::Unavailable;
+                        change.coverage = ContextCoverage::Unavailable;
+                        change.retrieval_handle = None;
+                        true
+                    }
                 }
                 _ => false,
             };
