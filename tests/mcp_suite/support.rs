@@ -209,9 +209,7 @@ pub(crate) async fn handle_tool_call(
     #[cfg(feature = "test-transport")]
     if matches!(
         tool_name,
-        "tracedecay_message_search"
-            | "tracedecay_session_start"
-            | "tracedecay_session_end"
+        "tracedecay_message_search" | "tracedecay_session_start" | "tracedecay_session_end"
     ) || tool_name.starts_with("tracedecay_lcm_")
     {
         let session_db_path = project_session_db_path(cg);
