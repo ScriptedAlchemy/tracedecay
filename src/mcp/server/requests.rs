@@ -45,7 +45,7 @@ struct ApplicationSurfaceDispatch<'a> {
     request_id: Option<tracedecay_application::RequestId>,
     deadline: Option<tracedecay_application::Deadline>,
     cancellation: Option<tracedecay_application::CancellationSignal>,
-    invocation_client: Option<&'a crate::daemon_client::DaemonInvocationClient>,
+    invocation_executor: Option<&'a dyn crate::daemon_client::DaemonInvocationExecutor>,
     _registration: ApplicationCancellationRegistration<'a>,
 }
 
@@ -855,7 +855,9 @@ impl McpServer {
         handler_arguments: Value,
         server_stats: Option<Value>,
         implicit_project_path: Option<&Path>,
-        application_invocation_client: Option<&crate::daemon_client::DaemonInvocationClient>,
+        application_invocation_executor: Option<
+            &dyn crate::daemon_client::DaemonInvocationExecutor,
+        >,
         application_request_id: Option<tracedecay_application::RequestId>,
         application_deadline: Option<tracedecay_application::Deadline>,
         application_cancellation: Option<tracedecay_application::CancellationSignal>,
@@ -891,7 +893,7 @@ impl McpServer {
                 feedback_status_reader: self.dashboard_feedback_status_reader.clone(),
                 diagnostics_cache: Some(&self.diagnostics_cache),
                 diagnostics_lsp: Some(Arc::clone(&self.diagnostics_lsp)),
-                application_invocation_client,
+                application_invocation_executor,
                 application_request_id,
                 application_deadline,
                 application_cancellation,
@@ -1023,7 +1025,7 @@ impl McpServer {
             request_id: application_request_id,
             deadline: application_deadline,
             cancellation: application_cancellation,
-            invocation_client: application_invocation_client,
+            invocation_executor: application_invocation_executor,
             _registration,
         } = self
             .prepare_application_surface_dispatch(
@@ -1041,7 +1043,7 @@ impl McpServer {
                 handler_arguments,
                 server_stats,
                 implicit_project_path,
-                application_invocation_client,
+                application_invocation_executor,
                 application_request_id.clone(),
                 application_deadline,
                 application_cancellation,
@@ -1056,7 +1058,7 @@ impl McpServer {
 
     /// Prepare the application-surface plumbing for a single dispatch. Returns
     /// the typed request id, deadline, cancellation, and daemon invocation
-    /// client, plus the RAII registration guard that must outlive the dispatch.
+    /// executor, plus the RAII registration guard that must outlive the dispatch.
     async fn prepare_application_surface_dispatch<'a>(
         &'a self,
         cg: &TraceDecay,
@@ -1112,19 +1114,24 @@ impl McpServer {
             ))
             .ok()
         });
-        let invocation_client = if application_surface.is_some() {
-            self.application_surface_client
-                .get_or_try_init(|| async {
-                    let handshake = crate::daemon::DaemonHandshake::for_current_client(
-                        Some(cg.project_root().to_path_buf()),
-                        self.scope_prefix.clone(),
-                        false,
-                        false,
-                    )?;
-                    crate::daemon_client::DaemonInvocationClient::for_current(handshake)
-                })
-                .await
-                .ok()
+        let invocation_executor = if application_surface.is_some() {
+            match self.application_invocation_executor.as_deref() {
+                Some(executor) => Some(executor),
+                None => self
+                    .application_surface_client
+                    .get_or_try_init(|| async {
+                        let handshake = crate::daemon::DaemonHandshake::for_current_client(
+                            Some(cg.project_root().to_path_buf()),
+                            self.scope_prefix.clone(),
+                            false,
+                            false,
+                        )?;
+                        crate::daemon_client::DaemonInvocationClient::for_current(handshake)
+                    })
+                    .await
+                    .ok()
+                    .map(|client| client as &dyn crate::daemon_client::DaemonInvocationExecutor),
+            }
         } else {
             None
         };
@@ -1132,7 +1139,7 @@ impl McpServer {
             request_id,
             deadline,
             cancellation,
-            invocation_client,
+            invocation_executor,
             _registration: registration,
         }
     }

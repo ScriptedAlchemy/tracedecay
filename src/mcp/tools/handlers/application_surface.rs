@@ -10,7 +10,7 @@ use crate::application_surface::{
     ApplicationSurfaceInvocationResult, ApplicationSurfaceOperation,
     parse_application_surface_request,
 };
-use crate::daemon_client::{DaemonInvocationClient, RequestedOutputFormat};
+use crate::daemon_client::{DaemonInvocationExecutor, RequestedOutputFormat};
 use crate::errors::{Result, TraceDecayError};
 use crate::mcp::tools::dispatch::{
     resolve_mcp_application_surface, resolve_mcp_application_surface_with_controls,
@@ -63,7 +63,7 @@ pub(super) async fn handle_application_surface(
     cg: &TraceDecay,
     operation: ApplicationSurfaceOperation,
     args: &Value,
-    client: Option<&DaemonInvocationClient>,
+    executor: Option<&dyn DaemonInvocationExecutor>,
     protocol_request_id: Option<RequestId>,
     protocol_deadline: Option<Deadline>,
     protocol_cancellation: Option<CancellationSignal>,
@@ -88,7 +88,7 @@ pub(super) async fn handle_application_surface(
         Ok(request) => request,
         Err(error) => {
             crate::application_surface::observe_surface_argument_rejection(
-                client,
+                executor,
                 tracedecay_tool_catalog::BindingSurface::Mcp,
                 operation,
                 &request_id,
@@ -111,7 +111,7 @@ pub(super) async fn handle_application_surface(
                 requested_format,
                 deadline,
                 cancellation,
-                client,
+                executor,
             )
             .await
         }
@@ -121,7 +121,7 @@ pub(super) async fn handle_application_surface(
                 request_id,
                 request,
                 requested_format,
-                client,
+                executor,
             )
             .await
         }

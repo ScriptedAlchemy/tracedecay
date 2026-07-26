@@ -1099,10 +1099,11 @@ async fn production_composition_harness_wires_pr9_search_authority() {
     let payload: serde_json::Value =
         serde_json::from_str(production_composition_tool_text(&response)).expect("search json");
     assert!(
-        payload["results"].as_array().is_some_and(|matches| matches
-            .iter()
-            .any(|candidate| candidate["display"]["name"]
-                == json!("production_composition_probe"))),
+        payload["results"].as_array().is_some_and(|matches| {
+            matches.iter().any(|candidate| {
+                candidate["display"]["name"] == json!("production_composition_probe")
+            })
+        }),
         "production PR9 search authority did not return the indexed symbol: {payload}"
     );
     harness.shutdown().await;
@@ -1157,4 +1158,71 @@ async fn production_composition_harness_wires_cross_project_resolver() {
         "production retained-project resolver must route search to the mounted project: {payload}"
     );
     harness.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn production_composition_harness_dispatches_application_invocations_in_process() {
+    let temp = TempDir::new().expect("temp dir");
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(project.join("src")).expect("source dir");
+    std::fs::write(project.join("src/lib.rs"), "pub fn storage_probe() {}\n").expect("source file");
+    commit_production_composition_project(&project);
+
+    let harness = ProductionProjectCompositionHarnessV1::open(temp.path(), vec![project.clone()])
+        .await
+        .expect("production composition");
+    assert!(
+        !harness.semantic_auto_download_enabled(),
+        "the effective semantic startup policy used by production composition must disable auto-download"
+    );
+    let response = harness
+        .call_tool(
+            &project,
+            "tracedecay_storage_status",
+            serde_json::json!({"format": "json"}),
+        )
+        .await
+        .expect("in-process application invocation");
+    let payload: serde_json::Value =
+        serde_json::from_str(production_composition_tool_text(&response))
+            .expect("storage-status application envelope");
+    assert!(
+        payload["contract"]["schema_id"]
+            == serde_json::json!("schema.application.primitive.storage-status.result"),
+        "production invocation must preserve the application result contract: {payload}"
+    );
+    assert!(
+        payload["problem"].is_null() && !payload["outcome"].is_null(),
+        "production composition must dispatch through retained daemon state: {payload}"
+    );
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn production_composition_harness_rejects_live_profile_overlap() {
+    let temp = TempDir::new().expect("temp dir");
+    let live_profile = temp.path().join("live-profile");
+    let overlapping_isolation = live_profile.join("test-isolation");
+    std::fs::create_dir_all(&live_profile).expect("live profile");
+
+    let error = match ProductionProjectCompositionHarnessV1::open_with_live_profile_root_for_test(
+        &overlapping_isolation,
+        Vec::new(),
+        live_profile.clone(),
+    )
+    .await
+    {
+        Ok(_) => panic!("live-profile overlap must be rejected before any project or store opens"),
+        Err(error) => error,
+    };
+    let message = error.to_string();
+    assert!(
+        message.contains("overlaps live profile")
+            && message.contains(&live_profile.display().to_string()),
+        "overlap rejection must identify the protected live profile: {message}"
+    );
+    assert!(
+        !overlapping_isolation.join("profile").exists(),
+        "rejection must fire before the harness creates an isolated profile"
+    );
 }

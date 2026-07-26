@@ -1777,6 +1777,165 @@ impl DaemonInvocationState {
         self.lsp_session_registry.lock().await.expire_at(u64::MAX);
         self.service.expire_all().await;
     }
+
+    async fn invoke_for_project(
+        &self,
+        store_administration: &StoreAdministration,
+        project_path: Option<&Path>,
+        request: DaemonInvocationRequest,
+    ) -> DaemonInvocationResponse {
+        let request_project_path = request.requires_project().then_some(project_path).flatten();
+        let root = request_project_path.and_then(admitted_lsp_root_for_project_path);
+        let git_service = if invocation_is_git_operation(request.operation()) {
+            git_service_for_project_path(store_administration, request_project_path).await
+        } else {
+            None
+        };
+        self.service
+            .invoke(
+                &self.lsp_session_registry,
+                request_project_path,
+                root,
+                git_service,
+                request,
+            )
+            .await
+    }
+}
+
+#[derive(Clone)]
+struct InProcessDaemonInvocationExecutor {
+    invocation: DaemonInvocationState,
+    store_administration: StoreAdministration,
+    project_path: PathBuf,
+}
+
+impl InProcessDaemonInvocationExecutor {
+    fn new(
+        invocation: DaemonInvocationState,
+        store_administration: StoreAdministration,
+        project_path: PathBuf,
+    ) -> Self {
+        Self {
+            invocation,
+            store_administration,
+            project_path,
+        }
+    }
+
+    async fn invoke_once(&self, request: DaemonInvocationRequest) -> DaemonInvocationResponse {
+        self.invocation
+            .invoke_for_project(
+                &self.store_administration,
+                Some(&self.project_path),
+                request,
+            )
+            .await
+    }
+}
+
+impl crate::daemon_client::DaemonInvocationExecutor for InProcessDaemonInvocationExecutor {
+    fn invoke_controlled(
+        &self,
+        request: DaemonInvocationRequest,
+        deadline: tracedecay_application::Deadline,
+        cancellation: tracedecay_application::CancellationSignal,
+        policy: crate::daemon_client::InvocationCancellationPolicy,
+    ) -> crate::daemon_client::DaemonInvocationExecutorFuture<
+        '_,
+        std::result::Result<DaemonInvocationResponse, crate::daemon_client::DaemonInvocationError>,
+    > {
+        Box::pin(async move {
+            use tracedecay_application::CancellationStage;
+
+            if cancellation.is_cancelled() {
+                return Err(crate::daemon_client::DaemonInvocationError::Cancelled {
+                    stage: CancellationStage::BeforeAdmission,
+                });
+            }
+            let remaining = crate::daemon_client::deadline_remaining(&deadline).ok_or(
+                crate::daemon_client::DaemonInvocationError::TimedOut {
+                    stage: CancellationStage::BeforeAdmission,
+                },
+            )?;
+            let executor = self.clone();
+            tokio::spawn(async move {
+                let stage = match policy {
+                    crate::daemon_client::InvocationCancellationPolicy::ReadOnly => {
+                        CancellationStage::DuringRead
+                    }
+                    crate::daemon_client::InvocationCancellationPolicy::AuthoritativeEffect => {
+                        CancellationStage::EffectInFlight
+                    }
+                };
+                if !policy.may_interrupt(stage) {
+                    return Ok(executor.invoke_once(request).await);
+                }
+                let invocation = executor.invoke_once(request);
+                tokio::pin!(invocation);
+                let cancellation_wait = crate::daemon_client::wait_for_cancellation(cancellation);
+                tokio::pin!(cancellation_wait);
+                tokio::select! {
+                    response = &mut invocation => Ok(response),
+                    () = &mut cancellation_wait => {
+                        Err(crate::daemon_client::DaemonInvocationError::Cancelled { stage })
+                    }
+                    () = tokio::time::sleep(remaining) => {
+                        Err(crate::daemon_client::DaemonInvocationError::TimedOut { stage })
+                    }
+                }
+            })
+            .await
+            .map_err(|_| crate::daemon_client::DaemonInvocationError::Unavailable)?
+        })
+    }
+
+    fn observe_plan26_feedback(
+        &self,
+        subject_digest: tracedecay_domain::ManifestDigest,
+        observed_at: tracedecay_domain::UtcMicros,
+        event: crate::application::feedback::observations::Plan26FeedbackSourceEventV1,
+    ) -> crate::daemon_client::DaemonInvocationExecutorFuture<'_, Result<()>> {
+        Box::pin(async move {
+            let request_id = crate::request_identity::mint_global_request_id(
+                crate::request_identity::GlobalRequestSurface::FeedbackObservation,
+            )
+            .map_err(|error| TraceDecayError::Config {
+                message: error.to_string(),
+            })?;
+            let response = self
+                .invoke_once(DaemonInvocationRequest::feedback_observation(
+                    request_id.as_str(),
+                    subject_digest,
+                    observed_at,
+                    event,
+                ))
+                .await;
+            if matches!(
+                response.outcome,
+                DaemonInvocationOutcome::ObservationAccepted
+            ) {
+                Ok(())
+            } else {
+                Err(TraceDecayError::Config {
+                    message: "daemon did not accept the feedback observation".to_owned(),
+                })
+            }
+        })
+    }
+}
+
+fn invocation_is_git_operation(operation: service::invocation::DaemonInvocationOperation) -> bool {
+    matches!(
+        operation,
+        service::invocation::DaemonInvocationOperation::GitStatus
+            | service::invocation::DaemonInvocationOperation::GitDiff
+            | service::invocation::DaemonInvocationOperation::GitHistory
+            | service::invocation::DaemonInvocationOperation::GitBlame
+            | service::invocation::DaemonInvocationOperation::GitHunks
+            | service::invocation::DaemonInvocationOperation::GitPreview
+            | service::invocation::DaemonInvocationOperation::GitApply
+    )
 }
 
 #[cfg(unix)]
@@ -3818,6 +3977,7 @@ struct ProductionProjectComposition {
     canonical_project_path: PathBuf,
     server: Arc<crate::mcp::McpServer>,
     inserted: bool,
+    semantic_auto_download_enabled: Option<bool>,
 }
 
 async fn production_project_server(
@@ -3842,6 +4002,7 @@ async fn production_project_server(
             canonical_project_path: canonical_project_path.to_path_buf(),
             server: server.1,
             inserted: false,
+            semantic_auto_download_enabled: None,
         });
     }
 
@@ -3858,6 +4019,7 @@ async fn production_project_server(
             canonical_project_path: canonical_project_path.to_path_buf(),
             server: server.1,
             inserted: false,
+            semantic_auto_download_enabled: None,
         });
     }
 
@@ -3895,9 +4057,11 @@ async fn production_project_server(
     .map_err(|_| TraceDecayError::Config {
         message: "semantic runtime resource ceilings are invalid".to_owned(),
     })?;
+    let semantic_auto_download_enabled =
+        semantic_config.auto_download && runtime.semantic_auto_download();
     let _ = crate::semantic_code::apply_config_and_queue_startup(
         semantic_config.selected_model.as_deref(),
-        semantic_config.auto_download && runtime.semantic_auto_download(),
+        semantic_auto_download_enabled,
     );
     let semantic_database = cg.dashboard_database_guard();
     let semantic_lifecycle = crate::semantic_code::shared_lifecycle_owner();
@@ -3915,6 +4079,7 @@ async fn production_project_server(
             canonical_project_path: canonical_project_path.to_path_buf(),
             server: existing,
             inserted: false,
+            semantic_auto_download_enabled: Some(semantic_auto_download_enabled),
         });
     }
 
@@ -4079,6 +4244,12 @@ async fn production_project_server(
     let dashboard_feedback_status_reader = crate::dashboard::feedback_api::feedback_status_reader(
         invocation.feedback_runtime_registrar(),
     );
+    let application_invocation_executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor> =
+        Arc::new(InProcessDaemonInvocationExecutor::new(
+            invocation.clone(),
+            store_administration.clone(),
+            canonical_project_path.to_path_buf(),
+        ));
     let mut context = crate::mcp::server::McpServerConstructionContext::daemon_owned(
         cg,
         handshake.scope_prefix.clone(),
@@ -4112,6 +4283,7 @@ async fn production_project_server(
     .with_code_index_publication_identity(code_index_publication_identity)
     .with_code_index_search_executor(code_index_search_executor)
     .with_code_index_search_authority(code_search_authority)
+    .with_application_invocation_executor(application_invocation_executor)
     .with_retained_project_graph_resolver(retained_project_graph_resolver(
         store_administration.clone(),
     ));
@@ -4181,6 +4353,7 @@ async fn production_project_server(
         canonical_project_path: canonical_project_path.to_path_buf(),
         server: resolved,
         inserted,
+        semantic_auto_download_enabled: Some(semantic_auto_download_enabled),
     })
 }
 
@@ -4202,6 +4375,7 @@ struct ProductionProjectHarnessResourcesV1 {
 pub struct ProductionProjectCompositionHarnessV1 {
     isolation_root: PathBuf,
     profile_root: PathBuf,
+    semantic_auto_download_enabled: bool,
     resources: Option<ProductionProjectHarnessResourcesV1>,
 }
 
@@ -4210,6 +4384,15 @@ impl ProductionProjectCompositionHarnessV1 {
     pub async fn open(
         isolation_root: impl AsRef<Path>,
         project_roots: impl IntoIterator<Item = PathBuf>,
+    ) -> Result<Self> {
+        let live_profile_root = crate::config::user_data_dir().filter(|path| path.exists());
+        Self::open_with_live_profile_root(isolation_root, project_roots, live_profile_root).await
+    }
+
+    async fn open_with_live_profile_root(
+        isolation_root: impl AsRef<Path>,
+        project_roots: impl IntoIterator<Item = PathBuf>,
+        live_profile_root: Option<PathBuf>,
     ) -> Result<Self> {
         std::fs::create_dir_all(isolation_root.as_ref()).map_err(|error| {
             TraceDecayError::Config {
@@ -4227,9 +4410,8 @@ impl ProductionProjectCompositionHarnessV1 {
                 ),
             }
         })?;
-        if let Some(live_profile_root) = crate::config::user_data_dir()
-            .filter(|path| path.exists())
-            .and_then(|path| std::fs::canonicalize(path).ok())
+        if let Some(live_profile_root) =
+            live_profile_root.and_then(|path| std::fs::canonicalize(path).ok())
         {
             let overlaps_live_profile = isolation_root == live_profile_root
                 || isolation_root.starts_with(&live_profile_root)
@@ -4309,6 +4491,7 @@ impl ProductionProjectCompositionHarnessV1 {
             global_db_path: profile_root.join("global.db"),
         };
         let mut servers = HashMap::new();
+        let mut semantic_auto_download_enabled = false;
 
         for (index, project_root) in project_roots.into_iter().enumerate() {
             let handshake = DaemonHandshake {
@@ -4347,12 +4530,19 @@ impl ProductionProjectCompositionHarnessV1 {
                 &composition.canonical_project_path,
             )
             .await?;
+            semantic_auto_download_enabled |= composition
+                .semantic_auto_download_enabled
+                .ok_or_else(|| TraceDecayError::Config {
+                    message: "production-composition harness reused an unobserved semantic runtime"
+                        .to_owned(),
+                })?;
             servers.insert(composition.canonical_project_path, composition.server);
         }
 
         Ok(Self {
             isolation_root,
             profile_root,
+            semantic_auto_download_enabled,
             resources: Some(ProductionProjectHarnessResourcesV1 {
                 _lifecycle_lease: lifecycle_lease,
                 _database_scope: database_scope,
@@ -4364,12 +4554,26 @@ impl ProductionProjectCompositionHarnessV1 {
         })
     }
 
+    #[cfg(test)]
+    async fn open_with_live_profile_root_for_test(
+        isolation_root: impl AsRef<Path>,
+        project_roots: impl IntoIterator<Item = PathBuf>,
+        live_profile_root: PathBuf,
+    ) -> Result<Self> {
+        Self::open_with_live_profile_root(isolation_root, project_roots, Some(live_profile_root))
+            .await
+    }
+
     pub fn isolation_root(&self) -> &Path {
         &self.isolation_root
     }
 
     pub fn profile_root(&self) -> &Path {
         &self.profile_root
+    }
+
+    pub fn semantic_auto_download_enabled(&self) -> bool {
+        self.semantic_auto_download_enabled
     }
 
     pub fn server(&self, project_root: impl AsRef<Path>) -> Result<Arc<crate::mcp::McpServer>> {
@@ -5123,18 +5327,9 @@ async fn execute_portable_daemon_invocation(
     #[cfg(test)] project_open_attempts: Option<Arc<AtomicUsize>>,
 ) -> DaemonInvocationResponse {
     let request_id = request.request_id.clone();
-    let git_operation = matches!(
-        request.operation(),
-        service::invocation::DaemonInvocationOperation::GitStatus
-            | service::invocation::DaemonInvocationOperation::GitDiff
-            | service::invocation::DaemonInvocationOperation::GitHistory
-            | service::invocation::DaemonInvocationOperation::GitBlame
-            | service::invocation::DaemonInvocationOperation::GitHunks
-            | service::invocation::DaemonInvocationOperation::GitPreview
-            | service::invocation::DaemonInvocationOperation::GitApply
-    );
+    let git_operation = invocation_is_git_operation(request.operation());
     let mut project_path = None;
-    let root = if request.requires_project() {
+    if request.requires_project() {
         if Box::pin(portable_project_server_for_request(
             lifecycle,
             store_administration.clone(),
@@ -5163,31 +5358,16 @@ async fn execute_portable_daemon_invocation(
                 DaemonInvocationProblem::NotFoundOrNotAuthorized,
             );
         };
-        let Some(root) = admitted_lsp_root_for_project_path(&resolved_project_path) else {
+        if admitted_lsp_root_for_project_path(&resolved_project_path).is_none() {
             return DaemonInvocationResponse::problem(
                 request_id,
                 DaemonInvocationProblem::Unavailable,
             );
-        };
+        }
         project_path = Some(resolved_project_path);
-        Some(root)
-    } else {
-        None
-    };
-    let git_service = if git_operation {
-        git_service_for_project_path(&store_administration, project_path.as_deref()).await
-    } else {
-        None
-    };
+    }
     invocation
-        .service
-        .invoke(
-            &invocation.lsp_session_registry,
-            project_path.as_deref(),
-            root,
-            git_service,
-            request,
-        )
+        .invoke_for_project(&store_administration, project_path.as_deref(), request)
         .await
 }
 
@@ -5519,18 +5699,9 @@ async fn execute_daemon_invocation(
     request: DaemonInvocationRequest,
 ) -> DaemonInvocationResponse {
     let request_id = request.request_id.clone();
-    let git_operation = matches!(
-        request.operation(),
-        service::invocation::DaemonInvocationOperation::GitStatus
-            | service::invocation::DaemonInvocationOperation::GitDiff
-            | service::invocation::DaemonInvocationOperation::GitHistory
-            | service::invocation::DaemonInvocationOperation::GitBlame
-            | service::invocation::DaemonInvocationOperation::GitHunks
-            | service::invocation::DaemonInvocationOperation::GitPreview
-            | service::invocation::DaemonInvocationOperation::GitApply
-    );
+    let git_operation = invocation_is_git_operation(request.operation());
     let mut project_path = None;
-    let root = if request.requires_project() {
+    if request.requires_project() {
         if engine.project_server_for_request(handshake).await.is_err() {
             return DaemonInvocationResponse::problem(
                 request_id,
@@ -5547,30 +5718,19 @@ async fn execute_daemon_invocation(
                 service::invocation::DaemonInvocationProblem::NotFoundOrNotAuthorized,
             );
         };
-        let Some(root) = admitted_lsp_root_for_project_path(&resolved_project_path) else {
+        if admitted_lsp_root_for_project_path(&resolved_project_path).is_none() {
             return DaemonInvocationResponse::problem(
                 request_id,
                 service::invocation::DaemonInvocationProblem::Unavailable,
             );
-        };
+        }
         project_path = Some(resolved_project_path);
-        Some(root)
-    } else {
-        None
-    };
-    let git_service = if git_operation {
-        git_service_for_project_path(&engine.store_administration, project_path.as_deref()).await
-    } else {
-        None
-    };
+    }
     engine
         .invocation
-        .service
-        .invoke(
-            &engine.invocation.lsp_session_registry,
+        .invoke_for_project(
+            &engine.store_administration,
             project_path.as_deref(),
-            root,
-            git_service,
             request,
         )
         .await

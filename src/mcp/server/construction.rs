@@ -70,6 +70,8 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) code_index_search_executor: Option<super::CodeIndexSearchExecutor>,
     pub(crate) code_index_search_authority: Option<super::CodeIndexSearchAuthorityV1>,
     pub(crate) retained_project_graph_resolver: Option<super::RetainedProjectGraphResolver>,
+    pub(crate) application_invocation_executor:
+        Option<Arc<dyn crate::daemon_client::DaemonInvocationExecutor>>,
     #[cfg(any(test, feature = "test-transport"))]
     pub(crate) host_admission_test_runtime:
         Option<Arc<crate::application::host_admission::HostAdmissionTestRuntimeV1>>,
@@ -151,6 +153,7 @@ impl McpServerConstructionContext {
             code_index_search_executor: None,
             code_index_search_authority: None,
             retained_project_graph_resolver: None,
+            application_invocation_executor: None,
             #[cfg(any(test, feature = "test-transport"))]
             host_admission_test_runtime: None,
         }
@@ -223,6 +226,7 @@ impl McpServerConstructionContext {
             code_index_search_executor: None,
             code_index_search_authority: None,
             retained_project_graph_resolver: None,
+            application_invocation_executor: None,
             #[cfg(any(test, feature = "test-transport"))]
             host_admission_test_runtime: None,
         }
@@ -258,6 +262,14 @@ impl McpServerConstructionContext {
         authority: super::CodeIndexSearchAuthorityV1,
     ) -> Self {
         self.code_index_search_authority = Some(authority);
+        self
+    }
+
+    pub(crate) fn with_application_invocation_executor(
+        mut self,
+        executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
+    ) -> Self {
+        self.application_invocation_executor = Some(executor);
         self
     }
 
