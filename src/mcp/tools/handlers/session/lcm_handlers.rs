@@ -24,7 +24,7 @@ use crate::query::temporal::context::ContextBudget;
 use crate::query::temporal::ranking::DiversityLimits;
 use crate::sessions::lcm::{
     LcmContentRange, LcmExpandQueryBudget, LcmExpandQueryContextBlock, LcmExpandQueryMatch,
-    LcmExpandQueryPagination, LcmExpandQueryResponse, LcmExpandQuerySynthesisPrompt,
+    LcmExpandQueryPagination, LcmExpandQueryResponse, LcmExpandQuerySynthesisPrompt, LcmSourceRef,
 };
 
 fn lcm_status_payload<T: Serialize>(
