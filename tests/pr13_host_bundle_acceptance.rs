@@ -11,11 +11,11 @@ use tracedecay::agents::host_bundle_registry::{
 };
 use tracedecay::agents::host_bundle_v2::{
     HostBundleComponentDoctorStateV1, HostBundleComponentV1, HostBundleError,
-    HostBundleInstallReceiptV1, HostBundleLifecycleOpV1, HostBundleReceiptArtifactV1,
-    HostBundleRegistrationInspectorV1, HostBundleRegistrationStateV1, HostBundleRollbackBoundaryV1,
-    HostBundleWriterV1, HostCapabilityStateV1, HostComponentSetExecutionRequestV1,
-    HostComponentSetLifecycleRequestV1, HostComponentSetRegistrationV1,
-    HostComponentSetTransactionV1, HostKindV1,
+    HostBundleExecutionRequestV1, HostBundleInstallReceiptV1, HostBundleLifecycleOpV1,
+    HostBundleLifecycleRequestV1, HostBundleReceiptArtifactV1, HostBundleRegistrationInspectorV1,
+    HostBundleRegistrationStateV1, HostBundleRollbackBoundaryV1, HostBundleWriterV1,
+    HostCapabilityStateV1, HostComponentSetExecutionRequestV1, HostComponentSetLifecycleRequestV1,
+    HostComponentSetRegistrationV1, HostComponentSetTransactionV1, HostKindV1,
     dry_run_host_component_set_lifecycle_with_lifecycle_root_at,
     inspect_installed_host_bundle_components_at, native_host_edit_stop_conformance_evidence,
     stock_host_kinds, stock_host_registration_evidence,
@@ -147,6 +147,57 @@ fn public_host_contracts_are_compiler_referenced() {
     assert_agent_integration::<OpenCodeIntegration>();
     let _native_decoder = decode_native_hook_event;
     let _opencode_decoder = decode_opencode_plugin_event;
+}
+
+#[test]
+fn embedded_component_backup_restore_runs_through_the_real_lifecycle_writer() {
+    let artifacts = tempfile::tempdir().unwrap();
+    let lifecycle = tempfile::tempdir().unwrap();
+    let bundle =
+        verified_embedded_host_bundle(HostKindV1::Codex, HostBundleComponentV1::Core, 0).unwrap();
+    let verifier = bundle.verifier();
+    let mut writer =
+        HostBundleWriterV1::open_with_lifecycle_root(artifacts.path(), lifecycle.path()).unwrap();
+    writer
+        .execute(
+            &bundle.manifest,
+            &HostBundleExecutionRequestV1 {
+                lifecycle: HostBundleLifecycleRequestV1 {
+                    operation: HostBundleLifecycleOpV1::Install,
+                    expected_host: HostKindV1::Codex,
+                    expected_component: HostBundleComponentV1::Core,
+                    explicit_confirmation: true,
+                    hermes_profile_bindings: 0,
+                },
+                operation_id: [81; 16],
+            },
+            &bundle.contents,
+            &verifier,
+        )
+        .unwrap();
+    writer
+        .backup_component(&bundle.manifest, [82; 16], true, &verifier)
+        .unwrap();
+
+    let first = &bundle.contents[0];
+    fs::write(
+        artifacts.path().join(&first.relative_path),
+        b"interrupted-host-edit",
+    )
+    .unwrap();
+    let restored = writer
+        .restore_component_backup([82; 16], [83; 16], true, &verifier)
+        .unwrap();
+    assert_eq!(
+        restored.restored_receipt.rollback_boundary,
+        HostBundleRollbackBoundaryV1::Passed
+    );
+    for content in &bundle.contents {
+        assert_eq!(
+            fs::read(artifacts.path().join(&content.relative_path)).unwrap(),
+            content.bytes
+        );
+    }
 }
 
 #[test]
