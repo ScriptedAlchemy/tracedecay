@@ -1211,8 +1211,20 @@ mod tests {
         )
         .unwrap();
 
-        let cg = TraceDecay::init(project).await.unwrap();
+        let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+            project,
+            "project.mcp-affected-tests",
+        )
+        .await
+        .unwrap();
         cg.index_all().await.unwrap();
+        {
+            let database = cg.dashboard_database_guard();
+            crate::diagnostics_store::DiagnosticsStore::new(database.conn())
+                .ensure_schema()
+                .await
+                .unwrap();
+        }
         let expected_root = project.to_path_buf();
         let result = handle_run_affected_tests_with_runner(
             &cg,
