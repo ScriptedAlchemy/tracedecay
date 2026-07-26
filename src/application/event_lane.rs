@@ -377,4 +377,55 @@ mod tests {
         assert_eq!(ActivityFamilyV1::Hook.stream_name(), "hook_activity");
         assert_eq!(ActivityFamilyV1::ToolCall.stream_name(), "tool_call");
     }
+
+    #[tokio::test]
+    async fn registered_activity_replays_without_retaining_project_paths() {
+        let _pin = crate::config::PinnedUserDataDir::new();
+        let project = tempfile::tempdir().expect("project");
+        let project_id = tracedecay_domain::ProjectId::new("project.activity").expect("project id");
+        let runtime = crate::application::host_admission::HostAdmissionTestRuntimeV1::project(
+            crate::storage::default_profile_root().expect("profile root"),
+            project.path(),
+            project_id.clone(),
+        )
+        .await
+        .expect("registered runtime");
+        let db = runtime
+            .project_observation_database_for_test()
+            .expect("project observation database");
+
+        publish(
+            db,
+            ActivityFamilyV1::Hook,
+            project.path(),
+            Some(project_id.as_str()),
+            2,
+            Some("after_edit"),
+        )
+        .await;
+        let replay = replay_after(db, project_id.as_str(), None)
+            .await
+            .expect("activity replay");
+        assert_eq!(replay.records.len(), 1);
+        assert_eq!(replay.records[0].pulse.units, 2);
+        assert_eq!(replay.records[0].pulse.project_root, PathBuf::new());
+        assert_eq!(
+            replay.records[0].pulse.project_id.as_deref(),
+            Some(project_id.as_str())
+        );
+        assert!(!replay.resume_gap);
+
+        let after = replay.records[0].producer_sequence;
+        let caught_up = replay_after(db, project_id.as_str(), Some(after))
+            .await
+            .expect("caught-up replay");
+        assert!(caught_up.records.is_empty());
+        assert!(!caught_up.resume_gap);
+        assert!(
+            !crate::storage::default_profile_root()
+                .expect("profile root")
+                .join("dashboard-events-v1.jsonl")
+                .exists()
+        );
+    }
 }
