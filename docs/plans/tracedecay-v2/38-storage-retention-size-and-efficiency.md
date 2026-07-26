@@ -31,6 +31,28 @@ clean zeros. This dashboard/API checkpoint is **implemented but unverified**
 because the Rust `dashboard_api_test` suite has not completed successfully; do
 not replan the behavior as absent and do not report it as verified.
 
+**Audit correction (2026-07-26; see
+[`GAP-LEDGER-PR8-PR14.md`](GAP-LEDGER-PR8-PR14.md) P0-7 and P1-a.)** "All seven
+sections are implemented" is true of the mechanisms and misleading about
+effect. Three lossless-data cleanup policies ship disabled by default:
+
+- Observation evidence retention defaults `enabled: false` with every release
+  window `None` (`src/global_db/observation/retention.rs:174-182`), even though
+  the daemon calls it (`src/daemon/git_watch/store_maintenance.rs:216-224`).
+- LCM retention runs, but `offload_after_days` and `drop_after_days` default to
+  `None`, leaving deduplication at 30 days as its only effect
+  (`src/sessions/lcm/retention.rs:128-139`). §4's "one content copy" is
+  therefore only partly achieved.
+- Session-row retention defaults `session_messages_days: None` and
+  `lcm_raw_messages_days: None` (`src/retention.rs:74-82`), deliberately,
+  because those rows are the lossless session record. Only `analytics_events`
+  prunes by default, at 180 days.
+
+LCM deduplication and analytics-event pruning still run by default, and the
+other product-contract sections add cleanup paths for the measured failure
+classes below. Whether lossless payload retention remains the right default
+given those measurements is an open owner question, not an implementation gap.
+
 ## Measured failure classes (evidence, one dogfood profile)
 
 The current measured profile totals 106 GB: `projects/` is 101 GB across 464
