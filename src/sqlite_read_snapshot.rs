@@ -459,6 +459,83 @@ pub(crate) async fn open_in(path: &Path, root: &Path) -> io::Result<SnapshotData
     })
 }
 
+/// Inspects a checkpointed, offline database through the canonical immutable
+/// snapshot boundary. This is intentionally purpose-bound: callers cannot
+/// obtain a connection or issue arbitrary SQL.
+pub(crate) fn checkpointed_database_has_any_rows(
+    path: &Path,
+    tables: &[&str],
+) -> io::Result<bool> {
+    let mut has_rows = false;
+    for table in tables {
+        if table.is_empty()
+            || !table
+                .bytes()
+                .all(|byte| byte == b'_' || byte.is_ascii_alphanumeric())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("invalid SQLite table identifier '{table}'"),
+            ));
+        }
+    }
+    for suffix in ["-wal", "-shm"] {
+        let sidecar = with_suffix(path, suffix);
+        if fs::metadata(&sidecar).is_ok_and(|metadata| metadata.len() > 0) {
+            return Err(io::Error::other(format!(
+                "checkpointed SQLite inspection refused live sidecar '{}'",
+                sidecar.display()
+            )));
+        }
+    }
+
+    let _authority = crate::db::DatabaseAuthority::for_runtime(
+        path,
+        "inspect checkpointed SQLite family for offline maintenance",
+    )
+    .map_err(io::Error::other)?;
+    let before = family_state(path)?;
+    let uri = PathBuf::from(immutable_uri(path)?);
+    let snapshot = SnapshotConnection::open(
+        &uri,
+        OpenFlags::SQLITE_OPEN_READ_ONLY
+            | OpenFlags::SQLITE_OPEN_URI
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(io::Error::other)?;
+    let connection = snapshot
+        .connection
+        .lock()
+        .map_err(|_| io::Error::other("snapshot connection lock poisoned"))?;
+    for table in tables {
+        let exists = connection
+            .query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1
+                 )",
+                [table],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(io::Error::other)?;
+        if !exists {
+            continue;
+        }
+        let sql = format!("SELECT EXISTS(SELECT 1 FROM \"{table}\" LIMIT 1)");
+        if connection
+            .query_row(&sql, [], |row| row.get::<_, bool>(0))
+            .map_err(io::Error::other)?
+        {
+            has_rows = true;
+            break;
+        }
+    }
+    drop(connection);
+    if family_state(path)? != before {
+        return Err(changed_during_snapshot(path));
+    }
+    Ok(has_rows)
+}
+
 pub(crate) fn family_fingerprint(path: &Path) -> io::Result<String> {
     use std::io::Read;
 
@@ -993,6 +1070,30 @@ fn read_only_uri(path: &Path) -> io::Result<String> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn checkpointed_inspection_is_purpose_bound_and_refuses_live_wal() {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("source.db");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE durable(value TEXT NOT NULL);
+                 CREATE TABLE empty(value TEXT NOT NULL);
+                 INSERT INTO durable(value) VALUES ('retained');",
+            )
+            .unwrap();
+        drop(connection);
+
+        assert!(
+            checkpointed_database_has_any_rows(&path, &["empty", "durable"]).unwrap()
+        );
+        assert!(!checkpointed_database_has_any_rows(&path, &["empty"]).unwrap());
+        assert!(checkpointed_database_has_any_rows(&path, &["bad-name"]).is_err());
+
+        fs::write(with_suffix(&path, "-wal"), b"live").unwrap();
+        assert!(checkpointed_database_has_any_rows(&path, &["durable"]).is_err());
+    }
 
     #[tokio::test]
     async fn snapshot_reads_wal_rows_without_touching_source_bytes_or_mtime() {
