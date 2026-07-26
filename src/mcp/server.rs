@@ -739,7 +739,7 @@ impl McpServer {
                 .await
                 .unwrap_or_default();
                 Arc::new(tokio::sync::Mutex::new(
-                    crate::dashboard::code_diagnostics_broker(
+                    crate::application::dashboard_diagnostics::diagnostic_broker(
                         cg.project_root().to_path_buf(),
                         code_diagnostics_settings,
                     ),

@@ -547,6 +547,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .expect("retained dashboard state");

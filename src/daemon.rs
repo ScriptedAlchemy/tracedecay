@@ -3081,7 +3081,7 @@ impl DaemonEngine {
                 .await
                 .unwrap_or_default();
         let diagnostic_broker = Arc::new(tokio::sync::Mutex::new(
-            crate::dashboard::code_diagnostics_broker(
+            crate::application::dashboard_diagnostics::diagnostic_broker(
                 canonical_project_path.clone(),
                 diagnostic_settings,
             ),
@@ -4153,7 +4153,7 @@ async fn portable_project_server(
             .await
             .unwrap_or_default();
     let diagnostic_broker = Arc::new(tokio::sync::Mutex::new(
-        crate::dashboard::code_diagnostics_broker(
+        crate::application::dashboard_diagnostics::diagnostic_broker(
             canonical_project_path.to_path_buf(),
             diagnostic_settings,
         ),

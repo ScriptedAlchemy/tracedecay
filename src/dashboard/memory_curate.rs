@@ -13,7 +13,6 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 
 use serde_json::{Map, Value, json};
 use tokio::sync::RwLock;
@@ -21,7 +20,7 @@ use tokio::sync::RwLock;
 use super::memory_service::{
     apply_delete_op, apply_merge_op, build_delete_plan, delete_fact, similarity_computation,
 };
-use super::{DashboardState, code_diagnostics_broker, storage_mode_label, token_count};
+use super::{DashboardState, storage_mode_label, token_count};
 use crate::db::Database;
 #[cfg(test)]
 use crate::db::TestDatabaseRuntimeMode;
@@ -152,11 +151,7 @@ async fn cli_state(cg: &TraceDecay) -> Result<DashboardState> {
         retention_config: cg.get_config().sync.retention.clone(),
         curation_activity: Arc::new(RwLock::new(Vec::new())),
         token_counts: Arc::new(token_count::TokenCountCache::new()),
-        code_diagnostics: Arc::new(RwLock::new(code_diagnostics_broker(
-            cg.project_root().to_path_buf(),
-            crate::diagnostics::lsp::settings::CodeDiagnosticsSettings::default(),
-        ))),
-        code_diagnostics_backfill_started: Arc::new(AtomicBool::new(false)),
+        code_diagnostics_authority: None,
         automation_scheduler_reconciler: None,
         automation_writer: super::standalone_dashboard_automation_writer(),
         doctor_report_reader: None,
@@ -195,11 +190,7 @@ fn user_state(
         retention_config: crate::config::RetentionConfig::default(),
         curation_activity: Arc::new(RwLock::new(Vec::new())),
         token_counts: Arc::new(token_count::TokenCountCache::new()),
-        code_diagnostics: Arc::new(RwLock::new(code_diagnostics_broker(
-            profile_root.to_path_buf(),
-            crate::diagnostics::lsp::settings::CodeDiagnosticsSettings::default(),
-        ))),
-        code_diagnostics_backfill_started: Arc::new(AtomicBool::new(false)),
+        code_diagnostics_authority: None,
         automation_scheduler_reconciler: None,
         automation_writer: super::standalone_dashboard_automation_writer(),
         doctor_report_reader: None,

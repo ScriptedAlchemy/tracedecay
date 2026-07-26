@@ -72,7 +72,6 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 
 use axum::Router;
 use axum::body::Body;
@@ -92,7 +91,6 @@ use crate::automation::config::{self, AutomationBackend, AutomationHostMode};
 use crate::daemon::{DaemonHandshake, daemon_operation_event_authority};
 use crate::daemon_client::DaemonInvocationClient;
 use crate::db::{Database, DatabaseEngineConnection};
-use crate::diagnostics::lsp;
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::RegisteredGlobalDb;
 use crate::storage::StorageMode;
@@ -230,12 +228,11 @@ pub(crate) struct DashboardState {
     pub(crate) curation_activity: Arc<RwLock<Vec<Value>>>,
     /// Process-local derived BPE token-count cache for the Savings & Cost tab.
     pub(crate) token_counts: Arc<token_count::TokenCountCache>,
-    /// Dashboard-owned LSP diagnostics broker. This is deliberately not
-    /// exposed to hooks or model-context paths in Phase 1.
-    pub(crate) code_diagnostics: Arc<RwLock<lsp::broker::DiagnosticBroker>>,
-    /// Ensures the dashboard-opened idle backfill pass is scheduled once per
-    /// dashboard server lifetime.
-    pub(crate) code_diagnostics_backfill_started: Arc<AtomicBool>,
+    /// Admitted daemon/application diagnostics authority. `None` keeps all
+    /// diagnostics controls typed unavailable; the dashboard never constructs
+    /// a broker or analyzer runtime.
+    pub(crate) code_diagnostics_authority:
+        Option<crate::application::dashboard_diagnostics::DashboardDiagnosticsAuthorityV1>,
     pub(crate) automation_scheduler_reconciler: Option<AutomationSchedulerReconciler>,
     /// Lifetime-owning capability for complete dashboard automation writes.
     pub(crate) automation_writer: DashboardAutomationWriter,
@@ -351,15 +348,6 @@ pub(crate) fn storage_mode_label(mode: &StorageMode) -> &'static str {
     }
 }
 
-pub(crate) fn code_diagnostics_broker(
-    project_root: PathBuf,
-    settings: lsp::settings::CodeDiagnosticsSettings,
-) -> lsp::broker::DiagnosticBroker {
-    let mut adapters = lsp::adapters::builtin_adapters();
-    adapters.extend(settings.custom_adapters.clone());
-    lsp::broker::DiagnosticBroker::new(project_root, adapters, settings)
-}
-
 pub(crate) fn resolve_project_memory_store(cg: &TraceDecay) -> (String, Arc<Database>) {
     (
         cg.dashboard_db_path().display().to_string(),
@@ -396,6 +384,9 @@ async fn build_state_inner(
     doctor_report_reader: Option<DoctorReportReader>,
     doctor_remediation_dispatcher: Option<doctor_remediation_api::DoctorRemediationDispatcherV1>,
     code_index_freshness_reader: Option<code_index_freshness_api::CodeIndexFreshnessReader>,
+    code_diagnostics_broker: Option<
+        Arc<tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>>,
+    >,
 ) -> Result<DashboardState> {
     let (mem_db_path, mem_db) = resolve_project_memory_store(cg);
     let memory_owner = project_memory_owner(cg)?;
@@ -404,11 +395,14 @@ async fn build_state_inner(
     let store_root = cg.store_layout().data_root.clone();
     let config_path = cg.store_layout().config_path.clone();
     let storage_mode = storage_mode_label(&cg.store_layout().storage_mode).to_string();
-    let code_diagnostics_settings = lsp::settings::load_settings(&dashboard_root)
-        .await
-        .unwrap_or_default();
-    let code_diagnostics =
-        code_diagnostics_broker(cg.project_root().to_path_buf(), code_diagnostics_settings);
+    let code_diagnostics_authority = code_diagnostics_broker.map(|broker| {
+        crate::application::dashboard_diagnostics::DashboardDiagnosticsAuthorityV1::new(
+            cg.project_root().to_path_buf(),
+            dashboard_root.clone(),
+            Arc::clone(&mem_db),
+            broker,
+        )
+    });
     let savings_db_path = registered_savings_db
         .as_ref()
         .map(|db| db.db_path().display().to_string())
@@ -438,8 +432,7 @@ async fn build_state_inner(
         retention_config: cg.get_config().sync.retention.clone(),
         curation_activity: Arc::new(RwLock::new(Vec::new())),
         token_counts: Arc::new(token_count::TokenCountCache::new()),
-        code_diagnostics: Arc::new(RwLock::new(code_diagnostics)),
-        code_diagnostics_backfill_started: Arc::new(AtomicBool::new(false)),
+        code_diagnostics_authority,
         automation_scheduler_reconciler,
         automation_writer,
         doctor_report_reader,
@@ -469,6 +462,7 @@ pub(crate) async fn build_state(cg: &TraceDecay) -> Result<DashboardState> {
         None,
         None,
         None,
+        None,
     )
     .await
 }
@@ -483,6 +477,9 @@ pub(crate) async fn build_state_with_automation_reconciler(
     doctor_report_reader: Option<DoctorReportReader>,
     doctor_remediation_dispatcher: Option<doctor_remediation_api::DoctorRemediationDispatcherV1>,
     code_index_freshness_reader: Option<code_index_freshness_api::CodeIndexFreshnessReader>,
+    code_diagnostics_broker: Option<
+        Arc<tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>>,
+    >,
 ) -> Result<DashboardState> {
     build_state_inner(
         cg.as_ref(),
@@ -496,6 +493,7 @@ pub(crate) async fn build_state_with_automation_reconciler(
         doctor_report_reader,
         doctor_remediation_dispatcher,
         code_index_freshness_reader,
+        code_diagnostics_broker,
     )
     .await
 }
@@ -523,6 +521,7 @@ pub(crate) async fn build_selected_project_state(
         None,
         None,
         active.code_index_freshness_reader.clone(),
+        None,
     )
     .await
 }
@@ -655,6 +654,7 @@ where
         options.warm_token_counts,
         None,
         standalone_dashboard_automation_writer(),
+        None,
         None,
         None,
         None,
@@ -1243,7 +1243,7 @@ async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
             "lcm_payload_health": has_lcm,
             "graph": true,
             "analytics": true,
-            "code_diagnostics": true,
+            "code_diagnostics": state.code_diagnostics_authority.is_some(),
             // Memory curation/refinement is served by the configured
             // standalone automation backend. Explicit agent ops apply through
             // /curate/apply.
@@ -1339,6 +1339,10 @@ mod authority_tests {
 
         assert_eq!(state.mem_db_path, expected_path);
         assert_eq!(state._database_guards.len(), 1);
+        assert!(
+            state.code_diagnostics_authority.is_none(),
+            "direct dashboard must not construct an analyzer authority"
+        );
     }
 
     #[tokio::test]
@@ -1367,6 +1371,12 @@ mod authority_tests {
                 Box::pin(async { Err(DoctorRemediationDispatchErrorV1::OwnerUnavailable) })
             }),
         );
+        let diagnostic_broker = Arc::new(tokio::sync::Mutex::new(
+            crate::application::dashboard_diagnostics::diagnostic_broker(
+                cg.project_root().to_path_buf(),
+                crate::diagnostics::lsp::settings::CodeDiagnosticsSettings::default(),
+            ),
+        ));
 
         let state = build_state_with_automation_reconciler(
             Arc::clone(&cg),
@@ -1378,6 +1388,7 @@ mod authority_tests {
             Some(Arc::clone(&doctor_reader)),
             Some(doctor_dispatcher),
             None,
+            Some(diagnostic_broker),
         )
         .await
         .expect("dashboard state");
@@ -1394,6 +1405,10 @@ mod authority_tests {
             &doctor_reader,
         ));
         assert!(state.doctor_remediation_dispatcher.is_some());
+        assert!(
+            state.code_diagnostics_authority.is_some(),
+            "daemon dashboard must retain the admitted diagnostics authority"
+        );
     }
 
     #[tokio::test]
