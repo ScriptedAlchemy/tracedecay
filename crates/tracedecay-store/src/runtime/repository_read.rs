@@ -31,11 +31,11 @@ use crate::{
 };
 
 /// One repository read operation, dispatched across the profile, project,
-/// session, code, and effects families.
+/// external-source, session, code, and effects families.
 ///
 /// This enum mirrors [`RepositoryWritePayloadV1`](crate::RepositoryWritePayloadV1)
 /// family for family: the write payload is a single closed enum spanning all
-/// five families even though no single executor owns every family. The
+/// typed families even though no single executor owns every family. The
 /// repository attachment executes profile/project/session and rejects
 /// code/effects (which the graph shard and the writer ledger own); the read
 /// contract keeps the same unified vocabulary with the same ownership split.

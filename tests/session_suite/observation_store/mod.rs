@@ -546,7 +546,9 @@ fn user_table_counts(database_path: &Path) -> BTreeMap<String, i64> {
         .prepare(
             "SELECT name
              FROM sqlite_master
-             WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+             WHERE type = 'table'
+               AND name NOT LIKE 'sqlite_%'
+               AND name NOT LIKE 'td_runtime_writer_%'
              ORDER BY name",
         )
         .unwrap();

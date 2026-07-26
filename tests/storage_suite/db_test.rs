@@ -485,12 +485,13 @@ async fn test_migrate_v7_adds_and_backfills_attrs_start_line() {
         .expect("open and migrate fixture");
     assert!(migrated, "expected v7 migration to run");
 
-    // user_version is now the latest schema version.
+    // The migrated store must have crossed the v7 boundary. Do not pin this
+    // regression test to an unrelated future latest version.
     let version = db
         .query_scalar_i64("read migrated schema version", "PRAGMA user_version")
         .await
         .expect("read version");
-    assert_eq!(version, 24);
+    assert!(version >= 7);
 
     // attrs_start_line is backfilled from start_line for both rows.
     // Row a: start_line=42 -> attrs_start_line=42.

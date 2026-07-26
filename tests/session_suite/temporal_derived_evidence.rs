@@ -295,12 +295,14 @@ async fn frozen_temporal_page_returns_projected_occurrences_and_lineage() {
         .await
         .unwrap();
 
+    let mut expected_occurrence_ids = vec![first.occurrence_id, second.occurrence_id];
+    expected_occurrence_ids.sort_unstable();
     assert_eq!(
         page.occurrences()
             .iter()
             .map(|occurrence| occurrence.occurrence_id.clone())
             .collect::<Vec<_>>(),
-        vec![first.occurrence_id, second.occurrence_id]
+        expected_occurrence_ids
     );
     assert_eq!(page.copies().len(), 1);
     assert_eq!(page.assertions().len(), 1);

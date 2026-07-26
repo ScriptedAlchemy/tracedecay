@@ -423,6 +423,9 @@ mod config_backend_tests {
             fusion_revision: ComponentRevision::new("fusion.semantic.pass.v1").unwrap(),
             artifact_manifest_digest: artifact.clone(),
             runtime_compatibility_digest: digest('4'),
+            search_index_key: tracedecay_domain::SemanticSearchIndexProfileV1::exact_flat_v1()
+                .and_then(|profile| profile.index_key())
+                .unwrap(),
             calibration: SemanticCalibrationProfileV1 {
                 calibration_profile_id: typed_id("calibration.semantic.pass.v1"),
                 cohort_digest: digest('5'),
