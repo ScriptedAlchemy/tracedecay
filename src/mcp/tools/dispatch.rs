@@ -13,23 +13,7 @@ use crate::application_surface::{
     observe_surface_argument_rejection, resolve_application_surface_dispatch,
     resolve_application_surface_dispatch_with_controls,
 };
-use crate::daemon_client::{
-    BindingResolver, DaemonInvocationClient, DispatchedInvocation, RequestedOutputFormat,
-    resolve_dispatch,
-};
-pub use crate::daemon_client::{
-    DispatchError as McpDispatchError, DispatchInput as McpDispatchInput,
-    InvocationControls as McpInvocationControls,
-};
-
-/// Resolves the MCP binding and constructs the same canonical dispatch used by
-/// the CLI adapter.
-pub fn resolve_mcp_dispatch<T>(
-    resolver: &impl BindingResolver,
-    input: McpDispatchInput<T>,
-) -> Result<DispatchedInvocation<T>, McpDispatchError> {
-    resolve_dispatch(resolver, BindingSurface::Mcp, input)
-}
+use crate::daemon_client::{DaemonInvocationClient, DispatchedInvocation, RequestedOutputFormat};
 
 pub async fn resolve_mcp_application_surface(
     operation: ApplicationSurfaceOperation,

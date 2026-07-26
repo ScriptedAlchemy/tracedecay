@@ -43,13 +43,6 @@ pub enum HttpApplicationOperation {
     GitHunks,
     GitPreview,
     GitApply,
-    FeedbackDiagnostics,
-    FeedbackGet,
-    FeedbackExpand,
-    FeedbackList,
-    FeedbackAdvisoryCycle,
-    FeedbackImpact,
-    AffectedTests,
     TestResults,
     CodeExactOccurrence,
     CodePhraseSearch,
@@ -108,7 +101,6 @@ pub enum HttpApplicationOperation {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum HttpApplicationOwnerKind {
     Git,
-    Feedback,
     CallableCode,
     Primitive,
     Configuration,
@@ -125,13 +117,6 @@ impl HttpApplicationOperation {
             Self::GitHunks => "git_hunks",
             Self::GitPreview => "git_preview",
             Self::GitApply => "git_apply",
-            Self::FeedbackDiagnostics => "feedback_diagnostics",
-            Self::FeedbackGet => "feedback_get",
-            Self::FeedbackExpand => "feedback_expand",
-            Self::FeedbackList => "feedback_list",
-            Self::FeedbackAdvisoryCycle => "feedback_advisory_cycle",
-            Self::FeedbackImpact => "feedback_impact",
-            Self::AffectedTests => "affected_tests",
             Self::TestResults => "test_results",
             Self::CodeExactOccurrence => "code_exact_occurrence",
             Self::CodePhraseSearch => "code_phrase_search",
@@ -196,12 +181,6 @@ impl HttpApplicationOperation {
             | Self::GitHunks
             | Self::GitPreview
             | Self::GitApply => HttpApplicationOwnerKind::Git,
-            Self::FeedbackDiagnostics
-            | Self::FeedbackGet
-            | Self::FeedbackExpand
-            | Self::FeedbackList
-            | Self::FeedbackAdvisoryCycle
-            | Self::FeedbackImpact => HttpApplicationOwnerKind::Feedback,
             Self::CodeExactOccurrence
             | Self::CodePhraseSearch
             | Self::CodeCallees
@@ -211,7 +190,6 @@ impl HttpApplicationOperation {
             | Self::CodeDefinition
             | Self::CodeTypeDefinition
             | Self::CodeReferences => HttpApplicationOwnerKind::CallableCode,
-            Self::AffectedTests => HttpApplicationOwnerKind::Feedback,
             Self::TestResults
             | Self::CodeSymbolSearch
             | Self::CodeSignatureSearch
@@ -285,8 +263,6 @@ pub type HttpApplicationInvocationFuture =
 pub trait HttpApplicationOwners: Clone + Send + Sync + 'static {
     fn invoke_git(&self, request: HttpApplicationRequest) -> HttpApplicationInvocationFuture;
 
-    fn invoke_feedback(&self, request: HttpApplicationRequest) -> HttpApplicationInvocationFuture;
-
     fn invoke_callable_code(
         &self,
         request: HttpApplicationRequest,
@@ -311,10 +287,6 @@ where
     Fut: Future<Output = CanonicalInvocationResult<Value>> + Send + 'static,
 {
     fn invoke_git(&self, request: HttpApplicationRequest) -> HttpApplicationInvocationFuture {
-        Box::pin((self)(request))
-    }
-
-    fn invoke_feedback(&self, request: HttpApplicationRequest) -> HttpApplicationInvocationFuture {
         Box::pin((self)(request))
     }
 
@@ -446,16 +418,6 @@ where
         .route("/git/preview", post(git_preview::<O>))
         .route("/git/apply", post(git_apply::<O>))
         .route("/git/{operation}", post(git_read::<O>))
-        .route("/feedback/diagnostics", post(feedback_diagnostics::<O>))
-        .route("/feedback/get", post(feedback_get::<O>))
-        .route("/feedback/expand", post(feedback_expand::<O>))
-        .route("/feedback/list", post(feedback_list::<O>))
-        .route(
-            "/feedback/advisory-cycle",
-            post(feedback_advisory_cycle::<O>),
-        )
-        .route("/feedback/impact", post(feedback_impact::<O>))
-        .route("/tests/affected", post(affected_tests::<O>))
         .route("/tests/results", post(test_results::<O>))
         .route("/code/{operation}", post(callable_code_read::<O>))
         .route("/primitives/{operation}", post(primitive_read::<O>))
@@ -555,153 +517,6 @@ where
 {
     invoke_route(
         HttpApplicationOperation::GitApply,
-        state,
-        request_id,
-        cancellation,
-        page,
-        body,
-    )
-    .await
-}
-
-async fn feedback_diagnostics<O>(
-    state: State<O>,
-    request_id: Extension<RequestId>,
-    cancellation: Extension<HttpApplicationControls>,
-    page: Result<Query<HttpPageQuery>, QueryRejection>,
-    body: Result<Json<Value>, JsonRejection>,
-) -> Response
-where
-    O: HttpApplicationOwners,
-{
-    invoke_route(
-        HttpApplicationOperation::FeedbackDiagnostics,
-        state,
-        request_id,
-        cancellation,
-        page,
-        body,
-    )
-    .await
-}
-
-async fn feedback_get<O>(
-    state: State<O>,
-    request_id: Extension<RequestId>,
-    cancellation: Extension<HttpApplicationControls>,
-    page: Result<Query<HttpPageQuery>, QueryRejection>,
-    body: Result<Json<Value>, JsonRejection>,
-) -> Response
-where
-    O: HttpApplicationOwners,
-{
-    invoke_route(
-        HttpApplicationOperation::FeedbackGet,
-        state,
-        request_id,
-        cancellation,
-        page,
-        body,
-    )
-    .await
-}
-
-async fn feedback_expand<O>(
-    state: State<O>,
-    request_id: Extension<RequestId>,
-    cancellation: Extension<HttpApplicationControls>,
-    page: Result<Query<HttpPageQuery>, QueryRejection>,
-    body: Result<Json<Value>, JsonRejection>,
-) -> Response
-where
-    O: HttpApplicationOwners,
-{
-    invoke_route(
-        HttpApplicationOperation::FeedbackExpand,
-        state,
-        request_id,
-        cancellation,
-        page,
-        body,
-    )
-    .await
-}
-
-async fn feedback_list<O>(
-    state: State<O>,
-    request_id: Extension<RequestId>,
-    cancellation: Extension<HttpApplicationControls>,
-    page: Result<Query<HttpPageQuery>, QueryRejection>,
-    body: Result<Json<Value>, JsonRejection>,
-) -> Response
-where
-    O: HttpApplicationOwners,
-{
-    invoke_route(
-        HttpApplicationOperation::FeedbackList,
-        state,
-        request_id,
-        cancellation,
-        page,
-        body,
-    )
-    .await
-}
-
-async fn feedback_advisory_cycle<O>(
-    state: State<O>,
-    request_id: Extension<RequestId>,
-    cancellation: Extension<HttpApplicationControls>,
-    page: Result<Query<HttpPageQuery>, QueryRejection>,
-    body: Result<Json<Value>, JsonRejection>,
-) -> Response
-where
-    O: HttpApplicationOwners,
-{
-    invoke_route(
-        HttpApplicationOperation::FeedbackAdvisoryCycle,
-        state,
-        request_id,
-        cancellation,
-        page,
-        body,
-    )
-    .await
-}
-
-async fn feedback_impact<O>(
-    state: State<O>,
-    request_id: Extension<RequestId>,
-    cancellation: Extension<HttpApplicationControls>,
-    page: Result<Query<HttpPageQuery>, QueryRejection>,
-    body: Result<Json<Value>, JsonRejection>,
-) -> Response
-where
-    O: HttpApplicationOwners,
-{
-    invoke_route(
-        HttpApplicationOperation::FeedbackImpact,
-        state,
-        request_id,
-        cancellation,
-        page,
-        body,
-    )
-    .await
-}
-
-async fn affected_tests<O>(
-    state: State<O>,
-    request_id: Extension<RequestId>,
-    cancellation: Extension<HttpApplicationControls>,
-    page: Result<Query<HttpPageQuery>, QueryRejection>,
-    body: Result<Json<Value>, JsonRejection>,
-) -> Response
-where
-    O: HttpApplicationOwners,
-{
-    invoke_route(
-        HttpApplicationOperation::AffectedTests,
         state,
         request_id,
         cancellation,
@@ -948,7 +763,6 @@ where
     };
     let invocation = match owner_kind {
         HttpApplicationOwnerKind::Git => owners.invoke_git(request),
-        HttpApplicationOwnerKind::Feedback => owners.invoke_feedback(request),
         HttpApplicationOwnerKind::CallableCode => owners.invoke_callable_code(request),
         HttpApplicationOwnerKind::Primitive => owners.invoke_primitive(request),
         HttpApplicationOwnerKind::Configuration => owners.invoke_configuration(request),

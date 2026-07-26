@@ -1,4 +1,3 @@
-use std::collections::BTreeSet;
 use std::io::Write as _;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
@@ -24,8 +23,7 @@ use tracedecay_domain::{
     SourceContentStateV1, SourceCoverageV1, SourceCursorV1, SourceDefinitionV1,
     SourceDeletionSemanticsV1, SourceInstanceId, SourceNativeObjectIdV1, SourceObjectObservationV1,
     SourceObjectRevisionV1, SourcePartitionFrontierV1, SourcePartitionIdV1,
-    SourceRefetchStrategyV1, SourceSnapshotCompletionV1, SourceSnapshotIdV1, UserProfileId,
-    canonical_sha256,
+    SourceRefetchStrategyV1, SourceSnapshotIdV1, UserProfileId, canonical_sha256,
 };
 use tracedecay_store::ObservationReplayRequest;
 
@@ -447,33 +445,33 @@ fn assert_external_source_contract(
         serde_json::from_value(observation.payload().clone()).unwrap();
     assert_eq!(envelope.provider().as_str(), provider);
 
+    let capabilities = SourceAcquisitionCapabilitiesV1::new(
+        [SourceCaptureModeV1::Poll].into_iter().collect(),
+        [SourceRefetchStrategyV1::WholeRoot].into_iter().collect(),
+        [SourceDeletionSemanticsV1::ExplicitOnly]
+            .into_iter()
+            .collect(),
+    )
+    .unwrap();
     let definition = SourceDefinitionV1::new(
-        SourceInstanceId::new(format!("source.host-event.{provider}")).unwrap(),
+        SourceInstanceId::new(format!("source.host-observation.{provider}")).unwrap(),
         1,
-        SourceAcquisitionContractV1::new(
-            envelope.provider().clone(),
-            SourceAcquisitionCapabilitiesV1::new(
-                BTreeSet::from([SourceCaptureModeV1::Poll]),
-                BTreeSet::from([SourceRefetchStrategyV1::WholeRoot]),
-                BTreeSet::from([SourceDeletionSemanticsV1::CompleteSnapshotAbsence]),
-            )
-            .unwrap(),
-        )
-        .unwrap(),
+        SourceAcquisitionContractV1::new(envelope.provider().clone(), capabilities).unwrap(),
         SourceCaptureModeV1::Poll,
         SourceRefetchStrategyV1::WholeRoot,
-        SourceDeletionSemanticsV1::CompleteSnapshotAbsence,
+        SourceDeletionSemanticsV1::ExplicitOnly,
         1,
     )
     .unwrap();
     let owner = match scope {
         HostAdmissionScope::Project => SourceBindingOwnerV1::Project(project_id.clone()),
         HostAdmissionScope::Profile => SourceBindingOwnerV1::Profile(
-            UserProfileId::new(format!("profile.host-event.{provider}")).unwrap(),
+            UserProfileId::new(format!("profile.host-observation.{provider}")).unwrap(),
         ),
     };
     let privacy_domain =
-        tracedecay_domain::PrivacyDomainId::new(format!("privacy.host-event.{provider}")).unwrap();
+        tracedecay_domain::PrivacyDomainId::new(format!("privacy.host-observation.{provider}"))
+            .unwrap();
     let scope_tag = match scope {
         HostAdmissionScope::Project => "project",
         HostAdmissionScope::Profile => "profile",
@@ -494,7 +492,7 @@ fn assert_external_source_contract(
 
     let alternate_owner = match owner {
         SourceBindingOwnerV1::Project(_) => SourceBindingOwnerV1::Profile(
-            UserProfileId::new(format!("profile.host-event.alternate.{provider}")).unwrap(),
+            UserProfileId::new(format!("profile.host-observation.alternate.{provider}")).unwrap(),
         ),
         SourceBindingOwnerV1::Profile(_) => SourceBindingOwnerV1::Project(project_id.clone()),
     };
@@ -503,7 +501,7 @@ fn assert_external_source_contract(
     assert_ne!(binding.binding_id, alternate_binding.binding_id);
 
     let partition = SourcePartitionIdV1::new(canonical_sha256(&("partition", provider)).unwrap());
-    let complete_snapshot =
+    let snapshot =
         SourceSnapshotIdV1::new(canonical_sha256(&("snapshot", provider, 1_u64)).unwrap());
     let object = SourceNativeObjectIdV1::new(
         canonical_sha256(&("native-object", observation.observation_id())).unwrap(),
@@ -517,75 +515,36 @@ fn assert_external_source_contract(
         SourceContentStateV1::Live,
     )
     .unwrap();
-    let completion = SourceSnapshotCompletionV1::new(
-        partition.clone(),
-        complete_snapshot.clone(),
-        BTreeSet::from([object.clone()]),
-    )
-    .unwrap();
-    assert!(completion.present_objects().contains(&object));
-
     let binding_identity = binding.immutable_identity().unwrap();
-    let complete = SourcePartitionFrontierV1::new(
+    let partial = SourcePartitionFrontierV1::new(
         binding_identity.clone(),
         partition.clone(),
         Some(SourceCursorV1::new(
             canonical_sha256(&("cursor", provider, 1_u64)).unwrap(),
         )),
-        Some(complete_snapshot.clone()),
-        None,
-        SourceCoverageV1::Complete,
+        Some(snapshot),
+        Some(SourceCursorV1::new(
+            canonical_sha256(&("continuation", provider, 1_u64)).unwrap(),
+        )),
+        SourceCoverageV1::Partial,
         1,
         None,
         canonical_sha256(&("input", provider, 1_u64)).unwrap(),
     )
     .unwrap();
-    let complete_aggregate =
-        SourceAggregateFrontierV1::with_updated_partition(binding_identity.clone(), None, complete)
-            .unwrap();
-    assert_eq!(complete_aggregate.coverage(), SourceCoverageV1::Complete);
-
-    let partial = SourcePartitionFrontierV1::new(
-        binding_identity.clone(),
-        partition.clone(),
-        Some(SourceCursorV1::new(
-            canonical_sha256(&("cursor", provider, 2_u64)).unwrap(),
-        )),
-        Some(SourceSnapshotIdV1::new(
-            canonical_sha256(&("snapshot", provider, 2_u64)).unwrap(),
-        )),
-        Some(SourceCursorV1::new(
-            canonical_sha256(&("continuation", provider, 2_u64)).unwrap(),
-        )),
-        SourceCoverageV1::Partial,
-        2,
-        Some(complete_snapshot.clone()),
-        canonical_sha256(&("input", provider, 2_u64)).unwrap(),
-    )
-    .unwrap();
-    let partial_aggregate = SourceAggregateFrontierV1::with_updated_partition(
-        binding_identity,
-        Some(&complete_aggregate),
-        partial,
-    )
-    .unwrap();
+    let partial_aggregate =
+        SourceAggregateFrontierV1::with_updated_partition(binding_identity, None, partial).unwrap();
 
     assert_eq!(partial_aggregate.coverage(), SourceCoverageV1::Partial);
-    assert_ne!(partial_aggregate.digest(), complete_aggregate.digest());
     assert_eq!(
         partial_aggregate
             .partition(&partition)
             .unwrap()
             .last_complete_snapshot(),
-        Some(complete_snapshot)
+        None
     );
     assert_eq!(retained.content_state(), SourceContentStateV1::Live);
-    assert!(
-        completion
-            .present_objects()
-            .contains(retained.native_object()),
-        "partial coverage must preserve the last complete object evidence"
-    );
+    assert_eq!(retained.native_object(), &object);
 }
 
 async fn execute_native_provider_path(provider: &str, home: &Path) -> HostAdmissionOutcome {

@@ -1,8 +1,4 @@
-mod common;
-
 use std::collections::BTreeSet;
-use std::process::Stdio;
-use std::sync::{Arc, Mutex};
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -14,14 +10,10 @@ use tracedecay::application_surface::{
     TestResultsSurfaceRequest, resolve_application_surface_dispatch,
     resolve_http_application_surface, resolve_http_application_surface_dispatch,
 };
-use tracedecay::daemon::DaemonHandshake;
 use tracedecay::daemon_client::{
-    BindingResolution, BindingResolver, CatalogBindingResolver, DaemonInvocationClient,
-    RequestedOutputFormat,
+    BindingResolution, BindingResolver, CatalogBindingResolver, RequestedOutputFormat,
 };
-use tracedecay::mcp::tools::dispatch::{
-    resolve_mcp_application_surface, resolve_mcp_application_surface_dispatch,
-};
+use tracedecay::mcp::tools::dispatch::resolve_mcp_application_surface_dispatch;
 use tracedecay::mcp::tools::get_tool_definitions;
 use tracedecay_api::{
     CanonicalInvocationResult, HttpApplicationControls, HttpApplicationRequest, HttpSseEvent,
@@ -29,8 +21,8 @@ use tracedecay_api::{
 };
 use tracedecay_application::{
     APPLICATION_DEFAULT_PROFILE_ID, ApplicationProblem, ApplicationProblemEnvelope,
-    ApplicationProblemKind, CancellationSignal, Deadline, IdempotencyKey, RequestId,
-    ResultContractRef, RetryDirective, StreamEvent,
+    CancellationSignal, Deadline, IdempotencyKey, RequestId, ResultContractRef, RetryDirective,
+    StreamEvent,
 };
 use tracedecay_domain::{
     GitCommitIdentityV1, GitCoverageV1, GitDiffScopeV1, GitHeadStateV1, GitIndexCommitIntentV1,
@@ -47,53 +39,32 @@ const PARITY_FIXTURE: &str =
     include_str!("../benchmarks/pr12-transport-boundary/goldens/application-surface-parity.json");
 
 #[tokio::test]
-async fn http_routes_apply_the_canonical_page_default_when_query_is_omitted() {
-    let observed = Arc::new(Mutex::new(None));
-    let capture = Arc::clone(&observed);
-    let owner = move |request: HttpApplicationRequest| {
-        let capture = Arc::clone(&capture);
-        async move {
-            *capture.lock().expect("capture HTTP page") = Some(request.page);
-            CanonicalInvocationResult::<serde_json::Value>::new(
-                BindingId::new("binding.http.feedback_diagnostics.v1").expect("binding"),
-                Err(ApplicationProblemEnvelope::new(
-                    ResultContractRef::new(
-                        SchemaId::new("schema.application.feedback.diagnostics.result")
-                            .expect("schema"),
-                        1,
-                    )
-                    .expect("result contract"),
-                    request.request_id,
-                    ApplicationProblem::not_found_or_not_authorized(RetryDirective::Never),
-                )),
-            )
-        }
+async fn removed_feedback_http_routes_do_not_invoke_an_owner() {
+    let owner = |_request: HttpApplicationRequest| async move {
+        panic!("removed feedback route invoked an application owner")
     };
-    let request = Request::builder()
-        .method("POST")
-        .uri("/feedback/diagnostics")
-        .header("content-type", "application/json")
-        .extension(RequestId::new("request.http-default-page").expect("request id"))
-        .extension(HttpApplicationControls {
-            deadline: Deadline::new(UtcMicros(i64::MAX)).expect("deadline"),
-            cancellation: CancellationSignal::active("cancel.http-default-page")
-                .expect("cancellation"),
-        })
-        .body(Body::from("{}"))
-        .expect("HTTP request");
-
-    let response = application_router(owner)
-        .oneshot(request)
-        .await
-        .expect("HTTP response");
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    let page = observed
-        .lock()
-        .expect("read captured HTTP page")
-        .clone()
-        .expect("owner invoked");
-    assert_eq!(page.page_size, 10);
-    assert!(page.cursor.is_none());
+    let router = application_router(owner);
+    for route in [
+        "/feedback/diagnostics",
+        "/feedback/get",
+        "/feedback/expand",
+        "/feedback/list",
+        "/feedback/impact",
+        "/feedback/affected-tests",
+    ] {
+        let request = Request::builder()
+            .method("POST")
+            .uri(route)
+            .header("content-type", "application/json")
+            .body(Body::from("{}"))
+            .expect("HTTP request");
+        let response = router
+            .clone()
+            .oneshot(request)
+            .await
+            .expect("HTTP response");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{route}");
+    }
 }
 
 #[test]
@@ -296,181 +267,46 @@ fn mcp_primitive_definitions_use_application_contracts() {
 }
 
 #[test]
-fn mcp_feedback_cycle_projection_schemas_require_only_the_canonical_handle() {
+fn handle_gated_feedback_tools_are_not_advertised_over_mcp() {
     let definitions = get_tool_definitions();
-    for operation in [
-        ApplicationSurfaceOperation::FeedbackImpact,
-        ApplicationSurfaceOperation::AffectedTests,
+    for tool_name in [
+        "tracedecay_feedback_diagnostics",
+        "tracedecay_feedback_get",
+        "tracedecay_feedback_expand",
+        "tracedecay_feedback_list",
+        "tracedecay_feedback_impact",
+        "tracedecay_affected_tests",
     ] {
-        let tool_name = format!("tracedecay_{}", operation.as_str());
-        let definition = definitions
-            .iter()
-            .find(|definition| definition.name == tool_name)
-            .unwrap_or_else(|| panic!("{tool_name} definition"));
-        assert_eq!(
-            definition.input_schema["properties"]
-                .as_object()
-                .expect("feedback-cycle properties")
-                .keys()
-                .map(String::as_str)
-                .collect::<BTreeSet<_>>(),
-            BTreeSet::from(["request_handle"])
+        assert!(
+            definitions
+                .iter()
+                .all(|definition| definition.name != tool_name),
+            "{tool_name} must not be advertised"
         );
-        assert_eq!(
-            definition.input_schema["required"],
-            serde_json::json!(["request_handle"])
-        );
-        tracedecay::application_surface::parse_application_surface_request(
-            operation,
-            serde_json::json!({"request_handle": "rh_feedback-cycle.fixture"}),
-        )
-        .unwrap_or_else(|error| panic!("{tool_name} must parse: {error}"));
     }
 }
 
-#[tokio::test]
-async fn feedback_reads_are_callable_and_conceal_unknown_handles() {
-    let (environment, project) = common::IsolatedEnv::acquire().await;
-    std::fs::create_dir_all(project.join("src")).expect("project source directory");
-    std::fs::write(
-        project.join("src/lib.rs"),
-        "pub fn transport_fixture() {}\n",
-    )
-    .expect("project source");
-    let initialization = common::tracedecay_command_with_home(environment.home())
-        .arg("init")
-        .current_dir(&project)
-        .stdin(Stdio::null())
-        .output()
-        .expect("initialize parity project");
-    assert!(
-        initialization.status.success(),
-        "tracedecay init failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&initialization.stdout),
-        String::from_utf8_lossy(&initialization.stderr)
-    );
-    let _daemon = common::spawn_tracedecay_daemon(environment.home());
-    let handshake = DaemonHandshake::for_current_client(Some(project.clone()), None, false, false)
-        .expect("daemon handshake");
-    let client = DaemonInvocationClient::for_current(handshake).expect("daemon client");
-    let project_arg = project.to_string_lossy().into_owned();
-    let fixture: serde_json::Value =
-        serde_json::from_str(PARITY_FIXTURE).expect("application parity fixture");
-    let expected_kind = fixture["authorization_concealment"]["problem_kind"]
-        .as_str()
-        .expect("concealed problem kind");
-    wait_for_feedback_owner(&client).await;
-
-    for operation in [
-        ApplicationSurfaceOperation::FeedbackDiagnostics,
-        ApplicationSurfaceOperation::FeedbackGet,
-        ApplicationSurfaceOperation::FeedbackExpand,
-        ApplicationSurfaceOperation::FeedbackList,
+#[test]
+fn handle_gated_feedback_capabilities_are_not_callable() {
+    let catalog = tracedecay::application_surface::application_surface_catalog()
+        .expect("application catalog");
+    for capability_id in [
+        "capability.application.feedback.affected-tests",
+        "capability.application.feedback.ci-failure-localize",
+        "capability.application.feedback.diagnostics",
+        "capability.application.feedback.expand",
+        "capability.application.feedback.get",
+        "capability.application.feedback.github-review-ingest",
+        "capability.application.feedback.impact",
+        "capability.application.feedback.list",
+        "capability.application.feedback.proximity",
     ] {
-        let expected = &fixture["operations"][operation.as_str()];
-        let handle = expected["request_handle"].as_str().expect("request handle");
-        let mcp = resolve_mcp_application_surface(
-            operation,
-            request_id(operation, "mcp-call"),
-            feedback_request(handle),
-            RequestedOutputFormat::Json,
-            Some(&client),
-        )
-        .await
-        .expect("MCP call");
-        let http = resolve_http_application_surface(
-            operation,
-            request_id(operation, "http-call"),
-            feedback_request(handle),
-            RequestedOutputFormat::Json,
-            Some(&client),
-        )
-        .await
-        .expect("HTTP call");
-
-        let mcp_problem = mcp
-            .result
-            .as_ref()
-            .expect_err("unknown handle must be concealed");
-        assert_eq!(
-            mcp_problem.problem.kind(),
-            ApplicationProblemKind::NotFoundOrNotAuthorized,
-            "{mcp_problem:?}"
-        );
-        let http_problem = http
-            .result
-            .as_ref()
-            .expect_err("unknown handle must be concealed");
-        assert_eq!(
-            http_problem.problem.kind(),
-            ApplicationProblemKind::NotFoundOrNotAuthorized,
-            "{http_problem:?}"
-        );
-        let http_value = serde_json::to_value(
-            CanonicalInvocationResult::<serde_json::Value>::new(http.binding_id, http.result)
-                .into_http_json(),
-        )
-        .expect("HTTP JSON");
-        assert_eq!(http_value["kind"], "problem");
-        assert_eq!(http_value["value"]["problem"]["kind"], expected_kind);
-        assert!(
-            http_value["value"].get("binding_id").is_none(),
-            "concealed HTTP problems must not disclose binding identity"
-        );
-
-        let output = common::tracedecay_command_with_home(environment.home())
-            .current_dir(&project)
-            .args([
-                "tool",
-                "--project",
-                project_arg.as_str(),
-                operation.as_str(),
-                "--request-handle",
-                handle,
-                "--json",
-            ])
-            .output()
-            .expect("run CLI");
-        assert!(
-            output.status.success(),
-            "stderr: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let value: serde_json::Value =
-            serde_json::from_slice(&output.stdout).expect("canonical CLI JSON");
-        assert_eq!(value["problem"]["kind"], expected_kind);
-    }
-}
-
-async fn wait_for_feedback_owner(client: &DaemonInvocationClient) {
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        let result = resolve_mcp_application_surface(
-            ApplicationSurfaceOperation::FeedbackDiagnostics,
-            request_id(
-                ApplicationSurfaceOperation::FeedbackDiagnostics,
-                "owner-readiness",
-            ),
-            feedback_request("rh_missing-pr12-owner-readiness"),
-            RequestedOutputFormat::Json,
-            Some(client),
-        )
-        .await
-        .expect("feedback owner readiness call");
-        match result.result {
-            Err(problem)
-                if problem.problem.kind() == ApplicationProblemKind::NotFoundOrNotAuthorized =>
-            {
-                return;
-            }
-            Err(problem)
-                if problem.problem.kind() == ApplicationProblemKind::Unavailable
-                    && tokio::time::Instant::now() < deadline =>
-            {
-                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-            }
-            other => panic!("feedback owner did not become ready: {other:?}"),
-        }
+        let capability_id =
+            tracedecay_tool_catalog::CapabilityId::new(capability_id).expect("capability id");
+        let capability = catalog
+            .capability(&capability_id)
+            .expect("feedback capability remains documented");
+        assert!(!capability.availability().is_callable(), "{capability_id}");
     }
 }
 
