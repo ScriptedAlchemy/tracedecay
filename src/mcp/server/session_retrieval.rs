@@ -143,7 +143,7 @@ impl DaemonSessionRetrievalRoot {
         })
     }
 
-    #[cfg(feature = "test-transport")]
+    #[cfg(any(test, feature = "test-transport"))]
     pub(crate) fn project_for_test(cg: &TraceDecay) -> Self {
         let project_root = cg.project_root().to_path_buf();
         let project_id = cg.store_layout().identity.project_id.clone();

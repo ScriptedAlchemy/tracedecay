@@ -174,7 +174,7 @@ flags are fine. Parameter names below are the MCP argument names in kebab-case.
 | `constructors` | `--struct` | — |
 | `rename_preview` | `--node-id` | — |
 | `str_replace` | `--path`, `--old-str`, `--new-str` | — |
-| `diagnostics` | — | `--scope`, `--name`, `--path` |
+| `diagnostics` | — | `--scope`, `--path`, `--maximum-diagnostics`, `--cursor` |
 | `diagnose` | `--cargo-output` | `--severity`, `--include-callers` |
 | `affected` | `--files` | — |
 | `diff_context` | `--files` | — |
