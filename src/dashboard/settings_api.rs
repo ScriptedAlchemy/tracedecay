@@ -1,14 +1,12 @@
 //! Dashboard endpoints for project and user settings.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-
 use axum::Json;
 use axum::extract::State;
 use axum::http::StatusCode;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tracedecay_application::{ApplicationProblemKind, RequestId};
+use tracedecay_application::ApplicationProblemKind;
 
 use super::DashboardState;
 use super::read_model::{
@@ -32,12 +30,12 @@ use crate::application_surface::{
 use crate::automation::config as automation_config;
 use crate::config::TraceDecayConfig;
 use crate::daemon_client::RequestedOutputFormat;
+use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use crate::user_config;
 
 type ApiResult = std::result::Result<Json<DashboardEnvelopeV1<SettingsPayloadV1>>, JsonError>;
 
 const AUTOMATION_CONFIG_ENDPOINT: &str = "/api/plugins/holographic/curation/config";
-static NEXT_SETTINGS_REQUEST: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Clone, Deserialize, JsonSchema, Default)]
 #[serde(deny_unknown_fields)]
@@ -301,13 +299,8 @@ pub(crate) async fn patch_project_settings(
             .into_iter()
             .map(surface_mutation)
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        let sequence = NEXT_SETTINGS_REQUEST.fetch_add(1, Ordering::Relaxed);
-        let request_id = RequestId::new(format!(
-            "request.dashboard.settings.{}.{}",
-            crate::tracedecay::current_timestamp(),
-            sequence
-        ))
-        .map_err(|error| configuration_unavailable(&error))?;
+        let request_id = mint_global_request_id(GlobalRequestSurface::DashboardSettings)
+            .map_err(|error| configuration_unavailable(&error))?;
         let outcome = resolve_dashboard_application_surface(
             ApplicationSurfaceOperation::ConfigurationBatch,
             request_id,

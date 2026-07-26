@@ -7,7 +7,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -15,7 +14,7 @@ use tokio::process::Command;
 use tokio::time::timeout;
 use tracedecay_application::{
     CancellationObservation, CancellationSignal, CancellationStage, Deadline, OperationBudgetUsage,
-    OperationReceipt, OperationTermination, RequestId,
+    OperationReceipt, OperationTermination,
 };
 use tracedecay_domain::{CommitId, UtcMicros};
 use url::Url;
@@ -28,6 +27,7 @@ use crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1;
 use crate::diagnostics_store::DiagnosticsStore;
 use crate::errors::{Result, TraceDecayError};
 use crate::redundancy::{Fingerprint, body_token_window, redundancy_match_score, round4};
+use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 use crate::tracedecay::{TraceDecay, is_test_file};
 use crate::types::Node;
 
@@ -39,8 +39,6 @@ use super::support::unique_file_paths;
 /// cap — libtest filters are passed as positional args so very long lists
 /// can blow past OS argv limits on some platforms.
 const MAX_TESTS_HARD_CAP: usize = 500;
-static NEXT_TEST_RUN_OPERATION: AtomicU64 = AtomicU64::new(1);
-
 /// Cap on cached fingerprint rows the near-duplicate lookup pulls per
 /// diagnostic. A single diagnose call can resolve many diagnostics, so we
 /// bound the candidate window query — a huge fingerprint cache must not be
@@ -763,9 +761,12 @@ async fn begin_test_run(
             message: "managed test-run root URI is invalid".to_owned(),
         })?
         .to_string();
-    let sequence = NEXT_TEST_RUN_OPERATION.fetch_add(1, Ordering::Relaxed);
-    let request_id = RequestId::new(format!("request.managed-test-run.{sequence}"))
-        .map_err(test_run_contract_error)?;
+    let request_id =
+        mint_global_request_id(GlobalRequestSurface::ManagedTestRun).map_err(|error| {
+            TraceDecayError::Config {
+                message: error.to_string(),
+            }
+        })?;
     let database = cg.dashboard_database_guard();
     let code_generation_id = DiagnosticsStore::new(database.conn())
         .current_generation()

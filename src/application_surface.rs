@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use axum::body::Body;
@@ -82,13 +82,13 @@ use crate::daemon_client::{
     DispatchError, DispatchInput, DispatchedInvocation, InvocationCancellationPolicy,
     InvocationControls, RequestedOutputFormat, ResolvedBinding, ScopeSelector, resolve_dispatch,
 };
+use crate::request_identity::{GlobalRequestSurface, mint_global_request_id};
 
 const DEFAULT_PAGE_SIZE: u32 = 10;
 const DEFAULT_DEADLINE_MICROS: i64 = 30_000_000;
 const APPLICATION_PROTOCOL_REVISION: u32 = 1;
 const HTTP_DEADLINE_HEADER: &str = "x-tracedecay-deadline-micros";
 const MAX_REQUEST_HANDLE_BYTES: usize = 256;
-static NEXT_HTTP_APPLICATION_REQUEST: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1168,12 +1168,7 @@ async fn application_http_context(
     mut request: Request<Body>,
     next: Next,
 ) -> Response {
-    let sequence = NEXT_HTTP_APPLICATION_REQUEST.fetch_add(1, Ordering::Relaxed);
-    let Ok(request_id) = RequestId::new(format!(
-        "request.http.{}.{}",
-        crate::tracedecay::current_timestamp(),
-        sequence
-    )) else {
+    let Ok(request_id) = mint_global_request_id(GlobalRequestSurface::Http) else {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
     let Ok(cancellation) =
