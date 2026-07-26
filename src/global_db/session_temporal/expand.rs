@@ -1,20 +1,17 @@
-//! Generation-bound derived evidence member expansion.
+//! Generation-bound temporal session retrieval.
 
 use std::collections::BTreeSet;
 
 use crate::db::engine::{Row, params};
 use serde::de::DeserializeOwned;
 use tracedecay_domain::{
-    AnchorDurabilityClass, DerivedEvidenceIdV1, DerivedEvidenceKindV1, DerivedEvidenceMemberRoleV1,
-    DurableObservationV1, HydrationStateV1, LogicalCopyRecordV1, MessageOccurrenceIdV1,
-    MessageOccurrenceRecordV1, ObservationScopeV1, PayloadAccessState, ProjectId,
-    RetrievalAnchorId, RetrievalAnchorRecord, SessionCursorKeyIdV1, SessionCursorVersionV1,
-    SessionId, SessionProjectionGenerationV1, SessionSummaryIdV1, SessionSummaryRecordV1,
-    SignedCursorKeyRefV1, SummaryPublicationMetadataV1, SummarySourceHorizonV1,
-    TemporalAssertionRecordV1, TemporalCoverageCountsV1, TemporalModeV1, UtcMicros,
+    LogicalCopyRecordV1, MessageOccurrenceRecordV1, RetrievalAnchorId, SessionCursorKeyIdV1,
+    SessionCursorVersionV1, SessionId, SessionProjectionGenerationV1, SessionSummaryIdV1,
+    SessionSummaryRecordV1, SignedCursorKeyRefV1, SummaryPublicationMetadataV1,
+    SummarySourceHorizonV1, TemporalAssertionRecordV1, TemporalCoverageCountsV1, TemporalModeV1,
+    UtcMicros,
 };
 use tracedecay_store::{
-    DerivedEvidenceMemberPageItemV1, DerivedEvidenceMemberPageV1,
     MAX_SESSION_TEMPORAL_RETRIEVAL_PAGE_SIZE, SessionFrozenWatermarksV1, SessionRetrievalPageV1,
     SessionStoreError, SessionStoreResult, SessionTemporalCapabilitiesV1,
     SessionTemporalCapabilityV1, SessionTemporalRetrievalRequestV1,
@@ -24,7 +21,7 @@ use tracedecay_store::{
 use super::query::{now_micros, storage, storage_message};
 use crate::global_db::RegisteredGlobalDb;
 
-const EXPAND_OPERATION: &str = "expand session derived evidence members";
+const EXPAND_OPERATION: &str = "retrieve session temporal page";
 const FREEZE_OPERATION: &str = "freeze session temporal snapshot";
 
 impl RegisteredGlobalDb {
@@ -98,176 +95,6 @@ impl RegisteredGlobalDb {
                 SessionTemporalCapabilityV1::GenerationRebuild,
             ]),
         ))
-    }
-
-    pub(crate) async fn expand_derived_members_result(
-        &self,
-        snapshot: SessionTemporalSnapshotV1,
-        evidence_kind: DerivedEvidenceKindV1,
-        evidence_id: DerivedEvidenceIdV1,
-        after_ordinal: Option<u32>,
-        limit: usize,
-    ) -> SessionStoreResult<DerivedEvidenceMemberPageV1> {
-        if !(1..=MAX_SESSION_TEMPORAL_RETRIEVAL_PAGE_SIZE).contains(&limit) {
-            return Err(SessionStoreError::InvalidPageLimit {
-                limit,
-                max: MAX_SESSION_TEMPORAL_RETRIEVAL_PAGE_SIZE,
-            });
-        }
-        let generation = i64::try_from(snapshot.watermarks().active_generation().value())
-            .map_err(|error| storage(EXPAND_OPERATION, error))?;
-        let read = self
-            .read_snapshot()
-            .await
-            .map_err(|error| storage(EXPAND_OPERATION, error))?;
-        validate_frozen_snapshot(&read, &snapshot).await?;
-
-        let mut evidence_rows = read
-            .query(
-                "SELECT 1
-                 FROM session_derived_evidence
-                 WHERE session_id = ?1
-                   AND generation = ?2
-                   AND evidence_kind = ?3
-                   AND evidence_id = ?4
-                 LIMIT 1",
-                params![
-                    snapshot.session_id().as_str(),
-                    generation,
-                    evidence_kind.as_str(),
-                    evidence_id.as_str(),
-                ],
-            )
-            .await
-            .map_err(|error| storage(EXPAND_OPERATION, error))?;
-        if evidence_rows
-            .next()
-            .await
-            .map_err(|error| storage(EXPAND_OPERATION, error))?
-            .is_none()
-        {
-            return Err(storage_message(
-                EXPAND_OPERATION,
-                "derived evidence record is missing from the frozen generation",
-            ));
-        }
-
-        let after = after_ordinal.map_or(-1_i64, i64::from);
-        let fetch_limit = i64::try_from(limit.saturating_add(1))
-            .map_err(|error| storage(EXPAND_OPERATION, error))?;
-        let now = now_micros(EXPAND_OPERATION)?;
-        let mut rows = read
-            .query(
-                "SELECT member.ordinal, member.occurrence_id, member.member_role,
-                        occurrence.retrieval_anchor_id,
-                        occurrence.source_observation_id,
-                        occurrence.projection_output_ordinal,
-                        anchor.anchor_json,
-                        anchor.owner_json,
-                        observation.observation_json,
-                        source.project_key
-                 FROM session_derived_evidence_members AS member
-                 LEFT JOIN session_occurrences AS occurrence
-                   ON occurrence.session_id = member.session_id
-                  AND occurrence.generation = member.generation
-                  AND occurrence.occurrence_id = member.occurrence_id
-                 LEFT JOIN observations AS observation
-                   ON observation.observation_id = occurrence.source_observation_id
-                 LEFT JOIN retrieval_anchors AS anchor
-                   ON anchor.anchor_id = occurrence.retrieval_anchor_id
-                 LEFT JOIN sessions AS source
-                   ON source.session_id = occurrence.session_id
-                  AND source.provider = COALESCE(
-                      json_extract(
-                          observation.observation_json,
-                          '$.identity.source.provider'
-                      ),
-                      'claude'
-                  )
-                 WHERE member.session_id = ?1
-                   AND member.generation = ?2
-                   AND member.evidence_kind = ?3
-                   AND member.evidence_id = ?4
-                   AND member.ordinal > ?5
-                 ORDER BY member.ordinal ASC
-                 LIMIT ?6",
-                params![
-                    snapshot.session_id().as_str(),
-                    generation,
-                    evidence_kind.as_str(),
-                    evidence_id.as_str(),
-                    after,
-                    fetch_limit,
-                ],
-            )
-            .await
-            .map_err(|error| storage(EXPAND_OPERATION, error))?;
-
-        let mut members = Vec::new();
-        let mut next_after_ordinal = None;
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|error| storage(EXPAND_OPERATION, error))?
-        {
-            if members.len() == limit {
-                next_after_ordinal = members
-                    .last()
-                    .map(|item: &DerivedEvidenceMemberPageItemV1| item.ordinal);
-                break;
-            }
-            let ordinal = u32::try_from(
-                row.get::<i64>(0)
-                    .map_err(|error| storage(EXPAND_OPERATION, error))?,
-            )
-            .map_err(|error| storage(EXPAND_OPERATION, error))?;
-            let occurrence_id = MessageOccurrenceIdV1::new(
-                row.get::<String>(1)
-                    .map_err(|error| storage(EXPAND_OPERATION, error))?,
-            )?;
-            let role_raw: String = row
-                .get(2)
-                .map_err(|error| storage(EXPAND_OPERATION, error))?;
-            let member_role = match role_raw.as_str() {
-                "member" => DerivedEvidenceMemberRoleV1::Member,
-                "first" => DerivedEvidenceMemberRoleV1::First,
-                "last" => DerivedEvidenceMemberRoleV1::Last,
-                _ => {
-                    return Err(storage_message(
-                        EXPAND_OPERATION,
-                        format!("unknown derived member role: {role_raw}"),
-                    ));
-                }
-            };
-            let availability = classify_member_availability(
-                &snapshot,
-                &occurrence_id,
-                row.get::<Option<String>>(3)
-                    .map_err(|error| storage(EXPAND_OPERATION, error))?,
-                row.get::<Option<String>>(4)
-                    .map_err(|error| storage(EXPAND_OPERATION, error))?,
-                row.get::<Option<i64>>(5)
-                    .map_err(|error| storage(EXPAND_OPERATION, error))?,
-                row.get::<Option<String>>(6)
-                    .map_err(|error| storage(EXPAND_OPERATION, error))?,
-                row.get::<Option<String>>(7)
-                    .map_err(|error| storage(EXPAND_OPERATION, error))?,
-                row.get::<Option<String>>(8)
-                    .map_err(|error| storage(EXPAND_OPERATION, error))?,
-                row.get::<Option<String>>(9)
-                    .map_err(|error| storage(EXPAND_OPERATION, error))?,
-                now,
-            );
-            members.push(DerivedEvidenceMemberPageItemV1 {
-                ordinal,
-                occurrence_id: (availability == HydrationStateV1::Available)
-                    .then_some(occurrence_id),
-                member_role,
-                availability,
-            });
-        }
-
-        DerivedEvidenceMemberPageV1::new(evidence_id, evidence_kind, members, next_after_ordinal)
     }
 
     pub(crate) async fn retrieve_session_temporal_page_result(
@@ -876,89 +703,6 @@ fn decode_summary_publication(encoded: &str) -> SessionStoreResult<SummaryPublic
         value
     };
     decode_json_value(value)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn classify_member_availability(
-    snapshot: &SessionTemporalSnapshotV1,
-    occurrence_id: &MessageOccurrenceIdV1,
-    retrieval_anchor_id: Option<String>,
-    source_observation_id: Option<String>,
-    projection_output_ordinal: Option<i64>,
-    anchor_json: Option<String>,
-    owner_json: Option<String>,
-    observation_json: Option<String>,
-    project_key: Option<String>,
-    now: tracedecay_domain::UtcMicros,
-) -> HydrationStateV1 {
-    let (
-        Some(retrieval_anchor_id),
-        Some(source_observation_id),
-        Some(projection_output_ordinal),
-        Some(anchor_json),
-        Some(owner_json),
-        Some(observation_json),
-    ) = (
-        retrieval_anchor_id,
-        source_observation_id,
-        projection_output_ordinal,
-        anchor_json,
-        owner_json,
-        observation_json,
-    )
-    else {
-        return HydrationStateV1::RetainedButUnavailable;
-    };
-    let Some(project_key) = project_key else {
-        return HydrationStateV1::Unauthorized;
-    };
-    let Ok(anchor) = serde_json::from_str::<RetrievalAnchorRecord>(&anchor_json) else {
-        return HydrationStateV1::UnverifiableLegacy;
-    };
-    let Ok(observation) = serde_json::from_str::<DurableObservationV1>(&observation_json) else {
-        return HydrationStateV1::UnverifiableLegacy;
-    };
-    let Ok(projection_output_ordinal) = u32::try_from(projection_output_ordinal) else {
-        return HydrationStateV1::UnverifiableLegacy;
-    };
-    let expected_owner = if project_key == "user" {
-        Some(ObservationScopeV1::Profile)
-    } else {
-        ProjectId::new(project_key)
-            .ok()
-            .map(|project_id| ObservationScopeV1::Project { project_id })
-    };
-    if anchor.validate().is_err()
-        || anchor.authorization().validate().is_err()
-        || anchor.anchor_id().as_str() != retrieval_anchor_id
-        || serde_json::to_string(anchor.owner()).ok().as_deref() != Some(owner_json.as_str())
-        || expected_owner.as_ref() != Some(anchor.owner())
-        || observation.scope() != anchor.owner()
-        || observation.observation_id().as_str() != source_observation_id
-        || observation.source().session_id() != snapshot.session_id()
-        || MessageOccurrenceIdV1::derive(
-            observation.observation_id(),
-            tracedecay_domain::ProjectionOutputOrdinalV1::new(projection_output_ordinal),
-        ) != *occurrence_id
-    {
-        return HydrationStateV1::Unauthorized;
-    }
-    match anchor.payload_access() {
-        PayloadAccessState::Eligible => {}
-        PayloadAccessState::Redacted => return HydrationStateV1::Redacted,
-        PayloadAccessState::Quarantined => return HydrationStateV1::Locked,
-        PayloadAccessState::RetentionExpired => return HydrationStateV1::RetentionExpired,
-        PayloadAccessState::Deleted => return HydrationStateV1::Deleted,
-        PayloadAccessState::Unavailable | PayloadAccessState::Ambiguous => {
-            return HydrationStateV1::RetainedButUnavailable;
-        }
-    }
-    match anchor.durability() {
-        AnchorDurabilityClass::RetentionBound { expires_at } if *expires_at <= now => {
-            HydrationStateV1::RetentionExpired
-        }
-        _ => HydrationStateV1::Available,
-    }
 }
 
 fn decode_generation_i64(

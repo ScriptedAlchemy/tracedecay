@@ -131,11 +131,6 @@ pub(in crate::db) async fn purge_memory_v2_fact(
     )
     .await;
     let payload_purged = finish_transaction(transaction, result, "memory_v2_purge").await?;
-    if payload_purged {
-        conn.execute_batch("PRAGMA incremental_vacuum(64)")
-            .await
-            .map_err(|error| db_error("memory_v2_purge", error))?;
-    }
     Ok(MemoryV2LegacyPurgeReceipt {
         owner: owner.clone(),
         source_store_id: source_store_id.clone(),
