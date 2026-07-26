@@ -967,6 +967,69 @@ pub async fn collect_retention_backlog_findings(
     storage_family_read(findings)
 }
 
+/// Read the exact code-generation liveness plan and surface superseded and
+/// collectable bytes through Doctor. These are ordinary files, not SQLite
+/// tables, so dbstat/table attribution cannot observe them.
+pub async fn collect_code_generation_retention_findings(
+    graph: &crate::db::Database,
+    code_index_store_root: &Path,
+) -> DoctorStorageFamilyReadV1 {
+    use crate::semantic_code::legacy_migration::LegacyVectorInventoryPortV1;
+    use crate::store::vector_generations::DatabaseVectorGenerationStoreV1;
+    use tracedecay_application::storage::{
+        CodeGenerationRetentionRecordV1, StorageByteSizeV1, StoreKeyV1,
+        code_generation_retention_finding,
+    };
+
+    if !code_index_store_root
+        .join("active-code-generation-v1.json")
+        .is_file()
+    {
+        return DoctorStorageFamilyReadV1::Absent;
+    }
+    let Ok(store) = DatabaseVectorGenerationStoreV1::open_legacy_migration(graph).await else {
+        return DoctorStorageFamilyReadV1::Unknown;
+    };
+    let Ok(inventory) = store.read_legacy_inventory().await else {
+        return DoctorStorageFamilyReadV1::Unknown;
+    };
+    let Ok(inventory) = inventory.read_only_inventory() else {
+        return DoctorStorageFamilyReadV1::Unknown;
+    };
+    let vector_readable_sources = inventory.retained_readable_sources();
+    let root = code_index_store_root.to_path_buf();
+    let Ok(plan) = tokio::task::spawn_blocking(move || {
+        crate::retention::code_index_generations::plan_code_generation_retention(
+            &root,
+            &vector_readable_sources,
+            crate::retention::code_index_generations::DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+        )
+    })
+    .await
+    else {
+        return DoctorStorageFamilyReadV1::Unknown;
+    };
+    let Ok(plan) = plan else {
+        return DoctorStorageFamilyReadV1::Unknown;
+    };
+    let Ok(store) = StoreKeyV1::new("code-index-v1") else {
+        return DoctorStorageFamilyReadV1::Unknown;
+    };
+    let record = CodeGenerationRetentionRecordV1 {
+        store,
+        superseded_generation_count: plan.superseded_generations.len() as u64,
+        superseded_generation_bytes: StorageByteSizeV1(plan.superseded_generation_bytes()),
+        collectable_generation_count: plan.collectable_generations.len() as u64,
+        collectable_generation_bytes: StorageByteSizeV1(plan.collectable_generation_bytes()),
+    };
+    let Ok(finding) =
+        code_generation_retention_finding(&record, DoctorCoverageCompletenessV1::Complete)
+    else {
+        return DoctorStorageFamilyReadV1::Unknown;
+    };
+    storage_family_read(vec![finding])
+}
+
 /// Adapter over storage retention/size findings (Storage family).
 pub struct StorageDoctorAdapterV1 {
     read: DoctorStorageFamilyReadV1,
@@ -1184,6 +1247,12 @@ pub(in crate::daemon) fn production_doctor_report_reader(
             let project_retention_backlog =
                 collect_retention_backlog_findings(project_sessions.as_ref(), &retention, now)
                     .await;
+            let code_index_store_root = super::code_index_scheduler::scoped_code_index_store_root(
+                &layout.data_root.join("code-index-v1"),
+                &project_root,
+            );
+            let code_generation_retention =
+                collect_code_generation_retention_findings(&graph, &code_index_store_root).await;
             let storage = [
                 orphan,
                 unregistered,
@@ -1192,6 +1261,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
                 incident_debris,
                 profile_retention_backlog,
                 project_retention_backlog,
+                code_generation_retention,
             ]
             .into_iter()
             .reduce(merge_storage_reads)

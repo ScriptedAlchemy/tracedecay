@@ -13,14 +13,14 @@ use tracedecay_application::{
     RetrievalPortOutcome, RetrievalRequestMeta, callable_code_operation,
 };
 use tracedecay_domain::{
-    ActorId, AuthorizationRevision, CalibrationProfileId, CommitId, ComponentRevision,
-    DiversityPolicy, EphemeralSanitizedQueryViewV1, ExactAdmissionRuleRevision, ExactClass,
-    FreshnessVectorDigest, FusedCandidate, FusionProfile, LogicalEvidenceId, ManifestDigest,
-    OptionalStagePublicStatus, PrincipalId, PrivacyDomainId, ProjectId, QueryNormalizationRevision,
-    RankedCandidate, RefId, RelationEdgeKindV1, RepositoryId, RerankPolicy, RetrievalAnchorId,
-    RetrievalBudget, RetrievalCursorKeyId, RetrievalRequest, RetrievalScope, RetrievalSnapshot,
-    RetrieverKind, SanitizerRevision, ScoreDomainId, SingleRootScopeV1, TemporalModeV1, UtcMicros,
-    VectorWatermark, WorktreeId,
+    ActorId, AuthorizationRevision, CalibrationProfileId, CodeGenerationId, CommitId,
+    ComponentRevision, DiversityPolicy, EphemeralSanitizedQueryViewV1, ExactAdmissionRuleRevision,
+    ExactClass, FreshnessVectorDigest, FusedCandidate, FusionProfile, LogicalEvidenceId,
+    ManifestDigest, OptionalStagePublicStatus, PrincipalId, PrivacyDomainId, ProjectId,
+    QueryNormalizationRevision, RankedCandidate, RefId, RelationEdgeKindV1, RepositoryId,
+    RerankPolicy, RetrievalAnchorId, RetrievalBudget, RetrievalCursorKeyId, RetrievalRequest,
+    RetrievalScope, RetrievalSnapshot, RetrieverKind, SanitizerRevision, ScoreDomainId,
+    SingleRootScopeV1, TemporalModeV1, UtcMicros, VectorWatermark, WorktreeId,
 };
 
 #[cfg(feature = "semantic-fastembed")]
@@ -125,6 +125,166 @@ fn published(outcome: CodeIndexReconcileOutcomeV1) -> super::CodeIndexPublishEvi
         CodeIndexReconcileOutcomeV1::Published(evidence) => evidence,
         CodeIndexReconcileOutcomeV1::Noop(_) => panic!("expected a published generation"),
     }
+}
+
+fn retention_generations(
+    fixture: &GitFixture,
+    store_root: &Path,
+    count: usize,
+) -> Vec<CodeGenerationId> {
+    let mut scheduler = scheduler(
+        fixture,
+        store_root.to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    );
+    let mut generations = Vec::with_capacity(count);
+    for revision in 0..count {
+        if revision > 0 {
+            fixture.edit(
+                "src/lib.rs",
+                &format!("pub fn retained_revision() -> usize {{ {revision} }}\n"),
+            );
+            scheduler.notify_hook_paths([PathBuf::from("src/lib.rs")]);
+        }
+        generations.push(
+            published(
+                scheduler
+                    .reconcile_now()
+                    .expect("publish retention fixture generation"),
+            )
+            .generation_id,
+        );
+    }
+    generations
+}
+
+#[test]
+fn code_generation_retention_dry_run_reports_without_deleting() {
+    use crate::retention::code_index_generations::{
+        CodeGenerationRetentionModeV1, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+        run_code_generation_retention,
+    };
+
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn retained_revision() -> usize { 0 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let generations = retention_generations(&fixture, store.path(), 5);
+
+    let report = run_code_generation_retention(
+        store.path(),
+        &BTreeSet::new(),
+        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+        CodeGenerationRetentionModeV1::DryRun,
+        UtcMicros(50),
+    )
+    .expect("plan retention");
+
+    assert_eq!(report.plan.superseded_generations.len(), 4);
+    assert_eq!(report.plan.collectable_generations.len(), 1);
+    assert_eq!(
+        report.plan.collectable_generations[0].generation_id,
+        generations[0]
+    );
+    println!(
+        "dry_run superseded_count={} superseded_bytes={} collectable_count={} collectable_bytes={} deleted_count={}",
+        report.plan.superseded_generations.len(),
+        report.plan.superseded_generation_bytes(),
+        report.plan.collectable_generations.len(),
+        report.plan.collectable_generation_bytes(),
+        report.deleted_generations.len(),
+    );
+    assert_eq!(report.deleted_generations.len(), 0);
+    assert!(report.receipt.is_none());
+    assert!(
+        store
+            .path()
+            .join("code-generations-v1")
+            .join(&report.plan.collectable_generations[0].generation_file)
+            .is_file()
+    );
+}
+
+#[test]
+fn code_generation_retention_never_sweeps_vector_readable_source() {
+    use crate::retention::code_index_generations::{
+        CodeGenerationRetentionModeV1, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+        run_code_generation_retention,
+    };
+
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn retained_revision() -> usize { 0 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let generations = retention_generations(&fixture, store.path(), 6);
+    let vector_readable = BTreeSet::from([generations[0].clone()]);
+
+    let report = run_code_generation_retention(
+        store.path(),
+        &vector_readable,
+        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+        CodeGenerationRetentionModeV1::Apply,
+        UtcMicros(60),
+    )
+    .expect("apply retention");
+
+    let vector_generation = report
+        .plan
+        .superseded_generations
+        .iter()
+        .find(|generation| generation.generation_id == generations[0])
+        .expect("vector-readable generation was inventoried");
+    assert!(
+        store
+            .path()
+            .join("code-generations-v1")
+            .join(&vector_generation.generation_file)
+            .is_file(),
+        "a generation named by retained_readable_sources must survive the sweep"
+    );
+    assert!(
+        report
+            .deleted_generations
+            .iter()
+            .all(|generation| generation.generation_id != generations[0])
+    );
+    assert_eq!(report.deleted_generations.len(), 1);
+    assert_eq!(report.deleted_generations[0].generation_id, generations[1]);
+}
+
+#[test]
+fn code_generation_retention_emits_durable_reclaim_receipt() {
+    use crate::retention::code_index_generations::{
+        CodeGenerationRetentionModeV1, DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+        observe_code_generation_retention, run_code_generation_retention,
+    };
+
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn retained_revision() -> usize { 0 }\n")]);
+    let store = TempDir::new().expect("store root");
+    retention_generations(&fixture, store.path(), 5);
+
+    let report = run_code_generation_retention(
+        store.path(),
+        &BTreeSet::new(),
+        DEFAULT_SUPERSEDED_GENERATION_FLOOR,
+        CodeGenerationRetentionModeV1::Apply,
+        UtcMicros(70),
+    )
+    .expect("apply retention");
+
+    let receipt = report.receipt.expect("applied reclaim receipt");
+    assert_eq!(receipt.deleted_generations.len(), 1);
+    assert_eq!(
+        receipt.reclaimed_bytes,
+        receipt.deleted_generations[0].size_bytes
+    );
+    assert!(
+        store
+            .path()
+            .join("code-generation-retention-receipts-v1")
+            .join(format!("receipt-{}.json", receipt.receipt_digest))
+            .is_file()
+    );
+    let observed =
+        observe_code_generation_retention(store.path()).expect("observe retained generations");
+    assert_eq!(observed.superseded_generation_count, 3);
+    assert!(observed.superseded_generation_bytes > 0);
 }
 
 struct MixedAnchorReverseRerankExecutorV1;

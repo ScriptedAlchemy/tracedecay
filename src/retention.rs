@@ -23,6 +23,8 @@ use crate::errors::{Result, TraceDecayError};
 /// Free-page compaction for tracked branch databases, off the hot path
 /// (plan 38, §6).
 pub mod branch_compaction;
+/// Exact-liveness mark-and-sweep for immutable derived code generations.
+pub mod code_index_generations;
 /// Store-owned quarantine and collection for corruption/recovery artifacts
 /// found beside live databases (plan 38, §5).
 pub mod incident_debris;
