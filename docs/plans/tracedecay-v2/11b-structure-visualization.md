@@ -28,13 +28,13 @@ truthful rather than merely diagrammatically correct.
 | Relation | Granularity | Where | Status |
 | --- | --- | --- | --- |
 | callers/callees one hop | symbol | `graph_queries.rs` `caller_rows`/`callee_rows`, `/api/plugins/graph/node/{id}/neighbors` | servable today |
-| sessions that edited code | **file only**, Claude-provider rollup (`sessions.metadata_json.$.edited_files[]`); Codex per-message `$.files[]`, no rollup; other hosts none | `src/sessions/claude/record_metadata.rs:463`, `/api/plugins/graph/node/{id}/sessions` | backend endpoint registered; frontend consumer missing; JSON-scan, unindexed |
+| sessions that edited code | **file only**, Claude-provider rollup (`sessions.metadata_json.$.edited_files[]`); Codex per-message `$.files[]`, no rollup; other hosts none | `src/sessions/claude/record_metadata.rs:463`, `/api/plugins/graph/node/{id}/sessions` | generated contract and `NodeEvidence` consumer live; JSON-scan, unindexed |
 | "discussed" | free-text FTS on the name (`session_messages_fts`) | global db | noisy for common names; secondary arm only |
-| facts citing a symbol | **name match** (memory_entities.normalized_name, v2 payload FTS) — not symbol identity | `src/db/memory_v2/…`, `/api/plugins/graph/node/{id}/facts` | backend endpoint registered; frontend consumer missing; same-name collision caveat |
-| covering tests | symbol (pure graph computation, callers depth-3 ∩ test files) | `handlers/health.rs:987` `handle_test_map`, `/api/plugins/graph/node/{id}/tests` | backend endpoint registered; frontend consumer missing |
+| facts citing a symbol | **name match** (memory_entities.normalized_name, v2 payload FTS) — not symbol identity | `src/db/memory_v2/…`, `/api/plugins/graph/node/{id}/facts` | generated contract and `NodeEvidence` consumer live; same-name collision caveat |
+| covering tests | symbol (pure graph computation, callers depth-3 ∩ test files) | `handlers/health.rs:987` `handle_test_map`, `/api/plugins/graph/node/{id}/tests` | generated contract and `NodeEvidence` consumer live |
 | live activity | **project only** (`ActivityPulseV1` has no path/symbol) | `src/dashboard/activity_bus.rs:83` | per-symbol strike needs a wire-contract change (stability tests exist) |
-| call chain | symbol, directed, calls-only, single shortest path, depth ≤20 | `queries.rs:133` `get_call_chain`, `/api/plugins/graph/call-chain` | backend endpoint registered; frontend consumer missing |
-| stratification | **file-level** dependency depth (Tarjan SCC → longest path), DSM clusters | `src/graph/health.rs:218/:733`, `/api/plugins/graph/strata` | backend endpoint registered; frontend consumer missing; adjacency scan unpaginated/uncached |
+| call chain | symbol, directed, calls-only, single shortest path, depth ≤20 | `queries.rs:133` `get_call_chain`, `/api/plugins/graph/call-chain` | generated contract and Code `CallChain` consumer live |
+| stratification | **file-level** dependency depth (Tarjan SCC → longest path), DSM clusters | `src/graph/health.rs:218/:733`, `/api/plugins/graph/strata` | generated contract and Code `Strata` consumer live; adjacency scan unpaginated/uncached |
 | co-change | **file pairs**, Claude sessions only, one `json_each` self-join | derivable; SQL in recon report | needs thin endpoint; provider-complete or symbol-level needs new extraction |
 
 Note: the existing `/api/plugins/graph/path` route is UNDIRECTED and

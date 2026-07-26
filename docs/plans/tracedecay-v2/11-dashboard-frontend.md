@@ -56,6 +56,15 @@ artifact, not evidence that the dashboard or embed path is absent. The
 specific unverified and unreachable sub-surfaces named in this plan remain
 open; the twelve workspace routes and embed mechanism must not be replanned.
 
+**PR14 surface alignment (2026-07-26).** The five Plan 11b graph-structure
+routes now have generated contracts and Code-workspace consumers. Explorer's
+duplicate query-run/source schemas were removed in favor of the generated
+barrel; only the two routes that still lack Rust wire types retain explicitly
+labelled hand-written schemas. Automations consumes the generated scheduler
+status type and wires typed pause/resume mutations that replace cached state
+only with the server's post-control reading. These are delivered surface
+corrections, not acceptance of the still-unverified checkpoint above.
+
 ## Rejected and superseded frontend approaches
 
 - **Module Federation is rejected.** The dashboard is one ordinary Rsbuild
