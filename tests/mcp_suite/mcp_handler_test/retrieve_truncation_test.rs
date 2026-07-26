@@ -17,12 +17,17 @@ async fn retrieve_tool_returns_full_stored_response() {
     .unwrap();
 
     let stored_payload: Value = serde_json::from_str(
-        &fs::read_to_string(response_handle_dir(&cg).join(format!("{}.json", stored.handle)))
-            .unwrap(),
+        &fs::read_to_string(
+            stored
+                .response_handle_root
+                .join(format!("{}.json", stored.handle)),
+        )
+        .unwrap(),
     )
     .unwrap();
     assert!(stored_payload.get("handle").is_none());
     assert!(stored_payload.get("original_chars").is_none());
+    assert_eq!(stored_payload["content"], original);
 
     let result = handle_tool_call(
         &cg,
