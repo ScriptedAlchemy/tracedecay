@@ -4000,6 +4000,32 @@ mod tests {
 
     #[test]
     fn distinct_ten_x_corpus_produces_measured_resource_evidence() {
+        const CHILD_ENV: &str = "TRACEDECAY_RESOURCE_EVIDENCE_TEST_CHILD";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            assert_distinct_ten_x_corpus_produces_measured_resource_evidence();
+            return;
+        }
+
+        let output = std::process::Command::new(
+            std::env::current_exe().expect("resource test binary has a current executable"),
+        )
+        .args([
+            "--exact",
+            "search_eval::candidate_output::tests::distinct_ten_x_corpus_produces_measured_resource_evidence",
+            "--nocapture",
+        ])
+        .env(CHILD_ENV, "1")
+        .output()
+        .expect("run resource measurement in a dedicated process");
+        assert!(
+            output.status.success(),
+            "dedicated resource measurement failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn assert_distinct_ten_x_corpus_produces_measured_resource_evidence() {
         let fixture = authenticated_repo_fixture();
         let fixture_root = &fixture.root;
         let workload = workload();
@@ -4018,7 +4044,15 @@ mod tests {
         } else {
             crate::search_eval::DirectEvaluationStatusV1::Pending
         };
-        assert_eq!(report.status, expected_status);
+        let resources = result
+            .outputs
+            .iter()
+            .map(|output| (&output.partition, &output.resources))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            report.status, expected_status,
+            "unexpected grouped resource evaluation: {resources:#?}"
+        );
         assert!(
             report
                 .profiles
