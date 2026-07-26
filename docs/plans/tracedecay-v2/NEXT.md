@@ -15,6 +15,11 @@ required to keep those surfaces fast while repositories and worktrees change.
 This file is contributor guidance only. TraceDecay never parses, imports,
 schedules, or executes roadmap documents.
 
+The PR8–PR14 requirement-by-requirement reconciliation against the code lives
+in [`GAP-LEDGER-PR8-PR14.md`](GAP-LEDGER-PR8-PR14.md). Where that ledger's
+cited `file:line` evidence contradicts a status line here, the ledger is
+authoritative and this file should be corrected.
+
 ## Current outcome
 
 Ship one production path in which:
@@ -156,7 +161,16 @@ unverified.
    retention-backlog Doctor sources are wired. The rusqlite reserved-health
    reader supplies primitive size/table-growth telemetry and the daemon maps it
    into the scoped application port with typed denied/unknown outcomes.
-   Owner-configured soft budgets remain inert when absent.)*
+   Owner-configured soft budgets remain inert when absent. Audit correction
+   2026-07-26: §3 session retention is implemented and daemon-scheduled
+   (`src/retention.rs:263`, `:297`; `src/daemon/scheduler.rs:1221`;
+   `src/daemon/doctor_kernel.rs:1470`) but prunes nothing by default —
+   `session_messages_days` and `lcm_raw_messages_days` both default to `None`
+   at `src/retention.rs:74-82`, deliberately, because those rows are part of
+   the lossless session record. Only `analytics_events` prunes by default, at
+   180 days. Plan 38's storage-size driver is therefore not addressed by
+   session-retention defaults; whether lossless-by-default remains correct is
+   an owner question.)*
 7. Run focused crate tests, all-feature workspace checks, release builds,
    package/install checks, and normal Linux/macOS/Windows CI. *(Ongoing. The
    SQLite session-store parity harness proves 27 session-store tables across
