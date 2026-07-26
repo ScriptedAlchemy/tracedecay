@@ -1,24 +1,37 @@
 use std::path::Path;
 
-use super::{RegisteredGlobalDb, SavingsDay, SavingsTotal};
+use super::{RegisteredGlobalDb, SavingsDay, SavingsTotal, global_db_operation_error};
 
 impl RegisteredGlobalDb {
     pub(crate) async fn upsert(&self, project_path: &Path, tokens_saved: u64) {
+        if let Err(error) = self
+            .try_upsert_project_tokens(project_path, tokens_saved)
+            .await
+        {
+            self.report_optional_accounting_failure("update project token total", &error);
+        }
+    }
+
+    pub(crate) async fn try_upsert_project_tokens(
+        &self,
+        project_path: &Path,
+        tokens_saved: u64,
+    ) -> crate::errors::Result<()> {
         let path = super::project_path_alias_key(project_path);
-        let Ok(transaction) = self.begin_write_transaction().await else {
-            return;
-        };
-        let write = transaction
+        let transaction = self.begin_write_transaction().await?;
+        transaction
             .execute(
                 "INSERT INTO projects (path, tokens_saved) VALUES (?1, ?2)
                  ON CONFLICT(path) DO UPDATE SET
                     tokens_saved = MAX(tokens_saved, excluded.tokens_saved)",
                 crate::db::engine::params![path, tokens_saved as i64],
             )
-            .await;
-        if write.is_ok() {
-            let _ = transaction.commit().await;
-        }
+            .await
+            .map_err(|error| global_db_operation_error("update project token total", error))?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| global_db_operation_error("commit project token total", error))
     }
 
     pub(crate) async fn get_project_tokens(&self, project_path: &Path) -> u64 {
@@ -59,11 +72,31 @@ impl RegisteredGlobalDb {
         after_tokens: u64,
         timestamp: i64,
     ) {
+        if let Err(error) = self
+            .try_record_savings(
+                project_path,
+                tool_name,
+                before_tokens,
+                after_tokens,
+                timestamp,
+            )
+            .await
+        {
+            self.report_optional_accounting_failure("append savings ledger entry", &error);
+        }
+    }
+
+    pub(crate) async fn try_record_savings(
+        &self,
+        project_path: &str,
+        tool_name: &str,
+        before_tokens: u64,
+        after_tokens: u64,
+        timestamp: i64,
+    ) -> crate::errors::Result<()> {
         let project_path = RegisteredGlobalDb::canonical_project_key(Path::new(project_path));
-        let Ok(transaction) = self.begin_write_transaction().await else {
-            return;
-        };
-        let write = transaction
+        let transaction = self.begin_write_transaction().await?;
+        transaction
             .execute(
                 "INSERT INTO savings_ledger
                      (ts, project_path, tool_name, before_tokens, after_tokens)
@@ -76,13 +109,25 @@ impl RegisteredGlobalDb {
                     after_tokens as i64
                 ],
             )
-            .await;
-        if write.is_ok() {
-            let _ = transaction.commit().await;
-        }
-        if let Err(error) = write {
-            eprintln!("[tracedecay] savings_ledger insert failed: {error}");
-        }
+            .await
+            .map_err(|error| global_db_operation_error("append savings ledger entry", error))?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| global_db_operation_error("commit savings ledger entry", error))
+    }
+
+    fn report_optional_accounting_failure(
+        &self,
+        operation: &'static str,
+        error: &crate::errors::TraceDecayError,
+    ) {
+        tracing::error!(
+            database = %self.db_path().display(),
+            operation,
+            error = %error,
+            "optional global database accounting write failed"
+        );
     }
 
     pub(crate) async fn sum_savings(&self, project: Option<&str>, since: i64) -> SavingsTotal {
@@ -339,21 +384,36 @@ impl RegisteredGlobalDb {
         Ok((inserted, cost_usd, tokens))
     }
 
-    pub(crate) async fn total_cost_since(&self, since: u64) -> Option<f64> {
-        let snapshot = self.read_snapshot().await.ok()?;
+    pub(crate) async fn try_total_cost_since(&self, since: u64) -> Result<f64, String> {
+        let snapshot = self
+            .read_snapshot()
+            .await
+            .map_err(|error| format!("failed to open accounting snapshot: {error}"))?;
         let mut rows = snapshot
             .query(
                 "SELECT COALESCE(SUM(cost_usd), 0.0) FROM turns WHERE timestamp >= ?1",
                 crate::db::engine::params![since as i64],
             )
             .await
-            .ok()?;
-        let row = rows.next().await.ok()??;
-        Some(row.get::<f64>(0).unwrap_or(0.0))
+            .map_err(|error| format!("failed to query total cost: {error}"))?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|error| format!("failed to read total cost row: {error}"))?
+            .ok_or_else(|| "total cost query returned no row".to_string())?;
+        row.get::<f64>(0)
+            .map_err(|error| format!("failed to decode total cost: {error}"))
     }
 
-    pub(crate) async fn total_tokens_since(&self, since: u64) -> Option<u64> {
-        let snapshot = self.read_snapshot().await.ok()?;
+    pub(crate) async fn total_cost_since(&self, since: u64) -> Option<f64> {
+        self.try_total_cost_since(since).await.ok()
+    }
+
+    pub(crate) async fn try_total_tokens_since(&self, since: u64) -> Result<u64, String> {
+        let snapshot = self
+            .read_snapshot()
+            .await
+            .map_err(|error| format!("failed to open accounting snapshot: {error}"))?;
         let mut rows = snapshot
             .query(
                 "SELECT COALESCE(SUM(input_tokens + output_tokens), 0)
@@ -361,9 +421,20 @@ impl RegisteredGlobalDb {
                 crate::db::engine::params![since as i64],
             )
             .await
-            .ok()?;
-        let row = rows.next().await.ok()??;
-        Some(row.get::<i64>(0).unwrap_or(0) as u64)
+            .map_err(|error| format!("failed to query total tokens: {error}"))?;
+        let row = rows
+            .next()
+            .await
+            .map_err(|error| format!("failed to read total tokens row: {error}"))?
+            .ok_or_else(|| "total tokens query returned no row".to_string())?;
+        let total = row
+            .get::<i64>(0)
+            .map_err(|error| format!("failed to decode total tokens: {error}"))?;
+        u64::try_from(total).map_err(|_| format!("total tokens cannot be negative: {total}"))
+    }
+
+    pub(crate) async fn total_tokens_since(&self, since: u64) -> Option<u64> {
+        self.try_total_tokens_since(since).await.ok()
     }
 
     /// One-snapshot denominator and aggregate for the canonical turn store.

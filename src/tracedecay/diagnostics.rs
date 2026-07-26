@@ -8,7 +8,7 @@ use serde::Serialize;
 
 use crate::branch;
 use crate::branch_meta;
-use crate::db::Database;
+use crate::db::{Database, DatabaseAccessMode};
 use crate::errors::{Result, TraceDecayError};
 use crate::storage::{self, StoreLayout};
 
@@ -176,6 +176,18 @@ impl TraceDecay {
         self.open_options.clone()
     }
 
+    async fn project_memory_mount(&self) -> Result<(tracedecay_domain::ProjectId, Vec<PathBuf>)> {
+        let project_id = Self::registered_project_id(&self.store_layout)?;
+        let enrollment_roots = Self::registered_enrollment_roots(
+            &self.project_root,
+            &self.store_layout,
+            &project_id,
+            self.profile_database.as_ref(),
+        )
+        .await?;
+        Ok((project_id, enrollment_roots))
+    }
+
     pub async fn open_project_store_db(&self) -> Result<Database> {
         if self.read_only {
             return Err(TraceDecayError::Config {
@@ -183,11 +195,28 @@ impl TraceDecay {
                     .to_string(),
             });
         }
-        Ok(self.db.clone())
+        if self.db_path() == self.store_layout.graph_db_path {
+            return Ok(self.db.clone());
+        }
+        let (project_id, enrollment_roots) = self.project_memory_mount().await?;
+        self.store_runtime_registry
+            .project_memory(project_id, enrollment_roots)
+            .await
+            .map(|database| database.as_ref().clone())
     }
 
     pub async fn open_project_store_db_read_only(&self) -> Result<Database> {
-        Ok(self.db.clone())
+        if self.db_path() == self.store_layout.graph_db_path {
+            return Database::publish_runtime(
+                self.db.retained_runtime().clone(),
+                DatabaseAccessMode::ReadOnly,
+            )
+            .await;
+        }
+        let (project_id, enrollment_roots) = self.project_memory_mount().await?;
+        self.store_runtime_registry
+            .project_memory_read_only(project_id, enrollment_roots)
+            .await
     }
 
     fn build_branch_diagnostics(

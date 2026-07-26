@@ -556,6 +556,25 @@ async fn registered_handles_share_one_serialized_writer() {
 }
 
 #[tokio::test]
+async fn optional_accounting_exposes_database_failures_to_callers() {
+    let mut harness = RegisteredGlobalDbHarness::open("accounting-write-errors").await;
+    let database = Arc::clone(&harness.registered);
+    harness.revoke();
+
+    let upsert_error = database
+        .try_upsert_project_tokens(std::path::Path::new("/project"), 10)
+        .await
+        .expect_err("revoked authority must be visible to optional token accounting");
+    let savings_error = database
+        .try_record_savings("/project", "tracedecay_runtime", 10, 5, 1)
+        .await
+        .expect_err("revoked authority must be visible to optional savings accounting");
+
+    assert!(upsert_error.to_string().contains("active daemon"));
+    assert!(savings_error.to_string().contains("active daemon"));
+}
+
+#[tokio::test]
 async fn concurrent_registered_writes_remain_isolated() {
     let harness = RegisteredGlobalDbHarness::open("concurrent-registered-writes").await;
     let handles = (0..12)

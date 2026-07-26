@@ -161,4 +161,16 @@ impl Database {
         let writer = self.writer_connection("finalize memory v2 cutover").await?;
         memory_v2::finalize_memory_v2_cutover(&writer.conn, receipt).await
     }
+
+    pub(crate) async fn reopen_memory_v2_cutover_for_legacy_union(
+        &self,
+        owner: &FactOwnerV1,
+        source_store_id: &SourceStoreId,
+    ) -> Result<bool> {
+        let writer = self
+            .writer_connection("reopen memory v2 cutover for branch union")
+            .await?;
+        memory_v2::reopen_memory_v2_cutover_for_legacy_union(&writer.conn, owner, source_store_id)
+            .await
+    }
 }

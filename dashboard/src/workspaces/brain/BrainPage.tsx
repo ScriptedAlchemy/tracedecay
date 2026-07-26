@@ -4,7 +4,7 @@ import { GraphCanvas } from '../../viz/graph/GraphCanvas.tsx';
 import { ActivationField } from '../../viz/graph/activation.ts';
 import { buildAdjacency, neighborsOf } from '../../viz/graph/adjacency.ts';
 import { useEventStreamState, useLiveActivity } from '../../data/sse/useEvents.tsx';
-import { LegacyBoundary } from '../../ui/LegacyStates.tsx';
+import { CenteredState, LegacyBoundary } from '../../ui/LegacyStates.tsx';
 import { Legend, Readout } from '../../ui/instrument.tsx';
 import { cn } from '../../ui/cn';
 import { useLegacy } from '../../data/query/useLegacy.ts';
@@ -45,6 +45,32 @@ export function BrainPage() {
   return (
     <LegacyBoundary title="Brain" pending={projects.isPending} result={projects.data}>
       {(data) => {
+        switch (data.status) {
+          case 'missing_registry':
+            return <CenteredState title="Project registry is not configured" kind="unknown" />;
+          case 'registry_unavailable':
+            return <CenteredState title="Project registry read failed" kind="error" />;
+          case 'ok':
+            break;
+          default: {
+            const unhandled: never = data.status;
+            return unhandled;
+          }
+        }
+        if (data.project_tree.length === 0) {
+          const measuredEmpty =
+            data.summary.project_count === 0 && data.summary.repo_count === 0;
+          return (
+            <CenteredState
+              title={
+                measuredEmpty
+                  ? 'Project registry contains no projects'
+                  : 'Project registry response is inconsistent'
+              }
+              kind={measuredEmpty ? 'complete_zero_findings' : 'partial'}
+            />
+          );
+        }
         const groups = [...data.project_tree].sort(
           (a, b) => latestSeen(b) - latestSeen(a),
         );

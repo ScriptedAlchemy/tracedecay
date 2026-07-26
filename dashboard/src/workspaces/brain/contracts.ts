@@ -45,7 +45,7 @@ export type ProjectRepoGroup = z.infer<typeof ProjectRepoGroupSchema>;
 
 export const ProjectsPayloadSchema = z
   .object({
-    status: z.string(),
+    status: z.enum(['ok', 'missing_registry', 'registry_unavailable']),
     truncated: z.boolean().optional(),
     active_project_id: z.string().nullable().optional(),
     active_project_root: z.string().optional(),

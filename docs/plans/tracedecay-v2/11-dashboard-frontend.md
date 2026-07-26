@@ -2,12 +2,24 @@
 
 ## Status / Role
 
-Normative product plan. Every product PR ships its usable UI slice with its backend behavior. PR14 completes the shared shell and the full Brain, Explorer, Loom, Sessions, Agents, Code, Knowledge, Delivery, Automations, Observatory, Costs, and Settings experience. PR17 adds the first-class Work workspace and task-graph projections owned semantically by [Plan 24](24-canonical-task-plan-graph-and-multi-agent-executor.md).
+Normative product plan. Every product PR ships its usable UI slice with its
+backend behavior. By current **plan authority**, PR14 completes exactly the
+shared shell and Brain, Explorer, Loom, Sessions, Agents, Code, Knowledge,
+Delivery, Automations, Observatory, Costs, and Settings, while PR17 adds the
+first-class Work workspace and task-graph projections owned semantically by
+[Plan 24](24-canonical-task-plan-graph-and-multi-agent-executor.md).
 PR17 also adds the execution-topology lens specified below: independent
 execution-placement, branch-topology, review-topology, and integration-strategy
 lanes, dependency-commit and merge-order rails,
 conflict/proximity evidence, integration proposals and receipts, test/CI state,
 and temporal replay over the same canonical Work selection.
+
+The user did not enumerate those twelve workspaces and did not accept the
+PR17 timing in recorded speech after asking "ahat about kanban/task graph etc"
+on 2026-07-25. He did explicitly require a first-class TraceDecay task
+graph/Kanban inspired by Hermes but more powerful. The twelve-workspace/PR17
+allocation remains binding plan authority pending an owner scheduling decision;
+it must not be attributed to the user.
 
 Earlier component names, route inventories, fixture matrices, packet names,
 script lists, and frontend gate layouts are historical implementation evidence,
@@ -16,19 +28,80 @@ and persisted deep links retain compatibility and migration obligations; all
 other retention is judged by the user journeys, behavior, accessibility,
 performance, platform, and regression requirements below.
 
-Fresh start (2026-07-23): the legacy multi-app dashboard (shell, holographic,
-lcm, graph, code-diagnostics, savings, settings as separate bundles) was
-removed from the tree; placeholder dist bundles keep the Rust build, packaging,
-and daemon serving green until the PR14 implementation replaces them. Nothing
-from the deleted apps is a dependency; the API handlers they consumed remain
-the compatibility surface the new implementation binds to.
+Current implementation (2026-07-25): the legacy multi-app dashboard (shell,
+holographic, lcm, graph, code-diagnostics, savings, settings as separate
+bundles) was removed. The real single-app `app-dist` bundle is the product
+served at `/`; the legacy placeholder shell is isolated at `/legacy` and must
+not be described as the product bundle. Nothing from the deleted apps is a
+dependency; retained API handlers remain compatibility surfaces for the
+current implementation.
+
+The current PR14 checkpoint is implemented but not accepted. Real Settings
+capability and authority-failure state (all seven prior "unsupported" claims
+were stale), storage budget findings and unreadable roles, truthful
+partial/unverified graph state, discriminated registry outcomes, scoped
+failures that no longer masquerade as `not mounted`, and unavailable reads
+preserved across Agents, Costs, Knowledge, and Sessions now exist. Explorer
+coordination/source-local query and LCM read context, Loom time boundaries,
+Delivery, Doctor, storage telemetry, asset serving, and feedback observation
+wiring also exist. The Rust `dashboard_api_test` suite has not completed
+successfully, so Settings CAS, Delivery, Explorer routes, Doctor, storage
+telemetry, Loom, and asset serving remain **implemented but unverified**.
+
+## Rejected and superseded frontend approaches
+
+- **Module Federation is rejected.** The dashboard is one ordinary Rsbuild
+  application and React tree, not a federated composition.
+- **Vite and an ADR about the bundler are rejected.** The user's exact
+  instruction is "use rsbuild. no adr. just pick rsbuild."
+- **The pre-PR14 dashboard is rejected as a frontend base.** "Gut the existing
+  dashboard" means retained API compatibility cannot restore its multi-app
+  composition or visual language.
+- **Foundation lanes do not style, structure, or select frontend
+  dependencies.** The historical model assignment has changed, but the
+  designated design-owner boundary remains.
+- **shadcn adoption is on hold.** "Dont use shadcn yet" is the current
+  delivery-first instruction; investigation does not authorize adoption.
+- **Git-hash-tied record documents are rejected.** Do not create per-commit
+  screenshot manifests, acceptance/evaluation records, or evidence packets.
+  Real-Chrome review, direct tests, ordinary run output, and owning-plan status
+  are the evidence.
+- **Generic, clinical, simple, non-world-class, or non-magnificent UI is
+  rejected on every page.** Beauty and function are simultaneous acceptance
+  criteria, not optional polish.
+- **Bottom chrome that steals space from an interactive graph, meaningless
+  sparse circles, invisible real activity, bland space-hungry vertical lists,
+  bland UML, service-box call chains, embedded-browser QA, and any falsified UI
+  are rejected.** Plans 11a/11b carry the concrete replacements.
+- **Deleting or renaming design tokens is rejected.** A `tokens.css` variant
+  removed tokens and broke 109 existing references. Additive, backward-
+  compatible token evolution supersedes it; existing token names remain until
+  every consumer has an explicit compatible migration.
+- **The Explorer workspace replacement from `86fd70fe6` is superseded.** It
+  was adopted and then reverted by `cb6c71739` to trunk behavior, retaining
+  only the independently accepted Hermes LCM parsing. Later coordinator,
+  accessibility, and source-binding work does not revive the rejected
+  redesign by implication.
+- **Forked shared primitives are rejected.** The duplicated `Meter` was
+  de-duplicated in `1d83b8071`; dashboard workspaces reuse
+  `dashboard/src/ui/instrument.tsx` and other shared primitives rather than
+  carrying local copies.
+
+The authoritative frontend-history brief was integrated on 2026-07-25. Its
+vendored/forked-Tailwind rejection is explicitly quarantined: it came from a
+different bundler-benchmark workspace and is not a quoted TraceDecay rule.
+Upstream maintained integration may still be preferred by plan/library-first
+reasoning, but not falsely attributed to the user.
 
 ## Outcome
 
 The dashboard is TraceDecay's world-class flagship product surface: a polished,
 highly interactive connected brain across projects that preserves precise
 repository, worktree, branch, session, agent, time, provenance, coverage, and
-authority scope. Visual quality serves comprehension rather than novelty.
+authority scope. Beauty is a hard acceptance criterion in the user's words:
+"its importsnt that it looks really beautiful and functional" and "we wanna
+overhaul anything that isnt magnificent and beautful." Visual quality serves
+comprehension and function rather than novelty.
 
 ## Delivery-first product journeys
 
@@ -121,7 +194,8 @@ Build and packaging:
 - One npm package at `dashboard/` producing ONE application: a single shell
   with one lazy, code-split route chunk per workspace. The legacy
   seven-bundle plugin-eval/SDK-injection composition is retired; workspaces
-  are ordinary routed modules inside one React tree.
+  are ordinary routed modules inside one React tree. Module Federation and
+  Vite are rejected; neither is a future seam.
 - The Rust integration contract is retained exactly: dist artifacts are
   embedded into the binary at compile time (zero filesystem dependency at
   runtime, offline-complete), `build.rs` keeps the content-stamp
@@ -155,6 +229,10 @@ Language, data, and state:
 
 Styling system (design-owned; foundation lanes do not restyle or restructure):
 
+- The following token, palette, theme, typography, spacing, and motion choices
+  are design-owner/agent plan decisions. The user supplied no preference on
+  typography, colour palette, dark/light mode, spacing scale, motion, or
+  easing; never cite these specifics as user authority.
 - Tailwind CSS v4, zero-runtime, over a semantic design-token layer expressed
   as CSS custom properties: color/space/type/radius/elevation scales plus
   named tokens for every `DashboardDomainState`, for severity, and for
@@ -166,6 +244,8 @@ Styling system (design-owned; foundation lanes do not restyle or restructure):
   preferred where a primitive would weaken keyboard, screen-reader, offline,
   or bundle behavior. No runtime CSS-in-JS anywhere (bundle and long-task
   budgets forbid it).
+- Do not adopt shadcn yet. Compatibility research may continue, but the current
+  user instruction is delivery first and "just leave it for now."
 - TanStack Virtual for large lists under the virtualization rules below.
 
 Visualization:
@@ -180,8 +260,10 @@ Visualization:
   rather than forced through a charting library. ECharts is the single
   quantitative charting library, imported modularly and lazy-loaded per
   route within each route's bundle budget; the earlier Observable Plot
-  admission is withdrawn. Cosmograph remains the gated optional GPU adapter
-  for overflow tiers per the fallback contract below. No renderer becomes
+  admission is withdrawn. The user named cosmograph.app as the visual
+  benchmark — "i want visuals like that" — not as a library mandate.
+  Cosmograph remains only a gated optional GPU adapter for overflow tiers per
+  the fallback contract below. No renderer becomes
   graph, query, health, readiness, ranking, or action authority.
 
 Legacy-surface dispositions (from the 2026-07-23 inventory):
@@ -596,6 +678,15 @@ filters, selection, evidence, temporal frame, or legal actions.
 
 ## Responsive, accessibility, performance, and usability gates
 
+**Open owner question — desktop-only versus responsive.** On 2026-07-06 the
+user said "desktop resolution only please." On 2026-07-25 he filed the
+Code-workspace bug in which symbol search disappeared below `lg` (1024px) and
+required checks at 320/768 widths with axe violations at zero. These are
+genuinely contradictory and neither is treated as superseded. Pending the
+user/product owner's decision, use the brief's provisional working reading:
+capture review screenshots at desktop resolution, but never hide functionality
+or ship a broken layout below `lg`.
+
 WCAG 2.2 AA is mandatory. Automated tests cover 320×568, 390×844, 768×1024,
 1024×768, 1280×720, and 1440×900 CSS pixels, 200% and 400% zoom,
 `prefers-reduced-motion`, `prefers-contrast: more`, and forced colors. At 320
@@ -725,8 +816,16 @@ NVDA/Firefox and VoiceOver/Safari completion remains required; screenshots or
 automated checks cannot substitute for semantic assertions or assistive-
 technology use.
 
-Focused developer commands and the aggregate frontend/repository gate may be
-reorganized as the test layout evolves. The aggregate must execute build,
+Visual acceptance additionally runs in real Google Chrome, never the
+embedded/in-IDE browser whose viewport the user rejected as too small. The
+reviewer captures every page and manually clicks through every interaction
+state, including movement and live updates. Automated Playwright/Chromium
+coverage supports that review but does not substitute for it. Screenshots are
+ordinary run output or CI artifacts, not committed per-commit evidence records
+or git-hash-tied manifests.
+
+Focused developer commands and the ordinary aggregate frontend/repository test
+run may be reorganized as the test layout evolves. That run must execute build,
 contract/DOM, accessibility, responsive, renderer parity, authority-negative,
 Work topology, performance, SSE, cross-browser end-to-end, smoke, manual
 assistive-technology, and usability checks; fail when required cases or samples
@@ -736,8 +835,12 @@ not mandatory recreation.
 
 ## Acceptance
 
-- The original twelve named workspaces are complete, navigable, responsive,
-  and accessible by PR14; Work meets the same bar in PR17.
+- Every page is both beautiful and functional, survives critical real-Chrome
+  review, and has no generic/clinical/simple or non-magnificent shipped state.
+- The original twelve plan-named workspaces are complete, navigable, and
+  accessible by PR14; pending the open responsive decision, they keep all
+  functionality below `lg`. Work meets the same bar under the current PR17
+  allocation.
 - Cross-links preserve scope and provenance across all twelve PR14 workspaces
   and PR17 Work.
 - Unit, DOM, accessibility, and smoke tests cover critical journeys and all state classes.

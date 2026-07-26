@@ -112,6 +112,168 @@ Migration, compatibility, recovery, and truthful partial/unavailable behavior
 remain direct product requirements. Git never rewrites published history,
 resolves semantic conflicts, or performs autonomous branch/ref mutation.
 
+## Rejected and superseded decisions
+
+This register is normative. A historical mention of one of these mechanisms is
+evidence that it was considered, not permission to rebuild it. Each entry
+records the rejected mechanism, the reason, and the retained replacement:
+
+1. **libSQL as the local runtime is superseded.** Its compatibility driver and
+   local runtime were removed after the rusqlite cutover. The
+   `tracedecay-rusqlite-runtime` path and daemon-owned SQLite authority replace
+   it; future remote work composes over that authority rather than reviving a
+   libSQL runtime.
+2. **Octocrab, `backon`, and `graphql-parser` are rejected for PR13.** They add
+   provider-client, retry, and parser abstractions that the one narrow
+   read-only GitHub/CI path does not need. Existing `ureq`, shared narrow typed
+   Serde DTOs, one compile-time static audited GraphQL query, and explicit
+   owner-local bounded retry are the runtime; `gh api` is manual
+   troubleshooting only.
+3. **PR-specific acceptance machinery is rejected.** Acceptance snapshots,
+   owner receipts, gate manifests, clean/content-addressed checkout snapshots,
+   signatures, attestations, reveal/trust-root evidence, and giant gate
+   scaffolds were planning bureaucracy rather than product evidence. The
+   authoritative acceptance rule above replaces them with direct product
+   tests, simple Linux developer benchmarks/evals, truthful
+   pass/fail/pending summaries, and normal cross-platform CI. Product-runtime
+   receipts, authorized repository/worktree/state snapshots, immutable
+   generations, and real content/source digests remain required.
+4. **Local first-party signing, trust-root, and attestation systems are
+   rejected.** No concrete local boundary requires a second origin or release
+   authority. Actual remote/network boundaries still authenticate, native Git
+   signing policy remains native Git's concern, and content digests may detect
+   corruption without becoming signatures or attestations.
+5. **The PR14/PR17 Work allocation is plan authority, not a user rejection.**
+   The user did not enumerate the twelve PR14 workspaces and asked "ahat about
+   kanban/task graph etc" on 2026-07-25 without a recorded answer accepting
+   deferral. The written plan currently assigns Brain, Explorer, Loom, Sessions,
+   Agents, Code, Knowledge, Delivery, Automations, Observatory, Costs, and
+   Settings to PR14, while Plan 24 owns the persistent task/work graph and PR17
+   adds Work. That allocation remains binding plan authority pending the open
+   scheduling decision recorded in Plans 11/11c; it must never be attributed to
+   the user. An independent or session-derived Kanban authority remains
+   architecturally rejected regardless of delivery timing.
+6. **The Cargo shim and `cargo-slot` are rejected.** The earlier local build
+   shim was removed by explicit direction and is not product, contributor, CI,
+   or release architecture. Stock Cargo behavior and portable repository
+   configuration supersede it.
+7. **Six separate GitHub pull requests for PR8–PR13 are superseded.** Draft PR
+   #421 is the consolidated delivery vehicle. PR8–PR13 names remain useful
+   product-slice and ownership labels, but they are not instructions to split
+   the work back into six branches or pull requests.
+8. **Synthetic or lookalike provider/observation fixtures are rejected as
+   acceptance evidence.** Invented protocol fields can agree with invented
+   adapters while proving no provider behavior. Only checked-in real native
+   fixtures with recorded origin/version/digest, replayed through the real
+   sanitizer and consuming path, are binding; synthetic data may exercise
+   isolated non-provider value contracts but cannot satisfy provider or
+   observation acceptance.
+9. **Custom infrastructure is rejected where a mature maintained library or
+   existing TraceDecay authority already owns the mechanism.** Do not add
+   bespoke parsers, cursors, caches, retries, transports, or registries that
+   duplicate those owners. Custom code is limited to TraceDecay-specific
+   authorization, scope, and composition. A design-approved, measured product
+   renderer used because admitted libraries do not satisfy the visual contract
+   is not an alternate infrastructure authority.
+10. **A synthetic Doctor remediation dispatcher is rejected.** The attempted
+    lane lacked the operation owner, authorization, preview/confirmation,
+    compare-and-swap, effect boundary, receipt, and rollback/recovery details
+    needed to dispatch safely. Plan 09 composes only owner-supplied legal
+    remediation operations; missing authority returns typed unavailable and
+    remains with the named owning plan rather than being filled by a generic
+    dispatcher.
+
+### Frontend rejection record
+
+The following entries come from the authoritative 2026-07-25 history brief.
+Quoted text is user speech; plan/design consequences are labeled separately.
+
+1. **Module Federation is rejected for the TraceDecay dashboard.** The user
+   said it "shouldn't be using Federation" there. The replacement is one
+   ordinary Rsbuild application and React tree.
+2. **Vite and bundler-ADR ceremony are rejected.** The exact instruction was
+   "use rsbuild. no adr. just pick rsbuild." Rsbuild is settled; do not reopen a
+   Vite comparison or write an ADR to restate the choice.
+3. **The pre-PR14 dashboard is rejected as an implementation base.** The user
+   said to "gut the existing dashboard" for a fresh, industry-leading
+   implementation. Retained API compatibility is not permission to restore its
+   frontend composition or visual language.
+4. **Foundation lanes styling or structuring the product are rejected.** The
+   historical instruction was "no styling or strucutring" for foundation
+   models. The named model has since been superseded, but one designated design
+   owner still owns styling, layout, and dependency selection.
+5. **Git-hash-tied record documents are rejected.** The user explicitly did
+   not want records "all iver the place tied to git hashes" because they waste
+   time and cause agents to redo work after commits. Never create per-commit
+   acceptance/evaluation documents, screenshot-record manifests, or evidence
+   packets. Direct tests, real-Chrome review, ordinary run output, and truthful
+   status in the owning plan replace them. A landed commit identifier may
+   annotate one authoritative implementation checkpoint; it does not create a
+   separate record or establish acceptance.
+6. **A dashboard that does not look world class is rejected.** Beauty is a hard
+   acceptance criterion: "its importsnt that it looks really beautiful and
+   functional" and "we wanna overhaul anything that isnt magnificent and
+   beautful." Function and beauty are simultaneous requirements on every page.
+7. **A generic, clinical, simple visual language is rejected.** This is the
+   user's named failure mode, not permission to invent a specific palette,
+   typeface, spacing system, or motion language on his behalf.
+8. **Bottom-panel chrome that steals graph space is rejected.** Controls and
+   evidence remain available without crowding the primary interactive field.
+9. **shadcn adoption is rejected for now.** The current instruction is "dont
+   use shadcn yet" and "just leave it for now"; this is a delivery-first hold,
+   not a permanent ban or a ban on investigating compatibility.
+10. **The sparse circular single-project Brain is rejected.** The circle
+    communicated no readable property and the selected-project view was too
+    sparse. Geometry must encode a named real measurement.
+11. **A Brain with no visible live neurons after real dogfooding is rejected.**
+    Real activity should visibly fire when agents work; missing activity must
+    remain truthful rather than simulated.
+12. **Bland vertical lists that consume large screen area are rejected.**
+    Lists remain accessible equivalents where needed, but cannot be the bland,
+    dominant visual treatment.
+13. **"Bland UML" is rejected as the structural idiom.** Structural views must
+    connect symbols, files, functions, callers/callees, sessions, facts, and
+    surrounding types in a comprehensible field.
+14. **Call chains drawn as service boxes are rejected.** They must show
+    function/type-level callers and callees, not resemble a service-architecture
+    diagram.
+15. **The embedded/in-IDE browser is rejected as the visual verification
+    surface.** Its viewport is too small. Use real Google Chrome, screenshot
+    every page, and manually click through every interaction state.
+16. **Anything not magnificent on any page is rejected.** The quality bar
+    applies across the dashboard, not only to hero graph surfaces.
+17. **Falsified UI is rejected categorically.** "All data must be fully wired
+    through to the frontend with no falsified ui"; missing backend behavior is
+    implementation work or a truthful typed unavailable state, never a
+    plausible zero, fake health, or decorative activity.
+18. **Vendored/forked Tailwind is an unconfirmed adjacent-workspace
+    inference, not a TraceDecay user rule.** The cited rejection came from a
+    bundler-benchmark workspace. TraceDecay may prefer upstream maintained
+    integration under the general library-first rule, but no plan may quote the
+    user as rejecting vendored Tailwind here without new TraceDecay-specific
+    evidence.
+
+**User-stated graph benchmark.** "Look at cosmograph.app i want visuals like
+that. relaly beautiful" sets the visual benchmark. It does not select or require
+the Cosmograph library; licensing, offline, accessibility, and product-authority
+constraints still govern implementation.
+
+**Unresolved desktop/responsive contradiction (owner: user/product owner).** On
+2026-07-06 the user said "desktop resolution only please." On 2026-07-25 he
+filed the hidden-below-1024px symbol-search bug and required verification at
+320/768 widths with axe violations at zero. Neither instruction is silently
+discarded. Until the owner decides, the working interpretation is desktop-sized
+screenshots in real Chrome while functionality remains present below `lg`; this
+is provisional, not a settled product-scope decision.
+
+**Unattributed design axes.** The complete history contains no user statement
+selecting typography, colour palette, dark/light preference, spacing scale,
+motion, or easing. Specific choices on those axes are design-owner/agent plan
+decisions and must never be presented as user preferences. The user's
+"kinestetic synastisya" direction was immediately hedged with "i dont wuite
+know but you get the idea"; it and "topography of the code base" are
+impressionistic direction, not a literal visual or motion specification.
+
 ## Retained semantic ownership
 
 These ownership rules prevent duplicate product behavior; they are not separate
@@ -218,8 +380,9 @@ changing their transport.
 and protocol structs; add no otherwise-unused `lsp-types` dependency.
 `async-lsp` remains a later candidate only if a measured conversion deletes
 gateway code and leaves one `lsp-types` version. GitHub/CI acquisition uses
-existing `ureq`, shared typed Serde DTOs, and static allowlisted GraphQL query
-text; `gh api` is the manual troubleshooting fallback, not a runtime
+existing `ureq`, shared narrow typed Serde DTOs, and one compile-time static
+audited allowlisted GraphQL query; `gh api` is the manual troubleshooting
+fallback, not a runtime
 dependency. This replaces new provider clients, dynamic GraphQL parsing, and
 source-local JSON models while retaining read-only methods, exact provider
 identity, pagination, freshness, coverage, rate-limit, and typed failure
@@ -263,10 +426,14 @@ authorized configuration or remediation commands back through the daemon.
 
 **Implementation and deletion.**
 
-- Ship the original twelve dashboard workspaces with renderer-neutral
-  semantics, a permissive default renderer, keyboard/accessibility parity,
-  Settings, typed SLOs, and denominator-safe measurements with provenance,
-  coverage, cohort, temporal delta, uncertainty, and calibration validity.
+- Ship exactly the original twelve dashboard workspaces — Brain, Explorer,
+  Loom, Sessions, Agents, Code, Knowledge, Delivery, Automations, Observatory,
+  Costs, and Settings — with renderer-neutral semantics, a permissive default
+  renderer, keyboard/accessibility parity, typed SLOs, and denominator-safe
+  measurements with provenance, coverage, cohort, temporal delta, uncertainty,
+  and calibration validity. By current plan authority Work is allocated to
+  PR17; the user did not enumerate the twelve or accept that deferral, so the
+  timing remains the open owner question recorded above.
 - Plan 09 remains the sole Doctor use-case implementation/composition
   authority, Plan 14 its historical regression/behavior contract, and Plan 26
   the measurement authority; the Plan 11 UI renders supplied results and never
@@ -287,11 +454,35 @@ adapter, ECharts as the single charting library, SSE monotone reducer). The
 legacy multi-bundle dashboard was removed the same day; Plan 11 is the single
 authority for frontend structure, styling, and dependency decisions.
 
+**Implementation checkpoint (2026-07-25; not acceptance).** Commits
+`03bf4590f`, `811e37eab`, `76895d201`, `4444833b8`, `5eb400a45`,
+`886609713`, `1933e6f1a`, `f2b5db388`, `d97f7160d`, `3f5268d4f`, and
+`30955e3f0` implement the current PR14 integration checkpoint: the real
+`app-dist` application is served at `/` and the legacy placeholder is isolated
+at `/legacy`; all seven formerly claimed unsupported Settings capabilities are
+served by the existing backend and the UI now renders real capability and
+authority-failure state; storage budget findings and unreadable storage roles
+are preserved; graph failures render truthful partial/unverified state with
+discriminated registry outcomes, scoped failures no longer masquerade as
+`not mounted`, and Agents, Costs, Knowledge, and Sessions preserve unavailable
+reads; Explorer owns its coordinator and source-local query binding, LCM
+size/read-context support, and reduced automated accessibility violations from
+12 to 0; Loom has explicit time boundaries; and the Delivery, Explorer, Doctor,
+storage telemetry, Loom, asset serving, and feedback-observation paths are
+implemented.
+
+This checkpoint is **implemented but unverified**: the Rust
+`dashboard_api_test` suite has not completed successfully. Settings CAS,
+Delivery, Explorer routes, Doctor, storage telemetry, Loom, and asset serving
+must retain that status until the suite executes successfully; none may be
+reported as verified from implementation or frontend tests alone.
+
 **Direct acceptance.** Starting from a real PR13 finding, navigate to retained
 evidence, diagnose an injected operational fault, apply an authorized
 remediation or setting change, observe the resulting state, and verify
 accessibility, cancellation, restart, denied-action, partial-data, and
-unavailable-provider behavior. Run the aggregate dashboard/Doctor gate.
+unavailable-provider behavior. Run those direct tests and normal repository CI;
+do not create a separate dashboard/Doctor acceptance gate.
 
 **Not in this PR.** Multi-root operation belongs to PR15 and Work/task views to
 PR17.
@@ -336,8 +527,8 @@ state, keep it read-only or block apply; do not add `git2`, and do not let
 resume against frozen state, follow evidence to its owning root, reject scope
 or watermark drift, then preview and perform each legal clean Git operation.
 Verify unauthorized roots, conflicts, partial shards, unavailable private
-preview, restart, and receipt recovery. Run aggregate multi-root and Git-safety
-gates.
+preview, restart, and receipt recovery through direct multi-root and Git-safety
+tests plus normal repository CI, without a separate acceptance gate.
 
 **Not in this PR.** Remote authority belongs to PR16; task execution topology
 belongs to PR17.
@@ -368,7 +559,8 @@ failover under a higher fence.
   cannot identify their generation and current authority.
 
 **Library-first implementation defaults.** Build on the existing HTTP/SSE,
-rustls, and libSQL paths. At a concrete delivery integration, consider
+rustls, and daemon-owned rusqlite runtime paths. At a concrete delivery
+integration, consider
 `reqwest` plus `eventsource-stream`, `tokio-util`, `zstd`/`tar`,
 `object_store`, or Hickory only when the dependency deletes identified stream,
 cancellation, compression/archive, object-backend, or discovery mechanics and
@@ -686,5 +878,6 @@ sources, and the rusqlite reserved-health size/table-growth primitive plus
 scoped daemon application adapter landed on 2026-07-23. Store soft budgets are
 owner-configured and inert by default.
 
-PR #421 stays open through PR20. It merges only after PR20, direct product
-tests, and normal cross-platform CI are stable.
+Draft PR #421 is the consolidated delivery vehicle that supersedes six
+separate PR8–PR13 pull requests. It stays open through PR20 and merges only
+after PR20, direct product tests, and normal cross-platform CI are stable.

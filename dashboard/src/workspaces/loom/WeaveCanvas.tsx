@@ -332,6 +332,10 @@ function Thread({
     'fill-[var(--kind-dark)] [[data-theme=light]_&]:fill-[var(--kind-light)]';
   const measuredEnd = y1 != null && y1 > y0;
   const bodyEnd = measuredEnd ? y1 : y0 + HEAD_CAP;
+  const boundaryClass =
+    thread.endSource === 'session_end'
+      ? 'stroke-[var(--ev-measured)]'
+      : 'stroke-[var(--ev-associated)]';
 
   return (
     <g
@@ -378,14 +382,25 @@ function Thread({
         />
       )}
 
-      {/* Unmeasured extent, drawn. */}
-      {measuredEnd ? null : (
+      {/* Boundary provenance is a separate visual channel from host hue:
+        * measured session end, associated last-message observation, or
+        * unknown open extent. */}
+      {measuredEnd ? (
+        <line
+          x1={x - half - 2}
+          y1={bodyEnd}
+          x2={x + half + 2}
+          y2={bodyEnd}
+          className={boundaryClass}
+          strokeWidth={2}
+        />
+      ) : (
         <line
           x1={x}
           y1={bodyEnd + 1}
           x2={x}
           y2={bodyEnd + OPEN_TAIL}
-          className={strokeClass}
+          className="stroke-[var(--ev-unknown)]"
           strokeWidth={Math.min(thickness, 2)}
           strokeDasharray="2 3"
           strokeOpacity={0.7}

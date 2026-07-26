@@ -179,6 +179,33 @@ describe('Settings read model', () => {
     });
     expect(model.sections[0]?.settingCount).toBe(1);
   });
+
+  it('does not describe unavailable automation authority as merged effective config', () => {
+    const model = buildSettingsModel({
+      automation: {
+        config_endpoint: '/api/plugins/holographic/curation/config',
+        availability: {
+          available: false,
+          reason: 'project automation configuration could not be read',
+          required_authority: 'project automation configuration',
+        },
+        source_coverage: {
+          global: 'available',
+          project: 'error',
+          effective: 'unavailable',
+        },
+      },
+    });
+    const automation = model.sections.find((section) => section.id === 'automation');
+
+    expect(automation?.blurb).toBe('Automation configuration unavailable');
+    expect(automation?.rows.map((row) => row.id)).not.toContain('enabled');
+    expect(automation?.rows.map((row) => row.id)).not.toContain('backend');
+    expect(automation?.rows.map((row) => row.id)).not.toContain('host_mode');
+    expect(automation?.rows.find((row) => row.id === 'availability.reason')?.text).toBe(
+      'project automation configuration could not be read',
+    );
+  });
 });
 
 describe('Settings filtering', () => {

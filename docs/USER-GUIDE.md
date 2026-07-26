@@ -809,7 +809,7 @@ user-preference writes here; projectless Codex and Cursor hooks recall from it.
 
 Repo-local projects create `.tracedecay/` inside each project you index. Profile-backed storage may instead keep the code project's graph/session artifacts in a private profile shard such as `~/.tracedecay/projects/<project_id>/`, with only a small enrollment marker in the repository. The active project store contains:
 
-- `tracedecay.db` — the libSQL database with all symbols, edges, files, and vector embeddings
+- `tracedecay.db` — the SQLite database, served by the `rusqlite` runtime, with all symbols, edges, files, and vector embeddings
 - `sessions.db` and sidecar directories such as response handles, LCM payloads, branch metadata, and dashboard artifacts when those features are used
 
 Project holographic memory remains sharded: project `memory_facts`, entities,

@@ -261,6 +261,47 @@ impl DaemonSessionRuntimeRegistryV1 {
         Ok(database)
     }
 
+    /// Mounts an existing project-memory shard without initializing or
+    /// migrating it, and exposes only a read-only database facade.
+    pub(crate) async fn project_memory_read_only(
+        &self,
+        project_id: ProjectId,
+        enrollment_roots: impl IntoIterator<Item = PathBuf>,
+    ) -> Result<Database> {
+        self.resolver
+            .register_project_authority(LocalProjectEnrollmentAuthorityV1::new(
+                project_id.clone(),
+                enrollment_roots,
+            ))
+            .map_err(|error| {
+                session_registry_error("register project memory authority", format!("{error:?}"))
+            })?;
+        if let Some(database) = self.project_memory.lock().await.get(&project_id).cloned() {
+            return Database::publish_runtime(
+                database.retained_runtime().clone(),
+                DatabaseAccessMode::ReadOnly,
+            )
+            .await;
+        }
+        let shard_id = StoreShardIdV1::project(
+            self.identity.brain_id().clone(),
+            self.identity.profile_id().clone(),
+            project_id,
+        );
+        let runtime = open_runtime(
+            &self.registry,
+            self.resolver.as_ref(),
+            shard_id,
+            self.incarnation,
+            Some(self.profile_pin.clone()),
+            None,
+            false,
+            "mount project memory store read-only",
+        )
+        .await?;
+        Database::publish_runtime(runtime, DatabaseAccessMode::ReadOnly).await
+    }
+
     pub(crate) async fn code_graph(
         &self,
         shard_id: StoreShardIdV1,

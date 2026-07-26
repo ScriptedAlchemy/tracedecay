@@ -9,7 +9,7 @@
 <p align="center">
   <a href="https://crates.io/crates/tracedecay"><img src="https://img.shields.io/crates/v/tracedecay.svg" alt="crates.io"></a>
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License: MIT"></a>
-  <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/Rust-1.70+-orange.svg" alt="Rust"></a>
+  <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/Rust-1.85+-orange.svg" alt="Rust"></a>
   <img src="https://img.shields.io/badge/macOS-supported-blue.svg" alt="macOS">
   <img src="https://img.shields.io/badge/Linux-supported-blue.svg" alt="Linux">
   <img src="https://img.shields.io/badge/Windows-supported-blue.svg" alt="Windows">
@@ -24,7 +24,7 @@ Instead of repeated `grep`, `glob`, and file reads, agents use MCP tools such as
 - 70+ MCP tools for discovery, call graphs, impact analysis, code health, test mapping, PR context, and anchored edits.
 - 50+ languages through Rust tree-sitter extractors, with lite/medium/full Cargo feature tiers.
 - Native integrations for Claude Code, Codex, Cursor, Gemini, Hermes, Kiro, OpenCode, Copilot, Cline, Roo Code, Zed, Antigravity, Kilo, Kimi, and Vibe.
-- Local libSQL storage. Your code and project memory stay on your machine.
+- Local SQLite storage through the `rusqlite` runtime. Your code and project memory stay on your machine.
 - On-demand freshness checks, optional per-branch databases, and linked git worktree support.
 - Local dashboard for code graph, memory, LCM sessions, savings, and cost analytics.
 

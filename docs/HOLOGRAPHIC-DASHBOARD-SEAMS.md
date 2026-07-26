@@ -1,5 +1,9 @@
 # Holographic Dashboard — Component Seam Map
 
+> Historical seam audit of the legacy holographic plugin, now isolated at
+> `/legacy`. It does not describe the product dashboard served from
+> `dashboard/app-dist` at `/`.
+
 Audit of `dashboard/holographic/src/` for complexity hotspots and practical split
 points. Scope: `SemanticMap.tsx`, `CurationPanel.tsx`, `AssociationGraph.tsx`.
 **No refactors were performed** — this is a map of seams, risk, extraction order,

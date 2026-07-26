@@ -37,4 +37,66 @@ describe('CostsPage truth claims', () => {
     expect(screen.getByText(/the wire does not report why/i)).toBeTruthy();
     expect(screen.queryByText(/they share one cache/i)).toBeNull();
   });
+
+  it('renders failed turn reads as unavailable instead of actual zero spend', async () => {
+    const payload = structuredClone(
+      FIXTURES['/api/plugins/savings/overview'],
+    ) as Record<string, unknown>;
+    payload['turns'] = {
+      available: false,
+      error: 'failed to read priced turn ledger',
+    };
+
+    renderCosts(payload);
+
+    expect(await screen.findByText(/priced turn ledger read failed/i)).toBeTruthy();
+    expect(screen.queryByText('$0.00')).toBeNull();
+    expect(screen.queryByText(/0 across those turns/i)).toBeNull();
+  });
+
+  it('renders a failed session aggregate separately from an empty ledger', async () => {
+    const payload = structuredClone(
+      FIXTURES['/api/plugins/savings/overview'],
+    ) as Record<string, unknown>;
+    payload['sessions'] = {
+      available: false,
+      error: 'failed to aggregate session tokens',
+    };
+
+    renderCosts(payload);
+
+    expect(await screen.findAllByText(/session ledger read failed/i)).not.toHaveLength(0);
+    expect(screen.queryByText(/reported no token breakdown/i)).toBeNull();
+    expect(screen.queryByText(/reported no messages/i)).toBeNull();
+  });
+
+  it('discloses that project savings are a capped top slice', async () => {
+    const payload = structuredClone(
+      FIXTURES['/api/plugins/savings/overview'],
+    ) as Record<string, unknown>;
+    const savings = payload['savings'] as Record<string, unknown>;
+    const lifetime = savings['lifetime_counters'] as Record<string, unknown>;
+    lifetime['project_total'] = 57;
+    lifetime['projects_limit'] = 25;
+    lifetime['projects_truncated'] = true;
+
+    renderCosts(payload);
+
+    expect(await screen.findByText(/top 25 of 57 projects/i)).toBeTruthy();
+  });
 });
+
+function renderCosts(payload: unknown) {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async () => new Response(JSON.stringify(payload), { status: 200 })),
+  );
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false, gcTime: 0 } },
+  });
+  render(
+    <QueryClientProvider client={client}>
+      <CostsPage />
+    </QueryClientProvider>,
+  );
+}

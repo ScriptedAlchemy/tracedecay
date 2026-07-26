@@ -894,7 +894,8 @@ impl StoreAdministration {
                     )?;
                 }
 
-                let canonical_paths = database_paths.iter().cloned().collect::<Vec<_>>();
+                let mut canonical_paths = database_paths.iter().cloned().collect::<Vec<_>>();
+                canonical_paths.sort();
                 let (fence, states) = crate::db::DatabaseDeletionFence::reacquire(
                     &canonical_paths,
                     recovery.transaction_id(),
@@ -914,7 +915,14 @@ impl StoreAdministration {
                 }
 
                 recovery.recover(
-                    |paths| self.prove_no_external_branch_store_holders(paths),
+                    |paths| {
+                        self.prove_no_external_branch_store_holders(paths)?;
+                        crate::migrate::memory_cutover::verify_branch_removal_receipts(
+                            data_root,
+                            &canonical_paths,
+                            paths,
+                        )
+                    },
                     |disposition| match disposition {
                         crate::branch::BranchAdminRecoveryDisposition::PreCommitRollback => {
                             fence.rollback_deleting()
@@ -961,7 +969,8 @@ impl StoreAdministration {
                 )?;
             }
 
-            let canonical_paths = database_paths.iter().cloned().collect::<Vec<_>>();
+            let mut canonical_paths = database_paths.iter().cloned().collect::<Vec<_>>();
+            canonical_paths.sort();
             let fence = crate::db::DatabaseDeletionFence::acquire(
                 &canonical_paths,
                 "delete branch SQLite families",
@@ -981,7 +990,14 @@ impl StoreAdministration {
             prepared.commit_with_transaction(
                 fence.transaction_id(),
                 || fence.publish_deleting(),
-                |paths| self.prove_no_external_branch_store_holders(paths),
+                |paths| {
+                    self.prove_no_external_branch_store_holders(paths)?;
+                    crate::migrate::memory_cutover::verify_branch_removal_receipts(
+                        data_root,
+                        &canonical_paths,
+                        paths,
+                    )
+                },
                 || fence.rollback_deleting(),
                 || fence.promote_deleted(),
             )

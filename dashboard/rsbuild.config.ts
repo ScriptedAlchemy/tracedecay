@@ -1,9 +1,8 @@
 import { defineConfig } from '@rsbuild/core';
 import { pluginReact } from '@rsbuild/plugin-react';
 
-// Single-app dashboard build (plan 11 "Finalized implementation architecture").
-// build.rs embeds this app-dist output into the binary served at `/`; the
-// legacy plugin dists remain available only through compatibility routes.
+// Canonical dashboard build. build.rs embeds this app-dist output into the
+// binary served at `/`, including every client-routed workspace.
 export default defineConfig({
   plugins: [pluginReact()],
   source: {

@@ -100,6 +100,11 @@ export function ExplorerSplit({
           {mobileFiltersOpen ? (
             <div
               id={mobileFiltersId}
+              // Scrollable regions need keyboard operation (WCAG 2.1.1). A
+              // filter column whose current content is all read-out — no facet
+              // buttons because nothing loaded — is scrollable with nothing
+              // inside to tab to, so the panel itself takes the tab stop.
+              tabIndex={0}
               className="max-h-[45vh] overflow-auto border-t border-edge-subtle p-2.5"
             >
               {filters}
@@ -119,7 +124,9 @@ export function ExplorerSplit({
             )}
           >
             <BayLegend>Query</BayLegend>
-            <div className="min-h-0 flex-1 overflow-auto p-2.5">{filters}</div>
+            <div tabIndex={0} className="min-h-0 flex-1 overflow-auto p-2.5">
+              {filters}
+            </div>
           </aside>
         ) : null}
         <section
@@ -208,6 +215,11 @@ export function DataRow({
         'relative flex w-full gap-3 border-b border-edge-subtle pl-3 pr-3 text-left text-xs',
         align === 'start' ? 'items-start pt-2' : 'items-center',
         'hover:bg-surface-1 focus-visible:bg-surface-1',
+        // Lists in this archetype pin a `ListCaption` at `top-0`, so a row
+        // brought into view by the roving arrow keys landed underneath it —
+        // focused but hidden, and unclickable at the same coordinates. The
+        // scroll margin parks the row below the caption instead.
+        'scroll-mt-9',
         selected && 'bg-surface-2',
         className,
       )}

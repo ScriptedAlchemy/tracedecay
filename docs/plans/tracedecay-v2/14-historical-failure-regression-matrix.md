@@ -32,6 +32,12 @@ below.
 
 - Plan 09 implements and composes the single Doctor application use case and
   legal-remediation handoffs.
+- A proposed synthetic Doctor remediation dispatcher was rejected because no
+  operation owner, authorization, preview/confirmation, compare-and-swap,
+  effect boundary, receipt, or rollback/recovery contract had been supplied.
+  That refusal is the accepted decision, not missing work. Plan 09 composes
+  only owner-supplied legal operations; absent authority remains typed
+  unavailable with the owning plan.
 - This plan owns Doctor's historical regression classes and observable
   behavior, not runtime health evaluation or remediation execution.
 - Plan 11 renders canonical Doctor findings, evidence, coverage, and supplied

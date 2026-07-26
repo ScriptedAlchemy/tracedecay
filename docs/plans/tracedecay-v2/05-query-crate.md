@@ -80,7 +80,9 @@ Every product surface can run the same bounded query use case and receive determ
 
 - A universal TraceQueryV1 god AST. Activity, facts, LCM, lexical code, semantic code, graph, and export use typed domain requests.
 - Scope discovery, authorization, saved-view mutation, annotations, usage accounting, or policy effects.
-- SQLite/libSQL connections, SQL, migrations, projector writes, model downloads, HTTP, SSE framing, MCP, CLI, or dashboard code.
+- SQLite/rusqlite connections, SQL, migrations, projector writes, model
+  downloads, HTTP, SSE framing, MCP, CLI, or dashboard code. The retired
+  libSQL runtime is not a future query-layer dependency.
 - Task/work domain identity, request schemas, graph traversal/projection
   semantics, saved lenses, Kanban/board meaning, readiness, leases, attempts,
   workflow execution, or agent orchestration. Plan 05 may execute a Plan

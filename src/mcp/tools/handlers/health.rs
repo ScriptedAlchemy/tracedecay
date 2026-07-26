@@ -18,7 +18,7 @@ use tracedecay_domain::{ManifestDigest, UtcMicros, canonical_sha256};
 use crate::errors::{Result, TraceDecayError};
 use crate::graph::health::{
     HealthDimensions, acyclicity_score, compute_composite_health, dependency_depth, depth_score,
-    gini_coefficient, gini_label, modularity_score,
+    dsm_clusters, gini_coefficient, gini_label, modularity_score,
 };
 
 /// Coarse human label for a modularity score in [0,1].
@@ -1088,16 +1088,20 @@ pub(super) async fn handle_dsm(
         0.0
     };
 
-    // Group files by parent directory
-    let mut dir_to_files: HashMap<String, Vec<String>> = HashMap::new();
-    for file in adj.keys() {
-        let dir = file
-            .rfind('/')
-            .map_or_else(|| ".".to_string(), |i| file[..i].to_string());
-        dir_to_files.entry(dir).or_default().push(file.clone());
-    }
-
-    let mut clusters = dsm_clusters(&adj, &dir_to_files);
+    let cluster_rows = dsm_clusters(&adj);
+    let mut clusters: Vec<Value> = cluster_rows
+        .iter()
+        .map(|cluster| {
+            json!({
+                "directory": cluster.directory,
+                "file_count": cluster.file_count,
+                "internal_edges": cluster.internal_edges,
+                "outgoing_edges": cluster.outgoing_edges,
+                "incoming_edges": cluster.incoming_edges,
+                "boundary_edges": cluster.boundary_edges(),
+            })
+        })
+        .collect();
     let largest_cluster = clusters
         .iter()
         .filter_map(|cluster| cluster["file_count"].as_u64())
@@ -1107,7 +1111,7 @@ pub(super) async fn handle_dsm(
         "files": file_count,
         "edges": edge_count,
         "density": (density * 10000.0).round() / 10000.0,
-        "clusters": dir_to_files.len(),
+        "clusters": cluster_rows.len(),
         "largest_cluster": largest_cluster,
     });
     let output = match shape {
@@ -1141,52 +1145,6 @@ pub(super) async fn handle_dsm(
         }),
         vec![],
     ))
-}
-
-fn dsm_clusters(
-    adj: &HashMap<String, HashSet<String>>,
-    dir_to_files: &HashMap<String, Vec<String>>,
-) -> Vec<Value> {
-    let mut clusters: Vec<Value> = dir_to_files
-        .iter()
-        .map(|(dir, files)| {
-            let file_set: HashSet<&str> = files.iter().map(String::as_str).collect();
-            let mut internal = 0usize;
-            let mut outgoing = 0usize;
-            let mut incoming = 0usize;
-            for file in files {
-                if let Some(targets) = adj.get(file) {
-                    for tgt in targets {
-                        if file_set.contains(tgt.as_str()) {
-                            internal += 1;
-                        } else {
-                            outgoing += 1;
-                        }
-                    }
-                }
-                for (src, targets) in adj {
-                    if !file_set.contains(src.as_str()) && targets.contains(file) {
-                        incoming += 1;
-                    }
-                }
-            }
-            json!({
-                "directory": dir,
-                "file_count": files.len(),
-                "internal_edges": internal,
-                "outgoing_edges": outgoing,
-                "incoming_edges": incoming,
-                "boundary_edges": outgoing + incoming,
-            })
-        })
-        .collect();
-    clusters.sort_by_key(|c| {
-        std::cmp::Reverse((
-            c["boundary_edges"].as_u64().unwrap_or(0),
-            c["file_count"].as_u64().unwrap_or(0),
-        ))
-    });
-    clusters
 }
 
 fn dsm_matrix(adj: &HashMap<String, HashSet<String>>, max_files: usize) -> Value {

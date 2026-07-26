@@ -114,9 +114,9 @@ fn automation_staged_log_line_is_stable() {
         "automation_staged",
         &super::super::automation_staged_log_fields(
             std::path::Path::new("/tmp/project"),
-            crate::automation::staged_notice::AutomationPendingCounts {
-                pending_fact_proposals: 2,
-                pending_skills: 1,
+            &crate::automation::staged_notice::AutomationPendingCounts {
+                fact_proposals: crate::automation::staged_notice::PendingReviewCount::Counted(2),
+                skills: crate::automation::staged_notice::PendingReviewCount::Counted(1),
             },
         ),
     );
@@ -124,5 +124,27 @@ fn automation_staged_log_line_is_stable() {
     assert_eq!(
         line,
         "[tracedecay] event=automation_staged project=/tmp/project pending_fact_proposals=2 pending_skills=1"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn automation_staged_log_line_marks_an_unreadable_queue() {
+    let line = super::super::format_daemon_log_line(
+        "automation_staged",
+        &super::super::automation_staged_log_fields(
+            std::path::Path::new("/tmp/project"),
+            &crate::automation::staged_notice::AutomationPendingCounts {
+                fact_proposals: crate::automation::staged_notice::PendingReviewCount::Counted(2),
+                skills: crate::automation::staged_notice::PendingReviewCount::unreadable(
+                    "profile root missing",
+                ),
+            },
+        ),
+    );
+
+    assert_eq!(
+        line,
+        "[tracedecay] event=automation_staged project=/tmp/project pending_fact_proposals=2 pending_skills=unreadable"
     );
 }

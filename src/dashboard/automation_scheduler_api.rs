@@ -14,7 +14,10 @@ use crate::automation::scheduler::{
     AutomationSchedulerControl, SessionActivity, load_scheduler_control, load_session_activity,
     save_scheduler_control, schedule_decision, scheduler_control_path,
 };
-use crate::automation::staged_notice::{AutomationPendingCounts, count_pending_automation_output};
+use crate::automation::staged_notice::{
+    AutomationPendingCounts, PendingReviewCount, count_pending_fact_proposals,
+    count_pending_managed_skills,
+};
 use crate::tracedecay::current_timestamp;
 use crate::user_config::UserConfig;
 
@@ -59,19 +62,7 @@ async fn scheduler_status_payload(state: &DashboardState) -> ApiResult {
     let records = load_run_records(&state.dashboard_root, 200)
         .await
         .map_err(|err| internal_error(&err))?;
-    // Pending fact proposals and skill drafts both require review.
-    let pending = match (
-        crate::storage::default_profile_root(),
-        crate::tracedecay::facts::memory_application_for_db(
-            state.memory_owner.clone(),
-            state.mem_db.as_ref(),
-        ),
-    ) {
-        (Ok(profile_root), Ok(memory)) => {
-            count_pending_automation_output(&memory, &profile_root).await
-        }
-        _ => AutomationPendingCounts::default(),
-    };
+    let pending = pending_review_counts(state).await;
     let now = current_timestamp();
     let activity = match state.lcm_db.as_deref() {
         Some(sessions_db) => load_session_activity(sessions_db).await,
@@ -80,8 +71,14 @@ async fn scheduler_status_payload(state: &DashboardState) -> ApiResult {
     Ok(Json(json!({
         "status": scheduler_status_label(&effective, control.paused),
         "paused": control.paused,
-        "pending_fact_proposals": pending.pending_fact_proposals,
-        "pending_skills": pending.pending_skills,
+        // Null, never zero, when the queue could not be read; `pending_review`
+        // carries which reading each figure actually is.
+        "pending_fact_proposals": pending.fact_proposals.count(),
+        "pending_skills": pending.skills.count(),
+        "pending_review": {
+            "fact_proposals": pending_review_json(&pending.fact_proposals),
+            "skills": pending_review_json(&pending.skills),
+        },
         "enabled": effective.enabled,
         "scheduler_tick_secs": effective.scheduler_tick_secs,
         "now": now,
@@ -98,6 +95,52 @@ async fn scheduler_status_payload(state: &DashboardState) -> ApiResult {
             task_status(&effective, control.paused, &records, activity, now, AgentTaskKind::SkillWriter),
         ],
     })))
+}
+
+/// Reads the two human-review queues, each from its own authority.
+///
+/// Both reads used to be gated behind one `match` whose failure arm produced
+/// zeroes, so an unresolvable profile root or an unmounted fact authority
+/// served `pending_fact_proposals: 0, pending_skills: 0` under HTTP 200 — a
+/// report that nothing awaits human approval. They are independent reads now,
+/// and a queue that cannot be read says so.
+async fn pending_review_counts(state: &DashboardState) -> AutomationPendingCounts {
+    let fact_proposals = match crate::tracedecay::facts::memory_application_for_db(
+        state.memory_owner.clone(),
+        state.mem_db.as_ref(),
+    ) {
+        Ok(memory) => count_pending_fact_proposals(&memory).await,
+        Err(error) => PendingReviewCount::unreadable(format!(
+            "the project fact authority is not available: {error}"
+        )),
+    };
+    let skills = match crate::storage::default_profile_root() {
+        Ok(profile_root) => count_pending_managed_skills(&profile_root).await,
+        Err(error) => PendingReviewCount::unreadable(format!(
+            "the user profile root could not be resolved: {error}"
+        )),
+    };
+    AutomationPendingCounts {
+        fact_proposals,
+        skills,
+    }
+}
+
+/// The per-queue reading, on the dashboard's evidence vocabulary: `measured`
+/// carries a real count, `unreadable` carries the reason and no count.
+fn pending_review_json(count: &PendingReviewCount) -> Value {
+    match count {
+        PendingReviewCount::Counted(count) => json!({
+            "state": "measured",
+            "count": count,
+            "reason": Value::Null,
+        }),
+        PendingReviewCount::Unreadable(reason) => json!({
+            "state": "unreadable",
+            "count": Value::Null,
+            "reason": reason,
+        }),
+    }
 }
 
 fn task_status(

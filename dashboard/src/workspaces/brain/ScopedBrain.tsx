@@ -2,7 +2,7 @@ import { useMemo, useRef } from 'react';
 import { GitBranch, FolderGit2 } from 'lucide-react';
 import { GraphCanvas } from '../../viz/graph/GraphCanvas.tsx';
 import { ActivationField } from '../../viz/graph/activation.ts';
-import { LegacyBoundary } from '../../ui/LegacyStates.tsx';
+import { CenteredState, LegacyBoundary } from '../../ui/LegacyStates.tsx';
 import { Legend, Meter, Readout } from '../../ui/instrument.tsx';
 import { elideStart, splitBytes, splitCount } from '../../ui/format.ts';
 import { useLegacy } from '../../data/query/useLegacy.ts';
@@ -32,12 +32,10 @@ import {
  *   inside them, the artifacts on disk with their byte sizes, and every path
  *   the project has been checked out at.
  *
- *   The project-scoped gateway, `/api/projects/{id}/…`, answers only while that
- *   project's graph is MOUNTED. That is where the code-graph field, the memory
- *   bank and the session analytics come from. When it is not mounted the daemon
- *   says so plainly (404, "registered project graph is not mounted") and this
- *   surface says so too, next to everything the registry does know. Nothing is
- *   estimated, and nothing from the all-projects view is reused as a stand-in.
+ *   The project-scoped gateway, `/api/projects/{id}/…`, supplies the code graph,
+ *   memory bank and session analytics when those reads resolve. The legacy
+ *   client preserves transport/schema outcomes but not the server's error body,
+ *   so this surface never guesses that a generic failure means "not mounted".
  */
 export function ScopedBrain({ projectId, label }: { projectId: string; label: string }) {
   const selectAllProjects = useScope((s) => s.selectAllProjects);
@@ -97,7 +95,14 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
     [graph],
   );
 
-  const totals = overview.data?.outcome === 'ok' ? overview.data.data.totals : null;
+  const reportedTotals =
+    overview.data?.outcome === 'ok' ? overview.data.data.totals : null;
+  const totalsUnverified =
+    reportedTotals != null &&
+    (reportedTotals.nodes === 0 ||
+      reportedTotals.edges === 0 ||
+      reportedTotals.files === 0);
+  const totals = totalsUnverified ? null : reportedTotals;
   const bank =
     memory.data?.outcome === 'ok' && memory.data.data.exists
       ? (memory.data.data.memory ?? null)
@@ -138,38 +143,57 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
                 { label: 'events', ...splitCount(usage?.event_count ?? null) },
               ]}
             />
+            {totalsUnverified ? (
+              <p className="max-w-sm bg-surface-0/75 px-2 py-1 text-3xs leading-relaxed text-text-muted backdrop-blur-sm">
+                Graph totals are unverified: this legacy response cannot distinguish zero data
+                from a query failure.
+              </p>
+            ) : null}
           </div>
-          {subgraph.isPending ? (
-            <p className="flex min-h-[55vh] items-center justify-center p-6 text-center text-sm text-text-muted lg:min-h-0 lg:flex-1">
-              composing this project's graph neighbourhood…
-            </p>
-          ) : nodes.length > 0 ? (
-            <GraphCanvas
-              nodes={nodes}
-              edges={edges}
-              fill
-              canvasClassName="min-h-[70vw] md:min-h-[58vh] lg:min-h-0"
-              activation={activationRef.current}
-              ariaLabel={`${label} code graph: ${nodes.length} symbols, ${edges.length} relations. The stores and branches listed alongside are the accessible equivalent.`}
-              encoding={{
-                body: 'symbol',
-                size: 'connectedness',
-                hue: 'symbol kind',
-                signal: 'click activation',
-                relation: 'relation; activation thickens',
-              }}
-              caption={
-                <>
-                  {nodes.length} of this project's most connected symbols ·{' '}
-                  {edges.length} real relations between them
-                  {graph?.capped?.nodes ? ' · capped by the daemon' : ''} · size =
-                  connectedness · hover isolates a neighbourhood, click fires it
-                </>
-              }
-            />
-          ) : (
-            <UnmountedGraphField label={label} context={context.data} />
-          )}
+          <LegacyBoundary
+            title={`${label} graph`}
+            pending={subgraph.isPending}
+            result={subgraph.data}
+          >
+            {() =>
+              nodes.length > 0 ? (
+                <GraphCanvas
+                  nodes={nodes}
+                  edges={edges}
+                  fill
+                  canvasClassName="min-h-[70vw] md:min-h-[58vh] lg:min-h-0"
+                  activation={activationRef.current}
+                  ariaLabel={`${label} code graph: ${nodes.length} returned symbols, ${edges.length} returned relations. The stores and branches listed alongside are the accessible equivalent.`}
+                  encoding={{
+                    body: 'symbol',
+                    size: 'connectedness',
+                    hue: 'symbol kind',
+                    signal: 'click activation',
+                    relation: 'relation; activation thickens',
+                  }}
+                  caption={
+                    <>
+                      {nodes.length} returned symbols · {edges.length} returned relations
+                      {graph?.capped?.nodes || graph?.capped?.edges
+                        ? ` · daemon capped ${[
+                            graph.capped.nodes ? 'symbols' : null,
+                            graph.capped.edges ? 'relations' : null,
+                          ]
+                            .filter(Boolean)
+                            .join(' and ')}`
+                        : ''}{' '}
+                      · size = connectedness · hover isolates a neighbourhood, click fires it
+                    </>
+                  }
+                />
+              ) : (
+                <CenteredState
+                  title="Graph slice is unverified — the legacy response cannot distinguish empty data from query failure"
+                  kind="partial"
+                />
+              )
+            }
+          </LegacyBoundary>
         </div>
         <aside
           aria-label={`What TraceDecay holds for ${label}`}
@@ -218,63 +242,6 @@ function ScopedReadout({
         ))}
       </dl>
       <span aria-hidden className="w-2 border-y border-r border-accent/40" />
-    </div>
-  );
-}
-
-/**
- * What the field shows when this project's code graph is not mounted.
- *
- * The daemon mounts one project's graph at a time, so for every other
- * registered project the scoped gateway truthfully answers 404. That is a fact
- * about the daemon, not a failure of this surface, so the field states the
- * situation and then spends its space on what the registry genuinely does hold:
- * the stores on disk, the branches indexed inside them, and how much they
- * weigh. An apology would have been shorter and would have shown less.
- */
-function UnmountedGraphField({
-  label,
-  context,
-}: {
-  label: string;
-  context: Parameters<typeof LegacyBoundary>[0]['result'];
-}) {
-  const data =
-    context && (context as { outcome: string }).outcome === 'ok'
-      ? ((context as { outcome: 'ok'; data: ProjectContextPayload }).data)
-      : null;
-  const stores = data?.stores ?? [];
-  const branches = stores.flatMap((store) => store.graph_scopes ?? []);
-  const bytes = stores
-    .flatMap((store) => store.artifacts ?? [])
-    .reduce((sum, artifact) => sum + (artifact.size_bytes ?? 0), 0);
-  const weight = splitBytes(bytes || null);
-  return (
-    <div className="td-graticule flex min-h-[55vh] flex-col justify-end gap-3 rounded-[var(--radius-card)] border border-edge-subtle/60 bg-surface-0 p-5 lg:min-h-0 lg:flex-1">
-      <div className="flex flex-col gap-2">
-        <Legend>graph field · not mounted</Legend>
-        <p className="max-w-prose text-xs leading-relaxed text-text-secondary">
-          The daemon keeps one project's code graph mounted at a time, and right
-          now that is not {label}. There is no neighbourhood to draw here until
-          it is — so nothing is drawn. Everything below is read from the
-          registry, which answers for {label} either way.
-        </p>
-      </div>
-      <div className="flex flex-wrap border-y border-edge-subtle bg-surface-1">
-        {[
-          { label: 'stores', ...splitCount(stores.length) },
-          { label: 'branches indexed', ...splitCount(branches.length) },
-          { label: 'on disk', value: weight.value, unit: weight.unit },
-          { label: 'checkouts', ...splitCount(data?.aliases?.length ?? null) },
-        ].map((item) => (
-          <div
-            key={item.label}
-            className="min-w-0 flex-1 basis-32 border-l border-edge-subtle px-3 py-2.5 first:border-l-0"
-          >
-            <Readout label={item.label} value={item.value} unit={item.unit} size="lg" />
-          </div>
-        ))}
-      </div>
     </div>
   );
 }

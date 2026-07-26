@@ -36,6 +36,7 @@ mod automation_scheduler_api;
 mod automation_skills_api;
 mod code_diagnostics_api;
 pub(crate) mod code_index_freshness_api;
+mod delivery_api;
 mod doctor_findings_api;
 pub(crate) mod doctor_remediation_api;
 pub(crate) use doctor_remediation_api::{
@@ -44,15 +45,18 @@ pub(crate) use doctor_remediation_api::{
     DoctorRemediationTargetV1,
 };
 mod events_api;
+mod explorer_api;
 mod graph_api;
 mod graph_queries;
 mod graph_service;
+mod graph_structure_api;
 mod lcm_api;
 #[cfg(test)]
 #[path = "../sessions/lcm/dashboard_fixes_tests.rs"]
 mod lcm_dashboard_fixes_tests;
 mod lcm_queries;
 mod lcm_service;
+mod loom_api;
 mod memory_analysis;
 mod memory_api;
 pub mod memory_curate;
@@ -810,13 +814,6 @@ fn router_with_active_application(
     let router = Router::new()
         .route("/", get(assets::app_index))
         .route("/static/{*tail}", get(assets::app_static))
-        .route("/legacy", get(assets::index_html))
-        .route("/shell/{file}", get(assets::shell_asset))
-        .route(
-            "/dashboard-plugins/{plugin}/dist/{file}",
-            get(assets::plugin_asset),
-        )
-        .route("/api/dashboard/plugins", get(plugins_list))
         .route("/api/projects", get(projects::list))
         .route("/api/projects/{project_id}", get(projects::context))
         .route(
@@ -828,6 +825,9 @@ fn router_with_active_application(
         .route("/api/automation/{*tail}", any(active_api_gateway))
         .route("/api/settings", any(active_api_gateway))
         .route("/api/settings/{*tail}", any(active_api_gateway))
+        .route("/api/delivery/{*tail}", any(active_api_gateway))
+        .route("/api/explorer/{*tail}", any(active_api_gateway))
+        .route("/api/loom/{*tail}", any(active_api_gateway))
         // PR14 V2 read-model surfaces bound through the active-project gateway,
         // mirroring the project-scoped `/api/projects/{id}/…` gateway path.
         .route("/api/doctor/{*tail}", any(active_api_gateway))
@@ -1033,6 +1033,22 @@ fn project_api_router() -> Router<DashboardState> {
         )
         .route("/api/plugins/graph/subgraph", get(graph_api::subgraph))
         .route("/api/plugins/graph/path", get(graph_api::path))
+        .route(
+            "/api/plugins/graph/call-chain",
+            get(graph_structure_api::call_chain),
+        )
+        .route(
+            "/api/plugins/graph/strata",
+            get(graph_structure_api::strata),
+        )
+        .route(
+            "/api/plugins/graph/node/{node_id}/facts",
+            get(graph_structure_api::node_facts),
+        )
+        .route(
+            "/api/plugins/graph/node/{node_id}/tests",
+            get(graph_structure_api::node_tests),
+        )
         // Durable analytics API (hint lifecycle scaffolds + session usage rollups)
         .route(
             "/api/plugins/analytics/overview",
@@ -1119,6 +1135,20 @@ fn project_api_router() -> Router<DashboardState> {
             "/api/settings/user/operations/{operation_id}/rollback",
             post(settings_api::rollback_user_settings_route),
         )
+        .route("/api/explorer/queries", post(explorer_api::create_query))
+        .route(
+            "/api/explorer/queries/{run_id}",
+            get(explorer_api::query_status).delete(explorer_api::cancel_query),
+        )
+        .route(
+            "/api/explorer/sessions/{session_id}/size",
+            get(explorer_api::session_size),
+        )
+        .route(
+            "/api/explorer/sessions/{session_id}/read-context",
+            get(explorer_api::read_context),
+        )
+        .route("/api/loom/temporal", get(loom_api::temporal))
         // PR14 V2 read-model surfaces (DashboardEnvelope<T>). Doctor finding
         // family, plan-38 storage telemetry/findings, code-index freshness, and
         // the typed SSE stream. See `read_model` for the normative envelope.
@@ -1144,6 +1174,7 @@ fn project_api_router() -> Router<DashboardState> {
             "/api/code-index/freshness",
             get(code_index_freshness_api::freshness),
         )
+        .route("/api/delivery/overview", get(delivery_api::overview))
         .route("/api/events", get(events_api::events))
 }
 
@@ -1301,33 +1332,8 @@ async fn capabilities(State(state): State<DashboardState>) -> Json<Value> {
             "host_mode": automation_host_mode,
             "availability": backend_availability,
         },
-        "dashboards": assets::DASHBOARD_PLUGINS
-            .iter()
-            .map(|plugin| plugin.name)
-            .collect::<Vec<_>>(),
+        "dashboards": ["tracedecay"],
     }))
-}
-
-/// Plugin manifest list, mirroring the Hermes `/api/dashboard/plugins`
-/// endpoint shape closely enough for the standalone shell.
-async fn plugins_list() -> Json<Value> {
-    Json(json!(
-        assets::DASHBOARD_PLUGINS
-            .iter()
-            .map(|plugin| {
-                json!({
-                    "name": plugin.name,
-                    "label": plugin.label,
-                    "description": plugin.description,
-                    "icon": plugin.icon,
-                    "entry": "dist/index.js",
-                    "css": "dist/style.css",
-                    "has_api": true,
-                    "source": "tracedecay",
-                })
-            })
-            .collect::<Vec<_>>()
-    ))
 }
 
 #[cfg(test)]

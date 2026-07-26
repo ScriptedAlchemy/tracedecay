@@ -94,7 +94,7 @@ export function percent(share: number | null | undefined): number | null {
 
 export interface EventWindow {
   /** How many events the endpoint actually counted. */
-  events: number;
+  events: number | null;
   /** Whether that count is the endpoint's own cap rather than the true total. */
   capped: boolean;
   /** Events per hour, straight off the diagnostics payload. */
@@ -120,13 +120,13 @@ export function describeWindow(
   events: number | null | undefined,
   perHour: number | null | undefined,
 ): EventWindow {
-  const count = Number.isFinite(events ?? NaN) ? (events as number) : 0;
+  const count = Number.isFinite(events ?? NaN) ? (events as number) : null;
   const rate = perHour != null && Number.isFinite(perHour) && perHour > 0 ? perHour : null;
   return {
     events: count,
-    capped: count >= ANALYTICS_EVENT_LIMIT,
+    capped: count != null && count >= ANALYTICS_EVENT_LIMIT,
     perHour: rate,
-    spanHours: rate != null && count > 0 ? count / rate : null,
+    spanHours: rate != null && count != null && count > 0 ? count / rate : null,
   };
 }
 

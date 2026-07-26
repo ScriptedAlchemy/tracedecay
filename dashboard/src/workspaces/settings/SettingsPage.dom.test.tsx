@@ -4,6 +4,7 @@ import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { FIXTURES } from '../../../stories/fixtures/data.ts';
 import { SettingsPage } from './SettingsPage.tsx';
+import { applySettingsMutation } from './settingsMutation.ts';
 
 describe('SettingsPage authorized changes', () => {
   beforeEach(() => {
@@ -39,6 +40,7 @@ describe('SettingsPage authorized changes', () => {
     const maxFileSize = await screen.findByLabelText('Maximum file size (bytes)');
     await user.clear(maxFileSize);
     await user.type(maxFileSize, '2097152');
+    expect(screen.getByText('Unsaved project changes')).toBeTruthy();
     await user.click(screen.getByRole('button', { name: 'Review project changes' }));
 
     const dialog = screen.getByRole('dialog', { name: 'Review project settings change' });
@@ -52,6 +54,7 @@ describe('SettingsPage authorized changes', () => {
     await user.click(screen.getByRole('button', { name: 'Apply project settings' }));
 
     expect(await screen.findByText('Project settings saved')).toBeTruthy();
+    expect(screen.getByText('Current project values')).toBeTruthy();
     expect(screen.getByText('Resync recommended')).toBeTruthy();
     expect(
       calls.map(({ method, url }) => `${method} ${url}`),
@@ -78,7 +81,12 @@ describe('SettingsPage authorized changes', () => {
         methods.push(`${method} ${url}`);
         if (url === '/api/settings' && method === 'GET') {
           getCount += 1;
-          return jsonResponse(getCount === 1 ? settings() : updatedSettings('rev-43'));
+          if (getCount === 1) return jsonResponse(settings());
+          const current = updatedSettings('rev-43');
+          const project = current['project'] as Record<string, unknown>;
+          const config = project['config'] as Record<string, unknown>;
+          config['max_file_size'] = 4096;
+          return jsonResponse(current);
         }
         throw new Error(`unexpected request ${method} ${url}`);
       }),
@@ -99,10 +107,12 @@ describe('SettingsPage authorized changes', () => {
 
     expect(
       await screen.findByText(
-        'Configuration changed since this form loaded (held rev-42, current rev-43).',
+        'Another writer saved project settings after this form loaded. Your draft was based on rev-42; the current authority is rev-43. Nothing was applied.',
       ),
     ).toBeTruthy();
-    expect(methods).toEqual(['GET /api/settings', 'GET /api/settings']);
+    await user.click(screen.getByRole('button', { name: 'Load current values' }));
+    expect(await screen.findByDisplayValue('4096')).toBeTruthy();
+    expect(methods).toEqual(['GET /api/settings', 'GET /api/settings', 'GET /api/settings']);
   });
 
   it('shows client validation without sending an invalid patch', async () => {
@@ -125,6 +135,12 @@ describe('SettingsPage authorized changes', () => {
     expect(
       screen.getByText('auto_track_pr_poll_secs must be at least 60 seconds'),
     ).toBeTruthy();
+    expect(poll.getAttribute('aria-invalid')).toBe('true');
+    const pollError = poll.getAttribute('aria-describedby');
+    expect(pollError).not.toBeNull();
+    expect(document.getElementById(pollError ?? '')?.textContent).toBe(
+      'auto_track_pr_poll_secs must be at least 60 seconds',
+    );
     expect(calls).toEqual(['GET /api/settings']);
   });
 
@@ -174,6 +190,13 @@ describe('SettingsPage authorized changes', () => {
     expect(
       await screen.findByText('watcher debounce is denied by the active profile policy'),
     ).toBeTruthy();
+    expect(debounce.getAttribute('aria-invalid')).toBe('true');
+    const debounceError = debounce.getAttribute('aria-describedby');
+    expect(debounceError).not.toBeNull();
+    expect(document.getElementById(debounceError ?? '')?.textContent).toBe(
+      'watcher debounce is denied by the active profile policy',
+    );
+    expect(screen.queryByRole('dialog')).toBeNull();
     expect(calls).toEqual([
       { method: 'GET', url: '/api/settings', body: null },
       { method: 'GET', url: '/api/settings', body: null },
@@ -186,6 +209,178 @@ describe('SettingsPage authorized changes', () => {
         },
       },
     ]);
+  });
+});
+
+describe('Settings response authority', () => {
+  it('classifies a malformed refresh payload as a settings contract violation', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse([])));
+
+    const result = await applySettingsMutation({
+      scope: 'project',
+      expectedRevisionId: 'rev-42',
+      readUrl: '/api/settings',
+      patchUrl: '/api/settings/project',
+      patch: { max_file_size: 2_097_152 },
+    });
+
+    expect(result).toEqual({
+      outcome: 'protocol_error',
+      authority: 'GET /api/settings',
+      detail: 'GET /api/settings violated the settings contract: expected a JSON object.',
+    });
+  });
+
+  it('classifies an incomplete refresh payload as a settings contract violation', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse({})));
+
+    const result = await applySettingsMutation({
+      scope: 'project',
+      expectedRevisionId: 'rev-42',
+      readUrl: '/api/settings',
+      patchUrl: '/api/settings/project',
+      patch: { max_file_size: 2_097_152 },
+    });
+
+    expect(result).toEqual({
+      outcome: 'protocol_error',
+      authority: 'GET /api/settings',
+      detail:
+        'GET /api/settings violated the settings contract: the response omitted editable values or revision identity.',
+    });
+  });
+
+  it('classifies a malformed update payload as a settings contract violation', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce(jsonResponse(settings()))
+        .mockResolvedValueOnce(jsonResponse([])),
+    );
+
+    const result = await applySettingsMutation({
+      scope: 'project',
+      expectedRevisionId: 'rev-42',
+      readUrl: '/api/settings',
+      patchUrl: '/api/settings/project',
+      patch: { max_file_size: 2_097_152 },
+    });
+
+    expect(result).toEqual({
+      outcome: 'protocol_error',
+      authority: 'PATCH /api/settings/project',
+      detail:
+        'PATCH /api/settings/project violated the settings contract: expected a JSON object.',
+    });
+  });
+
+  it('names the update authority when required editable fields are omitted', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi
+        .fn()
+        .mockResolvedValueOnce(jsonResponse(settings()))
+        .mockResolvedValueOnce(jsonResponse({})),
+    );
+
+    const result = await applySettingsMutation({
+      scope: 'user',
+      expectedRevisionId: 'user-rev-7',
+      readUrl: '/api/settings',
+      patchUrl: '/api/settings/user',
+      patch: { watcher_debounce: '15s' },
+    });
+
+    expect(result).toEqual({
+      outcome: 'protocol_error',
+      authority: 'PATCH /api/settings/user',
+      detail:
+        'PATCH /api/settings/user violated the settings contract: the response omitted editable values or revision identity.',
+    });
+  });
+
+  it('names the read authority when the daemon returns non-JSON', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('not json')));
+
+    const result = await applySettingsMutation({
+      scope: 'project',
+      expectedRevisionId: 'rev-42',
+      readUrl: '/api/settings',
+      patchUrl: '/api/settings/project',
+      patch: { max_file_size: 2_097_152 },
+    });
+
+    expect(result).toEqual({
+      outcome: 'protocol_error',
+      authority: 'GET /api/settings',
+      detail: 'GET /api/settings violated the settings contract: expected JSON.',
+    });
+  });
+
+  it('identifies both authorities when the editable read contract is incomplete', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        const payload = settings();
+        const project = payload['project'] as Record<string, unknown>;
+        delete project['configuration_revision_id'];
+        return jsonResponse(payload);
+      }),
+    );
+
+    renderSettings();
+
+    expect(
+      await screen.findByText(
+        'Settings editing requires project configuration values and configuration_revision_id from GET /api/settings, plus user settings and user_settings_revision_id from the same authority. The response omitted at least one required field.',
+      ),
+    ).toBeTruthy();
+  });
+
+  it('renders automation source failure without presenting a global fallback as effective', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        const payload = settings();
+        payload['automation'] = {
+          config_endpoint: '/api/plugins/holographic/curation/config',
+          availability: {
+            available: false,
+            reason: 'project automation configuration could not be read',
+            required_authority: 'project automation configuration',
+          },
+          source_coverage: {
+            global: 'available',
+            project: 'error',
+            effective: 'unavailable',
+          },
+        };
+        return jsonResponse(payload);
+      }),
+    );
+
+    renderSettings();
+
+    expect(await screen.findByText('Automation configuration unavailable')).toBeTruthy();
+    expect(screen.getByText('project automation configuration could not be read')).toBeTruthy();
+    expect(screen.queryByText('Effective automation config, merged daemon-side')).toBeNull();
+  });
+});
+
+describe('Settings responsive controls', () => {
+  it('keeps configuration group navigation available below desktop widths', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => jsonResponse(settings())));
+
+    renderSettings();
+
+    const navigation = await screen.findByRole('navigation', {
+      name: 'Configuration groups',
+    });
+    expect(navigation.className.split(/\s+/)).not.toContain('hidden');
+    expect(within(navigation).getByRole('button', { name: /Project/ })).toBeTruthy();
+    expect(within(navigation).getByRole('button', { name: /User/ })).toBeTruthy();
+    expect(within(navigation).getByRole('button', { name: /Environment/ })).toBeTruthy();
   });
 });
 

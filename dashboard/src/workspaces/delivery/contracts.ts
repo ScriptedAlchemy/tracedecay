@@ -3,14 +3,10 @@ import { z } from 'zod';
 /** Wire-true shapes for `GET /api/projects`
  * (src/dashboard/projects.rs::list → serialized from src/project_registry.rs).
  *
- * This is the only delivery-relevant git surface the daemon exposes to the
- * dashboard: registered repositories, the branches indexed under each, and the
- * primary/worktree checkouts that map to them. Commit history, pull-request,
- * and code-review state are NOT served over the dashboard API (there is no
- * advisory/PR/review route in src/dashboard/mod.rs), and per-worktree index
- * freshness is typed `unsupported` at src/dashboard/code_index_freshness_api.rs.
- * DeliveryPage renders those as truthful typed-unavailable states rather than
- * inventing data. */
+ * It serves registered repositories, indexed branch names, and the
+ * primary/worktree checkouts that map to each repository. The separate
+ * `/api/delivery/overview` envelope serves the active checkout's bounded Git
+ * status/history and typed authority gaps. */
 
 /** One checkout as returned in `projects[]` (src/project_registry.rs
  * PublicCodeProject). `default_branch`/`git_common_dir` serialize as null when
@@ -90,3 +86,66 @@ export const DeliveryProjectsPayloadSchema = z
   })
   .passthrough();
 export type DeliveryProjectsPayload = z.infer<typeof DeliveryProjectsPayloadSchema>;
+
+const GitHeadSchema = z.discriminatedUnion('state', [
+  z.object({ state: z.literal('attached'), branch: z.string(), commit: z.string() }),
+  z.object({ state: z.literal('detached'), commit: z.string() }),
+  z.object({ state: z.literal('unborn'), branch: z.string() }),
+]);
+
+export const DeliveryChangesSchema = z.object({
+  head: GitHeadSchema,
+  staged: z.number(),
+  unstaged: z.number(),
+  conflicted: z.number(),
+  untracked: z.number(),
+  ignored: z.number(),
+  changed_paths: z.array(z.string()),
+});
+
+export const DeliveryCommitSchema = z.object({
+  commit: z.string(),
+  subject: z.string(),
+  author_name: z.string(),
+  author_email: z.string(),
+  author_at_micros: z.number(),
+  committer_at_micros: z.number(),
+});
+
+export const DeliveryCommitsSchema = z.object({
+  items: z.array(DeliveryCommitSchema),
+  truncated: z.boolean(),
+});
+
+export const DeliveryGenerationFreshnessSchema = z.object({
+  comparison: z.enum(['current', 'behind']),
+  head_commit: z.string(),
+  indexed_commit: z.string(),
+});
+
+const missingProjectionSchema = z.object({
+  state: z.enum(['unavailable', 'unsupported']),
+  required_authority: z.string(),
+  reason: z.string(),
+});
+
+function projectionSchema<T extends z.ZodTypeAny>(value: T) {
+  return z.union([
+    z.object({ state: z.literal('ready'), value }),
+    missingProjectionSchema,
+  ]);
+}
+
+/** Reusable Delivery/Loom projection envelope payload. Unmounted authorities
+ * carry no `value`; consumers must render their typed state and reason. */
+export const DeliveryOverviewPayloadSchema = z.object({
+  changes: projectionSchema(DeliveryChangesSchema),
+  commits: projectionSchema(DeliveryCommitsSchema),
+  pull_requests: projectionSchema(z.object({ items: z.array(z.unknown()) })),
+  review_comments: projectionSchema(z.object({ items: z.array(z.unknown()) })),
+  ci_checks: projectionSchema(z.object({ items: z.array(z.unknown()) })),
+  failure_localization: projectionSchema(z.object({ items: z.array(z.unknown()) })),
+  releases: projectionSchema(z.object({ items: z.array(z.unknown()) })),
+  generation_freshness: projectionSchema(DeliveryGenerationFreshnessSchema),
+});
+export type DeliveryOverviewPayload = z.infer<typeof DeliveryOverviewPayloadSchema>;

@@ -110,7 +110,9 @@ pub(in crate::db::memory_v2) async fn quarantine_fact(
         } else {
             None
         };
-    purge_legacy_fact(conn, legacy_fact_id).await?;
+    // A failed import is evidence, not authorization to destroy its only raw
+    // payload. Keep the legacy row intact so an operator can repair or export
+    // it; only the rejected V2 projection is made inaccessible.
     if let Some(event_id) = event_id {
         conn.execute(
             "UPDATE memory_v2_current_facts SET
@@ -182,6 +184,26 @@ pub(in crate::db::memory_v2) async fn purge_memory_v2_fact_inner(
     {
         return Ok(false);
     }
+    if expected_last_event_id.is_some()
+        && legacy_fact_id.is_some()
+        && !row_exists(
+            conn,
+            "SELECT 1 FROM memory_v2_backfill_progress
+             WHERE owner_kind = ?1 AND project_id = ?2 AND source_store_id = ?3
+               AND phase = 'cutover_complete'",
+            params![
+                owner_key.kind,
+                owner_key.project_id.as_str(),
+                source_store_id.as_str()
+            ],
+        )
+        .await?
+    {
+        return Err(db_message(
+            "memory_v2_purge",
+            "legacy payload purge requires a verified completed backfill",
+        ));
+    }
     let current = current_fact_state(conn, owner_key, fact_id).await?;
     if expected_last_event_id.is_some_and(|expected| expected != &current.last_event_id) {
         return Err(db_message(
@@ -210,7 +232,13 @@ pub(in crate::db::memory_v2) async fn purge_memory_v2_fact_inner(
     })?;
     insert_event(conn, owner_key, &event, occurred_at.0).await?;
     purge_payload_rows(conn, owner_key, fact_id).await?;
-    if let Some(legacy_fact_id) = legacy_fact_id {
+    // Backfill replays historical tombstones before snapshot facts. It must
+    // never erase the source snapshot while migration is still proving
+    // completeness. Only an explicit live purge carrying a CAS event may
+    // remove the compatibility row.
+    if expected_last_event_id.is_some()
+        && let Some(legacy_fact_id) = legacy_fact_id
+    {
         purge_legacy_fact(conn, legacy_fact_id).await?;
     }
     conn.execute(
