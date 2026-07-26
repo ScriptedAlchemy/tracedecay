@@ -446,10 +446,12 @@ impl UserConfig {
             return Err(ConfigSaveError::PathUnavailable);
         };
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|source| ConfigSaveError::Io {
-                path: parent.to_path_buf(),
-                message: "failed to create config directory".to_string(),
-                source,
+            crate::storage::PrivateStoreIo::create_dir_all(parent).map_err(|source| {
+                ConfigSaveError::Io {
+                    path: parent.to_path_buf(),
+                    message: "failed to create config directory".to_string(),
+                    source,
+                }
             })?;
         }
 
@@ -510,10 +512,12 @@ impl UserConfig {
         })?;
 
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|source| ConfigSaveError::Io {
-                path: parent.to_path_buf(),
-                message: "failed to create config directory".to_string(),
-                source,
+            crate::storage::PrivateStoreIo::create_dir_all(parent).map_err(|source| {
+                ConfigSaveError::Io {
+                    path: parent.to_path_buf(),
+                    message: "failed to create config directory".to_string(),
+                    source,
+                }
             })?;
         }
 
@@ -806,13 +810,27 @@ mod tests {
     fn save_regenerates_when_no_file_exists() {
         let _lock = lock_user_data_dir_test_env();
         let temp = TempDir::new().unwrap();
-        let _env = EnvRestore::set(USER_DATA_DIR_ENV, temp.path());
+        let profile_root = temp.path().join("profile");
+        let _env = EnvRestore::set(USER_DATA_DIR_ENV, &profile_root);
         let path = config_path().expect("config path should resolve");
 
         let config = UserConfig::default();
         config.save().expect("save should create a fresh file");
         let saved = std::fs::read_to_string(&path).unwrap();
         toml::from_str::<UserConfig>(&saved).expect("fresh config parses");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            assert_eq!(
+                std::fs::metadata(profile_root)
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+        }
     }
 
     #[test]

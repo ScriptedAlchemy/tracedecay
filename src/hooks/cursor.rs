@@ -302,6 +302,7 @@ pub async fn hook_cursor_after_file_edit() -> i32 {
     let root = cursor_project_root_from_event_with_identity(&event).await;
     let hook_telemetry =
         record_hook_invoked(root.as_deref(), HintAgent::Cursor, "afterFileEdit", &event);
+    notify_cursor_after_file_edit(&event, &hook_telemetry).await;
     if let Some(root) = root.as_deref()
         && let super::v2::HookV2Dispatch::Handled { guidance, .. } =
             super::v2::dispatch(tracedecay_hooks::HookHostV1::CursorDesktop, &event, root).await
@@ -311,7 +312,6 @@ pub async fn hook_cursor_after_file_edit() -> i32 {
         }
         return 0;
     }
-    notify_cursor_after_file_edit(&event, &hook_telemetry).await;
     if let Some(decision) = cursor_after_file_edit_decision_for_hook(&event).await {
         println!("{decision}");
     }
@@ -386,7 +386,8 @@ async fn cursor_session_context_for_root(root: Option<&Path>) -> String {
 /// Cursor `afterShellExecution` hook handler.
 ///
 /// Notifies the daemon that Cursor completed a shell action. Command text is
-/// not forwarded and cannot become Git or synchronization authority.
+/// retained as provider evidence but cannot become Git or synchronization
+/// authority.
 pub async fn hook_cursor_after_shell() -> i32 {
     let event = read_hook_event!();
     let root = cursor_project_root_from_event_with_identity(&event).await;
@@ -761,6 +762,11 @@ async fn notify_cursor_after_shell_event(
     let Ok(parsed) = serde_json::from_str::<Value>(event_json) else {
         return;
     };
+    let command = parsed
+        .get("command")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
     let Some(root) = cursor_project_root_from_event_with_identity(event_json).await else {
         return;
     };
@@ -770,7 +776,7 @@ async fn notify_cursor_after_shell_event(
     let cwd = cursor_event_cwd(&parsed).unwrap_or_else(|| root.clone());
     super::notify_hook_event_with_telemetry(
         &root,
-        crate::daemon::DaemonHookEvent::cursor_after_shell_execution(cwd)
+        crate::daemon::DaemonHookEvent::cursor_after_shell_execution(command, cwd)
             .with_route(hook_route_metadata_from_event(event_json, &root)),
         telemetry,
     )

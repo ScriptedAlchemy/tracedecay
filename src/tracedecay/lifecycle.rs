@@ -447,7 +447,7 @@ impl TraceDecay {
         .await
     }
 
-    pub(super) async fn registered_enrollment_roots(
+    pub(crate) async fn registered_enrollment_roots(
         project_root: &Path,
         store_layout: &StoreLayout,
         project_id: &ProjectId,

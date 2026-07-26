@@ -2385,25 +2385,27 @@ fn project_route_for_handshake(handshake: &DaemonHandshake) -> Result<(PathBuf, 
 async fn bind_authenticated_profile_identity(
     handshake: &mut DaemonHandshake,
     store_administration: &StoreAdministration,
-) -> Result<()> {
-    let profile_identity = store_administration.profile_identity()?;
-    let profile_root = authority::canonical_identity_path(profile_identity.profile_root())?;
-    let profile_database = store_administration.registered_profile_database().await?;
+) -> Result<StoreAdministration> {
+    let profile_root = authority::canonical_identity_path(&handshake.client_identity.profile_root)?;
+    let profile_identity = profile_identity::load_or_create(&profile_root)?;
+    let scoped_administration = store_administration
+        .clone()
+        .with_profile_identity(profile_identity);
+    let profile_database = scoped_administration.registered_profile_database().await?;
     let global_db_path = authority::canonical_identity_path(profile_database.db_path())?;
-    let supplied_profile_root =
-        authority::canonical_identity_path(&handshake.client_identity.profile_root)?;
-    if supplied_profile_root != profile_root {
+    let supplied_global_db_path =
+        authority::canonical_identity_path(&handshake.client_identity.global_db_path)?;
+    if supplied_global_db_path != global_db_path {
         return Err(TraceDecayError::Config {
-            message:
-                "daemon client profile identity does not match the authenticated daemon profile"
-                    .to_owned(),
+            message: "daemon client global database does not match its registered profile runtime"
+                .to_owned(),
         });
     }
     handshake.client_identity = DaemonClientIdentity {
         profile_root,
         global_db_path,
     };
-    Ok(())
+    Ok(scoped_administration)
 }
 
 async fn project_open_gate(
@@ -4404,7 +4406,10 @@ async fn serve_broker_socket_client(
         return Ok(());
     };
     let mut handshake = DaemonHandshake::from_line(&line)?;
-    bind_authenticated_profile_identity(&mut handshake, &engine.store_administration).await?;
+    let store_administration =
+        bind_authenticated_profile_identity(&mut handshake, &engine.store_administration).await?;
+    let mut engine = engine;
+    engine.store_administration = store_administration;
     let first_request_line = tokio::select! {
         result = read_line_handling_wire_oversized(&mut transport) => result?,
         () = engine.lifecycle.wait_for_draining() => return Ok(()),
@@ -4736,7 +4741,8 @@ async fn serve_windows_broker_client_with_class_and_invocation(
         return Ok(());
     };
     let mut handshake = DaemonHandshake::from_line(&handshake_line)?;
-    bind_authenticated_profile_identity(&mut handshake, &store_administration).await?;
+    let store_administration =
+        bind_authenticated_profile_identity(&mut handshake, &store_administration).await?;
     let Some(first_request_line) = read_line_handling_wire_oversized(&mut transport).await? else {
         return Ok(());
     };
@@ -5139,6 +5145,12 @@ async fn open_project_for_handshake(
                 message: "registered project open requires an authoritative project identity"
                     .to_owned(),
             })?;
+    let typed_project_id =
+        tracedecay_store::ProjectId::new(project_id.to_owned()).map_err(|error| {
+            TraceDecayError::Config {
+                message: format!("registered project identity is invalid: {error}"),
+            }
+        })?;
     // First-touch enrollment: the daemon's registered session runtime resolves
     // a project's store through its on-disk enrollment marker, which a
     // never-seen project does not yet have. Persist it now — under the same
@@ -5155,8 +5167,15 @@ async fn open_project_for_handshake(
             },
         )?;
     }
+    let enrollment_roots = crate::tracedecay::TraceDecay::registered_enrollment_roots(
+        project_path,
+        &store_layout,
+        &typed_project_id,
+        registry_database.as_ref(),
+    )
+    .await?;
     let configuration_database = store_administration
-        .registered_project_session_database(project_id, [store_layout.project_root.clone()])
+        .registered_project_session_database(project_id, enrollment_roots)
         .await?;
     let runtime_registry = store_administration.registered_runtime_registry().await?;
     match crate::tracedecay::TraceDecay::open_with_registered_configuration(
@@ -5204,6 +5223,12 @@ async fn open_project_for_handshake(
             )
             .await
         }
+        Err(open_err) if is_missing_index_error(&open_err) => Err(TraceDecayError::Config {
+            message: format!(
+                "no TraceDecay index found at '{}'; run 'tracedecay init' first ({open_err})",
+                project_path.display()
+            ),
+        }),
         Err(open_err) => Err(open_err),
     }
 }
