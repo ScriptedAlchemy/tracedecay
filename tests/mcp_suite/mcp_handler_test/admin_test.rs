@@ -602,46 +602,44 @@ async fn active_project_tool_reports_resolved_store_metadata() {
     assert_eq!(payload["branch"]["serving_db_exists"].as_bool(), Some(true));
 }
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn storage_status_tool_summarizes_active_project_store_health() {
-    let (cg, _env, _dir) = setup_empty_project().await;
-    let layout = cg.store_layout();
-    let project_root = cg.project_root().display().to_string();
-    let graph_db_path = cg.db_path().display().to_string();
-    let config_path = layout.config_path.display().to_string();
-    let sync_lock_path = layout.sync_lock_path.display().to_string();
-    let branch_add_lock_path = layout.branch_add_lock_path.display().to_string();
-
-    let result = handle_tool_call(&cg, "tracedecay_storage_status", json!({}), None, None)
-        .await
-        .unwrap();
-
-    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
-    // Plan 21 moved this tool onto the daemon-retained typed primitive owner.
-    // Without a daemon transport (this in-process harness), the canonical
-    // outcome is the truthful unavailable problem envelope — never a
-    // fabricated local answer. Daemon-backed "ok" coverage lives in the
-    // runtime acceptance suite.
+    let fixture = production_composition_fixture().await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production project server");
+    let result =
+        handle_real_server_tool_call(&server, "tracedecay_storage_status", json!({})).await;
+    let payload: Value = serde_json::from_str(extract_real_server_text(&result)).unwrap();
     assert_eq!(
         payload["contract"]["schema_id"].as_str(),
         Some("schema.application.primitive.storage-status.result")
     );
-    assert_eq!(payload["problem"]["kind"].as_str(), Some("unavailable"));
-    assert_eq!(
-        payload["problem"]["code"].as_str(),
-        Some("application.transport.unavailable")
+    assert!(
+        payload["scope"]["project_id"]
+            .as_str()
+            .is_some_and(|project_id| !project_id.is_empty())
     );
     assert!(
-        payload["problem"]["legal_actions"]
-            .as_array()
-            .is_some_and(|actions| actions.iter().any(|a| a == "retry"))
+        payload["problem"].is_null() && !payload["outcome"].is_null(),
+        "production invocation must return retained storage evidence: {payload}"
     );
-    let _ = (
-        project_root,
-        graph_db_path,
-        config_path,
-        sync_lock_path,
-        branch_add_lock_path,
-        layout,
+    assert_eq!(payload["outcome"]["outcome"], json!("evidence"));
+    assert_eq!(
+        payload["outcome"]["value"]["payload"]["status"],
+        json!("ok")
     );
+    assert_eq!(
+        payload["outcome"]["value"]["payload"]["project_id"], payload["scope"]["project_id"],
+        "storage evidence must belong to the resolved production scope"
+    );
+    assert!(
+        payload["outcome"]["value"]["payload"]["database_bytes"]
+            .as_u64()
+            .is_some_and(|bytes| bytes > 0),
+        "production storage authority must report the retained database: {payload}"
+    );
+    fixture.harness.shutdown().await;
 }

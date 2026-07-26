@@ -1032,28 +1032,33 @@ async fn affected_central_daemon_fixture_preserves_set_and_ranks_near_tests_over
 // 16. tracedecay_module_api
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "test-transport")]
 #[tokio::test]
 async fn test_module_api() {
-    let (cg, _dir) = setup_project().await;
-    let result = handle_tool_call(
-        &cg,
-        "tracedecay_module_api",
-        json!({"path": "src"}),
-        None,
-        None,
-    )
-    .await
-    .unwrap();
-    let text = extract_text(&result.value);
-    // Plan 21: module_api is a daemon-retained primitive. Without a daemon
-    // transport this harness receives the truthful unavailable envelope;
-    // daemon-backed content coverage lives in the runtime acceptance suite.
+    let fixture = production_composition_fixture().await;
+    let server = fixture
+        .harness
+        .server(&fixture.project_root)
+        .expect("production project server");
+    let result =
+        handle_real_server_tool_call(&server, "tracedecay_module_api", json!({"path": "src"}))
+            .await;
+    let payload: Value = serde_json::from_str(extract_real_server_text(&result)).unwrap();
     assert!(
-        text.contains("application.transport.unavailable"),
-        "expected the canonical unavailable envelope, got: {text}"
+        payload["problem"].is_null() && !payload["outcome"].is_null(),
+        "production invocation must return retained module API evidence: {payload}"
     );
-    // Content assertions (public symbols, path echo) belong to the
-    // daemon-backed acceptance coverage of this primitive.
+    assert_eq!(payload["outcome"]["outcome"], json!("evidence"));
+    assert_eq!(payload["outcome"]["value"]["payload"]["path"], json!("src"));
+    assert!(
+        payload["outcome"]["value"]["payload"]["symbols"]
+            .as_array()
+            .is_some_and(|symbols| symbols.iter().any(|symbol| {
+                symbol["display"]["name"] == json!("helper") || symbol["name"] == json!("helper")
+            })),
+        "production module API must return the public fixture symbol: {payload}"
+    );
+    fixture.harness.shutdown().await;
 }
 
 // ---------------------------------------------------------------------------

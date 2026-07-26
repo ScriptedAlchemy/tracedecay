@@ -4,6 +4,8 @@
 //! admission/reconnect seams only. It does not invoke application services,
 //! query stores, or render results.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -413,6 +415,34 @@ const fn cancellation_stage_name(stage: CancellationStage) -> &'static str {
     }
 }
 
+pub type DaemonInvocationExecutorFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+/// Production execution boundary for the daemon's closed invocation protocol.
+///
+/// Socket clients and daemon-local project servers implement this same port.
+/// Request correlation is already present on `DaemonInvocationRequest`; effect
+/// idempotency remains owned by each operation payload and is never reminted
+/// by this transport boundary.
+pub trait DaemonInvocationExecutor: Send + Sync {
+    fn invoke_controlled(
+        &self,
+        request: crate::daemon::DaemonInvocationRequest,
+        deadline: Deadline,
+        cancellation: CancellationSignal,
+        policy: InvocationCancellationPolicy,
+    ) -> DaemonInvocationExecutorFuture<
+        '_,
+        Result<crate::daemon::DaemonInvocationResponse, DaemonInvocationError>,
+    >;
+
+    fn observe_plan26_feedback(
+        &self,
+        subject_digest: ManifestDigest,
+        observed_at: UtcMicros,
+        event: Plan26FeedbackSourceEventV1,
+    ) -> DaemonInvocationExecutorFuture<'_, crate::errors::Result<()>>;
+}
+
 /// Authenticated socket client for the daemon's closed invocation protocol.
 ///
 /// This client shares the daemon connection/authentication path with MCP but
@@ -649,6 +679,41 @@ impl DaemonInvocationClient {
     }
 }
 
+impl DaemonInvocationExecutor for DaemonInvocationClient {
+    fn invoke_controlled(
+        &self,
+        request: crate::daemon::DaemonInvocationRequest,
+        deadline: Deadline,
+        cancellation: CancellationSignal,
+        policy: InvocationCancellationPolicy,
+    ) -> DaemonInvocationExecutorFuture<
+        '_,
+        Result<crate::daemon::DaemonInvocationResponse, DaemonInvocationError>,
+    > {
+        Box::pin(DaemonInvocationClient::invoke_controlled(
+            self,
+            request,
+            deadline,
+            cancellation,
+            policy,
+        ))
+    }
+
+    fn observe_plan26_feedback(
+        &self,
+        subject_digest: ManifestDigest,
+        observed_at: UtcMicros,
+        event: Plan26FeedbackSourceEventV1,
+    ) -> DaemonInvocationExecutorFuture<'_, crate::errors::Result<()>> {
+        Box::pin(DaemonInvocationClient::observe_plan26_feedback(
+            self,
+            subject_digest,
+            observed_at,
+            event,
+        ))
+    }
+}
+
 #[derive(Clone, Debug, serde::Serialize, PartialEq, Eq)]
 pub struct SemanticEvaluationPublicationResultV1 {
     pub project_id: String,
@@ -659,7 +724,7 @@ pub struct SemanticEvaluationPublicationResultV1 {
     pub snapshot_digest: String,
 }
 
-fn deadline_remaining(deadline: &Deadline) -> Option<Duration> {
+pub(crate) fn deadline_remaining(deadline: &Deadline) -> Option<Duration> {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .ok()
@@ -669,7 +734,7 @@ fn deadline_remaining(deadline: &Deadline) -> Option<Duration> {
     (remaining > 0).then(|| Duration::from_micros(remaining as u64))
 }
 
-async fn wait_for_cancellation(cancellation: CancellationSignal) {
+pub(crate) async fn wait_for_cancellation(cancellation: CancellationSignal) {
     while !cancellation.is_cancelled() {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
