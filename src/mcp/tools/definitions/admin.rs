@@ -126,6 +126,10 @@ pub(super) fn def_runtime() -> ToolDefinition {
                     "type": "boolean",
                     "description": "Run the exhaustive observation-authority audit and include authority_audit_ok/error in database telemetry (default: false)"
                 },
+                "doctor_report": {
+                    "type": "boolean",
+                    "description": "Include the daemon-owned canonical Doctor report and typed per-table growth evidence (default: false)"
+                },
                 "session_ingest_health": {
                     "type": "boolean",
                     "description": "Include Cursor transcript-ingest health from the daemon-retained project session authority (default: false)"

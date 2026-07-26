@@ -16,6 +16,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tracedecay_domain::UtcMicros;
 
+use crate::doctor::DoctorEvidenceStateV1;
 use crate::error::ApplicationContractError;
 
 use super::identity::{FreePageRatioV1, StorageByteSizeV1, StoreKeyV1, TableNameV1};
@@ -229,6 +230,158 @@ impl StorageTelemetryReadV1 {
     }
 }
 
+/// The typed result of one per-table payload-growth read.
+///
+/// An empty sample list is reserved for an observed comparison with no tables.
+/// First-read baseline establishment and unavailable reads are distinct states,
+/// so consumers never have to interpret absence as zero growth.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum TableGrowthTelemetryReadV1 {
+    /// Two watermarks were compared and yielded per-table samples.
+    Observed {
+        store: StoreKeyV1,
+        samples: Vec<TableGrowthSampleV1>,
+    },
+    /// The first successful read established watermarks; no growth exists yet.
+    BaselineEstablished {
+        store: StoreKeyV1,
+        observed_at: UtcMicros,
+        tables_observed: u64,
+    },
+    /// The runtime cannot expose `dbstat` telemetry on this build/platform.
+    Unsupported { store: StoreKeyV1 },
+    /// Authorization to read per-table telemetry was denied.
+    Denied { store: StoreKeyV1 },
+    /// The per-table telemetry state could not be determined.
+    Unknown { store: StoreKeyV1 },
+}
+
+impl TableGrowthTelemetryReadV1 {
+    #[must_use]
+    pub fn store(&self) -> &StoreKeyV1 {
+        match self {
+            Self::Observed { store, .. }
+            | Self::BaselineEstablished { store, .. }
+            | Self::Unsupported { store }
+            | Self::Denied { store }
+            | Self::Unknown { store } => store,
+        }
+    }
+}
+
+/// An absolute table-payload jump large enough to surface regardless of ratio.
+pub const SIGNIFICANT_TABLE_GROWTH_ABSOLUTE_BYTES: u64 = 64 * 1024 * 1024;
+/// Smallest growth considered by the proportional rule, suppressing tiny-table noise.
+pub const SIGNIFICANT_TABLE_GROWTH_RELATIVE_FLOOR_BYTES: u64 = 1024 * 1024;
+/// Proportional growth threshold in whole percent.
+pub const SIGNIFICANT_TABLE_GROWTH_PERCENT: u64 = 10;
+
+/// Whether one table-growth sample is operationally meaningful enough to surface.
+#[must_use]
+pub fn is_significant_table_growth(sample: &TableGrowthSampleV1) -> bool {
+    let growth = sample.growth_bytes().get();
+    growth >= SIGNIFICANT_TABLE_GROWTH_ABSOLUTE_BYTES
+        || (growth >= SIGNIFICANT_TABLE_GROWTH_RELATIVE_FLOOR_BYTES
+            && u128::from(growth) * 100
+                >= u128::from(sample.previous_bytes.get())
+                    * u128::from(SIGNIFICANT_TABLE_GROWTH_PERCENT))
+}
+
+/// Contract-independent evidence ready to wrap in a future `TableGrowth`
+/// Storage finding once that generated-contract variant is available.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum TableGrowthDoctorEvidenceV1 {
+    SignificantGrowth {
+        store: StoreKeyV1,
+        table: TableNameV1,
+        previous_bytes: StorageByteSizeV1,
+        current_bytes: StorageByteSizeV1,
+        growth_bytes: StorageByteSizeV1,
+        previous_observed_at: UtcMicros,
+        current_observed_at: UtcMicros,
+    },
+    BaselineEstablished {
+        store: StoreKeyV1,
+        observed_at: UtcMicros,
+        tables_observed: u64,
+    },
+    Unsupported {
+        store: StoreKeyV1,
+    },
+    Denied {
+        store: StoreKeyV1,
+    },
+    Unknown {
+        store: StoreKeyV1,
+    },
+}
+
+impl TableGrowthDoctorEvidenceV1 {
+    /// Doctor health state for this evidence. Ordinary growth is informational:
+    /// it remains healthy with complete coverage and carries no remediation.
+    #[must_use]
+    pub const fn state(&self) -> DoctorEvidenceStateV1 {
+        match self {
+            Self::SignificantGrowth { .. } => DoctorEvidenceStateV1::HealthyCompleteCoverage,
+            Self::BaselineEstablished { .. } => DoctorEvidenceStateV1::Partial,
+            Self::Unsupported { .. } => DoctorEvidenceStateV1::Unsupported,
+            Self::Denied { .. } => DoctorEvidenceStateV1::Denied,
+            Self::Unknown { .. } => DoctorEvidenceStateV1::Unknown,
+        }
+    }
+}
+
+/// Project one typed read into actionable Doctor evidence.
+///
+/// Below-threshold observed samples are omitted. Baseline and unavailable
+/// states always produce evidence so they cannot collapse into zero growth.
+#[must_use]
+pub fn table_growth_doctor_evidence(
+    read: &TableGrowthTelemetryReadV1,
+) -> Vec<TableGrowthDoctorEvidenceV1> {
+    match read {
+        TableGrowthTelemetryReadV1::Observed { samples, .. } => samples
+            .iter()
+            .filter(|sample| is_significant_table_growth(sample))
+            .map(|sample| TableGrowthDoctorEvidenceV1::SignificantGrowth {
+                store: sample.store.clone(),
+                table: sample.table.clone(),
+                previous_bytes: sample.previous_bytes,
+                current_bytes: sample.current_bytes,
+                growth_bytes: sample.growth_bytes(),
+                previous_observed_at: sample.previous_observed_at,
+                current_observed_at: sample.current_observed_at,
+            })
+            .collect(),
+        TableGrowthTelemetryReadV1::BaselineEstablished {
+            store,
+            observed_at,
+            tables_observed,
+        } => vec![TableGrowthDoctorEvidenceV1::BaselineEstablished {
+            store: store.clone(),
+            observed_at: *observed_at,
+            tables_observed: *tables_observed,
+        }],
+        TableGrowthTelemetryReadV1::Unsupported { store } => {
+            vec![TableGrowthDoctorEvidenceV1::Unsupported {
+                store: store.clone(),
+            }]
+        }
+        TableGrowthTelemetryReadV1::Denied { store } => {
+            vec![TableGrowthDoctorEvidenceV1::Denied {
+                store: store.clone(),
+            }]
+        }
+        TableGrowthTelemetryReadV1::Unknown { store } => {
+            vec![TableGrowthDoctorEvidenceV1::Unknown {
+                store: store.clone(),
+            }]
+        }
+    }
+}
+
 /// Boxed future returned by [`StoreSizeTelemetryPort`], mirroring the diagnostic
 /// provider port convention (std `Future`, no extra runtime dependency).
 pub type StorageTelemetryFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
@@ -253,14 +406,13 @@ pub trait StoreSizeTelemetryPort {
         store: &'a StoreKeyV1,
     ) -> StorageTelemetryFuture<'a, StorageTelemetryReadV1>;
 
-    /// Read per-table growth samples for `store` between the runtime's retained
-    /// watermarks. An empty vector means the store carries no per-table history
-    /// yet, not that growth is zero.
+    /// Read per-table growth samples for `store` between retained watermarks.
+    /// Baseline establishment and unavailable reads remain typed and distinct.
     fn table_growth<'a>(
         &'a self,
         context: &'a crate::RequestContext,
         store: &'a StoreKeyV1,
-    ) -> StorageTelemetryFuture<'a, Vec<TableGrowthSampleV1>>;
+    ) -> StorageTelemetryFuture<'a, TableGrowthTelemetryReadV1>;
 }
 
 #[cfg(test)]
@@ -383,6 +535,128 @@ mod tests {
             }
             .store(),
             &store()
+        );
+    }
+
+    #[test]
+    fn unavailable_table_growth_is_typed_instead_of_zero() {
+        let read = TableGrowthTelemetryReadV1::Unknown { store: store() };
+        let serialized = serde_json::to_value(&read).expect("serialize table-growth read");
+
+        assert_eq!(
+            serialized,
+            serde_json::json!({
+                "kind": "unknown",
+                "store": "sessions.db",
+            })
+        );
+        assert!(serialized.get("growth_bytes").is_none());
+        assert!(serialized.get("samples").is_none());
+    }
+
+    #[test]
+    fn first_table_growth_read_reports_baseline_without_growth() {
+        let read = TableGrowthTelemetryReadV1::BaselineEstablished {
+            store: store(),
+            observed_at: UtcMicros(2_000),
+            tables_observed: 3,
+        };
+        let serialized = serde_json::to_value(&read).expect("serialize table-growth read");
+
+        assert_eq!(serialized["kind"], "baseline_established");
+        assert_eq!(serialized["tables_observed"], 3);
+        assert!(serialized.get("samples").is_none());
+        assert!(serialized.get("growth_bytes").is_none());
+    }
+
+    #[test]
+    fn table_growth_significance_combines_absolute_and_relative_rules() {
+        let sample = |previous_bytes, current_bytes| TableGrowthSampleV1 {
+            store: store(),
+            table: TableNameV1::new("observations").expect("valid table"),
+            previous_bytes: StorageByteSizeV1(previous_bytes),
+            current_bytes: StorageByteSizeV1(current_bytes),
+            previous_observed_at: UtcMicros(1_000),
+            current_observed_at: UtcMicros(2_000),
+        };
+
+        assert!(is_significant_table_growth(&sample(
+            10 * 1024 * 1024 * 1024,
+            10 * 1024 * 1024 * 1024 + 64 * 1024 * 1024,
+        )));
+        assert!(is_significant_table_growth(&sample(
+            10 * 1024 * 1024,
+            11 * 1024 * 1024,
+        )));
+        assert!(!is_significant_table_growth(&sample(
+            100 * 1024 * 1024,
+            101 * 1024 * 1024,
+        )));
+        assert!(!is_significant_table_growth(&sample(
+            5 * 1024 * 1024,
+            5 * 1024 * 1024 + 512 * 1024,
+        )));
+    }
+
+    #[test]
+    fn table_growth_evidence_maps_information_and_unavailability_honestly() {
+        let significant = TableGrowthSampleV1 {
+            store: store(),
+            table: TableNameV1::new("observations").expect("valid table"),
+            previous_bytes: StorageByteSizeV1(10 * 1024 * 1024),
+            current_bytes: StorageByteSizeV1(11 * 1024 * 1024),
+            previous_observed_at: UtcMicros(1_000),
+            current_observed_at: UtcMicros(2_000),
+        };
+        let evidence = table_growth_doctor_evidence(&TableGrowthTelemetryReadV1::Observed {
+            store: store(),
+            samples: vec![significant],
+        });
+        assert_eq!(evidence.len(), 1);
+        assert_eq!(
+            evidence[0].state(),
+            crate::doctor::DoctorEvidenceStateV1::HealthyCompleteCoverage
+        );
+
+        let baseline =
+            table_growth_doctor_evidence(&TableGrowthTelemetryReadV1::BaselineEstablished {
+                store: store(),
+                observed_at: UtcMicros(2_000),
+                tables_observed: 3,
+            });
+        assert_eq!(
+            baseline[0].state(),
+            crate::doctor::DoctorEvidenceStateV1::Partial
+        );
+
+        let unknown =
+            table_growth_doctor_evidence(&TableGrowthTelemetryReadV1::Unknown { store: store() });
+        assert_eq!(
+            unknown[0].state(),
+            crate::doctor::DoctorEvidenceStateV1::Unknown
+        );
+        let serialized = serde_json::to_value(&unknown[0]).expect("serialize evidence");
+        assert!(serialized.get("growth_bytes").is_none());
+        assert!(serialized.get("current_bytes").is_none());
+    }
+
+    #[test]
+    fn table_growth_evidence_suppresses_insignificant_samples() {
+        let insignificant = TableGrowthSampleV1 {
+            store: store(),
+            table: TableNameV1::new("observations").expect("valid table"),
+            previous_bytes: StorageByteSizeV1(100 * 1024 * 1024),
+            current_bytes: StorageByteSizeV1(101 * 1024 * 1024),
+            previous_observed_at: UtcMicros(1_000),
+            current_observed_at: UtcMicros(2_000),
+        };
+
+        assert!(
+            table_growth_doctor_evidence(&TableGrowthTelemetryReadV1::Observed {
+                store: store(),
+                samples: vec![insignificant],
+            })
+            .is_empty()
         );
     }
 }
