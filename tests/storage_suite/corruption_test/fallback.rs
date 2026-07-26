@@ -10,7 +10,7 @@ async fn raw_quick_check_detects_corruption(db_path: &Path) -> bool {
 }
 
 #[tokio::test]
-async fn fts_corruption_falls_back_without_rebuild_or_write() {
+async fn fts_corruption_propagates_without_rebuild_or_write() {
     let (db, _dir, db_path) = setup_db().await;
 
     // Insert data so FTS has content
@@ -78,16 +78,19 @@ async fn fts_corruption_falls_back_without_rebuild_or_write() {
     let (reopened, _) = crate::common::open_test_database(&db_path)
         .await
         .expect("direct database open should retain read fallback access");
-    let fallback = reopened
+    let error = reopened
         .search_nodes("important_handler", 10)
         .await
-        .expect("LIKE fallback should remain available");
-    assert_eq!(fallback[0].node.id, "e1");
+        .expect_err("direct database access must fail closed on FTS corruption");
+    assert!(
+        error.to_string().contains("fts5: corruption found"),
+        "unexpected direct database error: {error}"
+    );
     reopened.close();
     assert_eq!(
         std::fs::read(&db_path).unwrap(),
         corrupted_bytes,
-        "fallback open must not rebuild or otherwise write"
+        "direct database open must not rebuild or otherwise write"
     );
 }
 

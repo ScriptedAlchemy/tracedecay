@@ -69,7 +69,7 @@ impl Database {
                         .to_ascii_lowercase()
                         .contains("fts5: corruption") =>
             {
-                match self.non_fts_schema_intact_in_fresh_snapshot().await {
+                match self.non_fts_schema_intact(conn).await {
                     Ok(true) => {
                         if !FTS_REPAIR_WARNING_EMITTED.swap(true, Ordering::Relaxed) {
                             eprintln!(
@@ -113,15 +113,6 @@ impl Database {
             results.push(SearchResult { node, score: 1.0 });
         }
         Ok(results)
-    }
-
-    async fn non_fts_schema_intact_in_fresh_snapshot(&self) -> Result<bool> {
-        let snapshot = self
-            .begin_engine_read_snapshot("validate_search_fallback")
-            .await?;
-        let intact = self.non_fts_schema_intact(&snapshot).await?;
-        super::tx::commit(snapshot, "validate_search_fallback").await?;
-        Ok(intact)
     }
 
     /// Validates every non-FTS table and its indexes without asking `SQLite`
