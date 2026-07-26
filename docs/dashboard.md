@@ -1155,6 +1155,13 @@ It is a blocking step of the `Dashboard integration` CI job, not an advisory
 comparison against a preview artifact. Regenerate with `npm run
 contracts:generate` and commit the result; never hand-edit the outputs.
 
+The typed graph-structure routes are registered from the same declarations that
+name their response schemas. Schema export asserts every one of those registered
+responses exists in the contract catalog before writing generated output. A new
+typed route with no catalog entry therefore fails `contracts:check` with its
+method, path, and missing response type. Legacy type-erased plugin routes are
+not represented as fake `serde_json::Value` contracts.
+
 `npm run build` invokes Rsbuild using `dashboard/rsbuild.config.ts`, with
 `dashboard/src/app/main.tsx` as the entry point and `dashboard/app-dist/` as
 the output. The legacy `dashboard/{shell,holographic,lcm,graph,...}/dist`
