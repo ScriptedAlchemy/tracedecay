@@ -22,9 +22,9 @@ use serde_json::json;
 use crate::errors::{Result, TraceDecayError};
 
 use super::{
-    AgentIntegration, DoctorCounters, HealthcheckContext, InstallContext, UpdatePluginOutcome,
-    backup_and_write_json, backup_config_file, load_json_file, load_json_file_strict,
-    safe_write_json_file, safe_write_text_file,
+    AgentIntegration, DeferredUserAction, DoctorCounters, HealthcheckContext, InstallContext,
+    NonInteractiveInstallOutcome, UpdatePluginOutcome, backup_and_write_json, backup_config_file,
+    load_json_file, load_json_file_strict, safe_write_json_file, safe_write_text_file,
 };
 
 use super::prompt_rules::{PROMPT_RULE_MARKER, PromptRulesOptions};
@@ -53,14 +53,15 @@ impl AgentIntegration for KimiIntegration {
     }
 
     fn install(&self, ctx: &InstallContext) -> Result<()> {
-        let staged_dir = ctx
-            .home
-            .join(".tracedecay/host-bundle-stage/kimi/tracedecay");
-        deploy_kimi_plugin_to(&staged_dir, &ctx.tracedecay_bin)?;
-        Err(kimi_official_lifecycle_unavailable(
-            "install",
-            Some(&staged_dir),
-        ))
+        let deferred = stage_kimi_install_action(ctx)?;
+        Err(deferred_user_action_error(deferred))
+    }
+
+    fn prepare_non_interactive_install(
+        &self,
+        ctx: &InstallContext,
+    ) -> Result<NonInteractiveInstallOutcome> {
+        stage_kimi_install_action(ctx).map(NonInteractiveInstallOutcome::DeferredUserAction)
     }
 
     fn supports_local_install(&self) -> bool {
@@ -98,29 +99,19 @@ impl AgentIntegration for KimiIntegration {
     }
 
     fn update_plugin(&self, ctx: &InstallContext) -> Result<UpdatePluginOutcome> {
-        // The managed plugin dir is a tracedecay-generated bundle (its
-        // manifest is a rendered artifact, not user config), so refreshing it
-        // is exactly the install path. `plugins/installed.json` is a
-        // tracedecay-owned registry entry: the refresh bumps its `updatedAt`
-        // while preserving the user's `enabled`/`installedAt` values.
         let code_home = kimi_code_home(&ctx.home);
         if !installed_json_has_tracedecay(&code_home) {
             return Ok(UpdatePluginOutcome::NotInstalled);
         }
-        let staged_dir = ctx
-            .home
-            .join(".tracedecay/host-bundle-stage/kimi/tracedecay");
-        deploy_kimi_plugin_to(&staged_dir, &ctx.tracedecay_bin)?;
-        Err(kimi_official_lifecycle_unavailable(
-            "install",
-            Some(&staged_dir),
-        ))
+        stage_kimi_install_action(ctx).map(UpdatePluginOutcome::DeferredUserAction)
     }
 
     fn uninstall(&self, ctx: &InstallContext) -> Result<()> {
         let code_home = kimi_code_home(&ctx.home);
         if installed_json_has_tracedecay(&code_home) {
-            return Err(kimi_official_lifecycle_unavailable("remove", None));
+            return Err(deferred_user_action_error(
+                kimi_official_lifecycle_unavailable("remove", None),
+            ));
         }
 
         // Migration shim: pre-plugin tracedecay versions wrote a legacy global
@@ -230,14 +221,18 @@ impl AgentIntegration for KimiIntegration {
         if installed_json_has_tracedecay(&code_home) {
             Ok(())
         } else {
-            Err(kimi_official_lifecycle_unavailable("install", None))
+            Err(deferred_user_action_error(
+                kimi_official_lifecycle_unavailable("install", None),
+            ))
         }
     }
 
     fn deactivate_deployed_host_registration(&self, ctx: &InstallContext) -> Result<()> {
         let code_home = kimi_code_home(&ctx.home);
         if installed_json_has_tracedecay(&code_home) {
-            Err(kimi_official_lifecycle_unavailable("remove", None))
+            Err(deferred_user_action_error(
+                kimi_official_lifecycle_unavailable("remove", None),
+            ))
         } else {
             Ok(())
         }
@@ -361,17 +356,38 @@ fn deploy_kimi_plugin_to(managed_dir: &Path, tracedecay_bin: &str) -> Result<Pat
     Ok(managed_dir.to_path_buf())
 }
 
-fn kimi_official_lifecycle_unavailable(action: &str, staged_dir: Option<&Path>) -> TraceDecayError {
+fn stage_kimi_install_action(ctx: &InstallContext) -> Result<DeferredUserAction> {
+    let staged_dir = ctx
+        .home
+        .join(".tracedecay/host-bundle-stage/kimi/tracedecay");
+    deploy_kimi_plugin_to(&staged_dir, &ctx.tracedecay_bin)?;
+    Ok(kimi_official_lifecycle_unavailable(
+        "install",
+        Some(&staged_dir),
+    ))
+}
+
+fn deferred_user_action_error(action: DeferredUserAction) -> TraceDecayError {
+    TraceDecayError::Config {
+        message: action.remediation,
+    }
+}
+
+fn kimi_official_lifecycle_unavailable(
+    action: &str,
+    staged_dir: Option<&Path>,
+) -> DeferredUserAction {
     let command = staged_dir.map_or_else(
         || format!("/plugins {action} {KIMI_PLUGIN_ID}"),
         |path| format!("/plugins {action} {}", path.display()),
     );
-    TraceDecayError::Config {
-        message: format!(
+    DeferredUserAction {
+        remediation: format!(
             "Kimi Code exposes plugin {action} only through the interactive `/plugins` host API; \
              TraceDecay made no Kimi host-state changes. Open Kimi Code and run \
              `{command}`, then re-run repair to verify registration"
         ),
+        staged_paths: staged_dir.into_iter().map(Path::to_path_buf).collect(),
     }
 }
 
