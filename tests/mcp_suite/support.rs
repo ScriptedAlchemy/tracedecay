@@ -213,23 +213,28 @@ pub(crate) async fn handle_tool_call(
     ) || tool_name.starts_with("tracedecay_lcm_")
     {
         let session_db_path = project_session_db_path(cg);
-        let server = if session_db_path.is_file() {
-            let runtime = open_active_project_session_db(cg).await;
-            let server = McpServer::new_with_host_admission_test_runtime_for_test(
-                TraceDecay::open(cg.project_root()).await?,
-                None,
-                runtime,
+        if !session_db_path.is_file() {
+            return tracedecay::mcp::handle_tool_call(
+                cg,
+                tool_name,
+                args,
+                server_stats,
+                scope_prefix,
             )
             .await;
-            if !server.has_project_session_retrieval_service_for_test() {
-                return Err(TraceDecayError::Config {
-                    message: format!("{tool_name} project retrieval service was not constructed"),
-                });
-            }
-            server
-        } else {
-            McpServer::new(TraceDecay::open(cg.project_root()).await?, None).await
-        };
+        }
+        let runtime = open_active_project_session_db(cg).await;
+        let server = McpServer::new_with_host_admission_test_runtime_for_test(
+            TraceDecay::open(cg.project_root()).await?,
+            None,
+            runtime,
+        )
+        .await;
+        if !server.has_project_session_retrieval_service_for_test() {
+            return Err(TraceDecayError::Config {
+                message: format!("{tool_name} project retrieval service was not constructed"),
+            });
+        }
         let request = json!({
             "jsonrpc": "2.0",
             "id": 1,
