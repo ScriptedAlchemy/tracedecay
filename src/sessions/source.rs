@@ -532,13 +532,15 @@ pub(crate) async fn persist_parsed_transcript<S: TranscriptIngestStore>(
     // commits, so the dashboard never lights work that did not land. The project
     // id is left for the dashboard to resolve from the registry — ingest holds a
     // project root, not a registered identity, and must not pay a lookup here.
-    crate::dashboard::activity_bus::publish(
-        crate::dashboard::activity_bus::ActivityFamilyV1::SessionIngest,
+    crate::application::event_lane::publish(
+        store,
+        crate::application::event_lane::ActivityFamilyV1::SessionIngest,
         project_root,
         None,
         messages_upserted,
         Some(provider),
-    );
+    )
+    .await;
     Ok(TranscriptIngestStats {
         sessions_upserted: 1,
         messages_upserted,

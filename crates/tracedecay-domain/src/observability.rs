@@ -155,6 +155,44 @@ impl ObservabilityEnvelopeV1 {
         if self.quantity.is_some_and(|value| !value.is_finite()) {
             return Err("quantity");
         }
+        match &self.payload {
+            ObservabilityPayloadV1::Activity(activity) => {
+                if activity.units == 0
+                    || !matches!(
+                        activity.family.as_str(),
+                        "hook" | "session_ingest" | "code_index" | "tool_call"
+                    )
+                    || activity.detail.as_deref().is_some_and(|detail| {
+                        detail.is_empty()
+                            || detail.len() > 128
+                            || detail.trim() != detail
+                            || detail.chars().any(char::is_control)
+                    })
+                {
+                    return Err("activity");
+                }
+            }
+            ObservabilityPayloadV1::HealthSnapshot(snapshot) => {
+                if snapshot.scope_digest != self.scope_ref
+                    || snapshot.dimensions.is_empty()
+                    || snapshot.dimensions.len() > 16
+                    || snapshot.dimensions.iter().any(|(name, dimension)| {
+                        !matches!(
+                            name.as_str(),
+                            "acyclicity"
+                                | "depth"
+                                | "equality"
+                                | "redundancy"
+                                | "modularity"
+                                | "coverage_discipline"
+                        ) || dimension.score_ppm > 1_000_000
+                    })
+                {
+                    return Err("health_snapshot");
+                }
+            }
+            _ => {}
+        }
         Ok(())
     }
 }
