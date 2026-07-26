@@ -50,7 +50,9 @@ errors or times out, the same tool runs as `tracedecay tool <name> --args '<json
 | Wondering what breaks or which tests to run | `tracedecay:assessing-impact` |
 | Trait/interface/class type-hierarchy question (implementors, extenders, inheritance) | `tracedecay_type_hierarchy` — skill: `tracedecay:exploring-code` |
 | About to run `gh pr diff` / read a raw diff to review | `tracedecay_pr_context` / `tracedecay_diff_context` (offline, no gh needed) — `tracedecay:reviewing-changes` |
-| Need Context Scout status or recent bounded suggestions | `tracedecay_context_scout_capability` / `tracedecay_context_scout_explain` / `tracedecay_context_scout_budget` / `tracedecay_context_scout_recent` |
+| Need a saved document's combined post-edit diagnostics | `tracedecay_feedback_advisory_cycle`, then use its daemon-minted handle with `tracedecay_feedback_get`, `tracedecay_feedback_diagnostics`, `tracedecay_feedback_impact`, or `tracedecay_affected_tests` |
+| Need Context Scout status or recent bounded suggestions | `tracedecay_context_scout_status` / `tracedecay_context_scout_capability` / `tracedecay_context_scout_explain` / `tracedecay_context_scout_budget` / `tracedecay_context_scout_recent` |
+| Need to control an authenticated Context Scout generation | `tracedecay_context_scout_pause` / `tracedecay_context_scout_resume` require the exact configuration revision; `tracedecay_context_scout_cancel` / `tracedecay_context_scout_claim` / `tracedecay_context_scout_delivery` / `tracedecay_context_scout_feedback` require the daemon-returned exact address and typed work, claim, or receipt |
 | Need effective configuration or provenance | `tracedecay_configuration_list` / `tracedecay_configuration_get` / `tracedecay_configuration_explain` / `tracedecay_configuration_audit` / `tracedecay_configuration_observed_state` |
 | Need to mutate configuration | `tracedecay_configuration_batch`, `tracedecay_configuration_set`, or `tracedecay_configuration_unset`; protected and rollback changes require their exact `*_preview` then `*_apply` pair |
 | About to write a new helper, rename, or mass-edit | `tracedecay:editing-safely` |

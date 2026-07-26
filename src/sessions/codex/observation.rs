@@ -162,6 +162,13 @@ impl CodexObservationAdmission<'_> {
     pub(crate) fn accepts_session(&self, session_id: &str) -> bool {
         !matches!(self, Self::Profile { session_id: Some(expected), .. } if *expected != session_id)
     }
+
+    fn projection_project_path<'b>(&'b self, cwd: Option<&'b Path>) -> Option<&'b Path> {
+        match self {
+            Self::Project { root, .. } => Some(root),
+            Self::Profile { .. } => cwd,
+        }
+    }
 }
 
 async fn try_admit_codex_jsonl_observations(
@@ -224,12 +231,18 @@ async fn try_admit_codex_jsonl_observations(
                     }
                     let record_id = codex_native_record_id(&meta.session_id, &native)
                         .map_err(|_| ObservationRecordParseErrorV1::NormalizationFailed)?;
-                    let envelope = normalize_codex_observation(
+                    let envelope = normalize_codex_observation_with_location(
                         &native,
                         &meta.session_id,
                         native_thread_id.as_deref(),
                         record_id.clone(),
                         range,
+                        CodexObservationLocation {
+                            project_path: admission_scope
+                                .projection_project_path(context_state.cwd.as_deref()),
+                            location_path: context_state.cwd.as_deref(),
+                            transcript_path: path,
+                        },
                     )?;
                     stable_record_id = Some(record_id);
                     Ok(envelope)
@@ -275,6 +288,48 @@ pub(crate) fn normalize_codex_observation(
     stable_record_id: ObservationId,
     range: tracedecay_domain::ObservationSourceRangeV1,
 ) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
+    normalize_codex_observation_inner(
+        native,
+        session_id,
+        native_thread_id,
+        stable_record_id,
+        range,
+        None,
+    )
+}
+
+struct CodexObservationLocation<'a> {
+    project_path: Option<&'a Path>,
+    location_path: Option<&'a Path>,
+    transcript_path: &'a Path,
+}
+
+fn normalize_codex_observation_with_location(
+    native: &Value,
+    session_id: &str,
+    native_thread_id: Option<&str>,
+    stable_record_id: ObservationId,
+    range: tracedecay_domain::ObservationSourceRangeV1,
+    location: CodexObservationLocation<'_>,
+) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
+    normalize_codex_observation_inner(
+        native,
+        session_id,
+        native_thread_id,
+        stable_record_id,
+        range,
+        Some(location),
+    )
+}
+
+fn normalize_codex_observation_inner(
+    native: &Value,
+    session_id: &str,
+    native_thread_id: Option<&str>,
+    stable_record_id: ObservationId,
+    range: tracedecay_domain::ObservationSourceRangeV1,
+    location: Option<CodexObservationLocation<'_>>,
+) -> Result<CanonicalObservationEnvelopeV1, ObservationRecordParseErrorV1> {
     let native_kind = native
         .get("type")
         .and_then(Value::as_str)
@@ -305,6 +360,24 @@ pub(crate) fn normalize_codex_observation(
     }
 
     let mut facts = Vec::new();
+    if let Some(location) = location {
+        facts.push(CanonicalObservationFactV1::Session {
+            project_path: location
+                .project_path
+                .map(|path| path.to_string_lossy().into_owned()),
+            location_path: location
+                .location_path
+                .map(|path| path.to_string_lossy().into_owned()),
+            transcript_path: Some(location.transcript_path.to_string_lossy().into_owned()),
+            title: None,
+            started_at: None,
+            ended_at: None,
+            source: Some("codex_rollout".to_string()),
+            native_source: Some("codex".to_string()),
+            profile: None,
+            location_provenance: Some("rollout_context".to_string()),
+        });
+    }
     match native_kind {
         "session_meta" => {
             facts.push(CanonicalObservationFactV1::Boundary {
