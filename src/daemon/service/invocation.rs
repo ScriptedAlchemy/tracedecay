@@ -5000,13 +5000,17 @@ impl DaemonConfigurationRuntimeRegistrar {
             direct_layers: Arc::new(direct_layers),
             grants: Arc::new(RwLock::new(BTreeMap::new())),
         };
+        let mut runtimes = self.service.configuration_runtimes.lock().await;
+        if runtimes.contains_key(&project_root) {
+            return Ok(());
+        }
         runtime.install_authorities(
             Arc::new(DaemonConfigurationScopeResolution { actor, evidence }),
             Arc::new(PolicyBackedConfigurationMutationAuthorization::new(
                 grants.clone(),
             )),
         )?;
-        self.service.configuration_runtimes.lock().await.insert(
+        runtimes.insert(
             project_root,
             RegisteredConfigurationRuntime {
                 runtime,
@@ -5031,12 +5035,8 @@ impl DaemonConfigurationRuntimeRegistrar {
                 message: "semantic configuration operation requires a registered Plan 20 runtime"
                     .to_owned(),
             })?;
-        registered
-            .semantic_operation
-            .set(operation)
-            .map_err(|_| TraceDecayError::Config {
-                message: "semantic configuration operation is already installed".to_owned(),
-            })
+        let _ = registered.semantic_operation.set(operation);
+        Ok(())
     }
 }
 
