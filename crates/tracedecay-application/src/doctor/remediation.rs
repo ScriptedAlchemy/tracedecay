@@ -342,20 +342,6 @@ impl DoctorRemediationRegistryV1 {
                 DoctorConfirmationRequirementV1::Required,
                 "remount or rebuild a code/semantic index that is unmounted or stale",
             ),
-            (
-                operations::FEEDBACK_GET_FINDING,
-                DoctorOwningSurfaceV1::FeedbackRead,
-                false,
-                DoctorConfirmationRequirementV1::NotRequired,
-                "read the canonical advisory finding and its expandable evidence",
-            ),
-            (
-                operations::FEEDBACK_LIST_FINDINGS,
-                DoctorOwningSurfaceV1::FeedbackRead,
-                false,
-                DoctorConfirmationRequirementV1::NotRequired,
-                "list canonical advisory findings and retained omissions",
-            ),
         ];
         let descriptors = seed
             .iter()
@@ -421,6 +407,24 @@ mod tests {
             error,
             DoctorRemediationResolutionErrorV1::UnknownOperation {
                 operation: "use-case.application.storage.unknown-op".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn doctor_registry_does_not_advertise_unroutable_feedback_actions() {
+        let registry = DoctorRemediationRegistryV1::default_registry();
+        let error = registry
+            .resolve(&reference(
+                operations::FEEDBACK_GET_FINDING,
+                DoctorRemediationKindV1::Action,
+            ))
+            .expect_err("feedback read is not a Doctor remediation action");
+
+        assert_eq!(
+            error,
+            DoctorRemediationResolutionErrorV1::UnknownOperation {
+                operation: operations::FEEDBACK_GET_FINDING.to_string(),
             }
         );
     }
