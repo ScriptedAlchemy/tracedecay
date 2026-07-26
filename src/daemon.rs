@@ -2663,7 +2663,6 @@ async fn maintenance_transition_gate(
     gate
 }
 
-#[cfg(any(not(unix), test, feature = "test-transport"))]
 fn portable_database_owner_reconciler(
     store_administration: StoreAdministration,
     current_key: Arc<tokio::sync::Mutex<ProjectServerKey>>,
