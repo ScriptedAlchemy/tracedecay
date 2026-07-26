@@ -1834,9 +1834,13 @@ impl<'de> Deserialize<'de> for DurableObservationV1 {
         )
         .map_err(serde::de::Error::custom)?;
         if observation.observation_id != expected_observation_id {
-            return Err(serde::de::Error::custom(
-                ObservationContractError::ObservationIdentityMismatch,
-            ));
+            let legacy_observation_id =
+                legacy_observation_id(&observation.identity).map_err(serde::de::Error::custom)?;
+            if expected_observation_id != legacy_observation_id {
+                return Err(serde::de::Error::custom(
+                    ObservationContractError::ObservationIdentityMismatch,
+                ));
+            }
         }
         let legacy_idempotency_key =
             legacy_idempotency_key(&observation.identity).map_err(serde::de::Error::custom)?;
@@ -1906,6 +1910,28 @@ fn legacy_idempotency_key(
     material: &ClaudeObservationIdentityMaterialV1,
 ) -> Result<IdempotencyKeyV1, ObservationContractError> {
     IdempotencyKeyV1::new(domain_digest(LEGACY_IDEMPOTENCY_KEY_DOMAIN, material)?)
+}
+
+/// The observation id this material produced before a native record id
+/// participated in default-provider derivation.
+///
+/// Changing a derivation without accepting the previous one on decode makes
+/// every row already committed permanently undecodable, and there is no repair
+/// path that can quarantine such a row. Only the current derivation is ever
+/// written; this exists solely so stored rows still decode.
+///
+/// Non-default providers are returned unchanged because their derivation did
+/// not move.
+fn legacy_observation_id(
+    material: &ClaudeObservationIdentityMaterialV1,
+) -> Result<CanonicalObservationIdV1, ObservationContractError> {
+    if is_default_observation_provider(material.source().provider()) {
+        return CanonicalObservationIdV1::new(domain_digest(
+            CLAUDE_OBSERVATION_ID_DOMAIN,
+            material,
+        )?);
+    }
+    CanonicalObservationIdV1::derive(material)
 }
 
 fn sha256_digest(bytes: &[u8]) -> String {

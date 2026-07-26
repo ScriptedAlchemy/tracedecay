@@ -440,6 +440,17 @@ present source file or type name is not completion by itself; the cited direct
 regressions invoke the relevant boundary. Static fixture validation is useful,
 but the current Linux evaluation remains pending.
 
+**Production lifecycle correction (2026-07-26).** No shipped production path
+can install a model. `shared_lifecycle_owner()` opens the default owner with
+`HfHubModelMemberSourceV1`, whose `fetch_member` unconditionally returns
+`Rejected`; background acquisition therefore terminates in `Failed`.
+`import_local_artifact` and `import_configured_https_artifact` remain test-only
+or otherwise uncalled by production surfaces. The downstream verified-store,
+projection, publication, activation, retrieval, and fallback machinery remains
+real; artifact acquisition, cold-start/offline rollback, and production
+status/Doctor lifecycle acceptance are **not implemented end to end** until an
+install/import operation is production-reachable.
+
 - **Library-first FastEmbed:** delivered. The root manifest keeps
   `fastembed` optional with upstream defaults disabled, the
   `semantic-fastembed` feature selects the native runtime, and
@@ -452,8 +463,10 @@ but the current Linux evaluation remains pending.
 - **Local verified model bytes only:** delivered at the runtime boundary.
   Model, tokenizer, and config bytes come from the installed manifest members;
   runtime construction has no hub, ambient-cache, download, external-process,
-  or network-inference path. Direct tests validate the callable constructor and
-  integrity reads; cross-platform runtime coverage belongs to normal CI.
+  or network-inference path. Direct tests validate the constructor and
+  integrity reads, but there is currently no production-reachable operation
+  that creates the installed manifest and members. Cross-platform runtime
+  coverage belongs to normal CI after that lifecycle gap closes.
 - **Exact-flat semantic baseline:** delivered by
   `SemanticCodeRetriever`/`SemanticVectorReadPort::scan_exact_flat`, with direct
   deterministic ordering, provenance, generation, and coverage regression in
@@ -536,7 +549,8 @@ and normal CI.
    semantics eligible for the existing configuration activation. Run staged
    shadow/cohort behavior, rollback, migration, privacy, architecture, direct
    tests, Linux evaluation, and normal all-feature cross-platform CI. Status
-   and Doctor behavior is tested through the production semantic service;
+   and Doctor behavior must be tested through the production semantic service
+   after a model can be installed through a production-reachable operation;
    PR10 does not create a temporary public semantic endpoint or reserve later
    surface contracts.
 
