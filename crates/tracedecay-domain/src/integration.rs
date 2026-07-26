@@ -133,10 +133,18 @@ const fn canonical_stock_host_capabilities(host: HostKindV1) -> [HostCapabilityR
     };
     use HostCapabilityV1::{Cli, Hooks, Lsp, Mcp, NativeDiagnostics};
 
-    let (lsp, native_diagnostics, hooks) = match host {
-        HostKindV1::ClaudeCode => (Supported, Unavailable(HostApiAbsent), Supported),
+    let (lsp, native_diagnostics, hooks, mcp, cli) = match host {
+        HostKindV1::ClaudeCode => (
+            Supported,
+            Unavailable(HostApiAbsent),
+            Supported,
+            Supported,
+            Supported,
+        ),
         HostKindV1::CursorDesktop => (
             Unavailable(HostRegistrationUnsupported),
+            Supported,
+            Supported,
             Supported,
             Supported,
         ),
@@ -144,28 +152,38 @@ const fn canonical_stock_host_capabilities(host: HostKindV1) -> [HostCapabilityR
             Unavailable(HostRegistrationUnsupported),
             Unavailable(HostApiAbsent),
             Unavailable(CheckedInEvidenceMissing),
+            Unavailable(HostRegistrationUnsupported),
+            Unavailable(HostRegistrationUnsupported),
         ),
         HostKindV1::Codex | HostKindV1::Hermes => (
             Unavailable(HostRegistrationUnsupported),
             Unavailable(HostApiAbsent),
+            Supported,
+            Supported,
             Supported,
         ),
         HostKindV1::Kiro => (
             Unavailable(HostRegistrationUnsupported),
             Unavailable(HostApiAbsent),
             Degraded(NativeFixtureLimited),
+            Supported,
+            Supported,
         ),
         HostKindV1::ClineFamily | HostKindV1::Cline | HostKindV1::RooCode | HostKindV1::Kilo => (
             Unavailable(HostRegistrationUnsupported),
             Unavailable(HostApiAbsent),
             Unavailable(HostApiAbsent),
+            Supported,
+            Supported,
         ),
         HostKindV1::KimiCode => (
             Unavailable(HostRegistrationUnsupported),
             Unavailable(HostApiAbsent),
             Supported,
+            Supported,
+            Supported,
         ),
-        HostKindV1::OpenCode => (Supported, Supported, Supported),
+        HostKindV1::OpenCode => (Supported, Supported, Supported, Supported, Supported),
     };
     [
         HostCapabilityRecordV1 {
@@ -182,11 +200,11 @@ const fn canonical_stock_host_capabilities(host: HostKindV1) -> [HostCapabilityR
         },
         HostCapabilityRecordV1 {
             capability: Mcp,
-            state: Supported,
+            state: mcp,
         },
         HostCapabilityRecordV1 {
             capability: Cli,
-            state: Supported,
+            state: cli,
         },
     ]
 }
