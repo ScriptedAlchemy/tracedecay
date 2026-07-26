@@ -168,7 +168,10 @@ fn code_diagnostics_dashboard_api_exposes_engines_and_applies_settings() {
                 "idle_backfill": "idle"
             }),
         );
-        assert_eq!(status, 409, "stale settings patch must conflict: {conflict}");
+        assert_eq!(
+            status, 409,
+            "stale settings patch must conflict: {conflict}"
+        );
         assert_eq!(conflict["code"], "code_diagnostics_revision_conflict");
         assert_eq!(conflict["expected_revision"], stale_revision);
         assert_eq!(

@@ -134,9 +134,9 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
             .as_array()
             .unwrap_or_else(|| panic!("expected legal actions: {settings_envelope}"));
         let advertises = |operation: &str| {
-            legal_actions.iter().any(|action| {
-                action["kind"] == "request_apply" && action["operation"] == operation
-            })
+            legal_actions
+                .iter()
+                .any(|action| action["kind"] == "request_apply" && action["operation"] == operation)
         };
         assert!(
             !advertises("configuration_batch"),
