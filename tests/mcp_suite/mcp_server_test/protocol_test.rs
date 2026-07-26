@@ -4,8 +4,11 @@
 use crate::mcp_server_test::support::*;
 use serde_json::{Value, json};
 use std::fs;
+use std::path::Path;
+use std::process::Command;
 use std::sync::Arc;
 use tempfile::TempDir;
+use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 use tracedecay::mcp::McpServer;
 use tracedecay::mcp::handle_tool_call;
 use tracedecay::mcp::response_handles::{
@@ -13,6 +16,44 @@ use tracedecay::mcp::response_handles::{
 };
 use tracedecay::storage::resolve_response_handle_root;
 use tracedecay::tracedecay::{TraceDecay, current_timestamp};
+
+fn initialize_protocol_fixture(project: &Path, module: &str) {
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(
+        project.join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )
+    .unwrap();
+    fs::write(project.join("src/lib.rs"), format!("pub mod {module};\n")).unwrap();
+    fs::write(
+        project.join(format!("src/{module}.rs")),
+        format!("pub fn {module}_marker() {{}}\n"),
+    )
+    .unwrap();
+    for args in [
+        &["init", "--quiet"][..],
+        &["add", "."][..],
+        &[
+            "-c",
+            "user.name=TraceDecay Tests",
+            "-c",
+            "user.email=tests@tracedecay.invalid",
+            "commit",
+            "--quiet",
+            "-m",
+            "fixture",
+        ][..],
+    ] {
+        assert!(
+            Command::new("git")
+                .args(args)
+                .current_dir(project)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+}
 
 // ---------------------------------------------------------------------------
 // 1. test_initialize
@@ -42,68 +83,19 @@ async fn test_initialize() {
 
 #[tokio::test]
 async fn initialize_roots_route_registered_reader_tools_without_explicit_selector() {
-    let (_env, active_project) = crate::common::IsolatedEnv::acquire().await;
-    let target_project = active_project.with_file_name("target-project");
-
-    fs::create_dir_all(active_project.join("src")).unwrap();
-    fs::write(
-        active_project.join("src/active.rs"),
-        "pub fn active_marker() {}\n",
-    )
-    .unwrap();
-    fs::create_dir_all(target_project.join("src")).unwrap();
-    fs::write(
-        target_project.join("src/target.rs"),
-        "pub fn target_marker() {}\n",
-    )
-    .unwrap();
-
-    let active = crate::fixture::init_project_from_template(&active_project)
-        .await
-        .unwrap();
-    active.index_all().await.unwrap();
-    let target = crate::fixture::init_project_from_template(&target_project)
-        .await
-        .unwrap();
-    target.index_all().await.unwrap();
-
-    let project_id = active
-        .store_layout()
-        .identity
-        .project_id
-        .as_deref()
-        .and_then(|value| tracedecay_domain::ProjectId::new(value.to_string()).ok())
-        .expect("active project identity");
-    let runtime = tracedecay::application::host_admission::HostAdmissionTestRuntimeV1::project(
-        tracedecay::storage::default_profile_root().unwrap(),
-        active.project_root(),
-        project_id,
+    let isolation = TempDir::new().unwrap();
+    let active_project = isolation.path().join("active-project");
+    let target_project = isolation.path().join("target-project");
+    initialize_protocol_fixture(&active_project, "active");
+    initialize_protocol_fixture(&target_project, "target");
+    let harness = ProductionProjectCompositionHarnessV1::open(
+        isolation.path(),
+        [active_project.clone(), target_project.clone()],
     )
     .await
     .unwrap();
-    runtime
-        .upsert_code_project(
-            "proj_active",
-            active.project_root(),
-            None,
-            None,
-            Some("main"),
-        )
-        .await
-        .unwrap();
-    runtime
-        .upsert_code_project(
-            "proj_target",
-            target.project_root(),
-            None,
-            None,
-            Some("main"),
-        )
-        .await
-        .unwrap();
-    let server =
-        McpServer::new_with_host_admission_test_runtime_for_test(active, None, runtime).await;
-    let target_root_uri = url::Url::from_file_path(target.project_root())
+    let server = harness.server(&active_project).unwrap();
+    let target_root_uri = url::Url::from_file_path(&target_project)
         .expect("target project has a portable file URI")
         .to_string();
 

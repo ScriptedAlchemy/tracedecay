@@ -175,6 +175,9 @@ jobs:
           shared-key: ci-test-full-${{ runner.os }}
           cache-on-failure: true
 
+      - name: Check default-feature workspace
+        run: cargo check --workspace --locked
+
       - name: Run tests
         run: cargo nextest run --workspace --all-features --profile ci --locked
 
