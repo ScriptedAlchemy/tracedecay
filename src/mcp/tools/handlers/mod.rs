@@ -68,7 +68,6 @@ use crate::global_db::RegisteredGlobalDb;
 use crate::mcp::response_handles::{ResponseHandleLookup, retrieve_response_handle};
 use crate::tracedecay::TraceDecay;
 use crate::tracedecay::current_timestamp;
-use tracedecay_tool_catalog::BindingSurface;
 
 pub async fn handle_user_lcm_tool(
     tool_name: &str,
