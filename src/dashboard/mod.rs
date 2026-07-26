@@ -179,6 +179,10 @@ impl AdmittedDoctorReportV1 {
     }
 }
 
+/// Intentionally has no `Default` or defaulting builder. Every state variant
+/// must explicitly provide its mode-specific database and settings authorities;
+/// silently defaulting either could route dashboard operations to the wrong
+/// project or user profile.
 #[derive(Clone)]
 pub(crate) struct DashboardState {
     /// Registered project id for profile-backed stores, when known.

@@ -4,22 +4,22 @@ use std::future::Future;
 use std::task::{Context, Poll, Waker};
 
 use tracedecay_application::retrieval::{
-    SymbolPrimitiveRecord, SymbolRelationRecord, TypeHierarchyRecord,
+    CodeFacetRecord, CodeFacetRequest, CodeLexicalField, CodeLexicalFieldFilter,
+    CodeNavigationRequest, CodeTimelineRecord, CodeTimelineRequest, SymbolPrimitiveRecord,
+    SymbolRelationRecord, TypeHierarchyRecord,
 };
 use tracedecay_application::{
     ApplicationOperation, ApplicationOutcome, ApplicationProblem, ApplicationProblemKind,
     AuthorityReceipt, AuthorizationService, CALLABLE_CODE_OPERATION_COUNT,
     CallableCodeAuthorizationAdmission, CallableCodeAuthorizationFuture,
     CallableCodeAuthorizationPort, CallableCodeOperationKind, CallableCodeQueryFuture,
-    CallableCodeQueryPort, CallableCodeQueryService, CodeFacetRecord, CodeFacetRequest,
-    CodeHierarchyRequest, CodeImpactRequest, CodeImplementationsRequest, CodeLexicalField,
-    CodeLexicalFieldFilter, CodeNavigationRequest, CodeQueryPage, CodeQueryScope,
-    CodeRelationRequest, CodeSignatureRequest, CodeSymbolSearchRequest, CodeTimelineRecord,
-    CodeTimelineRequest, CoverageCompleteness, ExactOccurrenceRecord, ExactOccurrenceRequest,
-    LexicalOccurrenceRecord, ModuleApiRequest, OpaqueCursor, PageRequest, PhraseSearchRequest,
-    QualifiedNameRequest, RequestContext, ResultProjection, RetrievalOrder, RetrievalPortContext,
-    RetrievalPortOutcome, RetrievalRequestMeta, SourceMetadataRecord, SourceMetadataRequest,
-    callable_code_catalog_contribution, callable_code_handler_descriptors,
+    CallableCodeQueryPort, CallableCodeQueryService, CodeHierarchyRequest, CodeImpactRequest,
+    CodeImplementationsRequest, CodeQueryPage, CodeQueryScope, CodeRelationRequest,
+    CodeSignatureRequest, CodeSymbolSearchRequest, CoverageCompleteness, ExactOccurrenceRecord,
+    ExactOccurrenceRequest, LexicalOccurrenceRecord, ModuleApiRequest, OpaqueCursor, PageRequest,
+    PhraseSearchRequest, QualifiedNameRequest, RequestContext, ResultProjection, RetrievalOrder,
+    RetrievalPortContext, RetrievalPortOutcome, RetrievalRequestMeta, SourceMetadataRecord,
+    SourceMetadataRequest, callable_code_catalog_contribution, callable_code_handler_descriptors,
     callable_code_operations,
 };
 use tracedecay_domain::{
