@@ -41,13 +41,9 @@ pub use requests::{
     SourceLinesRequest, SourceLinesResult, SourceReference, SymbolSearchRequest,
     SymbolSearchResult,
 };
-pub use service::{
-    AffectedTestsService, GraphCallersService, SourceLinesService, SymbolSearchService,
-};
 pub use source_read::{
     MAX_SOURCE_READ_PATH_BYTES, SourceReadModeV1, SourceReadPortContext, SourceReadPortFuture,
-    SourceReadPortOutcome, SourceReadPrimitivePort, SourceReadPrimitiveRequest,
-    SourceReadPrimitiveService, SourceReadResultV1,
+    SourceReadPortOutcome, SourceReadPrimitivePort, SourceReadPrimitiveRequest, SourceReadResultV1,
 };
 pub use symbol_graph::{
     ExactSymbolRequest, GraphImpactPrimitiveRequest, GraphRelationRequest, ImplementationSelector,

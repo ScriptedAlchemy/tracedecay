@@ -50,8 +50,6 @@ pub mod operations {
     pub const HOST_REPAIR_INTEGRATION: &str = "use-case.application.host.repair-integration";
     /// Remount or rebuild a code/semantic index that is unmounted or stale.
     pub const CODE_INDEX_REMOUNT: &str = "use-case.application.code-index.remount";
-    /// Read one canonical advisory finding from the mounted feedback owner.
-    pub const FEEDBACK_GET_FINDING: &str = crate::feedback::FEEDBACK_GET_USE_CASE_ID_V1;
 }
 
 /// The application surface that owns dispatch of a remediation operation.
@@ -73,8 +71,6 @@ pub enum DoctorOwningSurfaceV1 {
     HostIntegration,
     /// The semantic/code index runtime (Plan 35 / semantic index).
     SemanticIndexRuntime,
-    /// The canonical advisory feedback read owner (PR11–PR13).
-    FeedbackRead,
 }
 
 /// Whether an owning operation requires an explicit human confirmation before it
@@ -268,8 +264,7 @@ impl DoctorRemediationRegistryV1 {
     pub fn default_registry() -> Self {
         // Each entry pairs a canonical operation string with its owning surface,
         // preview-ability, and confirmation requirement. Repair operations are
-        // mutating and confirmed; canonical feedback get is a non-mutating
-        // owner action with no confirmation.
+        // mutating and confirmed.
         let seed: &[(
             &str,
             DoctorOwningSurfaceV1,
@@ -340,13 +335,6 @@ impl DoctorRemediationRegistryV1 {
                 DoctorConfirmationRequirementV1::Required,
                 "remount or rebuild a code/semantic index that is unmounted or stale",
             ),
-            (
-                operations::FEEDBACK_GET_FINDING,
-                DoctorOwningSurfaceV1::FeedbackRead,
-                false,
-                DoctorConfirmationRequirementV1::NotRequired,
-                "read the canonical advisory finding and its expandable evidence",
-            ),
         ];
         let descriptors = seed
             .iter()
@@ -397,6 +385,20 @@ mod tests {
                 DoctorConfirmationRequirementV1::Required
             );
         }
+    }
+
+    #[test]
+    fn doctor_default_registry_contains_only_dispatchable_targets() {
+        let registry = DoctorRemediationRegistryV1::default_registry();
+        assert_eq!(registry.descriptors().len(), 9);
+        assert!(
+            registry
+                .descriptors()
+                .iter()
+                .all(|descriptor| descriptor.operation().as_str()
+                    != crate::feedback::FEEDBACK_GET_USE_CASE_ID_V1),
+            "feedback reads are navigation, not remediation effects"
+        );
     }
 
     #[test]

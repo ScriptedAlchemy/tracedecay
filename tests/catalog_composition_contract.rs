@@ -1,40 +1,16 @@
-use std::cell::Cell;
-use std::collections::{BTreeMap, BTreeSet};
-use std::rc::Rc;
+use std::collections::BTreeSet;
 
 use tracedecay::catalog_composition::{
-    CatalogCompositionError, build_application_catalog_snapshot, compose_application_catalog,
-    validate_application_catalog,
+    CatalogCompositionError, build_application_catalog_snapshot, validate_application_catalog,
 };
-use tracedecay_application::handlers::CanonicalApplicationDispatcher;
 use tracedecay_application::{
     ApplicationContractError, ApplicationHandlerDescriptor, ApplicationHandlerDescriptors,
-    ApplicationOperation, ApplicationResult, AuthorizationPort, AuthorizationPortOutcome,
-    AuthorizationRequest, AuthorizationService, CancellationContext, CapabilityGrantId,
-    CapabilityGrantSnapshot, Deadline, DisclosureClass, EvidenceCoverage, EvidenceDomain,
-    PageRequest, PageState, RequestContext, RequestId, ResolvedScope, ResultContractRef,
-    ResultProjection, RetrievalEvidence, RetrievalOrder, RetrievalPortContext,
-    RetrievalPortOutcome, SourceAuthorizationSnapshot, SymbolRetrievalPort, SymbolSearchRequest,
-    SymbolSearchResult, SymbolSearchService, TemporalState, application_catalog_contributions,
+    ApplicationOperation, ResultContractRef, application_catalog_contributions,
     application_handler_descriptors, retrieval::catalog::symbol_search_contribution,
 };
-use tracedecay_domain::{
-    ActorId, EphemeralSanitizedQueryViewV1, FallbackSubpayloadDigest, FusionProfileId,
-    ManifestDigest, Pr9FallbackSubpayload, ProjectId, PublicRetrieverStatus,
-    QueryNormalizationRevision, RefId, RepositoryId, RetrieverKind, SanitizerRevision, UtcMicros,
-    WorktreeId,
-};
-use tracedecay_policy::authorization::{
-    SourceAuthorizationEvaluatorV1, SourceAuthorizationInputV1, SourceAuthorizationTruthTableV1,
-};
 use tracedecay_tool_catalog::{
-    CapabilityId, ProfileBudget, ProfileId, ProfileKind, SchemaId, SchemaRef, SortContractId,
-    UseCaseId,
+    CapabilityId, ProfileBudget, ProfileId, ProfileKind, SchemaId, SchemaRef, UseCaseId,
 };
-
-const SHA256_A: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-const SOURCE_AUTHORIZATION_TRUTH_TABLES: &str =
-    include_str!("../crates/tracedecay-policy/tests/fixtures/source_authorization/core.json");
 
 #[test]
 fn root_snapshot_validates_every_application_contribution_against_declared_descriptors() {
@@ -200,47 +176,6 @@ fn root_snapshot_composes_every_explicit_profile_without_widening_eligibility() 
 }
 
 #[test]
-fn root_composition_invokes_the_canonical_typed_application_handler() {
-    let operation = application_handler_descriptors()
-        .unwrap()
-        .get(&UseCaseId::new("use-case.retrieval.symbol-search").unwrap())
-        .unwrap()
-        .operation()
-        .clone();
-    let context = request_context(&operation);
-    let calls = Rc::new(Cell::new(0));
-    let service = SymbolSearchService::new(
-        RecordingSymbolPort {
-            calls: Rc::clone(&calls),
-        },
-        AuthorizationService::new(
-            StaticAuthorizationPort,
-            SourceAuthorizationEvaluatorV1::default(),
-        ),
-        operation.clone(),
-    );
-    let composition = compose_application_catalog(CanonicalSymbolSearchDispatcher {
-        expected_operation: operation,
-        service,
-        context,
-    })
-    .unwrap();
-    let handler = composition
-        .handler(&UseCaseId::new("use-case.retrieval.symbol-search").unwrap())
-        .expect("composed catalog retains a handler bound to its dispatcher");
-
-    let result = handler
-        .invoke(symbol_search_request())
-        .expect("canonical symbol-search service returns evidence");
-
-    assert_eq!(calls.get(), 1);
-    assert_eq!(
-        result.contract,
-        handler.operation().result_contract().clone()
-    );
-}
-
-#[test]
 fn registered_capability_does_not_require_a_catalog_surface_binding() {
     assert_eq!(
         validate_application_catalog(
@@ -384,150 +319,4 @@ fn inconsistent(field: &'static str) -> Result<(), CatalogCompositionError> {
     Err(CatalogCompositionError::Application(
         ApplicationContractError::Inconsistent { field },
     ))
-}
-
-struct RecordingSymbolPort {
-    calls: Rc<Cell<usize>>,
-}
-
-impl SymbolRetrievalPort for RecordingSymbolPort {
-    fn symbol_search(
-        &self,
-        _context: &RetrievalPortContext<'_>,
-        _request: &SymbolSearchRequest,
-    ) -> RetrievalPortOutcome<SymbolSearchResult> {
-        self.calls.set(self.calls.get() + 1);
-        RetrievalPortOutcome::Completed(RetrievalEvidence {
-            payload: Some(SymbolSearchResult {
-                pr9_fallback: pr9_fallback(),
-            }),
-            temporal: TemporalState::current(UtcMicros(2)),
-            evidence_authorities: Vec::new(),
-            coverage: EvidenceCoverage::complete(vec![EvidenceDomain::Symbol], 1, 1, 1).unwrap(),
-            omissions: Vec::new(),
-            scores: Vec::new(),
-            contributions: Vec::new(),
-            page: PageState::first_page(
-                SortContractId::new("sort.symbol.catalog-dispatch.v1").unwrap(),
-                1,
-                Some(1),
-                1,
-            )
-            .unwrap(),
-            finished_at: UtcMicros(3),
-            budget: Default::default(),
-            cancellation: None,
-        })
-    }
-}
-
-struct StaticAuthorizationPort;
-
-impl AuthorizationPort for StaticAuthorizationPort {
-    fn source_authorization_snapshot(
-        &self,
-        _request: &AuthorizationRequest<'_>,
-    ) -> AuthorizationPortOutcome {
-        AuthorizationPortOutcome::Snapshot(Box::new(SourceAuthorizationSnapshot::new(
-            authorized_source_input(),
-            true,
-        )))
-    }
-}
-
-struct CanonicalSymbolSearchDispatcher {
-    expected_operation: ApplicationOperation,
-    service: SymbolSearchService<
-        RecordingSymbolPort,
-        StaticAuthorizationPort,
-        SourceAuthorizationEvaluatorV1,
-    >,
-    context: RequestContext,
-}
-
-impl CanonicalApplicationDispatcher<SymbolSearchRequest> for CanonicalSymbolSearchDispatcher {
-    type Output = ApplicationResult<SymbolSearchResult>;
-
-    fn invoke(
-        &self,
-        operation: &ApplicationOperation,
-        request: SymbolSearchRequest,
-    ) -> Self::Output {
-        assert_eq!(operation, &self.expected_operation);
-        self.service.execute(&self.context, request, UtcMicros(2))
-    }
-}
-
-fn symbol_search_request() -> SymbolSearchRequest {
-    let query = EphemeralSanitizedQueryViewV1::sanitize(
-        "symbol fixture",
-        SanitizerRevision::new("sanitizer.fixture.v1").unwrap(),
-        QueryNormalizationRevision::new("normalization.fixture.v1").unwrap(),
-    )
-    .unwrap();
-    SymbolSearchRequest::new(
-        query,
-        PageRequest::first(10).unwrap(),
-        ResultProjection::Evidence,
-        RetrievalOrder::Relevance,
-    )
-    .unwrap()
-}
-
-fn request_context(operation: &ApplicationOperation) -> RequestContext {
-    let scope = ResolvedScope::new(
-        ProjectId::new("project.catalog-dispatch").unwrap(),
-        RepositoryId::new("repository.catalog-dispatch").unwrap(),
-        WorktreeId::new("worktree.catalog-dispatch").unwrap(),
-        Some(RefId::new("refs/heads/main").unwrap()),
-    )
-    .unwrap();
-    let grant = CapabilityGrantSnapshot::new(
-        CapabilityGrantId::new("grant.catalog-dispatch").unwrap(),
-        1,
-        ManifestDigest::new(SHA256_A).unwrap(),
-        ActorId::new("actor.issuer").unwrap(),
-        UtcMicros(1),
-        UtcMicros(1_000),
-        scope.clone(),
-        BTreeSet::from([operation.capability_id().clone()]),
-        BTreeSet::from([operation.use_case_id().clone()]),
-        DisclosureClass::Evidence,
-    )
-    .unwrap();
-    RequestContext::new(
-        ActorId::new("actor.requester").unwrap(),
-        scope,
-        grant,
-        RequestId::new("request.catalog-dispatch").unwrap(),
-        Deadline::new(UtcMicros(500)).unwrap(),
-        CancellationContext::active("cancel.catalog-dispatch").unwrap(),
-    )
-    .unwrap()
-}
-
-fn authorized_source_input() -> SourceAuthorizationInputV1 {
-    serde_json::from_str::<Vec<SourceAuthorizationTruthTableV1>>(SOURCE_AUTHORIZATION_TRUTH_TABLES)
-        .unwrap()
-        .into_iter()
-        .find(|row| row.name == "project_authorized_live")
-        .unwrap()
-        .input
-}
-
-fn pr9_fallback() -> Pr9FallbackSubpayload {
-    let mut fallback = Pr9FallbackSubpayload {
-        profile_id: FusionProfileId::new("profile.pr9.catalog-dispatch").unwrap(),
-        ordered_candidates: Vec::new(),
-        public_pr9_lane_coverage: BTreeMap::from([
-            (RetrieverKind::ExactLiteral, PublicRetrieverStatus::Complete),
-            (RetrieverKind::Lexical, PublicRetrieverStatus::Complete),
-            (RetrieverKind::Graph, PublicRetrieverStatus::Complete),
-        ]),
-        freshness: Vec::new(),
-        cursor: None,
-        digest: FallbackSubpayloadDigest::new(SHA256_A).unwrap(),
-    };
-    fallback.digest = fallback.compute_digest().unwrap();
-    fallback
 }

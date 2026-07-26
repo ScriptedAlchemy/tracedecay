@@ -23,8 +23,7 @@ pub use github_ci_proximity::{
     GITHUB_REVIEW_INGEST_CAPABILITY_ID_V1, GITHUB_REVIEW_INGEST_USE_CASE_ID_V1,
     GitHubReviewReadPort, GitHubReviewReadPortOutcomeV1, GitHubReviewReadRequestV1,
     GitHubReviewReadResponseV1, PROXIMITY_CAPABILITY_ID_V1, PROXIMITY_USE_CASE_ID_V1,
-    ProximityCandidatesPortOutcomeV1, ProximityDedupeOutcomeV1, ProximityDedupePort,
-    ProximityEvaluationRequestV1, ProximityPort,
+    ProximityCandidatesPortOutcomeV1, ProximityDedupeOutcomeV1, ProximityEvaluationRequestV1,
 };
 pub use ports::{
     FeedbackCompletedPublicationReadPort, FeedbackCompletedPublicationV1, FeedbackCycleDedupePort,

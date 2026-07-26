@@ -227,27 +227,6 @@ pub enum ProximityDedupeOutcomeV1 {
     Unavailable,
 }
 
-/// The single producer boundary for both immediate and configured-threshold
-/// tiers. Splitting tiers into separate producers would permit divergent scope,
-/// threshold, and coverage decisions.
-pub trait ProximityPort {
-    fn candidates<'a>(
-        &'a self,
-        context: &'a RequestContext,
-        request: &'a ProximityEvaluationRequestV1,
-    ) -> FeedbackPortFuture<'a, ProximityCandidatesPortOutcomeV1>;
-}
-
-/// A presentation-dedupe decision. It never becomes a lock or a work claim.
-pub trait ProximityDedupePort {
-    fn classify<'a>(
-        &'a self,
-        context: &'a RequestContext,
-        request: &'a ProximityEvaluationRequestV1,
-        contribution: &'a ProximityContributionV1,
-    ) -> FeedbackPortFuture<'a, ProximityDedupeOutcomeV1>;
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
