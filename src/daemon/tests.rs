@@ -42,7 +42,8 @@ fn bootstrap_tool_catalog_uses_project_node_count() {
     let response = super::daemon_bootstrap_response(&request, None, Some(65_395))
         .expect("bootstrap response")
         .expect("tools/list response");
-    let context_description = response.result.expect("tools/list result")["tools"]
+    let result = response.result.expect("tools/list result");
+    let context_description = result["tools"]
         .as_array()
         .expect("tool catalog")
         .iter()
