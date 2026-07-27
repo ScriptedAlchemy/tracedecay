@@ -3,6 +3,8 @@ use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
+#[cfg(any(test, feature = "test-transport"))]
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
@@ -23,6 +25,45 @@ pub const REPOSITORY_IDENTITY_FILENAME: &str = "tracedecay-project.json";
 /// way by the post-update health pass (`branch-meta.json.corrupt-<timestamp>`).
 pub const BRANCH_META_QUARANTINE_PREFIX: &str = "branch-meta.json.corrupt-";
 pub const STORE_MANIFEST_SCHEMA_VERSION: u32 = 1;
+
+#[cfg(any(test, feature = "test-transport"))]
+static DURABLE_ATOMIC_WRITE_FAULT: AtomicU8 = AtomicU8::new(0);
+
+#[cfg(any(test, feature = "test-transport"))]
+#[derive(Clone, Copy)]
+pub(crate) enum DurableAtomicWriteFaultForTest {
+    AfterTempSync = 1,
+    AfterRename = 2,
+}
+
+#[cfg(any(test, feature = "test-transport"))]
+pub(crate) fn set_durable_atomic_write_fault_for_test(fault: DurableAtomicWriteFaultForTest) {
+    DURABLE_ATOMIC_WRITE_FAULT.store(fault as u8, Ordering::SeqCst);
+}
+
+#[derive(Clone, Copy)]
+enum DurableAtomicWritePhase {
+    AfterTempSync = 1,
+    AfterRename = 2,
+}
+
+fn inject_durable_atomic_write_fault(phase: DurableAtomicWritePhase) -> io::Result<()> {
+    #[cfg(any(test, feature = "test-transport"))]
+    if DURABLE_ATOMIC_WRITE_FAULT
+        .compare_exchange(phase as u8, 0, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+    {
+        return Err(io::Error::other(match phase {
+            DurableAtomicWritePhase::AfterTempSync => {
+                "injected durable atomic write failure after temp sync"
+            }
+            DurableAtomicWritePhase::AfterRename => {
+                "injected durable atomic write failure after rename"
+            }
+        }));
+    }
+    Ok(())
+}
 pub const REPOSITORY_IDENTITY_SCHEMA_VERSION: u32 = 1;
 
 /// Checks the fixed 16-byte `SQLite` header without opening the database.
@@ -1420,13 +1461,44 @@ impl PrivateStoreIo {
         temp_path: &Path,
         contents: &[u8],
     ) -> io::Result<()> {
-        Self::write_file_atomically(path, temp_path, contents)?;
-        fs::OpenOptions::new()
+        if path_parent(path) != path_parent(temp_path) || path == temp_path {
+            return Err(invalid_input(
+                "durable private-store write requires a distinct sibling temp path",
+            ));
+        }
+        if let Some(parent) = path.parent() {
+            Self::create_dir_all(parent)?;
+        }
+        reject_symlink_components(path, "private store file")?;
+        reject_symlink_components(temp_path, "private store temp file")?;
+        {
+            let mut options = fs::OpenOptions::new();
+            options.write(true).truncate(true);
+            let mut temp = Self::open_private(temp_path, &mut options)?;
+            temp.write_all(contents)?;
+            temp.sync_all()?;
+        }
+        inject_durable_atomic_write_fault(DurableAtomicWritePhase::AfterTempSync)?;
+        crate::db::DatabaseAuthority::replace_file_atomically(
+            temp_path,
+            path,
+            "private store durable file",
+        )
+        .map_err(io::Error::other)?;
+        set_private_file_permissions(path)?;
+        if let Err(error) = fs::OpenOptions::new()
             .read(true)
             .write(true)
-            .open(path)?
-            .sync_all()?;
-        sync_parent_directory(path)
+            .open(path)
+            .and_then(|file| file.sync_all())
+            .and_then(|()| inject_durable_atomic_write_fault(DurableAtomicWritePhase::AfterRename))
+            .and_then(|()| sync_parent_directory(path))
+        {
+            let _ = fs::remove_file(path);
+            let _ = sync_parent_directory(path);
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// Synchronizes the durable members of one SQLite WAL family. The SHM

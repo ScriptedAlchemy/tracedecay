@@ -12,7 +12,9 @@ use sha2::{Digest, Sha256};
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use tracedecay_domain::{FactOwnerV1, ProjectId, SourceStoreId};
-use tracedecay_store::CompatibilityLegacyMemoryCutoverProgressV1;
+use tracedecay_store::{
+    CompatibilityLegacyMemoryCutoverProgressV1, MEMORY_V2_OWNER_ARCHIVE_SCHEMA_V1,
+};
 
 use crate::branch_meta;
 use crate::db::engine::QueryExecutor;
@@ -34,12 +36,29 @@ static CUTOVER_FAULT: AtomicU8 = AtomicU8::new(0);
 pub enum CutoverFaultForTest {
     TargetDurabilityBarrier = 1,
     ReceiptDurability = 2,
+    ReceiptAfterRename = 3,
 }
 
 #[cfg(any(test, feature = "test-transport"))]
 #[doc(hidden)]
 pub fn set_cutover_fault_for_test(fault: CutoverFaultForTest) {
-    CUTOVER_FAULT.store(fault as u8, Ordering::SeqCst);
+    match fault {
+        CutoverFaultForTest::TargetDurabilityBarrier => {
+            CUTOVER_FAULT.store(fault as u8, Ordering::SeqCst);
+        }
+        CutoverFaultForTest::ReceiptDurability => {
+            CUTOVER_FAULT.store(0, Ordering::SeqCst);
+            storage::set_durable_atomic_write_fault_for_test(
+                storage::DurableAtomicWriteFaultForTest::AfterTempSync,
+            );
+        }
+        CutoverFaultForTest::ReceiptAfterRename => {
+            CUTOVER_FAULT.store(0, Ordering::SeqCst);
+            storage::set_durable_atomic_write_fault_for_test(
+                storage::DurableAtomicWriteFaultForTest::AfterRename,
+            );
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -73,6 +92,7 @@ pub struct MemoryCutoverReport {
 struct BranchMemoryCutoverReceipt {
     version: u32,
     project_id: String,
+    archive_schema: String,
     completed_at: i64,
     sources: Vec<BranchMemoryCutoverReceiptSource>,
 }
@@ -81,6 +101,8 @@ struct BranchMemoryCutoverReceipt {
 struct BranchMemoryCutoverReceiptSource {
     relative_path: PathBuf,
     generation: String,
+    legacy_only: bool,
+    archives: Vec<crate::migrate::consolidate::sqlite::MemoryV2ArchiveMergeProof>,
 }
 
 pub async fn plan(options: &MemoryCutoverOptions) -> Result<MemoryCutoverReport> {
@@ -195,6 +217,7 @@ async fn apply_planned(
     let target = graph.open_project_store_db().await?;
     let scratch = resolved.data_root.join("scratch").join("memory-cutover");
     storage::PrivateStoreIo::create_dir_all(&scratch)?;
+    let mut archive_proofs = Vec::with_capacity(planned.sources.len());
     for source in &planned.sources {
         if source_generation(&source.path)? != source.generation {
             return Err(migration_error(format!(
@@ -207,10 +230,17 @@ async fn apply_planned(
             .map_err(|error| {
                 migration_error(format!("snapshot '{}': {error}", source.path.display()))
             })?;
-        crate::migrate::consolidate::sqlite::merge_branch_legacy_memory_snapshot(
+        let proofs = crate::migrate::consolidate::sqlite::merge_branch_legacy_memory_snapshot(
             &target, &snapshot,
         )
         .await?;
+        if source.memory_v2_fact_count > 0 && proofs.is_empty() {
+            return Err(migration_error(format!(
+                "branch memory source '{}' has V2 authority without an archive inclusion proof",
+                source.path.display()
+            )));
+        }
+        archive_proofs.push((source.path.clone(), proofs));
     }
     crate::migrate::consolidate::sqlite::rebuild_branch_cutover_memory_banks(&target).await?;
 
@@ -243,8 +273,7 @@ async fn apply_planned(
     inject_cutover_fault(CutoverFaultPhase::TargetDurabilityBarrier)?;
     storage::PrivateStoreIo::sync_sqlite_family(&resolved.graph_db_path)
         .map_err(|error| migration_error(format!("synchronize project memory target: {error}")))?;
-    inject_cutover_fault(CutoverFaultPhase::ReceiptDurability)?;
-    write_cutover_receipt(&resolved, &planned.sources)?;
+    write_cutover_receipt(&resolved, &planned.sources, &archive_proofs)?;
 
     Ok(MemoryCutoverReport {
         applied: true,
@@ -256,7 +285,6 @@ async fn apply_planned(
 #[derive(Clone, Copy)]
 enum CutoverFaultPhase {
     TargetDurabilityBarrier = 1,
-    ReceiptDurability = 2,
 }
 
 fn inject_cutover_fault(phase: CutoverFaultPhase) -> Result<()> {
@@ -269,7 +297,6 @@ fn inject_cutover_fault(phase: CutoverFaultPhase) -> Result<()> {
             CutoverFaultPhase::TargetDurabilityBarrier => {
                 "injected target durability barrier failure"
             }
-            CutoverFaultPhase::ReceiptDurability => "injected receipt durability failure",
         }));
     }
     Ok(())
@@ -292,10 +319,19 @@ pub fn verify_branch_removal_receipts(
                         receipt_path.display()
                     ))
                 })?;
-            if receipt.version != 1 {
+            if receipt.version != 2 || receipt.archive_schema != MEMORY_V2_OWNER_ARCHIVE_SCHEMA_V1 {
                 return Err(migration_error(
                     "unsupported project-memory cutover receipt",
                 ));
+            }
+            let manifest_path = data_root.join(storage::STORE_MANIFEST_FILENAME);
+            if manifest_path.is_file() {
+                let manifest = storage::read_store_manifest(&manifest_path)?;
+                if manifest.project_id.as_deref() != Some(receipt.project_id.as_str()) {
+                    return Err(migration_error(
+                        "project-memory cutover receipt belongs to a different project",
+                    ));
+                }
             }
             Some(receipt)
         }
@@ -370,8 +406,67 @@ pub fn verify_branch_removal_receipts(
                 original.display()
             )));
         }
+        let has_v2_authority = branch_has_v2_authority(&candidate);
+        if has_v2_authority && (expected.legacy_only || expected.archives.is_empty()) {
+            return Err(migration_error(format!(
+                "branch database '{}' has V2 authority without a digest-bound archive receipt",
+                original.display()
+            )));
+        }
+        if !has_v2_authority && !expected.legacy_only {
+            return Err(migration_error(format!(
+                "branch database '{}' receipt misclassifies legacy-only authority",
+                original.display()
+            )));
+        }
+        for proof in &expected.archives {
+            let owner_matches = matches!(
+                &proof.owner,
+                FactOwnerV1::Project { project_id }
+                    if project_id.as_str() == receipt
+                        .as_ref()
+                        .map(|receipt| receipt.project_id.as_str())
+                        .unwrap_or_default()
+            );
+            if proof.schema != MEMORY_V2_OWNER_ARCHIVE_SCHEMA_V1
+                || !owner_matches
+                || !is_sha256_digest(&proof.source_digest)
+                || !is_sha256_digest(&proof.target_digest)
+            {
+                return Err(migration_error(format!(
+                    "branch database '{}' has an incomplete archive inclusion proof",
+                    original.display()
+                )));
+            }
+        }
     }
     Ok(())
+}
+
+fn branch_has_v2_authority(path: &Path) -> bool {
+    crate::sqlite_read_snapshot::checkpointed_database_has_any_rows(
+        path,
+        &[
+            "memory_v2_facts",
+            "memory_v2_assertions",
+            "memory_v2_lineage_events",
+            "memory_v2_evidence",
+            "memory_v2_feedback_history",
+            "memory_v2_fact_relations",
+            "memory_v2_proposals",
+            "memory_v2_proposal_transitions",
+            "memory_v2_legacy_map",
+            "memory_v2_legacy_quarantine",
+            "memory_v2_compatibility_operation_receipts",
+        ],
+    )
+    .is_ok_and(|has_rows| has_rows)
+}
+
+fn is_sha256_digest(value: &str) -> bool {
+    value
+        .strip_prefix("sha256:")
+        .is_some_and(|hex| hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
 
 fn branch_has_no_durable_memory(path: &Path) -> bool {
@@ -529,10 +624,15 @@ fn verify_source_generations(sources: &[MemoryCutoverSource]) -> Result<()> {
 fn write_cutover_receipt(
     resolved: &ResolvedMemoryCutover,
     sources: &[MemoryCutoverSource],
+    archive_proofs: &[(
+        PathBuf,
+        Vec<crate::migrate::consolidate::sqlite::MemoryV2ArchiveMergeProof>,
+    )],
 ) -> Result<()> {
     let receipt = BranchMemoryCutoverReceipt {
-        version: 1,
+        version: 2,
         project_id: resolved.project_id.clone(),
+        archive_schema: MEMORY_V2_OWNER_ARCHIVE_SCHEMA_V1.to_owned(),
         completed_at: crate::tracedecay::current_timestamp(),
         sources: sources
             .iter()
@@ -547,9 +647,34 @@ fn write_cutover_receipt(
                             source.path.display()
                         ))
                     })?;
+                let proofs = archive_proofs
+                    .iter()
+                    .find(|(path, _)| path == &source.path)
+                    .map(|(_, proofs)| proofs.clone())
+                    .ok_or_else(|| {
+                        migration_error(format!(
+                            "branch source '{}' has no archive proof result",
+                            source.path.display()
+                        ))
+                    })?;
+                for proof in &proofs {
+                    if proof.schema != MEMORY_V2_OWNER_ARCHIVE_SCHEMA_V1
+                        || !matches!(
+                            &proof.owner,
+                            FactOwnerV1::Project { project_id }
+                                if project_id.as_str() == resolved.project_id
+                        )
+                    {
+                        return Err(migration_error(
+                            "Memory V2 archive proof has an incompatible schema or project owner",
+                        ));
+                    }
+                }
                 Ok(BranchMemoryCutoverReceiptSource {
                     relative_path,
                     generation: source.generation.clone(),
+                    legacy_only: proofs.is_empty(),
+                    archives: proofs,
                 })
             })
             .collect::<Result<Vec<_>>>()?,
@@ -680,8 +805,9 @@ mod tests {
 
         fn write_receipt(&self, sources: Vec<BranchMemoryCutoverReceiptSource>) {
             let receipt = BranchMemoryCutoverReceipt {
-                version: 1,
+                version: 2,
                 project_id: "fixture-project".to_owned(),
+                archive_schema: MEMORY_V2_OWNER_ARCHIVE_SCHEMA_V1.to_owned(),
                 completed_at: 1,
                 sources,
             };
@@ -696,6 +822,8 @@ mod tests {
             BranchMemoryCutoverReceiptSource {
                 relative_path: PathBuf::from(format!("branches/{branch}.db")),
                 generation: source_generation(&self.database_path(branch)).unwrap(),
+                legacy_only: true,
+                archives: Vec::new(),
             }
         }
 
@@ -781,6 +909,8 @@ mod tests {
             relative_path: PathBuf::from("branches/feature.db"),
             generation: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
                 .to_owned(),
+            legacy_only: true,
+            archives: Vec::new(),
         }]);
 
         let error = fixture
@@ -806,6 +936,8 @@ mod tests {
             relative_path: PathBuf::from("branches/alpha.db"),
             generation: "sha256:0000000000000000000000000000000000000000000000000000000000000000"
                 .to_owned(),
+            legacy_only: true,
+            archives: Vec::new(),
         }]);
         let alpha = fixture.database_path("alpha");
         let zeta = fixture.database_path("zeta");
