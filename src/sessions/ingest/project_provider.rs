@@ -45,6 +45,9 @@ impl<'a> ProjectProviderRun<'a> {
     /// longer pins each `run()` at the call site.
     pub(super) fn run(self) -> Pin<Box<dyn Future<Output = ProviderRunOutcome> + Send + 'a>> {
         Box::pin(async move {
+            if self.cancellation.is_cancelled() {
+                return ProviderRunOutcome::skipped();
+            }
             match self.candidate {
                 SessionProvider::Codex => self.run_codex().await,
                 SessionProvider::Kiro => self.run_kiro().await,
@@ -71,6 +74,10 @@ impl<'a> ProjectProviderRun<'a> {
         let mut deferred = discovery.is_truncated();
         let mut outcome = ProviderRunOutcome::bounded(TranscriptIngestStats::default(), 0, false);
         for path in discovery.paths {
+            if self.cancellation.is_cancelled() {
+                deferred = true;
+                break;
+            }
             match codex::try_admit_codex_jsonl_observations_for_project_with_admission(
                 &path,
                 self.project_root,
@@ -173,6 +180,7 @@ impl<'a> ProjectProviderRun<'a> {
             self.project_id.clone(),
             self.facade,
             self.max_new_bytes,
+            self.cancellation,
         )
         .await
         {
@@ -275,6 +283,7 @@ async fn ingest_project_claude_observations(
     project_id: ProjectId,
     admission: &HostAdmissionFacade<'_>,
     max_new_bytes: u64,
+    cancellation: &ObservationCancellation,
 ) -> std::result::Result<
     claude_observation::ClaudeObservationIngestStats,
     claude_observation::ClaudeObservationIngestError,
@@ -288,7 +297,7 @@ async fn ingest_project_claude_observations(
         ObservationScopeV1::Project { project_id },
         admission,
         Some(max_new_bytes),
-        ObservationCancellation::default(),
+        cancellation.clone(),
     )
     .await
 }
