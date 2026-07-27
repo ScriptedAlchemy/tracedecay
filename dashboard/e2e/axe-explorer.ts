@@ -8,6 +8,14 @@
  * directory, and drives the surface through browse / searched / inspector so
  * the states a plain navigation never reaches are scanned too.
  *
+ * /explorer is deliberately absent from `axe-audit.ts`'s Plan 11 matrix subset:
+ * this file already owns the surface's driven states, so the matrix runs here
+ * instead of being reached for twice. Every state is swept at the three
+ * showcase viewports in both themes, exactly as before; the two states a plain
+ * arrival reaches — browse and searched — additionally carry the rest of the
+ * plan's viewport, zoom and media matrix, because they are the states whose
+ * long code signatures and dense result rows are what reflow actually strains.
+ *
  *   npm run axe:explorer              # from `dashboard/`
  *   npm run axe:explorer -- <label>   # output subdirectory under `.explorer-axe/`
  */
@@ -17,12 +25,28 @@ import { chromium, type Page } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
 import { installApiFixtures } from '../stories/fixtures/route.ts';
 import { STILLNESS_INIT, startStaticServer } from './axe-harness.ts';
+import {
+  FORCED_COLORS_PROBE,
+  MIN_TOUCH_TARGET_PX,
+  REFLOW_PROBE,
+  RESPONSIVE_MATRIX,
+  SHOWCASE_VIEWPORTS,
+  TOUCH_TARGET_PROBE,
+  clippedContentFailures,
+  reflowFailures,
+  touchTargetFailures,
+  type ForcedColorsOptOut,
+  type MediaMode,
+  type ReflowReport,
+  type Theme,
+  type TouchTargetReport,
+  type Viewport,
+} from './responsive.ts';
 import { ExplorerQueryRunSchema } from '../src/contracts/wire.ts';
 
 const LABEL = process.argv[2] ?? 'current';
 const OUT = path.join(process.cwd(), '.explorer-axe', LABEL);
-const WIDTHS = [320, 768, 1440] as const;
-const THEMES = ['light', 'dark'] as const;
+const THEMES: readonly Theme[] = ['light', 'dark'];
 
 const CODE_ROWS = [
   {
@@ -323,27 +347,83 @@ function emptyRun(query: string, confirmed: boolean): unknown {
 interface Finding {
   state: string;
   theme: string;
+  viewport: string;
   width: number;
+  height: number;
+  zoom: number;
+  media: MediaMode;
   violations: { id: string; impact: string | null; nodes: string[]; help: string }[];
+  reflow: ReflowReport;
+  targets: TouchTargetReport;
+  forcedColorOptOuts?: ForcedColorsOptOut[];
+  disabledRules?: string[];
+  /** The plan assertions this combination failed, if any. */
+  planFailures: string[];
 }
 
 const findings: Finding[] = [];
+const planFailures: string[] = [];
 
-async function scan(page: Page, state: string, theme: string, width: number): Promise<number> {
-  const results = await new AxeBuilder({ page })
-    .withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'])
-    .analyze();
+/**
+ * Scan and measure one state at one combination.
+ *
+ * `color-contrast` is off under forced colors for the reason recorded in
+ * `responsive.ts`: axe-core 4.12.1 reads the authored palette rather than the
+ * forced one, so it scores the dark theme as hundreds of failures the browser
+ * has already corrected. The direct measurement of what forced colors can
+ * genuinely break — elements declining the forced palette — replaces it.
+ */
+async function scan(
+  page: Page,
+  state: string,
+  theme: Theme,
+  viewport: Viewport,
+  media: MediaMode,
+): Promise<number> {
+  const off = media === 'forced-colors' ? ['color-contrast'] : [];
+  const builder = new AxeBuilder({ page }).withTags([
+    'wcag2a',
+    'wcag2aa',
+    'wcag21a',
+    'wcag21aa',
+  ]);
+  const results = await (off.length > 0 ? builder.disableRules(off) : builder).analyze();
+  const reflow = (await page.evaluate(REFLOW_PROBE)) as ReflowReport;
+  const targets = (await page.evaluate(TOUCH_TARGET_PROBE)) as TouchTargetReport;
+  const optOuts =
+    media === 'forced-colors'
+      ? ((await page.evaluate(FORCED_COLORS_PROBE)) as ForcedColorsOptOut[])
+      : [];
+  const tag = `${state}/${theme}/${viewport.id}/${media}`;
+  // Reflow is gated only where the plan gates it — 320 CSS pixels and 400%
+  // zoom — and measured everywhere.
+  const failures = [
+    ...(viewport.reflowGated ? reflowFailures(reflow, tag) : []),
+    ...(viewport.reflowGated ? clippedContentFailures(reflow, tag) : []),
+    ...touchTargetFailures(targets, tag),
+  ];
+  planFailures.push(...failures);
   findings.push({
     state,
     theme,
-    width,
+    viewport: viewport.id,
+    width: viewport.width,
+    height: viewport.height,
+    zoom: viewport.zoom,
+    media,
     violations: results.violations.map((v) => ({
       id: v.id,
       impact: v.impact ?? null,
       help: v.help,
       nodes: v.nodes.map((n) => `${n.target.join(' ')} :: ${n.html.slice(0, 180)}`),
     })),
+    reflow,
+    targets,
+    ...(optOuts.length ? { forcedColorOptOuts: optOuts } : {}),
+    ...(off.length ? { disabledRules: off } : {}),
+    planFailures: failures,
   });
+  for (const f of failures) console.log(`      ! ${f}`);
   return results.violations.length;
 }
 
@@ -351,7 +431,82 @@ async function shoot(page: Page, name: string): Promise<void> {
   await page.screenshot({ path: path.join(OUT, `${name}.png`), fullPage: true });
 }
 
-async function setTheme(page: Page, theme: string): Promise<void> {
+/**
+ * Open a row, and distinguish the three things that can happen.
+ *
+ * Absent is not a finding: at 320 the inspector column is `max-md:hidden`, so
+ * a state that renders no row there is a layout fact. PRESENT AND UNCLICKABLE
+ * is a finding, and it is the one the plan names — "at 320 pixels and 400%
+ * zoom there is no ... inaccessible action". A rendered control that cannot be
+ * brought into view is exactly that, and the previous `click({ force: true })`
+ * turned it into a fatal that abandoned every remaining state instead of
+ * reporting it. The box and the capture go into the record so the claim can be
+ * checked rather than taken on trust.
+ */
+async function openRow(page: Page, name: RegExp, tag: string): Promise<boolean> {
+  const row = page.getByRole('button', { name }).first();
+  if ((await row.count()) === 0) return false;
+  try {
+    // `force` because a sticky list caption can cover a row that was just
+    // scrolled to; that overlap is itself a finding, not a harness problem.
+    await row.click({ force: true, timeout: 10_000 });
+  } catch (err) {
+    const box = await row.boundingBox().catch(() => null);
+    const size = page.viewportSize();
+    // Whether ANY ancestor could have brought it into view. Without this the
+    // report would be asserting unreachability from a failed click, and a
+    // failed click is also what a Playwright quirk looks like.
+    const reach = await row
+      .evaluate((el) => {
+        const chain: string[] = [];
+        let room = 0;
+        for (let up: Element | null = el.parentElement; up !== null; up = up.parentElement) {
+          const style = getComputedStyle(up);
+          const scrolls =
+            (style.overflowY === 'auto' || style.overflowY === 'scroll') &&
+            up.scrollHeight > up.clientHeight + 1;
+          if (scrolls) room += up.scrollHeight - up.clientHeight - up.scrollTop;
+          if (scrolls || up === document.body) {
+            chain.push(
+              `${up.tagName.toLowerCase()} overflowY=${style.overflowY} ` +
+                `scrollH=${up.scrollHeight} clientH=${up.clientHeight} scrollTop=${up.scrollTop}`,
+            );
+          }
+        }
+        const doc = document.documentElement;
+        return {
+          remainingScroll: Math.round(room),
+          documentScroll: doc.scrollHeight - doc.clientHeight,
+          chain,
+        };
+      })
+      .catch(() => null);
+    const detail =
+      `${tag}: the row matching ${String(name)} is rendered but cannot be activated. ` +
+      `Viewport ${size?.width}x${size?.height}, row box ${JSON.stringify(box)}, ` +
+      `scroll available ${JSON.stringify(reach)}. ` +
+      `${String(err).split('\n')[0]}`;
+    planFailures.push(detail);
+    console.log(`      ! ${detail}`);
+    await page.screenshot({
+      path: path.join(OUT, `unreachable__${tag.replace(/[^\w-]+/g, '_')}.png`),
+      fullPage: true,
+    });
+    return false;
+  }
+  await page.waitForTimeout(900);
+  return true;
+}
+
+async function applyMedia(page: Page, media: MediaMode): Promise<void> {
+  await page.emulateMedia({
+    reducedMotion: 'reduce',
+    contrast: media === 'contrast-more' ? 'more' : 'no-preference',
+    forcedColors: media === 'forced-colors' ? 'active' : 'none',
+  });
+}
+
+async function setTheme(page: Page, theme: Theme): Promise<void> {
   await page.evaluate((t) => {
     try {
       localStorage.setItem('td-theme', t);
@@ -444,57 +599,91 @@ async function main(): Promise<void> {
   await page.addInitScript({ content: STILLNESS_INIT });
 
   let total = 0;
-  for (const width of WIDTHS) {
-    await page.setViewportSize({ width, height: 900 });
+  /** Land on /explorer fresh, in the given theme. */
+  const arrive = async (viewport: Viewport, theme: Theme): Promise<void> => {
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    await page.goto(`${base}/explorer`, { waitUntil: 'domcontentloaded' });
+    await setTheme(page, theme);
+    await page.waitForSelector('main#td-main', { timeout: 20_000 });
+    await page.waitForTimeout(900);
+  };
+  const search = async (term: string): Promise<void> => {
+    const box = page.getByRole('searchbox').first();
+    await box.click();
+    await box.fill(term);
+    await box.press('Enter');
+    await page.waitForTimeout(1_200);
+  };
+
+  // The full state sweep, at the plan's three showcase viewports in both
+  // themes. Unchanged in what it drives; the heights are now the plan's
+  // (320x568, 768x1024, 1440x900) rather than a uniform 900.
+  for (const viewport of SHOWCASE_VIEWPORTS) {
     for (const theme of THEMES) {
-      console.log(`[axe] ${theme} @ ${width}`);
-      await page.goto(`${base}/explorer`, { waitUntil: 'domcontentloaded' });
-      await setTheme(page, theme);
-      await page.waitForSelector('main#td-main', { timeout: 20_000 });
-      await page.waitForTimeout(900);
+      console.log(`[axe] ${theme} @ ${viewport.id}`);
+      await applyMedia(page, 'reduced-motion');
+      await arrive(viewport, theme);
 
-      total += await scan(page, 'browse', theme, width);
-      await shoot(page, `browse__${theme}__${width}`);
+      total += await scan(page, 'browse', theme, viewport, 'reduced-motion');
+      await shoot(page, `browse__${theme}__${viewport.id}`);
 
-      const box = page.getByRole('searchbox').first();
-      await box.click();
-      await box.fill('graph');
-      await box.press('Enter');
-      await page.waitForTimeout(1_200);
-      total += await scan(page, 'searched', theme, width);
-      await shoot(page, `searched__${theme}__${width}`);
+      await search('graph');
+      total += await scan(page, 'searched', theme, viewport, 'reduced-motion');
+      await shoot(page, `searched__${theme}__${viewport.id}`);
 
-      // `force` because a sticky list caption can cover a row that was just
-      // scrolled to; that overlap is itself a finding, not a harness problem.
-      const row = page.getByRole('button', { name: /graph_search/ }).first();
-      if ((await row.count()) > 0) {
-        await row.click({ force: true });
-        await page.waitForTimeout(900);
-        total += await scan(page, 'inspector', theme, width);
-        await shoot(page, `inspector__${theme}__${width}`);
+      const tag = `${theme}/${viewport.id}`;
+      if (await openRow(page, /graph_search/, `inspector/${tag}`)) {
+        total += await scan(page, 'inspector', theme, viewport, 'reduced-motion');
+        await shoot(page, `inspector__${theme}__${viewport.id}`);
       }
 
-      const sessionRow = page.getByRole('button', { name: /Using graph search/ }).first();
-      if ((await sessionRow.count()) > 0) {
-        await sessionRow.click({ force: true });
-        await page.waitForTimeout(900);
-        total += await scan(page, 'session-inspector', theme, width);
-        await shoot(page, `session__${theme}__${width}`);
+      if (await openRow(page, /Using graph search/, `session-inspector/${tag}`)) {
+        total += await scan(page, 'session-inspector', theme, viewport, 'reduced-motion');
+        await shoot(page, `session__${theme}__${viewport.id}`);
       }
 
-      await box.fill('zzzz-no-such-token');
-      await box.press('Enter');
-      await page.waitForTimeout(1_200);
-      total += await scan(page, 'no-rows-bounded', theme, width);
-      await shoot(page, `empty-bounded__${theme}__${width}`);
+      await search('zzzz-no-such-token');
+      total += await scan(page, 'no-rows-bounded', theme, viewport, 'reduced-motion');
+      await shoot(page, `empty-bounded__${theme}__${viewport.id}`);
 
-      await box.fill('confirmed-no-such-token');
-      await box.press('Enter');
-      await page.waitForTimeout(1_200);
-      total += await scan(page, 'no-rows-confirmed', theme, width);
-      await shoot(page, `empty-confirmed__${theme}__${width}`);
+      await search('confirmed-no-such-token');
+      total += await scan(page, 'no-rows-confirmed', theme, viewport, 'reduced-motion');
+      await shoot(page, `empty-confirmed__${theme}__${viewport.id}`);
     }
   }
+
+  // The rest of the plan matrix, over browse and searched. Grouped by (theme,
+  // media) with a single arrival per group and a resize per viewport: every
+  // mode here resolves through CSS, so re-searching thirty times would spend
+  // the budget re-reaching a state the group already holds.
+  const groups = new Map<string, typeof RESPONSIVE_MATRIX>();
+  for (const c of RESPONSIVE_MATRIX) {
+    const key = `${c.theme}|${c.media}`;
+    groups.set(key, [...(groups.get(key) ?? []), c]);
+  }
+  for (const group of groups.values()) {
+    const head = group[0]!;
+    console.log(`[axe] matrix ${head.theme} / ${head.media}`);
+    await applyMedia(page, head.media);
+    await arrive(head.viewport, head.theme);
+    for (const c of group) {
+      await page.setViewportSize({ width: c.viewport.width, height: c.viewport.height });
+      // Reflow and media-query re-evaluation need to settle before measuring.
+      await page.waitForTimeout(450);
+      total += await scan(page, 'browse', c.theme, c.viewport, c.media);
+      await shoot(page, `browse__${c.theme}__${c.viewport.id}__${c.media}`);
+    }
+    // One searched pass per group, at the group's widest viewport: the result
+    // list is where long code signatures meet a narrow column, and re-running
+    // the query at every size in the group buys the same rows in a different
+    // box for six times the wall clock.
+    const widest = [...group].sort((a, b) => b.viewport.width - a.viewport.width)[0]!;
+    await page.setViewportSize({ width: widest.viewport.width, height: widest.viewport.height });
+    await search('graph');
+    total += await scan(page, 'searched', widest.theme, widest.viewport, widest.media);
+    await shoot(page, `searched__${widest.theme}__${widest.viewport.id}__${widest.media}`);
+  }
+  await applyMedia(page, 'reduced-motion');
 
   writeFileSync(path.join(OUT, 'findings.json'), `${JSON.stringify(findings, null, 2)}\n`);
 
@@ -504,19 +693,59 @@ async function main(): Promise<void> {
 
   console.log(`\n===== explorer axe (${LABEL}) =====`);
   for (const f of findings) {
-    const tag = `${f.state}/${f.theme}/${f.width}`;
+    const tag = `${f.state}/${f.theme}/${f.viewport}/${f.media}`;
     if (f.violations.length === 0) {
-      console.log(`  ${tag.padEnd(34)} 0`);
+      console.log(`  ${tag.padEnd(46)} 0`);
       continue;
     }
-    console.log(`  ${tag.padEnd(34)} ${f.violations.length}`);
+    console.log(`  ${tag.padEnd(46)} ${f.violations.length}`);
     for (const v of f.violations) {
       console.log(`      - ${v.id} [${v.impact}] x${v.nodes.length} — ${v.help}`);
       for (const n of v.nodes.slice(0, 3)) console.log(`          ${n}`);
     }
   }
+  // One row per offending control rather than one per scan: the same 28px row
+  // measured at thirty combinations is one defect, not thirty.
+  const undersized = new Map<string, { size: string; name: string; scans: number; where: string }>();
+  for (const f of findings) {
+    for (const t of f.targets.undersized) {
+      const seen = undersized.get(t.selector);
+      if (seen === undefined) {
+        undersized.set(t.selector, {
+          size: `${t.width}x${t.height}`,
+          name: t.name,
+          scans: 1,
+          where: `${f.state}/${f.theme}/${f.viewport}/${f.media}`,
+        });
+      } else seen.scans += 1;
+    }
+  }
+  const optOuts = new Map<string, ForcedColorsOptOut>();
+  for (const f of findings) for (const o of f.forcedColorOptOuts ?? []) optOuts.set(o.selector, o);
+
   console.log(`\n  scans=${findings.length}  totalViolations=${total}`);
   console.log(`  byRule=${JSON.stringify(Object.fromEntries(byRule))}`);
+  console.log(
+    `  plan touch targets (>= ${MIN_TOUCH_TARGET_PX}x${MIN_TOUCH_TARGET_PX} CSS px): ` +
+      `${undersized.size} distinct control(s) under size`,
+  );
+  for (const [selector, t] of undersized) {
+    console.log(
+      `      ${t.size}  ${selector}${t.name === '' ? '' : `  "${t.name}"`}  in ${t.scans} scan(s), e.g. ${t.where}`,
+    );
+  }
+  console.log(
+    `  plan reflow (320 CSS px and 400% zoom): ` +
+      `${planFailures.filter((f) => f.includes('scrolls horizontally')).length} failure(s)`,
+  );
+  console.log(
+    `  forced colors: axe color-contrast disabled (it reads the authored palette, not the ` +
+      `forced one); ${optOuts.size} element(s) decline the forced palette`,
+  );
+  for (const o of [...optOuts.values()].slice(0, 6)) {
+    console.log(`      ${o.selector} color=${o.color} bg=${o.background}`);
+  }
+  console.log(`  planFailures=${planFailures.length}`);
   console.log(`  pageErrors=${pageErrors.length}`);
   console.log(`  shots=${OUT}`);
 
@@ -526,8 +755,10 @@ async function main(): Promise<void> {
   // above could report violations and still be read as a pass by anything that
   // checked the exit status — which is every CI runner and every reviewer who
   // trusted a green command. Nothing about the report changed; only that it can
-  // now fail.
-  if (total > 0 || pageErrors.length > 0) process.exitCode = 1;
+  // now fail — and it now fails on the two Plan 11 measurements as well as on
+  // axe, because a page that reflows into a sideways scroll or ships a 24px
+  // control is inaccessible whether or not any axe rule names it.
+  if (total > 0 || pageErrors.length > 0 || planFailures.length > 0) process.exitCode = 1;
 }
 
 main().catch((err: unknown) => {
