@@ -74,10 +74,10 @@ audit against the requirements below found these still unmet. They are
 recorded so acceptance is not claimed early. They are capability/test gaps, not
 permission to replace unavailable data with fabricated values.
 
-- **PR14 / Plan 11 owner:** performance budgets
-  (Brotli/LCP/frame p95/heap/SSE sustain), AST import-boundary rules,
-  virtualization mount-count assertions, and MSW fault injection inside
-  Vitest remain absent.
+- **PR14 / Plan 11 owner:** the runtime performance budgets (LCP, frame p95,
+  heap retention, SSE sustain), AST import-boundary rules, and MSW fault
+  injection inside Vitest remain absent. The transfer budgets and the
+  virtualization mount ceiling are now enforced — see the closure below.
 - **PR14 / Plan 11 owner:** the viewport matrix is partial. Current audits cover
   320/768/1440 in light and dark, but not 390×844, 1024×768, 1280×720,
   200%/400% zoom, `prefers-contrast: more`, or forced colors.
@@ -96,6 +96,30 @@ permission to replace unavailable data with fabricated values.
   `RequestCancel` and `RequestExternalHandoff` authority-negative coverage
   belongs to the executable Work/handoff journey and does not block the PR14
   twelve-workspace checkpoint.
+
+**Transfer budgets and list bounds closed (2026-07-27).** The two payload
+ceilings this plan states are now measured and enforced by
+`scripts/check-dashboard-budget.mjs`, run in the `dashboard-assets` CI job and
+locked into `tests/dashboard_workflow_contract_test.sh` beside the
+accessibility gates. It Brotli-compresses the real artifact, so these are
+transfer sizes rather than a proxy, and it fails on a missing lazy-chunk
+directory so a non-code-split bundle cannot pass by measuring nothing.
+
+Its first run found a live breach: `Chart` imported all of ECharts, producing a
+1,080 KiB raw / 288 KiB Brotli async chunk against the 200 KiB per-chunk
+ceiling. The product draws only bar and line series on a grid with a tooltip, so
+`dashboard/src/viz/chart/echarts.ts` now registers exactly that, taking the
+chunk to 536 KiB raw / 150 KiB Brotli. The initial payload measures 138 KiB
+Brotli against its 250 KiB ceiling. Because ECharts answers an unregistered
+series with an empty canvas rather than an error, `Chart` refuses to render a
+series type outside that registered set and says so, rather than presenting a
+blank canvas as a measurement.
+
+The virtualization bound is likewise asserted rather than described:
+`VirtualList.dom.test.tsx` proves a 100-row page and the 200-row threshold stay
+plainly rendered, and that a 5,000- and 20,000-row list windows to a
+viewport-sized set under the 250-element ceiling — with a nonzero lower bound,
+because a virtualizer that mounted nothing would otherwise satisfy any ceiling.
 
 One audit finding was checked and refuted: `/api/plugins/graph/strata` does
 have a Code-workspace consumer (`Strata.tsx` reads it through
