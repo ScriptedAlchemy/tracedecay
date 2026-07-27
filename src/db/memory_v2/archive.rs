@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use tracedecay_domain::{FactOwnerV1, ProjectId};
 use tracedecay_store::{
@@ -27,6 +27,13 @@ impl MemoryV2ArchiveDatabase {
             Self::Source => "source.",
         }
     }
+
+    fn schema_name(self) -> &'static str {
+        match self {
+            Self::Main => "main",
+            Self::Source => "source",
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -44,6 +51,11 @@ struct TableSpec {
     columns: &'static [&'static str],
     key_columns: &'static [&'static str],
     owner_filter: OwnerFilter,
+}
+
+struct PhysicalForeignKey {
+    target_family: MemoryV2ArchiveFamilyV1,
+    columns: Vec<(String, String)>,
 }
 
 pub(crate) async fn list_memory_v2_archive_owners(
@@ -81,6 +93,8 @@ pub(crate) async fn export_memory_v2_owner_archive(
     database: MemoryV2ArchiveDatabase,
     owner: &FactOwnerV1,
 ) -> Result<MemoryV2OwnerArchiveV1> {
+    validate_table_specs()?;
+    validate_physical_schema(conn, database).await?;
     owner
         .validate()
         .map_err(|error| db_message(OPERATION, error.to_string()))?;
@@ -116,6 +130,8 @@ pub(crate) async fn import_memory_v2_owner_archive(
     archive: &MemoryV2OwnerArchiveV1,
     plan: &MemoryV2OwnerMergePlanV1,
 ) -> Result<()> {
+    validate_table_specs()?;
+    validate_physical_schema(conn, MemoryV2ArchiveDatabase::Main).await?;
     if plan.owner() != archive.owner()
         || plan.source_digest()
             != &archive
@@ -144,6 +160,26 @@ pub(crate) async fn import_memory_v2_owner_archive(
         let spec = specs
             .get(&record.family())
             .ok_or_else(|| db_message(OPERATION, "archive record has no physical table adapter"))?;
+        let source_order = specs
+            .keys()
+            .position(|family| family == &record.family())
+            .ok_or_else(|| db_message(OPERATION, "archive family has no insertion order"))?;
+        for reference in record.references() {
+            let target_order = specs
+                .keys()
+                .position(|family| family == &reference.family())
+                .ok_or_else(|| db_message(OPERATION, "archive reference family is unsupported"))?;
+            if target_order > source_order {
+                return Err(db_message(
+                    OPERATION,
+                    format!(
+                        "archive family {:?} precedes its {:?} dependency",
+                        record.family(),
+                        reference.family()
+                    ),
+                ));
+            }
+        }
         insert_record(conn, spec, record).await?;
     }
     let verified =
@@ -168,6 +204,7 @@ async fn export_table(
     project_id: &str,
     owner_json: &str,
 ) -> Result<Vec<MemoryV2ArchiveRecordV1>> {
+    let physical_foreign_keys = physical_foreign_keys(conn, database, spec).await?;
     let columns = spec.columns.join(", ");
     let predicate = owner_predicate(database, spec.owner_filter);
     let sql = format!(
@@ -205,6 +242,12 @@ async fn export_table(
             key.insert((*column).to_owned(), value);
         }
         let references = references_for(spec.family, &values)?;
+        validate_physical_foreign_key_references(
+            spec,
+            &values,
+            &references,
+            &physical_foreign_keys,
+        )?;
         records.push(
             MemoryV2ArchiveRecordV1::new(spec.family, key, fields, references)
                 .map_err(|error| db_message(OPERATION, error.to_string()))?,
@@ -213,11 +256,138 @@ async fn export_table(
     Ok(records)
 }
 
+async fn physical_foreign_keys(
+    conn: &(impl Executor + Sync),
+    database: MemoryV2ArchiveDatabase,
+    spec: &TableSpec,
+) -> Result<Vec<PhysicalForeignKey>> {
+    let sql = format!(
+        "PRAGMA {}.foreign_key_list('{}')",
+        database.schema_name(),
+        spec.table
+    );
+    let mut rows = conn
+        .query(&sql, ())
+        .await
+        .map_err(|error| db_error(OPERATION, error))?;
+    let mut grouped: BTreeMap<i64, (String, Vec<(i64, String, String)>)> = BTreeMap::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| db_error(OPERATION, error))?
+    {
+        let id: i64 = row.get(0).map_err(|error| db_error(OPERATION, error))?;
+        let sequence: i64 = row.get(1).map_err(|error| db_error(OPERATION, error))?;
+        let target_table: String = row.get(2).map_err(|error| db_error(OPERATION, error))?;
+        let source_column: String = row.get(3).map_err(|error| db_error(OPERATION, error))?;
+        let target_column: String = row.get(4).map_err(|error| db_error(OPERATION, error))?;
+        let entry = grouped
+            .entry(id)
+            .or_insert_with(|| (target_table.clone(), Vec::new()));
+        if entry.0 != target_table {
+            return Err(db_message(
+                OPERATION,
+                "foreign key table changed within one id",
+            ));
+        }
+        entry.1.push((sequence, source_column, target_column));
+    }
+    grouped
+        .into_values()
+        .map(|(target_table, mut columns)| {
+            columns.sort_by_key(|(sequence, _, _)| *sequence);
+            let target_family = table_specs()
+                .iter()
+                .find(|target| target.table == target_table)
+                .map(|target| target.family)
+                .ok_or_else(|| {
+                    db_message(
+                        OPERATION,
+                        format!(
+                            "archive {:?} references non-authoritative table `{target_table}`",
+                            spec.family
+                        ),
+                    )
+                })?;
+            let source_order = table_specs()
+                .iter()
+                .position(|candidate| candidate.family == spec.family)
+                .ok_or_else(|| db_message(OPERATION, "source family has no insertion order"))?;
+            let target_order = table_specs()
+                .iter()
+                .position(|candidate| candidate.family == target_family)
+                .ok_or_else(|| db_message(OPERATION, "target family has no insertion order"))?;
+            if target_order > source_order {
+                return Err(db_message(
+                    OPERATION,
+                    format!(
+                        "archive {:?} is ordered before its physical {:?} dependency",
+                        spec.family, target_family
+                    ),
+                ));
+            }
+            Ok(PhysicalForeignKey {
+                target_family,
+                columns: columns
+                    .into_iter()
+                    .map(|(_, source, target)| (source, target))
+                    .collect(),
+            })
+        })
+        .collect()
+}
+
+fn validate_physical_foreign_key_references(
+    spec: &TableSpec,
+    values: &BTreeMap<String, MemoryV2ArchiveScalarV1>,
+    references: &[MemoryV2ArchiveReferenceV1],
+    physical_foreign_keys: &[PhysicalForeignKey],
+) -> Result<()> {
+    for foreign_key in physical_foreign_keys {
+        let mut target_key = BTreeMap::new();
+        let mut nulls = 0;
+        for (source, target) in &foreign_key.columns {
+            let value = values.get(source).ok_or_else(|| {
+                db_message(
+                    OPERATION,
+                    format!(
+                        "archive {:?} omits foreign-key column `{source}`",
+                        spec.family
+                    ),
+                )
+            })?;
+            if matches!(value, MemoryV2ArchiveScalarV1::Null) {
+                nulls += 1;
+            }
+            target_key.insert(target.clone(), value.clone());
+        }
+        // SQLite considers a composite foreign key satisfied when any child
+        // column is NULL. Optional references therefore have no target until
+        // every component is present.
+        if nulls != 0 {
+            continue;
+        }
+        if !references.iter().any(|reference| {
+            reference.family() == foreign_key.target_family && reference.key() == &target_key
+        }) {
+            return Err(db_message(
+                OPERATION,
+                format!(
+                    "archive {:?} does not encode its complete physical foreign key to {:?}",
+                    spec.family, foreign_key.target_family
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 async fn insert_record(
     conn: &(impl Executor + Sync),
     spec: &TableSpec,
     record: &MemoryV2ArchiveRecordV1,
 ) -> Result<()> {
+    validate_record_fields(spec, record)?;
     let placeholders = (1..=spec.columns.len())
         .map(|index| format!("?{index}"))
         .collect::<Vec<_>>()
@@ -248,6 +418,26 @@ async fn insert_record(
     conn.execute(&sql, params_from_iter(values))
         .await
         .map_err(|error| db_error(OPERATION, error))?;
+    Ok(())
+}
+
+fn validate_record_fields(spec: &TableSpec, record: &MemoryV2ArchiveRecordV1) -> Result<()> {
+    let expected: BTreeSet<_> = spec.columns.iter().copied().collect();
+    let actual: BTreeSet<_> = record
+        .key()
+        .keys()
+        .chain(record.fields().keys())
+        .map(String::as_str)
+        .collect();
+    if actual != expected {
+        return Err(db_message(
+            OPERATION,
+            format!(
+                "archive {:?} physical fields do not match its schema adapter",
+                record.family()
+            ),
+        ));
+    }
     Ok(())
 }
 
@@ -1293,4 +1483,252 @@ fn table_specs() -> &'static [TableSpec] {
         },
     ];
     SPECS
+}
+
+fn validate_table_specs() -> Result<()> {
+    let expected = authoritative_memory_v2_archive_families();
+    let actual: BTreeSet<_> = table_specs().iter().map(|spec| spec.family).collect();
+    if actual != expected || actual.len() != table_specs().len() {
+        return Err(db_message(
+            OPERATION,
+            "authoritative archive families and physical table adapters are not one-to-one",
+        ));
+    }
+    let tables: BTreeSet<_> = table_specs().iter().map(|spec| spec.table).collect();
+    if tables.len() != table_specs().len() {
+        return Err(db_message(
+            OPERATION,
+            "authoritative archive table adapters contain duplicate physical tables",
+        ));
+    }
+    for spec in table_specs() {
+        let columns: BTreeSet<_> = spec.columns.iter().copied().collect();
+        let keys: BTreeSet<_> = spec.key_columns.iter().copied().collect();
+        if columns.len() != spec.columns.len()
+            || keys.len() != spec.key_columns.len()
+            || !keys.is_subset(&columns)
+        {
+            return Err(db_message(
+                OPERATION,
+                format!(
+                    "archive {:?} has an invalid physical schema contract",
+                    spec.family
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn validate_physical_schema(
+    conn: &(impl Executor + Sync),
+    database: MemoryV2ArchiveDatabase,
+) -> Result<()> {
+    for spec in table_specs() {
+        let sql = format!(
+            "PRAGMA {}.table_info('{}')",
+            database.schema_name(),
+            spec.table
+        );
+        let mut rows = conn
+            .query(&sql, ())
+            .await
+            .map_err(|error| db_error(OPERATION, error))?;
+        let mut physical_columns = Vec::new();
+        let mut physical_primary_key = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| db_error(OPERATION, error))?
+        {
+            let name: String = row.get(1).map_err(|error| db_error(OPERATION, error))?;
+            let primary_key_ordinal: i64 =
+                row.get(5).map_err(|error| db_error(OPERATION, error))?;
+            physical_columns.push(name.clone());
+            if primary_key_ordinal > 0 {
+                physical_primary_key.push((primary_key_ordinal, name));
+            }
+        }
+        let local_columns = target_local_physical_columns(spec.family);
+        let expected_columns = local_columns
+            .iter()
+            .copied()
+            .chain(spec.columns.iter().copied())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        if physical_columns != expected_columns {
+            return Err(db_message(
+                OPERATION,
+                format!(
+                    "archive {:?} physical columns drifted: expected {expected_columns:?}, got {physical_columns:?}",
+                    spec.family
+                ),
+            ));
+        }
+        physical_primary_key.sort_by_key(|(ordinal, _)| *ordinal);
+        let physical_primary_key = physical_primary_key
+            .into_iter()
+            .map(|(_, column)| column)
+            .collect::<Vec<_>>();
+        let expected_key = if local_columns.is_empty() {
+            spec.key_columns
+        } else {
+            local_columns
+        }
+        .iter()
+        .copied()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+        if !physical_primary_key.is_empty() && physical_primary_key != expected_key {
+            return Err(db_message(
+                OPERATION,
+                format!(
+                    "archive {:?} physical primary key drifted: expected {expected_key:?}, got {physical_primary_key:?}",
+                    spec.family
+                ),
+            ));
+        }
+        if !local_columns.is_empty() && !has_unique_logical_key(conn, database, spec).await? {
+            return Err(db_message(
+                OPERATION,
+                format!(
+                    "archive {:?} logical identity is not backed by an exact unique index",
+                    spec.family
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn has_unique_logical_key(
+    conn: &(impl Executor + Sync),
+    database: MemoryV2ArchiveDatabase,
+    spec: &TableSpec,
+) -> Result<bool> {
+    let sql = format!(
+        "PRAGMA {}.index_list('{}')",
+        database.schema_name(),
+        spec.table
+    );
+    let mut rows = conn
+        .query(&sql, ())
+        .await
+        .map_err(|error| db_error(OPERATION, error))?;
+    let mut unique_indexes = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| db_error(OPERATION, error))?
+    {
+        let name: String = row.get(1).map_err(|error| db_error(OPERATION, error))?;
+        let unique: i64 = row.get(2).map_err(|error| db_error(OPERATION, error))?;
+        if unique != 0 {
+            unique_indexes.push(name);
+        }
+    }
+    drop(rows);
+    for index in unique_indexes {
+        let sql = format!(
+            "PRAGMA {}.index_info('{}')",
+            database.schema_name(),
+            index.replace('\'', "''")
+        );
+        let mut rows = conn
+            .query(&sql, ())
+            .await
+            .map_err(|error| db_error(OPERATION, error))?;
+        let mut columns = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| db_error(OPERATION, error))?
+        {
+            columns.push(
+                row.get::<String>(2)
+                    .map_err(|error| db_error(OPERATION, error))?,
+            );
+        }
+        if columns
+            == spec
+                .key_columns
+                .iter()
+                .map(|column| (*column).to_owned())
+                .collect::<Vec<_>>()
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn target_local_physical_columns(family: MemoryV2ArchiveFamilyV1) -> &'static [&'static str] {
+    match family {
+        MemoryV2ArchiveFamilyV1::RetrievalAnchorDisposition => &["sequence"],
+        MemoryV2ArchiveFamilyV1::AssertionPayload => &["rowid"],
+        MemoryV2ArchiveFamilyV1::LineageEvent => &["event_sequence"],
+        MemoryV2ArchiveFamilyV1::ProposalTransition => &["transition_sequence"],
+        _ => &[],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn physical_adapters_cover_each_authoritative_family_once() {
+        validate_table_specs().unwrap();
+        assert_eq!(
+            table_specs().len(),
+            authoritative_memory_v2_archive_families().len()
+        );
+    }
+
+    #[test]
+    fn every_authoritative_family_has_an_owner_filter_contract() {
+        for spec in table_specs() {
+            let main = owner_predicate(MemoryV2ArchiveDatabase::Main, spec.owner_filter);
+            let source = owner_predicate(MemoryV2ArchiveDatabase::Source, spec.owner_filter);
+            assert!(!main.trim().is_empty(), "{:?}", spec.family);
+            assert!(!source.trim().is_empty(), "{:?}", spec.family);
+            assert!(
+                main.contains("?1") || main.contains("?3"),
+                "{:?} owner filter is not parameter-bound",
+                spec.family
+            );
+        }
+    }
+
+    #[test]
+    fn physical_adapter_rejects_unknown_or_missing_fields_before_sql() {
+        let spec = table_specs()
+            .iter()
+            .find(|spec| spec.family == MemoryV2ArchiveFamilyV1::Fact)
+            .unwrap();
+        let record = MemoryV2ArchiveRecordV1::new(
+            MemoryV2ArchiveFamilyV1::Fact,
+            BTreeMap::from([
+                (
+                    "fact_id".to_owned(),
+                    MemoryV2ArchiveScalarV1::Text("fact.adapter".to_owned()),
+                ),
+                (
+                    "owner_kind".to_owned(),
+                    MemoryV2ArchiveScalarV1::Text("profile".to_owned()),
+                ),
+                (
+                    "project_id".to_owned(),
+                    MemoryV2ArchiveScalarV1::Text(String::new()),
+                ),
+            ]),
+            BTreeMap::from([(
+                "unexpected".to_owned(),
+                MemoryV2ArchiveScalarV1::Text("value".to_owned()),
+            )]),
+            Vec::new(),
+        )
+        .unwrap();
+        assert!(validate_record_fields(spec, &record).is_err());
+    }
 }
