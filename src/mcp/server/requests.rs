@@ -884,7 +884,6 @@ impl McpServer {
                 registered_project_session_db: self.registered_session_db.clone(),
                 registered_savings_db: self.accounting_db.clone(),
                 profile_root: self.profile_root.as_deref(),
-                allow_default_registry_fallback: self.allow_default_registry_fallback,
                 implicit_project_path,
                 automation_scheduler_reconciler: self.automation_scheduler_reconciler.clone(),
                 automation_writer: self.dashboard_automation_writer.clone(),
