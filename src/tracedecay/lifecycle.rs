@@ -205,18 +205,12 @@ impl TraceDecay {
         let selected_id = selected
             .as_ref()
             .and_then(|layout| layout.identity.project_id.as_deref());
-        let selected_layout_is_authoritative = if let Some(selected) = selected.as_ref() {
-            let inventory = store_identity_inventory(selected).await;
-            inventory.is_healthy() && !inventory.is_pristine()
-        } else {
-            false
-        };
-        let (candidates, selected_is_sole_exact_root) = storage::matching_legacy_profile_layouts(
-            project_root,
-            &profile_root,
-            selected_id,
-            selected_layout_is_authoritative,
-        )?;
+        // Store inventory opens the graph and sessions databases, so it must
+        // stay behind the rare paths that actually compare stores. Resolving a
+        // layout is on every open, including fail-closed clients that must not
+        // touch the store at all.
+        let (candidates, selected_is_sole_exact_root) =
+            storage::matching_legacy_profile_layouts(project_root, &profile_root, selected_id)?;
         Self::choose_identity_layout(
             project_root,
             selected,
@@ -238,7 +232,12 @@ impl TraceDecay {
         selected_is_sole_exact_root: bool,
         allow_repair: bool,
     ) -> Result<Option<StoreLayout>> {
-        if selected_is_sole_exact_root && let Some(selected) = selected.as_ref() {
+        // With no competing candidate the selected layout wins regardless, so
+        // skip the inventory rather than opening the store to confirm it.
+        if selected_is_sole_exact_root
+            && !candidates.is_empty()
+            && let Some(selected) = selected.as_ref()
+        {
             let selected_inventory = store_identity_inventory(selected).await;
             if selected_inventory.is_healthy() && !selected_inventory.is_pristine() {
                 return Ok(Some(selected.clone()));
