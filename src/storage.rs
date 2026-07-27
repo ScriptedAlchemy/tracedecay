@@ -1437,11 +1437,7 @@ impl PrivateStoreIo {
             path.to_path_buf(),
             PathBuf::from(format!("{}-wal", path.display())),
         ] {
-            match fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&member)
-            {
+            match fs::OpenOptions::new().read(true).write(true).open(&member) {
                 Ok(file) => file.sync_all()?,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error),

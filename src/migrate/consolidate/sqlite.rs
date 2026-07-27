@@ -242,11 +242,8 @@ pub(in crate::migrate) async fn merge_branch_legacy_memory_snapshot(
     let result = async {
         if source_has_memory_v2_authority(&transaction).await? {
             verify_complete_branch_memory_v2_authority(&transaction).await?;
-            merge_memory_v2_authority(
-                &transaction,
-                LegacyMappingPolicy::OmitBranchLocalMirrors,
-            )
-            .await
+            merge_memory_v2_authority(&transaction, LegacyMappingPolicy::OmitBranchLocalMirrors)
+                .await
         } else {
             merge_legacy_memory_tx(&transaction, offsets).await?;
             verify_legacy_fact_coverage(&transaction).await
