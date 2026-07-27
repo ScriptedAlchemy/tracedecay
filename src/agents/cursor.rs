@@ -300,11 +300,10 @@ async fn track_branch_after_install(project_path: Option<&Path>) {
     let Some(project_path) = project_path else {
         return;
     };
-    // Materialize the always-applied memory rule from this project's fact
-    // store so install/update-plugin leaves fresh memory in place instead of
-    // waiting for the first sessionStart hook. Fail-open, no-op when the
-    // project has no initialized store.
-    crate::hooks::memory_inject::regenerate_cursor_memory_rule(project_path).await;
+    // Memory materialization belongs to Cursor's session hooks, where the
+    // active user profile is authoritative. Install/update tests inject a
+    // temporary `InstallContext::home`; resolving `dirs::home_dir()` here
+    // would escape that boundary and write into the operator's live profile.
     let Some(branch_name) = crate::branch::current_branch(project_path) else {
         return;
     };
@@ -478,6 +477,7 @@ fn cursor_plugin_hooks(raw: &str, tracedecay_bin: &str) -> Result<String> {
 }
 
 fn remove_cursor_plugin_install(install_dir: &Path) -> Result<()> {
+    super::sweep_superseded_plugin_siblings(install_dir, &[".cursor-plugin/plugin.json"])?;
     let Ok(metadata) = std::fs::symlink_metadata(install_dir) else {
         return Ok(());
     };
@@ -597,6 +597,10 @@ fn cursor_plugin_managed_paths(install_dir: &Path) -> Vec<PathBuf> {
         .into_iter()
         .map(|(relative, _)| install_dir.join(relative))
         .collect();
+    // Retired in 0.0.66 when dynamic memory moved to ~/.cursor/rules. Keep the
+    // old receipt-owned path in the sweep inventory so install and uninstall
+    // can remove artifacts written by older bundles.
+    paths.push(install_dir.join("rules/tracedecay-memory.mdc"));
     paths.push(install_dir.join("rules/tracedecay-memory-digest.mdc"));
     paths
 }
@@ -1080,6 +1084,32 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    struct HomeEnvGuard(Option<std::ffi::OsString>);
+
+    impl HomeEnvGuard {
+        fn set(home: &Path) -> Self {
+            let previous = std::env::var_os("HOME");
+            // SAFETY: Cursor tests that mutate HOME run under the shared hook
+            // environment lock, so no sibling test can observe this override.
+            unsafe { std::env::set_var("HOME", home) };
+            Self(previous)
+        }
+    }
+
+    impl Drop for HomeEnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: See `HomeEnvGuard::set`; the same lock remains held
+            // until this guard restores the process environment.
+            unsafe {
+                if let Some(previous) = self.0.take() {
+                    std::env::set_var("HOME", previous);
+                } else {
+                    std::env::remove_var("HOME");
+                }
+            }
+        }
+    }
+
     fn plugin_source_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("plugin")
     }
@@ -1512,6 +1542,79 @@ mod tests {
         );
     }
 
+    #[test]
+    fn uninstall_sweeps_retired_plugin_memory_rule() {
+        let tmp = TempDir::new().unwrap();
+        let install_dir = tmp.path().join("tracedecay");
+        write_embedded_plugin(&install_dir, "tracedecay").expect("embedded install should succeed");
+        let retired_rule = install_dir.join("rules/tracedecay-memory.mdc");
+        std::fs::write(
+            &retired_rule,
+            crate::hooks::memory_inject::CURSOR_MEMORY_RULE_MARKER,
+        )
+        .unwrap();
+
+        remove_cursor_plugin_install(&install_dir).expect("uninstall should succeed");
+
+        assert!(
+            !retired_rule.exists(),
+            "uninstall must remove the memory rule retired from the plugin inventory"
+        );
+        assert!(
+            !install_dir.exists(),
+            "the retired managed rule must not strand the owned plugin directory"
+        );
+    }
+
+    #[test]
+    fn install_sweeps_retired_plugin_memory_rule() {
+        let home = TempDir::new().unwrap();
+        let install_dir = cursor_plugin_install_dir(home.path());
+        write_embedded_plugin(&install_dir, "old-tracedecay")
+            .expect("old embedded install should succeed");
+        let retired_rule = install_dir.join("rules/tracedecay-memory.mdc");
+        std::fs::write(
+            &retired_rule,
+            crate::hooks::memory_inject::CURSOR_MEMORY_RULE_MARKER,
+        )
+        .unwrap();
+
+        install_cursor_plugin(home.path(), "new-tracedecay").expect("install should refresh");
+
+        assert!(
+            !retired_rule.exists(),
+            "install must remove the memory rule retired from the plugin inventory"
+        );
+        assert!(install_dir.join("rules/tracedecay.mdc").exists());
+    }
+
+    #[test]
+    fn install_sweeps_owned_superseded_plugin_siblings_only() {
+        let home = TempDir::new().unwrap();
+        let plugins = home.path().join(".cursor/plugins/local");
+        let retired = plugins.join("tracedecay.pre-v2-adopt");
+        let foreign = plugins.join("tracedecay.personal");
+        for dir in [&retired, &foreign] {
+            std::fs::create_dir_all(dir.join(".cursor-plugin")).unwrap();
+            std::fs::write(
+                dir.join(".cursor-plugin/plugin.json"),
+                serde_json::to_vec(&json!({ "name": "tracedecay" })).unwrap(),
+            )
+            .unwrap();
+        }
+
+        install_cursor_plugin(home.path(), "tracedecay").expect("install should succeed");
+
+        assert!(
+            !retired.exists(),
+            "a manifest-owned superseded tracedecay sibling must be swept"
+        );
+        assert!(
+            foreign.exists(),
+            "an owned-looking sibling without an explicitly retired suffix must be preserved"
+        );
+    }
+
     /// Upgrading over an install that shipped the `tracedecay-*` dispatcher
     /// *skills* (now re-expressed as native `commands/` slash commands) must
     /// sweep those retired skill dirs instead of stranding them as unmanaged
@@ -1853,5 +1956,31 @@ mod tests {
     #[tokio::test]
     async fn post_install_handles_missing_project_path() {
         CursorIntegration.post_install(None).await;
+    }
+
+    #[test]
+    fn post_install_with_injected_home_never_writes_process_home() {
+        crate::hooks::run_with_test_env_lock(async {
+            let process_home = TempDir::new().expect("process home");
+            let injected_home = TempDir::new().expect("install context home");
+            let project = TempDir::new().expect("project");
+            let _home_guard = HomeEnvGuard::set(process_home.path());
+            let process_plugin = cursor_plugin_install_dir(process_home.path());
+            std::fs::create_dir_all(process_plugin.join(".cursor-plugin")).unwrap();
+            std::fs::write(
+                process_plugin.join(".cursor-plugin/plugin.json"),
+                r#"{"name":"tracedecay"}"#,
+            )
+            .unwrap();
+
+            install_cursor_plugin(injected_home.path(), "tracedecay")
+                .expect("injected-home install should succeed");
+            CursorIntegration.post_install(Some(project.path())).await;
+
+            assert!(
+                !cursor_memory_rule_path(process_home.path()).exists(),
+                "an install using an injected home must not materialize memory in process HOME"
+            );
+        });
     }
 }
