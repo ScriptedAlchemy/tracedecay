@@ -546,7 +546,15 @@ impl TraceDecay {
             .await?
         {
             candidates.push(PathBuf::from(context.project.canonical_root));
+            candidates.extend(
+                context
+                    .aliases
+                    .into_iter()
+                    .map(|alias| PathBuf::from(alias.alias_path)),
+            );
         }
+        candidates.sort();
+        candidates.dedup();
 
         let mut roots = Vec::new();
         for candidate in candidates {
@@ -1267,15 +1275,11 @@ impl TraceDecay {
         }
 
         if migrated {
-            eprintln!("[tracedecay] schema changed — performing full re-index…");
-            ts.index_all_with_progress(|current, total, file| {
-                eprintln!("[tracedecay] re-indexing [{current}/{total}] {file}");
-            })
-            .await?;
-            eprintln!("[tracedecay] re-index complete.");
+            ts.mark_migration_reindex_pending().await?;
         }
 
         ts.register_project_store_in_global_registry().await?;
+        ts.schedule_migration_reindex_if_needed().await?;
         Ok(ts)
     }
 

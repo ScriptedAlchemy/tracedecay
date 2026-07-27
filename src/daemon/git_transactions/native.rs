@@ -369,6 +369,13 @@ impl GitIndexPreviewAssembler for DaemonProjectGitIndexPreviewAssembler {
     ) -> Result<MaterializedGitIndexPreview, GitIndexTransactionPortError> {
         let scope = request.context.scope();
         if scope.project_id != self.project_id {
+            // The daemon has no tracing subscriber; its diagnostic channel is
+            // this event line, so anything emitted through tracing here is
+            // unreadable in the process that runs it.
+            eprintln!(
+                "[tracedecay] event=git_index_preview_project_mismatch requested={} mounted={}",
+                scope.project_id, self.project_id
+            );
             return Err(GitIndexTransactionPortError::StalePreview);
         }
         NativeGitIndexPreviewAssembler::new(

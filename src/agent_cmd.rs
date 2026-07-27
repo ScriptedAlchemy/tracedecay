@@ -368,26 +368,18 @@ fn dry_run_canonical_component_set(
     home: &Path,
     lifecycle_root: &Path,
 ) -> tracedecay::errors::Result<()> {
-    let request = component_set_request(component_set, operation, options.yes)?;
-    let mut registration = CompatibilityAgentRegistrationDelegate::new(
+    let preview = preview_canonical_component_set(
         agent_id,
+        operation,
+        component_set,
+        options,
         home,
         lifecycle_root,
-        request.lifecycle.operation,
     )?;
-    let preview = tracedecay::agents::host_bundle_v2::dry_run_host_component_set_lifecycle_with_lifecycle_root_at(
-            home,
-            lifecycle_root,
-            &component_set.component_set,
-            &request,
-            component_set,
-            &mut registration,
-        )
-        .map_err(host_bundle_error)?;
     eprintln!(
         "{} {:?}: plan={}, registration_base={}, registration_current={}, artifacts={}, confirmation={}",
         agent_id,
-        request.lifecycle.operation,
+        operation,
         hex::encode(preview.plan_digest),
         hex::encode(preview.base_registration_revision),
         hex::encode(preview.current_registration_revision),
@@ -406,6 +398,34 @@ fn dry_run_canonical_component_set(
         }
     }
     Ok(())
+}
+
+fn preview_canonical_component_set(
+    agent_id: &str,
+    operation: HostBundleCliOperation,
+    component_set: &tracedecay::agents::host_bundle_registry::VerifiedEmbeddedHostComponentSetV1,
+    options: &crate::cli::HostBundleCliOptions,
+    home: &Path,
+    lifecycle_root: &Path,
+) -> tracedecay::errors::Result<
+    tracedecay::agents::host_bundle_v2::HostComponentSetLifecyclePreviewV1,
+> {
+    let request = component_set_request(component_set, operation, options.yes)?;
+    let mut registration = CompatibilityAgentRegistrationDelegate::new(
+        agent_id,
+        home,
+        lifecycle_root,
+        request.lifecycle.operation,
+    )?;
+    tracedecay::agents::host_bundle_v2::dry_run_host_component_set_lifecycle_with_lifecycle_root_at(
+        home,
+        lifecycle_root,
+        &component_set.component_set,
+        &request,
+        component_set,
+        &mut registration,
+    )
+    .map_err(host_bundle_error)
 }
 
 fn apply_canonical_component_set(
@@ -1899,6 +1919,172 @@ pub(crate) async fn handle_update_plugin_command() -> tracedecay::errors::Result
         }
     }
     Ok(())
+}
+
+pub(crate) fn handle_reinstall_preflight_command() -> tracedecay::errors::Result<()> {
+    let home = tracedecay::agents::home_dir().ok_or_else(|| {
+        tracedecay::errors::TraceDecayError::Config {
+            message: "could not determine home directory".to_string(),
+        }
+    })?;
+    let tracedecay_bin = std::env::current_exe()
+        .map_err(|error| tracedecay::errors::TraceDecayError::Config {
+            message: format!("could not resolve the preflight binary: {error}"),
+        })?
+        .to_string_lossy()
+        .into_owned();
+    let user_config = tracedecay::user_config::UserConfig::load();
+    let mut agent_ids = user_config.installed_agents;
+    let additions = tracedecay::agents::detect_missing_installed_agents(&home, &agent_ids);
+    agent_ids.extend(additions);
+    let project_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let health_context = tracedecay::agents::HealthcheckContext {
+        home: home.clone(),
+        project_path,
+    };
+    let mut failures = Vec::new();
+    let mut checked = 0_usize;
+    let mut deferred = 0_usize;
+
+    eprintln!(
+        "Read-only integration refresh preflight ({} tracked).",
+        agent_ids.len()
+    );
+    for id in &agent_ids {
+        let integration = match tracedecay::agents::get_integration(id) {
+            Ok(integration) => integration,
+            Err(_) => {
+                eprintln!("  \x1b[33m!\x1b[0m {id}: unknown tracked id; refresh will skip it");
+                continue;
+            }
+        };
+        checked += 1;
+        let install_context = tracedecay::agents::InstallContext {
+            home: home.clone(),
+            tracedecay_bin: tracedecay_bin.clone(),
+            tool_permissions: tracedecay::agents::expected_tool_perms(),
+            project_root: None,
+            dashboard: true,
+        };
+        match integration.preflight_non_interactive_install(&install_context) {
+            Ok(tracedecay::agents::NonInteractiveInstallOutcome::Ready) => {}
+            Ok(tracedecay::agents::NonInteractiveInstallOutcome::DeferredUserAction(action)) => {
+                deferred += 1;
+                eprintln!(
+                    "  \x1b[32m✔\x1b[0m {id}: deferred manual activation is accepted ({})",
+                    action.remediation
+                );
+                continue;
+            }
+            Err(error) => {
+                eprintln!("  \x1b[31m✘\x1b[0m {id}: {error}");
+                failures.push(format!("{id}: {error}"));
+                continue;
+            }
+        }
+
+        match preflight_agent_integration(id, integration.as_ref(), &home, &health_context) {
+            Ok(summary) => eprintln!("  \x1b[32m✔\x1b[0m {id}: {summary}"),
+            Err(error) => {
+                eprintln!("  \x1b[31m✘\x1b[0m {id}: {error}");
+                failures.push(format!("{id}: {error}"));
+            }
+        }
+    }
+
+    if failures.is_empty() {
+        eprintln!("Integration refresh preflight passed: {checked} checked, {deferred} deferred.");
+        return Ok(());
+    }
+    Err(tracedecay::errors::TraceDecayError::Config {
+        message: format!(
+            "integration refresh preflight failed for: {}",
+            failures.join(", ")
+        ),
+    })
+}
+
+fn preflight_agent_integration(
+    agent_id: &str,
+    integration: &dyn tracedecay::agents::AgentIntegration,
+    home: &Path,
+    health_context: &tracedecay::agents::HealthcheckContext,
+) -> tracedecay::errors::Result<String> {
+    use tracedecay::agents::host_bundle_v2::{
+        HostBundleComponentV1, HostBundleRegistrationStateV1,
+    };
+
+    let now_unix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| tracedecay::errors::TraceDecayError::Config {
+            message: "system clock is before the Unix epoch".to_string(),
+        })?
+        .as_secs();
+    let Some(component_set) = canonical_host_component_set(agent_id, None, now_unix)? else {
+        let state =
+            integration.host_component_registration(HostBundleComponentV1::Core, health_context);
+        if state == HostBundleRegistrationStateV1::Corrupt {
+            return Err(tracedecay::errors::TraceDecayError::Config {
+                message: "registration config is corrupt".to_string(),
+            });
+        }
+        return Ok(format!(
+            "compatibility refresh ready; registration {}",
+            registration_state_label(state)
+        ));
+    };
+
+    let mut registration_states = Vec::new();
+    for component in &component_set.component_set.components {
+        let state =
+            integration.host_component_registration(component.manifest.component, health_context);
+        if state == HostBundleRegistrationStateV1::Corrupt {
+            return Err(tracedecay::errors::TraceDecayError::Config {
+                message: format!(
+                    "{:?} registration config is corrupt",
+                    component.manifest.component
+                ),
+            });
+        }
+        registration_states.push(format!(
+            "{:?}={}",
+            component.manifest.component,
+            registration_state_label(state)
+        ));
+    }
+    let lifecycle_root = tracedecay::agents::host_bundle_v2::resolved_host_bundle_lifecycle_root()
+        .map_err(|error| tracedecay::errors::TraceDecayError::Config {
+            message: format!("could not resolve host lifecycle root: {error}"),
+        })?;
+    preview_canonical_component_set(
+        agent_id,
+        HostBundleCliOperation::Repair,
+        &component_set,
+        &crate::cli::HostBundleCliOptions {
+            component: None,
+            dry_run: true,
+            yes: true,
+        },
+        home,
+        &lifecycle_root,
+    )?;
+    Ok(format!(
+        "signed repair plan valid; registration {}",
+        registration_states.join(", ")
+    ))
+}
+
+fn registration_state_label(
+    state: tracedecay::agents::host_bundle_v2::HostBundleRegistrationStateV1,
+) -> &'static str {
+    use tracedecay::agents::host_bundle_v2::HostBundleRegistrationStateV1;
+
+    match state {
+        HostBundleRegistrationStateV1::Current => "current",
+        HostBundleRegistrationStateV1::Repairable => "repairable",
+        HostBundleRegistrationStateV1::Missing => "missing",
+        HostBundleRegistrationStateV1::Corrupt => "corrupt",
+    }
 }
 
 /// Re-runs `install()` + `post_install()` for each tracked agent id, returning

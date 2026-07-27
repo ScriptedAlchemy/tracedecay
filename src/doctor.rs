@@ -739,10 +739,10 @@ fn daemon_runtime_args() -> serde_json::Value {
     })
 }
 
-/// A routed project publishes database telemetry only once it is mounted and
-/// admitted. Startup convergence therefore treats an absent `database` block as
-/// a warming state to poll, while telemetry that is present but malformed stays
-/// a terminal contract violation.
+/// A routed project publishes database telemetry only after it is mounted and
+/// admitted. During startup, an absent `database` block means "not published
+/// yet" and remains a warming state to poll, while telemetry that is present
+/// but malformed remains a terminal contract violation.
 const RUNTIME_TELEMETRY_PENDING: &str = "daemon runtime response omitted database telemetry";
 
 fn daemon_runtime_status(result: &serde_json::Value) -> crate::errors::Result<serde_json::Value> {

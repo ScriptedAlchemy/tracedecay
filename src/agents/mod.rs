@@ -232,6 +232,18 @@ pub trait AgentIntegration {
         Box::pin(std::future::ready(()))
     }
 
+    /// Validate non-interactive install readiness without changing host state.
+    ///
+    /// This is the pre-migration counterpart to
+    /// [`AgentIntegration::prepare_non_interactive_install`]. Hosts that need
+    /// manual activation report the same typed deferral without staging files.
+    fn preflight_non_interactive_install(
+        &self,
+        _ctx: &InstallContext,
+    ) -> Result<NonInteractiveInstallOutcome> {
+        Ok(NonInteractiveInstallOutcome::Ready)
+    }
+
     /// Prepare an install requested from a non-interactive orchestration path.
     ///
     /// Most integrations are immediately ready. Hosts whose official lifecycle

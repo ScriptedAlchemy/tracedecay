@@ -2,18 +2,68 @@
 //! detection for the active project store.
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
 
 use crate::config::brand_env;
-use crate::errors::Result;
+use crate::errors::{Result, TraceDecayError};
 use crate::resolution::ReferenceResolver;
 use crate::sync;
 use crate::types::*;
 
 use super::{IndexResult, SyncResult, TraceDecay, current_timestamp};
+
+const MIGRATION_REINDEX_STATE_KEY: &str = "migration_reindex_state_v1";
+static MIGRATION_REINDEX_WORKERS: LazyLock<Mutex<HashSet<PathBuf>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MigrationReindexAvailabilityV1 {
+    Stale,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum MigrationReindexStatusV1 {
+    Current {
+        schema_version: u32,
+        completed_at: i64,
+    },
+    Indexing {
+        schema_version: u32,
+        completed_files: u64,
+        total_files: Option<u64>,
+        availability: MigrationReindexAvailabilityV1,
+    },
+    Failed {
+        schema_version: u32,
+        availability: MigrationReindexAvailabilityV1,
+        retryable: bool,
+        reason: String,
+    },
+}
+
+fn should_schedule_migration_reindex(status: &MigrationReindexStatusV1) -> bool {
+    !matches!(status, MigrationReindexStatusV1::Current { .. })
+}
+
+struct MigrationReindexWorkerRegistration {
+    key: PathBuf,
+}
+
+impl Drop for MigrationReindexWorkerRegistration {
+    fn drop(&mut self) {
+        MIGRATION_REINDEX_WORKERS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.key);
+    }
+}
 
 /// Convert any backslash in a *relative* project-root-relative path to a
 /// forward slash, matching the canonical form the walker
@@ -229,6 +279,161 @@ fn should_use_subprocess() -> bool {
 }
 
 impl TraceDecay {
+    pub async fn migration_reindex_status(&self) -> Result<MigrationReindexStatusV1> {
+        let Some(encoded) = self.db.get_metadata(MIGRATION_REINDEX_STATE_KEY).await? else {
+            let completed_at = self
+                .db
+                .get_metadata("last_full_sync_at")
+                .await?
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0);
+            return Ok(MigrationReindexStatusV1::Current {
+                schema_version: crate::db::migrations::LATEST_VERSION,
+                completed_at,
+            });
+        };
+        serde_json::from_str(&encoded).map_err(|error| TraceDecayError::Database {
+            operation: "read migration re-index state".to_owned(),
+            message: format!("invalid migration re-index state: {error}"),
+        })
+    }
+
+    pub(super) async fn mark_migration_reindex_pending(&self) -> Result<()> {
+        let availability = if self
+            .db
+            .query_scalar_i64(
+                "inspect pre-migration graph availability",
+                "SELECT EXISTS(SELECT 1 FROM files LIMIT 1)",
+            )
+            .await?
+            != 0
+        {
+            MigrationReindexAvailabilityV1::Stale
+        } else {
+            MigrationReindexAvailabilityV1::Unavailable
+        };
+        self.write_migration_reindex_status(&MigrationReindexStatusV1::Indexing {
+            schema_version: crate::db::migrations::LATEST_VERSION,
+            completed_files: 0,
+            total_files: None,
+            availability,
+        })
+        .await
+    }
+
+    pub(super) async fn schedule_migration_reindex_if_needed(&self) -> Result<()> {
+        let status = self.migration_reindex_status().await?;
+        if !should_schedule_migration_reindex(&status) {
+            return Ok(());
+        }
+        self.ensure_branch_writable("schedule migration re-index")?;
+        let key = self.active_graph_layout.sync_lock_path.clone();
+        if !MIGRATION_REINDEX_WORKERS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key.clone())
+        {
+            return Ok(());
+        }
+        let availability = match status {
+            MigrationReindexStatusV1::Indexing { availability, .. }
+            | MigrationReindexStatusV1::Failed { availability, .. } => availability,
+            MigrationReindexStatusV1::Current { .. } => return Ok(()),
+        };
+        let worker = self.clone_for_background_index();
+        tokio::spawn(async move {
+            let _registration = MigrationReindexWorkerRegistration { key };
+            worker.run_migration_reindex(availability).await;
+        });
+        Ok(())
+    }
+
+    async fn run_migration_reindex(self, availability: MigrationReindexAvailabilityV1) {
+        let total = u64::try_from(self.scan_files().len()).unwrap_or(u64::MAX);
+        if let Err(error) = self
+            .write_migration_reindex_status(&MigrationReindexStatusV1::Indexing {
+                schema_version: crate::db::migrations::LATEST_VERSION,
+                completed_files: 0,
+                total_files: Some(total),
+                availability,
+            })
+            .await
+        {
+            eprintln!("[tracedecay] could not checkpoint migration re-index state: {error}");
+            return;
+        }
+
+        eprintln!(
+            "[tracedecay] schema changed — rebuilding {total} files in the background"
+        );
+        let result = self
+            .index_all_with_progress(|current, total, file| {
+                if current == total || current % 250 == 0 {
+                    eprintln!("[tracedecay] background re-index [{current}/{total}] {file}");
+                }
+            })
+            .await;
+        let status = match result {
+            Ok(_) => {
+                eprintln!("[tracedecay] background migration re-index complete");
+                MigrationReindexStatusV1::Current {
+                    schema_version: crate::db::migrations::LATEST_VERSION,
+                    completed_at: current_timestamp(),
+                }
+            }
+            Err(error) => {
+                eprintln!("[tracedecay] background migration re-index failed: {error}");
+                MigrationReindexStatusV1::Failed {
+                    schema_version: crate::db::migrations::LATEST_VERSION,
+                    availability,
+                    retryable: true,
+                    reason: error.to_string(),
+                }
+            }
+        };
+        if let Err(error) = self.write_migration_reindex_status(&status).await {
+            eprintln!("[tracedecay] could not publish migration re-index state: {error}");
+        }
+    }
+
+    async fn write_migration_reindex_status(
+        &self,
+        status: &MigrationReindexStatusV1,
+    ) -> Result<()> {
+        let encoded =
+            serde_json::to_string(status).map_err(|error| TraceDecayError::Database {
+                operation: "write migration re-index state".to_owned(),
+                message: error.to_string(),
+            })?;
+        self.db
+            .set_metadata(MIGRATION_REINDEX_STATE_KEY, &encoded)
+            .await
+    }
+
+    fn clone_for_background_index(&self) -> Self {
+        Self {
+            db: self.db.clone(),
+            profile_database: Arc::clone(&self.profile_database),
+            store_runtime_registry: Arc::clone(&self.store_runtime_registry),
+            config: self.config.clone(),
+            configuration_runtime: Arc::clone(&self.configuration_runtime),
+            project_root: self.project_root.clone(),
+            store_layout: self.store_layout.clone(),
+            active_graph_layout: self.active_graph_layout.clone(),
+            open_options: self.open_options.clone(),
+            registry: crate::extraction::LanguageRegistry::new(),
+            active_branch: self.active_branch.clone(),
+            serving_branch: self.serving_branch.clone(),
+            fallback_warning: self.fallback_warning.clone(),
+            read_only: self.read_only,
+            context_scout_owner: self.context_scout_owner.clone(),
+            context_scout_claim_authorities: Default::default(),
+            #[cfg(any(test, feature = "test-transport"))]
+            test_runtime_guard: self.test_runtime_guard.clone(),
+            standalone_maintenance_scope: self.standalone_maintenance_scope.clone(),
+        }
+    }
+
     /// Performs a full index: clears existing data, scans all Rust files,
     /// extracts nodes and edges, resolves references, and stores everything
     /// in the database.
@@ -1487,5 +1692,59 @@ mod worker_pool_tests {
         );
         assert_eq!(bounded_extraction_workers(96, 3), 3);
         assert_eq!(bounded_extraction_workers(0, 0), 1);
+    }
+}
+
+#[cfg(test)]
+mod migration_reindex_tests {
+    use super::{
+        MigrationReindexAvailabilityV1, MigrationReindexStatusV1, should_schedule_migration_reindex,
+    };
+
+    #[test]
+    fn pending_and_interrupted_migration_generations_resume() {
+        let pending = MigrationReindexStatusV1::Indexing {
+            schema_version: 25,
+            completed_files: 0,
+            total_files: None,
+            availability: MigrationReindexAvailabilityV1::Stale,
+        };
+        let interrupted = MigrationReindexStatusV1::Failed {
+            schema_version: 25,
+            availability: MigrationReindexAvailabilityV1::Unavailable,
+            retryable: true,
+            reason: "worker terminated".to_owned(),
+        };
+
+        assert!(should_schedule_migration_reindex(&pending));
+        assert!(should_schedule_migration_reindex(&interrupted));
+    }
+
+    #[test]
+    fn current_migration_generation_does_not_rebuild() {
+        let current = MigrationReindexStatusV1::Current {
+            schema_version: 25,
+            completed_at: 42,
+        };
+
+        assert!(!should_schedule_migration_reindex(&current));
+    }
+
+    #[test]
+    fn migration_state_is_typed_and_restart_safe() {
+        let state = MigrationReindexStatusV1::Indexing {
+            schema_version: 25,
+            completed_files: 17,
+            total_files: Some(41),
+            availability: MigrationReindexAvailabilityV1::Stale,
+        };
+
+        let encoded = serde_json::to_string(&state).expect("encode migration state");
+        let restored: MigrationReindexStatusV1 =
+            serde_json::from_str(&encoded).expect("restore migration state");
+
+        assert_eq!(restored, state);
+        assert!(encoded.contains("\"state\":\"indexing\""));
+        assert!(encoded.contains("\"availability\":\"stale\""));
     }
 }
