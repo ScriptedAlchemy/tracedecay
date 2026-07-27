@@ -30,6 +30,9 @@ pub use attachment::{
 pub use configuration::ConfigurationExecutor;
 pub use diagnostics::DiagnosticExecutor;
 pub use evidence_assembly::EvidenceAssemblyExecutor;
+#[cfg(feature = "test-transport")]
+#[doc(hidden)]
+pub use evidence_assembly::tests::write_fixture_for_project;
 pub use external_source::{EXTERNAL_SOURCE_SCHEMA_V1, ExternalSourceExecutor};
 pub use fact::FactExecutor;
 pub use fixtures::{AdapterParityFixtureV1, PRE_CUTOVER_ADAPTER_PARITY_FIXTURES_V1};

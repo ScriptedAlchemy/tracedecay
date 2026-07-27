@@ -199,7 +199,7 @@ lang-fsharp = ["dep:tracedecay-large-treesitters"]
 lang-quint = ["dep:tracedecay-large-treesitters"]
 lang-toml = ["dep:tracedecay-large-treesitters"]
 lang-lean = ["dep:tracedecay-large-treesitters"]
-test-transport = []
+test-transport = ["tracedecay-rusqlite-runtime/test-transport"]
 # Builds the root-package helper shim for integration tests. The rusqlite
 # dependency is used only by that bin target; normal root targets never import
 # it and are link-checked separately.

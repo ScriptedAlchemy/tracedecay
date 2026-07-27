@@ -46,7 +46,7 @@
 - Consumes `MemoryV2OwnerArchiveV1` and `MemoryV2OwnerMergePlanV1`.
 - Produces `DatabaseFactStore::export_owner_archive` and `DatabaseFactStore::import_owner_archive`.
 
-- [ ] Seed a comprehensive owner through production writers, including purge, feedback, relations, proposals, mappings, quarantine, retrieval provenance, and evidence assembly.
+- [x] Seed a comprehensive owner through production writers, including purge, feedback, relations, proposals, mappings, quarantine, retrieval provenance, and evidence assembly.
 - [x] Write failing export/import contract tests that delete the source and query current facts and lineage through `MemoryApplication`.
 - [x] Implement adapter-local row decoding, closure validation, FK-safe transactional import, exact conflict checks, and derived-state rebuild.
 - [x] Run only archive store contract tests until green.
