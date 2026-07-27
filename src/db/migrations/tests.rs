@@ -6,7 +6,11 @@ use tracedecay_rusqlite_runtime::migration_sql::{
 };
 
 use crate::db::engine::{Connection, TestConnection};
-use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
+use crate::db::{
+    Database, DatabaseAuthority, DatabaseAuthorityRole, TestDatabaseRuntimeMode,
+    enter_maintenance_database_scope,
+};
+use crate::lifecycle_lease::acquire_exclusive_for_profile;
 
 use super::{LATEST_VERSION, create_schema_connection, migrate_connection};
 
@@ -21,8 +25,14 @@ mod pre_v19;
 struct AllowMigrationWrites;
 
 impl MigrationSqlWriteAuthority for AllowMigrationWrites {
-    fn verify(&self, _intent: MigrationSqlWriteIntent) -> Result<(), MigrationSqlError> {
-        Ok(())
+    fn verify(&self, intent: MigrationSqlWriteIntent) -> Result<(), MigrationSqlError> {
+        if intent == MigrationSqlWriteIntent::Vacuum {
+            Err(MigrationSqlError::AuthorityDenied(
+                "ordinary migration fixture cannot vacuum".to_owned(),
+            ))
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -635,18 +645,38 @@ async fn exclusive_maintenance_completes_deferred_auto_vacuum_repair() {
         .execute_batch("PRAGMA auto_vacuum = NONE; VACUUM;")
         .unwrap();
     drop(setup);
-    let conn = TestConnection::open(&db_path);
+    let conn = TestConnection::open_with_write_authority(&db_path, Arc::new(AllowMigrationWrites));
     assert_eq!(super::auto_vacuum_mode(&*conn, "test").await.unwrap(), 0);
 
     assert!(!migrate_connection(&conn).await.unwrap());
     assert_eq!(super::auto_vacuum_mode(&*conn, "test").await.unwrap(), 0);
+    drop(conn);
+
+    let profile_root = dir.path().canonicalize().unwrap();
+    let lease = acquire_exclusive_for_profile(&profile_root, "auto-vacuum repair fixture").unwrap();
+    let _scope =
+        enter_maintenance_database_scope(&lease, &profile_root, "auto-vacuum repair fixture")
+            .unwrap();
+    let authority = DatabaseAuthority::for_runtime(&db_path, "auto-vacuum repair fixture").unwrap();
+    assert_eq!(authority.role(), DatabaseAuthorityRole::Maintenance);
+    let (database, _) = Database::publish_maintenance_test_runtime(
+        &db_path,
+        &authority,
+        TestDatabaseRuntimeMode::Existing,
+    )
+    .await
+    .unwrap();
 
     assert!(
-        !super::migrate_with_exclusive_maintenance(&conn)
+        !super::migrate_with_exclusive_maintenance(database)
             .await
             .unwrap()
     );
-    assert_eq!(super::auto_vacuum_mode(&*conn, "test").await.unwrap(), 2);
+    let raw_mode: i64 = rusqlite::Connection::open(&db_path)
+        .unwrap()
+        .query_row("PRAGMA auto_vacuum", (), |row| row.get(0))
+        .unwrap();
+    assert_eq!(raw_mode, 2, "the durable database file was not repaired");
 }
 
 /// Creates the V20 current projection shape so V21's additive compatibility
