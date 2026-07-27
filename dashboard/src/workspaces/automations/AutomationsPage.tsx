@@ -39,14 +39,17 @@ type ReviewQueueReading =
  *
  * These two counts are the whole human-approval step of the automation
  * pipeline: they are what tells a person that agent-proposed facts and skill
- * drafts are waiting. So there is no zero fallback anywhere on this path. A
- * daemon too old to send `pending_review` still gets read truthfully — its
- * bare number is a measured count, and a null or absent number is unknown.
+ * drafts are waiting. So there is no zero fallback anywhere on this path — a
+ * queue the daemon could not read reads as unknown.
+ *
+ * `pending_review` is the authority, not the flat `pending_*` mirrors. The
+ * bundle is embedded in the binary that answers this route, so the two always
+ * ship together and a payload without the discriminated union fails contract
+ * parsing into `unsupported_schema` rather than reaching a fallback here.
  */
 function reviewQueue(
   data: SchedulerStatus,
   queue: 'fact_proposals' | 'skills',
-  legacyCount: number | null | undefined,
 ): ReviewQueueReading {
   const reported = data.pending_review[queue];
   switch (reported.state) {
@@ -55,13 +58,16 @@ function reviewQueue(
     case 'measured':
       return { quality: 'measured', count: reported.count };
     default: {
-      const exhaustive: never = reported;
-      void exhaustive;
-      // Only reachable against a daemon predating `pending_review`, whose bare
-      // flat count is still a real measurement.
-      return typeof legacyCount === 'number'
-        ? { quality: 'measured', count: legacyCount }
-        : { quality: 'unknown', reason: 'the daemon reported no reading for this queue' };
+      // Compile-time exhaustiveness, so a third reading state cannot be added
+      // to the contract without this switch failing to build. It is not a
+      // runtime path: the discriminated union rejects an unknown `state`
+      // upstream, in `fetchLegacy`. The arm still returns `unknown` instead of
+      // throwing, because the one thing it must never do is pick a number.
+      const unhandled: never = reported;
+      return {
+        quality: 'unknown',
+        reason: `the daemon reported an unrecognized reading state: ${JSON.stringify(unhandled)}`,
+      };
     }
   }
 }
@@ -150,8 +156,8 @@ export function AutomationsPage() {
       </div>
       <LegacyBoundary title="Scheduler" pending={scheduler.isPending} result={scheduler.data}>
         {(data) => {
-          const proposals = reviewQueue(data, 'fact_proposals', data.pending_fact_proposals);
-          const drafts = reviewQueue(data, 'skills', data.pending_skills);
+          const proposals = reviewQueue(data, 'fact_proposals');
+          const drafts = reviewQueue(data, 'skills');
           const unread = (
             [
               ['fact proposals', proposals],
@@ -164,12 +170,12 @@ export function AutomationsPage() {
             <div className="flex flex-col gap-3 p-4">
               <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
                 <StatTile label="state" value={data.status} />
-                <StatTile
-                  label="tick interval"
-                  value={
-                    data.scheduler_tick_secs != null ? `${data.scheduler_tick_secs}s` : '—'
-                  }
-                />
+                {/* No null branch: `scheduler_tick_secs` is a plain `u64` on
+                  * the wire and non-nullable in the contract, so an em dash
+                  * here could only ever be a fallback for a payload the schema
+                  * has already rejected — the same unreachable fallback the
+                  * review queues used to carry. */}
+                <StatTile label="tick interval" value={`${data.scheduler_tick_secs}s`} />
                 <ReviewQueueTile label="pending proposals" reading={proposals} />
                 <ReviewQueueTile label="pending skills" reading={drafts} />
               </div>
