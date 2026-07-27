@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use tracedecay_domain::{CodeGenerationId, ManifestDigest, RepositoryId, WorktreeId};
@@ -32,6 +32,13 @@ pub(crate) struct CodeIndexGenerationPublishedV1 {
     pub observation_time_micros: i64,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct CodeIndexSchedulerMemoryStatsV1 {
+    pub mounted_worktrees: u64,
+    pub reconciling_worktrees: u64,
+    pub retained_generation_encoded_bytes: u64,
+}
+
 pub(super) struct MountedCodeIndexWorktreeV1 {
     pub(super) repository_id: RepositoryId,
     pub(super) worktree_id: WorktreeId,
@@ -47,6 +54,8 @@ pub(super) struct MountedCodeIndexWorktreeV1 {
     pub(super) serving_generation: Arc<RwLock<Option<LatestCompleteCodeIndexV1>>>,
     wake: Arc<tokio::sync::Notify>,
     shutting_down: Arc<AtomicBool>,
+    reconcile_in_progress: Arc<AtomicBool>,
+    active_generation_encoded_bytes: Arc<AtomicU64>,
     pub(super) semantic_evaluation_publication_gate: Arc<tokio::sync::Mutex<()>>,
     pub(super) task: tokio::task::JoinHandle<()>,
 }
@@ -130,6 +139,27 @@ impl CodeIndexSchedulerRegistryV1 {
         self.byte_pool.stats()
     }
 
+    pub async fn memory_stats(&self) -> CodeIndexSchedulerMemoryStatsV1 {
+        let mounted = self.mounted.lock().await;
+        CodeIndexSchedulerMemoryStatsV1 {
+            mounted_worktrees: u64::try_from(mounted.len()).unwrap_or(u64::MAX),
+            reconciling_worktrees: u64::try_from(
+                mounted
+                    .values()
+                    .filter(|worktree| worktree.reconcile_in_progress.load(Ordering::Acquire))
+                    .count(),
+            )
+            .unwrap_or(u64::MAX),
+            retained_generation_encoded_bytes: mounted.values().fold(0_u64, |total, worktree| {
+                total.saturating_add(
+                    worktree
+                        .active_generation_encoded_bytes
+                        .load(Ordering::Acquire),
+                )
+            }),
+        }
+    }
+
     pub async fn mount_worktree(
         &self,
         project_root: &Path,
@@ -143,7 +173,7 @@ impl CodeIndexSchedulerRegistryV1 {
         // initial reconcile can parse and hash an entire repository; holding
         // `mounted` here blocks every foreground query across every project.
         let _mount_admission = self.mount_admission.lock().await;
-        let mut mounted = self.mounted.lock().await;
+        let mounted = self.mounted.lock().await;
         if let Some(existing) = mounted.get(&project_root) {
             let scheduler = Arc::clone(&existing.scheduler);
             drop(mounted);
@@ -191,6 +221,8 @@ impl CodeIndexSchedulerRegistryV1 {
         }
         let repository_id = opened.identity().repository_id().clone();
         let worktree_id = opened.identity().worktree_id().clone();
+        let reconcile_in_progress = opened.reconcile_in_progress();
+        let active_generation_encoded_bytes = opened.active_generation_encoded_bytes();
         let serving_generation = Arc::new(RwLock::new(opened.latest_complete()));
         let scheduler = Arc::new(Mutex::new(opened));
         let semantic_evaluation_publication_gate = Arc::new(tokio::sync::Mutex::new(()));
@@ -278,6 +310,8 @@ impl CodeIndexSchedulerRegistryV1 {
                 serving_generation,
                 wake,
                 shutting_down,
+                reconcile_in_progress,
+                active_generation_encoded_bytes,
                 semantic_evaluation_publication_gate,
                 task,
             },

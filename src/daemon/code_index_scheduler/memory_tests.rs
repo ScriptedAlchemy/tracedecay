@@ -1,0 +1,107 @@
+use std::fs;
+use std::path::Path;
+use std::process::Command;
+use std::sync::Arc;
+
+use tempfile::TempDir;
+
+use super::{
+    CodeIndexReconcileOutcomeV1, CodeIndexSchedulerRegistryV1, CodeIndexWorktreeSchedulerV1,
+    SharedCodeIndexBytePoolV1,
+};
+
+fn git(root: &Path, args: &[&str]) {
+    let output = Command::new("git")
+        .current_dir(root)
+        .args(args)
+        .output()
+        .expect("run git");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn fixture() -> TempDir {
+    let root = TempDir::new().expect("fixture root");
+    git(root.path(), &["init", "-q"]);
+    git(
+        root.path(),
+        &["config", "user.email", "memory@test.invalid"],
+    );
+    git(root.path(), &["config", "user.name", "Memory Test"]);
+    fs::create_dir_all(root.path().join("src")).expect("create source directory");
+    fs::write(
+        root.path().join("src/lib.rs"),
+        "pub fn retained_generation() -> u32 { 1 }\n",
+    )
+    .expect("write source");
+    git(root.path(), &["add", "src/lib.rs"]);
+    git(root.path(), &["commit", "-q", "-m", "fixture"]);
+    root
+}
+
+#[test]
+fn latest_complete_reuses_the_immutable_generation_allocation() {
+    let project = fixture();
+    let store = TempDir::new().expect("store root");
+    let mut scheduler = CodeIndexWorktreeSchedulerV1::open(
+        project.path(),
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    )
+    .expect("open scheduler");
+    assert!(matches!(
+        scheduler.reconcile_now().expect("publish generation"),
+        CodeIndexReconcileOutcomeV1::Published(_)
+    ));
+
+    let first = scheduler.latest_complete().expect("first generation read");
+    let second = scheduler.latest_complete().expect("second generation read");
+
+    assert!(
+        std::ptr::eq(first.generation(), second.generation()),
+        "readers must share the sealed generation instead of deep-cloning it"
+    );
+    assert!(!first.exact().expect("exact chunks").is_empty());
+    let generation_id = first.generation().manifest().generation_id.clone();
+    drop(first);
+    drop(second);
+    drop(scheduler);
+
+    let reopened = CodeIndexWorktreeSchedulerV1::open(
+        project.path(),
+        store.path().to_path_buf(),
+        Arc::new(SharedCodeIndexBytePoolV1::default()),
+    )
+    .expect("reopen scheduler");
+    assert_eq!(
+        reopened
+            .latest_complete()
+            .expect("restored generation")
+            .generation()
+            .manifest()
+            .generation_id,
+        generation_id,
+        "borrowed publication encoding must remain restart-compatible"
+    );
+}
+
+#[tokio::test]
+async fn registry_reports_retained_generation_bytes_without_scheduler_locks() {
+    let project = fixture();
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(project.path(), store.path().to_path_buf(), None)
+        .await
+        .expect("mount worktree");
+
+    let stats = registry.memory_stats().await;
+
+    assert_eq!(stats.mounted_worktrees, 1);
+    assert_eq!(stats.reconciling_worktrees, 0);
+    assert!(stats.retained_generation_encoded_bytes > 0);
+    registry.shutdown().await;
+}

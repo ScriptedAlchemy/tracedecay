@@ -108,6 +108,18 @@ impl Default for TreeSitterExtractor {
     }
 }
 
+fn sort_canonical_json(values: &mut Vec<serde_json::Value>) {
+    let mut keyed = values
+        .drain(..)
+        .map(|value| {
+            let key = serde_json::to_string(&value).expect("canonical value serializes");
+            (key, value)
+        })
+        .collect::<Vec<_>>();
+    keyed.sort_by(|left, right| left.0.cmp(&right.0));
+    values.extend(keyed.into_iter().map(|(_, value)| value));
+}
+
 /// Canonical digest of the extraction rows. Operational timestamps are
 /// stripped and rows are canonically ordered before hashing.
 fn rows_digest(
@@ -139,14 +151,9 @@ fn rows_digest(
             serde_json::to_value(reference).expect("unresolved refs serialize canonically")
         })
         .collect();
-    let canonical_order = |left: &serde_json::Value, right: &serde_json::Value| {
-        serde_json::to_string(left)
-            .expect("canonical value serializes")
-            .cmp(&serde_json::to_string(right).expect("canonical value serializes"))
-    };
-    nodes.sort_by(canonical_order);
-    edges.sort_by(canonical_order);
-    unresolved.sort_by(canonical_order);
+    sort_canonical_json(&mut nodes);
+    sort_canonical_json(&mut edges);
+    sort_canonical_json(&mut unresolved);
 
     #[derive(Serialize)]
     struct RowsPayload<'a> {
