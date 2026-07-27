@@ -78,6 +78,10 @@ const DAEMON_SHUTDOWN_DEADLINE: Duration = Duration::from_secs(45);
 const DAEMON_CLIENT_DRAIN_DEADLINE: Duration = Duration::from_secs(15);
 #[cfg(unix)]
 const DAEMON_TASK_ABORT_DEADLINE: Duration = Duration::from_secs(2);
+/// How long a project open may queue behind an unrelated writer before the
+/// client is told to retry. The open itself keeps running in the background.
+#[cfg(unix)]
+const CONTENDED_PROJECT_OPEN_GRACE: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Default)]
 pub(crate) struct DaemonLifecycle {
@@ -2911,13 +2915,18 @@ async fn serve_broker_socket_client(
         }
     }
     let server = if let Some(project_path) = handshake.project_path.as_ref() {
+        // Queuing behind an unrelated writer can take that writer's whole
+        // operation, so answer with a retry hint rather than holding the
+        // client. An uncontended open is this client's own work and must run
+        // to completion, otherwise one-shot callers never get a result.
+        let contended = engine.store_administration.writer_is_busy();
         let mut project_open = engine.spawn_direct_project_server_open(handshake.clone());
-        let server = match tokio::time::timeout(
-            std::time::Duration::from_millis(500),
-            &mut project_open,
-        )
-        .await
-        {
+        let opened = if contended {
+            tokio::time::timeout(CONTENDED_PROJECT_OPEN_GRACE, &mut project_open).await
+        } else {
+            Ok((&mut project_open).await)
+        };
+        let server = match opened {
             Ok(Ok(Ok(server))) => server,
             Ok(Ok(Err(error))) => {
                 write_project_open_error(&mut transport, &first_request_line, &error).await?;
