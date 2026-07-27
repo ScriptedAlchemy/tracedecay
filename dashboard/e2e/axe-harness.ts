@@ -107,8 +107,22 @@ const ONLY = process.env['AXE_ONLY'] ?? '';
 
 type Theme = (typeof THEMES)[number];
 
-/** A JSON body, or an explicit HTTP failure to simulate a broken read. */
-type Override = { status: number; body: unknown };
+/**
+ * A JSON body, or an explicit HTTP failure to simulate a broken read.
+ *
+ * `bodyFor` receives the intercepted request URL, which is what makes a
+ * server-paginated surface auditable: a fixed body answers `offset=100` with
+ * page one, so the pager appears to work while nothing moves, and a focus or
+ * range assertion against it would be measuring the fixture rather than the
+ * surface.
+ */
+type Override =
+  | { status: number; body: unknown }
+  | { status: number; bodyFor: (url: URL) => unknown };
+
+function overrideBody(override: Override, url: string): unknown {
+  return 'bodyFor' in override ? override.bodyFor(new URL(url)) : override.body;
+}
 
 export interface Scenario {
   readonly id: string;
@@ -179,6 +193,25 @@ export async function expectVisibleText(page: Page, text: string, what: string):
 export async function expectAbsent(page: Page, selector: string, what: string): Promise<void> {
   const n = await page.locator(selector).count();
   if (n !== 0) throw new Error(`${what}: expected ${selector} to be absent, found ${n}`);
+}
+
+/**
+ * What holds focus right now, as `tag:name`, or `body` when nothing does.
+ *
+ * `body` is the failure this exists to name. A control that disables itself in
+ * response to its own activation — the last page of a pager — is removed from
+ * the tab order while focused, and the browser drops focus to the document. A
+ * keyboard user is then returned to the top of the page with no indication that
+ * anything happened, which no axe rule can see because the markup is faultless
+ * until the moment it is used.
+ */
+export async function focusedElement(page: Page): Promise<string> {
+  return page.evaluate(() => {
+    const el = document.activeElement;
+    if (el === null || el === document.body || el === document.documentElement) return 'body';
+    const name = (el.getAttribute('aria-label') ?? el.textContent ?? '').trim().replace(/\s+/g, ' ');
+    return `${el.tagName.toLowerCase()}${name === '' ? '' : `:${name.slice(0, 60)}`}`;
+  });
 }
 
 /**
@@ -496,7 +529,7 @@ export async function runHarness(scenarios: readonly Scenario[]): Promise<void> 
           await route.fulfill({
             status: override.status,
             contentType: 'application/json',
-            body: JSON.stringify(override.body),
+            body: JSON.stringify(overrideBody(override, route.request().url())),
           });
         });
       }
@@ -579,7 +612,7 @@ export async function runHarness(scenarios: readonly Scenario[]): Promise<void> 
           await route.fulfill({
             status: override.status,
             contentType: 'application/json',
-            body: JSON.stringify(override.body),
+            body: JSON.stringify(overrideBody(override, route.request().url())),
           });
         });
       }
