@@ -469,6 +469,67 @@ async fn memory_v2_merge_preserves_deletion_terminality_and_carries_live_facts()
 }
 
 #[tokio::test]
+async fn memory_v2_merge_rejects_incompatible_same_fact_identity() {
+    let temp = TempDir::new().unwrap();
+    let target_path = temp.path().join("target-conflict.db");
+    let source_path = temp.path().join("source-conflict.db");
+    for (path, identity) in [
+        (&target_path, r#"{"content":"target"}"#),
+        (&source_path, r#"{"content":"source"}"#),
+    ] {
+        let (database, _) = test_initialize(path).await;
+        let transaction = database
+            .begin_write_transaction("seed conflicting memory_v2 identity")
+            .await
+            .unwrap();
+        transaction
+            .execute(
+                "INSERT INTO memory_v2_facts(
+                    fact_id, owner_kind, project_id, owner_json, identity_json, created_at
+                 ) VALUES('fact.conflict', 'profile', '', '{\"kind\":\"profile\"}', ?1, 1)",
+                params![identity],
+            )
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+        database.checkpoint().await.unwrap();
+        database.close();
+    }
+
+    let error = sqlite::merge_memory_v2_for_test(&target_path, &source_path)
+        .await
+        .expect_err("same FactId with incompatible identity must fail closed");
+    assert!(
+        error.to_string().contains("memory_v2")
+            && error.to_string().contains("conflict"),
+        "unexpected conflict error: {error}"
+    );
+
+    let (target, _) = test_open_read_only(&target_path).await;
+    let snapshot = target
+        .begin_engine_read_snapshot("read rejected memory_v2 conflict")
+        .await
+        .unwrap();
+    let mut rows = snapshot
+        .query(
+            "SELECT identity_json FROM memory_v2_facts WHERE fact_id='fact.conflict'",
+            (),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        rows.next()
+            .await
+            .unwrap()
+            .unwrap()
+            .get::<String>(0)
+            .unwrap(),
+        r#"{"content":"target"}"#
+    );
+    target.close();
+}
+
+#[tokio::test]
 async fn memory_v2_merge_preserves_anchor_authority_and_evidence_assembly() {
     let temp = TempDir::new().unwrap();
     let target_path = temp.path().join("target-graph.db");

@@ -561,6 +561,99 @@ async fn busy_untrack_retains_managed_state_until_a_later_poll_succeeds() {
 }
 
 #[tokio::test]
+async fn target_durability_failure_blocks_cleanup_and_retry_is_idempotent() {
+    let (_env, project, origin, graph) = indexed_repo_with_origin().await;
+    let content = "Target durability failure keeps this fact readable";
+    add_same_repo_pr(&project, &origin, 16, "pr_sixteen_symbol");
+    let data_root = project_data_dir(&graph);
+    let label = "tracedecay/autotrack/pr/16";
+    let discovery = pr_autotrack::discover_open_prs(&project).expect("PR discovery succeeds");
+    let tracked = reconcile(&graph, &project, &data_root, &discovery, 10).await;
+    assert_eq!(tracked.tracked, vec![label.to_string()]);
+    let branch = load_branch_meta(&data_root).unwrap().branches[label].clone();
+    let database = data_root.join(&branch.db_file);
+    seed_branch_only_fact(&database, content);
+    git(&origin, &["update-ref", "-d", "refs/pull/16/head"]);
+    let closed = pr_autotrack::discover_open_prs(&project).expect("PR discovery succeeds");
+
+    tracedecay::migrate::memory_cutover::set_cutover_fault_for_test(
+        tracedecay::migrate::memory_cutover::CutoverFaultForTest::TargetDurabilityBarrier,
+    );
+    let blocked = reconcile(&graph, &project, &data_root, &closed, 10).await;
+    assert!(blocked.untracked.is_empty());
+    assert!(load_branch_meta(&data_root).unwrap().is_tracked(label));
+    assert!(database.is_file());
+    assert!(!data_root.join("memory-branch-cutover.json").exists());
+    assert_eq!(
+        graph
+            .list_facts(None, Some(0.0), 100)
+            .await
+            .unwrap()
+            .iter()
+            .filter(|fact| fact.content == content)
+            .count(),
+        1,
+        "the committed merge remains intact before receipt publication"
+    );
+
+    let retried = reconcile(&graph, &project, &data_root, &closed, 10).await;
+    assert_eq!(retried.untracked, vec![label.to_string()]);
+    assert!(!database.exists());
+    assert_eq!(
+        graph
+            .list_facts(None, Some(0.0), 100)
+            .await
+            .unwrap()
+            .iter()
+            .filter(|fact| fact.content == content)
+            .count(),
+        1,
+        "retry must not duplicate the merged fact"
+    );
+}
+
+#[tokio::test]
+async fn receipt_durability_failure_blocks_cleanup_until_durable_retry() {
+    let (_env, project, origin, graph) = indexed_repo_with_origin().await;
+    let content = "Receipt durability failure keeps this fact readable";
+    add_same_repo_pr(&project, &origin, 17, "pr_seventeen_symbol");
+    let data_root = project_data_dir(&graph);
+    let label = "tracedecay/autotrack/pr/17";
+    let discovery = pr_autotrack::discover_open_prs(&project).expect("PR discovery succeeds");
+    let tracked = reconcile(&graph, &project, &data_root, &discovery, 10).await;
+    assert_eq!(tracked.tracked, vec![label.to_string()]);
+    let branch = load_branch_meta(&data_root).unwrap().branches[label].clone();
+    let database = data_root.join(&branch.db_file);
+    seed_branch_only_fact(&database, content);
+    git(&origin, &["update-ref", "-d", "refs/pull/17/head"]);
+    let closed = pr_autotrack::discover_open_prs(&project).expect("PR discovery succeeds");
+
+    tracedecay::migrate::memory_cutover::set_cutover_fault_for_test(
+        tracedecay::migrate::memory_cutover::CutoverFaultForTest::ReceiptDurability,
+    );
+    let blocked = reconcile(&graph, &project, &data_root, &closed, 10).await;
+    assert!(blocked.untracked.is_empty());
+    assert!(load_branch_meta(&data_root).unwrap().is_tracked(label));
+    assert!(database.is_file());
+    assert!(!data_root.join("memory-branch-cutover.json").exists());
+
+    let retried = reconcile(&graph, &project, &data_root, &closed, 10).await;
+    assert_eq!(retried.untracked, vec![label.to_string()]);
+    assert!(!database.exists());
+    assert_eq!(
+        graph
+            .list_facts(None, Some(0.0), 100)
+            .await
+            .unwrap()
+            .iter()
+            .filter(|fact| fact.content == content)
+            .count(),
+        1,
+        "fact must remain readable after receipt-backed deletion"
+    );
+}
+
+#[tokio::test]
 async fn deferred_tracking_is_not_persisted_and_retries_next_cycle() {
     let (_env, project, origin, graph) = indexed_repo_with_origin().await;
     add_same_repo_pr(&project, &origin, 7, "pr_seven_symbol");

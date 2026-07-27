@@ -3,6 +3,8 @@
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+#[cfg(any(test, feature = "test-transport"))]
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::UNIX_EPOCH;
 
 use serde::{Deserialize, Serialize};
@@ -23,6 +25,23 @@ const RECEIPT_FILENAME: &str = "memory-branch-cutover.json";
 const MAX_CUTOVER_PASSES: usize = 100_000;
 const MIN_SUPPORTED_SOURCE_SCHEMA: i64 = 15;
 
+#[cfg(any(test, feature = "test-transport"))]
+static CUTOVER_FAULT: AtomicU8 = AtomicU8::new(0);
+
+#[cfg(any(test, feature = "test-transport"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[doc(hidden)]
+pub enum CutoverFaultForTest {
+    TargetDurabilityBarrier = 1,
+    ReceiptDurability = 2,
+}
+
+#[cfg(any(test, feature = "test-transport"))]
+#[doc(hidden)]
+pub fn set_cutover_fault_for_test(fault: CutoverFaultForTest) {
+    CUTOVER_FAULT.store(fault as u8, Ordering::SeqCst);
+}
+
 #[derive(Clone, Debug)]
 pub struct MemoryCutoverOptions {
     pub project_root: PathBuf,
@@ -36,7 +55,7 @@ pub struct MemoryCutoverSource {
     pub fact_count: u64,
     pub feedback_count: u64,
     pub oplog_count: u64,
-    pub unmapped_memory_v2_facts: u64,
+    pub memory_v2_fact_count: u64,
     pub generation: String,
 }
 
@@ -88,22 +107,7 @@ async fn plan_resolved(resolved: &ResolvedMemoryCutover) -> Result<MemoryCutover
         let fact_count = table_count(snapshot.connection(), "memory_facts").await?;
         let feedback_count = table_count(snapshot.connection(), "memory_feedback_events").await?;
         let oplog_count = table_count(snapshot.connection(), "memory_oplog").await?;
-        let unmapped_memory_v2_facts =
-            if table_exists(snapshot.connection(), "memory_v2_facts").await? {
-                scalar_u64(
-                    snapshot.connection(),
-                    "SELECT COUNT(*) FROM memory_v2_facts AS fact
-                     WHERE NOT EXISTS(
-                         SELECT 1 FROM memory_v2_legacy_map AS mapping
-                         WHERE mapping.fact_id = fact.fact_id
-                           AND mapping.owner_kind = fact.owner_kind
-                           AND mapping.project_id = fact.project_id
-                     )",
-                )
-                .await?
-            } else {
-                0
-            };
+        let memory_v2_fact_count = table_count(snapshot.connection(), "memory_v2_facts").await?;
         snapshot
             .validate_source()
             .map_err(|error| migration_error(error.to_string()))?;
@@ -114,7 +118,7 @@ async fn plan_resolved(resolved: &ResolvedMemoryCutover) -> Result<MemoryCutover
             fact_count,
             feedback_count,
             oplog_count,
-            unmapped_memory_v2_facts,
+            memory_v2_fact_count,
         });
     }
     let confirmation_token =
@@ -140,8 +144,6 @@ pub async fn apply(
             "memory cutover confirmation token does not match the current branch-store generation",
         ));
     }
-    validate_planned_sources(&planned)?;
-
     let lifecycle = crate::lifecycle_lease::acquire_exclusive_for_profile(
         &resolved.profile_root,
         "project-wide branch memory cutover",
@@ -182,24 +184,7 @@ pub(crate) async fn apply_for_retained_project(graph: &TraceDecay) -> Result<Mem
         ));
     }
     let planned = plan_resolved(&resolved).await?;
-    validate_planned_sources(&planned)?;
     apply_planned(&resolved, graph, planned).await
-}
-
-fn validate_planned_sources(planned: &MemoryCutoverReport) -> Result<()> {
-    if let Some(source) = planned
-        .sources
-        .iter()
-        .find(|source| source.unmapped_memory_v2_facts > 0)
-    {
-        return Err(migration_error(format!(
-            "branch memory source '{}' has {} Memory V2 fact(s) without a legacy mirror; \
-             refusing a lossy cutover",
-            source.path.display(),
-            source.unmapped_memory_v2_facts
-        )));
-    }
-    Ok(())
 }
 
 async fn apply_planned(
@@ -254,6 +239,11 @@ async fn apply_planned(
         }
     }
     verify_source_generations(&planned.sources)?;
+    target.checkpoint().await?;
+    inject_cutover_fault(CutoverFaultPhase::TargetDurabilityBarrier)?;
+    storage::PrivateStoreIo::sync_sqlite_family(&resolved.graph_db_path)
+        .map_err(|error| migration_error(format!("synchronize project memory target: {error}")))?;
+    inject_cutover_fault(CutoverFaultPhase::ReceiptDurability)?;
     write_cutover_receipt(&resolved, &planned.sources)?;
 
     Ok(MemoryCutoverReport {
@@ -261,6 +251,28 @@ async fn apply_planned(
         cutover_passes,
         ..planned
     })
+}
+
+#[derive(Clone, Copy)]
+enum CutoverFaultPhase {
+    TargetDurabilityBarrier = 1,
+    ReceiptDurability = 2,
+}
+
+fn inject_cutover_fault(phase: CutoverFaultPhase) -> Result<()> {
+    #[cfg(any(test, feature = "test-transport"))]
+    if CUTOVER_FAULT
+        .compare_exchange(phase as u8, 0, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+    {
+        return Err(migration_error(match phase {
+            CutoverFaultPhase::TargetDurabilityBarrier => {
+                "injected target durability barrier failure"
+            }
+            CutoverFaultPhase::ReceiptDurability => "injected receipt durability failure",
+        }));
+    }
+    Ok(())
 }
 
 /// Fails closed unless every selected branch family exactly matches a source
@@ -370,6 +382,15 @@ fn branch_has_no_durable_memory(path: &Path) -> bool {
             "memory_feedback_events",
             "memory_oplog",
             "memory_v2_facts",
+            "memory_v2_assertions",
+            "memory_v2_lineage_events",
+            "memory_v2_evidence",
+            "memory_v2_feedback_history",
+            "memory_v2_fact_relations",
+            "memory_v2_proposals",
+            "memory_v2_proposal_transitions",
+            "memory_v2_legacy_quarantine",
+            "memory_v2_compatibility_operation_receipts",
         ],
     )
     .is_ok_and(|has_rows| !has_rows)
@@ -537,7 +558,7 @@ fn write_cutover_receipt(
     let temp = path.with_extension(format!("json.tmp-{}", std::process::id()));
     let bytes =
         serde_json::to_vec_pretty(&receipt).map_err(|error| migration_error(error.to_string()))?;
-    storage::PrivateStoreIo::write_file_atomically(&path, &temp, &bytes)
+    storage::PrivateStoreIo::write_file_atomically_durable(&path, &temp, &bytes)
         .map_err(|error| migration_error(error.to_string()))
 }
 

@@ -1413,6 +1413,43 @@ impl PrivateStoreIo {
         set_private_file_permissions(path)
     }
 
+    /// Atomically replaces a private-store file and establishes the durability
+    /// barrier required before a destructive operation may trust it.
+    pub fn write_file_atomically_durable(
+        path: &Path,
+        temp_path: &Path,
+        contents: &[u8],
+    ) -> io::Result<()> {
+        Self::write_file_atomically(path, temp_path, contents)?;
+        fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)?
+            .sync_all()?;
+        sync_parent_directory(path)
+    }
+
+    /// Synchronizes the durable members of one SQLite WAL family. The SHM
+    /// coordination file is intentionally excluded because SQLite rebuilds it.
+    pub fn sync_sqlite_family(path: &Path) -> io::Result<()> {
+        reject_symlink_components(path, "private SQLite store")?;
+        for member in [
+            path.to_path_buf(),
+            PathBuf::from(format!("{}-wal", path.display())),
+        ] {
+            match fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&member)
+            {
+                Ok(file) => file.sync_all()?,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        sync_parent_directory(path)
+    }
+
     pub fn copy_artifact(source: &Path, target: &Path) -> io::Result<u64> {
         let meta = source.symlink_metadata()?;
         if meta.file_type().is_symlink() {
@@ -1454,6 +1491,20 @@ impl PrivateStoreIo {
         }
         Ok(bytes)
     }
+}
+
+#[cfg(unix)]
+fn sync_parent_directory(path: &Path) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| invalid_input("private store durable file has no parent directory"))?;
+    fs::File::open(parent)?.sync_all()
+}
+
+#[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)]
+fn sync_parent_directory(_path: &Path) -> io::Result<()> {
+    Ok(())
 }
 
 fn reject_symlink_components(path: &Path, subject: &str) -> io::Result<()> {
