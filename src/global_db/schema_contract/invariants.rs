@@ -278,7 +278,16 @@ pub(crate) async fn ensure_authority_invariants(
             },
         )
         .await?;
-        if foreign_key_violation_exists_resumable(conn).await? {
+        // Sweeping every foreign key detects corruption, but it cannot detect a
+        // violation an authorized write introduced: each runtime connection
+        // enables `PRAGMA foreign_keys` and verifies it came back on, so SQLite
+        // rejects the offending write itself. The sweep costs what a corruption
+        // scan costs — 96 foreign-key tables and roughly ten million child rows
+        // at ~59us per row, tens of minutes on a real store — which a cold open
+        // pays before admitting its first request. Restrict it to the case that
+        // actually implies tampering: guard triggers that were found missing or
+        // altered. An ordinary cold open still runs every row audit above.
+        if force_exhaustive && foreign_key_violation_exists_resumable(conn).await? {
             return Err(global_db_operation_message(
                 OPERATION,
                 "global database contains a foreign-key violation",

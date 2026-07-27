@@ -274,60 +274,69 @@ impl Database {
             return Ok(());
         }
 
-        let stmt = transaction
-            .prepare_engine(
-                    "INSERT OR REPLACE INTO nodes \
-                     (id,kind,name,qualified_name,file_path,\
-                     start_line,end_line,start_column,end_column,\
-                     docstring,signature,visibility,is_async,\
-                     branches,loops,returns,max_nesting,\
-                     unsafe_blocks,unchecked_calls,assertions,updated_at,attrs_start_line,parent_id) \
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23)"
-                )
+        // Keep each statement below SQLite's conservative 999-parameter
+        // floor: 32 rows × 23 columns = 736 parameters. This avoids one async
+        // runtime request per node while preserving the surrounding atomic
+        // full-index replacement.
+        const ROWS_PER_INSERT: usize = 32;
+        const COLUMNS: usize = 23;
+        for chunk in nodes.chunks(ROWS_PER_INSERT) {
+            let values_clause = (0..chunk.len())
+                .map(|row| {
+                    let first = row * COLUMNS + 1;
+                    let placeholders = (first..first + COLUMNS)
+                        .map(|index| format!("?{index}"))
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    format!("({placeholders})")
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "INSERT OR REPLACE INTO nodes \
+                 (id,kind,name,qualified_name,file_path,\
+                  start_line,end_line,start_column,end_column,\
+                  docstring,signature,visibility,is_async,\
+                  branches,loops,returns,max_nesting,\
+                  unsafe_blocks,unchecked_calls,assertions,updated_at,attrs_start_line,parent_id) \
+                 VALUES {values_clause}"
+            );
+            let mut values = Vec::with_capacity(chunk.len() * COLUMNS);
+            for node in chunk {
+                values.extend([
+                    Value::Text(node.id.clone()),
+                    Value::Text(node.kind.as_str().to_owned()),
+                    Value::Text(node.name.clone()),
+                    Value::Text(node.qualified_name.clone()),
+                    Value::Text(node.file_path.clone()),
+                    Value::Integer(i64::from(node.start_line)),
+                    Value::Integer(i64::from(node.end_line)),
+                    Value::Integer(i64::from(node.start_column)),
+                    Value::Integer(i64::from(node.end_column)),
+                    node.docstring.clone().map_or(Value::Null, Value::Text),
+                    node.signature.clone().map_or(Value::Null, Value::Text),
+                    Value::Text(node.visibility.as_str().to_owned()),
+                    Value::Integer(i64::from(node.is_async)),
+                    Value::Integer(i64::from(node.branches)),
+                    Value::Integer(i64::from(node.loops)),
+                    Value::Integer(i64::from(node.returns)),
+                    Value::Integer(i64::from(node.max_nesting)),
+                    Value::Integer(i64::from(node.unsafe_blocks)),
+                    Value::Integer(i64::from(node.unchecked_calls)),
+                    Value::Integer(i64::from(node.assertions)),
+                    Value::Integer(node.updated_at as i64),
+                    Value::Integer(i64::from(node.attrs_start_line)),
+                    node.parent_id.clone().map_or(Value::Null, Value::Text),
+                ]);
+            }
+            transaction
+                .execute_engine(&sql, values)
                 .await
                 .map_err(|e| TraceDecayError::Database {
-                    message: format!("failed to prepare: {e}"),
-                    operation: "insert_nodes".to_string(),
-                })?;
-
-        for node in nodes {
-            let params = params![
-                node.id.as_str(),
-                node.kind.as_str(),
-                node.name.as_str(),
-                node.qualified_name.as_str(),
-                node.file_path.as_str(),
-                i64::from(node.start_line),
-                i64::from(node.end_line),
-                i64::from(node.start_column),
-                i64::from(node.end_column),
-                opt_str(node.docstring.as_deref()),
-                opt_str(node.signature.as_deref()),
-                node.visibility.as_str(),
-                i64::from(node.is_async),
-                i64::from(node.branches),
-                i64::from(node.loops),
-                i64::from(node.returns),
-                i64::from(node.max_nesting),
-                i64::from(node.unsafe_blocks),
-                i64::from(node.unchecked_calls),
-                i64::from(node.assertions),
-                node.updated_at as i64,
-                i64::from(node.attrs_start_line),
-                opt_str(node.parent_id.as_deref()),
-            ];
-            let insert_result = stmt.execute(params).await;
-            if let Err(e) = insert_result {
-                stmt.reset();
-                return Err(TraceDecayError::Database {
                     message: format!("failed to insert node: {e}"),
                     operation: "insert_nodes".to_string(),
-                });
-            }
-            stmt.reset();
+                })?;
         }
-
-        drop(stmt);
         Ok(())
     }
 

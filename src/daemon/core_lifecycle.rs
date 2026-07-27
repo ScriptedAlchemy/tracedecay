@@ -11,7 +11,8 @@ use tokio::time::Duration;
 /// being killed with `SIGKILL` mid-checkpoint.
 #[cfg(unix)]
 pub(crate) const DAEMON_SHUTDOWN_DEADLINE: Duration = Duration::from_secs(45);
-pub(crate) const DAEMON_CLIENT_DRAIN_DEADLINE: Duration = Duration::from_secs(15);
+pub(crate) const DAEMON_SERVER_SHUTDOWN_DEADLINE: Duration = Duration::from_secs(3);
+pub(crate) const DAEMON_CLIENT_DRAIN_DEADLINE: Duration = Duration::from_secs(2);
 pub(crate) const DAEMON_TASK_ABORT_DEADLINE: Duration = Duration::from_secs(2);
 
 #[derive(Clone, Default)]

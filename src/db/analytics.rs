@@ -313,6 +313,93 @@ impl Database {
         Ok(items)
     }
 
+    /// Returns nodes ranked by total incoming and outgoing connectivity.
+    ///
+    /// Aggregation stays inside SQLite so large graphs never materialize the
+    /// complete edge table in the MCP process. The optional path filter is
+    /// applied before `LIMIT`, unlike post-filtering an already truncated list.
+    pub async fn get_hotspot_nodes(
+        &self,
+        path_prefix: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<(Node, u64, u64)>> {
+        debug_assert!(limit > 0, "get_hotspot_nodes limit must be positive");
+        let mut params = Vec::new();
+        let path_filter = if let Some(prefix) = path_prefix {
+            params.push(path_prefix_like_value(prefix));
+            "WHERE n.file_path LIKE ?1"
+        } else {
+            ""
+        };
+        let limit_index = params.len() + 1;
+        params.push(Value::Integer(limit as i64));
+        let sql = format!(
+            "WITH connectivity AS (
+                SELECT node_id,
+                       SUM(incoming) AS incoming,
+                       SUM(outgoing) AS outgoing
+                FROM (
+                    SELECT target AS node_id, COUNT(*) AS incoming, 0 AS outgoing
+                    FROM edges GROUP BY target
+                    UNION ALL
+                    SELECT source AS node_id, 0 AS incoming, COUNT(*) AS outgoing
+                    FROM edges GROUP BY source
+                )
+                GROUP BY node_id
+             )
+             SELECT n.id, n.kind, n.name, n.qualified_name, n.file_path,
+                    n.start_line, n.end_line, n.start_column, n.end_column,
+                    n.docstring, n.signature, n.visibility, n.is_async,
+                    n.branches, n.loops, n.returns, n.max_nesting,
+                    n.unsafe_blocks, n.unchecked_calls, n.assertions,
+                    n.updated_at, n.attrs_start_line, n.parent_id,
+                    connectivity.incoming, connectivity.outgoing
+             FROM connectivity
+             JOIN nodes n ON n.id = connectivity.node_id
+             {path_filter}
+             ORDER BY connectivity.incoming + connectivity.outgoing DESC,
+                      n.id ASC
+             LIMIT ?{limit_index}"
+        );
+        let operation = "get_hotspot_nodes";
+        let mut rows = self
+            .engine_conn()
+            .query(&sql, params_from_iter(params))
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("failed to query hotspot nodes: {error}"),
+                operation: operation.to_owned(),
+            })?;
+        let mut items = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("failed to read hotspot row: {error}"),
+                operation: operation.to_owned(),
+            })?
+        {
+            let node = row_to_node(&row).map_err(|error| TraceDecayError::Database {
+                message: format!("failed to map hotspot row: {error}"),
+                operation: operation.to_owned(),
+            })?;
+            let incoming = row
+                .get::<u64>(23)
+                .map_err(|error| TraceDecayError::Database {
+                    message: format!("failed to read hotspot incoming count: {error}"),
+                    operation: operation.to_owned(),
+                })?;
+            let outgoing = row
+                .get::<u64>(24)
+                .map_err(|error| TraceDecayError::Database {
+                    message: format!("failed to read hotspot outgoing count: {error}"),
+                    operation: operation.to_owned(),
+                })?;
+            items.push((node, incoming, outgoing));
+        }
+        Ok(items)
+    }
+
     /// Returns nodes ranked by line span (`end_line` - `start_line` + 1), optionally
     /// filtered by node kind. Results are ordered by size descending.
     pub async fn get_largest_nodes(

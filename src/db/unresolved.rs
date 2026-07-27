@@ -1,5 +1,5 @@
 // Rust guideline compliant 2025-10-17
-use crate::db::engine::params;
+use crate::db::engine::{Value, params};
 
 use super::connection::{Database, DatabaseWriteTransaction};
 use super::rows::row_to_unresolved_ref;
@@ -89,36 +89,50 @@ impl Database {
             return Ok(());
         }
 
-        let stmt = transaction
-            .prepare_engine("INSERT INTO unresolved_refs (from_node_id,reference_name,reference_kind,line,col,file_path) VALUES (?1,?2,?3,?4,?5,?6)")
-            .await
-            .map_err(|e| TraceDecayError::Database {
-                message: format!("failed to prepare: {e}"),
-                operation: "insert_unresolved_refs".to_string(),
-            })?;
-
-        for uref in refs {
-            if let Err(e) = stmt
-                .execute(params![
-                    uref.from_node_id.as_str(),
-                    uref.reference_name.as_str(),
-                    uref.reference_kind.as_str(),
-                    i64::from(uref.line),
-                    i64::from(uref.column),
-                    uref.file_path.as_str(),
-                ])
+        // `Statement::execute` is intentionally a fresh runtime request, not a
+        // pinned SQLite statement. Submitting one request per extracted
+        // reference made a large checkout pay nearly a million
+        // spawn_blocking/channel round-trips. Keep each SQL statement under
+        // SQLite's conservative 999-parameter floor (100 rows × 6 values) and
+        // retain the surrounding atomic full-index transaction.
+        const ROWS_PER_INSERT: usize = 100;
+        for chunk in refs.chunks(ROWS_PER_INSERT) {
+            let values_clause = (0..chunk.len())
+                .map(|row| {
+                    let first = row * 6 + 1;
+                    format!(
+                        "(?{first},?{},?{},?{},?{},?{})",
+                        first + 1,
+                        first + 2,
+                        first + 3,
+                        first + 4,
+                        first + 5
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "INSERT INTO unresolved_refs \
+                 (from_node_id,reference_name,reference_kind,line,col,file_path) \
+                 VALUES {values_clause}"
+            );
+            let mut values = Vec::with_capacity(chunk.len() * 6);
+            for unresolved in chunk {
+                values.push(Value::Text(unresolved.from_node_id.as_str().to_owned()));
+                values.push(Value::Text(unresolved.reference_name.as_str().to_owned()));
+                values.push(Value::Text(unresolved.reference_kind.as_str().to_owned()));
+                values.push(Value::Integer(i64::from(unresolved.line)));
+                values.push(Value::Integer(i64::from(unresolved.column)));
+                values.push(Value::Text(unresolved.file_path.clone()));
+            }
+            transaction
+                .execute_engine(&sql, values)
                 .await
-            {
-                stmt.reset();
-                return Err(TraceDecayError::Database {
+                .map_err(|e| TraceDecayError::Database {
                     message: format!("failed to insert unresolved ref: {e}"),
                     operation: "insert_unresolved_refs".to_string(),
-                });
-            }
-            stmt.reset();
+                })?;
         }
-
-        drop(stmt);
         Ok(())
     }
 

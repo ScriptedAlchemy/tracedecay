@@ -57,6 +57,7 @@ pub(crate) struct CodeIndexSchedulerRegistryV1 {
     pub(super) max_worktrees: usize,
     pub(super) byte_pool: Arc<SharedCodeIndexBytePoolV1>,
     pub(super) mounted: Arc<tokio::sync::Mutex<BTreeMap<PathBuf, MountedCodeIndexWorktreeV1>>>,
+    mount_admission: Arc<tokio::sync::Mutex<()>>,
     background_reconcile_admission: Arc<tokio::sync::Semaphore>,
     generation_publications: tokio::sync::broadcast::Sender<CodeIndexGenerationPublishedV1>,
     test_attribution_authorities: Arc<
@@ -80,6 +81,7 @@ impl CodeIndexSchedulerRegistryV1 {
             max_worktrees,
             byte_pool: Arc::new(SharedCodeIndexBytePoolV1::default()),
             mounted: Arc::new(tokio::sync::Mutex::new(BTreeMap::new())),
+            mount_admission: Arc::new(tokio::sync::Mutex::new(())),
             background_reconcile_admission: Arc::new(tokio::sync::Semaphore::new(
                 MAX_CONCURRENT_BACKGROUND_RECONCILES,
             )),
@@ -134,6 +136,10 @@ impl CodeIndexSchedulerRegistryV1 {
         >,
     ) -> Result<bool, CodeIndexSchedulerErrorV1> {
         let project_root = project_root.canonicalize()?;
+        // Serialize expensive mounts without pinning the registry map. The
+        // initial reconcile can parse and hash an entire repository; holding
+        // `mounted` here blocks every foreground query across every project.
+        let _mount_admission = self.mount_admission.lock().await;
         let mut mounted = self.mounted.lock().await;
         if let Some(existing) = mounted.get(&project_root) {
             let scheduler = Arc::clone(&existing.scheduler);
@@ -156,6 +162,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 "code-index scheduler capacity is exhausted".to_owned(),
             ));
         }
+        drop(mounted);
         let mut opened = self.open_worktree(
             &project_root,
             super::scoped_code_index_store_root(&store_root, &project_root),
@@ -241,6 +248,12 @@ impl CodeIndexSchedulerRegistryV1 {
                 let _ = result;
             }
         });
+        let mut mounted = self.mounted.lock().await;
+        if mounted.len() >= self.max_worktrees {
+            return Err(CodeIndexSchedulerErrorV1::Identity(
+                "code-index scheduler capacity is exhausted".to_owned(),
+            ));
+        }
         mounted.insert(
             project_root,
             MountedCodeIndexWorktreeV1 {

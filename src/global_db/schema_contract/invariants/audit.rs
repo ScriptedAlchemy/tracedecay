@@ -1022,6 +1022,7 @@ async fn validate_projection_authority_suffix_pages(
         let mut rows = conn
             .query(
                 "SELECT observation.sequence, observation.observation_json,
+                        observation.receipt_id,
                         (SELECT COUNT(*) FROM observation_projection_provenance
                          WHERE projector_version = ?1
                            AND observation_id = observation.observation_id),
@@ -1066,33 +1067,31 @@ async fn validate_projection_authority_suffix_pages(
             scan_cursor = row
                 .get::<i64>(0)
                 .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            let observation = decode_authority_json::<DurableObservationV1>(
-                &row.get::<String>(1)
-                    .map_err(|error| global_db_operation_error(OPERATION, error))?,
-                "projected observation authority JSON",
-            )?;
+            let observation_receipt_id = row
+                .get::<String>(2)
+                .map_err(|error| global_db_operation_error(OPERATION, error))?;
             let state = ProjectionAuthorityState {
                 provenance_rows: row
-                    .get(2)
-                    .map_err(|error| global_db_operation_error(OPERATION, error))?,
-                disposition_rows: row
                     .get(3)
                     .map_err(|error| global_db_operation_error(OPERATION, error))?,
-                alias_rows: row
+                disposition_rows: row
                     .get(4)
                     .map_err(|error| global_db_operation_error(OPERATION, error))?,
-                workflow_rows: row
+                alias_rows: row
                     .get(5)
                     .map_err(|error| global_db_operation_error(OPERATION, error))?,
+                workflow_rows: row
+                    .get(6)
+                    .map_err(|error| global_db_operation_error(OPERATION, error))?,
                 queued: row
-                    .get::<i64>(6)
+                    .get::<i64>(7)
                     .map_err(|error| global_db_operation_error(OPERATION, error))?
                     != 0,
             };
             let disposition = match (
-                row.get::<Option<String>>(7)
-                    .map_err(|error| global_db_operation_error(OPERATION, error))?,
                 row.get::<Option<String>>(8)
+                    .map_err(|error| global_db_operation_error(OPERATION, error))?,
+                row.get::<Option<String>>(9)
                     .map_err(|error| global_db_operation_error(OPERATION, error))?,
             ) {
                 (Some(receipt_id), Some(reason)) => {
@@ -1108,9 +1107,28 @@ async fn validate_projection_authority_suffix_pages(
             let stored_collision = disposition.as_ref().is_some_and(|disposition| {
                 disposition.reason == ProjectionSkipReason::OutputCollision.as_str()
             });
-            let skip_reason = if stored_collision {
-                Some(ProjectionSkipReason::OutputCollision)
-            } else {
+            if stored_collision {
+                if !state.is_skip() {
+                    return Err(authority_violation(
+                        "projection authority must contain exactly one collision skip outcome",
+                    ));
+                }
+                let disposition = disposition
+                    .as_ref()
+                    .ok_or_else(|| authority_violation("projection disposition disappeared"))?;
+                if disposition.receipt_id != observation_receipt_id {
+                    return Err(authority_violation(
+                        "projection collision disposition disagrees with observation receipt",
+                    ));
+                }
+                continue;
+            }
+            let observation = decode_authority_json::<DurableObservationV1>(
+                &row.get::<String>(1)
+                    .map_err(|error| global_db_operation_error(OPERATION, error))?,
+                "projected observation authority JSON",
+            )?;
+            let skip_reason =
                 match crate::global_db::observation_projection::derive_projection(&observation)
                     .map_err(|error| {
                         authority_violation(format!("invalid projection authority: {error}"))
@@ -1119,8 +1137,7 @@ async fn validate_projection_authority_suffix_pages(
                     ObservationProjection::Message(_) | ObservationProjection::Composite { .. } => {
                         None
                     }
-                }
-            };
+                };
             if let Some(reason) = skip_reason {
                 if !state.is_skip() {
                     return Err(authority_violation(
