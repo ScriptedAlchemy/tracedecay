@@ -251,6 +251,7 @@ pub(crate) async fn handle_list(all: bool) -> tracedecay::errors::Result<()> {
         .cloned()
         .unwrap_or_default();
     let mut rows: Vec<ListRow> = Vec::with_capacity(project_paths.len());
+    let mut token_errors: Vec<String> = Vec::new();
     let mut total_size: u64 = 0;
     let mut total_tokens: u64 = 0;
 
@@ -292,22 +293,29 @@ pub(crate) async fn handle_list(all: bool) -> tracedecay::errors::Result<()> {
         };
         let project_key =
             tracedecay::migrate::registry::MigrationRegistryRuntime::canonical_project_key(path);
-        let tokens = token_rows
-            .iter()
-            .find(|row| {
-                row.get("project")
-                    .and_then(serde_json::Value::as_str)
-                    .is_some_and(|value| {
-                        tracedecay::migrate::registry::MigrationRegistryRuntime::canonical_project_key(
-                            Path::new(value),
-                        ) == project_key
-                    })
-            })
+        let token_row = token_rows.iter().find(|row| {
+            row.get("project")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|value| {
+                    tracedecay::migrate::registry::MigrationRegistryRuntime::canonical_project_key(
+                        Path::new(value),
+                    ) == project_key
+                })
+        });
+        // `None` is a total this run could not read, which is not the same
+        // answer as a project that has saved nothing.
+        let tokens = token_row
             .and_then(|row| row.get("tokens"))
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
+            .and_then(serde_json::Value::as_u64);
+        if tokens.is_none() {
+            let reason = token_row
+                .and_then(|row| row.get("error"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("no token total reported for this project");
+            token_errors.push(format!("{}: {reason}", path.display()));
+        }
         total_size = total_size.saturating_add(size);
-        total_tokens = total_tokens.saturating_add(tokens);
+        total_tokens = total_tokens.saturating_add(tokens.unwrap_or(0));
         rows.push(ListRow {
             path: path.clone(),
             status_label: location.status.label(),
@@ -327,7 +335,7 @@ pub(crate) async fn handle_list(all: bool) -> tracedecay::errors::Result<()> {
     }
 
     total_size = rows.iter().map(|row| row.size).sum();
-    total_tokens = rows.iter().map(|row| row.tokens).sum();
+    total_tokens = rows.iter().filter_map(|row| row.tokens).sum();
 
     rows.sort_by(|a, b| b.tokens.cmp(&a.tokens).then_with(|| a.path.cmp(&b.path)));
 
@@ -351,10 +359,10 @@ pub(crate) async fn handle_list(all: bool) -> tracedecay::errors::Result<()> {
         } else {
             "—".to_string()
         };
-        let tokens_str = if r.tokens == 0 {
-            "—".to_string()
-        } else {
-            format_token_count(r.tokens)
+        let tokens_str = match r.tokens {
+            None => "unavailable".to_string(),
+            Some(0) => "—".to_string(),
+            Some(tokens) => format_token_count(tokens),
         };
         println!(
             "  {path_str}{pad}  {size:>10}  {tokens:>10} tokens",
@@ -369,11 +377,25 @@ pub(crate) async fn handle_list(all: bool) -> tracedecay::errors::Result<()> {
     } else {
         format_token_count(total_tokens)
     };
+    let unreadable = rows.iter().filter(|row| row.tokens.is_none()).count();
+    let total_suffix = if unreadable == 0 {
+        String::new()
+    } else {
+        format!(" (excludes {unreadable} project(s) with unavailable totals)")
+    };
     println!(
-        "Total: {} on disk · {} tokens saved",
+        "Total: {} on disk · {} tokens saved{}",
         tracedecay::display::format_bytes(total_size),
-        total_tokens_str
+        total_tokens_str,
+        total_suffix
     );
+    if !token_errors.is_empty() {
+        eprintln!();
+        eprintln!("Token totals could not be read for {} project(s):", token_errors.len());
+        for error in &token_errors {
+            eprintln!("  {error}");
+        }
+    }
     Ok(())
 }
 
@@ -383,7 +405,8 @@ struct ListRow {
     status_label: &'static str,
     has_data: bool,
     size: u64,
-    tokens: u64,
+    /// `None` when this run could not read the project's saved-token total.
+    tokens: Option<u64>,
 }
 
 fn append_orphan_manifest_rows(
@@ -426,7 +449,7 @@ fn append_orphan_manifest_rows(
             status_label: "orphan manifest-reconstructable",
             has_data,
             size,
-            tokens: 0,
+            tokens: Some(0),
         });
     }
 }

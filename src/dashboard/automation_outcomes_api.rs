@@ -11,7 +11,8 @@ use super::DashboardState;
 use super::util::http_detail;
 use crate::automation::managed_skills::list_managed_skills;
 use crate::automation::outcomes::{
-    compute_fact_outcomes, compute_skill_outcomes, load_outcomes_snapshot,
+    AutomationOutcomesSnapshot, compute_fact_outcomes, compute_skill_outcomes,
+    load_outcomes_snapshot,
 };
 use crate::automation::skill_usage::summarize_skill_usage;
 use crate::errors::{Result, TraceDecayError};
@@ -45,17 +46,70 @@ async fn outcomes_payload(state: &DashboardState) -> Result<Value> {
     })?;
     let fact_outcomes = compute_fact_outcomes(&memory, now).await?;
 
-    let snapshot = load_outcomes_snapshot(&state.dashboard_root)
-        .await
-        .unwrap_or_default();
+    let (snapshot, error) =
+        snapshot_fields(load_outcomes_snapshot(&state.dashboard_root).await);
     Ok(json!({
         "generated_at": now,
         "skills": skill_outcomes,
         "facts": fact_outcomes,
-        "snapshot": {
-            "skills_refreshed_at": snapshot.skills_refreshed_at,
-            "facts_refreshed_at": snapshot.facts_refreshed_at,
-        },
-        "error": "",
+        "snapshot": snapshot,
+        "error": error,
     }))
+}
+
+/// Renders the persisted snapshot's refresh watermarks, or the reason they
+/// could not be read.
+///
+/// A snapshot that failed to load is not a snapshot that has never been
+/// refreshed: reporting the defaulted `None` watermarks with an empty `error`
+/// asserted that the read succeeded and found nothing.
+fn snapshot_fields(loaded: Result<AutomationOutcomesSnapshot>) -> (Value, String) {
+    match loaded {
+        Ok(snapshot) => (
+            json!({
+                "available": true,
+                "skills_refreshed_at": snapshot.skills_refreshed_at,
+                "facts_refreshed_at": snapshot.facts_refreshed_at,
+            }),
+            String::new(),
+        ),
+        Err(error) => (
+            json!({
+                "available": false,
+                "skills_refreshed_at": Value::Null,
+                "facts_refreshed_at": Value::Null,
+            }),
+            error.to_string(),
+        ),
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_failed_snapshot_load_reports_the_failure_instead_of_never_refreshed() {
+        let (snapshot, error) = snapshot_fields(Err(TraceDecayError::Config {
+            message: "failed to parse automation outcomes snapshot '/x/outcomes.json'".to_owned(),
+        }));
+
+        assert_eq!(snapshot["available"], json!(false));
+        assert_eq!(snapshot["skills_refreshed_at"], Value::Null);
+        assert_eq!(snapshot["facts_refreshed_at"], Value::Null);
+        assert!(
+            error.contains("failed to parse automation outcomes snapshot"),
+            "the failed read must be reported, not an empty error: {error}"
+        );
+    }
+
+    #[test]
+    fn a_never_refreshed_snapshot_stays_distinct_from_a_failed_read() {
+        let (snapshot, error) = snapshot_fields(Ok(AutomationOutcomesSnapshot::default()));
+
+        assert_eq!(snapshot["available"], json!(true));
+        assert_eq!(snapshot["skills_refreshed_at"], Value::Null);
+        assert!(error.is_empty(), "a successful read reports no error");
+    }
 }

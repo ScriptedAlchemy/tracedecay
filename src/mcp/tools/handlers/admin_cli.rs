@@ -334,10 +334,16 @@ async fn registry_project_tokens(
 ) -> Value {
     let mut projects = Vec::with_capacity(project_args.len());
     for project in project_args {
-        projects.push(json!({
-            "project": project,
-            "tokens": global_db.get_project_tokens(project).await,
-        }));
+        // A project the accounting store could not be read for reports a null
+        // total and the reason, never a measured zero.
+        projects.push(match global_db.try_get_project_tokens(project).await {
+            Ok(tokens) => json!({ "project": project, "tokens": tokens }),
+            Err(error) => json!({
+                "project": project,
+                "tokens": Value::Null,
+                "error": error,
+            }),
+        });
     }
     json!({ "projects": projects })
 }
