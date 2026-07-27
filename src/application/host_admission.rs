@@ -723,6 +723,7 @@ impl<'a> HostAdmissionFacade<'a> {
     ) -> Result<CaptureObservationOutcome, HostAdmissionOutcome> {
         let provider = request.provider().to_owned();
         let scope = request.scope().clone();
+        self.authorities.validate_scope(&scope)?;
         let database = self
             .authorities
             .registered_database(host_scope(&scope))?
