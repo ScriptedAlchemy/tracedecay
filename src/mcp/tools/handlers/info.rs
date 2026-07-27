@@ -177,19 +177,35 @@ pub(super) async fn handle_status(
                     // fail closed instead of opening a second connection here.
                     output["session_ingest"] = json!({
                         "status": "unavailable",
+                        "reason": "session_store_unavailable",
                         "message": "daemon project session authority is unavailable",
                     });
                 }
-                Some(db) => {
-                    let ingest = db.session_ingest_health().await;
-                    output["session_ingest"] = serde_json::to_value(&ingest).unwrap_or(json!({}));
-                    if ingest.max_transcript_pending_bytes
-                        > crate::sessions::SESSION_TRANSCRIPT_STALLED_INGEST_WARNING_BYTES
-                    {
-                        output["session_ingest_warning"] =
-                            json!(session_ingest_warning(&ingest, cg.project_root()));
+                Some(db) => match db.cursor_session_ingest_health().await {
+                    Ok(ingest) => {
+                        output["session_ingest"] =
+                            serde_json::to_value(&ingest).unwrap_or_else(|error| {
+                                json!({
+                                    "status": "unavailable",
+                                    "reason": "session_ingest_serialization_failed",
+                                    "message": error.to_string(),
+                                })
+                            });
+                        if ingest.max_transcript_pending_bytes
+                            > crate::sessions::SESSION_TRANSCRIPT_STALLED_INGEST_WARNING_BYTES
+                        {
+                            output["session_ingest_warning"] =
+                                json!(session_ingest_warning(&ingest, cg.project_root()));
+                        }
                     }
-                }
+                    Err(error) => {
+                        output["session_ingest"] = json!({
+                            "status": "unavailable",
+                            "reason": "session_ingest_query_failed",
+                            "message": error,
+                        });
+                    }
+                },
             }
         }
     }

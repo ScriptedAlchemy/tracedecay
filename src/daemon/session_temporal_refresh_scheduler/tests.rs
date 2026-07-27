@@ -1000,16 +1000,14 @@ async fn worker_recovery_exposes_blocker_and_drains_backlog() {
     let recovering = tokio::time::timeout(Duration::from_secs(1), async {
         loop {
             let status = registry.profile_worker_status(db.db_path()).await;
-            if status.unavailable_reason
-                == Some(SessionTemporalRefreshUnavailableReason::Recovering)
-            {
+            if status.unavailable_reason == Some(SessionTemporalRefreshUnavailableReason::Stalled) {
                 break status;
             }
             tokio::task::yield_now().await;
         }
     })
     .await
-    .expect("worker should expose its supervised recovery");
+    .expect("worker should expose its stalled pre-progress recovery");
     assert_eq!(recovering.backlog, 1);
     assert_eq!(
         recovering.blocker,

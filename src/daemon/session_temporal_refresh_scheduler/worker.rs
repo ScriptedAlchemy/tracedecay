@@ -36,7 +36,7 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
             return;
         }
         while state.take_dirty() {
-            state.mark_running();
+            state.begin_pass();
             state.busy.store(true, Ordering::Release);
             state.pass_count.fetch_add(1, Ordering::AcqRel);
             let migration_complete = database
@@ -103,16 +103,17 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
                     () = state.wake.notified() => {}
                     () = tokio::time::sleep(session_refresh_retry_delay(class, retry_attempt)) => {}
                 }
-            } else if state.has_requests()
-                || report.begun > 0
-                || report.saturated
-                || report.projected_batches > 0
-            {
-                retry_attempt = 0;
-                state.dirty.store(true, Ordering::Release);
-                tokio::task::yield_now().await;
             } else {
+                state.mark_running();
                 retry_attempt = 0;
+                if state.has_requests()
+                    || report.begun > 0
+                    || report.saturated
+                    || report.projected_batches > 0
+                {
+                    state.dirty.store(true, Ordering::Release);
+                    tokio::task::yield_now().await;
+                }
             }
         }
         state.busy.store(false, Ordering::Release);

@@ -23,6 +23,9 @@ use super::MATERIALIZE_REFRESH;
 use super::persist::*;
 use super::receipts::*;
 
+const PARENT_RESOLVER_PAGE_SIZE: i64 = 512;
+const PARENT_RESOLVER_PAGE_MAX_BYTES: i64 = 32 * 1024 * 1024;
+
 pub(super) async fn materialize_session_temporal_refresh_batch_in_transaction(
     conn: &impl QueryExecutor,
     recovery: &SessionRefreshRecoveryV1,
@@ -485,35 +488,72 @@ pub(crate) async fn canonical_parent_message_resolver(
     operation: &'static str,
 ) -> SessionStoreResult<ParentMessageResolver> {
     let mut resolver = ParentMessageResolver::default();
-    let mut rows = conn
-        .query(
-            "SELECT observation_json
-             FROM observations
-             WHERE sequence <= ?1
-             ORDER BY sequence, observation_id",
-            params![frontier_i64(source_frontier, operation)?],
-        )
-        .await
-        .map_err(|error| storage(operation, error))?;
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| storage(operation, error))?
-    {
-        let encoded: String = row.get(0).map_err(|error| storage(operation, error))?;
-        let observation: tracedecay_domain::DurableObservationV1 =
-            serde_json::from_str(&encoded).map_err(|error| storage(operation, error))?;
-        let projection =
-            derive_projection(&observation).map_err(|error| storage(operation, error))?;
-        for output in projection
-            .messages()
-            .filter(|output| output.session().session_id == session_id)
+    let frontier = frontier_i64(source_frontier, operation)?;
+    let mut after_sequence = 0_i64;
+    loop {
+        let mut rows = conn
+            .query(
+                "WITH page AS (
+                     SELECT sequence, observation_json
+                     FROM observations
+                     WHERE sequence > ?1 AND sequence <= ?2
+                     ORDER BY sequence
+                     LIMIT ?3
+                 ),
+                 bounded AS (
+                     SELECT sequence, observation_json,
+                            ROW_NUMBER() OVER (ORDER BY sequence) AS page_row,
+                            SUM(length(CAST(observation_json AS BLOB)))
+                                OVER (ORDER BY sequence) AS cumulative_bytes
+                     FROM page
+                 )
+                 SELECT sequence, observation_json
+                 FROM bounded
+                 WHERE cumulative_bytes <= ?4 OR page_row = 1
+                 ORDER BY sequence",
+                params![
+                    after_sequence,
+                    frontier,
+                    PARENT_RESOLVER_PAGE_SIZE,
+                    PARENT_RESOLVER_PAGE_MAX_BYTES
+                ],
+            )
+            .await
+            .map_err(|error| storage(operation, error))?;
+        let mut page_count = 0usize;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| storage(operation, error))?
         {
-            let occurrence_id = MessageOccurrenceIdV1::derive(
-                observation.observation_id(),
-                tracedecay_domain::ProjectionOutputOrdinalV1::new(output.output_ordinal()),
-            );
-            resolver.register(&output.message().message_id, occurrence_id.as_str());
+            let sequence: i64 = row.get(0).map_err(|error| storage(operation, error))?;
+            if sequence <= after_sequence {
+                return Err(storage_message(
+                    operation,
+                    "parent resolver observation page did not advance",
+                ));
+            }
+            let encoded: String = row.get(1).map_err(|error| storage(operation, error))?;
+            let observation: tracedecay_domain::DurableObservationV1 =
+                serde_json::from_str(&encoded).map_err(|error| storage(operation, error))?;
+            let projection =
+                derive_projection(&observation).map_err(|error| storage(operation, error))?;
+            for output in projection
+                .messages()
+                .filter(|output| output.session().session_id == session_id)
+            {
+                let occurrence_id = MessageOccurrenceIdV1::derive(
+                    observation.observation_id(),
+                    tracedecay_domain::ProjectionOutputOrdinalV1::new(output.output_ordinal()),
+                );
+                resolver.register(&output.message().message_id, occurrence_id.as_str());
+            }
+            after_sequence = sequence;
+            page_count += 1;
+        }
+        drop(rows);
+        if page_count == 0 {
+            break;
         }
     }
     resolver.reject_ambiguity(operation)?;

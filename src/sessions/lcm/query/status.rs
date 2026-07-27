@@ -2,6 +2,9 @@ use std::path::Path;
 
 use super::*;
 
+const STORE_STATUS_PAGE_SIZE: i64 = 512;
+const STORE_STATUS_PAGE_MAX_BYTES: i64 = 32 * 1024 * 1024;
+
 #[derive(Debug, Default, PartialEq, Eq)]
 struct StatusQueryWork {
     status_query_calls: usize,
@@ -470,25 +473,61 @@ async fn store_status(
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<LcmStoreStatus, LcmError> {
-    let mut rows = conn
-        .query(
-            "SELECT content, snippet_text
-             FROM lcm_raw_messages
-             WHERE (?1 = 'all' OR provider = ?1)
-               AND (?2 IS NULL OR session_id = ?2)",
-            params![provider, session_id],
-        )
-        .await?;
     let mut messages = 0_i64;
     let mut estimated_tokens = 0_i64;
-    while let Some(row) = rows.next().await? {
-        messages += 1;
-        let content: Option<String> = row.get(0)?;
-        let snippet: String = row.get(1)?;
-        // Externalized rows count their inline placeholder, matching what the
-        // engine replays into active context.
-        let text = content.unwrap_or(snippet);
-        estimated_tokens += estimate_tokens(&text);
+    let mut after_store_id = 0_i64;
+    loop {
+        let mut rows = conn
+            .query(
+                "WITH page AS (
+                     SELECT store_id, COALESCE(content, snippet_text) AS replay_text
+                     FROM lcm_raw_messages
+                     WHERE (?1 = 'all' OR provider = ?1)
+                       AND (?2 IS NULL OR session_id = ?2)
+                       AND store_id > ?3
+                     ORDER BY store_id
+                     LIMIT ?4
+                 ),
+                 bounded AS (
+                     SELECT store_id, replay_text,
+                            ROW_NUMBER() OVER (ORDER BY store_id) AS page_row,
+                            SUM(length(CAST(replay_text AS BLOB)))
+                                OVER (ORDER BY store_id) AS cumulative_bytes
+                     FROM page
+                 )
+                 SELECT store_id, replay_text
+                 FROM bounded
+                 WHERE cumulative_bytes <= ?5 OR page_row = 1
+                 ORDER BY store_id",
+                params![
+                    provider,
+                    session_id,
+                    after_store_id,
+                    STORE_STATUS_PAGE_SIZE,
+                    STORE_STATUS_PAGE_MAX_BYTES
+                ],
+            )
+            .await?;
+        let mut page_count = 0usize;
+        while let Some(row) = rows.next().await? {
+            let store_id: i64 = row.get(0)?;
+            if store_id <= after_store_id {
+                return Err(LcmError::Db(
+                    "LCM store status page did not advance".to_string(),
+                ));
+            }
+            messages += 1;
+            // Externalized rows count their inline placeholder, matching what the
+            // engine replays into active context.
+            let text: String = row.get(1)?;
+            estimated_tokens += estimate_tokens(&text);
+            after_store_id = store_id;
+            page_count += 1;
+        }
+        drop(rows);
+        if page_count == 0 {
+            break;
+        }
     }
     Ok(LcmStoreStatus {
         messages,
@@ -839,5 +878,42 @@ mod tests {
             assert_eq!(status.raw_message_count, 12);
             assert_eq!(work, baseline);
         }
+    }
+
+    #[tokio::test]
+    async fn store_status_pages_more_rows_than_runtime_materialization_limit() {
+        let (_database_dir, conn) = test_lcm_connection().await;
+        conn.execute(
+            "INSERT INTO sessions(provider, session_id, project_key, project_path)
+             VALUES ('cursor', 'session-paged-status', '/project', '/project')",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            "WITH RECURSIVE fixture(value) AS (
+                 SELECT 1
+                 UNION ALL
+                 SELECT value + 1 FROM fixture WHERE value < 10001
+             )
+             INSERT INTO lcm_raw_messages (
+                 provider, message_id, session_id, role, ordinal, timestamp,
+                 content, content_hash, storage_kind, payload_ref, snippet_text,
+                 index_text, legacy_source, legacy_truncated, metadata_json
+             )
+             SELECT 'cursor', printf('message-%05d', value), 'session-paged-status',
+                    'assistant', value, value, 'one token',
+                    printf('hash-%05d', value), 'inline', NULL, 'one token',
+                    'one token', 0, 0, NULL
+             FROM fixture",
+            (),
+        )
+        .await
+        .unwrap();
+
+        let status = store_status(&*conn, "cursor", None).await.unwrap();
+
+        assert_eq!(status.messages, 10001);
+        assert_eq!(status.estimated_tokens, 20002);
     }
 }

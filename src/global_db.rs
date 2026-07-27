@@ -300,7 +300,7 @@ pub struct ProjectRegistryContext {
 
 /// Transcript-ingest backlog snapshot for a session store. See
 /// the registered session-store health route.
-#[derive(Debug, Default, Clone, serde::Serialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct SessionIngestHealth {
     /// Transcripts referenced by sessions that still exist on disk.
     pub tracked_transcripts: u64,

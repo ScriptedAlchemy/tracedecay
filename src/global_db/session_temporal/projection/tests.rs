@@ -23,6 +23,7 @@ use super::materialize::*;
 use crate::application::host_admission::{
     HostAdmissionScope, HostAdmissionTestRuntimeV1, SessionTemporalFixtureCountV1,
 };
+use crate::db::engine::{Executor, TestConnection, params};
 use crate::store::session::GlobalDbSessionTemporalStore;
 
 fn fixture_session(value: &str) -> SessionId {
@@ -501,6 +502,49 @@ async fn parent_resolver_rejects_ambiguous_session_message_ids() {
         detail.contains("message.shared") || detail.contains("resolves to 2 occurrences"),
         "{detail}"
     );
+}
+
+#[tokio::test]
+async fn parent_resolver_pages_live_sized_observation_history() {
+    let directory = TempDir::new().unwrap();
+    let connection = TestConnection::open(&directory.path().join("resolver-pages.db"));
+    connection
+        .execute_batch(
+            "CREATE TABLE observations (
+                sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                observation_id TEXT NOT NULL UNIQUE,
+                observation_json TEXT NOT NULL
+             );",
+        )
+        .await
+        .unwrap();
+    let session_id = fixture_session("session.projector.paged-parent-resolver");
+    let (observation, _) = fixture_observation(&session_id, 0, None, false);
+    let encoded = serde_json::to_string(&observation).unwrap();
+    connection
+        .execute(
+            "WITH RECURSIVE fixture(value) AS (
+                 SELECT 1
+                 UNION ALL
+                 SELECT value + 1 FROM fixture WHERE value < 10001
+             )
+             INSERT INTO observations (observation_id, observation_json)
+             SELECT printf('observation.%05d', value), ?1 FROM fixture",
+            params![encoded],
+        )
+        .await
+        .unwrap();
+
+    let resolver = canonical_parent_message_resolver(
+        &*connection,
+        session_id.as_str(),
+        10001,
+        "test paged parent resolver",
+    )
+    .await
+    .unwrap();
+
+    assert!(resolver.resolve("message.projector.0").is_some());
 }
 
 #[tokio::test]
