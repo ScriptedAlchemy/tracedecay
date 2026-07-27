@@ -2367,6 +2367,11 @@ impl ProjectOpenTasks {
     }
 
     async fn shutdown(&self) -> bool {
+        self.shutdown_with_deadline(DAEMON_TASK_ABORT_DEADLINE)
+            .await
+    }
+
+    async fn shutdown_with_deadline(&self, cooperative_deadline: Duration) -> bool {
         let mut entries = {
             let mut registry = self.registry.lock().await;
             std::mem::take(&mut registry.routes)
@@ -2376,7 +2381,7 @@ impl ProjectOpenTasks {
         for entry in &entries {
             entry.cancellation.cancel();
         }
-        let deadline = tokio::time::Instant::now() + DAEMON_TASK_ABORT_DEADLINE;
+        let deadline = tokio::time::Instant::now() + cooperative_deadline;
         let mut drained = true;
         for entry in &mut entries {
             if tokio::time::timeout_at(deadline, &mut entry.task)
@@ -2384,13 +2389,14 @@ impl ProjectOpenTasks {
                 .is_err()
             {
                 drained = false;
+                entry.task.abort();
                 let _ = (&mut entry.task).await;
             }
         }
         if !drained {
             log_daemon_event(
                 "project_server_warmup",
-                &[("outcome", "shutdown_cooperative_timeout".to_string())],
+                &[("outcome", "shutdown_abort_timeout".to_string())],
             );
         }
         drained
