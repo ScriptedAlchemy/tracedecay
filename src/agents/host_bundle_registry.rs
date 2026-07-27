@@ -118,53 +118,90 @@ pub fn verified_embedded_default_host_component_set(
 pub fn verified_embedded_project_host_component_set(
     host: HostKindV1,
     agent_id: &str,
-    now_unix: u64,
+    _now_unix: u64,
 ) -> Result<VerifiedEmbeddedHostComponentSetV1, HostBundleRegistryError> {
     validate_identifier(agent_id).map_err(|_| HostBundleRegistryError::Incompatible)?;
-    let mut component_set = verified_embedded_default_host_component_set(host, now_unix)?;
+    let project_components = match host {
+        // Roo and Kilo have documented project-local MCP files but no
+        // first-party global bundle. Their local transaction therefore owns
+        // only the registration delegate plus its project-scoped Core receipt.
+        HostKindV1::RooCode | HostKindV1::Kilo => vec![HostBundleComponentV1::Core],
+        _ => default_components(host),
+    };
+    if project_components.is_empty() {
+        return Err(HostBundleRegistryError::Incompatible);
+    }
+    let catalog = host_integration_catalog_v1();
+    let integration_manifest_digest = catalog
+        .host_capability_digest(host)
+        .map_err(|_| HostBundleRegistryError::Incompatible)?;
+    let catalog_digest = catalog
+        .canonical_authority_digest()
+        .map_err(|_| HostBundleRegistryError::Incompatible)?;
     let mut manifest_digests = BTreeSet::new();
-    for entry in &mut component_set.component_set.components {
-        let component = component_name(entry.manifest.component);
-        let relative_path = format!(".tracedecay/host-components/{agent_id}/{component}.v1.json");
+    let mut entries = Vec::with_capacity(project_components.len());
+    for component in project_components {
+        let component_name = component_name(component);
+        let relative_path =
+            format!(".tracedecay/host-components/{agent_id}/{component_name}.v1.json");
         let bytes = canonical_json_bytes(&EmbeddedProjectRegistrationMarkerV1 {
             schema_version: FIRST_PARTY_COMPONENT_SCHEMA_VERSION,
             registry_version: FIRST_PARTY_COMPONENT_CATALOG_VERSION,
             agent: agent_id,
-            component,
+            component: component_name,
             scope: "project",
             profile_binding: TraceDecayProfileBindingV1::User,
         })
         .map_err(|_| HostBundleRegistryError::Incompatible)?;
-        entry.manifest.artifacts = vec![HostBundleArtifactV1 {
+        let artifacts = vec![HostBundleArtifactV1 {
             relative_path: relative_path.clone(),
             artifact_digest: Sha256::digest(&bytes).into(),
-            ownership_marker: format!("tracedecay.{}.{}.v1", host_name(host), component),
+            ownership_marker: format!("tracedecay.{}.{component_name}.v1", host_name(host)),
         }];
-        entry.manifest.effective_behavior_digest = embedded_bundle_identity(
-            "project_effective_behavior",
+        let manifest = HostBundleManifestV1 {
+            schema_version: FIRST_PARTY_COMPONENT_SCHEMA_VERSION,
             host,
-            entry.manifest.component,
-            &entry.manifest.artifacts,
-        )?;
-        entry.manifest.resolution_provenance_digest = embedded_bundle_identity(
-            "project_resolution_provenance",
-            host,
-            entry.manifest.component,
-            &entry.manifest.artifacts,
-        )?;
-        entry.contents = vec![HostBundleArtifactContentV1 {
-            relative_path,
-            bytes,
-        }];
+            component,
+            integration_manifest_digest,
+            catalog_digest,
+            configuration_snapshot_id: format!("first-party.{}", env!("CARGO_PKG_VERSION")),
+            effective_behavior_digest: embedded_bundle_identity(
+                "project_effective_behavior",
+                host,
+                component,
+                &artifacts,
+            )?,
+            resolution_provenance_digest: embedded_bundle_identity(
+                "project_resolution_provenance",
+                host,
+                component,
+                &artifacts,
+            )?,
+            protocol_min: 1,
+            protocol_max: 1,
+            artifacts,
+        };
         manifest_digests.insert(
-            entry
-                .manifest
+            manifest
                 .canonical_digest()
                 .map_err(|_| HostBundleRegistryError::Incompatible)?,
         );
+        entries.push(HostComponentSetEntryV1 {
+            manifest,
+            contents: vec![HostBundleArtifactContentV1 {
+                relative_path,
+                bytes,
+            }],
+        });
     }
-    component_set.manifest_digests = manifest_digests;
-    Ok(component_set)
+    Ok(VerifiedEmbeddedHostComponentSetV1 {
+        registry_version: FIRST_PARTY_COMPONENT_CATALOG_VERSION,
+        component_set: HostComponentSetV1 {
+            host,
+            components: entries,
+        },
+        manifest_digests,
+    })
 }
 
 #[derive(serde::Serialize)]
