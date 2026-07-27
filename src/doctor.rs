@@ -654,6 +654,7 @@ fn daemon_startup_error_is_retryable(error: &crate::errors::TraceDecayError) -> 
         crate::errors::TraceDecayError::Config { message } => {
             (message.contains("daemon socket") && message.contains("not available"))
                 || message.contains("still warming up")
+                || message.contains("warming in the background")
                 || message.contains("restart grace")
                 || message.contains("timed out during read before deadline")
         }

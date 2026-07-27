@@ -1860,6 +1860,14 @@ fn daemon_startup_probe_skips_unrelated_profile_audits() {
     );
 }
 
+#[test]
+fn daemon_startup_background_warmup_is_retryable() {
+    let error = crate::errors::TraceDecayError::Config {
+        message: "TraceDecay project '/fast/projects/tracedecay' is warming in the background; retry the same tool shortly".to_owned(),
+    };
+    assert!(super::daemon_startup_error_is_retryable(&error));
+}
+
 #[tokio::test]
 async fn daemon_startup_health_surfaces_terminal_project_open_failure_immediately() {
     let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
