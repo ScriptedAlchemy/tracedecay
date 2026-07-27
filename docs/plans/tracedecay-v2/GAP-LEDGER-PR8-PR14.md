@@ -310,6 +310,9 @@ direct test coverage at all, and two of them still are:
 - `src/global_db/schema_contract/invariants/repair.rs` — 391 lines, zero tests;
 - `src/global_db/project_registry.rs` — 1,691 lines, zero tests.
 
+Those counts describe the tree at the time of writing. Restoration lanes were
+in flight, so confirm the current state before quoting a zero.
+
 The cause was mechanical rather than a judgement that the coverage was
 worthless: a `GlobalDb` → `RegisteredGlobalDb` refactor whose compile breaks were
 cleared by deleting callers. The evidence is that 20 tests in the same file were
