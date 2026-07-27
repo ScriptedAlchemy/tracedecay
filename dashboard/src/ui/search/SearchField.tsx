@@ -64,7 +64,12 @@ export function SearchField({
     >
       <div
         className={cn(
-          'group flex h-10 min-w-0 items-center gap-2 rounded-[var(--radius-standard)]',
+          // The field is meant to be the largest control on the page and its
+          // input measured 18.6px tall — the shell was 35px (`h-10` at a 14px
+          // root) and the input only claimed its own line box inside it. The
+          // shell now clears the touch minimum with its two hairlines counted,
+          // and the input stretches into it rather than floating in the middle.
+          'group flex min-h-[calc(var(--touch-target-min)+2px)] min-w-0 items-center gap-2 rounded-[var(--radius-standard)]',
           'border border-edge-subtle bg-surface-1 pl-3 pr-1.5',
           'focus-within:border-accent focus-within:bg-surface-0',
         )}
@@ -87,7 +92,7 @@ export function SearchField({
           spellCheck={false}
           autoComplete="off"
           className={cn(
-            'min-w-0 flex-1 bg-transparent text-sm text-text-primary outline-none',
+            'min-w-0 flex-1 self-stretch bg-transparent text-sm text-text-primary outline-none',
             'placeholder:text-text-muted',
           )}
         />
@@ -96,7 +101,8 @@ export function SearchField({
             type="button"
             onClick={onClear}
             aria-label="Clear search"
-            className="flex size-7 shrink-0 items-center justify-center rounded-[var(--radius-chip)] text-text-muted hover:bg-surface-2 hover:text-text-primary"
+            // The × keeps its 14px glyph; only the hit area reaches the minimum.
+            className="flex size-[var(--touch-target-min)] shrink-0 items-center justify-center rounded-[var(--radius-chip)] text-text-muted hover:bg-surface-2 hover:text-text-primary"
           >
             <X aria-hidden size={14} />
           </button>

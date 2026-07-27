@@ -207,7 +207,7 @@ function SettingsSurface({
             }}
             placeholder="Filter keys and values…"
             aria-label="Filter configuration"
-            className="h-8 w-full rounded-[var(--radius-chip)] border border-edge-subtle bg-surface-0 pl-7 pr-7 text-xs text-text-primary outline-none placeholder:text-text-muted focus-visible:border-accent"
+            className="h-[calc(var(--touch-target-min)+2px)] w-full rounded-[var(--radius-chip)] border border-edge-subtle bg-surface-0 pl-7 pr-7 text-xs text-text-primary outline-none placeholder:text-text-muted focus-visible:border-accent"
           />
           {query !== '' ? (
             <button
@@ -237,7 +237,13 @@ function SettingsSurface({
           tabIndex={0}
           role="region"
           aria-label="Effective configuration"
-          className="min-w-0 flex-1 overflow-auto"
+          // Stacked below `md` the section index takes its content height
+          // first, and this pane — a scroll container, so its automatic
+          // minimum size is zero — took the whole shortfall and resolved to
+          // `height: 0` at 400% zoom, hiding 4,388px of configuration behind a
+          // live "N settings" count. Same floor as the split archetype: keep a
+          // readable pane and let the page scroller carry the overflow.
+          className="min-h-[var(--pane-min-height)] min-w-0 flex-1 overflow-auto"
         >
           {filtered.length === 0 ? (
             <p className="p-8 text-center text-xs text-text-muted">
@@ -923,7 +929,7 @@ function SectionIndex({
             key={section.id}
             type="button"
             onClick={() => onJump(section.id)}
-            className="flex items-center gap-2 px-1.5 py-1.5 text-left text-xs text-text-secondary hover:bg-surface-2 hover:text-text-primary focus-visible:bg-surface-2"
+            className="flex min-h-[var(--touch-target-min)] items-center gap-2 px-1.5 py-1.5 text-left text-xs text-text-secondary hover:bg-surface-2 hover:text-text-primary focus-visible:bg-surface-2"
           >
             <OriginMark origin={section.origin} />
             <span className="min-w-0 flex-1 truncate">{section.title}</span>
@@ -1359,9 +1365,13 @@ function Highlight({ text, query }: { text: string; query: string }) {
   return <>{parts}</>;
 }
 
+/* Form controls, not instrument chrome: these edit and commit configuration,
+ * so they take the touch minimum on their own box rather than hiding a compact
+ * bezel inside a larger hit area the way the panel-header controls do. `+2px`
+ * on the input is its two hairlines, so the content box lands on 44. */
 const settingsInputClass =
-  'h-8 w-full rounded-[var(--radius-chip)] border border-edge-subtle bg-surface-0 px-2 text-xs text-text-primary outline-none focus-visible:border-accent';
+  'h-[calc(var(--touch-target-min)+2px)] w-full rounded-[var(--radius-chip)] border border-edge-subtle bg-surface-0 px-2 text-xs text-text-primary outline-none focus-visible:border-accent';
 const settingsButtonClass =
-  'inline-flex h-8 items-center justify-center rounded-[var(--radius-standard)] border border-accent/50 bg-accent/15 px-3 text-2xs font-semibold text-text-primary hover:border-accent disabled:cursor-not-allowed disabled:opacity-50';
+  'inline-flex min-h-[var(--touch-target-min)] items-center justify-center rounded-[var(--radius-standard)] border border-accent/50 bg-accent/15 px-3 text-2xs font-semibold text-text-primary hover:border-accent disabled:cursor-not-allowed disabled:opacity-50';
 const secondarySettingsButtonClass =
-  'inline-flex h-8 items-center justify-center rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-2 px-3 text-2xs font-medium text-text-secondary hover:text-text-primary';
+  'inline-flex min-h-[var(--touch-target-min)] items-center justify-center rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-2 px-3 text-2xs font-medium text-text-secondary hover:text-text-primary';
