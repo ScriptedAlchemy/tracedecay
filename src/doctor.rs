@@ -426,9 +426,8 @@ async fn daemon_project_status_with_deadline(
     // failure. The ordinary Doctor helper intentionally falls back to a cold
     // snapshot on daemon errors, which is useful for diagnostics but would
     // conceal a cached non-retryable warm-up failure here.
-    let admission_deadline = (tokio::time::Instant::now()
-        + std::time::Duration::from_secs(10))
-    .min(startup_deadline);
+    let admission_deadline =
+        (tokio::time::Instant::now() + std::time::Duration::from_secs(10)).min(startup_deadline);
     crate::daemon::call_default_tool_within(
         &handshake,
         "tracedecay_status",
