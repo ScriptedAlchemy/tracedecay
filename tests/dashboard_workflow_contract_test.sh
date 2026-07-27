@@ -8,6 +8,7 @@ python3 - \
   .github/workflows/release-plz.yml \
   .github/workflows/release-pr-integrity.yml \
   .github/workflows/plugin-validation.yml <<'PY'
+import os
 import pathlib
 import re
 import sys
@@ -228,6 +229,74 @@ if f"test(/^{lcm_prefix}/)" not in tracedecay_segment:
         f"'binary(=tracedecay) & test(/^{lcm_prefix}/)' - that is where the "
         "#[path] injection puts them"
     )
+
+# --------------------------------------------------------------------------
+# libtest-filtered gates must prove a test ran.
+#
+# `cargo test <name> -- --exact` exits 0 when the filter matches NOTHING, so
+# every name-filtered `cargo test` in CI is one rename away from becoming a
+# silent no-op that still reports success. scripts/require-exact-test.sh
+# asserts the count libtest prints.
+# --------------------------------------------------------------------------
+guard = pathlib.Path("scripts/require-exact-test.sh")
+if not guard.is_file():
+    raise SystemExit(f"{guard.as_posix()} must exist to guard name-filtered gates")
+if not os.access(guard, os.X_OK):
+    raise SystemExit(f"{guard.as_posix()} must be executable")
+
+# Both the Linux/macOS `test` job and the Windows packets job carry these
+# gates and the platform-lifecycle receipt, so both are held to the same rule.
+gate_jobs = {
+    "test": 3,  # lite grammar, platform lifecycle, observation crash harness
+    "windows-pr12-pr13-packets": 2,  # lite grammar, platform lifecycle
+}
+for job_name, guarded_gates in gate_jobs.items():
+    block = job_block(ci, job_name)
+    # Drop comment lines (YAML and shell alike - neither runs anything), then
+    # fold block scalars and shell line continuations so a guarded invocation
+    # reads as one command; otherwise the wrapped `cargo test ...` continuation
+    # line looks bare.
+    commands = "\n".join(
+        line for line in block.splitlines() if not line.lstrip().startswith("#")
+    )
+    folded = re.sub(r"\s+", " ", commands.replace("\\\n", " "))
+    for match in re.finditer(r"\bcargo test ", folded):
+        preceding = folded[max(0, match.start() - 40) : match.start()]
+        if "require-exact-test.sh" not in preceding:
+            raise SystemExit(
+                f"{job_name} must run name-filtered cargo tests through "
+                "scripts/require-exact-test.sh, not bare: "
+                f"{folded[match.start() : match.start() + 90]!r}"
+            )
+    if block.count("scripts/require-exact-test.sh") < guarded_gates:
+        raise SystemExit(
+            f"{job_name} must guard all {guarded_gates} name-filtered gates "
+            "with scripts/require-exact-test.sh"
+        )
+
+    # The platform-lifecycle receipt must be written by the step that ran the
+    # test and required by the step that reports it, never created after the
+    # fact by a step that cannot know whether the test ran.
+    if ": > pr12-pr13-os-evidence" in block or ': > "pr12-pr13-os-evidence' in block:
+        raise SystemExit(
+            f"{job_name} must not create platform_lifecycle.passed "
+            "unconditionally: only the step that ran the default-feature "
+            "lifecycle test can attest to it"
+        )
+    if not re.search(r"test -s \"?pr12-pr13-os-evidence/\S*platform_lifecycle\.passed", block):
+        raise SystemExit(
+            f"{job_name} must REQUIRE platform_lifecycle.passed before passing "
+            "--gate-passed platform_*_lifecycle"
+        )
+    lifecycle_step = block.split("- name: PR13 default-feature platform lifecycle", 1)
+    if len(lifecycle_step) != 2:
+        raise SystemExit(f"{job_name} must keep the PR13 platform lifecycle gate")
+    lifecycle_body = lifecycle_step[1].split("- name: ", 1)[0]
+    if "platform_lifecycle.passed" not in lifecycle_body:
+        raise SystemExit(
+            f"{job_name}'s PR13 default-feature platform lifecycle step must "
+            "write platform_lifecycle.passed itself"
+        )
 
 # A boundary step wired to an empty rule set passes every time and proves
 # nothing, so the gate's contents are part of the contract, not just its
