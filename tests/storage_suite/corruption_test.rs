@@ -784,6 +784,54 @@ async fn post_open_fts_repair_waits_for_concurrent_writer()
 }
 
 #[tokio::test]
+async fn open_self_heals_bundled_sqlite_fts_blob_corruption()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let dir = TempDir::new()?;
+    let project_root = dir.path().join("repo");
+    std::fs::create_dir_all(&project_root)?;
+    let open_options = TraceDecayOpenOptions {
+        profile_root: Some(dir.path().join("profile")),
+        global_db_path: Some(dir.path().join("global.db")),
+    };
+
+    let ts = TraceDecay::init_with_options(&project_root, open_options.clone()).await?;
+    let layout = ts.store_layout().clone();
+    ts.db()
+        .insert_nodes(&[sample_node("blob-corruption", "blob_corruption_probe")])
+        .await?;
+    let segment = ts
+        .db()
+        .query_scalar_blob(
+            "read FTS segment fixture",
+            "SELECT block FROM nodes_fts_data WHERE id > 10 ORDER BY id DESC LIMIT 1",
+        )
+        .await?;
+    ts.checkpoint().await?;
+    ts.close();
+    truncate_fixture_wal(&layout.graph_db_path);
+
+    let mut bytes = std::fs::read(&layout.graph_db_path)?;
+    let segment_offset = bytes
+        .windows(segment.len())
+        .position(|candidate| candidate == segment)
+        .expect("FTS segment must be present in the checkpointed database");
+    bytes[segment_offset..segment_offset + 8].fill(0xff);
+    std::fs::write(&layout.graph_db_path, bytes)?;
+
+    let reopened = TraceDecay::open_with_options(&project_root, open_options)
+        .await
+        .expect("bundled SQLite nodes_fts blob corruption must self-heal on open");
+    assert!(reopened.db().quick_check_report().await?.is_none());
+    let results = reopened
+        .db()
+        .search_nodes("blob_corruption_probe", 10)
+        .await?;
+    assert_eq!(results[0].node.id, "blob-corruption");
+    reopened.close();
+    Ok(())
+}
+
+#[tokio::test]
 async fn open_never_repairs_or_replaces_whole_database_corruption()
 -> std::result::Result<(), Box<dyn std::error::Error>> {
     let dir = TempDir::new()?;
