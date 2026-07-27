@@ -15,6 +15,7 @@ import { VirtualList } from '../../ui/VirtualList.tsx';
 import { AnyObject } from '../../data/query/legacy.ts';
 import { useLegacy } from '../../data/query/useLegacy.ts';
 import { LcmTimelinePayloadSchema } from '../../contracts/wire.ts';
+import { SessionInspector } from './SessionInspector.tsx';
 
 const BASE = '/api/plugins/hermes-lcm';
 
@@ -289,13 +290,34 @@ export function SessionsPage() {
         </LegacyBoundary>
         )
       }
-      inspector={
-        selected ? (
-          <InspectorPanel title="Session" onClose={() => setSelected(null)}>
-            <KeyValueTree value={selected} />
-          </InspectorPanel>
-        ) : undefined
-      }
+      inspector={<SelectedRecord record={selected} onClose={() => setSelected(null)} />}
     />
+  );
+}
+
+/**
+ * The inspector for whatever the list selected.
+ *
+ * Both the session list and a transcript search hit identify a session, so both
+ * open the real transcript drill-down. A row that carries no session id at all
+ * still gets its exact record rather than an empty panel — the point is never
+ * to show less than the store served.
+ */
+function SelectedRecord({
+  record,
+  onClose,
+}: {
+  record: Record<string, unknown> | null;
+  onClose: () => void;
+}) {
+  if (!record) return undefined;
+  const sessionId = record['session_id'] ?? record['id'];
+  if (typeof sessionId === 'string' && sessionId !== '') {
+    return <SessionInspector sessionId={sessionId} onClose={onClose} />;
+  }
+  return (
+    <InspectorPanel title="Record" onClose={onClose}>
+      <KeyValueTree value={record} />
+    </InspectorPanel>
   );
 }
