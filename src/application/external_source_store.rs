@@ -23,7 +23,7 @@ use tracedecay_store::{
     RepositoryReadOperationV1, RepositoryReadResultV1, RepositoryWritePayloadV1,
     RuntimeReadCoverageV1, RuntimeReadOperationV1, RuntimeReadResultV1, RuntimeSubmitOutcomeV1,
     SourceCommitReceiptV1, SourceCommitV1, SourceObjectMutationV1, SourceObjectTransitionV1,
-    SourceObservationEvidenceV1, SourceStoreStateV1,
+    SourceObservationEvidenceV1, SourceStoreStateV1, StorageRuntimeReadPort,
 };
 
 use crate::daemon::store_runtime::registry::StoreRuntimeHandle;
@@ -429,7 +429,8 @@ impl RuntimeExternalSourceStore {
         let probe = ExternalSourceRuntimeProbe::from_control(request.control());
         let outcome = self
             .runtime
-            .dispatch_read(request, &probe)
+            .read(request, &probe)
+            .await
             .map_err(|_| RuntimeExternalSourceErrorV1::Unavailable)?;
         if !matches!(
             outcome.coverage(),

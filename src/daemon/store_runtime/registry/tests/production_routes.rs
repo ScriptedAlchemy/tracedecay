@@ -12,8 +12,8 @@ use tracedecay_domain::{BrainId, LocatorDigest, ProjectId, UserProfileId, UtcMic
 use tracedecay_store::{
     ConsistencyModeV1, OperationPriorityV1, RuntimeCancellationIdV1, RuntimeCancellationIdentityV1,
     RuntimeDeadlineIdV1, RuntimeDeadlineV1, RuntimeReadOperationV1, RuntimeReadRequestV1,
-    RuntimeReadResultV1, RuntimeRequestControlV1, RuntimeRequestProbeV1, StoreShardIdV1,
-    StoreShardScopeV1, VerifiedStoreLocatorV1,
+    RuntimeReadResultV1, RuntimeRequestControlV1, RuntimeRequestProbeV1, StorageRuntimeReadPort,
+    StoreShardIdV1, StoreShardScopeV1, VerifiedStoreLocatorV1,
 };
 
 use super::super::*;
@@ -125,7 +125,7 @@ fn sessions_request(project: &str, pin: &ProfileAuthorityPin) -> StoreRuntimeOpe
     )
 }
 
-fn assert_health_route(handle: &StoreRuntimeHandle) {
+async fn assert_health_route(handle: &StoreRuntimeHandle) {
     assert!(
         !matches!(
             handle.binding().shard_id.scope,
@@ -145,8 +145,8 @@ fn assert_health_route(handle: &StoreRuntimeHandle) {
     );
 
     let (request, probe) = health_request(handle.binding());
-    let outcome = handle
-        .dispatch_read(request, &probe)
+    let outcome = StorageRuntimeReadPort::read(handle, request, &probe)
+        .await
         .expect("health data port must be mounted");
     assert!(matches!(
         outcome.value(),
@@ -181,7 +181,7 @@ async fn lifecycle_publisher_mounts_profile_project_and_session_health_routes() 
     let project = open_published(&registry, project_request("project.s8-route", &pin)).await;
     let sessions = open_published(&registry, sessions_request("project.s8-route", &pin)).await;
 
-    assert_health_route(&profile);
-    assert_health_route(&project);
-    assert_health_route(&sessions);
+    assert_health_route(&profile).await;
+    assert_health_route(&project).await;
+    assert_health_route(&sessions).await;
 }
