@@ -473,7 +473,7 @@ async fn test_find_dead_code() {
 
     let qm = GraphQueryManager::new(&db);
     let dead = qm
-        .find_dead_code(&[], false)
+        .find_dead_code(&[], false, None)
         .await
         .expect("find_dead_code failed");
 
@@ -501,7 +501,7 @@ async fn test_find_dead_code_excludes_pub() {
 
     let qm = GraphQueryManager::new(&db);
     let dead = qm
-        .find_dead_code(&[], false)
+        .find_dead_code(&[], false, None)
         .await
         .expect("find_dead_code failed");
 
@@ -610,7 +610,7 @@ async fn test_find_dead_code_excludes_test_annotated() {
 
     let qm = GraphQueryManager::new(&db);
     let dead = qm
-        .find_dead_code(&[NodeKind::Function], false)
+        .find_dead_code(&[NodeKind::Function], false, None)
         .await
         .expect("find_dead_code failed");
 
@@ -649,7 +649,7 @@ async fn test_find_dead_code_with_kind_filter() {
 
     // Filter to only Function kind.
     let dead = qm
-        .find_dead_code(&[NodeKind::Function], false)
+        .find_dead_code(&[NodeKind::Function], false, None)
         .await
         .expect("find_dead_code failed");
 
@@ -1325,7 +1325,7 @@ async fn dead_code_marker_resolve_is_single_pass() {
 
     let t0 = std::time::Instant::now();
     let dead = qm
-        .find_dead_code(&[NodeKind::Function], false)
+        .find_dead_code(&[NodeKind::Function], false, None)
         .await
         .expect("find_dead_code failed");
     let elapsed = t0.elapsed();
