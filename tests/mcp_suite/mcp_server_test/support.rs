@@ -1,7 +1,6 @@
 //! Shared helpers for the MCP server test domains, split mechanically
 //! from `mcp_server_test.rs`.
 
-use crate::common::EnvVarGuard;
 use serde_json::{Value, json};
 use std::fmt::Write as _;
 use std::fs;
@@ -9,11 +8,12 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
 use tempfile::TempDir;
+use tracedecay::application::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay::branch_meta::{BranchMeta, save_branch_meta};
 use tracedecay::mcp::McpServer;
 use tracedecay::mcp::transport::{ChannelTransport, McpTransport};
 use tracedecay::storage::{resolve_layout_for_current_profile, resolve_response_handle_root};
-use tracedecay::tracedecay::TraceDecay;
+use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -141,52 +141,19 @@ impl McpTransport for ReadErrorTransport {
     }
 }
 
-/// Serializes the savings-accounting tests below: they mutate process-wide
-/// global-accounting env vars. `#[tokio::test]` defaults to a current-thread
-/// runtime, so holding the guard across `.await` is fine.
+/// Serializes the two tests that still mutate process-wide global-accounting
+/// env vars. `#[tokio::test]` defaults to a current-thread runtime, so holding
+/// the guard across `.await` is fine.
 pub(crate) static SAVINGS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 pub(crate) static BRANCH_DRIFT_TEST_LOCK: tokio::sync::Mutex<()> =
     tokio::sync::Mutex::const_new(());
 
-pub(crate) fn persistent_temp_dir() -> std::path::PathBuf {
-    let dir = TempDir::new().unwrap();
-    let path = dir.path().to_path_buf();
-    // Other tests can construct servers while global-accounting env is
-    // temporarily redirected here. Keep the directory alive for the process so
-    // those captured paths do not dangle after this test restores the env.
-    std::mem::forget(dir);
-    path
-}
-
-/// Redirects only the global accounting DB, without changing HOME/profile
-/// storage resolution for concurrently running TraceDecay fixtures.
-pub(crate) fn isolated_savings_env(global_db_path: &std::path::Path) -> Vec<EnvVarGuard> {
-    let mut guards = vec![EnvVarGuard::set(
-        "TRACEDECAY_GLOBAL_DB",
-        global_db_path.as_os_str(),
-    )];
-    // `.cargo/config.toml` sets TRACEDECAY_DISABLE_GLOBAL_DB=1 to keep
-    // cargo-launched processes hermetic; the explicit enable wins.
-    guards.push(EnvVarGuard::set(
-        "TRACEDECAY_ENABLE_GLOBAL_DB",
-        std::ffi::OsStr::new("1"),
-    ));
-    guards
-}
-
 /// Awaits the server's ledger-write settlement signal (the rows are written
 /// by spawned fire-and-forget tasks), then reads the ledger once and asserts
-/// the expected row count for `project`. Deterministic where the old
-/// 10-second DB poll was not:
-///
-/// - settlement replaces the wall-clock deadline race against the spawned
-///   write task;
-/// - the DB path is captured by the caller under `SAVINGS_ENV_LOCK`, so a
-///   concurrent test's env mutation cannot redirect the read;
-/// - the count is scoped to this test's unique project path, because tests
-///   running in parallel *outside* the lock construct servers while `HOME`
-///   is redirected here and append their own ledger rows to this same DB.
+/// the expected row count for `project`. Settlement replaces a wall-clock
+/// deadline race against the spawned write task, and the profile belongs to
+/// this test alone, so no concurrent fixture can add rows to it.
 pub(crate) async fn settled_ledger_total(
     server: &McpServer,
     global_db_path: &std::path::Path,
@@ -212,19 +179,22 @@ pub(crate) async fn settled_ledger_total(
     total
 }
 
-/// The global-DB path as resolved *right now* (callers hold
-/// `SAVINGS_ENV_LOCK`, so this is the same path the server under test
-/// resolves at construction).
-pub(crate) fn locked_global_db_path() -> std::path::PathBuf {
-    tracedecay::global_db::global_db_path().expect("global db path resolves under isolated HOME")
+/// A server whose accounting and analytics writes are actually observable.
+///
+/// [`McpServer::new`] leaves both accounting databases unmounted, so ledger
+/// and analytics writes are dropped on the floor. These fields come from one
+/// profile this test owns end to end: the server writes through the
+/// registered runtime, and `global_db_path` reads the same profile back.
+pub(crate) struct AccountedServer {
+    pub(crate) server: Arc<McpServer>,
+    pub(crate) project: TempDir,
+    pub(crate) global_db_path: PathBuf,
+    _profile: TempDir,
 }
 
-/// Creates a temp project whose `src/main.rs` is large enough that the
-/// raw-file ("before") estimate is clearly nonzero, then indexes it.
-pub(crate) async fn setup_savings_project() -> (Arc<McpServer>, TempDir) {
-    let dir = TempDir::new().unwrap();
-    let project = dir.path();
-    fs::create_dir_all(project.join("src")).unwrap();
+/// `src/main.rs` large enough that the raw-file ("before") estimate is
+/// clearly nonzero.
+pub(crate) fn savings_project_source() -> String {
     let mut source = String::from("fn main() { let x = helper(); }\nfn helper() -> i32 { 42 }\n");
     for i in 0..80 {
         let _ = write!(
@@ -232,17 +202,61 @@ pub(crate) async fn setup_savings_project() -> (Arc<McpServer>, TempDir) {
             "/// Filler documentation line {i} to inflate the raw-file estimate.\nfn filler_{i}() -> i32 {{ {i} }}\n"
         );
     }
+    source
+}
+
+pub(crate) async fn setup_accounted_server() -> AccountedServer {
+    setup_accounted_server_with_source(
+        "fn main() { let x = helper(); }\nfn helper() -> i32 { 42 }\n",
+    )
+    .await
+}
+
+pub(crate) async fn setup_accounted_savings_server() -> AccountedServer {
+    setup_accounted_server_with_source(&savings_project_source()).await
+}
+
+async fn setup_accounted_server_with_source(source: &str) -> AccountedServer {
+    let profile_dir = TempDir::new().unwrap();
+    // A sibling of the profile root is the isolated transcript-source home
+    // the test runtime requires, so the profile cannot be the temp root.
+    let profile_root = profile_dir.path().join(".tracedecay");
+    let global_db_path = profile_root.join("global.db");
+    let dir = TempDir::new().unwrap();
+    let project = dir.path();
+    fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/main.rs"), source).unwrap();
-    let cg = crate::fixture::init_project_from_template(project)
-        .await
-        .unwrap();
+    let cg = crate::fixture::init_project_from_template_with_options(
+        project,
+        TraceDecayOpenOptions {
+            profile_root: Some(profile_root.clone()),
+            global_db_path: Some(global_db_path.clone()),
+        },
+    )
+    .await
+    .unwrap();
     cg.index_all().await.unwrap();
-    let server = McpServer::new(cg, None).await;
+    let project_id = cg
+        .store_layout()
+        .identity
+        .project_id
+        .as_deref()
+        .and_then(|value| tracedecay_domain::ProjectId::new(value.to_string()).ok())
+        .expect("savings fixture project identity");
+    let runtime = HostAdmissionTestRuntimeV1::project_scoped(&profile_root, project, project_id)
+        .await
+        .expect("registered project runtime opens for the savings profile");
+    let server = McpServer::new_with_host_admission_test_runtime_for_test(cg, None, runtime).await;
     server
         .install_project_open_source_edit_authority_for_test()
         .await
         .unwrap();
-    (server, dir)
+    AccountedServer {
+        server,
+        project: dir,
+        global_db_path,
+        _profile: profile_dir,
+    }
 }
 
 /// Extracts `(before, after)` from the `tracedecay_metrics:` line appended
