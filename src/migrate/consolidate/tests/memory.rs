@@ -500,8 +500,7 @@ async fn memory_v2_merge_rejects_incompatible_same_fact_identity() {
         .await
         .expect_err("same FactId with incompatible identity must fail closed");
     assert!(
-        error.to_string().contains("memory_v2")
-            && error.to_string().contains("conflict"),
+        error.to_string().contains("memory_v2") && error.to_string().contains("conflict"),
         "unexpected conflict error: {error}"
     );
 

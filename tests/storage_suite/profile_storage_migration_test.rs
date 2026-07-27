@@ -208,7 +208,11 @@ async fn project_memory_cutover_preserves_v2_authority_after_legacy_reclamation(
     let project = temp.path().join("project");
     let profile_root = temp.path().join("profile");
     fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/lib.rs"), "pub fn v2_cutover_fixture() {}\n").unwrap();
+    fs::write(
+        project.join("src/lib.rs"),
+        "pub fn v2_cutover_fixture() {}\n",
+    )
+    .unwrap();
     run_git(&project, &["init", "-b", "main"]);
     run_git(&project, &["config", "user.email", "test@example.com"]);
     run_git(&project, &["config", "user.name", "TraceDecay Test"]);
@@ -361,10 +365,9 @@ async fn project_memory_cutover_preserves_v2_authority_after_legacy_reclamation(
     let planned = tracedecay::migrate::memory_cutover::plan(&cutover)
         .await
         .unwrap();
-    let applied =
-        tracedecay::migrate::memory_cutover::apply(&cutover, &planned.confirmation_token)
-            .await
-            .unwrap();
+    let applied = tracedecay::migrate::memory_cutover::apply(&cutover, &planned.confirmation_token)
+        .await
+        .unwrap();
     assert!(applied.applied);
     tracedecay::migrate::memory_cutover::verify_branch_removal_receipts(
         &data_root,
@@ -476,7 +479,11 @@ async fn project_memory_cutover_rejects_incompatible_v2_identity_without_receipt
     let project = temp.path().join("project");
     let profile_root = temp.path().join("profile");
     fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(project.join("src/lib.rs"), "pub fn v2_conflict_fixture() {}\n").unwrap();
+    fs::write(
+        project.join("src/lib.rs"),
+        "pub fn v2_conflict_fixture() {}\n",
+    )
+    .unwrap();
     run_git(&project, &["init", "-b", "main"]);
     run_git(&project, &["config", "user.email", "test@example.com"]);
     run_git(&project, &["config", "user.name", "TraceDecay Test"]);
