@@ -117,7 +117,7 @@ export function CodePage() {
               onChange={(e) => setQuery(e.target.value)}
               placeholder="Search symbols"
               aria-label="Symbol search"
-              className="h-8 w-full rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-2 pl-7 pr-2 text-xs text-text-primary placeholder:text-text-muted focus:border-accent/60 focus:outline-none"
+              className="h-[calc(var(--touch-target-min)+2px)] w-full rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-2 pl-7 pr-2 text-xs text-text-primary placeholder:text-text-muted focus:border-accent/60 focus:outline-none"
             />
           </form>
           <LegacyBoundary title="Graph" pending={overview.isPending} result={overview.data}>
@@ -204,7 +204,18 @@ export function CodePage() {
             }}
           />
         ) : (
-          <div className="flex h-full flex-col">
+          // Two scroll containers, one inside the other: the archetype already
+          // scrolls the list slot, and this pane pinned itself to `h-full` of
+          // it and then divided that height between a canvas that cannot
+          // shrink and a hub list that can. Below `md` the canvas alone is
+          // taller than the pane, so the hub list resolved to `height: 0` and
+          // took its scrollbar with it — "top 12 of 12,873" over nothing. It is
+          // one scroll at narrow widths now: the pane grows to its content and
+          // the archetype's scroller carries the whole column. The pinned
+          // canvas with a separately scrolling list is kept from `md` up, where
+          // there is room to divide, with a floor so the division can never
+          // reach zero again.
+          <div className="flex min-h-full flex-col md:h-full">
             <div className="flex flex-col gap-1.5 border-b border-edge-subtle p-3">
               <LegacyBoundary
                 title="Code graph"
@@ -257,7 +268,7 @@ export function CodePage() {
                 }}
               </LegacyBoundary>
             </div>
-            <div className="min-h-0 flex-1 overflow-auto">
+            <div className="md:min-h-[var(--pane-min-height)] md:flex-1 md:overflow-auto">
               {submitted === '' ? (
                 <TopConnectedList
                   overviewPending={overview.isPending}
@@ -686,7 +697,7 @@ function HubCard({
       onClick={onSelect}
       aria-pressed={selected}
       className={cn(
-        'relative flex h-full w-full flex-col gap-0.5 px-3 py-1.5 text-left',
+        'relative flex h-full min-h-[var(--touch-target-min)] w-full flex-col gap-0.5 px-3 py-1.5 text-left',
         selected ? 'bg-surface-2' : 'bg-surface-0 hover:bg-surface-1',
         'focus-visible:bg-surface-1',
       )}

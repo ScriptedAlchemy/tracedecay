@@ -821,7 +821,7 @@ function PlannerRunPanel({
           type="button"
           onClick={onCancel}
           disabled={cancelling}
-          className="flex min-h-11 items-center justify-center border border-edge-subtle px-3 text-2xs text-text-secondary hover:border-accent hover:text-text-primary disabled:opacity-50"
+          className="flex min-h-[var(--touch-target-min)] items-center justify-center border border-edge-subtle px-3 text-2xs text-text-secondary hover:border-accent hover:text-text-primary disabled:opacity-50"
         >
           {cancelling ? 'Requesting cancellation…' : 'Cancel this run'}
         </button>
@@ -1165,7 +1165,7 @@ function EmptyResults({
         <button
           type="button"
           onClick={onClearFacet}
-          className="min-h-11 rounded-[var(--radius-chip)] border border-edge-subtle px-3 py-1 text-2xs text-text-secondary hover:border-accent hover:text-text-primary"
+          className="min-h-[var(--touch-target-min)] rounded-[var(--radius-chip)] border border-edge-subtle px-3 py-1 text-2xs text-text-secondary hover:border-accent hover:text-text-primary"
         >
           Clear the pivot
         </button>
@@ -1204,7 +1204,7 @@ function EmptyResults({
         <button
           type="button"
           onClick={onClearQuery}
-          className="min-h-11 rounded-[var(--radius-chip)] border border-edge-subtle px-3 py-1 text-2xs text-text-secondary hover:border-accent hover:text-text-primary"
+          className="min-h-[var(--touch-target-min)] rounded-[var(--radius-chip)] border border-edge-subtle px-3 py-1 text-2xs text-text-secondary hover:border-accent hover:text-text-primary"
         >
           Back to browsing
         </button>
