@@ -38,6 +38,41 @@ fn project_open_test_route(name: &str) -> ProjectRouteKey {
 }
 
 #[tokio::test]
+async fn unenrolled_ambient_directory_is_rejected_before_project_warmup() {
+    let home = TempDir::new().expect("isolated home");
+    let profile_root = home.path().join(".tracedecay");
+    let ambient_directory = home.path().join("ambient");
+    std::fs::create_dir_all(&ambient_directory).expect("create ambient directory");
+    let _database_scope =
+        enter_test_daemon_database_scope(&profile_root, "unenrolled ambient route");
+    let engine = test_daemon_engine_for_profile(&profile_root);
+    let mut handshake = test_handshake_defaults();
+    handshake.project_path = Some(ambient_directory.clone());
+    handshake.client_identity = test_client_identity_for(profile_root);
+
+    let error = match engine.begin_project_open(handshake, None).await {
+        Ok(_) => panic!("unenrolled ambient directory must not start project warm-up"),
+        Err(error) => error,
+    };
+
+    assert!(
+        error.to_string().contains("is not enrolled"),
+        "the route must fail at enrollment admission: {error}"
+    );
+    assert_eq!(
+        engine
+            .project_open_attempts
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "the expensive project-open operation must not start"
+    );
+    assert!(
+        !ambient_directory.join(".tracedecay").exists(),
+        "rejection must not manufacture project state"
+    );
+}
+
+#[tokio::test]
 async fn repeated_bootstrap_requests_share_one_bounded_invariant_open_failure() {
     let tasks = super::super::ProjectOpenTasks::default();
     let route = project_open_test_route("rejected");
