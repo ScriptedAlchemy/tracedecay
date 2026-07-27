@@ -1,0 +1,1296 @@
+use std::collections::BTreeMap;
+
+use tracedecay_domain::{FactOwnerV1, ProjectId};
+use tracedecay_store::{
+    MemoryV2ArchiveFamilyV1, MemoryV2ArchiveRecordV1, MemoryV2ArchiveReferenceV1,
+    MemoryV2ArchiveScalarV1, MemoryV2OwnerArchiveV1, MemoryV2OwnerMergePlanV1,
+    authoritative_memory_v2_archive_families, plan_memory_v2_owner_merge,
+};
+
+use crate::db::engine::{Executor, Value, params, params_from_iter};
+use crate::errors::Result;
+
+use super::{db_error, db_message, json_text};
+
+const OPERATION: &str = "memory_v2_owner_archive";
+
+#[derive(Clone, Copy)]
+pub(crate) enum MemoryV2ArchiveDatabase {
+    Main,
+    Source,
+}
+
+impl MemoryV2ArchiveDatabase {
+    fn prefix(self) -> &'static str {
+        match self {
+            Self::Main => "",
+            Self::Source => "source.",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum OwnerFilter {
+    Scope,
+    RetrievalAnchor,
+    RetrievalAnchorChild(&'static str),
+    EvidenceOwnerDigest,
+    EvidenceParent(&'static str, &'static str),
+}
+
+struct TableSpec {
+    family: MemoryV2ArchiveFamilyV1,
+    table: &'static str,
+    columns: &'static [&'static str],
+    key_columns: &'static [&'static str],
+    owner_filter: OwnerFilter,
+}
+
+pub(crate) async fn list_memory_v2_archive_owners(
+    conn: &(impl Executor + Sync),
+    database: MemoryV2ArchiveDatabase,
+) -> Result<Vec<FactOwnerV1>> {
+    let prefix = database.prefix();
+    let sql = format!(
+        "SELECT owner_kind, project_id FROM {prefix}memory_v2_facts
+         UNION SELECT owner_kind, project_id FROM {prefix}memory_v2_proposals
+         UNION SELECT owner_kind, project_id FROM {prefix}memory_v2_legacy_quarantine
+         UNION SELECT owner_kind, project_id
+               FROM {prefix}memory_v2_compatibility_operation_receipts
+         ORDER BY owner_kind, project_id"
+    );
+    let mut rows = conn
+        .query(&sql, ())
+        .await
+        .map_err(|error| db_error(OPERATION, error))?;
+    let mut owners = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| db_error(OPERATION, error))?
+    {
+        let kind: String = row.get(0).map_err(|error| db_error(OPERATION, error))?;
+        let project_id: String = row.get(1).map_err(|error| db_error(OPERATION, error))?;
+        owners.push(owner_from_key(&kind, &project_id)?);
+    }
+    Ok(owners)
+}
+
+pub(crate) async fn export_memory_v2_owner_archive(
+    conn: &(impl Executor + Sync),
+    database: MemoryV2ArchiveDatabase,
+    owner: &FactOwnerV1,
+) -> Result<MemoryV2OwnerArchiveV1> {
+    owner
+        .validate()
+        .map_err(|error| db_message(OPERATION, error.to_string()))?;
+    let (owner_kind, project_id) = owner_key(owner);
+    let owner_json = json_text(owner)?;
+    let mut records = Vec::new();
+    for spec in table_specs() {
+        records.extend(
+            export_table(conn, database, spec, owner_kind, &project_id, &owner_json).await?,
+        );
+    }
+    MemoryV2OwnerArchiveV1::new(
+        owner.clone(),
+        authoritative_memory_v2_archive_families(),
+        records,
+    )
+    .map_err(|error| db_message(OPERATION, error.to_string()))
+}
+
+pub(crate) async fn plan_memory_v2_owner_archive_import(
+    conn: &(impl Executor + Sync),
+    archive: &MemoryV2OwnerArchiveV1,
+) -> Result<MemoryV2OwnerMergePlanV1> {
+    let target =
+        export_memory_v2_owner_archive(conn, MemoryV2ArchiveDatabase::Main, archive.owner())
+            .await?;
+    plan_memory_v2_owner_merge(archive, &target)
+        .map_err(|error| db_message(OPERATION, error.to_string()))
+}
+
+pub(crate) async fn import_memory_v2_owner_archive(
+    conn: &(impl Executor + Sync),
+    archive: &MemoryV2OwnerArchiveV1,
+    plan: &MemoryV2OwnerMergePlanV1,
+) -> Result<()> {
+    if plan.owner() != archive.owner()
+        || plan.source_digest()
+            != &archive
+                .digest()
+                .map_err(|error| db_message(OPERATION, error.to_string()))?
+    {
+        return Err(db_message(
+            OPERATION,
+            "archive import plan does not bind the supplied archive",
+        ));
+    }
+    if !plan.can_apply() {
+        return Err(db_message(
+            OPERATION,
+            format!(
+                "archive import has {} incompatible stable identities",
+                plan.conflicts().len()
+            ),
+        ));
+    }
+    let specs: BTreeMap<_, _> = table_specs()
+        .iter()
+        .map(|spec| (spec.family, spec))
+        .collect();
+    for record in plan.inserts() {
+        let spec = specs
+            .get(&record.family())
+            .ok_or_else(|| db_message(OPERATION, "archive record has no physical table adapter"))?;
+        insert_record(conn, spec, record).await?;
+    }
+    let verified =
+        export_memory_v2_owner_archive(conn, MemoryV2ArchiveDatabase::Main, archive.owner())
+            .await?;
+    let verification = plan_memory_v2_owner_merge(archive, &verified)
+        .map_err(|error| db_message(OPERATION, error.to_string()))?;
+    if !verification.can_apply() || !verification.inserts().is_empty() {
+        return Err(db_message(
+            OPERATION,
+            "archive import readback did not preserve the complete source closure",
+        ));
+    }
+    Ok(())
+}
+
+async fn export_table(
+    conn: &(impl Executor + Sync),
+    database: MemoryV2ArchiveDatabase,
+    spec: &TableSpec,
+    owner_kind: &str,
+    project_id: &str,
+    owner_json: &str,
+) -> Result<Vec<MemoryV2ArchiveRecordV1>> {
+    let columns = spec.columns.join(", ");
+    let predicate = owner_predicate(database, spec.owner_filter);
+    let sql = format!(
+        "SELECT {columns} FROM {}{} WHERE {predicate} ORDER BY {}",
+        database.prefix(),
+        spec.table,
+        spec.key_columns.join(", ")
+    );
+    let mut rows = conn
+        .query(&sql, params![owner_kind, project_id, owner_json])
+        .await
+        .map_err(|error| db_error(OPERATION, error))?;
+    let mut records = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| db_error(OPERATION, error))?
+    {
+        let mut values = BTreeMap::new();
+        for (index, column) in spec.columns.iter().enumerate() {
+            let index = i32::try_from(index)
+                .map_err(|_| db_message(OPERATION, "archive column index overflow"))?;
+            let value: Value = row.get(index).map_err(|error| db_error(OPERATION, error))?;
+            values.insert((*column).to_owned(), scalar_from_value(value));
+        }
+        let mut key = BTreeMap::new();
+        let mut fields = values.clone();
+        for column in spec.key_columns {
+            let value = fields.remove(*column).ok_or_else(|| {
+                db_message(
+                    OPERATION,
+                    format!("archive key column `{column}` is absent"),
+                )
+            })?;
+            key.insert((*column).to_owned(), value);
+        }
+        let references = references_for(spec.family, &values)?;
+        records.push(
+            MemoryV2ArchiveRecordV1::new(spec.family, key, fields, references)
+                .map_err(|error| db_message(OPERATION, error.to_string()))?,
+        );
+    }
+    Ok(records)
+}
+
+async fn insert_record(
+    conn: &(impl Executor + Sync),
+    spec: &TableSpec,
+    record: &MemoryV2ArchiveRecordV1,
+) -> Result<()> {
+    let placeholders = (1..=spec.columns.len())
+        .map(|index| format!("?{index}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "INSERT INTO {}({}) VALUES({placeholders})",
+        spec.table,
+        spec.columns.join(", ")
+    );
+    let values = spec
+        .columns
+        .iter()
+        .map(|column| {
+            record
+                .key()
+                .get(*column)
+                .or_else(|| record.fields().get(*column))
+                .cloned()
+                .map(value_from_scalar)
+                .ok_or_else(|| {
+                    db_message(
+                        OPERATION,
+                        format!("archive record omits physical column `{column}`"),
+                    )
+                })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    conn.execute(&sql, params_from_iter(values))
+        .await
+        .map_err(|error| db_error(OPERATION, error))?;
+    Ok(())
+}
+
+fn owner_predicate(database: MemoryV2ArchiveDatabase, filter: OwnerFilter) -> String {
+    let prefix = database.prefix();
+    let selected_anchors = format!(
+        "SELECT anchor_id FROM {prefix}retrieval_anchors WHERE owner_json=?3
+         UNION
+         SELECT anchor.anchor_id
+         FROM {prefix}retrieval_anchors AS anchor
+         WHERE anchor.owner_json IN (
+             SELECT selected.owner_json
+             FROM {prefix}retrieval_anchors AS selected
+             JOIN {prefix}memory_v2_evidence AS evidence
+               ON evidence.anchor_id=selected.anchor_id
+             WHERE evidence.owner_kind=?1 AND evidence.project_id=?2
+         )"
+    );
+    let evidence_owners = format!(
+        "SELECT DISTINCT derived.owner_digest
+         FROM {prefix}evidence_derived_anchors AS derived
+         JOIN {prefix}memory_v2_evidence AS evidence
+           ON evidence.anchor_id=derived.anchor_id
+         WHERE evidence.owner_kind=?1 AND evidence.project_id=?2"
+    );
+    match filter {
+        OwnerFilter::Scope => "owner_kind=?1 AND project_id=?2 AND ?3=?3".to_owned(),
+        OwnerFilter::RetrievalAnchor => format!("anchor_id IN ({selected_anchors})"),
+        OwnerFilter::RetrievalAnchorChild(column) => {
+            format!("{column} IN ({selected_anchors})")
+        }
+        OwnerFilter::EvidenceOwnerDigest => {
+            format!("owner_digest IN ({evidence_owners}) AND ?3=?3")
+        }
+        OwnerFilter::EvidenceParent(parent, owner_column) => format!(
+            "{parent} IN (
+                SELECT {parent} FROM {prefix}{owner_column}
+                WHERE owner_digest IN ({evidence_owners})
+             ) AND ?3=?3"
+        ),
+    }
+}
+
+fn owner_key(owner: &FactOwnerV1) -> (&'static str, String) {
+    match owner {
+        FactOwnerV1::Profile => ("profile", String::new()),
+        FactOwnerV1::Project { project_id } => ("project", project_id.as_str().to_owned()),
+    }
+}
+
+fn owner_from_key(kind: &str, project_id: &str) -> Result<FactOwnerV1> {
+    match (kind, project_id) {
+        ("profile", "") => Ok(FactOwnerV1::Profile),
+        ("project", project_id) if !project_id.is_empty() => ProjectId::new(project_id.to_owned())
+            .map(|project_id| FactOwnerV1::Project { project_id })
+            .map_err(|error| db_message(OPERATION, error.to_string())),
+        _ => Err(db_message(
+            OPERATION,
+            "archive source contains an invalid owner scope",
+        )),
+    }
+}
+
+fn scalar_from_value(value: Value) -> MemoryV2ArchiveScalarV1 {
+    match value {
+        Value::Null => MemoryV2ArchiveScalarV1::Null,
+        Value::Integer(value) => MemoryV2ArchiveScalarV1::Integer(value),
+        Value::Real(value) => MemoryV2ArchiveScalarV1::RealBits(value.to_bits()),
+        Value::Text(value) => MemoryV2ArchiveScalarV1::Text(value),
+        Value::Blob(value) => MemoryV2ArchiveScalarV1::Blob(value),
+    }
+}
+
+fn value_from_scalar(value: MemoryV2ArchiveScalarV1) -> Value {
+    match value {
+        MemoryV2ArchiveScalarV1::Null => Value::Null,
+        MemoryV2ArchiveScalarV1::Integer(value) => Value::Integer(value),
+        MemoryV2ArchiveScalarV1::RealBits(value) => Value::Real(f64::from_bits(value)),
+        MemoryV2ArchiveScalarV1::Text(value) => Value::Text(value),
+        MemoryV2ArchiveScalarV1::Blob(value) => Value::Blob(value),
+    }
+}
+
+fn references_for(
+    family: MemoryV2ArchiveFamilyV1,
+    values: &BTreeMap<String, MemoryV2ArchiveScalarV1>,
+) -> Result<Vec<MemoryV2ArchiveReferenceV1>> {
+    use MemoryV2ArchiveFamilyV1 as Family;
+
+    let mut references = Vec::new();
+    match family {
+        Family::RetrievalAnchor
+        | Family::EvidenceOccurrenceSet
+        | Family::Fact
+        | Family::LegacyQuarantine
+        | Family::Proposal => {}
+        Family::RetrievalAnchorAlias => {
+            references.push(reference(
+                Family::RetrievalAnchor,
+                values,
+                &[("anchor_id", "anchor_id")],
+            )?);
+        }
+        Family::RetrievalAnchorDisposition => {
+            references.push(reference(
+                Family::RetrievalAnchor,
+                values,
+                &[("anchor_id", "anchor_id")],
+            )?);
+            push_optional_reference(
+                &mut references,
+                Family::RetrievalAnchor,
+                values,
+                &[("superseded_by", "anchor_id")],
+            )?;
+        }
+        Family::RetrievalAnchorReverseLineage => {
+            references.push(reference(
+                Family::RetrievalAnchor,
+                values,
+                &[("source_anchor_id", "anchor_id")],
+            )?);
+        }
+        Family::RetrievalAnchorDerivativeTombstone => {
+            references.push(reference(
+                Family::RetrievalAnchorReverseLineage,
+                values,
+                &[
+                    ("source_anchor_id", "source_anchor_id"),
+                    ("owner_json", "owner_json"),
+                    ("derivative_kind", "derivative_kind"),
+                    ("derivative_id", "derivative_id"),
+                ],
+            )?);
+        }
+        Family::EvidenceSourceOccurrence => {
+            references.push(reference(
+                Family::RetrievalAnchor,
+                values,
+                &[("source_anchor_id", "anchor_id")],
+            )?);
+        }
+        Family::EvidenceOccurrenceSetMember => {
+            references.push(reference(
+                Family::EvidenceOccurrenceSet,
+                values,
+                &[("occurrence_set_id", "occurrence_set_id")],
+            )?);
+            references.push(reference(
+                Family::EvidenceSourceOccurrence,
+                values,
+                &[("occurrence_id", "occurrence_id")],
+            )?);
+        }
+        Family::EvidenceSpan => {
+            references.push(reference(
+                Family::EvidenceOccurrenceSet,
+                values,
+                &[("occurrence_set_id", "occurrence_set_id")],
+            )?);
+            references.push(reference(
+                Family::RetrievalAnchor,
+                values,
+                &[("anchor_id", "anchor_id")],
+            )?);
+        }
+        Family::EvidenceSpanMember => {
+            references.push(reference(
+                Family::EvidenceSpan,
+                values,
+                &[("span_id", "span_id")],
+            )?);
+            references.push(reference(
+                Family::EvidenceSourceOccurrence,
+                values,
+                &[("occurrence_id", "occurrence_id")],
+            )?);
+        }
+        Family::EvidenceSpanProjectionReceipt => {
+            references.push(reference(
+                Family::EvidenceSpan,
+                values,
+                &[("span_id", "span_id")],
+            )?);
+        }
+        Family::EvidenceRetrieverContribution => {
+            references.push(reference(
+                Family::EvidenceSpan,
+                values,
+                &[("span_id", "span_id")],
+            )?);
+            references.push(reference(
+                Family::RetrievalAnchor,
+                values,
+                &[("anchor_id", "anchor_id")],
+            )?);
+        }
+        Family::EvidenceDerivedAnchor => {
+            references.push(reference(
+                Family::RetrievalAnchor,
+                values,
+                &[("anchor_id", "anchor_id")],
+            )?);
+            let target_family = match text_value(values, "target_kind")? {
+                "source_occurrence" => Family::EvidenceSourceOccurrence,
+                "evidence_span" => Family::EvidenceSpan,
+                "retriever_contribution" => Family::EvidenceRetrieverContribution,
+                _ => {
+                    return Err(db_message(
+                        OPERATION,
+                        "derived evidence anchor has an unknown target kind",
+                    ));
+                }
+            };
+            let target_key = match target_family {
+                Family::EvidenceSourceOccurrence => "occurrence_id",
+                Family::EvidenceSpan => "span_id",
+                Family::EvidenceRetrieverContribution => "contribution_id",
+                _ => unreachable!(),
+            };
+            references.push(reference(
+                target_family,
+                values,
+                &[("target_id", target_key)],
+            )?);
+        }
+        Family::EvidenceAssemblyReceipt => {
+            for (target, column, target_column) in [
+                (
+                    Family::EvidenceOccurrenceSet,
+                    "occurrence_set_id",
+                    "occurrence_set_id",
+                ),
+                (Family::EvidenceSpan, "span_id", "span_id"),
+                (
+                    Family::EvidenceRetrieverContribution,
+                    "contribution_id",
+                    "contribution_id",
+                ),
+                (
+                    Family::EvidenceSpanProjectionReceipt,
+                    "projection_receipt_id",
+                    "projection_receipt_id",
+                ),
+            ] {
+                references.push(reference(target, values, &[(column, target_column)])?);
+            }
+        }
+        Family::Assertion => references.push(fact_reference(values, "fact_id")?),
+        Family::AssertionSupersession => {
+            references.push(assertion_reference(values, "assertion_id")?);
+            references.push(assertion_reference(values, "superseded_assertion_id")?);
+        }
+        Family::AssertionPayload | Family::AssertionVector => {
+            references.push(assertion_reference(values, "assertion_id")?);
+        }
+        Family::FactEvidence => {
+            references.push(fact_reference(values, "fact_id")?);
+            references.push(reference(
+                Family::RetrievalAnchor,
+                values,
+                &[("anchor_id", "anchor_id")],
+            )?);
+        }
+        Family::AssertionEvidence => {
+            references.push(assertion_reference(values, "assertion_id")?);
+            references.push(reference(
+                Family::FactEvidence,
+                values,
+                &[
+                    ("evidence_id", "evidence_id"),
+                    ("fact_id", "fact_id"),
+                    ("owner_kind", "owner_kind"),
+                    ("project_id", "project_id"),
+                ],
+            )?);
+        }
+        Family::LineageEvent => references.push(fact_reference(values, "fact_id")?),
+        Family::CurrentFact => {
+            references.push(fact_reference(values, "fact_id")?);
+            push_optional_reference(
+                &mut references,
+                Family::Assertion,
+                values,
+                &[
+                    ("active_assertion_id", "assertion_id"),
+                    ("fact_id", "fact_id"),
+                    ("owner_kind", "owner_kind"),
+                    ("project_id", "project_id"),
+                ],
+            )?;
+            references.push(event_reference(values, "last_event_id")?);
+        }
+        Family::LegacyFactMap => references.push(fact_reference(values, "fact_id")?),
+        Family::CompatibilityOperationReceipt => {
+            push_optional_reference(
+                &mut references,
+                Family::Fact,
+                values,
+                &[
+                    ("fact_id", "fact_id"),
+                    ("owner_kind", "owner_kind"),
+                    ("project_id", "project_id"),
+                ],
+            )?;
+            push_optional_reference(
+                &mut references,
+                Family::LineageEvent,
+                values,
+                &[
+                    ("event_id", "event_id"),
+                    ("fact_id", "fact_id"),
+                    ("owner_kind", "owner_kind"),
+                    ("project_id", "project_id"),
+                ],
+            )?;
+        }
+        Family::LegacyFeedbackEventMap | Family::FeedbackHistory => {
+            references.push(fact_reference(values, "fact_id")?);
+            references.push(event_reference(values, "event_id")?);
+        }
+        Family::FactRelation => {
+            references.push(fact_reference(values, "source_fact_id")?);
+            references.push(fact_reference(values, "target_fact_id")?);
+        }
+        Family::ProposalTransition => {
+            references.push(proposal_reference(values)?);
+            push_optional_reference(
+                &mut references,
+                Family::Fact,
+                values,
+                &[
+                    ("promoted_fact_id", "fact_id"),
+                    ("owner_kind", "owner_kind"),
+                    ("project_id", "project_id"),
+                ],
+            )?;
+            push_optional_reference(
+                &mut references,
+                Family::Assertion,
+                values,
+                &[
+                    ("promoted_assertion_id", "assertion_id"),
+                    ("promoted_fact_id", "fact_id"),
+                    ("owner_kind", "owner_kind"),
+                    ("project_id", "project_id"),
+                ],
+            )?;
+            push_optional_reference(
+                &mut references,
+                Family::LineageEvent,
+                values,
+                &[
+                    ("promoted_event_id", "event_id"),
+                    ("promoted_fact_id", "fact_id"),
+                    ("owner_kind", "owner_kind"),
+                    ("project_id", "project_id"),
+                ],
+            )?;
+        }
+        Family::ProposalCurrent => {
+            references.push(proposal_reference(values)?);
+            references.push(reference(
+                Family::ProposalTransition,
+                values,
+                &[
+                    ("last_transition_id", "transition_id"),
+                    ("proposal_id", "proposal_id"),
+                    ("owner_kind", "owner_kind"),
+                    ("project_id", "project_id"),
+                ],
+            )?);
+        }
+        Family::LegacyProposalMap => references.push(proposal_reference(values)?),
+    }
+    Ok(references)
+}
+
+fn fact_reference(
+    values: &BTreeMap<String, MemoryV2ArchiveScalarV1>,
+    fact_column: &str,
+) -> Result<MemoryV2ArchiveReferenceV1> {
+    reference(
+        MemoryV2ArchiveFamilyV1::Fact,
+        values,
+        &[
+            (fact_column, "fact_id"),
+            ("owner_kind", "owner_kind"),
+            ("project_id", "project_id"),
+        ],
+    )
+}
+
+fn assertion_reference(
+    values: &BTreeMap<String, MemoryV2ArchiveScalarV1>,
+    assertion_column: &str,
+) -> Result<MemoryV2ArchiveReferenceV1> {
+    reference(
+        MemoryV2ArchiveFamilyV1::Assertion,
+        values,
+        &[
+            (assertion_column, "assertion_id"),
+            ("fact_id", "fact_id"),
+            ("owner_kind", "owner_kind"),
+            ("project_id", "project_id"),
+        ],
+    )
+}
+
+fn event_reference(
+    values: &BTreeMap<String, MemoryV2ArchiveScalarV1>,
+    event_column: &str,
+) -> Result<MemoryV2ArchiveReferenceV1> {
+    reference(
+        MemoryV2ArchiveFamilyV1::LineageEvent,
+        values,
+        &[
+            (event_column, "event_id"),
+            ("fact_id", "fact_id"),
+            ("owner_kind", "owner_kind"),
+            ("project_id", "project_id"),
+        ],
+    )
+}
+
+fn proposal_reference(
+    values: &BTreeMap<String, MemoryV2ArchiveScalarV1>,
+) -> Result<MemoryV2ArchiveReferenceV1> {
+    reference(
+        MemoryV2ArchiveFamilyV1::Proposal,
+        values,
+        &[
+            ("proposal_id", "proposal_id"),
+            ("owner_kind", "owner_kind"),
+            ("project_id", "project_id"),
+        ],
+    )
+}
+
+fn reference(
+    family: MemoryV2ArchiveFamilyV1,
+    values: &BTreeMap<String, MemoryV2ArchiveScalarV1>,
+    columns: &[(&str, &str)],
+) -> Result<MemoryV2ArchiveReferenceV1> {
+    let key = columns
+        .iter()
+        .map(|(source, target)| {
+            values
+                .get(*source)
+                .cloned()
+                .map(|value| ((*target).to_owned(), value))
+                .ok_or_else(|| {
+                    db_message(
+                        OPERATION,
+                        format!("archive reference column `{source}` is absent"),
+                    )
+                })
+        })
+        .collect::<Result<BTreeMap<_, _>>>()?;
+    MemoryV2ArchiveReferenceV1::new(family, key)
+        .map_err(|error| db_message(OPERATION, error.to_string()))
+}
+
+fn push_optional_reference(
+    references: &mut Vec<MemoryV2ArchiveReferenceV1>,
+    family: MemoryV2ArchiveFamilyV1,
+    values: &BTreeMap<String, MemoryV2ArchiveScalarV1>,
+    columns: &[(&str, &str)],
+) -> Result<()> {
+    let Some((source, _)) = columns.first() else {
+        return Ok(());
+    };
+    if !matches!(values.get(*source), Some(MemoryV2ArchiveScalarV1::Null)) {
+        references.push(reference(family, values, columns)?);
+    }
+    Ok(())
+}
+
+fn text_value<'a>(
+    values: &'a BTreeMap<String, MemoryV2ArchiveScalarV1>,
+    column: &str,
+) -> Result<&'a str> {
+    match values.get(column) {
+        Some(MemoryV2ArchiveScalarV1::Text(value)) => Ok(value),
+        _ => Err(db_message(
+            OPERATION,
+            format!("archive column `{column}` is not text"),
+        )),
+    }
+}
+
+fn table_specs() -> &'static [TableSpec] {
+    use MemoryV2ArchiveFamilyV1 as F;
+    use OwnerFilter as O;
+
+    static SPECS: &[TableSpec] = &[
+        TableSpec {
+            family: F::RetrievalAnchor,
+            table: "retrieval_anchors",
+            columns: &[
+                "anchor_id",
+                "anchor_json",
+                "owner_json",
+                "projection_generation",
+            ],
+            key_columns: &["anchor_id"],
+            owner_filter: O::RetrievalAnchor,
+        },
+        TableSpec {
+            family: F::RetrievalAnchorAlias,
+            table: "retrieval_anchor_aliases",
+            columns: &["owner_json", "alias_kind", "locator_digest", "anchor_id"],
+            key_columns: &["owner_json", "alias_kind", "locator_digest"],
+            owner_filter: O::RetrievalAnchorChild("anchor_id"),
+        },
+        TableSpec {
+            family: F::RetrievalAnchorDisposition,
+            table: "retrieval_anchor_dispositions",
+            columns: &[
+                "disposition_id",
+                "anchor_id",
+                "owner_json",
+                "state",
+                "superseded_by",
+                "reason_class",
+                "effective_at",
+                "record_json",
+            ],
+            key_columns: &["owner_json", "disposition_id"],
+            owner_filter: O::RetrievalAnchorChild("anchor_id"),
+        },
+        TableSpec {
+            family: F::RetrievalAnchorReverseLineage,
+            table: "retrieval_anchor_reverse_lineage",
+            columns: &[
+                "source_anchor_id",
+                "owner_json",
+                "derivative_kind",
+                "derivative_id",
+                "direct_evidence",
+            ],
+            key_columns: &[
+                "source_anchor_id",
+                "owner_json",
+                "derivative_kind",
+                "derivative_id",
+            ],
+            owner_filter: O::RetrievalAnchorChild("source_anchor_id"),
+        },
+        TableSpec {
+            family: F::RetrievalAnchorDerivativeTombstone,
+            table: "retrieval_anchor_derivative_tombstones",
+            columns: &[
+                "source_anchor_id",
+                "owner_json",
+                "derivative_kind",
+                "derivative_id",
+                "disposition_id",
+                "effective_at",
+            ],
+            key_columns: &[
+                "source_anchor_id",
+                "owner_json",
+                "derivative_kind",
+                "derivative_id",
+                "disposition_id",
+            ],
+            owner_filter: O::RetrievalAnchorChild("source_anchor_id"),
+        },
+        TableSpec {
+            family: F::EvidenceSourceOccurrence,
+            table: "evidence_source_occurrences",
+            columns: &[
+                "occurrence_id",
+                "owner_digest",
+                "timeline_digest",
+                "source_anchor_id",
+                "source_order",
+                "record_digest",
+                "record_json",
+            ],
+            key_columns: &["occurrence_id"],
+            owner_filter: O::EvidenceOwnerDigest,
+        },
+        TableSpec {
+            family: F::EvidenceOccurrenceSet,
+            table: "evidence_occurrence_sets",
+            columns: &[
+                "occurrence_set_id",
+                "owner_digest",
+                "record_digest",
+                "record_json",
+            ],
+            key_columns: &["occurrence_set_id"],
+            owner_filter: O::EvidenceOwnerDigest,
+        },
+        TableSpec {
+            family: F::EvidenceOccurrenceSetMember,
+            table: "evidence_occurrence_set_members",
+            columns: &["occurrence_set_id", "canonical_ordinal", "occurrence_id"],
+            key_columns: &["occurrence_set_id", "canonical_ordinal"],
+            owner_filter: O::EvidenceParent("occurrence_set_id", "evidence_occurrence_sets"),
+        },
+        TableSpec {
+            family: F::EvidenceSpan,
+            table: "evidence_spans",
+            columns: &[
+                "span_id",
+                "owner_digest",
+                "occurrence_set_id",
+                "anchor_id",
+                "producer_kind",
+                "record_digest",
+                "record_json",
+            ],
+            key_columns: &["span_id"],
+            owner_filter: O::EvidenceOwnerDigest,
+        },
+        TableSpec {
+            family: F::EvidenceSpanMember,
+            table: "evidence_span_members",
+            columns: &[
+                "span_id",
+                "assembly_ordinal",
+                "run_ordinal",
+                "run_member_ordinal",
+                "occurrence_id",
+            ],
+            key_columns: &["span_id", "assembly_ordinal"],
+            owner_filter: O::EvidenceParent("span_id", "evidence_spans"),
+        },
+        TableSpec {
+            family: F::EvidenceSpanProjectionReceipt,
+            table: "evidence_span_projection_receipts",
+            columns: &[
+                "projection_receipt_id",
+                "span_id",
+                "record_digest",
+                "record_json",
+            ],
+            key_columns: &["projection_receipt_id"],
+            owner_filter: O::EvidenceParent("span_id", "evidence_spans"),
+        },
+        TableSpec {
+            family: F::EvidenceRetrieverContribution,
+            table: "evidence_retriever_contributions",
+            columns: &[
+                "contribution_id",
+                "owner_digest",
+                "span_id",
+                "anchor_id",
+                "record_digest",
+                "record_json",
+            ],
+            key_columns: &["contribution_id"],
+            owner_filter: O::EvidenceOwnerDigest,
+        },
+        TableSpec {
+            family: F::EvidenceDerivedAnchor,
+            table: "evidence_derived_anchors",
+            columns: &[
+                "anchor_id",
+                "owner_digest",
+                "target_kind",
+                "target_id",
+                "anchor_json",
+            ],
+            key_columns: &["anchor_id"],
+            owner_filter: O::EvidenceOwnerDigest,
+        },
+        TableSpec {
+            family: F::EvidenceAssemblyReceipt,
+            table: "evidence_assembly_receipts",
+            columns: &[
+                "publication_receipt_id",
+                "owner_digest",
+                "privacy_domain_id",
+                "key_epoch",
+                "idempotency_key",
+                "assembly_digest",
+                "occurrence_set_id",
+                "span_id",
+                "contribution_id",
+                "projection_receipt_id",
+                "receipt_json",
+            ],
+            key_columns: &["publication_receipt_id"],
+            owner_filter: O::EvidenceOwnerDigest,
+        },
+        TableSpec {
+            family: F::Fact,
+            table: "memory_v2_facts",
+            columns: &[
+                "fact_id",
+                "owner_kind",
+                "project_id",
+                "owner_json",
+                "identity_json",
+                "created_at",
+            ],
+            key_columns: &["fact_id", "owner_kind", "project_id"],
+            owner_filter: O::Scope,
+        },
+        TableSpec {
+            family: F::Assertion,
+            table: "memory_v2_assertions",
+            columns: &[
+                "assertion_id",
+                "fact_id",
+                "owner_kind",
+                "project_id",
+                "owner_json",
+                "assertion_header_json",
+                "kind_json",
+                "payload_reference_json",
+                "receipt_json",
+                "asserted_at",
+                "actor_id",
+            ],
+            key_columns: &["assertion_id", "fact_id", "owner_kind", "project_id"],
+            owner_filter: O::Scope,
+        },
+        TableSpec {
+            family: F::AssertionSupersession,
+            table: "memory_v2_assertion_supersession",
+            columns: &[
+                "assertion_id",
+                "fact_id",
+                "owner_kind",
+                "project_id",
+                "superseded_assertion_id",
+                "ordinal",
+            ],
+            key_columns: &[
+                "assertion_id",
+                "fact_id",
+                "owner_kind",
+                "project_id",
+                "ordinal",
+            ],
+            owner_filter: O::Scope,
+        },
+        TableSpec {
+            family: F::AssertionPayload,
+            table: "memory_v2_assertion_payloads",
+            columns: &[
+                "assertion_id",
+                "fact_id",
+                "owner_kind",
+                "project_id",
+                "payload_json",
+                "content",
+            ],
+            key_columns: &["assertion_id", "fact_id", "owner_kind", "project_id"],
+            owner_filter: O::Scope,
+        },
+        TableSpec {
+            family: F::AssertionVector,
+            table: "memory_v2_assertion_vectors",
+            columns: &[
+                "assertion_id",
+                "fact_id",
+                "owner_kind",
+                "project_id",
+                "vector",
+                "algebra",
+                "dimensions",
+                "precision",
+            ],
+            key_columns: &["assertion_id", "fact_id", "owner_kind", "project_id"],
+            owner_filter: O::Scope,
+        },
+        TableSpec {
+            family: F::FactEvidence,
+            table: "memory_v2_evidence",
+            columns: &[
+                "evidence_id",
+                "fact_id",
+                "owner_kind",
+                "project_id",
+                "owner_json",
+                "anchor_id",
+                "evidence_json",
+            ],
+            key_columns: &["evidence_id", "fact_id", "owner_kind", "project_id"],
+            owner_filter: O::Scope,
+        },
+        TableSpec {
+            family: F::AssertionEvidence,
+            table: "memory_v2_assertion_evidence",
+            columns: &[
+                "assertion_id",
+                "evidence_id",
+                "fact_id",
+                "owner_kind",
+                "project_id",
+                "ordinal",
+            ],
+            key_columns: &[
+                "assertion_id",
+                "fact_id",
+                "owner_kind",
+                "project_id",
+                "ordinal",
+            ],
+            owner_filter: O::Scope,
+        },
+        TableSpec {
+            family: F::LineageEvent,
+            table: "memory_v2_lineage_events",
+            columns: &[
+                "event_id",
+                "fact_id",
+                "owner_kind",
+                "project_id",
+                "event_json",
+                "occurred_at",
+                "recorded_at",
+            ],
+            key_columns: &["event_id", "fact_id", "owner_kind", "project_id"],
+            owner_filter: O::Scope,
+        },
+        TableSpec {
+            family: F::CurrentFact,
+            table: "memory_v2_current_facts",
+            columns: &[
+                "fact_id",
+                "owner_kind",
+                "project_id",
+                "payload_access",
+                "trust_score",
+                "active_assertion_id",
+                "last_event_id",
+                "updated_at",
+                "retrieval_count",
+                "access_count",
+                "helpful_count",
+                "unhelpful_count",
+                "last_retrieved_at",
+                "last_recalled_at",
+                "last_feedback_at",
+                "projection_state",
+                "vector_watermark_json",
+            ],
+            key_columns: &["fact_id", "owner_kind", "project_id"],
+            owner_filter: O::Scope,
+        },
+        TableSpec {
+            family: F::LegacyFactMap,
+            table: "memory_v2_legacy_map",
+            columns: &[
+                "owner_kind",
+                "project_id",
+                "owner_json",
+                "source_store_id",
+                "legacy_fact_id",
+                "fact_id",
+                "mapping_json",
+            ],
+            key_columns: &[
+                "owner_kind",
+                "project_id",
+                "source_store_id",
+                "legacy_fact_id",
+            ],
+            owner_filter: O::Scope,
+        },
+        TableSpec {
+            family: F::LegacyQuarantine,
+            table: "memory_v2_legacy_quarantine",
+            columns: &[
+                "owner_kind",
+                "project_id",
+                "source_store_id",
+                "source_table",
+                "source_row_id",
+                "reason_code",
+                "recorded_at",
+            ],
+            key_columns: &[
+                "owner_kind",
+                "project_id",
+                "source_store_id",
+                "source_table",
+                "source_row_id",
+            ],
+            owner_filter: O::Scope,
+        },
+        TableSpec {
+            family: F::CompatibilityOperationReceipt,
+            table: "memory_v2_compatibility_operation_receipts",
+            columns: &[
+                "owner_kind",
+                "project_id",
+                "operation_id",
+                "operation_kind",
+                "request_digest",
+                "fact_id",
+                "event_id",
+                "receipt_json",
+                "recorded_at",
+            ],
+            key_columns: &["owner_kind", "project_id", "operation_id"],
+            owner_filter: O::Scope,
+        },
+        TableSpec {
+            family: F::LegacyFeedbackEventMap,
+            table: "memory_v2_legacy_feedback_event_map",
+            columns: &[
+                "owner_kind",
+                "project_id",
+                "source_store_id",
+                "legacy_feedback_event_id",
+                "fact_id",
+                "event_id",
+            ],
+            key_columns: &[
+                "owner_kind",
+                "project_id",
+                "source_store_id",
+                "legacy_feedback_event_id",
+            ],
+            owner_filter: O::Scope,
+        },
+        TableSpec {
+            family: F::FeedbackHistory,
+            table: "memory_v2_feedback_history",
+            columns: &[
+                "owner_kind",
+                "project_id",
+                "fact_id",
+                "event_id",
+                "action",
+                "old_trust",
+                "new_trust",
+                "occurred_at",
+                "source",
+                "note",
+                "details_availability",
+            ],
+            key_columns: &["owner_kind", "project_id", "fact_id", "event_id"],
+            owner_filter: O::Scope,
+        },
+        TableSpec {
+            family: F::FactRelation,
+            table: "memory_v2_fact_relations",
+            columns: &[
+                "owner_kind",
+                "project_id",
+                "source_fact_id",
+                "target_fact_id",
+                "relation",
+                "confidence",
+                "source_label",
+                "provenance_json",
+                "evidence_fact_ids_json",
+                "occurred_at",
+                "updated_at",
+            ],
+            key_columns: &[
+                "owner_kind",
+                "project_id",
+                "source_fact_id",
+                "target_fact_id",
+                "relation",
+            ],
+            owner_filter: O::Scope,
+        },
+        TableSpec {
+            family: F::Proposal,
+            table: "memory_v2_proposals",
+            columns: &[
+                "proposal_id",
+                "owner_kind",
+                "project_id",
+                "owner_json",
+                "idempotency_key",
+                "request_digest",
+                "request_json",
+                "evidence_json",
+                "submitted_at",
+            ],
+            key_columns: &["proposal_id", "owner_kind", "project_id"],
+            owner_filter: O::Scope,
+        },
+        TableSpec {
+            family: F::ProposalTransition,
+            table: "memory_v2_proposal_transitions",
+            columns: &[
+                "transition_id",
+                "proposal_id",
+                "owner_kind",
+                "project_id",
+                "previous_state",
+                "current_state",
+                "reviewer_json",
+                "validation_json",
+                "origin",
+                "promoted_fact_id",
+                "promoted_assertion_id",
+                "promoted_event_id",
+                "transition_json",
+                "occurred_at",
+            ],
+            key_columns: &["transition_id", "proposal_id", "owner_kind", "project_id"],
+            owner_filter: O::Scope,
+        },
+        TableSpec {
+            family: F::ProposalCurrent,
+            table: "memory_v2_proposal_current",
+            columns: &[
+                "proposal_id",
+                "owner_kind",
+                "project_id",
+                "state",
+                "revision",
+                "last_transition_id",
+                "updated_at",
+            ],
+            key_columns: &["proposal_id", "owner_kind", "project_id"],
+            owner_filter: O::Scope,
+        },
+        TableSpec {
+            family: F::LegacyProposalMap,
+            table: "memory_v2_legacy_proposal_map",
+            columns: &[
+                "owner_kind",
+                "project_id",
+                "source_store_id",
+                "legacy_proposal_id",
+                "proposal_id",
+                "history_coverage",
+                "import_receipt_json",
+                "imported_at",
+            ],
+            key_columns: &[
+                "owner_kind",
+                "project_id",
+                "source_store_id",
+                "legacy_proposal_id",
+            ],
+            owner_filter: O::Scope,
+        },
+    ];
+    SPECS
+}
