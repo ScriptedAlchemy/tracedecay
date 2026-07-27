@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use tracedecay_domain::{FactOwnerV1, ProjectId};
+use tracedecay_domain::{FactOwnerV1, ProjectId, SourceStoreId, UtcMicros};
 use tracedecay_store::{
     MemoryV2ArchiveFamilyV1, MemoryV2ArchiveRecordV1, MemoryV2ArchiveReferenceV1,
     MemoryV2ArchiveScalarV1, MemoryV2OwnerArchiveV1, MemoryV2OwnerMergePlanV1,
@@ -10,9 +10,21 @@ use tracedecay_store::{
 use crate::db::engine::{Executor, Value, params, params_from_iter};
 use crate::errors::Result;
 
-use super::{db_error, db_message, json_text};
+use super::{
+    db_error, db_message, json_text, mark_memory_v2_compatibility_bank_dirty_in_transaction,
+};
 
 const OPERATION: &str = "memory_v2_owner_archive";
+const LEGACY_MEMORY_SOURCE_STORE: &str = "legacy-memory-v1";
+const COMPATIBILITY_BANKS: [&str; 7] = [
+    "all",
+    "general",
+    "user_pref",
+    "project",
+    "tool",
+    "decision",
+    "code_area",
+];
 
 #[derive(Clone, Copy)]
 pub(crate) enum MemoryV2ArchiveDatabase {
@@ -66,7 +78,17 @@ pub(crate) async fn list_memory_v2_archive_owners(
     let prefix = database.prefix();
     let sql = format!(
         "SELECT owner_kind, project_id FROM {prefix}memory_v2_facts
+         UNION SELECT owner_kind, project_id FROM {prefix}memory_v2_assertions
+         UNION SELECT owner_kind, project_id FROM {prefix}memory_v2_evidence
+         UNION SELECT owner_kind, project_id FROM {prefix}memory_v2_current_facts
+         UNION SELECT owner_kind, project_id FROM {prefix}memory_v2_legacy_map
+         UNION SELECT owner_kind, project_id
+               FROM {prefix}memory_v2_legacy_feedback_event_map
+         UNION SELECT owner_kind, project_id FROM {prefix}memory_v2_feedback_history
+         UNION SELECT owner_kind, project_id FROM {prefix}memory_v2_fact_relations
          UNION SELECT owner_kind, project_id FROM {prefix}memory_v2_proposals
+         UNION SELECT owner_kind, project_id FROM {prefix}memory_v2_proposal_transitions
+         UNION SELECT owner_kind, project_id FROM {prefix}memory_v2_proposal_current
          UNION SELECT owner_kind, project_id FROM {prefix}memory_v2_legacy_quarantine
          UNION SELECT owner_kind, project_id
                FROM {prefix}memory_v2_compatibility_operation_receipts
@@ -86,6 +108,37 @@ pub(crate) async fn list_memory_v2_archive_owners(
         let project_id: String = row.get(1).map_err(|error| db_error(OPERATION, error))?;
         owners.push(owner_from_key(&kind, &project_id)?);
     }
+    let sql = format!(
+        "SELECT DISTINCT anchor.owner_json
+         FROM {prefix}retrieval_anchors AS anchor
+         WHERE anchor.anchor_id IN (
+             SELECT source_anchor_id FROM {prefix}evidence_source_occurrences
+             UNION SELECT anchor_id FROM {prefix}evidence_spans
+             UNION SELECT anchor_id FROM {prefix}evidence_retriever_contributions
+             UNION SELECT anchor_id FROM {prefix}evidence_derived_anchors
+         )
+         ORDER BY anchor.owner_json"
+    );
+    let mut rows = conn
+        .query(&sql, ())
+        .await
+        .map_err(|error| db_error(OPERATION, error))?;
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| db_error(OPERATION, error))?
+    {
+        let owner_json: String = row.get(0).map_err(|error| db_error(OPERATION, error))?;
+        let owner: FactOwnerV1 = serde_json::from_str(&owner_json)
+            .map_err(|error| db_message(OPERATION, error.to_string()))?;
+        owner
+            .validate()
+            .map_err(|error| db_message(OPERATION, error.to_string()))?;
+        if !owners.contains(&owner) {
+            owners.push(owner);
+        }
+    }
+    owners.sort_by_key(|owner| serde_json::to_string(owner).unwrap_or_default());
     Ok(owners)
 }
 
@@ -112,7 +165,7 @@ pub(crate) async fn export_memory_v2_owner_archive(
         authoritative_memory_v2_archive_families(),
         records,
     )
-    .map_err(|error| db_message(OPERATION, error.to_string()))
+    .map_err(|error| db_message(OPERATION, format!("{error}: {error:?}")))
 }
 
 pub(crate) async fn plan_memory_v2_owner_archive_import(
@@ -148,8 +201,9 @@ pub(crate) async fn import_memory_v2_owner_archive(
         return Err(db_message(
             OPERATION,
             format!(
-                "archive import has {} incompatible stable identities",
-                plan.conflicts().len()
+                "archive import has {} incompatible stable identities; first conflict: {:?}",
+                plan.conflicts().len(),
+                plan.conflicts().first()
             ),
         ));
     }
@@ -183,16 +237,71 @@ pub(crate) async fn import_memory_v2_owner_archive(
         }
         insert_record(conn, spec, record).await?;
     }
+    for record in plan.updates() {
+        let spec = specs
+            .get(&record.family())
+            .ok_or_else(|| db_message(OPERATION, "archive update has no physical adapter"))?;
+        update_projection_record(conn, spec, record).await?;
+    }
     let verified =
         export_memory_v2_owner_archive(conn, MemoryV2ArchiveDatabase::Main, archive.owner())
             .await?;
     let verification = plan_memory_v2_owner_merge(archive, &verified)
         .map_err(|error| db_message(OPERATION, error.to_string()))?;
-    if !verification.can_apply() || !verification.inserts().is_empty() {
+    if !verification.can_apply()
+        || !verification.inserts().is_empty()
+        || !verification.updates().is_empty()
+    {
         return Err(db_message(
             OPERATION,
             "archive import readback did not preserve the complete source closure",
         ));
+    }
+    if plan.inserts().iter().any(record_changes_fact_projection)
+        || plan.updates().iter().any(record_changes_fact_projection)
+    {
+        mark_imported_owner_banks_dirty(conn, archive).await?;
+    }
+    Ok(())
+}
+
+fn record_changes_fact_projection(record: &MemoryV2ArchiveRecordV1) -> bool {
+    matches!(
+        record.family(),
+        MemoryV2ArchiveFamilyV1::Fact | MemoryV2ArchiveFamilyV1::CurrentFact
+    )
+}
+
+async fn mark_imported_owner_banks_dirty(
+    conn: &(impl Executor + Sync),
+    archive: &MemoryV2OwnerArchiveV1,
+) -> Result<()> {
+    let updated_at = archive
+        .records()
+        .iter()
+        .filter(|record| record.family() == MemoryV2ArchiveFamilyV1::Fact)
+        .filter_map(|record| match record.fields().get("created_at") {
+            Some(MemoryV2ArchiveScalarV1::Integer(value)) => Some(*value),
+            _ => None,
+        })
+        .max()
+        .ok_or_else(|| {
+            db_message(
+                OPERATION,
+                "fact projection changed without an authoritative fact timestamp",
+            )
+        })?;
+    let source_store_id = SourceStoreId::new(LEGACY_MEMORY_SOURCE_STORE)
+        .map_err(|error| db_message(OPERATION, error.to_string()))?;
+    for bank_name in COMPATIBILITY_BANKS {
+        mark_memory_v2_compatibility_bank_dirty_in_transaction(
+            conn,
+            archive.owner(),
+            &source_store_id,
+            bank_name,
+            UtcMicros(updated_at),
+        )
+        .await?;
     }
     Ok(())
 }
@@ -206,13 +315,24 @@ async fn export_table(
     owner_json: &str,
 ) -> Result<Vec<MemoryV2ArchiveRecordV1>> {
     let physical_foreign_keys = physical_foreign_keys(conn, database, spec).await?;
-    let columns = spec.columns.join(", ");
+    let columns = spec
+        .columns
+        .iter()
+        .map(|column| archive_column_expression(database, spec.family, column))
+        .collect::<Vec<_>>()
+        .join(", ");
     let predicate = owner_predicate(database, spec.owner_filter);
+    let visibility = archive_visibility_predicate(database, spec.family);
     let sql = format!(
-        "SELECT {columns} FROM {}{} WHERE {predicate} ORDER BY {}",
+        "SELECT {columns} FROM {}{} AS archive_row
+         WHERE ({predicate}) AND ({visibility}) ORDER BY {}",
         database.prefix(),
         spec.table,
-        spec.key_columns.join(", ")
+        spec.key_columns
+            .iter()
+            .map(|column| format!("archive_row.{column}"))
+            .collect::<Vec<_>>()
+            .join(", ")
     );
     let mut rows = conn
         .query(&sql, params![owner_kind, project_id, owner_json])
@@ -255,6 +375,65 @@ async fn export_table(
         );
     }
     Ok(records)
+}
+
+fn archive_column_expression(
+    database: MemoryV2ArchiveDatabase,
+    family: MemoryV2ArchiveFamilyV1,
+    column: &str,
+) -> String {
+    if family == MemoryV2ArchiveFamilyV1::CurrentFact {
+        return match column {
+            "projection_state" => "'rebuilding'".to_owned(),
+            "vector_watermark_json" => "NULL".to_owned(),
+            _ => format!("archive_row.{column}"),
+        };
+    }
+    if family != MemoryV2ArchiveFamilyV1::FeedbackHistory
+        || !matches!(column, "source" | "note" | "details_availability")
+    {
+        return format!("archive_row.{column}");
+    }
+    let prefix = database.prefix();
+    let terminal = format!(
+        "EXISTS (
+            SELECT 1 FROM {prefix}memory_v2_current_facts AS current
+            WHERE current.fact_id=archive_row.fact_id
+              AND current.owner_kind=archive_row.owner_kind
+              AND current.project_id=archive_row.project_id
+              AND current.payload_access IN ('expired', 'redacted', 'deleted')
+        )"
+    );
+    if column == "details_availability" {
+        format!(
+            "CASE WHEN {terminal} THEN 'legacy_redacted'
+                  ELSE archive_row.details_availability END"
+        )
+    } else {
+        format!("CASE WHEN {terminal} THEN NULL ELSE archive_row.{column} END")
+    }
+}
+
+fn archive_visibility_predicate(
+    database: MemoryV2ArchiveDatabase,
+    family: MemoryV2ArchiveFamilyV1,
+) -> String {
+    if !matches!(
+        family,
+        MemoryV2ArchiveFamilyV1::AssertionPayload | MemoryV2ArchiveFamilyV1::AssertionVector
+    ) {
+        return "1=1".to_owned();
+    }
+    let prefix = database.prefix();
+    format!(
+        "NOT EXISTS (
+            SELECT 1 FROM {prefix}memory_v2_current_facts AS current
+            WHERE current.fact_id=archive_row.fact_id
+              AND current.owner_kind=archive_row.owner_kind
+              AND current.project_id=archive_row.project_id
+              AND current.payload_access IN ('expired', 'redacted', 'deleted')
+        )"
+    )
 }
 
 async fn physical_foreign_keys(
@@ -434,6 +613,68 @@ async fn insert_record(
     Ok(())
 }
 
+async fn update_projection_record(
+    conn: &(impl Executor + Sync),
+    spec: &TableSpec,
+    record: &MemoryV2ArchiveRecordV1,
+) -> Result<()> {
+    if record.family() != MemoryV2ArchiveFamilyV1::CurrentFact {
+        return Err(db_message(
+            OPERATION,
+            "only the derived current-fact projection may be reconciled",
+        ));
+    }
+    validate_record_fields(spec, record)?;
+    let field_columns = spec
+        .columns
+        .iter()
+        .filter(|column| !spec.key_columns.contains(column))
+        .copied()
+        .collect::<Vec<_>>();
+    let assignments = field_columns
+        .iter()
+        .enumerate()
+        .map(|(index, column)| format!("{column}=?{}", index + 1))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let key_offset = field_columns.len();
+    let predicate = spec
+        .key_columns
+        .iter()
+        .enumerate()
+        .map(|(index, column)| format!("{column}=?{}", key_offset + index + 1))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let values = field_columns
+        .iter()
+        .map(|column| {
+            record
+                .fields()
+                .get(*column)
+                .cloned()
+                .map(value_from_scalar)
+                .ok_or_else(|| db_message(OPERATION, format!("projection update omits `{column}`")))
+        })
+        .chain(spec.key_columns.iter().map(|column| {
+            record
+                .key()
+                .get(*column)
+                .cloned()
+                .map(value_from_scalar)
+                .ok_or_else(|| {
+                    db_message(OPERATION, format!("projection update omits key `{column}`"))
+                })
+        }))
+        .collect::<Result<Vec<_>>>()?;
+    conn.execute(
+        &format!("UPDATE {} SET {assignments} WHERE {predicate}", spec.table),
+        params_from_iter(values),
+    )
+    .await
+    .map_err(|error| db_error(OPERATION, error))?;
+    Ok(())
+}
+
 fn validate_record_fields(spec: &TableSpec, record: &MemoryV2ArchiveRecordV1) -> Result<()> {
     let expected: BTreeSet<_> = spec.columns.iter().copied().collect();
     let actual: BTreeSet<_> = record
@@ -470,7 +711,31 @@ fn owner_predicate(database: MemoryV2ArchiveDatabase, filter: OwnerFilter) -> St
          )"
     );
     let evidence_owners = format!(
-        "SELECT DISTINCT derived.owner_digest
+        "SELECT occurrence.owner_digest
+         FROM {prefix}evidence_source_occurrences AS occurrence
+         JOIN {prefix}retrieval_anchors AS anchor
+           ON anchor.anchor_id=occurrence.source_anchor_id
+         WHERE anchor.owner_json=?3
+         UNION
+         SELECT span.owner_digest
+         FROM {prefix}evidence_spans AS span
+         JOIN {prefix}retrieval_anchors AS anchor
+           ON anchor.anchor_id=span.anchor_id
+         WHERE anchor.owner_json=?3
+         UNION
+         SELECT contribution.owner_digest
+         FROM {prefix}evidence_retriever_contributions AS contribution
+         JOIN {prefix}retrieval_anchors AS anchor
+           ON anchor.anchor_id=contribution.anchor_id
+         WHERE anchor.owner_json=?3
+         UNION
+         SELECT derived.owner_digest
+         FROM {prefix}evidence_derived_anchors AS derived
+         JOIN {prefix}retrieval_anchors AS anchor
+           ON anchor.anchor_id=derived.anchor_id
+         WHERE anchor.owner_json=?3
+         UNION
+         SELECT derived.owner_digest
          FROM {prefix}evidence_derived_anchors AS derived
          JOIN {prefix}memory_v2_evidence AS evidence
            ON evidence.anchor_id=derived.anchor_id
@@ -586,13 +851,7 @@ fn references_for(
                 ],
             )?);
         }
-        Family::EvidenceSourceOccurrence => {
-            references.push(reference(
-                Family::RetrievalAnchor,
-                values,
-                &[("source_anchor_id", "anchor_id")],
-            )?);
-        }
+        Family::EvidenceSourceOccurrence => {}
         Family::EvidenceOccurrenceSetMember => {
             references.push(reference(
                 Family::EvidenceOccurrenceSet,
@@ -610,11 +869,6 @@ fn references_for(
                 Family::EvidenceOccurrenceSet,
                 values,
                 &[("occurrence_set_id", "occurrence_set_id")],
-            )?);
-            references.push(reference(
-                Family::RetrievalAnchor,
-                values,
-                &[("anchor_id", "anchor_id")],
             )?);
         }
         Family::EvidenceSpanMember => {
@@ -642,18 +896,8 @@ fn references_for(
                 values,
                 &[("span_id", "span_id")],
             )?);
-            references.push(reference(
-                Family::RetrievalAnchor,
-                values,
-                &[("anchor_id", "anchor_id")],
-            )?);
         }
         Family::EvidenceDerivedAnchor => {
-            references.push(reference(
-                Family::RetrievalAnchor,
-                values,
-                &[("anchor_id", "anchor_id")],
-            )?);
             let target_family = match text_value(values, "target_kind")? {
                 "source_occurrence" => Family::EvidenceSourceOccurrence,
                 "evidence_span" => Family::EvidenceSpan,
@@ -704,8 +948,20 @@ fn references_for(
             references.push(assertion_reference(values, "assertion_id")?);
             references.push(assertion_reference(values, "superseded_assertion_id")?);
         }
-        Family::AssertionPayload | Family::AssertionVector => {
+        Family::AssertionPayload => {
             references.push(assertion_reference(values, "assertion_id")?);
+        }
+        Family::AssertionVector => {
+            references.push(reference(
+                Family::AssertionPayload,
+                values,
+                &[
+                    ("assertion_id", "assertion_id"),
+                    ("fact_id", "fact_id"),
+                    ("owner_kind", "owner_kind"),
+                    ("project_id", "project_id"),
+                ],
+            )?);
         }
         Family::FactEvidence => {
             references.push(fact_reference(values, "fact_id")?);

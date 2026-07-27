@@ -329,6 +329,7 @@ pub struct MemoryV2OwnerMergePlanV1 {
     source_digest: ManifestDigest,
     target_digest: ManifestDigest,
     inserts: Vec<MemoryV2ArchiveRecordV1>,
+    updates: Vec<MemoryV2ArchiveRecordV1>,
     noops: Vec<MemoryV2ArchiveRecordV1>,
     conflicts: Vec<MemoryV2ArchiveConflictV1>,
 }
@@ -348,6 +349,10 @@ impl MemoryV2OwnerMergePlanV1 {
 
     pub fn inserts(&self) -> &[MemoryV2ArchiveRecordV1] {
         &self.inserts
+    }
+
+    pub fn updates(&self) -> &[MemoryV2ArchiveRecordV1] {
+        &self.updates
     }
 
     pub fn noops(&self) -> &[MemoryV2ArchiveRecordV1] {
@@ -380,12 +385,27 @@ pub fn plan_memory_v2_owner_merge(
         .map(|record| ((record.family, record.key.clone()), record))
         .collect();
     let mut inserts = Vec::new();
+    let mut updates = Vec::new();
     let mut noops = Vec::new();
     let mut conflicts = Vec::new();
     for record in &source.records {
         match target_records.get(&(record.family, record.key.clone())) {
             None => inserts.push(record.clone()),
-            Some(existing) if *existing == record => noops.push(record.clone()),
+            Some(existing)
+                if *existing == record || merge_equivalent_projection(record, existing) =>
+            {
+                noops.push(record.clone())
+            }
+            Some(existing) if record.family == MemoryV2ArchiveFamilyV1::CurrentFact => {
+                match reconcile_current_projection(record, existing) {
+                    Some(true) => updates.push(record.clone()),
+                    Some(false) => noops.push((*existing).clone()),
+                    None => conflicts.push(MemoryV2ArchiveConflictV1 {
+                        source: record.clone(),
+                        target: (*existing).clone(),
+                    }),
+                }
+            }
             Some(existing) => conflicts.push(MemoryV2ArchiveConflictV1 {
                 source: record.clone(),
                 target: (*existing).clone(),
@@ -397,9 +417,71 @@ pub fn plan_memory_v2_owner_merge(
         source_digest: source.digest()?,
         target_digest: target.digest()?,
         inserts,
+        updates,
         noops,
         conflicts,
     })
+}
+
+fn reconcile_current_projection(
+    source: &MemoryV2ArchiveRecordV1,
+    target: &MemoryV2ArchiveRecordV1,
+) -> Option<bool> {
+    let source_updated = match source.fields.get("updated_at")? {
+        MemoryV2ArchiveScalarV1::Integer(value) => *value,
+        _ => return None,
+    };
+    let target_updated = match target.fields.get("updated_at")? {
+        MemoryV2ArchiveScalarV1::Integer(value) => *value,
+        _ => return None,
+    };
+    let terminal = |value: &str| matches!(value, "expired" | "redacted" | "deleted");
+    match (
+        current_payload_access(source)?,
+        current_payload_access(target)?,
+    ) {
+        (source, target) if terminal(source) && !terminal(target) => Some(true),
+        (source, target) if !terminal(source) && terminal(target) => Some(false),
+        _ if source_updated > target_updated => Some(true),
+        _ if source_updated < target_updated => Some(false),
+        _ => None,
+    }
+}
+
+fn current_payload_access(record: &MemoryV2ArchiveRecordV1) -> Option<&str> {
+    match record.fields.get("payload_access") {
+        Some(MemoryV2ArchiveScalarV1::Text(value)) => Some(value.as_str()),
+        _ => None,
+    }
+}
+
+fn merge_equivalent_projection(
+    source: &MemoryV2ArchiveRecordV1,
+    target: &MemoryV2ArchiveRecordV1,
+) -> bool {
+    if source.family != MemoryV2ArchiveFamilyV1::CurrentFact
+        || source.key != target.key
+        || source.references != target.references
+    {
+        return false;
+    }
+    let mut source_fields = source.fields.clone();
+    let mut target_fields = target.fields.clone();
+    // These counters are a target-local projection of retrieval activity.
+    // Stable identity, assertion, lineage, payload access, feedback, and
+    // tombstone state remain exact conflict boundaries.
+    for field in [
+        "retrieval_count",
+        "access_count",
+        "last_retrieved_at",
+        "last_recalled_at",
+        "projection_state",
+        "vector_watermark_json",
+    ] {
+        source_fields.remove(field);
+        target_fields.remove(field);
+    }
+    source_fields == target_fields
 }
 
 fn validate_named_values(
@@ -821,6 +903,45 @@ mod tests {
             MemoryV2ArchiveFamilyV1::Assertion
         );
         assert!(!plan.can_apply());
+    }
+
+    #[test]
+    fn merge_planner_ignores_only_target_local_retrieval_projection_drift() {
+        let current = |retrieval_count, payload_access| {
+            MemoryV2ArchiveRecordV1::new(
+                MemoryV2ArchiveFamilyV1::CurrentFact,
+                BTreeMap::from([("fact_id".to_owned(), scalar("fact.projection"))]),
+                BTreeMap::from([
+                    ("payload_access".to_owned(), scalar(payload_access)),
+                    (
+                        "retrieval_count".to_owned(),
+                        MemoryV2ArchiveScalarV1::Integer(retrieval_count),
+                    ),
+                    (
+                        "last_retrieved_at".to_owned(),
+                        if retrieval_count == 0 {
+                            MemoryV2ArchiveScalarV1::Null
+                        } else {
+                            MemoryV2ArchiveScalarV1::Integer(20)
+                        },
+                    ),
+                ]),
+                Vec::new(),
+            )
+            .unwrap()
+        };
+        let source = archive(vec![current(0, "eligible")]);
+        let target = archive(vec![current(1, "eligible")]);
+        let plan = plan_memory_v2_owner_merge(&source, &target).unwrap();
+        assert!(plan.can_apply());
+        assert_eq!(plan.noops().len(), 1);
+
+        let incompatible = archive(vec![current(1, "deleted")]);
+        assert!(
+            !plan_memory_v2_owner_merge(&incompatible, &target)
+                .unwrap()
+                .can_apply()
+        );
     }
 
     #[test]
