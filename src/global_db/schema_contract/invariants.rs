@@ -19,9 +19,10 @@ use repair::{
     validate_observation_cursor_coverage,
 };
 use rows::{
-    authority_violation, query_has_rows, validate_mutable_invariant_rows,
-    validate_observation_authority_rows, validate_receipt_authority_rows,
-    validate_source_cursor_authority_chunk, validate_source_cursor_authority_rows,
+    authority_violation, observation_row_audit_covers, query_has_rows,
+    validate_mutable_invariant_rows, validate_observation_authority_rows,
+    validate_receipt_authority_rows, validate_source_cursor_authority_chunk,
+    validate_source_cursor_authority_rows,
 };
 use triggers::{FOREIGN_KEY_AUDIT_QUERY, replace_trigger, trigger_contracts_intact};
 pub(super) use triggers::{INVARIANTS, Trigger};
@@ -291,6 +292,9 @@ pub(super) async fn validate_invariant_rows(
     conn: &impl QueryExecutor,
 ) -> crate::errors::Result<()> {
     for invariant in INVARIANTS {
+        if observation_row_audit_covers(invariant) {
+            continue;
+        }
         if let Some(query) = invariant.audit_query
             && if query == FOREIGN_KEY_AUDIT_QUERY {
                 foreign_key_violation_exists(conn).await?

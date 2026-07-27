@@ -317,8 +317,6 @@ pub(in super::super) async fn ensure_observation_projection_performance_indexes(
             WHERE retrieval_anchor_id IS NULL;",
         "CREATE INDEX IF NOT EXISTS idx_observations_identity_receipt
          ON observations (observation_id, receipt_id);",
-        "CREATE INDEX IF NOT EXISTS idx_observations_receipt_id
-         ON observations (receipt_id);",
         "CREATE INDEX IF NOT EXISTS idx_projection_dispositions_observation_receipt
          ON observation_projection_dispositions (observation_id, receipt_id);",
     ] {
@@ -1257,7 +1255,6 @@ mod tests {
              DROP INDEX idx_observation_projection_provenance_pending_anchor;
              DROP INDEX idx_observation_workflow_facts_pending_anchor;
              DROP INDEX idx_observations_identity_receipt;
-             DROP INDEX idx_observations_receipt_id;
              DROP INDEX idx_projection_dispositions_observation_receipt;",
         )
         .await
@@ -1283,7 +1280,6 @@ mod tests {
                     'idx_observation_projection_provenance_pending_anchor',
                     'idx_observation_workflow_facts_pending_anchor',
                     'idx_observations_identity_receipt',
-                    'idx_observations_receipt_id',
                     'idx_projection_dispositions_observation_receipt'
                  )",
                 (),
