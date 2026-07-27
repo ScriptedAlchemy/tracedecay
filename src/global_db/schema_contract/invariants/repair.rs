@@ -389,3 +389,6 @@ pub(super) async fn validate_observation_cursor_coverage(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests;

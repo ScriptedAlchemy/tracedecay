@@ -153,9 +153,19 @@ const CONCURRENCY = Math.max(1, Number(process.env['AXE_CONCURRENCY'] ?? 3));
  * `visibility.dom.test.ts` is the evidence, and it fails on a faded page.
  */
 export const TRAP_MODE = process.env['AXE_TRAP'] === '1';
-/** Substring filter over scenario ids, so one state can be iterated on without
- * paying for the whole matrix across all of them. */
+/**
+ * Comma-separated substring filter over scenario ids, so one state can be
+ * iterated on without paying for the whole matrix across all of them.
+ *
+ * A list rather than one substring because the ids of related scenarios do not
+ * share a prefix — `AXE_ONLY=knowledge,delivery,loom` is otherwise three runs,
+ * each paying for its own bundle build, which is enough friction to push
+ * someone into running the whole gate to check one route.
+ */
 const ONLY = process.env['AXE_ONLY'] ?? '';
+const ONLY_PARTS = ONLY.split(',')
+  .map((part) => part.trim())
+  .filter((part) => part !== '');
 
 /**
  * A JSON body, or an explicit HTTP failure to simulate a broken read.
@@ -672,7 +682,10 @@ export async function runHarness(scenarios: readonly Scenario[]): Promise<void> 
   let assertionFailures = 0;
   const pageErrors: string[] = [];
 
-  const selected = scenarios.filter((s) => s.id.includes(ONLY));
+  const selected =
+    ONLY_PARTS.length === 0
+      ? [...scenarios]
+      : scenarios.filter((s) => ONLY_PARTS.some((part) => s.id.includes(part)));
   // A full gate run with nothing planted in it cannot distinguish "accessible"
   // from "the scan reported nothing". `AXE_ONLY` is the developer's iteration
   // flag, so it may narrow past the canary — loudly, and never in CI, which

@@ -8536,6 +8536,7 @@ mod tests {
             meta: crate::application_surface::CallableCodeSurfaceMeta {
                 projection: tracedecay_application::ResultProjection::Evidence,
                 order: tracedecay_application::RetrievalOrder::Relevance,
+                cursor: None,
             },
         };
         let page = tracedecay_application::PageRequest::first(16).expect("page");
@@ -8615,6 +8616,7 @@ mod tests {
         let meta = crate::application_surface::CallableCodeSurfaceMeta {
             projection: tracedecay_application::ResultProjection::Evidence,
             order: tracedecay_application::RetrievalOrder::Relevance,
+            cursor: None,
         };
         let request = crate::application_surface::CallableCodeSurfaceRequest::Facets(
             crate::application_surface::CodeFacetSurfaceRequest {

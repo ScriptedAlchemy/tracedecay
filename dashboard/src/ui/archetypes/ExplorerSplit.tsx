@@ -84,7 +84,8 @@ export function ExplorerSplit({
             aria-expanded={mobileFiltersOpen}
             aria-controls={mobileFiltersId}
             onClick={() => setMobileFiltersOpen((open) => !open)}
-            className="flex h-8 w-full items-center gap-2.5 px-2.5 text-left"
+            // The only way to reach filters below `lg`, at 28px tall.
+            className="flex min-h-[var(--touch-target-min)] w-full items-center gap-2.5 px-2.5 text-left"
           >
             <span className="td-title">Query</span>
             <span aria-hidden className="td-rule" />
@@ -132,10 +133,30 @@ export function ExplorerSplit({
         <section
           ref={resultsRef}
           aria-label="Results"
-          className="flex min-w-0 flex-1 flex-col overflow-hidden"
+          // The results pane is the one member of this split that is allowed to
+          // shrink — its only child is a scroll container, whose automatic
+          // minimum size is zero — so it absorbed every deficit the layout had.
+          // Stacked below `lg` the filter rail took its 224px first and left
+          // the results at `height: 0`; the rows and the scrollbar that would
+          // have reached them both disappeared while the caption above went on
+          // reporting "7 rows across 3 memories". The floor refuses that
+          // division: when the viewport cannot pay for it, the split overflows
+          // and `main#td-main` scrolls, which is a reader scrolling a page
+          // rather than a reader losing the answer.
+          className="flex min-h-[var(--pane-min-height)] min-w-0 flex-1 flex-col overflow-hidden"
           onKeyDown={onResultsKeyDown}
         >
-          <div className="min-h-0 flex-1 overflow-auto">{list}</div>
+          {/* Named, because Plan 11 licenses internal scrolling for LABELLED
+            * regions only, and this is the element that actually scrolls — the
+            * section around it is `overflow-hidden`, so its own name never
+            * reaches the scroll container a reader operates. */}
+          <div
+            role="region"
+            aria-label="Result rows"
+            className="min-h-0 flex-1 overflow-auto"
+          >
+            {list}
+          </div>
         </section>
         {inspector ? (
           <aside
@@ -288,7 +309,11 @@ export function InspectorPanel({
             type="button"
             onClick={onClose}
             aria-label="Close inspector"
-            className="shrink-0 px-1 text-text-muted hover:text-text-primary"
+            // 15x21 was the glyph's own box, which is the smallest control in
+            // the product. The × stays exactly the size it was — the hit area
+            // grows around it instead, and the negative margin lets it use the
+            // header's padding so the bar does not gain 16px to hold it.
+            className="-my-2 flex size-[var(--touch-target-min)] shrink-0 items-center justify-center text-text-muted hover:text-text-primary"
           >
             ×
           </button>
@@ -308,7 +333,12 @@ export function RawFields({
 }) {
   return (
     <details className="mt-4 border-t border-edge-subtle pt-3">
-      <summary className="cursor-pointer text-2xs uppercase tracking-[0.08em] text-text-muted hover:text-text-primary">
+      {/* Grown to the touch minimum by min-height and block alignment rather
+        * than by `flex`: a `<summary>` only draws its disclosure marker while
+        * it is `display: list-item`, and that triangle is the entire signal
+        * that this row opens. Losing it to satisfy a size check would trade a
+        * real affordance for a number. */}
+      <summary className="min-h-[var(--touch-target-min)] cursor-pointer content-center text-2xs uppercase tracking-[0.08em] text-text-muted hover:text-text-primary">
         {label}
       </summary>
       <div className="mt-2">

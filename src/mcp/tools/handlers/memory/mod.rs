@@ -98,7 +98,6 @@ pub(super) async fn open_target_memory_db<'a>(
     cg: &'a TraceDecay,
     args: &Value,
     global_db: Option<&RegisteredGlobalDb>,
-    allow_default_registry_fallback: bool,
 ) -> Result<TargetMemoryDb<'a>> {
     if requests_user_memory(args) {
         if project_selector_present(args, &["project_path"]) {
@@ -106,14 +105,13 @@ pub(super) async fn open_target_memory_db<'a>(
                 "memory_scope=user cannot be combined with a project selector",
             ));
         }
-        let profile_root = profile_root_for_global_db(global_db, allow_default_registry_fallback)?;
+        let profile_root = profile_root_for_global_db(global_db)?;
         return open_user_memory_target(cg.store_runtime_registry(), &profile_root).await;
     }
     let Some(context) = project_registry_context(
         args,
         &["project_path"],
         global_db,
-        allow_default_registry_fallback,
     )
     .await?
     else {
@@ -301,7 +299,7 @@ mod tests {
         .await
         .unwrap();
 
-        let target = open_target_memory_db(&cg, &json!({}), None, true)
+        let target = open_target_memory_db(&cg, &json!({}), None)
             .await
             .unwrap();
 
@@ -326,7 +324,6 @@ mod tests {
                 "project_id": "another_project",
             }),
             None,
-            true,
         )
         .await
         .unwrap_err();
@@ -346,7 +343,6 @@ mod tests {
             &cg,
             json!({ "fact_id": fact_id, "action": "helpful" }),
             None,
-            true,
         )
         .await
         .unwrap();
@@ -369,7 +365,7 @@ mod tests {
         });
 
         for _ in 0..2 {
-            handle_fact_feedback(&cg, args.clone(), None, true)
+            handle_fact_feedback(&cg, args.clone(), None)
                 .await
                 .unwrap();
         }
@@ -392,7 +388,6 @@ mod tests {
                 "__mcp_request_id": "request.mcp.connection-a.first",
             }),
             None,
-            true,
         )
         .await
         .unwrap();
@@ -404,7 +399,6 @@ mod tests {
                 "__mcp_request_id": "request.mcp.connection-b.first",
             }),
             None,
-            true,
         )
         .await
         .unwrap();
@@ -454,7 +448,6 @@ mod tests {
                 "__mcp_request_id": "request.mcp.reconnected.first",
             }),
             None,
-            true,
         )
         .await
         .unwrap();

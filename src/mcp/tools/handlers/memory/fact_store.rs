@@ -43,7 +43,6 @@ pub(in crate::mcp::tools::handlers) async fn handle_fact_store(
     cg: &TraceDecay,
     args: Value,
     global_db: Option<&RegisteredGlobalDb>,
-    allow_default_registry_fallback: bool,
 ) -> Result<ToolResult> {
     let action = required_str(&args, "action")?;
     let cross_project_selector = project_selector_present(&args, &["project_path"]);
@@ -54,7 +53,7 @@ pub(in crate::mcp::tools::handlers) async fn handle_fact_store(
         ));
     }
     let target_memory =
-        open_target_memory_db(cg, &args, global_db, allow_default_registry_fallback).await?;
+        open_target_memory_db(cg, &args, global_db).await?;
     handle_fact_store_for_target(args, cross_project_selector, target_memory).await
 }
 

@@ -130,10 +130,13 @@ impl NativeGitIndexPreviewAssembler {
         {
             return Err(GitIndexTransactionPortError::StalePreview);
         }
+        // Failing to read status at all says nothing about whether the caller's
+        // snapshot still holds; it says we could not look. Calling that staleness
+        // sent callers to recapture and retry a read that fails identically.
         let status = self
             .read_authority()
             .status()
-            .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
+            .map_err(|_| GitIndexTransactionPortError::NativeFailure)?;
         let index_bytes = runner.index_bytes().map_err(map_native_error)?;
         let index_checksum = canonical_sha256(&index_bytes)
             .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
@@ -250,7 +253,10 @@ impl NativeGitIndexPreviewAssembler {
                     })?,
             )
         })
-        .map_err(|_| GitIndexTransactionPortError::StalePreview)
+        // Constructing our own snapshot from state we just read, or failing to
+        // read the git version or refs digest, is this adapter failing rather
+        // than the repository moving under the caller.
+        .map_err(|_| GitIndexTransactionPortError::NativeFailure)
     }
 
     fn materialize_patches(
@@ -447,8 +453,11 @@ impl GitIndexPreviewAssembler for NativeGitIndexPreviewAssembler {
             drop(lock);
             return unsupported_materialized(request, runner, reason);
         }
+        // The snapshot already matched the caller's byte for byte above, so a
+        // digest we cannot compute over it is our own canonicalization
+        // failing, not the repository moving underneath the request.
         let snapshot_digest = GitIndexPreviewV1::repository_snapshot_digest(&current)
-            .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
+            .map_err(|_| GitIndexTransactionPortError::NativeFailure)?;
         let disposition = unsupported_hunk_selection(
             &request.selected_hunks,
             &runner,
@@ -496,7 +505,11 @@ impl GitIndexPreviewAssembler for NativeGitIndexPreviewAssembler {
             request.observed_at,
             expires_at,
         )
-        .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
+        // Every input here is either the caller's own request or state we just
+        // recaptured and matched, so a rejected construction — a commit intent
+        // the preview will not carry, most often — is a rejection of the
+        // request rather than evidence that it went stale.
+        .map_err(|_| GitIndexTransactionPortError::NativeFailure)?;
         Ok(MaterializedGitIndexPreview {
             preview,
             execution: completed_execution(request),

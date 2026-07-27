@@ -145,7 +145,7 @@ async fn managed_skill_mcp_tools_list_and_view_profile_store() {
     let _global_db_guard = GlobalDbEnvGuard::set(&home.join(".tracedecay/global.db"));
     let cg = TestTraceDecay::new(fixture::init_project_from_template(&project).await.unwrap());
     let profile_root = tracedecay::storage::default_profile_root().unwrap();
-    let runtime = open_active_project_session_db(&cg).await;
+    let runtime = open_active_project_scoped_runtime(&cg).await;
     let project_id = HostAdmissionTestRuntimeV1::canonical_project_key(cg.project_root());
 
     create_managed_skill_draft(

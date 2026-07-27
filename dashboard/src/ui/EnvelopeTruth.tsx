@@ -59,14 +59,16 @@ export function EnvelopeTruth({
       {refresh ? (
         <button
           type="button"
-          className="ml-auto inline-flex h-7 items-center gap-1.5 rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-2 px-2.5 text-2xs font-medium text-text-secondary hover:text-text-primary disabled:cursor-wait disabled:opacity-60"
+          className="td-hit group ml-auto disabled:cursor-wait disabled:opacity-60"
           onClick={onRefresh}
           disabled={refreshing}
           title={refresh}
           data-operation={refresh}
         >
-          <RefreshCw aria-hidden size={12} className={refreshing ? 'animate-spin' : undefined} />
-          {refreshing ? 'Refreshing' : 'Refresh'}
+          <span className="inline-flex h-7 items-center gap-1.5 rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-2 px-2.5 text-2xs font-medium text-text-secondary group-hover:text-text-primary">
+            <RefreshCw aria-hidden size={12} className={refreshing ? 'animate-spin' : undefined} />
+            {refreshing ? 'Refreshing' : 'Refresh'}
+          </span>
         </button>
       ) : null}
     </div>

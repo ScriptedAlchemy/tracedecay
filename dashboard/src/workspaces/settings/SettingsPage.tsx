@@ -207,7 +207,7 @@ function SettingsSurface({
             }}
             placeholder="Filter keys and values…"
             aria-label="Filter configuration"
-            className="h-8 w-full rounded-[var(--radius-chip)] border border-edge-subtle bg-surface-0 pl-7 pr-7 text-xs text-text-primary outline-none placeholder:text-text-muted focus-visible:border-accent"
+            className="h-[calc(var(--touch-target-min)+2px)] w-full rounded-[var(--radius-chip)] border border-edge-subtle bg-surface-0 pl-7 pr-7 text-xs text-text-primary outline-none placeholder:text-text-muted focus-visible:border-accent"
           />
           {query !== '' ? (
             <button
@@ -237,7 +237,13 @@ function SettingsSurface({
           tabIndex={0}
           role="region"
           aria-label="Effective configuration"
-          className="min-w-0 flex-1 overflow-auto"
+          // Stacked below `md` the section index takes its content height
+          // first, and this pane — a scroll container, so its automatic
+          // minimum size is zero — took the whole shortfall and resolved to
+          // `height: 0` at 400% zoom, hiding 4,388px of configuration behind a
+          // live "N settings" count. Same floor as the split archetype: keep a
+          // readable pane and let the page scroller carry the overflow.
+          className="min-h-[var(--pane-min-height)] min-w-0 flex-1 overflow-auto"
         >
           {filtered.length === 0 ? (
             <p className="p-8 text-center text-xs text-text-muted">
@@ -692,15 +698,16 @@ function SettingsCheckbox({
   const errorId = useId();
   return (
     <div>
-      <label className="flex min-h-8 items-center gap-2 text-2xs text-text-secondary">
+      <label className={settingsCheckboxRowClass}>
         <input
           type="checkbox"
+          className="td-check"
           checked={checked}
           aria-invalid={error ? true : undefined}
           aria-describedby={error ? errorId : undefined}
           onChange={(event) => onChange(event.target.checked)}
         />
-        <span>{label}</span>
+        <span className="min-w-0 pr-2">{label}</span>
       </label>
       <FieldError id={errorId} error={error} />
     </div>
@@ -745,9 +752,16 @@ function SettingsReviewDialog({
             </div>
             <Dialog.Close
               aria-label="Close settings review"
-              className="rounded-[var(--radius-chip)] p-1 text-text-muted hover:bg-surface-2"
+              // The glyph stays 16px — it is a dismiss, not an action the
+              // dialog is about — and the element around it carries the touch
+              // minimum. See `.td-hit`. The negative margin lets the 44px box
+              // use the dialog's own padding instead of adding a row of height
+              // to the header.
+              className="td-hit group -mr-2 -mt-2 shrink-0"
             >
-              <X aria-hidden size={16} />
+              <span className="inline-flex size-6 items-center justify-center rounded-[var(--radius-chip)] text-text-muted group-hover:bg-surface-2 group-hover:text-text-primary">
+                <X aria-hidden size={16} />
+              </span>
             </Dialog.Close>
           </div>
           {review ? (
@@ -758,13 +772,14 @@ function SettingsReviewDialog({
               <p className="break-all font-mono text-2xs text-text-muted">
                 expected revision {review.plan.expectedRevisionId}
               </p>
-              <label className="flex items-start gap-2 border border-edge-subtle p-3 text-xs text-text-secondary">
+              <label className="flex cursor-pointer items-center gap-1 border border-edge-subtle py-2 pr-3 text-xs text-text-secondary">
                 <input
                   type="checkbox"
+                  className="td-check"
                   checked={confirmed}
                   onChange={(event) => onConfirmedChange(event.target.checked)}
                 />
-                <span>
+                <span className="min-w-0">
                   I confirm this change against configuration revision{' '}
                   {review.plan.expectedRevisionId}.
                 </span>
@@ -923,7 +938,7 @@ function SectionIndex({
             key={section.id}
             type="button"
             onClick={() => onJump(section.id)}
-            className="flex items-center gap-2 px-1.5 py-1.5 text-left text-xs text-text-secondary hover:bg-surface-2 hover:text-text-primary focus-visible:bg-surface-2"
+            className="flex min-h-[var(--touch-target-min)] items-center gap-2 px-1.5 py-1.5 text-left text-xs text-text-secondary hover:bg-surface-2 hover:text-text-primary focus-visible:bg-surface-2"
           >
             <OriginMark origin={section.origin} />
             <span className="min-w-0 flex-1 truncate">{section.title}</span>
@@ -1359,9 +1374,19 @@ function Highlight({ text, query }: { text: string; query: string }) {
   return <>{parts}</>;
 }
 
+/* Form controls, not instrument chrome: these edit and commit configuration,
+ * so they take the touch minimum on their own box rather than hiding a compact
+ * bezel inside a larger hit area the way the panel-header controls do. `+2px`
+ * on the input is its two hairlines, so the content box lands on 44. */
 const settingsInputClass =
-  'h-8 w-full rounded-[var(--radius-chip)] border border-edge-subtle bg-surface-0 px-2 text-xs text-text-primary outline-none focus-visible:border-accent';
+  'h-[calc(var(--touch-target-min)+2px)] w-full rounded-[var(--radius-chip)] border border-edge-subtle bg-surface-0 px-2 text-xs text-text-primary outline-none focus-visible:border-accent';
 const settingsButtonClass =
-  'inline-flex h-8 items-center justify-center rounded-[var(--radius-standard)] border border-accent/50 bg-accent/15 px-3 text-2xs font-semibold text-text-primary hover:border-accent disabled:cursor-not-allowed disabled:opacity-50';
+  'inline-flex min-h-[var(--touch-target-min)] items-center justify-center rounded-[var(--radius-standard)] border border-accent/50 bg-accent/15 px-3 text-2xs font-semibold text-text-primary hover:border-accent disabled:cursor-not-allowed disabled:opacity-50';
 const secondarySettingsButtonClass =
-  'inline-flex h-8 items-center justify-center rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-2 px-3 text-2xs font-medium text-text-secondary hover:text-text-primary';
+  'inline-flex min-h-[var(--touch-target-min)] items-center justify-center rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-2 px-3 text-2xs font-medium text-text-secondary hover:text-text-primary';
+/* The same bezel as `settingsInputClass`, so a boolean field reads as a field
+ * rather than as loose text beside the inputs it sits among. The row carries no
+ * left padding of its own: `.td-check` is a 44px box around a 16px bezel, and
+ * that inset IS the padding. */
+const settingsCheckboxRowClass =
+  'flex min-h-[calc(var(--touch-target-min)+2px)] w-full cursor-pointer items-center rounded-[var(--radius-chip)] border border-edge-subtle bg-surface-0 text-2xs text-text-secondary hover:text-text-primary';

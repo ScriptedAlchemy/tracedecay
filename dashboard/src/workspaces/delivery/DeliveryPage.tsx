@@ -439,7 +439,11 @@ function RepoTable({
   return (
     <section aria-label="Repositories" className="flex min-w-0 flex-col">
       <Legend>repositories · most recently indexed first</Legend>
-      <div className="mt-1.5 max-h-80 overflow-auto border border-edge-subtle">
+      <div
+        role="region"
+        aria-label="Repositories table"
+        className="mt-1.5 max-h-80 overflow-auto border border-edge-subtle"
+      >
         <table className="w-full border-collapse text-2xs">
           <caption className="sr-only">
             Every repository on the field, most recently indexed first, with its
@@ -468,7 +472,7 @@ function RepoTable({
                     type="button"
                     onClick={() => onSelect(selectedId === body.id ? null : body.id)}
                     aria-pressed={selectedId === body.id}
-                    className="flex w-full min-w-0 items-center gap-1.5 text-left"
+                    className="flex min-h-[var(--touch-target-min)] w-full min-w-0 items-center gap-1.5 text-left"
                   >
                     {body.branches == null ? (
                       <FolderGit2 aria-hidden size={11} className="shrink-0 text-text-muted" />
