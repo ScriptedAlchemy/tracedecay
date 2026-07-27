@@ -232,6 +232,8 @@ pub enum ModelLifecycleErrorV1 {
     Rejected,
     #[error("semantic model download failed")]
     DownloadFailed,
+    #[error("semantic model download failed: {0}")]
+    DownloadFailedWithReason(String),
     #[error("semantic model verification failed")]
     VerificationFailed,
     #[error("semantic model install failed")]
@@ -262,11 +264,26 @@ pub trait ModelMemberSourceV1: Send + Sync {
 #[derive(Debug)]
 pub struct HfHubModelMemberSourceV1 {
     cache_dir: PathBuf,
+    endpoint: Option<String>,
+    offline: bool,
 }
 
 impl HfHubModelMemberSourceV1 {
     fn new(cache_dir: PathBuf) -> Self {
-        Self { cache_dir }
+        Self {
+            cache_dir,
+            endpoint: None,
+            offline: hf_hub_offline(),
+        }
+    }
+
+    #[cfg(all(test, feature = "semantic-fastembed"))]
+    fn new_for_tests(cache_dir: PathBuf, endpoint: Option<String>, offline: bool) -> Self {
+        Self {
+            cache_dir,
+            endpoint,
+            offline,
+        }
     }
 }
 
@@ -277,13 +294,22 @@ impl ModelMemberSourceV1 for HfHubModelMemberSourceV1 {
         upstream_path: &str,
         destination: &Path,
     ) -> Result<(), ModelLifecycleErrorV1> {
-        fetch_hf_hub_member(&self.cache_dir, model, upstream_path, destination)
+        fetch_hf_hub_member(
+            &self.cache_dir,
+            self.endpoint.as_deref(),
+            self.offline,
+            model,
+            upstream_path,
+            destination,
+        )
     }
 }
 
 #[cfg(feature = "semantic-fastembed")]
 fn fetch_hf_hub_member(
     cache_dir: &Path,
+    endpoint: Option<&str>,
+    offline: bool,
     model: &CatalogedFastEmbedModelV1,
     upstream_path: &str,
     destination: &Path,
@@ -297,26 +323,47 @@ fn fetch_hf_hub_member(
     let cached = cache.repo(repository.clone()).get(upstream_path);
     let source = match cached {
         Some(path) => path,
-        None if hf_hub_offline() => return Err(ModelLifecycleErrorV1::DownloadFailed),
-        None => ApiBuilder::from_cache(cache)
-            .with_token(None)
-            .with_progress(false)
-            .with_retries(3)
-            .build()
-            .map_err(|_| ModelLifecycleErrorV1::DownloadFailed)?
-            .repo(repository)
-            .get(upstream_path)
-            .map_err(|_| ModelLifecycleErrorV1::DownloadFailed)?,
+        None if offline => {
+            return Err(ModelLifecycleErrorV1::DownloadFailedWithReason(format!(
+                "member '{upstream_path}' is absent from the private cache while offline mode is enabled"
+            )));
+        }
+        None => {
+            let mut builder = ApiBuilder::from_cache(cache)
+                .with_token(None)
+                .with_progress(false)
+                .with_retries(3);
+            if let Some(endpoint) = endpoint {
+                builder = builder.with_endpoint(endpoint.to_owned());
+            }
+            builder
+                .build()
+                .map_err(|error| {
+                    ModelLifecycleErrorV1::DownloadFailedWithReason(format!(
+                        "cannot initialize the Hugging Face client for '{}': {error}",
+                        model.model_code
+                    ))
+                })?
+                .repo(repository)
+                .get(upstream_path)
+                .map_err(|error| {
+                    ModelLifecycleErrorV1::DownloadFailedWithReason(format!(
+                        "cannot acquire '{}@{}/{}': {error}",
+                        model.model_code, model.source.revision, upstream_path
+                    ))
+                })?
+        }
     };
     if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent).map_err(|_| ModelLifecycleErrorV1::StoreUnavailable)?;
     }
-    fs::copy(source, destination)
-        .map(|_| ())
-        .map_err(|_| ModelLifecycleErrorV1::DownloadFailed)
+    fs::copy(source, destination).map(|_| ()).map_err(|error| {
+        ModelLifecycleErrorV1::DownloadFailedWithReason(format!(
+            "cannot copy cached member '{upstream_path}' into staging: {error}"
+        ))
+    })
 }
 
-#[cfg(feature = "semantic-fastembed")]
 fn hf_hub_offline() -> bool {
     std::env::var("HF_HUB_OFFLINE")
         .is_ok_and(|value| !value.is_empty() && !matches!(value.as_str(), "0" | "false" | "FALSE"))
@@ -325,11 +372,20 @@ fn hf_hub_offline() -> bool {
 #[cfg(not(feature = "semantic-fastembed"))]
 fn fetch_hf_hub_member(
     cache_dir: &Path,
+    endpoint: Option<&str>,
+    offline: bool,
     model: &CatalogedFastEmbedModelV1,
     upstream_path: &str,
     destination: &Path,
 ) -> Result<(), ModelLifecycleErrorV1> {
-    let _ = (cache_dir, model, upstream_path, destination);
+    let _ = (
+        cache_dir,
+        endpoint,
+        offline,
+        model,
+        upstream_path,
+        destination,
+    );
     Err(ModelLifecycleErrorV1::Rejected)
 }
 
@@ -1108,18 +1164,40 @@ impl SemanticModelLifecycleOwnerV1 {
         let Some(model_id) = selected else {
             return false;
         };
+        let worker_root = root.clone();
+        let worker_catalog = catalog.clone();
+        let worker_model_id = model_id.clone();
+        let worker_inner = Arc::clone(&inner);
         let handle = thread::Builder::new()
             .name("tracedecay-fastembed-acquire".to_owned())
             .spawn(move || {
-                let _ =
-                    run_acquisition(&root, &catalog, source.as_ref(), &model_id, &cancel, &inner);
+                let _ = run_acquisition(
+                    &worker_root,
+                    &worker_catalog,
+                    source.as_ref(),
+                    &worker_model_id,
+                    &cancel,
+                    &worker_inner,
+                );
             });
         match handle {
             Ok(join) => {
                 *worker = Some(join);
                 true
             }
-            Err(_) => false,
+            Err(error) => {
+                if let Some(model) = catalog.get(&model_id) {
+                    let _ = set_failed_state(
+                        &root,
+                        &inner,
+                        model,
+                        &catalog_package_digest(model),
+                        &format!("cannot start background acquisition worker: {error}"),
+                        true,
+                    );
+                }
+                false
+            }
         }
     }
 
@@ -1152,6 +1230,46 @@ fn current_unix_seconds() -> Result<u64, ModelLifecycleErrorV1> {
 }
 
 fn run_acquisition(
+    root: &Path,
+    catalog: &FastEmbedModelCatalogV1,
+    source: &dyn ModelMemberSourceV1,
+    model_id: &str,
+    cancel: &AtomicBool,
+    inner: &Mutex<LifecycleInner>,
+) -> Result<(), ModelLifecycleErrorV1> {
+    let result = run_acquisition_inner(root, catalog, source, model_id, cancel, inner);
+    if let Err(error) = &result
+        && let Some(model) = catalog.get(model_id)
+    {
+        let already_failed = {
+            let guard = inner.lock().unwrap_or_else(PoisonError::into_inner);
+            matches!(
+                guard.durable.state.as_ref(),
+                Some(SemanticModelLifecycleStateV1::Failed { .. })
+            )
+        };
+        if !already_failed {
+            let retryable = matches!(
+                error,
+                ModelLifecycleErrorV1::StoreUnavailable
+                    | ModelLifecycleErrorV1::DownloadFailed
+                    | ModelLifecycleErrorV1::DownloadFailedWithReason(_)
+                    | ModelLifecycleErrorV1::InstallFailed
+            );
+            let _ = set_failed_state(
+                root,
+                inner,
+                model,
+                &catalog_package_digest(model),
+                &error.to_string(),
+                retryable,
+            );
+        }
+    }
+    result
+}
+
+fn run_acquisition_inner(
     root: &Path,
     catalog: &FastEmbedModelCatalogV1,
     source: &dyn ModelMemberSourceV1,
@@ -1269,6 +1387,22 @@ fn fail_state(
     detail: &str,
     retryable: bool,
 ) -> Result<(), ModelLifecycleErrorV1> {
+    set_failed_state(root, inner, model, digest, detail, retryable)?;
+    Err(if retryable {
+        ModelLifecycleErrorV1::DownloadFailed
+    } else {
+        ModelLifecycleErrorV1::VerificationFailed
+    })
+}
+
+fn set_failed_state(
+    root: &Path,
+    inner: &Mutex<LifecycleInner>,
+    model: &CatalogedFastEmbedModelV1,
+    digest: &str,
+    detail: &str,
+    retryable: bool,
+) -> Result<(), ModelLifecycleErrorV1> {
     let mut guard = inner.lock().unwrap_or_else(PoisonError::into_inner);
     guard.durable.state = Some(SemanticModelLifecycleStateV1::Failed {
         model_id: model.model_id.clone(),
@@ -1277,12 +1411,7 @@ fn fail_state(
         detail: detail.to_owned(),
         retryable,
     });
-    persist_durable(root, &guard.durable)?;
-    Err(if retryable {
-        ModelLifecycleErrorV1::DownloadFailed
-    } else {
-        ModelLifecycleErrorV1::VerificationFailed
-    })
+    persist_durable(root, &guard.durable)
 }
 
 fn verify_catalog_manifest(
@@ -1578,7 +1707,10 @@ pub fn apply_config_and_queue_startup(
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+    use std::net::{TcpListener, TcpStream};
     use std::sync::atomic::AtomicUsize;
+    use std::sync::mpsc::{self, Receiver, SyncSender};
+    use std::time::{Duration, Instant};
 
     use super::super::manifest::{
         ArtifactMemberPinV1, ArtifactPackageMemberV1, ArtifactProfileKindV1, DeviceClassV1,
@@ -1609,6 +1741,161 @@ mod tests {
             fs::copy(&source, destination).map_err(|_| ModelLifecycleErrorV1::DownloadFailed)?;
             Ok(())
         }
+    }
+
+    struct BlockingFixtureSource {
+        root: PathBuf,
+        calls: AtomicUsize,
+        entered: SyncSender<()>,
+        release: Mutex<Receiver<()>>,
+    }
+
+    impl ModelMemberSourceV1 for BlockingFixtureSource {
+        fn fetch_member(
+            &self,
+            _model: &CatalogedFastEmbedModelV1,
+            upstream_path: &str,
+            destination: &Path,
+        ) -> Result<(), ModelLifecycleErrorV1> {
+            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                self.entered
+                    .send(())
+                    .map_err(|_| ModelLifecycleErrorV1::DownloadFailed)?;
+                self.release
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .recv()
+                    .map_err(|_| ModelLifecycleErrorV1::DownloadFailed)?;
+            }
+            let source = self.root.join(upstream_path);
+            if let Some(parent) = destination.parent() {
+                fs::create_dir_all(parent).map_err(|_| ModelLifecycleErrorV1::DownloadFailed)?;
+            }
+            fs::copy(source, destination)
+                .map(|_| ())
+                .map_err(|_| ModelLifecycleErrorV1::DownloadFailed)
+        }
+    }
+
+    struct FixtureHub {
+        endpoint: String,
+        requests: Arc<AtomicUsize>,
+        worker: Option<JoinHandle<()>>,
+    }
+
+    impl FixtureHub {
+        fn start(model: &CatalogedFastEmbedModelV1, fixture: &Path) -> Self {
+            let members = model
+                .members
+                .values()
+                .map(|member| {
+                    (
+                        member.upstream_path.clone(),
+                        fs::read(fixture.join(&member.path)).unwrap(),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>();
+            let revision = model.source.revision.clone();
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let requests = Arc::new(AtomicUsize::new(0));
+            let request_counter = Arc::clone(&requests);
+            let worker = thread::spawn(move || {
+                let expected_requests = members.len() * 2;
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while request_counter.load(Ordering::SeqCst) < expected_requests
+                    && Instant::now() < deadline
+                {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => serve_fixture_hub_request(
+                            &mut stream,
+                            &members,
+                            &revision,
+                            &request_counter,
+                        ),
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(error) => panic!("fixture hub accept failed: {error}"),
+                    }
+                }
+            });
+            Self {
+                endpoint,
+                requests,
+                worker: Some(worker),
+            }
+        }
+
+        fn finish(mut self) -> usize {
+            self.worker.take().unwrap().join().unwrap();
+            self.requests.load(Ordering::SeqCst)
+        }
+    }
+
+    fn serve_fixture_hub_request(
+        stream: &mut TcpStream,
+        members: &BTreeMap<String, Vec<u8>>,
+        revision: &str,
+        requests: &AtomicUsize,
+    ) {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut request = Vec::with_capacity(1024);
+        loop {
+            let mut chunk = [0_u8; 1024];
+            let read = stream.read(&mut chunk).unwrap();
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&chunk[..read]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+        let request = String::from_utf8_lossy(&request);
+        let request_line = request.lines().next().unwrap();
+        let path = request_line.split_whitespace().nth(1).unwrap();
+        let resolve_marker = format!("/resolve/{revision}/");
+        let upstream_path = path
+            .split_once(&resolve_marker)
+            .map(|(_, upstream_path)| upstream_path)
+            .unwrap_or_else(|| panic!("unexpected fixture hub request path: {path}"));
+        let body = members
+            .get(upstream_path)
+            .unwrap_or_else(|| panic!("unexpected fixture hub request path: {path}"));
+        let metadata_request = request.to_ascii_lowercase().contains("range: bytes=0-0");
+        let response_body = if metadata_request { &body[..1] } else { body };
+        let end = if metadata_request { 0 } else { body.len() - 1 };
+        let etag = hex::encode(Sha256::digest(body));
+        write!(
+            stream,
+            "HTTP/1.1 206 Partial Content\r\n\
+             Content-Length: {}\r\n\
+             Content-Range: bytes 0-{end}/{}\r\n\
+             ETag: \"{etag}\"\r\n\
+             X-Repo-Commit: {revision}\r\n\
+             Connection: close\r\n\r\n",
+            response_body.len(),
+            body.len(),
+        )
+        .unwrap();
+        stream.write_all(response_body).unwrap();
+        stream.flush().unwrap();
+        requests.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn join_background_acquisition(owner: &SemanticModelLifecycleOwnerV1) {
+        owner
+            .worker
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+            .expect("background acquisition worker")
+            .join()
+            .expect("background acquisition worker must not panic");
     }
 
     fn tiny_catalog(fixture: &Path) -> (FastEmbedModelCatalogV1, String) {
@@ -1761,6 +2048,142 @@ mod tests {
         ));
         assert!(status.remediation.retry);
         assert!(!owner.enqueue_startup_acquisition_if_needed());
+    }
+
+    #[cfg(feature = "semantic-fastembed")]
+    #[test]
+    fn fresh_hub_acquisition_downloads_then_reuses_private_cache_offline() {
+        let fixture = tempfile::tempdir().unwrap();
+        let (catalog, model_id) = tiny_catalog(fixture.path());
+        let model = catalog.get(&model_id).unwrap().clone();
+        let online_root = tempfile::tempdir().unwrap();
+        let hub = FixtureHub::start(&model, fixture.path());
+        let cache = online_root.path().join(HF_HUB_CACHE_DIRECTORY_V1);
+        let online_source = Arc::new(HfHubModelMemberSourceV1::new_for_tests(
+            cache.clone(),
+            Some(hub.endpoint.clone()),
+            false,
+        ));
+        let online =
+            SemanticModelLifecycleOwnerV1::open(online_root.path(), catalog.clone(), online_source)
+                .unwrap();
+
+        online.select_model(Some(&model_id), true).unwrap();
+        assert!(online.enqueue_startup_acquisition_if_needed());
+        join_background_acquisition(&online);
+        assert!(matches!(
+            online.status().state,
+            Some(SemanticModelLifecycleStateV1::Installed { .. })
+        ));
+        assert_eq!(hub.finish(), model.members.len() * 2);
+
+        let offline_root = tempfile::tempdir().unwrap();
+        let offline_source = Arc::new(HfHubModelMemberSourceV1::new_for_tests(cache, None, true));
+        let offline =
+            SemanticModelLifecycleOwnerV1::open(offline_root.path(), catalog, offline_source)
+                .unwrap();
+        offline.select_model(Some(&model_id), true).unwrap();
+        offline.acquire_blocking_for_tests().unwrap();
+
+        assert!(matches!(
+            offline.status().state,
+            Some(SemanticModelLifecycleStateV1::Installed { .. })
+        ));
+    }
+
+    #[cfg(feature = "semantic-fastembed")]
+    #[test]
+    fn offline_cache_miss_reports_failed_reason_and_omits_semantics() {
+        let fixture = tempfile::tempdir().unwrap();
+        let (catalog, model_id) = tiny_catalog(fixture.path());
+        let root = tempfile::tempdir().unwrap();
+        let source = Arc::new(HfHubModelMemberSourceV1::new_for_tests(
+            root.path().join(HF_HUB_CACHE_DIRECTORY_V1),
+            None,
+            true,
+        ));
+        let owner = SemanticModelLifecycleOwnerV1::open(root.path(), catalog, source).unwrap();
+
+        owner.select_model(Some(&model_id), true).unwrap();
+        assert!(owner.enqueue_startup_acquisition_if_needed());
+        join_background_acquisition(&owner);
+
+        let status = owner.status();
+        let Some(SemanticModelLifecycleStateV1::Failed {
+            detail, retryable, ..
+        }) = status.state
+        else {
+            panic!("offline cache miss must report failed acquisition: {status:?}");
+        };
+        assert!(retryable);
+        assert!(detail.contains("offline"));
+        assert!(detail.contains("config.json"));
+        assert!(status.semantics_omitted);
+    }
+
+    #[test]
+    fn store_failure_does_not_leave_acquisition_stuck_in_progress() {
+        let fixture = tempfile::tempdir().unwrap();
+        let (catalog, model_id) = tiny_catalog(fixture.path());
+        let root = tempfile::tempdir().unwrap();
+        let source = Arc::new(FixtureSource {
+            root: fixture.path().to_path_buf(),
+            calls: AtomicUsize::new(0),
+        });
+        let owner = SemanticModelLifecycleOwnerV1::open(root.path(), catalog, source).unwrap();
+        owner.select_model(Some(&model_id), true).unwrap();
+        fs::remove_dir(root.path().join("staging")).unwrap();
+        fs::write(root.path().join("staging"), b"not a directory").unwrap();
+
+        assert_eq!(
+            owner.acquire_blocking_for_tests().unwrap_err(),
+            ModelLifecycleErrorV1::StoreUnavailable
+        );
+        let status = owner.status();
+        let Some(SemanticModelLifecycleStateV1::Failed {
+            detail, retryable, ..
+        }) = status.state
+        else {
+            panic!("store failure must terminate acquisition state: {status:?}");
+        };
+        assert!(retryable);
+        assert_eq!(detail, ModelLifecycleErrorV1::StoreUnavailable.to_string());
+        assert!(status.semantics_omitted);
+    }
+
+    #[test]
+    fn background_acquisition_does_not_block_startup_or_status_reads() {
+        let fixture = tempfile::tempdir().unwrap();
+        let (catalog, model_id) = tiny_catalog(fixture.path());
+        let root = tempfile::tempdir().unwrap();
+        let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::sync_channel(1);
+        let source = Arc::new(BlockingFixtureSource {
+            root: fixture.path().to_path_buf(),
+            calls: AtomicUsize::new(0),
+            entered: entered_tx,
+            release: Mutex::new(release_rx),
+        });
+        let owner = SemanticModelLifecycleOwnerV1::open(root.path(), catalog, source).unwrap();
+        owner.select_model(Some(&model_id), true).unwrap();
+
+        assert!(owner.enqueue_startup_acquisition_if_needed());
+        entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("background acquisition must start");
+        let acquiring = owner.status();
+        assert!(matches!(
+            acquiring.state,
+            Some(SemanticModelLifecycleStateV1::Downloading { .. })
+        ));
+        assert!(acquiring.semantics_omitted);
+
+        release_tx.send(()).unwrap();
+        join_background_acquisition(&owner);
+        assert!(matches!(
+            owner.status().state,
+            Some(SemanticModelLifecycleStateV1::Installed { .. })
+        ));
     }
 
     #[test]
