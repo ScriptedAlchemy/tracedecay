@@ -14,7 +14,7 @@ pub(crate) use failure::{
 pub(crate) use project::ingest_project_sources_for_provider_without_registered_authority;
 pub(crate) use project::{
     home_dir, ingest_project_sources_for_provider,
-    ingest_project_sources_for_provider_with_cancellation,
+    ingest_project_sources_for_provider_with_cancellation, with_transcript_source_home,
 };
 pub(crate) use startup::ingest_user_global_sources_for_startup_with_db;
 #[cfg(test)]

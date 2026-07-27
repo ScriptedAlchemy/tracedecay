@@ -109,6 +109,35 @@ pub(super) async fn run_startup_session_catch_up(
     project_outcome.is_success().then_some(db)
 }
 
+async fn run_startup_session_catch_up_with_home(
+    transcript_source_home: Option<PathBuf>,
+    session_db: Option<Arc<RegisteredGlobalDb>>,
+    registered_session_db: Option<Arc<crate::global_db::RegisteredGlobalDb>>,
+    user_session_db: Option<Arc<RegisteredGlobalDb>>,
+    registered_user_session_db: Option<Arc<crate::global_db::RegisteredGlobalDb>>,
+    registry_db: Option<Arc<RegisteredGlobalDb>>,
+    profile_identity: Option<crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1>,
+    project_root: &Path,
+    project_id: Option<&str>,
+    cancellation: &crate::application::observation::ObservationCancellation,
+) -> Option<Arc<RegisteredGlobalDb>> {
+    let catch_up = run_startup_session_catch_up(
+        session_db,
+        registered_session_db,
+        user_session_db,
+        registered_user_session_db,
+        registry_db,
+        profile_identity,
+        project_root,
+        project_id,
+        cancellation,
+    );
+    match transcript_source_home {
+        Some(home) => crate::sessions::with_transcript_source_home(home, catch_up).await,
+        None => catch_up.await,
+    }
+}
+
 impl McpServer {
     /// Detects mid-session branch drift and reopens the served instance
     /// onto the live branch's DB, returning the instance the caller should
@@ -260,8 +289,10 @@ impl McpServer {
             let ingest_done_flag = Arc::clone(&self.transcript_ingest_done);
             let cancellation = self.startup_transcript_ingest_cancellation.clone();
             let analytics_db = self.accounting_db.clone();
+            let transcript_source_home = self.transcript_source_home.clone();
             let task = tokio::spawn(async move {
-                if let Some(db) = run_startup_session_catch_up(
+                if let Some(db) = run_startup_session_catch_up_with_home(
+                    transcript_source_home,
                     session_db,
                     registered_session_db,
                     user_session_db,

@@ -317,6 +317,7 @@ pub struct McpServer {
     global_db: Option<Arc<RegisteredGlobalDb>>,
     profile_root: Option<PathBuf>,
     profile_identity: Option<crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1>,
+    transcript_source_home: Option<PathBuf>,
     accounting_db: Option<Arc<crate::global_db::RegisteredGlobalDb>>,
     /// Authoritative project session store retained for startup recovery.
     /// Recovery borrows this handle and never discovers or opens another DB.
@@ -696,6 +697,7 @@ impl McpServer {
             scope_prefix,
             profile_root,
             profile_identity,
+            transcript_source_home,
             global_db,
             accounting_db,
             registry_db,
@@ -728,6 +730,14 @@ impl McpServer {
             #[cfg(any(test, feature = "test-transport"))]
             host_admission_test_runtime,
         } = context;
+        #[cfg(test)]
+        assert!(
+            !startup_catch_up_enabled
+                || registered_session_db.is_none()
+                || profile_identity.is_none()
+                || transcript_source_home.is_some(),
+            "test MCP servers with startup transcript authority require an isolated transcript-source home"
+        );
         let file_token_map = cg.get_file_token_map().await.unwrap_or_default();
         let persisted = cg.get_tokens_saved().await.unwrap_or(0);
         let response_handle_project_root = cg.project_root().to_path_buf();
@@ -873,6 +883,7 @@ impl McpServer {
             accounting_db,
             profile_root,
             profile_identity,
+            transcript_source_home,
             session_db,
             registry_db,
             user_session_db,

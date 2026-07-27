@@ -33,6 +33,7 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) profile_root: Option<PathBuf>,
     pub(crate) profile_identity:
         Option<crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1>,
+    pub(crate) transcript_source_home: Option<PathBuf>,
     pub(crate) global_db: Option<Arc<RegisteredGlobalDb>>,
     pub(crate) accounting_db: Option<Arc<RegisteredGlobalDb>>,
     pub(crate) registry_db: Option<Arc<RegisteredGlobalDb>>,
@@ -95,6 +96,7 @@ pub(crate) struct McpServerDaemonDatabases {
 
 pub(crate) struct McpServerDaemonAuthority {
     pub(crate) profile_identity: crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1,
+    pub(crate) transcript_source_home: Option<PathBuf>,
     pub(crate) databases: McpServerDaemonDatabases,
     pub(crate) host_admission_broker:
         Option<crate::application::host_admission::SharedHostAdmissionBroker>,
@@ -127,6 +129,7 @@ impl McpServerConstructionContext {
             scope_prefix,
             profile_root: None,
             profile_identity: None,
+            transcript_source_home: None,
             global_db: None,
             accounting_db: None,
             registry_db: None,
@@ -187,6 +190,7 @@ impl McpServerConstructionContext {
     ) -> Self {
         let McpServerDaemonAuthority {
             profile_identity,
+            transcript_source_home,
             databases,
             host_admission_broker,
             project_session_refresh_wake,
@@ -201,6 +205,7 @@ impl McpServerConstructionContext {
             scope_prefix,
             profile_root: Some(profile_root),
             profile_identity: Some(profile_identity),
+            transcript_source_home,
             global_db: Some(Arc::clone(&registry)),
             accounting_db: databases.accounting,
             registry_db: Some(registry),

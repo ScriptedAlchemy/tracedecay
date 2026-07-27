@@ -4014,6 +4014,16 @@ struct ProductionProjectComposition {
     semantic_auto_download_enabled: Option<bool>,
 }
 
+#[cfg(test)]
+fn daemon_transcript_source_home(profile_root: &Path) -> Option<PathBuf> {
+    profile_root.parent().map(Path::to_path_buf)
+}
+
+#[cfg(not(test))]
+fn daemon_transcript_source_home(_profile_root: &Path) -> Option<PathBuf> {
+    crate::sessions::home_dir()
+}
+
 async fn production_project_server(
     store_administration: &StoreAdministration,
     project_open_gates: &tokio::sync::Mutex<ProjectOpenGates>,
@@ -4285,11 +4295,13 @@ async fn production_project_server(
             store_administration.clone(),
             canonical_project_path.to_path_buf(),
         ));
+    let transcript_source_home = daemon_transcript_source_home(profile_identity.profile_root());
     let mut context = crate::mcp::server::McpServerConstructionContext::daemon_owned(
         cg,
         handshake.scope_prefix.clone(),
         crate::mcp::server::McpServerDaemonAuthority {
             profile_identity,
+            transcript_source_home,
             databases: crate::mcp::server::McpServerDaemonDatabases {
                 accounting: accounting_db,
                 registry: registry_db,

@@ -2526,6 +2526,16 @@ impl HostAdmissionTestRuntimeV1 {
         scope_prefix: Option<String>,
     ) -> crate::errors::Result<crate::mcp::server::McpServerConstructionContext> {
         let profile_root = self.profile_root.clone();
+        let transcript_source_home =
+            profile_root
+                .parent()
+                .map(Path::to_path_buf)
+                .ok_or_else(|| crate::errors::TraceDecayError::Config {
+                    message: format!(
+                        "test profile '{}' has no isolated transcript-source home",
+                        profile_root.display()
+                    ),
+                })?;
         let project_sessions = self.project_registered.as_ref().cloned().ok_or_else(|| {
             crate::errors::TraceDecayError::Database {
                 operation: "bind MCP test project sessions".to_string(),
@@ -2546,6 +2556,7 @@ impl HostAdmissionTestRuntimeV1 {
                 );
         context.profile_root = Some(profile_root);
         context.profile_identity = Some(profile_identity);
+        context.transcript_source_home = Some(transcript_source_home);
         context.host_admission_test_runtime = Some(self);
         Ok(context)
     }
