@@ -1165,6 +1165,33 @@ async fn git_preview_and_apply_have_real_cli_mcp_runtime_parity() {
         .expect("Git status result")
         .scope
         .clone();
+    // The daemon checks the caller's snapshot identity against the ids on the
+    // scope the invoking surface resolved, so a CLI scope that differs from
+    // the MCP scope this snapshot is built from would be rejected before any
+    // repository state is compared. Prove the two surfaces agree first, or the
+    // preview failure below is unattributable.
+    let cli_status = run_application_tool(
+        fixture.home(),
+        &fixture.project,
+        ApplicationSurfaceOperation::GitStatus,
+        &serde_json::json!({}),
+    );
+    assert_command_success("CLI git_status", &cli_status);
+    let cli_status: ApplicationEnvelope<Value> =
+        serde_json::from_slice(&cli_status.stdout).expect("CLI status envelope");
+    assert_eq!(
+        cli_status.scope.project_id, scope.project_id,
+        "CLI and MCP must resolve the same project for one repository"
+    );
+    assert_eq!(
+        cli_status.scope.repository_id, scope.repository_id,
+        "CLI and MCP must resolve the same repository identity"
+    );
+    assert_eq!(
+        cli_status.scope.worktree_id, scope.worktree_id,
+        "CLI and MCP must resolve the same worktree identity"
+    );
+
     let original_head = git_stdout(&fixture.project, &["rev-parse", "HEAD"]);
     let captured_at = wall_clock_micros();
     let snapshot = tracedecay::daemon::capture_exact_git_snapshot_for_test(
@@ -1568,6 +1595,14 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
                 "rootUri": root_uri,
                 "capabilities": {
                     "general": { "positionEncodings": ["utf-16"] },
+                    // Standard methods are negotiated through standard client
+                    // capabilities, independently of the TraceDecay extension
+                    // below. A client that never declares them is correctly
+                    // refused, so this test declares the two it drives later.
+                    "textDocument": {
+                        "documentSymbol": { "dynamicRegistration": false },
+                        "hover": { "dynamicRegistration": false },
+                    },
                     "experimental": {
                         "tracedecay": {
                             "revision": TRACEDECAY_CONTEXT_REVISION,
