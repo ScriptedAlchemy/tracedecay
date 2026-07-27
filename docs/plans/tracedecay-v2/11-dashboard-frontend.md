@@ -74,13 +74,23 @@ audit against the requirements below found these still unmet. They are
 recorded so acceptance is not claimed early. They are capability/test gaps, not
 permission to replace unavailable data with fabricated values.
 
-- **PR14 / Plan 11 owner:** the runtime performance budgets (LCP, frame p95,
-  heap retention, SSE sustain), AST import-boundary rules, and MSW fault
-  injection inside Vitest remain absent. The transfer budgets and the
-  virtualization mount ceiling are now enforced — see the closure below.
-- **PR14 / Plan 11 owner:** the viewport matrix is partial. Current audits cover
-  320/768/1440 in light and dark, but not 390×844, 1024×768, 1280×720,
-  200%/400% zoom, `prefers-contrast: more`, or forced colors.
+- **PR14 / Plan 11 owner:** the runtime performance budgets — LCP, frame p95,
+  and heap retention — remain absent. MSW HTTP fault coverage, the ast-grep
+  renderer boundary gate, the SSE churn bounds, the transfer budgets, and the
+  virtualization mount ceiling have all since landed and are no longer open.
+- **PR14 / Plan 11 owner:** the 200 ms p95 input budget is unasserted and will
+  stay that way here. It cannot be measured deterministically in jsdom, which
+  has no layout or paint, so a jsdom timing assertion would be a gate attesting
+  to something it never checked. It belongs in Playwright against a real engine,
+  alongside the runtime budgets above.
+- **PR14 / Plan 11 owner:** a collapsed scroller hides content at 320 px width
+  and 400% zoom while the header still states a row count — the count is
+  truthful but the rows it counts are unreachable, which reads as falsified UI
+  to anyone at that viewport.
+- **PR14 / Plan 11 owner:** 18 controls render below the 44×44 minimum target
+  size. The cause is `html { font-size: 14px }`, which makes every rem-based
+  utility resolve smaller than its token intends — a nominal 44 px control
+  renders at 38.5 px.
 - **PR14 / Plan 11 owner:** Code still lacks diagnostics, affected tests, code
   health, and branch-aware freshness; Agents lacks its PR14 subagent/handoff
   context; Sessions lacks raw-message drill-down, compaction boundaries, and
@@ -96,6 +106,24 @@ permission to replace unavailable data with fabricated values.
   `RequestCancel` and `RequestExternalHandoff` authority-negative coverage
   belongs to the executable Work/handoff journey and does not block the PR14
   twelve-workspace checkpoint.
+
+**Accessibility matrix widened (2026-07-27).** The viewport matrix is no longer
+partial. The accessibility audit now covers the full specified set — the added
+390×844, 1024×768, and 1280×720 viewports, 200% and 400% zoom,
+`prefers-contrast: more`, and forced colors — across 460 scans. That closes the
+partial-matrix gap this section carried until now.
+
+The two new open items in the list above exist because of that widening: both
+the collapsed 320 px / 400% scroller and the 18 undersized controls were
+invisible to the narrower matrix and appeared on its first widened run. This is
+the ordinary consequence of a gate that now checks more, not a regression
+introduced by it. A lane is in flight on both; they stay recorded as open until
+the repairs land, and a claim that they are fixed must cite the landing commits.
+
+Every closure in this section was verified by scoped local runs. None has been
+validated by CI: no CI has run since 01:24 UTC on 2026-07-27 because PR #421 is
+conflicting. See the verification-status section of
+[`GAP-LEDGER-PR8-PR14.md`](GAP-LEDGER-PR8-PR14.md).
 
 **Transfer budgets and list bounds closed (2026-07-27).** The two payload
 ceilings this plan states are now measured and enforced by
