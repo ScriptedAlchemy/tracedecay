@@ -2,6 +2,9 @@ use std::hash::{Hash, Hasher};
 use std::process::Command;
 use std::{collections::hash_map::DefaultHasher, fmt::Write as _, fs, path::Path};
 
+#[path = "build-support/dashboard_cache.rs"]
+mod dashboard_cache;
+
 // Shared with the crate as `tracedecay::version::build_identity`, so the probe
 // that bakes the build's commit identity is the code its unit tests exercise
 // rather than a second copy that can drift.
@@ -240,42 +243,19 @@ fn generate_plugin_bundle() {
 /// generated manifest in OUT_DIR so the installed binary serves the UI with
 /// zero filesystem dependency.
 fn build_and_embed_dashboard_app() {
+    let repository_root = Path::new(".");
     let dashboard = Path::new("dashboard");
     let app_dist = dashboard.join("app-dist");
 
-    // Content stamp over frontend inputs (sources, config, lockfile).
-    let mut hasher = DefaultHasher::new();
-    for root in ["dashboard/src", "dashboard/codegen/schemas"] {
-        println!("cargo::rerun-if-changed={root}");
-        let root_path = Path::new(root);
-        for relative in collect_files_relative(root_path) {
-            relative.hash(&mut hasher);
-            if let Ok(bytes) = fs::read(root_path.join(&relative)) {
-                bytes.hash(&mut hasher);
-            }
-        }
+    for input in dashboard_cache::source_inputs() {
+        println!("cargo::rerun-if-changed={input}");
     }
-    for file in [
-        "dashboard/package.json",
-        "dashboard/package-lock.json",
-        "dashboard/rsbuild.config.ts",
-        "dashboard/tsconfig.json",
-    ] {
-        println!("cargo::rerun-if-changed={file}");
-        file.hash(&mut hasher);
-        if let Ok(bytes) = fs::read(file) {
-            bytes.hash(&mut hasher);
-        }
-    }
-    let source_stamp = format!("{:016x}", hasher.finish());
+    let source_stamp = dashboard_cache::source_stamp(repository_root);
     let stamp_path = app_dist.join(".source-stamp");
     println!("cargo::rerun-if-env-changed=TRACEDECAY_DASHBOARD_CONTRACT_SCHEMA_OUT");
     let contract_schema_export =
         std::env::var_os("TRACEDECAY_DASHBOARD_CONTRACT_SCHEMA_OUT").is_some();
-    let fresh = fs::read_to_string(&stamp_path)
-        .map(|current| current.trim() == source_stamp)
-        .unwrap_or(false)
-        && app_dist.join("index.html").exists();
+    let fresh = dashboard_cache::dist_is_fresh(repository_root, &source_stamp);
 
     // A packaged crate ships the prebuilt app-dist but none of the frontend
     // sources the stamp is computed from, so the stamp can never match there

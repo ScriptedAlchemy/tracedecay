@@ -11,6 +11,13 @@ staged_binary="$stage_dir/tracedecay"
 installed_binary="$install_dir/tracedecay"
 profile_dir=${TRACEDECAY_DOGFOOD_PROFILE_DIR:-"$HOME/.tracedecay"}
 boundary_state="$profile_dir/dogfood-migration-boundary.state"
+dogfood_started=$SECONDS
+
+report_stage() {
+  local stage=$1
+  local started=$2
+  printf '[dogfood timing] stage=%s elapsed_s=%d\n' "$stage" "$((SECONDS - started))" >&2
+}
 
 if [[ -L "$profile_dir" ]]; then
   printf 'dogfood profile directory must not be a symlink: %s\n' "$profile_dir" >&2
@@ -33,10 +40,12 @@ chmod 0600 "$dogfood_lock"
 flock -x "$dogfood_lock_fd"
 
 cd "$repo_root"
+stage_started=$SECONDS
 if [[ -z "${TRACEDECAY_DOGFOOD_SOURCE_BINARY:-}" ]]; then
   # Default features only — never `--all-features` (enables test-transport).
   cargo build --release --bin tracedecay
 fi
+report_stage release-binary-build "$stage_started"
 
 if [[ ! -x "$source_binary" ]]; then
   printf 'dogfood build did not produce %s\n' "$source_binary" >&2
@@ -317,6 +326,7 @@ record_boundary_outcome() {
 
 load_boundary_state
 rm -f -- "${boundary_state}".new.*
+preflight_started=$SECONDS
 
 # A valid reached/forbidden pending marker means a prior attempt already crossed
 # the migration boundary. Never trust the installed path without an identity
@@ -486,6 +496,8 @@ trap 'handle_signal 129' HUP
 trap 'handle_signal 130' INT
 trap 'handle_signal 143' TERM
 
+report_stage forward-boundary-preflight "$preflight_started"
+install_started=$SECONDS
 install -m 0755 "$source_binary" "$candidate"
 if [[ -e "$installed_binary" || -L "$installed_binary" ]]; then
   previous_installed=$(mktemp "$install_dir/tracedecay.previous.XXXXXX")
@@ -502,6 +514,7 @@ fi
 replacement_active=1
 install_atomically "$candidate" "$staged_binary"
 install_atomically "$candidate" "$installed_binary"
+report_stage staged-binary-atomic-install "$install_started"
 
 # Cargo-launched commands use an isolated development profile. The staged
 # executable must refresh the real user installation instead.
@@ -516,10 +529,13 @@ fi
 if [[ "${TRACEDECAY_DOGFOOD_NO_REINSTALL:-0}" == 1 ]]; then
   post_update_args+=(--no-reinstall)
 fi
+post_update_started=$SECONDS
 run_new_binary "${post_update_args[@]}"
+report_stage post-update "$post_update_started"
 
 record_boundary_outcome validated reached forbidden verified-new-version
 committed=1
 
 printf 'Dogfood binary installed at %s\n' "$installed_binary"
 printf 'Stable staged copy: %s\n' "$staged_binary"
+report_stage total-installer "$dogfood_started"

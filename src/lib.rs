@@ -64,6 +64,9 @@ pub mod context;
 pub mod daemon;
 pub mod daemon_client;
 pub mod dashboard;
+#[cfg(test)]
+#[path = "../build-support/dashboard_cache.rs"]
+mod dashboard_build_cache;
 pub mod db;
 mod dependency_imports;
 pub mod derive_table;

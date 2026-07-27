@@ -9,7 +9,7 @@
 //! `--no-reinstall` to skip that agent-integration refresh.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::cli::PostUpdateMode;
 use tracedecay::upgrade::UpgradeOutcome;
@@ -518,20 +518,36 @@ async fn run_forward_only_post_update_command(
     if let Err(error) = operation_result {
         return Err(forward_only_failure(&spec, error));
     }
+    let stage_started = Instant::now();
     if let Err(error) = tracedecay::daemon::wait_for_installed_service_state(target_daemon_state) {
         return Err(forward_only_failure(&spec, error));
     }
+    report_dogfood_stage("daemon-service-ready", stage_started);
+    let stage_started = Instant::now();
     if let Err(error) = verify_forward_only_binary_version(&spec.tracedecay_bin) {
         return Err(forward_only_failure(&spec, error));
     }
+    report_dogfood_stage("installed-version-check", stage_started);
+    let stage_started = Instant::now();
     if let Err(error) =
         tracedecay::doctor::wait_for_daemon_startup_health(startup_health_timeout()).await
     {
         return Err(forward_only_failure(&spec, error));
     }
-    tracedecay::doctor::run_doctor(None)
+    report_dogfood_stage("daemon-convergence", stage_started);
+    let stage_started = Instant::now();
+    let result = tracedecay::doctor::run_doctor(None)
         .await
-        .map_err(|error| forward_only_failure(&spec, error))
+        .map_err(|error| forward_only_failure(&spec, error));
+    report_dogfood_stage("doctor", stage_started);
+    result
+}
+
+fn report_dogfood_stage(stage: &str, started: Instant) {
+    eprintln!(
+        "[dogfood timing] stage={stage} elapsed_ms={}",
+        started.elapsed().as_millis()
+    );
 }
 
 /// How long post-update Doctor validation waits for daemon schema migration and
@@ -566,8 +582,13 @@ async fn run_forward_only_post_update_tasks(
     eprintln!("\nPreparing forward-only dogfood maintenance.");
     tracedecay::daemon::verify_installed_service_quiesced_under_lease()?;
 
+    let stage_started = Instant::now();
     run_post_update_mutations(no_heal, no_reinstall, true, lifecycle_lease).await?;
-    refresh_forward_only_daemon_service_after_update(target_daemon_state, spec)
+    report_dogfood_stage("post-update-integrations", stage_started);
+    let stage_started = Instant::now();
+    let result = refresh_forward_only_daemon_service_after_update(target_daemon_state, spec);
+    report_dogfood_stage("daemon-service-refresh", stage_started);
+    result
 }
 
 fn verify_forward_only_binary_version(binary: &Path) -> tracedecay::errors::Result<()> {
