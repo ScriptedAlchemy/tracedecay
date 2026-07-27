@@ -6,6 +6,9 @@ description = "Bundled SQLite runtime for TraceDecay storage adapters"
 license = "MIT"
 repository = "https://github.com/ScriptedAlchemy/tracedecay"
 
+[features]
+test-transport = []
+
 [dependencies]
 rusqlite = { version = "0.40.1", default-features = false, features = ["backup", "bundled", "hooks", "limits", "trace"] }
 serde = { version = "1", features = ["derive"] }

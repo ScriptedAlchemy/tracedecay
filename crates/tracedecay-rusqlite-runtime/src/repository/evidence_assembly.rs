@@ -932,8 +932,8 @@ fn evidence_target(anchor: &RetrievalAnchorRecordV3) -> rusqlite::Result<(&'stat
     }
 }
 
-#[cfg(test)]
-pub(crate) mod tests {
+#[cfg(any(test, feature = "test-transport"))]
+pub mod tests {
     use super::*;
     use tracedecay_domain::{
         AccessPolicyDigest, AnchorDurabilityClass, AnchorLineageRefV3, AnchorOwnerBindingV1,
@@ -967,11 +967,11 @@ pub(crate) mod tests {
 
     const DIGEST: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
-    fn owner() -> EvidenceAssemblyOwnerV1 {
+    fn owner(project_id: ProjectId) -> EvidenceAssemblyOwnerV1 {
         EvidenceAssemblyOwnerV1 {
             owner: AnchorOwnerBindingV1::for_project(
                 UserProfileId::new("profile.fixture").unwrap(),
-                ProjectId::new("project.fixture").unwrap(),
+                project_id,
                 PrivacyDomainId::new("privacy.fixture").unwrap(),
             )
             .unwrap(),
@@ -980,16 +980,14 @@ pub(crate) mod tests {
         }
     }
 
-    fn timeline() -> EvidenceSourceTimelineV1 {
+    fn timeline(project_id: ProjectId) -> EvidenceSourceTimelineV1 {
         EvidenceSourceTimelineV1 {
             source: ObservationSourceIdentityV1::for_provider(
                 ProviderId::new("provider.fixture").unwrap(),
                 SessionId::new("session.fixture").unwrap(),
             )
             .unwrap(),
-            scope: ObservationScopeV1::Project {
-                project_id: ProjectId::new("project.fixture").unwrap(),
-            },
+            scope: ObservationScopeV1::Project { project_id },
             source_generation: ObservationSourceGenerationV1::new(1).unwrap(),
             ordering_domain: ObservationOrderingDomainV1::DaemonSequence,
         }
@@ -1071,10 +1069,21 @@ pub(crate) mod tests {
         .unwrap()
     }
 
-    pub(crate) fn write_fixture(component_version: &str) -> EvidenceAssemblyWriteV1 {
-        let owner = owner();
-        let source = RetrievalAnchorId::new("retrieval.source.fixture").unwrap();
-        let timeline = timeline();
+    pub fn write_fixture_for_project(
+        component_version: &str,
+        project_id: ProjectId,
+    ) -> (RetrievalAnchorRecordV3, EvidenceAssemblyWriteV1) {
+        let owner = owner(project_id.clone());
+        let timeline = timeline(project_id);
+        let source_anchor = anchor(
+            RetrievalAnchorTargetV3::Entity(tracedecay_domain::EntityRef {
+                id: tracedecay_domain::EntityId::new("entity.source.fixture".to_owned()).unwrap(),
+                kind: tracedecay_domain::EntityKind::Document,
+            }),
+            &owner,
+            Vec::new(),
+        );
+        let source = source_anchor.anchor_id().clone();
         let coordinate = SourceOccurrenceCoordinateV1::ObservationProjection {
             canonical_observation_id: tracedecay_domain::CanonicalObservationIdV1::new(format!(
                 "sha256:{}",
@@ -1317,7 +1326,16 @@ pub(crate) mod tests {
         )
         .unwrap();
         write.validate().unwrap();
-        write
+        (source_anchor, write)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn write_fixture(component_version: &str) -> EvidenceAssemblyWriteV1 {
+        write_fixture_for_project(
+            component_version,
+            ProjectId::new("project.fixture").unwrap(),
+        )
+        .1
     }
 
     fn install(connection: &rusqlite::Connection) {

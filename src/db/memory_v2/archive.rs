@@ -4,7 +4,7 @@ use tracedecay_domain::{FactOwnerV1, ProjectId, SourceStoreId, UtcMicros};
 use tracedecay_store::{
     MemoryV2ArchiveFamilyV1, MemoryV2ArchiveRecordV1, MemoryV2ArchiveReferenceV1,
     MemoryV2ArchiveScalarV1, MemoryV2OwnerArchiveV1, MemoryV2OwnerMergePlanV1,
-    authoritative_memory_v2_archive_families, plan_memory_v2_owner_merge,
+    RetrievalAnchorOwnerV1, authoritative_memory_v2_archive_families, plan_memory_v2_owner_merge,
 };
 
 use crate::db::engine::{Executor, Value, params, params_from_iter};
@@ -129,11 +129,17 @@ pub(crate) async fn list_memory_v2_archive_owners(
         .map_err(|error| db_error(OPERATION, error))?
     {
         let owner_json: String = row.get(0).map_err(|error| db_error(OPERATION, error))?;
-        let owner: FactOwnerV1 = serde_json::from_str(&owner_json)
+        let owner: RetrievalAnchorOwnerV1 = serde_json::from_str(&owner_json)
             .map_err(|error| db_message(OPERATION, error.to_string()))?;
-        owner
-            .validate()
-            .map_err(|error| db_message(OPERATION, error.to_string()))?;
+        let owner = match owner {
+            RetrievalAnchorOwnerV1::V2(owner) => owner,
+            RetrievalAnchorOwnerV1::V3(owner) => match owner.project_id() {
+                Some(project_id) => FactOwnerV1::Project {
+                    project_id: project_id.clone(),
+                },
+                None => FactOwnerV1::Profile,
+            },
+        };
         if !owners.contains(&owner) {
             owners.push(owner);
         }
@@ -254,7 +260,12 @@ pub(crate) async fn import_memory_v2_owner_archive(
     {
         return Err(db_message(
             OPERATION,
-            "archive import readback did not preserve the complete source closure",
+            format!(
+                "archive import readback did not preserve the complete source closure: inserts={:?}, updates={:?}, conflicts={:?}",
+                verification.inserts(),
+                verification.updates(),
+                verification.conflicts(),
+            ),
         ));
     }
     if plan.inserts().iter().any(record_changes_fact_projection)
@@ -697,8 +708,28 @@ fn validate_record_fields(spec: &TableSpec, record: &MemoryV2ArchiveRecordV1) ->
 
 fn owner_predicate(database: MemoryV2ArchiveDatabase, filter: OwnerFilter) -> String {
     let prefix = database.prefix();
+    let anchor_owner = "(
+        owner_json=?3
+        OR (
+            json_extract(owner_json, '$.kind')=?1
+            AND (
+                (?1='profile' AND ?2='')
+                OR json_extract(owner_json, '$.project_id')=?2
+            )
+        )
+    )";
+    let evidence_anchor_owner = "(
+        anchor.owner_json=?3
+        OR (
+            json_extract(anchor.owner_json, '$.kind')=?1
+            AND (
+                (?1='profile' AND ?2='')
+                OR json_extract(anchor.owner_json, '$.project_id')=?2
+            )
+        )
+    )";
     let selected_anchors = format!(
-        "SELECT anchor_id FROM {prefix}retrieval_anchors WHERE owner_json=?3
+        "SELECT anchor_id FROM {prefix}retrieval_anchors WHERE {anchor_owner}
          UNION
          SELECT anchor.anchor_id
          FROM {prefix}retrieval_anchors AS anchor
@@ -715,19 +746,19 @@ fn owner_predicate(database: MemoryV2ArchiveDatabase, filter: OwnerFilter) -> St
          FROM {prefix}evidence_source_occurrences AS occurrence
          JOIN {prefix}retrieval_anchors AS anchor
            ON anchor.anchor_id=occurrence.source_anchor_id
-         WHERE anchor.owner_json=?3
+         WHERE {evidence_anchor_owner}
          UNION
          SELECT span.owner_digest
          FROM {prefix}evidence_spans AS span
          JOIN {prefix}retrieval_anchors AS anchor
            ON anchor.anchor_id=span.anchor_id
-         WHERE anchor.owner_json=?3
+         WHERE {evidence_anchor_owner}
          UNION
          SELECT contribution.owner_digest
          FROM {prefix}evidence_retriever_contributions AS contribution
          JOIN {prefix}retrieval_anchors AS anchor
            ON anchor.anchor_id=contribution.anchor_id
-         WHERE anchor.owner_json=?3
+         WHERE {evidence_anchor_owner}
          UNION
          SELECT derived.owner_digest
          FROM {prefix}evidence_derived_anchors AS derived

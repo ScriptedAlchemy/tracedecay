@@ -4,12 +4,21 @@ use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
 use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
-use tracedecay::application::memory::{MemoryApplication, MemoryOperationContext};
+use tracedecay::application::memory::{
+    MemoryApplication, MemoryOperationContext, automation_fact_proposal_add_command,
+};
+use tracedecay::automation::fact_proposals::{
+    FactProposalRecord, FactProposalState, FactProposalStore, fact_proposals_path,
+    import_legacy_fact_proposals,
+};
 use tracedecay::branch::BranchAddOutcome;
 use tracedecay::branch_meta::{self, BranchMeta};
 use tracedecay::config::{TraceDecayConfig, USER_DATA_DIR_ENV};
 use tracedecay::global_db::{GraphScopeUpsert, StoreArtifactUpsert, StoreInstanceUpsert};
-use tracedecay::memory::types::{AddFactRequest, MemoryCategory};
+use tracedecay::memory::types::{
+    AddFactRequest, FactRelationKind, FeedbackAction, FeedbackRequest, MemoryCategory,
+    MemoryGroomingOperation, UpdateFactRequest,
+};
 use tracedecay::migrate::inventory::{
     MigrationInventory, RegistryStatus, StoreArtifact, StoreBrand, StoreInventory, StoreRole,
     StoreStatus,
@@ -36,14 +45,19 @@ use tracedecay_domain::{
     ComponentVersion, Confidence, CoverageReportV1, DomainError, EntityId, EntityKind, EntityRef,
     EvidenceClass, FactAssertionKindV1, FactAssertionV1, FactCategoryV1, FactEvidenceRefV1,
     FactEvidenceRelationV1, FactId, FactIdentityMaterialV1, FactIdentitySourceV1,
-    FactLineageEventKindV1, FactLineageEventV1, FactOwnerV1, FactPayloadV1, PayloadAccessState,
-    PayloadReferenceV1, PrivacyDomainBoundLocatorDigest, PrivacyDomainId, ProjectId,
-    ProjectionGenerationId, ResolutionAuthorizationV1, RetentionClass, RetrievalAnchorRecordV2,
-    RetrievalAnchorRecordV2Parts, RetrievalAnchorTargetV2, SanitizationReceiptId,
-    SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, ScopeResolutionId,
-    SensitivityV1, UtcMicros, VectorWatermark,
+    FactLineageEventKindV1, FactLineageEventV1, FactOwnerV1, FactPayloadV1, NativeAliasKindV2,
+    NativeAliasV2, PayloadAccessState, PayloadReferenceV1, PrivacyDomainBoundLocatorDigest,
+    PrivacyDomainId, ProjectId, ProjectionGenerationId, ProvenanceId, ResolutionAuthorizationV1,
+    RetentionClass, RetrievalAnchorId, RetrievalAnchorRecordV2, RetrievalAnchorRecordV2Parts,
+    RetrievalAnchorTargetV2, SanitizationReceiptId, SanitizationReceiptRefV1,
+    SanitizationReceiptV1, SanitizerDispositionV1, ScopeResolutionId, SensitivityV1, UtcMicros,
+    VectorWatermark,
 };
-use tracedecay_store::{FactCommitOutcome, FactCurrentQuery, FactLineageQuery, FactWriteBatch};
+use tracedecay_store::{
+    AnchorDispositionReasonClassV1, AnchorDispositionStateV1, FactCommitOutcome, FactCurrentQuery,
+    FactLineageQuery, FactWriteBatch, RetrievalAnchorDispositionRecordV1,
+    RetrievalAnchorDispositionStore, RetrievalAnchorOwnerV1,
+};
 
 use crate::common::EnvVarGuard;
 use crate::support::{HOME_ENV_LOCK, ephemeral_safe_fixture_base};
@@ -63,7 +77,7 @@ where
 async fn seed_public_archive_fact(
     branch: &Path,
     owner: FactOwnerV1,
-) -> (FactId, String, FactId, i64) {
+) -> (FactId, String, FactId, i64, RetrievalAnchorId) {
     let (database, _) = crate::common::open_test_database(branch).await.unwrap();
     let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(&database)).unwrap();
     let operation = "project-memory-cutover-public";
@@ -81,7 +95,13 @@ async fn seed_public_archive_fact(
             kind: EntityKind::Document,
         }),
         owner: owner.clone().into(),
-        aliases: vec![],
+        aliases: vec![
+            NativeAliasV2::new(
+                NativeAliasKindV2::Path,
+                PrivacyDomainBoundLocatorDigest::new(ARCHIVE_DIGEST_A).unwrap(),
+            )
+            .unwrap(),
+        ],
         occurred_at: None,
         ingested_at: UtcMicros(10),
         evidence_class: EvidenceClass::Observed,
@@ -172,6 +192,7 @@ async fn seed_public_archive_fact(
         None,
     )
     .unwrap();
+    let source_anchor_id = anchor.anchor_id().clone();
     let batch = FactWriteBatch::new(
         fact_id.clone(),
         owner.clone(),
@@ -206,6 +227,132 @@ async fn seed_public_archive_fact(
         .unwrap()
         .fact
         .expect("compatibility add returns its legacy mirror");
+    memory
+        .update_fact_v1(
+            UpdateFactRequest {
+                fact_id: legacy_fact.fact_id,
+                content: Some("updated authoritative cutover closure".to_owned()),
+                category: None,
+                tags: Some(vec!["cutover".to_owned(), "superseded".to_owned()]),
+                entities: None,
+                trust: Some(0.85),
+                source: None,
+                metadata: None,
+            },
+            MemoryOperationContext::generated(&owner, "cutover-update", None).unwrap(),
+        )
+        .await
+        .unwrap();
+    memory
+        .record_fact_feedback_v1(
+            FeedbackRequest {
+                fact_id: legacy_fact.fact_id,
+                action: FeedbackAction::Helpful,
+                source: Some("project-memory-cutover-test".to_owned()),
+                note: Some("preserve feedback history".to_owned()),
+            },
+            MemoryOperationContext::generated(&owner, "cutover-feedback", None).unwrap(),
+        )
+        .await
+        .unwrap();
+    let related_fact = memory
+        .add_fact_v1(
+            AddFactRequest {
+                content: "related authoritative cutover closure".to_owned(),
+                category: MemoryCategory::Project,
+                source: Some("project-memory-cutover-test".to_owned()),
+                tags: vec!["relation".to_owned()],
+                entities: vec!["TraceDecay".to_owned()],
+                trust: Some(0.8),
+                metadata: serde_json::json!({"fixture": "relation-target"}),
+            },
+            MemoryOperationContext::generated(&owner, "cutover-related-add", None).unwrap(),
+        )
+        .await
+        .unwrap()
+        .fact
+        .unwrap();
+    memory
+        .dashboard_apply_grooming_v1(
+            vec![MemoryGroomingOperation::LinkFacts {
+                source_fact_id: legacy_fact.fact_id,
+                target_fact_id: related_fact.fact_id,
+                relation: FactRelationKind::Supports,
+                evidence_fact_ids: vec![related_fact.fact_id],
+                confidence: 0.9,
+                source: "project-memory-cutover-test".to_owned(),
+                metadata: serde_json::json!({"fixture": "relation"}),
+            }],
+            0.5,
+            MemoryOperationContext::generated(&owner, "cutover-curation", None).unwrap(),
+        )
+        .await
+        .unwrap();
+    let proposal_id = ProvenanceId::new("proposal.project-memory-cutover".to_owned()).unwrap();
+    let proposal_command = automation_fact_proposal_add_command(
+        owner.clone(),
+        AddFactRequest {
+            content: "proposed authoritative cutover closure".to_owned(),
+            category: MemoryCategory::Project,
+            source: Some("project-memory-cutover-test".to_owned()),
+            tags: vec!["proposal".to_owned()],
+            entities: vec!["TraceDecay".to_owned()],
+            trust: Some(0.8),
+            metadata: serde_json::json!({"fixture": "proposal"}),
+        },
+        "run.project-memory-cutover",
+        proposal_id.as_str(),
+        None,
+    )
+    .unwrap();
+    memory
+        .submit_compatibility_fact_proposal(proposal_id, proposal_command, None)
+        .await
+        .unwrap();
+    let legacy_proposal_root = branch.parent().unwrap().join("legacy-proposals");
+    let legacy_proposals = FactProposalStore {
+        schema_version: 1,
+        proposals: vec![FactProposalRecord {
+            schema_version: 1,
+            proposal_id: "legacy-proposal-project-memory-cutover".to_owned(),
+            run_id: "legacy-run-project-memory-cutover".to_owned(),
+            evidence_hash: None,
+            state: FactProposalState::PendingApproval,
+            add_fact_request: Some(AddFactRequest {
+                content: "imported legacy proposal closure".to_owned(),
+                category: MemoryCategory::Project,
+                source: Some("project-memory-cutover-test".to_owned()),
+                tags: vec!["legacy-proposal".to_owned()],
+                entities: vec!["TraceDecay".to_owned()],
+                trust: Some(0.8),
+                metadata: serde_json::json!({"fixture": "legacy-proposal"}),
+            }),
+            proposal: None,
+            validation_reason: None,
+            validation: None,
+            reviewer: None,
+            applied_canonical_fact_id: None,
+            applied_fact_id: None,
+            apply_outcome: None,
+            created_at: 1,
+            updated_at: 1,
+            duplicate_count: 0,
+            last_duplicate_run_id: None,
+            folded_contents: Vec::new(),
+        }],
+    };
+    tokio::fs::create_dir_all(&legacy_proposal_root)
+        .await
+        .unwrap();
+    tokio::fs::write(
+        fact_proposals_path(&legacy_proposal_root),
+        serde_json::to_vec(&legacy_proposals).unwrap(),
+    )
+    .await
+    .unwrap();
+    import_legacy_fact_proposals(&memory, &legacy_proposal_root)
+        .await
+        .unwrap();
     let before_purge = DatabaseFactStore::new(&database)
         .inspect_owner_archive_for_test(&owner)
         .await
@@ -249,7 +396,205 @@ async fn seed_public_archive_fact(
             fs::remove_file(path).unwrap();
         }
     }
-    (fact_id, content, purged_fact_id, legacy_fact.fact_id)
+    (
+        fact_id,
+        content,
+        purged_fact_id,
+        legacy_fact.fact_id,
+        source_anchor_id,
+    )
+}
+
+async fn seed_production_evidence_assembly(
+    branch: &Path,
+    owner: &FactOwnerV1,
+    project_id: ProjectId,
+) {
+    let (source_anchor, write) = tracedecay_rusqlite_runtime::repository::write_fixture_for_project(
+        "retriever.project-memory-cutover.v1",
+        project_id,
+    );
+    let (database, _) = crate::common::open_test_database(branch).await.unwrap();
+    let existing = DatabaseFactStore::new(&database)
+        .inspect_owner_archive_for_test(owner)
+        .await
+        .unwrap();
+    let anchor_id = tracedecay_store::MemoryV2ArchiveScalarV1::Text(
+        source_anchor.anchor_id().as_str().to_owned(),
+    );
+    let mut key = std::collections::BTreeMap::new();
+    key.insert("anchor_id".to_owned(), anchor_id);
+    let mut fields = std::collections::BTreeMap::new();
+    fields.insert(
+        "anchor_json".to_owned(),
+        tracedecay_store::MemoryV2ArchiveScalarV1::Text(
+            serde_json::to_string(&source_anchor).unwrap(),
+        ),
+    );
+    fields.insert(
+        "owner_json".to_owned(),
+        tracedecay_store::MemoryV2ArchiveScalarV1::Text(
+            serde_json::to_string(source_anchor.owner()).unwrap(),
+        ),
+    );
+    fields.insert(
+        "projection_generation".to_owned(),
+        tracedecay_store::MemoryV2ArchiveScalarV1::Text(
+            source_anchor.projection_generation().as_str().to_owned(),
+        ),
+    );
+    let mut records = existing.records().to_vec();
+    records.push(
+        tracedecay_store::MemoryV2ArchiveRecordV1::new(
+            tracedecay_store::MemoryV2ArchiveFamilyV1::RetrievalAnchor,
+            key,
+            fields,
+            Vec::new(),
+        )
+        .unwrap(),
+    );
+    let payload = records
+        .iter()
+        .find(|record| {
+            record.family() == tracedecay_store::MemoryV2ArchiveFamilyV1::AssertionPayload
+        })
+        .unwrap();
+    let mut vector_fields = std::collections::BTreeMap::new();
+    vector_fields.insert(
+        "vector".to_owned(),
+        tracedecay_store::MemoryV2ArchiveScalarV1::Blob(vec![0, 0, 128, 63]),
+    );
+    vector_fields.insert(
+        "algebra".to_owned(),
+        tracedecay_store::MemoryV2ArchiveScalarV1::Text(
+            "project-memory-cutover-fixture".to_owned(),
+        ),
+    );
+    vector_fields.insert(
+        "dimensions".to_owned(),
+        tracedecay_store::MemoryV2ArchiveScalarV1::Integer(1),
+    );
+    vector_fields.insert(
+        "precision".to_owned(),
+        tracedecay_store::MemoryV2ArchiveScalarV1::Text("f32".to_owned()),
+    );
+    records.push(
+        tracedecay_store::MemoryV2ArchiveRecordV1::new(
+            tracedecay_store::MemoryV2ArchiveFamilyV1::AssertionVector,
+            payload.key().clone(),
+            vector_fields,
+            vec![
+                tracedecay_store::MemoryV2ArchiveReferenceV1::new(
+                    tracedecay_store::MemoryV2ArchiveFamilyV1::AssertionPayload,
+                    payload.key().clone(),
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap(),
+    );
+    let (owner_kind, owner_project_id) = match owner {
+        FactOwnerV1::Profile => ("profile", String::new()),
+        FactOwnerV1::Project { project_id } => ("project", project_id.as_str().to_owned()),
+    };
+    let mut quarantine_key = std::collections::BTreeMap::new();
+    quarantine_key.insert(
+        "owner_kind".to_owned(),
+        tracedecay_store::MemoryV2ArchiveScalarV1::Text(owner_kind.to_owned()),
+    );
+    quarantine_key.insert(
+        "project_id".to_owned(),
+        tracedecay_store::MemoryV2ArchiveScalarV1::Text(owner_project_id),
+    );
+    quarantine_key.insert(
+        "source_store_id".to_owned(),
+        tracedecay_store::MemoryV2ArchiveScalarV1::Text("source.project-memory-cutover".to_owned()),
+    );
+    quarantine_key.insert(
+        "source_table".to_owned(),
+        tracedecay_store::MemoryV2ArchiveScalarV1::Text("memory_oplog".to_owned()),
+    );
+    quarantine_key.insert(
+        "source_row_id".to_owned(),
+        tracedecay_store::MemoryV2ArchiveScalarV1::Integer(9001),
+    );
+    let mut quarantine_fields = std::collections::BTreeMap::new();
+    quarantine_fields.insert(
+        "reason_code".to_owned(),
+        tracedecay_store::MemoryV2ArchiveScalarV1::Text("fixture-invalid-row".to_owned()),
+    );
+    quarantine_fields.insert(
+        "recorded_at".to_owned(),
+        tracedecay_store::MemoryV2ArchiveScalarV1::Integer(1),
+    );
+    records.push(
+        tracedecay_store::MemoryV2ArchiveRecordV1::new(
+            tracedecay_store::MemoryV2ArchiveFamilyV1::LegacyQuarantine,
+            quarantine_key,
+            quarantine_fields,
+            Vec::new(),
+        )
+        .unwrap(),
+    );
+    let archive = tracedecay_store::MemoryV2OwnerArchiveV1::new(
+        owner.clone(),
+        tracedecay_store::authoritative_memory_v2_archive_families(),
+        records,
+    )
+    .unwrap();
+    DatabaseFactStore::new(&database)
+        .import_owner_archive_for_test(&archive)
+        .await
+        .unwrap();
+    database.close();
+    for entry in fs::read_dir(branch.parent().unwrap()).unwrap() {
+        let path = entry.unwrap().path();
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(".tracedecay-test-profile-"))
+        {
+            fs::remove_file(path).unwrap();
+        }
+    }
+
+    let mut connection = rusqlite::Connection::open(branch).unwrap();
+    let mut transaction = connection.transaction().unwrap();
+    let savepoint = transaction.savepoint().unwrap();
+    tracedecay_rusqlite_runtime::repository::ProjectExecutor::default()
+        .execute_evidence_assembly_write(&savepoint, &write)
+        .unwrap();
+    savepoint.commit().unwrap();
+    transaction.commit().unwrap();
+    drop(connection);
+
+    let (database, _) = crate::common::open_test_database(branch).await.unwrap();
+    RetrievalAnchorDispositionStore::append_disposition(
+        &database,
+        RetrievalAnchorDispositionRecordV1::new(
+            "disposition.project-memory-cutover",
+            source_anchor.anchor_id().clone(),
+            RetrievalAnchorOwnerV1::V3(write.owner.owner.clone()),
+            AnchorDispositionStateV1::Deleted,
+            None,
+            AnchorDispositionReasonClassV1::UserRequest,
+            UtcMicros(3),
+        )
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    database.close();
+    for entry in fs::read_dir(branch.parent().unwrap()).unwrap() {
+        let path = entry.unwrap().path();
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(".tracedecay-test-profile-"))
+        {
+            fs::remove_file(path).unwrap();
+        }
+    }
 }
 
 #[tokio::test]
@@ -477,8 +822,29 @@ async fn project_memory_cutover_preserves_v2_authority_after_legacy_reclamation(
     fs::create_dir_all(&branches).unwrap();
     let branch = branches.join("v2-authority.db");
     fs::copy(&project_graph, &branch).unwrap();
-    let (public_fact_id, public_fact_content, purged_fact_id, purged_legacy_id) =
+    let (public_fact_id, public_fact_content, purged_fact_id, purged_legacy_id, _) =
         seed_public_archive_fact(&branch, owner.clone()).await;
+    seed_production_evidence_assembly(&branch, &owner, ProjectId::new(project_id.clone()).unwrap())
+        .await;
+    let (source_database, _) = crate::common::open_test_database_read_only(&branch)
+        .await
+        .unwrap();
+    let source_archive = DatabaseFactStore::new(&source_database)
+        .inspect_owner_archive_for_test(&owner)
+        .await
+        .unwrap();
+    source_database.close();
+    for entry in fs::read_dir(branch.parent().unwrap()).unwrap() {
+        let path = entry.unwrap().path();
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(".tracedecay-test-profile-"))
+        {
+            fs::remove_file(path).unwrap();
+        }
+    }
+    let source_records = source_archive.records().to_vec();
     let mut meta = branch_meta::load_branch_meta(&data_root).unwrap();
     meta.add_branch("v2-authority", "branches/v2-authority.db", "main");
     branch_meta::save_branch_meta(&data_root, &meta).unwrap();
@@ -553,6 +919,27 @@ async fn project_memory_cutover_preserves_v2_authority_after_legacy_reclamation(
         .inspect_owner_archive_for_test(&owner)
         .await
         .unwrap();
+    let populated_families = archive
+        .records()
+        .iter()
+        .map(tracedecay_store::MemoryV2ArchiveRecordV1::family)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        populated_families,
+        tracedecay_store::authoritative_memory_v2_archive_families(),
+        "the production-writer fixture must populate every authoritative archive family"
+    );
+    for source in &source_records {
+        if source.family() == tracedecay_store::MemoryV2ArchiveFamilyV1::CurrentFact {
+            continue;
+        }
+        assert!(
+            archive.records().contains(source),
+            "stable owner-scoped archive record was not preserved: {:?} {:?}",
+            source.family(),
+            source.key()
+        );
+    }
     project_database.close();
 
     let has_text =
