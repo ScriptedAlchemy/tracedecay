@@ -643,6 +643,7 @@ struct FakeCodexAppServer {
     _temp: TempDir,
     bin: PathBuf,
     log: PathBuf,
+    #[cfg(target_os = "linux")]
     pid: PathBuf,
 }
 
@@ -683,6 +684,7 @@ impl FakeCodexAppServer {
             _temp: temp,
             bin,
             log,
+            #[cfg(target_os = "linux")]
             pid,
         }
     }
