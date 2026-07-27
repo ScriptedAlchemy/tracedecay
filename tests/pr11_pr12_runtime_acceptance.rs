@@ -1632,7 +1632,19 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
     .await;
 
     let projection = poll_lsp_context(&mut session, &document_uri, "diagnostics", 2).await;
-    assert_eq!(projection["result"]["rootUri"], root_uri);
+    // The gateway compares roots by parsed path rather than by raw string,
+    // because a directory URI legitimately arrives with or without a trailing
+    // slash, so the projection is checked the same way it is admitted.
+    let projected_root = projection["result"]["rootUri"]
+        .as_str()
+        .expect("projected root URI");
+    assert_eq!(
+        url::Url::parse(projected_root)
+            .ok()
+            .and_then(|url| url.to_file_path().ok()),
+        Some(fixture.project.clone()),
+        "the projection must name the admitted root, got {projected_root}"
+    );
     assert_eq!(projection["result"]["documentUri"], document_uri);
     assert_eq!(projection["result"]["kind"], "diagnostics");
     assert_eq!(
@@ -1650,6 +1662,31 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
             .as_str()
             .is_some()
     );
+    // This project has ingested no diagnostics, which is every project's first
+    // run. The feedback authority answers such a read with terminal evidence
+    // and no cycle, and the LSP runtime used to turn that into a hard failure,
+    // so a fresh project could not obtain any context projection at all. The
+    // projection must arrive with real identity and state its own degradation
+    // rather than either failing or claiming a completeness it does not have.
+    let coverage = projection["result"]["coverage"]
+        .as_str()
+        .expect("projection coverage");
+    let producer_state = projection["result"]["producerState"]
+        .as_str()
+        .expect("projection producer state");
+    let items = projection["result"]["items"]
+        .as_array()
+        .expect("projection items");
+    if items.is_empty() {
+        assert_ne!(
+            coverage, "complete",
+            "an empty projection must not report complete coverage: {projection}"
+        );
+        assert_ne!(
+            producer_state, "complete",
+            "an empty projection must not report a complete producer: {projection}"
+        );
+    }
     for (request_id, method, params) in [
         (
             403,
