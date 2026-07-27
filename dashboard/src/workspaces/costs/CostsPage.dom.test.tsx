@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { FIXTURES } from '../../../stories/fixtures/data.ts';
+import { FIXTURES, resolveFixture } from '../../../stories/fixtures/data.ts';
 import { CostsPage } from './CostsPage.tsx';
 
 afterEach(() => {
@@ -19,18 +19,7 @@ describe('CostsPage truth claims', () => {
     sessions['estimated_messages'] = 600;
     sessions['messages'] = 1000;
 
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () => new Response(JSON.stringify(payload), { status: 200 })),
-    );
-    const client = new QueryClient({
-      defaultOptions: { queries: { retry: false, gcTime: 0 } },
-    });
-    render(
-      <QueryClientProvider client={client}>
-        <CostsPage />
-      </QueryClientProvider>,
-    );
+    renderCosts(payload);
 
     expect(await screen.findByText('tokenized')).toBeTruthy();
     expect(screen.getByText(/provider-reported token breakdown/i)).toBeTruthy();
@@ -92,6 +81,31 @@ describe('CostsPage truth claims', () => {
     expect(screen.queryByText(/reported no messages/i)).toBeNull();
   });
 
+  it('keeps the canonical cost read alive when the savings ledger read fails', async () => {
+    const payload = structuredClone(
+      FIXTURES['/api/plugins/savings/overview'],
+    ) as Record<string, unknown>;
+    // `savings_api::read_failed_block` shape: the block reports the failure and
+    // leaves both summaries null rather than settling them to zero.
+    payload['savings'] = {
+      available: false,
+      db: '/fast/projects/tracedecay/.tracedecay/savings.db',
+      error: 'failed to read savings ledger',
+      ledger: null,
+      lifetime_counters: null,
+      recording: null,
+    };
+
+    renderCosts(payload);
+
+    // The failed legacy read reports itself...
+    expect(await screen.findAllByText(/Savings ledger read failed/i)).not.toHaveLength(0);
+    // ...and the independent canonical projection still renders its own
+    // measurements rather than being blanked by its neighbour.
+    expect(await screen.findByText('provider tokens')).toBeTruthy();
+    expect(screen.getByText('latency breakdown')).toBeTruthy();
+  });
+
   it('discloses that project savings are a capped top slice', async () => {
     const payload = structuredClone(
       FIXTURES['/api/plugins/savings/overview'],
@@ -108,10 +122,24 @@ describe('CostsPage truth claims', () => {
   });
 });
 
-function renderCosts(payload: unknown) {
+/**
+ * The page issues two independent reads. The savings overview is the payload
+ * under test; every other route — the canonical `/api/costs` projection among
+ * them — is served its own fixture, because a stub that answers every URL with
+ * the savings body would make the canonical panel report a schema error and
+ * hide whichever failure the case is actually about.
+ */
+function renderCosts(savingsOverview: unknown) {
   vi.stubGlobal(
     'fetch',
-    vi.fn(async () => new Response(JSON.stringify(payload), { status: 200 })),
+    vi.fn(async (input: RequestInfo | URL) => {
+      const pathname = new URL(String(input), 'http://localhost').pathname;
+      const body =
+        pathname === '/api/plugins/savings/overview'
+          ? savingsOverview
+          : resolveFixture(pathname, '');
+      return new Response(JSON.stringify(body), { status: 200 });
+    }),
   );
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0 } },

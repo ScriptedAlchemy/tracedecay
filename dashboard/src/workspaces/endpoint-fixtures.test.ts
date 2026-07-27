@@ -28,6 +28,8 @@ import { AnyObject } from '../data/query/legacy.ts';
 import {
   AnalyticsOverviewPayloadSchema,
   AnalyticsUsageSummarySchema,
+  CodeIndexFreshnessPayloadSchema,
+  CostsReadModelSchema,
   DoctorFindingsPayloadSchema,
   DoctorStorageFindingKindSchema,
   EnvelopeSchema,
@@ -37,6 +39,7 @@ import {
   LcmSessionPayloadSchema,
   MemoryOverviewPayloadSchema,
   MemoryStatusPayloadSchema,
+  ObservatoryReadModelSchema,
   ProjectContextPayloadSchema,
   ProjectsPayloadSchema,
   SavingsOverviewPayloadSchema,
@@ -659,5 +662,65 @@ describe('endpoint fixtures parse against their consuming contracts', () => {
     expect(env.payload.entries.length).toBe(0);
     expect(env.payload.family_filter).toBeNull();
     expect(env.payload.known_families.length).toBe(7);
+  });
+
+  // The two Plan 26 canonical read models. The density assertions here are
+  // about the MIX, not the count: a fixture where every metric carries a value
+  // parses fine and renders a surface that never shows the unavailable plate,
+  // which is the exact state these workspaces exist to render honestly.
+  it('GET /api/observatory — canonical observations envelope', () => {
+    const env = parse(EnvelopeSchema(ObservatoryReadModelSchema), '/api/observatory');
+    const metrics = env.payload.metrics;
+    // Both producing sources present, so the surface renders two groups.
+    const sources = new Set(metrics.map((metric) => metric.provenance.source));
+    expect(sources).toEqual(new Set(['observability_envelope', 'feedback_observations']));
+    // Event flow and latency both reach the surface.
+    expect(metrics.some((metric) => metric.metric === 'observability_events')).toBe(true);
+    expect(
+      metrics.some(
+        (metric) => metric.metric === 'feedback_latency_p95' && metric.unit === 'microseconds',
+      ),
+    ).toBe(true);
+    // At least one completed and at least one genuinely unavailable, each with
+    // the coverage state that goes with it.
+    const unavailable = metrics.filter((metric) => metric.value == null);
+    expect(unavailable.length).toBeGreaterThan(0);
+    expect(metrics.filter((metric) => metric.value != null).length).toBeGreaterThan(0);
+    for (const metric of unavailable) {
+      expect(metric.unavailable_reason).toBeTruthy();
+      expect(metric.coverage.state).toBe('unknown');
+      expect(metric.coverage.eligible).toBeNull();
+      expect(metric.denominator_value).toBeNull();
+    }
+  });
+
+  it('GET /api/costs — canonical cost envelope with an unpriced ledger', () => {
+    const env = parse(EnvelopeSchema(CostsReadModelSchema), '/api/costs');
+    expect(env.payload.usage.length).toBeGreaterThan(0);
+    // Prices are recorded at ingest; a read over unpriced turns must arrive as
+    // a null cost with its reason, or the surface can never be shown refusing
+    // to print $0.00.
+    const cost = env.payload.estimated_cost.find((metric) => metric.metric === 'provider_cost');
+    expect(cost?.value).toBeNull();
+    expect(cost?.unavailable_reason).toBe('pricing_revision_unavailable');
+    expect(env.payload.pricing_revision).toBeNull();
+    // All-time window, which the wire carries as an unbounded lower edge.
+    expect(env.payload.horizon.since_micros).toBe(0);
+  });
+
+  it('GET /api/code-index/freshness — branch-aware generation envelope', () => {
+    const env = parse(
+      EnvelopeSchema(CodeIndexFreshnessPayloadSchema),
+      '/api/code-index/freshness',
+    );
+    const worktree = env.payload.worktrees[0];
+    expect(worktree).toBeTruthy();
+    // The branch-aware part: a sealed generation names the exact reference it
+    // was sealed against, so a graph read on another branch is visibly stale.
+    expect(worktree?.source_reference).toMatch(/^refs\//);
+    expect(worktree?.latest_generation_id).toBeTruthy();
+    expect(worktree?.snapshot_content_identity).toBeTruthy();
+    expect(worktree?.staleness_state).toBe('fresh');
+    expect(worktree?.coverage).toBe('complete');
   });
 });
