@@ -274,6 +274,7 @@ impl McpProxy {
         proxy
     }
 
+    #[cfg(target_os = "linux")]
     pub(super) fn pid(&self) -> u32 {
         self.child.id()
     }
