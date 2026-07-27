@@ -478,6 +478,25 @@ pub async fn call_default_tool_within(
     call_tool_within(&socket_path, handshake, tool_name, arguments, deadline).await
 }
 
+/// Calls a daemon tool, waiting out a warming project until `deadline`.
+///
+/// Bootstrap callers deliberately trigger the cold open they are waiting for,
+/// so the warming hint is progress rather than an answer: `tracedecay init`
+/// asks for a status it can only get after the open completes. That is the
+/// opposite of [`call_default_tool_within`], whose callers want the typed
+/// warming state returned to them, and wider than [`call_default_tool`], whose
+/// grace is sized for an already-open project rather than a first index.
+pub async fn call_default_tool_awaiting_project_open(
+    handshake: &DaemonHandshake,
+    tool_name: &str,
+    arguments: serde_json::Value,
+    deadline: Instant,
+) -> Result<serde_json::Value> {
+    let socket_path = default_available_socket_path()?;
+    call_tool_with_project_warming_retry(&socket_path, handshake, tool_name, arguments, deadline)
+        .await
+}
+
 pub async fn call_default_doctor_runtime(
     handshake: &DaemonHandshake,
     arguments: serde_json::Value,

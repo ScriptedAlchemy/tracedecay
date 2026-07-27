@@ -162,7 +162,7 @@ async fn brokered_init(
     // in CI. Give the bootstrap a generous budget so the client waits out the
     // background open instead of abandoning it just before it completes.
     let init_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(120);
-    tracedecay::daemon::call_default_tool_within(
+    tracedecay::daemon::call_default_tool_awaiting_project_open(
         handshake,
         "tracedecay_status",
         serde_json::json!({"format": "json"}),
