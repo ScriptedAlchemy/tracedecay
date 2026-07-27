@@ -1,6 +1,6 @@
 use super::schema_contract::{
     authority_invariant_triggers_intact, ensure_authority_audit_checkpoint_schema,
-    ensure_authority_invariant_schema, ensure_authority_invariants,
+    ensure_authority_invariant_schema, ensure_authority_invariants, require_foreign_key_audit,
     restore_immutability_after_canonical_repair, suspend_immutability_for_canonical_repair,
     suspend_session_invariants_for_schema_upgrade, validate_authority_rows_exhaustive,
     validate_authority_schema_contract, validate_registry_schema_contract,
@@ -219,7 +219,14 @@ pub(crate) async fn ensure_registered_schema(conn: &Connection) -> crate::errors
     let is_fresh = !table_exists(conn, "sessions").await?
         && !table_exists(conn, "observations").await?
         && !table_exists(conn, "code_projects").await?;
+    ensure_authority_audit_checkpoint_schema(conn).await?;
     let force_exhaustive = !authority_invariant_triggers_intact(conn).await?;
+    if force_exhaustive && !is_fresh {
+        // Persist the requirement before the schema transaction repairs the
+        // trigger evidence that armed it. The progress row doubles as the
+        // resumable cursor and is removed only by a completed FK sweep.
+        require_foreign_key_audit(conn).await?;
+    }
     let transaction = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .await
@@ -459,5 +466,45 @@ mod tests {
             -1,
             "validated exhaustive-audit frontiers must remain resumable after a late failure"
         );
+    }
+
+    #[tokio::test]
+    async fn foreign_key_failure_remains_blocking_after_trigger_repair() {
+        let directory = TempDir::new().unwrap();
+        let database_path = directory.path().join("sessions.db");
+        {
+            let connection = TestConnection::open(&database_path);
+            ensure_registered_schema(&connection)
+                .await
+                .expect("initialize authority schema");
+        }
+        {
+            let connection = rusqlite::Connection::open(&database_path).unwrap();
+            connection
+                .execute_batch(
+                    "PRAGMA foreign_keys = OFF;
+                     DROP TRIGGER IF EXISTS projection_queue_identity_insert_v1;
+                     CREATE TABLE audit_parent (id INTEGER PRIMARY KEY);
+                     CREATE TABLE audit_child (
+                        id INTEGER PRIMARY KEY,
+                        parent_id INTEGER NOT NULL REFERENCES audit_parent(id)
+                     );
+                     INSERT INTO audit_child(id, parent_id) VALUES (1, 99);",
+                )
+                .expect("seed a foreign-key violation behind a broken trigger");
+        }
+
+        for attempt in 1..=2 {
+            let connection = TestConnection::open(&database_path);
+            let error = ensure_registered_schema(&connection)
+                .await
+                .expect_err("an observed foreign-key violation must keep admission closed");
+            assert!(
+                error
+                    .to_string()
+                    .contains("global database contains a foreign-key violation"),
+                "open attempt {attempt} returned an unexpected error: {error}"
+            );
+        }
     }
 }
