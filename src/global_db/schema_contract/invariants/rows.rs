@@ -845,4 +845,226 @@ mod tests {
         )
         .await;
     }
+
+    mod authority_cross_checks {
+        //! The indexed columns beside each authority JSON blob are redundant
+        //! by construction: they exist so the daemon can filter and join
+        //! without decoding. Nothing at write time forces them to agree with
+        //! the JSON, so if they ever drift the daemon serves rows whose keys
+        //! contradict their own authority. These pin the detection.
+
+        use tracedecay_domain::{ObservationScopeV1, ObservationSourceRangeV1, ProjectId};
+        use tracedecay_store::observation::{ObservationCoverageReason, ObservationCoverageV1};
+
+        use super::super::super::test_fixture::{
+            authority_fixture, open_registered, seed_observation, shift,
+        };
+        use super::super::{
+            validate_observation_authority_rows, validate_receipt_authority_rows,
+            validate_source_cursor_authority_rows,
+        };
+        use crate::db::engine::{Executor, params};
+
+        /// The digest column is what payload lookups key on. A row whose
+        /// column names one payload while its JSON names another resolves to
+        /// the wrong payload without ever failing a query.
+        #[tokio::test]
+        async fn observation_authority_columns_are_cross_checked_against_json() {
+            let (_directory, conn) = open_registered().await;
+            let (observation, cursor) = authority_fixture(0, "observation-columns");
+            let receipt = observation.receipt();
+            conn.execute(
+                "INSERT INTO sanitization_receipts
+                 (receipt_id, sanitizer_version, payload_digest, receipt_json)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    receipt.receipt().receipt_id().as_str(),
+                    receipt.receipt().sanitizer_version().as_str(),
+                    observation.payload_reference().digest().as_str(),
+                    serde_json::to_string(receipt).unwrap()
+                ],
+            )
+            .await
+            .expect("seed sanitization receipt");
+            conn.execute(
+                "INSERT INTO observations
+                 (observation_id, payload_digest, receipt_id, observation_json,
+                  committed_cursor_json)
+                 VALUES (?1, 'digest.disagrees-with-json', ?2, ?3, ?4)",
+                params![
+                    observation.observation_id().as_str(),
+                    receipt.receipt().receipt_id().as_str(),
+                    serde_json::to_string(&observation).unwrap(),
+                    serde_json::to_string(&cursor).unwrap()
+                ],
+            )
+            .await
+            .expect("seed observation with a drifted digest column");
+
+            let error = validate_observation_authority_rows(&conn, 0)
+                .await
+                .expect_err("a drifted observation column must be detected");
+
+            assert!(
+                error.to_string().contains(
+                    "committed observation authority columns disagree with observation JSON"
+                ),
+                "{error}"
+            );
+        }
+
+        /// The committed cursor travels beside the observation as the resume
+        /// point for its source. If it disagrees with the observation's own
+        /// range, resuming from it replays or skips the difference.
+        #[tokio::test]
+        async fn committed_cursor_is_cross_checked_against_observation_evidence() {
+            let (_directory, conn) = open_registered().await;
+            let (observation, cursor) = authority_fixture(0, "committed-cursor");
+            let receipt = observation.receipt();
+            conn.execute(
+                "INSERT INTO sanitization_receipts
+                 (receipt_id, sanitizer_version, payload_digest, receipt_json)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    receipt.receipt().receipt_id().as_str(),
+                    receipt.receipt().sanitizer_version().as_str(),
+                    observation.payload_reference().digest().as_str(),
+                    serde_json::to_string(receipt).unwrap()
+                ],
+            )
+            .await
+            .expect("seed sanitization receipt");
+            conn.execute(
+                "INSERT INTO observations
+                 (observation_id, payload_digest, receipt_id, observation_json,
+                  committed_cursor_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    observation.observation_id().as_str(),
+                    observation.payload_reference().digest().as_str(),
+                    receipt.receipt().receipt_id().as_str(),
+                    serde_json::to_string(&observation).unwrap(),
+                    serde_json::to_string(&shift(&cursor, 25)).unwrap()
+                ],
+            )
+            .await
+            .expect("seed observation with a drifted committed cursor");
+
+            let error = validate_observation_authority_rows(&conn, 0)
+                .await
+                .expect_err("a committed cursor past its observation must be detected");
+
+            assert!(
+                error
+                    .to_string()
+                    .contains("committed source cursor disagrees with observation source evidence"),
+                "{error}"
+            );
+        }
+
+        /// The sanitizer version column selects which sanitizer's guarantees a
+        /// payload carries. A column that outruns the receipt JSON silently
+        /// credits the payload with a contract it was never sanitized under.
+        #[tokio::test]
+        async fn receipt_authority_columns_are_cross_checked_against_json() {
+            let (_directory, conn) = open_registered().await;
+            let (observation, _) = authority_fixture(0, "receipt-columns");
+            let receipt = observation.receipt();
+            conn.execute(
+                "INSERT INTO sanitization_receipts
+                 (receipt_id, sanitizer_version, payload_digest, receipt_json)
+                 VALUES (?1, 'sanitizer.disagrees-with-json', ?2, ?3)",
+                params![
+                    receipt.receipt().receipt_id().as_str(),
+                    observation.payload_reference().digest().as_str(),
+                    serde_json::to_string(receipt).unwrap()
+                ],
+            )
+            .await
+            .expect("seed receipt with a drifted sanitizer version column");
+
+            let error = validate_receipt_authority_rows(&conn, 0)
+                .await
+                .expect_err("a drifted receipt column must be detected");
+
+            assert!(
+                error
+                    .to_string()
+                    .contains("sanitization receipt authority columns disagree with receipt JSON"),
+                "{error}"
+            );
+        }
+
+        /// Cursor rows are looked up by their `(source_json, scope_json)` key.
+        /// A key naming a different scope than the cursor it stores hands the
+        /// wrong source its resume point.
+        #[tokio::test]
+        async fn source_cursor_authority_keys_are_cross_checked_against_json() {
+            let (_directory, conn) = open_registered().await;
+            let (_, cursor) = seed_observation(&conn, 0, "cursor-keys").await;
+            let foreign_scope = ObservationScopeV1::Project {
+                project_id: ProjectId::new("project.cursor-keys").expect("project identifier"),
+            };
+            conn.execute(
+                "INSERT INTO source_cursors(source_json, scope_json, cursor_json)
+                 VALUES (?1, ?2, ?3)",
+                params![
+                    serde_json::to_string(cursor.source()).unwrap(),
+                    serde_json::to_string(&foreign_scope).unwrap(),
+                    serde_json::to_string(&cursor).unwrap()
+                ],
+            )
+            .await
+            .expect("seed cursor whose scope key disagrees with its JSON");
+
+            let error = validate_source_cursor_authority_rows(&conn)
+                .await
+                .expect_err("a drifted cursor key must be detected");
+
+            assert!(
+                error
+                    .to_string()
+                    .contains("source cursor authority keys disagree with cursor JSON"),
+                "{error}"
+            );
+        }
+
+        /// An advance is what lets a frontier legitimately run past the last
+        /// commit. A receipt-bearing reason with no receipt row is exactly the
+        /// shape that would launder unreceipted progress into durable coverage.
+        #[tokio::test]
+        async fn source_cursor_advance_authority_is_cross_checked() {
+            let (_directory, conn) = open_registered().await;
+            let (_, cursor) = seed_observation(&conn, 0, "advance-evidence").await;
+            let coverage = ObservationCoverageV1::new(
+                cursor.generation(),
+                cursor.ordering_domain(),
+                ObservationSourceRangeV1::new(cursor.position(), cursor.position() + 50).unwrap(),
+            );
+            conn.execute(
+                "INSERT INTO source_cursor_advances
+                 (source_json, scope_json, coverage_json, reason)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    serde_json::to_string(cursor.source()).unwrap(),
+                    serde_json::to_string(cursor.scope()).unwrap(),
+                    serde_json::to_string(&coverage).unwrap(),
+                    ObservationCoverageReason::DuplicateObservation.as_str()
+                ],
+            )
+            .await
+            .expect("seed advance claiming a receipt it does not have");
+
+            let error = validate_source_cursor_authority_rows(&conn)
+                .await
+                .expect_err("a receiptless receipt-bearing advance must be detected");
+
+            assert!(
+                error
+                    .to_string()
+                    .contains("source cursor advance contains invalid authority evidence"),
+                "{error}"
+            );
+        }
+    }
 }
