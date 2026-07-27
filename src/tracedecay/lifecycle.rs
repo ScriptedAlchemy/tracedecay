@@ -205,22 +205,44 @@ impl TraceDecay {
         let selected_id = selected
             .as_ref()
             .and_then(|layout| layout.identity.project_id.as_deref());
-        let candidates =
+        // Store inventory opens the graph and sessions databases, so it must
+        // stay behind the rare paths that actually compare stores. Resolving a
+        // layout is on every open, including fail-closed clients that must not
+        // touch the store at all.
+        let (candidates, selected_is_sole_exact_root) =
             storage::matching_legacy_profile_layouts(project_root, &profile_root, selected_id)?;
-        Self::choose_identity_layout(project_root, selected, candidates, allow_repair)
-            .await?
-            .map_or_else(
-                || storage::default_profile_sharded_layout(project_root, &profile_root),
-                Ok,
-            )
+        Self::choose_identity_layout(
+            project_root,
+            selected,
+            candidates,
+            selected_is_sole_exact_root,
+            allow_repair,
+        )
+        .await?
+        .map_or_else(
+            || storage::default_profile_sharded_layout(project_root, &profile_root),
+            Ok,
+        )
     }
 
     async fn choose_identity_layout(
         project_root: &Path,
         selected: Option<StoreLayout>,
         candidates: Vec<StoreLayout>,
+        selected_is_sole_exact_root: bool,
         allow_repair: bool,
     ) -> Result<Option<StoreLayout>> {
+        // With no competing candidate the selected layout wins regardless, so
+        // skip the inventory rather than opening the store to confirm it.
+        if selected_is_sole_exact_root
+            && !candidates.is_empty()
+            && let Some(selected) = selected.as_ref()
+        {
+            let selected_inventory = store_identity_inventory(selected).await;
+            if selected_inventory.is_healthy() && !selected_inventory.is_pristine() {
+                return Ok(Some(selected.clone()));
+            }
+        }
         if candidates.len() > 1 {
             let mut details = Vec::new();
             for candidate in &candidates {
@@ -243,6 +265,29 @@ impl TraceDecay {
 
         let selected_inventory = store_identity_inventory(&selected).await;
         let candidate_inventory = store_identity_inventory(&candidate).await;
+        let manifest_matches_project_root = |layout: &StoreLayout| {
+            let manifest_path = layout.manifest_path.as_deref()?;
+            let manifest = storage::read_store_manifest(manifest_path).ok()?;
+            Some(
+                manifest.project_root == project_root
+                    || match (
+                        manifest.project_root.canonicalize(),
+                        project_root.canonicalize(),
+                    ) {
+                        (Ok(manifest_root), Ok(project_root)) => manifest_root == project_root,
+                        _ => false,
+                    },
+            )
+        };
+        if manifest_matches_project_root(&candidate) == Some(true)
+            && manifest_matches_project_root(&selected) == Some(false)
+            && candidate_inventory.is_healthy()
+            && !candidate_inventory.is_pristine()
+            && selected_inventory.is_healthy()
+            && !selected_inventory.is_pristine()
+        {
+            return Ok(Some(candidate));
+        }
         if selected_inventory.is_pristine() && candidate_inventory.is_healthy() {
             if !allow_repair {
                 return Err(identity_cutover_conflict(
