@@ -1162,7 +1162,12 @@ fn fallback_database_path(project_path: &Path) -> Option<PathBuf> {
 fn database_recovery_guidance(db_path: &Path) -> String {
     let wal_path = db_path.with_extension("db-wal");
     let shm_path = db_path.with_extension("db-shm");
-    let data_root = db_path.parent().unwrap_or_else(|| Path::new("."));
+    let graph_parent = db_path.parent().unwrap_or_else(|| Path::new("."));
+    let data_root = if graph_parent.file_name() == Some(std::ffi::OsStr::new("branches")) {
+        graph_parent.parent().unwrap_or(graph_parent)
+    } else {
+        graph_parent
+    };
     let mut graph_dirty = db_path.as_os_str().to_os_string();
     graph_dirty.push(".dirty");
     let graph_dirty = PathBuf::from(graph_dirty);
@@ -1178,7 +1183,8 @@ fn database_recovery_guidance(db_path: &Path) -> String {
          graph dirty sentinel: {}\n\
          legacy dirty sentinel (if present): {}\n\
          `sessions.db` is separate and must not be removed: {}\n\
-         Facts are stored in the graph database; automatic rebuild is intentionally blocked because it cannot preserve them generically.\n\
+         Facts are stored in the graph database; automatic default-store rebuild is intentionally blocked because it cannot preserve them generically.\n\
+         Derived branch indexes are preserved under `recovery/` and rebuilt automatically from a healthy tracked ancestor.\n\
          Do not run `tracedecay init`, `tracedecay sync --force`, or `tracedecay wipe` until that recovery set is safely copied.\n\
          Report the preserved set at https://github.com/ScriptedAlchemy/tracedecay/issues for offline recovery.",
         db_path.display(),
