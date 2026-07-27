@@ -526,23 +526,39 @@ fn catalog_bound_compatibility_tools_resolve_before_retained_dispatch() {
         }
     }
 
-    assert_eq!(resolved_bindings, 26);
+    assert_eq!(resolved_bindings, 58);
     assert_eq!(
         compatibility_operations,
         [
+            "api_migration_apply",
+            "api_migration_plan",
             "ast_grep_rewrite",
-            "git_blame",
-            "git_diff",
-            "git_history",
-            "git_hunks",
-            "git_status",
+            "fact_feedback",
+            "fact_store",
             "insert_at",
             "insert_at_symbol",
+            "lcm_compress",
+            "lcm_describe",
+            "lcm_doctor",
+            "lcm_expand",
+            "lcm_expand_query",
+            "lcm_grep",
+            "lcm_load_session",
+            "lcm_preflight",
+            "lcm_session_boundary",
+            "lcm_status",
+            "memory_status",
+            "message_search",
             "move_symbol",
             "multi_str_replace",
             "replace_symbol",
+            "session_end",
+            "session_refresh",
+            "session_start",
+            "sessions_for",
             "source_edit_reconcile",
             "str_replace",
+            "workflows",
         ]
         .into_iter()
         .map(str::to_owned)
