@@ -18,7 +18,6 @@ pub(in crate::mcp::tools::handlers) async fn handle_fact_feedback(
     cg: &TraceDecay,
     args: Value,
     global_db: Option<&RegisteredGlobalDb>,
-    allow_default_registry_fallback: bool,
 ) -> Result<ToolResult> {
     if project_selector_present(&args, &["project_path"]) {
         return Err(config_error(
@@ -31,7 +30,7 @@ pub(in crate::mcp::tools::handlers) async fn handle_fact_feedback(
         .and_then(Value::as_str)
         .map(ToOwned::to_owned);
     let target_memory =
-        open_target_memory_db(cg, &args, global_db, allow_default_registry_fallback).await?;
+        open_target_memory_db(cg, &args, global_db).await?;
     let request = FeedbackRequest {
         fact_id: fact_id(&args)?,
         action: feedback_action(&args)?,

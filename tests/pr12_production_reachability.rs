@@ -28,8 +28,8 @@ use tracedecay::daemon_client::{DaemonInvocationClient, RequestedOutputFormat};
 use tracedecay::mcp::tools::dispatch::resolve_mcp_application_surface;
 use tracedecay_application::retrieval::SymbolGraphScope;
 use tracedecay_application::{
-    ApplicationEnvelope, ApplicationOutcome, OperationTermination, RequestId, ResultProjection,
-    RetrievalOrder,
+    ApplicationEnvelope, ApplicationOutcome, OpaqueCursor, OperationTermination, RequestId,
+    ResultProjection, RetrievalOrder,
 };
 
 const DAEMON_SOURCE: &str = include_str!("../src/daemon.rs");
@@ -37,8 +37,8 @@ const PROJECT_OPEN_OWNERS_SOURCE: &str = include_str!("../src/daemon/project_ope
 const INVOCATION_SOURCE: &str = include_str!("../src/daemon/service/invocation.rs");
 const APPLICATION_SURFACE_SOURCE: &str = include_str!("../src/application_surface.rs");
 
-/// Every surface pins its page to ten rows, so a query with more matches than
-/// this must cross a page boundary to answer at all.
+/// Every surface pins its page size to ten rows, so a query with more matches
+/// than this must cross a page boundary to answer at all.
 const SURFACE_PAGE_SIZE: usize = 10;
 const PROBE_SYMBOL_COUNT: usize = 24;
 const PROBE_TOKEN: &str = "pr12_pagination_probe";
@@ -191,7 +191,7 @@ fn assert_command_success(label: &str, output: &Output) {
     );
 }
 
-fn symbol_search_request(query: &str) -> CodeSymbolSearchSurfaceRequest {
+fn symbol_search_request(query: &str, cursor: Option<&str>) -> CodeSymbolSearchSurfaceRequest {
     CodeSymbolSearchSurfaceRequest {
         query: query.to_owned(),
         scope: SymbolGraphScope { path_prefix: None },
@@ -199,13 +199,14 @@ fn symbol_search_request(query: &str) -> CodeSymbolSearchSurfaceRequest {
         meta: CallableCodeSurfaceMeta {
             projection: ResultProjection::Summary,
             order: RetrievalOrder::Relevance,
+            cursor: cursor.map(|cursor| OpaqueCursor::new(cursor.to_owned()).expect("cursor")),
         },
     }
 }
 
-fn symbol_search_surface_request(query: &str) -> ApplicationSurfaceRequest {
+fn symbol_search_surface_request(query: &str, cursor: Option<&str>) -> ApplicationSurfaceRequest {
     ApplicationSurfaceRequest::PrimitiveCode(PrimitiveCodeSurfaceRequest::SymbolSearch(
-        symbol_search_request(query),
+        symbol_search_request(query, cursor),
     ))
 }
 
@@ -230,9 +231,10 @@ fn evidence_payload(result: &ApplicationSurfaceInvocationResult) -> &Value {
     }
 }
 
-fn run_symbol_search_cli(home: &Path, project: &Path, query: &str) -> Output {
+fn run_symbol_search_cli(home: &Path, project: &Path, query: &str, cursor: Option<&str>) -> Output {
     let project_arg = project.to_string_lossy().into_owned();
-    let arguments = serde_json::to_string(&symbol_search_request(query)).expect("CLI arguments");
+    let arguments =
+        serde_json::to_string(&symbol_search_request(query, cursor)).expect("CLI arguments");
     common::tracedecay_command_with_home(home)
         .current_dir(project)
         .args([
@@ -275,8 +277,36 @@ fn assert_first_page_of_many(surface: &str, payload: &Value) {
     );
 }
 
+/// Asserts a resumed page continued from the first rather than restarting it.
+fn assert_second_page_continues(surface: &str, first: &Value, second: &Value) {
+    let first_items = first["items"].as_array().expect("first page items");
+    let second_items = second["items"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{surface} resumed page items: {second:#}"));
+    assert_eq!(
+        second["total"], first["total"],
+        "{surface} resume must read the same result set"
+    );
+    assert!(
+        !second_items.is_empty(),
+        "{surface} resume returned no rows: {second:#}"
+    );
+    assert_ne!(
+        second_items.first(),
+        first_items.first(),
+        "{surface} resume restarted at the first page instead of continuing"
+    );
+    for item in second_items {
+        assert!(
+            !first_items.contains(item),
+            "{surface} resume repeated a first-page row: {item:#}"
+        );
+    }
+}
+
 /// Project open must mount the PR12 primitive runtime, and that runtime must
-/// answer a read whose result set crosses a page boundary.
+/// answer a read whose result set crosses a page boundary in both directions:
+/// minting a continuation and honouring it.
 ///
 /// The daemon resolves the primitive runtime out of the registry populated by
 /// `register_project_open_production_owners`, so a request that returns evidence
@@ -284,26 +314,45 @@ fn assert_first_page_of_many(surface: &str, payload: &Value) {
 /// symbol-graph cursor authority to mint a continuation: a broken authority
 /// fails the whole read rather than returning a short page, which is how a
 /// digest-shape defect in that authority stayed invisible to single-page reads.
+/// Spending that continuation through the same shipped surface reaches
+/// `resume_offset`, which no surface could call while the page was hard-coded to
+/// the first one.
 #[tokio::test(flavor = "multi_thread")]
 async fn production_project_open_serves_a_paginated_symbol_graph_read() {
     let fixture = production_fixture().await;
     let result = resolve_mcp_application_surface(
         ApplicationSurfaceOperation::CodeSymbolSearch,
         RequestId::new("request.pr12-reachability.symbol-search.mcp").expect("request id"),
-        symbol_search_surface_request(PROBE_TOKEN),
+        symbol_search_surface_request(PROBE_TOKEN, None),
         RequestedOutputFormat::Json,
         Some(&fixture.client),
     )
     .await
     .expect("MCP application dispatch");
-    assert_first_page_of_many("MCP", evidence_payload(&result));
+    let first = evidence_payload(&result).clone();
+    assert_first_page_of_many("MCP", &first);
+
+    let cursor = first["next_cursor"]
+        .as_str()
+        .unwrap_or_else(|| panic!("continuation cursor: {first:#}"))
+        .to_owned();
+    let resumed = resolve_mcp_application_surface(
+        ApplicationSurfaceOperation::CodeSymbolSearch,
+        RequestId::new("request.pr12-reachability.symbol-search.resume").expect("request id"),
+        symbol_search_surface_request(PROBE_TOKEN, Some(cursor.as_str())),
+        RequestedOutputFormat::Json,
+        Some(&fixture.client),
+    )
+    .await
+    .expect("MCP application dispatch");
+    assert_second_page_continues("MCP", &first, evidence_payload(&resumed));
 
     // A query the page can hold must not advertise a continuation, so the
     // cursor above is the pagination path executing rather than a constant.
     let single = resolve_mcp_application_surface(
         ApplicationSurfaceOperation::CodeSymbolSearch,
         RequestId::new("request.pr12-reachability.symbol-search.single").expect("request id"),
-        symbol_search_surface_request(&format!("{PROBE_TOKEN}_07")),
+        symbol_search_surface_request(&format!("{PROBE_TOKEN}_07"), None),
         RequestedOutputFormat::Json,
         Some(&fixture.client),
     )
@@ -329,7 +378,7 @@ async fn production_primitive_reads_agree_across_mcp_http_and_cli() {
     let mcp = resolve_mcp_application_surface(
         ApplicationSurfaceOperation::CodeSymbolSearch,
         RequestId::new("request.pr12-reachability.parity.mcp").expect("request id"),
-        symbol_search_surface_request(PROBE_TOKEN),
+        symbol_search_surface_request(PROBE_TOKEN, None),
         RequestedOutputFormat::Json,
         Some(&fixture.client),
     )
@@ -341,7 +390,7 @@ async fn production_primitive_reads_agree_across_mcp_http_and_cli() {
     let http = resolve_http_application_surface(
         ApplicationSurfaceOperation::CodeSymbolSearch,
         RequestId::new("request.pr12-reachability.parity.http").expect("request id"),
-        symbol_search_surface_request(PROBE_TOKEN),
+        symbol_search_surface_request(PROBE_TOKEN, None),
         RequestedOutputFormat::Json,
         Some(&fixture.client),
     )
@@ -350,20 +399,40 @@ async fn production_primitive_reads_agree_across_mcp_http_and_cli() {
     let http = evidence_payload(&http).clone();
     assert_first_page_of_many("HTTP", &http);
 
-    let cli = run_symbol_search_cli(fixture.home(), &fixture.project, PROBE_TOKEN);
-    assert_command_success("CLI code_symbol_search", &cli);
-    let cli: ApplicationEnvelope<Value> =
-        serde_json::from_slice(&cli.stdout).expect("CLI application envelope");
-    let ApplicationOutcome::Evidence(cli) = cli.outcome else {
-        panic!("CLI code_symbol_search must return an evidence outcome");
-    };
-    assert_eq!(cli.execution.termination, OperationTermination::Completed);
-    let cli = cli.payload.expect("CLI evidence payload");
+    let cli = cli_symbol_search_payload(&fixture, PROBE_TOKEN, None);
     assert_first_page_of_many("CLI", &cli);
 
     assert_eq!(mcp["items"], http["items"], "MCP and HTTP page contents");
     assert_eq!(mcp["items"], cli["items"], "MCP and CLI page contents");
     assert_eq!(mcp["total"], cli["total"], "MCP and CLI page totals");
+
+    // The continuation must be spendable from the installed binary, not only
+    // from an in-process resolver: that is what a user or agent actually holds.
+    let cursor = cli["next_cursor"]
+        .as_str()
+        .unwrap_or_else(|| panic!("CLI continuation cursor: {cli:#}"))
+        .to_owned();
+    let resumed = cli_symbol_search_payload(&fixture, PROBE_TOKEN, Some(cursor.as_str()));
+    assert_second_page_continues("CLI", &cli, &resumed);
+}
+
+fn cli_symbol_search_payload(
+    fixture: &ProductionFixture,
+    query: &str,
+    cursor: Option<&str>,
+) -> Value {
+    let output = run_symbol_search_cli(fixture.home(), &fixture.project, query, cursor);
+    assert_command_success("CLI code_symbol_search", &output);
+    let envelope: ApplicationEnvelope<Value> =
+        serde_json::from_slice(&output.stdout).expect("CLI application envelope");
+    let ApplicationOutcome::Evidence(evidence) = envelope.outcome else {
+        panic!("CLI code_symbol_search must return an evidence outcome");
+    };
+    assert_eq!(
+        evidence.execution.termination,
+        OperationTermination::Completed
+    );
+    evidence.payload.expect("CLI evidence payload")
 }
 
 /// Project open must retain Scout, publish the route cache, then mount owners,

@@ -70,10 +70,25 @@ pub(crate) async fn open_diagnostic_broker(
     project_root: PathBuf,
     dashboard_root: &std::path::Path,
 ) -> Arc<Mutex<DiagnosticBroker>> {
-    let settings = crate::diagnostics::lsp::settings::load_settings(dashboard_root)
-        .await
-        .unwrap_or_default();
-    Arc::new(Mutex::new(diagnostic_broker(project_root, settings)))
+    // `load_settings` already returns the defaults as `Ok` for a project that
+    // has no settings file, so an `Err` is a file that exists and could not be
+    // read or parsed. Falling back to the defaults there drops every
+    // `custom_adapters` entry the user configured, and the broker has to say
+    // so rather than report the fallback as the user's configuration.
+    match crate::diagnostics::lsp::settings::load_settings(dashboard_root).await {
+        Ok(settings) => Arc::new(Mutex::new(diagnostic_broker(project_root, settings))),
+        Err(error) => {
+            tracing::warn!(
+                dashboard_root = %dashboard_root.display(),
+                error = %error,
+                "code diagnostics settings could not be loaded; serving defaults as degraded"
+            );
+            let mut broker =
+                diagnostic_broker(project_root, CodeDiagnosticsSettings::default());
+            broker.record_settings_unavailable(error.to_string());
+            Arc::new(Mutex::new(broker))
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -380,6 +395,51 @@ mod tests {
     use crate::application::host_admission::HostAdmissionTestRuntimeV1;
     use crate::diagnostics::lsp::adapters::{DiagnosticMode, LspAdapterDefinition};
     use tracedecay_domain::ProjectId;
+
+    #[tokio::test]
+    async fn unreadable_settings_mount_a_broker_that_reports_itself_degraded() {
+        let dashboard_root = tempfile::tempdir().expect("dashboard root");
+        tokio::fs::write(
+            crate::diagnostics::lsp::settings::settings_path(dashboard_root.path()),
+            b"{ this is not settings json",
+        )
+        .await
+        .expect("unparseable settings file");
+
+        let broker =
+            open_diagnostic_broker(dashboard_root.path().to_path_buf(), dashboard_root.path())
+                .await;
+        let snapshot = broker.lock().await.snapshot();
+
+        let reason = snapshot
+            .settings_unavailable
+            .expect("settings that cannot be parsed must not be reported as the user's settings")
+            .reason;
+        assert!(
+            reason.contains("failed to parse code diagnostics settings"),
+            "the degradation must name the failed read: {reason}"
+        );
+        assert!(
+            snapshot.settings.custom_adapters.is_empty(),
+            "the fallback settings carry no custom analyzers, which is exactly why the \
+             degradation has to be reported"
+        );
+    }
+
+    #[tokio::test]
+    async fn absent_settings_mount_a_healthy_broker_on_the_defaults() {
+        let dashboard_root = tempfile::tempdir().expect("dashboard root");
+
+        let broker =
+            open_diagnostic_broker(dashboard_root.path().to_path_buf(), dashboard_root.path())
+                .await;
+
+        assert_eq!(
+            broker.lock().await.snapshot().settings_unavailable,
+            None,
+            "a project that never configured analyzer settings is not degraded"
+        );
+    }
 
     #[tokio::test]
     async fn failed_refresh_is_an_error_and_never_claims_documents_opened() {

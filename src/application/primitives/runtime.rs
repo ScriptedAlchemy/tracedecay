@@ -2084,8 +2084,7 @@ mod tests {
     use super::{
         Pr12ExtendedPrimitivePort, Pr12OperationalPrimitiveRequest, Pr12PrimitiveCapacity,
         Pr12PrimitiveDispatch, Pr12PrimitiveRequest, StorageStatusPrimitiveRequest,
-        open_pr12_primitive_project_runtime, pre_admission_problem,
-        valid_owned_symbol_graph_request, validate_admitted_root_uri,
+        pre_admission_problem, valid_owned_symbol_graph_request, validate_admitted_root_uri,
     };
     use tracedecay_application::retrieval::{
         GraphRelationRequest, ImplementationSelector, ImplementationsRequest, ResultProjection,
@@ -2106,11 +2105,6 @@ mod tests {
     fn primitive_dispatch_is_object_safe() {
         let _ = assert_object_safe;
         let _ = assert_extended_object_safe;
-    }
-
-    #[test]
-    fn concrete_project_runtime_factory_is_exported() {
-        let _ = open_pr12_primitive_project_runtime;
     }
 
     #[test]

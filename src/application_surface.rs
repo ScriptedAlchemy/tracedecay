@@ -37,8 +37,9 @@ use tracedecay_application::{
     APPLICATION_DEFAULT_PROFILE_ID, ApplicationContractError, ApplicationEnvelope,
     ApplicationOperation, ApplicationProblem, ApplicationProblemEnvelope, ApplicationProblemKind,
     ApplicationResult, CancellationContext, CancellationSignal, Deadline, HealthReadRequest,
-    IdempotencyKey, LegalAction, OperationTermination, PageRequest, ProblemOwningLayer,
-    RequestContext, RequestId, ResultContractRef, ResultProjection, ResumeToken, RetrievalOrder,
+    IdempotencyKey, LegalAction, OpaqueCursor, OperationTermination, PageRequest,
+    ProblemOwningLayer, RequestContext, RequestId, ResultContractRef, ResultProjection, ResumeToken,
+    RetrievalOrder,
     RetrievalRequestMeta, RetryDirective, SafeDiagnostic, SessionLookupRequest, SourceLinesRequest,
     StreamEvent, StreamEventKind,
 };
@@ -403,18 +404,35 @@ pub struct FeedbackImpactSurfaceRequest {
 #[serde(deny_unknown_fields)]
 pub struct TestResultsSurfaceRequest {}
 
-/// Surface-owned query semantics. Pagination remains an invocation control so
-/// CLI, MCP, and HTTP cannot supply conflicting page authorities.
+/// Surface-owned query semantics. Page size remains an invocation control, but
+/// continuation is a request field so CLI, MCP, and HTTP callers all have the
+/// same channel for spending a `next_cursor`. HTTP folds its transport cursor
+/// into this field before decoding, keeping exactly one page authority at the
+/// point of use.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct CallableCodeSurfaceMeta {
     pub projection: ResultProjection,
     pub order: RetrievalOrder,
+    #[serde(default)]
+    pub cursor: Option<OpaqueCursor>,
 }
 
 impl CallableCodeSurfaceMeta {
     fn into_application(self, page: PageRequest) -> RetrievalRequestMeta {
-        RetrievalRequestMeta::current(page, self.projection, self.order)
+        let Self {
+            projection,
+            order,
+            cursor,
+        } = self;
+        let page = match cursor {
+            Some(cursor) => PageRequest {
+                page_size: page.page_size,
+                cursor: Some(cursor),
+            },
+            None => page,
+        };
+        RetrievalRequestMeta::current(page, projection, order)
     }
 }
 
@@ -3331,11 +3349,40 @@ async fn invoke_application_adapter_request(
     }
 }
 
+/// Operations whose decoded surface request carries a [`CallableCodeSurfaceMeta`].
+fn operation_carries_callable_code_meta(operation: ApplicationSurfaceOperation) -> bool {
+    matches!(
+        operation,
+        ApplicationSurfaceOperation::CodeExactOccurrence
+            | ApplicationSurfaceOperation::CodePhraseSearch
+            | ApplicationSurfaceOperation::CodeSymbolSearch
+            | ApplicationSurfaceOperation::CodeSignatureSearch
+            | ApplicationSurfaceOperation::CodeImplementations
+            | ApplicationSurfaceOperation::CodeTypeHierarchy
+            | ApplicationSurfaceOperation::CodeCallers
+            | ApplicationSurfaceOperation::CodeCallees
+            | ApplicationSurfaceOperation::CodeFacets
+            | ApplicationSurfaceOperation::CodeTimeline
+            | ApplicationSurfaceOperation::CodeDeclaration
+            | ApplicationSurfaceOperation::CodeDefinition
+            | ApplicationSurfaceOperation::CodeTypeDefinition
+            | ApplicationSurfaceOperation::CodeReferences
+    )
+}
+
 fn apply_http_page_to_surface_body(
     operation: ApplicationSurfaceOperation,
     mut body: Value,
     page: &PageRequest,
 ) -> Value {
+    if operation_carries_callable_code_meta(operation) {
+        if let Some(meta) = body.get_mut("meta").and_then(Value::as_object_mut) {
+            if let Some(cursor) = page.cursor.as_ref() {
+                meta.insert("cursor".to_owned(), Value::from(cursor.as_str()));
+            }
+        }
+        return body;
+    }
     if operation != ApplicationSurfaceOperation::DiagnosticsRead {
         return body;
     }

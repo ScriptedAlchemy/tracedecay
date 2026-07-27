@@ -130,10 +130,13 @@ impl NativeGitIndexPreviewAssembler {
         {
             return Err(GitIndexTransactionPortError::StalePreview);
         }
+        // Failing to read status at all says nothing about whether the caller's
+        // snapshot still holds; it says we could not look. Calling that staleness
+        // sent callers to recapture and retry a read that fails identically.
         let status = self
             .read_authority()
             .status()
-            .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
+            .map_err(|_| GitIndexTransactionPortError::NativeFailure)?;
         let index_bytes = runner.index_bytes().map_err(map_native_error)?;
         let index_checksum = canonical_sha256(&index_bytes)
             .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
@@ -250,7 +253,10 @@ impl NativeGitIndexPreviewAssembler {
                     })?,
             )
         })
-        .map_err(|_| GitIndexTransactionPortError::StalePreview)
+        // Constructing our own snapshot from state we just read, or failing to
+        // read the git version or refs digest, is this adapter failing rather
+        // than the repository moving under the caller.
+        .map_err(|_| GitIndexTransactionPortError::NativeFailure)
     }
 
     fn materialize_patches(

@@ -49,10 +49,6 @@ impl<'a> LcmHandlerContext<'a> {
             retrieval_store_scope: SessionRetrievalStoreScope::Project,
         }
     }
-
-    pub(in super::super) fn with_direct_open(self, _allow_direct_open: bool) -> Self {
-        self
-    }
 }
 
 fn lcm_unavailable(args: &Value) -> ToolResult {
@@ -126,7 +122,7 @@ mod tests {
         let db_path = temp.path().join("sessions.db");
 
         let resolution = open_lcm_storage(
-            LcmHandlerContext::user(&db_path, None, None).with_direct_open(true),
+            LcmHandlerContext::user(&db_path, None, None),
             &json!({}),
             LcmOpenMode::Writable,
         )
