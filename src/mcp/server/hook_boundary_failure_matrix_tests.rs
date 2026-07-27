@@ -283,7 +283,7 @@ async fn matrix_backpressure_overflow_rejects_before_writer_without_pending_grow
 
 #[tokio::test]
 async fn matrix_unavailable_then_success_keeps_sticky_retained_failure_frontier() {
-    let (cg, project, _pin) = init_indexed_repo().await;
+    let (cg, project, authority) = init_indexed_repo().await;
     let spool = TempDir::new().unwrap();
     let runtime = HostAdmissionRuntime::open(spool.path(), SpoolBounds::default())
         .unwrap()
@@ -316,9 +316,7 @@ async fn matrix_unavailable_then_success_keeps_sticky_retained_failure_frontier(
         .0;
     let broker = Arc::new(HostAdmissionBroker::new(runtime));
     let writes = Arc::new(Mutex::new(0usize));
-    let reopened_cg = crate::tracedecay::TraceDecay::open(project.path())
-        .await
-        .unwrap();
+    let reopened_cg = authority.reopen_project_graph(project.path()).await;
     let server = McpServer::new_with_context(context_with_broker(
         reopened_cg,
         Arc::clone(&broker),

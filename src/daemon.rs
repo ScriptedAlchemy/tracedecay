@@ -4655,6 +4655,54 @@ impl ProductionProjectCompositionHarnessV1 {
             })
     }
 
+    pub async fn project_data_root(&self, project_root: impl AsRef<Path>) -> Result<PathBuf> {
+        Ok(self
+            .server(project_root)?
+            .cg()
+            .await
+            .store_layout()
+            .data_root
+            .clone())
+    }
+
+    pub async fn track_worktree_branch(
+        &self,
+        project_root: impl AsRef<Path>,
+        worktree_root: impl AsRef<Path>,
+        branch: &str,
+    ) -> Result<crate::branch::BranchAddOutcome> {
+        self.server(project_root)?
+            .cg()
+            .await
+            .track_worktree_branch(worktree_root.as_ref(), branch)
+            .await
+    }
+
+    pub async fn sync_tracked_worktree_branch(
+        &self,
+        project_root: impl AsRef<Path>,
+        worktree_root: impl AsRef<Path>,
+        branch: &str,
+        query: &str,
+    ) -> Result<(Option<String>, Option<String>, bool, bool)> {
+        let graph = self.server(project_root)?.cg().await;
+        let (database_path, _, _) = crate::tracedecay::TraceDecay::resolve_db_for_branch(
+            graph.project_root(),
+            &graph.store_layout().data_root,
+            Some(branch),
+        );
+        let branch_graph = graph
+            .sync_retained_worktree_branch(worktree_root.as_ref(), branch, &database_path)
+            .await?;
+        let contains_query = !branch_graph.search(query, 10).await?.is_empty();
+        Ok((
+            branch_graph.active_branch().map(str::to_owned),
+            branch_graph.serving_branch().map(str::to_owned),
+            branch_graph.is_fallback(),
+            contains_query,
+        ))
+    }
+
     pub async fn call_tool(
         &self,
         project_root: impl AsRef<Path>,
