@@ -687,6 +687,175 @@ fn successful_application(result: &ApplicationSurfaceInvocationResult) -> &Value
     }
 }
 
+/// The dashboard's project-settings write must commit through the daemon-owned
+/// configuration control plane.
+///
+/// The in-process `dashboard_api_test` fixture serves a dashboard with no
+/// control plane mounted, so it proves the honest refusal
+/// (`configuration_authority_unavailable`) and cannot prove the write. This is
+/// the production topology instead: a real daemon hosts the dashboard, so the
+/// mutation travels the installed invocation executor rather than a double,
+/// and the same process that commits the revision republishes the pinned
+/// runtime configuration the next read serves.
+#[tokio::test(flavor = "multi_thread")]
+async fn dashboard_project_settings_commit_through_the_daemon_control_plane() {
+    let fixture = runtime_fixture().await;
+    let base_url = start_daemon_hosted_dashboard(&fixture).await;
+    let agent = common::http_agent();
+    let settings_url = format!("{base_url}/api/settings");
+    let project_url = format!("{settings_url}/project");
+
+    let (status, envelope) = get_dashboard_json(&agent, &settings_url);
+    assert_eq!(status, 200, "GET settings failed: {envelope}");
+    let settings = &envelope["payload"];
+    let revision = settings["project"]["configuration_revision_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("settings must expose a revision: {settings}"))
+        .to_owned();
+    let legacy_config_path = PathBuf::from(
+        settings["project"]["legacy_config_path"]
+            .as_str()
+            .unwrap_or_else(|| panic!("settings must expose the legacy path: {settings}")),
+    );
+    let legacy_config_before = std::fs::read(&legacy_config_path).ok();
+    let original_max_file_size = settings["project"]["config"]["max_file_size"].clone();
+
+    // The mirror of the in-process assertion: with the control plane mounted,
+    // the project apply is advertised as a legal action rather than withheld.
+    let advertises_project_apply = envelope["legal_actions"]
+        .as_array()
+        .unwrap_or_else(|| panic!("expected legal actions: {envelope}"))
+        .iter()
+        .any(|action| {
+            action["kind"] == "request_apply" && action["operation"] == "configuration_batch"
+        });
+    assert!(
+        advertises_project_apply,
+        "a daemon-hosted dashboard must advertise the project apply: {envelope}"
+    );
+
+    let (status, applied) = patch_dashboard_json(
+        &agent,
+        &project_url,
+        &serde_json::json!({
+            "expected_revision_id": revision,
+            "exclude": ["target/**", "dist/**"],
+            "include": [".github/**"],
+            "max_file_size": 2048
+        }),
+    );
+    assert_eq!(
+        status, 200,
+        "the installed production client must commit the project mutation: {applied}"
+    );
+    let applied_payload = &applied["payload"];
+    assert_eq!(applied_payload["resync_recommended"], true);
+    assert_eq!(
+        applied_payload["project"]["config"]["max_file_size"], 2048,
+        "the response must publish the daemon-returned snapshot: {applied_payload}"
+    );
+    let applied_revision = applied_payload["project"]["configuration_revision_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("mutated response omitted a revision: {applied_payload}"))
+        .to_owned();
+    assert_ne!(
+        applied_revision, revision,
+        "a committed mutation must publish a new configuration revision"
+    );
+    assert_ne!(
+        applied_payload["project"]["config"]["max_file_size"], original_max_file_size,
+        "the committed value must differ from the pre-change reading"
+    );
+    assert_eq!(
+        std::fs::read(&legacy_config_path).ok(),
+        legacy_config_before,
+        "a typed mutation must not fall back to config.json"
+    );
+
+    // Re-read: the commit is durable and the pinned runtime configuration the
+    // dashboard serves advanced with it, rather than the response alone.
+    let (status, reloaded) = get_dashboard_json(&agent, &settings_url);
+    assert_eq!(status, 200);
+    assert_eq!(
+        reloaded["payload"]["project"]["config"]["max_file_size"],
+        2048
+    );
+    assert_eq!(
+        reloaded["payload"]["project"]["config"]["include"][0],
+        ".github/**"
+    );
+    assert_eq!(
+        reloaded["payload"]["project"]["configuration_revision_id"],
+        applied_revision.as_str()
+    );
+
+    // CAS still holds against the real store: the superseded revision cannot
+    // apply a second time.
+    let (status, stale) = patch_dashboard_json(
+        &agent,
+        &project_url,
+        &serde_json::json!({
+            "expected_revision_id": revision,
+            "track_call_sites": false
+        }),
+    );
+    assert_eq!(status, 409, "a stale project patch must conflict: {stale}");
+    assert_eq!(stale["code"], "configuration_revision_conflict");
+    assert_eq!(stale["actual_revision_id"], applied_revision.as_str());
+
+    let _ = call_default_tool(
+        &fixture.handshake,
+        "tracedecay_dashboard",
+        serde_json::json!({ "action": "stop", "format": "json" }),
+    )
+    .await;
+}
+
+/// Starts the dashboard inside the running daemon and returns its base URL.
+///
+/// This is the same route `tracedecay dashboard` takes: the CLI asks the daemon
+/// to serve, so the dashboard shares the daemon's process and its application
+/// authorities instead of dialing back over a socket.
+async fn start_daemon_hosted_dashboard(fixture: &RuntimeFixture) -> String {
+    let started = call_default_tool(
+        &fixture.handshake,
+        "tracedecay_dashboard",
+        serde_json::json!({
+            "action": "start",
+            "host": "127.0.0.1",
+            "port": 0,
+            "format": "json"
+        }),
+    )
+    .await
+    .expect("start the daemon-hosted dashboard");
+    let payload = tracedecay::daemon::tool_json_payload(&started, "tracedecay_dashboard")
+        .expect("dashboard tool payload");
+    assert!(
+        matches!(
+            payload["status"].as_str(),
+            Some("started" | "already_running")
+        ),
+        "dashboard did not start: {payload}"
+    );
+    payload["url"]
+        .as_str()
+        .unwrap_or_else(|| panic!("dashboard tool returned no url: {payload}"))
+        .trim_end_matches('/')
+        .to_owned()
+}
+
+fn get_dashboard_json(agent: &ureq::Agent, url: &str) -> (u16, Value) {
+    let response = common::http_call_with_retry(&format!("GET {url}"), || agent.get(url).call());
+    common::response_to_json(response)
+}
+
+fn patch_dashboard_json(agent: &ureq::Agent, url: &str, body: &Value) -> (u16, Value) {
+    let response =
+        common::http_call_with_retry(&format!("PATCH {url}"), || agent.patch(url).send_json(body));
+    common::response_to_json(response)
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn project_open_application_boundary() {
     let fixture = runtime_fixture().await;
