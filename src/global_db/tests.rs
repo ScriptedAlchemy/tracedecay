@@ -942,3 +942,61 @@ async fn registered_runtime_does_not_recreate_a_missing_database() {
         "failed write recreated the database path"
     );
 }
+
+#[tokio::test]
+async fn project_tokens_separate_a_genuine_zero_from_a_failed_read() {
+    let harness = RegisteredGlobalDbHarness::open("project-tokens-failed-read").await;
+    let project = std::path::Path::new("/tmp/tracedecay-project-tokens");
+    let unregistered = std::path::Path::new("/tmp/tracedecay-never-registered");
+    harness.registered.upsert(project, 4_242).await;
+
+    assert_eq!(
+        harness.registered.try_get_project_tokens(project).await,
+        Ok(4_242)
+    );
+    assert_eq!(
+        harness
+            .registered
+            .try_get_project_tokens(unregistered)
+            .await,
+        Ok(0),
+        "a project with no registry row has genuinely saved nothing"
+    );
+
+    // A stored total that cannot be a token count is a corrupt row, not a zero.
+    harness
+        .registered
+        .writer_connection()
+        .unwrap()
+        .execute_batch("UPDATE projects SET tokens_saved = -1")
+        .await
+        .unwrap();
+    let error = harness
+        .registered
+        .try_get_project_tokens(project)
+        .await
+        .expect_err("a negative stored total must not be reported as a measurement");
+    assert!(error.contains("cannot be negative"), "{error}");
+
+    harness
+        .registered
+        .writer_connection()
+        .unwrap()
+        .execute_batch("DROP TABLE projects")
+        .await
+        .unwrap();
+    let error = harness
+        .registered
+        .try_get_project_tokens(project)
+        .await
+        .expect_err("a failed query must not be reported as a token total");
+    assert!(
+        error.contains("failed to query project tokens saved"),
+        "{error}"
+    );
+    assert_eq!(
+        harness.registered.get_project_tokens(project).await,
+        None,
+        "the optional form reports unavailable rather than zero"
+    );
+}

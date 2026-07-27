@@ -1732,9 +1732,19 @@ impl HostAdmissionTestRuntimeV1 {
             .await;
     }
 
+    /// Fails the calling test loudly: a read this runtime could not perform is
+    /// not a token total of zero.
     #[doc(hidden)]
     pub async fn get_project_tokens(&self, project_path: &Path) -> u64 {
-        self.profile_database.get_project_tokens(project_path).await
+        self.profile_database
+            .try_get_project_tokens(project_path)
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "could not read project tokens for '{}': {error}",
+                    project_path.display()
+                )
+            })
     }
 
     #[doc(hidden)]
