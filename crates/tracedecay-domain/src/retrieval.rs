@@ -1546,14 +1546,13 @@ mod tests {
         ]);
         accepted.validate().expect("PR9 lanes are admissible");
 
-        for lane in [RetrieverKind::Semantic] {
-            let rejected = subpayload(&[lane]);
-            assert_eq!(
-                rejected.validate(),
-                Err(RetrievalContractError::FallbackLaneViolation),
-                "lane {lane:?} must not enter the PR9 fallback subpayload"
-            );
-        }
+        let lane = RetrieverKind::Semantic;
+        let rejected = subpayload(&[lane]);
+        assert_eq!(
+            rejected.validate(),
+            Err(RetrievalContractError::FallbackLaneViolation),
+            "lane {lane:?} must not enter the PR9 fallback subpayload"
+        );
     }
 
     #[test]
