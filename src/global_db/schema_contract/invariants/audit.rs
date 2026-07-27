@@ -68,6 +68,10 @@ pub(super) async fn ensure_audit_checkpoint_schema(
             last_dispositions_audited INTEGER NOT NULL,
             last_aliases_audited INTEGER NOT NULL,
             bounded_passes_since_exhaustive INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS authority_foreign_key_audit_progress (
+            audit_name TEXT PRIMARY KEY,
+            last_table TEXT NOT NULL
         );",
     )
     .await
