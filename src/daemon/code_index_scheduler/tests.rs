@@ -1469,6 +1469,50 @@ async fn worktree_queries_do_not_serialize_on_slow_reconcile() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn busy_worktree_serves_last_complete_generation_without_waiting() {
+    let fixture = GitFixture::new(&[("src/lib.rs", "pub fn ready() -> u32 { 1 }\n")]);
+    let store = TempDir::new().expect("store root");
+    let registry = CodeIndexSchedulerRegistryV1::new(1);
+    registry
+        .mount_worktree(fixture.path(), store.path().to_path_buf(), None)
+        .await
+        .expect("mount worktree");
+    let expected = wait_for_initial_generation(&registry, fixture.path()).await;
+    let scheduler = registry
+        .scheduler_handle(fixture.path())
+        .await
+        .expect("scheduler handle");
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let lock_thread = std::thread::spawn(move || {
+        let _guard = scheduler
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        held_tx.send(()).expect("signal scheduler lock held");
+        let _ = release_rx.recv();
+    });
+    held_rx.recv().expect("scheduler lock acquired");
+
+    let result = tokio::time::timeout(
+        Duration::from_millis(250),
+        registry.latest_complete_fresh(fixture.path()),
+    )
+    .await;
+    release_tx.send(()).expect("release scheduler lock");
+    lock_thread.join().expect("scheduler lock thread joins");
+
+    let latest = result
+        .expect("foreground query must not wait for an in-flight refresh")
+        .expect("last complete generation remains queryable");
+    assert_eq!(
+        latest.generation.manifest().generation_id,
+        expected,
+        "foreground query must preserve the unchanged complete generation"
+    );
+    registry.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shutdown_signals_code_index_worker_without_taking_busy_scheduler_lock() {
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn busy() -> u32 { 1 }\n")]);
     let store = TempDir::new().expect("store root");
