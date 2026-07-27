@@ -740,8 +740,9 @@ fn daemon_runtime_args() -> serde_json::Value {
 }
 
 /// A routed project publishes database telemetry only after it is mounted and
-/// admitted. During startup, absence means "not published yet"; telemetry that
-/// is present but malformed remains a terminal contract violation.
+/// admitted. During startup, an absent `database` block means "not published
+/// yet" and remains a warming state to poll, while telemetry that is present
+/// but malformed remains a terminal contract violation.
 const RUNTIME_TELEMETRY_PENDING: &str = "daemon runtime response omitted database telemetry";
 
 fn daemon_runtime_status(result: &serde_json::Value) -> crate::errors::Result<serde_json::Value> {

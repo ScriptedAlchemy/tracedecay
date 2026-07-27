@@ -12,7 +12,7 @@
     "pr13_advisory_schema",
     "pr13_advisory_runtime_decoders",
     "pr13_advisory_pagination_cas",
-    "pr13_advisory_proximity_overlap",
+    "pr13_advisory_proximity_pillar",
     "pr13_advisory_structure",
     "pr13_advisory_no_secret"
   ],
@@ -36,7 +36,7 @@
     "pr13_advisory_schema": "awaiting_ci",
     "pr13_advisory_runtime_decoders": "awaiting_ci",
     "pr13_advisory_pagination_cas": "awaiting_ci",
-    "pr13_advisory_proximity_overlap": "awaiting_ci",
+    "pr13_advisory_proximity_pillar": "awaiting_ci",
     "pr13_advisory_structure": "awaiting_ci",
     "pr13_advisory_no_secret": "awaiting_ci"
   }

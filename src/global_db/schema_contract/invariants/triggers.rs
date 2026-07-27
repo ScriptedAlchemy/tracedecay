@@ -1797,3 +1797,166 @@ pub(in crate::global_db) async fn suspend_session_invariants_for_schema_upgrade(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::db::engine::{Executor, params};
+    use crate::global_db::tests::harness::RegisteredGlobalDbHarness;
+
+    /// Registry rows the identity triggers key off. `upsert_code_project`
+    /// refuses temporary roots, so the fixture writes the authority rows
+    /// directly rather than through the admission door.
+    const SEED_PROJECTS: &str = "INSERT INTO code_projects
+         (project_id, canonical_root, display_root, created_at, last_seen_at)
+         VALUES ('project_one', '/one', '/one', 1, 1), ('project_two', '/two', '/two', 1, 1);
+         INSERT INTO store_instances
+         (store_id, project_id, store_kind, storage_mode, store_relpath, created_at)
+         VALUES ('store_one', 'project_one', 'sessions', 'central', 'sessions', 1);";
+
+    /// A store row carries the only binding between a physical store and the
+    /// project that owns it. Letting `project_id` move would silently hand one
+    /// user's sessions to another project, so the update is refused outright.
+    #[tokio::test]
+    async fn store_project_identity_cannot_be_reparented() {
+        let harness = RegisteredGlobalDbHarness::open("store-project-reparent").await;
+        let transaction = harness
+            .registered
+            .begin_write_transaction()
+            .await
+            .expect("begin store identity fixture transaction");
+        transaction
+            .execute_batch(SEED_PROJECTS)
+            .await
+            .expect("seed registry identity rows");
+
+        let error = transaction
+            .execute(
+                "UPDATE store_instances SET project_id = 'project_two'
+                 WHERE store_id = 'store_one'",
+                (),
+            )
+            .await
+            .expect_err("store project identity must not be reparented");
+
+        assert!(
+            error
+                .to_string()
+                .contains("store project identity is immutable"),
+            "{error}"
+        );
+    }
+
+    /// The identity triggers reject rows whose cross-table keys disagree, so a
+    /// graph scope cannot claim a store owned by another project and the
+    /// projection queue cannot point at a sequence its observation does not
+    /// have.
+    #[tokio::test]
+    async fn cross_table_identity_constraints_reject_mismatched_rows() {
+        let harness = RegisteredGlobalDbHarness::open("cross-table-identity").await;
+        let transaction = harness
+            .registered
+            .begin_write_transaction()
+            .await
+            .expect("begin cross-table identity fixture transaction");
+        transaction
+            .execute_batch(SEED_PROJECTS)
+            .await
+            .expect("seed registry identity rows");
+
+        let graph_error = transaction
+            .execute(
+                "INSERT INTO graph_scopes
+                 (graph_scope_id, project_id, store_id, branch_name, db_relpath)
+                 VALUES ('scope_bad', 'project_two', 'store_one', 'main', 'graph.db')",
+                (),
+            )
+            .await
+            .expect_err("graph scope must not claim another project's store");
+        assert!(
+            graph_error.to_string().contains("store/project mismatch"),
+            "{graph_error}"
+        );
+
+        transaction
+            .execute_batch(
+                "INSERT INTO sanitization_receipts
+                 (receipt_id, sanitizer_version, payload_digest, receipt_json)
+                 VALUES ('receipt_one', 'v1', 'digest_one', '{}');
+                 INSERT INTO observations
+                 (observation_id, payload_digest, receipt_id, observation_json,
+                  committed_cursor_json)
+                 VALUES ('observation_one', 'digest_one', 'receipt_one', '{}', '{}');",
+            )
+            .await
+            .expect("seed observation identity rows");
+        let mut rows = transaction
+            .query(
+                "SELECT sequence FROM observations WHERE observation_id = 'observation_one'",
+                (),
+            )
+            .await
+            .expect("read seeded observation sequence");
+        let sequence = rows
+            .next()
+            .await
+            .expect("observation sequence row")
+            .expect("observation sequence value")
+            .get::<i64>(0)
+            .expect("observation sequence column");
+        drop(rows);
+
+        let queue_error = transaction
+            .execute(
+                "INSERT INTO projection_queue(observation_id, observation_sequence)
+                 VALUES ('observation_one', ?1)",
+                params![sequence + 1],
+            )
+            .await
+            .expect_err("projection queue must not diverge from observation identity");
+        assert!(
+            queue_error
+                .to_string()
+                .contains("observation identity mismatch"),
+            "{queue_error}"
+        );
+    }
+
+    /// A sanitization receipt is the proof that a payload was redacted before
+    /// it was committed. Rewriting or deleting one would leave sanitized data
+    /// with no binding evidence, so both are refused after commit.
+    #[tokio::test]
+    async fn sanitization_receipts_are_immutable_after_commit() {
+        let harness = RegisteredGlobalDbHarness::open("sanitization-receipt-immutability").await;
+        let transaction = harness
+            .registered
+            .begin_write_transaction()
+            .await
+            .expect("begin sanitization receipt fixture transaction");
+        transaction
+            .execute(
+                "INSERT INTO sanitization_receipts
+                 (receipt_id, sanitizer_version, payload_digest, receipt_json)
+                 VALUES ('receipt_immutable', 'v1', 'digest_immutable', '{}')",
+                (),
+            )
+            .await
+            .expect("seed sanitization receipt");
+
+        for statement in [
+            "UPDATE sanitization_receipts SET payload_digest = payload_digest
+             WHERE receipt_id = ?1",
+            "DELETE FROM sanitization_receipts WHERE receipt_id = ?1",
+        ] {
+            let error = transaction
+                .execute(statement, params!["receipt_immutable"])
+                .await
+                .expect_err("committed sanitization receipts must be immutable");
+            assert!(
+                error
+                    .to_string()
+                    .contains("sanitization receipts are immutable"),
+                "{error}"
+            );
+        }
+    }
+}

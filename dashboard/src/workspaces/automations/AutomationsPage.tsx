@@ -314,6 +314,10 @@ function controlFailure(result: LegacyResult<SchedulerStatus> | undefined): stri
       return null;
     case 'offline':
       return 'The daemon did not answer, so the scheduler was not changed.';
+    case 'unauthorized':
+      return 'The daemon accepted no identity for the change, so the scheduler was not changed.';
+    case 'denied':
+      return 'This identity is not permitted to control the scheduler, so it was not changed.';
     case 'error':
       return `The daemon refused the change (${result.detail}).`;
     case 'unsupported_schema':
@@ -357,12 +361,20 @@ function SchedulerControl({
         type="button"
         disabled={pending}
         onClick={() => onToggle(!paused)}
-        className={cn(
-          'inline-flex h-5 items-center gap-1 rounded-[var(--radius-chip)] border border-edge-subtle px-1.5 text-2xs',
-          'hover:bg-surface-2 disabled:opacity-50',
-        )}
+        // A 17.5px chip beside the scheduler badge it matches. The chip keeps
+        // that size — it is paired with `SchedulerBadge` and the two have to
+        // read as one register — while the button's own box becomes the 44px
+        // target. See `.td-hit`.
+        className="td-hit group disabled:opacity-50"
       >
-        {pending ? 'working…' : paused ? 'Resume scheduler' : 'Pause scheduler'}
+        <span
+          className={cn(
+            'inline-flex h-5 items-center gap-1 rounded-[var(--radius-chip)] border border-edge-subtle px-1.5 text-2xs',
+            'group-hover:bg-surface-2',
+          )}
+        >
+          {pending ? 'working…' : paused ? 'Resume scheduler' : 'Pause scheduler'}
+        </span>
       </button>
       {failure ? (
         <span role="status" className="text-2xs text-text-secondary">

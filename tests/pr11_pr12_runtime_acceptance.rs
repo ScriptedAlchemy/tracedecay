@@ -20,6 +20,9 @@ use tracedecay::application::operation_stream::{
     OperationKind, OperationStreamConfig,
 };
 use tracedecay::application::primitives::{Pr12PrimitiveRequest, StorageStatusPrimitiveRequest};
+use tracedecay::application_output::json::json_line as canonical_json_line;
+use tracedecay::application_output::markdown::render as render_markdown;
+use tracedecay::application_output::view::CanonicalHumanView;
 use tracedecay::application_surface::{
     ApplicationSurfaceInvocationResult, ApplicationSurfaceOperation, ApplicationSurfaceRequest,
     FeedbackSurfaceRequest, GitApplySurfaceRequest, GitPreviewSurfaceRequest,
@@ -1629,7 +1632,19 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
     .await;
 
     let projection = poll_lsp_context(&mut session, &document_uri, "diagnostics", 2).await;
-    assert_eq!(projection["result"]["rootUri"], root_uri);
+    // The gateway compares roots by parsed path rather than by raw string,
+    // because a directory URI legitimately arrives with or without a trailing
+    // slash, so the projection is checked the same way it is admitted.
+    let projected_root = projection["result"]["rootUri"]
+        .as_str()
+        .expect("projected root URI");
+    assert_eq!(
+        url::Url::parse(projected_root)
+            .ok()
+            .and_then(|url| url.to_file_path().ok()),
+        Some(fixture.project.clone()),
+        "the projection must name the admitted root, got {projected_root}"
+    );
     assert_eq!(projection["result"]["documentUri"], document_uri);
     assert_eq!(projection["result"]["kind"], "diagnostics");
     assert_eq!(
@@ -1647,6 +1662,31 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
             .as_str()
             .is_some()
     );
+    // This project has ingested no diagnostics, which is every project's first
+    // run. The feedback authority answers such a read with terminal evidence
+    // and no cycle, and the LSP runtime used to turn that into a hard failure,
+    // so a fresh project could not obtain any context projection at all. The
+    // projection must arrive with real identity and state its own degradation
+    // rather than either failing or claiming a completeness it does not have.
+    let coverage = projection["result"]["coverage"]
+        .as_str()
+        .expect("projection coverage");
+    let producer_state = projection["result"]["producerState"]
+        .as_str()
+        .expect("projection producer state");
+    let items = projection["result"]["items"]
+        .as_array()
+        .expect("projection items");
+    if items.is_empty() {
+        assert_ne!(
+            coverage, "complete",
+            "an empty projection must not report complete coverage: {projection}"
+        );
+        assert_ne!(
+            producer_state, "complete",
+            "an empty projection must not report a complete producer: {projection}"
+        );
+    }
     for (request_id, method, params) in [
         (
             403,
@@ -2275,12 +2315,52 @@ async fn primitive_config_markdown_json_parity() {
         json_result.result.as_ref().expect("JSON result").contract
     );
 
-    let markdown = run_storage_status(fixture.home(), &fixture.project, false);
-    let json = run_storage_status(fixture.home(), &fixture.project, true);
-    assert_command_success("CLI markdown storage_status", &markdown);
-    assert_command_success("CLI JSON storage_status", &json);
-    let markdown = String::from_utf8(markdown.stdout).expect("UTF-8 markdown");
-    let json: Value = serde_json::from_slice(&json.stdout).expect("CLI JSON");
+    // Markdown/JSON parity is renderer equivalence over one result. Two CLI
+    // processes cannot express it: each performs its own authorized read of a
+    // live store, so the comparison would only ever assert that two reads
+    // agree, which is a different and weaker claim. Both renderings below come
+    // from a single CLI-bound invocation through the same two functions
+    // `tracedecay tool` calls, so only the process and stdout plumbing around
+    // them is outside this test.
+    let cli_request_id =
+        RequestId::new("request.primitive-config-parity.cli").expect("CLI request id");
+    let cli_deadline = Deadline::new(UtcMicros(
+        wall_clock_micros().0.saturating_add(60_000_000),
+    ))
+    .expect("CLI deadline");
+    let cli_dispatch = resolve_application_surface_dispatch_with_controls(
+        BindingSurface::Cli,
+        ApplicationSurfaceOperation::StorageStatus,
+        cli_request_id,
+        storage_status_request(),
+        PageRequest::first(10).expect("page"),
+        Some(cli_deadline),
+        CancellationSignal::active("cancel.primitive-config-parity.cli").expect("cancellation"),
+        RequestedOutputFormat::Markdown,
+    )
+    .expect("CLI surface dispatch");
+    let cli_result = execute_application_surface(
+        ApplicationSurfaceOperation::StorageStatus,
+        cli_dispatch,
+        Some(&fixture.client),
+    )
+    .await
+    .expect("CLI application invocation");
+
+    let markdown = render_markdown(
+        CanonicalHumanView::from_application_result(
+            cli_result.operation.as_str(),
+            &cli_result.binding_id,
+            &cli_result.result,
+        )
+        .expect("canonical human view"),
+    )
+    .as_str()
+    .to_owned();
+    let json: Value = serde_json::from_str(
+        &canonical_json_line(&cli_result.result).expect("canonical JSON line"),
+    )
+    .expect("CLI JSON");
 
     assert_eq!(
         markdown.lines().next(),
@@ -2359,12 +2439,34 @@ async fn primitive_config_markdown_json_parity() {
     assert_exact_markdown_field(&markdown, "Termination", "completed");
     assert_exact_markdown_field(&markdown, "Cancellation stage", "none");
 
+    // The key list is derived from the payload rather than pinned to a literal,
+    // so it tracks the contract instead of going stale the next time the
+    // payload gains a field. The human view lists the first eight sorted keys
+    // and elides the rest behind its `--json` pointer, so the expectation
+    // reproduces that rule instead of assuming the payload stays small.
+    const HUMAN_VIEW_VISIBLE_KEYS: usize = 8;
     let payload = &json["outcome"]["value"]["payload"];
+    let payload_fields = payload
+        .as_object()
+        .expect("storage_status payload is an object");
+    assert!(
+        !payload_fields.is_empty(),
+        "an empty payload would make the key parity assertion vacuous"
+    );
     let payload_bytes = serde_json::to_vec(payload)
         .expect("serialize JSON payload")
         .len();
+    let mut payload_keys = payload_fields.keys().cloned().collect::<Vec<_>>();
+    payload_keys.sort_unstable();
+    let visible_keys = &payload_keys[..payload_keys.len().min(HUMAN_VIEW_VISIBLE_KEYS)];
+    let elision = if payload_keys.len() > visible_keys.len() {
+        ", …"
+    } else {
+        ""
+    };
+    let rendered_keys = visible_keys.join(",").replace('_', "\\_");
     let payload_summary = format!(
-        "- Payload: object(keys=database\\_bytes,details,read\\_only,status; json\\_bytes={payload_bytes}); complete: --json"
+        "- Payload: object(keys={rendered_keys}{elision}; json\\_bytes={payload_bytes}); complete: --json"
     );
     assert!(
         markdown.lines().any(|line| line == payload_summary),
@@ -2373,7 +2475,8 @@ async fn primitive_config_markdown_json_parity() {
     assert_eq!(json["outcome"]["outcome"], "evidence");
     assert_eq!(
         &json["outcome"]["value"]["payload"],
-        successful_application(&json_result)
+        successful_application(&cli_result),
+        "the JSON renderer must emit its own invocation's payload verbatim"
     );
 }
 

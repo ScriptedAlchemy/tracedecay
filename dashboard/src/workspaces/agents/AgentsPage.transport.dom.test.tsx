@@ -32,6 +32,8 @@ afterAll(() => server.close());
 const GUIDANCE = {
   error: /the read failed and nothing is being invented in its place/i,
   offline: /the daemon is not reachable from this browser/i,
+  unauthorized: /the daemon accepted no identity for this read/i,
+  denied: /does not permit it to read this scope/i,
   unsupported_schema: /a shape this build does not understand/i,
 } as const;
 
@@ -40,6 +42,12 @@ type FailKind = keyof typeof GUIDANCE;
 /**
  * What each wire fault must become on screen. `detail` is what keeps two faults
  * that share a state kind from being the same reading.
+ *
+ * The two authorization refusals carry no detail because they need none: each
+ * is its own state with its own icon, label and guidance, so a 401 and a 403
+ * are already two different readings without a status code to tell them apart.
+ * They were both `error · HTTP 4xx` until the taxonomy's `unauthorized` and
+ * `denied` states were actually wired to them.
  *
  * The last two rows deliberately declare the same reading. `LegacyResult`
  * carries a `detail` only on `error`, so a body that is not JSON and a body the
@@ -51,8 +59,8 @@ type FailKind = keyof typeof GUIDANCE;
 const MATRIX: ReadonlyArray<{ fault: HttpFault; kind: FailKind; detail: string | null }> = [
   { fault: 'server_error', kind: 'error', detail: 'HTTP 500' },
   { fault: 'not_found', kind: 'error', detail: 'HTTP 404' },
-  { fault: 'unauthorized', kind: 'error', detail: 'HTTP 401' },
-  { fault: 'forbidden', kind: 'error', detail: 'HTTP 403' },
+  { fault: 'unauthorized', kind: 'unauthorized', detail: null },
+  { fault: 'forbidden', kind: 'denied', detail: null },
   { fault: 'network_error', kind: 'offline', detail: null },
   { fault: 'malformed_body', kind: 'unsupported_schema', detail: null },
   { fault: 'unsupported_shape', kind: 'unsupported_schema', detail: null },
@@ -108,8 +116,8 @@ describe('AgentsPage under HTTP transport faults', () => {
     const declared = new Set(MATRIX.map((row) => `${row.kind}|${row.detail ?? ''}`));
     expect(new Set(rendered.values()).size).toBe(declared.size);
 
-    // Spelled out for the four that differ only by status code, since that is
-    // the pair most likely to be flattened into a generic "request failed".
+    // Spelled out for the rows that differ only by status code, since those
+    // are the ones most likely to be flattened into a generic "request failed".
     const statuses = MATRIX.filter((row) => row.detail).map((row) => rendered.get(row.fault));
     expect(new Set(statuses).size).toBe(statuses.length);
   });
@@ -150,7 +158,7 @@ function renderAgents() {
 
 /** The one state chip a fully failed page renders, once it has settled. */
 async function findChip(container: HTMLElement): Promise<Element> {
-  await screen.findByText(/^(Error|Offline|Unsupported schema)$/);
+  await screen.findByText(/^(Error|Offline|Unauthorized|Denied|Unsupported schema)$/);
   const chips = [...container.querySelectorAll('[data-state]')];
   expect(chips).toHaveLength(1);
   return chips[0]!;

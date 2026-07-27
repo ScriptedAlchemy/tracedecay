@@ -109,10 +109,42 @@ impl LspFeedbackProjectionScope {
 
 struct CurrentFeedbackCycle {
     scope: LspFeedbackProjectionScope,
-    result: FeedbackDiagnosticsReadResultV1,
+    /// `None` when the diagnostics authority returned terminal evidence
+    /// without a cycle. A project that has ingested nothing yet is the
+    /// ordinary first-run case, and the read is still authoritative about it,
+    /// so consumers receive the typed coverage below rather than nothing.
+    result: Option<FeedbackDiagnosticsReadResultV1>,
+    termination: OperationTermination,
     canonical_handle: String,
     observed_at: UtcMicros,
     expires_at: UtcMicros,
+}
+
+/// Coverage and producer state for a diagnostics read that terminated without
+/// a cycle, using the same termination vocabulary the projection path already
+/// applies to operation snapshots. A read that did not complete is evidence
+/// about the producer, not an absence of evidence.
+fn incomplete_read_projection(
+    termination: OperationTermination,
+) -> (ContextCoverage, ContextProducerState) {
+    match termination {
+        // A completed read that carried no cycle has nothing to report yet,
+        // which is unknown coverage rather than a clean document.
+        OperationTermination::Completed | OperationTermination::Partial => {
+            (ContextCoverage::Partial, ContextProducerState::Partial)
+        }
+        OperationTermination::Cancelled => {
+            (ContextCoverage::Unavailable, ContextProducerState::Cancelled)
+        }
+        OperationTermination::TimedOut => {
+            (ContextCoverage::Unavailable, ContextProducerState::TimedOut)
+        }
+        OperationTermination::Failed => (ContextCoverage::Failed, ContextProducerState::Failed),
+        OperationTermination::EffectUnknown => (
+            ContextCoverage::Unavailable,
+            ContextProducerState::Unavailable,
+        ),
+    }
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -1403,22 +1435,41 @@ impl ConcretePr12FeedbackLspSource {
         else {
             return;
         };
-        let cycle = &current.result.cycle;
-        let source_revision = cycle.result_id.as_str().to_owned();
-        let producer_state = producer_state_for_cycle(cycle);
         let identity = current.scope.projection_identity();
         let generation = current.scope.generation;
+        let (source_revision, producer_state, coverages) = match current.result.as_ref() {
+            Some(result) => {
+                let cycle = &result.cycle;
+                (
+                    cycle.result_id.as_str().to_owned(),
+                    producer_state_for_cycle(cycle),
+                    [
+                        cycle_coverage(cycle),
+                        impact_projection(cycle).0,
+                        affected_test_projection(cycle).0,
+                    ],
+                )
+            }
+            // No cycle to name a revision with. Keying the notification on the
+            // termination collapses a run of identical degraded reads into one
+            // change instead of re-announcing the same absence per read.
+            None => {
+                let (coverage, producer_state) = incomplete_read_projection(current.termination);
+                (
+                    format!("incomplete-read.{producer_state:?}"),
+                    producer_state,
+                    [coverage; 3],
+                )
+            }
+        };
         for (kind, coverage) in [
-            (ContextProjectionKind::diagnostics(), cycle_coverage(cycle)),
-            (
-                ContextProjectionKind::post_edit_impact(),
-                impact_projection(cycle).0,
-            ),
-            (
-                ContextProjectionKind::affected_tests(),
-                affected_test_projection(cycle).0,
-            ),
-        ] {
+            ContextProjectionKind::diagnostics(),
+            ContextProjectionKind::post_edit_impact(),
+            ContextProjectionKind::affected_tests(),
+        ]
+        .into_iter()
+        .zip(coverages)
+        {
             self.changes.offer(
                 source_revision.clone(),
                 ContextProjectionChange {
@@ -1476,18 +1527,29 @@ impl ConcretePr12FeedbackLspSource {
         let ApplicationOutcome::Evidence(evidence) = envelope.outcome else {
             return Err(LspRuntimeFailure::new("feedback-read-outcome-invalid"));
         };
-        if evidence.execution.termination != OperationTermination::Completed {
-            return Err(LspRuntimeFailure::new("feedback-read-incomplete"));
-        }
-        let payload = evidence
-            .payload
-            .ok_or_else(|| LspRuntimeFailure::new("feedback-current-result-unavailable"))?;
+        // A read that did not complete, or that completed with no cycle to
+        // report, is the ordinary state of a project that has ingested nothing
+        // yet. Refusing it here denied every first-run project any context
+        // projection at all, even though the projection envelope already
+        // carries typed coverage and producer state for exactly this case.
+        let termination = evidence.execution.termination;
+        let Some(payload) = evidence.payload else {
+            return Ok(CurrentFeedbackCycle {
+                scope,
+                result: None,
+                termination,
+                canonical_handle: handle,
+                observed_at,
+                expires_at,
+            });
+        };
         if !feedback_content_is_current(payload.cycle.content_identity.as_ref(), &scope) {
             return Err(LspRuntimeFailure::new("feedback-source-identity-stale"));
         }
         Ok(CurrentFeedbackCycle {
             scope,
-            result: payload,
+            result: Some(payload),
+            termination,
             canonical_handle: handle,
             observed_at,
             expires_at,
@@ -1754,7 +1816,16 @@ impl ManagedDiagnosticSnapshotPort for ConcretePr12FeedbackLspSource {
                 )
                 .await?;
             let scope = current.scope;
-            let cycle = current.result.cycle;
+            // `ManagedDiagnosticSnapshot` carries coverage only on individual
+            // diagnostics, so a read that produced no cycle has nowhere to say
+            // "unknown". Publishing an empty set would tell the editor the
+            // document is clean, so this one surface still declines rather
+            // than assert a health it cannot support. The context projection
+            // below has a coverage field and does report the degraded state.
+            let Some(result) = current.result else {
+                return Err(LspRuntimeFailure::new("feedback-read-incomplete"));
+            };
+            let cycle = result.cycle;
             let expansion_handles = source
                 .current_finding_items(
                     &request.root,
@@ -1833,10 +1904,35 @@ impl CanonicalContextProjectionAuthority for ConcretePr12FeedbackLspSource {
             let CurrentFeedbackCycle {
                 scope,
                 result,
+                termination,
                 canonical_handle,
                 observed_at,
                 expires_at,
             } = current;
+            let Some(result) = result else {
+                if request.kind != ContextProjectionKind::diagnostics()
+                    && request.kind != ContextProjectionKind::post_edit_impact()
+                    && request.kind != ContextProjectionKind::affected_tests()
+                {
+                    return ContextProjectionOutcome::Unsupported;
+                }
+                let (coverage, producer_state) = incomplete_read_projection(termination);
+                return ContextProjectionOutcome::Ready(ContextProjectionEnvelope {
+                    root_uri: root.uri().to_owned(),
+                    document_uri: request.document_uri,
+                    kind: request.kind,
+                    generation: scope.generation,
+                    identity: scope.projection_identity(),
+                    freshness: ContextFreshness::Current,
+                    producer_state,
+                    coverage,
+                    revision: TRACEDECAY_CONTEXT_REVISION,
+                    items: Vec::new(),
+                    omitted_count: 0,
+                    omission_reasons: projection_omission_reasons(coverage, 0, producer_state),
+                    retrieval_handle: None,
+                });
+            };
             let cycle = result.cycle;
             let kind = request.kind.clone();
             let (coverage, mut items, omitted_count) =

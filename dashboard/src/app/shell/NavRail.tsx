@@ -121,7 +121,11 @@ function RailLink({
       aria-label={label}
       className={({ isActive }) =>
         cn(
-          'group relative flex h-8 items-center gap-2.5 border-b border-edge-subtle pl-3.5 pr-2',
+          // A workspace link is the most-used control in the product and it
+          // rendered 41x28 — under the minimum on both axes once the rail
+          // collapses to icons. The row is the target, so the row carries the
+          // minimum rather than the glyph growing.
+          'group relative flex min-h-[var(--touch-target-min)] items-center gap-2.5 border-b border-edge-subtle pl-3.5 pr-2',
           'text-text-secondary transition-colors duration-[var(--dur-state)]',
           'hover:bg-surface-2 hover:text-text-primary max-md:justify-center max-md:px-0',
           isActive && 'bg-surface-2 text-text-primary',
@@ -223,10 +227,15 @@ export function NavRail() {
   return (
     <nav
       aria-label="Workspaces"
-      className="group/rail relative flex w-48 shrink-0 flex-col border-r border-edge-subtle bg-surface-1 max-md:w-12"
+      // Collapsed to icons the rail was `w-12` — 42px, so every link in it was
+      // 41px wide against a 44px minimum. The collapsed width is the link
+      // width, so it comes from the token plus the rail's own hairline.
+      className="group/rail relative flex w-48 shrink-0 flex-col border-r border-edge-subtle bg-surface-1 max-md:w-[calc(var(--touch-target-min)+1px)]"
       data-collapsed="false"
     >
-      <div className="flex h-12 shrink-0 items-center gap-2.5 border-b border-edge-subtle px-3 max-md:justify-center max-md:px-0">
+      {/* Matches the `ScopeBar` height beside it, which is sized from the same
+        * token so its stretched controls clear the minimum. */}
+      <div className="flex h-[calc(var(--touch-target-min)+1px)] shrink-0 items-center gap-2.5 border-b border-edge-subtle px-3 max-md:justify-center max-md:px-0">
         <span aria-hidden className="relative size-3 shrink-0 border border-accent">
           <span className="absolute inset-[3px] bg-accent" />
         </span>

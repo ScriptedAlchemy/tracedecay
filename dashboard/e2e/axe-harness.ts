@@ -38,11 +38,26 @@
  *
  *  5. ANY `pageerror` FAILS THE RUN. Same reason.
  *
+ * WHAT IT SWEEPS. Plan 11 mandates 320x568, 390x844, 768x1024, 1024x768,
+ * 1280x720 and 1440x900 CSS pixels, 200% and 400% zoom, reduced motion,
+ * `prefers-contrast: more` and forced colors — and two measurements no axe rule
+ * performs: no page-level horizontal scroll at 320 and 400% zoom, and touch
+ * targets of at least 44x44 CSS pixels. `responsive.ts` holds the matrix and
+ * both probes; see it for why zoom is emulated as a CSS viewport rather than
+ * `deviceScaleFactor`, and for each touch-target exemption.
+ *
+ * The cross of all of that against every scenario is a run nobody keeps, so it
+ * is deliberately split: every scenario pays for three showcase viewports in
+ * two themes, and a representative scenario per audited route — preferring the
+ * ones carrying a canary — pays for the rest of the matrix. Scenarios run
+ * concurrently, which is what buys the extra coverage back.
+ *
  * Env:
- *   AXE_PORT    Static-server port (default 5241).
- *   AXE_LABEL   Output subdirectory under `.axe-audit/` (default `current`).
- *   AXE_ONLY    Substring filter over scenario ids.
- *   AXE_TRAP    `1` reverts to the pre-fix stillness, to demonstrate defect 2.
+ *   AXE_PORT         Static-server port (default 5241).
+ *   AXE_LABEL        Output subdirectory under `.axe-audit/` (default `current`).
+ *   AXE_ONLY         Substring filter over scenario ids.
+ *   AXE_CONCURRENCY  Scenarios in flight (default 3). `1` restores ordered logs.
+ *   AXE_TRAP         `1` reverts to the pre-fix stillness, to demonstrate defect 2.
  */
 import { spawnSync } from 'node:child_process';
 import {
@@ -65,6 +80,30 @@ import {
   assertVisibilityReport,
   type VisibilityReport,
 } from './visibility.ts';
+import {
+  FORCED_COLORS_PROBE,
+  REFLOW_PROBE,
+  RESPONSIVE_MATRIX,
+  SHOWCASE_VIEWPORTS,
+  TOUCH_TARGET_PROBE,
+  clippedContentFailures,
+  combinationTag,
+  reflowFailures,
+  touchTargetFailures,
+  type Combination,
+  type ForcedColorsOptOut,
+  type MediaMode,
+  type ReflowReport,
+  type Theme,
+  type TouchTargetReport,
+  type Viewport,
+} from './responsive.ts';
+import {
+  reportRun,
+  type PlanFailure,
+  type ScenarioRecord,
+  type Violation,
+} from './axe-report.ts';
 
 const ROOT = process.cwd();
 const LABEL = process.env['AXE_LABEL'] ?? 'current';
@@ -81,10 +120,23 @@ const OUT_DIR = path.join(ROOT, '.axe-audit', LABEL);
  */
 const BUILD_DIST = path.join(ROOT, 'app-dist');
 const DIST = path.join(OUT_DIR, 'bundle');
-const THEMES = ['light', 'dark'] as const;
-const WIDTHS = [320, 768, 1440] as const;
-const VIEWPORT_HEIGHT = 900;
+const THEMES: readonly Theme[] = ['light', 'dark'];
 const PORT = Number(process.env['AXE_PORT'] ?? 5241);
+/**
+ * How many scenarios are driven at once.
+ *
+ * Scenarios were sequential when the set was fourteen. It is thirty-five now
+ * and the sweep is wider — the Plan 11 viewport, zoom and media matrix on top
+ * of the showcase sweep — so sequential execution puts the gate past the point
+ * where anyone will keep it in CI. Each scenario already owns a private browser
+ * context, private route overrides and a private react-query cache, so nothing
+ * is shared but the static server and the accumulator this pool merges into.
+ *
+ * Three is chosen against the plan's own 4 vCPU runner: axe's analysis is
+ * CPU-bound in the page, so a fourth worker mostly contends. Override with
+ * `AXE_CONCURRENCY=1` to get the old strictly-ordered log back when debugging.
+ */
+const CONCURRENCY = Math.max(1, Number(process.env['AXE_CONCURRENCY'] ?? 3));
 /**
  * `AXE_TRAP=1` reverts to the old stillness (shorten the animation instead of
  * removing it, no `data-motion`, no reduced-motion emulation).
@@ -102,10 +154,8 @@ const PORT = Number(process.env['AXE_PORT'] ?? 5241);
  */
 export const TRAP_MODE = process.env['AXE_TRAP'] === '1';
 /** Substring filter over scenario ids, so one state can be iterated on without
- * paying for a full six-viewport sweep of all of them. */
+ * paying for the whole matrix across all of them. */
 const ONLY = process.env['AXE_ONLY'] ?? '';
-
-type Theme = (typeof THEMES)[number];
 
 /**
  * A JSON body, or an explicit HTTP failure to simulate a broken read.
@@ -152,6 +202,19 @@ export interface Scenario {
    * assumption.
    */
   readonly expectViolations?: readonly string[];
+  /**
+   * Also sweep this scenario through the Plan 11 viewport/zoom/media matrix.
+   *
+   * The full scenario set runs at the three showcase viewports in both themes;
+   * crossing all thirty-five of them with six more viewports and three media
+   * modes would be a six-hundred-scan run nobody would keep. The matrix runs
+   * instead over a representative scenario per audited route, and the routes
+   * that carry a canary are preferred for it: the seeded rules must be
+   * reported at every one of those combinations too, so a clean 390x844 or
+   * forced-colors scan is a measurement rather than a scan that quietly
+   * stopped looking.
+   */
+  readonly matrix?: boolean;
 }
 
 export function expectEqual(actual: string | undefined, expected: string, what: string): void {
@@ -352,34 +415,34 @@ export async function setTheme(page: Page, theme: Theme): Promise<void> {
   }, theme);
 }
 
-interface Violation {
-  id: string;
-  impact: string;
-  nodes: string[];
-  help: string;
+/**
+ * Rules that must be switched off in a given media mode because they measure
+ * the wrong thing there — never because they are inconvenient.
+ *
+ * `color-contrast` under forced colors is the only entry, and
+ * `FORCED_COLORS_PROBE` in `responsive.ts` carries the measurements that
+ * justify it plus the direct check that replaces it. Every other rule, and
+ * `color-contrast` in every other mode, runs unchanged.
+ */
+function disabledRules(media: MediaMode): string[] {
+  return media === 'forced-colors' ? ['color-contrast'] : [];
 }
 
-export async function runAxe(page: Page): Promise<Violation[]> {
-  const results = await new AxeBuilder({ page })
-    .withTags(['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'])
-    .analyze();
+export async function runAxe(page: Page, media: MediaMode = 'reduced-motion'): Promise<Violation[]> {
+  const builder = new AxeBuilder({ page }).withTags([
+    'wcag2a',
+    'wcag2aa',
+    'wcag21a',
+    'wcag21aa',
+  ]);
+  const off = disabledRules(media);
+  const results = await (off.length > 0 ? builder.disableRules(off) : builder).analyze();
   return results.violations.map((v) => ({
     id: v.id,
     impact: v.impact ?? 'unknown',
     help: v.help,
     nodes: v.nodes.map((n) => `${n.target.join(' ')} :: ${n.html.slice(0, 160)}`),
   }));
-}
-
-interface ShotRecord {
-  theme: Theme;
-  width: number;
-  file: string;
-  violations: Violation[];
-  /** Violations this scenario planted on purpose, recorded so the artifact
-   * shows what the engine detected rather than only what it did not. */
-  seeded?: Violation[];
-  error?: string;
 }
 
 /**
@@ -457,24 +520,156 @@ function buildBundleIntoScratch(): void {
   }
 }
 
+/**
+ * The three media conditions the plan names, applied live.
+ *
+ * All three resolve through CSS media queries, so none of them needs a reload:
+ * `prefers-contrast` and `forced-colors` were both confirmed to switch real
+ * computed style in the pinned Chromium, not merely to flip `matchMedia`.
+ * Every axis is set explicitly on every call, so leaving forced colors behind
+ * on the next mode is not possible.
+ */
+async function applyMedia(page: Page, media: MediaMode): Promise<void> {
+  await page.emulateMedia({
+    reducedMotion: TRAP_MODE ? 'no-preference' : 'reduce',
+    contrast: media === 'contrast-more' ? 'more' : 'no-preference',
+    forcedColors: media === 'forced-colors' ? 'active' : 'none',
+  });
+}
+
+/** Everything one scenario produced, so workers accumulate privately and the
+ * caller merges once. Sharing the counters would make totals depend on
+ * interleaving. */
+interface ScenarioRun {
+  record: ScenarioRecord;
+  planFailures: PlanFailure[];
+  pageErrors: string[];
+  assertionFailures: number;
+  log: string[];
+}
+
+/**
+ * One page state: prove it rendered, photograph it, scan it, and take the two
+ * measurements the plan names that no axe rule performs.
+ */
+async function captureAndScan(
+  page: Page,
+  scenario: Scenario,
+  viewport: Viewport,
+  theme: Theme,
+  media: MediaMode,
+  run: ScenarioRun,
+): Promise<void> {
+  const file = `${scenario.id}__${theme}__${viewport.id}__${media}.png`;
+  const tag = `${scenario.id}/${theme}/${viewport.id}/${media}`;
+  await assertActuallyVisible(page, tag);
+  await page.screenshot({ path: path.join(OUT_DIR, file), fullPage: true });
+  const scanned = await runAxe(page, media);
+  const { real: violations, seeded } = partitionViolations(scanned, scenario.expectViolations, tag);
+  const reflow = (await page.evaluate(REFLOW_PROBE)) as ReflowReport;
+  const targets = (await page.evaluate(TOUCH_TARGET_PROBE)) as TouchTargetReport;
+  const optOuts =
+    media === 'forced-colors'
+      ? ((await page.evaluate(FORCED_COLORS_PROBE)) as ForcedColorsOptOut[])
+      : [];
+
+  // Reflow is measured at every size and recorded at every size, but only
+  // gated where the plan gates it: "at 320 pixels and 400% zoom there is no
+  // page-level horizontal scroll". A wide layout that scrolls sideways is a
+  // different and lesser complaint, and folding it in here would let the
+  // gate's meaning drift away from the sentence it implements.
+  const failures: PlanFailure[] = [
+    ...(viewport.reflowGated ? reflowFailures(reflow, tag) : []).map(
+      (detail): PlanFailure => ({
+        scenario: scenario.id,
+        route: scenario.route,
+        tag,
+        check: 'horizontal-scroll',
+        detail,
+      }),
+    ),
+    ...(viewport.reflowGated ? clippedContentFailures(reflow, tag) : []).map(
+      (detail): PlanFailure => ({
+        scenario: scenario.id,
+        route: scenario.route,
+        tag,
+        check: 'clipped-content',
+        detail,
+      }),
+    ),
+    ...touchTargetFailures(targets, tag).map(
+      (detail): PlanFailure => ({
+        scenario: scenario.id,
+        route: scenario.route,
+        tag,
+        check: 'touch-target',
+        detail,
+      }),
+    ),
+  ];
+  run.planFailures.push(...failures);
+  run.record.shots.push({
+    theme,
+    viewport: viewport.id,
+    width: viewport.width,
+    height: viewport.height,
+    zoom: viewport.zoom,
+    media,
+    file,
+    violations,
+    reflow,
+    targets,
+    ...(optOuts.length ? { forcedColorOptOuts: optOuts } : {}),
+    ...(disabledRules(media).length ? { disabledRules: disabledRules(media) } : {}),
+    ...(seeded.length ? { seeded } : {}),
+  });
+  run.log.push(
+    `[axe] ${file}  axe=${violations.length}` +
+      (violations.length ? ` (${violations.map((v) => v.id).join(', ')})` : '') +
+      `  reflow=${reflow.scrollWidth}/${reflow.clientWidth}` +
+      `  targets=${targets.undersized.length}/${targets.examined} under 44px` +
+      (seeded.length ? `  seeded-detected=${seeded.map((v) => v.id).join(', ')}` : ''),
+  );
+  for (const v of violations) {
+    run.log.push(`             - ${v.id} [${v.impact}] x${v.nodes.length} — ${v.help}`);
+    for (const n of v.nodes.slice(0, 3)) run.log.push(`                 ${n}`);
+  }
+  for (const f of failures) run.log.push(`             ! ${f.check}: ${f.detail}`);
+}
+
+/**
+ * Run `fn` over `items` with at most `limit` in flight, preserving input order
+ * in the results.
+ *
+ * Deliberately not a library: the pool is six lines and the alternative is a
+ * dependency in a gate whose whole argument is that it does not trust anything
+ * it did not measure.
+ */
+async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    for (let i = next++; i < items.length; i = next++) {
+      results[i] = await fn(items[i]!, i);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
+
 export async function runHarness(scenarios: readonly Scenario[]): Promise<void> {
   rmSync(OUT_DIR, { recursive: true, force: true });
   mkdirSync(OUT_DIR, { recursive: true });
   const { baseURL, server } = startStaticServer();
 
   let browser: Browser | null = null;
-  const records: Array<{
-    id: string;
-    route: string;
-    proves: string;
-    assertion: 'passed' | string;
-    shots: ShotRecord[];
-  }> = [];
-  let totalViolations = 0;
+  const records: ScenarioRecord[] = [];
+  const planFailures: PlanFailure[] = [];
   let assertionFailures = 0;
-  /** How many planted violations the scan actually caught, and which rules. */
-  let seededDetections = 0;
-  const seededByRule: Record<string, number> = {};
   const pageErrors: string[] = [];
 
   const selected = scenarios.filter((s) => s.id.includes(ONLY));
@@ -494,28 +689,50 @@ export async function runHarness(scenarios: readonly Scenario[]): Promise<void> 
     }
   }
 
+  // The showcase sweep every scenario pays for, and the matrix a
+  // representative subset adds on top of it. Built once so the plan is
+  // printed before the run rather than inferred from the log afterwards.
+  const showcase: Combination[] = SHOWCASE_VIEWPORTS.flatMap((viewport) =>
+    THEMES.map((theme): Combination => ({ viewport, theme, media: 'reduced-motion' })),
+  );
+  const matrixScenarios = selected.filter((s) => s.matrix === true);
+  console.log(
+    `[axe] plan matrix: ${selected.length} scenarios x ${showcase.length} showcase combinations` +
+      ` + ${matrixScenarios.length} matrix scenarios x ${RESPONSIVE_MATRIX.length} more` +
+      ` = ${selected.length * showcase.length + matrixScenarios.length * RESPONSIVE_MATRIX.length}` +
+      ` scans at concurrency ${CONCURRENCY}`,
+  );
+
   try {
     browser = await chromium.launch({ headless: true });
-    for (const scenario of selected) {
-      const record = {
-        id: scenario.id,
-        route: scenario.route,
-        proves: scenario.proves,
-        assertion: 'passed' as 'passed' | string,
-        shots: [] as ShotRecord[],
+    const live = browser;
+    const runs = await mapWithConcurrency(selected, CONCURRENCY, async (scenario) => {
+      const run: ScenarioRun = {
+        record: {
+          id: scenario.id,
+          route: scenario.route,
+          proves: scenario.proves,
+          assertion: 'passed',
+          matrix: scenario.matrix === true,
+          shots: [],
+        },
+        planFailures: [],
+        pageErrors: [],
+        assertionFailures: 0,
+        log: [],
       };
       // One fresh context per scenario: the route overrides and the react-query
       // cache must not leak between states. `reducedMotion` drives the app's
       // media path; the init script drives its attribute path.
-      const context = await browser.newContext({
+      const context = await live.newContext({
         deviceScaleFactor: 1,
         ...(TRAP_MODE ? {} : { reducedMotion: 'reduce' as const }),
       });
       const page = await context.newPage();
       page.on('pageerror', (err) => {
         const message = `${scenario.id}: ${err.message}`;
-        pageErrors.push(message);
-        console.error(`[axe] PAGEERROR ${message}`);
+        run.pageErrors.push(message);
+        run.log.push(`[axe] PAGEERROR ${message}`);
       });
       await installApiFixtures(page);
       // Registered after the fixtures, so these win for the routes under test.
@@ -542,58 +759,92 @@ export async function runHarness(scenarios: readonly Scenario[]): Promise<void> 
       // throws, and this harness fails the run on any page error.
       await page.addInitScript({ content: TRAP_MODE ? TRAP_INIT : STILLNESS_INIT });
 
-      for (const width of WIDTHS) {
-        await page.setViewportSize({ width, height: VIEWPORT_HEIGHT });
-        for (const theme of THEMES) {
-          const file = `${scenario.id}__${theme}__${width}.png`;
-          const tag = `${scenario.id}/${theme}/${width}`;
-          try {
-            await page.goto(`${baseURL}${scenario.route}`, { waitUntil: 'domcontentloaded' });
-            await setTheme(page, theme);
-            await page.waitForSelector('main#td-main', { timeout: 20_000 });
-            await sleep(900);
-            if (scenario.drive !== undefined) await scenario.drive(page);
-            await assertActuallyVisible(page, tag);
-            await page.screenshot({ path: path.join(OUT_DIR, file), fullPage: true });
-            const scanned = await runAxe(page);
-            const { real: violations, seeded } = partitionViolations(
-              scanned,
-              scenario.expectViolations,
-              tag,
-            );
-            totalViolations += violations.length;
-            seededDetections += seeded.length;
-            for (const v of seeded) seededByRule[v.id] = (seededByRule[v.id] ?? 0) + 1;
-            record.shots.push({
-              theme,
-              width,
-              file,
-              violations,
-              ...(seeded.length ? { seeded } : {}),
-            });
-            console.log(
-              `[axe] ${file}  axe=${violations.length}` +
-                (violations.length ? ` (${violations.map((v) => v.id).join(', ')})` : '') +
-                (seeded.length ? `  seeded-detected=${seeded.map((v) => v.id).join(', ')}` : ''),
-            );
-            for (const v of violations) {
-              console.log(`             - ${v.id} [${v.impact}] x${v.nodes.length} — ${v.help}`);
-              for (const n of v.nodes.slice(0, 3)) console.log(`                 ${n}`);
-            }
-            // Assert the rendered state once, at the showcase viewport.
-            if (width === 1440 && theme === 'light' && scenario.assert) {
-              await scenario.assert(page);
-            }
-          } catch (err) {
-            const message = String(err);
-            record.assertion = message;
-            assertionFailures += 1;
-            console.error(`[axe] FAILED ${tag}: ${message}`);
+      /** Land on the route in the state under test, from scratch. */
+      const arrive = async (viewport: Viewport, theme: Theme): Promise<void> => {
+        await page.setViewportSize({ width: viewport.width, height: viewport.height });
+        await page.goto(`${baseURL}${scenario.route}`, { waitUntil: 'domcontentloaded' });
+        await setTheme(page, theme);
+        await page.waitForSelector('main#td-main', { timeout: 20_000 });
+        await sleep(900);
+        if (scenario.drive !== undefined) await scenario.drive(page);
+      };
+
+      for (const { viewport, theme } of showcase) {
+        const tag = `${scenario.id}/${theme}/${viewport.id}`;
+        try {
+          await applyMedia(page, 'reduced-motion');
+          await arrive(viewport, theme);
+          await captureAndScan(page, scenario, viewport, theme, 'reduced-motion', run);
+          // Assert the rendered state once, at the showcase viewport.
+          if (viewport.id === '1440x900' && theme === 'light' && scenario.assert) {
+            await scenario.assert(page);
           }
+        } catch (err) {
+          const message = String(err);
+          run.record.assertion = message;
+          run.assertionFailures += 1;
+          run.log.push(`[axe] FAILED ${tag}: ${message}`);
         }
       }
-      records.push(record);
+
+      // The rest of the plan matrix, over one representative scenario per
+      // audited route. Grouped by (theme, media) and resized within a group:
+      // every mode here resolves through CSS, so the state under test survives
+      // a resize, and re-driving thirty times per scenario would spend the
+      // whole budget re-reaching states the group already holds. If a resize
+      // ever did lose the driven state, the seeded-violation check fails the
+      // run rather than scoring the emptied page clean.
+      if (scenario.matrix === true) {
+        const groups = new Map<string, Combination[]>();
+        for (const c of RESPONSIVE_MATRIX) {
+          const key = `${c.theme}|${c.media}`;
+          groups.set(key, [...(groups.get(key) ?? []), c]);
+        }
+        for (const group of groups.values()) {
+          const head = group[0]!;
+          try {
+            await applyMedia(page, head.media);
+            await arrive(head.viewport, head.theme);
+          } catch (err) {
+            const message = String(err);
+            run.record.assertion = message;
+            run.assertionFailures += 1;
+            run.log.push(`[axe] FAILED ${scenario.id}/${combinationTag(head)}: ${message}`);
+            continue;
+          }
+          for (const c of group) {
+            try {
+              await page.setViewportSize({ width: c.viewport.width, height: c.viewport.height });
+              // Reflow, media-query re-evaluation and any resize-driven
+              // re-render need to settle before anything is measured.
+              await sleep(450);
+              await captureAndScan(page, scenario, c.viewport, c.theme, c.media, run);
+            } catch (err) {
+              const message = String(err);
+              run.record.assertion = message;
+              run.assertionFailures += 1;
+              run.log.push(`[axe] FAILED ${scenario.id}/${combinationTag(c)}: ${message}`);
+            }
+          }
+        }
+        await applyMedia(page, 'reduced-motion');
+      }
+
       await context.close();
+      // Flushed here rather than after the pool drains: a five-minute CI step
+      // that prints nothing until it is over is a step nobody can tell apart
+      // from a hang. Buffering to the end of the SCENARIO is what keeps a
+      // scenario's lines contiguous under concurrency; buffering to the end of
+      // the RUN would just be silence.
+      console.log(run.log.join('\n'));
+      return run;
+    });
+
+    for (const run of runs) {
+      records.push(run.record);
+      planFailures.push(...run.planFailures);
+      pageErrors.push(...run.pageErrors);
+      assertionFailures += run.assertionFailures;
     }
 
     // The health dot is 8px square, which is the right size on screen and
@@ -603,7 +854,7 @@ export async function runHarness(scenarios: readonly Scenario[]): Promise<void> 
       const context = await browser.newContext({
         deviceScaleFactor: 6,
         reducedMotion: 'reduce',
-        viewport: { width: 1440, height: VIEWPORT_HEIGHT },
+        viewport: { width: 1440, height: 900 },
       });
       const page = await context.newPage();
       await installApiFixtures(page);
@@ -634,49 +885,17 @@ export async function runHarness(scenarios: readonly Scenario[]): Promise<void> 
     server.close();
   }
 
-  const byViewport: Record<string, number> = {};
-  const byRule: Record<string, number> = {};
-  for (const r of records) {
-    for (const s of r.shots) {
-      const key = `${s.theme}__${s.width}`;
-      byViewport[key] = (byViewport[key] ?? 0) + s.violations.length;
-      for (const v of s.violations) byRule[v.id] = (byRule[v.id] ?? 0) + 1;
-    }
-  }
-  const findings = {
-    generatedAt: new Date().toISOString(),
-    label: LABEL,
-    servedFrom: DIST,
-    widths: WIDTHS,
-    themes: THEMES,
-    axeTags: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa'],
-    scenarioCount: records.length,
-    shotCount: records.reduce((n, r) => n + r.shots.length, 0),
-    totalViolations,
-    assertionFailures,
-    pageErrors,
-    violationsByViewport: byViewport,
-    violationsByRule: byRule,
-    // The engine's own receipt. `totalViolations: 0` is only readable as a
-    // clean bill of health alongside a non-empty `seededDetectionsByRule`.
-    seededDetections,
-    seededDetectionsByRule: seededByRule,
-    scenarios: records,
-  };
-  writeFileSync(path.join(OUT_DIR, 'findings.json'), `${JSON.stringify(findings, null, 2)}\n`);
-
-  console.log('');
-  console.log('[axe] ===== summary =====');
-  console.log(`[axe] scenarios=${findings.scenarioCount} shots=${findings.shotCount}`);
-  console.log(
-    `[axe] axe violations=${totalViolations} byViewport=${JSON.stringify(byViewport)}`,
+  const failed = reportRun(
+    {
+      label: LABEL,
+      servedFrom: DIST,
+      records,
+      planFailures,
+      pageErrors,
+      assertionFailures,
+      themes: THEMES,
+    },
+    path.join(OUT_DIR, 'findings.json'),
   );
-  console.log(`[axe] byRule=${JSON.stringify(byRule)}`);
-  console.log(
-    `[axe] seeded violations DETECTED=${seededDetections} ` +
-      `byRule=${JSON.stringify(seededByRule)} — this is what makes the zero above readable`,
-  );
-  console.log(`[axe] assertion/visibility failures=${assertionFailures}`);
-  console.log(`[axe] page errors=${pageErrors.length}`);
-  if (totalViolations > 0 || assertionFailures > 0 || pageErrors.length > 0) process.exitCode = 1;
+  if (failed) process.exitCode = 1;
 }

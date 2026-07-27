@@ -1918,6 +1918,64 @@ fn daemon_startup_probe_skips_unrelated_profile_audits() {
 }
 
 #[test]
+fn daemon_startup_pending_runtime_telemetry_is_retryable() {
+    let error = super::daemon_runtime_status(&serde_json::json!({
+        "content": [{"type": "text", "text": r#"{"process":{"pid":1234}}"#}]
+    }))
+    .unwrap_err();
+    assert!(
+        super::daemon_startup_error_is_retryable(&error),
+        "an admitted project that has not published telemetry yet must be polled, not failed: {error}"
+    );
+    assert!(matches!(
+        super::classify_daemon_startup_health_result(Err(error)),
+        super::DaemonStartupHealthOutcome::Retryable { .. }
+    ));
+}
+
+#[test]
+fn daemon_startup_malformed_runtime_telemetry_stays_terminal() {
+    let error = super::daemon_runtime_status(&serde_json::json!({
+        "content": [{"type": "text", "text": r#"{"database":"not-an-object"}"#}]
+    }))
+    .unwrap_err();
+    assert!(
+        !super::daemon_startup_error_is_retryable(&error),
+        "telemetry that is present but malformed is a contract violation: {error}"
+    );
+}
+
+#[tokio::test]
+async fn daemon_startup_health_converges_after_runtime_telemetry_appears() {
+    let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let probe_attempts = std::sync::Arc::clone(&attempts);
+    super::wait_for_daemon_startup_health_with(
+        std::time::Duration::from_secs(30),
+        std::time::Duration::from_millis(1),
+        move || {
+            let attempt = probe_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            async move {
+                if attempt < 3 {
+                    return super::daemon_runtime_status(&serde_json::json!({
+                        "content": [{"type": "text", "text": r#"{"process":{"pid":1234}}"#}]
+                    }));
+                }
+                Ok(serde_json::json!({
+                    "storage_health": {"quick_check_ok": true}
+                }))
+            }
+        },
+        |_| {},
+    )
+    .await
+    .expect("startup health must converge once the warming project publishes telemetry");
+    assert!(
+        attempts.load(std::sync::atomic::Ordering::Relaxed) >= 4,
+        "the warming responses must have been polled before convergence"
+    );
+}
+
+#[test]
 fn daemon_startup_background_warmup_is_retryable() {
     let error = crate::errors::TraceDecayError::Config {
         message: "TraceDecay project '/fast/projects/tracedecay' is warming in the background; retry the same tool shortly".to_owned(),

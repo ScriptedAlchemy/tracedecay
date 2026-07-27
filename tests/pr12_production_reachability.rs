@@ -1,16 +1,47 @@
-//! Static reachability contract for the PR12 daemon-owned production path.
+//! Reachability contract for the PR12 daemon-owned production path.
+//!
+//! Two kinds of check live here and they answer different questions.
+//!
+//! `production_*` tests boot a real daemon, open a real project, and drive a
+//! PR12 primitive through the shipped MCP, HTTP, and CLI surfaces. They fail
+//! when the path stops executing.
+//!
+//! `source_*` tests are static lints over the daemon's own source. A lint can
+//! only show that a construct is written down or absent, so it is used here for
+//! statement ordering and forbidden-construct questions that no single runtime
+//! observation answers. A lint is never evidence that a path executes; when a
+//! claim is about execution, it belongs in a `production_*` test above.
+
+mod common;
+
+use std::path::Path;
+use std::process::{Output, Stdio};
+
+use serde_json::Value;
+use tracedecay::application_surface::{
+    ApplicationSurfaceInvocationResult, ApplicationSurfaceOperation, ApplicationSurfaceRequest,
+    CallableCodeSurfaceMeta, CodeSymbolSearchSurfaceRequest, PrimitiveCodeSurfaceRequest,
+    resolve_http_application_surface,
+};
+use tracedecay::daemon::DaemonHandshake;
+use tracedecay::daemon_client::{DaemonInvocationClient, RequestedOutputFormat};
+use tracedecay::mcp::tools::dispatch::resolve_mcp_application_surface;
+use tracedecay_application::retrieval::SymbolGraphScope;
+use tracedecay_application::{
+    ApplicationEnvelope, ApplicationOutcome, OperationTermination, RequestId, ResultProjection,
+    RetrievalOrder,
+};
 
 const DAEMON_SOURCE: &str = include_str!("../src/daemon.rs");
 const PROJECT_OPEN_OWNERS_SOURCE: &str = include_str!("../src/daemon/project_open_owners.rs");
 const INVOCATION_SOURCE: &str = include_str!("../src/daemon/service/invocation.rs");
 const APPLICATION_SURFACE_SOURCE: &str = include_str!("../src/application_surface.rs");
-const CLI_SURFACE_SOURCE: &str = include_str!("../src/cli/dispatch.rs");
-const MCP_SURFACE_SOURCE: &str = include_str!("../src/mcp/tools/dispatch.rs");
-const MCP_HANDLER_SOURCE: &str = include_str!("../src/mcp/tools/handlers/application_surface.rs");
-const HTTP_SURFACE_SOURCE: &str = include_str!("../crates/tracedecay-api/src/http.rs");
-const HOOK_RUNTIME_SOURCE: &str = include_str!("../src/mcp/tools/handlers/hook_runtime.rs");
-const HOOK_V2_SOURCE: &str = include_str!("../src/hooks/v2.rs");
-const SCOUT_OWNER_SOURCE: &str = include_str!("../src/agents/context_scout_owner.rs");
+
+/// Every surface pins its page to ten rows, so a query with more matches than
+/// this must cross a page boundary to answer at all.
+const SURFACE_PAGE_SIZE: usize = 10;
+const PROBE_SYMBOL_COUNT: usize = 24;
+const PROBE_TOKEN: &str = "pr12_pagination_probe";
 
 fn assert_contains_all(source: &str, names: &[&str]) {
     for name in names {
@@ -78,79 +109,324 @@ fn collect_call_offsets(
     }
 }
 
-#[test]
-fn project_open_scout_bootstrap_precedes_each_cache_publication() {
-    for function in ["open_project_server", "portable_project_server"] {
-        let bootstrap = call_offsets(
-            DAEMON_SOURCE,
-            function,
-            "ensure_context_scout_owner_before_advertising",
-        );
-        let publication = call_offsets(DAEMON_SOURCE, function, "bind_or_insert_route_bounded");
-        assert_eq!(
-            bootstrap.len(),
-            1,
-            "{function} must have one Scout bootstrap call"
-        );
-        assert_eq!(
-            publication.len(),
-            1,
-            "{function} must have one cache publication"
-        );
-        assert!(
-            bootstrap[0] < publication[0],
-            "{function} must retain Scout before cache publication"
-        );
+struct ProductionFixture {
+    _daemon: common::DaemonProcess,
+    client: DaemonInvocationClient,
+    project: std::path::PathBuf,
+    _environment: common::IsolatedEnv,
+}
+
+impl ProductionFixture {
+    fn home(&self) -> &Path {
+        self._environment.home()
     }
 }
 
-#[test]
-fn project_open_registers_production_owners_after_cache_publication() {
+/// Opens the shipped daemon over an indexed project whose symbol graph is large
+/// enough to cross a surface page boundary.
+///
+/// Nothing here is a double: the daemon is the release binary, the project is
+/// opened by the daemon's own project-open path, and the client is the same
+/// invocation client the hosts use.
+async fn production_fixture() -> ProductionFixture {
+    let (environment, project) = common::IsolatedEnv::acquire().await;
+    copy_dir(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/context_eval_project"),
+        &project,
+    );
+    write_pagination_probe(&project);
+    let daemon = common::spawn_tracedecay_daemon(environment.home());
+    let initialized = common::tracedecay_command_with_home(environment.home())
+        .arg("init")
+        .current_dir(&project)
+        .stdin(Stdio::null())
+        .output()
+        .expect("run tracedecay init");
+    assert_command_success("tracedecay init", &initialized);
+    let handshake = DaemonHandshake::for_current_client(Some(project.clone()), None, false, false)
+        .expect("daemon handshake");
+    let client = DaemonInvocationClient::for_current(handshake).expect("daemon client");
+    ProductionFixture {
+        _daemon: daemon,
+        client,
+        project,
+        _environment: environment,
+    }
+}
+
+/// Writes enough uniformly named symbols that a single query cannot be answered
+/// inside one page.
+fn write_pagination_probe(project: &Path) {
+    let mut source = String::new();
+    for index in 0..PROBE_SYMBOL_COUNT {
+        source.push_str(&format!(
+            "pub fn {PROBE_TOKEN}_{index:02}(input: u32) -> u32 {{\n    input + {index}\n}}\n\n"
+        ));
+    }
+    let destination = project.join("src");
+    std::fs::create_dir_all(&destination).expect("probe destination");
+    std::fs::write(destination.join("pr12_pagination_probe.rs"), source)
+        .expect("write the paginated symbol probe");
+}
+
+fn copy_dir(source: &Path, destination: &Path) {
+    std::fs::create_dir_all(destination).expect("fixture destination");
+    for entry in std::fs::read_dir(source).expect("fixture directory") {
+        let entry = entry.expect("fixture entry");
+        let target = destination.join(entry.file_name());
+        if entry.file_type().expect("fixture entry type").is_dir() {
+            copy_dir(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), target).expect("copy checked-in fixture");
+        }
+    }
+}
+
+fn assert_command_success(label: &str, output: &Output) {
     assert!(
-        DAEMON_SOURCE.contains("mod project_open_owners"),
-        "daemon must own the project-open production owner module"
+        output.status.success(),
+        "{label} failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
-    for function in ["open_project_server", "portable_project_server"] {
-        let publication = call_offsets(DAEMON_SOURCE, function, "bind_or_insert_route_bounded");
-        let owners = call_offsets(
-            DAEMON_SOURCE,
-            function,
-            "register_project_open_production_owners",
-        );
-        assert_eq!(
-            publication.len(),
-            1,
-            "{function} must have one cache publication"
-        );
-        assert_eq!(
-            owners.len(),
-            1,
-            "{function} must register production owners once"
-        );
-        assert!(
-            publication[0] < owners[0],
-            "{function} must register production owners after cache publication"
-        );
+}
+
+fn symbol_search_request(query: &str) -> CodeSymbolSearchSurfaceRequest {
+    CodeSymbolSearchSurfaceRequest {
+        query: query.to_owned(),
+        scope: SymbolGraphScope { path_prefix: None },
+        lazy_index_ignored_dependencies: false,
+        meta: CallableCodeSurfaceMeta {
+            projection: ResultProjection::Summary,
+            order: RetrievalOrder::Relevance,
+        },
     }
 }
 
-#[test]
-fn project_open_mounts_concrete_cycle_lsp_advisory_and_hook_owners() {
-    assert_contains_all(
-        PROJECT_OPEN_OWNERS_SOURCE,
-        &[
-            "resolve_production_feedback_cycle_parts",
-            "open_cycle_and_register",
-            "build_and_register_pr12",
-            "register_production",
-            "production_advisory_hook_notice_sink",
-            "open_pr12_production_primitive_runtime",
-            "ProductionFeedbackRuntimeStateV1",
-            "ProjectCiRetainedObservationStoreV1",
-            "ProjectCiCodeAnchorStoreV1",
-            "ConfiguredGitHubSourceAccessAuthorityV1",
-        ],
+fn symbol_search_surface_request(query: &str) -> ApplicationSurfaceRequest {
+    ApplicationSurfaceRequest::PrimitiveCode(PrimitiveCodeSurfaceRequest::SymbolSearch(
+        symbol_search_request(query),
+    ))
+}
+
+fn evidence_payload(result: &ApplicationSurfaceInvocationResult) -> &Value {
+    let envelope = result.result.as_ref().unwrap_or_else(|problem| {
+        panic!(
+            "{} returned {:?}: {:?}",
+            result.operation.as_str(),
+            problem.problem.kind(),
+            problem.problem
+        )
+    });
+    match &envelope.outcome {
+        ApplicationOutcome::Evidence(evidence) => {
+            assert_eq!(
+                evidence.execution.termination,
+                OperationTermination::Completed
+            );
+            evidence.payload.as_ref().expect("evidence payload")
+        }
+        other => panic!("expected evidence outcome, got {other:?}"),
+    }
+}
+
+fn run_symbol_search_cli(home: &Path, project: &Path, query: &str) -> Output {
+    let project_arg = project.to_string_lossy().into_owned();
+    let arguments = serde_json::to_string(&symbol_search_request(query)).expect("CLI arguments");
+    common::tracedecay_command_with_home(home)
+        .current_dir(project)
+        .args([
+            "tool",
+            "--project",
+            project_arg.as_str(),
+            ApplicationSurfaceOperation::CodeSymbolSearch.as_str(),
+            "--args",
+            arguments.as_str(),
+            "--json",
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .expect("run code_symbol_search through the CLI")
+}
+
+/// Asserts the page is the first of several and was produced by the cursor
+/// authority rather than by truncation.
+fn assert_first_page_of_many(surface: &str, payload: &Value) {
+    let items = payload["items"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{surface} symbol page items: {payload:#}"));
+    let total = payload["total"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("{surface} symbol page total: {payload:#}"));
+    assert!(
+        total > SURFACE_PAGE_SIZE as u64,
+        "{surface} probe query must exceed one page, saw {total}"
     );
+    assert_eq!(
+        items.len(),
+        SURFACE_PAGE_SIZE,
+        "{surface} must return a full first page"
+    );
+    assert_eq!(payload["truncated"], Value::Bool(true), "{surface} page");
+    assert!(
+        !payload["next_cursor"].is_null(),
+        "{surface} must issue a continuation cursor for the remaining {} rows: {payload:#}",
+        total - items.len() as u64
+    );
+}
+
+/// Project open must mount the PR12 primitive runtime, and that runtime must
+/// answer a read whose result set crosses a page boundary.
+///
+/// The daemon resolves the primitive runtime out of the registry populated by
+/// `register_project_open_production_owners`, so a request that returns evidence
+/// proves the registration ran. The oversized result set then forces the
+/// symbol-graph cursor authority to mint a continuation: a broken authority
+/// fails the whole read rather than returning a short page, which is how a
+/// digest-shape defect in that authority stayed invisible to single-page reads.
+#[tokio::test(flavor = "multi_thread")]
+async fn production_project_open_serves_a_paginated_symbol_graph_read() {
+    let fixture = production_fixture().await;
+    let result = resolve_mcp_application_surface(
+        ApplicationSurfaceOperation::CodeSymbolSearch,
+        RequestId::new("request.pr12-reachability.symbol-search.mcp").expect("request id"),
+        symbol_search_surface_request(PROBE_TOKEN),
+        RequestedOutputFormat::Json,
+        Some(&fixture.client),
+    )
+    .await
+    .expect("MCP application dispatch");
+    assert_first_page_of_many("MCP", evidence_payload(&result));
+
+    // A query the page can hold must not advertise a continuation, so the
+    // cursor above is the pagination path executing rather than a constant.
+    let single = resolve_mcp_application_surface(
+        ApplicationSurfaceOperation::CodeSymbolSearch,
+        RequestId::new("request.pr12-reachability.symbol-search.single").expect("request id"),
+        symbol_search_surface_request(&format!("{PROBE_TOKEN}_07")),
+        RequestedOutputFormat::Json,
+        Some(&fixture.client),
+    )
+    .await
+    .expect("MCP application dispatch");
+    let single = evidence_payload(&single);
+    assert!(
+        single["next_cursor"].is_null(),
+        "a single-page read must not issue a cursor: {single:#}"
+    );
+    assert_eq!(single["truncated"], Value::Bool(false));
+}
+
+/// The MCP, HTTP, and CLI surfaces must reach the same daemon-owned primitive.
+///
+/// Each surface is entered through its own shipped entry point — the MCP and
+/// HTTP application resolvers in-process, and the CLI as the installed binary —
+/// so a surface that stops routing to the daemon fails here.
+#[tokio::test(flavor = "multi_thread")]
+async fn production_primitive_reads_agree_across_mcp_http_and_cli() {
+    let fixture = production_fixture().await;
+
+    let mcp = resolve_mcp_application_surface(
+        ApplicationSurfaceOperation::CodeSymbolSearch,
+        RequestId::new("request.pr12-reachability.parity.mcp").expect("request id"),
+        symbol_search_surface_request(PROBE_TOKEN),
+        RequestedOutputFormat::Json,
+        Some(&fixture.client),
+    )
+    .await
+    .expect("MCP application dispatch");
+    let mcp = evidence_payload(&mcp).clone();
+    assert_first_page_of_many("MCP", &mcp);
+
+    let http = resolve_http_application_surface(
+        ApplicationSurfaceOperation::CodeSymbolSearch,
+        RequestId::new("request.pr12-reachability.parity.http").expect("request id"),
+        symbol_search_surface_request(PROBE_TOKEN),
+        RequestedOutputFormat::Json,
+        Some(&fixture.client),
+    )
+    .await
+    .expect("HTTP application dispatch");
+    let http = evidence_payload(&http).clone();
+    assert_first_page_of_many("HTTP", &http);
+
+    let cli = run_symbol_search_cli(fixture.home(), &fixture.project, PROBE_TOKEN);
+    assert_command_success("CLI code_symbol_search", &cli);
+    let cli: ApplicationEnvelope<Value> =
+        serde_json::from_slice(&cli.stdout).expect("CLI application envelope");
+    let ApplicationOutcome::Evidence(cli) = cli.outcome else {
+        panic!("CLI code_symbol_search must return an evidence outcome");
+    };
+    assert_eq!(cli.execution.termination, OperationTermination::Completed);
+    let cli = cli.payload.expect("CLI evidence payload");
+    assert_first_page_of_many("CLI", &cli);
+
+    assert_eq!(mcp["items"], http["items"], "MCP and HTTP page contents");
+    assert_eq!(mcp["items"], cli["items"], "MCP and CLI page contents");
+    assert_eq!(mcp["total"], cli["total"], "MCP and CLI page totals");
+}
+
+/// Project open must retain Scout, publish the route cache, then mount owners,
+/// in that order.
+///
+/// This is a source lint, not an execution proof. The invariant is an ordering
+/// between three statements in one function, and the windows it guards — a
+/// request admitted against a published route whose Scout owner or production
+/// owners do not exist yet — are not observable from a completed request.
+///
+/// `production_project_server` is the single orchestrator behind the direct,
+/// warm-up, and portable project-open entry points. The two names this lint
+/// used to walk, `open_project_server` and `portable_project_server`, were
+/// consolidated into it, and because nothing runs this suite the lint sat red
+/// rather than reporting the drift.
+#[test]
+fn source_project_open_orders_scout_publication_and_owner_mounting() {
+    const ORCHESTRATOR: &str = "production_project_server";
+    let bootstrap = call_offsets(
+        DAEMON_SOURCE,
+        ORCHESTRATOR,
+        "ensure_context_scout_owner_before_advertising",
+    );
+    let publication = call_offsets(DAEMON_SOURCE, ORCHESTRATOR, "bind_or_insert_route_bounded");
+    let owners = call_offsets(
+        DAEMON_SOURCE,
+        ORCHESTRATOR,
+        "register_project_open_production_owners",
+    );
+    assert_eq!(
+        bootstrap.len(),
+        1,
+        "{ORCHESTRATOR} must have one Scout bootstrap call"
+    );
+    assert_eq!(
+        publication.len(),
+        1,
+        "{ORCHESTRATOR} must have one cache publication"
+    );
+    assert_eq!(
+        owners.len(),
+        1,
+        "{ORCHESTRATOR} must register production owners once"
+    );
+    assert!(
+        bootstrap[0] < publication[0],
+        "{ORCHESTRATOR} must retain Scout before cache publication"
+    );
+    assert!(
+        publication[0] < owners[0],
+        "{ORCHESTRATOR} must register production owners after cache publication"
+    );
+}
+
+/// Project open must mount each owner exactly once and install no placeholder.
+///
+/// The exactly-once shape and the absence of an `Unavailable` shortcut are
+/// source questions: a duplicate registration is absorbed by the registrars'
+/// `AlreadyRegistered` arms, and a stub that answers `Unavailable` looks like an
+/// honest degraded response from outside. Whether these owners are reached at
+/// all is proven by the `production_*` tests above, not here.
+#[test]
+fn source_project_open_mounts_each_production_owner_once() {
     assert!(
         !PROJECT_OPEN_OWNERS_SOURCE.contains("Unavailable stub"),
         "project-open must not document Unavailable stub installation"
@@ -163,6 +439,11 @@ fn project_open_mounts_concrete_cycle_lsp_advisory_and_hook_owners() {
         PROJECT_OPEN_OWNERS_SOURCE,
         "register_project_open_production_owners",
         "feedback_runtime_registrar().open_and_register",
+    );
+    let primitive = call_offsets(
+        PROJECT_OPEN_OWNERS_SOURCE,
+        "register_project_open_production_owners",
+        "open_pr12_production_primitive_runtime",
     );
     let cycle = call_offsets(
         PROJECT_OPEN_OWNERS_SOURCE,
@@ -179,12 +460,17 @@ fn project_open_mounts_concrete_cycle_lsp_advisory_and_hook_owners() {
         "register_production_advisory_owner",
         "register_production",
     );
+    // The advisory owner must take its host-delivery sink from the live Hook V2
+    // notice queue. The legacy V1 sink beside it deliberately answers
+    // `Unavailable`, so naming the queue's own sink is what distinguishes a
+    // mounted delivery path from the retired one.
     let hooks = call_offsets(
         PROJECT_OPEN_OWNERS_SOURCE,
         "register_production_advisory_owner",
-        "production_advisory_hook_notice_sink",
+        "hook_notices.sink",
     );
     assert_eq!(feedback.len(), 1, "feedback runtime must register once");
+    assert_eq!(primitive.len(), 1, "primitive runtime must open once");
     assert_eq!(cycle.len(), 1, "feedback cycle must register once");
     assert_eq!(lsp.len(), 1, "LSP owner must register once");
     assert_eq!(advisory.len(), 1, "advisory production must register once");
@@ -195,8 +481,16 @@ fn project_open_mounts_concrete_cycle_lsp_advisory_and_hook_owners() {
     );
 }
 
+/// The daemon invocation protocol must not reacquire the legacy owner-injection
+/// escape hatch.
+///
+/// An absence claim has no runtime observation to make, so it stays a lint.
 #[test]
-fn primitive_dispatch_uses_the_closed_daemon_protocol_on_every_surface() {
+fn source_daemon_invocation_retains_no_owner_injection_escape_hatch() {
+    assert!(
+        !INVOCATION_SOURCE.contains("invoke_with_owners"),
+        "legacy owner injection must not remain on the daemon invocation path"
+    );
     assert_contains_all(
         INVOCATION_SOURCE,
         &[
@@ -209,10 +503,16 @@ fn primitive_dispatch_uses_the_closed_daemon_protocol_on_every_surface() {
             "DaemonPrimitiveRuntimeRegistrar",
         ],
     );
-    assert!(
-        !INVOCATION_SOURCE.contains("invoke_with_owners"),
-        "legacy owner injection must not remain on the daemon invocation path"
-    );
+}
+
+/// The application surface must keep declaring the PR12 operation family.
+///
+/// Declaration is all this checks. `production_primitive_reads_agree_across_mcp_http_and_cli`
+/// proves that a declared operation actually routes to the daemon; the
+/// remaining operations here are declared but reach the daemon only through
+/// their own suites.
+#[test]
+fn source_application_surface_declares_the_pr12_operation_family() {
     assert_contains_all(
         APPLICATION_SURFACE_SOURCE,
         &[
@@ -221,46 +521,6 @@ fn primitive_dispatch_uses_the_closed_daemon_protocol_on_every_surface() {
             "ApplicationSurfaceOperation::TestResults",
             "ApplicationSurfaceOperation::SessionLookup",
             "ApplicationSurfaceOperation::DiagnosticsRead",
-        ],
-    );
-    assert_contains_all(CLI_SURFACE_SOURCE, &["resolve_cli_application_surface"]);
-    assert_contains_all(MCP_SURFACE_SOURCE, &["resolve_mcp_application_surface"]);
-    assert_contains_all(
-        MCP_HANDLER_SOURCE,
-        &["handle_application_surface", "DaemonInvocationClient"],
-    );
-    assert_contains_all(
-        HTTP_SURFACE_SOURCE,
-        &[
-            "HttpApplicationOperation::FeedbackImpact",
-            "HttpApplicationOperation::AffectedTests",
-            "HttpApplicationOperation::TestResults",
-        ],
-    );
-}
-
-#[test]
-fn hook_v2_admission_is_daemon_owned_and_replayable() {
-    assert_contains_all(
-        HOOK_RUNTIME_SOURCE,
-        &["\"hook_v2_admit\"", "hook_v2_admit", "context_scout_owner"],
-    );
-    assert_contains_all(
-        SCOUT_OWNER_SOURCE,
-        &[
-            "ProjectContextScoutOwnerV1",
-            "claim_ready_guidance",
-            "record_delivery",
-            "record_feedback",
-        ],
-    );
-    assert_contains_all(
-        HOOK_V2_SOURCE,
-        &[
-            "\"hook_v2_admit\"",
-            "dispatch_decoded",
-            "append_for_replay",
-            "HookTransportDispositionV1::CatchupRequired",
         ],
     );
 }
