@@ -54,9 +54,10 @@ use tracedecay_domain::{
     VectorWatermark,
 };
 use tracedecay_store::{
-    AnchorDispositionReasonClassV1, AnchorDispositionStateV1, FactCommitOutcome, FactCurrentQuery,
-    FactLineageQuery, FactWriteBatch, RetrievalAnchorDispositionRecordV1,
-    RetrievalAnchorDispositionStore, RetrievalAnchorOwnerV1,
+    AnchorDispositionReasonClassV1, AnchorDispositionStateV1,
+    CompatibilityFactFeedbackHistoryQueryV1, CompatibilityFactIdV1, CompatibilityFactTargetV1,
+    FactCommitOutcome, FactCurrentQuery, FactLineageQuery, FactWriteBatch,
+    RetrievalAnchorDispositionRecordV1, RetrievalAnchorDispositionStore, RetrievalAnchorOwnerV1,
 };
 
 use crate::common::EnvVarGuard;
@@ -911,10 +912,49 @@ async fn project_memory_cutover_preserves_v2_authority_after_legacy_reclamation(
         .unwrap();
     assert_eq!(public_lineage.len(), 1);
     assert_eq!(public_lineage[0].fact_id(), &public_fact_id);
+    let tombstone_lineage = project_memory
+        .query_fact_lineage(
+            FactLineageQuery::new(owner.clone(), purged_fact_id.clone(), None, 100).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        tombstone_lineage.len() >= 3,
+        "public lineage must preserve assertion supersession and terminal history"
+    );
+    let feedback = project_memory
+        .get_compatibility_feedback_history(
+            CompatibilityFactFeedbackHistoryQueryV1::new(
+                CompatibilityFactTargetV1::Canonical(
+                    CompatibilityFactIdV1::new(owner.clone(), purged_fact_id.clone()).unwrap(),
+                ),
+                None,
+                100,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(feedback.events().len(), 1);
+    let proposals = project_memory
+        .list_compatibility_fact_proposals(None, None, 100)
+        .await
+        .unwrap();
+    assert!(
+        proposals.proposals().iter().any(|proposal| {
+            proposal.proposal_id().as_str() == "proposal.project-memory-cutover"
+        })
+    );
+    assert!(proposals.proposals().iter().any(|proposal| {
+        proposal
+            .automation_run_id()
+            .is_some_and(|run_id| run_id == "legacy-run-project-memory-cutover")
+    }));
     // Public MemoryApplication reads cover stable identity/current payload and
-    // lineage. Evidence and compatibility-map histories do not yet expose one
-    // aggregate public read, so the typed archive inspection below is the
-    // narrow adapter contract for those families.
+    // lineage, feedback history, and proposal state. Evidence assembly,
+    // retrieval disposition, relation, vector, quarantine, and compatibility
+    // mapping families do not expose one project-wide aggregate read, so the
+    // typed archive inspection below is the narrow adapter contract for them.
     let archive = DatabaseFactStore::new(&project_database)
         .inspect_owner_archive_for_test(&owner)
         .await
