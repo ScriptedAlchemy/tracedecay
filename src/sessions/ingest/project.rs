@@ -190,12 +190,25 @@ async fn ingest_project_sources_for_provider_inner(
     let facade = HostAdmissionFacade::new(authorities);
     let provider_byte_cap = default_ingest_pass_bounds().bytes_per_unit;
     let mut provider_runs = ProviderRunFold::default();
-    for &candidate in PROJECT_CATCH_UP_PROVIDERS {
-        if !provider_selected(provider, candidate)
-            || (candidate.scans_all_destinations() && !include_hermes)
-        {
-            continue;
+    let selected: Vec<SessionProvider> = PROJECT_CATCH_UP_PROVIDERS
+        .iter()
+        .copied()
+        .filter(|candidate| {
+            provider_selected(provider, *candidate)
+                && (!candidate.scans_all_destinations() || include_hermes)
+        })
+        .collect();
+    let mut attempted = 0usize;
+    let mut cancelled = false;
+    for candidate in selected.iter().copied() {
+        if cancellation.is_cancelled() {
+            cancelled = true;
+            provider_runs
+                .failures
+                .push(TranscriptCatchUpFailure::pass_cancelled());
+            break;
         }
+        attempted = attempted.saturating_add(1);
         provider_runs.record(
             ProjectProviderRun {
                 project_root,
@@ -209,27 +222,43 @@ async fn ingest_project_sources_for_provider_inner(
             .run()
             .await,
         );
+        if cancellation.is_cancelled() {
+            cancelled = true;
+            provider_runs
+                .failures
+                .push(TranscriptCatchUpFailure::pass_cancelled());
+            break;
+        }
     }
 
-    match Box::pin(claude_observation::drain_projection_queue(
-        &facade,
-        &scope,
-        cancellation,
-    ))
-    .await
-    {
-        Ok(projection_stats) => {
-            provider_runs.stats = provider_runs.stats.merge(projection_stats.transcript);
+    if !cancelled {
+        match Box::pin(claude_observation::drain_projection_queue(
+            &facade,
+            &scope,
+            cancellation,
+        ))
+        .await
+        {
+            Ok(projection_stats) => {
+                provider_runs.stats = provider_runs.stats.merge(projection_stats.transcript);
+            }
+            Err(error) => {
+                let failure = claude_catch_up_failure("projection", &error);
+                tracing::warn!(
+                    reason_code = failure.reason_code,
+                    retryable = failure.retryable,
+                    "project observation projection drain failed"
+                );
+                provider_runs.failures.push(failure);
+            }
         }
-        Err(error) => {
-            let failure = claude_catch_up_failure("projection", &error);
-            tracing::warn!(
-                reason_code = failure.reason_code,
-                retryable = failure.retryable,
-                "project observation projection drain failed"
-            );
-            provider_runs.failures.push(failure);
-        }
+    }
+    if cancelled {
+        provider_runs.deferred_units = provider_runs.deferred_units.saturating_add(
+            u64::try_from(selected.len().saturating_sub(attempted))
+                .unwrap_or(u64::MAX)
+                .max(1),
+        );
     }
     source_outcome.coverage = merge_project_provider_backpressure(
         source_outcome.coverage,
@@ -247,7 +276,9 @@ async fn ingest_project_sources_for_provider_inner(
             .failures
             .push(TranscriptCatchUpFailure::pass_backpressured());
     }
-    finalize_project_ingest(registered, &canonical_project_id, project_root).await;
+    if !cancelled {
+        finalize_project_ingest(registered, &canonical_project_id, project_root).await;
+    }
     source_outcome.stats = source_outcome.stats.merge(provider_runs.stats);
     source_outcome.failures.extend(provider_runs.failures);
     source_outcome.into_transcript_outcome()
