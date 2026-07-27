@@ -21,8 +21,8 @@ use super::failure::{
     plan_round_robin_admission, scheduling_write_required,
 };
 use super::project::{
-    ingest_project_sources_for_provider_without_registered_authority, parse_git_log_commits,
-    push_file_source,
+    home_dir, ingest_project_sources_for_provider_without_registered_authority,
+    parse_git_log_commits, push_file_source, with_transcript_source_home,
 };
 use super::scheduler::{
     DiscoveredIngestUnit, TRANSCRIPT_INGEST_SOURCE_FRONTIER_KEY, admit_fair_ingest_units,
@@ -49,6 +49,18 @@ const TEST_INGEST_BOUNDS: IngestPassBounds = IngestPassBounds {
     bytes_per_pass: 4096,
     retries: 0,
 };
+
+#[tokio::test]
+async fn scoped_transcript_source_home_overrides_ambient_home_without_mutating_it() {
+    let isolated_home = tempfile::tempdir().unwrap();
+    let ambient_home = std::env::var_os("HOME");
+
+    let resolved =
+        with_transcript_source_home(isolated_home.path().to_path_buf(), async { home_dir() }).await;
+
+    assert_eq!(resolved.as_deref(), Some(isolated_home.path()));
+    assert_eq!(std::env::var_os("HOME"), ambient_home);
+}
 
 fn scheduler_test_project_id() -> ProjectId {
     static NEXT_ID: AtomicU64 = AtomicU64::new(1);

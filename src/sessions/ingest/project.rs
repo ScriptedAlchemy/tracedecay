@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::path::{Path, PathBuf};
 
 use crate::application::host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
@@ -22,12 +23,28 @@ use super::user::provider_selected;
 
 const FILE_TRANSCRIPT_PROVIDERS: &[SessionProvider] = &[SessionProvider::Vibe];
 
+tokio::task_local! {
+    static TRANSCRIPT_SOURCE_HOME: PathBuf;
+}
+
+pub(crate) async fn with_transcript_source_home<F>(home: PathBuf, future: F) -> F::Output
+where
+    F: Future,
+{
+    TRANSCRIPT_SOURCE_HOME.scope(home, future).await
+}
+
 pub(crate) fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .filter(|value| !value.is_empty())
-        .or_else(|| std::env::var_os("USERPROFILE").filter(|value| !value.is_empty()))
-        .map(PathBuf::from)
-        .or_else(dirs::home_dir)
+    TRANSCRIPT_SOURCE_HOME
+        .try_with(Clone::clone)
+        .ok()
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .filter(|value| !value.is_empty())
+                .or_else(|| std::env::var_os("USERPROFILE").filter(|value| !value.is_empty()))
+                .map(PathBuf::from)
+                .or_else(dirs::home_dir)
+        })
 }
 
 /// Project-store half of catch-up. Cross-project search runs user ingestion

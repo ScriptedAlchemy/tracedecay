@@ -59,6 +59,17 @@ fn prepare_test_profile_root(profile_root: &std::path::Path) {
     }
 }
 
+#[test]
+fn daemon_test_transcript_source_home_is_profile_parent() {
+    let isolated_home = TempDir::new().expect("isolated home");
+    let profile_root = isolated_home.path().join("profile");
+
+    assert_eq!(
+        super::daemon_transcript_source_home(&profile_root).as_deref(),
+        Some(isolated_home.path())
+    );
+}
+
 fn test_store_administration_for_profile(profile_root: &std::path::Path) -> StoreAdministration {
     prepare_test_profile_root(profile_root);
     let profile_identity = crate::daemon::profile_identity::load_or_create(profile_root)
