@@ -686,6 +686,7 @@ fn daemon_startup_error_is_retryable(error: &crate::errors::TraceDecayError) -> 
                 || message.contains("warming in the background")
                 || message.contains("restart grace")
                 || message.contains("timed out during read before deadline")
+                || message.contains(RUNTIME_TELEMETRY_PENDING)
         }
         crate::errors::TraceDecayError::File { .. }
         | crate::errors::TraceDecayError::Parse { .. }
@@ -739,6 +740,11 @@ fn daemon_runtime_args() -> serde_json::Value {
     })
 }
 
+/// A routed project publishes database telemetry only after it is mounted and
+/// admitted. During startup, absence means "not published yet"; telemetry that
+/// is present but malformed remains a terminal contract violation.
+const RUNTIME_TELEMETRY_PENDING: &str = "daemon runtime response omitted database telemetry";
+
 fn daemon_runtime_status(result: &serde_json::Value) -> crate::errors::Result<serde_json::Value> {
     let runtime = crate::daemon::tool_json_payload(result, "tracedecay_runtime")?;
     let mut storage =
@@ -746,7 +752,7 @@ fn daemon_runtime_status(result: &serde_json::Value) -> crate::errors::Result<se
             .get("database")
             .cloned()
             .ok_or_else(|| crate::errors::TraceDecayError::Config {
-                message: "daemon runtime response omitted database telemetry".to_string(),
+                message: RUNTIME_TELEMETRY_PENDING.to_string(),
             })?;
     let storage =
         storage
