@@ -1,4 +1,6 @@
 // Rust guideline compliant 2025-10-17
+use std::collections::HashMap;
+
 use crate::db::engine::params;
 
 use super::connection::{Database, DatabaseWriteTransaction};
@@ -6,6 +8,13 @@ use super::rows::row_to_file;
 use super::sql::collect_rows;
 use crate::errors::{Result, TraceDecayError};
 use crate::types::*;
+
+/// Keyset page size for file token-map construction.
+///
+/// Token accounting only needs `(path, size)`. Paging keeps peak allocation
+/// proportional to this bound rather than the full `files` table width/row
+/// count during daemon / MCP startup.
+pub const FILE_TOKEN_MAP_PAGE_SIZE: usize = 1_024;
 
 impl Database {
     /// Inserts or replaces a file record.
@@ -142,6 +151,116 @@ impl Database {
         collect_rows(&mut rows, row_to_file, "get_all_files").await
     }
 
+    /// Returns only indexed logical paths.
+    ///
+    /// Startup language discovery needs names, not hashes or metadata. Keeping
+    /// that query narrow avoids materializing every full file record for large
+    /// projects.
+    pub async fn get_all_file_paths(&self) -> Result<Vec<String>> {
+        let mut rows = self
+            .engine_conn()
+            .query("SELECT path FROM files ORDER BY path", ())
+            .await
+            .map_err(|e| TraceDecayError::Database {
+                message: format!("failed to query all file paths: {e}"),
+                operation: "get_all_file_paths".to_string(),
+            })?;
+        let mut paths = Vec::new();
+        while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
+            message: format!("failed to read file path row: {e}"),
+            operation: "get_all_file_paths".to_string(),
+        })? {
+            paths.push(row.get(0).map_err(|e| TraceDecayError::Database {
+                message: format!("failed to map file path row: {e}"),
+                operation: "get_all_file_paths".to_string(),
+            })?);
+        }
+        Ok(paths)
+    }
+
+    /// Returns one keyset page of `(path, size)` pairs for token accounting.
+    ///
+    /// `after_path` is exclusive: pass `None` for the first page, then the last
+    /// path from the previous page. Rows are ordered by `path` ascending.
+    pub async fn get_file_token_sizes_page(
+        &self,
+        after_path: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<(String, u64)>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let mut rows = match after_path {
+            Some(after) => self
+                .engine_conn()
+                .query(
+                    "SELECT path, size FROM files WHERE path > ?1 ORDER BY path LIMIT ?2",
+                    params![after, limit],
+                )
+                .await
+                .map_err(|e| TraceDecayError::Database {
+                    message: format!("failed to query file token sizes page: {e}"),
+                    operation: "get_file_token_sizes_page".to_string(),
+                })?,
+            None => self
+                .engine_conn()
+                .query(
+                    "SELECT path, size FROM files ORDER BY path LIMIT ?1",
+                    params![limit],
+                )
+                .await
+                .map_err(|e| TraceDecayError::Database {
+                    message: format!("failed to query file token sizes page: {e}"),
+                    operation: "get_file_token_sizes_page".to_string(),
+                })?,
+        };
+
+        let mut page = Vec::new();
+        while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
+            message: format!("failed to read file token size row: {e}"),
+            operation: "get_file_token_sizes_page".to_string(),
+        })? {
+            let path: String = row.get(0).map_err(|e| TraceDecayError::Database {
+                message: format!("failed to map file token path: {e}"),
+                operation: "get_file_token_sizes_page".to_string(),
+            })?;
+            let size: i64 = row.get(1).map_err(|e| TraceDecayError::Database {
+                message: format!("failed to map file token size: {e}"),
+                operation: "get_file_token_sizes_page".to_string(),
+            })?;
+            page.push((path, size.max(0) as u64));
+        }
+        Ok(page)
+    }
+
+    /// Builds path → approximate token count (size / 4) via bounded keyset pages.
+    ///
+    /// Equivalent to mapping [`Self::get_all_files`] through `size / 4`, but never
+    /// materializes full `FileRecord` rows (including `content_hash`) at once.
+    pub async fn get_file_token_map(&self) -> Result<HashMap<String, u64>> {
+        let mut map = HashMap::new();
+        let mut after: Option<String> = None;
+        loop {
+            let page = self
+                .get_file_token_sizes_page(after.as_deref(), FILE_TOKEN_MAP_PAGE_SIZE)
+                .await?;
+            let page_len = page.len();
+            if page_len == 0 {
+                break;
+            }
+            let next_after = page.last().map(|(path, _)| path.clone());
+            for (path, size) in page {
+                map.insert(path, size / 4);
+            }
+            if page_len < FILE_TOKEN_MAP_PAGE_SIZE {
+                break;
+            }
+            after = next_after;
+        }
+        Ok(map)
+    }
+
     /// Deletes a file record and its graph data atomically.
     pub async fn delete_file(&self, path: &str) -> Result<()> {
         self.delete_file_transaction(path, std::future::ready(()))
@@ -185,6 +304,7 @@ impl Database {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::time::Duration;
 
     use super::*;
@@ -283,5 +403,97 @@ mod tests {
         delete.await.unwrap().unwrap();
         assert_eq!(row_count(&db, "nodes").await, 0);
         assert_eq!(row_count(&db, "files").await, 0);
+    }
+
+    async fn seed_token_map_files(db: &Database, count: usize) {
+        let files: Vec<FileRecord> = (0..count)
+            .map(|i| FileRecord {
+                path: format!("src/f{i:04}.rs"),
+                content_hash: format!("hash-{i}"),
+                size: ((i as u64) + 1) * 40,
+                modified_at: i as i64,
+                indexed_at: i as i64,
+                node_count: 1,
+            })
+            .collect();
+        db.upsert_files(&files).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn get_file_token_map_matches_full_file_materialization() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("graph.db");
+        let authority = DatabaseAuthority::acquire_test(&path, "token map tests").unwrap();
+        let (db, _) =
+            Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
+                .await
+                .unwrap();
+        seed_token_map_files(&db, 2_500).await;
+
+        let expected: HashMap<String, u64> = db
+            .get_all_files()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|f| (f.path, f.size / 4))
+            .collect();
+        let actual = db.get_file_token_map().await.unwrap();
+
+        assert_eq!(actual.len(), expected.len());
+        assert_eq!(actual, expected);
+    }
+
+    #[tokio::test]
+    async fn get_file_token_sizes_page_stays_within_limit() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("graph.db");
+        let authority = DatabaseAuthority::acquire_test(&path, "token page tests").unwrap();
+        let (db, _) =
+            Database::publish_test_runtime(&path, &authority, TestDatabaseRuntimeMode::Initialize)
+                .await
+                .unwrap();
+        seed_token_map_files(&db, 5).await;
+
+        let page_limit = 2;
+        let mut after: Option<String> = None;
+        let mut seen = Vec::new();
+        let mut max_page_len = 0usize;
+        let mut pages = 0usize;
+        loop {
+            let page = db
+                .get_file_token_sizes_page(after.as_deref(), page_limit)
+                .await
+                .unwrap();
+            pages += 1;
+            max_page_len = max_page_len.max(page.len());
+            assert!(
+                page.len() <= page_limit,
+                "page exceeded bound: got {} > {}",
+                page.len(),
+                page_limit
+            );
+            if page.is_empty() {
+                break;
+            }
+            let page_len = page.len();
+            after = page.last().map(|(path, _)| path.clone());
+            seen.extend(page.into_iter().map(|(path, _)| path));
+            if page_len < page_limit {
+                break;
+            }
+        }
+
+        assert_eq!(pages, 3); // 2 + 2 + 1
+        assert_eq!(max_page_len, page_limit);
+        assert_eq!(
+            seen,
+            vec![
+                "src/f0000.rs",
+                "src/f0001.rs",
+                "src/f0002.rs",
+                "src/f0003.rs",
+                "src/f0004.rs",
+            ]
+        );
     }
 }

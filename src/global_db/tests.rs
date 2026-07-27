@@ -891,6 +891,91 @@ async fn begun_registered_transaction_can_roll_back_after_scope_drop() {
     assert!(!table_exists(&db, "rolled_back_daemon_transaction").await);
 }
 
+#[tokio::test]
+async fn session_temporal_repair_request_is_durable_without_running_repair_inline() {
+    let harness = RegisteredGlobalDbHarness::open("session-repair-request").await;
+    let db = Arc::clone(&harness.registered);
+
+    assert_eq!(
+        super::enqueue_session_temporal_store_repair(&db)
+            .await
+            .unwrap(),
+        super::SessionTemporalRepairOutcome::Pending {
+            stage: super::SessionTemporalRepairStage::RepairState,
+        }
+    );
+    assert_eq!(
+        super::session_temporal_store_repair_status(&db)
+            .await
+            .unwrap(),
+        super::SessionTemporalRepairOutcome::Pending {
+            stage: super::SessionTemporalRepairStage::RepairState,
+        }
+    );
+}
+
+#[tokio::test]
+async fn session_temporal_repair_resumes_one_atomic_stage_at_a_time() {
+    let harness = RegisteredGlobalDbHarness::open("session-repair-resume").await;
+    let db = Arc::clone(&harness.registered);
+    super::enqueue_session_temporal_store_repair(&db)
+        .await
+        .unwrap();
+
+    let first = super::advance_session_temporal_store_repair(&db)
+        .await
+        .unwrap();
+    assert!(matches!(
+        first,
+        super::SessionTemporalRepairOutcome::Pending {
+            stage: super::SessionTemporalRepairStage::PrepareSchema
+        }
+    ));
+    assert_eq!(
+        super::session_temporal_store_repair_status(&db)
+            .await
+            .unwrap(),
+        first,
+        "the next stage must be checkpointed in the same transaction as the completed stage"
+    );
+
+    let second = super::advance_session_temporal_store_repair(&db)
+        .await
+        .unwrap();
+    assert_ne!(
+        second, first,
+        "a restarted worker must resume after the durable checkpoint"
+    );
+}
+
+#[tokio::test]
+async fn session_temporal_repair_drains_to_an_honest_terminal_state() {
+    let harness = RegisteredGlobalDbHarness::open("session-repair-complete").await;
+    let db = Arc::clone(&harness.registered);
+    super::enqueue_session_temporal_store_repair(&db)
+        .await
+        .unwrap();
+
+    let mut outcome = super::SessionTemporalRepairOutcome::Pending {
+        stage: super::SessionTemporalRepairStage::RepairState,
+    };
+    for _ in 0..32 {
+        outcome = super::advance_session_temporal_store_repair(&db)
+            .await
+            .unwrap();
+        if outcome == super::SessionTemporalRepairOutcome::Complete {
+            break;
+        }
+    }
+    assert_eq!(outcome, super::SessionTemporalRepairOutcome::Complete);
+    assert_eq!(
+        super::session_temporal_store_repair_status(&db)
+            .await
+            .unwrap(),
+        super::SessionTemporalRepairOutcome::NotRequired
+    );
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn registered_runtime_rejects_database_file_replacement() {

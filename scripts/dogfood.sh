@@ -5,6 +5,8 @@ umask 077
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 target_dir=${CARGO_TARGET_DIR:-"$repo_root/target"}
 source_binary=${TRACEDECAY_DOGFOOD_SOURCE_BINARY:-"$target_dir/release/tracedecay"}
+build_identity_stamp="$target_dir/dogfood-build-identity.stamp"
+dashboard_source_stamp="$target_dir/dogfood-dashboard-source.stamp"
 stage_dir=${TRACEDECAY_DOGFOOD_STAGE_DIR:-"$HOME/.local/lib/tracedecay/dogfood"}
 install_dir=${TRACEDECAY_DOGFOOD_INSTALL_DIR:-"$HOME/.local/bin"}
 staged_binary="$stage_dir/tracedecay"
@@ -13,10 +15,53 @@ profile_dir=${TRACEDECAY_DOGFOOD_PROFILE_DIR:-"$HOME/.tracedecay"}
 boundary_state="$profile_dir/dogfood-migration-boundary.state"
 dogfood_started=$SECONDS
 
+if [[ -n "${TRACEDECAY_SKIP_DASHBOARD_BUILD+x}" ]]; then
+  printf '%s\n' \
+    'dogfood refuses TRACEDECAY_SKIP_DASHBOARD_BUILD: dogfood must embed a fresh dashboard.' \
+    'Unset TRACEDECAY_SKIP_DASHBOARD_BUILD and rerun cargo dogfood.' >&2
+  exit 1
+fi
+
 report_stage() {
   local stage=$1
   local started=$2
   printf '[dogfood timing] stage=%s elapsed_s=%d\n' "$stage" "$((SECONDS - started))" >&2
+}
+
+refresh_build_identity_stamp() {
+  local temporary
+
+  mkdir -p "$target_dir" || return
+  dogfood_build_identity_refresh="${SECONDS}-$$-$RANDOM"
+  temporary=$(mktemp "${build_identity_stamp}.new.XXXXXX") || return
+  if ! printf '%s\n' "$dogfood_build_identity_refresh" >"$temporary" ||
+    ! mv -f -- "$temporary" "$build_identity_stamp"; then
+    rm -f -- "$temporary"
+    return 1
+  fi
+}
+
+verify_dashboard_freshness() {
+  local actual_stamp
+  local expected_stamp
+
+  if [[ ! -r "$dashboard_source_stamp" ]]; then
+    printf 'dogfood dashboard freshness stamp is missing: %s\n' "$dashboard_source_stamp" >&2
+    return 1
+  fi
+  if [[ ! -r "$repo_root/dashboard/app-dist/.source-stamp" ]] ||
+    [[ ! -f "$repo_root/dashboard/app-dist/index.html" ]]; then
+    printf 'dogfood dashboard bundle is missing its source stamp or entrypoint\n' >&2
+    return 1
+  fi
+  expected_stamp=$(<"$dashboard_source_stamp")
+  actual_stamp=$(<"$repo_root/dashboard/app-dist/.source-stamp")
+  if [[ -z "$expected_stamp" || "$actual_stamp" != "$expected_stamp" ]]; then
+    printf '%s\n' \
+      'dogfood dashboard bundle does not match the freshly computed source stamp.' \
+      'Rebuild the dashboard and release binary, then rerun cargo dogfood.' >&2
+    return 1
+  fi
 }
 
 if [[ -L "$profile_dir" ]]; then
@@ -43,7 +88,14 @@ cd "$repo_root"
 stage_started=$SECONDS
 if [[ -z "${TRACEDECAY_DOGFOOD_SOURCE_BINARY:-}" ]]; then
   # Default features only — never `--all-features` (enables test-transport).
-  cargo build --release --bin tracedecay
+  if ! refresh_build_identity_stamp; then
+    printf 'dogfood could not refresh build identity stamp: %s\n' "$build_identity_stamp" >&2
+    exit 1
+  fi
+  TRACEDECAY_DOGFOOD_BUILD_IDENTITY_STAMP="$build_identity_stamp" \
+    TRACEDECAY_DOGFOOD_BUILD_IDENTITY_REFRESH="$dogfood_build_identity_refresh" \
+    TRACEDECAY_DOGFOOD_DASHBOARD_STAMP_PATH="$dashboard_source_stamp" \
+    cargo build --release --bin tracedecay
 fi
 report_stage release-binary-build "$stage_started"
 
@@ -52,10 +104,75 @@ if [[ ! -x "$source_binary" ]]; then
   exit 1
 fi
 
+verify_dashboard_freshness
+
 mkdir -p "$stage_dir" "$install_dir"
 
 sync_path() {
   sync -f -- "$1"
+}
+
+checkout_build_identity() {
+  local checkout_root
+  local git_root
+  local sha
+  local status
+
+  checkout_root=$(cd "$repo_root" && pwd -P) || {
+    printf 'dogfood could not resolve checkout root: %s\n' "$repo_root" >&2
+    return 1
+  }
+  git_root=$(git -C "$repo_root" rev-parse --show-toplevel) || {
+    printf 'dogfood requires a Git worktree to verify the staged binary identity\n' >&2
+    return 1
+  }
+  git_root=$(cd "$git_root" && pwd -P) || {
+    printf 'dogfood could not resolve Git worktree root: %s\n' "$git_root" >&2
+    return 1
+  }
+  if [[ "$git_root" != "$checkout_root" ]]; then
+    printf 'dogfood checkout root is not the Git worktree root: %s\n' "$repo_root" >&2
+    return 1
+  fi
+  sha=$(git -C "$repo_root" rev-parse --short=12 HEAD) || {
+    printf 'dogfood could not resolve the checkout Git SHA\n' >&2
+    return 1
+  }
+  status=$(git -C "$repo_root" status --porcelain) || {
+    printf 'dogfood could not read the checkout dirty state\n' >&2
+    return 1
+  }
+  if [[ -n "$status" ]]; then
+    printf '%s.dirty' "$sha"
+  else
+    printf '%s' "$sha"
+  fi
+}
+
+verify_binary_identity() {
+  local binary=$1
+  local expected_identity
+  local reported_identity
+  local reported_version
+
+  expected_identity=$(checkout_build_identity) || return 1
+  reported_version=$("$binary" --version) || {
+    printf 'dogfood could not read candidate binary version: %s\n' "$binary" >&2
+    return 1
+  }
+  case "$reported_version" in
+    "tracedecay "*+*) reported_identity=${reported_version##*+} ;;
+    *)
+      printf 'dogfood candidate binary reported an invalid version: %s\n' "$reported_version" >&2
+      return 1
+      ;;
+  esac
+  if [[ "$reported_identity" != "$expected_identity" ]]; then
+    printf '%s\n' \
+      "dogfood candidate binary identity mismatch: expected $expected_identity, got $reported_version." \
+      'Force a fresh release rebuild, then rerun cargo dogfood.' >&2
+    return 1
+  fi
 }
 
 marker_checksum() {
@@ -328,6 +445,20 @@ load_boundary_state
 rm -f -- "${boundary_state}".new.*
 preflight_started=$SECONDS
 
+# Validate the exact tracked-integration refresh before recovery, daemon, store,
+# marker, or installed-binary mutation. Cargo-launched commands use an isolated
+# development profile, but dogfood must inspect the real user integrations.
+verify_binary_identity "$source_binary"
+unset TRACEDECAY_DATA_DIR TRACEDECAY_DISABLE_GLOBAL_DB
+integration_preflight_started=$SECONDS
+if ! "$source_binary" reinstall --dry-run; then
+  printf '%s\n' \
+    'dogfood integration refresh preflight failed before the migration boundary.' \
+    'No daemon, store, migration marker, or installed binary was changed.' >&2
+  exit 1
+fi
+report_stage integration-refresh-preflight "$integration_preflight_started"
+
 # A valid reached/forbidden pending marker means a prior attempt already crossed
 # the migration boundary. Never trust the installed path without an identity
 # binding from that attempt. Stage the current source build atomically, then use
@@ -344,6 +475,11 @@ require_inactive_recovery_before_preparing() {
     printf '%s\n' \
       'The retained installed binary does not match its migration-marker binding.' \
       'It will not be executed; recovery will use the current source build.' >&2
+  fi
+
+  if ! verify_binary_identity "$source_binary"; then
+    printf 'The migration marker was left unchanged.\n' >&2
+    return 1
   fi
 
   if ! install_atomically "$source_binary" "$staged_binary"; then
@@ -370,7 +506,6 @@ if [[ "$marker_boundary" == reached ]]; then
   old_binary_policy=forbidden
 fi
 attempt_id="$(date +%s)-$$-$RANDOM-$RANDOM"
-record_boundary_outcome preparing not-reached "$old_binary_policy" unchanged
 
 candidate=$(mktemp "$stage_dir/tracedecay.candidate.XXXXXX")
 previous_installed=
@@ -498,6 +633,7 @@ trap 'handle_signal 143' TERM
 
 report_stage forward-boundary-preflight "$preflight_started"
 install_started=$SECONDS
+record_boundary_outcome preparing not-reached "$old_binary_policy" unchanged
 install -m 0755 "$source_binary" "$candidate"
 if [[ -e "$installed_binary" || -L "$installed_binary" ]]; then
   previous_installed=$(mktemp "$install_dir/tracedecay.previous.XXXXXX")
@@ -515,10 +651,6 @@ replacement_active=1
 install_atomically "$candidate" "$staged_binary"
 install_atomically "$candidate" "$installed_binary"
 report_stage staged-binary-atomic-install "$install_started"
-
-# Cargo-launched commands use an isolated development profile. The staged
-# executable must refresh the real user installation instead.
-unset TRACEDECAY_DATA_DIR TRACEDECAY_DISABLE_GLOBAL_DB
 
 boundary_reached=1
 record_boundary_outcome post-update-starting reached forbidden inactivity-pending

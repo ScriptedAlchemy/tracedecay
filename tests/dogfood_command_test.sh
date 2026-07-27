@@ -19,8 +19,32 @@ write_fake_binary() {
     printf '#!/usr/bin/env bash\n'
     printf 'set -euo pipefail\n'
     printf 'binary_id=%q\n' "$binary_id"
+    printf 'checkout_root=%q\n' "$repo_root"
     cat <<'EOF'
+if [[ "${1:-}" == "--version" ]]; then
+  sha=$(git -C "$checkout_root" rev-parse --short=12 HEAD)
+  status=$(git -C "$checkout_root" status --porcelain)
+  dirty=
+  if [[ -n "$status" ]]; then
+    dirty=.dirty
+  fi
+  reported_version=${TRACEDECAY_DOGFOOD_TEST_REPORTED_VERSION:-"0.0.0+$sha$dirty"}
+  printf 'tracedecay %s\n' "$reported_version"
+  exit 0
+fi
+
 command_text=$*
+if [[ "$command_text" == "reinstall --dry-run" ]]; then
+  if [[ -n "${TRACEDECAY_DOGFOOD_TEST_PREFLIGHT_MARKER:-}" ]]; then
+    : >"$TRACEDECAY_DOGFOOD_TEST_PREFLIGHT_MARKER"
+  fi
+  if [[ "${TRACEDECAY_DOGFOOD_TEST_FAIL_PREFLIGHT:-0}" == 1 ]]; then
+    printf 'cline: registration config is corrupt\n' >&2
+    exit 42
+  fi
+  exit 0
+fi
+
 printf '%s:%s\n' "$binary_id" "$command_text" \
   >>"${TRACEDECAY_DOGFOOD_TEST_LOG:?}"
 
@@ -69,10 +93,6 @@ fi
 if [[ "$command_text" == "post-update --mode dogfood-recover-inactive" \
   && -n "${TRACEDECAY_DOGFOOD_TEST_DAEMON_MARKER:-}" ]]; then
   rm -f "$TRACEDECAY_DOGFOOD_TEST_DAEMON_MARKER"
-fi
-
-if [[ "${1:-}" == "--version" ]]; then
-  printf 'tracedecay 0.0.0-dogfood\n'
 fi
 EOF
   } >"$path"
@@ -186,6 +206,8 @@ setup_case() {
   case_install="$case_root/install with spaces"
   case_profile="$case_root/profile with spaces"
   case_source="$case_root/build output/tracedecay candidate"
+  case_target="$case_root/target"
+  case_dashboard_stamp="$case_target/dogfood-dashboard-source.stamp"
   case_log="$case_root/actions.log"
   case_output="$case_root/output.log"
   case_state="$case_profile/dogfood-migration-boundary.state"
@@ -203,7 +225,8 @@ setup_case() {
   installed="$case_install/tracedecay"
   staged="$case_stage/tracedecay"
   mkdir -p "$case_home" "$case_stage" "$case_install" "$case_profile" \
-    "$(dirname "$case_source")" "$case_manager_dir"
+    "$(dirname "$case_source")" "$case_manager_dir" "$case_target"
+  cp "$repo_root/dashboard/app-dist/.source-stamp" "$case_dashboard_stamp"
   : >"$case_log"
 }
 
@@ -216,6 +239,7 @@ run_case() {
   env \
     PATH="$clean_path" \
     HOME="$case_home" \
+    CARGO_TARGET_DIR="$case_target" \
     TRACEDECAY_DOGFOOD_SOURCE_BINARY="$case_source" \
     TRACEDECAY_DOGFOOD_STAGE_DIR="$case_stage" \
     TRACEDECAY_DOGFOOD_INSTALL_DIR="$case_install" \
@@ -229,6 +253,7 @@ run_case_background() {
   exec env \
     PATH="$clean_path" \
     HOME="$case_home" \
+    CARGO_TARGET_DIR="$case_target" \
     TRACEDECAY_DOGFOOD_SOURCE_BINARY="$case_source" \
     TRACEDECAY_DOGFOOD_STAGE_DIR="$case_stage" \
     TRACEDECAY_DOGFOOD_INSTALL_DIR="$case_install" \
@@ -352,6 +377,7 @@ write_crashable_binary() {
     printf '#!/usr/bin/env bash\n'
     printf 'set -euo pipefail\n'
     printf 'binary_id=%q\n' "$binary_id"
+    printf 'checkout_root=%q\n' "$repo_root"
     cat <<'EOF'
 command_text=$*
 printf '%s:%s\n' "$binary_id" "$command_text" \
@@ -397,7 +423,13 @@ case "$command_text" in
     systemctl --user disable --now tracedecay.service
     ;;
   --version)
-    printf 'tracedecay 0.0.0-dogfood\n'
+    sha=$(git -C "$checkout_root" rev-parse --short=12 HEAD)
+    status=$(git -C "$checkout_root" status --porcelain)
+    dirty=
+    if [[ -n "$status" ]]; then
+      dirty=.dirty
+    fi
+    printf 'tracedecay 0.0.0+%s%s\n' "$sha" "$dirty"
     ;;
 esac
 EOF
@@ -970,6 +1002,74 @@ assert_boundary outcome safe-rollback-complete
 assert_boundary attempt_boundary not-reached
 assert_boundary old_binary_policy allowed
 assert_boundary managed_daemon unchanged
+assert_no_temporary_install_files
+
+# Registration refresh failures must surface before the migration marker,
+# binary replacement, or any daemon lifecycle command.
+setup_case integration-preflight-failure
+write_fake_binary "$case_source" new
+install_old_pair
+cp "$installed" "$case_root/expected installed"
+cp "$staged" "$case_root/expected staged"
+preflight_marker="$case_root/integration-preflight-ran"
+if run_case \
+  TRACEDECAY_DOGFOOD_TEST_PREFLIGHT_MARKER="$preflight_marker" \
+  TRACEDECAY_DOGFOOD_TEST_FAIL_PREFLIGHT=1 \
+  >"$case_output" 2>&1; then
+  fail 'integration preflight failure unexpectedly succeeded'
+fi
+test -e "$preflight_marker" || fail 'integration preflight did not run'
+cmp "$case_root/expected installed" "$installed"
+cmp "$case_root/expected staged" "$staged"
+test ! -e "$case_state" || fail 'integration preflight failure recorded a boundary marker'
+test ! -s "$case_log" || fail 'integration preflight failure ran a lifecycle command'
+grep -Fq 'cline: registration config is corrupt' "$case_output" ||
+  fail 'integration preflight omitted the per-integration cause'
+grep -Fq 'dogfood integration refresh preflight failed before the migration boundary' \
+  "$case_output" ||
+  fail 'integration preflight failure did not identify the safe boundary'
+assert_no_temporary_install_files
+
+# A candidate binary must attest to this checkout's fresh SHA and dirty state
+# before dogfood mutates binary paths or records a migration-boundary marker.
+setup_case staged-identity-mismatch
+write_fake_binary "$case_source" new
+install_old_pair
+cp "$installed" "$case_root/expected installed"
+cp "$staged" "$case_root/expected staged"
+daemon_marker="$case_root/daemon-running"
+: >"$daemon_marker"
+if run_case \
+  TRACEDECAY_DOGFOOD_TEST_REPORTED_VERSION='0.0.0+000000000000' \
+  >"$case_output" 2>&1; then
+  fail 'staged identity mismatch unexpectedly succeeded'
+fi
+cmp "$case_root/expected installed" "$installed"
+cmp "$case_root/expected staged" "$staged"
+test -e "$daemon_marker" || fail 'identity mismatch stopped the old daemon'
+test ! -s "$case_log" || fail 'identity mismatch executed a lifecycle command'
+grep -Fq 'dogfood candidate binary identity mismatch' "$case_output" ||
+  fail 'identity mismatch was not explicit'
+test ! -e "$case_state" || fail 'identity mismatch recorded a boundary marker'
+assert_no_temporary_install_files
+
+# The dashboard stamp written by build.rs is the positive freshness proof.
+# A mismatch fails before dogfood mutates binary paths or records a boundary.
+setup_case dashboard-freshness-mismatch
+write_fake_binary "$case_source" new
+install_old_pair
+cp "$installed" "$case_root/expected installed"
+cp "$staged" "$case_root/expected staged"
+printf 'stale-dashboard-stamp\n' >"$case_dashboard_stamp"
+if run_case >"$case_output" 2>&1; then
+  fail 'stale dashboard bundle unexpectedly succeeded'
+fi
+cmp "$case_root/expected installed" "$installed"
+cmp "$case_root/expected staged" "$staged"
+test ! -s "$case_log" || fail 'stale dashboard bundle executed a lifecycle command'
+grep -Fq 'dogfood dashboard bundle does not match' "$case_output" ||
+  fail 'stale dashboard rejection was not explicit'
+test ! -e "$case_state" || fail 'stale dashboard recorded a boundary marker'
 assert_no_temporary_install_files
 
 # A later dogfood attempt may fail before its own boundary after an earlier

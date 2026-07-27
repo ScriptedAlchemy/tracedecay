@@ -952,14 +952,13 @@ pub(crate) async fn register_project_open_production_owners(
         Ok(_) | Err(DaemonPrimitiveRuntimeRegistrationError::AlreadyRegistered) => {}
     }
 
-    let indexed_files = graph
-        .get_file_token_map()
-        .await
-        .map_err(|error| TraceDecayError::Config {
-            message: format!("project-open LSP language discovery failed: {error}"),
-        })?
-        .into_keys()
-        .collect::<Vec<_>>();
+    let indexed_files =
+        graph
+            .get_all_file_paths()
+            .await
+            .map_err(|error| TraceDecayError::Config {
+                message: format!("project-open LSP language discovery failed: {error}"),
+            })?;
     let diagnostic_broker = server.diagnostics_lsp();
     let admitted_providers = diagnostic_broker
         .lock()

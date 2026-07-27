@@ -368,6 +368,11 @@ impl TraceDecay {
         self.db.get_all_files().await
     }
 
+    /// Returns all indexed logical file paths without full record metadata.
+    pub async fn get_all_file_paths(&self) -> Result<Vec<String>> {
+        self.db.get_all_file_paths().await
+    }
+
     /// Returns the `#[derive(...)]` names attached to the given node.
     ///
     /// The graph's `DerivesMacro` edges are unreliable here: the resolver
@@ -563,9 +568,11 @@ impl TraceDecay {
     }
 
     /// Returns a map of file path to approximate token count (size / 4).
+    ///
+    /// Delegates to the DB keyset-paged reader so callers never force an
+    /// unbounded full-`FileRecord` materialization on startup or refresh.
     pub async fn get_file_token_map(&self) -> Result<HashMap<String, u64>> {
-        let files = self.db.get_all_files().await?;
-        Ok(files.into_iter().map(|f| (f.path, f.size / 4)).collect())
+        self.db.get_file_token_map().await
     }
 
     /// Returns the persisted tokens-saved counter.
