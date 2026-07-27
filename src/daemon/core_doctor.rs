@@ -7,6 +7,10 @@ use serde_json::json;
 use tokio::time::{Duration, timeout};
 
 use super::{DaemonHandshake, projectless_tool_call, write_json_rpc_response};
+use crate::application::semantic_runtime::{
+    SemanticConfigurationPinV1, SemanticFallbackReasonV1, SemanticRuntimeStateV1,
+    SemanticRuntimeStatusV1,
+};
 use crate::errors::Result;
 use crate::mcp::{JsonRpcRequest, JsonRpcResponse, McpTransport};
 
@@ -107,7 +111,7 @@ fn doctor_runtime_unavailable(
             "status": "unavailable",
             "reason": "session_store_unavailable",
         },
-        "semantic_runtime": doctor_semantic_runtime_status(),
+        "semantic_runtime": doctor_semantic_runtime_status(project_path, None),
     })
 }
 
@@ -413,15 +417,49 @@ async fn doctor_runtime_value_inner(
         Some(db) => json!(doctor_literal_workspace_placeholder_paths(db, 10).await),
         None => json!([]),
     };
-    value["semantic_runtime"] = doctor_semantic_runtime_status();
+    let semantic_configuration = graph
+        .configuration_runtime()
+        .client()
+        .current()
+        .await
+        .ok()
+        .and_then(|pinned| {
+            SemanticConfigurationPinV1::from_current(
+                &crate::application::configuration::ConfigurationCurrentStateV1 {
+                    revision_id: pinned.revision_id,
+                    snapshot: pinned.snapshot,
+                },
+            )
+            .ok()
+        });
+    value["semantic_runtime"] =
+        doctor_semantic_runtime_status(Some(project_path), semantic_configuration);
     value
 }
 
-fn doctor_semantic_runtime_status() -> serde_json::Value {
-    use crate::application::semantic_runtime::{
-        SemanticFallbackReasonV1, SemanticRuntimeStateV1, SemanticRuntimeStatusV1,
-    };
-
+fn doctor_semantic_runtime_status(
+    project_path: Option<&Path>,
+    configuration: Option<SemanticConfigurationPinV1>,
+) -> serde_json::Value {
+    if let Some(project_path) = project_path
+        && let Some(status) =
+            crate::application::semantic_runtime::project_semantic_application_status(
+                project_path,
+                configuration.clone(),
+            )
+    {
+        return serde_json::to_value(status)
+            .unwrap_or_else(|_| json!({ "state": { "state": "unavailable" } }));
+    }
+    if configuration.is_none() {
+        return serde_json::to_value(SemanticRuntimeStatusV1::new(
+            None,
+            SemanticRuntimeStateV1::Unavailable {
+                reason: SemanticFallbackReasonV1::ConfigurationUnavailable,
+            },
+        ))
+        .unwrap_or_else(|_| json!({ "state": { "state": "unavailable" } }));
+    }
     let Some(owner) = crate::semantic_code::shared_lifecycle_owner() else {
         return serde_json::to_value(SemanticRuntimeStatusV1::new(
             None,
@@ -438,7 +476,7 @@ fn doctor_semantic_runtime_status() -> serde_json::Value {
             reason: SemanticFallbackReasonV1::ConfigurationUnavailable,
         },
     };
-    serde_json::to_value(SemanticRuntimeStatusV1::new(None, state))
+    serde_json::to_value(SemanticRuntimeStatusV1::new(configuration, state))
         .unwrap_or_else(|_| json!({ "state": { "state": "unavailable" } }))
 }
 
@@ -644,6 +682,21 @@ mod doctor_runtime_route_tests {
 
         let ordinary = request.replace("\"authority_audit\":true", "\"authority_audit\":false");
         assert!(doctor_runtime_request(&ordinary).is_none());
+    }
+
+    #[test]
+    fn semantic_status_without_configuration_is_valid_unavailable() {
+        let value = super::doctor_semantic_runtime_status(None, None);
+        let status: crate::application::semantic_runtime::SemanticRuntimeStatusV1 =
+            serde_json::from_value(value).expect("semantic runtime status");
+
+        assert_eq!(status.validate(), Ok(()));
+        assert!(matches!(
+            status.state,
+            crate::application::semantic_runtime::SemanticRuntimeStateV1::Unavailable {
+                reason: crate::application::semantic_runtime::SemanticFallbackReasonV1::ConfigurationUnavailable,
+            }
+        ));
     }
 
     #[tokio::test]

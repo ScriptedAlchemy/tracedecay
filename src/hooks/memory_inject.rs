@@ -733,9 +733,7 @@ pub async fn regenerate_cursor_user_memory_rule() -> bool {
 
 async fn regenerate_cursor_memory_rule_with_home(root: &Path, home: &Path) -> bool {
     let rule_path = crate::agents::cursor::cursor_memory_rule_path(home);
-    let Some(plugin_dir) = rule_path.parent().and_then(Path::parent) else {
-        return false;
-    };
+    let plugin_dir = crate::agents::cursor::cursor_plugin_install_dir(home);
     if !plugin_dir.join(".cursor-plugin/plugin.json").exists() {
         return false;
     }
@@ -1057,7 +1055,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
 
         let rule_path = crate::agents::cursor::cursor_memory_rule_path(home.path());
-        let plugin_dir = rule_path.parent().unwrap().parent().unwrap();
+        let plugin_dir = crate::agents::cursor::cursor_plugin_install_dir(home.path());
         std::fs::create_dir_all(plugin_dir.join(".cursor-plugin")).unwrap();
         std::fs::write(plugin_dir.join(".cursor-plugin/plugin.json"), "{}").unwrap();
         std::fs::create_dir_all(rule_path.parent().unwrap()).unwrap();

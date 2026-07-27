@@ -214,10 +214,8 @@ const CLAUDE_COMMAND_FILES: &[PluginFile] = &[
 ];
 
 /// Cursor `.mdc` rules.
-const CURSOR_RULE_FILES: &[PluginFile] = &[
-    plugin_file!("rules/tracedecay.mdc", "rules/tracedecay.mdc"),
-    plugin_file!("rules/tracedecay-memory.mdc", "rules/tracedecay-memory.mdc"),
-];
+const CURSOR_RULE_FILES: &[PluginFile] =
+    &[plugin_file!("rules/tracedecay.mdc", "rules/tracedecay.mdc")];
 
 /// Claude manifest dir + shared MCP + Claude hooks + README.
 pub const CLAUDE_MANIFEST_FILES: &[PluginFile] = &[

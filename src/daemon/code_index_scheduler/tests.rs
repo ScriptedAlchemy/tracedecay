@@ -977,9 +977,8 @@ fn production_query_owners_bind_exact_lexical_and_graph_lanes() {
     let bytes = Arc::new(SharedCodeIndexBytePoolV1::default());
     let mut scheduler = scheduler(&fixture, store.path().to_path_buf(), bytes);
     published(scheduler.reconcile_now().expect("publish"));
-    let owners = scheduler
-        .latest_complete()
-        .expect("latest generation")
+    let latest = scheduler.latest_complete().expect("latest generation");
+    let owners = latest
         .production_query_owners()
         .expect("connect production query owners");
     assert!(
@@ -987,6 +986,15 @@ fn production_query_owners_bind_exact_lexical_and_graph_lanes() {
             && std::mem::size_of_val(&owners.lexical) > 0
             && std::mem::size_of_val(&owners.graph) > 0,
         "exact/lexical/graph production owners must be concrete lane values"
+    );
+    let same_generation = scheduler.latest_complete().expect("same latest generation");
+    assert!(
+        Arc::ptr_eq(&latest.query_owners, &same_generation.query_owners),
+        "repeated queries must reuse generation-bound query projections"
+    );
+    assert!(
+        same_generation.query_owners.get().is_some(),
+        "the shared query projection cache must remain populated"
     );
 }
 
