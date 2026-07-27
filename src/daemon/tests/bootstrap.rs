@@ -478,6 +478,50 @@ async fn project_open_shutdown_waits_for_safe_unit_then_joins() {
         .expect_err("cancelled project open must report a terminal failure");
 }
 
+#[tokio::test]
+async fn project_open_shutdown_backstop_aborts_and_joins_noncooperative_task() {
+    struct DropSignal(Option<tokio::sync::oneshot::Sender<()>>);
+
+    impl Drop for DropSignal {
+        fn drop(&mut self) {
+            if let Some(signal) = self.0.take() {
+                let _ = signal.send(());
+            }
+        }
+    }
+
+    let tasks = super::super::ProjectOpenTasks::default();
+    let route = project_open_test_route("shutdown-backstop");
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
+    match tasks
+        .start_cancellable(route, move |_| async move {
+            let _drop_signal = DropSignal(Some(dropped_tx));
+            started_tx.send(()).expect("publish task start");
+            std::future::pending::<crate::errors::Result<()>>().await
+        })
+        .await
+    {
+        super::super::ProjectOpenTaskClaim::InFlight(_) => {}
+        super::super::ProjectOpenTaskClaim::Failed(_) => panic!("pending task must start"),
+        super::super::ProjectOpenTaskClaim::Saturated => panic!("pending task must fit"),
+    }
+    started_rx.await.expect("noncooperative task started");
+
+    let cooperative = tokio::time::timeout(
+        tokio::time::Duration::from_secs(1),
+        tasks.shutdown_with_deadline(tokio::time::Duration::ZERO),
+    )
+    .await
+    .expect("shutdown backstop must join the aborted task");
+
+    assert!(!cooperative, "noncooperative task must reach the backstop");
+    dropped_rx
+        .await
+        .expect("joined task must drop its owned resources before shutdown returns");
+    assert_eq!(tasks.tracked_route_count().await, 0);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn portable_broker_bootstrap_bypasses_project_writer_gate() {
     const TOKEN: &str = "0123456789abcdef0123456789abcdef";
