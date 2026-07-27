@@ -3084,6 +3084,7 @@ impl DaemonEngine {
         initialize_request: Option<JsonRpcRequest>,
     ) -> Result<ProjectOpenTaskClaim> {
         let (project_path, route) = Self::project_route(&handshake)?;
+        self.ensure_registered_project_route(&project_path).await?;
         let tasks = project_open_tasks(&self.project_open_gates).await;
         let engine = self.clone();
         let open_handshake = handshake.clone();
@@ -3100,6 +3101,42 @@ impl DaemonEngine {
             },
         ))
         .await)
+    }
+
+    /// Rejects ambient working directories before scheduling project warm-up.
+    ///
+    /// Host MCP clients may start from `$HOME` and include that directory in
+    /// their handshake. Opening it as a project would perform graph and index
+    /// work before session-store resolution eventually notices the missing
+    /// enrollment. Registry alias and repository-identity lookups preserve
+    /// linked-worktree routing without manufacturing path-derived authority.
+    async fn ensure_registered_project_route(&self, project_path: &Path) -> Result<()> {
+        let registry = self.store_administration.registered_profile_database().await?;
+        if registry
+            .project_registry_context_by_alias(project_path)
+            .await?
+            .is_some()
+        {
+            return Ok(());
+        }
+
+        let git_root = crate::worktree::git_worktree_root(project_path)
+            .unwrap_or_else(|| project_path.to_path_buf());
+        let git_common_dir = crate::worktree::git_common_dir(&git_root);
+        if registry
+            .project_registry_context_by_identity(&git_root, git_common_dir.as_deref())
+            .await?
+            .is_some()
+        {
+            return Ok(());
+        }
+
+        Err(TraceDecayError::Config {
+            message: format!(
+                "TraceDecay project '{}' is not enrolled in the authenticated profile",
+                project_path.display()
+            ),
+        })
     }
 
     async fn schedule_project_server_warmup(
