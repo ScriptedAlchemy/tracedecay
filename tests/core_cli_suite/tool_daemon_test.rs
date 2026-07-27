@@ -294,6 +294,54 @@ fn tool_status_server_tool_calls(home: &Path, project: &Path) -> u64 {
         .unwrap_or_else(|| panic!("missing server.tool_calls in {payload}"))
 }
 
+fn configuration_tool_success(
+    home: &Path,
+    project: &Path,
+    tool_name: &str,
+    arguments: Value,
+) -> Value {
+    let project_arg = project.to_string_lossy().to_string();
+    let arguments = serde_json::to_string(&arguments).expect("configuration arguments");
+    let deadline = Instant::now() + CLI_ROUNDTRIP_TIMEOUT;
+    loop {
+        let mut command = tracedecay_command_with_home(home);
+        command.current_dir(project).args([
+            "tool",
+            "--project",
+            project_arg.as_str(),
+            tool_name,
+            "--args",
+            arguments.as_str(),
+            "--json",
+        ]);
+        let output = run_command_with_timeout(command, CLI_ROUNDTRIP_TIMEOUT);
+        let payload: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+            panic!(
+                "{tool_name} returned invalid JSON: {error}\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            )
+        });
+        if payload.get("outcome").is_some() {
+            assert!(
+                output.status.success(),
+                "{tool_name} returned an outcome with a failing status\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return payload;
+        }
+        if Instant::now() >= deadline {
+            panic!(
+                "{tool_name} never became available\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 fn wait_for_daemon_socket(socket_path: &Path) {
     let deadline = Instant::now() + Duration::from_secs(10);
     common::poll_until(
@@ -1002,6 +1050,120 @@ fn first_touch_store_tool_cli_invokes_daemon_with_init_permission() {
         .recv_timeout(CLI_ROUNDTRIP_TIMEOUT)
         .expect("fake daemon should receive first-touch tools/call request");
     assert_eq!(request["params"]["arguments"]["action"], "add");
+}
+
+#[test]
+fn configuration_tool_cli_persists_effects_and_fails_on_stale_cas() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let home_path = canonical_existing_path(home.path());
+    let project_path = canonical_existing_path(project.path());
+    init_project_with_cli(&home_path, &project_path);
+    let daemon = spawn_tracedecay_daemon(&home_path);
+
+    let observed = configuration_tool_success(
+        &home_path,
+        &project_path,
+        "configuration_observed_state",
+        json!({}),
+    );
+    let project_id = observed["scope"]["project_id"]
+        .as_str()
+        .expect("configuration scope project id")
+        .to_owned();
+    let initial_revision = observed["outcome"]["value"]["payload"][0]["desired_revision_id"]
+        .as_str()
+        .expect("initial configuration revision")
+        .to_owned();
+    let initial = configuration_tool_success(
+        &home_path,
+        &project_path,
+        "configuration_get",
+        json!({ "key": "diagnostics.prewarm.v1" }),
+    );
+    let initial_value = initial["outcome"]["value"]["payload"]["effective_value"]["value"]
+        .as_bool()
+        .expect("initial diagnostics prewarm value");
+    let next_value = !initial_value;
+    let mutation = json!({
+        "layer": {
+            "kind": "project",
+            "project_id": project_id,
+        },
+        "key": "diagnostics.prewarm.v1",
+        "value": {
+            "kind": "boolean",
+            "value": next_value,
+        },
+        "expected_revision": initial_revision,
+    });
+
+    configuration_tool_success(
+        &home_path,
+        &project_path,
+        "configuration_set",
+        mutation.clone(),
+    );
+    let advanced = configuration_tool_success(
+        &home_path,
+        &project_path,
+        "configuration_observed_state",
+        json!({}),
+    );
+    let advanced_revision = advanced["outcome"]["value"]["payload"][0]["desired_revision_id"]
+        .as_str()
+        .expect("advanced configuration revision")
+        .to_owned();
+    assert_ne!(advanced_revision, initial_revision);
+
+    drop(daemon);
+    let _restarted_daemon = spawn_tracedecay_daemon(&home_path);
+    let reloaded = configuration_tool_success(
+        &home_path,
+        &project_path,
+        "configuration_get",
+        json!({ "key": "diagnostics.prewarm.v1" }),
+    );
+    assert_eq!(
+        reloaded["outcome"]["value"]["payload"]["effective_value"]["value"], next_value,
+        "the CLI mutation must survive a daemon restart and affect the resolved setting"
+    );
+
+    let stale_mutation = json!({
+        "layer": {
+            "kind": "project",
+            "project_id": project_id,
+        },
+        "key": "diagnostics.prewarm.v1",
+        "value": {
+            "kind": "boolean",
+            "value": initial_value,
+        },
+        "expected_revision": initial_revision,
+    });
+    let project_arg = project_path.to_string_lossy().to_string();
+    let stale_arguments = serde_json::to_string(&stale_mutation).unwrap();
+    let mut command = tracedecay_command_with_home(&home_path);
+    command.current_dir(&project_path).args([
+        "tool",
+        "--project",
+        project_arg.as_str(),
+        "configuration_set",
+        "--args",
+        stale_arguments.as_str(),
+        "--json",
+    ]);
+    let stale = run_command_with_timeout(command, CLI_ROUNDTRIP_TIMEOUT);
+    assert!(
+        !stale.status.success(),
+        "a stale configuration write must fail the shell gate\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&stale.stdout),
+        String::from_utf8_lossy(&stale.stderr)
+    );
+    let stale_payload: Value =
+        serde_json::from_slice(&stale.stdout).expect("stale write problem JSON");
+    assert_eq!(stale_payload["problem"]["kind"], "conflict");
+    assert_eq!(stale_payload["problem"]["code"], "configuration.conflict");
 }
 
 #[test]

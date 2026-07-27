@@ -800,3 +800,33 @@ fn canonical_problem_markdown_matches_the_golden_contract() {
         )
     );
 }
+
+#[test]
+fn application_problem_makes_the_tool_command_fail() {
+    let request_id = RequestId::new("request.cli.configuration-conflict").unwrap();
+    let result = ApplicationSurfaceInvocationResult {
+        operation: ApplicationSurfaceOperation::ConfigurationSet,
+        binding_id: BindingId::new("binding.cli.configuration-set.v1").unwrap(),
+        result: Err(ApplicationProblemEnvelope::new(
+            ResultContractRef::new(SchemaId::new("schema.test.result").unwrap(), 1).unwrap(),
+            request_id,
+            ApplicationProblem::unavailable(
+                SafeDiagnostic::new(
+                    "configuration_revision_conflict",
+                    "The expected configuration revision is stale",
+                )
+                .unwrap(),
+            ),
+        )),
+        requested_format: RequestedOutputFormat::Json,
+    };
+
+    let error = print_cli_application_surface(result, true)
+        .expect_err("a canonical application problem must fail the CLI process");
+    assert!(
+        error
+            .to_string()
+            .contains("configuration_revision_conflict"),
+        "{error}"
+    );
+}

@@ -34,6 +34,7 @@
 //! can be referenced by more than one field in a single invocation.
 
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -333,19 +334,29 @@ fn print_cli_application_surface(
     result: ApplicationSurfaceInvocationResult,
     raw_json: bool,
 ) -> Result<()> {
+    let application_problem = result
+        .result
+        .as_ref()
+        .err()
+        .map(|problem| format!("{}: {}", problem.problem.code, problem.problem.message));
     if raw_json {
         print!("{}", crate::cli::output::json::json_line(&result.result)?);
-        return Ok(());
+    } else {
+        let view = crate::cli::output::view::CanonicalHumanView::from_application_result(
+            result.operation.as_str(),
+            &result.binding_id,
+            &result.result,
+        )?;
+        let rendered = crate::cli::output::markdown::render(view);
+        println!("{}", rendered.as_str());
     }
-
-    let view = crate::cli::output::view::CanonicalHumanView::from_application_result(
-        result.operation.as_str(),
-        &result.binding_id,
-        &result.result,
-    )?;
-    let rendered = crate::cli::output::markdown::render(view);
-    println!("{}", rendered.as_str());
-    Ok(())
+    if application_problem.is_some() {
+        std::io::stdout().flush()?;
+    }
+    match application_problem {
+        Some(message) => Err(TraceDecayError::Config { message }),
+        None => Ok(()),
+    }
 }
 
 struct DaemonToolDispatch {

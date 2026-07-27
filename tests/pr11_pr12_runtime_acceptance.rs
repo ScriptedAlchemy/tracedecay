@@ -811,6 +811,133 @@ async fn dashboard_project_settings_commit_through_the_daemon_control_plane() {
     .await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn mcp_configuration_write_persists_and_rejects_stale_cas() {
+    let fixture = runtime_fixture().await;
+    let observed = resolve_mcp_application_surface(
+        ApplicationSurfaceOperation::ConfigurationObservedState,
+        RequestId::new("request.configuration.mcp-observed").unwrap(),
+        parse_application_surface_request(
+            ApplicationSurfaceOperation::ConfigurationObservedState,
+            serde_json::json!({}),
+        )
+        .unwrap(),
+        RequestedOutputFormat::Json,
+        Some(&fixture.client),
+    )
+    .await
+    .expect("MCP observed-state dispatch");
+    let initial_revision = successful_application(&observed)[0]["desired_revision_id"]
+        .as_str()
+        .expect("initial configuration revision")
+        .to_owned();
+    let project_id = observed
+        .result
+        .as_ref()
+        .expect("observed-state application result")
+        .scope
+        .project_id
+        .clone();
+    let get_arguments = serde_json::json!({ "key": "diagnostics.prewarm.v1" });
+    let current = resolve_mcp_application_surface(
+        ApplicationSurfaceOperation::ConfigurationGet,
+        RequestId::new("request.configuration.mcp-get-before").unwrap(),
+        parse_application_surface_request(
+            ApplicationSurfaceOperation::ConfigurationGet,
+            get_arguments.clone(),
+        )
+        .unwrap(),
+        RequestedOutputFormat::Json,
+        Some(&fixture.client),
+    )
+    .await
+    .expect("MCP configuration get");
+    let initial_value = successful_application(&current)["effective_value"]["value"]
+        .as_bool()
+        .expect("initial diagnostics prewarm value");
+    let next_value = !initial_value;
+    let set_arguments = serde_json::json!({
+        "layer": {
+            "kind": "project",
+            "project_id": project_id,
+        },
+        "key": "diagnostics.prewarm.v1",
+        "value": {
+            "kind": "boolean",
+            "value": next_value,
+        },
+        "expected_revision": initial_revision,
+    });
+    let applied = resolve_mcp_application_surface(
+        ApplicationSurfaceOperation::ConfigurationSet,
+        RequestId::new("request.configuration.mcp-set").unwrap(),
+        parse_application_surface_request(
+            ApplicationSurfaceOperation::ConfigurationSet,
+            set_arguments,
+        )
+        .unwrap(),
+        RequestedOutputFormat::Json,
+        Some(&fixture.client),
+    )
+    .await
+    .expect("MCP configuration set");
+    let applied_envelope = applied.result.as_ref().expect("successful MCP mutation");
+    assert!(
+        matches!(&applied_envelope.outcome, ApplicationOutcome::Effect(_)),
+        "configuration mutation must return an effect receipt"
+    );
+
+    let reloaded = resolve_mcp_application_surface(
+        ApplicationSurfaceOperation::ConfigurationGet,
+        RequestId::new("request.configuration.mcp-get-after").unwrap(),
+        parse_application_surface_request(
+            ApplicationSurfaceOperation::ConfigurationGet,
+            get_arguments,
+        )
+        .unwrap(),
+        RequestedOutputFormat::Json,
+        Some(&fixture.client),
+    )
+    .await
+    .expect("MCP configuration re-read");
+    assert_eq!(
+        successful_application(&reloaded)["effective_value"]["value"],
+        next_value,
+        "the MCP mutation must affect the retained configuration"
+    );
+
+    let stale_arguments = serde_json::json!({
+        "layer": {
+            "kind": "project",
+            "project_id": project_id,
+        },
+        "key": "diagnostics.prewarm.v1",
+        "value": {
+            "kind": "boolean",
+            "value": initial_value,
+        },
+        "expected_revision": initial_revision,
+    });
+    let stale = resolve_mcp_application_surface(
+        ApplicationSurfaceOperation::ConfigurationSet,
+        RequestId::new("request.configuration.mcp-stale").unwrap(),
+        parse_application_surface_request(
+            ApplicationSurfaceOperation::ConfigurationSet,
+            stale_arguments,
+        )
+        .unwrap(),
+        RequestedOutputFormat::Json,
+        Some(&fixture.client),
+    )
+    .await
+    .expect("MCP stale configuration dispatch");
+    let problem = stale
+        .result
+        .expect_err("a stale MCP configuration write must conflict");
+    assert_eq!(problem.problem.kind(), ApplicationProblemKind::Conflict);
+    assert_eq!(problem.problem.code, "configuration.conflict");
+}
+
 /// Starts the dashboard inside the running daemon and returns its base URL.
 ///
 /// This is the same route `tracedecay dashboard` takes: the CLI asks the daemon
