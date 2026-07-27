@@ -1,6 +1,25 @@
 import { useEffect, useRef, useState } from 'react';
 import type { EChartsOption, ECharts } from 'echarts';
 import { useReducedMotion } from '../trace/reducedMotion.ts';
+import { isRegisteredSeries } from './echarts.ts';
+
+/**
+ * Series types in this option that the dashboard's ECharts build cannot draw.
+ *
+ * ECharts answers an unregistered series with an empty canvas, not an error, so
+ * without this the reader would see a chart-shaped blank where a measurement
+ * belongs. `series` may be one object or an array; an entry with no `type` is
+ * left to ECharts, which infers it from the surrounding option.
+ */
+function unsupportedSeries(option: EChartsOption): string[] {
+  const series = option.series;
+  const entries = Array.isArray(series) ? series : series ? [series] : [];
+  const unsupported = entries
+    .map((entry) => (entry as { type?: unknown }).type)
+    .filter((type): type is string => typeof type === 'string')
+    .filter((type) => !isRegisteredSeries(type));
+  return [...new Set(unsupported)];
+}
 
 /** Resolve the live theme into the chart's own styling. Canvas renderers
  * cannot consume CSS variables, so the tokens are sampled off the container
@@ -94,14 +113,17 @@ export function Chart({
   // effect here at all — and a reader who pinned "Full" was overridden by the
   // OS. The media query is one input to that decision, not the decision.
   const { reduced } = useReducedMotion();
+  const unsupported = unsupportedSeries(option);
 
   useEffect(() => {
+    // Null whenever the option carries an unsupported series, because that
+    // branch renders a notice instead of the canvas the chart would mount into.
     const container = containerRef.current;
     if (!container) return;
     let disposed = false;
     let chart: ECharts | null = null;
 
-    void import('echarts').then((echarts) => {
+    void import('./echarts.ts').then((echarts) => {
       if (disposed || !containerRef.current) return;
       chart = echarts.init(containerRef.current);
       chartRef.current = chart;
@@ -131,6 +153,20 @@ export function Chart({
     if (!container || !chart) return;
     chart.setOption(themedOption(container, option, reduced), { notMerge: true });
   }, [option, themeRevision, ready, reduced]);
+
+  // A series this build cannot draw is a reporting failure, not an empty
+  // measurement, so it says so instead of mounting a canvas that would stay
+  // blank next to a real reading.
+  if (unsupported.length > 0) {
+    return (
+      <div
+        style={{ height }}
+        className="flex items-center justify-center border border-edge-subtle bg-surface-1 px-3 py-2 text-2xs leading-relaxed text-text-secondary"
+      >
+        {`This build cannot draw a ${unsupported.join(' or ')} series, so ${ariaLabel} is not shown. Register the series type in viz/chart/echarts.ts.`}
+      </div>
+    );
+  }
 
   return <div ref={containerRef} style={{ height }} role="img" aria-label={ariaLabel} />;
 }

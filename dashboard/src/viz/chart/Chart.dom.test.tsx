@@ -27,7 +27,12 @@ import { Chart } from './Chart.tsx';
 /** Every option handed to the chart instance, in order. */
 const applied: EChartsOption[] = [];
 
-vi.mock('echarts', () => ({
+// The narrow registered build, not the full distribution: `Chart` imports
+// `./echarts.ts` so the bundle carries only the series the product draws.
+// `isRegisteredSeries` is the real one — mocking it would make the
+// unsupported-series case unable to fail.
+vi.mock('./echarts.ts', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./echarts.ts')>()),
   init: () => ({
     setOption: (option: EChartsOption) => {
       applied.push(option);
@@ -142,5 +147,70 @@ describe('Chart theming and motion', () => {
     stubSystemPrefersReduced(true);
     render(<Chart option={OPTION} ariaLabel="tokens per day" />);
     expect((await lastOption()).animation).toBe(false);
+  });
+});
+
+/**
+ * The dashboard registers only the series it draws, which is what keeps the
+ * ECharts chunk inside plan 11's per-chunk budget. ECharts answers an
+ * unregistered series with an empty canvas rather than an error, so the cost of
+ * that narrowing is a chart-shaped blank standing in for a real measurement.
+ */
+describe('Chart registered-series guard', () => {
+  beforeEach(() => {
+    applied.length = 0;
+    stubSystemPrefersReduced(false);
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        observe(): void {}
+        disconnect(): void {}
+      },
+    );
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('draws a registered series', async () => {
+    render(<Chart option={OPTION} ariaLabel="tokens per day" />);
+    expect((await lastOption()).series).toBeTruthy();
+  });
+
+  it('names an unregistered series instead of mounting a blank canvas', async () => {
+    const { queryByRole, getByText } = render(
+      <Chart
+        option={{ series: [{ type: 'treemap', data: [] }] } as EChartsOption}
+        ariaLabel="fact families"
+      />,
+    );
+
+    expect(getByText(/cannot draw a treemap series/i)).toBeTruthy();
+    expect(getByText(/fact families is not shown/i)).toBeTruthy();
+    // The canvas host carries `role="img"`; its absence is the whole point.
+    expect(queryByRole('img')).toBeNull();
+    await waitFor(() => expect(applied.length).toBe(0));
+  });
+
+  it('reports every unregistered series once, and still refuses a mixed option', () => {
+    const { getByText } = render(
+      <Chart
+        option={
+          {
+            series: [
+              { type: 'bar', data: [1] },
+              { type: 'pie', data: [] },
+              { type: 'pie', data: [] },
+            ],
+          } as EChartsOption
+        }
+        ariaLabel="spend mix"
+      />,
+    );
+
+    // One registered series does not license drawing the option: the pie would
+    // simply be missing from a chart that otherwise looks complete.
+    expect(getByText(/cannot draw a pie series/i)).toBeTruthy();
   });
 });
