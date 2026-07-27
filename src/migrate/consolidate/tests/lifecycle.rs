@@ -1302,7 +1302,6 @@ async fn a_third_matching_shard_is_left_for_its_own_pass() {
         &fixture.project,
         &fixture.profile,
         Some(applied.destination_project_id.as_str()),
-        false,
     )
     .unwrap();
     assert_eq!(

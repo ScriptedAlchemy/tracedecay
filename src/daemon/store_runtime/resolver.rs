@@ -1266,7 +1266,8 @@ fn is_network_filesystem(filesystem_type: &str) -> bool {
 fn is_known_local_filesystem(filesystem_type: &str) -> bool {
     matches!(
         filesystem_type,
-        "apfs" | "btrfs"
+        "apfs"
+            | "btrfs"
             | "bcachefs"
             | "cdfs"
             | "erofs"

@@ -2359,10 +2359,8 @@ async fn primitive_config_markdown_json_parity() {
     // them is outside this test.
     let cli_request_id =
         RequestId::new("request.primitive-config-parity.cli").expect("CLI request id");
-    let cli_deadline = Deadline::new(UtcMicros(
-        wall_clock_micros().0.saturating_add(60_000_000),
-    ))
-    .expect("CLI deadline");
+    let cli_deadline = Deadline::new(UtcMicros(wall_clock_micros().0.saturating_add(60_000_000)))
+        .expect("CLI deadline");
     let cli_dispatch = resolve_application_surface_dispatch_with_controls(
         BindingSurface::Cli,
         ApplicationSurfaceOperation::StorageStatus,

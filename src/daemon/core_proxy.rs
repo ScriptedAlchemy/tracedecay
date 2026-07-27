@@ -11,9 +11,8 @@ use tokio::time::{Duration, Instant};
 
 use super::{
     DAEMON_TOOL_LIVENESS_POLL_INTERVAL, DaemonClientDeadline, DaemonHandshake,
-    PROJECT_WARMING_RETRY_HINT, client_connection, connect_to_daemon_connection,
-    connect_to_daemon_connection_within, default_available_socket_path, next_daemon_response_line,
-    write_daemon_preamble,
+    PROJECT_WARMING_RETRY_HINT, connect_to_current_daemon_within, connect_to_daemon_connection,
+    default_available_socket_path, next_daemon_response_line, write_daemon_preamble,
 };
 #[cfg(unix)]
 use super::{
@@ -470,22 +469,21 @@ pub(crate) async fn send_daemon_request_line_with_liveness_poll(
     liveness_poll_interval: Duration,
     client_deadline: Option<DaemonClientDeadline>,
 ) -> Result<Vec<String>> {
-    let connection = client_connection(socket_path)?;
     let request = serde_json::from_str::<JsonRpcRequest>(line).ok();
     let request_id = request.as_ref().and_then(|request| request.id.clone());
     let request_label = request
         .as_ref()
         .map_or("daemon request", |request| request.method.as_str())
         .to_string();
-    let stream = match client_deadline {
+    let (connection, stream) = match client_deadline {
         Some(deadline) => {
             deadline
                 .run("connect", &request_label, async {
-                    connect_to_daemon_connection_within(&connection, Some(deadline)).await
+                    connect_to_current_daemon_within(socket_path, Some(deadline)).await
                 })
                 .await?
         }
-        None => connect_to_daemon_connection(&connection).await?,
+        None => connect_to_current_daemon_within(socket_path, None).await?,
     };
     let (reader, mut writer) = stream.into_split();
 
