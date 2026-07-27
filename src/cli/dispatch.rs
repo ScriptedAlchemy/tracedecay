@@ -8,7 +8,9 @@ use tracedecay::application_surface::{
     ApplicationSurfaceOperation, ApplicationSurfaceRequest, execute_application_surface,
     observe_surface_argument_rejection, resolve_application_surface_dispatch_with_controls,
 };
-use tracedecay::daemon_client::{DaemonInvocationClient, RequestedOutputFormat};
+use tracedecay::daemon_client::{
+    DaemonInvocationClient, DaemonInvocationExecutor, RequestedOutputFormat,
+};
 use tracedecay_application::{CancellationSignal, Deadline, PageRequest, RequestId};
 use tracedecay_tool_catalog::BindingSurface;
 
@@ -21,12 +23,13 @@ pub async fn resolve_cli_application_surface(
     cancellation: CancellationSignal,
     client: Option<&DaemonInvocationClient>,
 ) -> Result<ApplicationSurfaceInvocationResult, ApplicationSurfaceAdapterError> {
+    let executor = client.map(|client| client as &dyn DaemonInvocationExecutor);
     let page = match PageRequest::first(10) {
         Ok(page) => page,
         Err(error) => {
             let error = ApplicationSurfaceAdapterError::from(error);
             observe_surface_argument_rejection(
-                client,
+                executor,
                 BindingSurface::Cli,
                 operation,
                 &request_id,
@@ -49,7 +52,7 @@ pub async fn resolve_cli_application_surface(
         Ok(dispatched) => dispatched,
         Err(error) => {
             observe_surface_argument_rejection(
-                client,
+                executor,
                 BindingSurface::Cli,
                 operation,
                 &request_id,
@@ -59,5 +62,5 @@ pub async fn resolve_cli_application_surface(
             return Err(error);
         }
     };
-    execute_application_surface(operation, dispatched, client).await
+    execute_application_surface(operation, dispatched, executor).await
 }

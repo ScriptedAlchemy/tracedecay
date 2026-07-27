@@ -192,7 +192,7 @@ async fn reconcile_untracks_closed_pr_and_cleans_store() {
 
     // Empty discovery => PR 5 is closed/merged => must be untracked.
     let daemon_administration = StoreAdministration::with_external_holder_verifier(|_| Ok(()));
-    let administration = PrStoreAdministration::new(&daemon_administration);
+    let administration = PrStoreAdministration::state_only(&daemon_administration);
     let report = reconcile_project_with_administration(
         repo_root.path(),
         data_root.path(),
@@ -237,7 +237,15 @@ async fn reconcile_is_idempotent_for_already_managed_pr() {
         skipped_forks: vec![],
         ..Default::default()
     };
-    let report = reconcile_project(repo_root.path(), data_root.path(), &discovery, 10).await;
+    let daemon_administration = StoreAdministration::default();
+    let report = reconcile_project_with_administration(
+        repo_root.path(),
+        data_root.path(),
+        &discovery,
+        10,
+        PrStoreAdministration::state_only(&daemon_administration),
+    )
+    .await;
 
     // Already managed and still open: nothing changes.
     assert!(report.tracked.is_empty());
@@ -282,7 +290,15 @@ async fn partial_discovery_suppresses_removals() {
         partial: true,
         ..Default::default()
     };
-    let report = reconcile_project(repo_root.path(), data_root.path(), &discovery, 10).await;
+    let daemon_administration = StoreAdministration::default();
+    let report = reconcile_project_with_administration(
+        repo_root.path(),
+        data_root.path(),
+        &discovery,
+        10,
+        PrStoreAdministration::state_only(&daemon_administration),
+    )
+    .await;
 
     assert!(
         report.removals_suppressed,

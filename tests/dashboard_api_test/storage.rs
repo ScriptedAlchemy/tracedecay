@@ -72,7 +72,26 @@ fn storage_findings_endpoint_reports_every_producer_source_honestly() {
         let statuses = envelope["payload"]["kind_statuses"]
             .as_array()
             .unwrap_or_else(|| panic!("storage producer statuses should be an array: {envelope}"));
-        assert_eq!(statuses.len(), 5, "every Plan 38 producer must be named");
+        let producer_kinds = statuses
+            .iter()
+            .map(|status| {
+                status["kind"]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("storage producer kind must be typed: {status}"))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            producer_kinds,
+            [
+                "over_budget_store",
+                "orphan_store",
+                "stale_branch_dbs",
+                "incident_debris_present",
+                "retention_backlog",
+                "table_growth",
+            ],
+            "every canonical Plan 38 producer must appear exactly once"
+        );
 
         let status_for = |kind: &str| {
             statuses
@@ -97,6 +116,7 @@ fn storage_findings_endpoint_reports_every_producer_source_honestly() {
             "stale_branch_dbs",
             "incident_debris_present",
             "retention_backlog",
+            "table_growth",
         ] {
             let producer = status_for(kind);
             assert_eq!(

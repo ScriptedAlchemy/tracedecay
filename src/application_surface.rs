@@ -2553,7 +2553,7 @@ pub fn parse_application_surface_request(
 pub async fn execute_application_surface(
     operation: ApplicationSurfaceOperation,
     dispatched: DispatchedInvocation<ApplicationSurfaceRequest>,
-    client: Option<&crate::daemon_client::DaemonInvocationClient>,
+    executor: Option<&dyn crate::daemon_client::DaemonInvocationExecutor>,
 ) -> Result<ApplicationSurfaceInvocationResult, ApplicationSurfaceAdapterError> {
     validate_current_application_binding(operation, &dispatched)?;
     let result_contract = ResultContractRef::from_schema(&dispatched.invocation.result_schema);
@@ -2702,7 +2702,7 @@ pub async fn execute_application_surface(
         }
     }
     .with_delivery_route(delivery_route);
-    let Some(client) = client else {
+    let Some(executor) = executor else {
         return Ok(ApplicationSurfaceInvocationResult {
             operation,
             binding_id,
@@ -2737,7 +2737,7 @@ pub async fn execute_application_surface(
     } else {
         InvocationCancellationPolicy::ReadOnly
     };
-    let response = client
+    let response = executor
         .invoke_controlled(request, request_deadline, cancellation, policy)
         .await;
     let response = match response {
@@ -2782,7 +2782,7 @@ pub async fn execute_application_surface(
                         duration_micros: None,
                     },
                 };
-                let _ = client
+                let _ = executor
                     .observe_plan26_feedback(subject_digest, observed_at, event)
                     .await;
             }
@@ -3000,7 +3000,7 @@ fn plan26_surface_is_observable(operation: ApplicationSurfaceOperation) -> bool 
 }
 
 pub async fn observe_surface_argument_rejection(
-    client: Option<&crate::daemon_client::DaemonInvocationClient>,
+    executor: Option<&dyn crate::daemon_client::DaemonInvocationExecutor>,
     surface: BindingSurface,
     operation: ApplicationSurfaceOperation,
     request_id: &RequestId,
@@ -3012,8 +3012,8 @@ pub async fn observe_surface_argument_rejection(
     let Some((argument, rejection, outcome)) = surface_rejection_metadata(error) else {
         return;
     };
-    let (Some(client), Ok(subject_digest), Ok(observed_at)) = (
-        client,
+    let (Some(executor), Ok(subject_digest), Ok(observed_at)) = (
+        executor,
         canonical_sha256(&(
             "tracedecay.feedback.surface-rejection.v1",
             request_id.as_str(),
@@ -3024,7 +3024,7 @@ pub async fn observe_surface_argument_rejection(
     ) else {
         return;
     };
-    let _ = client
+    let _ = executor
         .observe_plan26_feedback(
             subject_digest,
             observed_at,
@@ -3076,7 +3076,7 @@ pub async fn resolve_http_application_surface(
     request_id: RequestId,
     request: ApplicationSurfaceRequest,
     requested_format: RequestedOutputFormat,
-    client: Option<&crate::daemon_client::DaemonInvocationClient>,
+    executor: Option<&dyn crate::daemon_client::DaemonInvocationExecutor>,
 ) -> Result<ApplicationSurfaceInvocationResult, ApplicationSurfaceAdapterError> {
     let dispatched = match resolve_http_application_surface_dispatch(
         operation,
@@ -3087,7 +3087,7 @@ pub async fn resolve_http_application_surface(
         Ok(dispatched) => dispatched,
         Err(error) => {
             observe_surface_argument_rejection(
-                client,
+                executor,
                 BindingSurface::Http,
                 operation,
                 &request_id,
@@ -3097,7 +3097,7 @@ pub async fn resolve_http_application_surface(
             return Err(error);
         }
     };
-    execute_application_surface(operation, dispatched, client).await
+    execute_application_surface(operation, dispatched, executor).await
 }
 
 /// Resolve a dashboard action through the same catalog entry and daemon-owned
@@ -3109,7 +3109,7 @@ pub async fn resolve_dashboard_application_surface(
     request_id: RequestId,
     request: ApplicationSurfaceRequest,
     requested_format: RequestedOutputFormat,
-    client: Option<&crate::daemon_client::DaemonInvocationClient>,
+    executor: Option<&dyn crate::daemon_client::DaemonInvocationExecutor>,
 ) -> Result<ApplicationSurfaceInvocationResult, ApplicationSurfaceAdapterError> {
     let dispatched = resolve_application_surface_dispatch(
         BindingSurface::Dashboard,
@@ -3118,7 +3118,7 @@ pub async fn resolve_dashboard_application_surface(
         request,
         requested_format,
     )?;
-    execute_application_surface(operation, dispatched, client).await
+    execute_application_surface(operation, dispatched, executor).await
 }
 
 pub fn resolve_http_application_surface_dispatch(

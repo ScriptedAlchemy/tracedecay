@@ -28,7 +28,7 @@ use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::current_timestamp;
 
 /// Durable table for generation-bound diagnostic records.
-const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS generation_diagnostics (
+pub(crate) const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS generation_diagnostics (
         diagnostic_anchor TEXT PRIMARY KEY,
         generation_id TEXT NOT NULL,
         repository TEXT NOT NULL,

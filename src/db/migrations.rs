@@ -90,13 +90,7 @@ async fn repair_incremental_auto_vacuum(
         return Ok(());
     }
 
-    conn.execute_batch("PRAGMA auto_vacuum = INCREMENTAL;")
-        .await
-        .map_err(|e| TraceDecayError::Database {
-            message: format!("{operation}: failed to enable incremental auto_vacuum: {e}"),
-            operation: operation.to_string(),
-        })?;
-    conn.execute_batch("VACUUM;")
+    conn.repair_incremental_auto_vacuum()
         .await
         .map_err(|e| TraceDecayError::Database {
             message: format!("{operation}: failed to rebuild database for auto_vacuum: {e}"),
@@ -349,9 +343,20 @@ pub(crate) async fn migrate_connection(conn: &Connection) -> Result<bool> {
 /// Runs schema migrations and completes any whole-file auto-vacuum repair.
 ///
 /// Callers must hold exclusive maintenance authority. Ordinary opens use
-/// [`migrate`] so startup latency never grows with the database file size.
-pub(crate) async fn migrate_with_exclusive_maintenance(conn: &Connection) -> Result<bool> {
-    migrate_inner(conn, true).await
+/// [`migrate`] so startup latency never grows with the database file size. The
+/// maintenance runtime is consumed because a whole-file rebuild invalidates
+/// reader connections opened against the previous file image.
+pub(crate) async fn migrate_with_exclusive_maintenance(
+    database: crate::db::Database,
+) -> Result<bool> {
+    let result = {
+        let writer = database
+            .writer_connection("migrate schema under exclusive maintenance")
+            .await?;
+        migrate_inner(writer.engine_connection(), true).await
+    };
+    database.close();
+    result
 }
 
 async fn migrate_inner(conn: &Connection, exclusive_maintenance: bool) -> Result<bool> {
@@ -436,11 +441,56 @@ async fn run_migrations(conn: &Transaction, current: u32) -> Result<()> {
         current < LATEST_VERSION,
         "run_migrations called when already at latest version"
     );
-    for version in (current + 1)..=LATEST_VERSION {
+    run_migrations_through(conn, current, LATEST_VERSION).await
+}
+
+async fn run_migrations_through(conn: &Transaction, current: u32, target: u32) -> Result<()> {
+    for version in (current + 1)..=target {
         run_migration(conn, version).await?;
         set_version(conn, version).await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+pub(crate) async fn migrate_test_connection_to_version(
+    conn: &Connection,
+    target: u32,
+) -> Result<()> {
+    if target > LATEST_VERSION {
+        return Err(TraceDecayError::Database {
+            message: format!(
+                "test migration target v{target} is newer than supported v{LATEST_VERSION}"
+            ),
+            operation: "migrate_test_connection_to_version".to_owned(),
+        });
+    }
+    let transaction =
+        conn.schema_migration_transaction()
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("failed to acquire test migration writer lock: {error}"),
+                operation: "migrate_test_connection_to_version".to_owned(),
+            })?;
+    let current = get_version(&transaction).await?;
+    if current > target {
+        let _ = transaction.rollback().await;
+        return Err(TraceDecayError::Database {
+            message: format!("database schema v{current} is newer than test target v{target}"),
+            operation: "migrate_test_connection_to_version".to_owned(),
+        });
+    }
+    if let Err(error) = run_migrations_through(&transaction, current, target).await {
+        let _ = transaction.rollback().await;
+        return Err(error);
+    }
+    transaction
+        .commit()
+        .await
+        .map_err(|error| TraceDecayError::Database {
+            message: format!("failed to commit test migrations: {error}"),
+            operation: "migrate_test_connection_to_version".to_owned(),
+        })
 }
 
 /// Dispatches a single migration by version number.

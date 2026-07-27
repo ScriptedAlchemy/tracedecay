@@ -423,6 +423,14 @@ impl MigrationSqlWriteAuthority for DatabaseAuthority {
             MigrationSqlWriteIntent::ExecuteBatch => {
                 "execute registered global database statement batch"
             }
+            MigrationSqlWriteIntent::Vacuum => {
+                if self.role() != crate::db::DatabaseAuthorityRole::Maintenance {
+                    return Err(MigrationSqlError::AuthorityDenied(
+                        "whole-database vacuum requires exclusive maintenance authority".to_owned(),
+                    ));
+                }
+                "vacuum registered global database under exclusive maintenance"
+            }
             MigrationSqlWriteIntent::BeginTransaction => {
                 "begin registered global database transaction"
             }

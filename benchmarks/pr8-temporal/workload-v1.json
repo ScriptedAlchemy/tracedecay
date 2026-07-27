@@ -1,109 +1,25 @@
 {
-  "schema_version": 2,
-  "workload_id": "pr8-session-temporal-v1",
-  "status": "harness_ready",
-  "implementation": {
-    "path": "src/sessions/session_temporal_benchmark.rs",
-    "sha256": "243a6f7414c08560e959b6c5cd427798feb65bcd1abb8b48b7e73ad49b8b02b9"
-  },
-  "runner": {
-    "path": "scripts/run-pr8-temporal-benchmark.sh",
-    "sha256": "c05eaf2812f895f8b385a6f18bade7c5f9952719415f30a21f954c77a1d3907e"
-  },
-  "profile": {
-    "manifest_path": "Cargo.toml",
-    "manifest_sha256": "f12aeaa3ab017dc22fdefa5dc99f64028b7ce80db5166cea49888fff49b8b7e0",
-    "cargo_profile": "bench",
-    "opt_level": 3,
-    "debug": false,
-    "debug_assertions": false,
-    "overflow_checks": false,
-    "incremental": false
-  },
-  "fixture_evidence": {
-    "status": "accepted_for_harness",
-    "independently_sourced": true,
-    "sanitization_receipt": "benchmarks/pr8-temporal/fixtures/codex-sanitization-receipt.json",
-    "introduction_commit": "c293df93ce063885580ea7145cc81e6dbdc8e9ec",
-    "provider": "codex",
-    "format": "checked_in_native_bounded_copy_v1",
-    "files": [
-      {
-        "path": "tests/fixtures/provider_normalization/codex/session_meta.input.json",
-        "sha256": "125540c90d77740256c4b2a31c029b5ddb25e037b9c20f053007339533b48832"
-      },
-      {
-        "path": "tests/fixtures/provider_normalization/codex/agent_message.input.json",
-        "sha256": "98c62c375f7f1d9f6552ab0591007e0063165b44b767c472644ad4e66eace6cf"
-      }
-    ]
-  },
-  "production_path": {
-    "required": [
-      "HostAdmissionFacade::drain_projection_queue with the canonical GlobalDb observation projector",
-      "CanonicalSessionTemporalProjector via GlobalDb::materialize_session_temporal_refresh_batch_result",
-      "SessionRefreshService with GlobalDbSessionTemporalStore",
-      "SessionRetrievalService with GlobalDbSessionTemporalExecution"
-    ],
-    "available_to_benchmark_target": true,
-    "reason": "harness admits provider-native Codex inputs, drains the canonical GlobalDb observation projector, then uses the production refresh materialize path and public retrieval adapters"
-  },
-  "storage_isolation": {
-    "required_environment": [
-      "HOME",
-      "TRACEDECAY_DATA_DIR"
-    ],
-    "required_ownership": "benchmark-owned temporary storage with RAII cleanup",
-    "status": "enforced_by_harness_and_runner"
-  },
-  "statistics": {
-    "status": "descriptive_sample_quantiles",
-    "p95_label": "descriptive nearest-rank sample p95",
-    "p99_label": "descriptive nearest-rank sample p99 (sample maximum when n=30)",
-    "inferential_claim": false
-  },
-  "measurement_contract": {
-    "warmup_repetitions": 3,
-    "measured_repetitions": 30,
-    "phases": [
-      {
-        "phase": "rebuild_activate",
-        "path": "SessionRefreshService::begin_or_join + CanonicalSessionTemporalProjector materialize/persist + complete"
-      },
-      {
-        "phase": "exact_replay",
-        "path": "idempotent SessionRefreshCompletionRequestV1 replay"
-      },
-      {
-        "phase": "compact_rank",
-        "path": "SessionRetrievalService::retrieve LogicalMessage"
-      },
-      {
-        "phase": "late_hydrate",
-        "path": "SessionRetrievalService::retrieve Occurrence"
-      }
-    ]
-  },
+  "command": "scripts/run-pr8-temporal-benchmark.sh --run",
   "file_inventory": [
     {
       "path": "benches/session_temporal.rs",
-      "sha256": "4daa9a4be81b29ca697698207c3cc6923c7c119d68b2b546ef40ac242c9cf01f"
+      "sha256": "8a8b087ba2038a8db180b81a3f2d2172d2c56fe27027006957646712e43f60a8"
     },
     {
       "path": "src/sessions/session_temporal_benchmark.rs",
-      "sha256": "ac555607b85350081d530fe1e76c2c62b3213d272c334d5634b5d14f7232aa74"
+      "sha256": "7a1337d6ca349bd3c74636d557935b4b44cfbc8f2f49df0369715f3b12951f72"
     },
     {
       "path": "scripts/run-pr8-temporal-benchmark.sh",
-      "sha256": "619054159ed91e8590a08570024586c0f3a0ff86f724bed66f645f2c607bcbb9"
+      "sha256": "d1d321db6c3e4d372017a50245da8bd69df0b108f755696539bce21fe0a80306"
     },
     {
       "path": "Cargo.toml",
-      "sha256": "f12aeaa3ab017dc22fdefa5dc99f64028b7ce80db5166cea49888fff49b8b7e0"
+      "sha256": "41459cec9df43a473194d6864bea84b502c08ebeee77bda6cbe1010e43335120"
     },
     {
       "path": ".github/workflows/ci.yml",
-      "sha256": "ad348151bb9b0ecb9be3cf58a8d608d8c0eac0d9c8bd1aa7cfc52d3e8e38980b"
+      "sha256": "55c98346ec08bd5bf5e2ac310679e6e7f987bbee7d66bb9bc3ef87b0148c1ec9"
     },
     {
       "path": "benchmarks/pr8-temporal/fixtures/codex-sanitization-receipt.json",
@@ -123,8 +39,101 @@
     },
     {
       "path": "benchmarks/pr8-temporal/README.md",
-      "sha256": "ac83844b6385bdcea0eecc1ecabe70dd5a69270328d2d343db92766333b0352e"
+      "sha256": "63fbf56ccbcbcee268606e532be5c25ae2d6e6a61cadbd0494569f3dee6b423a"
     }
   ],
-  "command": "scripts/run-pr8-temporal-benchmark.sh --run"
+  "fixture_evidence": {
+    "files": [
+      {
+        "path": "tests/fixtures/provider_normalization/codex/session_meta.input.json",
+        "sha256": "125540c90d77740256c4b2a31c029b5ddb25e037b9c20f053007339533b48832"
+      },
+      {
+        "path": "tests/fixtures/provider_normalization/codex/agent_message.input.json",
+        "sha256": "98c62c375f7f1d9f6552ab0591007e0063165b44b767c472644ad4e66eace6cf"
+      }
+    ],
+    "format": "checked_in_native_bounded_copy_v1",
+    "independently_sourced": true,
+    "introduction_commit": "c293df93ce063885580ea7145cc81e6dbdc8e9ec",
+    "provider": "codex",
+    "sanitization_receipt": "benchmarks/pr8-temporal/fixtures/codex-sanitization-receipt.json",
+    "status": "accepted_for_harness"
+  },
+  "implementation": {
+    "path": "src/sessions/session_temporal_benchmark.rs",
+    "sha256": "7a1337d6ca349bd3c74636d557935b4b44cfbc8f2f49df0369715f3b12951f72"
+  },
+  "measurement_contract": {
+    "measured_repetitions": 30,
+    "phases": [
+      {
+        "path": "SessionRefreshService::begin_or_join + CanonicalSessionTemporalProjector materialize/persist + complete",
+        "phase": "rebuild_activate"
+      },
+      {
+        "path": "idempotent SessionRefreshCompletionRequestV1 replay",
+        "phase": "exact_replay"
+      },
+      {
+        "path": "SessionRetrievalService::retrieve LogicalMessage",
+        "phase": "compact_rank"
+      },
+      {
+        "path": "SessionRetrievalService::retrieve Occurrence",
+        "phase": "late_hydrate"
+      }
+    ],
+    "warmup_repetitions": 3
+  },
+  "production_path": {
+    "available_to_benchmark_target": true,
+    "reason": "harness admits provider-native Codex inputs, drains the canonical GlobalDb observation projector, then uses the production refresh materialize path and public retrieval adapters",
+    "required": [
+      "HostAdmissionFacade::drain_projection_queue with the canonical GlobalDb observation projector",
+      "CanonicalSessionTemporalProjector via GlobalDb::materialize_session_temporal_refresh_batch_result",
+      "SessionRefreshService with GlobalDbSessionTemporalStore",
+      "SessionRetrievalService with GlobalDbSessionTemporalExecution"
+    ]
+  },
+  "profile": {
+    "cargo_profile": "bench",
+    "debug": false,
+    "debug_assertions": false,
+    "incremental": false,
+    "manifest_path": "Cargo.toml",
+    "manifest_sha256": "41459cec9df43a473194d6864bea84b502c08ebeee77bda6cbe1010e43335120",
+    "opt_level": 3,
+    "overflow_checks": false
+  },
+  "refresh_provenance": {
+    "measured_record_count": 30,
+    "measured_repetitions": 30,
+    "record_count": 1,
+    "records_per_repetition": 1,
+    "source_commit": "49af326148e8e421806b1b08fbe9a5df7f5b434d",
+    "source_mode": "clean_git_worktree_v1",
+    "warmup_repetitions": 3
+  },
+  "runner": {
+    "path": "scripts/run-pr8-temporal-benchmark.sh",
+    "sha256": "d1d321db6c3e4d372017a50245da8bd69df0b108f755696539bce21fe0a80306"
+  },
+  "schema_version": 2,
+  "statistics": {
+    "inferential_claim": false,
+    "p95_label": "descriptive nearest-rank sample p95",
+    "p99_label": "descriptive nearest-rank sample p99 (sample maximum when n=30)",
+    "status": "descriptive_sample_quantiles"
+  },
+  "status": "harness_ready",
+  "storage_isolation": {
+    "required_environment": [
+      "HOME",
+      "TRACEDECAY_DATA_DIR"
+    ],
+    "required_ownership": "benchmark-owned temporary storage with RAII cleanup",
+    "status": "enforced_by_harness_and_runner"
+  },
+  "workload_id": "pr8-session-temporal-v1"
 }

@@ -421,6 +421,9 @@ pub struct McpServer {
     /// walk and index sync. The detached transcript-ingest spawn is tracked
     /// separately by [`Self::transcript_ingest_done`].
     startup_catch_up_done: AtomicBool,
+    /// Retained startup catch-up task so shutdown joins it before database
+    /// authorities are released.
+    startup_catch_up_task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Guards the one-shot startup catch-up spawn (D1). `compare_exchange`d
     /// from `false` to `true` by the first caller so the catch-up runs at
     /// most once per server even if two `new_with_dbs` paths race. Distinct
@@ -456,6 +459,9 @@ pub struct McpServer {
     /// `Arc<AtomicBool>` so the spawned task can hold a
     /// cheap clone and signal completion without a raw-pointer round-trip.
     transcript_ingest_done: Arc<AtomicBool>,
+    /// Retained transcript-ingest task, which owns both project and profile
+    /// session authorities while its database work is in flight.
+    startup_transcript_ingest_task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     /// Savings-ledger recorder tasks spawned so far / finished so far, plus
     /// a notifier pinged on every completion. Production never awaits these
     /// (ledger writes stay fire-and-forget); tests await
@@ -494,6 +500,10 @@ pub struct McpServer {
     connection_identity: McpConnectionIdentityAuthority,
     /// One lazy authenticated application client retained for this server.
     application_surface_client: tokio::sync::OnceCell<crate::daemon_client::DaemonInvocationClient>,
+    /// Daemon-local executor installed by production project composition.
+    /// External/direct servers fall back to the authenticated socket client.
+    application_invocation_executor:
+        Option<Arc<dyn crate::daemon_client::DaemonInvocationExecutor>>,
     /// Live MCP cancellation tokens keyed by canonical application request id.
     application_surface_cancellations:
         std::sync::Mutex<HashMap<String, tracedecay_application::CancellationSignal>>,
@@ -695,6 +705,7 @@ impl McpServer {
             project_session_refresh_wake,
             user_session_refresh_wake,
             own_project_host_admission_replay,
+            startup_catch_up_enabled,
             allow_default_registry_fallback,
             automation_scheduler_reconciler,
             database_owner_reconciler,
@@ -711,6 +722,7 @@ impl McpServer {
             code_index_search_executor,
             code_index_search_authority,
             retained_project_graph_resolver,
+            application_invocation_executor,
             #[cfg(any(test, feature = "test-transport"))]
             host_admission_test_runtime,
         } = context;
@@ -915,12 +927,14 @@ impl McpServer {
             last_automation_notice_check_at: AtomicI64::new(0),
             worktree_mismatch,
             startup_catch_up_done: AtomicBool::new(true),
+            startup_catch_up_task: tokio::sync::Mutex::new(None),
             startup_catch_up_started: AtomicBool::new(false),
             background_refresh_running: Arc::new(AtomicBool::new(false)),
             last_background_refresh_at: AtomicI64::new(0),
             last_background_refresh_done_at: Arc::new(AtomicI64::new(0)),
             sync_config,
             transcript_ingest_done: Arc::new(AtomicBool::new(true)),
+            startup_transcript_ingest_task: tokio::sync::Mutex::new(None),
             ledger_writes_started: Arc::new(AtomicU64::new(0)),
             ledger_writes_finished: Arc::new(AtomicU64::new(0)),
             ledger_write_notify: Arc::new(tokio::sync::Notify::new()),
@@ -930,6 +944,7 @@ impl McpServer {
             client_name: std::sync::Mutex::new(None),
             connection_identity: McpConnectionIdentityAuthority::from_os_entropy(),
             application_surface_client: tokio::sync::OnceCell::new(),
+            application_invocation_executor,
             application_surface_cancellations: std::sync::Mutex::new(HashMap::new()),
         });
 
@@ -972,7 +987,8 @@ impl McpServer {
         // Gated on `SyncConfig.session_start_sync` (default true) and single-
         // flighted by `startup_catch_up_started` so it runs at most once per
         // server even if two `new_with_dbs` paths overlap.
-        if server.sync_config.session_start_sync
+        if startup_catch_up_enabled
+            && server.sync_config.session_start_sync
             && server
                 .startup_catch_up_started
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -994,9 +1010,10 @@ impl McpServer {
                 .transcript_ingest_done
                 .store(false, Ordering::Release);
             let s = Arc::clone(&server);
-            tokio::spawn(async move {
+            let task = tokio::spawn(async move {
                 s.run_startup_catch_up_sync().await;
             });
+            *server.startup_catch_up_task.lock().await = Some(task);
         }
 
         server

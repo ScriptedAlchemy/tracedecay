@@ -9,6 +9,8 @@ import {
   type StorageFindingKindStatus,
   type StorageTelemetryRead,
   type StoreTelemetryEntry,
+  type TableGrowthDimension,
+  type TableGrowthThreshold,
   type WireCoverage,
   type WireFreshness,
   type WireLegalActionRef,
@@ -29,6 +31,8 @@ import {
   storageFindingLabel,
   storageSourcePresentation,
   storeRolesLabel,
+  tableGrowthOmissionPresentation,
+  tableGrowthPresentation,
   type DimensionPresentation,
 } from './storageModel.ts';
 import { DoctorInspector } from './DoctorInspector.tsx';
@@ -138,13 +142,20 @@ function TelemetryReadModel({
       {envelope.payload.stores.length === 0 ? (
         <ReadModelState kind="unknown" detail="telemetry payload contained no stores" />
       ) : (
-        <OverviewGrid>
-          {/* One card per distinct store *file*: roles that share a database
-              are merged server-side, so the path is the stable identity. */}
-          {envelope.payload.stores.map((store) => (
-            <StoreCard key={store.path} entry={store} />
-          ))}
-        </OverviewGrid>
+        <>
+          <TableGrowthFleetCoverage coverage={envelope.payload.table_growth_coverage} />
+          <OverviewGrid>
+            {/* One card per distinct store *file*: roles that share a database
+                are merged server-side, so the path is the stable identity. */}
+            {envelope.payload.stores.map((store) => (
+              <StoreCard
+                key={store.path}
+                entry={store}
+                tableGrowthThreshold={envelope.payload.table_growth_threshold}
+              />
+            ))}
+          </OverviewGrid>
+        </>
       )}
       <ReadModelNotes notes={[
         `budgets: ${envelope.payload.budget_note}`,
@@ -198,7 +209,7 @@ function FindingsReadModel({
 function StorageSourceStatuses({ statuses }: { statuses: StorageFindingKindStatus[] }) {
   return (
     <ul
-      className="mx-4 mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-5"
+      className="mx-4 mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6"
       aria-label="Storage finding source status"
     >
       {statuses.map((status) => {
@@ -276,7 +287,54 @@ function EnvelopeTruth({
   );
 }
 
-function StoreCard({ entry }: { entry: StoreTelemetryEntry }) {
+/** Aggregate table-growth coverage for the whole read. The store cards below
+ * carry per-store detail; this is the only place that says how much of the
+ * fleet the per-table view actually covers, so a run where four of five stores
+ * never produced a comparison cannot read as a complete picture. */
+function TableGrowthFleetCoverage({ coverage }: { coverage: WireCoverage }) {
+  const complete = coverage.completeness === 'complete';
+  return (
+    <section
+      className="mx-4 mt-3 rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-1 p-3"
+      aria-label="Table growth coverage across all stores"
+      data-table-growth-coverage={coverage.completeness}
+    >
+      <p className="flex flex-wrap items-center gap-1.5 text-2xs">
+        <span
+          aria-hidden
+          className={`size-1.5 shrink-0 rounded-full ${dimensionDotClass(
+            complete ? 'ready' : 'baseline',
+          )}`}
+        />
+        <span className="font-medium text-text-secondary">Table growth · all stores</span>
+        <span className="tabular text-text-primary">
+          · {coverage.examined ?? 'unknown'} of {coverage.denominator ?? 'unknown'}{' '}
+          {coverage.unit ?? 'stores'} fully compared
+        </span>
+      </p>
+      {coverage.omission_reasons.length > 0 ? (
+        <>
+          <p className="mt-1.5 text-3xs font-medium uppercase tracking-wide text-text-muted">
+            Stores without a complete per-table comparison
+          </p>
+          <ul className="mt-1 space-y-1 text-2xs text-text-muted">
+            {coverage.omission_reasons.map((reason) => (
+              <li key={reason}>{reason}</li>
+            ))}
+          </ul>
+        </>
+      ) : null}
+    </section>
+  );
+}
+
+function StoreCard({
+  entry,
+  tableGrowthThreshold,
+}: {
+  entry: StoreTelemetryEntry;
+  tableGrowthThreshold: TableGrowthThreshold;
+}) {
   // `observed` is a full page-level sample. `observed_bytes` is a real total
   // size with no page sample behind it, so free pages are UNKNOWN rather than
   // zero — and `CapacityBar` reads a null `freeBytes` as zero free space, which
@@ -325,12 +383,125 @@ function StoreCard({ entry }: { entry: StoreTelemetryEntry }) {
         )}
         <DimensionRow label="Budget" presentation={budgetPresentation(entry.budget)} />
         <DimensionRow label="Growth" presentation={growthPresentation(entry.growth)} />
+        <TableGrowthPanel
+          growth={entry.table_growth}
+          threshold={tableGrowthThreshold}
+          store={entry.store}
+        />
         <p className="truncate font-mono text-2xs text-text-muted" title={entry.path}>
           {entry.path}
         </p>
       </div>
     </OverviewCard>
   );
+}
+
+function TableGrowthPanel({
+  growth,
+  threshold,
+  store,
+}: {
+  growth: TableGrowthDimension;
+  threshold: TableGrowthThreshold;
+  store: string;
+}) {
+  const presentation = tableGrowthPresentation(growth);
+  return (
+    <section
+      className="rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-2 p-2.5"
+      data-table-growth-state={growth.state}
+      data-table-growth-tone={presentation.tone}
+      // Every store card carries one of these regions, so the store name is
+      // part of the accessible name: a landmark list of identical "Per-table
+      // growth" entries would name nothing.
+      aria-label={`Per-table growth · ${store}`}
+    >
+      <div className="flex items-center gap-1.5 text-2xs">
+        <span
+          aria-hidden
+          className={`size-1.5 shrink-0 rounded-full ${dimensionDotClass(presentation.tone)}`}
+        />
+        <span className="font-medium text-text-secondary">Table growth</span>
+        <span className="text-text-primary">· {presentation.summary}</span>
+      </div>
+
+      {growth.state === 'observed' && growth.significant_samples.length > 0 ? (
+        <ul className="mt-2 space-y-1.5" aria-label="Significant table growth samples">
+          {growth.significant_samples.map((sample) => (
+            <li
+              key={`${sample.table}:${sample.previous_observed_at}:${sample.current_observed_at}`}
+              className="rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-1 p-2 text-2xs"
+              data-table-growth-sample={sample.table}
+            >
+              <p className="flex flex-wrap items-baseline justify-between gap-2">
+                <code className="text-text-secondary">{sample.table}</code>
+                <span className="tabular text-text-primary">
+                  +{formatBytes(sample.growth_bytes)}
+                </span>
+              </p>
+              <p className="mt-1 text-text-muted tabular">
+                {formatBytes(sample.previous_bytes)} → {formatBytes(sample.current_bytes)}
+              </p>
+              <p className="mt-1 text-3xs text-text-muted">
+                {formatUtcMicros(sample.previous_observed_at)} →{' '}
+                {formatUtcMicros(sample.current_observed_at)}
+              </p>
+            </li>
+          ))}
+        </ul>
+      ) : null}
+
+      {growth.state === 'observed' && growth.omissions.length > 0 ? (
+        <div className="mt-2">
+          <p className="text-3xs font-medium uppercase tracking-wide text-text-muted">
+            Omitted from significant list
+          </p>
+          <ul className="mt-1 space-y-1 text-2xs text-text-muted">
+            {growth.omissions.map((omission) => {
+              const omitted = tableGrowthOmissionPresentation(omission);
+              return (
+                <li
+                  key={omitted.table}
+                  className="flex flex-wrap items-baseline justify-between gap-x-2"
+                  data-table-growth-omission={omitted.kind}
+                >
+                  <code className="text-text-secondary">{omitted.table}</code>
+                  <span className="tabular">
+                    {omitted.figure} · {omitted.detail}
+                  </span>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      ) : null}
+
+      {/* Server reasons, verbatim, for every state — including an observed read
+          whose table coverage is partial. The rows above format the structured
+          byte evidence; these sentences say why each table was left out. */}
+      {presentation.notes.length > 0 ? (
+        <ul className="mt-2 space-y-1 text-2xs text-text-muted">
+          {presentation.notes.map((note) => (
+            <li key={note}>{note}</li>
+          ))}
+        </ul>
+      ) : null}
+
+      <p className="mt-2 text-3xs text-text-muted">
+        Informational threshold · {formatBytes(threshold.absolute_bytes)} absolute, or{' '}
+        {formatBytes(threshold.relative_floor_bytes)} and {threshold.relative_percent}% of previous
+        size
+      </p>
+      <p className="mt-1 text-3xs text-text-muted">
+        Coverage · this store · {growth.coverage.examined ?? 'unknown'} of{' '}
+        {growth.coverage.denominator ?? 'unknown'} {growth.coverage.unit ?? 'reads'} compared
+      </p>
+    </section>
+  );
+}
+
+function formatUtcMicros(micros: number): string {
+  return new Date(Math.floor(micros / 1000)).toISOString();
 }
 
 /** `/api/storage/findings` is the storage-family projection of the admitted
