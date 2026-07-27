@@ -13,6 +13,13 @@ profile_dir=${TRACEDECAY_DOGFOOD_PROFILE_DIR:-"$HOME/.tracedecay"}
 boundary_state="$profile_dir/dogfood-migration-boundary.state"
 dogfood_started=$SECONDS
 
+if [[ -n "${TRACEDECAY_SKIP_DASHBOARD_BUILD+x}" ]]; then
+  printf '%s\n' \
+    'dogfood refuses TRACEDECAY_SKIP_DASHBOARD_BUILD: dogfood must embed a fresh dashboard.' \
+    'Unset TRACEDECAY_SKIP_DASHBOARD_BUILD and rerun cargo dogfood.' >&2
+  exit 1
+fi
+
 report_stage() {
   local stage=$1
   local started=$2
@@ -56,6 +63,68 @@ mkdir -p "$stage_dir" "$install_dir"
 
 sync_path() {
   sync -f -- "$1"
+}
+
+checkout_build_identity() {
+  local checkout_root
+  local git_root
+  local sha
+  local status
+
+  checkout_root=$(cd "$repo_root" && pwd -P) || {
+    printf 'dogfood could not resolve checkout root: %s\n' "$repo_root" >&2
+    return 1
+  }
+  git_root=$(git -C "$repo_root" rev-parse --show-toplevel) || {
+    printf 'dogfood requires a Git worktree to verify the staged binary identity\n' >&2
+    return 1
+  }
+  git_root=$(cd "$git_root" && pwd -P) || {
+    printf 'dogfood could not resolve Git worktree root: %s\n' "$git_root" >&2
+    return 1
+  }
+  if [[ "$git_root" != "$checkout_root" ]]; then
+    printf 'dogfood checkout root is not the Git worktree root: %s\n' "$repo_root" >&2
+    return 1
+  fi
+  sha=$(git -C "$repo_root" rev-parse --short=12 HEAD) || {
+    printf 'dogfood could not resolve the checkout Git SHA\n' >&2
+    return 1
+  }
+  status=$(git -C "$repo_root" status --porcelain) || {
+    printf 'dogfood could not read the checkout dirty state\n' >&2
+    return 1
+  }
+  if [[ -n "$status" ]]; then
+    printf '%s.dirty' "$sha"
+  else
+    printf '%s' "$sha"
+  fi
+}
+
+verify_staged_binary_identity() {
+  local expected_identity
+  local reported_identity
+  local reported_version
+
+  expected_identity=$(checkout_build_identity) || return 1
+  reported_version=$("$staged_binary" --version) || {
+    printf 'dogfood could not read staged binary version: %s\n' "$staged_binary" >&2
+    return 1
+  }
+  case "$reported_version" in
+    "tracedecay "*+*) reported_identity=${reported_version##*+} ;;
+    *)
+      printf 'dogfood staged binary reported an invalid version: %s\n' "$reported_version" >&2
+      return 1
+      ;;
+  esac
+  if [[ "$reported_identity" != "$expected_identity" ]]; then
+    printf '%s\n' \
+      "dogfood staged binary identity mismatch: expected $expected_identity, got $reported_version." \
+      'Force a fresh release rebuild, then rerun cargo dogfood.' >&2
+    return 1
+  fi
 }
 
 marker_checksum() {
@@ -353,6 +422,11 @@ require_inactive_recovery_before_preparing() {
     return 1
   fi
 
+  if ! verify_staged_binary_identity; then
+    printf 'The migration marker was left unchanged.\n' >&2
+    return 1
+  fi
+
   if ! "$staged_binary" post-update --mode dogfood-recover-inactive; then
     printf '%s\n' \
       "dogfood inactive recovery failed while a $marker_outcome marker is pending." \
@@ -513,6 +587,7 @@ if [[ -e "$staged_binary" || -L "$staged_binary" ]]; then
 fi
 replacement_active=1
 install_atomically "$candidate" "$staged_binary"
+verify_staged_binary_identity
 install_atomically "$candidate" "$installed_binary"
 report_stage staged-binary-atomic-install "$install_started"
 
