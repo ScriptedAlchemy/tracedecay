@@ -33,6 +33,7 @@ pub(in crate::global_db) use triggers::{
 
 const OPERATION: &str = "ensure global database authority invariants";
 const INCOMPLETE_EXHAUSTIVE_PASS: i64 = -1;
+const FOREIGN_KEY_AUDIT_PROGRESS: &str = "authority-invariants";
 
 /// Rows an authority row audit may ask the SQL channel for at once.
 ///
@@ -265,6 +266,24 @@ pub(crate) async fn ensure_authority_invariants(
         validate_projection_authority_suffix(conn, projection_start).await?
     };
     if exhaustive {
+        write_audit_checkpoint(
+            conn,
+            AuditProgress {
+                checkpoint,
+                receipts_audited,
+                observations_audited,
+                provenance_audited,
+                dispositions_audited,
+                aliases_audited,
+            },
+        )
+        .await?;
+        if foreign_key_violation_exists_resumable(conn).await? {
+            return Err(global_db_operation_message(
+                OPERATION,
+                "global database contains a foreign-key violation",
+            ));
+        }
         validate_invariant_rows(conn).await?;
     } else {
         validate_mutable_invariant_rows(conn).await?;
@@ -296,11 +315,8 @@ pub(super) async fn validate_invariant_rows(
             continue;
         }
         if let Some(query) = invariant.audit_query
-            && if query == FOREIGN_KEY_AUDIT_QUERY {
-                foreign_key_violation_exists(conn).await?
-            } else {
-                query_has_rows(conn, query).await?
-            }
+            && query != FOREIGN_KEY_AUDIT_QUERY
+            && query_has_rows(conn, query).await?
         {
             return Err(global_db_operation_message(OPERATION, invariant.violation));
         }
@@ -308,7 +324,91 @@ pub(super) async fn validate_invariant_rows(
     Ok(())
 }
 
-async fn foreign_key_violation_exists(conn: &impl QueryExecutor) -> crate::errors::Result<bool> {
+async fn foreign_key_violation_exists_resumable(
+    conn: &impl Executor,
+) -> crate::errors::Result<bool> {
+    loop {
+        let mut rows = conn
+            .query(
+                "SELECT COALESCE((
+                    SELECT last_table FROM authority_foreign_key_audit_progress
+                    WHERE audit_name = ?1
+                 ), '')",
+                (FOREIGN_KEY_AUDIT_PROGRESS,),
+            )
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let last_table = rows
+            .next()
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?
+            .ok_or_else(|| {
+                global_db_operation_message(OPERATION, "foreign-key audit cursor disappeared")
+            })?
+            .get::<String>(0)
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        drop(rows);
+
+        let mut rows = conn
+            .query(
+                "SELECT DISTINCT schema.name
+                 FROM sqlite_schema AS schema
+                 JOIN pragma_foreign_key_list(schema.name) AS foreign_key
+                 WHERE schema.type = 'table' AND schema.name > ?1
+                 ORDER BY schema.name
+                 LIMIT 1",
+                (last_table,),
+            )
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let table = rows
+            .next()
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?
+            .map(|row| row.get::<String>(0))
+            .transpose()
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        drop(rows);
+        let Some(table) = table else {
+            conn.execute(
+                "DELETE FROM authority_foreign_key_audit_progress WHERE audit_name = ?1",
+                (FOREIGN_KEY_AUDIT_PROGRESS,),
+            )
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+            return Ok(false);
+        };
+
+        let mut rows = conn
+            .query(
+                "SELECT 1 FROM pragma_foreign_key_check(?1) LIMIT 1",
+                (table.as_str(),),
+            )
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let violation = rows
+            .next()
+            .await
+            .map_err(|error| global_db_operation_error(OPERATION, error))?
+            .is_some();
+        drop(rows);
+        if violation {
+            return Ok(true);
+        }
+        conn.execute(
+            "INSERT INTO authority_foreign_key_audit_progress (audit_name, last_table)
+             VALUES (?1, ?2)
+             ON CONFLICT(audit_name) DO UPDATE SET last_table = excluded.last_table",
+            params![FOREIGN_KEY_AUDIT_PROGRESS, table],
+        )
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    }
+}
+
+async fn foreign_key_violation_exists_read_only(
+    conn: &impl QueryExecutor,
+) -> crate::errors::Result<bool> {
     let mut rows = conn
         .query(
             "SELECT DISTINCT schema.name
@@ -361,6 +461,12 @@ pub(in crate::global_db) async fn validate_authority_rows_exhaustive(
     validate_source_cursor_authority_rows(conn).await?;
     validate_observation_cursor_coverage(conn, 0).await?;
     validate_projection_authority_suffix(conn, AuditCheckpoint::default()).await?;
+    if foreign_key_violation_exists_read_only(conn).await? {
+        return Err(global_db_operation_message(
+            OPERATION,
+            "global database contains a foreign-key violation",
+        ));
+    }
     validate_invariant_rows(conn).await
 }
 
@@ -384,7 +490,10 @@ pub(in crate::global_db) async fn validate_session_temporal_repair_authority(
 mod tests {
     use tempfile::TempDir;
 
-    use super::foreign_key_violation_exists;
+    use super::{
+        FOREIGN_KEY_AUDIT_PROGRESS, foreign_key_violation_exists_read_only,
+        foreign_key_violation_exists_resumable,
+    };
     use crate::db::engine::TestConnection;
 
     #[tokio::test]
@@ -406,6 +515,65 @@ mod tests {
         drop(connection);
         let connection = TestConnection::open(&database_path);
 
-        assert!(foreign_key_violation_exists(&connection).await.unwrap());
+        assert!(
+            foreign_key_violation_exists_read_only(&connection)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn foreign_key_audit_resumes_after_last_durable_table() {
+        let directory = TempDir::new().unwrap();
+        let database_path = directory.path().join("sessions.db");
+        let connection = rusqlite::Connection::open(&database_path).unwrap();
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys = OFF;
+                 CREATE TABLE authority_foreign_key_audit_progress (
+                    audit_name TEXT PRIMARY KEY,
+                    last_table TEXT NOT NULL
+                 );
+                 CREATE TABLE parent (id INTEGER PRIMARY KEY);
+                 CREATE TABLE child_a (
+                    id INTEGER PRIMARY KEY,
+                    parent_id INTEGER NOT NULL REFERENCES parent(id)
+                 );
+                 CREATE TABLE child_b (
+                    id INTEGER PRIMARY KEY,
+                    parent_id INTEGER NOT NULL REFERENCES parent(id)
+                 );
+                 INSERT INTO parent(id) VALUES (1);
+                 INSERT INTO child_a(id, parent_id) VALUES (1, 1);
+                 INSERT INTO child_b(id, parent_id) VALUES (1, 99);
+                 INSERT INTO authority_foreign_key_audit_progress (audit_name, last_table)
+                 VALUES ('authority-invariants', 'child_a');",
+            )
+            .unwrap();
+        drop(connection);
+        let connection = TestConnection::open(&database_path);
+
+        assert!(
+            foreign_key_violation_exists_resumable(&connection)
+                .await
+                .unwrap()
+        );
+        let mut rows = connection
+            .query(
+                "SELECT last_table FROM authority_foreign_key_audit_progress
+                 WHERE audit_name = ?1",
+                (FOREIGN_KEY_AUDIT_PROGRESS,),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.next()
+                .await
+                .unwrap()
+                .unwrap()
+                .get::<String>(0)
+                .unwrap(),
+            "child_a"
+        );
     }
 }
