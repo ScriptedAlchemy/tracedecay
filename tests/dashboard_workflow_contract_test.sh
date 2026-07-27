@@ -79,19 +79,53 @@ if dashboard_job.index("Install ast-grep") > dashboard_job.index("npm run bounda
     raise SystemExit("CI dashboard job must install ast-grep before the boundary gate")
 
 # Plan 11 makes WCAG 2.2 AA and the payload ceilings acceptance criteria, so
-# they are gates rather than scripts a developer may remember to run. They live
-# in dashboard-assets because each one needs the built bundle and Node, not the
-# Rust toolchain.
+# they are gates rather than scripts a developer may remember to run. The budget
+# check belongs to the artifact build: it measures the bytes being uploaded.
 assets_job = job_block(ci, "dashboard-assets")
+if "scripts/check-dashboard-budget.mjs" not in assets_job:
+    raise SystemExit(
+        "CI dashboard-assets job must preserve the payload budget gate "
+        "'scripts/check-dashboard-budget.mjs'"
+    )
+
+# The accessibility gates are their own job. Every Rust job declares
+# `needs: dashboard-assets`, so an axe failure inside dashboard-assets skipped
+# the entire Rust matrix and destroyed the signal about whether Rust passed.
+# Each harness also runs its own full rsbuild build, which alone blew that
+# job's timeout budget.
+accessibility_job = job_block(ci, "dashboard-accessibility")
 for required in [
-    "scripts/check-dashboard-budget.mjs",
     "playwright install",
     "npm run axe:audit",
     "npm run axe:explorer",
+    "needs: dashboard-assets",
+    "actions/download-artifact@",
+    "path: dashboard/app-dist",
 ]:
-    if required not in assets_job:
+    if required not in accessibility_job:
         raise SystemExit(
-            f"CI dashboard-assets job must preserve frontend gate {required!r}"
+            f"CI dashboard-accessibility job must preserve {required!r}"
+        )
+
+# Keeping the gates out of dashboard-assets is the entire point of the split;
+# a well-meaning "run them where the bundle is" edit would undo it silently.
+for forbidden in ["playwright install", "npm run axe:"]:
+    if forbidden in assets_job:
+        raise SystemExit(
+            f"CI dashboard-assets job must not run {forbidden!r}: the Rust "
+            "matrix needs it, so an accessibility failure would skip every "
+            "Rust job. Keep it in dashboard-accessibility."
+        )
+
+# Nothing may depend on the accessibility gate, or its failure would skip
+# whatever does and reintroduce the blast radius this split removed.
+jobs_section = ci.split("\njobs:\n", 1)[1]
+for job_name in re.findall(r"(?m)^  ([A-Za-z0-9_-]+):$", jobs_section):
+    if job_name == "dashboard-accessibility":
+        continue
+    if "dashboard-accessibility" in job_block(ci, job_name):
+        raise SystemExit(
+            f"CI job {job_name!r} must not depend on dashboard-accessibility"
         )
 
 for name, workflow, jobs in [

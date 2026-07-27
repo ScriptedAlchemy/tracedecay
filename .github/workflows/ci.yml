@@ -26,7 +26,11 @@ jobs:
   dashboard-assets:
     name: Build dashboard artifact
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # Every Rust job needs this one, so it stays tight: a wedged `rsbuild build`
+    # should fail the matrix quickly rather than sit. This step list ran inside
+    # 15 minutes before the accessibility gates were (wrongly) added here; the
+    # only addition since is the payload budget check, measured at ~3s locally.
+    timeout-minutes: 16
     steps:
       - uses: actions/checkout@v7
 
@@ -64,13 +68,51 @@ jobs:
           include-hidden-files: true
           retention-days: 7
 
-      # WCAG 2.2 AA is a plan 11 acceptance criterion, so the accessibility
-      # gates run in CI rather than only on a developer's machine. Both
-      # harnesses serve a bundle they build themselves and exit nonzero on an
-      # axe violation, an uncaught page error, or a failed state assertion —
-      # a clean scan of a falsified reading is not a pass. They run after the
-      # upload because each one rebuilds into `app-dist` and restores it, so
-      # the published artifact stays the bytes the guards above validated.
+  # WCAG 2.2 AA is a plan 11 acceptance criterion, so the accessibility gates
+  # run in CI rather than only on a developer's machine. Both harnesses exit
+  # nonzero on an axe violation, an uncaught page error, or a failed state
+  # assertion — a clean scan of a falsified reading is not a pass.
+  #
+  # This is a job rather than three more steps in dashboard-assets. The whole
+  # Rust matrix declares `needs: dashboard-assets`, so an accessibility failure
+  # placed there skipped every Rust job and destroyed the signal about whether
+  # Rust passed. NOTHING may declare `needs: dashboard-accessibility`.
+  dashboard-accessibility:
+    name: Dashboard accessibility
+    needs: dashboard-assets
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON('["master","feature/holographic-memory"]'), github.event.pull_request.base.ref) }}
+    runs-on: ubuntu-latest
+    # Locally axe:audit takes ~3.3 min and axe:explorer ~1.3 min, and each one
+    # runs its OWN full `rsbuild build` (see dashboard/e2e/axe-harness.ts: it
+    # snapshots app-dist, builds into it, copies the output to scratch, then
+    # restores it). At ~3x for a 2-core runner rendering 2 themes x 3 widths
+    # that is ~14 min, plus ~3 min for the Chromium and system-dependency
+    # install and ~1 min for npm ci. 30 leaves headroom for a slow runner while
+    # still cutting off a hung browser or wedged static server.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      # The harness rebuilds its own bundle, but it restores app-dist to
+      # exactly what it found. Downloading the validated artifact keeps that
+      # restore honest, and `needs:` keeps this gate from reporting a second
+      # red when the real fault is that the bundle never built.
+      - name: Download dashboard artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dashboard-app-dist
+          path: dashboard/app-dist
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+
+      - name: Install dashboard dependencies
+        working-directory: dashboard
+        run: npm ci
+
       - name: Install Playwright Chromium
         working-directory: dashboard
         run: npx playwright install --with-deps chromium
