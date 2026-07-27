@@ -1062,20 +1062,16 @@ async fn daemon_linked_worktree_route_repairs_primary_identity_and_keeps_alias()
         client_identity,
         ..test_handshake_defaults()
     };
-    engine
+    let linked_server = engine
         .project_server(&handshake)
         .await
         .expect("linked worktree must open before the primary route");
-
-    let primary_handshake = DaemonHandshake {
-        project_path: Some(primary.clone()),
-        client_identity: handshake.client_identity.clone(),
-        ..test_handshake_defaults()
-    };
+    let linked_graph = linked_server.cg().await;
     engine
-        .project_server(&primary_handshake)
+        .store_administration
+        .registered_project_session_database(&primary, linked_graph.store_layout())
         .await
-        .expect("primary route must reuse the linked route's typed authority");
+        .expect("primary alias must reuse the linked route's typed authority");
 
     let registry = engine
         .store_administration
