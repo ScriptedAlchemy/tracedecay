@@ -1620,36 +1620,66 @@ pub struct ProjectSymbolGraphCursorSnapshotAuthority {
     watermark: u64,
 }
 
+fn symbol_graph_snapshot_failure(
+    code: &str,
+    message: &str,
+) -> tracedecay_application::retrieval::PrimitiveFailure {
+    tracedecay_application::retrieval::PrimitiveFailure::new(
+        tracedecay_application::retrieval::PrimitiveFailureKind::Unavailable,
+        code,
+        message,
+    )
+    .unwrap_or_else(|_| panic!("static"))
+}
+
 impl SymbolGraphCursorSnapshotAuthority for ProjectSymbolGraphCursorSnapshotAuthority {
     fn snapshot(
         &self,
         context: &RequestContext,
-        _lane: &str,
+        lane: &str,
         _observed_at: UtcMicros,
     ) -> Result<TemporalExecutionSnapshot, tracedecay_application::retrieval::PrimitiveFailure>
     {
+        // The snapshot identity is what a cursor is verified against on the
+        // next request, so it is derived from the authorization and lane that
+        // must still hold at resume time. A per-request correlation id would
+        // both fail the digest binding and make every resume a different
+        // request.
+        let request_digest = canonical_sha256(&(
+            "tracedecay.symbol-graph.cursor.v1",
+            context.actor(),
+            context.grant().revision,
+            &context.grant().digest,
+            &context.grant().issuer,
+            &context.grant().allowed_capabilities,
+            &context.grant().allowed_use_cases,
+            context.grant().disclosure,
+            lane,
+        ))
+        .map_err(|_| {
+            symbol_graph_snapshot_failure(
+                "application.symbol-graph.request",
+                "could not derive the symbol-graph cursor request digest",
+            )
+        })?;
         let request = TemporalSnapshotRequest::new(
             SessionId::new("session.daemon.primitive").map_err(|_| {
-                tracedecay_application::retrieval::PrimitiveFailure::new(
-                    tracedecay_application::retrieval::PrimitiveFailureKind::Unavailable,
+                symbol_graph_snapshot_failure(
                     "application.symbol-graph.session",
                     "could not mint primitive session id",
                 )
-                .unwrap_or_else(|_| panic!("static"))
             })?,
             context.scope().scope_digest.as_str(),
-            context.request_id().as_str(),
+            request_digest.as_str(),
             context.grant().digest.as_str(),
             TemporalModeV1::Current,
             RetrievalGrainV1::Occurrence,
         )
         .map_err(|_| {
-            tracedecay_application::retrieval::PrimitiveFailure::new(
-                tracedecay_application::retrieval::PrimitiveFailureKind::Unavailable,
+            symbol_graph_snapshot_failure(
                 "application.symbol-graph.snapshot",
                 "could not build temporal snapshot request",
             )
-            .unwrap_or_else(|_| panic!("static"))
         })?;
         TemporalExecutionSnapshot::new_authorized(
             request,
@@ -1668,24 +1698,20 @@ impl SymbolGraphCursorSnapshotAuthority for ProjectSymbolGraphCursorSnapshotAuth
                     self.configuration_digest.as_str(),
                 )
                 .map_err(|_| {
-                    tracedecay_application::retrieval::PrimitiveFailure::new(
-                        tracedecay_application::retrieval::PrimitiveFailureKind::Unavailable,
+                    symbol_graph_snapshot_failure(
                         "application.symbol-graph.configuration",
                         "invalid configuration digest",
                     )
-                    .unwrap_or_else(|_| panic!("static"))
                 })?,
             },
             Some(self.key.clone()),
             ValidatedAuthorization::Authorized,
         )
         .map_err(|_| {
-            tracedecay_application::retrieval::PrimitiveFailure::new(
-                tracedecay_application::retrieval::PrimitiveFailureKind::Unavailable,
+            symbol_graph_snapshot_failure(
                 "application.symbol-graph.snapshot",
                 "could not authorize temporal snapshot",
             )
-            .unwrap_or_else(|_| panic!("static"))
         })
     }
 }
@@ -2550,6 +2576,100 @@ mod affected_tests_tests {
                     "file.diagnostics",
                 )
                 .is_err()
+        );
+    }
+
+    fn symbol_graph_context(request_id: RequestId) -> RequestContext {
+        let scope = ResolvedScope::new(
+            ProjectId::new("project.symbol-graph").expect("project"),
+            RepositoryId::new("repository.symbol-graph").expect("repository"),
+            WorktreeId::new("worktree.symbol-graph").expect("worktree"),
+            Some(RefId::new("refs/heads/symbol-graph").expect("reference")),
+        )
+        .expect("scope");
+        let capability = CapabilityId::new("capability.symbol-graph").expect("capability");
+        let use_case = UseCaseId::new("use-case.symbol-graph").expect("use case");
+        let expires_at = UtcMicros(i64::MAX / 2);
+        let grant = CapabilityGrantSnapshot::new(
+            CapabilityGrantId::new("grant.symbol-graph").expect("grant"),
+            1,
+            digest('a'),
+            ActorId::new("actor.symbol-graph.issuer").expect("issuer"),
+            UtcMicros(1),
+            expires_at,
+            scope.clone(),
+            BTreeSet::from([capability]),
+            BTreeSet::from([use_case]),
+            DisclosureClass::Evidence,
+        )
+        .expect("grant");
+        RequestContext::new(
+            ActorId::new("actor.symbol-graph.requester").expect("actor"),
+            scope,
+            grant,
+            request_id,
+            Deadline::new(expires_at).expect("deadline"),
+            CancellationContext::active("cancel.symbol-graph").expect("cancellation"),
+        )
+        .expect("context")
+    }
+
+    /// Production never mints a `sha256:`-prefixed request id, so a snapshot
+    /// bound to one could not be built, and a snapshot bound to the
+    /// correlation id could never be resumed by the next request. Both
+    /// contexts here carry ids minted by the real production surfaces.
+    #[test]
+    fn symbol_graph_cursors_resume_across_production_minted_request_ids() {
+        let key = SignedCursorKeyRefV1 {
+            key_id: SessionCursorKeyIdV1::new("cursor.symbol-graph").expect("key"),
+            version: SessionCursorVersionV1::new(1).expect("version"),
+        };
+        let authenticator = Arc::new(
+            InMemoryCursorAuthenticator::new(key.clone(), vec![9_u8; 32]).expect("authenticator"),
+        );
+        let adapter = AuthenticatedSymbolGraphCursorAdapter::new(
+            Arc::new(ProjectSymbolGraphCursorSnapshotAuthority {
+                key,
+                configuration_digest: digest('c'),
+                watermark: 11,
+            }),
+            authenticator,
+        );
+
+        let issuing = symbol_graph_context(
+            crate::request_identity::mcp_connection_request_id(
+                &serde_json::json!(1),
+                "connection.symbol-graph",
+            )
+            .expect("mcp connection request id"),
+        );
+        let resuming = symbol_graph_context(
+            crate::request_identity::mint_global_request_id(
+                crate::request_identity::GlobalRequestSurface::McpFallback,
+            )
+            .expect("mcp fallback request id"),
+        );
+        assert_ne!(
+            issuing.request_id().as_str(),
+            resuming.request_id().as_str(),
+            "each request carries its own correlation id"
+        );
+
+        let observed_at = now_observed();
+        let cursor = adapter
+            .issue_cursor(&issuing, "search", 3, 8, observed_at)
+            .expect("a production request must be able to issue a page cursor");
+        assert_eq!(
+            adapter
+                .resume_offset(&resuming, "search", &cursor, observed_at)
+                .expect("the next production request must resume the page"),
+            3
+        );
+        assert!(
+            adapter
+                .resume_offset(&resuming, "callers", &cursor, observed_at)
+                .is_err(),
+            "a cursor must not resume into another lane"
         );
     }
 
