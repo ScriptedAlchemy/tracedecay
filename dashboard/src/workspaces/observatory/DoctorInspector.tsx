@@ -646,14 +646,14 @@ function RemediationDialog({
               )}
 
               {confirmationRequired ? (
-                <label className="flex items-start gap-2 rounded-[var(--radius-standard)] border border-edge-subtle p-3 text-xs text-text-secondary">
+                <label className="flex cursor-pointer items-center gap-1 rounded-[var(--radius-standard)] border border-edge-subtle py-2 pr-3 text-xs text-text-secondary">
                   <input
                     type="checkbox"
                     checked={confirmed}
                     onChange={(event) => onConfirmedChange(event.target.checked)}
-                    className="mt-0.5"
+                    className="td-check"
                   />
-                  <span>
+                  <span className="min-w-0">
                     {authorityScope
                       ? 'I confirm this exact owner operation for the authority scope shown above and the displayed evidence.'
                       : 'I confirm this exact owner operation and the displayed evidence; the owner must resolve and recheck authority before any effect.'}

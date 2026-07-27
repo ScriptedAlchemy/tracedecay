@@ -453,7 +453,11 @@ function ThreadTable({
   return (
     <section aria-label="Threads" className="flex min-w-0 flex-col">
       <Legend>threads · earliest first</Legend>
-      <div className="mt-1.5 max-h-72 overflow-auto border border-edge-subtle">
+      <div
+        role="region"
+        aria-label="Threads table"
+        className="mt-1.5 max-h-72 overflow-auto border border-edge-subtle"
+      >
         <table className="w-full border-collapse text-2xs">
           <caption className="sr-only">
             Every session drawn on the weave, in start order, with its host,
@@ -482,7 +486,15 @@ function ThreadTable({
                     type="button"
                     onClick={() => onSelect(selectedId === thread.id ? null : thread.id)}
                     aria-pressed={selectedId === thread.id}
-                    className="flex w-full min-w-0 items-center gap-1.5 text-left"
+                    // The only keyboard and touch path to selecting a thread —
+                    // the weave canvas beside it is the picture, this is the
+                    // control — so the row carries the touch minimum on its own
+                    // box, in BOTH axes. At 320 the session column is the one
+                    // the five-column table squeezes (38px), and the width half
+                    // of the minimum is what stops it: the column holds 44 and
+                    // the table scrolls inside its labelled region instead,
+                    // which is the trade Plan 11 licenses.
+                    className="flex min-h-[var(--touch-target-min)] w-full min-w-[var(--touch-target-min)] items-center gap-1.5 text-left"
                   >
                     <span
                       aria-hidden
