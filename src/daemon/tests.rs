@@ -3155,8 +3155,8 @@ async fn daemon_scheduler_skips_stale_owner_key_after_rekey() {
         ..test_handshake_defaults()
     };
     let engine = super::DaemonEngine::default();
-    let stale_key = super::ProjectServerKey::from_open_project(&cg, &handshake)
-        .expect("stale owner key");
+    let stale_key =
+        super::ProjectServerKey::from_open_project(&cg, &handshake).expect("stale owner key");
 
     save_project_config(
         &cg.store_layout().dashboard_root,
@@ -3177,11 +3177,7 @@ async fn daemon_scheduler_skips_stale_owner_key_after_rekey() {
     let mut current_key = stale_key.clone();
     current_key.scope_prefix = Some("rekeyed".to_string());
     {
-        let mut owners = engine
-            .store_administration
-            .project_servers()
-            .lock()
-            .await;
+        let mut owners = engine.store_administration.project_servers().lock().await;
         owners.insert(stale_key.clone(), server);
         assert!(owners.rekey(&stale_key, &current_key));
     }

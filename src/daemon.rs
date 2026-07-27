@@ -19,8 +19,7 @@ use crate::errors::{Result, TraceDecayError};
 use crate::mcp::ReplayTransport;
 use crate::mcp::server::{McpMethod, SERVER_INSTRUCTIONS, classify_mcp_method, initialize_result};
 use crate::mcp::tools::{
-    explore_call_budget, get_tool_definitions_with_budget,
-    get_tool_definitions_with_warming_budget,
+    explore_call_budget, get_tool_definitions_with_budget, get_tool_definitions_with_warming_budget,
 };
 use crate::mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport, StdioTransport};
 use branch_add::{branch_add_response, coordinated_hook_branch_writer, parse_branch_add_request};
@@ -2661,7 +2660,13 @@ async fn cached_project_node_count(
             .get_route(&route)
             .map(|(_, server)| Arc::clone(server))
     }?;
-    server.cg().await.get_stats().await.ok().map(|stats| stats.node_count)
+    server
+        .cg()
+        .await
+        .get_stats()
+        .await
+        .ok()
+        .map(|stats| stats.node_count)
 }
 
 fn spawn_lifecycle_project_server_warmup<OpenFuture>(
@@ -2839,8 +2844,7 @@ async fn serve_broker_socket_client(
         write_json_rpc_response(&mut transport, &response).await?;
         return Ok(());
     }
-    if let Ok(request) = serde_json::from_str::<JsonRpcRequest>(first_request_line.trim())
-    {
+    if let Ok(request) = serde_json::from_str::<JsonRpcRequest>(first_request_line.trim()) {
         let project_node_count =
             if matches!(classify_mcp_method(&request.method), McpMethod::ToolsList) {
                 if handshake.project_path.is_some() {
@@ -2851,11 +2855,9 @@ async fn serve_broker_socket_client(
             } else {
                 None
             };
-        if let Some(response) = daemon_bootstrap_response(
-            &request,
-            initialize_route.as_ref(),
-            project_node_count,
-        ) {
+        if let Some(response) =
+            daemon_bootstrap_response(&request, initialize_route.as_ref(), project_node_count)
+        {
             // Keep catalog-refresh bookkeeping consistent with the regular MCP
             // server path: initialize and tools/list mark this catalog current.
             if let Some(key) = engine
@@ -3020,8 +3022,7 @@ async fn serve_windows_broker_client(
         write_json_rpc_response(&mut transport, &response).await?;
         return Ok(());
     }
-    if let Ok(request) = serde_json::from_str::<JsonRpcRequest>(first_request_line.trim())
-    {
+    if let Ok(request) = serde_json::from_str::<JsonRpcRequest>(first_request_line.trim()) {
         let project_node_count =
             if matches!(classify_mcp_method(&request.method), McpMethod::ToolsList) {
                 if handshake.project_path.is_some() {
@@ -3032,11 +3033,9 @@ async fn serve_windows_broker_client(
             } else {
                 None
             };
-        if let Some(response) = daemon_bootstrap_response(
-            &request,
-            initialize_route.as_ref(),
-            project_node_count,
-        ) {
+        if let Some(response) =
+            daemon_bootstrap_response(&request, initialize_route.as_ref(), project_node_count)
+        {
             if matches!(classify_mcp_method(&request.method), McpMethod::Initialize)
                 && handshake.project_path.is_some()
             {

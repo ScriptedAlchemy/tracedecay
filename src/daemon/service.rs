@@ -402,9 +402,7 @@ pub fn quiesce_installed_service_under_lease() -> Result<DaemonServiceState> {
 /// the caller invokes it only after exclusive lifecycle acquisition failed.
 #[doc(hidden)]
 pub fn restore_quiesced_installed_service(previous_state: DaemonServiceState) -> Result<()> {
-    if !cfg!(any(target_os = "linux", target_os = "macos"))
-        || !previous_state.is_running()
-    {
+    if !cfg!(any(target_os = "linux", target_os = "macos")) || !previous_state.is_running() {
         return Ok(());
     }
     let service_path = service_unit_path()?;
@@ -418,11 +416,7 @@ pub fn restore_quiesced_installed_service(previous_state: DaemonServiceState) ->
     }
     let unit = read_service_unit(&service_path)?;
     let socket_path = socket_path_from_unit_text(&unit).unwrap_or(default_socket_path()?);
-    ServiceRunner::current()?.restore_after_quiesce(
-        &service_path,
-        &socket_path,
-        previous_state,
-    )
+    ServiceRunner::current()?.restore_after_quiesce(&service_path, &socket_path, previous_state)
 }
 
 fn quiesce_installed_service() -> Result<DaemonServiceState> {

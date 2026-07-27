@@ -141,9 +141,7 @@ where
     Refresh: FnOnce(
         tracedecay::daemon::DaemonServiceState,
     ) -> tracedecay::errors::Result<Option<(PathBuf, PathBuf)>>,
-    Restore: FnOnce(
-        tracedecay::daemon::DaemonServiceState,
-    ) -> tracedecay::errors::Result<()>,
+    Restore: FnOnce(tracedecay::daemon::DaemonServiceState) -> tracedecay::errors::Result<()>,
 {
     // The managed daemon holds a shared lifecycle lease while serving its
     // databases. Stop it first, then acquire exclusive ownership before the
