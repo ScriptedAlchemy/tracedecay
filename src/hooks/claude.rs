@@ -814,11 +814,6 @@ mod tests {
     async fn session_root_uses_shared_identity_resolver_for_global_only_project() {
         let _profile = crate::config::PinnedUserDataDir::new();
         let profile_root = crate::storage::default_profile_root().unwrap();
-        let gdb =
-            crate::application::host_admission::HostAdmissionTestRuntimeV1::profile(&profile_root)
-                .await
-                .unwrap();
-
         let project_dir = tempfile::tempdir().unwrap();
         let project_root = project_dir.path().canonicalize().unwrap();
         let status = std::process::Command::new("git")
@@ -829,32 +824,25 @@ mod tests {
         assert!(status.success(), "git init failed");
 
         let project_id = "proj_claude_identity";
-        gdb.upsert_code_project(project_id, &project_root, None, None, None)
-            .await
-            .unwrap();
-        gdb.upsert_store_instance(crate::global_db::StoreInstanceUpsert {
-            store_id: "store_claude_identity".to_string(),
-            project_id: project_id.to_string(),
-            store_kind: "code_project".to_string(),
-            storage_mode: "profile_sharded".to_string(),
-            store_relpath: format!("projects/{project_id}"),
-            manifest_relpath: Some(format!("projects/{project_id}/store_manifest.json")),
-            last_verified_at: Some(100),
-            last_write_at: Some(101),
-        })
+        let runtime = crate::application::host_admission::HostAdmissionTestRuntimeV1::project(
+            &profile_root,
+            &project_root,
+            tracedecay_store::ProjectId::new(project_id).unwrap(),
+        )
         .await
         .unwrap();
-        let layout = crate::storage::profile_sharded_layout(
-            &project_root,
-            &profile_root,
-            &crate::storage::EnrollmentMarker {
-                project_id: project_id.to_string(),
-                storage_mode: crate::storage::StorageMode::ProfileSharded,
-            },
-        )
-        .unwrap();
-        std::fs::create_dir_all(layout.graph_db_path.parent().unwrap()).unwrap();
-        std::fs::write(&layout.graph_db_path, b"").unwrap();
+        let graph = runtime
+            .initialize_project_graph_for_test(
+                &project_root,
+                crate::tracedecay::TraceDecayOpenOptions {
+                    profile_root: Some(profile_root.clone()),
+                    global_db_path: None,
+                },
+            )
+            .await
+            .unwrap();
+        let graph_db_path = graph.store_layout().graph_db_path.clone();
+        graph.index_all().await.unwrap();
 
         let nested = project_root.join("crates/inner");
         std::fs::create_dir_all(&nested).unwrap();
@@ -879,10 +867,14 @@ mod tests {
             "a cwd outside every registered project must not resolve"
         );
 
-        std::fs::remove_file(&layout.graph_db_path).unwrap();
-        assert!(
-            claude_session_project_root(&event).await.is_none(),
-            "a registered project without a real graph db must not resolve"
+        std::fs::remove_file(&graph_db_path).unwrap();
+        assert_eq!(
+            claude_session_project_root(&event)
+                .await
+                .as_deref()
+                .map(|path| std::fs::canonicalize(path).unwrap()),
+            Some(project_root),
+            "durable enrollment remains the project-root authority when the graph needs repair"
         );
     }
 

@@ -141,7 +141,7 @@ async fn hook_event_is_durable_before_attempt_and_retained_on_failure() {
 
 #[tokio::test]
 async fn commit_before_ack_replays_once_and_acknowledges_exact_duplicate() {
-    let (cg, project, _pin) = init_indexed_repo().await;
+    let (cg, project, authority) = init_indexed_repo().await;
     let spool = TempDir::new().unwrap();
     let runtime = HostAdmissionRuntime::open(spool.path(), SpoolBounds::default())
         .unwrap()
@@ -196,9 +196,7 @@ async fn commit_before_ack_replays_once_and_acknowledges_exact_duplicate() {
             })
         })
     };
-    let reopened = crate::tracedecay::TraceDecay::open(project.path())
-        .await
-        .unwrap();
+    let reopened = authority.reopen_project_graph(project.path()).await;
     let server = McpServer::new_with_context(context_with_broker(
         reopened,
         Arc::clone(&broker),
@@ -287,7 +285,7 @@ async fn oversized_event_is_rejected_before_canonical_attempt() {
 
 #[tokio::test]
 async fn malformed_semantic_payload_is_explicit_and_quarantined_across_reopen() {
-    let (cg, project, _pin) = init_indexed_repo().await;
+    let (cg, project, authority) = init_indexed_repo().await;
     let spool = TempDir::new().unwrap();
     let runtime = HostAdmissionRuntime::open(spool.path(), SpoolBounds::default())
         .unwrap()
@@ -342,9 +340,7 @@ async fn malformed_semantic_payload_is_explicit_and_quarantined_across_reopen() 
     let broker = Arc::new(HostAdmissionBroker::new(runtime));
     assert_eq!(broker.pending_count().await, 0);
     assert_eq!(broker.quarantine_count().await, 1);
-    let reopened = crate::tracedecay::TraceDecay::open(project.path())
-        .await
-        .unwrap();
+    let reopened = authority.reopen_project_graph(project.path()).await;
     let server =
         McpServer::new_with_context(context_with_broker(reopened, Arc::clone(&broker), writer))
             .await;
@@ -796,7 +792,7 @@ async fn add_branch_replay_rejects_stale_branch_after_delayed_switch() {
 
 #[tokio::test]
 async fn add_branch_restart_replay_rejects_stale_branch_after_switch() {
-    let (_cg, project, _pin) = init_indexed_repo().await;
+    let (_cg, project, authority) = init_indexed_repo().await;
     let payload = add_branch_payload_for("main");
 
     let spool = TempDir::new().unwrap();
@@ -831,9 +827,7 @@ async fn add_branch_restart_replay_rejects_stale_branch_after_switch() {
             })
         })
     };
-    let reopened = crate::tracedecay::TraceDecay::open(project.path())
-        .await
-        .unwrap();
+    let reopened = authority.reopen_project_graph(project.path()).await;
     let server =
         McpServer::new_with_context(context_with_broker(reopened, Arc::clone(&broker), writer))
             .await;
@@ -902,7 +896,7 @@ async fn sync_current_branch_replay_rejects_stale_branch_after_delayed_switch() 
 
 #[tokio::test]
 async fn sync_current_branch_restart_replay_rejects_stale_branch_after_switch() {
-    let (_cg, project, _pin) = init_indexed_repo().await;
+    let (_cg, project, authority) = init_indexed_repo().await;
     let payload = sync_current_branch_payload("main");
 
     let spool = TempDir::new().unwrap();
@@ -937,9 +931,7 @@ async fn sync_current_branch_restart_replay_rejects_stale_branch_after_switch() 
             })
         })
     };
-    let reopened = crate::tracedecay::TraceDecay::open(project.path())
-        .await
-        .unwrap();
+    let reopened = authority.reopen_project_graph(project.path()).await;
     let server =
         McpServer::new_with_context(context_with_broker(reopened, Arc::clone(&broker), writer))
             .await;
@@ -961,7 +953,7 @@ async fn sync_current_branch_restart_replay_rejects_stale_branch_after_switch() 
 
 #[tokio::test]
 async fn add_branch_at_restart_replay_rejects_common_dir_drift() {
-    let (_cg, project, _pin) = init_indexed_repo().await;
+    let (_cg, project, authority) = init_indexed_repo().await;
     let worktree = linked_worktree_on(project.path());
     let payload = add_branch_at_payload(worktree.clone(), "feature/admission");
 
@@ -1012,9 +1004,7 @@ async fn add_branch_at_restart_replay_rejects_common_dir_drift() {
             })
         })
     };
-    let reopened = crate::tracedecay::TraceDecay::open(project.path())
-        .await
-        .unwrap();
+    let reopened = authority.reopen_project_graph(project.path()).await;
     let server =
         McpServer::new_with_context(context_with_broker(reopened, Arc::clone(&broker), writer))
             .await;
@@ -1036,7 +1026,7 @@ async fn add_branch_at_restart_replay_rejects_common_dir_drift() {
 #[cfg(unix)]
 #[tokio::test]
 async fn add_branch_at_restart_replay_rejects_symlink_swap() {
-    let (_cg, project, _pin) = init_indexed_repo().await;
+    let (_cg, project, authority) = init_indexed_repo().await;
     let worktree = linked_worktree_on(project.path());
     let alias = unique_sibling(project.path(), "worktree-alias");
     std::os::unix::fs::symlink(&worktree, &alias).expect("alias");
@@ -1082,9 +1072,7 @@ async fn add_branch_at_restart_replay_rejects_symlink_swap() {
             })
         })
     };
-    let reopened = crate::tracedecay::TraceDecay::open(project.path())
-        .await
-        .unwrap();
+    let reopened = authority.reopen_project_graph(project.path()).await;
     let server =
         McpServer::new_with_context(context_with_broker(reopened, Arc::clone(&broker), writer))
             .await;

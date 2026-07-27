@@ -33,10 +33,11 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use crate::common::IsolatedEnv;
+use tempfile::TempDir;
 use tracedecay::branch::{self, BranchAddOutcome};
 use tracedecay::branch_meta::load_branch_meta;
-use tracedecay::storage::resolve_layout_for_current_profile;
-use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
+use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
+use tracedecay::tracedecay::TraceDecay;
 use tracedecay::types::NodeKind;
 
 fn git(project: &Path, args: &[&str]) {
@@ -86,12 +87,6 @@ fn commit_all(project: &Path, message: &str) {
     );
 }
 
-fn project_data_dir(project: &Path) -> PathBuf {
-    resolve_layout_for_current_profile(project)
-        .unwrap_or_else(|err| panic!("failed to resolve test project storage layout: {err}"))
-        .data_root
-}
-
 /// Initialises a git repo with one indexed file on `main` and returns the
 /// indexed project root. Mirrors the watcher's precondition: a project already
 /// has a store whose `last_synced_commit` is stamped at HEAD.
@@ -105,6 +100,21 @@ async fn init_indexed_repo() -> (IsolatedEnv, PathBuf) {
     let main = TraceDecay::init(&project).await.unwrap();
     main.index_all().await.unwrap();
     (env, project)
+}
+
+async fn init_production_indexed_repo() -> (TempDir, PathBuf, ProductionProjectCompositionHarnessV1)
+{
+    let root = TempDir::new().unwrap();
+    let project = root.path().join("project");
+    fs::create_dir_all(&project).unwrap();
+    git(&project, &["init", "-b", "main"]);
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn on_main() {}\n").unwrap();
+    commit_all(&project, "initial commit");
+    let harness = ProductionProjectCompositionHarnessV1::open(root.path(), [project.clone()])
+        .await
+        .unwrap();
+    (root, project, harness)
 }
 
 /// The watcher's sync-execution logic, reproduced faithfully: diff-scope from
@@ -170,17 +180,19 @@ async fn unhooked_commit_makes_index_fresh() {
 /// watcher's HEAD-move handler calls `add_branch_tracking`).
 #[tokio::test]
 async fn external_checkout_creates_branch_store() {
-    let (_env, project) = init_indexed_repo().await;
+    let (_env, project, harness) = init_production_indexed_repo().await;
+    let data_root = harness.project_data_root(&project).await.unwrap();
 
     git(&project, &["checkout", "-b", "feat/x"]);
 
     // Not tracked yet.
     assert!(
-        load_branch_meta(&project_data_dir(&project)).is_none_or(|m| !m.is_tracked("feat/x")),
+        load_branch_meta(&data_root).is_none_or(|m| !m.is_tracked("feat/x")),
         "branch should be untracked before the watcher reacts"
     );
 
-    let outcome = TraceDecay::add_branch_tracking(&project, "feat/x")
+    let outcome = harness
+        .track_worktree_branch(&project, &project, "feat/x")
         .await
         .unwrap();
     assert!(
@@ -191,7 +203,7 @@ async fn external_checkout_creates_branch_store() {
         "watcher branch-add should create the store, got {outcome:?}"
     );
 
-    let meta = load_branch_meta(&project_data_dir(&project)).expect("branch meta after add");
+    let meta = load_branch_meta(&data_root).expect("branch meta after add");
     assert!(
         meta.is_tracked("feat/x"),
         "branch store must exist after add"
@@ -203,7 +215,7 @@ async fn external_checkout_creates_branch_store() {
 /// harness-worktree bug that put ~100 sessions on a read-only fallback DB.
 #[tokio::test]
 async fn external_worktree_add_is_auto_tracked_and_writable() {
-    let (_env, project) = init_indexed_repo().await;
+    let (_root, project, harness) = init_production_indexed_repo().await;
 
     // A sibling worktree dir, resolved through the shared temp root's parent so
     // it lives under the same isolated storage env.
@@ -220,13 +232,10 @@ async fn external_worktree_add_is_auto_tracked_and_writable() {
     );
 
     // The watcher resolves the linked worktree and tracks its branch.
-    let outcome = TraceDecay::add_branch_tracking_with_options(
-        &worktree,
-        "feat/y",
-        TraceDecayOpenOptions::default(),
-    )
-    .await
-    .unwrap();
+    let outcome = harness
+        .track_worktree_branch(&project, &worktree, "feat/y")
+        .await
+        .unwrap();
     assert!(
         matches!(
             outcome,
@@ -235,27 +244,21 @@ async fn external_worktree_add_is_auto_tracked_and_writable() {
         "worktree branch should be trackable, got {outcome:?}"
     );
 
-    // Opening the worktree must serve its OWN branch store, writable, not a
-    // fallback ancestor — the whole point of proactive worktree tracking.
-    let wt = TraceDecay::open(&worktree).await.unwrap();
-    assert_eq!(wt.active_branch(), Some("feat/y"));
-    assert_eq!(wt.serving_branch(), Some("feat/y"));
-    assert!(
-        !wt.is_fallback(),
-        "tracked worktree must not serve a read-only fallback store"
-    );
-
     // And a sync through the worktree store must succeed (a fallback store would
     // refuse the write — see branch_db_safety_test).
     fs::write(worktree.join("src/wt_only.rs"), "pub fn wt_only() {}\n").unwrap();
     commit_all(&worktree, "worktree-only symbol");
-    wt.sync()
+    let (active_branch, serving_branch, is_fallback, contains_query) = harness
+        .sync_tracked_worktree_branch(&project, &worktree, "feat/y", "wt_only")
         .await
         .expect("writable worktree store must accept a sync");
+    assert_eq!(active_branch.as_deref(), Some("feat/y"));
+    assert_eq!(serving_branch.as_deref(), Some("feat/y"));
     assert!(
-        !wt.search("wt_only", 10).await.unwrap().is_empty(),
-        "worktree sync should index its own symbol"
+        !is_fallback,
+        "tracked worktree must not serve a read-only fallback store"
     );
+    assert!(contains_query, "worktree sync should index its own symbol");
 }
 
 /// A 50-commit rebase → the watcher fires EXACTLY ONE sync. The watcher
@@ -355,14 +358,15 @@ async fn concurrent_syncs_are_single_flight() {
 /// compatibility API must fail closed even when given a zero grace window.
 #[tokio::test]
 async fn deleted_branch_store_gc_fails_closed_without_daemon_administration() {
-    let (_env, project) = init_indexed_repo().await;
+    let (_env, project, harness) = init_production_indexed_repo().await;
 
     git(&project, &["checkout", "-b", "feat/dead"]);
-    TraceDecay::add_branch_tracking(&project, "feat/dead")
+    harness
+        .track_worktree_branch(&project, &project, "feat/dead")
         .await
         .unwrap();
     git(&project, &["checkout", "main"]);
-    let data_dir = project_data_dir(&project);
+    let data_dir = harness.project_data_root(&project).await.unwrap();
     assert!(
         load_branch_meta(&data_dir).is_some_and(|m| m.is_tracked("feat/dead")),
         "branch should be tracked before its ref is deleted"

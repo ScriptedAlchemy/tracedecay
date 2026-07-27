@@ -1158,11 +1158,6 @@ mod tests {
     async fn cursor_root_uses_identity_resolver_for_global_only_store() {
         let _profile = crate::config::PinnedUserDataDir::new();
         let profile_root = crate::storage::default_profile_root().unwrap();
-        let gdb =
-            crate::application::host_admission::HostAdmissionTestRuntimeV1::profile(&profile_root)
-                .await
-                .unwrap();
-
         let project = tempfile::tempdir().unwrap();
         let project_root = project.path().canonicalize().unwrap();
         let status = std::process::Command::new("git")
@@ -1173,39 +1168,24 @@ mod tests {
         assert!(status.success(), "git init failed");
 
         let project_id = "proj_cursor_identity";
-        let git_common_dir = crate::worktree::git_common_dir(&project_root);
-        gdb.upsert_code_project(
-            project_id,
-            &project_root,
-            git_common_dir.as_deref(),
-            None,
-            None,
-        )
-        .await
-        .unwrap();
-        gdb.upsert_store_instance(crate::global_db::StoreInstanceUpsert {
-            store_id: "store_cursor_identity".to_string(),
-            project_id: project_id.to_string(),
-            store_kind: "code_project".to_string(),
-            storage_mode: "profile_sharded".to_string(),
-            store_relpath: format!("projects/{project_id}"),
-            manifest_relpath: Some(format!("projects/{project_id}/store_manifest.json")),
-            last_verified_at: Some(100),
-            last_write_at: Some(101),
-        })
-        .await
-        .unwrap();
-        let layout = crate::storage::profile_sharded_layout(
-            &project_root,
+        let runtime = crate::application::host_admission::HostAdmissionTestRuntimeV1::project(
             &profile_root,
-            &crate::storage::EnrollmentMarker {
-                project_id: project_id.to_string(),
-                storage_mode: crate::storage::StorageMode::ProfileSharded,
-            },
+            &project_root,
+            tracedecay_store::ProjectId::new(project_id).unwrap(),
         )
+        .await
         .unwrap();
-        std::fs::create_dir_all(layout.graph_db_path.parent().unwrap()).unwrap();
-        std::fs::write(&layout.graph_db_path, b"").unwrap();
+        let graph = runtime
+            .initialize_project_graph_for_test(
+                &project_root,
+                crate::tracedecay::TraceDecayOpenOptions {
+                    profile_root: Some(profile_root.clone()),
+                    global_db_path: None,
+                },
+            )
+            .await
+            .unwrap();
+        graph.index_all().await.unwrap();
 
         let nested = project_root.join("src/deep");
         std::fs::create_dir_all(&nested).unwrap();
@@ -1214,7 +1194,10 @@ mod tests {
             "workspace_roots": [project_root.clone()],
         });
 
-        assert!(cursor_project_root_from_parsed_event(&parsed).is_none());
+        assert_eq!(
+            cursor_project_root_from_parsed_event(&parsed),
+            Some(project_root.clone())
+        );
         assert_eq!(
             cursor_project_root_from_parsed_event_with_identity(&parsed).await,
             Some(project_root)
