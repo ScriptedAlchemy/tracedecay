@@ -113,6 +113,27 @@ impl<'a> DatabaseFactStore<'a> {
     pub const fn new(db: &'a Database) -> Self {
         Self { db }
     }
+
+    #[cfg(any(test, feature = "test-transport"))]
+    #[doc(hidden)]
+    pub async fn inspect_owner_archive_for_test(
+        &self,
+        owner: &tracedecay_domain::FactOwnerV1,
+    ) -> FactStoreResult<tracedecay_store::MemoryV2OwnerArchiveV1> {
+        let transaction = self
+            .db
+            .begin_memory_read_transaction(QUERY_OPERATION)
+            .await
+            .map_err(|error| storage_error(QUERY_OPERATION, error))?;
+        let archive = crate::db::export_memory_v2_owner_archive(
+            &transaction,
+            crate::db::MemoryV2ArchiveDatabase::Main,
+            owner,
+        )
+        .await
+        .map_err(|error| storage_error(QUERY_OPERATION, error));
+        finish_read_snapshot(transaction, archive).await
+    }
 }
 
 impl FactStore for DatabaseFactStore<'_> {

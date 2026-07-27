@@ -584,6 +584,183 @@ mod tests {
     }
 
     #[test]
+    fn realistic_composite_closure_preserves_relationship_keys() {
+        fn text_key(parts: &[(&str, &str)]) -> BTreeMap<String, MemoryV2ArchiveScalarV1> {
+            parts
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), scalar(value)))
+                .collect()
+        }
+        fn reference_to(record: &MemoryV2ArchiveRecordV1) -> MemoryV2ArchiveReferenceV1 {
+            MemoryV2ArchiveReferenceV1::new(record.family(), record.key().clone()).unwrap()
+        }
+        fn linked(
+            family: MemoryV2ArchiveFamilyV1,
+            key: BTreeMap<String, MemoryV2ArchiveScalarV1>,
+            references: Vec<MemoryV2ArchiveReferenceV1>,
+        ) -> MemoryV2ArchiveRecordV1 {
+            MemoryV2ArchiveRecordV1::new(family, key, BTreeMap::new(), references).unwrap()
+        }
+
+        let scope = [
+            ("owner_kind", "project"),
+            ("project_id", "project.archive-test"),
+        ];
+        let fact = linked(
+            MemoryV2ArchiveFamilyV1::Fact,
+            text_key(&[("fact_id", "fact.realistic"), scope[0], scope[1]]),
+            Vec::new(),
+        );
+        let anchor = linked(
+            MemoryV2ArchiveFamilyV1::RetrievalAnchor,
+            text_key(&[("anchor_id", "anchor.realistic")]),
+            Vec::new(),
+        );
+        let assertion = linked(
+            MemoryV2ArchiveFamilyV1::Assertion,
+            text_key(&[
+                ("assertion_id", "assertion.realistic"),
+                ("fact_id", "fact.realistic"),
+                scope[0],
+                scope[1],
+            ]),
+            vec![reference_to(&fact)],
+        );
+        let evidence = linked(
+            MemoryV2ArchiveFamilyV1::FactEvidence,
+            text_key(&[
+                ("evidence_id", "evidence.realistic"),
+                ("fact_id", "fact.realistic"),
+                scope[0],
+                scope[1],
+            ]),
+            vec![reference_to(&fact), reference_to(&anchor)],
+        );
+        let assertion_evidence = linked(
+            MemoryV2ArchiveFamilyV1::AssertionEvidence,
+            BTreeMap::from([
+                ("assertion_id".to_owned(), scalar("assertion.realistic")),
+                ("fact_id".to_owned(), scalar("fact.realistic")),
+                ("owner_kind".to_owned(), scalar("project")),
+                ("project_id".to_owned(), scalar("project.archive-test")),
+                ("ordinal".to_owned(), MemoryV2ArchiveScalarV1::Integer(0)),
+            ]),
+            vec![reference_to(&assertion), reference_to(&evidence)],
+        );
+        let event = linked(
+            MemoryV2ArchiveFamilyV1::LineageEvent,
+            text_key(&[
+                ("event_id", "event.realistic"),
+                ("fact_id", "fact.realistic"),
+                scope[0],
+                scope[1],
+            ]),
+            vec![reference_to(&fact)],
+        );
+        let feedback = linked(
+            MemoryV2ArchiveFamilyV1::FeedbackHistory,
+            text_key(&[
+                scope[0],
+                scope[1],
+                ("fact_id", "fact.realistic"),
+                ("event_id", "event.realistic"),
+            ]),
+            vec![reference_to(&fact), reference_to(&event)],
+        );
+        let proposal = linked(
+            MemoryV2ArchiveFamilyV1::Proposal,
+            text_key(&[("proposal_id", "proposal.realistic"), scope[0], scope[1]]),
+            Vec::new(),
+        );
+        let transition = linked(
+            MemoryV2ArchiveFamilyV1::ProposalTransition,
+            text_key(&[
+                ("transition_id", "transition.realistic"),
+                ("proposal_id", "proposal.realistic"),
+                scope[0],
+                scope[1],
+            ]),
+            vec![
+                reference_to(&proposal),
+                reference_to(&fact),
+                reference_to(&event),
+            ],
+        );
+        let proposal_current = linked(
+            MemoryV2ArchiveFamilyV1::ProposalCurrent,
+            text_key(&[("proposal_id", "proposal.realistic"), scope[0], scope[1]]),
+            vec![reference_to(&proposal), reference_to(&transition)],
+        );
+        let reverse = linked(
+            MemoryV2ArchiveFamilyV1::RetrievalAnchorReverseLineage,
+            text_key(&[
+                ("source_anchor_id", "anchor.realistic"),
+                ("owner_json", "project.archive-test"),
+                ("derivative_kind", "finding"),
+                ("derivative_id", "finding.realistic"),
+            ]),
+            vec![reference_to(&anchor)],
+        );
+        let tombstone = linked(
+            MemoryV2ArchiveFamilyV1::RetrievalAnchorDerivativeTombstone,
+            BTreeMap::from([
+                ("source_anchor_id".to_owned(), scalar("anchor.realistic")),
+                ("owner_json".to_owned(), scalar("project.archive-test")),
+                ("derivative_kind".to_owned(), scalar("finding")),
+                ("derivative_id".to_owned(), scalar("finding.realistic")),
+                ("disposition_id".to_owned(), scalar("disposition.realistic")),
+            ]),
+            vec![reference_to(&reverse)],
+        );
+        let legacy_map = linked(
+            MemoryV2ArchiveFamilyV1::LegacyFactMap,
+            BTreeMap::from([
+                ("owner_kind".to_owned(), scalar("project")),
+                ("project_id".to_owned(), scalar("project.archive-test")),
+                ("source_store_id".to_owned(), scalar("legacy-memory-v1")),
+                (
+                    "legacy_fact_id".to_owned(),
+                    MemoryV2ArchiveScalarV1::Integer(41),
+                ),
+            ]),
+            vec![reference_to(&fact)],
+        );
+
+        let records = vec![
+            fact,
+            anchor,
+            assertion,
+            evidence,
+            assertion_evidence,
+            event,
+            feedback,
+            proposal,
+            transition,
+            proposal_current,
+            reverse,
+            tombstone,
+            legacy_map,
+        ];
+        let complete = archive(records.clone());
+        assert_eq!(complete.records().len(), records.len());
+
+        let without_reverse = records
+            .into_iter()
+            .filter(|record| {
+                record.family() != MemoryV2ArchiveFamilyV1::RetrievalAnchorReverseLineage
+            })
+            .collect();
+        assert!(
+            MemoryV2OwnerArchiveV1::new(
+                owner(),
+                authoritative_memory_v2_archive_families(),
+                without_reverse,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn merge_planner_encodes_new_identical_and_conflicting_rows() {
         let existing = record(MemoryV2ArchiveFamilyV1::Fact, "fact.same", "same");
         let target = archive(vec![existing.clone()]);

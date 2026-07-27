@@ -17,7 +17,8 @@ pub(super) mod projection;
 mod temporal;
 mod verify;
 
-use memory_v2::{LegacyMappingPolicy, merge_memory_v2_authority};
+pub(in crate::migrate) use memory_v2::MemoryV2ArchiveMergeProof;
+use memory_v2::{LegacyMappingPolicy, merge_memory_v2_authority, merge_memory_v2_owner_archives};
 use observation::merge_observation_authority;
 pub(super) use observation::{preflight_observation_merge, verify_observation_merge};
 
@@ -71,7 +72,7 @@ pub(super) async fn merge_memory_v2_for_test(target_path: &Path, source: &Path) 
         .execute("PRAGMA defer_foreign_keys = ON", ())
         .await
         .map_err(|error| db_error("merge_memory_v2_for_test", error))?;
-    merge_memory_v2_authority(&transaction, LegacyMappingPolicy::PreserveSourceRows).await?;
+    merge_memory_v2_owner_archives(&transaction).await?;
     transaction
         .commit()
         .await
@@ -220,7 +221,7 @@ pub(super) async fn merge_registered_graph_facts(
 pub(in crate::migrate) async fn merge_branch_legacy_memory_snapshot(
     target: &Database,
     source: &crate::sqlite_read_snapshot::SnapshotDatabase,
-) -> Result<()> {
+) -> Result<Vec<MemoryV2ArchiveMergeProof>> {
     let offsets = registered_graph_maxima(target).await?;
     let transaction = target
         .begin_memory_write_transaction("merge branch legacy memory")
@@ -242,27 +243,31 @@ pub(in crate::migrate) async fn merge_branch_legacy_memory_snapshot(
     let result = async {
         if source_has_memory_v2_authority(&transaction).await? {
             verify_complete_branch_memory_v2_authority(&transaction).await?;
-            merge_memory_v2_authority(&transaction, LegacyMappingPolicy::OmitBranchLocalMirrors)
-                .await
+            merge_memory_v2_owner_archives(&transaction).await
         } else {
             merge_legacy_memory_tx(&transaction, offsets).await?;
-            verify_legacy_fact_coverage(&transaction).await
+            verify_legacy_fact_coverage(&transaction).await?;
+            Ok(Vec::new())
         }
     }
     .await;
-    match result {
-        Ok(()) => transaction
-            .commit()
-            .await
-            .map_err(|error| db_error("merge_branch_legacy_memory", error))?,
+    let proofs = match result {
+        Ok(proofs) => {
+            transaction
+                .commit()
+                .await
+                .map_err(|error| db_error("merge_branch_legacy_memory", error))?;
+            proofs
+        }
         Err(error) => {
             let _ = transaction.rollback().await;
             return Err(error);
         }
-    }
+    };
     source
         .validate_source()
-        .map_err(|error| db_error("merge_branch_legacy_memory", error))
+        .map_err(|error| db_error("merge_branch_legacy_memory", error))?;
+    Ok(proofs)
 }
 
 pub(in crate::migrate) async fn rebuild_branch_cutover_memory_banks(
