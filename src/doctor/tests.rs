@@ -1818,19 +1818,11 @@ fn doctor_result_preserves_daemon_and_storage_errors() {
 }
 
 #[test]
-fn daemon_startup_health_waits_for_storage_and_temporal_convergence() {
+fn daemon_startup_health_gates_only_current_project_storage() {
     let healthy = serde_json::json!({
         "storage_health": {
             "quick_check_ok": true,
-            "authority_audit_ok": true
-        }
-    });
-    assert!(super::daemon_startup_health_ready(&healthy));
-
-    let migrating = serde_json::json!({
-        "storage_health": {
-            "quick_check_error": "project_store_schema_unsupported",
-            "authority_audit_reason": "authority_audit_not_run"
+            "quick_check_error": null
         },
         "session_temporal_health": {
             "status": "unavailable",
@@ -1841,7 +1833,31 @@ fn daemon_startup_health_waits_for_storage_and_temporal_convergence() {
             }]
         }
     });
+    assert!(
+        super::daemon_startup_health_ready(&healthy),
+        "unrelated session-temporal findings must remain Doctor findings, not block current-project admission"
+    );
+    assert_eq!(super::daemon_startup_health_detail(&healthy), "storage=ok");
+
+    let migrating = serde_json::json!({
+        "storage_health": {
+            "quick_check_error": "project_store_schema_unsupported"
+        }
+    });
     assert!(!super::daemon_startup_health_ready(&migrating));
+}
+
+#[test]
+fn daemon_startup_probe_skips_unrelated_profile_audits() {
+    assert_eq!(
+        super::daemon_runtime_args(),
+        serde_json::json!({
+            "format": "json",
+            "authority_audit": false,
+            "doctor_report": false,
+            "session_ingest_health": false,
+        })
+    );
 }
 
 #[tokio::test]
@@ -1984,14 +2000,12 @@ async fn daemon_startup_health_retryable_progress_changes_then_converges() {
                     }),
                     1 => serde_json::json!({
                         "storage_health": {
-                            "quick_check_ok": true,
-                            "authority_audit_reason": "authority_audit_not_run"
+                            "quick_check_error": "project_store_migration_in_progress"
                         }
                     }),
                     _ => serde_json::json!({
                         "storage_health": {
-                            "quick_check_ok": true,
-                            "authority_audit_ok": true
+                            "quick_check_ok": true
                         }
                     }),
                 })
@@ -2018,7 +2032,11 @@ async fn daemon_startup_health_retryable_progress_changes_then_converges() {
             .detail
             .contains("project_store_schema_unsupported")
     );
-    assert!(reports[1].detail.contains("quick_check_pending"));
+    assert!(
+        reports[1]
+            .detail
+            .contains("project_store_migration_in_progress")
+    );
 }
 
 #[tokio::test]

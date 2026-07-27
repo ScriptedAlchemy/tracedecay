@@ -670,45 +670,35 @@ fn daemon_startup_error_is_retryable(error: &crate::errors::TraceDecayError) -> 
 
 fn daemon_startup_health_detail(status: &serde_json::Value) -> String {
     let storage = status.get("storage_health");
-    let quick = storage
-        .and_then(|storage| storage.get("quick_check_error"))
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("quick_check_pending");
-    let authority = storage
-        .and_then(|storage| storage.get("authority_audit_reason"))
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("authority_audit_pending");
-    let temporal = status
-        .get("session_temporal_health")
-        .and_then(|health| health.get("reason").or_else(|| health.get("status")))
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("temporal_health_pending");
-    format!("storage={quick}, authority={authority}, temporal={temporal}")
-}
-
-fn daemon_startup_health_ready(status: &serde_json::Value) -> bool {
-    let storage = status.get("storage_health");
-    let storage_ready = storage
+    let quick = if storage
         .and_then(|storage| storage.get("quick_check_ok"))
         .and_then(serde_json::Value::as_bool)
         == Some(true)
-        && storage
-            .and_then(|storage| storage.get("authority_audit_ok"))
-            .and_then(serde_json::Value::as_bool)
-            == Some(true);
-    let temporal_ready = temporal_health::diagnose(status.get("session_temporal_health"))
-        .lines()
-        .iter()
-        .all(|line| line.level != temporal_health::TemporalHealthLineLevel::Fail);
-    storage_ready && temporal_ready
+    {
+        "ok"
+    } else {
+        storage
+            .and_then(|storage| storage.get("quick_check_error"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("quick_check_pending")
+    };
+    format!("storage={quick}")
+}
+
+fn daemon_startup_health_ready(status: &serde_json::Value) -> bool {
+    status
+        .get("storage_health")
+        .and_then(|storage| storage.get("quick_check_ok"))
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
 }
 
 fn daemon_runtime_args() -> serde_json::Value {
     serde_json::json!({
         "format": "json",
-        "authority_audit": true,
+        "authority_audit": false,
         "doctor_report": false,
-        "session_ingest_health": true,
+        "session_ingest_health": false,
     })
 }
 
