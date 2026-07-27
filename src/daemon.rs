@@ -15,6 +15,7 @@ use tokio::net::UnixStream;
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::{Duration, timeout};
 
+use crate::application::context::CancellationToken;
 use crate::client_identity::DaemonClientIdentity;
 use crate::errors::{Result, TraceDecayError};
 use crate::mcp::ReplayTransport;
@@ -2156,6 +2157,7 @@ struct ProjectOpenTaskRegistry {
 
 struct ProjectOpenTaskEntry {
     state: tokio::sync::watch::Receiver<ProjectOpenTaskState>,
+    cancellation: CancellationToken,
     task: JoinHandle<()>,
 }
 
@@ -2277,12 +2279,25 @@ impl ProjectOpenTaskRegistry {
 }
 
 impl ProjectOpenTasks {
+    #[cfg(test)]
     async fn start<OpenFuture>(
         &self,
         route: ProjectRouteKey,
         open: OpenFuture,
     ) -> ProjectOpenTaskClaim
     where
+        OpenFuture: std::future::Future<Output = Result<()>> + Send + 'static,
+    {
+        self.start_cancellable(route, |_| open).await
+    }
+
+    async fn start_cancellable<OpenOperation, OpenFuture>(
+        &self,
+        route: ProjectRouteKey,
+        open: OpenOperation,
+    ) -> ProjectOpenTaskClaim
+    where
+        OpenOperation: FnOnce(CancellationToken) -> OpenFuture + Send + 'static,
         OpenFuture: std::future::Future<Output = Result<()>> + Send + 'static,
     {
         let now = Instant::now();
@@ -2301,8 +2316,10 @@ impl ProjectOpenTasks {
         }
 
         let (updates, state) = tokio::sync::watch::channel(ProjectOpenTaskState::Opening);
+        let cancellation = CancellationToken::new();
+        let task_cancellation = cancellation.clone();
         let task = tokio::spawn(async move {
-            let state = match open.await {
+            let state = match open(task_cancellation).await {
                 Ok(()) => ProjectOpenTaskState::Ready,
                 Err(error) => ProjectOpenTaskState::Failed(ProjectOpenFailure::from_error(&error)),
             };
@@ -2312,6 +2329,7 @@ impl ProjectOpenTasks {
             route,
             ProjectOpenTaskEntry {
                 state: state.clone(),
+                cancellation,
                 task,
             },
         );
@@ -2348,32 +2366,34 @@ impl ProjectOpenTasks {
         }
     }
 
-    async fn shutdown(&self) {
-        let entries = {
+    async fn shutdown(&self) -> bool {
+        let mut entries = {
             let mut registry = self.registry.lock().await;
             std::mem::take(&mut registry.routes)
-        };
-        // Warm-up can own detached blocking work that cannot make its watch
-        // state terminal after the tracking future is cancelled. Waiting here
-        // adds a full drain deadline but does not cancel that work. Abort the
-        // tracked futures now; server/runtime shutdown below closes the owned
-        // database actors, and SQLite rolls active transactions back.
-        for entry in entries.values() {
-            entry.task.abort();
         }
-        let drained = timeout(DAEMON_TASK_ABORT_DEADLINE, async {
-            for entry in entries.into_values() {
-                let _ = entry.task.await;
+        .into_values()
+        .collect::<Vec<_>>();
+        for entry in &entries {
+            entry.cancellation.cancel();
+        }
+        let deadline = tokio::time::Instant::now() + DAEMON_TASK_ABORT_DEADLINE;
+        let mut drained = true;
+        for entry in &mut entries {
+            if tokio::time::timeout_at(deadline, &mut entry.task)
+                .await
+                .is_err()
+            {
+                drained = false;
+                let _ = (&mut entry.task).await;
             }
-        })
-        .await
-        .is_ok();
+        }
         if !drained {
             log_daemon_event(
                 "project_server_warmup",
-                &[("outcome", "shutdown_abort_timeout".to_string())],
+                &[("outcome", "shutdown_cooperative_timeout".to_string())],
             );
         }
+        drained
     }
 
     #[cfg(test)]
@@ -2551,6 +2571,19 @@ fn project_open_task_capacity_error() -> TraceDecayError {
             "daemon project open task capacity reached (capacity={MAX_TRACKED_PROJECT_OPEN_TASKS}); retry shortly"
         ),
     }
+}
+
+fn project_open_cancellation_error() -> TraceDecayError {
+    TraceDecayError::Config {
+        message: "daemon is draining during project warm-up".to_string(),
+    }
+}
+
+fn project_open_cancellation_checkpoint(cancellation: &CancellationToken) -> Result<()> {
+    if cancellation.is_cancelled() {
+        return Err(project_open_cancellation_error());
+    }
+    Ok(())
 }
 
 fn project_warming_error(project_path: &Path) -> TraceDecayError {
@@ -2996,16 +3029,29 @@ impl DaemonEngine {
         &self,
         handshake: &DaemonHandshake,
     ) -> Result<Arc<crate::mcp::McpServer>> {
+        let cancellation = CancellationToken::new();
+        self.project_server_until_cancelled(handshake, &cancellation)
+            .await
+    }
+
+    async fn project_server_until_cancelled(
+        &self,
+        handshake: &DaemonHandshake,
+        cancellation: &CancellationToken,
+    ) -> Result<Arc<crate::mcp::McpServer>> {
         if let Some(server) = self.cached_project_server(handshake).await? {
             return Ok(server);
         }
 
-        let cached = {
-            self.store_administration
-                .with_writer(|| self.open_project_server(handshake))
-                .await?
-        };
+        let cached = self
+            .store_administration
+            .with_writer_until_cancelled(cancellation, || {
+                self.open_project_server_until_cancelled(handshake, cancellation)
+            })
+            .await
+            .ok_or_else(project_open_cancellation_error)??;
         let (_key, project_path, server, _inserted) = cached;
+        project_open_cancellation_checkpoint(cancellation)?;
         Ok(self.activate_project_server(project_path, server).await)
     }
 
@@ -3034,13 +3080,18 @@ impl DaemonEngine {
         let (project_path, route) = Self::project_route(&handshake)?;
         let tasks = project_open_tasks(&self.project_open_gates).await;
         let engine = self.clone();
+        let open_handshake = handshake.clone();
         Ok(Box::pin(start_lifecycle_project_open(
             &tasks,
             self.lifecycle.clone(),
             route,
             project_path,
             initialize_request,
-            async move { engine.project_server(&handshake).await },
+            move |cancellation| async move {
+                engine
+                    .project_server_until_cancelled(&open_handshake, &cancellation)
+                    .await
+            },
         ))
         .await)
     }
@@ -3115,6 +3166,16 @@ impl DaemonEngine {
         &self,
         handshake: &DaemonHandshake,
     ) -> Result<(ProjectServerKey, PathBuf, Arc<crate::mcp::McpServer>, bool)> {
+        let cancellation = CancellationToken::new();
+        self.open_project_server_until_cancelled(handshake, &cancellation)
+            .await
+    }
+
+    async fn open_project_server_until_cancelled(
+        &self,
+        handshake: &DaemonHandshake,
+        cancellation: &CancellationToken,
+    ) -> Result<(ProjectServerKey, PathBuf, Arc<crate::mcp::McpServer>, bool)> {
         let Some(project_path) = handshake.project_path.as_ref() else {
             return Err(TraceDecayError::Config {
                 message: "project server requested without project_path".to_string(),
@@ -3131,6 +3192,7 @@ impl DaemonEngine {
             &canonical_project_path,
             handshake,
             ProductionProjectCompositionRuntime::Unix(self.clone()),
+            cancellation,
             #[cfg(test)]
             Some(&self.project_open_attempts),
         )
@@ -3681,15 +3743,16 @@ async fn cached_project_node_count(
         .map(|stats| stats.node_count)
 }
 
-async fn start_lifecycle_project_open<OpenFuture>(
+async fn start_lifecycle_project_open<OpenOperation, OpenFuture>(
     tasks: &ProjectOpenTasks,
     lifecycle: DaemonLifecycle,
     route: ProjectRouteKey,
     project_path: PathBuf,
     initialize_request: Option<JsonRpcRequest>,
-    open_project_server: OpenFuture,
+    open_project_server: OpenOperation,
 ) -> ProjectOpenTaskClaim
 where
+    OpenOperation: FnOnce(CancellationToken) -> OpenFuture + Send + 'static,
     OpenFuture: std::future::Future<Output = Result<Arc<crate::mcp::McpServer>>> + Send + 'static,
 {
     if !lifecycle.accepting() {
@@ -3699,27 +3762,23 @@ where
         });
     }
     tasks
-        .start(route, async move {
+        .start_cancellable(route, move |cancellation| async move {
             let Some(activity) = lifecycle.try_enter() else {
                 return Err(TraceDecayError::Config {
                     message: "daemon is draining before project warm-up".to_string(),
                 });
             };
             let _activity = activity;
-            // Once warm-up is admitted, the open drives a daemon-owned schema
-            // migration inside a detached build task. Racing it against
-            // `wait_for_draining` and abandoning on drain does not stop that
-            // migration -- it only untracks it, so shutdown would then close the
-            // runtime underneath a live migration and `sqlite3_interrupt` it
-            // mid-statement (`SQLite advance query failed: interrupted`). Run the
-            // open to completion instead: the held `_activity` keeps the daemon's
-            // drain wait pending until the migration settles, and new warm-ups are
-            // already refused above by `accepting()`/`try_enter`. An operator drain
-            // still wins promptly -- `ProjectOpenTasks::shutdown` bounds the wait
-            // and aborts stragglers once the migration has committed or rolled back.
-            let result = Box::pin(open_project_server).await;
+            // Once admitted, warm-up may be inside a schema migration. The
+            // cancellation token is observed only at explicit boundaries around
+            // those transactionally safe units; dropping this future on drain
+            // would untrack the database owner and can interrupt SQLite
+            // mid-statement. The lifecycle activity remains held until the task
+            // reports its terminal outcome and shutdown explicitly joins it.
+            let result = Box::pin(open_project_server(cancellation.clone())).await;
             match result {
                 Ok(server) => {
+                    project_open_cancellation_checkpoint(&cancellation)?;
                     if let Some(initialize_request) = initialize_request {
                         // Preserve the regular initialize side effect that records
                         // the negotiated MCP client name on the real server.
@@ -3728,6 +3787,9 @@ where
                     Ok(())
                 }
                 Err(error) => {
+                    if cancellation.is_cancelled() {
+                        return Err(error);
+                    }
                     log_daemon_event(
                         "project_server_warmup",
                         &[
@@ -3803,9 +3865,9 @@ async fn begin_portable_project_open(
         route,
         canonical_project_path,
         initialize_request,
-        async move {
+        move |cancellation| async move {
             store_administration
-                .with_writer(|| async {
+                .with_writer_until_cancelled(&cancellation, || async {
                     production_project_server(
                         &store_administration,
                         open_gates.as_ref(),
@@ -3817,6 +3879,7 @@ async fn begin_portable_project_open(
                             semantic_auto_download: true,
                             startup_catch_up: true,
                         },
+                        &cancellation,
                         #[cfg(test)]
                         project_open_attempts.as_ref(),
                     )
@@ -3824,6 +3887,7 @@ async fn begin_portable_project_open(
                     .map(|composition| composition.server)
                 })
                 .await
+                .ok_or_else(project_open_cancellation_error)?
         },
     ))
     .await
@@ -4051,8 +4115,10 @@ async fn production_project_server(
     canonical_project_path: &Path,
     handshake: &DaemonHandshake,
     runtime: ProductionProjectCompositionRuntime,
+    cancellation: &CancellationToken,
     #[cfg(test)] project_open_attempts: Option<&Arc<AtomicUsize>>,
 ) -> Result<ProductionProjectComposition> {
+    project_open_cancellation_checkpoint(cancellation)?;
     let route = ProjectRouteKey::from_handshake(canonical_project_path, handshake)?;
     if let Some(server) = {
         let mut servers = store_administration.project_servers().lock().await;
@@ -4070,7 +4136,11 @@ async fn production_project_server(
     }
 
     let gate = project_open_gate(project_open_gates, &route).await;
-    let _singleflight = gate.lock().await;
+    let _singleflight = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => return Err(project_open_cancellation_error()),
+        singleflight = gate.lock() => singleflight,
+    };
     if let Some(server) = {
         let mut servers = store_administration.project_servers().lock().await;
         servers
@@ -4096,6 +4166,7 @@ async fn production_project_server(
         store_administration,
     ))
     .await?;
+    project_open_cancellation_checkpoint(cancellation)?;
     ensure_context_scout_owner_before_advertising(&cg)?;
     cg.register_project_store_in_global_registry().await?;
     let key = ProjectServerKey::from_open_project(&cg, handshake)?;
@@ -4357,7 +4428,13 @@ async fn production_project_server(
     if let Some(reconciler) = automation_scheduler_reconciler {
         context = context.with_automation_scheduler_reconciler(reconciler);
     }
+    project_open_cancellation_checkpoint(cancellation)?;
     let candidate = crate::mcp::McpServer::new_with_context(context).await;
+    if cancellation.is_cancelled() {
+        candidate.cancel_startup_transcript_ingest();
+        candidate.shutdown().await;
+        return Err(project_open_cancellation_error());
+    }
     let project_id = key
         .owner
         .project_id
@@ -4383,6 +4460,10 @@ async fn production_project_server(
     if !inserted {
         route_registered.store(false, Ordering::Release);
     } else {
+        if cancellation.is_cancelled() {
+            resolved.cancel_startup_transcript_ingest();
+            return Err(project_open_cancellation_error());
+        }
         invocation
             .mount_code_index(
                 canonical_project_path,
@@ -4393,6 +4474,10 @@ async fn production_project_server(
                 Some(*semantic_resources),
             )
             .await?;
+        if cancellation.is_cancelled() {
+            resolved.cancel_startup_transcript_ingest();
+            return Err(project_open_cancellation_error());
+        }
         match invocation
             .semantic_runtime_registrar()
             .register(canonical_project_path.to_path_buf(), semantic_runtime)
@@ -4578,6 +4663,7 @@ impl ProductionProjectCompositionHarnessV1 {
             let (canonical_project_path, _) = project_route_for_handshake(&handshake)?;
             let composition = store_administration
                 .with_writer(|| async {
+                    let cancellation = CancellationToken::new();
                     production_project_server(
                         &store_administration,
                         &project_open_gates,
@@ -4589,6 +4675,7 @@ impl ProductionProjectCompositionHarnessV1 {
                             semantic_auto_download: false,
                             startup_catch_up: false,
                         },
+                        &cancellation,
                         #[cfg(test)]
                         None,
                     )

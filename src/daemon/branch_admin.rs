@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use serde_json::json;
 
+use crate::application::context::CancellationToken;
 use crate::errors::{Result, TraceDecayError};
 use crate::mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
 
@@ -852,6 +853,25 @@ impl StoreAdministration {
     {
         let _writer = self.gate.lock().await;
         operation().await
+    }
+
+    /// Cancels while queued for writer administration, then lets an admitted
+    /// operation finish its transactionally safe unit before releasing it.
+    pub(super) async fn with_writer_until_cancelled<Operation, OperationFuture, Output>(
+        &self,
+        cancellation: &CancellationToken,
+        operation: Operation,
+    ) -> Option<Output>
+    where
+        Operation: FnOnce() -> OperationFuture,
+        OperationFuture: Future<Output = Output>,
+    {
+        let _writer = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => return None,
+            writer = self.gate.lock() => writer,
+        };
+        Some(operation().await)
     }
 
     /// Resolves the authenticated client's project layout and runs destructive

@@ -361,9 +361,12 @@ async fn project_open_task_shutdown_cancels_and_clears_route_registry() {
     let started = Arc::new(tokio::sync::Notify::new());
     let task_started = Arc::clone(&started);
     let state = match tasks
-        .start(route, async move {
+        .start_cancellable(route, move |cancellation| async move {
             task_started.notify_one();
-            std::future::pending::<crate::errors::Result<()>>().await
+            cancellation.cancelled().await;
+            Err(crate::errors::TraceDecayError::Config {
+                message: "project open cancelled".to_string(),
+            })
         })
         .await
     {
@@ -384,6 +387,95 @@ async fn project_open_task_shutdown_cancels_and_clears_route_registry() {
             .is_err(),
         "cancelled open tasks must wake waiters instead of retaining them"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn project_open_shutdown_waits_for_safe_unit_then_joins() {
+    let tasks = super::super::ProjectOpenTasks::default();
+    let route = project_open_test_route("cooperative-shutdown");
+    let lifecycle = DaemonLifecycle::default();
+    let store_administration = StoreAdministration::default();
+    let (cancellation_tx, cancellation_rx) = tokio::sync::oneshot::channel();
+    let (unit_started_tx, unit_started_rx) = tokio::sync::oneshot::channel();
+    let (unit_release_tx, unit_release_rx) = tokio::sync::oneshot::channel();
+    let (unit_finished_tx, unit_finished_rx) = tokio::sync::oneshot::channel();
+
+    let task_lifecycle = lifecycle.clone();
+    let task_administration = store_administration.clone();
+    let state = match tasks
+        .start_cancellable(route, move |cancellation| async move {
+            let _activity = task_lifecycle
+                .try_enter()
+                .expect("project open lifecycle activity");
+            let published_cancellation = cancellation.clone();
+            task_administration
+                .with_writer_until_cancelled(&cancellation, move || async move {
+                    cancellation_tx
+                        .send(published_cancellation)
+                        .expect("publish project-open cancellation");
+                    unit_started_tx.send(()).expect("publish safe unit start");
+                    unit_release_rx.await.expect("release safe unit");
+                    unit_finished_tx
+                        .send(())
+                        .expect("publish safe unit completion");
+                })
+                .await
+                .expect("safe unit acquired writer administration");
+            cancellation.cancelled().await;
+            Err(crate::errors::TraceDecayError::Config {
+                message: "project open cancelled after safe unit".to_string(),
+            })
+        })
+        .await
+    {
+        super::super::ProjectOpenTaskClaim::InFlight(state) => state,
+        super::super::ProjectOpenTaskClaim::Failed(_) => panic!("project open must start"),
+        super::super::ProjectOpenTaskClaim::Saturated => panic!("project open must fit"),
+    };
+    let cancellation = cancellation_rx
+        .await
+        .expect("project-open cancellation token");
+    unit_started_rx.await.expect("safe unit started");
+
+    let shutdown_tasks = tasks.clone();
+    let mut shutdown = tokio::spawn(async move { shutdown_tasks.shutdown().await });
+    tokio::time::timeout(
+        tokio::time::Duration::from_secs(1),
+        cancellation.cancelled(),
+    )
+    .await
+    .expect("shutdown must request cooperative cancellation");
+    assert!(
+        !shutdown.is_finished(),
+        "shutdown must not abort a transactionally safe unit in progress"
+    );
+
+    unit_release_tx.send(()).expect("release safe unit");
+    unit_finished_rx.await.expect("safe unit completed");
+    let cooperative = tokio::time::timeout(tokio::time::Duration::from_secs(1), &mut shutdown)
+        .await
+        .expect("cooperative project-open shutdown timed out")
+        .expect("project-open shutdown task");
+    assert!(
+        cooperative,
+        "normal warm-up cancellation must not reach its timeout guard"
+    );
+    tokio::time::timeout(
+        tokio::time::Duration::from_secs(1),
+        lifecycle.wait_for_idle(),
+    )
+    .await
+    .expect("client-drain lifecycle activity must be released");
+    tokio::time::timeout(
+        tokio::time::Duration::from_secs(1),
+        store_administration.with_writer(|| async {}),
+    )
+    .await
+    .expect("server shutdown must reacquire writer administration");
+    assert_eq!(tasks.tracked_route_count().await, 0);
+    super::super::ProjectOpenTasks::wait_for_completion(state)
+        .await
+        .expect_err("cancelled project open must report a terminal failure");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -756,7 +848,7 @@ async fn project_warmup_settles_when_drain_is_simultaneously_ready() {
             project_open_test_route("simultaneous-drain"),
             std::path::PathBuf::from("/projects/simultaneous-drain"),
             Some(initialize_request.clone()),
-            async move {
+            move |_| async move {
                 open_polled_by_future.notify_one();
                 open_lifecycle.wait_for_draining().await;
                 open_won_by_future.store(true, std::sync::atomic::Ordering::Release);
