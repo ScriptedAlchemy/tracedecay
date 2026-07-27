@@ -47,7 +47,7 @@
 - Produces `DatabaseFactStore::export_owner_archive` and `DatabaseFactStore::import_owner_archive`.
 
 - [ ] Seed a comprehensive owner through production writers, including purge, feedback, relations, proposals, mappings, quarantine, retrieval provenance, and evidence assembly.
-- [ ] Write failing export/import contract tests that delete the source and query current facts and lineage through `MemoryApplication`.
+- [x] Write failing export/import contract tests that delete the source and query current facts and lineage through `MemoryApplication`.
 - [x] Implement adapter-local row decoding, closure validation, FK-safe transactional import, exact conflict checks, and derived-state rebuild.
 - [x] Run only archive store contract tests until green.
 - [x] Commit as `feat(memory): add V2 archive store ports`.
@@ -76,8 +76,8 @@
 **Interfaces:**
 - Consumes the durable project-memory cutover.
 
-- [ ] Replace raw branch-memory fixture writes with production archive writers.
-- [ ] Verify stable FactId and public current/lineage reads after actual source deletion.
-- [ ] Run the exact nine lifecycle tests and focused archive/cutover contract target.
-- [ ] Merge current integration, run default check, workspace all-feature/all-target check, and formatting.
+- [x] Replace raw branch-memory fixture writes with production archive writers.
+- [x] Verify stable FactId and public current/lineage reads after actual source deletion.
+- [x] Run the exact nine lifecycle tests and focused archive/cutover contract target.
+- [x] Merge current integration, run default check, workspace all-feature/all-target check, and formatting.
 - [ ] Commit any integration-only repairs conventionally.
