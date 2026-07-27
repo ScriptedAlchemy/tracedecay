@@ -241,9 +241,11 @@ fn database_recovery_guidance_names_the_preserved_recovery_set() {
 
     let branch_db = PathBuf::from("/profile/projects/proj_test/branches/feature.db");
     let branch_guidance = database_recovery_guidance(&branch_db);
-    assert!(branch_guidance.contains("/profile/projects/proj_test/dirty"));
-    assert!(branch_guidance.contains("/profile/projects/proj_test/sessions.db"));
-    assert!(!branch_guidance.contains("/branches/sessions.db"));
+    let branches_root = branch_db.parent().unwrap();
+    let data_root = branches_root.parent().unwrap();
+    assert!(branch_guidance.contains(&data_root.join("dirty").display().to_string()));
+    assert!(branch_guidance.contains(&data_root.join("sessions.db").display().to_string()));
+    assert!(!branch_guidance.contains(&branches_root.join("sessions.db").display().to_string()));
 }
 
 #[tokio::test]

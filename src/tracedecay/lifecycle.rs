@@ -1207,7 +1207,11 @@ fn preserve_corrupt_branch_store(store_layout: &StoreLayout, db_path: &Path) -> 
                 ),
             });
         }
-        std::fs::File::open(&target)
+        // Windows `FlushFileBuffers` requires a write handle, so a read-only
+        // open would fail the durability sync with "access is denied".
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&target)
             .and_then(|file| file.sync_all())
             .map_err(|error| TraceDecayError::Config {
                 message: format!(
