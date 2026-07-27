@@ -889,19 +889,38 @@ fn create_private_directory_all(path: &Path) -> io::Result<()> {
     } else {
         std::env::current_dir()?.join(path)
     };
+    // Walk up only as far as the deepest component that already exists. The
+    // components below it are the ones this call creates, and the loop below
+    // re-checks each of them. Ancestors above it belong to the operating system
+    // and are routinely symlinks -- macOS reaches the default temporary
+    // directory through `/var` -> `/private/var` -- so requiring the whole
+    // chain to be symlink-free rejected every scratch path on that platform.
+    // The scratch root's own owner and mode are verified by
+    // `ensure_private_root`, which is what actually keeps it private.
     let mut missing = Vec::new();
     let mut current = path.as_path();
-    let mut collect_missing = true;
     loop {
+        let is_ancestor = current != path.as_path();
         match fs::symlink_metadata(current) {
+            // The target itself must never be a symlink; an ancestor may be, so
+            // long as it leads to a directory.
+            Ok(metadata) if is_ancestor && metadata.file_type().is_symlink() => {
+                if !fs::metadata(current)?.is_dir() {
+                    return Err(io::Error::other(format!(
+                        "SQLite scratch path component '{}' is not a regular directory",
+                        current.display()
+                    )));
+                }
+                break;
+            }
             Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
                 return Err(io::Error::other(format!(
                     "SQLite scratch path component '{}' is not a regular directory",
                     current.display()
                 )));
             }
-            Ok(_) => collect_missing = false,
-            Err(error) if error.kind() == io::ErrorKind::NotFound && collect_missing => {
+            Ok(_) => break,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 missing.push(current.to_path_buf());
             }
             Err(error) => return Err(error),
@@ -1350,9 +1369,13 @@ mod tests {
         }
     }
 
+    /// macOS reaches its default temporary directory through the system
+    /// `/var` -> `/private/var` symlink, so a symlinked ancestor that leads to a
+    /// directory has to be usable. The scratch root's own owner and mode are
+    /// what keep it private.
     #[cfg(unix)]
     #[tokio::test]
-    async fn nested_scratch_root_rejects_a_symlinked_component() {
+    async fn nested_scratch_root_accepts_a_symlinked_ancestor() {
         use std::os::unix::fs::symlink;
 
         let temp = TempDir::new().unwrap();
@@ -1367,14 +1390,35 @@ mod tests {
             .execute_batch("CREATE TABLE durable(value TEXT NOT NULL);")
             .unwrap();
 
-        let error =
-            match SnapshotSet::capture_in(&[path], &linked.join("existing/sqlite-read")).await {
-                Ok(_) => panic!("symlinked scratch ancestry must be rejected"),
-                Err(error) => error,
-            };
+        SnapshotSet::capture_in(&[path], &linked.join("existing/sqlite-read"))
+            .await
+            .expect("a symlinked ancestor that leads to a directory is usable");
+        assert!(real.join("existing/sqlite-read").is_dir());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn scratch_root_rejects_a_symlinked_target() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("source.db");
+        let real = temp.path().join("real");
+        let linked = temp.path().join("linked");
+        fs::create_dir(&real).unwrap();
+        symlink(&real, &linked).unwrap();
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch("CREATE TABLE durable(value TEXT NOT NULL);")
+            .unwrap();
+
+        let error = match SnapshotSet::capture_in(&[path], &linked).await {
+            Ok(_) => panic!("a symlinked scratch root must be rejected"),
+            Err(error) => error,
+        };
 
         assert!(
-            error.to_string().contains("not a regular directory"),
+            error.to_string().contains("not a directory"),
             "unexpected error: {error}"
         );
     }

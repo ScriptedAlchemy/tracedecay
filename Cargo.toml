@@ -328,9 +328,21 @@ futures-util = "0.3.33"
 flate2 = "1"
 tar = "0.4"
 
+# `statfs(2)` for daemon store-locality detection (src/daemon/store_runtime/
+# resolver.rs). Linux reads `/proc/self/mountinfo` instead; macOS has no such
+# file, and `MNT_LOCAL` is the kernel's direct answer to "is this volume local".
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
 [target.'cfg(windows)'.dependencies]
 fsys = "1.1.0"
 zip = { version = "8", default-features = false, features = ["deflate"] }
+# Volume APIs for the same store-locality detection: `GetDriveTypeW` is what
+# separates a network drive from attached storage on Windows.
+windows-sys = { version = "0.61", features = [
+    "Win32_Storage_FileSystem",
+    "Win32_System_WindowsProgramming",
+] }
 
 [build-dependencies]
 logo-art = "0.2"

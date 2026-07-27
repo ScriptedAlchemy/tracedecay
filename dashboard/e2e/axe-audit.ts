@@ -289,6 +289,12 @@ function canary(id: string, route: string, drive?: (page: Page) => Promise<void>
     route,
     proves: `THE GATE ITSELF on ${route} — a known-inaccessible element is reported here, so this route's zeros are measurements`,
     overrides: {},
+    // The canaries carry the Plan 11 viewport/zoom/media matrix for their
+    // routes, so every 390x844, 400%-zoom and forced-colors scan in the run is
+    // one where a planted violation had to be reported for the scan to count.
+    // A widened matrix whose new combinations silently stopped detecting
+    // anything would otherwise read as five more routes scoring clean.
+    matrix: true,
     // Checked on every scan, not once: the seeding is re-applied after each
     // navigation, so each viewport and theme is an independent confirmation
     // that the scan running at that size is live. It also means a breakage
@@ -781,6 +787,11 @@ const SCENARIOS: readonly Scenario[] = [
     route: '/brain',
     proves: 'Brain definition lists are well-formed (definition-list / dlitem)',
     overrides: {},
+    // Brain is the one audited route with no canary, and its definition lists
+    // are the densest reflow subject in the app, so it carries the matrix for
+    // /brain. Its zeros lean on the five canaried routes scanning the same
+    // combinations in the same run rather than on a planted defect of its own.
+    matrix: true,
     assert: async (page) => {
       // Structural check independent of axe: every dt/dd sits directly in a dl
       // or in a div wrapper whose parent is the dl, and each group's dt

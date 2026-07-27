@@ -26,7 +26,10 @@ afterAll(() => server.close());
 const FAULTS: ReadonlyArray<{ fault: HttpFault; kind: string; detail: string | null }> = [
   { fault: 'server_error', kind: 'error', detail: 'HTTP 500' },
   { fault: 'not_found', kind: 'error', detail: 'HTTP 404' },
-  { fault: 'forbidden', kind: 'error', detail: 'HTTP 403' },
+  // A refused read is its own state, carrying no status code: the chip label
+  // and its guidance already say the store was reachable and would not answer.
+  { fault: 'unauthorized', kind: 'unauthorized', detail: null },
+  { fault: 'forbidden', kind: 'denied', detail: null },
   { fault: 'network_error', kind: 'offline', detail: null },
   { fault: 'malformed_body', kind: 'unsupported_schema', detail: null },
   { fault: 'unsupported_shape', kind: 'unsupported_schema', detail: null },
