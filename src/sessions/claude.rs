@@ -27,7 +27,7 @@ use crate::accounting::parser::parse_timestamp;
 use crate::sessions::SessionMessageRecord;
 use crate::sessions::shared::{
     ProjectRootMatcherCache, StoredCursor, TranscriptLocation, TranscriptLocationMetadataKeys,
-    append_location_metadata, append_tool_calls_metadata, append_tool_event_metadata,
+    append_location_metadata_cached, append_tool_calls_metadata, append_tool_event_metadata,
     append_usage_metadata, content_storage_text_and_tools, preview_truncated, title_from_messages,
 };
 use crate::sessions::source::{
@@ -240,6 +240,7 @@ impl TranscriptSource for ClaudeSource {
                 line.offset,
                 session_cwd.as_deref(),
                 &mut accumulator,
+                &self.project_matchers,
             )
             .or_else(|| {
                 system_hook_message_from_line(
@@ -289,6 +290,7 @@ impl TranscriptSource for ClaudeSource {
                 session_cwd.as_deref(),
                 subagent.as_ref(),
                 &accumulator,
+                &self.project_matchers,
             ))
             .ok(),
             parent_session_id: subagent.as_ref().map(|info| info.parent_session_id.clone()),
@@ -517,6 +519,7 @@ fn message_from_line(
     offset: i64,
     session_cwd: Option<&Path>,
     accumulator: &mut SessionAccumulator,
+    location_cache: &ProjectRootMatcherCache,
 ) -> Option<SessionMessageRecord> {
     let kind = record.get("type").and_then(Value::as_str)?;
     if kind != "user" && kind != "assistant" {
@@ -590,6 +593,7 @@ fn message_from_line(
             content,
             session_cwd,
             accumulator,
+            location_cache,
         ))
         .ok(),
     })
@@ -1123,16 +1127,18 @@ fn session_metadata(
     session_cwd: Option<&Path>,
     subagent: Option<&ClaudeSubagentInfo>,
     accumulator: &SessionAccumulator,
+    location_cache: &ProjectRootMatcherCache,
 ) -> Value {
     let mut metadata = Map::new();
     metadata.insert(
         "source".to_string(),
         Value::String("claude_transcript".to_string()),
     );
-    append_location_metadata(
+    append_location_metadata_cached(
         &mut metadata,
         CLAUDE_SESSION_LOCATION_KEYS,
         TranscriptLocation::new(session_cwd, "transcript_session"),
+        location_cache,
     );
 
     // Subagent spawn provenance (from the sibling agent-<id>.meta.json and the
@@ -1184,6 +1190,7 @@ fn message_metadata(
     content: &Value,
     session_cwd: Option<&Path>,
     accumulator: &mut SessionAccumulator,
+    location_cache: &ProjectRootMatcherCache,
 ) -> Value {
     let mut metadata = Map::new();
     metadata.insert(
@@ -1197,10 +1204,11 @@ fn message_metadata(
     } else {
         (session_cwd, "transcript_session")
     };
-    append_location_metadata(
+    append_location_metadata_cached(
         &mut metadata,
         CLAUDE_MESSAGE_LOCATION_KEYS,
         TranscriptLocation::new(location_cwd, location_provenance),
+        location_cache,
     );
     if let Some(branch) = record
         .get("gitBranch")
@@ -1412,8 +1420,16 @@ mod tests {
         let path = Path::new("/tmp/sess.jsonl");
 
         let mut accumulator = SessionAccumulator::default();
-        let message = message_from_line(&record, "sess", path, 10, None, &mut accumulator)
-            .expect("assistant message row");
+        let message = message_from_line(
+            &record,
+            "sess",
+            path,
+            10,
+            None,
+            &mut accumulator,
+            &ProjectRootMatcherCache::default(),
+        )
+        .expect("assistant message row");
         assert_eq!(message.message_id, "msg_1");
         assert_eq!(message.kind.as_deref(), Some("message"));
         assert!(!message.text.contains("First I inspect the parser"));
@@ -1440,6 +1456,56 @@ mod tests {
         assert_eq!(metadata["parent_message_id"], "msg_1");
         assert_eq!(metadata["thinking_blocks"], 2);
         assert!(metadata.get("redacted_thinking_blocks").is_none());
+    }
+
+    #[test]
+    fn claude_message_metadata_reuses_worktree_for_repeated_cwd() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let project_root = temp.path().join("repo");
+        let nested_cwd = project_root.join("packages/app");
+        std::fs::create_dir_all(&nested_cwd).expect("nested cwd");
+        let status = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&project_root)
+            .status()
+            .expect("git init");
+        assert!(status.success());
+
+        let record = assistant_record(&json!([{"type": "text", "text": "Repeated cwd metadata."}]));
+        let path = temp.path().join("session.jsonl");
+        let cache = ProjectRootMatcherCache::default();
+        let mut accumulator = SessionAccumulator::default();
+        let first = message_from_line(
+            &record,
+            "sess",
+            &path,
+            10,
+            Some(&nested_cwd),
+            &mut accumulator,
+            &cache,
+        )
+        .expect("first message");
+        let first_metadata: Value =
+            serde_json::from_str(first.metadata_json.as_deref().unwrap()).unwrap();
+        let first_worktree = first_metadata["claude_message_worktree"].clone();
+        assert!(first_worktree.is_string());
+
+        std::fs::rename(project_root.join(".git"), project_root.join(".git.hidden"))
+            .expect("hide git metadata after first lookup");
+
+        let second = message_from_line(
+            &record,
+            "sess",
+            &path,
+            20,
+            Some(&nested_cwd),
+            &mut accumulator,
+            &cache,
+        )
+        .expect("second message");
+        let second_metadata: Value =
+            serde_json::from_str(second.metadata_json.as_deref().unwrap()).unwrap();
+        assert_eq!(second_metadata["claude_message_worktree"], first_worktree);
     }
 
     #[test]

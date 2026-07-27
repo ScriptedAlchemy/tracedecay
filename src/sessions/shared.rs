@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use serde_json::Value;
 
@@ -217,6 +217,7 @@ impl ProjectRootMatcher {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ProjectRootMatcherCache {
     matchers: Arc<Mutex<HashMap<PathBuf, Arc<ProjectRootMatcher>>>>,
+    location_worktrees: Arc<Mutex<HashMap<PathBuf, Arc<OnceLock<Option<PathBuf>>>>>>,
 }
 
 impl ProjectRootMatcherCache {
@@ -229,6 +230,27 @@ impl ProjectRootMatcherCache {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .entry(key)
             .or_insert_with(|| Arc::new(ProjectRootMatcher::new(project_root)))
+            .clone()
+    }
+
+    /// Resolve a transcript cwd's worktree once for this ingest source.
+    ///
+    /// Location metadata is added per message, so one transcript can otherwise
+    /// repeat git discovery thousands of times for the same cwd. Keep this
+    /// source-lifetime like the project matchers and use the bounded CLI-first
+    /// identity path instead of opening the repository object database.
+    pub(crate) fn git_worktree_root(&self, cwd: &Path) -> Option<PathBuf> {
+        let resolution = self
+            .location_worktrees
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(cwd.to_path_buf())
+            .or_insert_with(|| Arc::new(OnceLock::new()))
+            .clone();
+        resolution
+            .get_or_init(|| {
+                crate::worktree::git_repo_identity(cwd).map(|identity| identity.worktree_root)
+            })
             .clone()
     }
 }
@@ -442,6 +464,34 @@ pub(crate) fn append_location_metadata(
     keys: TranscriptLocationMetadataKeys,
     location: TranscriptLocation<'_>,
 ) {
+    append_location_metadata_with_worktree(
+        map,
+        keys,
+        location,
+        location.cwd.and_then(crate::worktree::git_worktree_root),
+    );
+}
+
+pub(crate) fn append_location_metadata_cached(
+    map: &mut serde_json::Map<String, Value>,
+    keys: TranscriptLocationMetadataKeys,
+    location: TranscriptLocation<'_>,
+    cache: &ProjectRootMatcherCache,
+) {
+    append_location_metadata_with_worktree(
+        map,
+        keys,
+        location,
+        location.cwd.and_then(|cwd| cache.git_worktree_root(cwd)),
+    );
+}
+
+fn append_location_metadata_with_worktree(
+    map: &mut serde_json::Map<String, Value>,
+    keys: TranscriptLocationMetadataKeys,
+    location: TranscriptLocation<'_>,
+    worktree: Option<PathBuf>,
+) {
     let Some(cwd) = location.cwd else {
         return;
     };
@@ -449,7 +499,7 @@ pub(crate) fn append_location_metadata(
         keys.cwd.to_string(),
         Value::String(cwd.to_string_lossy().to_string()),
     );
-    if let Some(worktree) = crate::worktree::git_worktree_root(cwd) {
+    if let Some(worktree) = worktree {
         map.insert(
             keys.worktree.to_string(),
             Value::String(worktree.to_string_lossy().to_string()),
@@ -599,12 +649,57 @@ pub(crate) fn title_from_messages(messages: &[SessionMessageRecord]) -> Option<S
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use serde_json::{Value, json};
     use tempfile::TempDir;
 
     use super::ProjectRootMatcher;
+    use super::ProjectRootMatcherCache;
+    use super::TranscriptLocation;
+    use super::TranscriptLocationMetadataKeys;
+    use super::append_location_metadata_cached;
     use super::one_line_truncated;
     use super::usage_counters_from;
+
+    #[test]
+    fn location_metadata_cache_reuses_worktree_root_for_repeated_cwd() {
+        let temp = TempDir::new().expect("temp dir");
+        let project_root = temp.path().join("repo");
+        let nested_cwd = project_root.join("packages/app");
+        std::fs::create_dir_all(&nested_cwd).expect("nested cwd");
+        let status = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&project_root)
+            .status()
+            .expect("git init");
+        assert!(status.success());
+
+        let cache = ProjectRootMatcherCache::default();
+        let keys = TranscriptLocationMetadataKeys::new("cwd", "worktree", "provenance");
+        let location = TranscriptLocation::new(Some(&nested_cwd), "test");
+        let mut first = serde_json::Map::new();
+        append_location_metadata_cached(&mut first, keys, location, &cache);
+        assert_eq!(
+            first.get("worktree").and_then(Value::as_str),
+            Some(
+                project_root
+                    .canonicalize()
+                    .expect("canonical project root")
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        );
+
+        std::fs::rename(project_root.join(".git"), project_root.join(".git.hidden"))
+            .expect("hide git metadata after first lookup");
+
+        let mut second = serde_json::Map::new();
+        append_location_metadata_cached(&mut second, keys, location, &cache);
+        assert_eq!(
+            second.get("worktree").and_then(Value::as_str),
+            first.get("worktree").and_then(Value::as_str),
+            "repeated cwd should reuse the source-lifetime worktree resolution"
+        );
+    }
 
     #[test]
     fn project_root_matcher_caches_repeated_path_membership() {

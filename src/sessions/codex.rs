@@ -260,6 +260,7 @@ impl TranscriptSource for CodexSource {
                         &mut message,
                         context_state.cwd.as_deref(),
                         context_state.git.as_ref(),
+                        &self.project_matchers,
                     );
                     messages.push(message);
                 }
@@ -283,6 +284,7 @@ impl TranscriptSource for CodexSource {
                     &mut message,
                     context_state.cwd.as_deref(),
                     context_state.git.as_ref(),
+                    &self.project_matchers,
                 );
                 messages.push(message);
                 continue;
@@ -298,6 +300,7 @@ impl TranscriptSource for CodexSource {
                     &mut message,
                     context_state.cwd.as_deref(),
                     context_state.git.as_ref(),
+                    &self.project_matchers,
                 );
                 messages.push(message);
                 continue;
@@ -313,6 +316,7 @@ impl TranscriptSource for CodexSource {
                     &mut message,
                     context_state.cwd.as_deref(),
                     context_state.git.as_ref(),
+                    &self.project_matchers,
                 );
                 messages.push(message);
                 continue;
@@ -331,6 +335,7 @@ impl TranscriptSource for CodexSource {
                     &mut message,
                     context_state.cwd.as_deref(),
                     context_state.git.as_ref(),
+                    &self.project_matchers,
                 );
                 messages.push(message);
                 continue;
@@ -346,6 +351,7 @@ impl TranscriptSource for CodexSource {
                     &mut message,
                     context_state.cwd.as_deref(),
                     context_state.git.as_ref(),
+                    &self.project_matchers,
                 );
                 messages.push(message);
                 continue;
@@ -366,6 +372,7 @@ impl TranscriptSource for CodexSource {
                     &mut message,
                     context_state.cwd.as_deref(),
                     context_state.git.as_ref(),
+                    &self.project_matchers,
                 );
                 messages.push(message);
             }
@@ -380,6 +387,7 @@ impl TranscriptSource for CodexSource {
                 &mut message,
                 last_in_scope_cwd.as_deref(),
                 last_in_scope_git.as_ref(),
+                &self.project_matchers,
             );
             messages.push(message);
         }
@@ -399,6 +407,7 @@ impl TranscriptSource for CodexSource {
             metadata_json: context::session_metadata_json(
                 &meta,
                 self.user_scope.is_none().then_some(&structured.summary),
+                &self.project_matchers,
             ),
             parent_session_id: meta.parent_session_id.clone(),
             is_subagent: meta.is_subagent,
@@ -1656,11 +1665,18 @@ mod source_matcher_cache_tests {
             .parse_new(&first_path, StoredCursor::default(), &project_root, None)
             .unwrap();
         assert_eq!(first.messages.len(), 1);
+        let first_metadata: Value =
+            serde_json::from_str(first.messages[0].metadata_json.as_deref().unwrap()).unwrap();
+        let first_worktree = first_metadata["codex_turn_worktree"].clone();
+        assert!(first_worktree.is_string());
 
         std::fs::rename(project_root.join(".git"), project_root.join(".git.hidden")).unwrap();
         let second = source
             .parse_new(&second_path, StoredCursor::default(), &project_root, None)
             .unwrap();
         assert_eq!(second.messages.len(), 1);
+        let second_metadata: Value =
+            serde_json::from_str(second.messages[0].metadata_json.as_deref().unwrap()).unwrap();
+        assert_eq!(second_metadata["codex_turn_worktree"], first_worktree);
     }
 }
