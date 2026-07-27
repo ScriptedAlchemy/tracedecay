@@ -25,7 +25,11 @@ export function Shell() {
       <div className="flex min-w-0 flex-1 flex-col">
         <ScopeUrlSync />
         <ScopeBar onOpenPalette={() => setPaletteOpen(true)} />
-        <main id="td-main" className="min-h-0 flex-1 overflow-auto">
+        {/* Named because it is also the page's scroll container: a workspace
+          * whose content outruns the viewport scrolls HERE rather than losing
+          * the overflow, and Plan 11 licenses internal scrolling for labelled
+          * regions only. */}
+        <main id="td-main" aria-label="Active workspace" className="min-h-0 flex-1 overflow-auto">
           <Outlet />
         </main>
         <StatusStrip />

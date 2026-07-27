@@ -439,7 +439,11 @@ function RepoTable({
   return (
     <section aria-label="Repositories" className="flex min-w-0 flex-col">
       <Legend>repositories · most recently indexed first</Legend>
-      <div className="mt-1.5 max-h-80 overflow-auto border border-edge-subtle">
+      <div
+        role="region"
+        aria-label="Repositories table"
+        className="mt-1.5 max-h-80 overflow-auto border border-edge-subtle"
+      >
         <table className="w-full border-collapse text-2xs">
           <caption className="sr-only">
             Every repository on the field, most recently indexed first, with its
