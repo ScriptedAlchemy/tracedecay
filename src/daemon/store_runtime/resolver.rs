@@ -951,23 +951,225 @@ enum FilesystemSafety {
     NotDetectable { filesystem_type: String },
 }
 
+const UNKNOWN_FILESYSTEM_TYPE: &str = "unknown";
+
+fn undetectable_filesystem() -> FilesystemSafety {
+    FilesystemSafety::NotDetectable {
+        filesystem_type: UNKNOWN_FILESYSTEM_TYPE.to_owned(),
+    }
+}
+
+/// Platform-reported evidence about the volume backing one path.
+///
+/// `locally_attached` carries the operating system's own answer to "is this
+/// storage attached to this machine": macOS reports `MNT_LOCAL` in `statfs`,
+/// and Windows distinguishes `DRIVE_REMOTE` from the locally attached drive
+/// types. Linux exposes no equivalent per-mount flag, so it leaves this `None`
+/// and classification falls back to the mount's filesystem-type name alone.
+struct FilesystemEvidence {
+    filesystem_type: String,
+    locally_attached: Option<bool>,
+}
+
+/// Decides locality from platform evidence, fail-closed on anything ambiguous.
+///
+/// Every platform funnels through here so the three outcomes stay identical
+/// across targets, and so the decision itself is testable on any host.
+fn classify_filesystem(evidence: FilesystemEvidence) -> FilesystemSafety {
+    let FilesystemEvidence {
+        filesystem_type,
+        locally_attached,
+    } = evidence;
+    let filesystem_type = if filesystem_type.is_empty() {
+        UNKNOWN_FILESYSTEM_TYPE.to_owned()
+    } else {
+        filesystem_type
+    };
+
+    if locally_attached == Some(false) || is_network_filesystem(&filesystem_type) {
+        return FilesystemSafety::Network { filesystem_type };
+    }
+    // A positive kernel locality flag is stronger evidence than any name table,
+    // but an unnamed filesystem is still undetectable: refuse rather than mount
+    // a volume we cannot describe in the locator's metadata.
+    if locally_attached == Some(true) && filesystem_type != UNKNOWN_FILESYSTEM_TYPE {
+        return FilesystemSafety::Local { filesystem_type };
+    }
+    if is_known_local_filesystem(&filesystem_type) {
+        return FilesystemSafety::Local { filesystem_type };
+    }
+    FilesystemSafety::NotDetectable { filesystem_type }
+}
+
+/// Returns the deepest ancestor of `path` that exists, `path` itself included.
+///
+/// A locator legitimately names a store file or directory that resolution has
+/// not created yet. Linux answers for such a path from the mount table without
+/// touching it; the query-by-path interfaces on other platforms need a real
+/// object, and the prospective path's locality is that of the nearest directory
+/// that will contain it.
+#[cfg(any(target_os = "macos", windows))]
+fn nearest_existing_ancestor(path: &Path) -> Option<&Path> {
+    let mut candidate = Some(path);
+    while let Some(current) = candidate {
+        if fs::symlink_metadata(current).is_ok() {
+            return Some(current);
+        }
+        candidate = current.parent();
+    }
+    None
+}
+
 #[cfg(target_os = "linux")]
 fn local_filesystem_safety(path: &Path) -> FilesystemSafety {
     let Ok(mountinfo) = fs::read_to_string("/proc/self/mountinfo") else {
-        return FilesystemSafety::NotDetectable {
-            filesystem_type: "unknown".to_owned(),
-        };
+        return undetectable_filesystem();
     };
     filesystem_safety_from_linux_mountinfo(path, &mountinfo)
 }
 
-#[cfg(not(target_os = "linux"))]
-fn local_filesystem_safety(_path: &Path) -> FilesystemSafety {
-    // No portable std-only mount classifier exists on these targets. Returning
-    // unavailable is safer than assuming an arbitrary path is local.
-    FilesystemSafety::NotDetectable {
-        filesystem_type: "unknown".to_owned(),
+/// Classifies a macOS path from `statfs(2)`.
+///
+/// `statfs` answers for the exact path rather than for an enumerated mount
+/// table, so no longest-prefix matching is needed. `MNT_LOCAL` is the kernel's
+/// own record that the mount is served by hardware attached to this machine.
+#[cfg(target_os = "macos")]
+fn local_filesystem_safety(path: &Path) -> FilesystemSafety {
+    use std::ffi::CString;
+    use std::mem::MaybeUninit;
+    use std::os::unix::ffi::OsStrExt;
+
+    let Some(existing) = nearest_existing_ancestor(path) else {
+        return undetectable_filesystem();
+    };
+    let Ok(path) = CString::new(existing.as_os_str().as_bytes()) else {
+        return undetectable_filesystem();
+    };
+    let mut buffer = MaybeUninit::<libc::statfs>::uninit();
+    // SAFETY: `path` is a live NUL-terminated C string for the whole call, and
+    // `buffer` is a live, correctly sized, correctly aligned `statfs` slot that
+    // the kernel fully initializes when it reports success.
+    let status = unsafe { libc::statfs(path.as_ptr(), buffer.as_mut_ptr()) };
+    if status != 0 {
+        return undetectable_filesystem();
     }
+    // SAFETY: `statfs` returned success, so it initialized `buffer`.
+    let buffer = unsafe { buffer.assume_init() };
+
+    classify_filesystem(FilesystemEvidence {
+        filesystem_type: nul_terminated_c_string(&buffer.f_fstypename),
+        locally_attached: Some((buffer.f_flags & (libc::MNT_LOCAL as u32)) != 0),
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn nul_terminated_c_string(field: &[libc::c_char]) -> String {
+    let bytes = field
+        .iter()
+        .take_while(|unit| **unit != 0)
+        .map(|unit| *unit as u8)
+        .collect::<Vec<u8>>();
+    String::from_utf8(bytes)
+        .map(|value| value.to_ascii_lowercase())
+        .unwrap_or_default()
+}
+
+/// Classifies a Windows path from its volume mount point.
+///
+/// `GetVolumePathNameW` maps the path onto the volume that serves it, including
+/// volumes mounted into a directory and UNC shares. `GetDriveTypeW` then
+/// separates `DRIVE_REMOTE` from locally attached storage, and
+/// `GetVolumeInformationW` names the filesystem for the locator's metadata.
+#[cfg(windows)]
+fn local_filesystem_safety(path: &Path) -> FilesystemSafety {
+    use std::os::windows::ffi::OsStrExt;
+
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetDriveTypeW, GetVolumeInformationW, GetVolumePathNameW,
+    };
+    use windows_sys::Win32::System::WindowsProgramming::{
+        DRIVE_CDROM, DRIVE_FIXED, DRIVE_RAMDISK, DRIVE_REMOTE, DRIVE_REMOVABLE,
+    };
+
+    // `MAX_PATH` plus the terminating NUL, the buffer size both
+    // `GetVolumePathNameW` and `GetVolumeInformationW` document.
+    const WIDE_BUFFER_CAPACITY: usize = 261;
+
+    let Some(existing) = nearest_existing_ancestor(path) else {
+        return undetectable_filesystem();
+    };
+    let mut requested = existing.as_os_str().encode_wide().collect::<Vec<u16>>();
+    if requested.contains(&0) {
+        return undetectable_filesystem();
+    }
+    requested.push(0);
+
+    let mut volume_root = [0u16; WIDE_BUFFER_CAPACITY];
+    // SAFETY: `requested` is NUL-terminated and outlives the call, and the
+    // declared capacity matches the `volume_root` buffer being written.
+    let resolved = unsafe {
+        GetVolumePathNameW(
+            requested.as_ptr(),
+            volume_root.as_mut_ptr(),
+            volume_root.len() as u32,
+        )
+    };
+    if resolved == 0 {
+        return undetectable_filesystem();
+    }
+
+    // SAFETY: the successful call above NUL-terminated `volume_root`.
+    let drive_type = unsafe { GetDriveTypeW(volume_root.as_ptr()) };
+    let locally_attached = match drive_type {
+        DRIVE_REMOTE => Some(false),
+        DRIVE_FIXED | DRIVE_REMOVABLE | DRIVE_RAMDISK | DRIVE_CDROM => Some(true),
+        // `DRIVE_UNKNOWN` and `DRIVE_NO_ROOT_DIR` carry no locality evidence,
+        // so fall back to the filesystem name the way Linux does.
+        _ => None,
+    };
+
+    let mut filesystem_name = [0u16; WIDE_BUFFER_CAPACITY];
+    // SAFETY: `volume_root` is NUL-terminated, the null out-pointers are the
+    // documented way to skip the fields we do not read, and the declared
+    // capacity matches the `filesystem_name` buffer being written.
+    let described = unsafe {
+        GetVolumeInformationW(
+            volume_root.as_ptr(),
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            filesystem_name.as_mut_ptr(),
+            filesystem_name.len() as u32,
+        )
+    };
+    let filesystem_type = if described == 0 {
+        String::new()
+    } else {
+        nul_terminated_wide_string(&filesystem_name)
+    };
+
+    classify_filesystem(FilesystemEvidence {
+        filesystem_type,
+        locally_attached,
+    })
+}
+
+#[cfg(windows)]
+fn nul_terminated_wide_string(field: &[u16]) -> String {
+    let length = field
+        .iter()
+        .position(|unit| *unit == 0)
+        .unwrap_or(field.len());
+    String::from_utf16_lossy(&field[..length]).to_ascii_lowercase()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn local_filesystem_safety(_path: &Path) -> FilesystemSafety {
+    // No mount classifier is implemented for these targets. Returning
+    // unavailable is safer than assuming an arbitrary path is local.
+    undetectable_filesystem()
 }
 
 #[cfg(target_os = "linux")]
@@ -1000,17 +1202,12 @@ fn filesystem_safety_from_linux_mountinfo(path: &Path, mountinfo: &str) -> Files
     }
 
     let Some((_, filesystem_type)) = best_match else {
-        return FilesystemSafety::NotDetectable {
-            filesystem_type: "unknown".to_owned(),
-        };
+        return undetectable_filesystem();
     };
-    if is_network_filesystem(&filesystem_type) {
-        FilesystemSafety::Network { filesystem_type }
-    } else if is_known_local_filesystem(&filesystem_type) {
-        FilesystemSafety::Local { filesystem_type }
-    } else {
-        FilesystemSafety::NotDetectable { filesystem_type }
-    }
+    classify_filesystem(FilesystemEvidence {
+        filesystem_type,
+        locally_attached: None,
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -1035,14 +1232,19 @@ fn unescape_mountinfo_path(value: &str) -> Option<PathBuf> {
     String::from_utf8(output).ok().map(PathBuf::from)
 }
 
-#[cfg(target_os = "linux")]
+/// Lowercase filesystem-type names that always denote remote storage.
+///
+/// Names come from Linux `mountinfo`, macOS `f_fstypename`, and the Windows
+/// volume filesystem name, so the table spans all three vocabularies.
 fn is_network_filesystem(filesystem_type: &str) -> bool {
     matches!(
         filesystem_type,
-        "9p" | "afs"
+        "9p" | "afpfs"
+            | "afs"
             | "ceph"
             | "cifs"
             | "davfs"
+            | "ftp"
             | "fuse.sshfs"
             | "gfs"
             | "gfs2"
@@ -1055,26 +1257,34 @@ fn is_network_filesystem(filesystem_type: &str) -> bool {
             | "smb"
             | "smb2"
             | "smb3"
+            | "smbfs"
+            | "webdav"
     )
 }
 
-#[cfg(target_os = "linux")]
+/// Lowercase filesystem-type names known to be backed by attached storage.
 fn is_known_local_filesystem(filesystem_type: &str) -> bool {
     matches!(
         filesystem_type,
-        "btrfs"
+        "apfs" | "btrfs"
             | "bcachefs"
+            | "cdfs"
             | "erofs"
             | "exfat"
             | "ext2"
             | "ext3"
             | "ext4"
             | "f2fs"
+            | "fat"
+            | "fat32"
+            | "hfs"
+            | "hfsplus"
             | "iso9660"
             | "msdos"
             | "ntfs"
             | "ntfs3"
             | "ramfs"
+            | "refs"
             | "squashfs"
             | "tmpfs"
             | "vfat"
@@ -1757,19 +1967,97 @@ mod tests {
         );
     }
 
-    #[cfg(not(target_os = "linux"))]
     #[test]
-    fn unsupported_platform_locality_is_typed_unavailable() {
+    fn kernel_locality_flag_decides_before_the_filesystem_name_table() {
+        // macOS `MNT_LOCAL` and the Windows drive type are direct answers, so a
+        // named volume the tables do not list is still local.
+        assert_eq!(
+            classify_filesystem(FilesystemEvidence {
+                filesystem_type: "apfs".to_owned(),
+                locally_attached: Some(true),
+            }),
+            FilesystemSafety::Local {
+                filesystem_type: "apfs".to_owned(),
+            }
+        );
+        assert_eq!(
+            classify_filesystem(FilesystemEvidence {
+                filesystem_type: "some-future-local-fs".to_owned(),
+                locally_attached: Some(true),
+            }),
+            FilesystemSafety::Local {
+                filesystem_type: "some-future-local-fs".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn classification_refuses_remote_and_undescribable_filesystems() {
+        // A cleared locality flag refuses even when the name looks ordinary.
+        assert_eq!(
+            classify_filesystem(FilesystemEvidence {
+                filesystem_type: "ntfs".to_owned(),
+                locally_attached: Some(false),
+            }),
+            FilesystemSafety::Network {
+                filesystem_type: "ntfs".to_owned(),
+            }
+        );
+        // A known-remote name refuses even when the platform claims locality.
+        assert_eq!(
+            classify_filesystem(FilesystemEvidence {
+                filesystem_type: "smbfs".to_owned(),
+                locally_attached: Some(true),
+            }),
+            FilesystemSafety::Network {
+                filesystem_type: "smbfs".to_owned(),
+            }
+        );
+        // A volume the platform cannot name stays unverified rather than local.
+        assert_eq!(
+            classify_filesystem(FilesystemEvidence {
+                filesystem_type: String::new(),
+                locally_attached: Some(true),
+            }),
+            undetectable_filesystem()
+        );
+    }
+
+    #[test]
+    fn platforms_without_a_locality_flag_fall_back_to_the_name_table() {
+        assert_eq!(
+            classify_filesystem(FilesystemEvidence {
+                filesystem_type: "ext4".to_owned(),
+                locally_attached: None,
+            }),
+            FilesystemSafety::Local {
+                filesystem_type: "ext4".to_owned(),
+            }
+        );
+        assert_eq!(
+            classify_filesystem(FilesystemEvidence {
+                filesystem_type: "unrecognized".to_owned(),
+                locally_attached: None,
+            }),
+            FilesystemSafety::NotDetectable {
+                filesystem_type: "unrecognized".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn the_running_platform_mounts_an_ordinary_local_store() {
         let fixture = Fixture::new();
         let resolver = fixture.resolver_for([fixture.first_alias.clone()]);
         let key = StoreRuntimeKey::new(fixture.shard(), incarnation());
 
-        assert!(matches!(
-            resolver.resolve_key(&key),
-            LocalStoreLocatorResolutionV1::Unavailable(LocalStoreLocatorUnavailableV1 {
-                reason: LocalStoreLocatorUnavailableReasonV1::FilesystemLocalityUnverified { .. },
-                ..
-            })
-        ));
+        // Exercises the real per-platform classifier, not the test double: an
+        // ordinary temporary directory must resolve on every supported host.
+        match resolver.resolve_key(&key) {
+            LocalStoreLocatorResolutionV1::Resolved(_) => {}
+            LocalStoreLocatorResolutionV1::Unavailable(unavailable) => {
+                panic!("expected a resolved locator on this platform, got {unavailable:?}")
+            }
+        }
     }
 }
