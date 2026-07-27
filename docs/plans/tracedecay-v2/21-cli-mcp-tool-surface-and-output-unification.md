@@ -23,6 +23,19 @@ evidence rather than a spine to reconstruct. A missing callable operation or
 lost semantic is a gap; a renamed/deleted scaffold is not. PR17 adds only the
 surface needed to complete the Plan 24/32 user journey.
 
+**Cursor-parity correction (2026-07-27).** The cursor half of that parity
+requirement was stated as delivered while no shipped code-read surface could
+supply a continuation: CLI, MCP, and HTTP each pinned the page to
+`PageRequest::first(DEFAULT_PAGE_SIZE)`, so a caller received a `next_cursor` it
+had no way to spend, and HTTP discarded `?cursor=` for code reads. `97d6499ce`
+closes it by carrying the continuation on `CallableCodeSurfaceMeta`, which all
+fourteen code operations pass through, and by advertising `cursor` in the MCP
+schema only now that it is honored. Page size deliberately remains a fixed
+invocation control at ten; there is no advertised page-size parameter, and its
+absence is not a parity gap. Verification is the pr12 reachability test resuming
+page two through MCP and the installed CLI; like every commit from that date it
+has scoped local evidence only, because no CI has run since 01:24 UTC.
+
 ## Retained and required surface capabilities
 
 The delivery-first rewrite changes sequencing and removes duplicate
