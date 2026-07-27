@@ -4,10 +4,12 @@ use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
 use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+use tracedecay::application::memory::{MemoryApplication, MemoryOperationContext};
 use tracedecay::branch::BranchAddOutcome;
 use tracedecay::branch_meta::{self, BranchMeta};
 use tracedecay::config::{TraceDecayConfig, USER_DATA_DIR_ENV};
 use tracedecay::global_db::{GraphScopeUpsert, StoreArtifactUpsert, StoreInstanceUpsert};
+use tracedecay::memory::types::{AddFactRequest, MemoryCategory};
 use tracedecay::migrate::inventory::{
     MigrationInventory, RegistryStatus, StoreArtifact, StoreBrand, StoreInventory, StoreRole,
     StoreStatus,
@@ -27,11 +29,228 @@ use tracedecay::storage::{
     StoreKind, StoreManifest, read_enrollment_marker, write_enrollment_marker,
     write_repository_identity_marker,
 };
+use tracedecay::store::memory::DatabaseFactStore;
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
-use tracedecay_domain::ProjectId;
+use tracedecay_domain::{
+    AccessPolicyDigest, AnchorDurabilityClass, AnchorSourceGenerationV2, CapabilityId,
+    ComponentVersion, Confidence, CoverageReportV1, DomainError, EntityId, EntityKind, EntityRef,
+    EvidenceClass, FactAssertionKindV1, FactAssertionV1, FactCategoryV1, FactEvidenceRefV1,
+    FactEvidenceRelationV1, FactId, FactIdentityMaterialV1, FactIdentitySourceV1,
+    FactLineageEventKindV1, FactLineageEventV1, FactOwnerV1, FactPayloadV1, PayloadAccessState,
+    PayloadReferenceV1, PrivacyDomainBoundLocatorDigest, PrivacyDomainId, ProjectId,
+    ProjectionGenerationId, ResolutionAuthorizationV1, RetentionClass, RetrievalAnchorRecordV2,
+    RetrievalAnchorRecordV2Parts, RetrievalAnchorTargetV2, SanitizationReceiptId,
+    SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, ScopeResolutionId,
+    SensitivityV1, UtcMicros, VectorWatermark,
+};
+use tracedecay_store::{FactCommitOutcome, FactCurrentQuery, FactWriteBatch};
 
 use crate::common::EnvVarGuard;
 use crate::support::{HOME_ENV_LOCK, ephemeral_safe_fixture_base};
+
+const ARCHIVE_DIGEST_A: &str =
+    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const ARCHIVE_DIGEST_B: &str =
+    "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+fn archive_id<T>(value: &str) -> T
+where
+    T: TryFrom<String, Error = DomainError>,
+{
+    T::try_from(value.to_owned()).unwrap()
+}
+
+async fn seed_public_archive_fact(
+    branch: &Path,
+    owner: FactOwnerV1,
+) -> (FactId, String, FactId, i64) {
+    let (database, _) = crate::common::open_test_database(branch).await.unwrap();
+    let memory = MemoryApplication::new(owner.clone(), DatabaseFactStore::new(&database)).unwrap();
+    let operation = "project-memory-cutover-public";
+    let identity = FactIdentityMaterialV1::new(
+        owner.clone(),
+        FactIdentitySourceV1::Application {
+            operation_id: archive_id("operation.project-memory-cutover-public"),
+        },
+    )
+    .unwrap();
+    let fact_id = FactId::derive(&identity).unwrap();
+    let anchor = RetrievalAnchorRecordV2::new(RetrievalAnchorRecordV2Parts {
+        target: RetrievalAnchorTargetV2::Entity(EntityRef {
+            id: EntityId::new("entity.project-memory-cutover-public".to_owned()).unwrap(),
+            kind: EntityKind::Document,
+        }),
+        owner: owner.clone().into(),
+        aliases: vec![],
+        occurred_at: None,
+        ingested_at: UtcMicros(10),
+        evidence_class: EvidenceClass::Observed,
+        source_generation: AnchorSourceGenerationV2::Unknown,
+        projection_generation: ProjectionGenerationId::new(
+            "projection.project-memory-cutover-public".to_owned(),
+        )
+        .unwrap(),
+        projection_watermark: VectorWatermark::default(),
+        coverage: CoverageReportV1::default(),
+        source_observations: vec![],
+        source_anchors: vec![],
+        authorization: ResolutionAuthorizationV1 {
+            resolved_scope_id: ScopeResolutionId::new(
+                "scope.project-memory-cutover-public".to_owned(),
+            )
+            .unwrap(),
+            privacy_domain_id: PrivacyDomainId::new(
+                "privacy.project-memory-cutover-public".to_owned(),
+            )
+            .unwrap(),
+            access_policy_digest: AccessPolicyDigest::new(ARCHIVE_DIGEST_A).unwrap(),
+            capability_id: CapabilityId::new("capability.project-memory-cutover-public".to_owned())
+                .unwrap(),
+            canonical_request_digest: PrivacyDomainBoundLocatorDigest::new(ARCHIVE_DIGEST_B)
+                .unwrap(),
+        },
+        payload_access: PayloadAccessState::Eligible,
+        retention_class: RetentionClass::new("retention.project-memory-cutover-public".to_owned())
+            .unwrap(),
+        durability: AnchorDurabilityClass::DurableEvidence,
+    })
+    .unwrap();
+    let content = "public writer branch fact survives retirement".to_owned();
+    let material = serde_json::json!({
+        "content": content,
+        "category": "project",
+        "tags": ["cutover"],
+        "entities": ["TraceDecay"],
+        "metadata": {"source": operation},
+    });
+    let receipt = SanitizationReceiptV1::new(
+        SanitizationReceiptRefV1::new(
+            archive_id::<SanitizationReceiptId>("receipt.project-memory-cutover-public"),
+            archive_id::<ComponentVersion>("sanitizer.project-memory-cutover.v1"),
+        )
+        .unwrap(),
+        SanitizerDispositionV1::Accepted,
+        SensitivityV1::NonSensitive,
+        Some(PayloadReferenceV1::for_payload(&material).unwrap()),
+    )
+    .unwrap();
+    let payload = FactPayloadV1::new(
+        content.clone(),
+        FactCategoryV1::Project,
+        vec!["cutover".to_owned()],
+        vec!["TraceDecay".to_owned()],
+        serde_json::json!({"source": operation}),
+        receipt,
+        RetentionClass::new("retention.project-memory-cutover-public".to_owned()).unwrap(),
+    )
+    .unwrap();
+    let evidence = FactEvidenceRefV1::new(
+        fact_id.clone(),
+        anchor.anchor_id().clone(),
+        FactEvidenceRelationV1::Supports,
+        EvidenceClass::Observed,
+        Confidence::new(1.0).unwrap(),
+    )
+    .unwrap();
+    let assertion = FactAssertionV1::new(
+        fact_id.clone(),
+        owner.clone(),
+        FactAssertionKindV1::Initial,
+        payload,
+        vec![evidence],
+        UtcMicros(10),
+        None,
+    )
+    .unwrap();
+    let event = FactLineageEventV1::new(
+        fact_id.clone(),
+        owner.clone(),
+        FactLineageEventKindV1::AssertionRecorded {
+            assertion_id: assertion.assertion_id().clone(),
+        },
+        UtcMicros(10),
+        None,
+    )
+    .unwrap();
+    let batch = FactWriteBatch::new(
+        fact_id.clone(),
+        owner.clone(),
+        Some(assertion),
+        vec![event],
+        vec![anchor],
+        vec![],
+        None,
+        None,
+    )
+    .unwrap()
+    .with_identity_material(identity)
+    .unwrap();
+    assert!(matches!(
+        memory.commit_fact(batch).await.unwrap(),
+        FactCommitOutcome::Committed(_)
+    ));
+    let legacy_fact = memory
+        .add_fact_v1(
+            AddFactRequest {
+                content: "authorized purge V2-only closure".to_owned(),
+                category: MemoryCategory::Project,
+                source: Some("project-memory-cutover-test".to_owned()),
+                tags: vec!["cutover".to_owned()],
+                entities: vec!["TraceDecay".to_owned()],
+                trust: Some(0.8),
+                metadata: serde_json::json!({"fixture": "authorized-purge"}),
+            },
+            MemoryOperationContext::generated(&owner, "cutover-add", None).unwrap(),
+        )
+        .await
+        .unwrap()
+        .fact
+        .expect("compatibility add returns its legacy mirror");
+    let before_purge = DatabaseFactStore::new(&database)
+        .inspect_owner_archive_for_test(&owner)
+        .await
+        .unwrap();
+    let purged_fact_id = before_purge
+        .records()
+        .iter()
+        .find_map(|record| {
+            if record.family() != tracedecay_store::MemoryV2ArchiveFamilyV1::LegacyFactMap
+                || !matches!(
+                    record.key().get("legacy_fact_id"),
+                    Some(tracedecay_store::MemoryV2ArchiveScalarV1::Integer(value))
+                        if *value == legacy_fact.fact_id
+                )
+            {
+                return None;
+            }
+            match record.fields().get("fact_id") {
+                Some(tracedecay_store::MemoryV2ArchiveScalarV1::Text(value)) => {
+                    Some(FactId::new(value.clone()).unwrap())
+                }
+                _ => None,
+            }
+        })
+        .expect("production compatibility writer publishes its stable V2 mapping");
+    memory
+        .remove_fact_v1(
+            legacy_fact.fact_id,
+            MemoryOperationContext::generated(&owner, "cutover-remove", None).unwrap(),
+        )
+        .await
+        .unwrap();
+    database.close();
+    for entry in fs::read_dir(branch.parent().unwrap()).unwrap() {
+        let path = entry.unwrap().path();
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(".tracedecay-test-profile-"))
+        {
+            fs::remove_file(path).unwrap();
+        }
+    }
+    (fact_id, content, purged_fact_id, legacy_fact.fact_id)
+}
 
 #[tokio::test]
 async fn project_memory_cutover_unions_all_branches_and_accepts_v18() {
@@ -231,10 +450,10 @@ async fn project_memory_cutover_preserves_v2_authority_after_legacy_reclamation(
         .unwrap()
         .unwrap()
         .project_id;
-    let owner_json = serde_json::to_string(&tracedecay_domain::FactOwnerV1::Project {
+    let owner = FactOwnerV1::Project {
         project_id: ProjectId::new(project_id.clone()).unwrap(),
-    })
-    .unwrap();
+    };
+    let owner_json = serde_json::to_string(&owner).unwrap();
     let lifecycle = tracedecay::lifecycle_lease::acquire_exclusive_for_profile(
         &profile_root,
         "checkpoint V2 project memory cutover fixture",
@@ -259,6 +478,8 @@ async fn project_memory_cutover_preserves_v2_authority_after_legacy_reclamation(
     fs::create_dir_all(&branches).unwrap();
     let branch = branches.join("v2-authority.db");
     fs::copy(&project_graph, &branch).unwrap();
+    let (public_fact_id, public_fact_content, purged_fact_id, purged_legacy_id) =
+        seed_public_archive_fact(&branch, owner.clone()).await;
     let source = rusqlite::Connection::open(&branch).unwrap();
     source
         .execute_batch(&format!(
@@ -377,98 +598,153 @@ async fn project_memory_cutover_preserves_v2_authority_after_legacy_reclamation(
     .unwrap();
     fs::remove_file(&branch).unwrap();
 
-    let target = rusqlite::Connection::open_with_flags(
-        &project_graph,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .unwrap();
-    let identity: String = target
-        .query_row(
-            "SELECT identity_json FROM memory_v2_facts
-             WHERE fact_id='fact.v2-only' AND owner_kind='project' AND project_id=?1",
-            [&project_id],
-            |row| row.get(0),
-        )
+    let (project_database, _) = crate::common::open_test_database_read_only(&project_graph)
+        .await
         .unwrap();
+    let project_memory =
+        MemoryApplication::new(owner.clone(), DatabaseFactStore::new(&project_database)).unwrap();
+    let public_fact = project_memory
+        .query_fact_current(FactCurrentQuery::new(owner.clone(), public_fact_id.clone()).unwrap())
+        .await
+        .unwrap()
+        .expect("public writer fact remains readable after branch source deletion");
+    assert_eq!(public_fact.fact_id(), &public_fact_id);
+    assert_eq!(
+        public_fact.payload().map(FactPayloadV1::content),
+        Some(public_fact_content.as_str())
+    );
+    // Public MemoryApplication reads cover stable identity/current payload.
+    // Immutable lineage/evidence/map families do not yet expose one aggregate
+    // public read, so the typed archive inspection below is the narrow adapter
+    // contract used for those histories.
+    let archive = DatabaseFactStore::new(&project_database)
+        .inspect_owner_archive_for_test(&owner)
+        .await
+        .unwrap();
+    project_database.close();
+
+    let has_text =
+        |record: &tracedecay_store::MemoryV2ArchiveRecordV1, column: &str, expected: &str| {
+            matches!(
+                record
+                    .key()
+                    .get(column)
+                    .or_else(|| record.fields().get(column)),
+                Some(tracedecay_store::MemoryV2ArchiveScalarV1::Text(value))
+                    if value == expected
+            )
+        };
+    let records_for_fact = |family: tracedecay_store::MemoryV2ArchiveFamilyV1, fact_id: &str| {
+        archive
+            .records()
+            .iter()
+            .filter(|record| record.family() == family && has_text(record, "fact_id", fact_id))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        records_for_fact(
+            tracedecay_store::MemoryV2ArchiveFamilyV1::Fact,
+            purged_fact_id.as_str()
+        )
+        .len(),
+        1,
+        "authorized legacy purge must retain the original V2 identity"
+    );
+    assert_eq!(
+        records_for_fact(
+            tracedecay_store::MemoryV2ArchiveFamilyV1::LegacyFactMap,
+            purged_fact_id.as_str()
+        )
+        .iter()
+        .filter(|record| {
+            matches!(
+                record.key().get("legacy_fact_id"),
+                Some(tracedecay_store::MemoryV2ArchiveScalarV1::Integer(value))
+                    if *value == purged_legacy_id
+            )
+        })
+        .count(),
+        1,
+        "authorized legacy purge must not erase its stable V2 mapping"
+    );
+    let v2_fact = records_for_fact(
+        tracedecay_store::MemoryV2ArchiveFamilyV1::Fact,
+        "fact.v2-only",
+    );
+    assert_eq!(v2_fact.len(), 1);
+    let identity = match v2_fact[0].fields().get("identity_json") {
+        Some(tracedecay_store::MemoryV2ArchiveScalarV1::Text(identity)) => identity,
+        value => panic!("typed archive omitted V2 identity: {value:?}"),
+    };
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&identity).unwrap(),
         serde_json::json!({"stable": "fact.v2-only"})
     );
-    for (table, expected) in [
-        ("memory_v2_assertions", 1_i64),
-        ("memory_v2_lineage_events", 2),
-        ("memory_v2_evidence", 1),
-        ("memory_v2_assertion_evidence", 1),
-        ("memory_v2_feedback_history", 1),
+    for (family, expected) in [
+        (tracedecay_store::MemoryV2ArchiveFamilyV1::Assertion, 1),
+        (tracedecay_store::MemoryV2ArchiveFamilyV1::LineageEvent, 2),
+        (tracedecay_store::MemoryV2ArchiveFamilyV1::FactEvidence, 1),
+        (
+            tracedecay_store::MemoryV2ArchiveFamilyV1::AssertionEvidence,
+            1,
+        ),
+        (
+            tracedecay_store::MemoryV2ArchiveFamilyV1::FeedbackHistory,
+            1,
+        ),
     ] {
         assert_eq!(
-            target
-                .query_row(
-                    &format!("SELECT COUNT(*) FROM {table} WHERE fact_id='fact.v2-only'"),
-                    [],
-                    |row| row.get::<_, i64>(0),
-                )
-                .unwrap(),
+            records_for_fact(family, "fact.v2-only").len(),
             expected,
-            "{table} history must survive branch retirement"
+            "{family:?} history must survive branch retirement"
         );
     }
     assert_eq!(
-        target
-            .query_row(
-                "SELECT payload_access FROM memory_v2_current_facts
-                 WHERE fact_id='fact.v2-only'",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .unwrap(),
-        "deleted"
+        records_for_fact(
+            tracedecay_store::MemoryV2ArchiveFamilyV1::CurrentFact,
+            "fact.v2-only"
+        )
+        .iter()
+        .filter(|record| has_text(record, "payload_access", "deleted"))
+        .count(),
+        1
     );
     assert_eq!(
-        target
-            .query_row(
-                "SELECT COUNT(*) FROM memory_v2_facts WHERE fact_id='fact.mirror'",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .unwrap(),
+        records_for_fact(
+            tracedecay_store::MemoryV2ArchiveFamilyV1::Fact,
+            "fact.mirror"
+        )
+        .len(),
         1,
         "the authoritative mirrored V2 identity must not be rederived"
     );
     assert_eq!(
-        target
-            .query_row(
-                "SELECT COUNT(*) FROM memory_facts WHERE content='mirrored content'",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .unwrap(),
-        0,
-        "a legacy mirror must not be reimported beside authoritative V2 data"
-    );
-    assert_eq!(
-        target
-            .query_row(
-                "SELECT COUNT(*) FROM memory_v2_assertion_payloads
-                 WHERE fact_id='fact.mirror' AND content='mirrored content'",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .unwrap(),
+        records_for_fact(
+            tracedecay_store::MemoryV2ArchiveFamilyV1::AssertionPayload,
+            "fact.mirror"
+        )
+        .iter()
+        .filter(|record| has_text(record, "content", "mirrored content"))
+        .count(),
         1,
         "the authoritative V2 payload remains readable under its stable FactId"
     );
     assert_eq!(
-        target
-            .query_row(
-                "SELECT COUNT(*) FROM memory_v2_legacy_map
-                 WHERE fact_id='fact.mirror'",
-                [],
-                |row| row.get::<_, i64>(0),
-            )
-            .unwrap(),
-        0,
-        "branch-local numeric mappings must not be rewritten onto target ids"
+        archive
+            .records()
+            .iter()
+            .filter(|record| {
+                record.family() == tracedecay_store::MemoryV2ArchiveFamilyV1::LegacyFactMap
+                    && has_text(record, "source_store_id", "legacy-memory-v1")
+                    && has_text(record, "fact_id", "fact.mirror")
+                    && matches!(
+                        record.key().get("legacy_fact_id"),
+                        Some(tracedecay_store::MemoryV2ArchiveScalarV1::Integer(41))
+                    )
+            })
+            .count(),
+        1,
+        "stale legacy map identity must remain bound to its stable V2 FactId"
     );
 }
 
