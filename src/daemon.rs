@@ -2615,32 +2615,47 @@ fn attach_initialize_route_metadata(
     result["_meta"]["tracedecayInitializeRoute"] = json!(route);
 }
 
-/// Returns `None` for project-dependent requests, `Some(None)` for handled
-/// notifications, and `Some(Some(response))` for static MCP bootstrap calls.
+/// A static MCP bootstrap call the daemon answers without opening a project.
+enum DaemonBootstrap {
+    /// A notification that needs no response written back.
+    Handled,
+    /// A static response to write back to the client.
+    Respond(JsonRpcResponse),
+}
+
+/// Returns `None` for project-dependent requests, which the caller must route
+/// to a project server instead.
 fn daemon_bootstrap_response(
     request: &JsonRpcRequest,
     route: Option<&InitializeRouteMetadata>,
     project_node_count: Option<u64>,
-) -> Option<Option<JsonRpcResponse>> {
+) -> Option<DaemonBootstrap> {
     match classify_mcp_method(&request.method) {
-        McpMethod::Initialize => Some(request.id.clone().map(|id| {
-            let mut response = JsonRpcResponse::success(id, initialize_result(SERVER_INSTRUCTIONS));
-            if let Some(route) = route {
-                attach_initialize_route_metadata(&mut response, route);
+        McpMethod::Initialize => Some(match request.id.clone() {
+            Some(id) => {
+                let mut response =
+                    JsonRpcResponse::success(id, initialize_result(SERVER_INSTRUCTIONS));
+                if let Some(route) = route {
+                    attach_initialize_route_metadata(&mut response, route);
+                }
+                DaemonBootstrap::Respond(response)
             }
-            response
-        })),
-        McpMethod::InitializedAck => Some(None),
-        McpMethod::ToolsList => Some(request.id.clone().map(|id| {
-            let tools = project_node_count.map_or_else(
-                || get_tool_definitions_with_warming_budget(10),
-                |node_count| {
-                    let budget = explore_call_budget(node_count);
-                    get_tool_definitions_with_budget(node_count, budget)
-                },
-            );
-            JsonRpcResponse::success(id, json!({ "tools": tools }))
-        })),
+            None => DaemonBootstrap::Handled,
+        }),
+        McpMethod::InitializedAck => Some(DaemonBootstrap::Handled),
+        McpMethod::ToolsList => Some(match request.id.clone() {
+            Some(id) => {
+                let tools = project_node_count.map_or_else(
+                    || get_tool_definitions_with_warming_budget(10),
+                    |node_count| {
+                        let budget = explore_call_budget(node_count);
+                        get_tool_definitions_with_budget(node_count, budget)
+                    },
+                );
+                DaemonBootstrap::Respond(JsonRpcResponse::success(id, json!({ "tools": tools })))
+            }
+            None => DaemonBootstrap::Handled,
+        }),
         _ => None,
     }
 }
@@ -2855,7 +2870,7 @@ async fn serve_broker_socket_client(
             } else {
                 None
             };
-        if let Some(response) =
+        if let Some(bootstrap) =
             daemon_bootstrap_response(&request, initialize_route.as_ref(), project_node_count)
         {
             // Keep catalog-refresh bookkeeping consistent with the regular MCP
@@ -2874,7 +2889,7 @@ async fn serve_broker_socket_client(
                 engine.spawn_project_server_warmup(handshake.clone(), request);
             }
             drop(setup_activity);
-            if let Some(response) = response {
+            if let DaemonBootstrap::Respond(response) = bootstrap {
                 write_json_rpc_response(&mut transport, &response).await?;
             }
             return Ok(());
@@ -3033,7 +3048,7 @@ async fn serve_windows_broker_client(
             } else {
                 None
             };
-        if let Some(response) =
+        if let Some(bootstrap) =
             daemon_bootstrap_response(&request, initialize_route.as_ref(), project_node_count)
         {
             if matches!(classify_mcp_method(&request.method), McpMethod::Initialize)
@@ -3050,7 +3065,7 @@ async fn serve_windows_broker_client(
                 );
             }
             drop(setup_activity);
-            if let Some(response) = response {
+            if let DaemonBootstrap::Respond(response) = bootstrap {
                 write_json_rpc_response(&mut transport, &response).await?;
             }
             return Ok(());

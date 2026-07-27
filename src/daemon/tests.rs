@@ -39,9 +39,11 @@ fn bootstrap_tool_catalog_uses_project_node_count() {
         "method": "tools/list"
     }))
     .expect("tools/list request");
-    let response = super::daemon_bootstrap_response(&request, None, Some(65_395))
-        .expect("bootstrap response")
-        .expect("tools/list response");
+    let super::DaemonBootstrap::Respond(response) =
+        super::daemon_bootstrap_response(&request, None, Some(65_395)).expect("bootstrap response")
+    else {
+        panic!("tools/list must produce a response");
+    };
     let result = response.result.expect("tools/list result");
     let context_description = result["tools"]
         .as_array()
