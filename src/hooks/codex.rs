@@ -1048,24 +1048,19 @@ mod tests {
         let project_dir = tempfile::tempdir().unwrap();
         let project_root = project_dir.path().canonicalize().unwrap();
         let project_id = "proj_codex_identity";
-        let runtime = crate::application::host_admission::HostAdmissionTestRuntimeV1::project(
+        let gdb = crate::application::host_admission::HostAdmissionTestRuntimeV1::project(
             &profile_root,
             &project_root,
-            tracedecay_store::ProjectId::new(project_id).unwrap(),
+            tracedecay_domain::ProjectId::new(project_id).unwrap(),
         )
         .await
         .unwrap();
-        let graph = runtime
-            .initialize_project_graph_for_test(
-                &project_root,
-                crate::tracedecay::TraceDecayOpenOptions {
-                    profile_root: Some(profile_root.clone()),
-                    global_db_path: None,
-                },
-            )
+        let graph = gdb
+            .initialize_project_graph_for_test(&project_root, Default::default())
             .await
             .unwrap();
-        graph.index_all().await.unwrap();
+        drop(graph);
+        crate::storage::remove_enrollment_marker(&project_root, project_id).unwrap();
 
         let event = serde_json::json!({ "cwd": project_root.to_string_lossy() }).to_string();
         let (_context, status) = codex_session_context_for_event(&event).await;

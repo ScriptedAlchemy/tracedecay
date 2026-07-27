@@ -3,8 +3,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::symlink;
 use std::time::SystemTime;
 
-use rusqlite::Connection as RusqliteConnection;
-
 use super::*;
 use crate::global_db::StoreInstanceUpsert;
 use crate::storage::{
@@ -1622,7 +1620,7 @@ async fn temporal_fts_health_and_repair_are_explicit_bounded_and_idempotent() {
 }
 
 #[tokio::test]
-async fn temporal_fts_repair_accepts_only_exact_malformed_index_damage() {
+async fn temporal_fts_repair_accepts_exact_blob_index_damage() {
     let dir = tempfile::TempDir::new().unwrap();
     let runtime = DoctorTestRuntime::open(
         &dir.path().join("profile"),
@@ -1678,11 +1676,15 @@ async fn temporal_health_detects_cross_session_ownership() {
     .await;
     let db = runtime.database();
     db.checkpoint_result().await.unwrap();
-    let writer = RusqliteConnection::open(db.db_path()).unwrap();
+    let writer = db.writer_connection().unwrap();
     writer
         .execute_batch(
-            "PRAGMA foreign_keys = OFF;
-             DROP TRIGGER session_summary_sources_owner_guard_v1;
+            "DROP TRIGGER session_summary_sources_owner_guard_v1;
+             INSERT INTO retrieval_anchors (
+                 anchor_id, anchor_json, owner_json, projection_generation
+             ) VALUES
+                 ('anchor-a', '{}', '{}', 'doctor-fixture'),
+                 ('anchor-b', '{}', '{}', 'doctor-fixture');
              INSERT INTO session_summary_nodes (
                  summary_id, session_id, summary_anchor_id, summary_text, index_text,
                  source_horizon_json, publication_json, created_at
@@ -1693,6 +1695,7 @@ async fn temporal_health_detects_cross_session_ownership() {
                  summary_id, source_ordinal, source_kind, source_anchor_id, source_summary_id
              ) VALUES ('summary-b', 0, 'summary', NULL, 'summary-a');",
         )
+        .await
         .unwrap();
     drop(writer);
     db.checkpoint_result().await.unwrap();
@@ -1722,6 +1725,27 @@ fn temporal_fts_classifier_rejects_whole_database_corruption() {
     assert!(
         crate::global_db::SessionTemporalHealthReport::is_allowed_fts_quick_check_for_test(
             "malformed inverted index for FTS5 table main.session_occurrences_fts",
+            true,
+            false,
+        )
+    );
+    assert!(
+        crate::global_db::SessionTemporalHealthReport::is_allowed_fts_quick_check_for_test(
+            "fts5: corruption found reading blob 137438953473 from table \"session_occurrences_fts\"",
+            true,
+            false,
+        )
+    );
+    assert!(
+        !crate::global_db::SessionTemporalHealthReport::is_allowed_fts_quick_check_for_test(
+            "fts5: corruption found reading blob 137438953473 from table \"session_summary_nodes_fts\"",
+            true,
+            false,
+        )
+    );
+    assert!(
+        !crate::global_db::SessionTemporalHealthReport::is_allowed_fts_quick_check_for_test(
+            "fts5: corruption found reading blob unknown from table \"session_occurrences_fts\"",
             true,
             false,
         )

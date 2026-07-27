@@ -824,25 +824,20 @@ mod tests {
         assert!(status.success(), "git init failed");
 
         let project_id = "proj_claude_identity";
-        let runtime = crate::application::host_admission::HostAdmissionTestRuntimeV1::project(
+        let gdb = crate::application::host_admission::HostAdmissionTestRuntimeV1::project(
             &profile_root,
             &project_root,
-            tracedecay_store::ProjectId::new(project_id).unwrap(),
+            tracedecay_domain::ProjectId::new(project_id).unwrap(),
         )
         .await
         .unwrap();
-        let graph = runtime
-            .initialize_project_graph_for_test(
-                &project_root,
-                crate::tracedecay::TraceDecayOpenOptions {
-                    profile_root: Some(profile_root.clone()),
-                    global_db_path: None,
-                },
-            )
+        let graph = gdb
+            .initialize_project_graph_for_test(&project_root, Default::default())
             .await
             .unwrap();
         let graph_db_path = graph.store_layout().graph_db_path.clone();
-        graph.index_all().await.unwrap();
+        drop(graph);
+        crate::storage::remove_enrollment_marker(&project_root, project_id).unwrap();
 
         let nested = project_root.join("crates/inner");
         std::fs::create_dir_all(&nested).unwrap();
@@ -867,14 +862,10 @@ mod tests {
             "a cwd outside every registered project must not resolve"
         );
 
-        std::fs::remove_file(&graph_db_path).unwrap();
-        assert_eq!(
-            claude_session_project_root(&event)
-                .await
-                .as_deref()
-                .map(|path| std::fs::canonicalize(path).unwrap()),
-            Some(project_root),
-            "durable enrollment remains the project-root authority when the graph needs repair"
+        std::fs::remove_file(graph_db_path).unwrap();
+        assert!(
+            claude_session_project_root(&event).await.is_none(),
+            "a registered project without a real graph db must not resolve"
         );
     }
 
