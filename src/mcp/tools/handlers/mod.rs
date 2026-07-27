@@ -74,7 +74,7 @@ pub async fn handle_user_lcm_tool(
     args: Value,
     profile_root: &Path,
 ) -> Result<crate::mcp::tools::ToolResult> {
-    handle_user_lcm_tool_with_db(tool_name, args, profile_root, None, None, true, None).await
+    handle_user_lcm_tool_with_db(tool_name, args, profile_root, None, None, None).await
 }
 
 /// Projectless daemon path: retain the profile session DB and optional
@@ -92,7 +92,6 @@ pub(crate) async fn handle_user_lcm_tool_with_retained_authority(
         profile_root,
         Some(retained_session_db),
         None,
-        false,
         retrieval_service,
     )
     .await
@@ -104,7 +103,6 @@ pub(crate) async fn handle_user_lcm_tool_with_db(
     profile_root: &Path,
     retained_session_db: Option<&Arc<RegisteredGlobalDb>>,
     _registry_db: Option<&RegisteredGlobalDb>,
-    allow_owned_session_db: bool,
     retrieval_service: Option<&dyn session::message_search::SessionRetrievalServicePort>,
 ) -> Result<crate::mcp::tools::ToolResult> {
     if args.get("storage_scope").and_then(Value::as_str) != Some("user") {
@@ -139,8 +137,7 @@ pub(crate) async fn handle_user_lcm_tool_with_db(
     }
     let sessions_db_path = crate::sessions::user_sessions_db_path(profile_root);
     let context =
-        session::LcmHandlerContext::user(&sessions_db_path, retained_session_db, retrieval_service)
-            .with_direct_open(allow_owned_session_db);
+        session::LcmHandlerContext::user(&sessions_db_path, retained_session_db, retrieval_service);
     dispatch_lcm_tool(tool_name, args, context).await
 }
 
@@ -296,7 +293,6 @@ async fn selected_registered_project_reader(
     tool_name: &str,
     args: &Value,
     global_db: Option<&RegisteredGlobalDb>,
-    allow_default_registry_fallback: bool,
     resolver: Option<&crate::mcp::server::RetainedProjectGraphResolver>,
 ) -> Result<Option<Arc<TraceDecay>>> {
     if !tool_dispatches_registered_project_reader(tool_name) {
@@ -306,7 +302,6 @@ async fn selected_registered_project_reader(
         args,
         &["project_path", "project_root"],
         global_db,
-        allow_default_registry_fallback,
     )
     .await?
     else {
@@ -431,7 +426,6 @@ pub async fn handle_tool_call_with_registry(
     server_stats: Option<Value>,
     scope_prefix: Option<&str>,
     global_db: Option<&RegisteredGlobalDb>,
-    allow_default_registry_fallback: bool,
 ) -> Result<ToolResult> {
     Box::pin(handle_tool_call_with_registry_and_implicit_project(
         cg,
@@ -441,7 +435,6 @@ pub async fn handle_tool_call_with_registry(
         scope_prefix,
         ToolCallRegistryOptions {
             global_db,
-            allow_default_registry_fallback,
             ..Default::default()
         },
     ))
@@ -455,7 +448,6 @@ pub struct ToolCallRegistryOptions<'a> {
     pub registered_project_session_db: Option<Arc<crate::global_db::RegisteredGlobalDb>>,
     pub registered_savings_db: Option<Arc<crate::global_db::RegisteredGlobalDb>>,
     pub profile_root: Option<&'a Path>,
-    pub allow_default_registry_fallback: bool,
     pub implicit_project_path: Option<&'a Path>,
     pub automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,
     pub automation_writer: crate::dashboard::DashboardAutomationWriter,
@@ -494,7 +486,6 @@ impl Default for ToolCallRegistryOptions<'_> {
             registered_project_session_db: None,
             registered_savings_db: None,
             profile_root: None,
-            allow_default_registry_fallback: true,
             implicit_project_path: None,
             automation_scheduler_reconciler: None,
             automation_writer: crate::dashboard::standalone_dashboard_automation_writer(),
@@ -547,7 +538,6 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
                     Some(profile_root) => profile_root.to_path_buf(),
                     None => support::profile_root_for_global_db(
                         options.global_db,
-                        options.allow_default_registry_fallback,
                     )?,
                 };
                 if let Some(operation) = RetainedSurfaceOperation::from_name(tool_name) {
@@ -566,7 +556,6 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
                     &profile_root,
                     options.session_authorities.user,
                     options.global_db,
-                    options.allow_default_registry_fallback,
                     options.session_authorities.profile_retrieval,
                 )
                 .await;
@@ -606,7 +595,6 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
         tool_name,
         &args,
         options.global_db,
-        options.allow_default_registry_fallback,
         options.retained_project_graph_resolver.as_ref(),
     )
     .await?;
@@ -624,8 +612,7 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
         cg,
         active_project_session_db,
         options.session_authorities.project_retrieval,
-    )
-    .with_direct_open(options.allow_default_registry_fallback);
+    );
     if let Some(result) = dispatch_application_surface_tools(tool_name, cg, &args, &options).await {
         return result;
     }
@@ -928,7 +915,6 @@ async fn execute_profile_retained_application_tool(
                 profile_root,
                 options.session_authorities.user,
                 options.global_db,
-                options.allow_default_registry_fallback,
                 options.session_authorities.profile_retrieval,
             )
             .await
@@ -1030,7 +1016,6 @@ async fn dispatch_info_tools(
                 cg,
                 args.clone(),
                 options.global_db,
-                options.allow_default_registry_fallback,
             )
             .await
         }
@@ -1039,7 +1024,6 @@ async fn dispatch_info_tools(
                 cg,
                 args.clone(),
                 options.global_db,
-                options.allow_default_registry_fallback,
             )
             .await
         }
@@ -1048,7 +1032,6 @@ async fn dispatch_info_tools(
                 cg,
                 args.clone(),
                 options.global_db,
-                options.allow_default_registry_fallback,
             )
             .await
         }
@@ -1356,7 +1339,6 @@ async fn execute_project_retained_application_tool(
                 cg,
                 request.arguments,
                 options.global_db,
-                options.allow_default_registry_fallback,
             )
             .await
         }
@@ -1365,7 +1347,6 @@ async fn execute_project_retained_application_tool(
                 cg,
                 request.arguments,
                 options.global_db,
-                options.allow_default_registry_fallback,
             )
             .await
         }
@@ -1374,7 +1355,6 @@ async fn execute_project_retained_application_tool(
                 cg,
                 request.arguments,
                 options.global_db,
-                options.allow_default_registry_fallback,
             )
             .await
         }
@@ -1455,7 +1435,6 @@ async fn dispatch_memory_tools(
                 args.clone(),
                 options.global_db,
                 options.accounting_db,
-                options.allow_default_registry_fallback,
             )
             .await
         }
@@ -1591,7 +1570,6 @@ mod tests {
         });
         ToolCallRegistryOptions {
             global_db: Some(registry.database.as_ref()),
-            allow_default_registry_fallback: false,
             retained_project_graph_resolver: Some(resolver),
             ..Default::default()
         }
@@ -1987,7 +1965,6 @@ mod tests {
             None,
             None,
             Some(registry.database.as_ref()),
-            false,
         )
         .await
         .unwrap_err();
@@ -2074,7 +2051,6 @@ mod tests {
             registered_project_session_db: runtime.registered_database_arc(
                 crate::application::host_admission::HostAdmissionScope::Project,
             ),
-            allow_default_registry_fallback: false,
             ..Default::default()
         };
         let status = handle_tool_call_with_registry_and_implicit_project(

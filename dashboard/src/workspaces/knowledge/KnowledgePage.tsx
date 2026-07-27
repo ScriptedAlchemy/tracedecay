@@ -111,7 +111,7 @@ export function KnowledgePage() {
                     onChange={(event) => setQuery(event.target.value)}
                     placeholder="Search facts"
                     aria-label="Search facts"
-                    className="h-8 w-full rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-2 pl-7 pr-2 text-xs text-text-primary placeholder:text-text-muted focus:border-accent/60 focus:outline-none"
+                    className="h-[calc(var(--touch-target-min)+2px)] w-full rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-2 pl-7 pr-2 text-xs text-text-primary placeholder:text-text-muted focus:border-accent/60 focus:outline-none"
                   />
                 </form>
                 {/* The rail used to be a 2×1 grid of equal tiles whose 26px

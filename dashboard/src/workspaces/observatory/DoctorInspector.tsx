@@ -406,12 +406,14 @@ function FindingCard({
                     onClick={() => onPreview({ operation: descriptor.operation, target })}
                     disabled={previewing}
                   >
-                    {previewing ? 'Previewing' : 'Preview'}
+                    <span className={secondaryBezelClass}>
+                      {previewing ? 'Previewing' : 'Preview'}
+                    </span>
                   </button>
                 ) : null}
                 {actions.canApply ? (
                   <button type="button" className={primaryButtonClass} onClick={onInspect}>
-                    Review remediation
+                    <span className={primaryBezelClass}>Review remediation</span>
                   </button>
                 ) : null}
               </div>
@@ -499,8 +501,10 @@ function DoctorTruth({
           disabled={refreshing}
           data-operation={refresh.operation}
         >
-          <RefreshCw aria-hidden size={12} className={refreshing ? 'animate-spin' : undefined} />
-          {refreshing ? 'Refreshing' : 'Refresh'}
+          <span className={secondaryBezelClass}>
+            <RefreshCw aria-hidden size={12} className={refreshing ? 'animate-spin' : undefined} />
+            {refreshing ? 'Refreshing' : 'Refresh'}
+          </span>
         </button>
       ) : null}
     </div>
@@ -642,14 +646,14 @@ function RemediationDialog({
               )}
 
               {confirmationRequired ? (
-                <label className="flex items-start gap-2 rounded-[var(--radius-standard)] border border-edge-subtle p-3 text-xs text-text-secondary">
+                <label className="flex cursor-pointer items-center gap-1 rounded-[var(--radius-standard)] border border-edge-subtle py-2 pr-3 text-xs text-text-secondary">
                   <input
                     type="checkbox"
                     checked={confirmed}
                     onChange={(event) => onConfirmedChange(event.target.checked)}
-                    className="mt-0.5"
+                    className="td-check"
                   />
-                  <span>
+                  <span className="min-w-0">
                     {authorityScope
                       ? 'I confirm this exact owner operation for the authority scope shown above and the displayed evidence.'
                       : 'I confirm this exact owner operation and the displayed evidence; the owner must resolve and recheck authority before any effect.'}
@@ -660,7 +664,9 @@ function RemediationDialog({
               <RemediationResult result={result} />
 
               <div className="flex justify-end gap-2">
-                <Dialog.Close className={secondaryButtonClass}>Cancel</Dialog.Close>
+                <Dialog.Close className={secondaryButtonClass}>
+                  <span className={secondaryBezelClass}>Cancel</span>
+                </Dialog.Close>
                 <button
                   type="button"
                   className={primaryButtonClass}
@@ -671,8 +677,10 @@ function RemediationDialog({
                     (confirmationRequired && !confirmed)
                   }
                 >
-                  <ShieldCheck aria-hidden size={13} />
-                  {applying ? 'Applying' : 'Apply remediation'}
+                  <span className={primaryBezelClass}>
+                    <ShieldCheck aria-hidden size={13} />
+                    {applying ? 'Applying' : 'Apply remediation'}
+                  </span>
                 </button>
               </div>
             </div>
@@ -808,7 +816,17 @@ function operationPhaseState(
   }
 }
 
-const secondaryButtonClass =
-  'inline-flex h-7 items-center justify-center gap-1.5 rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-2 px-2.5 text-2xs font-medium text-text-secondary hover:text-text-primary disabled:cursor-wait disabled:opacity-60';
-const primaryButtonClass =
-  'inline-flex h-7 items-center justify-center gap-1.5 rounded-[var(--radius-standard)] border border-accent/50 bg-accent/15 px-2.5 text-2xs font-semibold text-text-primary hover:border-accent disabled:cursor-not-allowed disabled:opacity-50';
+/* Operation controls, split into the box a pointer has to be able to hit and
+ * the bezel a reader sees.
+ *
+ * These are 24.5px tall by design — they sit inside panel headers and evidence
+ * strips, and a row of 44px slabs there would be a different console. So the
+ * element carries the 44px minimum (`.td-hit`, see `tailwind.css`) and the
+ * bezel goes on being drawn at `h-7` inside it. Hover moves to the group so
+ * the whole hit area lights the bezel, not just the bezel itself. */
+const secondaryButtonClass = 'td-hit group disabled:cursor-wait disabled:opacity-60';
+const secondaryBezelClass =
+  'inline-flex h-7 items-center justify-center gap-1.5 rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-2 px-2.5 text-2xs font-medium text-text-secondary group-hover:text-text-primary';
+const primaryButtonClass = 'td-hit group disabled:cursor-not-allowed disabled:opacity-50';
+const primaryBezelClass =
+  'inline-flex h-7 items-center justify-center gap-1.5 rounded-[var(--radius-standard)] border border-accent/50 bg-accent/15 px-2.5 text-2xs font-semibold text-text-primary group-hover:border-accent';

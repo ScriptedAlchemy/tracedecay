@@ -1087,6 +1087,55 @@ fn session_domain_digest_error(
     }
 }
 
+/// A [`HostAdmissionTestRuntimeV1`] statically known to carry project scope.
+///
+/// Seams that mount a project graph or a project-session authority need both
+/// `project_id` and a registered `ProjectSessions` mount, which only
+/// [`HostAdmissionTestRuntimeV1::project`] establishes. Taking this type
+/// instead of the bare runtime makes a profile-scoped runtime unrepresentable
+/// at those seams, so the mismatch is a compile error at the call site rather
+/// than a panic deep inside construction.
+#[cfg(any(test, feature = "test-transport"))]
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct ProjectScopedTestRuntimeV1(Arc<HostAdmissionTestRuntimeV1>);
+
+#[cfg(any(test, feature = "test-transport"))]
+impl ProjectScopedTestRuntimeV1 {
+    /// Checked promotion for runtimes whose scope is not known statically,
+    /// such as one recovered from an already-open graph.
+    #[doc(hidden)]
+    pub fn new(
+        runtime: impl Into<Arc<HostAdmissionTestRuntimeV1>>,
+    ) -> crate::errors::Result<Self> {
+        let runtime = runtime.into();
+        if runtime.project_id.is_none() || runtime.project_registered.is_none() {
+            return Err(crate::errors::TraceDecayError::Config {
+                message: format!(
+                    "test runtime for profile '{}' is profile-scoped; project-scoped authority \
+                     requires HostAdmissionTestRuntimeV1::project",
+                    runtime.profile_root.display()
+                ),
+            });
+        }
+        Ok(Self(runtime))
+    }
+
+    #[doc(hidden)]
+    pub fn into_runtime(self) -> Arc<HostAdmissionTestRuntimeV1> {
+        self.0
+    }
+}
+
+#[cfg(any(test, feature = "test-transport"))]
+impl std::ops::Deref for ProjectScopedTestRuntimeV1 {
+    type Target = HostAdmissionTestRuntimeV1;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
 impl HostAdmissionTestRuntimeV1 {
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-transport"))]
@@ -1131,7 +1180,6 @@ impl HostAdmissionTestRuntimeV1 {
                 global_db: Some(self.profile_database.as_ref()),
                 accounting_db: Some(self.profile_database.as_ref()),
                 profile_root: Some(&self.profile_root),
-                allow_default_registry_fallback: false,
                 implicit_project_path: Some(cg.project_root()),
                 session_authorities: self.mcp_session_authorities(),
                 ..Default::default()
@@ -1171,6 +1219,18 @@ impl HostAdmissionTestRuntimeV1 {
             Some((project_root.as_ref().to_path_buf(), project_id)),
         )
         .await
+    }
+
+    /// [`Self::project`] returning the scope proof that project-graph and
+    /// project-session seams require.
+    #[doc(hidden)]
+    #[cfg(any(test, feature = "test-transport"))]
+    pub async fn project_scoped(
+        profile_root: impl AsRef<Path>,
+        project_root: impl AsRef<Path>,
+        project_id: ProjectId,
+    ) -> crate::errors::Result<ProjectScopedTestRuntimeV1> {
+        ProjectScopedTestRuntimeV1::new(Self::project(profile_root, project_root, project_id).await?)
     }
 
     async fn open(
@@ -1274,6 +1334,26 @@ impl HostAdmissionTestRuntimeV1 {
         project_root: &Path,
         open_options: crate::tracedecay::TraceDecayOpenOptions,
     ) -> crate::errors::Result<crate::tracedecay::TraceDecay> {
+        let (store_layout, project_database) =
+            self.registered_project_open_inputs(project_root, &open_options)
+                .await?;
+        crate::tracedecay::TraceDecay::open_with_registered_configuration(
+            project_root,
+            open_options,
+            store_layout,
+            project_database,
+            Arc::clone(&self.profile_database),
+            Arc::clone(&self._session_registry),
+        )
+        .await
+    }
+
+    #[cfg(any(test, feature = "test-transport"))]
+    async fn registered_project_open_inputs(
+        &self,
+        project_root: &Path,
+        open_options: &crate::tracedecay::TraceDecayOpenOptions,
+    ) -> crate::errors::Result<(crate::storage::StoreLayout, Arc<RegisteredGlobalDb>)> {
         let project_id =
             self.project_id
                 .as_ref()
@@ -1287,7 +1367,7 @@ impl HostAdmissionTestRuntimeV1 {
         })?;
         let store_layout = crate::tracedecay::TraceDecay::resolve_registered_configuration_layout(
             project_root,
-            &open_options,
+            open_options,
             self.profile_database.as_ref(),
             true,
         )
@@ -1297,15 +1377,7 @@ impl HostAdmissionTestRuntimeV1 {
                 message: "project graph identity differs from registered test authority".to_owned(),
             });
         }
-        crate::tracedecay::TraceDecay::open_with_registered_configuration(
-            project_root,
-            open_options,
-            store_layout,
-            project_database,
-            Arc::clone(&self.profile_database),
-            Arc::clone(&self._session_registry),
-        )
-        .await
+        Ok((store_layout, project_database))
     }
 
     /// Opens one tracked branch through this retained registered runtime.
@@ -1363,31 +1435,9 @@ impl HostAdmissionTestRuntimeV1 {
         project_root: &Path,
         open_options: crate::tracedecay::TraceDecayOpenOptions,
     ) -> crate::errors::Result<crate::tracedecay::TraceDecay> {
-        let project_id =
-            self.project_id
-                .as_ref()
-                .ok_or_else(|| crate::errors::TraceDecayError::Config {
-                    message: "read-only project graph open requires project-scoped test authority"
-                        .to_owned(),
-                })?;
-        let project_database = self.project_registered.as_ref().cloned().ok_or_else(|| {
-            crate::errors::TraceDecayError::Config {
-                message: "read-only project graph open requires a registered project session"
-                    .to_owned(),
-            }
-        })?;
-        let store_layout = crate::tracedecay::TraceDecay::resolve_registered_configuration_layout(
-            project_root,
-            &open_options,
-            self.profile_database.as_ref(),
-            true,
-        )
-        .await?;
-        if store_layout.identity.project_id.as_deref() != Some(project_id.as_str()) {
-            return Err(crate::errors::TraceDecayError::Config {
-                message: "project graph identity differs from registered test authority".to_owned(),
-            });
-        }
+        let (store_layout, project_database) = self
+            .registered_project_open_inputs(project_root, &open_options)
+            .await?;
         crate::tracedecay::TraceDecay::open_read_only_with_registered_configuration(
             project_root,
             open_options,
@@ -1682,9 +1732,19 @@ impl HostAdmissionTestRuntimeV1 {
             .await;
     }
 
+    /// Fails the calling test loudly: a read this runtime could not perform is
+    /// not a token total of zero.
     #[doc(hidden)]
     pub async fn get_project_tokens(&self, project_path: &Path) -> u64 {
-        self.profile_database.get_project_tokens(project_path).await
+        self.profile_database
+            .try_get_project_tokens(project_path)
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "could not read project tokens for '{}': {error}",
+                    project_path.display()
+                )
+            })
     }
 
     #[doc(hidden)]
@@ -2552,7 +2612,6 @@ impl HostAdmissionTestRuntimeV1 {
                     Some(profile_database),
                     Some(project_sessions),
                     Some(profile_sessions),
-                    false,
                 );
         context.profile_root = Some(profile_root);
         context.profile_identity = Some(profile_identity);

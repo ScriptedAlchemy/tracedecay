@@ -3,6 +3,9 @@
  *
  * `npx tsx e2e/axe-audit.ts`  (run from `dashboard/`)
  *
+ * Settings, Knowledge, Delivery, Loom and Agents live in `axe-workspaces.ts`,
+ * which explains why they are separate; their canaries stay here with the rest.
+ *
  * A plain navigation reaches none of the states that matter here: a governance
  * read that FAILED, a health read that could not be resolved, a coordinator that
  * claims complete coverage over units it never examined. Each scenario overrides
@@ -50,6 +53,7 @@ import {
   searchFor,
   type Scenario,
 } from './axe-harness.ts';
+import { WORKSPACE_SCENARIOS } from './axe-workspaces.ts';
 
 const STORAGE_FINDINGS_KINDS = [
   'over_budget_store',
@@ -283,18 +287,25 @@ async function seedKnownDefects(page: Page): Promise<void> {
  * a clean one. Seeding on each route means the zero recorded for that route was
  * measured on that route.
  */
-function canary(id: string, route: string, drive?: (page: Page) => Promise<void>): Scenario {
+function canary(
+  id: string,
+  route: string,
+  drive?: (page: Page) => Promise<void>,
+  // `matrix` canaries carry the Plan 11 viewport/zoom/media matrix for their
+  // routes, so every 390x844, 400%-zoom and forced-colors scan in the run is
+  // one where a planted violation had to be reported for the scan to count.
+  // A widened matrix whose new combinations silently stopped detecting
+  // anything would otherwise read as five more routes scoring clean. Five of
+  // these are enough to witness every combination in the run, so a canary
+  // added purely for a new route's own liveness may stay on the showcase tier.
+  tier: 'matrix' | 'showcase' = 'matrix',
+): Scenario {
   return {
     id,
     route,
     proves: `THE GATE ITSELF on ${route} — a known-inaccessible element is reported here, so this route's zeros are measurements`,
     overrides: {},
-    // The canaries carry the Plan 11 viewport/zoom/media matrix for their
-    // routes, so every 390x844, 400%-zoom and forced-colors scan in the run is
-    // one where a planted violation had to be reported for the scan to count.
-    // A widened matrix whose new combinations silently stopped detecting
-    // anything would otherwise read as five more routes scoring clean.
-    matrix: true,
+    matrix: tier === 'matrix',
     // Checked on every scan, not once: the seeding is re-applied after each
     // navigation, so each viewport and theme is an independent confirmation
     // that the scan running at that size is live. It also means a breakage
@@ -1576,6 +1587,23 @@ const SCENARIOS: readonly Scenario[] = [
       );
     },
   },
+
+  // The five workspaces this gate did not visit. Their scenarios live in
+  // `axe-workspaces.ts`; the canaries stay here beside the other five so the
+  // per-route liveness rule is legible in one place.
+  //
+  // Showcase-only, deliberately. A canary answers "did THIS route render
+  // something a scan can see", which is a question about hydration and not
+  // about width, and the showcase tier already asks it at 320, 768 and 1440 in
+  // both themes. The thirty-combination tier is carried by the five canaries
+  // above, so every 390x844, 400%-zoom, contrast-more and forced-colors scan in
+  // the run is still one where a planted violation had to be reported.
+  ...WORKSPACE_SCENARIOS,
+  canary('settings-canary', '/settings', undefined, 'showcase'),
+  canary('knowledge-canary', '/knowledge', undefined, 'showcase'),
+  canary('delivery-canary', '/delivery', undefined, 'showcase'),
+  canary('loom-canary', '/loom', undefined, 'showcase'),
+  canary('agents-canary', '/agents', undefined, 'showcase'),
 ];
 
 runHarness(SCENARIOS).catch((err: unknown) => {

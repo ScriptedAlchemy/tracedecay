@@ -225,14 +225,12 @@ async fn resolve_scope(
     cg: &TraceDecay,
     args: &Value,
     global_db: Option<&RegisteredGlobalDb>,
-    allow_default_registry_fallback: bool,
     all_projects: bool,
 ) -> Result<ResolvedScope> {
     let context = project_registry_context(
         args,
         &["project_path"],
         global_db,
-        allow_default_registry_fallback,
     )
     .await?;
     let (project_root, project_display) = match &context {
@@ -267,7 +265,6 @@ pub(super) async fn handle_analytics(
     args: Value,
     global_db: Option<&RegisteredGlobalDb>,
     analytics_db: Option<&RegisteredGlobalDb>,
-    allow_default_registry_fallback: bool,
 ) -> Result<ToolResult> {
     let all_projects = parse_scope(&args)?;
     let window_days = parse_window_days(&args);
@@ -281,7 +278,6 @@ pub(super) async fn handle_analytics(
         cg,
         &args,
         global_db,
-        allow_default_registry_fallback,
         all_projects,
     )
     .await?;
@@ -337,7 +333,7 @@ pub(super) async fn handle_analytics(
         }
     }
     if wants_section(section, "facts") {
-        let facts = facts_section(cg, &args, global_db, allow_default_registry_fallback).await;
+        let facts = facts_section(cg, &args, global_db).await;
         if let Some(object) = value.as_object_mut() {
             object.insert("facts".to_string(), facts);
         }
@@ -425,10 +421,9 @@ async fn facts_section(
     cg: &TraceDecay,
     args: &Value,
     global_db: Option<&RegisteredGlobalDb>,
-    allow_default_registry_fallback: bool,
 ) -> Value {
     let target =
-        match open_target_memory_db(cg, args, global_db, allow_default_registry_fallback).await {
+        match open_target_memory_db(cg, args, global_db).await {
             Ok(target) => target,
             Err(err) => {
                 return json!({

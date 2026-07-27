@@ -72,6 +72,25 @@ the usability study. See
 - Roughly eight known test failures remain, and roughly 4,169 tests have not
   been measured because no full suite has completed. Focused green runs and the
   failure-fix clusters landed today do not satisfy the aggregate gate.
+- CI has not run since 01:24 UTC. PR #421 has been conflicting since 05:13 UTC,
+  and `pull_request` workflows cannot build a merge ref for a conflicting pull
+  request, so roughly 60 commits — including the whole 2026-07-27 night batch —
+  carry scoped local verification only. Restoring a mergeable PR #421 is a
+  precondition for any aggregate claim about this slice.
+- Six independent lanes found the same failure family on 2026-07-27: a gate
+  reporting success without exercising what it names, including a Windows job
+  whose nextest filter matched zero tests and a reachability test asserting that
+  a symbol name appears in source text. Because libtest exits 0 on an empty name
+  filter, a dangling `cargo test --exact` is silently vacuous forever. Gate
+  review for this slice must prove a filter selects a nonempty set before
+  counting the gate as evidence. The ledger records all six.
+- Commit `9e3ca9fd2` deleted 124 first-party tests, 75 of them covering shipping
+  behavior, and three of those intersect claims recorded as delivered — Plan 16
+  worktree/store identity, Plan 38 cursor-repair recovery, and the Plans 18/23
+  end-to-end sanitization property. These are verification-coverage gaps, not
+  retractions: restoring the assertions is the work, and no delivered capability
+  is reopened by them. The ledger names each one and the residual zero-coverage
+  files.
 
 ## Worktree-aware incremental indexing contract
 

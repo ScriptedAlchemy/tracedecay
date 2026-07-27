@@ -206,6 +206,95 @@
     color: var(--raw-text-secondary);
   }
 
+  /* ---- the compact control ----
+   * How a deliberately small bezel reaches the 44px touch minimum without
+   * being redrawn at 44px.
+   *
+   * Several controls here are compact by design — a 24px `Refresh` in a panel
+   * header, a 17px scheduler chip, a 20px order toggle — because this console
+   * is a dense instrument and a row of 44px slabs is a different product. The
+   * minimum is about what a finger can land on, not about how large the chrome
+   * looks, so the two are separated: the ELEMENT becomes a transparent 44x44
+   * hit area and an inner span goes on drawing the bezel at exactly the size
+   * it was designed. Nothing on screen changes; the target it reports is now
+   * the target a pointer actually gets.
+   *
+   * Deliberately NOT a pseudo-element on the small box. The gate measures the
+   * element's own border box, and an `::after` that merely overlaps a larger
+   * area would report 24px while claiming 44 — a hit area the harness cannot
+   * see is indistinguishable from one that does not exist. */
+  .td-hit {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: var(--touch-target-min);
+    min-width: var(--touch-target-min);
+  }
+
+  /* ---- the checkbox ----
+   * `.td-hit` for a control that cannot hold an inner span. A native checkbox
+   * paints at 13x13 and does not grow with padding — the box is UA-drawn, so
+   * padding pushes the LABEL away and leaves the target exactly as small as it
+   * was. The element therefore becomes the 44x44 target itself and draws its
+   * bezel in `::before` at the size it was designed, which is the same
+   * separation `.td-hit` makes with a wrapper span, expressed in CSS because
+   * an `<input>` has no children to draw with.
+   *
+   * The mark is a rotated BORDER, never a background or a box-shadow. Forced
+   * colors forces `background-color` to `Canvas` and `box-shadow` to `none`,
+   * so a checkmark drawn either way disappears into its own box in exactly the
+   * mode a reader is relying on it most. `border-color` is forced to
+   * `CanvasText`, so a bordered tick survives the forced palette — and it
+   * survives it without `forced-color-adjust`, which no element in this app
+   * sets and the gate's forced-colors probe measures. */
+  .td-check {
+    appearance: none;
+    display: grid;
+    place-content: center;
+    flex: none;
+    width: var(--touch-target-min);
+    height: var(--touch-target-min);
+    margin: 0;
+    border: 0;
+    background: transparent;
+    cursor: pointer;
+  }
+  .td-check::before {
+    content: '';
+    grid-area: 1 / 1;
+    width: 16px;
+    height: 16px;
+    border: 1px solid var(--raw-edge-strong);
+    border-radius: var(--radius-chip);
+    background: var(--raw-surface-0);
+  }
+  .td-check:hover::before {
+    border-color: var(--raw-accent);
+  }
+  .td-check:checked::before {
+    border-color: var(--raw-accent);
+    background: var(--raw-accent);
+  }
+  .td-check::after {
+    content: '';
+    grid-area: 1 / 1;
+    place-self: center;
+    width: 5px;
+    height: 9px;
+    margin-top: -1px;
+    border: solid var(--raw-surface-0);
+    border-width: 0 2px 2px 0;
+    transform: rotate(45deg);
+    opacity: 0;
+  }
+  .td-check:checked::after {
+    opacity: 1;
+  }
+  .td-check:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+  }
+
   /* ---- elevation planes (see tokens.css) ---- */
   /* Recessed: milled out of the face. Things you look into. */
   .td-well {

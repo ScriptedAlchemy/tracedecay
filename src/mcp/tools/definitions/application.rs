@@ -735,6 +735,11 @@ fn callable_code_meta_schema() -> serde_json::Value {
                     "temporal_descending",
                     "stable_identity"
                 ]
+            },
+            "cursor": {
+                "type": ["string", "null"],
+                "minLength": 1,
+                "description": "Authenticated opaque continuation returned as next_cursor by the prior page of an otherwise identical request."
             }
         }),
         &["projection", "order"],

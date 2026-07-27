@@ -350,7 +350,6 @@ pub struct McpServer {
     /// when global accounting is disabled so daemon clients do not fall back
     /// to the daemon process profile for selector resolution.
     registry_db: Option<Arc<RegisteredGlobalDb>>,
-    allow_default_registry_fallback: bool,
     automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,
     database_owner_reconciler: Option<DatabaseOwnerReconciler>,
     dashboard_automation_writer: crate::dashboard::DashboardAutomationWriter,
@@ -541,20 +540,14 @@ impl McpServer {
         scope_prefix: Option<String>,
         global_db: Option<Arc<RegisteredGlobalDb>>,
         registry_db: Option<Arc<RegisteredGlobalDb>>,
-        allow_default_registry_fallback: bool,
+        use_default_profile_root: bool,
     ) -> Arc<Self> {
-        let profile_root = allow_default_registry_fallback
+        let profile_root = use_default_profile_root
             .then(crate::storage::default_profile_root)
             .and_then(std::result::Result::ok);
-        let context = Self::direct_context_with_dbs(
-            cg,
-            scope_prefix,
-            profile_root,
-            global_db,
-            registry_db,
-            allow_default_registry_fallback,
-        )
-        .await;
+        let context =
+            Self::direct_context_with_dbs(cg, scope_prefix, profile_root, global_db, registry_db)
+                .await;
         Self::new_with_context(context).await
     }
 
@@ -570,7 +563,6 @@ impl McpServer {
             None,
             Some(session_db),
             None,
-            false,
         );
         Self::new_with_context(context).await
     }
@@ -594,13 +586,40 @@ impl McpServer {
     pub async fn new_with_host_admission_test_runtime_for_test(
         cg: TraceDecay,
         scope_prefix: Option<String>,
-        runtime: impl Into<Arc<crate::application::host_admission::HostAdmissionTestRuntimeV1>>,
+        runtime: crate::application::host_admission::ProjectScopedTestRuntimeV1,
     ) -> Arc<Self> {
-        let runtime = runtime.into();
+        Self::new_with_retained_test_graphs_for_test(cg, scope_prefix, runtime, Vec::new()).await
+    }
+
+    /// As [`Self::new_with_host_admission_test_runtime_for_test`], plus graphs
+    /// for projects other than `cg`'s.
+    ///
+    /// Tools that name another project reach it only through the retained
+    /// resolver (see `handlers::selected_registered_project_reader`), and a
+    /// test runtime is scoped to a single project, so a cross-project fixture
+    /// has to open each additional graph through its own scoped runtime and
+    /// hand the result in here.
+    #[cfg(any(test, feature = "test-transport"))]
+    #[doc(hidden)]
+    pub async fn new_with_retained_test_graphs_for_test(
+        cg: TraceDecay,
+        scope_prefix: Option<String>,
+        runtime: crate::application::host_admission::ProjectScopedTestRuntimeV1,
+        retained_graphs: Vec<Arc<TraceDecay>>,
+    ) -> Arc<Self> {
+        let runtime = runtime.into_runtime();
         let retained_root = cg.project_root().to_path_buf();
         let profile_root = runtime.profile_root_for_test().to_path_buf();
-        let retained_graph = Arc::new(
-            runtime
+        let mut retained: Vec<(PathBuf, Arc<TraceDecay>)> = retained_graphs
+            .into_iter()
+            .map(|graph| (canonical_or_original(graph.project_root()), graph))
+            .collect();
+        // The runtime's resolver only mounts stores inside its own profile
+        // root. A runtime supplied purely as an injected registry for a graph
+        // in another profile has no graph here to retain; retaining
+        // unconditionally instead resolved a store path never created.
+        if graph_lives_under_profile(&cg, &profile_root) {
+            let active = runtime
                 .open_project_graph_for_test(
                     &retained_root,
                     crate::tracedecay::TraceDecayOpenOptions {
@@ -609,17 +628,23 @@ impl McpServer {
                     },
                 )
                 .await
-                .expect("MCP test runtime retained project graph"),
-        );
-        let retained_project_graph_resolver: RetainedProjectGraphResolver =
-            Arc::new(move |requested_root| {
-                let graph = (requested_root == retained_root).then(|| Arc::clone(&retained_graph));
+                .expect("MCP test runtime retained project graph");
+            retained.push((canonical_or_original(&retained_root), Arc::new(active)));
+        }
+        let mut context = runtime
+            .mcp_server_context_for_test(cg, scope_prefix)
+            .expect("MCP test runtime must retain exact profile and session authorities");
+        if !retained.is_empty() {
+            let resolver: RetainedProjectGraphResolver = Arc::new(move |requested_root| {
+                let requested = canonical_or_original(&requested_root);
+                let graph = retained
+                    .iter()
+                    .find(|(root, _)| *root == requested)
+                    .map(|(_, graph)| Arc::clone(graph));
                 Box::pin(async move { graph })
             });
-        let context = runtime
-            .mcp_server_context_for_test(cg, scope_prefix)
-            .expect("MCP test runtime must retain exact profile and session authorities")
-            .with_retained_project_graph_resolver(retained_project_graph_resolver);
+            context = context.with_retained_project_graph_resolver(resolver);
+        }
         Self::new_with_context(context).await
     }
 
@@ -631,21 +656,15 @@ impl McpServer {
         scope_prefix: Option<String>,
         global_db: Option<Arc<RegisteredGlobalDb>>,
         registry_db: Option<Arc<RegisteredGlobalDb>>,
-        allow_default_registry_fallback: bool,
+        use_default_profile_root: bool,
     ) -> Arc<Self> {
-        let profile_root = allow_default_registry_fallback
+        let profile_root = use_default_profile_root
             .then(crate::storage::default_profile_root)
             .and_then(std::result::Result::ok);
         let session_db_path = cg.store_layout().sessions_db_path.clone();
-        let mut context = Self::direct_context_with_dbs(
-            cg,
-            scope_prefix,
-            profile_root,
-            global_db,
-            registry_db,
-            allow_default_registry_fallback,
-        )
-        .await;
+        let mut context =
+            Self::direct_context_with_dbs(cg, scope_prefix, profile_root, global_db, registry_db)
+                .await;
         let _ = session_db_path;
         let Some(session_db) = context.session_db.as_ref() else {
             panic!("test server project sessions database should open");
@@ -675,18 +694,11 @@ impl McpServer {
         profile_root: Option<PathBuf>,
         global_db: Option<Arc<RegisteredGlobalDb>>,
         registry_db: Option<Arc<RegisteredGlobalDb>>,
-        allow_default_registry_fallback: bool,
     ) -> McpServerConstructionContext {
         let user_session_db = None;
         let session_db = None;
         let mut context = McpServerConstructionContext::direct(cg, scope_prefix)
-            .with_direct_databases(
-                global_db,
-                registry_db,
-                session_db,
-                user_session_db,
-                allow_default_registry_fallback,
-            );
+            .with_direct_databases(global_db, registry_db, session_db, user_session_db);
         context.profile_root = profile_root;
         context
     }
@@ -710,7 +722,6 @@ impl McpServer {
             user_session_refresh_wake,
             own_project_host_admission_replay,
             startup_catch_up_enabled,
-            allow_default_registry_fallback,
             automation_scheduler_reconciler,
             database_owner_reconciler,
             dashboard_automation_writer,
@@ -744,6 +755,15 @@ impl McpServer {
         // Register this project in the global DB with its current tokens
         if let Some(ref gdb) = accounting_db {
             gdb.upsert(cg.project_root(), persisted).await;
+        } else if global_db.is_none() {
+            // Name the gap where it is created. Every later savings and
+            // analytics write from this server is a no-op (see
+            // `LedgerSink::NotMounted`); without this, a fixture that forgot
+            // to mount a database only failed much later, as an absent row.
+            tracing::debug!(
+                project_root = %cg.project_root().display(),
+                "MCP server built with no accounting database; ledger and analytics writes are inert"
+            );
         }
 
         // Detect borrowed-worktree index once at startup so every read
@@ -901,7 +921,6 @@ impl McpServer {
             #[cfg(test)]
             user_session_retrieval_calls,
             project_host_admission_replay: tokio::sync::Mutex::new(None),
-            allow_default_registry_fallback,
             automation_scheduler_reconciler,
             database_owner_reconciler,
             dashboard_automation_writer,
@@ -1189,7 +1208,7 @@ impl McpServer {
             "retained_state_proxy": {
                 "file_token_entries": file_token_entries,
                 "database_authorities": {
-                    "accounting": self.accounting_db.is_some() || self.global_db.is_some(),
+                    "accounting": self.ledger_sink_is_mounted(),
                     "registry": self.registry_db.is_some(),
                     "project_sessions": self.session_db.is_some(),
                     "user_sessions": self.user_session_db.is_some(),
@@ -1230,6 +1249,19 @@ impl McpServer {
 
         stats
     }
+}
+
+#[cfg(any(test, feature = "test-transport"))]
+fn canonical_or_original(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Whether `cg`'s graph store sits inside `profile_root`, which is the only
+/// region a test runtime rooted there is allowed to mount.
+#[cfg(any(test, feature = "test-transport"))]
+fn graph_lives_under_profile(cg: &TraceDecay, profile_root: &Path) -> bool {
+    canonical_or_original(&cg.store_layout().graph_db_path)
+        .starts_with(canonical_or_original(profile_root))
 }
 
 fn json_rpc_request_id_string(id: &Value) -> Option<String> {

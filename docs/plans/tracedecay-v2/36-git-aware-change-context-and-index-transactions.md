@@ -21,6 +21,23 @@ effects depend on them. Other historical Rust type names, files, schema
 registries, and packet fixtures are implementation evidence rather than
 artifacts to recreate.
 
+**Open portability gap (found 2026-07-27; not fixed).** Path canonicalization is
+inconsistent across the preview boundary. The daemon canonicalizes
+`repository_root` before building the assembler
+(`src/daemon/git_transactions/owner.rs`, around line 460), while callers — the
+pr11/pr12 acceptance fixture among them — capture snapshots from uncanonicalized
+paths. On Linux with a real `/tmp` the two forms are identical, so the defect is
+latent and no current test would catch it. On any host whose repository path
+traverses a symlink, macOS `/tmp` → `/private/tmp` being the canonical case,
+daemon recapture and caller snapshot diverge and `git_preview` misreports
+`stale_preview` for a preview that is in fact current.
+
+The recommended fix is to canonicalize consistently at snapshot construction so
+both sides derive the same path form from the same point. Loosening the
+comparison so mismatched forms compare equal is rejected: immutable preview
+identity is contract-bearing here, and a comparison relaxed to hide a real
+divergence would also hide a genuinely stale preview.
+
 ## Retained PR11 and PR12 delivery requirements
 
 - PR7 delivery records generation-bound repository/worktree/ref/HEAD/index

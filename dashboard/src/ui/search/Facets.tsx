@@ -60,7 +60,9 @@ export function FacetGroup({
                   aria-pressed={selected}
                   onClick={() => onToggle(selected ? null : facet.id)}
                   className={cn(
-                    'group flex w-full flex-col gap-1 rounded-[var(--radius-chip)] px-1.5 py-1 text-left',
+                    // A facet is a full-width list row, so the row is the
+                    // target and it carries the minimum directly.
+                    'group flex min-h-[var(--touch-target-min)] w-full flex-col justify-center gap-1 rounded-[var(--radius-chip)] px-1.5 py-1 text-left',
                     'hover:bg-surface-2',
                     selected && 'bg-surface-2',
                   )}

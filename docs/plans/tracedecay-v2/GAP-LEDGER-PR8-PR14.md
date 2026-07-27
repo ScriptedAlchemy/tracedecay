@@ -29,6 +29,10 @@ not inherited merely because the superseded branch entered history.
   cadence is suspect after a 237-minute stale observation, roughly eight known
   test failures remain, and roughly 4,169 tests have never been measured in a
   completed full-suite run.
+- No CI has run since 01:24 UTC on 2026-07-27 because PR #421 has been
+  conflicting since 05:13 UTC. Roughly 60 commits, including every repair
+  recorded below, are locally verified only. See the verification-status section
+  below before treating any of them as proven.
 - Plan 32 is PR17-only and SCOPE-OUT for PR8–PR14 audits.
 - Plan 34 is split: the published read-only rename preview is implemented and
   reachable; apply-grade rename is not certified by that preview, and the
@@ -124,6 +128,33 @@ One refuted finding, recorded so it is not re-reported: an audit claimed
 generated `StructureReadV12Schema`, and `CodePage.tsx` renders it. All five
 Plan 11b structure routes are consumed; do not reopen that as a gap.
 
+### Symbol-graph continuation cutover (closed 2026-07-27)
+
+Plan 21 declares cursor and resume parity across CLI, MCP, and HTTP as a
+delivered PR12 core requirement, and Plan 05 lists opaque-cursor authentication
+as delivered. Both were accurate about their own layer and inaccurate as a
+statement about the shipped product: until `97d6499ce`, every shipped code-read
+surface pinned the page to `PageRequest::first(DEFAULT_PAGE_SIZE)`. The
+server-side resume logic in `src/daemon/code_index_scheduler/queries.rs` was
+fully built and fully unreachable, a first page returned a `next_cursor` and
+`truncated: true` that no caller could spend, and HTTP silently discarded
+`?cursor=` for code reads.
+
+The fix routes continuation through `CallableCodeSurfaceMeta::into_application`
+— one choke point covering all fourteen code operations — folds the HTTP
+transport cursor into the same field, and advertises `cursor` in the MCP schema
+only now that it is honored. The pr12 reachability test resumes page two through
+MCP and the installed CLI binary and asserts the second page continues rather
+than restarts; the author reports 6/6 green and falsified the assertion by
+resuming with `None`. As with every 2026-07-27 commit, that is scoped local
+evidence and not CI.
+
+Record this as a delivered claim that was inaccurate until 2026-07-27 and is now
+closed, not as an unbuilt capability. One item is deliberately left open: page
+size remains a fixed invocation control at ten, with no advertised page-size
+parameter, so the surface offers no affordance it does not honor. Do not file
+the absent page-size parameter as a parity gap.
+
 ### Later-plan placement
 
 Plan 32 belongs to PR17 and must not be filed as unmet PR14 work. Plan 34 is
@@ -140,6 +171,10 @@ the temporary-alias deletion slices.
   includes both the shared session-observation path and the external-source
   host-observation specialization. Broader acquisition/refetch remains a
   retained, unmounted seam.
+- `05-query-crate.md`: opaque-cursor authentication and validation are delivered
+  in-crate and were never the defect. What was missing until 2026-07-27 was a
+  shipped code-read surface able to supply one; see the continuation-cutover
+  adjudication above. No audit may read that correction as a Plan 05 overclaim.
 - `08-tool-catalog-crate.md`: host discovery no longer advertises
   handle-gated feedback operations or unsupported symbol-search `AsOf`;
   internal handlers are not mistaken for host-constructible requests.
@@ -185,6 +220,10 @@ the temporary-alias deletion slices.
   daemon-hosted dashboard path has direct commit/CAS coverage. PR17's complete
   work-execution snapshot and broader component activation/drift journey remain
   open, and the live semantic snapshot is currently invalid.
+- `21-cli-mcp-tool-surface-and-output-unification.md`: the cursor half of the
+  declared CLI/MCP/HTTP parity was inaccurate as delivered until `97d6499ce`
+  closed it on 2026-07-27. Page size remains a fixed invocation control and is
+  deliberately not a caller-supplied parameter.
 - `23-session-lcm-temporal-retrieval-and-evaluation.md`: retrieval-time expiry
   and `RetentionWithheld` remain here; retention writers and
   `source_cursor_advances` reclamation belong to Plan 38.
@@ -213,6 +252,17 @@ the temporary-alias deletion slices.
   the daemon gateway, `src/lsp_bridge.rs`, `src/diagnostics/lsp/`, and
   `tracedecay lsp servers|bridge`; the old `--no-lsp`/environment/config/module
   proposal is not a missing plan requirement.
+- `36-git-aware-change-context-and-index-transactions.md`: carries an open
+  portability gap recorded 2026-07-27. The daemon canonicalizes
+  `repository_root` before building the assembler
+  (`src/daemon/git_transactions/owner.rs`, around line 460) while callers
+  capture snapshots from uncanonicalized paths. On Linux with a real `/tmp`
+  the two agree, so the defect is latent there; on any host whose repository
+  path traverses a symlink — macOS `/tmp` → `/private/tmp` is the canonical
+  case — daemon recapture and caller snapshot diverge and `git_preview` would
+  misreport `stale_preview`. The honest repair is to canonicalize consistently
+  at snapshot construction. Loosening the comparison to make the paths match is
+  the wrong fix and must not be adopted.
 - `38-storage-retention-size-and-efficiency.md` and `NEXT.md`: raw LCM
   offload/drop, projected-message dedupe, legacy session/raw pruning, and
   observation-evidence release now have bounded defaults. Superseded
@@ -236,6 +286,134 @@ the temporary-alias deletion slices.
 No numbered plan claims `.tracedecay/domain-symbols.toml` as a delivered
 capability, so the no-op `DOMAIN-EXTRACTORS.md` proposal requires no plan-side
 correction.
+
+## Verification status of the 2026-07-27 night commits
+
+Everything recorded in the three sections below landed on
+`codex/tracedecay-total-redesign-plan` during the night of 2026-07-27. **None of
+the 24 commits has been validated by CI.** PR #421 has been in a conflicting
+state since 05:13 UTC, and `pull_request` workflows cannot build a merge ref for
+a conflicting pull request, so no CI run has started since 01:24 UTC — a gap now
+covering roughly 60 commits. `gh pr view 421` still reports
+`mergeable: CONFLICTING`.
+
+Local verification during that window was scoped and contended. Several lanes
+committed on `cargo check` plus a filtered test run rather than a completed
+suite. Where a fix below is described as fixed, that means the repair landed and
+its author observed a scoped local run — not that the repository's aggregate
+gates agree. No claim here upgrades the delivery band, which remains not green
+per the authority section above.
+
+## Verification-coverage corrections (2026-07-27)
+
+Commit `9e3ca9fd2` (2026-07-24, 617 files changed) deleted 124 first-party
+tests. 75 of those covered behavior that still ships. Three of them intersect
+claims this ledger or its numbered plans record as **delivered**.
+
+These are **verification-coverage corrections, not retractions**. Nothing here
+withdraws a delivered claim, and no audit may cite this section as evidence that
+the underlying behavior is broken or must be reimplemented. The behavior may
+well be correct. What is missing is the assertion that it is. A later audit's
+only licensed action is to restore or replace the coverage — never to reopen the
+capability as unbuilt.
+
+- **Plan 16 — worktree/store identity.** The corrections list states that linked
+  worktrees "collapse to primary-checkout project/store identity while retaining
+  exact worktree snapshot authority". The mechanism enforcing the immutable half
+  of that is the `store_instances_project_immutable_v1` trigger, and its test
+  `store_project_identity_cannot_be_reparented` was among the deletions. Between
+  2026-07-24 and 2026-07-27 nothing asserted that the trigger fires. `b8ef48ec5`
+  restored it, together with the cross-table identity-constraint and
+  sanitization-receipt-immutability tests. Three restored tests against 67
+  declared guards is a partial restoration, not closure.
+- **Plan 38 — `source_cursor_advances` reclamation.** The corrections list
+  states that superseded advances are reclaimed "while preserving the current-
+  frontier receipt and restoring the immutable delete trigger before commit".
+  The adjacent recovery logic in
+  `src/global_db/schema_contract/invariants/repair.rs` — 391 lines that run on
+  every reopen and can rewind cursors and requeue projection suffixes — lost all
+  nine of its tests in the same commit and currently has zero. The retention
+  transaction's own coverage is a separate question from this one; what is
+  unasserted is the repair path that can move the same cursors outside it.
+- **Plans 18 and 23 — end-to-end sanitization.** Plan 18 lists structural
+  sanitization as delivered and Plan 23 requires every imported row to carry a
+  verified sanitization receipt. `tests/session_suite/temporal_privacy.rs` (1,081
+  lines) was deleted outright, taking the three end-to-end tests that a redacted
+  value cannot resurface through temporal summary, context, reopen, or rebuild
+  replay. Unit sanitization coverage in `src/privacy/tests.rs` survives, so the
+  detector and sanitizer are still asserted; the end-to-end non-resurfacing
+  property is not. The fixtures those tests consumed are still on disk, so
+  restoration does not require regenerating inputs.
+
+### Structural residue of the same deletion
+
+Three files carrying schema-enforcement and registry authority were left with no
+direct test coverage at all, and two of them still are:
+
+- `src/global_db/schema_contract/invariants/triggers.rs` — 67 `RAISE(ABORT)`
+  guards across roughly 1,800 lines of trigger definitions, of which three are
+  asserted by the module `b8ef48ec5` restored and 64 are not;
+- `src/global_db/schema_contract/invariants/repair.rs` — 391 lines, zero tests;
+- `src/global_db/project_registry.rs` — 1,691 lines, zero tests.
+
+Those counts describe the tree at the time of writing. Restoration lanes were
+in flight, so confirm the current state before quoting a zero.
+
+The cause was mechanical rather than a judgement that the coverage was
+worthless: a `GlobalDb` → `RegisteredGlobalDb` refactor whose compile breaks were
+cleared by deleting callers. The evidence is that 20 tests in the same file were
+successfully re-pointed at the new type while 63 were deleted. A later audit
+should treat this as a restoration backlog against known-good prior assertions,
+not as new test design.
+
+## Gates that attest to what they never checked
+
+Six independent lanes each found the same failure family on 2026-07-27: a gate
+that reports success without having exercised the thing it names. Recording the
+family so future gate review looks for it directly.
+
+1. `windows-pr8-temporal-durable` filtered on
+   `binary(=session_suite) & test(/^lcm_schema::/)`, which matched zero tests
+   while the job reported green. 30 LCM schema tests had never run under the
+   Windows DELETE+FULL pragmas the job exists to cover. Fixed in `7a92b147a`.
+2. `platform_lifecycle.passed` receipts were written unconditionally on two
+   operating systems, under a comment claiming they proved a test had run. Fixed
+   in `2758e5b97`.
+3. `pr13_lite_grammar_contract` was satisfiable by all-features junit evidence
+   without the lite build ever running. Fixed in `6b0417935`.
+4. MCP fixtures wired test doubles into test doubles, and `production_joins.rs`
+   has no production implementor — the seam is proven only against itself.
+5. `pr13_advisory_proximity_overlap` filtered on a test deleted a month earlier,
+   which reddened the `test` job at HEAD. Fixed in `3ec8f086b`.
+6. `tests/pr12_production_reachability.rs` asserts that a symbol *name appears
+   in source text* rather than that the path executes. That is why symbol-graph
+   pagination was dead from the day it was written without any gate noticing.
+
+The asymmetry that hides this family: **libtest exits 0 when a name filter
+matches nothing, while nextest can be made to fail on an empty filter.** A
+dangling `cargo test --exact` is therefore silently vacuous forever, and stays
+green through the deletion of the very test it names. Treat a name-filtered gate
+as unverified until something proves the filter selects a nonempty set.
+
+## Product defects found and fixed 2026-07-27
+
+Each landed with scoped local verification only; see the CI-status section
+above.
+
+- Symbol-graph pagination failed any read exceeding one page, from the day it
+  was written — `e864c9bf1` binds the cursors to a derived digest.
+- macOS and Windows could not mount a store at all, because the
+  filesystem-locality classifier was Linux-only — `2edeee16c`, cross-checked on
+  four target triples.
+- `test_map` reported well-tested functions as untested when a graph read
+  failed, presenting a failure as an empty success — `e56c1cc6c`.
+- SSE renders were never coalesced, producing roughly 1,000 renders/s against a
+  stated ceiling of ten, and one queue overflow fired eleven invalidations —
+  `e402d6cfe`.
+- Route grant identity was not request-correlated, and `storage_status` wrote a
+  history row on every read — `5d2a6d4b9`.
+- LSP refused to project context for any freshly bootstrapped project —
+  `f3135e9f7` projects degraded feedback instead.
 
 ## Refuted defect claims — do not reintroduce
 

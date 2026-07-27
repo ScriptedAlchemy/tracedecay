@@ -18,6 +18,8 @@ if str(BENCHMARKS_DIR) not in sys.path:
 
 from pr12_pr13_gate_evidence import (  # noqa: E402
     EVIDENCE_PASSED,
+    PLATFORM_GATE_OS,
+    command_is_feature_scoped,
     evaluate_gate,
     load_junit_passed_names,
     require_ci_gate_status_shape,
@@ -31,7 +33,7 @@ KNOWN_CI_GATES = {
     "pr13_advisory_schema",
     "pr13_advisory_runtime_decoders",
     "pr13_advisory_pagination_cas",
-    "pr13_advisory_proximity_overlap",
+    "pr13_advisory_proximity_pillar",
     "pr13_advisory_structure",
     "pr13_advisory_no_secret",
 }
@@ -40,7 +42,14 @@ PARENT_GATE_COMMANDS = {
     "pr13_advisory_schema": "cargo test --all-features --test pr13_host_bundle_acceptance draft07_schemas_validate_contract_packets -- --exact",
     "pr13_advisory_runtime_decoders": "cargo test --all-features --test pr13_advisory_runtime_acceptance authentic_github_and_ci_responses_use_production_decoders -- --exact",
     "pr13_advisory_pagination_cas": "cargo test --all-features --lib github_nested_pagination_and_cas_are_owner_bound -- --exact",
-    "pr13_advisory_proximity_overlap": "cargo test --all-features --test pr13_advisory_runtime_acceptance proximity_file_overlap_and_tiering -- --exact",
+    # This gate attests that the proximity pillar participates in the production
+    # advisory cycle, NOT that overlap detection and tiering produce the right
+    # answer. The end-to-end assertion (SameFile warning class, overlap_size,
+    # ProximityTierV1::Immediate) lived in `proximity_file_overlap_and_tiering`,
+    # which 9e3ca9fd2 deleted after 992934e03 narrowed
+    # `production_proximity_evidence_authority_v1` to `pub(crate)` and broke the
+    # test's import. Nothing replaced those assertions; see README.md.
+    "pr13_advisory_proximity_pillar": "cargo test --all-features --test pr13_advisory_runtime_acceptance production_host_ingest_uses_registered_project_runtime -- --exact",
     "pr13_advisory_structure": "cargo test --all-features --test pr13_host_bundle_acceptance structural_checks_ignore_commented_out_symbols -- --exact",
     "pr13_advisory_no_secret": "cargo test --all-features --test pr13_host_bundle_acceptance packets_pass_shared_minimal_no_secret_kernel -- --exact",
 }
@@ -213,13 +222,23 @@ def strict_acceptance(
 
     ci_gates = cast(list[str], packet["ci_gate_ids"])
     checked_in = require_ci_gate_status_shape(packet, ci_gates, fail=fail)
+    # CI hands this packet an untagged junit path because no advisory gate is
+    # bound to a runner OS or to a reduced feature set. Prove that before using
+    # the untagged bucket, so a later OS-bound or --no-default-features gate
+    # cannot silently borrow all-features Linux evidence.
+    for gate_id in ci_gates:
+        if gate_id in PLATFORM_GATE_OS:
+            fail(f"{gate_id} is OS-bound and cannot accept untagged junit evidence")
+        if command_is_feature_scoped(PARENT_GATE_COMMANDS[gate_id]):
+            fail(f"{gate_id} is feature-scoped and cannot accept all-features junit")
     junit_passed: set[str] = set()
     for path in junit_paths:
         junit_passed.update(load_junit_passed_names(path))
+    junit_by_os = {"untagged": junit_passed}
     executed_passed: set[str] = set()
     if run_gates:
         for gate_id in ci_gates:
-            if run_gate_command(repository, gate_id, PARENT_GATE_COMMANDS[gate_id]):
+            if run_gate_command(repository, PARENT_GATE_COMMANDS[gate_id]):
                 executed_passed.add(gate_id)
             else:
                 fail(f"strict local gate command failed: {gate_id}")
@@ -237,9 +256,10 @@ def strict_acceptance(
             gate_id=gate_id,
             command=PARENT_GATE_COMMANDS[gate_id],
             checked_in_state=checked_in[gate_id],
-            junit_passed=junit_passed,
+            junit_by_os=junit_by_os,
             npm_markers=set(),
             executed_passed=executed_passed,
+            executed_passed_os={},
         )
         if state != EVIDENCE_PASSED:
             unresolved.append(f"{gate_id}={state}")

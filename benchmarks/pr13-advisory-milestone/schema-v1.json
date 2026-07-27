@@ -38,7 +38,7 @@
           "pr13_advisory_schema",
           "pr13_advisory_runtime_decoders",
           "pr13_advisory_pagination_cas",
-          "pr13_advisory_proximity_overlap",
+          "pr13_advisory_proximity_pillar",
           "pr13_advisory_structure",
           "pr13_advisory_no_secret"
         ]
@@ -108,7 +108,7 @@
         "pr13_advisory_schema": { "$ref": "#/definitions/checkedInGateState" },
         "pr13_advisory_runtime_decoders": { "$ref": "#/definitions/checkedInGateState" },
         "pr13_advisory_pagination_cas": { "$ref": "#/definitions/checkedInGateState" },
-        "pr13_advisory_proximity_overlap": { "$ref": "#/definitions/checkedInGateState" },
+        "pr13_advisory_proximity_pillar": { "$ref": "#/definitions/checkedInGateState" },
         "pr13_advisory_structure": { "$ref": "#/definitions/checkedInGateState" },
         "pr13_advisory_no_secret": { "$ref": "#/definitions/checkedInGateState" }
       },
@@ -117,7 +117,7 @@
         "pr13_advisory_schema",
         "pr13_advisory_runtime_decoders",
         "pr13_advisory_pagination_cas",
-        "pr13_advisory_proximity_overlap",
+        "pr13_advisory_proximity_pillar",
         "pr13_advisory_structure",
         "pr13_advisory_no_secret"
       ]

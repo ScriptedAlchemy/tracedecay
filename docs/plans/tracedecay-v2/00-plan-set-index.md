@@ -110,6 +110,16 @@ suite.
   been measured because no full suite run has completed. The active PR12/PR13
   stabilization slice owns reducing that uncertainty and reporting the next
   full run truthfully; no PR9–PR14 acceptance follows from focused green suites.
+- No CI has run since 01:24 UTC on 2026-07-27. PR #421 has been conflicting
+  since 05:13 UTC, and `pull_request` workflows cannot build a merge ref for a
+  conflicting pull request, so roughly 60 commits — the entire 2026-07-27 night
+  batch of repairs included — are verified only by scoped, contended local runs.
+  Nothing in that batch may be reported as CI-validated.
+- Commit `9e3ca9fd2` deleted 124 first-party tests, 75 of which cover behavior
+  that still ships, and three of those intersect claims recorded as delivered.
+  `GAP-LEDGER-PR8-PR14.md` records them as verification-coverage corrections
+  rather than retractions, together with the six instances of gates that
+  attested to something they never checked.
 
 Completed-slice names are historical implementation evidence, not instructions
 to recreate a type, file layout, fixture filename, milestone, or gate. A deleted
@@ -119,6 +129,12 @@ to its current canonical owner and direct behavior/regression evidence; only
 missing callable behavior or a missing direct regression is a product gap.
 Removed planning/evidence machinery is not unfinished product work and must not
 be rebuilt.
+
+That rule protects deleted scaffolds, not deleted assertions. A direct test that
+covered retained shipping behavior is exactly the "missing direct regression"
+case above, so the 2026-07-24 deletions are a restoration backlog against
+known-good prior coverage. Restoring them changes no delivered claim and
+authorizes no reimplementation of the behavior they asserted.
 
 ## Delivery rules and practical safety baseline
 
