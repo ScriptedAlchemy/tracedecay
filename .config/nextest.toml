@@ -23,7 +23,7 @@ path = "junit.xml"
 # any assertion or adding a sleep. Applies on all hosts (the flake is a
 # scheduler-starvation timeout, not a Windows-only concern).
 [[profile.ci.overrides]]
-filter = '(binary(=daemon_suite) & test(/^git_watch_test::(fifty_commit_rebase_needs_one_sync|concurrent_syncs_are_single_flight|deleted_branch_store_is_garbage_collected)$/)) | (binary(=tracedecay) & test(~daemon::git_watch::tests::))'
+filter = '(binary(=daemon_suite) & test(/^git_watch_test::(fifty_commit_rebase_needs_one_sync|concurrent_syncs_are_single_flight|deleted_branch_store_gc_fails_closed_without_daemon_administration)$/)) | (binary(=tracedecay) & test(~daemon::git_watch::tests::))'
 slow-timeout = { period = "60s", terminate-after = 10 }
 
 [test-groups]
@@ -46,11 +46,11 @@ filter = 'binary(=dashboard_api_test)'
 threads-required = "num-cpus"
 
 [[profile.ci.overrides]]
-filter = 'binary(=core_cli_suite) & test(/^tool_daemon_test::(daemon_socket_is_owner_only|daemon_sigterm_exits_while_project_client_is_connected)$/)'
+filter = 'binary(=core_cli_suite) & test(/^tool_daemon_test::(daemon_socket_is_owner_only|daemon_sigterm_exits_while_authenticated_project_client_is_connected)$/)'
 threads-required = "num-cpus"
 
 [[profile.default.overrides]]
-filter = 'binary(=core_cli_suite) & test(/^tool_daemon_test::(daemon_socket_is_owner_only|daemon_sigterm_exits_while_project_client_is_connected)$/)'
+filter = 'binary(=core_cli_suite) & test(/^tool_daemon_test::(daemon_socket_is_owner_only|daemon_sigterm_exits_while_authenticated_project_client_is_connected)$/)'
 threads-required = "num-cpus"
 
 [[profile.ci.overrides]]
