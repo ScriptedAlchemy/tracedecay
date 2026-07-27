@@ -169,6 +169,18 @@ fn memory_operation_context(
     target_memory: &TargetMemoryDb<'_>,
     action: &str,
 ) -> Result<MemoryOperationContext> {
+    if matches!(action, "search" | "probe" | "related" | "reason" | "list") {
+        return match args.get("__mcp_request_id").and_then(Value::as_str) {
+            Some(request_id) => MemoryOperationContext::from_trusted_request_id(
+                target_memory.owner(),
+                action,
+                request_id,
+                None,
+            ),
+            None => MemoryOperationContext::generated(target_memory.owner(), action, None),
+        }
+        .map_err(memory_application_error);
+    }
     let mut logical_effect = args.clone();
     if let Some(effect) = logical_effect.as_object_mut() {
         effect.remove("__mcp_request_id");

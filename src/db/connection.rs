@@ -1323,6 +1323,28 @@ impl Database {
         Ok(DatabaseWriteTransaction { transaction, guard })
     }
 
+    /// Starts an atomic bulk-replacement transaction on the canonical writer.
+    ///
+    /// A full index can contain more than a million rows. Unlike an ordinary
+    /// mutation, it can legitimately remain active beyond the fixed
+    /// transaction lease while continuously making progress. The runtime's
+    /// migration policy renews that lease only after successful commands;
+    /// idle transactions, revoked authority, and shutdown still cancel it.
+    pub(crate) async fn begin_bulk_write_transaction(
+        &self,
+        operation: &str,
+    ) -> Result<DatabaseWriteTransaction<'_>> {
+        let guard = self.writer().await;
+        let conn = self.open_writer_connection_unguarded(operation).await?;
+        let transaction = conn.schema_migration_transaction().await.map_err(|error| {
+            TraceDecayError::Database {
+                message: format!("failed to begin bulk writer transaction: {error}"),
+                operation: operation.to_string(),
+            }
+        })?;
+        Ok(DatabaseWriteTransaction { transaction, guard })
+    }
+
     pub(crate) async fn begin_memory_write_transaction(
         &self,
         operation: &str,

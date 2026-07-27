@@ -331,7 +331,7 @@ impl TraceDecay {
         // database mutations while the connection is still in normal mode.
         let transaction = self
             .db
-            .begin_write_transaction("replace full index")
+            .begin_bulk_write_transaction("replace full index")
             .await?;
         self.db.clear_unguarded(&transaction).await?;
         self.db.begin_bulk_load_unguarded(&transaction).await?;

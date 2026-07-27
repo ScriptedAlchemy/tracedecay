@@ -38,10 +38,12 @@ use super::scoring::{
     compatibility_millionths, compatibility_temporal_decay, compatibility_term_coverage,
     compatibility_tokens,
 };
+use crate::memory::encoding::HolographicEncoder;
 
 fn compatibility_search_scores(
-    query: &str,
     query_tokens: &[String],
+    encoder: &HolographicEncoder,
+    query_vector: &[f64],
     fact: &CompatibilityFactV1,
     now: UtcMicros,
 ) -> FactStoreResult<(CompatibilityFactSearchScoresV1, String)> {
@@ -49,7 +51,7 @@ fn compatibility_search_scores(
     let coverage = compatibility_term_coverage(query_tokens, &fact_tokens);
     let fts = coverage;
     let jaccard = compatibility_jaccard(query_tokens, &fact_tokens);
-    let holographic = compatibility_holographic_score(query, fact);
+    let holographic = compatibility_holographic_score(encoder, query_vector, fact);
     let trust = fact.fact().trust().as_f64();
     let temporal_decay = compatibility_temporal_decay(fact.telemetry().updated_at(), now);
     let usage_boost = 1.0 + (0.02 * (fact.telemetry().retrieval_count() as f64).ln_1p()).min(0.5);
@@ -88,6 +90,118 @@ async fn compatibility_available_facts_tx(
         .collect())
 }
 
+async fn compatibility_search_candidates_tx(
+    transaction: &Transaction<'_>,
+    query: &CompatibilityFactSearchQuery,
+    min_trust: Confidence,
+) -> FactCompatibilityResult<Vec<CompatibilityFactV1>> {
+    let text = query.query().ok_or_else(|| {
+        storage_message(
+            COMPATIBILITY_READ_OPERATION,
+            "compatibility search query is missing",
+        )
+    })?;
+    let mut tokens = compatibility_tokens(text)
+        .into_iter()
+        .map(|token| token.to_ascii_lowercase())
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>();
+    tokens.sort();
+    tokens.dedup();
+    if tokens.is_empty() {
+        return compatibility_available_facts_tx(
+            transaction,
+            query.owner(),
+            query.filter().category(),
+            Some(min_trust),
+        )
+        .await;
+    }
+    tokens.truncate(8);
+
+    let key = OwnerKey::new(query.owner())?;
+    let mut values = vec![
+        crate::db::engine::Value::Text(key.kind.to_string()),
+        crate::db::engine::Value::Text(key.project_id.clone()),
+        crate::db::engine::Value::Text(key.json.clone()),
+        crate::db::engine::Value::Real(min_trust.as_f64()),
+    ];
+    let category_filter = query
+        .filter()
+        .category()
+        .map_or_else(String::new, |category| {
+            let index = values.len() + 1;
+            values.push(crate::db::engine::Value::Text(
+                compatibility_category_label(category).to_owned(),
+            ));
+            format!("AND json_extract(payloads.payload_json, '$.category') = ?{index}")
+        });
+    let mut token_filters = Vec::with_capacity(tokens.len());
+    for token in tokens {
+        let content_index = values.len() + 1;
+        values.push(crate::db::engine::Value::Text(format!("%{token}%")));
+        let payload_index = values.len() + 1;
+        values.push(crate::db::engine::Value::Text(format!("%{token}%")));
+        token_filters.push(format!(
+            "(lower(payloads.content) LIKE ?{content_index} \
+              OR lower(payloads.payload_json) LIKE ?{payload_index})"
+        ));
+    }
+    let limit_index = values.len() + 1;
+    let candidate_limit = query.limit().saturating_mul(2).clamp(4, 32);
+    values.push(crate::db::engine::Value::Integer(
+        i64::try_from(candidate_limit).unwrap_or(256),
+    ));
+    let sql = format!(
+        "SELECT current_facts.fact_id
+         FROM memory_v2_current_facts AS current_facts
+         JOIN memory_v2_facts AS facts
+           ON facts.fact_id = current_facts.fact_id
+          AND facts.owner_kind = current_facts.owner_kind
+          AND facts.project_id = current_facts.project_id
+         JOIN memory_v2_assertion_payloads AS payloads
+           ON payloads.assertion_id = current_facts.active_assertion_id
+          AND payloads.fact_id = current_facts.fact_id
+          AND payloads.owner_kind = current_facts.owner_kind
+          AND payloads.project_id = current_facts.project_id
+         WHERE current_facts.owner_kind = ?1
+           AND current_facts.project_id = ?2
+           AND facts.owner_json = ?3
+           AND current_facts.active_assertion_id IS NOT NULL
+           AND current_facts.trust_score >= ?4
+           {category_filter}
+           AND ({})
+         ORDER BY current_facts.updated_at DESC, current_facts.fact_id ASC
+         LIMIT ?{limit_index}",
+        token_filters.join(" OR ")
+    );
+    let mut rows = transaction
+        .query(&sql, values)
+        .await
+        .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?;
+    let mut fact_ids = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| storage_error(COMPATIBILITY_READ_OPERATION, error))?
+    {
+        fact_ids.push(
+            FactId::new(row_string(&row, 0, COMPATIBILITY_READ_OPERATION)?)
+                .map_err(FactStoreError::from)?,
+        );
+    }
+    drop(rows);
+    let mut facts = Vec::with_capacity(fact_ids.len());
+    for fact_id in fact_ids {
+        if let Some(CompatibilityFactProjectionV1::Available(fact)) =
+            load_compatibility_projection_tx(transaction, query.owner(), &fact_id).await?
+        {
+            facts.push(fact.as_ref().clone());
+        }
+    }
+    Ok(facts)
+}
+
 fn compatibility_matches_entity(fact: &CompatibilityFactV1, entity: &str) -> bool {
     let normalized = normalize_entity(entity).to_ascii_lowercase();
     !normalized.is_empty()
@@ -112,13 +226,17 @@ async fn compatibility_rank_facts_tx(
         .filter()
         .min_trust()
         .unwrap_or(Confidence::new(0.3).map_err(FactStoreError::from)?);
-    let mut facts = compatibility_available_facts_tx(
-        transaction,
-        query.owner(),
-        query.filter().category(),
-        Some(min_trust),
-    )
-    .await?;
+    let mut facts = if matches!(query.kind(), CompatibilityFactSearchKindV1::Search) {
+        compatibility_search_candidates_tx(transaction, query, min_trust).await?
+    } else {
+        compatibility_available_facts_tx(
+            transaction,
+            query.owner(),
+            query.filter().category(),
+            Some(min_trust),
+        )
+        .await?
+    };
     let now = compatibility_now()?;
     let mut ranked = Vec::with_capacity(facts.len());
     match query.kind() {
@@ -130,8 +248,11 @@ async fn compatibility_rank_facts_tx(
                 )
             })?;
             let tokens = compatibility_tokens(text);
+            let encoder = HolographicEncoder::new();
+            let query_vector = encoder.encode_fact(text, &tokens);
             for fact in facts.drain(..) {
-                let (scores, why) = compatibility_search_scores(text, &tokens, &fact, now)?;
+                let (scores, why) =
+                    compatibility_search_scores(&tokens, &encoder, &query_vector, &fact, now)?;
                 // Mirror the legacy retriever's relevance floor: a non-empty
                 // query only returns facts with a real textual signal (FTS/term
                 // overlap). Facts surfaced solely by the dense holographic
