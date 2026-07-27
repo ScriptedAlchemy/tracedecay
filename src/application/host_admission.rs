@@ -1180,7 +1180,6 @@ impl HostAdmissionTestRuntimeV1 {
                 global_db: Some(self.profile_database.as_ref()),
                 accounting_db: Some(self.profile_database.as_ref()),
                 profile_root: Some(&self.profile_root),
-                allow_default_registry_fallback: false,
                 implicit_project_path: Some(cg.project_root()),
                 session_authorities: self.mcp_session_authorities(),
                 ..Default::default()
@@ -2603,7 +2602,6 @@ impl HostAdmissionTestRuntimeV1 {
                     Some(profile_database),
                     Some(project_sessions),
                     Some(profile_sessions),
-                    false,
                 );
         context.profile_root = Some(profile_root);
         context.profile_identity = Some(profile_identity);

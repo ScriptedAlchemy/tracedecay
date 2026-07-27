@@ -468,7 +468,6 @@ fn bounded_limit(args: &Value, default: usize, max: usize) -> usize {
 
 async fn open_project_registry_read_only(
     global_db: Option<&RegisteredGlobalDb>,
-    _allow_default_registry_fallback: bool,
 ) -> Result<Option<(PathBuf, &RegisteredGlobalDb)>> {
     if let Some(db) = global_db {
         return Ok(Some((db.db_path().to_path_buf(), db)));
@@ -552,11 +551,10 @@ pub(super) async fn handle_project_list(
     cg: &TraceDecay,
     args: Value,
     global_db: Option<&RegisteredGlobalDb>,
-    allow_default_registry_fallback: bool,
 ) -> Result<ToolResult> {
     let limit = bounded_limit(&args, 25, 100);
     let Some((registry_path, db)) =
-        open_project_registry_read_only(global_db, allow_default_registry_fallback).await?
+        open_project_registry_read_only(global_db).await?
     else {
         let mut payload = registry_missing_payload();
         let (title, summary, project_tree) = empty_registry_view_payload("registered projects");
@@ -597,7 +595,6 @@ pub(super) async fn handle_project_search(
     cg: &TraceDecay,
     args: Value,
     global_db: Option<&RegisteredGlobalDb>,
-    allow_default_registry_fallback: bool,
 ) -> Result<ToolResult> {
     let query =
         args.get("query")
@@ -607,7 +604,7 @@ pub(super) async fn handle_project_search(
             })?;
     let limit = bounded_limit(&args, 10, 50);
     let Some((registry_path, db)) =
-        open_project_registry_read_only(global_db, allow_default_registry_fallback).await?
+        open_project_registry_read_only(global_db).await?
     else {
         let mut payload = registry_missing_payload();
         let (title, summary, project_tree) =
@@ -661,10 +658,9 @@ pub(super) async fn handle_project_context(
     cg: &TraceDecay,
     args: Value,
     global_db: Option<&RegisteredGlobalDb>,
-    allow_default_registry_fallback: bool,
 ) -> Result<ToolResult> {
     let Some((registry_path, db)) =
-        open_project_registry_read_only(global_db, allow_default_registry_fallback).await?
+        open_project_registry_read_only(global_db).await?
     else {
         return Ok(project_registry_result(
             cg,

@@ -132,7 +132,6 @@ pub(super) fn safe_profile_relpath(value: &str) -> Result<PathBuf> {
 
 pub(super) fn profile_root_for_global_db(
     global_db: Option<&RegisteredGlobalDb>,
-    _allow_default_registry_fallback: bool,
 ) -> Result<PathBuf> {
     if let Some(global_db) = global_db {
         return global_db
@@ -160,7 +159,6 @@ pub(super) async fn project_registry_context(
     args: &Value,
     top_level_path_keys: &[&str],
     global_db: Option<&RegisteredGlobalDb>,
-    _allow_default_registry_fallback: bool,
 ) -> Result<Option<ProjectRegistryContext>> {
     let selector_present = project_selector_present(args, top_level_path_keys);
     let selector = args
