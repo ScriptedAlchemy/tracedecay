@@ -80,6 +80,12 @@ struct MountedContextScoutClaimAuthorityV1 {
 }
 
 impl TraceDecay {
+    pub(crate) fn storage_telemetry_handle(
+        &self,
+    ) -> Result<tracedecay_rusqlite_runtime::migration_sql::MigrationSqlHandle> {
+        self.db.storage_telemetry_handle()
+    }
+
     pub(crate) async fn storage_page_counts(&self) -> Result<(u64, u64, u64)> {
         self.db.storage_page_counts().await
     }

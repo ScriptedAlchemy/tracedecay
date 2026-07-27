@@ -179,7 +179,17 @@ impl HookConfigurationPublicationStoreV1 for HookConfigurationFileWriterV1 {
         snapshot: HookConfigurationSnapshotV1,
     ) -> Result<HookConfigurationPublicationOutcomeV1, HookConfigurationPublicationError> {
         snapshot.validate()?;
-        if let Some(current) = read_snapshot(&self.path)? {
+        let current = match read_snapshot(&self.path) {
+            Ok(current) => current,
+            // This writer is the sole daemon-owned publication authority. A
+            // structurally stale or malformed prior snapshot cannot authorize
+            // anything, but it also must not permanently prevent the authority
+            // from replacing it with a validated current snapshot.
+            Err(HookConfigurationPublicationError::Corrupted)
+            | Err(HookConfigurationPublicationError::InvalidSnapshot) => None,
+            Err(error) => return Err(error),
+        };
+        if let Some(current) = current {
             if current == snapshot {
                 return Ok(HookConfigurationPublicationOutcomeV1::Duplicate);
             }

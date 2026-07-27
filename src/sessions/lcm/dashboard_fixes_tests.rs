@@ -83,6 +83,7 @@ impl DashboardFixture {
             memory_owner: FactOwnerV1::Project { project_id },
             graph_conn: memory.engine_conn(),
             _database_guards: vec![Arc::clone(&memory)],
+            graph_telemetry_handle: memory.storage_telemetry_handle().ok(),
             graph_db_path: memory_path.clone(),
             mem_db: memory,
             mem_db_path: memory_path,
@@ -107,7 +108,7 @@ impl DashboardFixture {
             automation_writer: standalone_dashboard_automation_writer(),
             doctor_report_reader: None,
             doctor_remediation_dispatcher: None,
-            application_client: None,
+            application_invocation_executor: None,
         };
         Self {
             state,

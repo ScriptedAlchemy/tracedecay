@@ -76,14 +76,16 @@ pub(super) fn compatibility_jaccard(left: &[String], right: &[String]) -> f64 {
     }
 }
 
-pub(super) fn compatibility_holographic_score(query: &str, fact: &CompatibilityFactV1) -> f64 {
+pub(super) fn compatibility_holographic_score(
+    encoder: &HolographicEncoder,
+    query_vector: &[f64],
+    fact: &CompatibilityFactV1,
+) -> f64 {
     let Some(content) = fact.content() else {
         return 0.0;
     };
-    let encoder = HolographicEncoder::new();
-    let query_vector = encoder.encode_fact(query, &compatibility_tokens(query));
     let fact_vector = encoder.encode_fact(content, fact.entities().unwrap_or_default());
-    f64::midpoint(encoder.similarity(&query_vector, &fact_vector), 1.0).clamp(0.0, 1.0)
+    f64::midpoint(encoder.similarity(query_vector, &fact_vector), 1.0).clamp(0.0, 1.0)
 }
 
 pub(super) fn compatibility_millionths(value: f64) -> u32 {

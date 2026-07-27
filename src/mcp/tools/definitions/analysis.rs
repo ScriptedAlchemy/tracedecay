@@ -28,6 +28,10 @@ pub(super) fn def_dead_code() -> ToolDefinition {
                 "include_public": {
                     "type": "boolean",
                     "description": "When true, do NOT exclude pub items. Default false."
+                },
+                "limit": {
+                    "type": "number",
+                    "description": "Maximum symbols to return (default: 100, max: 1000)"
                 }
             }
         }),

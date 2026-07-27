@@ -472,8 +472,10 @@ pub async fn call_default_tool_within(
     deadline: Instant,
 ) -> Result<serde_json::Value> {
     let socket_path = default_available_socket_path()?;
-    call_tool_with_project_warming_retry(&socket_path, handshake, tool_name, arguments, deadline)
-        .await
+    // Deadline-aware application callers need the daemon's typed warming
+    // response. Retrying that response until `deadline` turns a useful
+    // temporary state into a client-side timeout with no response body.
+    call_tool_within(&socket_path, handshake, tool_name, arguments, deadline).await
 }
 
 pub async fn call_default_doctor_runtime(

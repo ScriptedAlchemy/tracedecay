@@ -653,10 +653,13 @@ async fn resolve_occurrence(
             HydrationStateV1::UnverifiableLegacy,
         )));
     }
-    if let Some(message) =
-        canonical_projected_message(&observation, &message_id, projection_output_ordinal)
+    let canonical_message =
+        canonical_projected_message(&observation, &message_id, projection_output_ordinal);
+    if let Some(message) = canonical_message
+        .as_ref()
+        .filter(|message| !message.text.is_empty())
     {
-        let content = Zeroizing::new(message.text.into_bytes());
+        let content = Zeroizing::new(message.text.as_bytes().to_vec());
         let content_hash = sha256_hex(content.as_slice());
         return Ok(Some(HydrationResolution::Available(PayloadDescriptor {
             byte_count: content.len(),
@@ -719,6 +722,15 @@ async fn resolve_occurrence(
             }
             _ => {}
         }
+    }
+    if let Some(message) = canonical_message {
+        let content = Zeroizing::new(message.text.into_bytes());
+        let content_hash = sha256_hex(content.as_slice());
+        return Ok(Some(HydrationResolution::Available(PayloadDescriptor {
+            byte_count: content.len(),
+            source: PayloadSource::Occurrence { content },
+            content_hash,
+        })));
     }
     Ok(Some(HydrationResolution::Unavailable(
         HydrationStateV1::RetainedButUnavailable,

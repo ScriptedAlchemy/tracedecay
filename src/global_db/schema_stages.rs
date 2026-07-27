@@ -216,7 +216,6 @@ const TRANSCRIPT_SCHEMA: &str = "
 /// registered runtime connection. No database path is resolved or reopened.
 pub(crate) async fn ensure_registered_schema(conn: &Connection) -> crate::errors::Result<()> {
     const OPERATION: &str = "initialize registered global database schema";
-
     let is_fresh = !table_exists(conn, "sessions").await?
         && !table_exists(conn, "observations").await?
         && !table_exists(conn, "code_projects").await?;
@@ -266,7 +265,6 @@ pub(crate) async fn ensure_registered_schema(conn: &Connection) -> crate::errors
     )
     .await?;
     ensure_authority_invariant_schema(&transaction).await?;
-    validate_authority_schema_contract(&transaction).await?;
 
     crate::sessions::lcm::schema::ensure_lcm_schema_in_transaction(&transaction)
         .await
@@ -293,6 +291,18 @@ pub(crate) async fn ensure_registered_schema(conn: &Connection) -> crate::errors
         .commit()
         .await
         .map_err(|error| global_db_operation_error("commit registered global schema", error))?;
+
+    observation_projection::ensure_observation_projection_performance_indexes(conn)
+        .await
+        .map_err(|error| {
+            global_db_operation_error("initialize observation projection indexes", error)
+        })?;
+    validate_authority_schema_contract(conn).await?;
+    observation_projection::converge_v4_projection_anchor_bindings(conn)
+        .await
+        .map_err(|error| {
+            global_db_operation_error("backfill observation projection anchors", error)
+        })?;
 
     // Both of these page their own progress through individually committed
     // transactions. They must stay outside the schema-upgrade transaction

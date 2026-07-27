@@ -183,7 +183,13 @@ pub(super) async fn handle_dead_code(
         .get("include_public")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
-    let dead = cg.find_dead_code(&kinds, include_public).await?;
+    let limit = args
+        .get("limit")
+        .and_then(Value::as_u64)
+        .map_or(100, |value| value.clamp(1, 1_000) as usize);
+    let dead = cg
+        .find_dead_code_bounded(&kinds, include_public, limit)
+        .await?;
     let dead = filter_by_scope(dead, scope_prefix, |n| &n.file_path);
 
     let touched_files = unique_file_paths(dead.iter().map(|n| n.file_path.as_str()));
@@ -344,49 +350,21 @@ pub(super) async fn handle_hotspots(
         .map_or(10, |v| v.min(100) as usize);
     debug_assert!(limit > 0, "handle_hotspots limit must be positive");
 
-    let all_edges = cg.get_all_edges().await?;
-
-    // Count incoming + outgoing edges per node
-    let mut connectivity: HashMap<String, (usize, usize)> = HashMap::new();
-    for edge in &all_edges {
-        connectivity.entry(edge.source.clone()).or_insert((0, 0)).1 += 1; // outgoing
-        connectivity.entry(edge.target.clone()).or_insert((0, 0)).0 += 1; // incoming
-    }
-
-    // Sort by total connectivity descending
-    let mut sorted: Vec<(String, usize, usize)> = connectivity
-        .into_iter()
-        .map(|(id, (inc, out))| (id, inc, out))
-        .collect();
-    sorted.sort_by_key(|x| std::cmp::Reverse(x.1 + x.2));
-    sorted.truncate(limit);
-
-    // Resolve node details
+    let hotspots = cg.get_hotspot_nodes(scope_prefix, limit).await?;
     let mut items: Vec<Value> = Vec::new();
     let mut touched: Vec<String> = Vec::new();
-    for (node_id, incoming, outgoing) in &sorted {
-        if let Some(node) = cg.get_node(node_id).await? {
-            touched.push(node.file_path.clone());
-            items.push(json!({
-                "id": node.id,
-                "name": node.name,
-                "kind": node.kind.as_str(),
-                "file": node.file_path,
-                "line": node.start_line,
-                "incoming": incoming,
-                "outgoing": outgoing,
-                "total": incoming + outgoing,
-            }));
-        }
-    }
-
-    if let Some(prefix) = scope_prefix {
-        items.retain(|item| {
-            item["file"]
-                .as_str()
-                .is_some_and(|f| crate::path_scope::path_matches_scope(f, Some(prefix)))
-        });
-        touched.retain(|f| crate::path_scope::path_matches_scope(f, Some(prefix)));
+    for (node, incoming, outgoing) in hotspots {
+        touched.push(node.file_path.clone());
+        items.push(json!({
+            "id": node.id,
+            "name": node.name,
+            "kind": node.kind.as_str(),
+            "file": node.file_path,
+            "line": node.start_line,
+            "incoming": incoming,
+            "outgoing": outgoing,
+            "total": incoming + outgoing,
+        }));
     }
 
     let touched_files = unique_file_paths(touched.iter().map(std::string::String::as_str));

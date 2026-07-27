@@ -362,7 +362,7 @@ mod tests {
 
         assert_waits_for_writer(&db, |db| async move {
             GraphQueryManager::new(&db)
-                .find_dead_code(&[], true)
+                .find_dead_code(&[], true, None)
                 .await
                 .map(|_| ())
         })

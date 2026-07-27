@@ -62,7 +62,7 @@ impl SessionTemporalRefreshSchedulerEntry {
     async fn shutdown(self) {
         self.state.cancel();
         let mut task = self.task;
-        if tokio::time::timeout(super::super::DAEMON_TASK_ABORT_DEADLINE, &mut task)
+        if tokio::time::timeout(super::super::DAEMON_CLIENT_DRAIN_DEADLINE, &mut task)
             .await
             .is_err()
         {

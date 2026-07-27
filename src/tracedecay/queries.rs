@@ -160,7 +160,18 @@ impl TraceDecay {
         include_public: bool,
     ) -> Result<Vec<Node>> {
         let qm = GraphQueryManager::new(&self.db);
-        qm.find_dead_code(kinds, include_public).await
+        qm.find_dead_code(kinds, include_public, None).await
+    }
+
+    /// Returns a bounded dead-code page for interactive tools.
+    pub async fn find_dead_code_bounded(
+        &self,
+        kinds: &[NodeKind],
+        include_public: bool,
+        limit: usize,
+    ) -> Result<Vec<Node>> {
+        let qm = GraphQueryManager::new(&self.db);
+        qm.find_dead_code(kinds, include_public, Some(limit)).await
     }
 
     /// Returns all nodes for a given file, ordered by start line.
@@ -241,6 +252,15 @@ impl TraceDecay {
         self.db
             .get_ranked_nodes_by_edge_kind(edge_kind, node_kind, incoming, path_prefix, limit)
             .await
+    }
+
+    /// Returns nodes ranked by total incoming and outgoing connectivity.
+    pub async fn get_hotspot_nodes(
+        &self,
+        path_prefix: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<(Node, u64, u64)>> {
+        self.db.get_hotspot_nodes(path_prefix, limit).await
     }
 
     /// Returns nodes ranked by line span, optionally filtered by node kind and path.

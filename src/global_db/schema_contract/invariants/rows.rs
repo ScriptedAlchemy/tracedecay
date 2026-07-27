@@ -34,7 +34,6 @@ const BOUNDED_ROW_AUDIT_VIOLATIONS: &[&str] = &[
     "graph_scopes contains a store/project identity mismatch",
     "projection_queue contains an observation identity mismatch",
     "observation projection provenance contains invalid message_created",
-    "committed observation contains invalid authority JSON",
     "session cursor key rotation state is invalid",
     "session refresh operation state is invalid",
     "session temporal generation state is invalid",
@@ -48,15 +47,26 @@ const EXPENSIVE_ROW_AUDIT_VIOLATIONS: &[&str] = &[
     "workflow projection contains an observation receipt mismatch",
     "observation projection disposition contains a receipt mismatch",
     "observation projection checkpoints contains a negative sequence",
-    "committed observation references a missing receipt",
     "projection checkpoint exceeds the committed observation frontier",
     "global database contains a foreign-key violation",
     "session summary authority is mutable or crosses sessions",
     "session temporal receipts or cursor keys are mutable",
 ];
 
+const OBSERVATION_ROW_AUDIT_VIOLATIONS: &[&str] = &[
+    "committed observation references a missing receipt",
+    "committed observation contains invalid authority JSON",
+];
+
+pub(super) fn observation_row_audit_covers(invariant: &Invariant) -> bool {
+    OBSERVATION_ROW_AUDIT_VIOLATIONS.contains(&invariant.violation)
+}
+
 fn classify_invariant_row_audit(invariant: &Invariant) -> Option<InvariantRowAuditCategory> {
     invariant.audit_query.as_ref()?;
+    if observation_row_audit_covers(invariant) {
+        return None;
+    }
     if BOUNDED_ROW_AUDIT_VIOLATIONS.contains(&invariant.violation) {
         Some(InvariantRowAuditCategory::Bounded)
     } else {
@@ -522,6 +532,18 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn observation_row_validation_replaces_redundant_sql_scans() {
+        for violation in OBSERVATION_ROW_AUDIT_VIOLATIONS {
+            let invariant = INVARIANTS
+                .iter()
+                .find(|invariant| invariant.violation == *violation)
+                .unwrap();
+            assert!(observation_row_audit_covers(invariant));
+            assert_eq!(classify_invariant_row_audit(invariant), None);
         }
     }
 

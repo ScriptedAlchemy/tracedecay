@@ -938,6 +938,15 @@ mod tests {
         async fn new(session_id: &str) -> Self {
             let temp = TempDir::new().expect("temporary observation fixture");
             let home = temp.path().join("home");
+            Self::new_with_temp_and_home(session_id, temp, home).await
+        }
+
+        async fn new_in_home(session_id: &str, home: PathBuf) -> Self {
+            let temp = TempDir::new().expect("temporary observation fixture");
+            Self::new_with_temp_and_home(session_id, temp, home).await
+        }
+
+        async fn new_with_temp_and_home(session_id: &str, temp: TempDir, home: PathBuf) -> Self {
             let profile = home.join(".tracedecay");
             let transcript = home
                 .join(".claude/projects/project-scope")
@@ -1437,7 +1446,13 @@ mod tests {
 
     #[tokio::test]
     async fn registered_claude_ingest_api_routes_through_observation_authority() {
-        let fixture = Fixture::new("legacy-api-session").await;
+        let _profile = crate::config::PinnedUserDataDir::new();
+        let profile_root = crate::storage::default_profile_root().unwrap();
+        let fixture = Fixture::new_in_home(
+            "legacy-api-session",
+            profile_root.parent().unwrap().to_path_buf(),
+        )
+        .await;
         fixture.write_record("legacy API searchable", "legacy-api-secret");
         let admission = fixture.runtime.facade();
         let stats = crate::sessions::claude::ingest_user_sessions_with_admission(

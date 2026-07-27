@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use crate::db::engine::{Connection, Executor, QueryExecutor, TransactionBehavior, params};
 use tracedecay_domain::{CanonicalObservationIdV1, DurableObservationV1};
 use tracedecay_store::{
@@ -24,6 +26,7 @@ use super::transition::{
 
 const REBUILD_PAGE_SIZE: i64 = 128;
 const REBUILD_MAX_STEPS_PER_INVOCATION: usize = 4;
+static NEVER_CANCELLED: AtomicBool = AtomicBool::new(false);
 
 pub(crate) async fn project_observation_with_engine(
     conn: &Connection,
@@ -45,9 +48,20 @@ pub(crate) async fn rebuild_projection_with_engine(
     conn: &Connection,
     frontier_sequence: u64,
 ) -> ProjectionStoreResult<ProjectionRebuildOutcome> {
+    rebuild_projection_until_cancelled_with_engine(conn, frontier_sequence, &NEVER_CANCELLED).await
+}
+
+async fn rebuild_projection_until_cancelled_with_engine(
+    conn: &Connection,
+    frontier_sequence: u64,
+    cancelled: &AtomicBool,
+) -> ProjectionStoreResult<ProjectionRebuildOutcome> {
     prepare_projection_rebuild_with_engine(conn, frontier_sequence).await?;
     for _ in 0..REBUILD_MAX_STEPS_PER_INVOCATION {
-        match advance_projection_rebuild_with_engine(conn, frontier_sequence).await? {
+        if cancelled.load(Ordering::Acquire) {
+            break;
+        }
+        match advance_projection_rebuild_with_engine(conn, frontier_sequence, cancelled).await? {
             RebuildAdvance::Pending => {}
             RebuildAdvance::Complete(outcome) => return Ok(outcome),
         }
@@ -57,12 +71,13 @@ pub(crate) async fn rebuild_projection_with_engine(
 
 pub(super) async fn resume_projection_rebuild_with_engine(
     conn: &Connection,
+    cancelled: &AtomicBool,
 ) -> ProjectionStoreResult<Option<bool>> {
     let Some(job) = read_optional_rebuild_job(conn).await? else {
         return Ok(None);
     };
     let frontier = decode_sequence(job.frontier, "resume projection rebuild frontier")?;
-    rebuild_projection_with_engine(conn, frontier)
+    rebuild_projection_until_cancelled_with_engine(conn, frontier, cancelled)
         .await
         .map(|outcome| Some(outcome.is_complete()))
 }
@@ -93,6 +108,7 @@ pub(super) async fn prepare_projection_rebuild_with_engine(
 async fn advance_projection_rebuild_with_engine(
     conn: &Connection,
     frontier_sequence: u64,
+    cancelled: &AtomicBool,
 ) -> ProjectionStoreResult<RebuildAdvance> {
     let job = read_rebuild_job(conn).await?;
     match job.state {
@@ -101,7 +117,7 @@ async fn advance_projection_rebuild_with_engine(
             Ok(RebuildAdvance::Pending)
         }
         RebuildState::Building => {
-            stage_projection_rebuild_batch_with_engine(conn).await?;
+            stage_projection_rebuild_batch_with_engine(conn, cancelled).await?;
             Ok(RebuildAdvance::Pending)
         }
         RebuildState::Ready => activate_projection_rebuild_with_engine(conn, frontier_sequence)
@@ -124,12 +140,13 @@ async fn stage_projection_alias_batch_with_engine(conn: &Connection) -> Projecti
 
 async fn stage_projection_rebuild_batch_with_engine(
     conn: &Connection,
+    cancelled: &AtomicBool,
 ) -> ProjectionStoreResult<bool> {
     let transaction = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .await
         .map_err(|error| storage("begin projection rebuild batch", error))?;
-    let outcome = stage_projection_rebuild_batch_transaction(&transaction).await?;
+    let outcome = stage_projection_rebuild_batch_transaction(&transaction, cancelled).await?;
     let commit_operation = match outcome {
         RebuildBatchStage::AlreadyReady => "commit completed projection rebuild batch",
         RebuildBatchStage::Advanced { .. } => "commit projection rebuild batch",
@@ -339,6 +356,7 @@ async fn stage_projection_alias_batch_transaction(
 
 async fn stage_projection_rebuild_batch_transaction(
     transaction: &impl Executor,
+    cancelled: &AtomicBool,
 ) -> ProjectionStoreResult<RebuildBatchStage> {
     let job = read_rebuild_job(transaction).await?;
     if job.state == RebuildState::Ready {
@@ -411,6 +429,9 @@ async fn stage_projection_rebuild_batch_transaction(
             }
         }
         staged_through = sequence_i64;
+        if cancelled.load(Ordering::Acquire) {
+            break;
+        }
     }
     if staged_through < job.frontier && staged_through == job.staged_through {
         return Err(storage_message(
