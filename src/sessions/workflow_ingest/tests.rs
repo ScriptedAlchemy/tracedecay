@@ -32,6 +32,14 @@ async fn workflow_test_store(project_root: &Path) -> WorkflowTestStore {
         .await
         .unwrap();
     let project_id = ProjectId::new(format!("project.workflow-ingest-{nonce}")).unwrap();
+    crate::storage::write_enrollment_marker(
+        project_root,
+        &crate::storage::EnrollmentMarker {
+            project_id: project_id.as_str().to_owned(),
+            storage_mode: crate::storage::StorageMode::ProfileSharded,
+        },
+    )
+    .unwrap();
     let database = registry
         .project_sessions(project_id.clone(), [project_root.to_path_buf()])
         .await
