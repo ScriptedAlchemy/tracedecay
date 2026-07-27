@@ -18,6 +18,7 @@ import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { GraphCanvas } from '../../viz/graph/GraphCanvas.tsx';
 import { kindColorVars } from '../../viz/graph/kindColor.ts';
 import { ActivationField } from '../../viz/graph/activation.ts';
+import { IndexFreshness } from './IndexFreshness.tsx';
 import { Strata } from './Strata.tsx';
 import { TraceView, type TraceFocus } from './TraceView.tsx';
 import {
@@ -186,6 +187,10 @@ export function CodePage() {
            * totals rather than inside the canvas — it is a property of the
            * whole index, not of the slice currently drawn. */}
           <Strata />
+          {/* Both readings above are only as current as the generation they
+           * were computed from, and that generation was sealed against one
+           * exact source reference. This states which. */}
+          <IndexFreshness />
         </div>
       }
       list={
