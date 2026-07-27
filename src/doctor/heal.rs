@@ -836,17 +836,6 @@ mod tests {
             .unwrap();
         let project = dir.path().join("repo");
         let profile = dir.path().join("profile");
-        let lifecycle = crate::lifecycle_lease::acquire_exclusive_for_profile(
-            &profile,
-            "post-update healer test",
-        )
-        .unwrap();
-        let _database_scope = crate::db::enter_maintenance_database_scope(
-            &lifecycle,
-            &profile,
-            "post-update health pass",
-        )
-        .unwrap();
         std::fs::create_dir_all(&project).unwrap();
         let status = std::process::Command::new("git")
             .args(["init", "--quiet"])
@@ -892,7 +881,7 @@ mod tests {
         std::fs::write(
             ledger_root.join(format!("{migration_id}.json")),
             serde_json::to_vec_pretty(&serde_json::json!({
-                "schema_version": 2,
+                "schema_version": 3,
                 "migration_id": migration_id,
                 "confirmation_token": "confirm-healer",
                 "input_fingerprint": "healer-fixture",
@@ -946,6 +935,28 @@ mod tests {
             .await
             .unwrap();
         global.checkpoint().await;
+        drop(global);
+        drop(runtime);
+
+        let lifecycle = crate::lifecycle_lease::acquire_exclusive_for_profile(
+            &profile,
+            "post-update healer test",
+        )
+        .unwrap();
+        let _database_scope = crate::db::enter_maintenance_database_scope(
+            &lifecycle,
+            &profile,
+            "post-update health pass",
+        )
+        .unwrap();
+        let profile_identity = crate::daemon::profile_identity::load_or_create(&profile).unwrap();
+        let maintenance_registry =
+            crate::daemon::store_runtime::session_registry::DaemonSessionRuntimeRegistryV1::open(
+                profile_identity,
+            )
+            .await
+            .unwrap();
+        let global = maintenance_registry.profile_database().await.unwrap();
 
         let pause = profile
             .join("migration-inventory")
@@ -967,12 +978,19 @@ mod tests {
             report
         });
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while !paused.is_file() {
+            while !paused.is_file() && !interrupted.is_finished() {
                 tokio::task::yield_now().await;
             }
         })
         .await
         .expect("registry retirement did not reach cancellation point");
+        if interrupted.is_finished() {
+            let report = interrupted.await.unwrap();
+            panic!(
+                "registry retirement exited before cancellation point: {:?}",
+                report.warnings
+            );
+        }
         interrupted.abort();
         assert!(interrupted.await.unwrap_err().is_cancelled());
         std::fs::remove_file(pause).unwrap();
