@@ -299,7 +299,7 @@ mod tests {
         .await
         .unwrap();
 
-        let target = open_target_memory_db(&cg, &json!({}), None, true)
+        let target = open_target_memory_db(&cg, &json!({}), None)
             .await
             .unwrap();
 
@@ -324,7 +324,6 @@ mod tests {
                 "project_id": "another_project",
             }),
             None,
-            true,
         )
         .await
         .unwrap_err();
@@ -344,7 +343,6 @@ mod tests {
             &cg,
             json!({ "fact_id": fact_id, "action": "helpful" }),
             None,
-            true,
         )
         .await
         .unwrap();
@@ -367,7 +365,7 @@ mod tests {
         });
 
         for _ in 0..2 {
-            handle_fact_feedback(&cg, args.clone(), None, true)
+            handle_fact_feedback(&cg, args.clone(), None)
                 .await
                 .unwrap();
         }
@@ -390,7 +388,6 @@ mod tests {
                 "__mcp_request_id": "request.mcp.connection-a.first",
             }),
             None,
-            true,
         )
         .await
         .unwrap();
@@ -402,7 +399,6 @@ mod tests {
                 "__mcp_request_id": "request.mcp.connection-b.first",
             }),
             None,
-            true,
         )
         .await
         .unwrap();
@@ -452,7 +448,6 @@ mod tests {
                 "__mcp_request_id": "request.mcp.reconnected.first",
             }),
             None,
-            true,
         )
         .await
         .unwrap();
