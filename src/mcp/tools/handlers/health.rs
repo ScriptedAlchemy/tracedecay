@@ -1146,8 +1146,26 @@ pub(super) async fn handle_runtime(
     {
         attach_doctor_report(&mut value, doctor_report_reader).await;
     }
+    let semantic_configuration = cg
+        .configuration_runtime()
+        .client()
+        .current()
+        .await
+        .ok()
+        .and_then(|pinned| {
+            crate::application::semantic_runtime::SemanticConfigurationPinV1::from_current(
+                &crate::application::configuration::ConfigurationCurrentStateV1 {
+                    revision_id: pinned.revision_id,
+                    snapshot: pinned.snapshot,
+                },
+            )
+            .ok()
+        });
     if let Some(semantic) =
-        crate::application::semantic_runtime::project_semantic_application_status(cg.project_root())
+        crate::application::semantic_runtime::project_semantic_application_status(
+            cg.project_root(),
+            semantic_configuration,
+        )
     {
         value["semantic_runtime"] = serde_json::to_value(&semantic).unwrap_or_else(|_| json!({}));
     }

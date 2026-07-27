@@ -183,8 +183,10 @@ impl CodeIndexSchedulerRegistryV1 {
         let code_generation_display = Some(code_generation.as_str().to_owned());
         let current_source =
             crate::application::semantic_runtime::project_semantic_source_generation(project_root);
-        let status =
-            crate::application::semantic_runtime::project_semantic_application_status(project_root);
+        let status = crate::application::semantic_runtime::project_semantic_application_status(
+            project_root,
+            None,
+        );
         let reason = semantic_mcp_reason(
             current_source.as_ref(),
             &code_generation,

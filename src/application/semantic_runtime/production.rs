@@ -2488,9 +2488,16 @@ pub(crate) fn project_semantic_generation_pointer(
 }
 
 /// Application status for a mounted project semantic scheduler, if any.
-pub fn project_semantic_application_status(project_root: &Path) -> Option<SemanticRuntimeStatusV1> {
+pub fn project_semantic_application_status(
+    project_root: &Path,
+    configuration: Option<SemanticConfigurationPinV1>,
+) -> Option<SemanticRuntimeStatusV1> {
     if let Some(runtime) = project_semantic_production_runtime(project_root) {
-        return Some(DaemonSemanticRuntimeBackendV1::from_production(runtime).application_status());
+        let backend = DaemonSemanticRuntimeBackendV1::from_production(runtime);
+        if let Some(configuration) = configuration {
+            backend.bind_configuration(configuration);
+        }
+        return Some(backend.application_status());
     }
     let handle = project_semantic_handles()
         .lock()
@@ -2499,7 +2506,7 @@ pub fn project_semantic_application_status(project_root: &Path) -> Option<Semant
         .cloned()?;
     Some(application_status_from_projection(
         &handle.status_projection(),
-        None,
+        configuration,
     ))
 }
 

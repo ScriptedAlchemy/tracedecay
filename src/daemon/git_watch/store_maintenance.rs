@@ -51,11 +51,7 @@ pub(super) async fn sync_project(
                 },
                 None => cg.sync().await.map(|_| ()),
             };
-            let synced = matches!(
-                result,
-                Ok(()) | Err(crate::errors::TraceDecayError::SyncLock { .. })
-            );
-            synced
+            result.is_ok()
         })
         .await
 }

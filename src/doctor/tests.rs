@@ -1972,6 +1972,15 @@ fn daemon_startup_health_classifies_sqlite_corruption_spellings_as_terminal() {
 }
 
 #[test]
+fn doctor_runtime_requests_authority_and_report_without_cold_route() {
+    let args = super::daemon_runtime_args();
+
+    assert_eq!(args["authority_audit"], serde_json::json!(true));
+    assert_eq!(args["doctor_report"], serde_json::json!(true));
+    assert_eq!(args["session_ingest_health"], serde_json::json!(false));
+}
+
+#[test]
 fn daemon_startup_health_preserves_corruption_error_and_adds_remediation() {
     let problem = "fts5: corruption found reading blob 412316860480 from table \"nodes_fts\"";
     let outcome =

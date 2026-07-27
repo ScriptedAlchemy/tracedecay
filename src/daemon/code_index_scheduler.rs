@@ -10,7 +10,7 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     sync::{
-        Arc, Mutex, Weak,
+        Arc, Mutex, OnceLock, Weak,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -534,6 +534,7 @@ pub(super) enum CodeIndexReconcileOutcomeV1 {
 #[derive(Clone)]
 pub(in crate::daemon) struct LatestCompleteCodeIndexV1 {
     generation: CodeIndexPublishedGenerationV1,
+    query_owners: Arc<OnceLock<ProductionCodeIndexQueryOwnersV1>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -547,6 +548,7 @@ pub(super) struct SemanticEvaluationCodeSnapshotV1 {
 /// generation. Lanes remain independently disableable by omitting a field from
 /// composition; this bundle only proves the daemon can mint all three from the
 /// same sealed generation evidence.
+#[derive(Clone)]
 pub(super) struct ProductionCodeIndexQueryOwnersV1 {
     pub exact: ExactLane<
         CentralExactAdmissionAuthorityV1,
@@ -626,6 +628,9 @@ impl LatestCompleteCodeIndexV1 {
     pub fn production_query_owners(
         &self,
     ) -> Result<ProductionCodeIndexQueryOwnersV1, RetrievalPortError> {
+        if let Some(owners) = self.query_owners.get() {
+            return Ok(owners.clone());
+        }
         let generation_id = self.generation.manifest().generation_id.clone();
         let freshness = production_code_index_freshness(
             self.generation.manifest().seal.sealed_at,
@@ -677,11 +682,13 @@ impl LatestCompleteCodeIndexV1 {
             self.generation.edges(),
             self.generation.chunks().chunks(),
         )?);
-        Ok(ProductionCodeIndexQueryOwnersV1 {
+        let owners = ProductionCodeIndexQueryOwnersV1 {
             exact,
             lexical,
             graph,
-        })
+        };
+        let _ = self.query_owners.set(owners.clone());
+        Ok(self.query_owners.get().cloned().unwrap_or(owners))
     }
 }
 
@@ -731,6 +738,12 @@ pub(super) struct CodeIndexWorktreeSchedulerV1 {
     epoch: Arc<AtomicU64>,
     shutting_down: Arc<AtomicBool>,
     latest_content_identity: Option<ContentDigest>,
+    query_owners: Mutex<
+        Option<(
+            CodeGenerationId,
+            Arc<OnceLock<ProductionCodeIndexQueryOwnersV1>>,
+        )>,
+    >,
     /// Optional PR10 hook: schedule `FastEmbed` projection without joining it.
     semantic_schedule:
         Option<crate::application::semantic_runtime::SavedCodeGenerationScheduleHookV1>,
@@ -821,6 +834,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             epoch,
             shutting_down: Arc::new(AtomicBool::new(false)),
             latest_content_identity,
+            query_owners: Mutex::new(None),
             semantic_schedule: None,
         };
         Ok(scheduler)
@@ -1125,7 +1139,25 @@ impl CodeIndexWorktreeSchedulerV1 {
             .active_generation()
             .ok()
             .flatten()
-            .map(|generation| LatestCompleteCodeIndexV1 { generation })
+            .map(|generation| {
+                let generation_id = generation.manifest().generation_id.clone();
+                let mut cached = self
+                    .query_owners
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let query_owners = match cached.as_ref() {
+                    Some((cached_id, owners)) if cached_id == &generation_id => Arc::clone(owners),
+                    _ => {
+                        let owners = Arc::new(OnceLock::new());
+                        *cached = Some((generation_id, Arc::clone(&owners)));
+                        owners
+                    }
+                };
+                LatestCompleteCodeIndexV1 {
+                    generation,
+                    query_owners,
+                }
+            })
     }
 
     fn generation(
@@ -1134,7 +1166,12 @@ impl CodeIndexWorktreeSchedulerV1 {
     ) -> Result<Option<LatestCompleteCodeIndexV1>, CodeIndexSchedulerErrorV1> {
         self.publication
             .load_generation(generation_id)
-            .map(|generation| generation.map(|generation| LatestCompleteCodeIndexV1 { generation }))
+            .map(|generation| {
+                generation.map(|generation| LatestCompleteCodeIndexV1 {
+                    generation,
+                    query_owners: Arc::new(OnceLock::new()),
+                })
+            })
             .map_err(|error| CodeIndexProductionErrorV1::Publication(error).into())
     }
 

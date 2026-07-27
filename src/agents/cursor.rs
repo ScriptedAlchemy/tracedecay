@@ -341,7 +341,7 @@ fn embedded_plugin_files() -> Vec<(&'static str, &'static str)> {
     crate::agents::plugin_bundle::cursor_files()
 }
 
-fn cursor_plugin_install_dir(home: &Path) -> PathBuf {
+pub(crate) fn cursor_plugin_install_dir(home: &Path) -> PathBuf {
     home.join(".cursor/plugins/local/tracedecay")
 }
 
@@ -380,10 +380,10 @@ fn cursor_native_extension_registration(home: &Path) -> HostBundleRegistrationSt
 
 /// Path of the materialized always-applied memory rule rendered from the
 /// project fact store (see `hooks::memory_inject::regenerate_cursor_memory_rule`).
-/// The install path writes the embedded placeholder; hooks rewrite it in
-/// place with rendered facts.
+/// Dynamic memory lives outside the receipt-owned plugin bundle so hook
+/// refreshes cannot create component ownership conflicts.
 pub fn cursor_memory_rule_path(home: &Path) -> PathBuf {
-    cursor_plugin_install_dir(home).join("rules/tracedecay-memory.mdc")
+    home.join(".cursor/rules/tracedecay-memory.mdc")
 }
 
 fn install_cursor_plugin(home: &Path, tracedecay_bin: &str) -> Result<()> {
@@ -1309,13 +1309,20 @@ mod tests {
             "hooks/hooks.json",
             "README.md",
             "rules/tracedecay.mdc",
-            "rules/tracedecay-memory.mdc",
         ] {
             assert!(
                 deploy.contains(expected),
                 "Cursor deploy set is missing {expected}"
             );
         }
+        assert!(
+            !deploy.contains("rules/tracedecay-memory.mdc"),
+            "dynamic project memory must not modify receipt-owned plugin files"
+        );
+        assert_eq!(
+            cursor_memory_rule_path(Path::new("/home/test")),
+            PathBuf::from("/home/test/.cursor/rules/tracedecay-memory.mdc")
+        );
 
         // Every canonical agent is rendered into Cursor's generated deploy
         // set. Directory discovery prevents a newly added catalog entry from

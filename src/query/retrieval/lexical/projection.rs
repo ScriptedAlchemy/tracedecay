@@ -165,6 +165,63 @@ impl ProjectedChunkV1 {
 pub struct CodeLexicalProjectionAdapterV1 {
     metadata: CodeLexicalProjectionMetadataV1,
     rows: Arc<Vec<ProjectedChunkV1>>,
+    statistics: Arc<LexicalCorpusStatisticsV1>,
+}
+
+#[derive(Clone, Debug)]
+struct LexicalCorpusStatisticsV1 {
+    vocabulary: BTreeSet<String>,
+    document_frequencies: BTreeMap<LexicalFieldV1, BTreeMap<String, usize>>,
+    average_field_lengths: BTreeMap<LexicalFieldV1, usize>,
+}
+
+impl LexicalCorpusStatisticsV1 {
+    fn from_rows(rows: &[ProjectedChunkV1]) -> Self {
+        let mut vocabulary = BTreeSet::new();
+        let mut document_frequencies = BTreeMap::<LexicalFieldV1, BTreeMap<String, usize>>::new();
+        let mut field_lengths = BTreeMap::<LexicalFieldV1, usize>::new();
+        for row in rows {
+            for (field, terms) in &row.fields {
+                *field_lengths.entry(*field).or_default() += terms.len();
+                let mut unique = BTreeSet::new();
+                for term in terms {
+                    if *field != LexicalFieldV1::Subtoken {
+                        vocabulary.insert(term.clone());
+                    }
+                    unique.insert(term);
+                }
+                for term in unique {
+                    *document_frequencies
+                        .entry(*field)
+                        .or_default()
+                        .entry(term.clone())
+                        .or_default() += 1;
+                }
+            }
+        }
+        let divisor = rows.len().max(1);
+        let average_field_lengths = field_lengths
+            .into_iter()
+            .map(|(field, total)| (field, total.div_ceil(divisor).max(1)))
+            .collect();
+        Self {
+            vocabulary,
+            document_frequencies,
+            average_field_lengths,
+        }
+    }
+
+    fn document_frequency(&self, field: LexicalFieldV1, term: &str) -> usize {
+        self.document_frequencies
+            .get(&field)
+            .and_then(|frequencies| frequencies.get(term))
+            .copied()
+            .unwrap_or_default()
+    }
+
+    fn average_field_length(&self, field: LexicalFieldV1) -> usize {
+        self.average_field_lengths.get(&field).copied().unwrap_or(1)
+    }
 }
 
 impl CodeLexicalProjectionAdapterV1 {
@@ -232,9 +289,11 @@ impl CodeLexicalProjectionAdapterV1 {
             rows.push(ProjectedChunkV1::new(chunk, logical_path));
         }
         rows.sort_by(|left, right| left.chunk.id.cmp(&right.chunk.id));
+        let statistics = Arc::new(LexicalCorpusStatisticsV1::from_rows(&rows));
         Ok(Self {
             metadata,
             rows: Arc::new(rows),
+            statistics,
         })
     }
 
@@ -265,10 +324,23 @@ impl CodeLexicalProjectionAdapterV1 {
         request: &LexicalLaneRequest<'_>,
     ) -> Result<RetrieverBatch<LexicalLaneEvidence>, RetrievalPortError> {
         let fuzzy = self.fuzzy_expansions(request);
+        let phrase_document_frequencies = request
+            .phrases
+            .iter()
+            .map(|phrase| normalize_lexical(phrase))
+            .map(|phrase| {
+                let frequency = self
+                    .rows
+                    .iter()
+                    .filter(|row| substring_count(&row.normalized_text, &phrase) > 0)
+                    .count();
+                (phrase, frequency)
+            })
+            .collect::<BTreeMap<_, _>>();
         let mut pairs = Vec::new();
         let mut excluded = 0_u64;
         for row in self.rows.iter() {
-            let score = self.score_row(row, request, &fuzzy);
+            let score = self.score_row(row, request, &fuzzy, &phrase_document_frequencies);
             if score.field_scores.is_empty() {
                 excluded += 1;
                 continue;
@@ -321,14 +393,6 @@ impl CodeLexicalProjectionAdapterV1 {
         if request.fuzzy_budget == 0 {
             return FuzzyExpansionsV1::default();
         }
-        let mut vocabulary = BTreeSet::new();
-        for row in self.rows.iter() {
-            for (field, terms) in &row.fields {
-                if *field != LexicalFieldV1::Subtoken {
-                    vocabulary.extend(terms.iter().cloned());
-                }
-            }
-        }
         let mut candidates = Vec::new();
         for (query_ordinal, query) in request.whole_terms.iter().enumerate() {
             let normalized_query = normalize_lexical(query);
@@ -336,7 +400,7 @@ impl CodeLexicalProjectionAdapterV1 {
             if bound == 0 {
                 continue;
             }
-            for term in &vocabulary {
+            for term in &self.statistics.vocabulary {
                 if term == &normalized_query {
                     continue;
                 }
@@ -360,6 +424,7 @@ impl CodeLexicalProjectionAdapterV1 {
         row: &ProjectedChunkV1,
         request: &LexicalLaneRequest<'_>,
         fuzzy: &FuzzyExpansionsV1,
+        phrase_document_frequencies: &BTreeMap<String, usize>,
     ) -> LexicalRowScoreV1 {
         let mut field_scores: BTreeMap<LexicalFieldV1, u64> = BTreeMap::new();
         let mut matched_whole_terms = BTreeSet::new();
@@ -426,7 +491,15 @@ impl CodeLexicalProjectionAdapterV1 {
                 LexicalFieldV1::BodyText
             };
             let score = self
-                .phrase_score(field, &normalized, tf, row)
+                .phrase_score(
+                    field,
+                    tf,
+                    row,
+                    phrase_document_frequencies
+                        .get(&normalized)
+                        .copied()
+                        .unwrap_or_default(),
+                )
                 .saturating_mul(PHRASE_SCORE_MILLIS)
                 / 1_000;
             add_score(&mut field_scores, field, score);
@@ -458,18 +531,9 @@ impl CodeLexicalProjectionAdapterV1 {
         term_frequency: usize,
         row: &ProjectedChunkV1,
     ) -> u64 {
-        let document_frequency = self
-            .rows
-            .iter()
-            .filter(|candidate| {
-                candidate
-                    .fields
-                    .get(&field)
-                    .is_some_and(|terms| terms.iter().any(|value| value == term))
-            })
-            .count();
+        let document_frequency = self.statistics.document_frequency(field, term);
         let document_length = row.fields.get(&field).map_or(0, Vec::len).max(1);
-        let average_length = average_field_length(&self.rows, field);
+        let average_length = self.statistics.average_field_length(field);
         bm25_score_micros(
             self.rows.len(),
             document_frequency,
@@ -483,22 +547,17 @@ impl CodeLexicalProjectionAdapterV1 {
     fn phrase_score(
         &self,
         field: LexicalFieldV1,
-        phrase: &str,
         term_frequency: usize,
         row: &ProjectedChunkV1,
+        document_frequency: usize,
     ) -> u64 {
-        let document_frequency = self
-            .rows
-            .iter()
-            .filter(|candidate| substring_count(&candidate.normalized_text, phrase) > 0)
-            .count();
         let document_length = row.fields.get(&field).map_or(0, Vec::len).max(1);
         bm25_score_micros(
             self.rows.len(),
             document_frequency,
             term_frequency,
             document_length,
-            average_field_length(&self.rows, field),
+            self.statistics.average_field_length(field),
             field_weight_millis(field),
         )
     }
@@ -797,17 +856,6 @@ fn add_score(scores: &mut BTreeMap<LexicalFieldV1, u64>, field: LexicalFieldV1, 
         .entry(field)
         .and_modify(|current| *current = current.saturating_add(score))
         .or_insert(score);
-}
-
-fn average_field_length(rows: &[ProjectedChunkV1], field: LexicalFieldV1) -> usize {
-    if rows.is_empty() {
-        return 1;
-    }
-    let total: usize = rows
-        .iter()
-        .map(|row| row.fields.get(&field).map_or(0, Vec::len))
-        .sum();
-    total.div_ceil(rows.len()).max(1)
 }
 
 fn field_weight_millis(field: LexicalFieldV1) -> u64 {

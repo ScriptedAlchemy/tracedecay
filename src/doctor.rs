@@ -697,8 +697,8 @@ fn daemon_startup_health_ready(status: &serde_json::Value) -> bool {
 fn daemon_runtime_args() -> serde_json::Value {
     serde_json::json!({
         "format": "json",
-        "authority_audit": false,
-        "doctor_report": false,
+        "authority_audit": true,
+        "doctor_report": true,
         "session_ingest_health": false,
     })
 }
