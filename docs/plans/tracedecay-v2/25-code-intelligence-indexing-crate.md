@@ -22,6 +22,20 @@ profile comparison, thresholds, and activation recommendations. PR9 implements t
 versioned lexical/chunk contracts and emits measurements; it does not tune or
 activate retrieval policy.
 
+**Incremental-runtime correction (2026-07-27).** Foreground code queries no
+longer wait behind an in-flight scheduler refresh: each mounted worktree retains
+its last complete immutable generation, a busy scheduler serves that generation,
+and successful reconcile atomically replaces it. Shutdown cancellation is
+checked before and during snapshot capture so work that cannot publish exits
+cooperatively. Direct regressions cover both behaviors.
+
+This closes serve-during-refresh and cooperative-shutdown behavior, not PR9
+acceptance or freshness cadence. A live profile was observed 237 minutes stale,
+and the index reported refresh beginning only after 285 minutes while the plan
+reconciliation was checked. The PR9/Plan 25 owner must diagnose hint/reconcile
+cadence and complete the event-to-ready measurements; serving an old complete
+generation truthfully is not permission to leave it stale indefinitely.
+
 Plan 25 owns code-generation, chunking, graph, and generation-bound evidence
 semantics for PR9. Plan 15 owns quality evaluation. Plan 31 is the later PR10
 consumer of tested chunks and lexical/graph fallback behavior; application,

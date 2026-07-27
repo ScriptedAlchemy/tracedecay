@@ -8,6 +8,15 @@ pass. PR9 must still ship and test the exact/lexical/graph fallback and
 exact-tier behavior before PR10 can activate semantics. Those versioned PR9
 results become immutable runtime prerequisites for semantic composition.
 
+**Operational qualification (2026-07-27).** The callable semantic machinery
+does not mean the live profile is currently serving semantic results. Semantic
+search is disabled because the admitted configuration snapshot is invalid.
+Plan 20 owns repairing and validating that snapshot; this plan owns mounting a
+compatible complete semantic generation and proving successful activation.
+Until both occur, fallback-allowed requests preserve exact/lexical/graph
+results and strict-semantic requests return typed unavailable. This is truthful
+degraded behavior, not PR10 acceptance.
+
 Plan 31 owns the PR10 semantic adapter, projection/runtime, and direct
 testing. Plan 15 owns quality evaluation, while Plan 25 owns the PR9 code
 generation and lexical/graph prerequisite. Plans 09/10/11/12/14 are later

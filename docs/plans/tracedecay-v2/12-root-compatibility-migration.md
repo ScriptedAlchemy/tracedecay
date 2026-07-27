@@ -6,14 +6,19 @@ Normative PR19 plan. PR19 performs the complete forward migration from released
 V1 data and root wiring, atomically makes V2 authoritative, provides bounded
 recovery, and deletes migration-only and superseded V1 paths.
 
-**Memory cutover correction (2026-07-26).** The Memory V1→V2 cutover is
-complete now: the cutover receipt carries source-versus-represented coverage,
-V2 is authoritative, and migrated-fact deletion reaches the
-cutover-coverage-guarded reclamation path in production. The V1-shaped memory
-bank remains an explicitly owned permanent compatibility projection maintained
-by the canonical memory transaction; it is not an alternate writer or a
-superseded archive. Generic deletion language in this plan does not authorize
-removing that compatibility projection.
+**Memory cutover correction (updated 2026-07-27).** The delivered Memory
+V1→V2 branch-store cutover is complete. Its typed owner archive covers all 33
+authoritative Memory V2 families; the physical adapters are checked for
+one-to-one family parity, archive construction validates referential closure,
+imports merge idempotently, and cutover/removal receipts bind the owner,
+archive schema, source generation, and archive digest before the old branch
+store can be reclaimed. Public reads and consolidation/cutover regressions
+exercise the resulting V2 authority. The V1-shaped memory bank remains an
+explicitly owned permanent compatibility projection maintained by the
+canonical memory transaction; it is not an alternate writer or a superseded
+archive. Generic deletion language in this plan does not authorize removing
+that compatibility projection. This closure does not complete PR19's broader
+released-installation migration, recovery window, or V1 product-path deletion.
 
 **Root lifecycle correction (2026-07-26).** The four former non-test
 `TraceDecay::lifecycle` stubs are implemented. Direct project init, project
@@ -21,6 +26,12 @@ open, read-only open, and branch open now acquire the exact profile's owned
 exclusive maintenance scope and delegate to the registered production
 authorities; `configuration_runtime_unavailable` remains only in test-transport
 builds.
+
+**Localized integrity-repair correction (2026-07-27).** Bundled-SQLite FTS
+blob corruption is now covered by a direct open-and-self-heal regression that
+restores search while leaving whole-database corruption fail-closed. This
+closes the localized FTS repair regression only; it does not weaken the
+maintenance fence or authorize replacement of a generally corrupt database.
 
 **Schema-disposition evidence correction (2026-07-26).** A consolidation
 inventory test accepted any non-`None` disposition, so labelling a table

@@ -35,8 +35,8 @@ Ship one production path in which:
   with the default feature set equal to `--all-features`, including FastEmbed
   and bundled ORT.
 
-PR14 remains blocked until PR12/PR13 production contracts, direct tests, and
-normal CI are stable.
+PR14 remains blocked until its named Plan 11 gaps are closed and PR12/PR13
+production contracts, direct tests, and normal CI are stable.
 
 The 2026-07-25 PR14 integration checkpoint is nevertheless implemented and
 must not be replanned as missing: the real `app-dist` application serves `/`
@@ -44,10 +44,34 @@ and the legacy placeholder is isolated at `/legacy`; real Settings capability
 state, storage budget/unreadable-role findings, truthful graph failure states,
 the Explorer coordinator and source-local/LCM read path, Loom time boundaries,
 Delivery, Doctor, storage telemetry, asset serving, and feedback observation
-wiring are present. This is not acceptance. The Rust `dashboard_api_test`
-suite has not completed successfully, so Settings CAS, Delivery, Explorer
-routes, Doctor, storage telemetry, Loom, and asset serving are implemented but
-unverified.
+wiring are present.
+
+As of 2026-07-27 the Rust `dashboard_api_test` suite completes successfully
+(58 run, 58 passed, twice, with `--all-features`), so Settings CAS, Delivery,
+Explorer routes, Doctor, storage telemetry, Loom, and asset serving are no
+longer blocked on it. This is still not acceptance: PR14 owes the Plan 11
+performance budgets, renderer parity/fallback measurement, SSE-churn sustain
+runs, real-Chrome visual review, manual assistive-technology completion, and
+the usability study. See
+[`GAP-LEDGER-PR8-PR14.md`](GAP-LEDGER-PR8-PR14.md) for the closed items.
+
+**Operational status (2026-07-27; not green).**
+
+- `cargo dogfood` still exits nonzero. Doctor reports
+  `authority_audit_unavailable`, and Cursor Core has a component-ownership
+  conflict. Plan 09 owns the Doctor diagnosis; Plan 27 and this PR12/PR13 slice
+  own the host lifecycle/ownership repair.
+- Semantic search is disabled by an invalid configuration snapshot. Plan 20
+  owns snapshot validity/forward repair and Plan 31 owns activation; exact,
+  lexical, and graph search must continue unchanged.
+- The live profile was observed 237 minutes stale; during this reconciliation
+  the index reported that refresh had begun after 285 minutes of staleness.
+  Plan 25 and this slice own cadence/freshness diagnosis. Serving the previous
+  complete generation during refresh is delivered behavior, not a fix for a
+  refresh that fails to start promptly.
+- Roughly eight known test failures remain, and roughly 4,169 tests have not
+  been measured because no full suite has completed. Focused green runs and the
+  failure-fix clusters landed today do not satisfy the aggregate gate.
 
 ## Worktree-aware incremental indexing contract
 
@@ -81,9 +105,9 @@ unverified.
    found the saved-tree cache disconnected from extraction — never wired in and
    net-negative — so it was deleted; because this clause already treats tree
    reuse as optional, removing it stays contract-compatible. Warm parsing
-   currently reparses the admitted snapshot from canonical bytes; the tree
-   cache is retained only as a possible future optimization, not current
-   behavior.
+   currently reparses the admitted snapshot from canonical bytes. A future
+   owner may re-evaluate tree reuse from measurements, but there is no retained
+   cache scaffold to complete.
 5. Rebuild only changed symbol chunks, enclosing structural ancestors,
    affected file-level chunks, and dependency/test-attribution closures whose
    evidence changed. Deletions produce tombstones. Rename/move reuse requires
@@ -119,7 +143,11 @@ unverified.
    production reads through the typed code-family executor rather than a
    parallel direct-read path.)*
 2. Finish PR12 application, transport, LSP, cancellation, streaming, and
-   distribution reachability. *(In flight.)*
+   distribution reachability. *(In flight. Landed 2026-07-27: daemon shutdown
+   cancellation now reaches startup transcript/provider ingest and code-index
+   reconciliation, prevents cancelled finalization/backfill, and has focused
+   regressions. This closes the startup/shutdown cancellation sub-slice, not
+   PR12 transport/distribution acceptance.)*
 3. Finish PR13 Hook V2, Context Scout, advisory authorities, host lifecycle,
    Cursor extension, and daemon project-open registration. *(In flight; hook
    wiring and FastEmbed acceptance wiring may be landing concurrently.)*
@@ -133,8 +161,12 @@ unverified.
    non-serializing cross-worktree queries via `spawn_blocking`. Project open
    now skips code-index mounting gracefully for non-git roots — the code index
    has no identity without a repository, and every other surface stays
-   available. Remaining: daemon-owned bounded worker mount and, if not yet
-   landed, FastEmbed acceptance wiring.)*
+   available. Landed 2026-07-27: a busy scheduler serves its prior complete
+   immutable generation without blocking a foreground query, and shutdown
+   cooperatively interrupts reconciliation. The bounded daemon scheduler mount
+   and semantic wiring exist; remaining work is the measured cadence defect,
+   semantic activation from a valid configuration snapshot, and aggregate
+   acceptance.)*
 5. Add worktree/edit/no-op/rename/delete/overflow/cancellation/restart
    regressions and current/10x performance evidence. *(Partially landed
    2026-07-23: identity isolation, byte-reuse-without-alias,
@@ -187,7 +219,8 @@ unverified.
    unwired hooks v2 ready-guidance lookup is deleted; the V2 version bump is
    deferred to release-plz, with semver-checks declaring the release-type major
    as its vocabulary for a breaking change while the shipped bump stays a 0.x
-   minor.)*
+   minor. Current qualification 2026-07-27: roughly eight known failures remain
+   and roughly 4,169 tests have not been measured in a completed full run.)*
 
 ## Direct verification
 
@@ -212,15 +245,19 @@ unverified.
 - default and explicit all-feature release artifacts pass build, test, package,
   install, host-bundle, LSP, PR12/PR13 surface, and FastEmbed smoke checks.
 
-**Status (2026-07-23).** The incremental-indexing verification items now have
+**Status (2026-07-27).** The incremental-indexing verification items now have
 landed direct regressions: no-op/save-without-change suppression, one-symbol
 edit narrowing, deletion tombstoning, staged/unstaged/untracked/deleted
 classification, and two-worktree shared-byte reuse without identity aliasing.
 Project open and exact/lexical/graph search stay available while semantic work
 loads — including non-git roots, where code-index mounting is skipped by
-design. Remaining verification work: the full event-to-ready
-p50/p95/p99/queue/amplification performance measurements and the default and
-all-feature release-artifact gates.
+design — and a foreground query now returns the prior complete generation
+while a refresh owns the scheduler. Cooperative startup/shutdown cancellation
+and bundled-SQLite FTS self-heal also have direct regressions. Remaining
+verification work: diagnose the observed stale-index cadence, restore semantic
+activation from a valid configuration snapshot, run the full event-to-ready
+p50/p95/p99/queue/amplification measurements, and complete the default and
+all-feature release/full-suite gates.
 
 ## Done
 

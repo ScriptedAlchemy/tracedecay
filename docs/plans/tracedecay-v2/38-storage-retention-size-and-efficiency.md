@@ -36,9 +36,11 @@ qualitative, not a table-size claim.
 
 Commits `4444833b8` and `76895d201` additionally wire real storage-budget
 findings and preserve unreadable storage roles instead of converting them to
-clean zeros. This dashboard/API checkpoint is **implemented but unverified**
-because the Rust `dashboard_api_test` suite has not completed successfully; do
-not replan the behavior as absent and do not report it as verified.
+clean zeros. As of 2026-07-27 the Rust `dashboard_api_test` suite completes
+successfully (58/58 on two consecutive all-feature runs), so this
+dashboard/API checkpoint is no longer blocked on that suite. That focused
+verification does not complete this plan's retention, measured-size, debris,
+generation-GC, or full-profile acceptance requirements.
 
 ## Measured failure classes (evidence, one dogfood profile)
 
