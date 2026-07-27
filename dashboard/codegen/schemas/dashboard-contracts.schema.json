@@ -1145,7 +1145,8 @@
             {
               "type": "null"
             }
-          ]
+          ],
+          "description": "The dispatch target this route can construct from the finding alone.\n`None` means the owning surface must supply the target (a protected\nconfiguration apply needs the concrete key, value, and base revision),\nnot that the owner withholds the action — that is `legal_actions`."
         }
       },
       "required": [
