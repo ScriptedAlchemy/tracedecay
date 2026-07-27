@@ -297,6 +297,7 @@ async fn project_startup_catch_up_rejects_missing_registered_authority_argument(
         None,
         cg.project_root(),
         cg.store_layout().identity.project_id.as_deref(),
+        &crate::application::observation::ObservationCancellation::default(),
     )
     .await;
 

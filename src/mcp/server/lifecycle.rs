@@ -40,6 +40,7 @@ pub(super) async fn run_startup_session_catch_up(
     profile_identity: Option<crate::daemon::profile_identity::LocalProfileIdentityAuthorityV1>,
     project_root: &Path,
     project_id: Option<&str>,
+    cancellation: &crate::application::observation::ObservationCancellation,
 ) -> Option<Arc<RegisteredGlobalDb>> {
     let Some(db) = session_db else {
         tracing::warn!(
@@ -63,7 +64,7 @@ pub(super) async fn run_startup_session_catch_up(
         return None;
     };
     let project_id = project_id.and_then(|id| tracedecay_domain::ProjectId::new(id).ok());
-    let project_outcome = crate::sessions::ingest_project_sources_for_provider(
+    let project_outcome = crate::sessions::ingest_project_sources_for_provider_with_cancellation(
         profile_identity.brain_id(),
         profile_identity.profile_id(),
         registered.as_ref(),
@@ -71,10 +72,14 @@ pub(super) async fn run_startup_session_catch_up(
         project_id,
         None,
         true,
+        cancellation,
     )
     .await;
     for failure in &project_outcome.failures {
         log_startup_transcript_ingest_failure("project", failure);
+    }
+    if cancellation.is_cancelled() {
+        return None;
     }
     if let (Some(user_db), Some(user_registered), Some(registry_db)) =
         (user_session_db, registered_user_session_db, registry_db)
@@ -253,6 +258,7 @@ impl McpServer {
             let project_session_refresh_wake = self.project_session_refresh_wake.clone();
             let user_session_refresh_wake = self.user_session_refresh_wake.clone();
             let ingest_done_flag = Arc::clone(&self.transcript_ingest_done);
+            let cancellation = self.startup_transcript_ingest_cancellation.clone();
             let analytics_db = self.accounting_db.clone();
             let task = tokio::spawn(async move {
                 if let Some(db) = run_startup_session_catch_up(
@@ -264,9 +270,14 @@ impl McpServer {
                     profile_identity,
                     &project_root,
                     project_id.as_deref(),
+                    &cancellation,
                 )
                 .await
                 {
+                    if cancellation.is_cancelled() {
+                        ingest_done_flag.store(true, Ordering::Release);
+                        return;
+                    }
                     if let Some(wake) = &project_session_refresh_wake {
                         wake.wake();
                     }
@@ -284,6 +295,10 @@ impl McpServer {
                             crate::sessions::git_correlation::DEFAULT_AUTO_BACKFILL_SESSIONS_PER_PASS,
                         )
                         .await;
+                    if cancellation.is_cancelled() {
+                        ingest_done_flag.store(true, Ordering::Release);
+                        return;
+                    }
                     // With transcripts freshly ingested into `db`'s
                     // session_messages, close the hint-efficacy loop: import
                     // any new hook telemetry into the durable analytics store

@@ -44,12 +44,37 @@ pub(crate) async fn ingest_project_sources_for_provider(
     provider: Option<SessionProvider>,
     include_hermes: bool,
 ) -> TranscriptIngestOutcome {
+    ingest_project_sources_for_provider_with_cancellation(
+        brain_id,
+        profile_id,
+        registered,
+        project_root,
+        project_id,
+        provider,
+        include_hermes,
+        &ObservationCancellation::default(),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn ingest_project_sources_for_provider_with_cancellation(
+    brain_id: &BrainId,
+    profile_id: &UserProfileId,
+    registered: &RegisteredGlobalDb,
+    project_root: &Path,
+    project_id: Option<ProjectId>,
+    provider: Option<SessionProvider>,
+    include_hermes: bool,
+    cancellation: &ObservationCancellation,
+) -> TranscriptIngestOutcome {
     ingest_project_sources_for_provider_inner(
         (brain_id, profile_id, registered),
         project_root,
         project_id,
         provider,
         include_hermes,
+        cancellation,
     )
     .await
 }
@@ -90,6 +115,7 @@ async fn ingest_project_sources_for_provider_inner(
     project_id: Option<ProjectId>,
     provider: Option<SessionProvider>,
     include_hermes: bool,
+    cancellation: &ObservationCancellation,
 ) -> TranscriptIngestOutcome {
     let Some(canonical_project_id) = project_id else {
         return TranscriptIngestOutcome::new(
@@ -136,7 +162,7 @@ async fn ingest_project_sources_for_provider_inner(
         &canonical_project_id,
         &sources,
         default_ingest_pass_bounds(),
-        &ObservationCancellation::default(),
+        cancellation,
     ))
     .await;
     let scope = ObservationScopeV1::Project {
@@ -162,7 +188,6 @@ async fn ingest_project_sources_for_provider_inner(
         authorities = authorities.with_repository_provenance(repository_provenance);
     }
     let facade = HostAdmissionFacade::new(authorities);
-    let cancellation = ObservationCancellation::default();
     let provider_byte_cap = default_ingest_pass_bounds().bytes_per_unit;
     let mut provider_runs = ProviderRunFold::default();
     for &candidate in PROJECT_CATCH_UP_PROVIDERS {
@@ -179,7 +204,7 @@ async fn ingest_project_sources_for_provider_inner(
                 scope: &scope,
                 candidate,
                 max_new_bytes: provider_byte_cap,
-                cancellation: &cancellation,
+                cancellation,
             }
             .run()
             .await,
@@ -189,7 +214,7 @@ async fn ingest_project_sources_for_provider_inner(
     match Box::pin(claude_observation::drain_projection_queue(
         &facade,
         &scope,
-        &cancellation,
+        cancellation,
     ))
     .await
     {

@@ -424,6 +424,8 @@ pub struct McpServer {
     /// Retained startup catch-up task so shutdown joins it before database
     /// authorities are released.
     startup_catch_up_task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    startup_transcript_ingest_cancellation:
+        crate::application::observation::ObservationCancellation,
     /// Guards the one-shot startup catch-up spawn (D1). `compare_exchange`d
     /// from `false` to `true` by the first caller so the catch-up runs at
     /// most once per server even if two `new_with_dbs` paths race. Distinct
@@ -922,6 +924,8 @@ impl McpServer {
             worktree_mismatch,
             startup_catch_up_done: AtomicBool::new(true),
             startup_catch_up_task: tokio::sync::Mutex::new(None),
+            startup_transcript_ingest_cancellation:
+                crate::application::observation::ObservationCancellation::default(),
             startup_catch_up_started: AtomicBool::new(false),
             background_refresh_running: Arc::new(AtomicBool::new(false)),
             last_background_refresh_at: AtomicI64::new(0),

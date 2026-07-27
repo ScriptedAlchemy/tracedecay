@@ -857,6 +857,9 @@ impl CodeIndexWorktreeSchedulerV1 {
     pub fn reconcile_now(
         &mut self,
     ) -> Result<CodeIndexReconcileOutcomeV1, CodeIndexSchedulerErrorV1> {
+        if self.shutting_down.load(Ordering::Acquire) {
+            return Err(cancelled_code_index_reconcile());
+        }
         // Re-resolve exact identity before indexing (tier-3 backstop). The
         // worktree must still be the same structural identity this scheduler is
         // bound to; a HEAD move under the same worktree is allowed and simply
@@ -1138,6 +1141,9 @@ impl CodeIndexWorktreeSchedulerV1 {
     fn capture_authoritative_snapshot(
         &self,
     ) -> Result<CapturedSnapshotV1, CodeIndexSchedulerErrorV1> {
+        if self.shutting_down.load(Ordering::Acquire) {
+            return Err(cancelled_code_index_reconcile());
+        }
         let repository = gix::open(&self.project_root)
             .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
         // Classify committed/staged/unstaged/untracked/deleted/renamed paths
@@ -1146,6 +1152,9 @@ impl CodeIndexWorktreeSchedulerV1 {
         let mut retained_bytes: Vec<Arc<[u8]>> = Vec::new();
         let classification = classification::WorktreeChangeClassificationV1::classify(&repository)
             .map_err(|error| CodeIndexSchedulerErrorV1::Git(error.to_string()))?;
+        if self.shutting_down.load(Ordering::Acquire) {
+            return Err(cancelled_code_index_reconcile());
+        }
         let candidate_paths = classification.candidate_paths();
         let changed_paths = classification.changed_paths();
 
@@ -1154,6 +1163,9 @@ impl CodeIndexWorktreeSchedulerV1 {
         let mut captured_files = Vec::new();
         let mut sanitization_receipts = BTreeSet::new();
         for logical_path in candidate_paths {
+            if self.shutting_down.load(Ordering::Acquire) {
+                return Err(cancelled_code_index_reconcile());
+            }
             let absolute = self.project_root.join(&logical_path);
             if !absolute.is_file() {
                 continue;
@@ -1166,6 +1178,9 @@ impl CodeIndexWorktreeSchedulerV1 {
                 continue;
             };
             let raw_bytes = std::fs::read(&absolute)?;
+            if self.shutting_down.load(Ordering::Acquire) {
+                return Err(cancelled_code_index_reconcile());
+            }
             let sanitized: CodeSourceSanitizationV1 = sanitize_code_source_bytes(&raw_bytes)
                 .map_err(|error| CodeIndexSchedulerErrorV1::Privacy(error.to_string()))?;
             let sensitivity_level = match sanitized.receipt().disposition() {
@@ -1228,6 +1243,13 @@ impl CodeIndexWorktreeSchedulerV1 {
             retained_bytes,
         })
     }
+}
+
+fn cancelled_code_index_reconcile() -> CodeIndexSchedulerErrorV1 {
+    CodeIndexProductionErrorV1::Interrupted(
+        crate::code_index::production::CodeIndexInterruptionV1::Cancelled,
+    )
+    .into()
 }
 
 impl Drop for CodeIndexWorktreeSchedulerV1 {
