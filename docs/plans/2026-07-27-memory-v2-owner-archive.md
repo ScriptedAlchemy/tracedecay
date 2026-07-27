@@ -80,4 +80,4 @@
 - [x] Verify stable FactId and public current/lineage reads after actual source deletion.
 - [x] Run the exact nine lifecycle tests and focused archive/cutover contract target.
 - [x] Merge current integration, run default check, workspace all-feature/all-target check, and formatting.
-- [ ] Commit any integration-only repairs conventionally.
+- [x] Commit any integration-only repairs conventionally.
