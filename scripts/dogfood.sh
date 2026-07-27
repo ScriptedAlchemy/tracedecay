@@ -445,6 +445,20 @@ load_boundary_state
 rm -f -- "${boundary_state}".new.*
 preflight_started=$SECONDS
 
+# Validate the exact tracked-integration refresh before recovery, daemon, store,
+# marker, or installed-binary mutation. Cargo-launched commands use an isolated
+# development profile, but dogfood must inspect the real user integrations.
+verify_binary_identity "$source_binary"
+unset TRACEDECAY_DATA_DIR TRACEDECAY_DISABLE_GLOBAL_DB
+integration_preflight_started=$SECONDS
+if ! "$source_binary" reinstall --dry-run; then
+  printf '%s\n' \
+    'dogfood integration refresh preflight failed before the migration boundary.' \
+    'No daemon, store, migration marker, or installed binary was changed.' >&2
+  exit 1
+fi
+report_stage integration-refresh-preflight "$integration_preflight_started"
+
 # A valid reached/forbidden pending marker means a prior attempt already crossed
 # the migration boundary. Never trust the installed path without an identity
 # binding from that attempt. Stage the current source build atomically, then use
@@ -619,7 +633,6 @@ trap 'handle_signal 143' TERM
 
 report_stage forward-boundary-preflight "$preflight_started"
 install_started=$SECONDS
-verify_binary_identity "$source_binary"
 record_boundary_outcome preparing not-reached "$old_binary_policy" unchanged
 install -m 0755 "$source_binary" "$candidate"
 if [[ -e "$installed_binary" || -L "$installed_binary" ]]; then
@@ -638,10 +651,6 @@ replacement_active=1
 install_atomically "$candidate" "$staged_binary"
 install_atomically "$candidate" "$installed_binary"
 report_stage staged-binary-atomic-install "$install_started"
-
-# Cargo-launched commands use an isolated development profile. The staged
-# executable must refresh the real user installation instead.
-unset TRACEDECAY_DATA_DIR TRACEDECAY_DISABLE_GLOBAL_DB
 
 boundary_reached=1
 record_boundary_outcome post-update-starting reached forbidden inactivity-pending

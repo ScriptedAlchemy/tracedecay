@@ -803,16 +803,25 @@ async fn dispatch_agent_command(
     command: Commands,
     host_bundle: HostBundleCliOptions,
 ) -> tracedecay::errors::Result<()> {
+    let full_reinstall_preflight = matches!(
+        &command,
+        Commands::Reinstall {
+            local: false,
+            agent: None,
+        }
+    ) && host_bundle.component.is_none()
+        && host_bundle.dry_run
+        && !host_bundle.yes;
     // `--dry-run` / `--yes` preview or confirm a first-party component
-    // mutation, so they require `--component` to name the target. This mirrors
-    // the requirement clap used to encode globally, now scoped to the agent
-    // lifecycle commands that actually consume it. `feedback-rollback` uses its
-    // own action-local flags and rejects the globals itself.
+    // mutation, so they normally require `--component` to name the target.
+    // Full `reinstall --dry-run` is the read-only exception: it validates the
+    // same tracked integration set that post-update will refresh.
     if !matches!(
         command,
         Commands::FeedbackRollback { .. } | Commands::HostBundle { .. }
     ) && host_bundle.component.is_none()
         && (host_bundle.dry_run || host_bundle.yes)
+        && !full_reinstall_preflight
     {
         return Err(tracedecay::errors::TraceDecayError::Config {
             message: "--dry-run and --yes require --component to select the target host component"
@@ -863,6 +872,8 @@ async fn dispatch_agent_command(
                     host_bundle,
                 )
                 .await?;
+            } else if host_bundle.dry_run {
+                agent_cmd::handle_reinstall_preflight_command()?;
             } else if local {
                 agent_cmd::handle_project_local_lifecycle_command(
                     agent.expect("--local requires --agent"),
