@@ -16,7 +16,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tempfile::TempDir;
 use tokio::sync::{Mutex, MutexGuard};
-use tracedecay::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+use tracedecay::application::host_admission::{
+    HostAdmissionScope, HostAdmissionTestRuntimeV1, ProjectScopedTestRuntimeV1,
+};
 #[cfg(feature = "test-transport")]
 use tracedecay::daemon::ProductionProjectCompositionHarnessV1;
 use tracedecay::errors::TraceDecayError;
@@ -81,6 +83,21 @@ impl McpTransport for CaptureTransport {
 pub(crate) async fn handle_real_server_tool_call(
     server: &McpServer,
     tool_name: &str,
+    arguments: Value,
+) -> Value {
+    let response = handle_real_server_tool_call_raw(server, tool_name, arguments).await;
+    assert!(response["error"].is_null(), "{response}");
+    response["result"].clone()
+}
+
+/// The whole JSON-RPC response, including a protocol-level `error`.
+///
+/// Handlers that return `Err` are mapped to a JSON-RPC error rather than an
+/// `isError` tool result (see `crate::mcp::server::tool_errors`), so tests
+/// asserting on infrastructure failures need the envelope, not just `result`.
+pub(crate) async fn handle_real_server_tool_call_raw(
+    server: &McpServer,
+    tool_name: &str,
     mut arguments: Value,
 ) -> Value {
     if let Some(arguments) = arguments.as_object_mut() {
@@ -102,9 +119,7 @@ pub(crate) async fn handle_real_server_tool_call(
         .handle_and_write(&request.to_string(), &mut transport)
         .await
         .expect("real MCP server tool call");
-    let response: Value = serde_json::from_str(transport.output.trim()).expect("JSON-RPC response");
-    assert!(response["error"].is_null(), "{response}");
-    response["result"].clone()
+    serde_json::from_str(transport.output.trim()).expect("JSON-RPC response")
 }
 
 pub(crate) fn extract_real_server_text(result: &Value) -> &str {
@@ -278,7 +293,7 @@ pub(crate) async fn handle_tool_call(
             )
             .await;
         }
-        let runtime = open_active_project_session_db(cg).await;
+        let runtime = open_active_project_scoped_runtime(cg).await;
         let server = McpServer::new_with_host_admission_test_runtime_for_test(
             TraceDecay::open(cg.project_root()).await?,
             None,
@@ -702,7 +717,7 @@ pub(crate) async fn real_mcp_server(cg: TestTraceDecay) -> Arc<McpServer> {
         .clone()
         .expect("test project id");
     let project_root = cg.project_root().to_path_buf();
-    let runtime = open_active_project_session_db(&cg).await;
+    let runtime = open_active_project_scoped_runtime(&cg).await;
     runtime
         .upsert_code_project(&project_id, &project_root, None, None, None)
         .await
@@ -846,6 +861,15 @@ pub(crate) async fn open_active_project_session_db(
 ) -> Arc<HostAdmissionTestRuntimeV1> {
     cg.test_runtime_for_test()
         .expect("test graph should retain its registered project-local session runtime")
+}
+
+/// The active graph's retained runtime, promoted to the project scope the MCP
+/// test server constructor requires.
+pub(crate) async fn open_active_project_scoped_runtime(
+    cg: &TraceDecay,
+) -> ProjectScopedTestRuntimeV1 {
+    ProjectScopedTestRuntimeV1::new(open_active_project_session_db(cg).await)
+        .expect("active test graph should retain a project-scoped runtime")
 }
 
 /// Creates a small Rust library with an integration-style test that calls a

@@ -13,7 +13,7 @@ use tracedecay::mcp::{McpServer, handle_tool_call};
 use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
 use crate::common::canonical_existing_path;
-use crate::support::{handle_real_server_tool_call, open_active_project_session_db};
+use crate::support::{handle_real_server_tool_call, open_active_project_scoped_runtime};
 
 /// The dashboard manager is process-global (one dashboard per MCP server
 /// process), so these tests must not run concurrently: serialize them.
@@ -45,7 +45,7 @@ fn main() { println!("hi"); }
 }
 
 async fn dashboard_test_server(cg: TraceDecay) -> Arc<McpServer> {
-    let runtime = open_active_project_session_db(&cg).await;
+    let runtime = open_active_project_scoped_runtime(&cg).await;
     McpServer::new_with_host_admission_test_runtime_for_test(cg, None, runtime).await
 }
 
