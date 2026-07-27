@@ -1,4 +1,6 @@
 #!/bin/bash
+set -euo pipefail
+
 # Block Explore agents and exploration-style general-purpose agents
 # when tracedecay MCP tools should be used instead.
 # This is a PreToolUse hook for the "Agent" tool matcher.

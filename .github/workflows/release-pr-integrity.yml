@@ -39,6 +39,7 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           EXTRA_FILES_APPROVED: ${{ contains(github.event.pull_request.labels.*.name, 'release-extra-files-approved') }}
         run: |
+          set -euo pipefail
           args=()
           if [[ "$EXTRA_FILES_APPROVED" == "true" ]]; then
             args+=(--allow-extra-files)

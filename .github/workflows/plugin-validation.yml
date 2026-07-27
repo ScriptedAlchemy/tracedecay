@@ -82,6 +82,7 @@ jobs:
 
       - name: Compile vendored schemas
         run: |
+          set -euo pipefail
           npx --no-install ajv compile --spec=draft7 -c ajv-formats \
             -s tests/fixtures/cursor-schemas/plugin.schema.json \
             -s tests/fixtures/cursor-schemas/marketplace.schema.json \
@@ -90,6 +91,7 @@ jobs:
 
       - name: Validate Cursor plugin manifest
         run: |
+          set -euo pipefail
           npx --no-install ajv validate --spec=draft7 -c ajv-formats --errors=text \
             -s tests/fixtures/cursor-schemas/plugin.schema.json \
             -d plugin/.cursor-plugin/plugin.json
@@ -113,6 +115,7 @@ jobs:
 
       - name: Install Claude Code
         run: |
+          set -euo pipefail
           curl -fsSL https://claude.ai/install.sh | bash
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 

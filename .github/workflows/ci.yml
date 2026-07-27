@@ -182,6 +182,7 @@ jobs:
 
       - name: Install ast-grep
         run: |
+          set -euo pipefail
           npm install --global "@ast-grep/cli@${AST_GREP_VERSION}"
           ast-grep --version
 
@@ -597,6 +598,7 @@ jobs:
     steps:
       - name: Check Windows shards
         run: |
+          set -euo pipefail
           if [ "${{ needs.windows-test-shard.result }}" != "success" ]; then
             echo "Windows shard result: ${{ needs.windows-test-shard.result }}"
             exit 1
@@ -878,6 +880,7 @@ jobs:
 
       - name: Install ast-grep
         run: |
+          set -euo pipefail
           npm install --global "@ast-grep/cli@${AST_GREP_VERSION}"
           ast-grep --version
 
@@ -942,6 +945,7 @@ jobs:
 
       - name: Install ast-grep
         run: |
+          set -euo pipefail
           npm install --global "@ast-grep/cli@${AST_GREP_VERSION}"
           ast-grep --version
 
