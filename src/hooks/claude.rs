@@ -814,7 +814,6 @@ mod tests {
     async fn session_root_uses_shared_identity_resolver_for_global_only_project() {
         let _profile = crate::config::PinnedUserDataDir::new();
         let profile_root = crate::storage::default_profile_root().unwrap();
-
         let project_dir = tempfile::tempdir().unwrap();
         let project_root = project_dir.path().canonicalize().unwrap();
         let status = std::process::Command::new("git")

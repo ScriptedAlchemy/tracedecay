@@ -1158,7 +1158,6 @@ mod tests {
     async fn cursor_root_uses_identity_resolver_for_global_only_store() {
         let _profile = crate::config::PinnedUserDataDir::new();
         let profile_root = crate::storage::default_profile_root().unwrap();
-
         let project = tempfile::tempdir().unwrap();
         let project_root = project.path().canonicalize().unwrap();
         let status = std::process::Command::new("git")
@@ -1190,7 +1189,10 @@ mod tests {
             "workspace_roots": [project_root.clone()],
         });
 
-        assert!(cursor_project_root_from_parsed_event(&parsed).is_none());
+        assert_eq!(
+            cursor_project_root_from_parsed_event(&parsed),
+            Some(project_root.clone())
+        );
         assert_eq!(
             cursor_project_root_from_parsed_event_with_identity(&parsed).await,
             Some(project_root)

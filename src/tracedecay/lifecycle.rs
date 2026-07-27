@@ -1392,12 +1392,12 @@ impl TraceDecay {
         Ok(branch::BranchAddOutcome::Added)
     }
 
-    async fn sync_retained_worktree_branch(
+    pub(crate) async fn sync_retained_worktree_branch(
         &self,
         worktree_root: &Path,
         branch_name: &str,
         database_path: &Path,
-    ) -> Result<()> {
+    ) -> Result<Self> {
         let db = self
             .store_runtime_registry
             .code_graph_branch_registered(
@@ -1439,7 +1439,7 @@ impl TraceDecay {
                     branch_graph
                         .register_project_store_in_global_registry()
                         .await?;
-                    return Ok(());
+                    return Ok(branch_graph);
                 }
                 Err(TraceDecayError::SyncLock { .. }) if attempts < 20 => {
                     attempts += 1;
