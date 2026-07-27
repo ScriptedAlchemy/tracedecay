@@ -55,6 +55,7 @@ struct TableSpec {
 
 struct PhysicalForeignKey {
     target_family: MemoryV2ArchiveFamilyV1,
+    target_identity_columns: Vec<String>,
     columns: Vec<(String, String)>,
 }
 
@@ -296,10 +297,9 @@ async fn physical_foreign_keys(
         .into_values()
         .map(|(target_table, mut columns)| {
             columns.sort_by_key(|(sequence, _, _)| *sequence);
-            let target_family = table_specs()
+            let target_spec = table_specs()
                 .iter()
                 .find(|target| target.table == target_table)
-                .map(|target| target.family)
                 .ok_or_else(|| {
                     db_message(
                         OPERATION,
@@ -309,6 +309,7 @@ async fn physical_foreign_keys(
                         ),
                     )
                 })?;
+            let target_family = target_spec.family;
             let source_order = table_specs()
                 .iter()
                 .position(|candidate| candidate.family == spec.family)
@@ -328,6 +329,11 @@ async fn physical_foreign_keys(
             }
             Ok(PhysicalForeignKey {
                 target_family,
+                target_identity_columns: target_spec
+                    .key_columns
+                    .iter()
+                    .map(|column| (*column).to_owned())
+                    .collect(),
                 columns: columns
                     .into_iter()
                     .map(|(_, source, target)| (source, target))
@@ -367,9 +373,16 @@ fn validate_physical_foreign_key_references(
         if nulls != 0 {
             continue;
         }
-        if !references.iter().any(|reference| {
-            reference.family() == foreign_key.target_family && reference.key() == &target_key
-        }) {
+        let target_identity = target_key
+            .into_iter()
+            .filter(|(column, _)| foreign_key.target_identity_columns.contains(column))
+            .collect::<BTreeMap<_, _>>();
+        if target_identity.len() != foreign_key.target_identity_columns.len()
+            || !references.iter().any(|reference| {
+                reference.family() == foreign_key.target_family
+                    && reference.key() == &target_identity
+            })
+        {
             return Err(db_message(
                 OPERATION,
                 format!(
