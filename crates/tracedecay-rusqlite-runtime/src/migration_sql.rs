@@ -67,6 +67,7 @@ struct InsertTracker {
 enum AuthorizedDatabaseOperation {
     Attach,
     Detach(String),
+    Vacuum,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -268,6 +269,7 @@ pub enum MigrationSqlWriteIntent {
     Execute,
     Query,
     ExecuteBatch,
+    Vacuum,
     BeginTransaction,
     Commit,
 }
@@ -600,6 +602,22 @@ impl MigrationSqlHandle {
         }
     }
 
+    /// Enables incremental auto-vacuum through its fixed maintenance rebuild.
+    pub fn repair_incremental_auto_vacuum(&self) -> Result<(), MigrationSqlError> {
+        let (reply, response) = mpsc::sync_channel(1);
+        self.writer
+            .as_ref()
+            .ok_or(MigrationSqlError::WriterUnavailable)?
+            .try_send(WriterCommand::Vacuum {
+                reply,
+                authority: self.write_authority.clone(),
+            })
+            .map_err(map_writer_send_error)?;
+        response
+            .recv()
+            .map_err(|_| MigrationSqlError::WriterUnavailable)?
+    }
+
     pub fn begin_read_snapshot(
         &self,
         max_wait: Duration,
@@ -911,6 +929,10 @@ pub(crate) enum WriterCommand {
         reply: SyncSender<Result<MigrationSqlRows, MigrationSqlError>>,
         authority: Option<Arc<dyn MigrationSqlWriteAuthority>>,
     },
+    Vacuum {
+        reply: SyncSender<Result<(), MigrationSqlError>>,
+        authority: Option<Arc<dyn MigrationSqlWriteAuthority>>,
+    },
 }
 
 pub(crate) enum TransactionCommand {
@@ -1025,6 +1047,7 @@ pub(crate) fn run_writer_command(
             let result = with_migration_guard(
                 connection,
                 false,
+                false,
                 Some(Arc::clone(shutdown_requested)),
                 None,
                 true,
@@ -1035,6 +1058,60 @@ pub(crate) fn run_writer_command(
                 None,
                 || execute_query_unchecked(connection, statement),
             );
+            let _ = reply.send(result);
+        }
+        WriterCommand::Vacuum { reply, authority } => {
+            let Some(authority) = authority else {
+                let _ = reply.send(Err(MigrationSqlError::AuthorityDenied(
+                    "exclusive-maintenance vacuum requires attached write authority".to_owned(),
+                )));
+                return;
+            };
+            if let Err(error) =
+                verify_write_authority(Some(authority.as_ref()), MigrationSqlWriteIntent::Vacuum)
+            {
+                let _ = reply.send(Err(error));
+                return;
+            }
+            let previous_attachment_limit =
+                match connection.set_limit(Limit::SQLITE_LIMIT_ATTACHED, 1) {
+                    Ok(previous) => previous,
+                    Err(error) => {
+                        let _ = reply.send(Err(sqlite_error(
+                            "open exclusive-maintenance vacuum attachment slot",
+                            error,
+                        )));
+                        return;
+                    }
+                };
+            let mut result = with_migration_guard(
+                connection,
+                false,
+                true,
+                Some(Arc::clone(shutdown_requested)),
+                None,
+                true,
+                Some((Arc::clone(&authority), MigrationSqlWriteIntent::Vacuum)),
+                crate::connection::authorize_writer,
+                true,
+                Some(AuthorizedDatabaseOperation::Vacuum),
+                None,
+                || {
+                    execute_batch(connection, "PRAGMA auto_vacuum = INCREMENTAL; VACUUM")
+                        .map(|_| ())
+                },
+            );
+            if let Err(error) =
+                connection.set_limit(Limit::SQLITE_LIMIT_ATTACHED, previous_attachment_limit)
+            {
+                shutdown_requested.store(true, Ordering::Release);
+                if result.is_ok() {
+                    result = Err(sqlite_error(
+                        "restore exclusive-maintenance vacuum attachment limit",
+                        error,
+                    ));
+                }
+            }
             let _ = reply.send(result);
         }
     }
@@ -1049,6 +1126,9 @@ pub(crate) fn reject_writer_command(command: WriterCommand) {
             let _ = reply.send(Err(MigrationSqlError::WriterUnavailable));
         }
         WriterCommand::CheckpointWalTruncate { reply, .. } => {
+            let _ = reply.send(Err(MigrationSqlError::WriterUnavailable));
+        }
+        WriterCommand::Vacuum { reply, .. } => {
             let _ = reply.send(Err(MigrationSqlError::WriterUnavailable));
         }
     }
@@ -1398,6 +1478,7 @@ fn execute_request(
     let result = with_migration_guard(
         connection,
         pinned_transaction,
+        false,
         shutdown_requested,
         execution_deadline,
         enforce_statement_limit,
@@ -1506,6 +1587,7 @@ fn attach_database(
     with_migration_guard(
         connection,
         pinned_transaction,
+        false,
         shutdown_requested,
         execution_deadline,
         true,
@@ -1529,6 +1611,7 @@ fn detach_database(
     let sql = format!("DETACH DATABASE \"{database_name}\"");
     with_migration_guard(
         connection,
+        false,
         false,
         shutdown_requested,
         None,
@@ -1562,6 +1645,7 @@ fn execute_batch(
 fn with_migration_guard<T, F>(
     connection: &Connection,
     allow_savepoints: bool,
+    allow_transactions: bool,
     shutdown_requested: Option<Arc<AtomicBool>>,
     execution_deadline: Option<Instant>,
     enforce_statement_limit: bool,
@@ -1593,7 +1677,7 @@ where
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .insert(table_name.to_owned());
             }
-            if matches!(context.action, AuthAction::Transaction { .. })
+            if (!allow_transactions && matches!(context.action, AuthAction::Transaction { .. }))
                 || (!allow_savepoints && matches!(context.action, AuthAction::Savepoint { .. }))
             {
                 hook_denied.store(true, Ordering::Release);
@@ -1722,7 +1806,7 @@ fn authorize_migration_writer(
         AuthAction::Attach { .. }
             if matches!(
                 database_operation,
-                Some(AuthorizedDatabaseOperation::Attach)
+                Some(AuthorizedDatabaseOperation::Attach | AuthorizedDatabaseOperation::Vacuum)
             ) =>
         {
             return Authorization::Allow;
@@ -1736,7 +1820,7 @@ fn authorize_migration_writer(
         } if code == rusqlite::ffi::SQLITE_ATTACH
             && matches!(
                 database_operation,
-                Some(AuthorizedDatabaseOperation::Attach)
+                Some(AuthorizedDatabaseOperation::Attach | AuthorizedDatabaseOperation::Vacuum)
             ) =>
         {
             return Authorization::Allow;
@@ -1746,6 +1830,9 @@ fn authorize_migration_writer(
                 database_operation,
                 Some(AuthorizedDatabaseOperation::Detach(expected))
                     if database_name.eq_ignore_ascii_case(expected)
+            ) || matches!(
+                database_operation,
+                Some(AuthorizedDatabaseOperation::Vacuum)
             ) =>
         {
             return Authorization::Allow;
@@ -1859,6 +1946,7 @@ pub(crate) fn execute_query(
     request.validate()?;
     with_migration_guard(
         connection,
+        false,
         false,
         None,
         None,
@@ -3122,6 +3210,7 @@ mod tests {
         with_migration_guard(
             &connection,
             false,
+            false,
             None,
             None,
             true,
@@ -3154,6 +3243,7 @@ mod tests {
         let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _: Result<(), MigrationSqlError> = with_migration_guard(
                 &connection,
+                false,
                 false,
                 None,
                 None,

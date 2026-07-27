@@ -1304,7 +1304,7 @@ async fn memory_status_reports_repair_state_without_repairing() {
     let fact_id = added["fact"]["fact_id"].as_i64().unwrap();
     let db_path = project_graph_db(&cg);
     let (db, _) = crate::common::open_test_database(&db_path).await.unwrap();
-    rusqlite::Connection::open(db.database_path())
+    let changed = rusqlite::Connection::open(db.database_path())
         .unwrap()
         .execute(
             "UPDATE memory_facts
@@ -1313,6 +1313,7 @@ async fn memory_status_reports_repair_state_without_repairing() {
             rusqlite::params![fact_id],
         )
         .unwrap();
+    assert_eq!(changed, 1, "the out-of-band corruption must hit one fact");
     db.close();
 
     // A status read alone must not repair the missing vector or rebuild banks.
