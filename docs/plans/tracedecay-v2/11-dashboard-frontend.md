@@ -62,12 +62,14 @@ and CAS rejection of the superseded revision.
 
 Acceptance is still open, and this correction claims only what executed. A
 focused frontend suite, `typecheck`, `contracts:check`, and both accessibility
-gates (`axe:audit` across six viewport/theme combinations and `axe:explorer`)
-have completed successfully at this checkpoint with zero reported axe
-violations, page errors, or state-assertion failures. Exact file/test/scan
-counts remain run output rather than a plan invariant. `axe:audit` and
-`axe:explorer` are now enforced by the `dashboard-assets` CI job;
-`visual:audit`, `visual:topography`, and `live:sweep` remain developer-run.
+gates (`axe:audit` and `axe:explorer`) have completed successfully at this
+checkpoint with zero reported axe violations, page errors, or state-assertion
+failures. The six viewport/theme combinations `axe:audit` covered when this
+paragraph was written are superseded by the widened matrix and route coverage
+recorded below. Exact file/test/scan counts remain run output rather than a plan
+invariant. Both gates are declared by the `dashboard-accessibility` CI job,
+which has not yet executed; `visual:audit`, `visual:topography`, and
+`live:sweep` remain developer-run.
 
 **Audited open gaps (2026-07-27).** A gate-by-gate and workspace-by-workspace
 audit against the requirements below found these still unmet. They are
@@ -83,14 +85,6 @@ permission to replace unavailable data with fabricated values.
   has no layout or paint, so a jsdom timing assertion would be a gate attesting
   to something it never checked. It belongs in Playwright against a real engine,
   alongside the runtime budgets above.
-- **PR14 / Plan 11 owner:** a collapsed scroller hides content at 320 px width
-  and 400% zoom while the header still states a row count — the count is
-  truthful but the rows it counts are unreachable, which reads as falsified UI
-  to anyone at that viewport.
-- **PR14 / Plan 11 owner:** 18 controls render below the 44×44 minimum target
-  size. The cause is `html { font-size: 14px }`, which makes every rem-based
-  utility resolve smaller than its token intends — a nominal 44 px control
-  renders at 38.5 px.
 - **PR14 / Plan 11 owner:** Code still lacks diagnostics, affected tests, code
   health, and branch-aware freshness; Agents lacks its PR14 subagent/handoff
   context; Sessions lacks raw-message drill-down, compaction boundaries, and
@@ -107,23 +101,69 @@ permission to replace unavailable data with fabricated values.
   belongs to the executable Work/handoff journey and does not block the PR14
   twelve-workspace checkpoint.
 
-**Accessibility matrix widened (2026-07-27).** The viewport matrix is no longer
-partial. The accessibility audit now covers the full specified set — the added
+**Accessibility matrix and route coverage closed (2026-07-27).** The viewport
+matrix is no longer partial: the audit covers the full specified set — the added
 390×844, 1024×768, and 1280×720 viewports, 200% and 400% zoom,
-`prefers-contrast: more`, and forced colors — across 460 scans. That closes the
-partial-matrix gap this section carried until now.
+`prefers-contrast: more`, and forced colors. `666ff456d` then closed the route
+half of the same gap, which was the more serious one. The gate had scenarios for
+7 of the 12 workspaces, so its zeros under-reported by construction: a page no
+scenario visits cannot report a violation. Settings, Knowledge, Delivery, Loom,
+and Agents now have scenarios, each driving its surface into the state where it
+makes a truth claim and asserting against that claim rather than navigating and
+scanning. `/settings` joins the 30-combination matrix tier because its trapped
+pane is a 400% zoom condition; the other four sit on the showcase tier, and each
+new route also carries a canary. Current run output is 46 scenarios and 486
+scans, with `axe:explorer` unchanged at 72. Per the convention above, those
+counts are run output rather than a plan invariant, and they supersede the 460
+figure this section carried earlier.
 
-The two new open items in the list above exist because of that widening: both
-the collapsed 320 px / 400% scroller and the 18 undersized controls were
-invisible to the narrower matrix and appeared on its first widened run. This is
-the ordinary consequence of a gate that now checks more, not a regression
-introduced by it. A lane is in flight on both; they stay recorded as open until
-the repairs land, and a claim that they are fixed must cite the landing commits.
+**Trapped panes and touch targets closed (2026-07-27).** Both items this section
+listed as open are fixed, by two commits rather than one.
 
-Every closure in this section was verified by scoped local runs. None has been
-validated by CI: no CI has run since 01:24 UTC on 2026-07-27 because PR #421 is
-conflicting. See the verification-status section of
-[`GAP-LEDGER-PR8-PR14.md`](GAP-LEDGER-PR8-PR14.md).
+`15ef9f578` fixed the original pair. A `flex-1` scroll container has an
+automatic minimum size of zero, so whenever its siblings claimed more height
+than the viewport could give, it resolved to `height: 0` — clipping every row
+and removing the scrollbar that would reach them, while the caption above went
+on counting them. That hit Explorer's results pane, Code's hub list, and
+Settings' configuration pane; a `--pane-min-height` floor refuses the division
+and `main#td-main` scrolls instead. The same commit fixed the undersized
+controls: the 44 px minimum was already a token referenced nowhere, and
+`html { font-size: 14px }` made Tailwind's rem spacing lie, so `min-h-11` and
+`size-11` were written for 44 and rendered 38.5. Controls now size from
+`--touch-target-min`, with compact instrument bezels keeping their drawn size
+inside a transparent 44 px hit area rather than being redrawn as slabs. The root
+font size is unchanged and remains documented in `tokens.css`.
+
+`c42e18917` fixed the four genuine WCAG touch-target defects that only became
+visible once the gate reached all twelve workspaces: seven 13×13 native
+checkboxes on `/settings` including the review dialog, the 23×23 dialog close
+button, and Loom's row-select buttons, now 44 px in both axes. A native checkbox
+paints at 13×13 and does not grow with padding, so the new `.td-check` primitive
+makes the input itself the 44×44 target and draws its bezel in `::before`; the
+tick is a rotated border rather than a background or box-shadow, both of which
+forced colors erases, so the checked state survives the forced palette with no
+`forced-color-adjust` opt-out. The same commit gave accessible names to the five
+internal scrollers that announced nothing, which is what this plan's
+labelled-region licence for internal scrolling actually requires.
+
+**Observed run output and its limits (2026-07-27).** A full `npm run axe:audit`
+exited 0 with zero axe violations, zero plan failures, zero assertion failures,
+420 seeded canary detections proving the scans ran live, and a forced-colors
+opt-out count of zero. `typecheck`, `boundary:check`, and Vitest at 69 files and
+715 tests also passed.
+
+All of that is local. CI has not executed the `dashboard-accessibility` job at
+all — it is dark pending the master merge integration — so none of these
+closures is CI-validated; see the verification-status section of
+[`GAP-LEDGER-PR8-PR14.md`](GAP-LEDGER-PR8-PR14.md). One concrete risk to watch
+on the first CI run: the job's 30-minute timeout was sized against the old
+matrix — its own comment reasons from two themes by three widths to a roughly
+14-minute estimate — and the gate now runs 46 scenarios. Local wall time is
+6m14s, a slower 4-vCPU runner is estimated near 19 minutes, and the margin is
+therefore about 1.6×, which is thin enough to watch rather than assume. If it
+overruns, the levers are `AXE_CONCURRENCY` or splitting the audit from the
+explorer run. Narrowing the matrix to fit the timeout is not a lever — that
+would restore exactly the under-reporting `666ff456d` removed.
 
 **Transfer budgets and list bounds closed (2026-07-27).** The two payload
 ceilings this plan states are now measured and enforced by
