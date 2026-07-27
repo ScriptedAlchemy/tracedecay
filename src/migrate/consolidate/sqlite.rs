@@ -17,7 +17,7 @@ pub(super) mod projection;
 mod temporal;
 mod verify;
 
-use memory_v2::merge_memory_v2_authority;
+use memory_v2::{LegacyMappingPolicy, merge_memory_v2_authority};
 use observation::merge_observation_authority;
 pub(super) use observation::{preflight_observation_merge, verify_observation_merge};
 
@@ -71,7 +71,7 @@ pub(super) async fn merge_memory_v2_for_test(target_path: &Path, source: &Path) 
         .execute("PRAGMA defer_foreign_keys = ON", ())
         .await
         .map_err(|error| db_error("merge_memory_v2_for_test", error))?;
-    merge_memory_v2_authority(&transaction).await?;
+    merge_memory_v2_authority(&transaction, LegacyMappingPolicy::PreserveSourceRows).await?;
     transaction
         .commit()
         .await
@@ -212,11 +212,11 @@ pub(super) async fn merge_registered_graph_facts(
     transaction.commit().await
 }
 
-/// Merges one frozen branch store's legacy memory authority into the canonical
-/// project database. Source schemas v17 and v18 are accepted without mutating
-/// them; V18 relations are copied when present. Memory V2 is deliberately
-/// rebuilt from this canonical legacy union so branch-local numeric identities
-/// cannot collide across stores.
+/// Merges one frozen branch store's complete memory authority into the
+/// canonical project database. Source schemas v17 and v18 are accepted without
+/// mutation. Legacy rows are unioned with remapped numeric identities; any
+/// Memory V2 authority is then merged by its stable owner-bound identities,
+/// including assertions, lineage, evidence, tombstones and feedback history.
 pub(in crate::migrate) async fn merge_branch_legacy_memory_snapshot(
     target: &Database,
     source: &crate::sqlite_read_snapshot::SnapshotDatabase,
@@ -240,8 +240,17 @@ pub(in crate::migrate) async fn merge_branch_legacy_memory_snapshot(
         .await
         .map_err(|error| db_error("merge_branch_legacy_memory", error))?;
     let result = async {
-        merge_legacy_memory_tx(&transaction, offsets).await?;
-        verify_legacy_fact_coverage(&transaction).await
+        if source_has_memory_v2_authority(&transaction).await? {
+            verify_complete_branch_memory_v2_authority(&transaction).await?;
+            merge_memory_v2_authority(
+                &transaction,
+                LegacyMappingPolicy::OmitBranchLocalMirrors,
+            )
+            .await
+        } else {
+            merge_legacy_memory_tx(&transaction, offsets).await?;
+            verify_legacy_fact_coverage(&transaction).await
+        }
     }
     .await;
     match result {
@@ -325,7 +334,70 @@ async fn merge_one_graph_tx(conn: &impl Executor, offset: &GraphMergeOffsets) ->
         ),
     )
     .await?;
-    merge_memory_v2_authority(conn).await
+    merge_memory_v2_authority(conn, LegacyMappingPolicy::PreserveSourceRows).await
+}
+
+async fn source_has_memory_v2_authority(conn: &impl Executor) -> Result<bool> {
+    if !table_exists(conn, "source", "memory_v2_facts").await? {
+        return Ok(false);
+    }
+    Ok(query_i64(
+        conn,
+        "SELECT
+             (SELECT COUNT(*) FROM source.memory_v2_facts)
+           + (SELECT COUNT(*) FROM source.memory_v2_proposals)
+           + (SELECT COUNT(*) FROM source.memory_v2_compatibility_operation_receipts)
+           + (SELECT COUNT(*) FROM source.memory_v2_legacy_quarantine)",
+    )
+    .await?
+        > 0)
+}
+
+async fn verify_complete_branch_memory_v2_authority(conn: &impl Executor) -> Result<()> {
+    let unmapped_legacy_facts = query_i64(
+        conn,
+        "SELECT COUNT(*) FROM source.memory_facts AS legacy
+         WHERE NOT EXISTS(
+             SELECT 1
+             FROM source.memory_v2_legacy_map AS mapping
+             JOIN source.memory_v2_facts AS fact
+               ON fact.fact_id=mapping.fact_id
+              AND fact.owner_kind=mapping.owner_kind
+              AND fact.project_id=mapping.project_id
+             WHERE mapping.legacy_fact_id=legacy.fact_id
+         )",
+    )
+    .await?;
+    if unmapped_legacy_facts != 0 {
+        return Err(db_message(
+            "merge_branch_memory",
+            format!(
+                "branch has {unmapped_legacy_facts} legacy fact(s) outside its Memory V2 authority"
+            ),
+        ));
+    }
+    if table_exists(conn, "source", "memory_feedback_events").await?
+        && table_exists(conn, "source", "memory_v2_legacy_feedback_event_map").await?
+    {
+        let unmapped_feedback = query_i64(
+            conn,
+            "SELECT COUNT(*) FROM source.memory_feedback_events AS legacy
+             WHERE NOT EXISTS(
+                 SELECT 1 FROM source.memory_v2_legacy_feedback_event_map AS mapping
+                 WHERE mapping.legacy_feedback_event_id=legacy.event_id
+             )",
+        )
+        .await?;
+        if unmapped_feedback != 0 {
+            return Err(db_message(
+                "merge_branch_memory",
+                format!(
+                    "branch has {unmapped_feedback} legacy feedback event(s) outside its Memory V2 authority"
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 async fn merge_legacy_memory_tx(conn: &impl Executor, offset: (i64, i64, i64, i64)) -> Result<()> {

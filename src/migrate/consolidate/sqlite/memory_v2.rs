@@ -2,7 +2,7 @@ use crate::db::engine::Executor;
 
 use crate::errors::Result;
 
-use super::db_error;
+use super::{db_error, db_message, query_i64};
 
 /// Unions the source shard's `memory_v2` durable authority into the attached
 /// target graph connection. Every carried table is owner-bound (fact ids embed
@@ -16,10 +16,20 @@ use super::db_error;
 /// The connection must already have `source` attached and
 /// `PRAGMA defer_foreign_keys = ON` set (as `merge_one_graph` does), because the
 /// union crosses foreign keys between the durable tables.
-pub(super) async fn merge_memory_v2_authority(conn: &impl Executor) -> Result<()> {
+#[derive(Clone, Copy)]
+pub(super) enum LegacyMappingPolicy {
+    PreserveSourceRows,
+    OmitBranchLocalMirrors,
+}
+
+pub(super) async fn merge_memory_v2_authority(
+    conn: &impl Executor,
+    legacy_mapping_policy: LegacyMappingPolicy,
+) -> Result<()> {
     if !source_has_memory_v2(conn).await? {
         return Ok(());
     }
+    reject_incompatible_authority(conn).await?;
 
     // Retrieval anchors back memory_v2 evidence and must land first. These are
     // the graph-side anchor tables (distinct from the sessions-db anchors the
@@ -234,14 +244,6 @@ pub(super) async fn merge_memory_v2_authority(conn: &impl Executor) -> Result<()
                 last_transition_id, updated_at
          FROM source.memory_v2_proposal_current;
 
-         INSERT OR IGNORE INTO memory_v2_legacy_map(
-             owner_kind, project_id, owner_json, source_store_id,
-             legacy_fact_id, fact_id, mapping_json
-         )
-         SELECT owner_kind, project_id, owner_json, source_store_id,
-                legacy_fact_id, fact_id, mapping_json
-         FROM source.memory_v2_legacy_map;
-
          INSERT OR IGNORE INTO memory_v2_legacy_proposal_map(
              owner_kind, project_id, source_store_id, legacy_proposal_id,
              proposal_id, history_coverage, import_receipt_json, imported_at
@@ -277,8 +279,190 @@ pub(super) async fn merge_memory_v2_authority(conn: &impl Executor) -> Result<()
     .await
     .map_err(|error| db_error("merge_memory_v2_authority", error))?;
 
+    if matches!(
+        legacy_mapping_policy,
+        LegacyMappingPolicy::PreserveSourceRows
+    ) {
+        conn.execute_batch(
+            "INSERT OR IGNORE INTO memory_v2_legacy_map(
+                 owner_kind, project_id, owner_json, source_store_id,
+                 legacy_fact_id, fact_id, mapping_json
+             )
+             SELECT owner_kind, project_id, owner_json, source_store_id,
+                    legacy_fact_id, fact_id, mapping_json
+             FROM source.memory_v2_legacy_map;",
+        )
+        .await
+        .map_err(|error| db_error("merge_memory_v2_legacy_map", error))?;
+    }
+
     merge_current_facts_with_deletion_terminality(conn).await?;
-    reconcile_memory_v2_derived_state(conn).await
+    reconcile_memory_v2_derived_state(conn).await?;
+    verify_memory_v2_authority_coverage(conn).await
+}
+
+async fn reject_incompatible_authority(conn: &impl Executor) -> Result<()> {
+    let conflicts = [
+        (
+            "fact identity",
+            "SELECT COUNT(*)
+             FROM source.memory_v2_facts AS source_row
+             JOIN memory_v2_facts AS target_row
+               ON target_row.fact_id=source_row.fact_id
+              AND target_row.owner_kind=source_row.owner_kind
+              AND target_row.project_id=source_row.project_id
+             WHERE target_row.owner_json IS NOT source_row.owner_json
+                OR target_row.identity_json IS NOT source_row.identity_json
+                OR target_row.created_at IS NOT source_row.created_at",
+        ),
+        (
+            "assertion identity",
+            "SELECT COUNT(*)
+             FROM source.memory_v2_assertions AS source_row
+             JOIN memory_v2_assertions AS target_row
+               ON target_row.assertion_id=source_row.assertion_id
+              AND target_row.fact_id=source_row.fact_id
+              AND target_row.owner_kind=source_row.owner_kind
+              AND target_row.project_id=source_row.project_id
+             WHERE target_row.owner_json IS NOT source_row.owner_json
+                OR target_row.assertion_header_json IS NOT source_row.assertion_header_json
+                OR target_row.kind_json IS NOT source_row.kind_json
+                OR target_row.payload_reference_json IS NOT source_row.payload_reference_json
+                OR target_row.receipt_json IS NOT source_row.receipt_json
+                OR target_row.asserted_at IS NOT source_row.asserted_at
+                OR target_row.actor_id IS NOT source_row.actor_id",
+        ),
+        (
+            "assertion payload",
+            "SELECT COUNT(*)
+             FROM source.memory_v2_assertion_payloads AS source_row
+             JOIN memory_v2_assertion_payloads AS target_row
+               ON target_row.assertion_id=source_row.assertion_id
+              AND target_row.fact_id=source_row.fact_id
+              AND target_row.owner_kind=source_row.owner_kind
+              AND target_row.project_id=source_row.project_id
+             WHERE target_row.payload_json IS NOT source_row.payload_json
+                OR target_row.content IS NOT source_row.content",
+        ),
+        (
+            "lineage event",
+            "SELECT COUNT(*)
+             FROM source.memory_v2_lineage_events AS source_row
+             JOIN memory_v2_lineage_events AS target_row
+               ON target_row.event_id=source_row.event_id
+              AND target_row.fact_id=source_row.fact_id
+              AND target_row.owner_kind=source_row.owner_kind
+              AND target_row.project_id=source_row.project_id
+             WHERE target_row.event_json IS NOT source_row.event_json
+                OR target_row.occurred_at IS NOT source_row.occurred_at
+                OR target_row.recorded_at IS NOT source_row.recorded_at",
+        ),
+        (
+            "evidence identity",
+            "SELECT COUNT(*)
+             FROM source.memory_v2_evidence AS source_row
+             JOIN memory_v2_evidence AS target_row
+               ON target_row.evidence_id=source_row.evidence_id
+              AND target_row.fact_id=source_row.fact_id
+              AND target_row.owner_kind=source_row.owner_kind
+              AND target_row.project_id=source_row.project_id
+             WHERE target_row.owner_json IS NOT source_row.owner_json
+                OR target_row.anchor_id IS NOT source_row.anchor_id
+                OR target_row.evidence_json IS NOT source_row.evidence_json",
+        ),
+    ];
+    for (label, sql) in conflicts {
+        if query_i64(conn, sql).await? != 0 {
+            return Err(db_message(
+                "merge_memory_v2_authority",
+                format!("memory_v2 {label} conflict for an existing stable identity"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn verify_memory_v2_authority_coverage(conn: &impl Executor) -> Result<()> {
+    let missing = [
+        (
+            "facts",
+            "SELECT COUNT(*) FROM source.memory_v2_facts AS source_row
+             WHERE NOT EXISTS(
+                 SELECT 1 FROM memory_v2_facts AS target_row
+                 WHERE target_row.fact_id=source_row.fact_id
+                   AND target_row.owner_kind=source_row.owner_kind
+                   AND target_row.project_id=source_row.project_id
+             )",
+        ),
+        (
+            "assertions",
+            "SELECT COUNT(*) FROM source.memory_v2_assertions AS source_row
+             WHERE NOT EXISTS(
+                 SELECT 1 FROM memory_v2_assertions AS target_row
+                 WHERE target_row.assertion_id=source_row.assertion_id
+                   AND target_row.fact_id=source_row.fact_id
+                   AND target_row.owner_kind=source_row.owner_kind
+                   AND target_row.project_id=source_row.project_id
+             )",
+        ),
+        (
+            "lineage events",
+            "SELECT COUNT(*) FROM source.memory_v2_lineage_events AS source_row
+             WHERE NOT EXISTS(
+                 SELECT 1 FROM memory_v2_lineage_events AS target_row
+                 WHERE target_row.event_id=source_row.event_id
+                   AND target_row.fact_id=source_row.fact_id
+                   AND target_row.owner_kind=source_row.owner_kind
+                   AND target_row.project_id=source_row.project_id
+             )",
+        ),
+        (
+            "evidence",
+            "SELECT COUNT(*) FROM source.memory_v2_evidence AS source_row
+             WHERE NOT EXISTS(
+                 SELECT 1 FROM memory_v2_evidence AS target_row
+                 WHERE target_row.evidence_id=source_row.evidence_id
+                   AND target_row.fact_id=source_row.fact_id
+                   AND target_row.owner_kind=source_row.owner_kind
+                   AND target_row.project_id=source_row.project_id
+             )",
+        ),
+        (
+            "feedback history",
+            "SELECT COUNT(*) FROM source.memory_v2_feedback_history AS source_row
+             WHERE NOT EXISTS(
+                 SELECT 1 FROM memory_v2_feedback_history AS target_row
+                 WHERE target_row.event_id=source_row.event_id
+                   AND target_row.fact_id=source_row.fact_id
+                   AND target_row.owner_kind=source_row.owner_kind
+                   AND target_row.project_id=source_row.project_id
+             )",
+        ),
+        (
+            "current facts",
+            "SELECT COUNT(*) FROM source.memory_v2_current_facts AS source_row
+             WHERE NOT EXISTS(
+                 SELECT 1 FROM memory_v2_current_facts AS target_row
+                 WHERE target_row.fact_id=source_row.fact_id
+                   AND target_row.owner_kind=source_row.owner_kind
+                   AND target_row.project_id=source_row.project_id
+                   AND (
+                       source_row.payload_access <> 'deleted'
+                       OR target_row.payload_access = 'deleted'
+                   )
+             )",
+        ),
+    ];
+    for (label, sql) in missing {
+        let count = query_i64(conn, sql).await?;
+        if count != 0 {
+            return Err(db_message(
+                "merge_memory_v2_authority",
+                format!("{count} source memory_v2 {label} row(s) are absent from target"),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Reconciles the derived `memory_v2_current_facts` projection across the two

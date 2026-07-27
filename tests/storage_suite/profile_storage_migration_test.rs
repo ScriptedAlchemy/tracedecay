@@ -201,6 +201,376 @@ async fn project_memory_cutover_unions_all_branches_and_accepts_v18() {
     );
 }
 
+#[tokio::test]
+async fn project_memory_cutover_preserves_v2_authority_after_legacy_reclamation() {
+    let _lock = HOME_ENV_LOCK.lock().await;
+    let temp = TempDir::new().unwrap();
+    let project = temp.path().join("project");
+    let profile_root = temp.path().join("profile");
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn v2_cutover_fixture() {}\n").unwrap();
+    run_git(&project, &["init", "-b", "main"]);
+    run_git(&project, &["config", "user.email", "test@example.com"]);
+    run_git(&project, &["config", "user.name", "TraceDecay Test"]);
+    run_git(&project, &["add", "."]);
+    run_git(&project, &["commit", "-m", "initial"]);
+    let options = TraceDecayOpenOptions {
+        profile_root: Some(profile_root.clone()),
+        global_db_path: Some(profile_root.join("global.db")),
+    };
+    let initialized = init_with_maintenance(&project, &profile_root, options)
+        .await
+        .unwrap();
+    let data_root = initialized.store_layout().data_root.clone();
+    let project_graph = initialized.store_layout().graph_db_path.clone();
+    let project_id = read_enrollment_marker(&project)
+        .unwrap()
+        .unwrap()
+        .project_id;
+    let owner_json = serde_json::to_string(&tracedecay_domain::FactOwnerV1::Project {
+        project_id: ProjectId::new(project_id.clone()).unwrap(),
+    })
+    .unwrap();
+    let lifecycle = tracedecay::lifecycle_lease::acquire_exclusive_for_profile(
+        &profile_root,
+        "checkpoint V2 project memory cutover fixture",
+    )
+    .unwrap();
+    let _database_scope = tracedecay::db::enter_maintenance_database_scope(
+        &lifecycle,
+        &profile_root,
+        "checkpoint V2 project memory cutover fixture",
+    )
+    .unwrap();
+    initialized
+        .db()
+        .truncate_wal_for_test_artifact()
+        .await
+        .unwrap();
+    initialized.close();
+    drop(_database_scope);
+    drop(lifecycle);
+
+    let branches = data_root.join("branches");
+    fs::create_dir_all(&branches).unwrap();
+    let branch = branches.join("v2-authority.db");
+    fs::copy(&project_graph, &branch).unwrap();
+    let source = rusqlite::Connection::open(&branch).unwrap();
+    source
+        .execute_batch(&format!(
+            r#"
+            INSERT INTO retrieval_anchors(
+                anchor_id, anchor_json, owner_json, projection_generation
+            ) VALUES(
+                'anchor.v2-only', '{{}}', '{owner_json}', 'generation.v2-only'
+            );
+            INSERT INTO memory_v2_facts(
+                fact_id, owner_kind, project_id, owner_json, identity_json, created_at
+            ) VALUES
+                ('fact.v2-only', 'project', '{project_id}', '{owner_json}',
+                 '{{"stable":"fact.v2-only"}}', 10),
+                ('fact.mirror', 'project', '{project_id}', '{owner_json}',
+                 '{{"stable":"fact.mirror"}}', 20);
+            INSERT INTO memory_v2_lineage_events(
+                event_id, fact_id, owner_kind, project_id, event_json,
+                occurred_at, recorded_at
+            ) VALUES
+                ('event.v2-created', 'fact.v2-only', 'project', '{project_id}',
+                 '{{"kind":"created"}}', 10, 10),
+                ('event.v2-deleted', 'fact.v2-only', 'project', '{project_id}',
+                 '{{"kind":"payload_access_changed","current":"deleted"}}', 30, 30),
+                ('event.mirror-created', 'fact.mirror', 'project', '{project_id}',
+                 '{{"kind":"created"}}', 20, 20);
+            INSERT INTO memory_v2_assertions(
+                assertion_id, fact_id, owner_kind, project_id, owner_json,
+                assertion_header_json, kind_json, payload_reference_json,
+                receipt_json, asserted_at, actor_id
+            ) VALUES
+                ('assertion.v2-only', 'fact.v2-only', 'project', '{project_id}',
+                 '{owner_json}', '{{"stable":"assertion.v2-only"}}', '{{}}', '{{}}',
+                 '{{"receipt":"v2-only"}}', 10, NULL),
+                ('assertion.mirror', 'fact.mirror', 'project', '{project_id}',
+                 '{owner_json}', '{{"stable":"assertion.mirror"}}', '{{}}', '{{}}',
+                 '{{"receipt":"mirror"}}', 20, NULL);
+            INSERT INTO memory_v2_assertion_payloads(
+                assertion_id, fact_id, owner_kind, project_id, payload_json, content
+            ) VALUES(
+                'assertion.mirror', 'fact.mirror', 'project', '{project_id}',
+                '{{"content":"mirrored content"}}', 'mirrored content'
+            );
+            INSERT INTO memory_v2_evidence(
+                evidence_id, fact_id, owner_kind, project_id, owner_json,
+                anchor_id, evidence_json
+            ) VALUES(
+                'evidence.v2-only', 'fact.v2-only', 'project', '{project_id}',
+                '{owner_json}', 'anchor.v2-only', '{{"stable":"evidence.v2-only"}}'
+            );
+            INSERT INTO memory_v2_assertion_evidence(
+                assertion_id, evidence_id, fact_id, owner_kind, project_id, ordinal
+            ) VALUES(
+                'assertion.v2-only', 'evidence.v2-only', 'fact.v2-only',
+                'project', '{project_id}', 0
+            );
+            INSERT INTO memory_v2_feedback_history(
+                owner_kind, project_id, fact_id, event_id, action, old_trust,
+                new_trust, occurred_at, source, note, details_availability
+            ) VALUES(
+                'project', '{project_id}', 'fact.v2-only', 'event.v2-deleted',
+                'helpful', 0.4, 0.5, 30, NULL, NULL, 'legacy_redacted'
+            );
+            INSERT INTO memory_v2_current_facts(
+                fact_id, owner_kind, project_id, payload_access, trust_score,
+                active_assertion_id, last_event_id, updated_at, retrieval_count,
+                access_count, helpful_count, unhelpful_count, last_retrieved_at,
+                last_recalled_at, last_feedback_at, projection_state,
+                vector_watermark_json
+            ) VALUES
+                ('fact.v2-only', 'project', '{project_id}', 'deleted', 0.5,
+                 NULL, 'event.v2-deleted', 30, 0, 0, 1, 0, NULL, NULL, 30,
+                 'unavailable', NULL),
+                ('fact.mirror', 'project', '{project_id}', 'eligible', 0.7,
+                 'assertion.mirror', 'event.mirror-created', 20, 0, 1, 0, 0,
+                 NULL, NULL, NULL, 'ready', NULL);
+            INSERT INTO memory_facts(
+                fact_id, content, category, tags, trust_score, access_count,
+                created_at, updated_at, source, metadata, hrr_precision
+            ) VALUES(
+                41, 'mirrored content', 'project', '[]', 0.7, 1,
+                20, 20, 'legacy-mirror', '{{}}', 'f32'
+            );
+            INSERT INTO memory_v2_legacy_map(
+                owner_kind, project_id, owner_json, source_store_id,
+                legacy_fact_id, fact_id, mapping_json
+            ) VALUES
+                ('project', '{project_id}', '{owner_json}', 'legacy-memory-v1',
+                 41, 'fact.mirror', '{{"kind":"legacy"}}'),
+                ('project', '{project_id}', '{owner_json}', 'legacy-memory-v1',
+                 42, 'fact.v2-only', '{{"kind":"legacy"}}');
+            "#,
+        ))
+        .unwrap();
+    drop(source);
+    let mut meta = branch_meta::load_branch_meta(&data_root).unwrap();
+    meta.add_branch("v2-authority", "branches/v2-authority.db", "main");
+    branch_meta::save_branch_meta(&data_root, &meta).unwrap();
+
+    let cutover = MemoryCutoverOptions {
+        project_root: project,
+        profile_root,
+    };
+    let planned = tracedecay::migrate::memory_cutover::plan(&cutover)
+        .await
+        .unwrap();
+    let applied =
+        tracedecay::migrate::memory_cutover::apply(&cutover, &planned.confirmation_token)
+            .await
+            .unwrap();
+    assert!(applied.applied);
+    tracedecay::migrate::memory_cutover::verify_branch_removal_receipts(
+        &data_root,
+        std::slice::from_ref(&branch),
+        &[],
+    )
+    .unwrap();
+    fs::remove_file(&branch).unwrap();
+
+    let target = rusqlite::Connection::open_with_flags(
+        &project_graph,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .unwrap();
+    let identity: String = target
+        .query_row(
+            "SELECT identity_json FROM memory_v2_facts
+             WHERE fact_id='fact.v2-only' AND owner_kind='project' AND project_id=?1",
+            [&project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&identity).unwrap(),
+        serde_json::json!({"stable": "fact.v2-only"})
+    );
+    for (table, expected) in [
+        ("memory_v2_assertions", 1_i64),
+        ("memory_v2_lineage_events", 2),
+        ("memory_v2_evidence", 1),
+        ("memory_v2_assertion_evidence", 1),
+        ("memory_v2_feedback_history", 1),
+    ] {
+        assert_eq!(
+            target
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE fact_id='fact.v2-only'"),
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            expected,
+            "{table} history must survive branch retirement"
+        );
+    }
+    assert_eq!(
+        target
+            .query_row(
+                "SELECT payload_access FROM memory_v2_current_facts
+                 WHERE fact_id='fact.v2-only'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+        "deleted"
+    );
+    assert_eq!(
+        target
+            .query_row(
+                "SELECT COUNT(*) FROM memory_v2_facts WHERE fact_id='fact.mirror'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1,
+        "the authoritative mirrored V2 identity must not be rederived"
+    );
+    assert_eq!(
+        target
+            .query_row(
+                "SELECT COUNT(*) FROM memory_facts WHERE content='mirrored content'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0,
+        "a legacy mirror must not be reimported beside authoritative V2 data"
+    );
+    assert_eq!(
+        target
+            .query_row(
+                "SELECT COUNT(*) FROM memory_v2_assertion_payloads
+                 WHERE fact_id='fact.mirror' AND content='mirrored content'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1,
+        "the authoritative V2 payload remains readable under its stable FactId"
+    );
+    assert_eq!(
+        target
+            .query_row(
+                "SELECT COUNT(*) FROM memory_v2_legacy_map
+                 WHERE fact_id='fact.mirror'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0,
+        "branch-local numeric mappings must not be rewritten onto target ids"
+    );
+}
+
+#[tokio::test]
+async fn project_memory_cutover_rejects_incompatible_v2_identity_without_receipt() {
+    let _lock = HOME_ENV_LOCK.lock().await;
+    let temp = TempDir::new().unwrap();
+    let project = temp.path().join("project");
+    let profile_root = temp.path().join("profile");
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(project.join("src/lib.rs"), "pub fn v2_conflict_fixture() {}\n").unwrap();
+    run_git(&project, &["init", "-b", "main"]);
+    run_git(&project, &["config", "user.email", "test@example.com"]);
+    run_git(&project, &["config", "user.name", "TraceDecay Test"]);
+    run_git(&project, &["add", "."]);
+    run_git(&project, &["commit", "-m", "initial"]);
+    let initialized = init_with_maintenance(
+        &project,
+        &profile_root,
+        TraceDecayOpenOptions {
+            profile_root: Some(profile_root.clone()),
+            global_db_path: Some(profile_root.join("global.db")),
+        },
+    )
+    .await
+    .unwrap();
+    let data_root = initialized.store_layout().data_root.clone();
+    let project_graph = initialized.store_layout().graph_db_path.clone();
+    let project_id = read_enrollment_marker(&project)
+        .unwrap()
+        .unwrap()
+        .project_id;
+    let owner_json = serde_json::to_string(&tracedecay_domain::FactOwnerV1::Project {
+        project_id: ProjectId::new(project_id.clone()).unwrap(),
+    })
+    .unwrap();
+    let lifecycle = tracedecay::lifecycle_lease::acquire_exclusive_for_profile(
+        &profile_root,
+        "checkpoint V2 conflict fixture",
+    )
+    .unwrap();
+    let _database_scope = tracedecay::db::enter_maintenance_database_scope(
+        &lifecycle,
+        &profile_root,
+        "checkpoint V2 conflict fixture",
+    )
+    .unwrap();
+    initialized
+        .db()
+        .truncate_wal_for_test_artifact()
+        .await
+        .unwrap();
+    initialized.close();
+    drop(_database_scope);
+    drop(lifecycle);
+
+    let branches = data_root.join("branches");
+    fs::create_dir_all(&branches).unwrap();
+    let branch = branches.join("v2-conflict.db");
+    fs::copy(&project_graph, &branch).unwrap();
+    for (path, identity) in [
+        (&project_graph, r#"{"content":"target"}"#),
+        (&branch, r#"{"content":"source"}"#),
+    ] {
+        let connection = rusqlite::Connection::open(path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO memory_v2_facts(
+                    fact_id, owner_kind, project_id, owner_json, identity_json, created_at
+                 ) VALUES('fact.conflict', 'project', ?1, ?2, ?3, 1)",
+                rusqlite::params![project_id, owner_json, identity],
+            )
+            .unwrap();
+    }
+    let mut meta = branch_meta::load_branch_meta(&data_root).unwrap();
+    meta.add_branch("v2-conflict", "branches/v2-conflict.db", "main");
+    branch_meta::save_branch_meta(&data_root, &meta).unwrap();
+
+    let cutover = MemoryCutoverOptions {
+        project_root: project,
+        profile_root,
+    };
+    let planned = tracedecay::migrate::memory_cutover::plan(&cutover)
+        .await
+        .unwrap();
+    let error = tracedecay::migrate::memory_cutover::apply(&cutover, &planned.confirmation_token)
+        .await
+        .expect_err("incompatible stable V2 identity must fail closed");
+    assert!(
+        error.to_string().contains("memory_v2") && error.to_string().contains("conflict"),
+        "unexpected conflict error: {error}"
+    );
+    assert!(branch.is_file());
+    assert!(!data_root.join("memory-branch-cutover.json").exists());
+    assert!(
+        tracedecay::migrate::memory_cutover::verify_branch_removal_receipts(
+            &data_root,
+            std::slice::from_ref(&branch),
+            &[],
+        )
+        .is_err(),
+        "a failed merge must not authorize source deletion"
+    );
+}
+
 struct HomeEnvGuard {
     previous_home: Option<OsString>,
     previous_userprofile: Option<OsString>,
