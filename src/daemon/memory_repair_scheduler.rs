@@ -1,7 +1,8 @@
-//! Daemon-owned compatibility-memory repair scheduler.
+//! Daemon-owned resumable repair scheduler.
 //!
 //! One loop per project owner drains feedback-history repair and the legacy
-//! memory cutover; unlike automation, repair is never configuration-gated.
+//! memory cutover plus any checkpointed session-store repair; unlike
+//! automation, repair is never configuration-gated.
 //! The loop is driven by an explicit [`MemoryRepairPassDecision`] and retries
 //! on the shared bounded `replay_backoff` curve rather than a fixed delay.
 
@@ -176,11 +177,17 @@ impl DaemonEngine {
                     let generation = Arc::new(std::sync::atomic::AtomicU64::new(0));
                     let termination = Arc::new(MaintenanceTaskTermination::pending());
                     let administration = self.store_administration.clone();
+                    let scheduler_administration = administration.clone();
                     let cg = Arc::clone(&cg);
                     let (published, start) = tokio::sync::oneshot::channel();
                     let task = tokio::spawn(async move {
                         let _ = start.await;
-                        Box::pin(run_memory_repair_scheduler_loop(project_path, cg)).await;
+                        Box::pin(run_memory_repair_scheduler_loop(
+                            project_path,
+                            cg,
+                            scheduler_administration,
+                        ))
+                        .await;
                         administration
                             .memory_repair_schedulers()
                             .lock()
@@ -371,6 +378,7 @@ fn observed_memory_repair_lifecycle(
 async fn run_memory_repair_scheduler_loop(
     project_path: PathBuf,
     cg: Arc<crate::tracedecay::TraceDecay>,
+    administration: super::branch_admin::StoreAdministration,
 ) {
     let tick_project = project_path.clone();
     run_memory_repair_scheduler_loop_with(
@@ -378,7 +386,10 @@ async fn run_memory_repair_scheduler_loop(
         move || {
             let project_path = tick_project.clone();
             let cg = Arc::clone(&cg);
-            async move { run_memory_repair_scheduler_tick(&project_path, &cg).await }
+            let administration = administration.clone();
+            async move {
+                run_maintenance_repair_scheduler_tick(&project_path, &cg, &administration).await
+            }
         },
         tokio::time::sleep,
     )
@@ -445,6 +456,57 @@ async fn run_memory_repair_scheduler_loop_with<Tick, TickFuture, Wait, WaitFutur
                 wait(delay).await;
             }
         }
+    }
+}
+
+async fn run_maintenance_repair_scheduler_tick(
+    project_path: &Path,
+    cg: &crate::tracedecay::TraceDecay,
+    administration: &super::branch_admin::StoreAdministration,
+) -> Result<MemoryRepairPassDecision> {
+    let memory = run_memory_repair_scheduler_tick(project_path, cg).await?;
+    let database = administration
+        .registered_project_session_database(project_path, cg.store_layout())
+        .await?;
+    let session =
+        match crate::global_db::advance_session_temporal_store_repair(database.as_ref()).await? {
+            crate::global_db::SessionTemporalRepairOutcome::Pending { stage } => {
+                log_daemon_event(
+                    "session_temporal_repair",
+                    &[
+                        ("project", project_path.display().to_string()),
+                        ("outcome", "pending".to_string()),
+                        ("stage", format!("{stage:?}")),
+                    ],
+                );
+                MemoryRepairPassDecision::Advanced
+            }
+            crate::global_db::SessionTemporalRepairOutcome::Complete => {
+                log_daemon_event(
+                    "session_temporal_repair",
+                    &[
+                        ("project", project_path.display().to_string()),
+                        ("outcome", "complete".to_string()),
+                    ],
+                );
+                MemoryRepairPassDecision::Idle
+            }
+            crate::global_db::SessionTemporalRepairOutcome::NotRequired => {
+                MemoryRepairPassDecision::Idle
+            }
+        };
+    Ok(combine_repair_decisions(memory, session))
+}
+
+fn combine_repair_decisions(
+    memory: MemoryRepairPassDecision,
+    session: MemoryRepairPassDecision,
+) -> MemoryRepairPassDecision {
+    if memory == MemoryRepairPassDecision::Advanced || session == MemoryRepairPassDecision::Advanced
+    {
+        MemoryRepairPassDecision::Advanced
+    } else {
+        MemoryRepairPassDecision::Idle
     }
 }
 
@@ -547,10 +609,28 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::{
-        MemoryRepairPassDecision, MemoryRepairTickOutcome, memory_repair_pass_advanced,
-        run_memory_repair_scheduler_loop_with,
+        MemoryRepairPassDecision, MemoryRepairTickOutcome, combine_repair_decisions,
+        memory_repair_pass_advanced, run_memory_repair_scheduler_loop_with,
     };
     use crate::errors::TraceDecayError;
+
+    #[test]
+    fn session_repair_keeps_the_shared_maintenance_loop_alive() {
+        assert_eq!(
+            combine_repair_decisions(
+                MemoryRepairPassDecision::Idle,
+                MemoryRepairPassDecision::Advanced
+            ),
+            MemoryRepairPassDecision::Advanced
+        );
+        assert_eq!(
+            combine_repair_decisions(
+                MemoryRepairPassDecision::Idle,
+                MemoryRepairPassDecision::Idle
+            ),
+            MemoryRepairPassDecision::Idle
+        );
+    }
 
     #[test]
     fn saturation_flips_the_repair_decision_for_finished_passes() {

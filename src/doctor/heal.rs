@@ -120,6 +120,14 @@ impl std::fmt::Display for HealthPassWarning {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionStoreRepairHealth {
+    NotRequired,
+    Pending,
+    Complete,
+    Degraded,
+}
+
 /// Outcome of one post-update health pass.
 #[derive(Debug, Default)]
 pub struct HealthPassReport {
@@ -133,6 +141,7 @@ pub struct HealthPassReport {
     /// Stale store manifests reconciled to the registry canonical path.
     pub reconciled_store_roots: Vec<super::registry_drift::ReconciledStoreRoot>,
     pub remaining_findings: Vec<String>,
+    pub session_store_repair: Option<SessionStoreRepairHealth>,
     pub warnings: Vec<HealthPassWarning>,
 }
 
@@ -271,29 +280,47 @@ async fn compute_health_pass_report(
                     .await
                 {
                     Ok(session_database) => {
-                        if let Err(error) =
-                            crate::global_db::repair_session_temporal_store(&session_database).await
+                        match crate::global_db::enqueue_session_temporal_store_repair(
+                            &session_database,
+                        )
+                        .await
                         {
-                            report.warnings.push(HealthPassWarning::about_store(
-                                format!("could not repair the current project session store: {error}"),
-                                StoreShardKind::ProjectSessions,
-                            ));
+                            Ok(outcome) => {
+                                report.session_store_repair =
+                                    Some(session_store_repair_health(outcome));
+                            }
+                            Err(error) => {
+                                report.session_store_repair =
+                                    Some(SessionStoreRepairHealth::Degraded);
+                                report.warnings.push(HealthPassWarning::about_store(
+                                    format!(
+                                        "could not enqueue the current project session-store repair: {error}"
+                                    ),
+                                    StoreShardKind::ProjectSessions,
+                                ));
+                            }
                         }
                     }
-                    Err(error) => report.warnings.push(HealthPassWarning::about_store(
-                        format!(
-                            "could not mount the current project session store for repair: {error}"
-                        ),
-                        StoreShardKind::ProjectSessions,
-                    )),
+                    Err(error) => {
+                        report.session_store_repair = Some(SessionStoreRepairHealth::Degraded);
+                        report.warnings.push(HealthPassWarning::about_store(
+                            format!(
+                                "could not mount the current project session store for repair: {error}"
+                            ),
+                            StoreShardKind::ProjectSessions,
+                        ));
+                    }
                 }
             }
-            Err(error) => report.warnings.push(HealthPassWarning::about_store(
-                format!(
-                    "could not repair the current project session store because its identity is invalid: {error}"
-                ),
-                StoreShardKind::ProjectSessions,
-            )),
+            Err(error) => {
+                report.session_store_repair = Some(SessionStoreRepairHealth::Degraded);
+                report.warnings.push(HealthPassWarning::about_store(
+                    format!(
+                        "could not repair the current project session store because its identity is invalid: {error}"
+                    ),
+                    StoreShardKind::ProjectSessions,
+                ));
+            }
         }
     }
 
@@ -366,6 +393,22 @@ async fn compute_health_pass_report(
             .map(|message| HealthPassWarning::about_store(message, StoreShardKind::Profile)),
     );
     report
+}
+
+fn session_store_repair_health(
+    outcome: crate::global_db::SessionTemporalRepairOutcome,
+) -> SessionStoreRepairHealth {
+    match outcome {
+        crate::global_db::SessionTemporalRepairOutcome::NotRequired => {
+            SessionStoreRepairHealth::NotRequired
+        }
+        crate::global_db::SessionTemporalRepairOutcome::Pending { .. } => {
+            SessionStoreRepairHealth::Pending
+        }
+        crate::global_db::SessionTemporalRepairOutcome::Complete => {
+            SessionStoreRepairHealth::Complete
+        }
+    }
 }
 
 async fn retire_completed_consolidation_manifests(
@@ -599,6 +642,16 @@ mod tests {
         let path = shard.join(BRANCH_META_FILENAME);
         std::fs::write(&path, content).unwrap();
         path
+    }
+
+    #[test]
+    fn queued_session_repair_is_reported_as_pending_not_healthy() {
+        assert_eq!(
+            session_store_repair_health(crate::global_db::SessionTemporalRepairOutcome::Pending {
+                stage: crate::global_db::SessionTemporalRepairStage::RepairState,
+            }),
+            SessionStoreRepairHealth::Pending
+        );
     }
 
     #[test]

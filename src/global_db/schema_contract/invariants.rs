@@ -61,6 +61,7 @@ const SESSION_TEMPORAL_REPAIR_AUDITS: &[&str] = &[
     "session temporal generation state is invalid",
     "session temporal authority ownership is invalid",
 ];
+pub(in crate::global_db) const SESSION_TEMPORAL_REPAIR_AUDIT_PAGE_ROWS: i64 = 256;
 
 pub(in crate::global_db) async fn authority_invariant_triggers_intact(
     conn: &impl QueryExecutor,
@@ -513,20 +514,127 @@ pub(in crate::global_db) async fn validate_authority_rows_exhaustive(
     validate_invariant_rows(conn).await
 }
 
-pub(in crate::global_db) async fn validate_session_temporal_repair_authority(
+pub(in crate::global_db) async fn validate_session_temporal_repair_authority_audit(
     conn: &impl QueryExecutor,
+    audit_index: usize,
 ) -> crate::errors::Result<()> {
-    for invariant in INVARIANTS
+    let invariant = INVARIANTS
         .iter()
         .filter(|invariant| SESSION_TEMPORAL_REPAIR_AUDITS.contains(&invariant.violation))
+        .nth(audit_index)
+        .ok_or_else(|| {
+            global_db_operation_message(
+                OPERATION,
+                format!("unknown session temporal repair authority audit {audit_index}"),
+            )
+        })?;
+    if let Some(query) = invariant.audit_query
+        && query_has_rows(conn, query).await?
     {
-        if let Some(query) = invariant.audit_query
-            && query_has_rows(conn, query).await?
-        {
-            return Err(global_db_operation_message(OPERATION, invariant.violation));
-        }
+        return Err(global_db_operation_message(OPERATION, invariant.violation));
     }
     Ok(())
+}
+
+pub(in crate::global_db) async fn validate_session_temporal_effect_authority_page(
+    conn: &impl QueryExecutor,
+    after_rowid: i64,
+) -> crate::errors::Result<(i64, bool)> {
+    let mut rows = conn
+        .query(
+            "SELECT effect.rowid, observation.observation_id IS NULL
+             FROM session_temporal_observation_effects AS effect
+             LEFT JOIN observations AS observation
+               ON observation.observation_id = effect.observation_id
+              AND observation.sequence = effect.observation_sequence
+              AND observation.receipt_id = effect.receipt_id
+             WHERE effect.rowid > ?1
+             ORDER BY effect.rowid
+             LIMIT ?2",
+            params![after_rowid, SESSION_TEMPORAL_REPAIR_AUDIT_PAGE_ROWS],
+        )
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    let mut last_rowid = after_rowid;
+    let mut count = 0_i64;
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?
+    {
+        last_rowid = row
+            .get(0)
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let invalid = row
+            .get::<i64>(1)
+            .map_err(|error| global_db_operation_error(OPERATION, error))?
+            != 0;
+        if invalid {
+            return Err(global_db_operation_message(
+                OPERATION,
+                SESSION_TEMPORAL_REPAIR_AUDITS[0],
+            ));
+        }
+        count += 1;
+    }
+    Ok((last_rowid, count < SESSION_TEMPORAL_REPAIR_AUDIT_PAGE_ROWS))
+}
+
+pub(in crate::global_db) async fn validate_session_temporal_receipt_authority_page(
+    conn: &impl QueryExecutor,
+    after_rowid: i64,
+) -> crate::errors::Result<(i64, bool)> {
+    let mut rows = conn
+        .query(
+            "SELECT receipt.rowid,
+                    generation.session_id IS NULL
+                    OR (
+                        receipt.batch_ordinal > 0
+                        AND NOT EXISTS (
+                            SELECT 1
+                            FROM session_temporal_projection_receipts AS previous
+                            WHERE previous.session_id = receipt.session_id
+                              AND previous.generation = receipt.generation
+                              AND previous.batch_ordinal = receipt.batch_ordinal - 1
+                              AND previous.source_through <= receipt.source_through
+                              AND previous.projection_through <= receipt.projection_through
+                        )
+                    )
+             FROM session_temporal_projection_receipts AS receipt
+             LEFT JOIN session_temporal_generations AS generation
+               ON generation.session_id = receipt.session_id
+              AND generation.generation = receipt.generation
+              AND generation.frozen_watermarks_json = receipt.frozen_watermarks_json
+             WHERE receipt.rowid > ?1
+             ORDER BY receipt.rowid
+             LIMIT ?2",
+            params![after_rowid, SESSION_TEMPORAL_REPAIR_AUDIT_PAGE_ROWS],
+        )
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    let mut last_rowid = after_rowid;
+    let mut count = 0_i64;
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?
+    {
+        last_rowid = row
+            .get(0)
+            .map_err(|error| global_db_operation_error(OPERATION, error))?;
+        let invalid = row
+            .get::<i64>(1)
+            .map_err(|error| global_db_operation_error(OPERATION, error))?
+            != 0;
+        if invalid {
+            return Err(global_db_operation_message(
+                OPERATION,
+                SESSION_TEMPORAL_REPAIR_AUDITS[0],
+            ));
+        }
+        count += 1;
+    }
+    Ok((last_rowid, count < SESSION_TEMPORAL_REPAIR_AUDIT_PAGE_ROWS))
 }
 
 #[cfg(test)]
@@ -535,9 +643,67 @@ mod tests {
 
     use super::{
         FOREIGN_KEY_AUDIT_PROGRESS, foreign_key_violation_exists_read_only,
-        foreign_key_violation_exists_resumable,
+        foreign_key_violation_exists_resumable, validate_session_temporal_effect_authority_page,
     };
     use crate::db::engine::TestConnection;
+
+    #[tokio::test]
+    async fn session_temporal_effect_audit_checkpoints_bounded_pages() {
+        let directory = TempDir::new().unwrap();
+        let database_path = directory.path().join("sessions.db");
+        let mut connection = rusqlite::Connection::open(&database_path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE observations (
+                    observation_id TEXT NOT NULL,
+                    sequence INTEGER NOT NULL,
+                    receipt_id TEXT NOT NULL,
+                    PRIMARY KEY(observation_id, sequence, receipt_id)
+                 );
+                 CREATE TABLE session_temporal_observation_effects (
+                    observation_id TEXT NOT NULL,
+                    observation_sequence INTEGER NOT NULL,
+                    receipt_id TEXT NOT NULL
+                 );",
+            )
+            .unwrap();
+        let transaction = connection.transaction().unwrap();
+        for ordinal in 1..=257 {
+            let observation_id = format!("observation-{ordinal}");
+            let receipt_id = format!("receipt-{ordinal}");
+            transaction
+                .execute(
+                    "INSERT INTO observations(observation_id, sequence, receipt_id)
+                     VALUES (?1, ?2, ?3)",
+                    rusqlite::params![observation_id, ordinal, receipt_id],
+                )
+                .unwrap();
+            transaction
+                .execute(
+                    "INSERT INTO session_temporal_observation_effects(
+                        observation_id, observation_sequence, receipt_id
+                     ) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![observation_id, ordinal, receipt_id],
+                )
+                .unwrap();
+        }
+        transaction.commit().unwrap();
+        drop(connection);
+        let connection = TestConnection::open(&database_path);
+
+        let (first_cursor, first_complete) =
+            validate_session_temporal_effect_authority_page(&connection, 0)
+                .await
+                .unwrap();
+        assert_eq!(first_cursor, 256);
+        assert!(!first_complete);
+        let (second_cursor, second_complete) =
+            validate_session_temporal_effect_authority_page(&connection, first_cursor)
+                .await
+                .unwrap();
+        assert_eq!(second_cursor, 257);
+        assert!(second_complete);
+    }
 
     #[tokio::test]
     async fn foreign_key_audit_finds_violations_by_child_table() {

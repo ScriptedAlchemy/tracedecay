@@ -1315,10 +1315,7 @@ pub(super) async fn run_automation_scheduler_tick(
         })?;
     let session_database = engine
         .store_administration
-        .registered_project_session_database(
-            authoritative_project_id,
-            [project_path.to_path_buf(), cg.project_root().to_path_buf()],
-        )
+        .registered_project_session_database(project_path, cg.store_layout())
         .await?;
     let profile_identity = engine.store_administration.profile_identity()?.clone();
     let retrieval =
@@ -1508,10 +1505,7 @@ async fn run_host_receipt_review(
         })?;
     let session_database = engine
         .store_administration
-        .registered_project_session_database(
-            authoritative_project_id,
-            [project_path.to_path_buf(), cg.project_root().to_path_buf()],
-        )
+        .registered_project_session_database(project_path, cg.store_layout())
         .await?;
     let snapshot =
         session_database

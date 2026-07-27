@@ -330,45 +330,335 @@ pub struct TranscriptBatch {
 /// Whether a transcript batch writes the full dual store (LCM raw + searchable
 /// projection) or only the `session_messages` projection.
 /// User-level database tracking all `TraceDecay` projects.
-pub(crate) async fn repair_session_temporal_store(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionTemporalRepairStage {
+    RepairState,
+    PrepareSchema,
+    AuthorityEffects,
+    AuthorityReceipts,
+    AuthorityCursorKeys,
+    AuthorityRefresh,
+    AuthorityGenerations,
+    AuthorityOwnership,
+}
+
+impl SessionTemporalRepairStage {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::RepairState => "repair_state",
+            Self::PrepareSchema => "prepare_schema",
+            Self::AuthorityEffects => "authority_effects",
+            Self::AuthorityReceipts => "authority_receipts",
+            Self::AuthorityCursorKeys => "authority_cursor_keys",
+            Self::AuthorityRefresh => "authority_refresh",
+            Self::AuthorityGenerations => "authority_generations",
+            Self::AuthorityOwnership => "authority_ownership",
+        }
+    }
+
+    fn parse(value: &str) -> crate::errors::Result<Self> {
+        match value {
+            "repair_state" => Ok(Self::RepairState),
+            "prepare_schema" => Ok(Self::PrepareSchema),
+            "authority_effects" => Ok(Self::AuthorityEffects),
+            "authority_receipts" => Ok(Self::AuthorityReceipts),
+            "authority_cursor_keys" => Ok(Self::AuthorityCursorKeys),
+            "authority_refresh" => Ok(Self::AuthorityRefresh),
+            "authority_generations" => Ok(Self::AuthorityGenerations),
+            "authority_ownership" => Ok(Self::AuthorityOwnership),
+            _ => Err(global_db_operation_message(
+                "read session temporal repair progress",
+                format!("unknown repair stage '{value}'"),
+            )),
+        }
+    }
+
+    fn authority_audit(self) -> Option<usize> {
+        match self {
+            Self::AuthorityCursorKeys => Some(1),
+            Self::AuthorityRefresh => Some(2),
+            Self::AuthorityGenerations => Some(3),
+            Self::AuthorityOwnership => Some(4),
+            Self::RepairState
+            | Self::PrepareSchema
+            | Self::AuthorityEffects
+            | Self::AuthorityReceipts => None,
+        }
+    }
+
+    fn next(self) -> Option<Self> {
+        match self {
+            Self::RepairState => Some(Self::PrepareSchema),
+            Self::PrepareSchema => Some(Self::AuthorityEffects),
+            Self::AuthorityEffects => Some(Self::AuthorityReceipts),
+            Self::AuthorityReceipts => Some(Self::AuthorityCursorKeys),
+            Self::AuthorityCursorKeys => Some(Self::AuthorityRefresh),
+            Self::AuthorityRefresh => Some(Self::AuthorityGenerations),
+            Self::AuthorityGenerations => Some(Self::AuthorityOwnership),
+            Self::AuthorityOwnership => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionTemporalRepairOutcome {
+    NotRequired,
+    Pending { stage: SessionTemporalRepairStage },
+    Complete,
+}
+
+const SESSION_TEMPORAL_REPAIR_NAME: &str = "session-temporal-v1";
+
+#[derive(Debug, Clone, Copy)]
+struct SessionTemporalRepairCheckpoint {
+    stage: SessionTemporalRepairStage,
+    cursor: i64,
+}
+
+pub(crate) async fn enqueue_session_temporal_store_repair(
     database: &RegisteredGlobalDb,
-) -> crate::errors::Result<()> {
+) -> crate::errors::Result<SessionTemporalRepairOutcome> {
     let transaction = database
         .begin_write_transaction()
         .await
-        .map_err(|error| global_db_operation_error("begin session temporal repair", error))?;
-    let repair = async {
-        if !connection_table_exists(&transaction, "session_messages").await?
-            || !connection_table_exists(&transaction, "observations").await?
-        {
-            return crate::errors::Result::Ok(false);
-        }
-        session_temporal::repair_session_temporal_state(&transaction).await?;
-        session_temporal::ensure_session_temporal_schema(&transaction).await?;
-        schema_contract::ensure_authority_invariant_schema(&transaction).await?;
-        schema_contract::validate_session_temporal_repair_authority(&transaction).await?;
-        crate::errors::Result::Ok(true)
-    }
-    .await;
-    match repair {
-        Ok(true) => transaction
-            .commit()
-            .await
-            .map_err(|error| global_db_operation_error("commit session temporal repair", error)),
-        Ok(false) => transaction
+        .map_err(|error| global_db_operation_error("enqueue session temporal repair", error))?;
+    if !connection_table_exists(&transaction, "session_messages").await?
+        || !connection_table_exists(&transaction, "observations").await?
+    {
+        transaction
             .rollback()
             .await
-            .map_err(|error| global_db_operation_error("rollback skipped session repair", error)),
+            .map_err(|error| global_db_operation_error("rollback skipped session repair", error))?;
+        return Ok(SessionTemporalRepairOutcome::NotRequired);
+    }
+    transaction
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS session_temporal_repair_progress (
+                repair_name TEXT PRIMARY KEY,
+                stage TEXT NOT NULL,
+                cursor INTEGER NOT NULL DEFAULT 0 CHECK(cursor >= 0),
+                requested_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+             )",
+        )
+        .await
+        .map_err(|error| global_db_operation_error("create session repair checkpoint", error))?;
+    transaction
+        .execute(
+            "INSERT INTO session_temporal_repair_progress (
+                repair_name, stage, cursor, requested_at, updated_at
+             ) VALUES (?1, ?2, 0, unixepoch(), unixepoch())
+             ON CONFLICT(repair_name) DO NOTHING",
+            crate::db::engine::params![
+                SESSION_TEMPORAL_REPAIR_NAME,
+                SessionTemporalRepairStage::RepairState.as_str()
+            ],
+        )
+        .await
+        .map_err(|error| global_db_operation_error("enqueue session temporal repair", error))?;
+    let checkpoint = read_session_temporal_repair_checkpoint(&transaction)
+        .await?
+        .ok_or_else(|| {
+            global_db_operation_message(
+                "enqueue session temporal repair",
+                "repair checkpoint disappeared before commit",
+            )
+        })?;
+    transaction
+        .commit()
+        .await
+        .map_err(|error| global_db_operation_error("commit session repair request", error))?;
+    Ok(SessionTemporalRepairOutcome::Pending {
+        stage: checkpoint.stage,
+    })
+}
+
+pub(crate) async fn session_temporal_store_repair_status(
+    database: &RegisteredGlobalDb,
+) -> crate::errors::Result<SessionTemporalRepairOutcome> {
+    let snapshot = database
+        .read_snapshot()
+        .await
+        .map_err(|error| global_db_operation_error("snapshot session repair status", error))?;
+    Ok(
+        match read_session_temporal_repair_checkpoint(&snapshot).await? {
+            Some(checkpoint) => SessionTemporalRepairOutcome::Pending {
+                stage: checkpoint.stage,
+            },
+            None => SessionTemporalRepairOutcome::NotRequired,
+        },
+    )
+}
+
+pub(crate) async fn advance_session_temporal_store_repair(
+    database: &RegisteredGlobalDb,
+) -> crate::errors::Result<SessionTemporalRepairOutcome> {
+    let transaction = database
+        .begin_write_transaction()
+        .await
+        .map_err(|error| global_db_operation_error("advance session temporal repair", error))?;
+    let Some(checkpoint) = read_session_temporal_repair_checkpoint(&transaction).await? else {
+        transaction
+            .rollback()
+            .await
+            .map_err(|error| global_db_operation_error("rollback idle session repair", error))?;
+        return Ok(SessionTemporalRepairOutcome::NotRequired);
+    };
+    let stage = checkpoint.stage;
+
+    let repair = async {
+        let (next_stage, next_cursor) = match stage {
+            SessionTemporalRepairStage::RepairState => {
+                session_temporal::repair_session_temporal_state(&transaction).await?;
+                // Repair state temporarily drops immutable guards. Restore every
+                // authority trigger before this batch becomes visible.
+                schema_contract::ensure_authority_invariant_schema(&transaction).await?;
+                (stage.next(), 0)
+            }
+            SessionTemporalRepairStage::PrepareSchema => {
+                session_temporal::ensure_session_temporal_schema(&transaction).await?;
+                schema_contract::ensure_authority_invariant_schema(&transaction).await?;
+                (stage.next(), 0)
+            }
+            SessionTemporalRepairStage::AuthorityEffects => {
+                let (cursor, complete) =
+                    schema_contract::validate_session_temporal_effect_authority_page(
+                        &transaction,
+                        checkpoint.cursor,
+                    )
+                    .await?;
+                (
+                    if complete { stage.next() } else { Some(stage) },
+                    if complete { 0 } else { cursor },
+                )
+            }
+            SessionTemporalRepairStage::AuthorityReceipts => {
+                let (cursor, complete) =
+                    schema_contract::validate_session_temporal_receipt_authority_page(
+                        &transaction,
+                        checkpoint.cursor,
+                    )
+                    .await?;
+                (
+                    if complete { stage.next() } else { Some(stage) },
+                    if complete { 0 } else { cursor },
+                )
+            }
+            _ => {
+                let audit_index = stage.authority_audit().ok_or_else(|| {
+                    global_db_operation_message(
+                        "advance session temporal repair",
+                        "repair stage has no authority audit",
+                    )
+                })?;
+                schema_contract::validate_session_temporal_repair_authority_audit(
+                    &transaction,
+                    audit_index,
+                )
+                .await?;
+                (stage.next(), 0)
+            }
+        };
+
+        if let Some(next) = next_stage {
+            transaction
+                .execute(
+                    "UPDATE session_temporal_repair_progress
+                     SET stage = ?1, cursor = ?2, updated_at = unixepoch()
+                     WHERE repair_name = ?3",
+                    crate::db::engine::params![
+                        next.as_str(),
+                        next_cursor,
+                        SESSION_TEMPORAL_REPAIR_NAME
+                    ],
+                )
+                .await
+                .map_err(|error| {
+                    global_db_operation_error("checkpoint session temporal repair", error)
+                })?;
+            Ok(SessionTemporalRepairOutcome::Pending { stage: next })
+        } else {
+            transaction
+                .execute(
+                    "DELETE FROM session_temporal_repair_progress WHERE repair_name = ?1",
+                    crate::db::engine::params![SESSION_TEMPORAL_REPAIR_NAME],
+                )
+                .await
+                .map_err(|error| {
+                    global_db_operation_error("complete session temporal repair", error)
+                })?;
+            Ok(SessionTemporalRepairOutcome::Complete)
+        }
+    }
+    .await;
+
+    match repair {
+        Ok(outcome) => {
+            transaction.commit().await.map_err(|error| {
+                global_db_operation_error("commit session temporal repair batch", error)
+            })?;
+            Ok(outcome)
+        }
         Err(error) => {
             transaction.rollback().await.map_err(|rollback_error| {
                 global_db_operation_message(
-                    "rollback failed session temporal repair",
+                    "rollback failed session temporal repair batch",
                     format!("{rollback_error}; original repair failure: {error}"),
                 )
             })?;
             Err(error)
         }
     }
+}
+
+pub(crate) async fn repair_session_temporal_store(
+    database: &RegisteredGlobalDb,
+) -> crate::errors::Result<()> {
+    let mut outcome = enqueue_session_temporal_store_repair(database).await?;
+    while matches!(outcome, SessionTemporalRepairOutcome::Pending { .. }) {
+        outcome = advance_session_temporal_store_repair(database).await?;
+    }
+    match outcome {
+        SessionTemporalRepairOutcome::NotRequired | SessionTemporalRepairOutcome::Complete => {
+            Ok(())
+        }
+        SessionTemporalRepairOutcome::Pending { .. } => {
+            unreachable!("session repair loop exits only on a terminal outcome")
+        }
+    }
+}
+
+async fn read_session_temporal_repair_checkpoint(
+    conn: &(impl crate::db::engine::QueryExecutor + ?Sized),
+) -> crate::errors::Result<Option<SessionTemporalRepairCheckpoint>> {
+    if !connection_table_exists(conn, "session_temporal_repair_progress").await? {
+        return Ok(None);
+    }
+    let mut rows = crate::db::engine::QueryExecutor::query(
+        conn,
+        "SELECT stage, cursor
+         FROM session_temporal_repair_progress
+         WHERE repair_name = ?1",
+        crate::db::engine::params![SESSION_TEMPORAL_REPAIR_NAME],
+    )
+    .await
+    .map_err(|error| global_db_operation_error("read session temporal repair progress", error))?;
+    rows.next()
+        .await
+        .map_err(|error| global_db_operation_error("read session temporal repair progress", error))?
+        .map(|row| {
+            let stage = row
+                .get::<String>(0)
+                .map_err(|error| {
+                    global_db_operation_error("read session temporal repair progress", error)
+                })
+                .and_then(|stage| SessionTemporalRepairStage::parse(&stage))?;
+            let cursor = row.get::<i64>(1).map_err(|error| {
+                global_db_operation_error("read session temporal repair progress", error)
+            })?;
+            Ok(SessionTemporalRepairCheckpoint { stage, cursor })
+        })
+        .transpose()
 }
 
 async fn connection_table_exists(

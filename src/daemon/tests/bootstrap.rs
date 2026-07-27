@@ -73,6 +73,41 @@ async fn unenrolled_ambient_directory_is_rejected_before_project_warmup() {
 }
 
 #[tokio::test]
+async fn unenrolled_ambient_directory_is_rejected_by_direct_project_open() {
+    let home = TempDir::new().expect("isolated home");
+    let profile_root = home.path().join(".tracedecay");
+    let ambient_directory = home.path().join("ambient");
+    std::fs::create_dir_all(&ambient_directory).expect("create ambient directory");
+    let _database_scope =
+        enter_test_daemon_database_scope(&profile_root, "direct unenrolled ambient route");
+    let engine = test_daemon_engine_for_profile(&profile_root);
+    let mut handshake = test_handshake_defaults();
+    handshake.project_path = Some(ambient_directory.clone());
+    handshake.client_identity = test_client_identity_for(profile_root);
+
+    let error = match engine.project_server(&handshake).await {
+        Ok(_) => panic!("direct project open must enforce enrollment admission"),
+        Err(error) => error,
+    };
+
+    assert!(
+        error.to_string().contains("is not enrolled"),
+        "the deepest project-open route must fail at enrollment admission: {error}"
+    );
+    assert_eq!(
+        engine
+            .project_open_attempts
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "the expensive project-open operation must not start"
+    );
+    assert!(
+        !ambient_directory.join(".tracedecay").exists(),
+        "rejection must not manufacture project state"
+    );
+}
+
+#[tokio::test]
 async fn repeated_bootstrap_requests_share_one_bounded_invariant_open_failure() {
     let tasks = super::super::ProjectOpenTasks::default();
     let route = project_open_test_route("rejected");

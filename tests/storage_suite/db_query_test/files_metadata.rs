@@ -18,6 +18,25 @@ async fn test_get_all_files() {
 }
 
 #[tokio::test]
+async fn test_get_all_file_paths_reads_only_logical_paths() {
+    let db = setup_db().await;
+    let mut first = sample_file("src/a.rs");
+    first.content_hash = "x".repeat(1024 * 1024);
+    let mut second = sample_file("src/b.rs");
+    second.content_hash = "y".repeat(1024 * 1024);
+    db.upsert_files(&[first, second])
+        .await
+        .expect("upsert_files failed");
+
+    let paths = db
+        .get_all_file_paths()
+        .await
+        .expect("get_all_file_paths failed");
+
+    assert_eq!(paths, vec!["src/a.rs", "src/b.rs"]);
+}
+
+#[tokio::test]
 async fn test_last_index_time_empty() {
     let db = setup_db().await;
 

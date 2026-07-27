@@ -2758,12 +2758,9 @@ fn portable_database_owner_reconciler(
                 return;
             };
             if rekeyed
-                && let Some(project_id) = new_owner.project_id.as_deref()
+                && new_owner.project_id.is_some()
                 && let Ok(database) = store_administration
-                    .registered_project_session_database(
-                        project_id,
-                        [fresh.project_root().to_path_buf()],
-                    )
+                    .registered_project_session_database(fresh.project_root(), fresh.store_layout())
                     .await
             {
                 store_administration
@@ -3084,7 +3081,8 @@ impl DaemonEngine {
         initialize_request: Option<JsonRpcRequest>,
     ) -> Result<ProjectOpenTaskClaim> {
         let (project_path, route) = Self::project_route(&handshake)?;
-        self.ensure_registered_project_route(&project_path).await?;
+        self.ensure_registered_project_route(&project_path, handshake.allow_init)
+            .await?;
         let tasks = project_open_tasks(&self.project_open_gates).await;
         let engine = self.clone();
         let open_handshake = handshake.clone();
@@ -3110,33 +3108,12 @@ impl DaemonEngine {
     /// work before session-store resolution eventually notices the missing
     /// enrollment. Registry alias and repository-identity lookups preserve
     /// linked-worktree routing without manufacturing path-derived authority.
-    async fn ensure_registered_project_route(&self, project_path: &Path) -> Result<()> {
-        let registry = self.store_administration.registered_profile_database().await?;
-        if registry
-            .project_registry_context_by_alias(project_path)
-            .await?
-            .is_some()
-        {
-            return Ok(());
-        }
-
-        let git_root = crate::worktree::git_worktree_root(project_path)
-            .unwrap_or_else(|| project_path.to_path_buf());
-        let git_common_dir = crate::worktree::git_common_dir(&git_root);
-        if registry
-            .project_registry_context_by_identity(&git_root, git_common_dir.as_deref())
-            .await?
-            .is_some()
-        {
-            return Ok(());
-        }
-
-        Err(TraceDecayError::Config {
-            message: format!(
-                "TraceDecay project '{}' is not enrolled in the authenticated profile",
-                project_path.display()
-            ),
-        })
+    async fn ensure_registered_project_route(
+        &self,
+        project_path: &Path,
+        allow_init: bool,
+    ) -> Result<()> {
+        ensure_registered_project_route(&self.store_administration, project_path, allow_init).await
     }
 
     async fn schedule_project_server_warmup(
@@ -3431,11 +3408,11 @@ impl DaemonEngine {
                         }
                         let project_path = fresh.project_root().to_path_buf();
                         let new_session_db = match new_key.owner.project_id.as_deref() {
-                            Some(project_id) => engine
+                            Some(_) => engine
                                 .store_administration
                                 .registered_project_session_database(
-                                    project_id,
-                                    [fresh.project_root().to_path_buf()],
+                                    fresh.project_root(),
+                                    fresh.store_layout(),
                                 )
                                 .await
                                 .ok(),
@@ -3868,6 +3845,72 @@ fn spawn_lifecycle_automation_scheduler_activation<ActivationFuture>(
     });
 }
 
+async fn ensure_registered_project_route(
+    store_administration: &StoreAdministration,
+    project_path: &Path,
+    allow_init: bool,
+) -> Result<()> {
+    let registry = store_administration.registered_profile_database().await?;
+    let context = match registry
+        .project_registry_context_by_alias(project_path)
+        .await?
+    {
+        Some(context) => Some(context),
+        None => {
+            let git_root = crate::worktree::git_worktree_root(project_path)
+                .unwrap_or_else(|| project_path.to_path_buf());
+            let git_common_dir = crate::worktree::git_common_dir(&git_root);
+            registry
+                .project_registry_context_by_identity(&git_root, git_common_dir.as_deref())
+                .await?
+        }
+    };
+    let Some(context) = context else {
+        if allow_init {
+            return Ok(());
+        }
+        return Err(unenrolled_project_route_error(project_path));
+    };
+
+    let project_id = context.project.project_id;
+    let mut enrollment_roots = vec![
+        project_path.to_path_buf(),
+        PathBuf::from(context.project.canonical_root),
+    ];
+    enrollment_roots.extend(
+        context
+            .aliases
+            .into_iter()
+            .map(|alias| PathBuf::from(alias.alias_path)),
+    );
+    enrollment_roots.sort();
+    enrollment_roots.dedup();
+    for root in enrollment_roots {
+        let Ok(root) = root.canonicalize() else {
+            continue;
+        };
+        let Some(marker) = crate::storage::read_enrollment_marker(&root)? else {
+            continue;
+        };
+        if marker.storage_mode == crate::storage::StorageMode::ProfileSharded
+            && marker.project_id == project_id
+        {
+            return Ok(());
+        }
+    }
+
+    Err(unenrolled_project_route_error(project_path))
+}
+
+fn unenrolled_project_route_error(project_path: &Path) -> TraceDecayError {
+    TraceDecayError::Config {
+        message: format!(
+            "TraceDecay project '{}' is not enrolled in the authenticated profile",
+            project_path.display()
+        ),
+    }
+}
+
 #[cfg(any(not(unix), test))]
 async fn portable_cached_project_server(
     store_administration: &StoreAdministration,
@@ -3899,6 +3942,15 @@ async fn begin_portable_project_open(
     initialize_request: Option<JsonRpcRequest>,
     #[cfg(test)] project_open_attempts: Option<Arc<AtomicUsize>>,
 ) -> ProjectOpenTaskClaim {
+    if let Err(error) = ensure_registered_project_route(
+        &store_administration,
+        &canonical_project_path,
+        handshake.allow_init,
+    )
+    .await
+    {
+        return ProjectOpenTaskClaim::Failed(ProjectOpenFailure::from_error(&error));
+    }
     let tasks = project_open_tasks(project_open_gates.as_ref()).await;
     let open_project_path = canonical_project_path.clone();
     let open_gates = Arc::clone(&project_open_gates);
@@ -4178,6 +4230,12 @@ async fn production_project_server(
         });
     }
 
+    ensure_registered_project_route(
+        store_administration,
+        canonical_project_path,
+        handshake.allow_init,
+    )
+    .await?;
     let gate = project_open_gate(project_open_gates, &route).await;
     let _singleflight = tokio::select! {
         biased;
@@ -4287,10 +4345,7 @@ async fn production_project_server(
                     .to_owned(),
             })?;
     let registered_project_session_db = store_administration
-        .registered_project_session_database(
-            authoritative_project_id,
-            [cg.project_root().to_path_buf()],
-        )
+        .registered_project_session_database(cg.project_root(), cg.store_layout())
         .await?;
     ensure_git_index_transactions_before_advertising(
         store_administration,
@@ -5750,7 +5805,7 @@ async fn open_project_for_handshake(
         )?;
     }
     let configuration_database = store_administration
-        .registered_project_session_database(project_id, [store_layout.project_root.clone()])
+        .registered_project_session_database(project_path, &store_layout)
         .await?;
     let runtime_registry = store_administration.registered_runtime_registry().await?;
     match crate::tracedecay::TraceDecay::open_with_registered_configuration(

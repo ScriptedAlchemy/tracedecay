@@ -471,16 +471,25 @@ impl StoreAdministration {
 
     pub(super) async fn registered_project_session_database(
         &self,
-        project_id: &str,
-        enrollment_roots: impl IntoIterator<Item = PathBuf>,
+        project_root: &Path,
+        store_layout: &crate::storage::StoreLayout,
     ) -> Result<Arc<crate::global_db::RegisteredGlobalDb>> {
-        let project_id =
-            tracedecay_store::ProjectId::new(project_id.to_owned()).map_err(|error| {
-                TraceDecayError::Config {
-                    message: format!(
-                        "invalid authoritative project identity for session runtime: {error}"
-                    ),
-                }
+        let project_id = store_layout
+            .identity
+            .project_id
+            .as_deref()
+            .ok_or_else(|| TraceDecayError::Config {
+                message: "project session runtime requires an authoritative project identity"
+                    .to_owned(),
+            })
+            .and_then(|project_id| {
+                tracedecay_store::ProjectId::new(project_id.to_owned()).map_err(|error| {
+                    TraceDecayError::Config {
+                        message: format!(
+                            "invalid authoritative project identity for session runtime: {error}"
+                        ),
+                    }
+                })
             })?;
         let registry = self.session_runtime_registry().await?;
         // A mounted shard already carries the exact typed enrollment authority
@@ -489,6 +498,14 @@ impl StoreAdministration {
         if let Some(database) = registry.mounted_project_sessions(&project_id).await {
             return Ok(database);
         }
+        let profile_database = self.registered_profile_database().await?;
+        let enrollment_roots = crate::tracedecay::TraceDecay::registered_enrollment_roots(
+            project_root,
+            store_layout,
+            &project_id,
+            profile_database.as_ref(),
+        )
+        .await?;
         registry
             .project_sessions(project_id, enrollment_roots)
             .await
@@ -896,7 +913,7 @@ impl StoreAdministration {
             message: "branch administration requires an enrolled project session authority"
                 .to_owned(),
         })?;
-        let Some(project_id) = layout.identity.project_id.as_deref() else {
+        let Some(_) = layout.identity.project_id.as_deref() else {
             return Err(TraceDecayError::Config {
                 message:
                     "branch administration requires an authoritative registered project identity"
@@ -904,10 +921,7 @@ impl StoreAdministration {
             });
         };
         let configuration_database = self
-            .registered_project_session_database(
-                project_id,
-                [project_root.to_path_buf(), layout.project_root.clone()],
-            )
+            .registered_project_session_database(project_root, &layout)
             .await?;
         // Branch administration runs inside the daemon, which owns the durable
         // configuration store. Resolve the pinned snapshot on demand when this
