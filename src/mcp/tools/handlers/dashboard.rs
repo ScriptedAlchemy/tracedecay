@@ -65,6 +65,9 @@ pub(super) async fn handle_dashboard(
     code_diagnostics_broker: Option<
         Arc<tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>>,
     >,
+    application_invocation_executor: Option<
+        Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
+    >,
 ) -> Result<ToolResult> {
     let action = args
         .get("action")
@@ -136,6 +139,7 @@ pub(super) async fn handle_dashboard(
                 code_index_freshness_reader,
                 feedback_status_reader,
                 code_diagnostics_broker,
+                application_invocation_executor,
             )
             .await?;
 
