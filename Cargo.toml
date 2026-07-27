@@ -57,6 +57,7 @@ include = [
     "/rust-toolchain.toml",
     "/.cargo/config.toml",
     "/build.rs",
+    "/build-support/dashboard_cache.rs",
     "/src/**",
     "/benches/**",
     "/examples/**",

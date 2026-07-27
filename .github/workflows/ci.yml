@@ -26,7 +26,7 @@ jobs:
   dashboard-assets:
     name: Build dashboard artifact
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v7
 
@@ -58,6 +58,25 @@ jobs:
           if-no-files-found: error
           include-hidden-files: true
           retention-days: 7
+
+      # WCAG 2.2 AA is a plan 11 acceptance criterion, so the accessibility
+      # gates run in CI rather than only on a developer's machine. Both
+      # harnesses serve a bundle they build themselves and exit nonzero on an
+      # axe violation, an uncaught page error, or a failed state assertion —
+      # a clean scan of a falsified reading is not a pass. They run after the
+      # upload because each one rebuilds into `app-dist` and restores it, so
+      # the published artifact stays the bytes the guards above validated.
+      - name: Install Playwright Chromium
+        working-directory: dashboard
+        run: npx playwright install --with-deps chromium
+
+      - name: Accessibility gate (workspaces)
+        working-directory: dashboard
+        run: npm run axe:audit
+
+      - name: Accessibility gate (Explorer)
+        working-directory: dashboard
+        run: npm run axe:explorer
 
   commit-messages:
     name: Commit Messages
@@ -752,7 +771,26 @@ jobs:
       - name: Validate publishable package manifests
         # Package the workspace as one dependency-ordered batch because the V2
         # crates do not exist in the registry until release-plz publishes them.
-        run: cargo package --workspace --locked --allow-dirty --no-verify
+        run: |
+          set -euo pipefail
+          cargo package --workspace --locked --allow-dirty --no-verify
+
+          version="$(
+            cargo metadata --no-deps --locked --format-version 1 |
+              jq -r '.packages[] | select(.name == "tracedecay") | .version'
+          )"
+          root_archive="target/package/tracedecay-${version}.crate"
+          test -s "$root_archive"
+          tar tzf "$root_archive" > root-archive-contents.txt
+          grep -Fq "/build-support/dashboard_cache.rs" root-archive-contents.txt
+          grep -Fq "/dashboard/app-dist/" root-archive-contents.txt
+
+          package_root="${RUNNER_TEMP}/tracedecay-package"
+          rm -rf "$package_root"
+          mkdir -p "$package_root"
+          tar xzf "$root_archive" -C "$package_root"
+          python3 scripts/check-dashboard-bundle.py \
+            "$package_root/tracedecay-${version}/dashboard/app-dist"
 
       - name: Check root crate API compatibility
         uses: obi1kenobi/cargo-semver-checks-action@v2

@@ -96,6 +96,14 @@ jobs:
             ${{ runner.os }}-cargo-release-plz-release-
             ${{ runner.os }}-cargo-
 
+      - name: Validate root crate package inputs
+        run: |
+          set -euo pipefail
+          cargo package --package tracedecay --locked --allow-dirty --list \
+            > root-package-files.txt
+          grep -Fxq "build-support/dashboard_cache.rs" root-package-files.txt
+          grep -Eq "^dashboard/app-dist/.+" root-package-files.txt
+
       - name: Run release-plz release
         id: release
         uses: release-plz/action@v0.5
