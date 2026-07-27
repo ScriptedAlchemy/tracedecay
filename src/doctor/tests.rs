@@ -541,47 +541,22 @@ async fn current_project_store_resolves_profile_shard_via_registry_alias()
     let project_root = dir.path().join("repo");
     std::fs::create_dir_all(&project_root)?;
     let project_root = canonical_temp_path(&project_root);
-    let shard_root =
-        crate::storage::profile_sharded_data_root(&profile_root, "proj_doctor_current");
-    std::fs::create_dir_all(&shard_root)?;
-    std::fs::write(
-        shard_root.join(crate::config::db_filename(&shard_root)),
-        b"graph",
-    )?;
-
-    let runtime =
-        DoctorTestRuntime::open(&profile_root, "doctor current project resolution test").await;
-    let db = runtime.database();
-    let global_db_path = db.db_path().to_path_buf();
-    db.upsert_code_project(
-        "proj_doctor_current",
+    let project_id = tracedecay_store::ProjectId::new("proj_doctor_current")?;
+    let runtime = crate::application::host_admission::HostAdmissionTestRuntimeV1::project(
+        &profile_root,
         &project_root,
-        None,
-        None,
-        Some("main"),
+        project_id,
     )
-    .await
-    .ok_or_else(|| std::io::Error::other("could not upsert project"))?;
-    db.upsert_store_instance(StoreInstanceUpsert {
-        store_id: "store:proj_doctor_current:profile_sharded".to_string(),
-        project_id: "proj_doctor_current".to_string(),
-        store_kind: "code_project".to_string(),
-        storage_mode: "profile_sharded".to_string(),
-        store_relpath: Path::new("projects")
-            .join("proj_doctor_current")
-            .to_string_lossy()
-            .to_string(),
-        manifest_relpath: Some(crate::storage::STORE_MANIFEST_FILENAME.to_string()),
-        last_verified_at: Some(1_800_000_000),
-        last_write_at: Some(1_800_000_000),
-    })
-    .await
-    .ok_or_else(|| std::io::Error::other("could not upsert store"))?;
-
+    .await?;
     let open_options = TraceDecayOpenOptions {
         profile_root: Some(profile_root.clone()),
-        global_db_path: Some(global_db_path),
+        global_db_path: None,
     };
+    let graph = runtime
+        .initialize_project_graph_for_test(&project_root, open_options.clone())
+        .await?;
+    graph.index_all().await?;
+    let shard_root = graph.store_layout().data_root.clone();
 
     // No repo-local `.tracedecay/` index exists, yet the project must not
     // be reported as uninitialized: resolution finds the profile shard.
