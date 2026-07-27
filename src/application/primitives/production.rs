@@ -142,6 +142,20 @@ fn failed<T>(domain: EvidenceDomain, finished_at: UtcMicros) -> RetrievalPortOut
     })
 }
 
+/// Reports a test primitive read that could not be served.
+///
+/// A graph read that fails leaves the port with no measurement at all. The
+/// empty default would be returned as `Completed`, so a store failure would
+/// claim a tested function has no tests, which is worse than reporting
+/// nothing. Whole-read failures land here; per-symbol failures keep the
+/// symbols that were read and report `Partial`.
+fn test_primitive_failed<T>(context: TestPrimitivePortContext<'_>) -> TestPrimitivePortOutcome<T> {
+    TestPrimitivePortOutcome::Failed {
+        finished_at: context.observed_at,
+        budget: OperationBudgetUsage::default(),
+    }
+}
+
 fn diagnostics_unavailable(
     finished_at: UtcMicros,
     reason: OmissionReason,
@@ -457,16 +471,22 @@ impl LexicalGrepAuthorityV1 for TraceDecayLexicalGrepAuthorityV1 {
                 return PrimitiveOutcomeV1::Cancelled;
             }
             let mut matches = Vec::with_capacity(hits.len());
+            // A graph read that fails cannot distinguish "this line is in no
+            // symbol" from "the enclosing symbol could not be read", so the
+            // page reports itself incomplete rather than attributing the hit
+            // to nothing.
+            let mut unread_enclosing_symbols = false;
             for hit in hits {
                 if context.request.cancellation().is_cancelled() {
                     return PrimitiveOutcomeV1::Cancelled;
                 }
-                let enclosing = self
-                    .graph
-                    .node_at_location(&hit.file, hit.line)
-                    .await
-                    .ok()
-                    .flatten();
+                let enclosing = match self.graph.node_at_location(&hit.file, hit.line).await {
+                    Ok(enclosing) => enclosing,
+                    Err(_) => {
+                        unread_enclosing_symbols = true;
+                        None
+                    }
+                };
                 matches.push(GrepHitV1 {
                     file: hit.file,
                     line: hit.line,
@@ -479,17 +499,18 @@ impl LexicalGrepAuthorityV1 for TraceDecayLexicalGrepAuthorityV1 {
                 });
             }
             let returned = matches.len() as u64;
+            let incomplete = truncated || unread_enclosing_symbols;
             let page = PrimitivePageV1 {
                 payload: GrepResultV1 {
                     matches,
                     truncated,
                     files_scanned: files_scanned as u64,
                 },
-                coverage: coverage(files_scanned as u64, returned, truncated),
+                coverage: coverage(files_scanned as u64, returned, incomplete),
                 continuation: None,
                 finished_at: context.observed_at,
             };
-            if truncated {
+            if incomplete {
                 PrimitiveOutcomeV1::Partial(page)
             } else {
                 PrimitiveOutcomeV1::Completed(page)
@@ -584,39 +605,40 @@ impl TestPrimitivePort for TraceDecayTestPrimitivePortV1 {
     ) -> TestPrimitivePortFuture<'a, TestMapPrimitiveResultV1> {
         Box::pin(async move {
             let source_nodes = if let Some(file) = request.file.as_deref() {
-                self.graph.get_nodes_by_file(file).await.unwrap_or_default()
-            } else if let Some(node_id) = request.node_id.as_deref() {
-                self.graph
-                    .get_node(node_id)
-                    .await
-                    .ok()
-                    .flatten()
-                    .into_iter()
-                    .collect::<Vec<_>>()
-            } else {
-                return TestPrimitivePortOutcome::Failed {
-                    finished_at: context.observed_at,
-                    budget: OperationBudgetUsage::default(),
+                let Ok(nodes) = self.graph.get_nodes_by_file(file).await else {
+                    return test_primitive_failed(context);
                 };
+                nodes
+            } else if let Some(node_id) = request.node_id.as_deref() {
+                let Ok(node) = self.graph.get_node(node_id).await else {
+                    return test_primitive_failed(context);
+                };
+                node.into_iter().collect::<Vec<_>>()
+            } else {
+                return test_primitive_failed(context);
             };
             let mut coverage_map = Vec::new();
             let mut uncovered = Vec::new();
             let mut test_files = std::collections::BTreeSet::new();
+            let mut unread_symbols = false;
             for node in source_nodes {
                 if !node.kind.is_callable_kind() {
                     continue;
                 }
-                let callers = self
-                    .graph
-                    .get_callers(&node.id, 3)
-                    .await
-                    .unwrap_or_default();
+                // A caller or annotation read that fails leaves this symbol
+                // unmeasured. Listing it as uncovered would report a tested
+                // function as untested, so it is omitted and the page reports
+                // itself partial.
+                let Ok(callers) = self.graph.get_callers(&node.id, 3).await else {
+                    unread_symbols = true;
+                    continue;
+                };
                 let caller_ids: Vec<String> = callers.iter().map(|(n, _)| n.id.clone()).collect();
-                let test_annotated = self
-                    .graph
-                    .get_test_annotated_node_ids(&caller_ids)
-                    .await
-                    .unwrap_or_default();
+                let Ok(test_annotated) = self.graph.get_test_annotated_node_ids(&caller_ids).await
+                else {
+                    unread_symbols = true;
+                    continue;
+                };
                 let tests: Vec<TestReferenceV1> = callers
                     .into_iter()
                     .filter(|(n, _)| {
@@ -651,18 +673,29 @@ impl TestPrimitivePort for TraceDecayTestPrimitivePortV1 {
             }
             let covered_symbols = coverage_map.len();
             let uncovered_symbols = uncovered.len();
-            TestPrimitivePortOutcome::Completed {
-                result: TestMapPrimitiveResultV1 {
-                    covered_symbols,
-                    uncovered_symbols,
-                    test_files: test_files.into_iter().collect(),
-                    coverage: coverage_map,
-                    uncovered,
-                    total: Some((covered_symbols + uncovered_symbols) as u64),
-                    next_cursor: None,
-                },
-                finished_at: context.observed_at,
-                budget: OperationBudgetUsage::default(),
+            let result = TestMapPrimitiveResultV1 {
+                covered_symbols,
+                uncovered_symbols,
+                test_files: test_files.into_iter().collect(),
+                coverage: coverage_map,
+                uncovered,
+                total: Some((covered_symbols + uncovered_symbols) as u64),
+                next_cursor: None,
+            };
+            let finished_at = context.observed_at;
+            let budget = OperationBudgetUsage::default();
+            if unread_symbols {
+                TestPrimitivePortOutcome::Partial {
+                    result,
+                    finished_at,
+                    budget,
+                }
+            } else {
+                TestPrimitivePortOutcome::Completed {
+                    result,
+                    finished_at,
+                    budget,
+                }
             }
         })
     }
@@ -677,11 +710,10 @@ impl TestPrimitivePort for TraceDecayTestPrimitivePortV1 {
                 .filter
                 .as_deref()
                 .and_then(|pattern| glob::Pattern::new(pattern).ok());
-            let files_with_inline_tests = self
-                .graph
-                .get_files_with_test_annotations()
-                .await
-                .unwrap_or_default();
+            let Ok(files_with_inline_tests) = self.graph.get_files_with_test_annotations().await
+            else {
+                return test_primitive_failed(context);
+            };
             let Ok(traversal) = collect_affected_test_files(
                 self.graph.as_ref(),
                 &request.files,
@@ -691,10 +723,7 @@ impl TestPrimitivePort for TraceDecayTestPrimitivePortV1 {
             )
             .await
             else {
-                return TestPrimitivePortOutcome::Failed {
-                    finished_at: context.observed_at,
-                    budget: OperationBudgetUsage::default(),
-                };
+                return test_primitive_failed(context);
             };
             let mut affected_tests = traversal.test_distances.keys().cloned().collect::<Vec<_>>();
             affected_tests.sort();
@@ -1095,11 +1124,13 @@ impl Pr12ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
         request: &'a QualifiedNamePrimitiveRequest,
     ) -> Pr12ExtendedPrimitiveFuture<'a, QualifiedNamePrimitiveResult> {
         Box::pin(async move {
-            let nodes = self
+            let Ok(nodes) = self
                 .graph
                 .get_nodes_by_qualified_name(&request.qualified_name)
                 .await
-                .unwrap_or_default();
+            else {
+                return failed(EvidenceDomain::Symbol, now_observed());
+            };
             let symbols: Vec<_> = nodes
                 .into_iter()
                 .map(|node| symbol_record(node, None))
@@ -1123,7 +1154,7 @@ impl Pr12ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
         request: &'a CallChainPrimitiveRequest,
     ) -> Pr12ExtendedPrimitiveFuture<'a, CallChainPrimitiveResult> {
         Box::pin(async move {
-            let path = self
+            let Ok(path) = self
                 .graph
                 .get_call_chain(
                     &request.from_node_id,
@@ -1131,9 +1162,12 @@ impl Pr12ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                     request.maximum_depth as usize,
                 )
                 .await
-                .ok()
-                .flatten()
-                .unwrap_or_default();
+            else {
+                return failed(EvidenceDomain::Graph, now_observed());
+            };
+            // A traversal that completes without finding a route is an
+            // authoritative empty chain; only the failed read is withheld.
+            let path = path.unwrap_or_default();
             let mut node_ids = Vec::new();
             let mut edge_kinds = Vec::new();
             for (node, edge) in path {
@@ -1159,11 +1193,9 @@ impl Pr12ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
         request: &'a FileDependentsPrimitiveRequest,
     ) -> Pr12ExtendedPrimitiveFuture<'a, FileDependentsPrimitiveResult> {
         Box::pin(async move {
-            let dependent_files = self
-                .graph
-                .get_file_dependents(&request.file)
-                .await
-                .unwrap_or_default();
+            let Ok(dependent_files) = self.graph.get_file_dependents(&request.file).await else {
+                return failed(EvidenceDomain::Graph, now_observed());
+            };
             completed(
                 FileDependentsPrimitiveResult {
                     file: request.file.clone(),
@@ -1216,11 +1248,9 @@ impl Pr12ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
         request: &'a SourceOutlinePrimitiveRequest,
     ) -> Pr12ExtendedPrimitiveFuture<'a, SourceOutlinePrimitiveResult> {
         Box::pin(async move {
-            let nodes = self
-                .graph
-                .get_nodes_by_file(&request.file)
-                .await
-                .unwrap_or_default();
+            let Ok(nodes) = self.graph.get_nodes_by_file(&request.file).await else {
+                return failed(EvidenceDomain::Source, now_observed());
+            };
             completed(
                 SourceOutlinePrimitiveResult {
                     file: request.file.clone(),
@@ -1241,7 +1271,9 @@ impl Pr12ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
         request: &'a ModuleApiPrimitiveRequest,
     ) -> Pr12ExtendedPrimitiveFuture<'a, ModuleApiPrimitiveResult> {
         Box::pin(async move {
-            let nodes = self.graph.get_all_nodes().await.unwrap_or_default();
+            let Ok(nodes) = self.graph.get_all_nodes().await else {
+                return failed(EvidenceDomain::Symbol, now_observed());
+            };
             completed(
                 ModuleApiPrimitiveResult {
                     path: request.path.clone(),
@@ -2118,10 +2150,17 @@ pub(crate) async fn open_pr12_production_primitive_runtime(
                 field: "PR12 primitive session cursor authenticator",
             })?,
     );
+    // The watermark is part of every symbol-graph cursor's snapshot identity.
+    // Substituting a plausible count for a failed read would make two
+    // different graph states share one identity, so an unreadable store
+    // refuses to open the runtime rather than mint ambiguous cursors.
     let watermark = graph
         .get_stats()
         .await
-        .map_or(1, |stats| stats.node_count)
+        .map_err(|_| ApplicationContractError::Inconsistent {
+            field: "PR12 primitive symbol-graph cursor watermark",
+        })?
+        .node_count
         .max(1);
     let snapshots = Arc::new(ProjectSymbolGraphCursorSnapshotAuthority {
         key: key.clone(),
