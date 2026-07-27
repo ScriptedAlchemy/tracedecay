@@ -1450,8 +1450,24 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
     // Stop automation before announcing shutdown or waiting for clients.
     // Scheduler tasks may be inside a synchronous auxiliary-agent call, so
     // shutdown also terminates their tracked process trees before joining.
-    engine.shutdown_automation_schedulers().await;
-    engine.shutdown_memory_repair_schedulers().await;
+    let (automation_stopped, memory_repair_stopped) = tokio::join!(
+        timeout(
+            DAEMON_TASK_ABORT_DEADLINE,
+            engine.shutdown_automation_schedulers(),
+        ),
+        timeout(
+            DAEMON_TASK_ABORT_DEADLINE,
+            engine.shutdown_memory_repair_schedulers(),
+        )
+    );
+    let automation_stopped = automation_stopped.is_ok();
+    let memory_repair_stopped = memory_repair_stopped.is_ok();
+    if !automation_stopped || !memory_repair_stopped {
+        log_daemon_event(
+            "daemon_shutdown",
+            &[("outcome", "scheduler_lock_timeout".to_string())],
+        );
+    }
     log_daemon_event(
         "daemon_shutdown",
         &[("socket", socket_path.display().to_string())],
@@ -1470,7 +1486,12 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
     let clients_drained = drain_client_tasks(&mut client_tasks, DAEMON_TASK_ABORT_DEADLINE).await;
     // Client setup and in-flight requests may create schedulers or project
     // servers. Sweep owned background tasks only after all client work drains.
-    engine.shutdown_background_tasks().await;
+    let background_drained = timeout(
+        DAEMON_TASK_ABORT_DEADLINE,
+        engine.shutdown_background_tasks(),
+    )
+    .await
+    .is_ok();
     if !in_flight_drained || !clients_drained {
         log_daemon_event(
             "daemon_shutdown",
@@ -1486,7 +1507,12 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
                 ),
             ],
         );
-        return endpoint_cleanup;
+    }
+    if !background_drained {
+        log_daemon_event(
+            "daemon_shutdown",
+            &[("outcome", "background_task_timeout".to_string())],
+        );
     }
     // Graceful shutdown persists tokens-saved counters and checkpoints WALs
     // for every live project server sequentially; with many servers or large
@@ -1494,7 +1520,7 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
     // to the daemon. On timeout the shutdown future is dropped and we proceed
     // to exit: the remaining persistence is best-effort and the database WAL
     // keeps state crash-safe.
-    let completed = timeout(DAEMON_SHUTDOWN_DEADLINE, engine.shutdown_servers())
+    let completed = timeout(DAEMON_SERVER_SHUTDOWN_DEADLINE, engine.shutdown_servers())
         .await
         .is_ok();
     if !completed {
@@ -1504,7 +1530,7 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
                 ("outcome", "timeout".to_string()),
                 (
                     "deadline_secs",
-                    DAEMON_SHUTDOWN_DEADLINE.as_secs().to_string(),
+                    DAEMON_SERVER_SHUTDOWN_DEADLINE.as_secs().to_string(),
                 ),
             ],
         );
@@ -2323,27 +2349,11 @@ impl ProjectOpenTasks {
             let mut registry = self.registry.lock().await;
             std::mem::take(&mut registry.routes)
         };
-        // Let in-flight warm-ups settle before aborting. Each warm-up task drives
-        // a daemon-owned schema migration inside a detached build; aborting the
-        // task drops only its tracking future, so closing the runtime while the
-        // migration still runs would `sqlite3_interrupt` it mid-statement. The
-        // migration is transactional (an interrupt rolls it back, never corrupts),
-        // but warm-up then fails and the daemon never settles under load. Waiting
-        // for a terminal outcome first means the migration has committed or rolled
-        // back before the runtime closes. Operator drain still wins: the bounded
-        // deadline aborts stragglers below.
-        let settled = timeout(DAEMON_CLIENT_DRAIN_DEADLINE, async {
-            for entry in entries.values() {
-                let mut state = entry.state.clone();
-                while matches!(&*state.borrow_and_update(), ProjectOpenTaskState::Opening) {
-                    if state.changed().await.is_err() {
-                        break;
-                    }
-                }
-            }
-        })
-        .await
-        .is_ok();
+        // Warm-up can own detached blocking work that cannot make its watch
+        // state terminal after the tracking future is cancelled. Waiting here
+        // adds a full drain deadline but does not cancel that work. Abort the
+        // tracked futures now; server/runtime shutdown below closes the owned
+        // database actors, and SQLite rolls active transactions back.
         for entry in entries.values() {
             entry.task.abort();
         }
@@ -2354,12 +2364,6 @@ impl ProjectOpenTasks {
         })
         .await
         .is_ok();
-        if !settled {
-            log_daemon_event(
-                "project_server_warmup",
-                &[("outcome", "shutdown_settle_timeout".to_string())],
-            );
-        }
         if !drained {
             log_daemon_event(
                 "project_server_warmup",
@@ -4653,6 +4657,54 @@ impl ProductionProjectCompositionHarnessV1 {
                     canonical_project_path.display()
                 ),
             })
+    }
+
+    pub async fn project_data_root(&self, project_root: impl AsRef<Path>) -> Result<PathBuf> {
+        Ok(self
+            .server(project_root)?
+            .cg()
+            .await
+            .store_layout()
+            .data_root
+            .clone())
+    }
+
+    pub async fn track_worktree_branch(
+        &self,
+        project_root: impl AsRef<Path>,
+        worktree_root: impl AsRef<Path>,
+        branch: &str,
+    ) -> Result<crate::branch::BranchAddOutcome> {
+        self.server(project_root)?
+            .cg()
+            .await
+            .track_worktree_branch(worktree_root.as_ref(), branch)
+            .await
+    }
+
+    pub async fn sync_tracked_worktree_branch(
+        &self,
+        project_root: impl AsRef<Path>,
+        worktree_root: impl AsRef<Path>,
+        branch: &str,
+        query: &str,
+    ) -> Result<(Option<String>, Option<String>, bool, bool)> {
+        let graph = self.server(project_root)?.cg().await;
+        let (database_path, _, _) = crate::tracedecay::TraceDecay::resolve_db_for_branch(
+            graph.project_root(),
+            &graph.store_layout().data_root,
+            Some(branch),
+        );
+        let branch_graph = graph
+            .sync_retained_worktree_branch(worktree_root.as_ref(), branch, &database_path)
+            .await?;
+        let contains_query = !branch_graph.search(query, 10).await?.is_empty();
+        Ok((
+            branch_graph.active_branch().map(str::to_owned),
+            branch_graph.serving_branch().map(str::to_owned),
+            branch_graph.is_fallback(),
+            contains_query,
+        ))
     }
 
     pub async fn call_tool(

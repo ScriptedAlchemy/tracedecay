@@ -17,7 +17,12 @@ const AUDIT_NAME: &str = "observation-authority";
 const AUDIT_VERSION: i64 = 2;
 pub(super) const MAX_BOUNDED_AUDIT_PASSES: i64 = 64;
 const DETAILED_AUDIT_CONCURRENCY: usize = 32;
-const MAX_DETAILED_OBSERVATIONS_PER_PAGE: usize = 1;
+const DETAILED_TAIL_CONCURRENCY: usize = 1;
+// Amortize the page query across several bounded validation chunks while
+// checkpointing often enough to stay below one ordinary statement deadline.
+const DETAILED_AUDIT_CHUNKS_PER_PAGE: usize = 3;
+const MAX_DETAILED_OBSERVATIONS_PER_PAGE: usize =
+    DETAILED_AUDIT_CONCURRENCY * DETAILED_AUDIT_CHUNKS_PER_PAGE;
 const PROJECTION_PROGRESS_PAGE_INTERVAL: i64 = 1;
 
 #[derive(Clone, Copy, Default)]
@@ -63,6 +68,10 @@ pub(super) async fn ensure_audit_checkpoint_schema(
             last_dispositions_audited INTEGER NOT NULL,
             last_aliases_audited INTEGER NOT NULL,
             bounded_passes_since_exhaustive INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS authority_foreign_key_audit_progress (
+            audit_name TEXT PRIMARY KEY,
+            last_table TEXT NOT NULL
         );",
     )
     .await
@@ -1013,6 +1022,7 @@ async fn validate_projection_authority_suffix_pages(
         let mut rows = conn
             .query(
                 "SELECT observation.sequence, observation.observation_json,
+                        observation.receipt_id,
                         (SELECT COUNT(*) FROM observation_projection_provenance
                          WHERE projector_version = ?1
                            AND observation_id = observation.observation_id),
@@ -1046,7 +1056,7 @@ async fn validate_projection_authority_suffix_pages(
             .await
             .map_err(|error| global_db_operation_error(OPERATION, error))?;
         let mut page_rows = 0_i64;
-        let mut detailed_observations = Vec::<DurableObservationV1>::new();
+        let mut detailed_observations = Vec::<(i64, DurableObservationV1)>::new();
         let mut detailed_limit_reached = false;
         while let Some(row) = rows
             .next()
@@ -1057,33 +1067,31 @@ async fn validate_projection_authority_suffix_pages(
             scan_cursor = row
                 .get::<i64>(0)
                 .map_err(|error| global_db_operation_error(OPERATION, error))?;
-            let observation = decode_authority_json::<DurableObservationV1>(
-                &row.get::<String>(1)
-                    .map_err(|error| global_db_operation_error(OPERATION, error))?,
-                "projected observation authority JSON",
-            )?;
+            let observation_receipt_id = row
+                .get::<String>(2)
+                .map_err(|error| global_db_operation_error(OPERATION, error))?;
             let state = ProjectionAuthorityState {
                 provenance_rows: row
-                    .get(2)
-                    .map_err(|error| global_db_operation_error(OPERATION, error))?,
-                disposition_rows: row
                     .get(3)
                     .map_err(|error| global_db_operation_error(OPERATION, error))?,
-                alias_rows: row
+                disposition_rows: row
                     .get(4)
                     .map_err(|error| global_db_operation_error(OPERATION, error))?,
-                workflow_rows: row
+                alias_rows: row
                     .get(5)
                     .map_err(|error| global_db_operation_error(OPERATION, error))?,
+                workflow_rows: row
+                    .get(6)
+                    .map_err(|error| global_db_operation_error(OPERATION, error))?,
                 queued: row
-                    .get::<i64>(6)
+                    .get::<i64>(7)
                     .map_err(|error| global_db_operation_error(OPERATION, error))?
                     != 0,
             };
             let disposition = match (
-                row.get::<Option<String>>(7)
-                    .map_err(|error| global_db_operation_error(OPERATION, error))?,
                 row.get::<Option<String>>(8)
+                    .map_err(|error| global_db_operation_error(OPERATION, error))?,
+                row.get::<Option<String>>(9)
                     .map_err(|error| global_db_operation_error(OPERATION, error))?,
             ) {
                 (Some(receipt_id), Some(reason)) => {
@@ -1099,9 +1107,28 @@ async fn validate_projection_authority_suffix_pages(
             let stored_collision = disposition.as_ref().is_some_and(|disposition| {
                 disposition.reason == ProjectionSkipReason::OutputCollision.as_str()
             });
-            let skip_reason = if stored_collision {
-                Some(ProjectionSkipReason::OutputCollision)
-            } else {
+            if stored_collision {
+                if !state.is_skip() {
+                    return Err(authority_violation(
+                        "projection authority must contain exactly one collision skip outcome",
+                    ));
+                }
+                let disposition = disposition
+                    .as_ref()
+                    .ok_or_else(|| authority_violation("projection disposition disappeared"))?;
+                if disposition.receipt_id != observation_receipt_id {
+                    return Err(authority_violation(
+                        "projection collision disposition disagrees with observation receipt",
+                    ));
+                }
+                continue;
+            }
+            let observation = decode_authority_json::<DurableObservationV1>(
+                &row.get::<String>(1)
+                    .map_err(|error| global_db_operation_error(OPERATION, error))?,
+                "projected observation authority JSON",
+            )?;
+            let skip_reason =
                 match crate::global_db::observation_projection::derive_projection(&observation)
                     .map_err(|error| {
                         authority_violation(format!("invalid projection authority: {error}"))
@@ -1110,8 +1137,7 @@ async fn validate_projection_authority_suffix_pages(
                     ObservationProjection::Message(_) | ObservationProjection::Composite { .. } => {
                         None
                     }
-                }
-            };
+                };
             if let Some(reason) = skip_reason {
                 if !state.is_skip() {
                     return Err(authority_violation(
@@ -1123,7 +1149,7 @@ async fn validate_projection_authority_suffix_pages(
                     .ok_or_else(|| authority_violation("projection disposition disappeared"))?;
                 validate_skipped_projection_row(&observation, disposition, reason)?;
             } else {
-                detailed_observations.push(observation);
+                detailed_observations.push((scan_cursor, observation));
                 if detailed_observations.len() >= MAX_DETAILED_OBSERVATIONS_PER_PAGE {
                     detailed_limit_reached = true;
                     break;
@@ -1131,13 +1157,28 @@ async fn validate_projection_authority_suffix_pages(
             }
         }
         drop(rows);
-        for chunk in detailed_observations.chunks(DETAILED_AUDIT_CONCURRENCY) {
+        let validation_concurrency = if detailed_limit_reached {
+            DETAILED_AUDIT_CONCURRENCY
+        } else {
+            // The final partial page can contain unusually expensive composite
+            // outputs. Checkpoint smaller chunks so interruption never restarts
+            // the whole tail.
+            DETAILED_TAIL_CONCURRENCY
+        };
+        for chunk in detailed_observations.chunks(validation_concurrency) {
             try_join_all(
                 chunk
                     .iter()
-                    .map(|observation| validate_projection_effect(conn, observation)),
+                    .map(|(_, observation)| validate_projection_effect(conn, observation)),
             )
             .await?;
+            let validated_through = chunk
+                .last()
+                .map(|(sequence, _)| *sequence)
+                .unwrap_or(scan_cursor);
+            checkpoint =
+                projection_audit_checkpoint_through_sequence(conn, checkpoint, validated_through)
+                    .await?;
         }
         pages_audited += 1;
         if page_rows < AUDIT_PAGE_ROWS && !detailed_limit_reached {
@@ -1308,9 +1349,11 @@ mod tests {
     use tracedecay_store::{ObservationProjection, SESSION_MESSAGE_PROJECTOR_VERSION};
 
     use super::{
-        AuditCheckpoint, MAX_DETAILED_OBSERVATIONS_PER_PAGE, PROJECTION_PROGRESS_PAGE_INTERVAL,
-        ensure_audit_checkpoint_schema, historical_projection_delta_required,
-        projection_audit_checkpoint_through_sequence, validate_projection_authority_suffix,
+        AuditCheckpoint, DETAILED_AUDIT_CHUNKS_PER_PAGE, DETAILED_AUDIT_CONCURRENCY,
+        DETAILED_TAIL_CONCURRENCY, MAX_DETAILED_OBSERVATIONS_PER_PAGE,
+        PROJECTION_PROGRESS_PAGE_INTERVAL, ensure_audit_checkpoint_schema,
+        historical_projection_delta_required, projection_audit_checkpoint_through_sequence,
+        validate_projection_authority_suffix,
     };
     use crate::db::engine::{
         Executor, IntoParams, QueryExecutor, Result as EngineResult, Rows, TestConnection, params,
@@ -1347,7 +1390,11 @@ mod tests {
 
     #[test]
     fn exhaustive_projection_audit_bounds_detailed_work() {
-        assert_eq!(MAX_DETAILED_OBSERVATIONS_PER_PAGE, 1);
+        assert_eq!(
+            MAX_DETAILED_OBSERVATIONS_PER_PAGE,
+            DETAILED_AUDIT_CONCURRENCY * DETAILED_AUDIT_CHUNKS_PER_PAGE
+        );
+        assert!(DETAILED_TAIL_CONCURRENCY < DETAILED_AUDIT_CONCURRENCY);
         assert_eq!(PROJECTION_PROGRESS_PAGE_INTERVAL, 1);
     }
 

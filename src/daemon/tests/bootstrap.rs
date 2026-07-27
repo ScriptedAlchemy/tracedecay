@@ -2,6 +2,8 @@ use super::*;
 use crate::daemon::ProductionProjectCompositionHarnessV1;
 use crate::mcp::JsonRpcResponse;
 
+static PRODUCTION_DASHBOARD_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[test]
 fn bootstrap_tool_catalog_uses_project_node_count() {
     let request: super::super::JsonRpcRequest = serde_json::from_value(serde_json::json!({
@@ -1195,6 +1197,176 @@ async fn production_composition_harness_dispatches_application_invocations_in_pr
         payload["problem"].is_null() && !payload["outcome"].is_null(),
         "production composition must dispatch through retained daemon state: {payload}"
     );
+    harness.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn production_composition_dashboard_persists_project_settings_over_http() {
+    let _dashboard_guard = PRODUCTION_DASHBOARD_TEST_LOCK.lock().await;
+    let temp = TempDir::new().expect("temp dir");
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(project.join("src")).expect("source dir");
+    std::fs::write(
+        project.join("src/lib.rs"),
+        "pub fn dashboard_settings_probe() {}\n",
+    )
+    .expect("source file");
+    commit_production_composition_project(&project);
+
+    let harness = ProductionProjectCompositionHarnessV1::open(temp.path(), vec![project.clone()])
+        .await
+        .expect("production composition");
+    let dashboard = harness
+        .call_tool(
+            &project,
+            "tracedecay_dashboard",
+            json!({
+                "action": "start",
+                "host": "127.0.0.1",
+                "port": 0,
+                "format": "json"
+            }),
+        )
+        .await
+        .expect("start production dashboard");
+    let dashboard_payload: serde_json::Value =
+        serde_json::from_str(production_composition_tool_text(&dashboard))
+            .expect("dashboard start payload");
+    let base_url = dashboard_payload["url"]
+        .as_str()
+        .expect("dashboard URL")
+        .trim_end_matches('/')
+        .to_owned();
+
+    tokio::task::spawn_blocking(move || {
+        fn response_json(
+            mut response: ureq::http::Response<ureq::Body>,
+        ) -> (u16, serde_json::Value) {
+            let status = response.status().as_u16();
+            let body = response
+                .body_mut()
+                .read_to_string()
+                .expect("read dashboard response");
+            let payload = serde_json::from_str(&body)
+                .unwrap_or_else(|error| panic!("decode dashboard response `{body}`: {error}"));
+            (status, payload)
+        }
+
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .timeout_global(Some(std::time::Duration::from_secs(4)))
+            .build()
+            .into();
+        let settings_url = format!("{base_url}/api/settings");
+        let project_settings_url = format!("{settings_url}/project");
+
+        let (status, initial_envelope) = response_json(
+            agent
+                .get(&settings_url)
+                .call()
+                .expect("GET project settings"),
+        );
+        assert_eq!(status, 200, "GET settings failed: {initial_envelope}");
+        let initial = &initial_envelope["payload"];
+        let initial_revision = initial["project"]["configuration_revision_id"]
+            .as_str()
+            .expect("initial configuration revision")
+            .to_owned();
+        let initial_snapshot = initial["project"]["configuration_snapshot_id"]
+            .as_str()
+            .expect("initial configuration snapshot")
+            .to_owned();
+
+        let (status, patched_envelope) = response_json(
+            agent
+                .patch(&project_settings_url)
+                .send_json(json!({
+                    "expected_revision_id": initial_revision,
+                    "max_file_size": 2048
+                }))
+                .expect("PATCH project settings"),
+        );
+        assert_eq!(
+            status, 200,
+            "production dashboard settings patch failed: {patched_envelope}"
+        );
+        let patched = &patched_envelope["payload"];
+        let patched_revision = patched["project"]["configuration_revision_id"]
+            .as_str()
+            .expect("patched configuration revision")
+            .to_owned();
+        assert_ne!(
+            patched_revision, initial_revision,
+            "configuration mutation must advance its content-addressed revision"
+        );
+        assert_ne!(
+            patched["project"]["configuration_snapshot_id"], initial_snapshot,
+            "response must carry the daemon's updated configuration snapshot"
+        );
+        assert_eq!(patched["project"]["config"]["max_file_size"], 2048);
+        assert_eq!(
+            patched["resync_recommended"], true,
+            "index-affecting settings must truthfully recommend resync"
+        );
+
+        let (status, persisted_envelope) = response_json(
+            agent
+                .get(&settings_url)
+                .call()
+                .expect("GET persisted settings"),
+        );
+        assert_eq!(
+            status, 200,
+            "persisted settings GET failed: {persisted_envelope}"
+        );
+        let persisted = &persisted_envelope["payload"];
+        assert_eq!(
+            persisted["project"]["configuration_revision_id"],
+            patched_revision
+        );
+        assert_eq!(persisted["project"]["config"]["max_file_size"], 2048);
+        assert_eq!(persisted["project"]["config"]["track_call_sites"], true);
+
+        let (status, stale) = response_json(
+            agent
+                .patch(&project_settings_url)
+                .send_json(json!({
+                    "expected_revision_id": initial_revision,
+                    "track_call_sites": false
+                }))
+                .expect("PATCH stale project settings"),
+        );
+        assert_eq!(status, 409, "stale project settings must conflict: {stale}");
+
+        let (status, unchanged_envelope) = response_json(
+            agent
+                .get(&settings_url)
+                .call()
+                .expect("GET unchanged settings"),
+        );
+        assert_eq!(
+            status, 200,
+            "unchanged settings GET failed: {unchanged_envelope}"
+        );
+        let unchanged = &unchanged_envelope["payload"];
+        assert_eq!(
+            unchanged["project"]["configuration_revision_id"],
+            patched_revision
+        );
+        assert_eq!(unchanged["project"]["config"]["max_file_size"], 2048);
+        assert_eq!(unchanged["project"]["config"]["track_call_sites"], true);
+    })
+    .await
+    .expect("dashboard HTTP assertions");
+
+    harness
+        .call_tool(
+            &project,
+            "tracedecay_dashboard",
+            json!({"action": "stop", "format": "json"}),
+        )
+        .await
+        .expect("stop production dashboard");
     harness.shutdown().await;
 }
 

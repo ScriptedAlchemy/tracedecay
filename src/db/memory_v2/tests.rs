@@ -340,7 +340,7 @@ async fn v23_rebuilds_v22_fact_relations_without_losing_rows() {
         optional_i64(&conn, "PRAGMA user_version", ())
             .await
             .unwrap(),
-        Some(24)
+        Some(i64::from(super::super::migrations::LATEST_VERSION))
     );
     assert!(
         table_exists(&conn, "memory_v2_compatibility_banks")

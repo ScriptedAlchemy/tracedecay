@@ -708,10 +708,13 @@ fn observatory_and_costs_http_dashboard_export_preserve_value_and_coverage() {
         );
         assert_eq!(status, 200);
         assert_eq!(
-            observatory_dashboard["payload"]["metrics"],
-            observatory_http["metrics"]
+            metric_parity_view(&observatory_dashboard["payload"]["metrics"]),
+            metric_parity_view(&observatory_http["metrics"])
         );
-        assert_eq!(observatory_http["metrics"], observatory_export["metrics"]);
+        assert_eq!(
+            metric_parity_view(&observatory_http["metrics"]),
+            metric_parity_view(&observatory_export["metrics"])
+        );
 
         let (status, costs_dashboard) =
             get_json(&agent, &format!("{}/api/costs", fixture.base_url));
@@ -727,14 +730,54 @@ fn observatory_and_costs_http_dashboard_export_preserve_value_and_coverage() {
             &format!("{}/api/plugins/savings/costs/export", fixture.base_url),
         );
         assert_eq!(status, 200);
-        assert_eq!(costs_dashboard["payload"]["usage"], costs_http["usage"]);
-        assert_eq!(
-            costs_dashboard["payload"]["estimated_cost"],
-            costs_http["estimated_cost"]
-        );
-        assert_eq!(costs_http["usage"], costs_export["usage"]);
-        assert_eq!(costs_http["estimated_cost"], costs_export["estimated_cost"]);
+        for series in ["usage", "estimated_cost"] {
+            assert_eq!(
+                metric_parity_view(&costs_dashboard["payload"][series]),
+                metric_parity_view(&costs_http[series]),
+                "costs {series} drifted between the dashboard and plugin reads"
+            );
+            assert_eq!(
+                metric_parity_view(&costs_http[series]),
+                metric_parity_view(&costs_export[series]),
+                "costs {series} drifted between the plugin read and its export"
+            );
+        }
     });
+}
+
+/// Metric content with each read's own observation horizon removed.
+///
+/// Every surface answers a separate request and stamps `temporal.horizon` with
+/// the window it actually observed, so two reads taken microseconds apart
+/// legitimately carry different `until_micros`. Parity is about value,
+/// coverage, provenance, and cohort agreeing across surfaces; the horizon is
+/// checked here for being a real observed window instead.
+fn metric_parity_view(metrics: &Value) -> Vec<Value> {
+    let rows = metrics
+        .as_array()
+        .unwrap_or_else(|| panic!("expected a metrics array: {metrics}"));
+    assert!(
+        !rows.is_empty(),
+        "metric parity needs at least one metric: {metrics}"
+    );
+    rows.iter()
+        .map(|metric| {
+            let horizon = &metric["temporal"]["horizon"];
+            let (Some(since), Some(until)) = (
+                horizon["since_micros"].as_i64(),
+                horizon["until_micros"].as_i64(),
+            ) else {
+                panic!("metric omitted its observation horizon: {metric}");
+            };
+            assert!(
+                since < until,
+                "each read must stamp a real observed window: {horizon}"
+            );
+            let mut compared = metric.clone();
+            compared["temporal"]["horizon"] = Value::Null;
+            compared
+        })
+        .collect()
 }
 
 #[test]
@@ -786,7 +829,7 @@ fn costs_read_model_is_mounted_on_the_active_dashboard() {
         let fixture = start_fixture(false).await;
         let (status, costs) = get_json(&http_agent(), &format!("{}/api/costs", fixture.base_url));
         assert_eq!(status, 200);
-        assert_eq!(costs["authorized_scope_ref"], "all");
+        assert_eq!(costs["payload"]["authorized_scope_ref"], "all");
         assert!(costs["payload"]["usage"].is_array());
         assert!(costs["payload"]["estimated_cost"].is_array());
     });

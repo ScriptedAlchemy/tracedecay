@@ -39,13 +39,12 @@ pub(super) async fn run_session_temporal_refresh_scheduler(
             state.mark_running();
             state.busy.store(true, Ordering::Release);
             state.pass_count.fetch_add(1, Ordering::AcqRel);
-            let migration = database.advance_projection_version_migration();
-            tokio::pin!(migration);
-            let migration_complete = tokio::select! {
-                biased;
-                () = state.wait_for_cancellation() => return,
-                outcome = &mut migration => outcome,
-            };
+            let migration_complete = database
+                .advance_projection_version_migration_until_cancelled(&state.cancelled)
+                .await;
+            if state.cancelled.load(Ordering::Acquire) {
+                return;
+            }
             match migration_complete {
                 Ok(true) => {}
                 Ok(false) => {

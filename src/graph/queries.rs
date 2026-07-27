@@ -137,6 +137,7 @@ impl<'a> GraphQueryManager<'a> {
         &self,
         kinds: &[NodeKind],
         include_public: bool,
+        limit: Option<usize>,
     ) -> Result<Vec<Node>> {
         let transaction = self.db.begin_write_transaction("find dead code").await?;
         let kind_filter = if kinds.is_empty() {
@@ -197,7 +198,7 @@ impl<'a> GraphQueryManager<'a> {
         //   probe is now against a ~15K-row indexed lookup table, not a
         //   correlated subquery the optimiser can re-shape.
         let result = self
-            .find_dead_code_inner(&transaction, visibility_filter, &kind_filter)
+            .find_dead_code_inner(&transaction, visibility_filter, &kind_filter, limit)
             .await;
 
         // Always drop both temp tables, even on the error path, so a
@@ -223,6 +224,7 @@ impl<'a> GraphQueryManager<'a> {
         connection: &DatabaseWriteTransaction<'_>,
         visibility_filter: &str,
         kind_filter: &str,
+        limit: Option<usize>,
     ) -> Result<Vec<Node>> {
         let marker_ids = self.db.collect_test_marker_ids_on(connection).await?;
         let test_annotated_targets_filter = if marker_ids.is_empty() {
@@ -237,6 +239,7 @@ impl<'a> GraphQueryManager<'a> {
             "AND id NOT IN (SELECT target FROM temp.test_annotated_targets)"
         };
 
+        let limit_clause = limit.map_or_else(String::new, |limit| format!("LIMIT {limit}"));
         let sql = format!(
             "SELECT id, kind, name, qualified_name, file_path, start_line, end_line,
                     start_column, end_column, docstring, signature, visibility,
@@ -252,7 +255,9 @@ impl<'a> GraphQueryManager<'a> {
                  WHERE target = nodes.id
                  AND kind IN ('calls', 'implements', 'extends', 'type_of', 'returns', 'receives', 'uses')
              )
-             {test_annotated_targets_filter}"
+             {test_annotated_targets_filter}
+             ORDER BY file_path ASC, start_line ASC, id ASC
+             {limit_clause}"
         );
 
         let mut rows =

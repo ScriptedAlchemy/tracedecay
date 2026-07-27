@@ -560,12 +560,7 @@ fn storage_fingerprint(harness: &RegisteredTemporalHarness) -> ([u8; 32], [u8; 3
         "{}-wal",
         database_path.file_name().unwrap().to_string_lossy()
     )));
-    let payload = file_fingerprint(
-        &database_path
-            .parent()
-            .unwrap()
-            .join("lcm-payloads/application-fixture.bin"),
-    );
+    let payload = file_fingerprint(&harness.application_external_payload_path());
     (database, wal, payload)
 }
 

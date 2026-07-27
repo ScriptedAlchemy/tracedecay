@@ -2,6 +2,7 @@ import type {
   DashboardDoctorRemediationDescriptorV1,
   DoctorEvidenceState,
   DoctorFindingFamily,
+  DoctorOwningSurface,
   DoctorRemediationOperation,
   DoctorReportEntry,
   WireScope,
@@ -93,10 +94,41 @@ export function remediationForEntry(
     : undefined;
 }
 
+const SURFACE_LABELS: Record<DoctorOwningSurface, string> = {
+  configuration_control_plane: 'the configuration control plane',
+  storage_runtime: 'the storage runtime',
+  daemon_runtime: 'the daemon runtime',
+  host_integration: 'the host integration installer',
+  semantic_index_runtime: 'the semantic index runtime',
+};
+
+export function doctorOwningSurfaceLabel(surface: DoctorOwningSurface): string {
+  return SURFACE_LABELS[surface];
+}
+
+/**
+ * What may be done about one finding, keeping two independent facts apart.
+ *
+ * `canPreview`/`canApply` are the owner's answer: the server consulted the
+ * owning operation and reported which actions it currently authorizes.
+ * `dispatchable` is this view's own limit: some operations need a target the
+ * finding does not determine — a protected configuration apply needs the
+ * concrete key, value, and base revision — and the findings route sends
+ * `target: null` rather than inventing one.
+ *
+ * Collapsing the two would make the card claim no action is authorized
+ * whenever it merely cannot address one from here.
+ */
+export interface RemediationActionAvailability {
+  readonly canPreview: boolean;
+  readonly canApply: boolean;
+  readonly dispatchable: boolean;
+}
+
 export function availableRemediationActions(
   descriptor: DashboardDoctorRemediationDescriptorV1,
   legalActions: WireLegalActionRef[],
-): { canPreview: boolean; canApply: boolean } {
+): RemediationActionAvailability {
   const exactKinds = new Set(
     legalActions
       .filter((action) => action.operation === descriptor.operation)
@@ -105,6 +137,7 @@ export function availableRemediationActions(
   return {
     canPreview: descriptor.preview_available && exactKinds.has('request_dry_run'),
     canApply: exactKinds.has('request_apply'),
+    dispatchable: descriptor.target != null,
   };
 }
 

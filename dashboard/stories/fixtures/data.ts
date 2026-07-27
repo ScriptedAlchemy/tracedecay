@@ -1992,10 +1992,13 @@ const storageFindings = envelope({
 
 /* ==========================================================================
  * /api/settings (settings_api.rs::get_settings) and /api/capabilities
- * (mod.rs::capabilities). Settings is consumed by SettingsPage (AnyObject).
+ * (mod.rs::capabilities). Settings answers a DashboardEnvelopeV1 whose
+ * payload is `SettingsPayloadV1`, and whose legal actions name the two write
+ * scopes separately: `configuration_batch` appears only when the daemon-owned
+ * configuration control plane is mounted, `user_settings_mutate` always.
  * ========================================================================== */
 
-const settings: Record<string, unknown> = {
+const settingsPayload: Record<string, unknown> = {
   project: {
     config_path: '/fast/projects/tracedecay/.tracedecay/config.toml',
     legacy_config_path: '/fast/projects/tracedecay/.tracedecay/config.toml',
@@ -2025,6 +2028,12 @@ const settings: Record<string, unknown> = {
   },
   automation: {
     config_endpoint: '/api/plugins/holographic/curation/config',
+    availability: { available: true, reason: null, required_authority: null },
+    source_coverage: {
+      global: 'available',
+      project: 'available',
+      effective: 'available',
+    },
     enabled: true,
     backend: 'codex_app_server',
     host_mode: 'standalone_backend',
@@ -2057,6 +2066,12 @@ const settings: Record<string, unknown> = {
   },
   version: { version: '2.0.0', channel: 'stable', cached_latest_version: null },
 };
+
+const settings: Record<string, unknown> = envelope(settingsPayload, 'ready', [
+  { kind: 'request_apply', operation: 'configuration_batch' },
+  { kind: 'request_apply', operation: 'user_settings_mutate' },
+  { kind: 'refresh', operation: 'configuration_list' },
+]);
 
 const capabilities: Record<string, unknown> = {
   name: 'tracedecay-dashboard',

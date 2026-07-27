@@ -37,6 +37,13 @@ type ApiResult = std::result::Result<Json<DashboardEnvelopeV1<SettingsPayloadV1>
 
 const AUTOMATION_CONFIG_ENDPOINT: &str = "/api/plugins/holographic/curation/config";
 
+/// Owning operations behind the two settings write scopes. They are advertised
+/// separately because their authorities differ: the project batch needs the
+/// daemon-owned configuration control plane, while user settings are written
+/// through the profile authority every dashboard state carries.
+const PROJECT_APPLY_OPERATION: &str = "configuration_batch";
+const USER_APPLY_OPERATION: &str = "user_settings_mutate";
+
 #[derive(Debug, Clone, Deserialize, JsonSchema, Default)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ProjectSettingsPatch {
@@ -286,9 +293,9 @@ pub(crate) async fn patch_project_settings(
     )
     .map_err(project_preview_error)?;
     if preview.changed {
-        let client = state
-            .application_client
-            .as_ref()
+        let executor = state
+            .application_invocation_executor
+            .as_deref()
             .ok_or_else(|| configuration_unavailable(&"application transport is unavailable"))?;
         let DirectConfigurationMutation::Batch { mutations } = preview.mutation else {
             return Err(configuration_unavailable(
@@ -311,7 +318,7 @@ pub(crate) async fn patch_project_settings(
                 },
             )),
             RequestedOutputFormat::Json,
-            Some(client),
+            Some(executor),
         )
         .await
         .map_err(|error| configuration_unavailable(&error))?;
@@ -439,18 +446,32 @@ async fn settings_envelope(
         resync_recommended,
         restart_recommended,
     };
+    // Project configuration writes are performed by the daemon-owned
+    // configuration control plane; user settings are written through the
+    // always-mounted profile authority. Advertising a project apply without
+    // that control plane would offer a control that can only fail.
+    let mut legal_actions = Vec::new();
+    if state.application_invocation_executor.is_some() {
+        legal_actions.push(DashboardLegalActionRefV1::new(
+            DashboardLegalActionKindV1::RequestApply,
+            PROJECT_APPLY_OPERATION,
+        ));
+    }
+    legal_actions.push(DashboardLegalActionRefV1::new(
+        DashboardLegalActionKindV1::RequestApply,
+        USER_APPLY_OPERATION,
+    ));
+    legal_actions.push(DashboardLegalActionRefV1::new(
+        DashboardLegalActionKindV1::Refresh,
+        "configuration_list",
+    ));
+
     Ok(DashboardEnvelopeV1::ready(
         scope_from_state(state),
         DashboardCoverageV1::complete(2, "configuration_authorities"),
         payload,
     )
-    .with_legal_actions(vec![
-        DashboardLegalActionRefV1::new(
-            DashboardLegalActionKindV1::RequestApply,
-            "configuration_batch",
-        ),
-        DashboardLegalActionRefV1::new(DashboardLegalActionKindV1::Refresh, "configuration_list"),
-    ]))
+    .with_legal_actions(legal_actions))
 }
 
 fn user_settings_payload(user: &UserSettingsSnapshotV1) -> UserSettingsPayloadV1 {

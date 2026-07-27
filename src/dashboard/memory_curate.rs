@@ -135,6 +135,7 @@ async fn cli_state(cg: &TraceDecay) -> Result<DashboardState> {
         memory_owner: super::project_memory_owner(cg)?,
         graph_conn: mem_db.engine_conn(),
         _database_guards: vec![mem_db.clone()],
+        graph_telemetry_handle: cg.storage_telemetry_handle().ok(),
         graph_db_path: cg.dashboard_db_path().display().to_string(),
         mem_db,
         mem_db_path,
@@ -159,7 +160,7 @@ async fn cli_state(cg: &TraceDecay) -> Result<DashboardState> {
         automation_writer: super::standalone_dashboard_automation_writer(),
         doctor_report_reader: None,
         doctor_remediation_dispatcher: None,
-        application_client: None,
+        application_invocation_executor: None,
     })
 }
 
@@ -177,6 +178,7 @@ fn user_state(
         memory_owner: tracedecay_domain::FactOwnerV1::Profile,
         graph_conn: memory_db.engine_conn(),
         _database_guards: vec![mem_db.clone()],
+        graph_telemetry_handle: memory_db.storage_telemetry_handle().ok(),
         graph_db_path: memory_db_path.display().to_string(),
         mem_db,
         mem_db_path: memory_db_path.display().to_string(),
@@ -201,7 +203,7 @@ fn user_state(
         automation_writer: super::standalone_dashboard_automation_writer(),
         doctor_report_reader: None,
         doctor_remediation_dispatcher: None,
-        application_client: None,
+        application_invocation_executor: None,
     }
 }
 

@@ -1,5 +1,6 @@
 import {
   buildSettingsEditor,
+  settingsPayload,
   settingsRevisionConflict,
   type ProjectSettingsChangeSet,
   type SettingsValidationError,
@@ -31,6 +32,12 @@ export type SettingsMutationResult =
       readonly outcome: 'offline' | 'error';
       readonly detail: string;
     }
+  /** The authority that performs this write is not currently mounted. Kept
+   * apart from `error`: nothing was attempted, and nothing changed. */
+  | {
+      readonly outcome: 'unavailable';
+      readonly detail: string;
+    }
   | {
       readonly outcome: 'protocol_error';
       readonly authority: string;
@@ -56,10 +63,11 @@ export async function applySettingsMutation(
       detail: `Unable to refresh settings before apply (HTTP ${current.response.status}).`,
     };
   }
-  if (!isRecord(current.body)) {
-    return protocolError(`GET ${request.readUrl}`, 'expected a JSON object.');
+  const currentPayload = settingsPayload(current.body);
+  if (!isRecord(currentPayload)) {
+    return protocolError(`GET ${request.readUrl}`, 'expected an envelope carrying a payload.');
   }
-  if (!buildSettingsEditor(current.body)) {
+  if (!buildSettingsEditor(currentPayload)) {
     return protocolError(
       `GET ${request.readUrl}`,
       'the response omitted editable values or revision identity.',
@@ -68,7 +76,7 @@ export async function applySettingsMutation(
   const conflict = settingsRevisionConflict(
     request.scope,
     request.expectedRevisionId,
-    current.body,
+    currentPayload,
   );
   if (conflict) return { outcome: 'conflict', ...conflict };
 
@@ -84,6 +92,9 @@ export async function applySettingsMutation(
   if (patched.response.status === 409) {
     return readConflict(patched.body, request.expectedRevisionId);
   }
+  if (patched.response.status === 503) {
+    return { outcome: 'unavailable', detail: unavailableDetail(patched.body) };
+  }
   if (!patched.response.ok) {
     const validation = readValidation(patched.body);
     return validation ?? {
@@ -91,10 +102,14 @@ export async function applySettingsMutation(
       detail: `Settings update failed (HTTP ${patched.response.status}).`,
     };
   }
-  if (!isRecord(patched.body)) {
-    return protocolError(`PATCH ${request.patchUrl}`, 'expected a JSON object.');
+  const patchedPayload = settingsPayload(patched.body);
+  if (!isRecord(patchedPayload)) {
+    return protocolError(
+      `PATCH ${request.patchUrl}`,
+      'expected an envelope carrying a payload.',
+    );
   }
-  const editor = buildSettingsEditor(patched.body);
+  const editor = buildSettingsEditor(patchedPayload);
   if (!editor) {
     return protocolError(
       `PATCH ${request.patchUrl}`,
@@ -104,14 +119,21 @@ export async function applySettingsMutation(
   return {
     outcome: 'success',
     scope: request.scope,
-    payload: patched.body,
+    payload: patchedPayload,
     revisionId:
       request.scope === 'project'
         ? editor.projectExpectedRevisionId
         : editor.userExpectedRevisionId,
-    resyncRecommended: patched.body['resync_recommended'] === true,
-    restartRecommended: patched.body['restart_recommended'] === true,
+    resyncRecommended: patchedPayload['resync_recommended'] === true,
+    restartRecommended: patchedPayload['restart_recommended'] === true,
   };
+}
+
+function unavailableDetail(body: unknown): string {
+  const detail = isRecord(body) ? body['detail'] : undefined;
+  return typeof detail === 'string' && detail.length > 0
+    ? `Nothing was applied: ${detail.replace(/\.$/, '')}.`
+    : 'Nothing was applied: the authority for this write is unavailable.';
 }
 
 type JsonFetchResult =

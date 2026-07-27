@@ -7,10 +7,13 @@ import {
   filterOverrides,
   filterRows,
   isPathLike,
+  settingsPayload,
   splitPath,
 } from './settingsModel.ts';
 
-const payload = FIXTURES['/api/settings'];
+// `/api/settings` answers a DashboardEnvelopeV1; the read model addresses the
+// settings groups inside its payload.
+const payload = settingsPayload(FIXTURES['/api/settings']);
 
 describe('Settings read model', () => {
   it('reads every top-level group the payload carries', () => {
