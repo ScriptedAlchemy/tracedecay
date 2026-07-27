@@ -173,7 +173,10 @@ async fn reconcile_untracks_closed_pr_and_cleans_store() {
     let mut meta = BranchMeta::new("main");
     meta.add_branch("pr/5", "branches/pr_5.db", "main");
     std::fs::create_dir_all(data_root.path().join("branches")).unwrap();
-    std::fs::write(data_root.path().join("branches/pr_5.db"), b"db").unwrap();
+    drop(
+        rusqlite::Connection::open(data_root.path().join("branches/pr_5.db"))
+            .expect("empty branch database"),
+    );
     save_branch_meta(data_root.path(), &meta).unwrap();
 
     // Seed autotrack state marking pr/5 as managed.
@@ -191,7 +194,15 @@ async fn reconcile_untracks_closed_pr_and_cleans_store() {
     save_state(data_root.path(), &state).unwrap();
 
     // Empty discovery => PR 5 is closed/merged => must be untracked.
-    let daemon_administration = StoreAdministration::with_external_holder_verifier(|_| Ok(()));
+    let identity = crate::daemon::profile_identity::load_or_create(data_root.path()).unwrap();
+    let _database_scope = crate::db::enter_daemon_database_scope(
+        identity.profile_root(),
+        1,
+        "pr-autotrack-removal-test",
+    )
+    .unwrap();
+    let daemon_administration = StoreAdministration::with_external_holder_verifier(|_| Ok(()))
+        .with_profile_identity(identity);
     let administration = PrStoreAdministration::state_only(&daemon_administration);
     let report = reconcile_project_with_administration(
         repo_root.path(),
