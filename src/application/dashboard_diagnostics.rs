@@ -200,7 +200,7 @@ impl DashboardDiagnosticsAuthorityV1 {
         self.inner.broker.lock().await.record_backfill_progress(
             language,
             document_count,
-            document_count,
+            0,
             0,
             None,
         );
@@ -220,53 +220,60 @@ impl DashboardDiagnosticsAuthorityV1 {
             .lock()
             .await
             .prepare_refresh(language, documents);
-        let mut progress_recorded_in_task = false;
-        let refresh_ok = match prepared {
+        match prepared {
             Ok(Some(prepared)) => {
-                progress_recorded_in_task = true;
                 let authority = self.clone();
-                let language = language.to_owned();
-                let (tx, rx) = tokio::sync::oneshot::channel();
+                let task_language = language.to_owned();
+                let (tx, rx) = tokio::sync::oneshot::channel::<Result<()>>();
                 tokio::spawn(async move {
                     let completed = prepared.collect_diagnostics(Duration::from_secs(5)).await;
-                    let refresh_ok = completed.is_ok();
-                    {
+                    let refresh_result = {
                         let mut broker = authority.inner.broker.lock().await;
-                        let _ = broker.finish_refresh(completed);
-                        let database = Arc::clone(&authority.inner.database);
-                        broker
-                            .resolve_enclosing_nodes(move |file| {
-                                let database = Arc::clone(&database);
-                                async move { node_spans_for_file(&database, &file).await }
-                            })
-                            .await;
+                        let refresh_result = broker.finish_refresh(completed);
+                        if refresh_result.is_ok() {
+                            let database = Arc::clone(&authority.inner.database);
+                            broker
+                                .resolve_enclosing_nodes(move |file| {
+                                    let database = Arc::clone(&database);
+                                    async move { node_spans_for_file(&database, &file).await }
+                                })
+                                .await;
+                        }
                         let snapshot = broker.snapshot();
-                        let files_with_diagnostics = files_with_diagnostics(&snapshot, &language);
+                        let files_with_diagnostics =
+                            files_with_diagnostics(&snapshot, &task_language);
                         broker.record_backfill_progress(
-                            &language,
+                            &task_language,
                             document_count,
-                            document_count,
+                            if refresh_result.is_ok() {
+                                document_count
+                            } else {
+                                0
+                            },
                             files_with_diagnostics,
-                            refresh_ok.then(crate::tracedecay::current_timestamp),
+                            refresh_result
+                                .is_ok()
+                                .then(crate::tracedecay::current_timestamp),
                         );
-                    }
-                    let _ = tx.send(refresh_ok);
+                        refresh_result
+                    };
+                    let _ = tx.send(refresh_result);
                 });
-                rx.await.unwrap_or(false)
+                rx.await.map_err(|error| TraceDecayError::Config {
+                    message: format!(
+                        "code diagnostics refresh task failed for '{language}': {error}"
+                    ),
+                })??;
             }
-            Ok(None) => true,
-            Err(_) => false,
-        };
-        if !progress_recorded_in_task {
-            let snapshot = self.inner.broker.lock().await.snapshot();
-            let files_with_diagnostics = files_with_diagnostics(&snapshot, language);
-            self.inner.broker.lock().await.record_backfill_progress(
-                language,
-                document_count,
-                document_count,
-                files_with_diagnostics,
-                refresh_ok.then(crate::tracedecay::current_timestamp),
-            );
+            Ok(None) => {
+                return Err(TraceDecayError::Config {
+                    message: format!(
+                        "code diagnostics refresh became unavailable for '{language}'"
+                    ),
+                }
+                .into());
+            }
+            Err(error) => return Err(error.into()),
         }
         Ok(())
     }
@@ -364,4 +371,82 @@ async fn indexed_files(database: &Database) -> Result<Vec<String>> {
         .collect::<Vec<_>>();
     files.sort();
     Ok(files)
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::*;
+    use crate::application::host_admission::HostAdmissionTestRuntimeV1;
+    use crate::diagnostics::lsp::adapters::{DiagnosticMode, LspAdapterDefinition};
+    use tracedecay_domain::ProjectId;
+
+    #[tokio::test]
+    async fn failed_refresh_is_an_error_and_never_claims_documents_opened() {
+        let _pin = crate::config::PinnedUserDataDir::new();
+        let project = tempfile::tempdir().expect("project");
+        std::fs::write(project.path().join("fixture.rs"), "fn fixture() {}\n")
+            .expect("fixture source");
+        let runtime = HostAdmissionTestRuntimeV1::project(
+            crate::storage::default_profile_root().expect("profile root"),
+            project.path(),
+            ProjectId::new("project.dashboard-diagnostics-refresh").expect("project id"),
+        )
+        .await
+        .expect("test runtime");
+        let graph = runtime
+            .initialize_project_graph_for_test(
+                project.path(),
+                crate::tracedecay::TraceDecayOpenOptions::default(),
+            )
+            .await
+            .expect("project graph");
+        graph.sync().await.expect("index fixture source");
+        let adapter = LspAdapterDefinition {
+            language: "fake".to_owned(),
+            language_id: "fake".to_owned(),
+            command: "false".to_owned(),
+            args: Vec::new(),
+            extensions: vec!["rs".to_owned()],
+            root_markers: Vec::new(),
+            install_options: Vec::new(),
+            diagnostics: DiagnosticMode::Push,
+        };
+        let mut settings = CodeDiagnosticsSettings::default();
+        settings.custom_adapters.push(adapter.clone());
+        let broker = Arc::new(Mutex::new(DiagnosticBroker::new(
+            project.path(),
+            vec![adapter],
+            settings,
+        )));
+        let database = graph.dashboard_database_guard();
+        assert_eq!(
+            indexed_files(&database).await.expect("indexed files"),
+            vec!["fixture.rs"]
+        );
+        let authority = DashboardDiagnosticsAuthorityV1::new(
+            project.path().to_path_buf(),
+            project.path().to_path_buf(),
+            database,
+            Arc::clone(&broker),
+        );
+
+        let error = authority
+            .refresh_language("fake")
+            .await
+            .expect_err("an analyzer process failure must fail the refresh");
+        assert!(matches!(error, DashboardDiagnosticsErrorV1::Runtime(_)));
+
+        let progress = broker
+            .lock()
+            .await
+            .snapshot()
+            .backfill
+            .get("fake")
+            .cloned()
+            .expect("backfill progress");
+        assert_eq!(progress.queued_files, 1);
+        assert_eq!(progress.opened_files, 0);
+        assert_eq!(progress.last_completed_sweep, None);
+    }
 }
