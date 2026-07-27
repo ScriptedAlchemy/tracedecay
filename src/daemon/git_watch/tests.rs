@@ -102,6 +102,18 @@ fn heartbeat_staleness() {
     assert!(old.heartbeat_stale());
 }
 
+#[test]
+fn timed_out_identity_discovery_retries_instead_of_degrading_forever() {
+    assert!(matches!(
+        identity_discovery_disposition(crate::worktree::GitRepoIdentityOutcome::Unknown),
+        IdentityDiscoveryDisposition::Retry
+    ));
+    assert!(matches!(
+        identity_discovery_disposition(crate::worktree::GitRepoIdentityOutcome::NotFound),
+        IdentityDiscoveryDisposition::Degraded
+    ));
+}
+
 /// The shared coordinator must not start a second store-writing lifetime while
 /// the first one is held. Paused Tokio time plus Notify/oneshot handshakes make
 /// this a scheduling-state assertion rather than a wall-clock sleep.
