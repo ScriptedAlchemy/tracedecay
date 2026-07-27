@@ -51,7 +51,6 @@ pub(crate) struct McpServerConstructionContext {
     /// continues bounded host-admission replay passes until idle.
     pub(crate) own_project_host_admission_replay: bool,
     pub(crate) startup_catch_up_enabled: bool,
-    pub(crate) allow_default_registry_fallback: bool,
     pub(crate) automation_scheduler_reconciler:
         Option<crate::dashboard::AutomationSchedulerReconciler>,
     pub(crate) database_owner_reconciler: Option<DatabaseOwnerReconciler>,
@@ -142,7 +141,6 @@ impl McpServerConstructionContext {
             user_session_refresh_wake: None,
             own_project_host_admission_replay: false,
             startup_catch_up_enabled: true,
-            allow_default_registry_fallback: true,
             automation_scheduler_reconciler: None,
             database_owner_reconciler: None,
             dashboard_automation_writer: crate::dashboard::standalone_dashboard_automation_writer(),
@@ -170,7 +168,6 @@ impl McpServerConstructionContext {
         registry_db: Option<Arc<RegisteredGlobalDb>>,
         session_db: Option<Arc<RegisteredGlobalDb>>,
         user_session_db: Option<Arc<RegisteredGlobalDb>>,
-        allow_default_registry_fallback: bool,
     ) -> Self {
         self.global_db = global_db;
         self.accounting_db = self.global_db.clone();
@@ -179,7 +176,6 @@ impl McpServerConstructionContext {
         self.user_session_db = user_session_db.clone();
         self.registered_session_db = session_db;
         self.registered_user_session_db = user_session_db;
-        self.allow_default_registry_fallback = allow_default_registry_fallback;
         self
     }
 
@@ -218,7 +214,6 @@ impl McpServerConstructionContext {
             user_session_refresh_wake: Some(user_session_refresh_wake),
             own_project_host_admission_replay: true,
             startup_catch_up_enabled: true,
-            allow_default_registry_fallback: false,
             automation_scheduler_reconciler: None,
             database_owner_reconciler: Some(database_owner_reconciler),
             dashboard_automation_writer: writers.dashboard_automation,

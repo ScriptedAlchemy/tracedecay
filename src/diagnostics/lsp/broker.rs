@@ -145,6 +145,18 @@ pub struct DiagnosticsSummary {
     pub last_refresh_age_seconds: Option<i64>,
 }
 
+/// Why a broker holds default analyzer settings instead of the project's
+/// persisted ones.
+///
+/// A project that never configured settings is not degraded — `load_settings`
+/// returns the defaults as `Ok` for an absent file. This is set only when a
+/// settings file exists and could not be read or parsed, in which case every
+/// custom analyzer the user configured is missing from this broker.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettingsUnavailable {
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiagnosticsSnapshot {
     pub summary: DiagnosticsSummary,
@@ -152,6 +164,8 @@ pub struct DiagnosticsSnapshot {
     pub diagnostics: Vec<CodeDiagnostic>,
     pub backfill: BTreeMap<String, BackfillProgress>,
     pub settings: CodeDiagnosticsSettings,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings_unavailable: Option<SettingsUnavailable>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -485,6 +499,7 @@ pub struct DiagnosticBroker {
     refresh_epochs: BTreeMap<String, u64>,
     project_languages: BTreeSet<String>,
     backfill: BTreeMap<String, BackfillProgress>,
+    settings_unavailable: Option<SettingsUnavailable>,
 }
 
 impl DiagnosticBroker {
@@ -504,7 +519,17 @@ impl DiagnosticBroker {
             refresh_epochs: BTreeMap::new(),
             project_languages: BTreeSet::new(),
             backfill: BTreeMap::new(),
+            settings_unavailable: None,
         }
+    }
+
+    /// Records that the project's persisted settings could not be loaded, so
+    /// every read of this broker reports the degradation instead of passing
+    /// the fallback defaults off as the user's configuration.
+    pub fn record_settings_unavailable(&mut self, reason: impl Into<String>) {
+        self.settings_unavailable = Some(SettingsUnavailable {
+            reason: reason.into(),
+        });
     }
 
     pub fn new_for_test(
@@ -531,6 +556,7 @@ impl DiagnosticBroker {
             diagnostics: self.diagnostics.clone(),
             backfill: self.backfill.clone(),
             settings: self.settings.clone(),
+            settings_unavailable: self.settings_unavailable.clone(),
         }
     }
 
@@ -818,6 +844,9 @@ impl DiagnosticBroker {
 
     pub fn update_settings(&mut self, settings: CodeDiagnosticsSettings) {
         self.settings = settings;
+        // These settings were just persisted, so whatever the broker could not
+        // read at mount time is no longer what it is serving.
+        self.settings_unavailable = None;
         self.clients.clear();
         self.engine_overrides.clear();
         let disabled_languages: Vec<String> = self

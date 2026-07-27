@@ -39,10 +39,9 @@ pub(in crate::mcp::tools::handlers) async fn handle_memory_status(
     cg: &TraceDecay,
     args: Value,
     global_db: Option<&RegisteredGlobalDb>,
-    allow_default_registry_fallback: bool,
 ) -> Result<ToolResult> {
     let target_memory =
-        open_target_memory_db(cg, &args, global_db, allow_default_registry_fallback).await?;
+        open_target_memory_db(cg, &args, global_db).await?;
     let status = memory_application(&target_memory)?
         .memory_status_with_repair_v1()
         .await

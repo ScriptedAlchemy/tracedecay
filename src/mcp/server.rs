@@ -350,7 +350,6 @@ pub struct McpServer {
     /// when global accounting is disabled so daemon clients do not fall back
     /// to the daemon process profile for selector resolution.
     registry_db: Option<Arc<RegisteredGlobalDb>>,
-    allow_default_registry_fallback: bool,
     automation_scheduler_reconciler: Option<crate::dashboard::AutomationSchedulerReconciler>,
     database_owner_reconciler: Option<DatabaseOwnerReconciler>,
     dashboard_automation_writer: crate::dashboard::DashboardAutomationWriter,
@@ -541,20 +540,14 @@ impl McpServer {
         scope_prefix: Option<String>,
         global_db: Option<Arc<RegisteredGlobalDb>>,
         registry_db: Option<Arc<RegisteredGlobalDb>>,
-        allow_default_registry_fallback: bool,
+        use_default_profile_root: bool,
     ) -> Arc<Self> {
-        let profile_root = allow_default_registry_fallback
+        let profile_root = use_default_profile_root
             .then(crate::storage::default_profile_root)
             .and_then(std::result::Result::ok);
-        let context = Self::direct_context_with_dbs(
-            cg,
-            scope_prefix,
-            profile_root,
-            global_db,
-            registry_db,
-            allow_default_registry_fallback,
-        )
-        .await;
+        let context =
+            Self::direct_context_with_dbs(cg, scope_prefix, profile_root, global_db, registry_db)
+                .await;
         Self::new_with_context(context).await
     }
 
@@ -570,7 +563,6 @@ impl McpServer {
             None,
             Some(session_db),
             None,
-            false,
         );
         Self::new_with_context(context).await
     }
@@ -664,21 +656,15 @@ impl McpServer {
         scope_prefix: Option<String>,
         global_db: Option<Arc<RegisteredGlobalDb>>,
         registry_db: Option<Arc<RegisteredGlobalDb>>,
-        allow_default_registry_fallback: bool,
+        use_default_profile_root: bool,
     ) -> Arc<Self> {
-        let profile_root = allow_default_registry_fallback
+        let profile_root = use_default_profile_root
             .then(crate::storage::default_profile_root)
             .and_then(std::result::Result::ok);
         let session_db_path = cg.store_layout().sessions_db_path.clone();
-        let mut context = Self::direct_context_with_dbs(
-            cg,
-            scope_prefix,
-            profile_root,
-            global_db,
-            registry_db,
-            allow_default_registry_fallback,
-        )
-        .await;
+        let mut context =
+            Self::direct_context_with_dbs(cg, scope_prefix, profile_root, global_db, registry_db)
+                .await;
         let _ = session_db_path;
         let Some(session_db) = context.session_db.as_ref() else {
             panic!("test server project sessions database should open");
@@ -708,18 +694,11 @@ impl McpServer {
         profile_root: Option<PathBuf>,
         global_db: Option<Arc<RegisteredGlobalDb>>,
         registry_db: Option<Arc<RegisteredGlobalDb>>,
-        allow_default_registry_fallback: bool,
     ) -> McpServerConstructionContext {
         let user_session_db = None;
         let session_db = None;
         let mut context = McpServerConstructionContext::direct(cg, scope_prefix)
-            .with_direct_databases(
-                global_db,
-                registry_db,
-                session_db,
-                user_session_db,
-                allow_default_registry_fallback,
-            );
+            .with_direct_databases(global_db, registry_db, session_db, user_session_db);
         context.profile_root = profile_root;
         context
     }
@@ -743,7 +722,6 @@ impl McpServer {
             user_session_refresh_wake,
             own_project_host_admission_replay,
             startup_catch_up_enabled,
-            allow_default_registry_fallback,
             automation_scheduler_reconciler,
             database_owner_reconciler,
             dashboard_automation_writer,
@@ -777,6 +755,15 @@ impl McpServer {
         // Register this project in the global DB with its current tokens
         if let Some(ref gdb) = accounting_db {
             gdb.upsert(cg.project_root(), persisted).await;
+        } else if global_db.is_none() {
+            // Name the gap where it is created. Every later savings and
+            // analytics write from this server is a no-op (see
+            // `LedgerSink::NotMounted`); without this, a fixture that forgot
+            // to mount a database only failed much later, as an absent row.
+            tracing::debug!(
+                project_root = %cg.project_root().display(),
+                "MCP server built with no accounting database; ledger and analytics writes are inert"
+            );
         }
 
         // Detect borrowed-worktree index once at startup so every read
@@ -934,7 +921,6 @@ impl McpServer {
             #[cfg(test)]
             user_session_retrieval_calls,
             project_host_admission_replay: tokio::sync::Mutex::new(None),
-            allow_default_registry_fallback,
             automation_scheduler_reconciler,
             database_owner_reconciler,
             dashboard_automation_writer,
@@ -1222,7 +1208,7 @@ impl McpServer {
             "retained_state_proxy": {
                 "file_token_entries": file_token_entries,
                 "database_authorities": {
-                    "accounting": self.accounting_db.is_some() || self.global_db.is_some(),
+                    "accounting": self.ledger_sink_is_mounted(),
                     "registry": self.registry_db.is_some(),
                     "project_sessions": self.session_db.is_some(),
                     "user_sessions": self.user_session_db.is_some(),

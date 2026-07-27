@@ -34,24 +34,37 @@ impl RegisteredGlobalDb {
             .map_err(|error| global_db_operation_error("commit project token total", error))
     }
 
-    pub(crate) async fn get_project_tokens(&self, project_path: &Path) -> u64 {
+    /// A project with no registry row has genuinely saved nothing, so an
+    /// absent row is `Ok(0)`. Every other outcome is a failed read and stays
+    /// an error rather than becoming that same zero.
+    pub(crate) async fn try_get_project_tokens(&self, project_path: &Path) -> Result<u64, String> {
         let path = super::project_path_alias_key(project_path);
-        let Ok(snapshot) = self.read_snapshot().await else {
-            return 0;
-        };
-        let Ok(mut rows) = snapshot
+        let snapshot = self
+            .read_snapshot()
+            .await
+            .map_err(|error| format!("failed to open accounting snapshot: {error}"))?;
+        let mut rows = snapshot
             .query(
                 "SELECT tokens_saved FROM projects WHERE path = ?1",
                 crate::db::engine::params![path],
             )
             .await
+            .map_err(|error| format!("failed to query project tokens saved: {error}"))?;
+        let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| format!("failed to read project tokens saved row: {error}"))?
         else {
-            return 0;
+            return Ok(0);
         };
-        match rows.next().await {
-            Ok(Some(row)) => row.get::<i64>(0).unwrap_or(0).max(0) as u64,
-            _ => 0,
-        }
+        let total = row
+            .get::<i64>(0)
+            .map_err(|error| format!("failed to decode project tokens saved: {error}"))?;
+        u64::try_from(total).map_err(|_| format!("project tokens saved cannot be negative: {total}"))
+    }
+
+    pub(crate) async fn get_project_tokens(&self, project_path: &Path) -> Option<u64> {
+        self.try_get_project_tokens(project_path).await.ok()
     }
 
     pub(crate) async fn try_global_tokens_saved(&self) -> Result<u64, String> {

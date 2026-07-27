@@ -98,7 +98,6 @@ pub(super) async fn open_target_memory_db<'a>(
     cg: &'a TraceDecay,
     args: &Value,
     global_db: Option<&RegisteredGlobalDb>,
-    allow_default_registry_fallback: bool,
 ) -> Result<TargetMemoryDb<'a>> {
     if requests_user_memory(args) {
         if project_selector_present(args, &["project_path"]) {
@@ -106,14 +105,13 @@ pub(super) async fn open_target_memory_db<'a>(
                 "memory_scope=user cannot be combined with a project selector",
             ));
         }
-        let profile_root = profile_root_for_global_db(global_db, allow_default_registry_fallback)?;
+        let profile_root = profile_root_for_global_db(global_db)?;
         return open_user_memory_target(cg.store_runtime_registry(), &profile_root).await;
     }
     let Some(context) = project_registry_context(
         args,
         &["project_path"],
         global_db,
-        allow_default_registry_fallback,
     )
     .await?
     else {

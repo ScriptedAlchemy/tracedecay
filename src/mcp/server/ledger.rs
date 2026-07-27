@@ -13,6 +13,21 @@ const LEDGER_SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
 // by default; see `crate::global_db::global_accounting_mode` for the env
 // override precedence.
 
+/// Where this server's savings-ledger and analytics writes land.
+///
+/// A server built without an accounting database is legitimate (a direct
+/// `McpServer::new` has no profile to account against), but it used to be
+/// *silent*: each recorder independently checked both handles and returned
+/// early, so a fixture that forgot to mount a database failed later as a
+/// missing row in an assertion far from the construction that caused it.
+/// Naming the state makes the absence observable at construction — see
+/// [`McpServer::ledger_sink_is_mounted`] — and collapses three copies of
+/// the same fallback into one resolution.
+pub(crate) enum LedgerSink {
+    Mounted(Arc<crate::global_db::RegisteredGlobalDb>),
+    NotMounted,
+}
+
 pub(crate) struct McpToolErrorAnalyticsRequest<'a> {
     pub(crate) project_root: &'a Path,
     pub(crate) session_id: Option<String>,
@@ -24,6 +39,26 @@ pub(crate) struct McpToolErrorAnalyticsRequest<'a> {
 }
 
 impl McpServer {
+    /// Resolves the ledger sink: the dedicated accounting database when the
+    /// daemon mounted one, otherwise the registry handle it shares with, and
+    /// [`LedgerSink::NotMounted`] when this server accounts against nothing.
+    pub(crate) fn ledger_sink(&self) -> LedgerSink {
+        self.accounting_db
+            .as_ref()
+            .or(self.global_db.as_ref())
+            .map_or(LedgerSink::NotMounted, |db| {
+                LedgerSink::Mounted(Arc::clone(db))
+            })
+    }
+
+    /// Whether any ledger write from this server can reach a database.
+    ///
+    /// Lets a caller assert its accounting wiring where it is built rather
+    /// than discovering the gap as an absent row much later.
+    pub fn ledger_sink_is_mounted(&self) -> bool {
+        matches!(self.ledger_sink(), LedgerSink::Mounted(_))
+    }
+
     /// Estimates the raw-file token cost ("before") for the given file
     /// paths from the cached file-token map (indexed file bytes / 4).
     /// Pure lookup — persists nothing.
@@ -61,9 +96,7 @@ impl McpServer {
         // Also increment the resettable local counter
         let _ = cg.add_local_counter(delta).await;
         // Best-effort update to global DB
-        if let Some(ref gdb) = self.accounting_db {
-            gdb.upsert(cg.project_root(), new_total).await;
-        } else if let Some(ref gdb) = self.global_db {
+        if let LedgerSink::Mounted(gdb) = self.ledger_sink() {
             gdb.upsert(cg.project_root(), new_total).await;
         }
     }
@@ -173,7 +206,7 @@ impl McpServer {
         }
         let delta = current - last_flushed;
 
-        if self.accounting_db.is_none() && self.global_db.is_none() {
+        if !self.ledger_sink_is_mounted() {
             return;
         }
 
@@ -218,11 +251,9 @@ impl McpServer {
             duration_us,
             error,
         } = request;
-        let registered = self.accounting_db.clone();
-        let legacy = self.global_db.clone();
-        if registered.is_none() && legacy.is_none() {
+        let LedgerSink::Mounted(gdb) = self.ledger_sink() else {
             return;
-        }
+        };
         let client_name = self.client_name();
         // `TraceDecayError`'s `Display` (via `thiserror`) already carries a
         // variant-classified, human-readable message (e.g. "config error:
@@ -247,14 +278,7 @@ impl McpServer {
             failure_reason: Some(&failure_reason),
         });
         self.spawn_observed_ledger_write(async move {
-            let result = if let Some(gdb) = registered {
-                gdb.append_analytics_event(&event).await
-            } else if let Some(gdb) = legacy {
-                gdb.append_analytics_event(&event).await
-            } else {
-                return;
-            };
-            if let Err(e) = result {
+            if let Err(e) = gdb.append_analytics_event(&event).await {
                 tracing::warn!(error = %e, "MCP error analytics event insert failed");
             }
         });
@@ -282,20 +306,11 @@ impl McpServer {
         ) else {
             return;
         };
-        let registered = self.accounting_db.clone();
-        let legacy = self.global_db.clone();
-        if registered.is_none() && legacy.is_none() {
+        let LedgerSink::Mounted(gdb) = self.ledger_sink() else {
             return;
-        }
+        };
         self.spawn_observed_ledger_write(async move {
-            let result = if let Some(gdb) = registered {
-                gdb.append_analytics_event(&event).await
-            } else if let Some(gdb) = legacy {
-                gdb.append_analytics_event(&event).await
-            } else {
-                return;
-            };
-            if let Err(e) = result {
+            if let Err(e) = gdb.append_analytics_event(&event).await {
                 // Deliberate fail-open: admission already committed; telemetry
                 // loss is preferred over blocking or rewriting host outcomes.
                 tracing::warn!(error = %e, "hook route analytics insert failed");
