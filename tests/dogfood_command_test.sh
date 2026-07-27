@@ -195,6 +195,8 @@ setup_case() {
   case_install="$case_root/install with spaces"
   case_profile="$case_root/profile with spaces"
   case_source="$case_root/build output/tracedecay candidate"
+  case_target="$case_root/target"
+  case_dashboard_stamp="$case_target/dogfood-dashboard-source.stamp"
   case_log="$case_root/actions.log"
   case_output="$case_root/output.log"
   case_state="$case_profile/dogfood-migration-boundary.state"
@@ -212,7 +214,8 @@ setup_case() {
   installed="$case_install/tracedecay"
   staged="$case_stage/tracedecay"
   mkdir -p "$case_home" "$case_stage" "$case_install" "$case_profile" \
-    "$(dirname "$case_source")" "$case_manager_dir"
+    "$(dirname "$case_source")" "$case_manager_dir" "$case_target"
+  cp "$repo_root/dashboard/app-dist/.source-stamp" "$case_dashboard_stamp"
   : >"$case_log"
 }
 
@@ -225,6 +228,7 @@ run_case() {
   env \
     PATH="$clean_path" \
     HOME="$case_home" \
+    CARGO_TARGET_DIR="$case_target" \
     TRACEDECAY_DOGFOOD_SOURCE_BINARY="$case_source" \
     TRACEDECAY_DOGFOOD_STAGE_DIR="$case_stage" \
     TRACEDECAY_DOGFOOD_INSTALL_DIR="$case_install" \
@@ -238,6 +242,7 @@ run_case_background() {
   exec env \
     PATH="$clean_path" \
     HOME="$case_home" \
+    CARGO_TARGET_DIR="$case_target" \
     TRACEDECAY_DOGFOOD_SOURCE_BINARY="$case_source" \
     TRACEDECAY_DOGFOOD_STAGE_DIR="$case_stage" \
     TRACEDECAY_DOGFOOD_INSTALL_DIR="$case_install" \
@@ -988,8 +993,8 @@ assert_boundary old_binary_policy allowed
 assert_boundary managed_daemon unchanged
 assert_no_temporary_install_files
 
-# The staged binary must attest to this checkout's fresh SHA and dirty state
-# before dogfood replaces either installed path or opens a writable store.
+# A candidate binary must attest to this checkout's fresh SHA and dirty state
+# before dogfood mutates binary paths or records a migration-boundary marker.
 setup_case staged-identity-mismatch
 write_fake_binary "$case_source" new
 install_old_pair
@@ -1006,12 +1011,28 @@ cmp "$case_root/expected installed" "$installed"
 cmp "$case_root/expected staged" "$staged"
 test -e "$daemon_marker" || fail 'identity mismatch stopped the old daemon'
 test ! -s "$case_log" || fail 'identity mismatch executed a lifecycle command'
-grep -Fq 'dogfood staged binary identity mismatch' "$case_output" ||
+grep -Fq 'dogfood candidate binary identity mismatch' "$case_output" ||
   fail 'identity mismatch was not explicit'
-assert_boundary outcome safe-rollback-complete
-assert_boundary attempt_boundary not-reached
-assert_boundary old_binary_policy allowed
-assert_boundary managed_daemon unchanged
+test ! -e "$case_state" || fail 'identity mismatch recorded a boundary marker'
+assert_no_temporary_install_files
+
+# The dashboard stamp written by build.rs is the positive freshness proof.
+# A mismatch fails before dogfood mutates binary paths or records a boundary.
+setup_case dashboard-freshness-mismatch
+write_fake_binary "$case_source" new
+install_old_pair
+cp "$installed" "$case_root/expected installed"
+cp "$staged" "$case_root/expected staged"
+printf 'stale-dashboard-stamp\n' >"$case_dashboard_stamp"
+if run_case >"$case_output" 2>&1; then
+  fail 'stale dashboard bundle unexpectedly succeeded'
+fi
+cmp "$case_root/expected installed" "$installed"
+cmp "$case_root/expected staged" "$staged"
+test ! -s "$case_log" || fail 'stale dashboard bundle executed a lifecycle command'
+grep -Fq 'dogfood dashboard bundle does not match' "$case_output" ||
+  fail 'stale dashboard rejection was not explicit'
+test ! -e "$case_state" || fail 'stale dashboard recorded a boundary marker'
 assert_no_temporary_install_files
 
 # A later dogfood attempt may fail before its own boundary after an earlier
