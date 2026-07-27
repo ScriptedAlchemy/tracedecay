@@ -9,26 +9,34 @@
  * exited clean for months. There is one engine now, and its exit code is the
  * gate.
  *
- * Four things here exist specifically to stop the gate from passing itself:
+ * Five things here exist specifically to stop the gate from passing itself:
  *
  *  1. NON-ZERO EXIT ON ANY FAILURE. Violations, page errors, and failed
- *     assertions all set `process.exitCode = 1`. A harness nobody has watched
- *     fail is not a gate; `axe-audit.ts` documents how to make it fail on
- *     demand.
+ *     assertions all set `process.exitCode = 1`.
  *
- *  2. STILLNESS IS `data-motion`, NOT `animation-duration: 0s`. An animation
+ *  2. THE ENGINE PROVES IT CAN SEE A VIOLATION, EVERY RUN. A scenario may
+ *     declare `expectViolations`: rule ids it deliberately seeds into the page.
+ *     Those are excluded from the gate's violation total — they are planted, so
+ *     counting them would hold the gate permanently red — and their ABSENCE is
+ *     an assertion failure. That inverts the dangerous direction: a scan that
+ *     silently stops reporting anything (wrong tags, a page that never
+ *     rendered, an `analyze()` that resolves empty) now fails loudly instead of
+ *     scoring every surface clean. A zero only means something once something
+ *     known-bad was detected in the same run, through the same code path.
+ *
+ *  3. STILLNESS IS `data-motion`, NOT `animation-duration: 0s`. An animation
  *     with `both` fill and zero duration holds its from-state — `opacity: 0` —
  *     permanently, so a harness that shortens animations photographs invisible
  *     content, and Axe reports invisible content as clean. Stillness goes
  *     through the app's own switch (`data-motion="reduced"`) plus a
  *     belt-and-braces `animation: none`.
  *
- *  3. THE BUILT BUNDLE, NOT `rsbuild dev`. Lazy route compilation under the dev
+ *  4. THE BUILT BUNDLE, NOT `rsbuild dev`. Lazy route compilation under the dev
  *     server can race and throw (`factory is undefined`), which renders the
  *     router's error boundary — accessible markup that screenshots happily and
  *     passes Axe. A crashed page must not score a clean bill of health.
  *
- *  4. ANY `pageerror` FAILS THE RUN. Same reason.
+ *  5. ANY `pageerror` FAILS THE RUN. Same reason.
  *
  * Env:
  *   AXE_PORT    Static-server port (default 5241).
@@ -118,6 +126,18 @@ export interface Scenario {
    * pass.
    */
   readonly assert?: (page: Page) => Promise<void>;
+  /**
+   * Axe rule ids this scenario deliberately plants, via `drive`, to prove the
+   * scan can still see a violation.
+   *
+   * Every listed id must appear in EVERY scan of this scenario or the run
+   * fails, and none of them count toward the gate's violation total. Only a
+   * scenario that seeds the markup itself may declare this — it is the one
+   * place where a violation is the expected result, and it exists so that
+   * `axe violations=0` on the other scenarios is a measurement rather than an
+   * assumption.
+   */
+  readonly expectViolations?: readonly string[];
 }
 
 export function expectEqual(actual: string | undefined, expected: string, what: string): void {
@@ -323,7 +343,40 @@ interface ShotRecord {
   width: number;
   file: string;
   violations: Violation[];
+  /** Violations this scenario planted on purpose, recorded so the artifact
+   * shows what the engine detected rather than only what it did not. */
+  seeded?: Violation[];
   error?: string;
+}
+
+/**
+ * Split a scan into planted violations and real ones, and fail if a planted
+ * rule went unreported.
+ *
+ * A scenario with no `expectViolations` is unchanged: everything is real.
+ */
+function partitionViolations(
+  violations: Violation[],
+  expected: readonly string[] | undefined,
+  tag: string,
+): { real: Violation[]; seeded: Violation[] } {
+  if (expected === undefined || expected.length === 0) {
+    return { real: violations, seeded: [] };
+  }
+  const wanted = new Set(expected);
+  const seeded = violations.filter((v) => wanted.has(v.id));
+  const real = violations.filter((v) => !wanted.has(v.id));
+  const found = new Set(seeded.map((v) => v.id));
+  const missing = expected.filter((id) => !found.has(id));
+  if (missing.length > 0) {
+    throw new Error(
+      `${tag}: the axe scan did not report the seeded violation(s) ${missing.join(', ')}. ` +
+        `The engine is not detecting known-inaccessible markup, so every clean ` +
+        `scan in this run is worthless. Reported instead: ` +
+        `${violations.length === 0 ? '(nothing)' : violations.map((v) => v.id).join(', ')}`,
+    );
+  }
+  return { real, seeded };
 }
 
 /**
@@ -386,11 +439,31 @@ export async function runHarness(scenarios: readonly Scenario[]): Promise<void> 
   }> = [];
   let totalViolations = 0;
   let assertionFailures = 0;
+  /** How many planted violations the scan actually caught, and which rules. */
+  let seededDetections = 0;
+  const seededByRule: Record<string, number> = {};
   const pageErrors: string[] = [];
+
+  const selected = scenarios.filter((s) => s.id.includes(ONLY));
+  // A full gate run with nothing planted in it cannot distinguish "accessible"
+  // from "the scan reported nothing". `AXE_ONLY` is the developer's iteration
+  // flag, so it may narrow past the canary — loudly, and never in CI, which
+  // runs the whole set.
+  const canaries = selected.filter((s) => (s.expectViolations?.length ?? 0) > 0);
+  if (canaries.length === 0) {
+    const message =
+      'no scenario in this run seeds a known violation, so a clean scan proves nothing about the engine';
+    if (ONLY === '') {
+      console.error(`[axe] ${message}`);
+      assertionFailures += 1;
+    } else {
+      console.warn(`[axe] WARNING (AXE_ONLY=${ONLY}): ${message}`);
+    }
+  }
 
   try {
     browser = await chromium.launch({ headless: true });
-    for (const scenario of scenarios.filter((s) => s.id.includes(ONLY))) {
+    for (const scenario of selected) {
       const record = {
         id: scenario.id,
         route: scenario.route,
@@ -449,12 +522,26 @@ export async function runHarness(scenarios: readonly Scenario[]): Promise<void> 
             if (scenario.drive !== undefined) await scenario.drive(page);
             await assertActuallyVisible(page, tag);
             await page.screenshot({ path: path.join(OUT_DIR, file), fullPage: true });
-            const violations = await runAxe(page);
+            const scanned = await runAxe(page);
+            const { real: violations, seeded } = partitionViolations(
+              scanned,
+              scenario.expectViolations,
+              tag,
+            );
             totalViolations += violations.length;
-            record.shots.push({ theme, width, file, violations });
+            seededDetections += seeded.length;
+            for (const v of seeded) seededByRule[v.id] = (seededByRule[v.id] ?? 0) + 1;
+            record.shots.push({
+              theme,
+              width,
+              file,
+              violations,
+              ...(seeded.length ? { seeded } : {}),
+            });
             console.log(
               `[axe] ${file}  axe=${violations.length}` +
-                (violations.length ? ` (${violations.map((v) => v.id).join(', ')})` : ''),
+                (violations.length ? ` (${violations.map((v) => v.id).join(', ')})` : '') +
+                (seeded.length ? `  seeded-detected=${seeded.map((v) => v.id).join(', ')}` : ''),
             );
             for (const v of violations) {
               console.log(`             - ${v.id} [${v.impact}] x${v.nodes.length} — ${v.help}`);
@@ -537,6 +624,10 @@ export async function runHarness(scenarios: readonly Scenario[]): Promise<void> 
     pageErrors,
     violationsByViewport: byViewport,
     violationsByRule: byRule,
+    // The engine's own receipt. `totalViolations: 0` is only readable as a
+    // clean bill of health alongside a non-empty `seededDetectionsByRule`.
+    seededDetections,
+    seededDetectionsByRule: seededByRule,
     scenarios: records,
   };
   writeFileSync(path.join(OUT_DIR, 'findings.json'), `${JSON.stringify(findings, null, 2)}\n`);
@@ -548,6 +639,10 @@ export async function runHarness(scenarios: readonly Scenario[]): Promise<void> 
     `[axe] axe violations=${totalViolations} byViewport=${JSON.stringify(byViewport)}`,
   );
   console.log(`[axe] byRule=${JSON.stringify(byRule)}`);
+  console.log(
+    `[axe] seeded violations DETECTED=${seededDetections} ` +
+      `byRule=${JSON.stringify(seededByRule)} — this is what makes the zero above readable`,
+  );
   console.log(`[axe] assertion/visibility failures=${assertionFailures}`);
   console.log(`[axe] page errors=${pageErrors.length}`);
   if (totalViolations > 0 || assertionFailures > 0 || pageErrors.length > 0) process.exitCode = 1;

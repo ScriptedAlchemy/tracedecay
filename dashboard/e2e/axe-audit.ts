@@ -15,9 +15,10 @@
  * match the shape the nav rail parses. Reading a state without asserting on it
  * is how three tests become one.
  *
- * TO CONFIRM THIS GATE CAN FAIL (do this after changing the engine): add
- * `<img src="x">` with no alt text to any rendered surface, run, and check for a
- * non-zero exit and an `image-alt` violation. `AXE_ONLY=brain` keeps it quick.
+ * THAT THIS GATE CAN FAIL IS NOW PROVEN BY THE RUN, not by a procedure someone
+ * remembers to follow. `axe-engine-canary` plants known-inaccessible markup on
+ * a real surface at every viewport and theme and requires the scan to report
+ * it; see that scenario for why the check runs on every scan rather than once.
  */
 import type { Page } from '@playwright/test';
 import { resolveFixture } from '../stories/fixtures/data.ts';
@@ -206,7 +207,78 @@ async function doctorDotState(page: Page): Promise<{ state: string; label: strin
   };
 }
 
+/**
+ * Two rules, chosen because they are detected by different means: `image-alt`
+ * is a missing-attribute check, `button-name` runs axe's accessible-name
+ * computation. A scan that reports both is exercising more than one code path
+ * inside the engine.
+ */
+const SEEDED_DEFECTS = ['image-alt', 'button-name'] as const;
+
+/**
+ * Plant the known-inaccessible markup the canary scan must find.
+ *
+ * Injected into the live page rather than served as a static fixture so the
+ * proof runs through the *same* path every real scenario uses — this build's
+ * bundle, this context, this stillness init, this `AxeBuilder` tag set. A
+ * separate hand-written HTML page would prove that axe works somewhere, which
+ * is not the question; the question is whether these scans would have caught
+ * anything.
+ */
+async function seedKnownDefects(page: Page): Promise<void> {
+  const planted = await page.evaluate(() => {
+    const main = document.querySelector('main#td-main');
+    if (!main) return -1;
+    const host = document.createElement('div');
+    host.setAttribute('data-axe-canary', '');
+    // A 1x1 transparent GIF inlined as a data URI: the scan must never depend
+    // on a network fetch, and axe only needs the element, not the pixels.
+    const img = document.createElement('img');
+    img.src = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
+    img.style.cssText = 'width:24px;height:24px';
+    host.append(img);
+    // No text, no aria-label, no title: nothing for the accessible-name
+    // computation to find.
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.style.cssText = 'width:24px;height:24px';
+    host.append(button);
+    main.prepend(host);
+    return host.childElementCount;
+  });
+  if (planted !== SEEDED_DEFECTS.length) {
+    throw new Error(
+      `the canary planted ${planted} elements, expected ${SEEDED_DEFECTS.length}` +
+        (planted === -1 ? ' (main#td-main was not in the page)' : ''),
+    );
+  }
+}
+
 const SCENARIOS: readonly Scenario[] = [
+  {
+    id: 'axe-engine-canary',
+    route: '/automations',
+    proves:
+      'THE GATE ITSELF — a known-inaccessible element on a real surface is reported, so the zeros elsewhere in this run are measurements',
+    overrides: {},
+    drive: seedKnownDefects,
+    // Checked on every scan, not once: the seeding is re-applied after each
+    // navigation, so each viewport and theme is an independent confirmation
+    // that the scan running at that size is live. It also means a breakage
+    // that only shows up at one width cannot hide behind five good scans.
+    expectViolations: SEEDED_DEFECTS,
+    assert: async (page) => {
+      // The planted nodes must really be on the page and really be visible. An
+      // element the browser never laid out is one axe skips, which would turn
+      // the whole canary into a check that cannot fail.
+      const canary = page.locator('[data-axe-canary]');
+      const hosts = await canary.count();
+      if (hosts !== 1) throw new Error(`expected one canary host in the page, found ${hosts}`);
+      if (!(await canary.isVisible())) {
+        throw new Error('the canary markup is present but not visible, so axe would skip it');
+      }
+    },
+  },
   {
     id: 'automations-measured',
     route: '/automations',
@@ -317,13 +389,17 @@ const SCENARIOS: readonly Scenario[] = [
     },
   },
   {
-    id: 'automations-legacy-null',
+    id: 'automations-uncontracted-payload',
     route: '/automations',
     proves:
-      'a daemon too old to send pending_review, reporting null counts, reads as unknown not zero',
+      'a scheduler payload missing the pending_review union reads as unsupported schema, never as counts',
     overrides: {
       [SCHEDULER]: {
         status: 200,
+        // The flat `pending_*` mirrors without the discriminated union. The
+        // bundle ships inside the binary that answers this route, so this is
+        // not a version skew the surface may paper over with the mirrors: it
+        // is a payload that does not satisfy the generated contract.
         body: {
           status: 'configured',
           paused: false,
@@ -340,13 +416,23 @@ const SCENARIOS: readonly Scenario[] = [
       },
     },
     assert: async (page) => {
-      const tiles = await reviewTiles(page);
-      expectEqual(tiles['pending proposals'], '—', 'legacy null proposals tile');
-      expectEqual(tiles['pending skills'], '—', 'legacy null skills tile');
       await expectVisibleText(
         page,
-        'Awaiting-review counts are unknown, not zero.',
-        'the unknown-not-zero sentence on a legacy payload',
+        'The daemon answered with a shape this build does not understand.',
+        'the unsupported-schema sentence',
+      );
+      // No tile at all is the point: an uncontracted payload must not be
+      // mined for a number, and must not print a zero in place of one.
+      const tiles = await reviewTiles(page);
+      if ('pending proposals' in tiles || 'pending skills' in tiles) {
+        throw new Error(
+          `FALSIFIED: an uncontracted scheduler payload still rendered review tiles: ${JSON.stringify(tiles)}`,
+        );
+      }
+      await expectAbsent(
+        page,
+        'text=Awaiting-review counts are unknown',
+        'no partial scheduler panel behind an unsupported-schema state',
       );
     },
   },
