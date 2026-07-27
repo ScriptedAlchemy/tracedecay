@@ -92,13 +92,13 @@ use tokio::sync::RwLock;
 use tower::ServiceExt;
 
 use crate::application_surface::{
-    dashboard_configuration_application_router, dashboard_feedback_application_router,
-    http_application_router,
+    dashboard_configuration_application_router_with_executor,
+    dashboard_feedback_application_router_with_executor, http_application_router_with_executor,
 };
 use crate::automation::backend;
 use crate::automation::config::{self, AutomationBackend, AutomationHostMode};
 use crate::daemon::{DaemonHandshake, daemon_operation_event_authority};
-use crate::daemon_client::DaemonInvocationClient;
+use crate::daemon_client::{DaemonInvocationClient, DaemonInvocationExecutor};
 use crate::db::{Database, DatabaseEngineConnection};
 use crate::errors::{Result, TraceDecayError};
 use crate::global_db::RegisteredGlobalDb;
@@ -277,9 +277,9 @@ pub(crate) struct DashboardState {
     pub(crate) doctor_remediation_dispatcher:
         Option<doctor_remediation_api::DoctorRemediationDispatcherV1>,
     /// Active-project daemon application transport. Mutating dashboard routes
-    /// use this catalog-bound client instead of opening stores or applying
+    /// use this catalog-bound executor instead of opening stores or applying
     /// configuration inside HTTP adapters.
-    pub(crate) application_client: Option<DaemonInvocationClient>,
+    pub(crate) application_invocation_executor: Option<Arc<dyn DaemonInvocationExecutor>>,
 }
 
 /// Test-only lifetime owner for the same registered authorities retained by a
@@ -425,6 +425,7 @@ async fn build_state_inner(
     code_diagnostics_broker: Option<
         Arc<tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>>,
     >,
+    application_invocation_executor: Option<Arc<dyn DaemonInvocationExecutor>>,
 ) -> Result<DashboardState> {
     let (mem_db_path, mem_db) = resolve_project_memory_store(cg);
     let memory_owner = project_memory_owner(cg)?;
@@ -477,7 +478,7 @@ async fn build_state_inner(
         automation_writer,
         doctor_report_reader,
         doctor_remediation_dispatcher,
-        application_client: None,
+        application_invocation_executor,
     };
     // Pre-count non-usage messages in the background so the first Savings
     // tab paint doesn't pay the initial BPE pass over the session store.
@@ -505,6 +506,7 @@ pub(crate) async fn build_state(cg: &TraceDecay) -> Result<DashboardState> {
         None,
         None,
         None,
+        None,
     )
     .await
 }
@@ -523,6 +525,7 @@ pub(crate) async fn build_state_with_automation_reconciler(
     code_diagnostics_broker: Option<
         Arc<tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>>,
     >,
+    application_invocation_executor: Option<Arc<dyn DaemonInvocationExecutor>>,
 ) -> Result<DashboardState> {
     build_state_inner(
         cg.as_ref(),
@@ -538,6 +541,7 @@ pub(crate) async fn build_state_with_automation_reconciler(
         code_index_freshness_reader,
         feedback_status_reader,
         code_diagnostics_broker,
+        application_invocation_executor,
     )
     .await
 }
@@ -567,6 +571,7 @@ pub(crate) async fn build_selected_project_state(
         active.code_index_freshness_reader.clone(),
         active.feedback_status_reader.clone(),
         None,
+        active.application_invocation_executor.clone(),
     )
     .await
 }
@@ -704,6 +709,7 @@ where
         None,
         None,
         None,
+        None,
     )
     .await?;
     let app = router(cg, state).await?;
@@ -771,18 +777,26 @@ struct ActiveProjectApplicationRoutes {
     http_router: Router,
     dashboard_configuration_router: Router,
     dashboard_feedback_router: Router,
-    client: Option<DaemonInvocationClient>,
+    executor: Option<Arc<dyn DaemonInvocationExecutor>>,
 }
 
 impl ActiveProjectApplicationRoutes {
-    fn for_active_project(cg: &TraceDecay) -> Result<Self> {
-        let handshake = DaemonHandshake::for_current_client(
-            Some(cg.project_root().to_path_buf()),
-            None,
-            false,
-            false,
-        )?;
-        let client = DaemonInvocationClient::for_current(handshake)?;
+    fn for_active_project(
+        cg: &TraceDecay,
+        executor: Option<Arc<dyn DaemonInvocationExecutor>>,
+    ) -> Result<Self> {
+        let executor = match executor {
+            Some(executor) => executor,
+            None => {
+                let handshake = DaemonHandshake::for_current_client(
+                    Some(cg.project_root().to_path_buf()),
+                    None,
+                    false,
+                    false,
+                )?;
+                Arc::new(DaemonInvocationClient::for_current(handshake)?)
+            }
+        };
         let active_project_id = match project_memory_owner(cg)? {
             FactOwnerV1::Project { project_id } => project_id,
             FactOwnerV1::Profile => {
@@ -791,8 +805,8 @@ impl ActiveProjectApplicationRoutes {
                 ));
             }
         };
-        let http_router = http_application_router(
-            client.clone(),
+        let http_router = http_application_router_with_executor(
+            Arc::clone(&executor),
             daemon_operation_event_authority(),
             active_project_id,
         )
@@ -800,20 +814,21 @@ impl ActiveProjectApplicationRoutes {
             message: format!("could not mount application HTTP routes: {error}"),
         })?;
         let dashboard_configuration_router =
-            dashboard_configuration_application_router(client.clone()).map_err(|error| {
-                TraceDecayError::Config {
+            dashboard_configuration_application_router_with_executor(Arc::clone(&executor))
+                .map_err(|error| TraceDecayError::Config {
                     message: format!("could not mount dashboard configuration routes: {error}"),
-                }
-            })?;
-        let dashboard_feedback_router = dashboard_feedback_application_router(client.clone())
-            .map_err(|error| TraceDecayError::Config {
-                message: format!("could not mount dashboard feedback routes: {error}"),
-            })?;
+                })?;
+        let dashboard_feedback_router = dashboard_feedback_application_router_with_executor(
+            Arc::clone(&executor),
+        )
+        .map_err(|error| TraceDecayError::Config {
+            message: format!("could not mount dashboard feedback routes: {error}"),
+        })?;
         Ok(Self {
             http_router,
             dashboard_configuration_router,
             dashboard_feedback_router,
-            client: Some(client),
+            executor: Some(executor),
         })
     }
 }
@@ -845,9 +860,12 @@ pub(crate) async fn router(cg: &TraceDecay, mut state: DashboardState) -> Result
     // whole server before it binds. Degrade gracefully instead — serve the core
     // dashboard and skip the `/api/application` surface, mirroring the
     // best-effort derived-memory repair above.
-    let application = match ActiveProjectApplicationRoutes::for_active_project(cg) {
+    let application = match ActiveProjectApplicationRoutes::for_active_project(
+        cg,
+        state.application_invocation_executor.clone(),
+    ) {
         Ok(application) => {
-            state.application_client = application.client.clone();
+            state.application_invocation_executor = application.executor.clone();
             Some(application)
         }
         Err(error) => {
@@ -1258,7 +1276,10 @@ async fn project_scoped_api_gateway(
             )
                 .into_response();
         };
-        let application = match ActiveProjectApplicationRoutes::for_active_project(project_graph) {
+        let application = match ActiveProjectApplicationRoutes::for_active_project(
+            project_graph,
+            selected.state.application_invocation_executor.clone(),
+        ) {
             Ok(application) => application,
             Err(err) => {
                 return (
@@ -1520,6 +1541,7 @@ mod authority_tests {
             None,
             None,
             Some(diagnostic_broker),
+            None,
         )
         .await
         .expect("dashboard state");
@@ -1664,7 +1686,7 @@ mod authority_tests {
                 .route("/probe", get(|| async { StatusCode::ACCEPTED })),
             dashboard_feedback_router: Router::new()
                 .route("/probe", get(|| async { StatusCode::OK })),
-            client: None,
+            executor: None,
         };
         let app = router_with_active_application(state, Some(application));
 

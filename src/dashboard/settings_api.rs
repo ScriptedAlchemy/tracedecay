@@ -286,9 +286,9 @@ pub(crate) async fn patch_project_settings(
     )
     .map_err(project_preview_error)?;
     if preview.changed {
-        let client = state
-            .application_client
-            .as_ref()
+        let executor = state
+            .application_invocation_executor
+            .as_deref()
             .ok_or_else(|| configuration_unavailable(&"application transport is unavailable"))?;
         let DirectConfigurationMutation::Batch { mutations } = preview.mutation else {
             return Err(configuration_unavailable(
@@ -311,7 +311,7 @@ pub(crate) async fn patch_project_settings(
                 },
             )),
             RequestedOutputFormat::Json,
-            Some(client),
+            Some(executor),
         )
         .await
         .map_err(|error| configuration_unavailable(&error))?;

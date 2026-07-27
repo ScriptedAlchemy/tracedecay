@@ -469,6 +469,8 @@ pub struct ToolCallRegistryOptions<'a> {
         Option<Arc<tokio::sync::Mutex<crate::diagnostics::lsp::broker::DiagnosticBroker>>>,
     pub application_invocation_executor:
         Option<&'a dyn crate::daemon_client::DaemonInvocationExecutor>,
+    pub dashboard_application_invocation_executor:
+        Option<Arc<dyn crate::daemon_client::DaemonInvocationExecutor>>,
     pub application_request_id: Option<tracedecay_application::RequestId>,
     pub application_deadline: Option<tracedecay_application::Deadline>,
     pub application_cancellation: Option<tracedecay_application::CancellationSignal>,
@@ -503,6 +505,7 @@ impl Default for ToolCallRegistryOptions<'_> {
             diagnostics_cache: None,
             diagnostics_lsp: None,
             application_invocation_executor: None,
+            dashboard_application_invocation_executor: None,
             application_request_id: None,
             application_deadline: None,
             application_cancellation: None,
@@ -1507,6 +1510,7 @@ async fn dispatch_session_workflow_tools(
                 options.code_index_freshness_reader.clone(),
                 options.feedback_status_reader.clone(),
                 options.diagnostics_lsp.clone(),
+                options.dashboard_application_invocation_executor.clone(),
             )
             .await
         }
