@@ -239,7 +239,29 @@ pub(crate) async fn connect_to_daemon_connection_within(
         Some(deadline) => deadline.remaining()?.min(DAEMON_RESTART_GRACE),
         None => DAEMON_RESTART_GRACE,
     };
-    connect_with_restart_grace(connection, grace, DAEMON_RESTART_POLL_INTERVAL).await
+    let (_, stream) = connect_with_restart_grace_resolving(
+        || Ok(connection.clone()),
+        grace,
+        DAEMON_RESTART_POLL_INTERVAL,
+    )
+    .await?;
+    Ok(stream)
+}
+
+pub(crate) async fn connect_to_current_daemon_within(
+    socket_path: &Path,
+    client_deadline: Option<DaemonClientDeadline>,
+) -> Result<(DaemonConnection, BrokerStream)> {
+    let grace = match client_deadline {
+        Some(deadline) => deadline.remaining()?.min(DAEMON_RESTART_GRACE),
+        None => DAEMON_RESTART_GRACE,
+    };
+    connect_with_restart_grace_resolving(
+        || client_connection(socket_path),
+        grace,
+        DAEMON_RESTART_POLL_INTERVAL,
+    )
+    .await
 }
 
 /// Connects to the daemon socket, tolerating a short restart outage.
@@ -251,10 +273,24 @@ pub(crate) async fn connect_with_restart_grace(
     grace: Duration,
     poll_interval: Duration,
 ) -> Result<BrokerStream> {
+    let (_, stream) =
+        connect_with_restart_grace_resolving(|| Ok(connection.clone()), grace, poll_interval)
+            .await?;
+    Ok(stream)
+}
+
+/// Resolves endpoint authority on every retry because a daemon restart rotates
+/// both its authority epoch and authentication token.
+async fn connect_with_restart_grace_resolving(
+    mut resolve: impl FnMut() -> Result<DaemonConnection>,
+    grace: Duration,
+    poll_interval: Duration,
+) -> Result<(DaemonConnection, BrokerStream)> {
     let deadline = Instant::now() + grace;
     loop {
+        let connection = resolve()?;
         match BrokerStream::connect(&connection.endpoint).await {
-            Ok(stream) => return Ok(stream),
+            Ok(stream) => return Ok((connection, stream)),
             Err(TraceDecayError::Io(err)) => {
                 if !is_transient_daemon_connect_error(err.kind()) || Instant::now() >= deadline {
                     return Err(TraceDecayError::Config {
@@ -279,16 +315,15 @@ pub(crate) async fn call_tool_with_liveness_poll(
     liveness_poll_interval: Duration,
     client_deadline: Option<DaemonClientDeadline>,
 ) -> Result<serde_json::Value> {
-    let connection = client_connection(socket_path)?;
-    let stream = match client_deadline {
+    let (connection, stream) = match client_deadline {
         Some(deadline) => {
             deadline
                 .run("connect", tool_name, async {
-                    connect_to_daemon_connection_within(&connection, Some(deadline)).await
+                    connect_to_current_daemon_within(socket_path, Some(deadline)).await
                 })
                 .await?
         }
-        None => connect_to_daemon_connection(&connection).await?,
+        None => connect_to_current_daemon_within(socket_path, None).await?,
     };
     let (reader, mut writer) = stream.into_split();
     let id = json!(1);
