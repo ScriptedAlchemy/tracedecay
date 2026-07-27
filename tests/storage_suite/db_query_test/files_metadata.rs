@@ -1,6 +1,8 @@
 //! File records, metadata keys, and test-annotation query tests (split from
 //! `db_query_test.rs`).
 
+use std::collections::HashMap;
+
 use super::*;
 
 #[tokio::test]
@@ -34,6 +36,96 @@ async fn test_get_all_file_paths_reads_only_logical_paths() {
         .expect("get_all_file_paths failed");
 
     assert_eq!(paths, vec!["src/a.rs", "src/b.rs"]);
+}
+
+#[tokio::test]
+async fn test_get_file_token_map_matches_full_file_materialization() {
+    let db = setup_db().await;
+    // More than one keyset page (FILE_TOKEN_MAP_PAGE_SIZE = 1024).
+    let count = 1_041;
+    let files: Vec<FileRecord> = (0..count)
+        .map(|i| {
+            let mut file = sample_file(&format!("src/f{i:04}.rs"));
+            file.size = ((i as u64) + 1) * 40;
+            file.content_hash = format!("hash-{i}");
+            file
+        })
+        .collect();
+    db.upsert_files(&files)
+        .await
+        .expect("upsert_files failed");
+
+    let expected: HashMap<String, u64> = db
+        .get_all_files()
+        .await
+        .expect("get_all_files failed")
+        .into_iter()
+        .map(|f| (f.path, f.size / 4))
+        .collect();
+    let actual = db
+        .get_file_token_map()
+        .await
+        .expect("get_file_token_map failed");
+
+    assert_eq!(actual.len(), count);
+    assert_eq!(actual, expected);
+}
+
+#[tokio::test]
+async fn test_get_file_token_sizes_page_stays_within_limit() {
+    let db = setup_db().await;
+    let files: Vec<FileRecord> = (0..5)
+        .map(|i| {
+            let mut file = sample_file(&format!("src/f{i:04}.rs"));
+            file.size = ((i as u64) + 1) * 40;
+            file
+        })
+        .collect();
+    db.upsert_files(&files)
+        .await
+        .expect("upsert_files failed");
+
+    let page_limit = 2;
+    let mut after: Option<String> = None;
+    let mut seen = Vec::new();
+    let mut max_page_len = 0usize;
+    let mut pages = 0usize;
+    loop {
+        let page = db
+            .get_file_token_sizes_page(after.as_deref(), page_limit)
+            .await
+            .expect("get_file_token_sizes_page failed");
+        pages += 1;
+        max_page_len = max_page_len.max(page.len());
+        assert!(
+            page.len() <= page_limit,
+            "page exceeded bound: got {} > {}",
+            page.len(),
+            page_limit
+        );
+        if page.is_empty() {
+            break;
+        }
+        let page_len = page.len();
+        after = page.last().map(|(path, _)| path.clone());
+        seen.extend(page.into_iter().map(|(path, _)| path));
+        if page_len < page_limit {
+            break;
+        }
+    }
+
+    assert_eq!(pages, 3);
+    assert_eq!(max_page_len, page_limit);
+    assert_eq!(
+        seen,
+        vec![
+            "src/f0000.rs",
+            "src/f0001.rs",
+            "src/f0002.rs",
+            "src/f0003.rs",
+            "src/f0004.rs",
+        ]
+    );
 }
 
 #[tokio::test]
