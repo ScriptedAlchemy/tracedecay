@@ -100,6 +100,7 @@ impl UserProviderUnit<'_> {
             self.roots.to_vec(),
             self.facade,
             Some(self.max_new_bytes),
+            self.cancellation,
         )
         .await
         {
@@ -125,6 +126,7 @@ impl UserProviderUnit<'_> {
             self.facade,
             self.roots,
             Some(self.max_new_bytes),
+            self.cancellation,
         )
         .await;
         ProviderRunOutcome::bounded(

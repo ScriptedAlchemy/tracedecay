@@ -10,10 +10,14 @@ use tracedecay_domain::{
 use tracedecay_store::observation::ObservationCoverageReason;
 
 use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+use crate::application::observation::ObservationCancellation;
 use crate::privacy::{MAX_OBSERVATION_RECORD_BYTES, parse_normalized_observation_record_v1};
 use crate::sessions::shared::StoredCursor;
 
-use super::coverage::{admit_rows_with_admission, drain_hermes_projections_with_admission};
+use super::coverage::{
+    admit_rows_with_admission, admit_rows_with_admission_and_cancellation,
+    drain_hermes_projections_with_admission,
+};
 use super::*;
 
 static HERMES_UNIT_FIXTURE_OWNED_STORE_READY: tokio::sync::OnceCell<()> =
@@ -117,6 +121,38 @@ fn canonical(row: &HermesRow, start: u64) -> CanonicalObservationEnvelopeV1 {
     )
     .unwrap();
     serde_json::from_value(parsed.value().clone()).unwrap()
+}
+
+#[tokio::test]
+async fn cancelled_hermes_admission_stops_before_the_next_transactional_row() {
+    let profile = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let project_id = tracedecay_domain::ProjectId::new("project.hermes-cancelled-startup").unwrap();
+    let runtime =
+        HostAdmissionTestRuntimeV1::project(profile.path(), project.path(), project_id.clone())
+            .await
+            .unwrap();
+    let facade = runtime.facade();
+    let cancellation = ObservationCancellation::default();
+    cancellation.cancel();
+
+    let stats = admit_rows_with_admission_and_cancellation(
+        &facade,
+        &[fixture(1)],
+        ObservationScopeV1::Project { project_id },
+        ObservationSourceGenerationV1::new(1).unwrap(),
+        1,
+        1,
+        |_| panic!("cancelled Hermes admission must not route a row"),
+        &cancellation,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        stats,
+        crate::sessions::shared::TranscriptIngestStats::default()
+    );
 }
 
 #[test]

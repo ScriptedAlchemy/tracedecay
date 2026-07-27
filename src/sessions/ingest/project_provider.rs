@@ -78,12 +78,13 @@ impl<'a> ProjectProviderRun<'a> {
                 deferred = true;
                 break;
             }
-            match codex::try_admit_codex_jsonl_observations_for_project_with_admission(
+            match codex::try_admit_codex_jsonl_observations_for_project_with_admission_and_cancellation(
                 &path,
                 self.project_root,
                 self.project_id.clone(),
                 self.facade,
                 Some(remaining),
+                self.cancellation,
             )
             .await
             {
@@ -212,12 +213,13 @@ impl<'a> ProjectProviderRun<'a> {
     async fn run_cursor(self) -> ProviderRunOutcome {
         let composer = if let Some(source) = cursor_composer::CursorComposerSource::new() {
             source
-                .ingest_capped(
+                .ingest_capped_with_cancellation(
                     self.facade,
                     self.project_root,
                     self.project_id.clone(),
                     cursor_composer::DEFAULT_COMPOSER_ENVELOPE_CAP,
                     Some(self.max_new_bytes),
+                    self.cancellation,
                 )
                 .await
         } else {
@@ -231,6 +233,9 @@ impl<'a> ProjectProviderRun<'a> {
             composer.bytes_consumed,
             composer.deferred_by_byte_cap,
         );
+        if self.cancellation.is_cancelled() {
+            return outcome;
+        }
         let remaining = self.max_new_bytes.saturating_sub(composer.bytes_consumed);
         match cursor::try_ingest_cursor_project_sweep_capped_with_admission(
             self.project_root,
@@ -238,6 +243,7 @@ impl<'a> ProjectProviderRun<'a> {
             self.facade,
             Some(remaining),
             composer.owned_session_ids,
+            self.cancellation,
         )
         .await
         {
@@ -263,11 +269,12 @@ impl<'a> ProjectProviderRun<'a> {
     }
 
     async fn run_hermes(self) -> ProviderRunOutcome {
-        let outcome = hermes::ingest_for_project_capped_with_admission(
+        let outcome = hermes::ingest_for_project_capped_with_admission_and_cancellation(
             self.project_root,
             self.project_id.clone(),
             self.facade,
             Some(self.max_new_bytes),
+            self.cancellation,
         )
         .await;
         ProviderRunOutcome::bounded(

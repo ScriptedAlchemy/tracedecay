@@ -590,10 +590,7 @@ impl McpServer {
             let _ = task.await;
             self.startup_catch_up_done.store(true, Ordering::Release);
         }
-        self.startup_transcript_ingest_cancellation.cancel();
-        if let Some(task) = self.startup_transcript_ingest_task.lock().await.take() {
-            let _ = task.await;
-        }
+        self.shutdown_startup_transcript_ingest().await;
     }
 
     pub(crate) async fn replay_host_admission(

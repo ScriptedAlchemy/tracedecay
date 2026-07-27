@@ -37,6 +37,7 @@ pub(crate) struct JsonlObservationAdmissionRequest<'request, 'authority> {
     retention_class: RetentionClass,
     max_new_bytes: Option<u64>,
     persisted_cursor_update: PersistedCursorUpdate,
+    cancellation: ObservationCancellation,
 }
 
 impl<'request, 'authority> JsonlObservationAdmissionRequest<'request, 'authority> {
@@ -57,6 +58,7 @@ impl<'request, 'authority> JsonlObservationAdmissionRequest<'request, 'authority
             retention_class,
             max_new_bytes: None,
             persisted_cursor_update: PersistedCursorUpdate::Monotonic,
+            cancellation: ObservationCancellation::default(),
         }
     }
 
@@ -70,6 +72,11 @@ impl<'request, 'authority> JsonlObservationAdmissionRequest<'request, 'authority
         persisted_cursor_update: PersistedCursorUpdate,
     ) -> Self {
         self.persisted_cursor_update = persisted_cursor_update;
+        self
+    }
+
+    pub(crate) fn with_cancellation(mut self, cancellation: ObservationCancellation) -> Self {
+        self.cancellation = cancellation;
         self
     }
 }
@@ -147,6 +154,7 @@ struct ActiveAdmission<'request, 'authority> {
     scope: ObservationScopeV1,
     generation: ObservationSourceGenerationV1,
     file_identity: u64,
+    cancellation: ObservationCancellation,
 }
 
 impl ActiveAdmission<'_, '_> {
@@ -202,7 +210,7 @@ impl ActiveAdmission<'_, '_> {
         })?
         .with_resume_checkpoint(self.file_identity, checkpoint.resume_fingerprint);
         self.admission
-            .advance_non_durable_source_cursor(advance, ObservationCancellation::default())
+            .advance_non_durable_source_cursor(advance, self.cancellation.clone())
             .await
             .map_err(|outcome| TranscriptIngestError::NonDurableRecord {
                 provider: self.provider,
@@ -237,7 +245,7 @@ impl ActiveAdmission<'_, '_> {
             identity,
             expected_cursor.clone(),
             retention_class.clone(),
-            ObservationCancellation::default(),
+            self.cancellation.clone(),
         )
         .map_err(|_| TranscriptIngestError::InvalidFrameState {
             provider: self.provider,
@@ -333,7 +341,14 @@ pub(crate) async fn admit_jsonl_observations<State>(
         retention_class,
         max_new_bytes,
         persisted_cursor_update,
+        cancellation,
     } = request;
+    if cancellation.is_cancelled() {
+        return Ok(JsonlObservationAdmissionProgress {
+            bytes_consumed: 0,
+            source_deferred: true,
+        });
+    }
     let mut expected_cursor = admission
         .get_source_cursor(&source, &scope)
         .await
@@ -360,10 +375,14 @@ pub(crate) async fn admit_jsonl_observations<State>(
         MAX_JSONL_RECORD_BYTES,
         resume_state,
     )?;
-    let progress = JsonlObservationAdmissionProgress {
+    let mut progress = JsonlObservationAdmissionProgress {
         bytes_consumed: raw.read_through.saturating_sub(raw.start_offset),
         source_deferred: raw.deferred.is_some(),
     };
+    if cancellation.is_cancelled() {
+        progress.source_deferred = true;
+        return Ok(progress);
+    }
     let generation = ObservationSourceGenerationV1::new(raw.new_cursor.file_id)?;
     let mut state = initialize(JsonlObservationScan {
         resumed: had_expected_cursor && raw.start_offset > 0,
@@ -379,14 +398,23 @@ pub(crate) async fn admit_jsonl_observations<State>(
         scope,
         generation,
         file_identity: raw.file_identity,
+        cancellation,
     };
     let mut skipped = raw.skipped.into_iter().peekable();
 
     for frame in raw.frames {
+        if active.cancellation.is_cancelled() {
+            progress.source_deferred = true;
+            break;
+        }
         while skipped
             .peek()
             .is_some_and(|skipped| skipped.offset < frame.offset)
         {
+            if active.cancellation.is_cancelled() {
+                progress.source_deferred = true;
+                break;
+            }
             let skipped = skipped
                 .next()
                 .ok_or(TranscriptIngestError::InvalidFrameState { provider })?;
@@ -402,6 +430,10 @@ pub(crate) async fn admit_jsonl_observations<State>(
                     None,
                 )
                 .await?;
+        }
+        if active.cancellation.is_cancelled() {
+            progress.source_deferred = true;
+            break;
         }
 
         let range =
@@ -436,19 +468,21 @@ pub(crate) async fn admit_jsonl_observations<State>(
             .await?;
     }
 
-    for skipped in skipped {
-        active
-            .advance_coverage(
-                &mut expected_cursor,
-                JsonlCheckpoint::new(
-                    skipped.offset,
-                    skipped.end_offset,
-                    skipped.resume_fingerprint,
-                ),
-                skipped_reason(skipped.reason),
-                None,
-            )
-            .await?;
+    if !active.cancellation.is_cancelled() {
+        for skipped in skipped {
+            active
+                .advance_coverage(
+                    &mut expected_cursor,
+                    JsonlCheckpoint::new(
+                        skipped.offset,
+                        skipped.end_offset,
+                        skipped.resume_fingerprint,
+                    ),
+                    skipped_reason(skipped.reason),
+                    None,
+                )
+                .await?;
+        }
     }
     Ok(progress)
 }

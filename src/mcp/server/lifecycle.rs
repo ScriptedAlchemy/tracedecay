@@ -5,6 +5,19 @@ use super::*;
 
 /// Cache duration for version checks (15 minutes).
 const VERSION_CHECK_INTERVAL: Duration = Duration::from_mins(15);
+const STARTUP_TRANSCRIPT_INGEST_ABORT_DEADLINE: Duration = Duration::from_secs(2);
+
+async fn join_or_abort_startup_ingest(
+    mut task: tokio::task::JoinHandle<()>,
+    deadline: Duration,
+) -> bool {
+    if tokio::time::timeout(deadline, &mut task).await.is_ok() {
+        return true;
+    }
+    task.abort();
+    let _ = task.await;
+    false
+}
 
 /// Cached result of a latest-version check against GitHub releases.
 pub(crate) struct VersionCheckState {
@@ -91,6 +104,7 @@ pub(super) async fn run_startup_session_catch_up(
                 user_registered.as_ref(),
                 registry_db.as_ref(),
                 profile_root,
+                cancellation,
             )
             .await;
             for failure in &outcome.failures {
@@ -139,6 +153,23 @@ async fn run_startup_session_catch_up_with_home(
 }
 
 impl McpServer {
+    pub(crate) fn cancel_startup_transcript_ingest(&self) {
+        self.startup_transcript_ingest_cancellation.cancel();
+    }
+
+    pub(super) async fn shutdown_startup_transcript_ingest(&self) {
+        self.cancel_startup_transcript_ingest();
+        if let Some(task) = self.startup_transcript_ingest_task.lock().await.take() {
+            if !join_or_abort_startup_ingest(task, STARTUP_TRANSCRIPT_INGEST_ABORT_DEADLINE).await {
+                tracing::warn!(
+                    deadline_secs = STARTUP_TRANSCRIPT_INGEST_ABORT_DEADLINE.as_secs(),
+                    "startup transcript ingest shutdown backstop aborted and joined the task"
+                );
+            }
+        }
+        self.transcript_ingest_done.store(true, Ordering::Release);
+    }
+
     /// Detects mid-session branch drift and reopens the served instance
     /// onto the live branch's DB, returning the instance the caller should
     /// use for this request.
@@ -655,5 +686,44 @@ impl McpServer {
         } else {
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+
+    use super::join_or_abort_startup_ingest;
+
+    struct Dropped(Arc<AtomicBool>);
+
+    impl Drop for Dropped {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    #[tokio::test]
+    async fn startup_ingest_timeout_aborts_and_joins_instead_of_detaching() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let task_dropped = Arc::clone(&dropped);
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _dropped = Dropped(task_dropped);
+            let _ = entered_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        entered_rx.await.expect("startup ingest task entered");
+
+        assert!(
+            !join_or_abort_startup_ingest(task, Duration::from_millis(5)).await,
+            "a stuck startup ingest must use the abort backstop"
+        );
+        assert!(
+            dropped.load(Ordering::Acquire),
+            "the aborted task must be joined before shutdown continues"
+        );
     }
 }

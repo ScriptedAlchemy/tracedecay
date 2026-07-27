@@ -1,12 +1,14 @@
 use std::path::{Path, PathBuf};
 
+use crate::application::observation::ObservationCancellation;
 use crate::global_db::RegisteredGlobalDb;
 use crate::sessions::shared::TranscriptIngestStats;
 use tracedecay_domain::{BrainId, UserProfileId};
 
 use super::failure::{IngestPassCoverage, IngestPassOutcome, TranscriptCatchUpFailure};
 use super::user::{
-    ingest_user_global_sources_for_provider_with_roots, registered_project_roots_from,
+    ingest_user_global_sources_for_provider_with_roots_and_cancellation,
+    registered_project_roots_from,
 };
 
 pub(crate) struct TranscriptIngestOutcome {
@@ -105,11 +107,13 @@ pub(crate) async fn ingest_user_global_sources_for_startup_with_db(
     registered: &RegisteredGlobalDb,
     registry_db: &RegisteredGlobalDb,
     profile_root: &Path,
+    cancellation: &ObservationCancellation,
 ) -> TranscriptIngestOutcome {
     ingest_user_global_sources_for_startup_inner(
         (brain_id, profile_id, registered),
         registry_db,
         profile_root,
+        cancellation,
     )
     .await
 }
@@ -132,10 +136,23 @@ async fn ingest_user_global_sources_for_startup_inner(
     registered: (&BrainId, &UserProfileId, &RegisteredGlobalDb),
     registry_db: &RegisteredGlobalDb,
     profile_root: &Path,
+    cancellation: &ObservationCancellation,
 ) -> TranscriptIngestOutcome {
+    if cancellation.is_cancelled() {
+        return TranscriptIngestOutcome::new(
+            TranscriptIngestStats::default(),
+            vec![TranscriptCatchUpFailure::pass_cancelled()],
+        );
+    }
     let Some(mut guard) = StartupUserIngestGuard::claim(profile_root.to_path_buf()) else {
         return TranscriptIngestOutcome::new(TranscriptIngestStats::default(), Vec::new());
     };
+    if cancellation.is_cancelled() {
+        return TranscriptIngestOutcome::new(
+            TranscriptIngestStats::default(),
+            vec![TranscriptCatchUpFailure::pass_cancelled()],
+        );
+    }
     let Some(roots) = registered_project_roots_from(registry_db).await else {
         return TranscriptIngestOutcome::new(
             TranscriptIngestStats::default(),
@@ -147,14 +164,21 @@ async fn ingest_user_global_sources_for_startup_inner(
             )],
         );
     };
+    if cancellation.is_cancelled() {
+        return TranscriptIngestOutcome::new(
+            TranscriptIngestStats::default(),
+            vec![TranscriptCatchUpFailure::pass_cancelled()],
+        );
+    }
     let (brain_id, profile_id, registered) = registered;
-    let outcome = ingest_user_global_sources_for_provider_with_roots(
+    let outcome = ingest_user_global_sources_for_provider_with_roots_and_cancellation(
         brain_id,
         profile_id,
         registered,
         profile_root,
         None,
         roots,
+        cancellation,
     )
     .await;
     if !outcome.is_success() {

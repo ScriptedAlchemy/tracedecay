@@ -8,12 +8,15 @@ use rayon::prelude::*;
 use tracedecay_domain::{ObservationScopeV1, ObservationSourceGenerationV1, ProjectId};
 
 use crate::application::host_admission::HostAdmissionFacade;
+use crate::application::observation::ObservationCancellation;
 use crate::sessions::ingest_byte_budget::IngestByteBudget;
 use crate::sessions::shared::{
     ProjectRootMatcher, SqliteReadConn, StoredCursor, TranscriptIngestStats,
 };
 
-use super::coverage::{admit_rows_with_admission, sqlite_incarnation};
+use super::coverage::{
+    admit_rows_with_admission, admit_rows_with_admission_and_cancellation, sqlite_incarnation,
+};
 use super::ingest::{HermesProfileSource, ProjectIngestDestination};
 use super::observation::{HermesProjectionMetadata, project_projection_metadata};
 use super::routing::{
@@ -370,6 +373,7 @@ async fn ingest_bounded_pages<F, R>(
     resume_fingerprint: u64,
     budget: &mut IngestByteBudget,
     mut route_page: F,
+    cancellation: &ObservationCancellation,
 ) -> Result<TranscriptIngestStats, String>
 where
     F: FnMut(&[HermesRow]) -> R,
@@ -378,6 +382,9 @@ where
     let mut read_cursor = StoredCursor::default();
     let mut stats = TranscriptIngestStats::default();
     loop {
+        if cancellation.is_cancelled() {
+            return Ok(stats);
+        }
         let new = read_new_rows_strict(conn, select_sql, read_cursor).await?;
         let row_count = new.items.len();
         if row_count == 0 {
@@ -393,7 +400,7 @@ where
         }
         let bounded = &new.items[..bounded_count];
         let route = route_page(bounded);
-        let admitted = admit_rows_with_admission(
+        let admitted = admit_rows_with_admission_and_cancellation(
             admission,
             bounded,
             scope.clone(),
@@ -401,6 +408,7 @@ where
             file_identity,
             resume_fingerprint,
             route,
+            cancellation,
         )
         .await?;
         stats.messages_upserted = stats
@@ -431,7 +439,11 @@ pub(crate) async fn try_ingest_state_db_bounded_with_admission(
     project_id: ProjectId,
     admission: &HostAdmissionFacade<'_>,
     budget: &mut IngestByteBudget,
+    cancellation: &ObservationCancellation,
 ) -> Result<TranscriptIngestStats, String> {
+    if cancellation.is_cancelled() {
+        return Ok(TranscriptIngestStats::default());
+    }
     let (conn, generation, file_identity, resume_fingerprint, select_sql) =
         open_state_source(source).await?;
     let scope = ObservationScopeV1::Project { project_id };
@@ -452,6 +464,7 @@ pub(crate) async fn try_ingest_state_db_bounded_with_admission(
                 })
             }
         },
+        cancellation,
     )
     .await
 }
@@ -553,7 +566,11 @@ pub(crate) async fn try_ingest_user_state_db_bounded_with_admission(
     source: &HermesProfileSource,
     _registered_roots: &[PathBuf],
     budget: &mut IngestByteBudget,
+    cancellation: &ObservationCancellation,
 ) -> Result<TranscriptIngestStats, String> {
+    if cancellation.is_cancelled() {
+        return Ok(TranscriptIngestStats::default());
+    }
     let (conn, generation, file_identity, resume_fingerprint, select_sql) =
         open_state_source(source).await?;
     ingest_bounded_pages(
@@ -583,6 +600,7 @@ pub(crate) async fn try_ingest_user_state_db_bounded_with_admission(
                     })
             }
         },
+        cancellation,
     )
     .await
 }
