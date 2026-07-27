@@ -25,7 +25,7 @@
  * the turn but not its body (offloaded or dropped by retention). That is said
  * outright rather than rendered as a blank line.
  */
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
 import {
   LcmSessionPayloadSchema,
@@ -54,6 +54,18 @@ export function SessionInspector({
 }) {
   const [offset, setOffset] = useState(0);
   const [order, setOrder] = useState<'asc' | 'desc'>('asc');
+  /**
+   * The page a reader asked for, held until it arrives on screen.
+   *
+   * It lives up here because the transcript below does not survive the trip: a
+   * new `limit`/`offset` is a new query, so `LegacyBoundary` swings to its
+   * loading state and unmounts the whole page of rows — including the control
+   * that was just activated. Focus goes to the document, and a keyboard user is
+   * returned to the top of the app with no indication that anything moved. A
+   * flag inside the unmounted subtree would be reinitialised by the remount and
+   * could not repair it.
+   */
+  const [pagedTo, setPagedTo] = useState<number | null>(null);
   const session = useLegacy(
     ['lcm', 'session', sessionId, offset, order],
     `/api/plugins/hermes-lcm/session/${encodeURIComponent(sessionId)}?limit=${PAGE_SIZE}&offset=${offset}&order=${order}`,
@@ -78,8 +90,14 @@ export function SessionInspector({
                 onOrderChange={(next) => {
                   setOrder(next);
                   setOffset(0);
+                  setPagedTo(0);
                 }}
-                onOffsetChange={setOffset}
+                onOffsetChange={(next) => {
+                  setOffset(next);
+                  setPagedTo(next);
+                }}
+                pagedTo={pagedTo}
+                onArrived={() => setPagedTo(null)}
               />
             )
           }
@@ -94,11 +112,15 @@ function SessionBody({
   order,
   onOrderChange,
   onOffsetChange,
+  pagedTo,
+  onArrived,
 }: {
   payload: LcmSessionPayloadV1;
   order: 'asc' | 'desc';
   onOrderChange: (order: 'asc' | 'desc') => void;
   onOffsetChange: (offset: number) => void;
+  pagedTo: number | null;
+  onArrived: () => void;
 }) {
   return (
     <div className="flex flex-col gap-4">
@@ -109,6 +131,8 @@ function SessionBody({
         order={order}
         onOrderChange={onOrderChange}
         onOffsetChange={onOffsetChange}
+        pagedTo={pagedTo}
+        onArrived={onArrived}
       />
       <p className="td-value break-all text-3xs text-text-muted" title={payload.path}>
         {payload.storage_scope} · {payload.path}
@@ -196,7 +220,16 @@ function CompactionBoundaries({ payload }: { payload: LcmSessionPayloadV1 }) {
           }
         />
       ) : (
-        <ol className="flex max-h-64 flex-col overflow-auto border border-edge-subtle">
+        // Scrollable regions need keyboard operation (WCAG 2.1.1). Every row
+        // here is read-out — there is nothing inside to tab to — so the list
+        // itself takes the tab stop, and it is named because a tab stop that
+        // announces nothing tells a keyboard user only that they have arrived
+        // somewhere.
+        <ol
+          tabIndex={0}
+          aria-label="Compaction boundaries"
+          className="flex max-h-64 flex-col overflow-auto border border-edge-subtle"
+        >
           {nodes.map((node) => (
             <SummaryNodeRow key={node.node_id} node={node} />
           ))}
@@ -249,15 +282,38 @@ function RawMessages({
   order,
   onOrderChange,
   onOffsetChange,
+  pagedTo,
+  onArrived,
 }: {
   payload: LcmSessionPayloadV1;
   order: 'asc' | 'desc';
   onOrderChange: (order: 'asc' | 'desc') => void;
   onOffsetChange: (offset: number) => void;
+  pagedTo: number | null;
+  onArrived: () => void;
 }) {
   const { messages, offset, limit } = payload;
   const first = messages.length === 0 ? 0 : offset + 1;
   const last = offset + messages.length;
+  const range = useRef<HTMLParagraphElement>(null);
+
+  /**
+   * The requested page is on screen, so put focus back if paging lost it.
+   *
+   * Focus lands on the range line rather than the first row, because the range
+   * line is the answer to the question a reader who just paged is holding —
+   * which page am I on now — and it is the one element here that renders in
+   * every state, including a page past the end of the transcript.
+   *
+   * Only when focus was actually orphaned. A reader who paged with the mouse
+   * and is now looking somewhere else keeps what they had.
+   */
+  useEffect(() => {
+    if (pagedTo === null || pagedTo !== offset) return;
+    onArrived();
+    if (document.activeElement === document.body) range.current?.focus();
+  }, [pagedTo, offset, onArrived]);
+
   return (
     <div className="flex flex-col gap-1.5">
       <Legend
@@ -266,7 +322,10 @@ function RawMessages({
             type="button"
             className="shrink-0 border border-edge-subtle bg-surface-2 px-1.5 py-0.5 text-3xs text-text-secondary hover:text-text-primary"
             onClick={() => onOrderChange(order === 'asc' ? 'desc' : 'asc')}
-            aria-label={`Order transcript ${order === 'asc' ? 'newest first' : 'oldest first'}`}
+            // The order itself leads, because it is this control's visible
+            // label: an accessible name that omits the visible text leaves a
+            // speech-control user with nothing they can say (WCAG 2.5.3).
+            aria-label={`Order ${payload.order} — switch to ${order === 'asc' ? 'newest first' : 'oldest first'}`}
           >
             {payload.order}
           </button>
@@ -277,8 +336,17 @@ function RawMessages({
 
       {/* Loaded range, whole-session total, ordering, and whether another page
         * exists — all four, because any one of them alone lets a page read as
-        * the transcript. */}
-      <p className="text-3xs text-text-muted tabular">
+        * the transcript.
+        *
+        * A status region, so paging announces where the reader now is instead
+        * of silently replacing the rows under them; `tabIndex={-1}` so the
+        * focus repair above can land here without adding a tab stop. */}
+      <p
+        ref={range}
+        role="status"
+        tabIndex={-1}
+        className="text-3xs text-text-muted tabular"
+      >
         {first}–{last} of {payload.counts.message_count.toLocaleString()} · {payload.order} order ·
         page size {limit}
         {payload.has_more_messages ? ' · more pages follow' : ' · last page'}
@@ -294,7 +362,13 @@ function RawMessages({
           }
         />
       ) : (
-        <ol className="flex max-h-96 flex-col overflow-auto border border-edge-subtle">
+        // Keyboard-operable for the same reason as the boundary list above: the
+        // rows are read-out, so the scroll container itself is the tab stop.
+        <ol
+          tabIndex={0}
+          aria-label="Raw messages"
+          className="flex max-h-96 flex-col overflow-auto border border-edge-subtle"
+        >
           {messages.map((message) => (
             <MessageRow key={message.message_id} message={message} />
           ))}
