@@ -594,13 +594,40 @@ impl McpServer {
     pub async fn new_with_host_admission_test_runtime_for_test(
         cg: TraceDecay,
         scope_prefix: Option<String>,
-        runtime: impl Into<Arc<crate::application::host_admission::HostAdmissionTestRuntimeV1>>,
+        runtime: crate::application::host_admission::ProjectScopedTestRuntimeV1,
     ) -> Arc<Self> {
-        let runtime = runtime.into();
+        Self::new_with_retained_test_graphs_for_test(cg, scope_prefix, runtime, Vec::new()).await
+    }
+
+    /// As [`Self::new_with_host_admission_test_runtime_for_test`], plus graphs
+    /// for projects other than `cg`'s.
+    ///
+    /// Tools that name another project reach it only through the retained
+    /// resolver (see `handlers::selected_registered_project_reader`), and a
+    /// test runtime is scoped to a single project, so a cross-project fixture
+    /// has to open each additional graph through its own scoped runtime and
+    /// hand the result in here.
+    #[cfg(any(test, feature = "test-transport"))]
+    #[doc(hidden)]
+    pub async fn new_with_retained_test_graphs_for_test(
+        cg: TraceDecay,
+        scope_prefix: Option<String>,
+        runtime: crate::application::host_admission::ProjectScopedTestRuntimeV1,
+        retained_graphs: Vec<Arc<TraceDecay>>,
+    ) -> Arc<Self> {
+        let runtime = runtime.into_runtime();
         let retained_root = cg.project_root().to_path_buf();
         let profile_root = runtime.profile_root_for_test().to_path_buf();
-        let retained_graph = Arc::new(
-            runtime
+        let mut retained: Vec<(PathBuf, Arc<TraceDecay>)> = retained_graphs
+            .into_iter()
+            .map(|graph| (canonical_or_original(graph.project_root()), graph))
+            .collect();
+        // The runtime's resolver only mounts stores inside its own profile
+        // root. A runtime supplied purely as an injected registry for a graph
+        // in another profile has no graph here to retain; retaining
+        // unconditionally instead resolved a store path never created.
+        if graph_lives_under_profile(&cg, &profile_root) {
+            let active = runtime
                 .open_project_graph_for_test(
                     &retained_root,
                     crate::tracedecay::TraceDecayOpenOptions {
@@ -609,17 +636,23 @@ impl McpServer {
                     },
                 )
                 .await
-                .expect("MCP test runtime retained project graph"),
-        );
-        let retained_project_graph_resolver: RetainedProjectGraphResolver =
-            Arc::new(move |requested_root| {
-                let graph = (requested_root == retained_root).then(|| Arc::clone(&retained_graph));
+                .expect("MCP test runtime retained project graph");
+            retained.push((canonical_or_original(&retained_root), Arc::new(active)));
+        }
+        let mut context = runtime
+            .mcp_server_context_for_test(cg, scope_prefix)
+            .expect("MCP test runtime must retain exact profile and session authorities");
+        if !retained.is_empty() {
+            let resolver: RetainedProjectGraphResolver = Arc::new(move |requested_root| {
+                let requested = canonical_or_original(&requested_root);
+                let graph = retained
+                    .iter()
+                    .find(|(root, _)| *root == requested)
+                    .map(|(_, graph)| Arc::clone(graph));
                 Box::pin(async move { graph })
             });
-        let context = runtime
-            .mcp_server_context_for_test(cg, scope_prefix)
-            .expect("MCP test runtime must retain exact profile and session authorities")
-            .with_retained_project_graph_resolver(retained_project_graph_resolver);
+            context = context.with_retained_project_graph_resolver(resolver);
+        }
         Self::new_with_context(context).await
     }
 
@@ -1230,6 +1263,19 @@ impl McpServer {
 
         stats
     }
+}
+
+#[cfg(any(test, feature = "test-transport"))]
+fn canonical_or_original(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// Whether `cg`'s graph store sits inside `profile_root`, which is the only
+/// region a test runtime rooted there is allowed to mount.
+#[cfg(any(test, feature = "test-transport"))]
+fn graph_lives_under_profile(cg: &TraceDecay, profile_root: &Path) -> bool {
+    canonical_or_original(&cg.store_layout().graph_db_path)
+        .starts_with(canonical_or_original(profile_root))
 }
 
 fn json_rpc_request_id_string(id: &Value) -> Option<String> {
