@@ -409,8 +409,17 @@ async fn daemon_project_status(project_path: &Path) -> crate::errors::Result<ser
         false,
         false,
     )?;
-    let result =
-        crate::daemon::call_default_doctor_runtime(&handshake, daemon_runtime_args()).await?;
+    // Startup validation must observe the routed project's terminal open
+    // failure. The ordinary Doctor helper intentionally falls back to a cold
+    // snapshot on daemon errors, which is useful for diagnostics but would
+    // conceal a cached non-retryable warm-up failure here.
+    let result = crate::daemon::call_default_tool_within(
+        &handshake,
+        "tracedecay_runtime",
+        daemon_runtime_args(),
+        tokio::time::Instant::now() + std::time::Duration::from_secs(10),
+    )
+    .await?;
     daemon_runtime_status(&result)
 }
 

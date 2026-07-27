@@ -2609,6 +2609,38 @@ pub struct GlobalDbConfigurationControlStore<'db> {
     db: &'db RegisteredGlobalDb,
 }
 
+fn complete_snapshot_for_current_registry(
+    snapshot: &ConfigurationSnapshotV1,
+) -> Result<ConfigurationSnapshotV1, ConfigurationError> {
+    let registry = ConfigurationRegistry::core().map_err(ConfigurationError::validation)?;
+    let expected = registry
+        .definitions()
+        .map(|definition| definition.key.clone())
+        .collect::<BTreeSet<_>>();
+    if snapshot
+        .effective_values
+        .keys()
+        .any(|key| !expected.contains(key))
+    {
+        return Err(ConfigurationError::validation_message(
+            "configuration snapshot contains a setting outside the current registry",
+        ));
+    }
+    let mut effective_values = snapshot.effective_values.clone();
+    let mut provenance = snapshot.provenance.clone();
+    for definition in registry.definitions() {
+        if !effective_values.contains_key(&definition.key) {
+            effective_values.insert(definition.key.clone(), definition.default_value.clone());
+            provenance.insert(
+                definition.key.clone(),
+                vec![registry_default_candidate().map_err(ConfigurationError::validation)?],
+            );
+        }
+    }
+    ConfigurationSnapshotV1::new(effective_values, provenance)
+        .map_err(ConfigurationError::validation)
+}
+
 impl<'db> GlobalDbConfigurationControlStore<'db> {
     pub(crate) const fn new_registered(db: &'db RegisteredGlobalDb) -> Self {
         Self { db }
@@ -2631,9 +2663,11 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
                 .map_err(|_| ConfigurationError::Unavailable)?;
             let outcome = async {
                 let current = current_state_from_transaction(&transaction).await?;
+                let base_snapshot = complete_snapshot_for_current_registry(&current.snapshot)?;
+                let registry_was_completed = base_snapshot != current.snapshot;
                 let key = SettingKey::new(SOURCE_BINDINGS_SETTING_KEY)
                     .map_err(ConfigurationError::validation)?;
-                let configured = match current.snapshot.effective_values.get(&key) {
+                let configured = match base_snapshot.effective_values.get(&key) {
                     Some(ConfigurationValueV1::SourceBindings(bindings)) => bindings,
                     Some(_) => {
                         return Err(ConfigurationError::validation_message(
@@ -2653,18 +2687,28 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
                             && candidate.authority == binding.authority
                     })
                     .collect::<Vec<_>>();
-                if authority_bindings.len() == 1
-                    && authority_bindings[0].source_locator_digest
-                        == binding.source_locator_digest
-                {
-                    return Ok(current);
-                }
                 if authority_bindings.len() > 1 {
                     return Err(ConfigurationError::validation_message(
                         "daemon source binding repair found ambiguous authority",
                     ));
                 }
+                let exact_binding = authority_bindings.first().is_some_and(|candidate| {
+                    candidate.source_locator_digest == binding.source_locator_digest
+                });
+                if exact_binding && !registry_was_completed {
+                    return Ok(current);
+                }
                 let change = match authority_bindings.first() {
+                    Some(candidate)
+                        if exact_binding && candidate.binding_id == binding.binding_id =>
+                    {
+                        ProtectedChange::RebindSource(binding)
+                    }
+                    Some(_) if exact_binding => {
+                        return Err(ConfigurationError::validation_message(
+                            "daemon source binding registry repair found a non-canonical binding id",
+                        ));
+                    }
                     Some(candidate) if candidate.binding_id == binding.binding_id => {
                         ProtectedChange::RebindSource(binding)
                     }
@@ -2687,6 +2731,7 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
                 let operation_digest = canonical_sha256(&(
                     "tracedecay.configuration.daemon-source-binding-repair.v1",
                     &current.revision_id,
+                    &base_snapshot.snapshot_id,
                     &change,
                 ))
                 .map_err(ConfigurationError::validation)?;
@@ -2706,8 +2751,7 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
                     &idempotency_key,
                     &operation_digest,
                 )?;
-                let snapshot = current
-                    .snapshot
+                let snapshot = base_snapshot
                     .apply_protected_change(&change, &next_revision_id)
                     .map_err(map_protected_change_snapshot_error)?;
                 let actor_id = ActorId::new("actor.configuration-migration".to_owned())
@@ -4109,6 +4153,27 @@ mod tests {
 
     fn digest(byte: char) -> ManifestDigest {
         ManifestDigest::new(format!("sha256:{}", byte.to_string().repeat(64))).unwrap()
+    }
+
+    #[test]
+    fn forward_repair_materializes_defaults_added_after_a_stored_revision() {
+        let registry = ConfigurationRegistry::core().unwrap();
+        let current = resolve_configuration(&registry, &[]).unwrap().snapshot;
+        let missing_key = SettingKey::new(DIAGNOSTICS_PREWARM_SETTING_KEY).unwrap();
+        let mut effective_values = current.effective_values;
+        let mut provenance = current.provenance;
+        effective_values.remove(&missing_key);
+        provenance.remove(&missing_key);
+        let incomplete = ConfigurationSnapshotV1::new(effective_values, provenance).unwrap();
+        assert!(validate_snapshot_registry_completeness(&incomplete).is_err());
+
+        let repaired = complete_snapshot_for_current_registry(&incomplete).unwrap();
+
+        validate_snapshot_registry_completeness(&repaired).unwrap();
+        assert_eq!(
+            repaired.effective_values.get(&missing_key),
+            Some(&registry.definition(&missing_key).unwrap().default_value),
+        );
     }
 
     fn migration_fixture() -> (
