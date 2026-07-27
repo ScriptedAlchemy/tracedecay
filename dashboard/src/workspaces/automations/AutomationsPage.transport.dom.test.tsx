@@ -36,7 +36,10 @@ const EMPTY_COPY = [
 const FAULTS: ReadonlyArray<{ fault: HttpFault; kind: string; detail: string | null }> = [
   { fault: 'server_error', kind: 'error', detail: 'HTTP 500' },
   { fault: 'not_found', kind: 'error', detail: 'HTTP 404' },
-  { fault: 'unauthorized', kind: 'error', detail: 'HTTP 401' },
+  // The two refusals are their own states, so neither carries a status code:
+  // the chip label and its guidance already say which refusal happened.
+  { fault: 'unauthorized', kind: 'unauthorized', detail: null },
+  { fault: 'forbidden', kind: 'denied', detail: null },
   { fault: 'network_error', kind: 'offline', detail: null },
   { fault: 'malformed_body', kind: 'unsupported_schema', detail: null },
   { fault: 'unsupported_shape', kind: 'unsupported_schema', detail: null },
@@ -77,7 +80,9 @@ describe('AutomationsPage under HTTP transport faults', () => {
       renderAutomations();
 
       const jobs = await screen.findByRole('region', { name: 'Jobs' });
-      const chip = await within(jobs).findByText(/Error|Offline|Unsupported schema/);
+      const chip = await within(jobs).findByText(
+        /Error|Offline|Unauthorized|Denied|Unsupported schema/,
+      );
       const chipHost = chip.closest('[data-state]');
       expect(chipHost?.getAttribute('data-state')).toBe(kind);
       if (detail) expect(chipHost?.textContent).toContain(detail);

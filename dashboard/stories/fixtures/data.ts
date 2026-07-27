@@ -6,10 +6,13 @@
  * fixtures stay consistent across test transports.
  *
  * Shapes are hand-matched, endpoint by endpoint, to the Rust producers in
- * `src/dashboard/*` and gated against each route's single decoding schema
- * zod schema by `data.test.ts`. Every route the 12 workspaces read is modeled
- * with data-dense, wire-true payloads so audited surfaces render populated
- * content rather than empty / "unsupported schema" states.
+ * `src/dashboard/*`, and two suites hold them there: `data.test.ts` parses
+ * every fixture against the generated contract for its route, and
+ * `src/workspaces/endpoint-fixtures.test.ts` parses it against what the
+ * consuming workspace decodes and how densely the surface needs it populated.
+ * Every route the 12 workspaces read is modeled with data-dense, wire-true
+ * payloads so audited surfaces render populated content rather than empty /
+ * "unsupported schema" states.
  *
  * Determinism: fixtures never call `Math.random`; array shapes derive from the
  * row index, so the parse-gate test and screenshots are stable across runs.
@@ -633,6 +636,19 @@ function lcmTimelinePayload(): Record<string, unknown> {
       count: Math.round(Number(b['count']) / 6),
     })),
     undated: { count: 4, token_estimate: 5200 },
+    // `lcm_service::timeline_payload` always attaches this alongside a real
+    // read — it is only absent when there is no LCM store at all, and this
+    // fixture says `exists: true`. `limit` is the route's own default
+    // (`coerce_limit(params.limit, 400, 2000)`), and with every dated bucket
+    // returned the window is untruncated, so there is no next page cursor.
+    coverage: {
+      limit: 400,
+      returned_buckets: buckets.length,
+      total_dated_buckets: buckets.length,
+      truncated: false,
+      ordering: 'most_recent',
+      next_before_bucket: null,
+    },
   };
 }
 
@@ -1440,6 +1456,17 @@ function analyticsHintsPayload(): Record<string, unknown> {
  * Consumed by AutomationsPage.
  * ========================================================================== */
 
+/**
+ * `AutomationSchedulerStatusV1` (automation_scheduler_api.rs).
+ *
+ * `pending_review` is required and is the authority AutomationsPage reads; the
+ * flat `pending_*` fields are the pre-union mirrors the same handler still
+ * emits. This fixture carried only the mirrors, so a perfectly healthy 200
+ * failed the generated contract and the scheduler plate rendered
+ * `unsupported_schema` — including in every visual-audit screenshot of it.
+ * Both queues are `measured` here, which is the reading a mounted profile
+ * produces; the `unreadable` arm is exercised by the page's own DOM tests.
+ */
 function schedulerStatusPayload(): Record<string, unknown> {
   return {
     status: 'configured',
@@ -1448,6 +1475,10 @@ function schedulerStatusPayload(): Record<string, unknown> {
     scheduler_tick_secs: 900,
     pending_fact_proposals: 5,
     pending_skills: 2,
+    pending_review: {
+      fact_proposals: { state: 'measured', count: 5, reason: null },
+      skills: { state: 'measured', count: 2, reason: null },
+    },
     now: nowSecs,
     last_session_activity: nowSecs - 1200,
     project_config_path: '/fast/projects/tracedecay/.tracedecay/automation.toml',
