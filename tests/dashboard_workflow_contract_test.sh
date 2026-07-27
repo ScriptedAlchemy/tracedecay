@@ -65,6 +65,22 @@ for required in ["npm run typecheck", "npm run contracts:check", "npm test"]:
             f"CI dashboard integration job must preserve frontend check {required!r}"
         )
 
+# Plan 11 makes WCAG 2.2 AA and the payload ceilings acceptance criteria, so
+# they are gates rather than scripts a developer may remember to run. They live
+# in dashboard-assets because each one needs the built bundle and Node, not the
+# Rust toolchain.
+assets_job = job_block(ci, "dashboard-assets")
+for required in [
+    "scripts/check-dashboard-budget.mjs",
+    "playwright install",
+    "npm run axe:audit",
+    "npm run axe:explorer",
+]:
+    if required not in assets_job:
+        raise SystemExit(
+            f"CI dashboard-assets job must preserve frontend gate {required!r}"
+        )
+
 for name, workflow, jobs in [
     ("stable release", stable, ["build", "package-workspace"]),
     ("beta release", beta, ["build", "package-workspace"]),
