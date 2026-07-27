@@ -1000,7 +1000,7 @@ pub type HttpApplicationInvocationFuture =
     Pin<Box<dyn Future<Output = CanonicalInvocationResult<Value>> + Send + 'static>>;
 
 struct HttpApplicationCatalogDispatcher {
-    client: crate::daemon_client::DaemonInvocationClient,
+    executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
     catalog: Arc<CatalogSnapshotV1>,
 }
 
@@ -1023,17 +1023,22 @@ impl CanonicalApplicationDispatcher<CatalogBoundHttpApplicationRequest>
     ) -> Self::Output {
         assert_eq!(operation.capability_id(), &request.capability_id);
         assert_eq!(operation.use_case_id(), &request.use_case_id);
-        let client = self.client.clone();
+        let executor = Arc::clone(&self.executor);
         let catalog = self.catalog.clone();
         Box::pin(async move {
-            invoke_application_adapter_request(request.request, request.surface, &client, &catalog)
-                .await
+            invoke_application_adapter_request(
+                request.request,
+                request.surface,
+                executor.as_ref(),
+                &catalog,
+            )
+            .await
         })
     }
 }
 
 fn application_invoker_for_surface(
-    client: crate::daemon_client::DaemonInvocationClient,
+    executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
     surface: BindingSurface,
     required_operations: &[ApplicationSurfaceOperation],
 ) -> Result<
@@ -1042,7 +1047,7 @@ fn application_invoker_for_surface(
 > {
     let composition = Arc::new(compose_application_catalog_with(|catalog| {
         HttpApplicationCatalogDispatcher {
-            client,
+            executor,
             catalog: Arc::new(catalog.clone()),
         }
     })?);
@@ -1071,7 +1076,7 @@ pub fn http_application_invoker(
     ApplicationSurfaceAdapterError,
 > {
     application_invoker_for_surface(
-        client,
+        Arc::new(client),
         BindingSurface::Http,
         &APPLICATION_SURFACE_OPERATIONS,
     )
@@ -1106,7 +1111,7 @@ pub fn dashboard_configuration_application_invoker(
     ApplicationSurfaceAdapterError,
 > {
     application_invoker_for_surface(
-        client,
+        Arc::new(client),
         BindingSurface::Dashboard,
         &DASHBOARD_CONFIGURATION_OPERATIONS,
     )
@@ -1117,42 +1122,70 @@ pub fn http_application_router(
     operation_events: OperationEventAuthority,
     active_project_id: ProjectId,
 ) -> Result<axum::Router, ApplicationSurfaceAdapterError> {
+    http_application_router_with_executor(Arc::new(client), operation_events, active_project_id)
+}
+
+pub fn http_application_router_with_executor(
+    executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
+    operation_events: OperationEventAuthority,
+    active_project_id: ProjectId,
+) -> Result<axum::Router, ApplicationSurfaceAdapterError> {
     let cancellations = Arc::new(Mutex::new(BTreeMap::new()));
-    let event_client = client.clone();
+    let event_executor = Arc::clone(&executor);
     Ok(
-        tracedecay_api::application_router(http_application_invoker(client)?)
-            .layer(axum::middleware::from_fn_with_state(
-                Arc::clone(&cancellations),
-                application_http_context,
-            ))
-            .merge(http_operation_event_router(
-                operation_events,
-                active_project_id,
-                cancellations,
-                Some(event_client),
-            )),
+        tracedecay_api::application_router(application_invoker_for_surface(
+            executor,
+            BindingSurface::Http,
+            &APPLICATION_SURFACE_OPERATIONS,
+        )?)
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::clone(&cancellations),
+            application_http_context,
+        ))
+        .merge(http_operation_event_router(
+            operation_events,
+            active_project_id,
+            cancellations,
+            Some(event_executor),
+        )),
     )
 }
 
 pub fn dashboard_configuration_application_router(
     client: crate::daemon_client::DaemonInvocationClient,
 ) -> Result<axum::Router, ApplicationSurfaceAdapterError> {
+    dashboard_configuration_application_router_with_executor(Arc::new(client))
+}
+
+pub fn dashboard_configuration_application_router_with_executor(
+    executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
+) -> Result<axum::Router, ApplicationSurfaceAdapterError> {
     let cancellations = Arc::new(Mutex::new(BTreeMap::new()));
-    Ok(tracedecay_api::configuration_application_router(
-        dashboard_configuration_application_invoker(client)?,
+    Ok(
+        tracedecay_api::configuration_application_router(application_invoker_for_surface(
+            executor,
+            BindingSurface::Dashboard,
+            &DASHBOARD_CONFIGURATION_OPERATIONS,
+        )?)
+        .layer(axum::middleware::from_fn_with_state(
+            cancellations,
+            application_http_context,
+        )),
     )
-    .layer(axum::middleware::from_fn_with_state(
-        cancellations,
-        application_http_context,
-    )))
 }
 
 pub fn dashboard_feedback_application_router(
     client: crate::daemon_client::DaemonInvocationClient,
 ) -> Result<axum::Router, ApplicationSurfaceAdapterError> {
+    dashboard_feedback_application_router_with_executor(Arc::new(client))
+}
+
+pub fn dashboard_feedback_application_router_with_executor(
+    executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
+) -> Result<axum::Router, ApplicationSurfaceAdapterError> {
     let cancellations = Arc::new(Mutex::new(BTreeMap::new()));
     let invoker = application_invoker_for_surface(
-        client,
+        executor,
         BindingSurface::Dashboard,
         &DASHBOARD_FEEDBACK_OPERATIONS,
     )?;
@@ -1247,11 +1280,11 @@ struct HttpOperationEventState {
     authority: OperationEventAuthority,
     active_project_id: ProjectId,
     cancellations: HttpCancellationRegistry,
-    client: Option<crate::daemon_client::DaemonInvocationClient>,
+    executor: Option<Arc<dyn crate::daemon_client::DaemonInvocationExecutor>>,
 }
 
 struct SseDisconnectObserver {
-    client: crate::daemon_client::DaemonInvocationClient,
+    executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
     subject: ManifestDigest,
     terminal: Arc<AtomicBool>,
 }
@@ -1261,11 +1294,11 @@ impl Drop for SseDisconnectObserver {
         if self.terminal.load(Ordering::Relaxed) {
             return;
         }
-        let client = self.client.clone();
+        let executor = Arc::clone(&self.executor);
         let subject = self.subject.clone();
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn(async move {
-                let _ = client
+                let _ = executor
                     .observe_plan26_feedback(
                         subject,
                         current_micros().unwrap_or(UtcMicros(1)),
@@ -1300,7 +1333,7 @@ fn http_operation_event_router(
     authority: OperationEventAuthority,
     active_project_id: ProjectId,
     cancellations: HttpCancellationRegistry,
-    client: Option<crate::daemon_client::DaemonInvocationClient>,
+    executor: Option<Arc<dyn crate::daemon_client::DaemonInvocationExecutor>>,
 ) -> axum::Router {
     axum::Router::new()
         .route(
@@ -1315,7 +1348,7 @@ fn http_operation_event_router(
             authority,
             active_project_id,
             cancellations: Arc::clone(&cancellations),
-            client,
+            executor,
         })
         .layer(axum::middleware::from_fn_with_state(
             cancellations,
@@ -1361,8 +1394,8 @@ async fn emit_http_plan26_observation(
     observed_at: UtcMicros,
     event: Plan26FeedbackSourceEventV1,
 ) {
-    if let (Some(subject), Some(client)) = (subject, state.client.as_ref()) {
-        let _ = client
+    if let (Some(subject), Some(executor)) = (subject, state.executor.as_ref()) {
+        let _ = executor
             .observe_plan26_feedback(subject.clone(), observed_at, event)
             .await;
     }
@@ -1531,10 +1564,10 @@ async fn http_operation_events(
     .await;
     let (correlation_id, frontier, stream) = subscription.into_sse_parts();
     let observer = observation_subject
-        .zip(state.client.clone())
-        .map(|(subject, client)| {
+        .zip(state.executor.clone())
+        .map(|(subject, executor)| {
             Arc::new(SseDisconnectObserver {
-                client,
+                executor,
                 subject,
                 terminal: Arc::new(AtomicBool::new(false)),
             })
@@ -1549,7 +1582,7 @@ async fn http_operation_events(
                     observer.terminal.store(true, Ordering::Relaxed);
                 }
                 let _ = observer
-                    .client
+                    .executor
                     .observe_plan26_feedback(
                         observer.subject.clone(),
                         current_micros().unwrap_or(UtcMicros(1)),
@@ -3212,7 +3245,7 @@ fn invoke_catalog_bound_application_request(
 async fn invoke_application_adapter_request(
     request: HttpApplicationRequest,
     surface: BindingSurface,
-    client: &crate::daemon_client::DaemonInvocationClient,
+    executor: &dyn crate::daemon_client::DaemonInvocationExecutor,
     catalog: &CatalogSnapshotV1,
 ) -> CanonicalInvocationResult<Value> {
     let operation = application_operation_for_http(request.operation);
@@ -3228,7 +3261,7 @@ async fn invoke_application_adapter_request(
         Ok(request) => request,
         Err(error) => {
             observe_surface_argument_rejection(
-                Some(client),
+                Some(executor),
                 surface,
                 operation,
                 &request_id,
@@ -3253,7 +3286,7 @@ async fn invoke_application_adapter_request(
         Ok(input) => input,
         Err(error) => {
             observe_surface_argument_rejection(
-                Some(client),
+                Some(executor),
                 surface,
                 operation,
                 &request_id,
@@ -3271,7 +3304,7 @@ async fn invoke_application_adapter_request(
         Err(error) => {
             let error = map_dispatch_error(error);
             observe_surface_argument_rejection(
-                Some(client),
+                Some(executor),
                 surface,
                 operation,
                 &request_id,
@@ -3284,7 +3317,7 @@ async fn invoke_application_adapter_request(
             );
         }
     };
-    match execute_application_surface(operation, dispatched, Some(client)).await {
+    match execute_application_surface(operation, dispatched, Some(executor)).await {
         Ok(result) => CanonicalInvocationResult::new(result.binding_id, result.result),
         Err(error) => CanonicalInvocationResult::new(
             binding_id,

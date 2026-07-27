@@ -895,6 +895,9 @@ impl McpServer {
                 diagnostics_cache: Some(&self.diagnostics_cache),
                 diagnostics_lsp: Some(Arc::clone(&self.diagnostics_lsp)),
                 application_invocation_executor,
+                dashboard_application_invocation_executor: self
+                    .application_invocation_executor
+                    .clone(),
                 application_request_id,
                 application_deadline,
                 application_cancellation,
