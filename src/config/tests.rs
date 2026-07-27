@@ -1399,13 +1399,15 @@ mod runtime_configuration_cutover {
     use std::sync::Mutex;
 
     use tempfile::TempDir;
-    use tracedecay_domain::ProjectId;
     use tracedecay_domain::configuration::{
         ConfigurationLayerIdV1, ConfigurationRevisionId, ConfigurationValueV1,
-        SYNC_AUTO_WATCH_SETTING_KEY, SettingKey,
+        SOURCE_BINDINGS_SETTING_KEY, SYNC_AUTO_WATCH_SETTING_KEY, SettingKey,
     };
+    use tracedecay_domain::{ProjectId, UtcMicros};
 
-    use crate::application::configuration::DirectConfigurationMutation;
+    use crate::application::configuration::{
+        ConfigurationControlStore, DirectConfigurationMutation,
+    };
     use crate::application::host_admission::HostAdmissionTestRuntimeV1;
     use crate::config::registry::ConfigurationRegistry;
     use crate::config::registry::legacy_decoder::{
@@ -1878,6 +1880,95 @@ mod runtime_configuration_cutover {
             runtime_configuration_for_layout(root.path(), &layout).is_ok(),
             "after ensure, fail-closed lookup must see the published pin"
         );
+    }
+
+    #[tokio::test]
+    async fn ensure_runtime_configuration_repairs_pre_binding_revision_forward_only() {
+        let _profile = crate::config::PinnedUserDataDir::new();
+        let root = TempDir::new().expect("temporary project root");
+        let project_id = project_id("proj_runtime_binding_repair");
+        crate::storage::write_enrollment_marker(
+            root.path(),
+            &crate::storage::EnrollmentMarker {
+                project_id: project_id.as_str().to_owned(),
+                storage_mode: crate::storage::StorageMode::ProfileSharded,
+            },
+        )
+        .expect("write enrollment marker");
+        let layout = crate::storage::resolve_layout_for_current_profile(root.path())
+            .expect("resolve store layout");
+        std::fs::create_dir_all(&layout.data_root).expect("create data root");
+        let runtime = HostAdmissionTestRuntimeV1::project(
+            crate::storage::default_profile_root().unwrap(),
+            root.path(),
+            project_id.clone(),
+        )
+        .await
+        .expect("open retained project runtime");
+        let database = runtime
+            .registered_database_arc(
+                crate::application::host_admission::HostAdmissionScope::Project,
+            )
+            .expect("bind registered project database");
+        let store =
+            crate::global_db::configuration::GlobalDbConfigurationControlStore::new_registered(
+                database.as_ref(),
+            );
+        let old_revision = revision_id("configuration.initial.pre-binding");
+        let target = LegacyConfigurationDecodeTargetV1 {
+            target_layer: ConfigurationLayerIdV1::Project {
+                project_id: project_id.clone(),
+            },
+            target_revision_id: old_revision.clone(),
+        };
+        let inputs = decode_legacy_configuration_inputs(
+            r#"{"sync":{"auto_watch":false}}"#,
+            &BTreeMap::new(),
+            &target,
+        )
+        .expect("decode pre-binding configuration");
+        crate::global_db::configuration::migrate_legacy_configuration_inputs(
+            &ConfigurationRegistry::core().expect("configuration registry"),
+            &inputs,
+            &store,
+            UtcMicros(1),
+        )
+        .await
+        .expect("seed pre-binding durable revision");
+        let seeded = store.current().await.expect("read seeded configuration");
+        assert_eq!(seeded.revision_id, old_revision);
+        let bindings_key =
+            SettingKey::new(SOURCE_BINDINGS_SETTING_KEY).expect("source bindings key");
+        assert_eq!(
+            seeded.snapshot.effective_values.get(&bindings_key),
+            Some(&ConfigurationValueV1::SourceBindings(Vec::new())),
+            "fixture must reproduce a durable revision created before daemon binding genesis"
+        );
+
+        let repaired = runtime
+            .ensure_runtime_configuration_for_test(root.path(), &layout)
+            .await
+            .expect("registered daemon authority repairs the durable binding");
+        let expected = crate::config::scope_control::daemon_owned_project_source_binding(
+            &project_id,
+            root.path(),
+        )
+        .expect("derive expected daemon binding");
+        assert_ne!(
+            repaired.revision_id, old_revision,
+            "repair must append a forward child revision"
+        );
+        assert_eq!(
+            repaired.snapshot.effective_values.get(&bindings_key),
+            Some(&ConfigurationValueV1::SourceBindings(vec![expected])),
+        );
+
+        let reopened = runtime
+            .ensure_runtime_configuration_for_test(root.path(), &layout)
+            .await
+            .expect("binding repair is idempotent");
+        assert_eq!(reopened.revision_id, repaired.revision_id);
+        assert_eq!(reopened.snapshot, repaired.snapshot);
     }
 
     #[tokio::test]

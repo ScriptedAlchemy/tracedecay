@@ -1179,76 +1179,84 @@ async fn open_runtime_configuration_from_store(
     layout: &crate::storage::StoreLayout,
     store: &GlobalDbConfigurationControlStore<'_>,
 ) -> Result<PinnedRuntimeConfiguration> {
-    let current = match store.current().await {
-        Ok(current) => current,
-        Err(error) => {
-            if !store
-                .is_uninitialized()
-                .await
-                .map_err(map_configuration_error)?
-            {
-                return Err(map_configuration_error(error));
-            }
-            let registry = registry::ConfigurationRegistry::core().map_err(|error| {
-                config_error(format!("configuration registry unavailable: {error}"))
-            })?;
-            let target_layer = ConfigurationLayerIdV1::Project {
-                project_id: target.project_id.clone(),
-            };
-            let initial_revision_id = ConfigurationRevisionId::new(
-                "configuration.initial.migration.v1",
-            )
-            .map_err(|error| {
-                config_error(format!("invalid initial configuration revision: {error}"))
-            })?;
-            let legacy_target = registry::legacy_decoder::LegacyConfigurationDecodeTargetV1 {
-                target_layer: target_layer.clone(),
-                target_revision_id: initial_revision_id.clone(),
-            };
-            let environment = std::env::vars().collect::<BTreeMap<_, _>>();
-            let legacy = read_legacy_configuration_inputs(
-                &layout.config_path,
-                &environment,
-                &legacy_target,
-            )?;
-            // The project's first durable revision states the one binding the
-            // daemon already owns for the project it just registered. Both
-            // components restate resolved identity the caller holds — the
-            // project's own id and its project-open locator digest — so this
-            // grants no authority that a later protected `BindSource` would be
-            // required to grant. Without it a fresh project has no binding at
-            // all and every source-authorized surface is unreachable.
-            let genesis = CanonicalGenesisConfigurationV1 {
-                target_layer,
-                target_revision_id: initial_revision_id,
-                source_bindings: vec![
-                    scope_control::daemon_owned_project_source_binding(
-                        &target.project_id,
-                        &target.project_root,
-                    )
-                    .map_err(|error| {
-                        config_error(format!(
-                            "daemon project source binding could not be derived: {error}"
-                        ))
-                    })?,
-                ],
-            };
-            migrate_legacy_configuration_inputs_with_genesis(
-                &registry,
-                &legacy,
-                &genesis,
-                store,
-                current_utc_micros(),
-            )
+    if let Err(error) = store.current().await {
+        if !store
+            .is_uninitialized()
             .await
-            .map_err(|error| {
-                config_error(format!(
-                    "configuration initial migration could not commit: {error}"
-                ))
-            })?;
-            store.current().await.map_err(map_configuration_error)?
+            .map_err(map_configuration_error)?
+        {
+            return Err(map_configuration_error(error));
         }
-    };
+        let registry = registry::ConfigurationRegistry::core().map_err(|error| {
+            config_error(format!("configuration registry unavailable: {error}"))
+        })?;
+        let target_layer = ConfigurationLayerIdV1::Project {
+            project_id: target.project_id.clone(),
+        };
+        let initial_revision_id =
+            ConfigurationRevisionId::new("configuration.initial.migration.v1").map_err(
+                |error| config_error(format!("invalid initial configuration revision: {error}")),
+            )?;
+        let legacy_target = registry::legacy_decoder::LegacyConfigurationDecodeTargetV1 {
+            target_layer: target_layer.clone(),
+            target_revision_id: initial_revision_id.clone(),
+        };
+        let environment = std::env::vars().collect::<BTreeMap<_, _>>();
+        let legacy =
+            read_legacy_configuration_inputs(&layout.config_path, &environment, &legacy_target)?;
+        // The project's first durable revision states the one binding the
+        // daemon already owns for the project it just registered. Both
+        // components restate resolved identity the caller holds — the
+        // project's own id and its project-open locator digest — so this
+        // grants no authority that a later protected `BindSource` would be
+        // required to grant. Without it a fresh project has no binding at
+        // all and every source-authorized surface is unreachable.
+        let genesis = CanonicalGenesisConfigurationV1 {
+            target_layer,
+            target_revision_id: initial_revision_id,
+            source_bindings: vec![
+                scope_control::daemon_owned_project_source_binding(
+                    &target.project_id,
+                    &target.project_root,
+                )
+                .map_err(|error| {
+                    config_error(format!(
+                        "daemon project source binding could not be derived: {error}"
+                    ))
+                })?,
+            ],
+        };
+        migrate_legacy_configuration_inputs_with_genesis(
+            &registry,
+            &legacy,
+            &genesis,
+            store,
+            current_utc_micros(),
+        )
+        .await
+        .map_err(|error| {
+            config_error(format!(
+                "configuration initial migration could not commit: {error}"
+            ))
+        })?;
+    }
+    let daemon_binding = scope_control::daemon_owned_project_source_binding(
+        &target.project_id,
+        &target.project_root,
+    )
+    .map_err(|error| {
+        config_error(format!(
+            "daemon project source binding could not be derived: {error}"
+        ))
+    })?;
+    let current = store
+        .ensure_daemon_source_binding(daemon_binding, current_utc_micros())
+        .await
+        .map_err(|error| {
+            config_error(format!(
+                "daemon project source binding forward repair failed: {error}"
+            ))
+        })?;
     let configuration =
         PinnedRuntimeConfiguration::new(target, current.revision_id, current.snapshot)?;
     install_pinned_runtime_configuration(configuration.clone())?;

@@ -854,36 +854,28 @@ impl DaemonEngine {
     }
 
     pub(super) async fn shutdown_automation_schedulers(&self) {
-        let retirements = self
+        // Draining is latched before this runs, and every registration path
+        // rechecks that latch. Do not queue shutdown behind unrelated
+        // migration/branch administration that may hold the broad writer gate.
+        let owners: Vec<ProjectServerKey> = self
             .store_administration
-            .with_writer(|| async {
-                let owners: Vec<ProjectServerKey> = self
-                    .store_administration
-                    .automation_schedulers()
-                    .lock()
-                    .await
-                    .keys()
-                    .cloned()
-                    .collect();
-                let mut retirements = Vec::with_capacity(owners.len());
-                for owner in owners {
-                    if let Some(retirement) = self.retire_automation_scheduler_locked(&owner).await
-                    {
-                        retirements.push(retirement);
-                    }
-                }
-                retirements
-            })
-            .await;
+            .automation_schedulers()
+            .lock()
+            .await
+            .keys()
+            .cloned()
+            .collect();
+        let mut retirements = Vec::with_capacity(owners.len());
+        for owner in owners {
+            if let Some(retirement) = self.retire_automation_scheduler_locked(&owner).await {
+                retirements.push(retirement);
+            }
+        }
         self.store_administration
-            .with_writer(|| async {
-                self.store_administration
-                    .automation_schedulers()
-                    .lock()
-                    .await
-                    .clear();
-            })
-            .await;
+            .automation_schedulers()
+            .lock()
+            .await
+            .clear();
         let _child_shutdown = crate::sessions::codex_app_server::begin_codex_app_server_shutdown();
         let _ = timeout(DAEMON_TASK_ABORT_DEADLINE, async {
             for retirement in retirements {

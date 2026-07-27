@@ -326,37 +326,28 @@ impl DaemonEngine {
     }
 
     pub(super) async fn shutdown_memory_repair_schedulers(&self) {
-        let retirements = self
+        // The daemon is already draining, so scheduler registration is closed.
+        // Retire the owned tasks through their dedicated map instead of waiting
+        // behind unrelated migration/branch administration.
+        let owners: Vec<ProjectServerKey> = self
             .store_administration
-            .with_writer(|| async {
-                let owners: Vec<ProjectServerKey> = self
-                    .store_administration
-                    .memory_repair_schedulers()
-                    .lock()
-                    .await
-                    .keys()
-                    .cloned()
-                    .collect();
-                let mut retirements = Vec::with_capacity(owners.len());
-                for owner in owners {
-                    if let Some(retirement) =
-                        self.retire_memory_repair_scheduler_locked(&owner).await
-                    {
-                        retirements.push(retirement);
-                    }
-                }
-                retirements
-            })
-            .await;
+            .memory_repair_schedulers()
+            .lock()
+            .await
+            .keys()
+            .cloned()
+            .collect();
+        let mut retirements = Vec::with_capacity(owners.len());
+        for owner in owners {
+            if let Some(retirement) = self.retire_memory_repair_scheduler_locked(&owner).await {
+                retirements.push(retirement);
+            }
+        }
         self.store_administration
-            .with_writer(|| async {
-                self.store_administration
-                    .memory_repair_schedulers()
-                    .lock()
-                    .await
-                    .clear();
-            })
-            .await;
+            .memory_repair_schedulers()
+            .lock()
+            .await
+            .clear();
         let _ = timeout(DAEMON_TASK_ABORT_DEADLINE, async {
             for retirement in retirements {
                 retirement.wait().await;
