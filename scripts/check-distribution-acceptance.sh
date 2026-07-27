@@ -40,6 +40,7 @@ python3 tests/distribution/fastembed/validate_fixture.py <temporary verified fix
 cargo build --workspace --release --all-features --lib --bins
 cargo package --workspace --all-features --allow-dirty --no-verify
 cargo check --release --all-features --lib <extracted tracedecay package>
+CARGO_NET_OFFLINE=true cargo test --release --all-features --lib <packaged model-acquisition lifecycle suite>
 CARGO_NET_OFFLINE=true HF_HUB_OFFLINE=1 cargo test --release --all-features --lib <packaged background model-acquisition acceptance>
 CARGO_NET_OFFLINE=true cargo test --release --all-features --lib <packaged typed semantic-unavailable acceptance>
 cargo install --root <temporary install root> --all-features <extracted tracedecay package>
@@ -277,6 +278,7 @@ run_self_test() {
     "cargo build --workspace --release --all-features --lib --bins" \
     "cargo package --workspace --all-features --allow-dirty --no-verify" \
     "cargo check --release --all-features --lib" \
+    "packaged model-acquisition lifecycle suite" \
     "packaged background model-acquisition acceptance" \
     "CARGO_NET_OFFLINE=true cargo test --release --all-features --lib" \
     "cargo install --root <temporary install root> --all-features" \
@@ -692,6 +694,15 @@ PY
 [[ -n $ort_lib_path ]] ||
   die "cached ONNX Runtime library is unavailable for the offline semantic tests"
 export ORT_LIB_PATH="$ort_lib_path"
+
+echo "distribution acceptance: checking packaged model-acquisition lifecycle suite"
+CARGO_NET_OFFLINE=true cargo test \
+  --manifest-path "$root_package/Cargo.toml" \
+  --release \
+  --all-features \
+  --lib \
+  --config "$patch_config" \
+  semantic_code::model_lifecycle::tests::
 
 cat "$repo/tests/distribution/fastembed/semantic_unavailable_tests.rs.inc" \
   >>"$root_package/src/query/retrieval/semantic/tests.rs"
