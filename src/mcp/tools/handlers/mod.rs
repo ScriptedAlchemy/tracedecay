@@ -1965,7 +1965,6 @@ mod tests {
             None,
             None,
             Some(registry.database.as_ref()),
-            false,
         )
         .await
         .unwrap_err();
