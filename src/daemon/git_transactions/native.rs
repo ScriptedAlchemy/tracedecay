@@ -447,8 +447,11 @@ impl GitIndexPreviewAssembler for NativeGitIndexPreviewAssembler {
             drop(lock);
             return unsupported_materialized(request, runner, reason);
         }
+        // The snapshot already matched the caller's byte for byte above, so a
+        // digest we cannot compute over it is our own canonicalization
+        // failing, not the repository moving underneath the request.
         let snapshot_digest = GitIndexPreviewV1::repository_snapshot_digest(&current)
-            .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
+            .map_err(|_| GitIndexTransactionPortError::NativeFailure)?;
         let disposition = unsupported_hunk_selection(
             &request.selected_hunks,
             &runner,
@@ -496,7 +499,11 @@ impl GitIndexPreviewAssembler for NativeGitIndexPreviewAssembler {
             request.observed_at,
             expires_at,
         )
-        .map_err(|_| GitIndexTransactionPortError::StalePreview)?;
+        // Every input here is either the caller's own request or state we just
+        // recaptured and matched, so a rejected construction — a commit intent
+        // the preview will not carry, most often — is a rejection of the
+        // request rather than evidence that it went stale.
+        .map_err(|_| GitIndexTransactionPortError::NativeFailure)?;
         Ok(MaterializedGitIndexPreview {
             preview,
             execution: completed_execution(request),
