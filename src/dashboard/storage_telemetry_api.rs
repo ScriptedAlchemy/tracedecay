@@ -388,20 +388,12 @@ async fn collect_store_samples(
     };
 
     // Graph store: use the retained database runtime that owns this exact path.
-    let graph = state
-        ._database_guards
-        .iter()
-        .find(|database| {
-            store_identity(&database.database_path().display().to_string())
-                == store_identity(&state.graph_db_path)
-        })
-        .and_then(|database| database.storage_telemetry_handle().ok());
     push_or_merge_role(
         &mut entries,
         &mut seen,
         "graph",
         &state.graph_db_path,
-        graph,
+        state.graph_telemetry_handle.clone(),
         &context,
         include_table_growth,
     )
@@ -1114,23 +1106,28 @@ mod tests {
     use crate::dashboard::read_model::{DashboardDomainStateV1, DashboardFreshnessStateV1};
     use crate::tracedecay::TraceDecay;
 
-    async fn state_for_test() -> (tempfile::TempDir, DashboardState) {
+    async fn state_for_test() -> (tempfile::TempDir, DashboardState, u64) {
         let project = tempfile::tempdir().expect("project tempdir");
         std::fs::write(project.path().join("lib.rs"), "pub fn fixture() {}\n")
             .expect("fixture source");
         let cg = TraceDecay::init(project.path())
             .await
             .expect("project init");
+        let (page_size, page_count, _) = cg
+            .storage_page_counts()
+            .await
+            .expect("authoritative graph page counts");
+        let graph_total_bytes = page_size.saturating_mul(page_count);
         let state = crate::dashboard::build_state(&cg)
             .await
             .expect("dashboard state");
-        (project, state)
+        (project, state, graph_total_bytes)
     }
 
     #[tokio::test]
     async fn telemetry_reports_real_observed_sizes_for_held_stores() {
         let _pin = crate::config::PinnedUserDataDir::new();
-        let (_project, state) = state_for_test().await;
+        let (_project, state, graph_total_bytes) = state_for_test().await;
         let Json(envelope) = telemetry(State(state)).await;
 
         assert_eq!(envelope.schema_revision, 1);
@@ -1172,6 +1169,17 @@ mod tests {
             assert!(!entry.roles.is_empty());
             assert!(entry.roles.contains(&entry.role));
         }
+        let graph = envelope
+            .payload
+            .stores
+            .iter()
+            .find(|entry| entry.roles.iter().any(|role| role == "graph"))
+            .expect("graph store entry");
+        assert_eq!(
+            graph.total_bytes,
+            Some(graph_total_bytes),
+            "graph bytes must come from the retained graph runtime's real page counts"
+        );
 
         // Complete coverage carries a real denominator equal to the store count.
         assert!(envelope.coverage.is_complete());
@@ -1184,7 +1192,7 @@ mod tests {
     #[tokio::test]
     async fn roles_sharing_one_store_file_are_reported_once_with_both_roles() {
         let _pin = crate::config::PinnedUserDataDir::new();
-        let (_project, state) = state_for_test().await;
+        let (_project, state, _) = state_for_test().await;
         let Json(envelope) = telemetry(State(state)).await;
 
         // No two entries may name the same store file: identical sizes reported
