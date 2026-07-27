@@ -58,6 +58,15 @@ impl AgentIntegration for KimiIntegration {
         Err(deferred_user_action_error(deferred))
     }
 
+    fn preflight_non_interactive_install(
+        &self,
+        _ctx: &InstallContext,
+    ) -> Result<NonInteractiveInstallOutcome> {
+        Ok(NonInteractiveInstallOutcome::DeferredUserAction(
+            kimi_official_lifecycle_unavailable("install", None),
+        ))
+    }
+
     fn prepare_non_interactive_install(
         &self,
         ctx: &InstallContext,

@@ -34,6 +34,17 @@ if [[ "${1:-}" == "--version" ]]; then
 fi
 
 command_text=$*
+if [[ "$command_text" == "reinstall --dry-run" ]]; then
+  if [[ -n "${TRACEDECAY_DOGFOOD_TEST_PREFLIGHT_MARKER:-}" ]]; then
+    : >"$TRACEDECAY_DOGFOOD_TEST_PREFLIGHT_MARKER"
+  fi
+  if [[ "${TRACEDECAY_DOGFOOD_TEST_FAIL_PREFLIGHT:-0}" == 1 ]]; then
+    printf 'cline: registration config is corrupt\n' >&2
+    exit 42
+  fi
+  exit 0
+fi
+
 printf '%s:%s\n' "$binary_id" "$command_text" \
   >>"${TRACEDECAY_DOGFOOD_TEST_LOG:?}"
 
@@ -991,6 +1002,32 @@ assert_boundary outcome safe-rollback-complete
 assert_boundary attempt_boundary not-reached
 assert_boundary old_binary_policy allowed
 assert_boundary managed_daemon unchanged
+assert_no_temporary_install_files
+
+# Registration refresh failures must surface before the migration marker,
+# binary replacement, or any daemon lifecycle command.
+setup_case integration-preflight-failure
+write_fake_binary "$case_source" new
+install_old_pair
+cp "$installed" "$case_root/expected installed"
+cp "$staged" "$case_root/expected staged"
+preflight_marker="$case_root/integration-preflight-ran"
+if run_case \
+  TRACEDECAY_DOGFOOD_TEST_PREFLIGHT_MARKER="$preflight_marker" \
+  TRACEDECAY_DOGFOOD_TEST_FAIL_PREFLIGHT=1 \
+  >"$case_output" 2>&1; then
+  fail 'integration preflight failure unexpectedly succeeded'
+fi
+test -e "$preflight_marker" || fail 'integration preflight did not run'
+cmp "$case_root/expected installed" "$installed"
+cmp "$case_root/expected staged" "$staged"
+test ! -e "$case_state" || fail 'integration preflight failure recorded a boundary marker'
+test ! -s "$case_log" || fail 'integration preflight failure ran a lifecycle command'
+grep -Fq 'cline: registration config is corrupt' "$case_output" ||
+  fail 'integration preflight omitted the per-integration cause'
+grep -Fq 'dogfood integration refresh preflight failed before the migration boundary' \
+  "$case_output" ||
+  fail 'integration preflight failure did not identify the safe boundary'
 assert_no_temporary_install_files
 
 # A candidate binary must attest to this checkout's fresh SHA and dirty state
