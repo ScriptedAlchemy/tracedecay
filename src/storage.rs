@@ -1004,8 +1004,7 @@ fn resolve_enrolled_layout(
     if let Some(layout) = resolve_persisted_layout(project_root, profile_root)? {
         return Ok(Some(layout));
     }
-    let (mut candidates, _) =
-        matching_legacy_profile_layouts(project_root, profile_root, None, false)?;
+    let (mut candidates, _) = matching_legacy_profile_layouts(project_root, profile_root, None)?;
     match candidates.len() {
         0 => Ok(None),
         1 => Ok(Some(candidates.remove(0))),
