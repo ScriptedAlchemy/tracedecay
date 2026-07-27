@@ -1297,10 +1297,7 @@ pub(in crate::daemon) fn production_doctor_report_reader(
             });
             let registered_authority_current = registry.writer_connection().is_ok()
                 && profile_sessions.writer_connection().is_ok();
-            let temporal = crate::global_db::session_temporal::session_temporal_doctor_health_at(
-                profile_sessions.db_path(),
-            )
-            .await;
+            let temporal = profile_sessions.session_temporal_doctor_health().await;
             let temporal_ok = match temporal.status() {
                 crate::global_db::session_temporal::SessionTemporalHealthStatus::Complete => {
                     Some(temporal.findings().is_empty())
