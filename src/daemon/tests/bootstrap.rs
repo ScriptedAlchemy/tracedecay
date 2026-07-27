@@ -1,6 +1,8 @@
 use super::*;
+use crate::application::context::CancellationToken;
 use crate::daemon::ProductionProjectCompositionHarnessV1;
 use crate::mcp::JsonRpcResponse;
+use std::process::Command;
 
 static PRODUCTION_DASHBOARD_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -73,26 +75,47 @@ async fn unenrolled_ambient_directory_is_rejected_before_project_warmup() {
 }
 
 #[tokio::test]
-async fn unenrolled_ambient_directory_is_rejected_by_direct_project_open() {
+async fn unenrolled_leaf_is_rejected_from_cache_and_direct_open() {
     let home = TempDir::new().expect("isolated home");
     let profile_root = home.path().join(".tracedecay");
-    let ambient_directory = home.path().join("ambient");
-    std::fs::create_dir_all(&ambient_directory).expect("create ambient directory");
+    let repository = home.path().join("repository");
+    std::fs::create_dir_all(&repository).expect("create repository");
+    let status = Command::new("git")
+        .args(["init", "--quiet"])
+        .arg(&repository)
+        .status()
+        .expect("initialize repository");
+    assert!(status.success(), "initialize repository");
+    let leaf_directory = repository.join("leaf");
+    std::fs::create_dir_all(&leaf_directory).expect("create leaf directory");
     let _database_scope =
-        enter_test_daemon_database_scope(&profile_root, "direct unenrolled ambient route");
+        enter_test_daemon_database_scope(&profile_root, "direct unenrolled leaf route");
     let engine = test_daemon_engine_for_profile(&profile_root);
     let mut handshake = test_handshake_defaults();
-    handshake.project_path = Some(ambient_directory.clone());
+    handshake.project_path = Some(leaf_directory.clone());
     handshake.client_identity = test_client_identity_for(profile_root);
+    handshake.allow_init = true;
 
-    let error = match engine.project_server(&handshake).await {
+    let cache_error = match engine.cached_project_server(&handshake).await {
+        Ok(_) => panic!("cache lookup must enforce enrollment admission"),
+        Err(error) => error,
+    };
+    assert!(
+        cache_error.to_string().contains("is not enrolled"),
+        "cache lookup must fail at enrollment admission: {cache_error}"
+    );
+
+    let cancellation = CancellationToken::new();
+    let open_error = match engine
+        .open_project_server_until_cancelled(&handshake, &cancellation)
+        .await
+    {
         Ok(_) => panic!("direct project open must enforce enrollment admission"),
         Err(error) => error,
     };
-
     assert!(
-        error.to_string().contains("is not enrolled"),
-        "the deepest project-open route must fail at enrollment admission: {error}"
+        open_error.to_string().contains("is not enrolled"),
+        "the deepest project-open route must fail at enrollment admission: {open_error}"
     );
     assert_eq!(
         engine
@@ -102,7 +125,7 @@ async fn unenrolled_ambient_directory_is_rejected_by_direct_project_open() {
         "the expensive project-open operation must not start"
     );
     assert!(
-        !ambient_directory.join(".tracedecay").exists(),
+        !leaf_directory.join(".tracedecay").exists(),
         "rejection must not manufacture project state"
     );
 }

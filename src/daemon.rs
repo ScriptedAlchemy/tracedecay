@@ -3063,6 +3063,8 @@ impl DaemonEngine {
         handshake: &DaemonHandshake,
     ) -> Result<Option<Arc<crate::mcp::McpServer>>> {
         let (project_path, route) = Self::project_route(handshake)?;
+        self.ensure_registered_project_route(&project_path, handshake.allow_init)
+            .await?;
         let cached = {
             let mut servers = self.store_administration.project_servers().lock().await;
             servers
@@ -3204,6 +3206,8 @@ impl DaemonEngine {
         let canonical_project_path = project_path
             .canonicalize()
             .unwrap_or_else(|_| project_path.clone());
+        self.ensure_registered_project_route(&canonical_project_path, handshake.allow_init)
+            .await?;
         let composition = production_project_server(
             &self.store_administration,
             self.project_open_gates.as_ref(),
@@ -3866,10 +3870,16 @@ async fn ensure_registered_project_route(
         }
     };
     let Some(context) = context else {
-        if allow_init {
+        let project_path = project_path
+            .canonicalize()
+            .unwrap_or_else(|_| project_path.to_path_buf());
+        let is_project_root = crate::worktree::git_worktree_root(&project_path)
+            .map(|git_root| git_root == project_path)
+            .unwrap_or(true);
+        if allow_init && is_project_root {
             return Ok(());
         }
-        return Err(unenrolled_project_route_error(project_path));
+        return Err(unenrolled_project_route_error(&project_path));
     };
 
     let project_id = context.project.project_id;
@@ -3917,6 +3927,12 @@ async fn portable_cached_project_server(
     canonical_project_path: &Path,
     handshake: &DaemonHandshake,
 ) -> Result<Option<Arc<crate::mcp::McpServer>>> {
+    ensure_registered_project_route(
+        store_administration,
+        canonical_project_path,
+        handshake.allow_init,
+    )
+    .await?;
     let route = ProjectRouteKey::from_handshake(canonical_project_path, handshake)?;
     let server = {
         let mut servers = store_administration.project_servers().lock().await;
