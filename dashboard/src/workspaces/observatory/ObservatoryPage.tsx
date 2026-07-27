@@ -1,5 +1,4 @@
 import { useQuery } from '@tanstack/react-query';
-import { RefreshCw } from 'lucide-react';
 import type { ReactNode } from 'react';
 import {
   assertNever,
@@ -12,22 +11,21 @@ import {
   type TableGrowthDimension,
   type TableGrowthThreshold,
   type WireCoverage,
-  type WireFreshness,
-  type WireLegalActionRef,
 } from '../../contracts/wire.ts';
 import { fetchEnvelope, type EnvelopeResult } from '../../data/query/envelope.ts';
 import { scopeKey, scopedUrl, useScope } from '../../data/scope/store.ts';
 import { CapacityBar } from '../../ui/ActivityColumns.tsx';
+import { EnvelopeTruth, ReadModelState } from '../../ui/EnvelopeTruth.tsx';
 import { EvidenceTruthStrip } from '../../ui/EvidenceTruthStrip.tsx';
 import { OverviewCard, OverviewGrid } from '../../ui/archetypes/OverviewGrid';
 import { StateChip, type DomainStateKind } from '../../ui/StateChip';
+import { CanonicalObservations } from './CanonicalObservations.tsx';
 import { doctorEvidencePresentation } from './doctorModel.ts';
 import {
   budgetPresentation,
   dimensionDotClass,
   formatBytes,
   growthPresentation,
-  refreshOperation,
   storageFindingLabel,
   storageSourcePresentation,
   storeRolesLabel,
@@ -62,11 +60,13 @@ export function ObservatoryPage() {
       <header className="flex items-center gap-3 border-b border-edge-subtle px-4 py-2">
         <h1 className="text-sm font-semibold tracking-tight">Observatory</h1>
         <span className="text-2xs text-text-muted">
-          storage size, reclaimable pages, and Doctor retention evidence
+          event flow, latency, storage size, reclaimable pages, and Doctor retention evidence
         </span>
       </header>
 
       <DoctorInspector />
+
+      <CanonicalObservations />
 
       <StorageSection title="Store telemetry" query={telemetry.data} pending={telemetry.isPending}>
         {(result) => (
@@ -136,6 +136,7 @@ function TelemetryReadModel({
         coverage={envelope.coverage}
         freshness={envelope.freshness}
         legalActions={envelope.legal_actions}
+        authorization={envelope.authorization}
         refreshing={refreshing}
         onRefresh={onRefresh}
       />
@@ -185,6 +186,7 @@ function FindingsReadModel({
         coverage={envelope.coverage}
         freshness={envelope.freshness}
         legalActions={envelope.legal_actions}
+        authorization={envelope.authorization}
         refreshing={refreshing}
         onRefresh={onRefresh}
       />
@@ -240,50 +242,6 @@ function StorageSourceStatuses({ statuses }: { statuses: StorageFindingKindStatu
         );
       })}
     </ul>
-  );
-}
-
-function EnvelopeTruth({
-  state,
-  coverage,
-  freshness,
-  legalActions,
-  refreshing,
-  onRefresh,
-}: {
-  state: DomainStateKind;
-  coverage: WireCoverage;
-  freshness: WireFreshness;
-  legalActions: WireLegalActionRef[];
-  refreshing: boolean;
-  onRefresh: () => void;
-}) {
-  const refresh = refreshOperation(legalActions);
-  return (
-    <div className="flex flex-wrap items-center gap-3 px-4 pt-2">
-      <StateChip kind={state} />
-      <EvidenceTruthStrip
-        coverage={toStripCoverage(coverage)}
-        freshness={toStripFreshness(freshness)}
-      />
-      {refresh ? (
-        <button
-          type="button"
-          className="ml-auto inline-flex h-7 items-center gap-1.5 rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-2 px-2.5 text-2xs font-medium text-text-secondary hover:text-text-primary disabled:cursor-wait disabled:opacity-60"
-          onClick={onRefresh}
-          disabled={refreshing}
-          title={refresh}
-          data-operation={refresh}
-        >
-          <RefreshCw
-            aria-hidden
-            size={12}
-            className={refreshing ? 'animate-spin' : undefined}
-          />
-          {refreshing ? 'Refreshing' : 'Refresh'}
-        </button>
-      ) : null}
-    </div>
   );
 }
 
@@ -603,14 +561,6 @@ function DimensionSummary({ presentation }: { presentation: DimensionPresentatio
   );
 }
 
-function ReadModelState({ kind, detail }: { kind: DomainStateKind; detail?: string }) {
-  return (
-    <div className="flex min-h-28 items-center justify-center p-4">
-      <StateChip kind={kind} detail={detail} />
-    </div>
-  );
-}
-
 function ReadModelNotes({ notes }: { notes: string[] }) {
   return (
     <p className="border-t border-edge-subtle px-4 py-2 text-2xs text-text-muted">
@@ -654,20 +604,3 @@ function readUnavailableMessage(read: StorageTelemetryRead): string {
   }
 }
 
-function toStripCoverage(coverage: WireCoverage) {
-  return {
-    completeness: coverage.completeness,
-    examined: coverage.examined,
-    eligible: coverage.eligible,
-  };
-}
-
-function toStripFreshness(freshness: WireFreshness) {
-  return {
-    state: freshness.state,
-    observed_at:
-      freshness.observed_at_micros != null
-        ? new Date(freshness.observed_at_micros / 1000).toLocaleTimeString()
-        : undefined,
-  };
-}

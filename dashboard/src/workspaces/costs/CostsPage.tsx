@@ -14,6 +14,7 @@ import {
   type ProjectSpread,
   type TokenMix,
 } from './spend.ts';
+import { CanonicalCosts } from './CanonicalCosts.tsx';
 
 const BASE = '/api/plugins/savings';
 
@@ -29,6 +30,30 @@ const BASE = '/api/plugins/savings';
  * which is a legend's worth of information given a plate's worth of space.
  */
 export function CostsPage() {
+  return (
+    <div
+      className="flex h-full flex-col overflow-auto"
+      tabIndex={0}
+      role="region"
+      aria-label="Costs content"
+    >
+      <div className="flex items-baseline gap-3 border-b border-edge-subtle px-4 py-2">
+        <h1 className="text-sm font-semibold tracking-tight">Costs</h1>
+        <span className="min-w-0 truncate text-2xs text-text-muted">
+          priced turn ledger, cache savings, and the canonical cost observations
+        </span>
+      </div>
+      {/* Two independent reads. The legacy savings overview and the canonical
+        * Plan 26 projection answer with different stores behind them, so a
+        * failure in one must not blank the other — which is exactly what
+        * happened while the whole page sat inside a single boundary. */}
+      <SavingsLedger />
+      <CanonicalCosts />
+    </div>
+  );
+}
+
+function SavingsLedger() {
   const overview = useLegacy(
     ['savings', 'overview'],
     `${BASE}/overview`,
@@ -53,20 +78,12 @@ export function CostsPage() {
           ? `Savings by project (top ${(lifetime.projects?.length ?? lifetime.projects_limit ?? 0).toLocaleString()} of ${(lifetime.project_total ?? 0).toLocaleString()} projects)`
           : 'Savings by project (lifetime)';
         return (
-          <div
-            className="flex h-full flex-col overflow-auto"
-            tabIndex={0}
-            role="region"
-            aria-label="Costs content"
-          >
-            <div className="flex items-baseline gap-3 border-b border-edge-subtle px-4 py-2">
-              <h1 className="text-sm font-semibold tracking-tight">Costs</h1>
-              <span className="min-w-0 truncate text-2xs text-text-muted">
-                {data.turns.available
-                  ? `turn ledger · ${data.turns.cost_basis ?? 'unknown'} cost basis`
-                  : 'turn ledger unavailable'}
-              </span>
-            </div>
+          <>
+            <p className="border-b border-edge-subtle px-4 py-1.5 text-2xs text-text-muted">
+              {data.turns.available
+                ? `turn ledger · ${data.turns.cost_basis ?? 'unknown'} cost basis`
+                : 'turn ledger unavailable'}
+            </p>
 
             {/* Spend first, and at the display tier. Everything below it is
               * either an explanation of this number or a counterfactual about
@@ -251,7 +268,7 @@ export function CostsPage() {
             {/* Provenance, as a legend. Source, model count and offline state
               * are things you check once and then stop looking at; they were
               * holding a full panel in a three-panel grid. */}
-            <p className="mt-auto flex flex-wrap items-baseline gap-x-4 gap-y-1 border-t border-edge-subtle px-4 py-2 text-3xs text-text-muted">
+            <p className="flex flex-wrap items-baseline gap-x-4 gap-y-1 border-t border-edge-subtle px-4 py-2 text-3xs text-text-muted">
               <span className="td-legend">pricing</span>
               <span>source {String(data.pricing.source ?? '—')}</span>
               <span>{String(data.pricing.model_count ?? '—')} models priced</span>
@@ -261,7 +278,7 @@ export function CostsPage() {
                 <span>{data.sessions.model_count.toLocaleString()} models seen</span>
               ) : null}
             </p>
-          </div>
+          </>
         );
       }}
     </LegacyBoundary>

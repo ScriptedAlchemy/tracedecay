@@ -2281,15 +2281,74 @@ function loomChainPayload(): Record<string, unknown> {
     has_more_summary_nodes: false,
     counts: {
       message_count: 998,
-      source_token_count: 0,
-      summary_node_count: 0,
-      summary_token_count: 0,
+      source_token_count: 18_400,
+      summary_node_count: LOOM_CHAIN_SUMMARY_NODES.length,
+      summary_token_count: 1_020,
       token_estimate_total: 21_460,
     },
     messages,
-    summary_nodes: [],
+    summary_nodes: LOOM_CHAIN_SUMMARY_NODES.map((node) => ({ ...node, session_id: sessionId })),
   };
 }
+
+/**
+ * LCM compaction boundaries for the transcript above.
+ *
+ * The Sessions drill-down reads these as the compactor's cuts: each names the
+ * source tokens it replaced and the token count it replaced them with, so the
+ * audit exercises a real boundary rather than the zero state. `expand_hint` is
+ * the producer's own recovery instruction and is rendered verbatim.
+ */
+const LOOM_CHAIN_SUMMARY_NODES = [
+  {
+    node_id: 'sn-recon-0001',
+    category: 'tool_activity',
+    depth: 1,
+    summary:
+      'Read and grepped the worktree reconciliation path, then confirmed the durable restart branch against the scheduler registry.',
+    source_type: 'messages',
+    source_token_count: 9_800,
+    token_count: 540,
+    created_at: 1_752_988_400,
+    latest_at: 1_752_989_050,
+    expand_hint: 'lcm expand node:sn-recon-0001',
+  },
+  {
+    node_id: 'sn-recon-0002',
+    category: 'code_change',
+    depth: 1,
+    summary:
+      'Edits to the generation-publication path and the reconciliation guard, with the tests that cover them.',
+    source_type: 'messages',
+    source_token_count: 6_200,
+    token_count: 330,
+    created_at: 1_752_989_600,
+    latest_at: 1_752_990_100,
+    expand_hint: 'lcm expand node:sn-recon-0002',
+  },
+  {
+    node_id: 'sn-recon-0003',
+    category: 'outcome',
+    depth: 2,
+    summary:
+      'Session outcome: reconciliation verified, one gap left open against the hook-hint queue drain.',
+    source_type: 'summary_nodes',
+    source_token_count: 2_400,
+    token_count: 150,
+    created_at: 1_752_990_400,
+    latest_at: null,
+    expand_hint: 'lcm expand node:sn-recon-0003',
+  },
+] as const;
+
+/** Thirty days back, matching `analytics_api::observatory_model`. Declared
+ * above the fixture map because the map is built at module init and a `const`
+ * is not hoisted the way the builder functions below it are. */
+const OBSERVATORY_SINCE_MICROS = nowMicros - 30 * 86_400 * 1_000_000;
+
+const ANALYTICS_DESCRIPTOR = 'analytics-observability.v1';
+const FEEDBACK_DESCRIPTOR = 'feedback-system-quality.v1';
+const COST_DESCRIPTOR = 'accounting-cost.v1';
 
 /**
  * Exact-path fixture map. Keys are the pathname (query string stripped by the
@@ -2332,6 +2391,15 @@ export const FIXTURES: Readonly<Record<string, unknown>> = {
   '/api/automation/jobs': jobsPayload(),
   '/api/automation/skills': skillsPayload(),
   '/api/automation/fact-proposals': factProposalsPayload(),
+  // Plan 26 canonical read models. These are the projections the CLI and MCP
+  // also serve, so their fixtures carry the mixed available/unavailable metric
+  // set the real projector emits rather than a fully-populated one.
+  '/api/observatory': observatoryEnvelope(),
+  '/api/costs': costsEnvelope(),
+  // Code-index freshness. Served against a mounted daemon scheduler, which is
+  // the state the audit needs to shoot — the unattached case is a state chip
+  // with no reading behind it.
+  '/api/code-index/freshness': codeIndexFreshnessEnvelope(),
 };
 
 /** Prefix fixtures for query-bearing / dynamic routes. The resolver falls back
@@ -2346,6 +2414,331 @@ export const FIXTURE_PREFIXES: ReadonlyArray<readonly [string, unknown]> = [
   ['/api/plugins/graph', graphOverviewPayload()],
   ['/api/plugins/savings', savingsPayload()],
 ];
+
+/* ==========================================================================
+ * Plan 26 canonical read models (`/api/observatory`, `/api/costs`).
+ *
+ * Shapes come from `src/application/observability.rs`. Two of its behaviours
+ * are deliberately reproduced here rather than smoothed away, because they are
+ * the behaviours the workspaces exist to render honestly:
+ *
+ *   - a metric the projector could not complete carries `value: null` and an
+ *     `unavailable_reason`, and its coverage goes `unknown` with a null
+ *     eligible population;
+ *   - every completed metric carries a degenerate uncertainty interval
+ *     (`lower == upper == value`), which the plate must drop rather than draw.
+ * ========================================================================== */
+
+/** One `MetricValueV1`. `value: null` also nulls the coverage denominator, as
+ * the projector's `coverage(None, 0, 1, Unknown)` does. */
+function metricValue(spec: {
+  metric: string;
+  value: number | null;
+  unit: string;
+  denominator: string;
+  eligible: number | null;
+  source: string;
+  sourceRevision: string;
+  projectorRevision: string;
+  watermark: string;
+  descriptorRevision: string;
+  unavailableReason?: string | null;
+}): Record<string, unknown> {
+  const available = spec.value != null;
+  return {
+    descriptor_revision: spec.descriptorRevision,
+    metric: spec.metric,
+    value: spec.value,
+    unit: spec.unit,
+    denominator: spec.denominator,
+    denominator_value: available ? spec.eligible : null,
+    coverage: {
+      state: available ? 'known' : 'unknown',
+      eligible: available ? spec.eligible : null,
+      observed: available ? (spec.eligible ?? 0) : 0,
+      completed: available ? (spec.eligible ?? 0) : 0,
+      censored: 0,
+      excluded: 0,
+      unknown: available ? 0 : 1,
+    },
+    evidence_class: 'measurement',
+    provenance: {
+      source: spec.source,
+      source_revision: spec.sourceRevision,
+      projector_revision: spec.projectorRevision,
+      watermark: spec.watermark,
+    },
+    cohort: {
+      descriptor_revision: `${spec.denominator}.v1`,
+      eligible_population: spec.denominator,
+    },
+    temporal: {
+      horizon: { since_micros: OBSERVATORY_SINCE_MICROS, until_micros: nowMicros },
+      baseline_watermark: null,
+      delta: null,
+    },
+    uncertainty: available
+      ? { lower: spec.value, upper: spec.value, reason: null }
+      : { lower: null, upper: null, reason: spec.unavailableReason ?? null },
+    calibration: null,
+    unavailable_reason: spec.unavailableReason ?? null,
+  };
+}
+
+function observabilityMetric(
+  metric: string,
+  value: number | null,
+  reason: string | null = null,
+): Record<string, unknown> {
+  return metricValue({
+    metric,
+    value,
+    unit: 'events',
+    denominator: 'eligible_observability_events',
+    eligible: 6_142,
+    source: 'observability_envelope',
+    sourceRevision: 'observability-envelope.v1',
+    projectorRevision: 'observatory-projector.v1',
+    watermark: 'analytics:918422',
+    descriptorRevision: ANALYTICS_DESCRIPTOR,
+    unavailableReason: reason,
+  });
+}
+
+function feedbackMetric(spec: {
+  metric: string;
+  value: number | null;
+  unit: string;
+  denominator: string;
+  eligible: number | null;
+  reason?: string | null;
+}): Record<string, unknown> {
+  return metricValue({
+    ...spec,
+    source: 'feedback_observations',
+    sourceRevision: 'feedback-observations.v1',
+    projectorRevision: 'feedback-system-quality-projector.v1',
+    watermark: 'feedback:31204',
+    descriptorRevision: FEEDBACK_DESCRIPTOR,
+    unavailableReason: spec.reason ?? null,
+  });
+}
+
+/** GET /api/observatory (src/dashboard/analytics_api.rs `observatory`). */
+function observatoryEnvelope(): Record<string, unknown> {
+  const metrics = [
+    observabilityMetric('observability_events', 6_142),
+    observabilityMetric('observability_failures', 23),
+    observabilityMetric('telemetry_drops_lower_bound', 0),
+    feedbackMetric({
+      metric: 'feedback_coverage',
+      value: 0.9127,
+      unit: 'ratio',
+      denominator: 'eligible_observations',
+      eligible: 1_884,
+    }),
+    feedbackMetric({
+      metric: 'feedback_relevance',
+      value: 0.7431,
+      unit: 'ratio',
+      denominator: 'relevance_labels',
+      eligible: 612,
+    }),
+    feedbackMetric({
+      metric: 'feedback_diversity',
+      value: 0.6208,
+      unit: 'ratio',
+      denominator: 'eligible_source_families',
+      eligible: 8,
+    }),
+    feedbackMetric({
+      metric: 'feedback_latency_p95',
+      value: 214_800,
+      unit: 'microseconds',
+      denominator: 'latency_samples',
+      eligible: 1_884,
+    }),
+    feedbackMetric({
+      metric: 'feedback_omission_rate',
+      value: 0.0412,
+      unit: 'ratio',
+      denominator: 'returned_and_omitted_items',
+      eligible: 9_260,
+    }),
+    feedbackMetric({
+      metric: 'feedback_denial_rate',
+      value: 0.0,
+      unit: 'ratio',
+      denominator: 'outcome_observations',
+      eligible: 1_884,
+    }),
+    feedbackMetric({
+      metric: 'feedback_staleness_rate',
+      value: 0.0217,
+      unit: 'ratio',
+      denominator: 'outcome_observations',
+      eligible: 1_884,
+    }),
+    // Two the projector genuinely could not complete on a store with no
+    // revocation or stack-transition observations. The audit needs these: a
+    // fully-populated fixture never shoots the unavailable plate.
+    feedbackMetric({
+      metric: 'feedback_revocation_propagation_p95',
+      value: null,
+      unit: 'microseconds',
+      denominator: 'revocation_observations',
+      eligible: null,
+      reason: 'no_revocation_observations',
+    }),
+    feedbackMetric({
+      metric: 'feedback_stack_transitions',
+      value: null,
+      unit: 'transitions',
+      denominator: 'stack_transition_observations',
+      eligible: null,
+      reason: 'no_stack_transition_observations',
+    }),
+  ];
+  const payload = {
+    authorized_scope_ref: 'proj_a5b3d7e3ebe14ca7',
+    horizon: { since_micros: OBSERVATORY_SINCE_MICROS, until_micros: nowMicros },
+    watermark: 'analytics:918422;feedback:31204',
+    observed_at_micros: nowMicros,
+    current: false,
+    metrics,
+  };
+  return {
+    ...envelope(payload, 'partial', [
+      { kind: 'refresh', operation: 'use-case.dashboard.observatory.refresh' },
+    ]),
+    coverage: {
+      completeness: 'partial',
+      eligible: metrics.length,
+      examined: metrics.length - 2,
+      matched: null,
+      excluded: null,
+      omitted: 2,
+      unknown: null,
+      denominator: metrics.length,
+      unit: 'metrics',
+      omission_reasons: ['incomplete_metric_coverage'],
+    },
+  };
+}
+
+/** GET /api/costs (src/dashboard/savings_api.rs `costs`). The projector asks
+ * for an all-time window, which reaches the wire as `since_micros: 0`. */
+function costsEnvelope(): Record<string, unknown> {
+  const usage = [
+    metricValue({
+      metric: 'provider_tokens',
+      value: 41_882_140,
+      unit: 'tokens',
+      denominator: 'ingested_provider_turns',
+      eligible: 27_401,
+      source: 'accounting_turn',
+      sourceRevision: 'accounting-turn.v1',
+      projectorRevision: 'costs-projector.v1',
+      watermark: 'turns:27401:1752990400',
+      descriptorRevision: COST_DESCRIPTOR,
+    }),
+    metricValue({
+      metric: 'saved_tokens',
+      value: 30_144_802,
+      unit: 'tokens',
+      denominator: 'eligible_savings_calls',
+      eligible: 12_608,
+      source: 'savings_ledger',
+      sourceRevision: 'savings-ledger.v1',
+      projectorRevision: 'costs-projector.v1',
+      watermark: 'savings:1752990400',
+      descriptorRevision: COST_DESCRIPTOR,
+    }),
+  ];
+  // Prices are recorded at ingest. Turns counted without a pricing revision
+  // produce a null cost with this exact reason — never a zero bill.
+  const estimatedCost = [
+    metricValue({
+      metric: 'provider_cost',
+      value: null,
+      unit: 'usd',
+      denominator: 'priced_provider_turns',
+      eligible: null,
+      source: 'accounting_turn',
+      sourceRevision: 'accounting-turn.v1',
+      projectorRevision: 'costs-projector.v1',
+      watermark: 'turns:27401:1752990400',
+      descriptorRevision: COST_DESCRIPTOR,
+      unavailableReason: 'pricing_revision_unavailable',
+    }),
+  ];
+  const payload = {
+    authorized_scope_ref: 'all',
+    horizon: { since_micros: 0, until_micros: nowMicros },
+    watermark: 'turns:27401:1752990400;savings:1752990400',
+    observed_at_micros: nowMicros,
+    current: false,
+    usage,
+    estimated_cost: estimatedCost,
+    pricing_revision: null,
+  };
+  return {
+    ...envelope(payload, 'partial', [
+      { kind: 'refresh', operation: 'use-case.dashboard.costs.refresh' },
+    ]),
+    coverage: {
+      completeness: 'partial',
+      eligible: 3,
+      examined: 2,
+      matched: null,
+      excluded: null,
+      omitted: 1,
+      unknown: null,
+      denominator: 3,
+      unit: 'metrics',
+      omission_reasons: ['incomplete_metric_coverage'],
+    },
+  };
+}
+
+/** GET /api/code-index/freshness (src/dashboard/code_index_freshness_api.rs). */
+function codeIndexFreshnessEnvelope(): Record<string, unknown> {
+  const payload = {
+    worktrees: [
+      {
+        worktree_root: '/fast/projects/tracedecay',
+        repository_id: 'repository.b41f2c9d',
+        worktree_id: 'worktree.primary',
+        source_reference: 'refs/heads/codex/tracedecay-total-redesign-plan',
+        latest_generation_id: 'generation.2f8c41ab',
+        snapshot_content_identity: 'sha256:9c1f4a2e7b05',
+        sealed_at_micros: nowMicros - 214_000_000,
+        last_reconcile_micros: nowMicros - 8_400_000,
+        staleness_state: 'fresh',
+        hook_hint_count: 0,
+        coverage: 'complete',
+      },
+    ],
+    note: 'live daemon scheduler state; generation and scope come from the durable sealed generation',
+  };
+  return {
+    ...envelope(payload, 'ready', [
+      { kind: 'refresh', operation: 'use-case.dashboard.code-index.freshness.refresh' },
+    ]),
+    coverage: {
+      completeness: 'complete',
+      eligible: 1,
+      examined: 1,
+      matched: 1,
+      excluded: 0,
+      omitted: 0,
+      unknown: 0,
+      denominator: 1,
+      unit: 'mounted_worktree',
+      omission_reasons: [],
+    },
+  };
+}
 
 /** GET /api/plugins/holographic/status (src/dashboard/memory_api.rs `status`). */
 function memoryStatusPayload(): Record<string, unknown> {
