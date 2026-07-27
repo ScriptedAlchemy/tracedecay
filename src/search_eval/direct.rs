@@ -1444,7 +1444,7 @@ mod tests {
             workload.execution_contract.exact_eligible_chunks_10x,
             19_600
         );
-        assert_eq!(workload.execution_contract.exact_query_count, 24);
+        assert_eq!(workload.execution_contract.exact_query_count, 28);
         assert_eq!(
             workload.execution_contract.exact_eligible_chunks_10x,
             workload

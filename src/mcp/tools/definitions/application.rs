@@ -1198,9 +1198,9 @@ mod tests {
 
         let diagnostics = def_diagnostics_read();
         let scope = &diagnostics.input_schema["properties"]["scope"];
+        assert_eq!(scope["oneOf"].as_array().map(Vec::len), Some(2));
         assert_eq!(scope["oneOf"][0]["const"], "workspace");
-        assert_eq!(scope["oneOf"][1]["required"], json!(["package"]));
-        assert_eq!(scope["oneOf"][2]["required"], json!(["file"]));
+        assert_eq!(scope["oneOf"][1]["required"], json!(["file"]));
     }
 
     #[test]

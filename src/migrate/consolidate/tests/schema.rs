@@ -252,6 +252,9 @@ fn session_table_disposition(table: &str) -> Option<&'static str> {
         // inputs but deliberately does not materialize it in the destination.
         "dashboard_token_counts" => Some("legacy derived cache discarded"),
         "authority_audit_checkpoints"
+        // Resumable foreign-key audit cursor is scoped to the source store's
+        // table order. The consolidated target restarts its own audit.
+        | "authority_foreign_key_audit_progress"
         | "global_schema_migrations"
         // Resumable-backfill watermarks scoped to one store's own sequences; a
         // consolidated target re-derives its own from the merged observations.
