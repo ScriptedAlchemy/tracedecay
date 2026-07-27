@@ -143,10 +143,17 @@ fn non_indexing_packages_exclude_grammars_structural_search_and_root_indexer() {
 fn domain_dependencies_are_exactly_the_pure_value_allowlist() {
     let metadata = cargo_metadata();
     let direct = direct_dependencies(&metadata, "tracedecay-domain");
-    let expected_direct = ["serde", "serde_json", "sha2", "thiserror"]
-        .into_iter()
-        .map(str::to_owned)
-        .collect::<BTreeSet<_>>();
+    let expected_direct = [
+        "schemars",
+        "serde",
+        "serde_json",
+        "sha2",
+        "thiserror",
+        "url",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect::<BTreeSet<_>>();
     assert_eq!(
         direct, expected_direct,
         "tracedecay-domain must not depend on I/O, stores, transports, providers, settings, credentials, lifecycle, UI, or the root crate"
@@ -193,6 +200,7 @@ fn application_dependencies_are_exactly_the_use_case_allowlist() {
     let metadata = cargo_metadata();
     let direct = direct_dependencies(&metadata, "tracedecay-application");
     let expected_direct = [
+        "schemars",
         "serde",
         "serde_json",
         "thiserror",
