@@ -20,6 +20,7 @@ pub(crate) enum SessionTemporalRefreshRetryClass {
 pub(crate) enum SessionTemporalRefreshUnavailableReason {
     Missing,
     Recovering,
+    Stalled,
     Stopped,
 }
 
@@ -71,6 +72,7 @@ impl SessionTemporalRefreshWorkerStatus {
 
 struct SessionTemporalRefreshWorkerTelemetry {
     last_progress_at_unix_micros: Option<i64>,
+    last_pass_made_progress: bool,
     queued_backlog: usize,
     durable_backlog: usize,
     blocker: Option<SessionTemporalRefreshBlocker>,
@@ -82,6 +84,7 @@ impl Default for SessionTemporalRefreshWorkerTelemetry {
     fn default() -> Self {
         Self {
             last_progress_at_unix_micros: None,
+            last_pass_made_progress: false,
             queued_backlog: 0,
             durable_backlog: 0,
             blocker: Some(SessionTemporalRefreshBlocker::WorkerStopped),
@@ -209,6 +212,13 @@ impl SessionTemporalRefreshWakeState {
         telemetry.unavailable_reason = None;
     }
 
+    pub(super) fn begin_pass(&self) {
+        self.telemetry
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .last_pass_made_progress = false;
+    }
+
     pub(super) fn mark_recovering(
         &self,
         blocker: SessionTemporalRefreshBlocker,
@@ -246,6 +256,7 @@ impl SessionTemporalRefreshWakeState {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         telemetry.durable_backlog = durable_backlog;
+        telemetry.last_pass_made_progress = made_progress;
         if made_progress {
             let micros = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -268,6 +279,15 @@ impl SessionTemporalRefreshWakeState {
             .telemetry
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
+        let unavailable_reason = match (
+            telemetry.unavailable_reason,
+            telemetry.last_pass_made_progress,
+        ) {
+            (Some(SessionTemporalRefreshUnavailableReason::Recovering), false) => {
+                Some(SessionTemporalRefreshUnavailableReason::Stalled)
+            }
+            (reason, _) => reason,
+        };
         SessionTemporalRefreshWorkerStatus {
             last_progress_at_unix_micros: telemetry.last_progress_at_unix_micros,
             backlog: telemetry
@@ -275,7 +295,7 @@ impl SessionTemporalRefreshWakeState {
                 .saturating_add(telemetry.durable_backlog),
             blocker: telemetry.blocker,
             retry_class: telemetry.retry_class,
-            unavailable_reason: telemetry.unavailable_reason,
+            unavailable_reason,
         }
     }
 
@@ -528,5 +548,60 @@ impl SessionTemporalRefreshWake {
             state.wake();
         }
         disposition
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recovery_without_any_progress_is_reported_as_stalled() {
+        let state = SessionTemporalRefreshWakeState::default();
+        state.observe_durable_backlog(14);
+        state.mark_recovering(
+            SessionTemporalRefreshBlocker::Storage,
+            SessionTemporalRefreshRetryClass::Storage,
+        );
+
+        let stalled = state.status();
+        assert_eq!(
+            stalled.unavailable_reason,
+            Some(SessionTemporalRefreshUnavailableReason::Stalled)
+        );
+        assert_eq!(stalled.last_progress_at_unix_micros, None);
+        assert_eq!(stalled.backlog, 14);
+        assert_eq!(
+            stalled.blocker,
+            Some(SessionTemporalRefreshBlocker::Storage)
+        );
+
+        state.record_pass(13, true);
+        state.mark_recovering(
+            SessionTemporalRefreshBlocker::Storage,
+            SessionTemporalRefreshRetryClass::Storage,
+        );
+        let progressing = state.status();
+        assert_eq!(
+            progressing.unavailable_reason,
+            Some(SessionTemporalRefreshUnavailableReason::Recovering)
+        );
+        assert!(progressing.last_progress_at_unix_micros.is_some());
+
+        state.record_pass(13, false);
+        state.mark_recovering(
+            SessionTemporalRefreshBlocker::Storage,
+            SessionTemporalRefreshRetryClass::Storage,
+        );
+        let stalled_after_progress = state.status();
+        assert_eq!(
+            stalled_after_progress.unavailable_reason,
+            Some(SessionTemporalRefreshUnavailableReason::Stalled)
+        );
+        assert!(
+            stalled_after_progress
+                .last_progress_at_unix_micros
+                .is_some()
+        );
     }
 }

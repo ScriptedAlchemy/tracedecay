@@ -917,86 +917,6 @@ async fn observation_authority_audit(
     }
 }
 
-/// Registered-runtime implementation of session-ingest health over a
-/// registered read snapshot: same sessions/parse-offset queries and the same
-/// filesystem backlog accounting.
-async fn session_ingest_health_for_provider(
-    conn: &impl crate::db::engine::QueryExecutor,
-    provider: Option<&str>,
-) -> crate::global_db::SessionIngestHealth {
-    let mut health = crate::global_db::SessionIngestHealth::default();
-    let rows = if let Some(provider) = provider {
-        conn.query(
-            "SELECT DISTINCT transcript_path FROM sessions
-             WHERE provider = ?1
-               AND transcript_path IS NOT NULL
-               AND transcript_path != ''
-             LIMIT 1000",
-            crate::db::engine::params![provider],
-        )
-        .await
-    } else {
-        conn.query(
-            "SELECT DISTINCT transcript_path FROM sessions
-             WHERE transcript_path IS NOT NULL AND transcript_path != ''
-             LIMIT 1000",
-            (),
-        )
-        .await
-    };
-    let Ok(mut rows) = rows else {
-        return health;
-    };
-    let mut paths = Vec::new();
-    while let Ok(Some(row)) = rows.next().await {
-        if let Ok(path) = row.get::<String>(0) {
-            paths.push(path);
-        }
-    }
-    for path in paths {
-        let Ok(meta) = std::fs::metadata(&path) else {
-            continue;
-        };
-        health.tracked_transcripts += 1;
-        let (byte_offset, mtime) = parse_offset_for_path(conn, &path).await.unwrap_or_default();
-        if mtime > 0 {
-            let mtime = mtime as i64;
-            health.last_ingest_unix = Some(
-                health
-                    .last_ingest_unix
-                    .map_or(mtime, |prev| prev.max(mtime)),
-            );
-        }
-        let pending = meta.len().saturating_sub(byte_offset);
-        if pending > 0 {
-            health.pending_transcripts += 1;
-            health.pending_bytes = health.pending_bytes.saturating_add(pending);
-            health.max_transcript_pending_bytes = health.max_transcript_pending_bytes.max(pending);
-        }
-    }
-    health
-}
-
-/// Reads one transcript parse offset through the two-column projection; a
-/// column subset stays valid whether or not the current `file_id` column
-/// exists.
-async fn parse_offset_for_path(
-    conn: &impl crate::db::engine::QueryExecutor,
-    path: &str,
-) -> Option<(u64, u64)> {
-    let mut rows = conn
-        .query(
-            "SELECT byte_offset, mtime FROM parse_offsets WHERE file_path = ?1",
-            crate::db::engine::params![path],
-        )
-        .await
-        .ok()?;
-    let row = rows.next().await.ok()??;
-    let byte_offset = row.get::<i64>(0).ok()?;
-    let mtime = row.get::<i64>(1).ok()?;
-    Some((u64::try_from(byte_offset).ok()?, u64::try_from(mtime).ok()?))
-}
-
 /// Registered-runtime implementation of literal workspace-placeholder paths
 /// over a registered read snapshot.
 async fn literal_workspace_placeholder_transcript_paths(
@@ -1114,26 +1034,36 @@ pub(super) async fn handle_runtime(
         .unwrap_or(false)
     {
         match project_session_db {
-            Some(db) => match db.read_snapshot().await {
-                Ok(snapshot) => {
-                    value["cursor_session_ingest"] = serde_json::to_value(
-                        session_ingest_health_for_provider(&snapshot, Some("cursor")).await,
-                    )
-                    .unwrap_or_else(|_| json!({}));
-                    value["cursor_session_placeholder_paths"] =
-                        json!(literal_workspace_placeholder_transcript_paths(&snapshot, 10).await);
-                }
-                Err(_) => {
-                    value["cursor_session_ingest"] = json!({
+            Some(db) => {
+                value["cursor_session_ingest"] = match db.cursor_session_ingest_health().await {
+                    Ok(health) => serde_json::to_value(health).unwrap_or_else(|error| {
+                        json!({
+                            "status": "unavailable",
+                            "reason": "session_ingest_serialization_failed",
+                            "message": error.to_string(),
+                        })
+                    }),
+                    Err(error) => json!({
                         "status": "unavailable",
-                        "message": "project session store snapshot is unavailable",
-                    });
-                    value["cursor_session_placeholder_paths"] = json!([]);
+                        "reason": "session_ingest_query_failed",
+                        "message": error,
+                    }),
+                };
+                match db.read_snapshot().await {
+                    Ok(snapshot) => {
+                        value["cursor_session_placeholder_paths"] = json!(
+                            literal_workspace_placeholder_transcript_paths(&snapshot, 10).await
+                        );
+                    }
+                    Err(_) => {
+                        value["cursor_session_placeholder_paths"] = json!([]);
+                    }
                 }
-            },
+            }
             None => {
                 value["cursor_session_ingest"] = json!({
                     "status": "unavailable",
+                    "reason": "session_store_unavailable",
                     "message": "daemon project session authority is unavailable",
                 });
             }

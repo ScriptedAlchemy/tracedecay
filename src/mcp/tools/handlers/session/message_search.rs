@@ -471,6 +471,7 @@ pub(crate) enum SessionRetrievalUnavailableReason {
     ServiceNotConfigured,
     RefreshWorkerMissing,
     RefreshWorkerRecovering,
+    RefreshWorkerStalled,
     RefreshWorkerStopped,
     UnsupportedQuery,
     #[allow(dead_code)]
@@ -486,6 +487,7 @@ impl SessionRetrievalUnavailableReason {
             Self::ServiceNotConfigured => "service_not_configured",
             Self::RefreshWorkerMissing => "refresh_worker_missing",
             Self::RefreshWorkerRecovering => "refresh_worker_recovering",
+            Self::RefreshWorkerStalled => "refresh_worker_stalled",
             Self::RefreshWorkerStopped => "refresh_worker_stopped",
             Self::UnsupportedQuery => "unsupported_query",
             Self::RequestContextInvalid => "request_context_invalid",
@@ -499,6 +501,7 @@ impl SessionRetrievalUnavailableReason {
             self,
             Self::RefreshWorkerMissing
                 | Self::RefreshWorkerRecovering
+                | Self::RefreshWorkerStalled
                 | Self::RefreshWorkerStopped
                 | Self::TemporalStoreUnavailable
                 | Self::HydrationUnavailable
@@ -1888,5 +1891,40 @@ mod cutover_tests {
         assert!(markdown.contains(
             "Refresh worker: last progress 42, backlog 7, blocker `worker_panicked`, retry class `projector`"
         ));
+    }
+
+    #[tokio::test]
+    async fn unavailable_outcome_reports_no_progress_backlog_as_stalled() {
+        let service = RecordingService::with_outcome(SessionRetrievalServiceOutcome::Unavailable(
+            SessionRetrievalUnavailable {
+                reason: SessionRetrievalUnavailableReason::RefreshWorkerStalled,
+                worker: Some(SessionRetrievalWorkerStatusView {
+                    last_progress_at_unix_micros: None,
+                    backlog: 14,
+                    blocker: Some(SessionRetrievalWorkerBlocker::Storage),
+                    retry_class: Some(SessionRetrievalWorkerRetryClass::Storage),
+                }),
+            },
+        ));
+
+        let result = handle_message_search_with_service(
+            Some(Path::new("/repo")),
+            SessionRetrievalStoreScope::Project,
+            json_args(),
+            Some(&service),
+        )
+        .await
+        .unwrap();
+        let payload = response_payload(&result);
+
+        assert_eq!(payload["error"]["reason"], "refresh_worker_stalled");
+        assert_eq!(payload["error"]["retryable"], true);
+        assert_eq!(
+            payload["service_status"]["last_progress_at_unix_micros"],
+            Value::Null
+        );
+        assert_eq!(payload["service_status"]["backlog"], 14);
+        assert_eq!(payload["service_status"]["blocker"], "storage");
+        assert_eq!(payload["service_status"]["retry_class"], "storage");
     }
 }

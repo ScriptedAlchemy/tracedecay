@@ -2005,6 +2005,130 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn status_and_runtime_share_cursor_session_ingest_authority() {
+        let _env_lock = lock_user_data_dir_test_env();
+        let dir = TempDir::new().unwrap();
+        let _env = SelectorEnv::new(dir.path());
+        let project = dir.path().join("active");
+        fs::create_dir_all(&project).unwrap();
+        let (cg, runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+            &project,
+            "project.mcp-session-ingest-authority",
+        )
+        .await
+        .unwrap();
+        let database = runtime
+            .registered_database(crate::application::host_admission::HostAdmissionScope::Project)
+            .unwrap();
+        let cursor_path = dir.path().join("cursor.jsonl");
+        let claude_path = dir.path().join("claude.jsonl");
+        fs::write(&cursor_path, b"0123456789").unwrap();
+        fs::write(&claude_path, b"01234567890123456789").unwrap();
+        for (provider, session_id, path) in [
+            ("cursor", "session.cursor", cursor_path.as_path()),
+            ("claude", "session.claude", claude_path.as_path()),
+        ] {
+            assert!(
+                database
+                    .upsert_session(&crate::sessions::SessionRecord {
+                        provider: provider.to_owned(),
+                        session_id: session_id.to_owned(),
+                        project_key: project.display().to_string(),
+                        project_path: project.display().to_string(),
+                        title: None,
+                        started_at: None,
+                        ended_at: None,
+                        transcript_path: Some(path.display().to_string()),
+                        metadata_json: None,
+                        parent_session_id: None,
+                        is_subagent: false,
+                        agent_id: None,
+                        parent_tool_use_id: None,
+                    })
+                    .await
+            );
+        }
+        database
+            .set_parse_offset(
+                cursor_path.to_str().unwrap(),
+                crate::global_db::ParseOffset {
+                    byte_offset: 4,
+                    mtime: 100,
+                    file_id: 0,
+                },
+            )
+            .await
+            .unwrap();
+        database
+            .set_parse_offset(
+                claude_path.to_str().unwrap(),
+                crate::global_db::ParseOffset {
+                    byte_offset: 20,
+                    mtime: 200,
+                    file_id: 0,
+                },
+            )
+            .await
+            .unwrap();
+        let options = || ToolCallRegistryOptions {
+            registered_project_session_db: runtime.registered_database_arc(
+                crate::application::host_admission::HostAdmissionScope::Project,
+            ),
+            allow_default_registry_fallback: false,
+            ..Default::default()
+        };
+        let status = handle_tool_call_with_registry_and_implicit_project(
+            &cg,
+            "tracedecay_status",
+            json!({
+                "format": "json",
+                "include_branch_diagnostics": false,
+                "include_storage_health": false,
+                "include_staleness": false,
+            }),
+            None,
+            None,
+            options(),
+        )
+        .await
+        .unwrap();
+        let runtime_result = handle_tool_call_with_registry_and_implicit_project(
+            &cg,
+            "tracedecay_runtime",
+            json!({
+                "format": "json",
+                "session_ingest_health": true,
+            }),
+            None,
+            None,
+            options(),
+        )
+        .await
+        .unwrap();
+        let parse = |result: ToolResult| {
+            serde_json::from_str::<Value>(
+                result.value["content"][0]["text"]
+                    .as_str()
+                    .expect("tool JSON text"),
+            )
+            .expect("parse tool JSON")
+        };
+        let status = parse(status);
+        let runtime_result = parse(runtime_result);
+
+        assert_eq!(
+            status["session_ingest"],
+            runtime_result["cursor_session_ingest"]
+        );
+        assert_eq!(status["session_ingest"]["tracked_transcripts"], 1);
+        assert_eq!(status["session_ingest"]["pending_bytes"], 6);
+        assert_eq!(status["session_ingest"]["last_ingest_unix"], 100);
+
+        cg.checkpoint().await.unwrap();
+        cg.close();
+    }
+
+    #[tokio::test]
     async fn unsupported_selector_tool_rejects_explicit_project_selector() {
         let _env_lock = lock_user_data_dir_test_env();
         let dir = TempDir::new().unwrap();

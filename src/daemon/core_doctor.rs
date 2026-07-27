@@ -175,55 +175,6 @@ fn doctor_runtime_store_paths_for_branch(
     Ok((graph_path, layout.sessions_db_path))
 }
 
-async fn doctor_session_ingest_health(
-    database: &crate::global_db::RegisteredGlobalDb,
-    provider: &str,
-) -> crate::global_db::SessionIngestHealth {
-    let mut health = crate::global_db::SessionIngestHealth::default();
-    let Ok(mut rows) = database
-        .read_connection()
-        .query(
-            "SELECT DISTINCT transcript_path FROM sessions
-             WHERE provider = ?1
-               AND transcript_path IS NOT NULL
-               AND transcript_path != ''
-             LIMIT 1000",
-            crate::db::engine::params![provider],
-        )
-        .await
-    else {
-        return health;
-    };
-    let mut paths = Vec::new();
-    while let Ok(Some(row)) = rows.next().await {
-        if let Ok(path) = row.get::<String>(0) {
-            paths.push(path);
-        }
-    }
-    for path in paths {
-        let Ok(metadata) = std::fs::metadata(&path) else {
-            continue;
-        };
-        health.tracked_transcripts = health.tracked_transcripts.saturating_add(1);
-        let cursor = database.get_parse_offset(&path).await.unwrap_or_default();
-        if cursor.mtime > 0 {
-            let mtime = i64::try_from(cursor.mtime).unwrap_or(i64::MAX);
-            health.last_ingest_unix = Some(
-                health
-                    .last_ingest_unix
-                    .map_or(mtime, |previous| previous.max(mtime)),
-            );
-        }
-        let pending = metadata.len().saturating_sub(cursor.byte_offset);
-        if pending > 0 {
-            health.pending_transcripts = health.pending_transcripts.saturating_add(1);
-            health.pending_bytes = health.pending_bytes.saturating_add(pending);
-            health.max_transcript_pending_bytes = health.max_transcript_pending_bytes.max(pending);
-        }
-    }
-    health
-}
-
 async fn doctor_literal_workspace_placeholder_paths(
     database: &crate::global_db::RegisteredGlobalDb,
     limit: usize,
@@ -401,13 +352,20 @@ async fn doctor_runtime_value_inner(
         None => doctor_runtime_temporal_unavailable("session_store_missing"),
     };
     value["cursor_session_ingest"] = match session_db.as_ref() {
-        Some(db) => serde_json::to_value(doctor_session_ingest_health(db, "cursor").await)
-            .unwrap_or_else(|_| {
+        Some(db) => match db.cursor_session_ingest_health().await {
+            Ok(health) => serde_json::to_value(health).unwrap_or_else(|error| {
                 json!({
                     "status": "unavailable",
                     "reason": "session_ingest_serialization_failed",
+                    "message": error.to_string(),
                 })
             }),
+            Err(error) => json!({
+                "status": "unavailable",
+                "reason": "session_ingest_query_failed",
+                "message": error,
+            }),
+        },
         None => json!({
             "status": "unavailable",
             "reason": "session_store_unavailable",

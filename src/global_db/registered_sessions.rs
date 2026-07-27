@@ -11,52 +11,106 @@ use super::{
     interleave_workflow_search_results, session_fts_query,
 };
 
+const SESSION_INGEST_HEALTH_PAGE_SIZE: i64 = 512;
+
 impl RegisteredGlobalDb {
-    pub async fn session_ingest_health(&self) -> SessionIngestHealth {
-        let mut health = SessionIngestHealth::default();
-        let Ok(snapshot) = self.read_snapshot().await else {
-            return health;
-        };
-        let Ok(mut rows) = snapshot
-            .query(
-                "SELECT DISTINCT transcript_path FROM sessions
-                 WHERE transcript_path IS NOT NULL AND transcript_path != ''
-                 LIMIT 1000",
-                (),
-            )
+    pub async fn cursor_session_ingest_health(&self) -> Result<SessionIngestHealth, String> {
+        self.session_ingest_health_for_provider(Some("cursor"))
             .await
-        else {
-            return health;
-        };
-        let mut paths = Vec::new();
-        while let Ok(Some(row)) = rows.next().await {
-            if let Ok(path) = row.get::<String>(0) {
-                paths.push(path);
+    }
+
+    pub(crate) async fn session_ingest_health_for_provider(
+        &self,
+        provider: Option<&str>,
+    ) -> Result<SessionIngestHealth, String> {
+        let mut health = SessionIngestHealth::default();
+        let snapshot = self
+            .read_snapshot()
+            .await
+            .map_err(|error| format!("failed to begin session ingest health snapshot: {error}"))?;
+        let mut after_path = String::new();
+        loop {
+            let mut rows = snapshot
+                .query(
+                    "SELECT paths.transcript_path,
+                            COALESCE(offsets.byte_offset, 0),
+                            COALESCE(offsets.mtime, 0)
+                     FROM (
+                         SELECT DISTINCT transcript_path
+                         FROM sessions
+                         WHERE (?1 IS NULL OR provider = ?1)
+                           AND transcript_path IS NOT NULL
+                           AND transcript_path != ''
+                           AND transcript_path > ?2
+                         ORDER BY transcript_path
+                         LIMIT ?3
+                     ) AS paths
+                     LEFT JOIN parse_offsets AS offsets
+                       ON offsets.file_path = paths.transcript_path
+                     ORDER BY paths.transcript_path",
+                    crate::db::engine::params![
+                        provider,
+                        after_path.as_str(),
+                        SESSION_INGEST_HEALTH_PAGE_SIZE
+                    ],
+                )
+                .await
+                .map_err(|error| format!("failed to query session ingest health: {error}"))?;
+            let mut page = Vec::with_capacity(SESSION_INGEST_HEALTH_PAGE_SIZE as usize);
+            while let Some(row) = rows
+                .next()
+                .await
+                .map_err(|error| format!("failed to read session ingest health: {error}"))?
+            {
+                let path = row
+                    .get::<String>(0)
+                    .map_err(|error| format!("failed to decode transcript path: {error}"))?;
+                let byte_offset = u64::try_from(
+                    row.get::<i64>(1)
+                        .map_err(|error| format!("failed to decode transcript offset: {error}"))?,
+                )
+                .map_err(|error| format!("invalid transcript offset: {error}"))?;
+                let mtime = u64::try_from(
+                    row.get::<i64>(2)
+                        .map_err(|error| format!("failed to decode transcript mtime: {error}"))?,
+                )
+                .map_err(|error| format!("invalid transcript mtime: {error}"))?;
+                page.push((path, byte_offset, mtime));
+            }
+            drop(rows);
+            if page.is_empty() {
+                break;
+            }
+            for (path, byte_offset, mtime) in &page {
+                let Ok(metadata) = std::fs::metadata(path) else {
+                    continue;
+                };
+                health.tracked_transcripts = health.tracked_transcripts.saturating_add(1);
+                if *mtime > 0 {
+                    let mtime = i64::try_from(*mtime).unwrap_or(i64::MAX);
+                    health.last_ingest_unix = Some(
+                        health
+                            .last_ingest_unix
+                            .map_or(mtime, |previous| previous.max(mtime)),
+                    );
+                }
+                let pending = metadata.len().saturating_sub(*byte_offset);
+                if pending > 0 {
+                    health.pending_transcripts = health.pending_transcripts.saturating_add(1);
+                    health.pending_bytes = health.pending_bytes.saturating_add(pending);
+                    health.max_transcript_pending_bytes =
+                        health.max_transcript_pending_bytes.max(pending);
+                }
+            }
+            after_path = page
+                .last()
+                .map(|(path, _, _)| path.clone())
+                .ok_or_else(|| "session ingest health page unexpectedly empty".to_owned())?;
+            if page.len() < SESSION_INGEST_HEALTH_PAGE_SIZE as usize {
+                break;
             }
         }
-        for path in paths {
-            let Ok(metadata) = std::fs::metadata(&path) else {
-                continue;
-            };
-            health.tracked_transcripts += 1;
-            let cursor = self.get_parse_offset(&path).await.unwrap_or_default();
-            if cursor.mtime > 0 {
-                let mtime = cursor.mtime as i64;
-                health.last_ingest_unix = Some(
-                    health
-                        .last_ingest_unix
-                        .map_or(mtime, |previous| previous.max(mtime)),
-                );
-            }
-            let pending = metadata.len().saturating_sub(cursor.byte_offset);
-            if pending > 0 {
-                health.pending_transcripts += 1;
-                health.pending_bytes = health.pending_bytes.saturating_add(pending);
-                health.max_transcript_pending_bytes =
-                    health.max_transcript_pending_bytes.max(pending);
-            }
-        }
-        health
+        Ok(health)
     }
 
     pub(crate) async fn has_session_message(
@@ -775,4 +829,96 @@ fn row_to_workflow_message(
         source_offset: None,
         metadata_json: Some(JsonValue::Object(metadata).to_string()),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+    use crate::global_db::ParseOffset;
+
+    fn session(provider: &str, session_id: &str, transcript_path: &str) -> SessionRecord {
+        SessionRecord {
+            provider: provider.to_owned(),
+            session_id: session_id.to_owned(),
+            project_key: "/project".to_owned(),
+            project_path: "/project".to_owned(),
+            title: None,
+            started_at: None,
+            ended_at: None,
+            transcript_path: Some(transcript_path.to_owned()),
+            metadata_json: None,
+            parent_session_id: None,
+            is_subagent: false,
+            agent_id: None,
+            parent_tool_use_id: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn cursor_ingest_authority_is_shared_and_provider_scoped() {
+        let profile = TempDir::new().unwrap();
+        let runtime = HostAdmissionTestRuntimeV1::profile(profile.path())
+            .await
+            .unwrap();
+        let database = runtime
+            .registered_database(HostAdmissionScope::Profile)
+            .unwrap();
+        let cursor_path = profile.path().join("cursor.jsonl");
+        let claude_path = profile.path().join("claude.jsonl");
+        std::fs::write(&cursor_path, b"0123456789").unwrap();
+        std::fs::write(&claude_path, b"01234567890123456789").unwrap();
+        assert!(
+            database
+                .upsert_session(&session(
+                    "cursor",
+                    "session.cursor",
+                    cursor_path.to_str().unwrap()
+                ))
+                .await
+        );
+        assert!(
+            database
+                .upsert_session(&session(
+                    "claude",
+                    "session.claude",
+                    claude_path.to_str().unwrap()
+                ))
+                .await
+        );
+        database
+            .set_parse_offset(
+                cursor_path.to_str().unwrap(),
+                ParseOffset {
+                    byte_offset: 4,
+                    mtime: 100,
+                    file_id: 0,
+                },
+            )
+            .await
+            .unwrap();
+        database
+            .set_parse_offset(
+                claude_path.to_str().unwrap(),
+                ParseOffset {
+                    byte_offset: 20,
+                    mtime: 200,
+                    file_id: 0,
+                },
+            )
+            .await
+            .unwrap();
+
+        let runtime_surface = database.cursor_session_ingest_health().await.unwrap();
+        let status_surface = database.cursor_session_ingest_health().await.unwrap();
+
+        assert_eq!(runtime_surface, status_surface);
+        assert_eq!(runtime_surface.tracked_transcripts, 1);
+        assert_eq!(runtime_surface.pending_transcripts, 1);
+        assert_eq!(runtime_surface.pending_bytes, 6);
+        assert_eq!(runtime_surface.max_transcript_pending_bytes, 6);
+        assert_eq!(runtime_surface.last_ingest_unix, Some(100));
+    }
 }

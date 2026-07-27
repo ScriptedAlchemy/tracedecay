@@ -2647,67 +2647,13 @@ impl HostAdmissionTestRuntimeV1 {
         provider: Option<&str>,
     ) -> crate::errors::Result<crate::global_db::SessionIngestHealth> {
         let database = self.session_database_for_test(scope)?;
-        if provider.is_none() {
-            return Ok(database.session_ingest_health().await);
-        }
-        let snapshot = database.read_snapshot().await?;
-        let mut rows = snapshot
-            .query(
-                "SELECT DISTINCT transcript_path FROM sessions
-                 WHERE provider = ?1
-                   AND transcript_path IS NOT NULL
-                   AND transcript_path != ''
-                 LIMIT 1000",
-                [provider.expect("provider checked above")],
-            )
+        database
+            .session_ingest_health_for_provider(provider)
             .await
-            .map_err(|error| crate::errors::TraceDecayError::Database {
-                operation: "query registered provider transcript paths".to_string(),
-                message: error.to_string(),
-            })?;
-        let mut paths = Vec::new();
-        while let Some(row) =
-            rows.next()
-                .await
-                .map_err(|error| crate::errors::TraceDecayError::Database {
-                    operation: "read registered provider transcript paths".to_string(),
-                    message: error.to_string(),
-                })?
-        {
-            paths.push(row.get::<String>(0).map_err(|error| {
-                crate::errors::TraceDecayError::Database {
-                    operation: "decode registered provider transcript path".to_string(),
-                    message: error.to_string(),
-                }
-            })?);
-        }
-        drop(rows);
-        drop(snapshot);
-
-        let mut health = crate::global_db::SessionIngestHealth::default();
-        for path in paths {
-            let Ok(metadata) = std::fs::metadata(&path) else {
-                continue;
-            };
-            health.tracked_transcripts += 1;
-            let cursor = database.get_parse_offset(&path).await.unwrap_or_default();
-            if cursor.mtime > 0 {
-                let mtime = cursor.mtime as i64;
-                health.last_ingest_unix = Some(
-                    health
-                        .last_ingest_unix
-                        .map_or(mtime, |last| last.max(mtime)),
-                );
-            }
-            let pending = metadata.len().saturating_sub(cursor.byte_offset);
-            if pending > 0 {
-                health.pending_transcripts += 1;
-                health.pending_bytes = health.pending_bytes.saturating_add(pending);
-                health.max_transcript_pending_bytes =
-                    health.max_transcript_pending_bytes.max(pending);
-            }
-        }
-        Ok(health)
+            .map_err(|message| crate::errors::TraceDecayError::Database {
+                operation: "read registered session ingest health".to_string(),
+                message,
+            })
     }
 
     #[doc(hidden)]

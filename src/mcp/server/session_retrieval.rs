@@ -429,6 +429,9 @@ impl DaemonSessionRetrievalService {
                 SessionTemporalRefreshUnavailableReason::Recovering => {
                     SessionRetrievalUnavailableReason::RefreshWorkerRecovering
                 }
+                SessionTemporalRefreshUnavailableReason::Stalled => {
+                    SessionRetrievalUnavailableReason::RefreshWorkerStalled
+                }
                 SessionTemporalRefreshUnavailableReason::Stopped => {
                     SessionRetrievalUnavailableReason::RefreshWorkerStopped
                 }
