@@ -760,17 +760,11 @@ impl McpServer {
         let diagnostics_lsp = match diagnostics_lsp {
             Some(diagnostics_lsp) => diagnostics_lsp,
             None => {
-                let code_diagnostics_settings = crate::diagnostics::lsp::settings::load_settings(
+                crate::application::dashboard_diagnostics::open_diagnostic_broker(
+                    cg.project_root().to_path_buf(),
                     &cg.store_layout().dashboard_root,
                 )
                 .await
-                .unwrap_or_default();
-                Arc::new(tokio::sync::Mutex::new(
-                    crate::application::dashboard_diagnostics::diagnostic_broker(
-                        cg.project_root().to_path_buf(),
-                        code_diagnostics_settings,
-                    ),
-                ))
             }
         };
         let active_project_id = cg.store_layout().identity.project_id.clone();
