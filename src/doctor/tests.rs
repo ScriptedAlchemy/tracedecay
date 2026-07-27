@@ -1874,4 +1874,9 @@ async fn daemon_startup_health_surfaces_terminal_project_open_failure_immediatel
         1,
         "terminal failure must not be polled until the deadline"
     );
+    assert!(super::daemon_startup_error_is_retryable(
+        &crate::errors::TraceDecayError::Config {
+            message: "daemon tracedecay_runtime timed out during read before deadline".to_owned(),
+        }
+    ));
 }

@@ -514,6 +514,7 @@ fn daemon_startup_error_is_retryable(error: &crate::errors::TraceDecayError) -> 
             (message.contains("daemon socket") && message.contains("not available"))
                 || message.contains("still warming up")
                 || message.contains("restart grace")
+                || message.contains("timed out during read before deadline")
         }
         crate::errors::TraceDecayError::File { .. }
         | crate::errors::TraceDecayError::Parse { .. }
@@ -565,7 +566,7 @@ fn daemon_runtime_args() -> serde_json::Value {
     serde_json::json!({
         "format": "json",
         "authority_audit": true,
-        "doctor_report": true,
+        "doctor_report": false,
         "session_ingest_health": true,
     })
 }
