@@ -100,6 +100,12 @@ pub(crate) async fn ensure_authority_invariant_schema(
     Ok(trigger_contracts_were_intact)
 }
 
+pub(crate) async fn ensure_authority_audit_checkpoint_schema(
+    conn: &impl Executor,
+) -> crate::errors::Result<()> {
+    ensure_audit_checkpoint_schema(conn).await
+}
+
 pub(crate) async fn ensure_authority_invariants(
     conn: &impl Executor,
     force_exhaustive: bool,
