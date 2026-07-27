@@ -3,6 +3,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 
+use fs2::FileExt;
 #[cfg(unix)]
 use serde_json::Value;
 
@@ -104,6 +105,124 @@ async fn init_index_uses_graph_specific_sync_lock() {
         err.to_string()
             .contains("another sync is already in progress")
     );
+}
+
+#[tokio::test]
+async fn corrupt_derived_branch_store_is_preserved_and_rebuilt_automatically() {
+    let (_env, project, feature) = open_untracked_project().await;
+    let layout = feature.store_layout().clone();
+    let corrupt_db = feature.db_path().to_path_buf();
+    feature.checkpoint().await.unwrap();
+    feature.close();
+
+    let sessions_bytes = b"sessions-are-separate";
+    fs::write(&layout.sessions_db_path, sessions_bytes).unwrap();
+    let mut corrupted = fs::read(&corrupt_db).unwrap();
+    corrupted[..16].copy_from_slice(b"not-a-sqlite-db!");
+    fs::write(&corrupt_db, &corrupted).unwrap();
+
+    let wal_path = PathBuf::from(format!("{}-wal", corrupt_db.display()));
+    let shm_path = PathBuf::from(format!("{}-shm", corrupt_db.display()));
+    let dirty_path = PathBuf::from(format!("{}.dirty", corrupt_db.display()));
+    let wal_bytes = b"preserve-corrupt-wal";
+    let shm_bytes = b"preserve-corrupt-shm";
+    let dirty_bytes = b"pid=99999\nversion=old";
+    fs::write(&wal_path, wal_bytes).unwrap();
+    fs::write(&shm_path, shm_bytes).unwrap();
+    fs::write(&dirty_path, dirty_bytes).unwrap();
+    fs::write(&layout.dirty_path, dirty_bytes).unwrap();
+
+    let repaired = TraceDecay::open(&project)
+        .await
+        .expect("a corrupt derived branch index should rebuild from its tracked ancestor");
+    assert_eq!(repaired.active_branch(), Some("feature/untracked"));
+    assert_eq!(repaired.serving_branch(), Some("feature/untracked"));
+    assert!(!repaired.is_fallback());
+    assert!(repaired.db().quick_check().await.unwrap());
+    assert!(
+        !repaired
+            .search("untracked_only", 10)
+            .await
+            .unwrap()
+            .is_empty(),
+        "the rebuilt branch index must include branch-only working-tree symbols"
+    );
+    assert_eq!(fs::read(&layout.sessions_db_path).unwrap(), sessions_bytes);
+    assert!(!layout.dirty_path.exists());
+
+    let recovery_root = layout.data_root.join("recovery");
+    let recovery_dirs = fs::read_dir(&recovery_root)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.is_dir())
+        .collect::<Vec<_>>();
+    assert_eq!(recovery_dirs.len(), 1);
+    let recovery_dir = &recovery_dirs[0];
+    assert_eq!(
+        fs::read(recovery_dir.join(corrupt_db.file_name().unwrap())).unwrap(),
+        corrupted
+    );
+    assert_eq!(
+        fs::read(recovery_dir.join(wal_path.file_name().unwrap())).unwrap(),
+        wal_bytes
+    );
+    assert_eq!(
+        fs::read(recovery_dir.join(shm_path.file_name().unwrap())).unwrap(),
+        shm_bytes
+    );
+    assert_eq!(
+        fs::read(recovery_dir.join(dirty_path.file_name().unwrap())).unwrap(),
+        dirty_bytes
+    );
+    assert!(corrupt_db.exists());
+    assert_ne!(fs::read(&corrupt_db).unwrap(), corrupted);
+    assert!(!dirty_path.exists());
+    repaired.close();
+}
+
+#[tokio::test]
+async fn corrupt_derived_branch_repair_waits_for_the_active_sync_lease() {
+    let (_env, project, feature) = open_untracked_project().await;
+    let corrupt_db = feature.db_path().to_path_buf();
+    let recovery_root = feature.store_layout().data_root.join("recovery");
+    feature.checkpoint().await.unwrap();
+    feature.close();
+
+    let mut corrupted = fs::read(&corrupt_db).unwrap();
+    corrupted[..16].copy_from_slice(b"not-a-sqlite-db!");
+    fs::write(&corrupt_db, &corrupted).unwrap();
+    let lock_path = corrupt_db.with_file_name(format!(
+        "{}.sync.lock",
+        corrupt_db.file_name().unwrap().to_string_lossy()
+    ));
+    let active_lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .unwrap();
+    active_lock.try_lock_exclusive().unwrap();
+
+    let error = match TraceDecay::open(&project).await {
+        Ok(_) => panic!("active writer lease must block branch recovery"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("another sync is already in progress")
+    );
+    assert_eq!(fs::read(&corrupt_db).unwrap(), corrupted);
+    assert!(!recovery_root.exists());
+
+    drop(active_lock);
+    let repaired = TraceDecay::open(&project)
+        .await
+        .expect("repair should proceed after the active lease is released");
+    assert!(repaired.db().quick_check().await.unwrap());
+    assert_ne!(fs::read(&corrupt_db).unwrap(), corrupted);
+    repaired.close();
 }
 
 #[tokio::test]

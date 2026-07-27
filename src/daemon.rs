@@ -917,9 +917,9 @@ fn is_transient_daemon_connect_error(kind: std::io::ErrorKind) -> bool {
     )
 }
 
-async fn connect_to_daemon_connection(connection: &DaemonConnection) -> Result<BrokerStream> {
-    connect_with_restart_grace(
-        connection,
+async fn connect_to_current_daemon(socket_path: &Path) -> Result<(DaemonConnection, BrokerStream)> {
+    connect_with_restart_grace_resolving(
+        || client_connection(socket_path),
         DAEMON_RESTART_GRACE,
         DAEMON_RESTART_POLL_INTERVAL,
     )
@@ -935,10 +935,27 @@ async fn connect_with_restart_grace(
     grace: Duration,
     poll_interval: Duration,
 ) -> Result<BrokerStream> {
+    let (_, stream) =
+        connect_with_restart_grace_resolving(|| Ok(connection.clone()), grace, poll_interval)
+            .await?;
+    Ok(stream)
+}
+
+/// Resolves the current authority record on every connect attempt.
+///
+/// A daemon restart replaces both its endpoint authority epoch and auth token.
+/// Resolving only before the restart window would connect to the new socket
+/// with stale credentials after it rebinds.
+async fn connect_with_restart_grace_resolving(
+    mut resolve: impl FnMut() -> Result<DaemonConnection>,
+    grace: Duration,
+    poll_interval: Duration,
+) -> Result<(DaemonConnection, BrokerStream)> {
     let deadline = tokio::time::Instant::now() + grace;
     loop {
+        let connection = resolve()?;
         match BrokerStream::connect(&connection.endpoint).await {
-            Ok(stream) => return Ok(stream),
+            Ok(stream) => return Ok((connection, stream)),
             Err(TraceDecayError::Io(err)) => {
                 if !is_transient_daemon_connect_error(err.kind())
                     || tokio::time::Instant::now() >= deadline
@@ -1291,8 +1308,7 @@ async fn send_daemon_request_line_with_liveness_poll(
     line: &str,
     liveness_poll_interval: Duration,
 ) -> Result<Vec<String>> {
-    let connection = client_connection(socket_path)?;
-    let stream = connect_to_daemon_connection(&connection).await?;
+    let (connection, stream) = connect_to_current_daemon(socket_path).await?;
     let (reader, mut writer) = stream.into_split();
 
     write_daemon_preamble(&mut writer, &connection, handshake).await?;
@@ -1490,8 +1506,7 @@ async fn call_tool_with_liveness_poll(
     arguments: serde_json::Value,
     liveness_poll_interval: Duration,
 ) -> Result<serde_json::Value> {
-    let connection = client_connection(socket_path)?;
-    let stream = connect_to_daemon_connection(&connection).await?;
+    let (connection, stream) = connect_to_current_daemon(socket_path).await?;
     let (reader, mut writer) = stream.into_split();
     let id = json!(1);
     let request = JsonRpcRequest {

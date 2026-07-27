@@ -299,6 +299,14 @@ impl TraceDecay {
         project_root: &Path,
         open_options: TraceDecayOpenOptions,
     ) -> Result<Self> {
+        Self::open_with_options_inner(project_root, open_options, true).await
+    }
+
+    async fn open_with_options_inner(
+        project_root: &Path,
+        open_options: TraceDecayOpenOptions,
+        allow_corrupt_branch_repair: bool,
+    ) -> Result<Self> {
         let store_layout =
             Self::resolve_store_layout_for_project(project_root, &open_options).await?;
         let config = load_config_from_path(project_root, &store_layout.config_path)?;
@@ -321,6 +329,11 @@ impl TraceDecay {
         // store root. Different tracked branches have independent databases
         // and must never clear or inherit one another's dirty marker or lock.
         let active_graph_layout = active_graph_layout(&db_path);
+        let repair_corrupt_branch = allow_corrupt_branch_repair
+            && active_branch.is_some()
+            && active_branch == serving_branch
+            && db_path != store_layout.graph_db_path
+            && db_path.parent() == Some(store_layout.data_root.join("branches").as_path());
 
         if !db_path.exists() {
             return Err(TraceDecayError::Config {
@@ -346,7 +359,7 @@ impl TraceDecay {
         // it cannot race that writer or clear its sentinel. Preflight through
         // the read-only connection before Database::open applies writable
         // pragmas or migrations to a potentially damaged recovery set.
-        let _recovery_lock = if crashed {
+        let recovery_lock = if crashed {
             Some(try_acquire_graph_sync_locks(
                 &active_graph_layout.sync_lock_path,
                 &store_layout.sync_lock_path,
@@ -359,8 +372,16 @@ impl TraceDecay {
             let verification = match Database::open_read_only(&db_path, &authority).await {
                 Ok((db, _)) => db,
                 Err(error) => {
-                    print_corruption_warning(&db_path);
-                    return Err(recovery_required_error(&db_path, error));
+                    drop(recovery_lock);
+                    return Self::recover_corrupt_branch_or_fail(
+                        project_root,
+                        open_options,
+                        &store_layout,
+                        &db_path,
+                        error,
+                        repair_corrupt_branch,
+                    )
+                    .await;
                 }
             };
             let integrity = verification.quick_check().await;
@@ -368,15 +389,28 @@ impl TraceDecay {
             match integrity {
                 Ok(true) => {}
                 Ok(false) => {
-                    print_corruption_warning(&db_path);
-                    return Err(recovery_required_error(
+                    drop(recovery_lock);
+                    return Self::recover_corrupt_branch_or_fail(
+                        project_root,
+                        open_options,
+                        &store_layout,
                         &db_path,
                         "read-only SQLite quick_check did not return ok",
-                    ));
+                        repair_corrupt_branch,
+                    )
+                    .await;
                 }
                 Err(error) => {
-                    print_corruption_warning(&db_path);
-                    return Err(recovery_required_error(&db_path, error));
+                    drop(recovery_lock);
+                    return Self::recover_corrupt_branch_or_fail(
+                        project_root,
+                        open_options,
+                        &store_layout,
+                        &db_path,
+                        error,
+                        repair_corrupt_branch,
+                    )
+                    .await;
                 }
             }
         }
@@ -389,8 +423,16 @@ impl TraceDecay {
         let (db, migrated) = match open_result {
             Ok(pair) => pair,
             Err(e) if Database::is_corruption_error(&e) || crashed => {
-                print_corruption_warning(&db_path);
-                return Err(recovery_required_error(&db_path, &e));
+                drop(recovery_lock);
+                return Self::recover_corrupt_branch_or_fail(
+                    project_root,
+                    open_options,
+                    &store_layout,
+                    &db_path,
+                    e,
+                    repair_corrupt_branch,
+                )
+                .await;
             }
             Err(e) => return Err(e),
         };
@@ -404,15 +446,30 @@ impl TraceDecay {
                     clear_dirty_sentinel_at(&store_layout.dirty_path);
                 }
                 Ok(false) => {
-                    print_corruption_warning(&db_path);
-                    return Err(recovery_required_error(
+                    db.close();
+                    drop(recovery_lock);
+                    return Self::recover_corrupt_branch_or_fail(
+                        project_root,
+                        open_options,
+                        &store_layout,
                         &db_path,
                         "SQLite quick_check did not return ok",
-                    ));
+                        repair_corrupt_branch,
+                    )
+                    .await;
                 }
                 Err(e) => {
-                    print_corruption_warning(&db_path);
-                    return Err(recovery_required_error(&db_path, &e));
+                    db.close();
+                    drop(recovery_lock);
+                    return Self::recover_corrupt_branch_or_fail(
+                        project_root,
+                        open_options,
+                        &store_layout,
+                        &db_path,
+                        e,
+                        repair_corrupt_branch,
+                    )
+                    .await;
                 }
             }
         }
@@ -442,6 +499,54 @@ impl TraceDecay {
 
         ts.register_project_store_in_global_registry().await;
         Ok(ts)
+    }
+
+    async fn recover_corrupt_branch_or_fail(
+        project_root: &Path,
+        open_options: TraceDecayOpenOptions,
+        store_layout: &StoreLayout,
+        db_path: &Path,
+        detail: impl std::fmt::Display,
+        repair_corrupt_branch: bool,
+    ) -> Result<Self> {
+        let detail = detail.to_string();
+        if repair_corrupt_branch {
+            let active_graph_layout = active_graph_layout(db_path);
+            let repair_result = (|| {
+                let _sync_locks = try_acquire_graph_sync_locks(
+                    &active_graph_layout.sync_lock_path,
+                    &store_layout.sync_lock_path,
+                )?;
+                let _authority =
+                    DatabaseAuthority::for_runtime(db_path, "preserve corrupt branch store")?;
+                preserve_corrupt_branch_store(store_layout, db_path)
+            })();
+
+            match repair_result {
+                Ok(recovery_dir) => {
+                    eprintln!(
+                        "[tracedecay] corrupt derived branch index preserved at '{}' — rebuilding from a healthy tracked ancestor",
+                        recovery_dir.display()
+                    );
+                    return Box::pin(Self::open_with_options_inner(
+                        project_root,
+                        open_options,
+                        false,
+                    ))
+                    .await;
+                }
+                Err(repair_error) => {
+                    print_corruption_warning(db_path);
+                    return Err(recovery_required_error(
+                        db_path,
+                        format!("{detail}; automatic derived-branch repair failed: {repair_error}"),
+                    ));
+                }
+            }
+        }
+
+        print_corruption_warning(db_path);
+        Err(recovery_required_error(db_path, detail))
     }
 
     /// Opens an existing project for read-only inspection.
@@ -1026,6 +1131,130 @@ fn graph_sidecar_path(db_path: &Path, suffix: &str) -> PathBuf {
     let mut file_name = db_path.file_name().unwrap_or_default().to_os_string();
     file_name.push(suffix);
     db_path.with_file_name(file_name)
+}
+
+fn preserve_corrupt_branch_store(store_layout: &StoreLayout, db_path: &Path) -> Result<PathBuf> {
+    let db_name = db_path.file_name().ok_or_else(|| TraceDecayError::Config {
+        message: format!(
+            "cannot preserve corrupt branch store with no filename: '{}'",
+            db_path.display()
+        ),
+    })?;
+    let recovery_root = store_layout.data_root.join("recovery");
+    std::fs::create_dir_all(&recovery_root).map_err(|error| TraceDecayError::Config {
+        message: format!(
+            "failed to create branch recovery directory '{}': {error}",
+            recovery_root.display()
+        ),
+    })?;
+    let recovery_dir = recovery_root.join(format!(
+        "{}-{}-{}",
+        db_name.to_string_lossy(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos(),
+        std::process::id()
+    ));
+    std::fs::create_dir(&recovery_dir).map_err(|error| TraceDecayError::Config {
+        message: format!(
+            "failed to create branch recovery set '{}': {error}",
+            recovery_dir.display()
+        ),
+    })?;
+
+    let db_wal = graph_sidecar_path(db_path, "-wal");
+    let db_shm = graph_sidecar_path(db_path, "-shm");
+    let db_dirty = graph_sidecar_path(db_path, ".dirty");
+    let sources = [&db_wal, &db_shm, &db_dirty, db_path];
+    let mut preserved_db = false;
+    let mut preserved = Vec::new();
+    for source in sources {
+        let metadata = match std::fs::symlink_metadata(source) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(TraceDecayError::Config {
+                    message: format!(
+                        "failed to inspect recovery-set member '{}': {error}",
+                        source.display()
+                    ),
+                });
+            }
+        };
+        if !metadata.file_type().is_file() {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "refusing to preserve non-regular recovery-set member '{}'",
+                    source.display()
+                ),
+            });
+        }
+        let target = recovery_dir.join(source.file_name().unwrap_or_default());
+        let copied = std::fs::copy(source, &target).map_err(|error| TraceDecayError::Config {
+            message: format!(
+                "failed to preserve recovery-set member '{}' at '{}': {error}",
+                source.display(),
+                target.display()
+            ),
+        })?;
+        if copied != metadata.len() {
+            return Err(TraceDecayError::Config {
+                message: format!(
+                    "incomplete recovery-set copy for '{}': copied {copied} of {} bytes",
+                    source.display(),
+                    metadata.len()
+                ),
+            });
+        }
+        // Windows `FlushFileBuffers` requires a write handle, so a read-only
+        // open would fail the durability sync with "access is denied".
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&target)
+            .and_then(|file| file.sync_all())
+            .map_err(|error| TraceDecayError::Config {
+                message: format!(
+                    "failed to sync preserved recovery-set member '{}': {error}",
+                    target.display()
+                ),
+            })?;
+        preserved_db |= source == db_path;
+        preserved.push(source.to_path_buf());
+    }
+    if !preserved_db {
+        return Err(TraceDecayError::Config {
+            message: format!(
+                "corrupt branch database '{}' disappeared",
+                db_path.display()
+            ),
+        });
+    }
+    #[cfg(unix)]
+    for directory in [&recovery_dir, &recovery_root, &store_layout.data_root] {
+        std::fs::File::open(directory)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| TraceDecayError::Config {
+                message: format!(
+                    "failed to sync preserved recovery-set directory '{}': {error}",
+                    directory.display()
+                ),
+            })?;
+    }
+
+    // Delete the source database last. If any sidecar deletion fails, the
+    // corrupt DB remains in place and the complete copied recovery set is
+    // still available for a later retry or offline salvage.
+    for source in preserved {
+        std::fs::remove_file(&source).map_err(|error| TraceDecayError::Config {
+            message: format!(
+                "preserved recovery set at '{}', but failed to retire '{}': {error}",
+                recovery_dir.display(),
+                source.display()
+            ),
+        })?;
+    }
+    Ok(recovery_dir)
 }
 
 fn active_graph_layout(db_path: &Path) -> super::ActiveGraphLayout {
