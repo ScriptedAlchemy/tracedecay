@@ -38,6 +38,18 @@ pub(crate) struct GitRepoIdentity {
     pub(crate) common_dir: PathBuf,
 }
 
+/// Tri-state repository identity used by session ingest.
+///
+/// `Unknown` is reserved for bounded git timeouts. Callers that decide whether
+/// to persist a transcript cursor must retry later rather than treating it as
+/// the definitive absence of a repository.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum GitRepoIdentityOutcome {
+    Resolved(GitRepoIdentity),
+    NotFound,
+    Unknown,
+}
+
 /// Resolve both halves of a repository identity with one cheap git subprocess.
 ///
 /// `gix::discover` can open and scan every pack index in a large repository.
@@ -45,27 +57,41 @@ pub(crate) struct GitRepoIdentity {
 /// without opening the object database. If git is unavailable or rejects the
 /// path, one gix discovery preserves the previous fail-open behavior.
 pub(crate) fn git_repo_identity(dir: &Path) -> Option<GitRepoIdentity> {
-    if !git_may_resolve_repo(dir) {
-        return None;
+    match git_repo_identity_outcome(dir) {
+        GitRepoIdentityOutcome::Resolved(identity) => Some(identity),
+        GitRepoIdentityOutcome::NotFound | GitRepoIdentityOutcome::Unknown => None,
     }
-    resolve_git_identity_with(
+}
+
+pub(crate) fn git_repo_identity_outcome(dir: &Path) -> GitRepoIdentityOutcome {
+    if !git_may_resolve_repo(dir) {
+        return GitRepoIdentityOutcome::NotFound;
+    }
+    resolve_git_identity_outcome_with(
         dir,
         || crate::git::git_capture_at(dir, &["rev-parse", "--show-toplevel", "--git-common-dir"]),
         || git_repo_identity_from_gix(dir),
     )
 }
 
-fn resolve_git_identity_with(
+fn resolve_git_identity_outcome_with(
     dir: &Path,
     cli_output: impl FnOnce() -> crate::git::GitCaptureAtResult,
     gix_fallback: impl FnOnce() -> Option<GitRepoIdentity>,
-) -> Option<GitRepoIdentity> {
+) -> GitRepoIdentityOutcome {
+    let fallback = || {
+        gix_fallback().map_or(
+            GitRepoIdentityOutcome::NotFound,
+            GitRepoIdentityOutcome::Resolved,
+        )
+    };
     match cli_output() {
         crate::git::GitCaptureAtResult::Captured(output) => {
-            git_repo_identity_from_cli_output(dir, &output).or_else(gix_fallback)
+            git_repo_identity_from_cli_output(dir, &output)
+                .map_or_else(fallback, GitRepoIdentityOutcome::Resolved)
         }
-        crate::git::GitCaptureAtResult::Failed => gix_fallback(),
-        crate::git::GitCaptureAtResult::TimedOut => None,
+        crate::git::GitCaptureAtResult::Failed => fallback(),
+        crate::git::GitCaptureAtResult::TimedOut => GitRepoIdentityOutcome::Unknown,
     }
 }
 
@@ -315,12 +341,14 @@ mod tests {
         fs::create_dir_all(&common_dir).unwrap();
         let output = format!("{}\n../../../main/.git", worktree.display());
 
-        let identity = resolve_git_identity_with(
+        let outcome = resolve_git_identity_outcome_with(
             &nested,
             || crate::git::GitCaptureAtResult::Captured(output),
             || panic!("valid CLI identity must short-circuit gix discovery"),
-        )
-        .expect("paired CLI identity");
+        );
+        let GitRepoIdentityOutcome::Resolved(identity) = outcome else {
+            panic!("paired CLI identity should resolve");
+        };
 
         assert_eq!(
             identity.worktree_root,
@@ -335,12 +363,12 @@ mod tests {
     #[test]
     fn timed_out_cli_identity_does_not_fallback_to_gix() {
         let tmp = tempdir().unwrap();
-        let identity = resolve_git_identity_with(
+        let outcome = resolve_git_identity_outcome_with(
             tmp.path(),
             || crate::git::GitCaptureAtResult::TimedOut,
             || panic!("timed-out CLI identity must not fall through to gix"),
         );
-        assert!(identity.is_none());
+        assert_eq!(outcome, GitRepoIdentityOutcome::Unknown);
     }
 
     #[test]

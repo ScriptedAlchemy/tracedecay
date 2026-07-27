@@ -56,7 +56,7 @@ use serde_json::Value;
 use crate::accounting::parser::parse_timestamp;
 use crate::sessions::SessionMessageRecord;
 use crate::sessions::shared::{
-    ProjectRootMatcherCache, StoredCursor, append_tool_calls_metadata,
+    ProjectMembership, ProjectRootMatcherCache, StoredCursor, append_tool_calls_metadata,
     content_storage_text_and_tools, title_from_messages,
 };
 use crate::sessions::source::{
@@ -206,22 +206,26 @@ impl TranscriptSource for CodexSource {
         let mut last_in_scope_git = None;
         for line in &new.lines {
             let is_context_record = context_state.observe_context_record(&line.value, path, &meta);
-            let in_scope = self.user_scope.as_ref().map_or_else(
-                || {
-                    context_state.cwd.as_deref().is_some_and(|cwd| {
-                        project_matcher
-                            .as_ref()
-                            .is_some_and(|matcher| matcher.contains(cwd))
-                    })
-                },
-                |_scope| {
-                    context_state.cwd.as_deref().is_none_or(|cwd| {
-                        !registered_root_matchers
-                            .iter()
-                            .any(|matcher| matcher.contains(cwd))
-                    })
-                },
-            );
+            let in_scope = if self.user_scope.is_none() {
+                context_state.cwd.as_deref().map_or(Some(false), |cwd| {
+                    project_matcher
+                        .as_ref()
+                        .map(|matcher| matcher.contains_status(cwd).definitive())
+                        .unwrap_or(Some(false))
+                })
+            } else {
+                context_state.cwd.as_deref().map_or(Some(true), |cwd| {
+                    let mut unknown = false;
+                    for matcher in &registered_root_matchers {
+                        match matcher.contains_status(cwd) {
+                            ProjectMembership::Match => return Some(false),
+                            ProjectMembership::NoMatch => {}
+                            ProjectMembership::Unknown => unknown = true,
+                        }
+                    }
+                    (!unknown).then_some(true)
+                })
+            }?;
             if !in_scope {
                 if compacted_summary_from_line(
                     &line.value,
@@ -1606,9 +1610,27 @@ mod goal_event_tests {
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod source_matcher_cache_tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
     use serde_json::json;
     use tempfile::TempDir;
+
+    static UNKNOWN_PATH_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
+
+    fn retrying_identity(path: &Path) -> crate::worktree::GitRepoIdentityOutcome {
+        let root = path
+            .ancestors()
+            .find(|ancestor| ancestor.file_name().is_some_and(|name| name == "repo"))
+            .unwrap_or(path);
+        if UNKNOWN_PATH_ATTEMPTS.fetch_add(1, Ordering::SeqCst) == 0 {
+            return crate::worktree::GitRepoIdentityOutcome::Unknown;
+        }
+        crate::worktree::GitRepoIdentityOutcome::Resolved(crate::worktree::GitRepoIdentity {
+            worktree_root: root.to_path_buf(),
+            common_dir: root.join(".git"),
+        })
+    }
 
     fn write_rollout(path: &Path, session_id: &str, cwd: &Path) {
         let lines = [
@@ -1678,5 +1700,34 @@ mod source_matcher_cache_tests {
         let second_metadata: Value =
             serde_json::from_str(second.messages[0].metadata_json.as_deref().unwrap()).unwrap();
         assert_eq!(second_metadata["codex_turn_worktree"], first_worktree);
+    }
+
+    #[test]
+    fn codex_unknown_membership_retries_without_advancing_cursor() {
+        UNKNOWN_PATH_ATTEMPTS.store(0, Ordering::SeqCst);
+        let temp = TempDir::new().unwrap();
+        let project_root = temp.path().join("repo");
+        let nested_cwd = project_root.join("packages/app");
+        std::fs::create_dir_all(&nested_cwd).unwrap();
+        let transcript = temp.path().join("retry.jsonl");
+        write_rollout(&transcript, "retry-session", &nested_cwd);
+        let mut source = CodexSource::with_home(temp.path());
+        source.project_matchers =
+            ProjectRootMatcherCache::with_identity_resolver(retrying_identity);
+
+        let previous = StoredCursor::default();
+        assert!(
+            source
+                .parse_new(&transcript, previous, &project_root, None)
+                .is_none(),
+            "unknown membership must abort before a new cursor can be persisted"
+        );
+
+        let retried = source
+            .parse_new(&transcript, previous, &project_root, None)
+            .expect("unknown membership must be resolved again on retry");
+        assert_eq!(retried.messages.len(), 1);
+        assert!(retried.new_cursor.position > previous.position);
+        assert_eq!(UNKNOWN_PATH_ATTEMPTS.load(Ordering::SeqCst), 3);
     }
 }

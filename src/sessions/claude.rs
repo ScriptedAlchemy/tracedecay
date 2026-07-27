@@ -26,9 +26,10 @@ use serde_json::{Map, Value};
 use crate::accounting::parser::parse_timestamp;
 use crate::sessions::SessionMessageRecord;
 use crate::sessions::shared::{
-    ProjectRootMatcherCache, StoredCursor, TranscriptLocation, TranscriptLocationMetadataKeys,
-    append_location_metadata_cached, append_tool_calls_metadata, append_tool_event_metadata,
-    append_usage_metadata, content_storage_text_and_tools, preview_truncated, title_from_messages,
+    ProjectMembership, ProjectRootMatcherCache, StoredCursor, TranscriptLocation,
+    TranscriptLocationMetadataKeys, append_location_metadata_cached, append_tool_calls_metadata,
+    append_tool_event_metadata, append_usage_metadata, content_storage_text_and_tools,
+    preview_truncated, title_from_messages,
 };
 use crate::sessions::source::{
     ParsedTranscript, SessionDraft, TranscriptSource, collect_files_with_ext, stream_new_jsonl,
@@ -210,22 +211,26 @@ impl TranscriptSource for ClaudeSource {
         for line in &new.lines {
             let record = &line.value;
             let line_cwd = record_cwd(record).or_else(|| session_cwd.clone());
-            let include = self.user_scope.as_ref().map_or_else(
-                || {
-                    line_cwd.as_deref().is_some_and(|cwd| {
-                        project_matcher
-                            .as_ref()
-                            .is_some_and(|matcher| matcher.contains(cwd))
-                    })
-                },
-                |_scope| {
-                    line_cwd.as_deref().is_none_or(|cwd| {
-                        !registered_root_matchers
-                            .iter()
-                            .any(|matcher| matcher.contains(cwd))
-                    })
-                },
-            );
+            let include = if self.user_scope.is_none() {
+                line_cwd.as_deref().map_or(Some(false), |cwd| {
+                    project_matcher
+                        .as_ref()
+                        .map(|matcher| matcher.contains_status(cwd).definitive())
+                        .unwrap_or(Some(false))
+                })
+            } else {
+                line_cwd.as_deref().map_or(Some(true), |cwd| {
+                    let mut unknown = false;
+                    for matcher in &registered_root_matchers {
+                        match matcher.contains_status(cwd) {
+                            ProjectMembership::Match => return Some(false),
+                            ProjectMembership::NoMatch => {}
+                            ProjectMembership::Unknown => unknown = true,
+                        }
+                    }
+                    (!unknown).then_some(true)
+                })
+            }?;
             if !include {
                 continue;
             }
@@ -1362,8 +1367,26 @@ fn record_cwd(record: &Value) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
     use serde_json::json;
+
+    static UNKNOWN_PATH_ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
+
+    fn retrying_identity(path: &Path) -> crate::worktree::GitRepoIdentityOutcome {
+        let root = path
+            .ancestors()
+            .find(|ancestor| ancestor.file_name().is_some_and(|name| name == "repo"))
+            .unwrap_or(path);
+        if UNKNOWN_PATH_ATTEMPTS.fetch_add(1, Ordering::SeqCst) == 0 {
+            return crate::worktree::GitRepoIdentityOutcome::Unknown;
+        }
+        crate::worktree::GitRepoIdentityOutcome::Resolved(crate::worktree::GitRepoIdentity {
+            worktree_root: root.to_path_buf(),
+            common_dir: root.join(".git"),
+        })
+    }
 
     #[test]
     fn structured_git_operation_becomes_host_commit_evidence() {
@@ -1506,6 +1529,47 @@ mod tests {
         let second_metadata: Value =
             serde_json::from_str(second.metadata_json.as_deref().unwrap()).unwrap();
         assert_eq!(second_metadata["claude_message_worktree"], first_worktree);
+    }
+
+    #[test]
+    fn claude_unknown_membership_retries_without_advancing_cursor() {
+        UNKNOWN_PATH_ATTEMPTS.store(0, Ordering::SeqCst);
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let project_root = temp.path().join("repo");
+        let nested_cwd = project_root.join("packages/app");
+        std::fs::create_dir_all(&nested_cwd).expect("nested cwd");
+        let transcript = temp.path().join("retry.jsonl");
+        std::fs::write(
+            &transcript,
+            format!(
+                "{}\n",
+                json!({
+                    "type": "user",
+                    "sessionId": "retry",
+                    "cwd": nested_cwd,
+                    "message": {"role": "user", "content": "retry me"}
+                })
+            ),
+        )
+        .expect("write transcript");
+        let mut source = ClaudeSource::with_home(temp.path());
+        source.project_matchers =
+            ProjectRootMatcherCache::with_identity_resolver(retrying_identity);
+
+        let previous = StoredCursor::default();
+        assert!(
+            source
+                .parse_new(&transcript, previous, &project_root, None)
+                .is_none(),
+            "unknown membership must abort before a new cursor can be persisted"
+        );
+
+        let retried = source
+            .parse_new(&transcript, previous, &project_root, None)
+            .expect("unknown membership must be resolved again on retry");
+        assert_eq!(retried.messages.len(), 1);
+        assert!(retried.new_cursor.position > previous.position);
+        assert_eq!(UNKNOWN_PATH_ATTEMPTS.load(Ordering::SeqCst), 3);
     }
 
     #[test]
