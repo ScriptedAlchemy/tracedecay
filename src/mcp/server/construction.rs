@@ -374,8 +374,18 @@ mod tests {
 
     #[tokio::test]
     async fn direct_context_installs_only_the_explicit_search_executor() {
-        let project = tempfile::tempdir().expect("project");
-        let cg = TraceDecay::open(project.path()).await.expect("graph");
+        let project = tempfile::tempdir_in(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .expect("repository parent"),
+        )
+        .expect("project");
+        let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
+            project.path(),
+            "project.mcp-construction",
+        )
+        .await
+        .expect("registered graph");
         let executor: crate::mcp::server::CodeIndexSearchExecutor = Arc::new(|_| {
             Box::pin(async {
                 crate::mcp::server::CodeIndexSearchOutcomeV1::Unavailable(

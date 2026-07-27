@@ -3059,7 +3059,10 @@ mod tests {
         .accept_replay("cursor", HostAdmissionScope::Profile);
 
         assert_eq!(admission.status, HostAdmissionStatus::Unavailable);
-        assert_eq!(admission.reason_code, Some("authority_unavailable"));
+        assert_eq!(
+            admission.reason_code,
+            Some("registered_authority_unavailable")
+        );
     }
 
     #[tokio::test]
