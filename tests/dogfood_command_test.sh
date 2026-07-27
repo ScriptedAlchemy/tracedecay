@@ -19,7 +19,20 @@ write_fake_binary() {
     printf '#!/usr/bin/env bash\n'
     printf 'set -euo pipefail\n'
     printf 'binary_id=%q\n' "$binary_id"
+    printf 'checkout_root=%q\n' "$repo_root"
     cat <<'EOF'
+if [[ "${1:-}" == "--version" ]]; then
+  sha=$(git -C "$checkout_root" rev-parse --short=12 HEAD)
+  status=$(git -C "$checkout_root" status --porcelain)
+  dirty=
+  if [[ -n "$status" ]]; then
+    dirty=.dirty
+  fi
+  reported_version=${TRACEDECAY_DOGFOOD_TEST_REPORTED_VERSION:-"0.0.0+$sha$dirty"}
+  printf 'tracedecay %s\n' "$reported_version"
+  exit 0
+fi
+
 command_text=$*
 printf '%s:%s\n' "$binary_id" "$command_text" \
   >>"${TRACEDECAY_DOGFOOD_TEST_LOG:?}"
@@ -69,10 +82,6 @@ fi
 if [[ "$command_text" == "post-update --mode dogfood-recover-inactive" \
   && -n "${TRACEDECAY_DOGFOOD_TEST_DAEMON_MARKER:-}" ]]; then
   rm -f "$TRACEDECAY_DOGFOOD_TEST_DAEMON_MARKER"
-fi
-
-if [[ "${1:-}" == "--version" ]]; then
-  printf 'tracedecay 0.0.0-dogfood\n'
 fi
 EOF
   } >"$path"
@@ -352,6 +361,7 @@ write_crashable_binary() {
     printf '#!/usr/bin/env bash\n'
     printf 'set -euo pipefail\n'
     printf 'binary_id=%q\n' "$binary_id"
+    printf 'checkout_root=%q\n' "$repo_root"
     cat <<'EOF'
 command_text=$*
 printf '%s:%s\n' "$binary_id" "$command_text" \
@@ -397,7 +407,13 @@ case "$command_text" in
     systemctl --user disable --now tracedecay.service
     ;;
   --version)
-    printf 'tracedecay 0.0.0-dogfood\n'
+    sha=$(git -C "$checkout_root" rev-parse --short=12 HEAD)
+    status=$(git -C "$checkout_root" status --porcelain)
+    dirty=
+    if [[ -n "$status" ]]; then
+      dirty=.dirty
+    fi
+    printf 'tracedecay 0.0.0+%s%s\n' "$sha" "$dirty"
     ;;
 esac
 EOF
@@ -966,6 +982,32 @@ cmp "$case_root/expected installed" "$installed"
 cmp "$case_root/expected staged" "$staged"
 test -e "$daemon_marker" || fail 'pre-boundary rollback stopped the old daemon'
 test ! -s "$case_log" || fail 'a binary ran before the migration boundary'
+assert_boundary outcome safe-rollback-complete
+assert_boundary attempt_boundary not-reached
+assert_boundary old_binary_policy allowed
+assert_boundary managed_daemon unchanged
+assert_no_temporary_install_files
+
+# The staged binary must attest to this checkout's fresh SHA and dirty state
+# before dogfood replaces either installed path or opens a writable store.
+setup_case staged-identity-mismatch
+write_fake_binary "$case_source" new
+install_old_pair
+cp "$installed" "$case_root/expected installed"
+cp "$staged" "$case_root/expected staged"
+daemon_marker="$case_root/daemon-running"
+: >"$daemon_marker"
+if run_case \
+  TRACEDECAY_DOGFOOD_TEST_REPORTED_VERSION='0.0.0+000000000000' \
+  >"$case_output" 2>&1; then
+  fail 'staged identity mismatch unexpectedly succeeded'
+fi
+cmp "$case_root/expected installed" "$installed"
+cmp "$case_root/expected staged" "$staged"
+test -e "$daemon_marker" || fail 'identity mismatch stopped the old daemon'
+test ! -s "$case_log" || fail 'identity mismatch executed a lifecycle command'
+grep -Fq 'dogfood staged binary identity mismatch' "$case_output" ||
+  fail 'identity mismatch was not explicit'
 assert_boundary outcome safe-rollback-complete
 assert_boundary attempt_boundary not-reached
 assert_boundary old_binary_policy allowed
