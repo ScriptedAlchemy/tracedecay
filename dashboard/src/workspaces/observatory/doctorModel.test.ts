@@ -7,6 +7,7 @@ import {
 import {
   availableRemediationActions,
   doctorEvidencePresentation,
+  doctorOwningSurfaceLabel,
   readActiveDoctorOperation,
   saveActiveDoctorOperation,
   sameDoctorScope,
@@ -180,6 +181,7 @@ describe('Doctor frontend contracts', () => {
     expect(availableRemediationActions(descriptor, [])).toEqual({
       canPreview: false,
       canApply: false,
+      dispatchable: true,
     });
     expect(
       availableRemediationActions(descriptor, [
@@ -188,13 +190,32 @@ describe('Doctor frontend contracts', () => {
           operation: 'use-case.application.runtime.recover-daemon',
         },
       ]),
-    ).toEqual({ canPreview: false, canApply: false });
+    ).toEqual({ canPreview: false, canApply: false, dispatchable: true });
     expect(
       availableRemediationActions(descriptor, [
         { kind: 'request_dry_run', operation: descriptor.operation },
         { kind: 'request_apply', operation: descriptor.operation },
       ]),
-    ).toEqual({ canPreview: true, canApply: true });
+    ).toEqual({ canPreview: true, canApply: true, dispatchable: true });
+  });
+
+  it('keeps an owner-authorized action distinct from one this view can address', () => {
+    // The findings route sends `target: null` for an operation whose change it
+    // cannot determine from the finding, while the owner still authorizes the
+    // apply. Reading that as "unauthorized" would deny an available repair.
+    const withoutTarget: DashboardDoctorRemediationDescriptorV1 = {
+      ...descriptor,
+      operation: 'use-case.application.configuration.protected-apply',
+      target: null,
+    };
+    expect(
+      availableRemediationActions(withoutTarget, [
+        { kind: 'request_apply', operation: withoutTarget.operation },
+      ]),
+    ).toEqual({ canPreview: false, canApply: true, dispatchable: false });
+    expect(doctorOwningSurfaceLabel(withoutTarget.surface)).toBe(
+      'the configuration control plane',
+    );
   });
 
   it('persists only the durable operation identity for reload resume', () => {

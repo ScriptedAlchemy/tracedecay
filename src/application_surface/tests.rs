@@ -1138,7 +1138,7 @@ async fn authenticated_context_reuses_exact_scope_and_transport_controls() {
         authority,
         active_project_id: project_id,
         cancellations: Arc::default(),
-        client: None,
+        executor: None,
     };
     let observed_at = current_micros().expect("current time");
     let request_id = RequestId::new("request.http.subscription").expect("HTTP request");
@@ -1270,7 +1270,7 @@ async fn resolver_conceals_cross_project_scope_with_one_typed_denial() {
         authority,
         active_project_id: ProjectId::new("project.other").expect("other project"),
         cancellations: Arc::default(),
-        client: None,
+        executor: None,
     };
 
     let denied = resolve_authenticated_http_request_context(

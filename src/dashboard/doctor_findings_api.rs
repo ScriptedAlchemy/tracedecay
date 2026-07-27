@@ -27,6 +27,10 @@ use super::read_model::{
 pub(crate) struct DashboardDoctorRemediationDescriptorV1 {
     #[serde(flatten)]
     descriptor: DoctorRemediationDescriptorV1,
+    /// The dispatch target this route can construct from the finding alone.
+    /// `None` means the owning surface must supply the target (a protected
+    /// configuration apply needs the concrete key, value, and base revision),
+    /// not that the owner withholds the action — that is `legal_actions`.
     pub target: Option<DoctorRemediationTargetV1>,
 }
 
@@ -204,9 +208,7 @@ async fn project_report(
                 target: target.clone(),
             });
         }
-        if target.is_some()
-            && let Some(dispatcher) = dispatcher
-        {
+        if let Some(dispatcher) = dispatcher {
             for kind in dispatcher.legal_actions(reference).await {
                 let kind = match kind {
                     super::doctor_remediation_api::DoctorRemediationLegalActionV1::RequestPreview => {
@@ -714,5 +716,11 @@ mod tests {
                     tracedecay_application::doctor::operations::CONFIGURATION_PROTECTED_APPLY,
                 ))
         );
+        // The owner authorizes the action even though this route cannot build
+        // the protected-apply target from the finding. Suppressing the action
+        // because the target is absent would report "no authorized action" for
+        // an operation the owner does authorize.
+        assert_eq!(envelope.payload.remediations.len(), 1);
+        assert!(envelope.payload.remediations[0].target.is_none());
     }
 }

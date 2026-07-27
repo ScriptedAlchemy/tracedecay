@@ -197,6 +197,47 @@ describe('DoctorInspector', () => {
     });
   });
 
+  it('names the owning surface when an authorized action is not addressable here', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => jsonResponse(ownerSuppliedChangeFindingsEnvelope())),
+    );
+
+    renderDoctor();
+
+    expect(
+      await screen.findByText(
+        /Authorized by the configuration control plane, which also supplies the exact change to apply/,
+      ),
+    ).toBeTruthy();
+    // The owner authorized the apply, so the card must not claim otherwise.
+    expect(
+      screen.queryByText(/No authorized remediation action is currently available/),
+    ).toBeNull();
+    // ...and it must not offer a control it cannot send a change with.
+    expect(screen.queryByRole('button', { name: 'Review remediation' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Preview' })).toBeNull();
+  });
+
+  it('reports an owner that authorizes nothing as exactly that', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        const response = findingsEnvelope();
+        response.legal_actions = response.legal_actions.filter(
+          (action: { kind: string }) => action.kind === 'refresh',
+        );
+        return jsonResponse(response);
+      }),
+    );
+
+    renderDoctor();
+
+    expect(
+      await screen.findByText(/No authorized remediation action is currently available/),
+    ).toBeTruthy();
+  });
+
   it('resumes the durable owner status identity after a reload', async () => {
     saveActiveDoctorOperation({
       schema_revision: 3,
@@ -408,6 +449,23 @@ function findingsEnvelope() {
       { kind: 'request_apply', operation },
     ],
   );
+}
+
+/** A protected configuration apply: the owner authorizes it, but the findings
+ * route cannot name the key, value, and base revision it would carry, so it
+ * sends no target. */
+function ownerSuppliedChangeFindingsEnvelope() {
+  const protectedApply = 'use-case.application.configuration.protected-apply';
+  const result = findingsEnvelope();
+  result.payload.entries[0]!.finding.remediation!.owning_operation = protectedApply;
+  result.payload.remediations[0]!.operation = protectedApply;
+  result.payload.remediations[0]!.preview_available = false;
+  result.payload.remediations[0]!.target = null;
+  result.legal_actions = [
+    { kind: 'refresh', operation: 'use-case.dashboard.doctor.findings.refresh' },
+    { kind: 'request_apply', operation: protectedApply },
+  ];
+  return result;
 }
 
 function directActionFindingsEnvelope() {
