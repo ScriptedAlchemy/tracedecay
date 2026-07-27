@@ -4,7 +4,6 @@
 //! `~/.vibe/config.toml` as a `[[mcp_servers]]` entry with stdio transport,
 //! and prompt rules via `~/.vibe/prompts/cli.md`.
 
-use std::io::Write;
 use std::path::Path;
 
 use crate::errors::{Result, TraceDecayError};
@@ -188,44 +187,76 @@ fn local_config_has_tracedecay(project_root: &Path) -> bool {
 // Install helpers
 // ---------------------------------------------------------------------------
 
-/// Append a `[[mcp_servers]]` entry for tracedecay to `config.toml` (idempotent).
+/// Install or refresh tracedecay's `[[mcp_servers]]` entry (idempotent).
 fn install_mcp_server(config_path: &Path, tracedecay_bin: &str) -> Result<()> {
-    let existing = if config_path.exists() {
-        std::fs::read_to_string(config_path).unwrap_or_default()
-    } else {
-        String::new()
-    };
-
-    if existing.contains(TOML_MARKER) {
-        eprintln!(
-            "  tracedecay MCP server already registered in {}, skipping",
-            config_path.display()
-        );
-        return Ok(());
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| TraceDecayError::Config {
+            message: format!("failed to create {}: {error}", parent.display()),
+        })?;
     }
-
-    let block = format!(
-        "\n[[mcp_servers]]\n\
-         name = \"tracedecay\"\n\
-         transport = \"stdio\"\n\
-         command = \"{tracedecay_bin}\"\n\
-         args = [\"serve\"]\n"
-    );
-
-    let mut f = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(config_path)
-        .map_err(|e| TraceDecayError::Config {
-            message: format!("failed to open {}: {e}", config_path.display()),
+    let mut config = super::load_toml_file(config_path)?;
+    let root = config
+        .as_table_mut()
+        .ok_or_else(|| TraceDecayError::Config {
+            message: format!("{} is not a TOML document", config_path.display()),
         })?;
-    f.write_all(block.as_bytes())
-        .map_err(|e| TraceDecayError::Config {
-            message: format!("failed to write {}: {e}", config_path.display()),
+    let servers = root
+        .entry("mcp_servers")
+        .or_insert_with(|| toml::Value::Array(Vec::new()))
+        .as_array_mut()
+        .ok_or_else(|| TraceDecayError::Config {
+            message: format!(
+                "{} has a non-array mcp_servers value; refusing to overwrite it",
+                config_path.display()
+            ),
         })?;
+    let existing = servers
+        .iter_mut()
+        .find(|server| server.get("name").and_then(toml::Value::as_str) == Some("tracedecay"));
+    if let Some(server) = existing {
+        let table = server
+            .as_table_mut()
+            .ok_or_else(|| TraceDecayError::Config {
+                message: format!(
+                    "{} has a non-table tracedecay MCP entry; refusing to overwrite it",
+                    config_path.display()
+                ),
+            })?;
+        if table.get("command").and_then(toml::Value::as_str) == Some(tracedecay_bin) {
+            eprintln!(
+                "  tracedecay MCP server already current in {}, skipping",
+                config_path.display()
+            );
+            return Ok(());
+        }
+        table.insert(
+            "command".to_string(),
+            toml::Value::String(tracedecay_bin.to_string()),
+        );
+    } else {
+        let mut server = toml::Table::new();
+        server.insert(
+            "name".to_string(),
+            toml::Value::String("tracedecay".to_string()),
+        );
+        server.insert(
+            "transport".to_string(),
+            toml::Value::String("stdio".to_string()),
+        );
+        server.insert(
+            "command".to_string(),
+            toml::Value::String(tracedecay_bin.to_string()),
+        );
+        server.insert(
+            "args".to_string(),
+            toml::Value::Array(vec![toml::Value::String("serve".to_string())]),
+        );
+        servers.push(toml::Value::Table(server));
+    }
+    super::write_toml_file(config_path, &config)?;
 
     eprintln!(
-        "\x1b[32m✔\x1b[0m Added tracedecay MCP server to {}",
+        "\x1b[32m✔\x1b[0m Registered tracedecay MCP server in {}",
         config_path.display()
     );
     Ok(())
@@ -358,17 +389,37 @@ fn doctor_check_config(dc: &mut DoctorCounters, home: &Path) {
         return;
     }
 
-    let contents = std::fs::read_to_string(&config_path).unwrap_or_default();
-    if contents.contains(TOML_MARKER) {
-        dc.pass(&format!(
-            "MCP server registered in {}",
+    let Ok(config) = super::load_toml_file(&config_path) else {
+        dc.fail(&format!("could not parse {}", config_path.display()));
+        return;
+    };
+    let registered = config
+        .get("mcp_servers")
+        .and_then(toml::Value::as_array)
+        .and_then(|servers| {
+            servers.iter().find(|server| {
+                server.get("name").and_then(toml::Value::as_str) == Some("tracedecay")
+            })
+        })
+        .and_then(|server| server.get("command"))
+        .and_then(toml::Value::as_str);
+    let Some(expected) = super::which_tracedecay() else {
+        dc.fail("could not resolve the active tracedecay binary for Vibe");
+        return;
+    };
+    match registered {
+        Some(command) if command == expected => dc.pass(&format!(
+            "MCP server registered with the current binary in {}",
             config_path.display()
-        ));
-    } else {
-        dc.fail(&format!(
+        )),
+        Some(command) => dc.fail(&format!(
+            "MCP server in {} uses stale command `{command}`; expected `{expected}` — run `tracedecay install --agent vibe`",
+            config_path.display()
+        )),
+        None => dc.fail(&format!(
             "MCP server NOT registered in {} — run `tracedecay install --agent vibe`",
             config_path.display()
-        ));
+        )),
     }
 }
 
@@ -385,5 +436,66 @@ fn doctor_check_prompt(dc: &mut DoctorCounters, home: &Path) {
         }
     } else {
         dc.warn("Vibe prompt does not exist");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn install_rewrites_a_stale_tracedecay_command_and_preserves_other_servers() {
+        let home = tempfile::tempdir().unwrap();
+        let config_path = vibe_config_path(home.path());
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &config_path,
+            r#"[[mcp_servers]]
+name = "other"
+transport = "stdio"
+command = "/bin/other"
+args = ["serve"]
+
+[[mcp_servers]]
+name = "tracedecay"
+transport = "stdio"
+command = "/old/tracedecay"
+args = ["serve"]
+"#,
+        )
+        .unwrap();
+
+        install_mcp_server(&config_path, "/new/tracedecay").unwrap();
+
+        let config = super::super::load_toml_file(&config_path).unwrap();
+        let servers = config["mcp_servers"].as_array().unwrap();
+        assert_eq!(servers.len(), 2);
+        assert_eq!(servers[0]["name"].as_str(), Some("other"));
+        assert_eq!(servers[0]["command"].as_str(), Some("/bin/other"));
+        assert_eq!(servers[1]["name"].as_str(), Some("tracedecay"));
+        assert_eq!(servers[1]["command"].as_str(), Some("/new/tracedecay"));
+    }
+
+    #[test]
+    fn healthcheck_rejects_a_stale_tracedecay_command() {
+        let home = tempfile::tempdir().unwrap();
+        let config_path = vibe_config_path(home.path());
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        let expected = super::super::which_tracedecay().unwrap_or_else(|| "tracedecay".into());
+        std::fs::write(
+            &config_path,
+            format!(
+                "[[mcp_servers]]\nname = \"tracedecay\"\ntransport = \"stdio\"\ncommand = \"{expected}-stale\"\nargs = [\"serve\"]\n"
+            ),
+        )
+        .unwrap();
+
+        let mut counters = DoctorCounters::new();
+        doctor_check_config(&mut counters, home.path());
+
+        assert_eq!(
+            counters.issues, 1,
+            "Doctor must reject a registration that names the wrong binary"
+        );
     }
 }

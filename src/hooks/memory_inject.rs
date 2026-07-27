@@ -720,9 +720,7 @@ pub async fn regenerate_cursor_user_memory_rule() -> bool {
         return false;
     };
     let rule_path = crate::agents::cursor::cursor_memory_rule_path(&home);
-    let Some(plugin_dir) = rule_path.parent().and_then(Path::parent) else {
-        return false;
-    };
+    let plugin_dir = crate::agents::cursor::cursor_plugin_install_dir(&home);
     if !plugin_dir.join(".cursor-plugin/plugin.json").exists() {
         return false;
     }
@@ -751,6 +749,31 @@ async fn regenerate_cursor_memory_rule_with_home(root: &Path, home: &Path) -> bo
 mod tests {
     use super::*;
     use crate::memory::types::MemoryCategory;
+
+    struct HomeEnvGuard(Option<std::ffi::OsString>);
+
+    impl HomeEnvGuard {
+        fn set(home: &Path) -> Self {
+            let previous = std::env::var_os("HOME");
+            // SAFETY: The shared hook test lock prevents concurrent tests from
+            // observing this temporary process-environment override.
+            unsafe { std::env::set_var("HOME", home) };
+            Self(previous)
+        }
+    }
+
+    impl Drop for HomeEnvGuard {
+        fn drop(&mut self) {
+            // SAFETY: The lock used by the caller remains held through drop.
+            unsafe {
+                if let Some(previous) = self.0.take() {
+                    std::env::set_var("HOME", previous);
+                } else {
+                    std::env::remove_var("HOME");
+                }
+            }
+        }
+    }
 
     fn fact(fact_id: i64, category: MemoryCategory, trust: f64, content: &str) -> FactRecord {
         FactRecord {
@@ -1073,5 +1096,28 @@ mod tests {
         assert!(content.contains(CURSOR_MEMORY_RULE_MARKER));
         assert!(content.contains("No durable facts stored yet"));
         assert!(!content.contains("stale fact from another workspace"));
+    }
+
+    #[test]
+    fn projectless_cursor_memory_uses_the_plugin_install_directory() {
+        crate::hooks::run_with_test_env_lock(async {
+            let home = tempfile::tempdir().unwrap();
+            let _home_guard = HomeEnvGuard::set(home.path());
+            let plugin_dir = crate::agents::cursor::cursor_plugin_install_dir(home.path());
+            std::fs::create_dir_all(plugin_dir.join(".cursor-plugin")).unwrap();
+            std::fs::write(
+                plugin_dir.join(".cursor-plugin/plugin.json"),
+                r#"{"name":"tracedecay"}"#,
+            )
+            .unwrap();
+
+            assert!(
+                regenerate_cursor_user_memory_rule().await,
+                "projectless Cursor memory should regenerate when the plugin is installed"
+            );
+            let rule_path = crate::agents::cursor::cursor_memory_rule_path(home.path());
+            let content = std::fs::read_to_string(rule_path).unwrap();
+            assert!(content.contains("# User memory (tracedecay)"));
+        });
     }
 }

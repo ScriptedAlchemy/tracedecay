@@ -2393,6 +2393,10 @@ fn corrupt_component_result(
     component: Option<HostBundleComponentV1>,
 ) -> HostBundleComponentDoctorResultV1 {
     let repair_action = match (host, component) {
+        (Some(HostKindV1::KimiCode), Some(_)) => format!(
+            "remove the corrupt receipt {}, run `tracedecay install --agent kimi` to refresh the staged bundle, then open Kimi Code and run `/plugins install ~/.tracedecay/host-bundle-stage/kimi/tracedecay`; rerun Doctor to verify registration",
+            receipt_path.display()
+        ),
         (Some(host), Some(component)) => format!(
             "remove the corrupt receipt {}, then run `tracedecay install --agent {} --component {} --yes`",
             receipt_path.display(),
@@ -2421,6 +2425,9 @@ fn repair_action(
     state: HostBundleComponentDoctorStateV1,
     registration: HostBundleRegistrationStateV1,
 ) -> String {
+    if host == HostKindV1::KimiCode && state != HostBundleComponentDoctorStateV1::Current {
+        return "run `tracedecay install --agent kimi` to refresh the staged bundle, then open Kimi Code and run `/plugins install ~/.tracedecay/host-bundle-stage/kimi/tracedecay`; rerun Doctor to verify registration".to_string();
+    }
     let component = component_slug(component);
     let host = host_cli_id(host);
     match state {
@@ -5190,6 +5197,42 @@ fn component_slug(component: HostBundleComponentV1) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kimi_repair_actions_name_the_interactive_plugins_flow() {
+        for state in [
+            HostBundleComponentDoctorStateV1::Repairable,
+            HostBundleComponentDoctorStateV1::Missing,
+            HostBundleComponentDoctorStateV1::Corrupt,
+            HostBundleComponentDoctorStateV1::OwnershipConflict,
+        ] {
+            let action = repair_action(
+                HostKindV1::KimiCode,
+                HostBundleComponentV1::Core,
+                state,
+                HostBundleRegistrationStateV1::Repairable,
+            );
+            assert!(
+                action.contains("/plugins install ~/.tracedecay/host-bundle-stage/kimi/tracedecay"),
+                "Kimi remediation must name the interactive host command: {action}"
+            );
+            assert!(
+                !action.contains("reinstall --component"),
+                "Kimi remediation must not advertise an unsupported repair command: {action}"
+            );
+        }
+
+        let corrupt = corrupt_component_result(
+            PathBuf::from("/tmp/kimi-corrupt-receipt.json"),
+            Some(HostKindV1::KimiCode),
+            Some(HostBundleComponentV1::Core),
+        );
+        assert!(
+            corrupt
+                .repair_action
+                .contains("/plugins install ~/.tracedecay/host-bundle-stage/kimi/tracedecay")
+        );
+    }
 
     #[derive(Clone)]
     struct FirstPartyVerifier([u8; 32]);

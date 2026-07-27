@@ -380,6 +380,13 @@ fn known_marketplaces_path(home: &Path) -> PathBuf {
 /// Returns the deploy dir.
 fn deploy_plugin_bundle(home: &Path, tracedecay_bin: &str) -> Result<PathBuf> {
     let deploy_dir = plugin_deploy_dir(home);
+    super::sweep_superseded_plugin_siblings(
+        &deploy_dir,
+        &[
+            ".claude-plugin/plugin.json",
+            ".claude-plugin/marketplace.json",
+        ],
+    )?;
     // Clean-replace: wipe the tracedecay-owned deploy dir before writing the
     // fresh bundle, so a file the bundle no longer ships (e.g. a retired skill
     // dir) does not linger across upgrades. Only remove a directory we
@@ -521,6 +528,13 @@ fn set_mcp_command(raw: &str, tracedecay_bin: &str) -> Result<String> {
 /// marketplace dir).
 fn remove_deployed_bundle(home: &Path) -> Result<()> {
     let deploy_dir = plugin_deploy_dir(home);
+    super::sweep_superseded_plugin_siblings(
+        &deploy_dir,
+        &[
+            ".claude-plugin/plugin.json",
+            ".claude-plugin/marketplace.json",
+        ],
+    )?;
     match std::fs::remove_dir_all(&deploy_dir) {
         Ok(()) => {
             eprintln!(
