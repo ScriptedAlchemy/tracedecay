@@ -26,10 +26,9 @@ use serde_json::{Map, Value};
 use crate::accounting::parser::parse_timestamp;
 use crate::sessions::SessionMessageRecord;
 use crate::sessions::shared::{
-    StoredCursor, TranscriptLocation, TranscriptLocationMetadataKeys, append_location_metadata,
-    append_tool_calls_metadata, append_tool_event_metadata, append_usage_metadata,
-    content_storage_text_and_tools, path_belongs_to_project, preview_truncated,
-    title_from_messages,
+    ProjectRootMatcherCache, StoredCursor, TranscriptLocation, TranscriptLocationMetadataKeys,
+    append_location_metadata, append_tool_calls_metadata, append_tool_event_metadata,
+    append_usage_metadata, content_storage_text_and_tools, preview_truncated, title_from_messages,
 };
 use crate::sessions::source::{
     ParsedTranscript, SessionDraft, TranscriptSource, collect_files_with_ext, stream_new_jsonl,
@@ -76,6 +75,7 @@ pub(crate) const CWD_PROBE_LINES: usize = 8;
 pub struct ClaudeSource {
     projects_dir: PathBuf,
     user_scope: Option<UserClaudeScope>,
+    project_matchers: ProjectRootMatcherCache,
 }
 
 struct UserClaudeScope {
@@ -96,6 +96,7 @@ impl ClaudeSource {
         Self {
             projects_dir: home.join(".claude").join("projects"),
             user_scope: None,
+            project_matchers: ProjectRootMatcherCache::default(),
         }
     }
 
@@ -191,21 +192,37 @@ impl TranscriptSource for ClaudeSource {
         // summary alongside the per-row marker rows / metadata.
         let mut accumulator = SessionAccumulator::default();
         let mut messages = Vec::new();
+        let project_matcher = self
+            .user_scope
+            .is_none()
+            .then(|| self.project_matchers.get(project_root));
+        let registered_root_matchers = self
+            .user_scope
+            .as_ref()
+            .map(|scope| {
+                scope
+                    .registered_roots
+                    .iter()
+                    .map(|root| self.project_matchers.get(root))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         for line in &new.lines {
             let record = &line.value;
             let line_cwd = record_cwd(record).or_else(|| session_cwd.clone());
             let include = self.user_scope.as_ref().map_or_else(
                 || {
-                    line_cwd
-                        .as_deref()
-                        .is_some_and(|cwd| path_belongs_to_project(cwd, project_root))
+                    line_cwd.as_deref().is_some_and(|cwd| {
+                        project_matcher
+                            .as_ref()
+                            .is_some_and(|matcher| matcher.contains(cwd))
+                    })
                 },
-                |scope| {
+                |_scope| {
                     line_cwd.as_deref().is_none_or(|cwd| {
-                        !scope
-                            .registered_roots
+                        !registered_root_matchers
                             .iter()
-                            .any(|root| path_belongs_to_project(cwd, root))
+                            .any(|matcher| matcher.contains(cwd))
                     })
                 },
             );
