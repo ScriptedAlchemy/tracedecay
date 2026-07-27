@@ -114,6 +114,9 @@ fn assert_success(output: &Output, what: &str) {
 }
 
 fn write_branch_meta(profile_root: &Path, project_id: &str, content: &str) -> PathBuf {
+    std::fs::create_dir_all(profile_root).unwrap();
+    #[cfg(unix)]
+    std::fs::set_permissions(profile_root, std::fs::Permissions::from_mode(0o700)).unwrap();
     let shard = profile_root.join("projects").join(project_id);
     std::fs::create_dir_all(&shard).unwrap();
     let path = shard.join("branch-meta.json");
@@ -154,7 +157,9 @@ fn post_update_quarantines_corrupt_branch_meta() {
     assert_success(&output, "post-update");
     assert!(
         !corrupt.exists(),
-        "corrupt branch-meta.json should be quarantined away"
+        "corrupt branch-meta.json should be quarantined away\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
     let quarantined = quarantined_branch_meta_files(corrupt.parent().unwrap());
     assert_eq!(
@@ -199,7 +204,9 @@ fn post_update_quarantines_semantically_corrupt_branch_meta() {
     assert_success(&output, "post-update");
     assert!(
         !semantic_corrupt.exists(),
-        "semantically corrupt branch-meta.json should be quarantined away"
+        "semantically corrupt branch-meta.json should be quarantined away\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
     let quarantined = quarantined_branch_meta_files(semantic_corrupt.parent().unwrap());
     assert_eq!(
