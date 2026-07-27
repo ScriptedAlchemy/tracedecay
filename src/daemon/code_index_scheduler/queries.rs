@@ -201,7 +201,7 @@ impl CodeIndexSchedulerRegistryV1 {
         scope: &tracedecay_application::ResolvedScope,
         generation_id: &CodeGenerationId,
     ) -> Option<LatestCompleteCodeIndexV1> {
-        let scheduler = {
+        let (scheduler, serving_generation) = {
             let mounted = self.mounted.lock().await;
             let mut matched = None;
             for worktree in mounted.values() {
@@ -211,7 +211,10 @@ impl CodeIndexSchedulerRegistryV1 {
                     if matched.is_some() {
                         return None;
                     }
-                    matched = Some(std::sync::Arc::clone(&worktree.scheduler));
+                    matched = Some((
+                        std::sync::Arc::clone(&worktree.scheduler),
+                        std::sync::Arc::clone(&worktree.serving_generation),
+                    ));
                 }
             }
             matched?
@@ -219,6 +222,18 @@ impl CodeIndexSchedulerRegistryV1 {
         let scope = scope.clone();
         let generation_id = generation_id.clone();
         tokio::task::spawn_blocking(move || {
+            if let Some(generation) = serving_generation
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref()
+                .filter(|generation| {
+                    generation.generation.manifest().generation_id == generation_id
+                        && Self::latest_matches_scope(generation, &scope)
+                })
+                .cloned()
+            {
+                return Some(generation);
+            }
             let scheduler = scheduler
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);

@@ -44,6 +44,7 @@ pub(super) struct MountedCodeIndexWorktreeV1 {
         Arc<super::semantic_query_runtime::SemanticQueryAuthorityV1>,
     )>,
     pub(super) scheduler: Arc<Mutex<CodeIndexWorktreeSchedulerV1>>,
+    pub(super) serving_generation: Arc<RwLock<Option<LatestCompleteCodeIndexV1>>>,
     wake: Arc<tokio::sync::Notify>,
     shutting_down: Arc<AtomicBool>,
     pub(super) semantic_evaluation_publication_gate: Arc<tokio::sync::Mutex<()>>,
@@ -190,6 +191,7 @@ impl CodeIndexSchedulerRegistryV1 {
         }
         let repository_id = opened.identity().repository_id().clone();
         let worktree_id = opened.identity().worktree_id().clone();
+        let serving_generation = Arc::new(RwLock::new(opened.latest_complete()));
         let scheduler = Arc::new(Mutex::new(opened));
         let semantic_evaluation_publication_gate = Arc::new(tokio::sync::Mutex::new(()));
         let (wake, shutting_down) = {
@@ -202,6 +204,7 @@ impl CodeIndexSchedulerRegistryV1 {
             )
         };
         let worker_scheduler = Arc::clone(&scheduler);
+        let worker_serving_generation = Arc::clone(&serving_generation);
         let worker_wake = Arc::clone(&wake);
         let worker_shutting_down = Arc::clone(&shutting_down);
         let worker_semantic_evaluation_publication_gate =
@@ -230,13 +233,20 @@ impl CodeIndexSchedulerRegistryV1 {
                 }
                 let scheduler = Arc::clone(&worker_scheduler);
                 let result = tokio::task::spawn_blocking(move || {
-                    scheduler
+                    let mut scheduler = scheduler
                         .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .reconcile_now()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let result = scheduler.reconcile_now();
+                    let latest = scheduler.latest_complete();
+                    (result, latest)
                 })
                 .await;
-                if let Ok(Ok(CodeIndexReconcileOutcomeV1::Published(evidence))) = &result {
+                if let Ok((_, Some(latest))) = &result {
+                    *worker_serving_generation
+                        .write()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(latest.clone());
+                }
+                if let Ok((Ok(CodeIndexReconcileOutcomeV1::Published(evidence)), _)) = &result {
                     Self::publish_generation(
                         &worker_generation_publications,
                         worker_project_root.clone(),
@@ -265,6 +275,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 pr9_query_authority: None,
                 semantic_query_authority: None,
                 scheduler,
+                serving_generation,
                 wake,
                 shutting_down,
                 semantic_evaluation_publication_gate,
@@ -543,23 +554,39 @@ impl CodeIndexSchedulerRegistryV1 {
         // ladder (gix status + hashing + build_and_publish) must never run while
         // the registry map is locked, or one worktree's reconcile would
         // serialize every other worktree's queries and stall the executor.
-        let scheduler = {
+        let (scheduler, serving_generation) = {
             let mounted = self.mounted.lock().await;
-            Arc::clone(&mounted.get(&project_root)?.scheduler)
+            let worktree = mounted.get(&project_root)?;
+            (
+                Arc::clone(&worktree.scheduler),
+                Arc::clone(&worktree.serving_generation),
+            )
         };
-        // Run the synchronous reconcile off the async executor. Freshness is an
-        // admission requirement: if it cannot be established, fail closed
-        // rather than serving a last-known generation that may now be stale.
+        // Run the synchronous reconcile off the async executor. When the
+        // background worker already owns the scheduler, preserve the last
+        // complete immutable generation instead of joining the in-progress
+        // refresh; the next request observes the newly published generation.
         let authority_root = project_root.clone();
         let (latest, publication) = tokio::task::spawn_blocking(move || {
-            let mut scheduler = scheduler
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut scheduler = match scheduler.try_lock() {
+                Ok(scheduler) => scheduler,
+                Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    return serving_generation
+                        .read()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone()
+                        .map(|latest| (latest, None));
+                }
+            };
             let before = scheduler
                 .latest_complete()
                 .map(|latest| latest.generation.manifest().generation_id.clone());
             let reconciled = scheduler.ensure_fresh_for_query().ok()?;
             let latest = scheduler.latest_complete()?;
+            *serving_generation
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(latest.clone());
             let publication = (reconciled
                 && before.as_ref() != Some(&latest.generation.manifest().generation_id))
             .then(|| CodeIndexGenerationPublishedV1 {
