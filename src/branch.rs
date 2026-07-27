@@ -910,24 +910,9 @@ async fn create_consistent_branch_snapshot(
         if let Some(source) = retained_source {
             source.snapshot_to(&temp).await?;
         } else {
-            let source = crate::sqlite_read_snapshot::open_in(src, parent_dir)
-                .await
-                .map_err(|error| crate::errors::TraceDecayError::Database {
-                    message: format!("failed to freeze branch source database: {error}"),
-                    operation: "create branch snapshot".to_owned(),
-                })?;
-            source
-                .backup_to(&temp)
-                .await
-                .map_err(|error| crate::errors::TraceDecayError::Database {
-                    message: format!("failed to back up frozen branch database: {error}"),
-                    operation: "create branch snapshot".to_owned(),
-                })?;
-            source.validate_source().map_err(|error| {
+            backup_live_sqlite_database(src, &temp).await.map_err(|error| {
                 crate::errors::TraceDecayError::Database {
-                    message: format!(
-                        "branch source changed while its snapshot was created: {error}"
-                    ),
+                    message: format!("failed to back up live branch database: {error}"),
                     operation: "create branch snapshot".to_owned(),
                 }
             })?;
@@ -948,6 +933,28 @@ async fn create_consistent_branch_snapshot(
         Err(error) => Err(error),
         Ok(()) => cleanup,
     }
+}
+
+async fn backup_live_sqlite_database(src: &Path, dst: &Path) -> std::io::Result<()> {
+    let src = src.to_path_buf();
+    let dst = dst.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let source =
+            rusqlite::Connection::open_with_flags(&src, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .map_err(std::io::Error::other)?;
+        let mut destination = rusqlite::Connection::open_with_flags(
+            &dst,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_CREATE,
+        )
+        .map_err(std::io::Error::other)?;
+        let backup = rusqlite::backup::Backup::new(&source, &mut destination)
+            .map_err(std::io::Error::other)?;
+        backup
+            .run_to_completion(128, std::time::Duration::from_millis(1), None)
+            .map_err(std::io::Error::other)
+    })
+    .await
+    .map_err(|error| std::io::Error::other(format!("branch backup task failed: {error}")))?
 }
 
 /// Compatibility wrapper for the PR-autotrack lifecycle. Administrative CLI

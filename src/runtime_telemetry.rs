@@ -119,8 +119,15 @@ pub struct DirtyMarkerSnapshot {
 /// rather than failing the whole snapshot, because the value of this
 /// tool is recording *what's available* during a spike.
 pub async fn collect(cg: &crate::tracedecay::TraceDecay) -> Result<RuntimeSnapshot> {
+    collect_with_integrity(cg, false).await
+}
+
+pub async fn collect_with_integrity(
+    cg: &crate::tracedecay::TraceDecay,
+    include_integrity: bool,
+) -> Result<RuntimeSnapshot> {
     let process = sample_process();
-    let database = collect_database(cg).await?;
+    let database = collect_database(cg, include_integrity).await?;
     let captured_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
@@ -274,6 +281,7 @@ fn sample_process_with_window(cpu_sample_window: Duration) -> ProcessSnapshot {
 
 pub(crate) async fn collect_database(
     cg: &crate::tracedecay::TraceDecay,
+    include_integrity: bool,
 ) -> Result<DatabaseSnapshot> {
     let project_root = cg.project_root().to_path_buf();
     let db_path = cg.db_path().clone();
@@ -289,10 +297,14 @@ pub(crate) async fn collect_database(
         .await
         .ok()
         .and_then(|value| u64::try_from(value).ok());
-    let (quick_check_ok, quick_check_error) = match cg.quick_check_report().await {
-        Ok(None) => (Some(true), None),
-        Ok(Some(problem)) => (Some(false), Some(problem)),
-        Err(error) => (None, Some(error.to_string())),
+    let (quick_check_ok, quick_check_error) = if include_integrity {
+        match cg.quick_check_report().await {
+            Ok(None) => (Some(true), None),
+            Ok(Some(problem)) => (Some(false), Some(problem)),
+            Err(error) => (None, Some(error.to_string())),
+        }
+    } else {
+        (None, None)
     };
     let dirty_marker = read_dirty_marker(&with_suffix(&db_path, ".dirty"));
     let writer_owner = match crate::db::probe_writer_owner(&db_path) {

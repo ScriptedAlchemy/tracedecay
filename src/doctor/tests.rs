@@ -1850,12 +1850,10 @@ fn daemon_startup_health_gates_only_current_project_storage() {
 #[test]
 fn daemon_startup_probe_skips_unrelated_profile_audits() {
     assert_eq!(
-        super::daemon_runtime_args(),
+        super::daemon_admission_args(),
         serde_json::json!({
             "format": "json",
-            "authority_audit": false,
-            "doctor_report": false,
-            "session_ingest_health": false,
+            "include_branch_diagnostics": false,
         })
     );
 }

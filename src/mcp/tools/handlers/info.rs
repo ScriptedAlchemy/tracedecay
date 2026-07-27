@@ -148,7 +148,7 @@ pub(super) async fn handle_status(
     let mut output: Value = serde_json::to_value(&stats).unwrap_or(json!({}));
     if include_storage_health {
         let mut storage_health =
-            serde_json::to_value(crate::runtime_telemetry::collect_database(cg).await?)
+            serde_json::to_value(crate::runtime_telemetry::collect_database(cg, false).await?)
                 .unwrap_or_else(|_| json!({}));
         if server_stats.is_some() {
             storage_health["daemon_owner_pid"] = json!(std::process::id());

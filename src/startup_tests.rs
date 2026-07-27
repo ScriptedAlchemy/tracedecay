@@ -1,5 +1,6 @@
 use super::{
-    AnalyticsAction, CommandFamily, Commands, PostUpdateMode, SilentReinstallAction,
+    AnalyticsAction, CommandFamily, Commands, MAX_ASYNC_WORKER_THREADS, MAX_BLOCKING_THREADS,
+    PostUpdateMode, SilentReinstallAction, async_worker_threads, is_extract_worker,
     is_local_install_command, should_skip_agent_install_maintenance,
     should_skip_startup_maintenance, silent_reinstall_action,
 };
@@ -56,6 +57,19 @@ fn dispatch_command_stays_a_thin_family_router() {
         lines <= 24,
         "dispatch_command should remain a thin router; found {lines} lines"
     );
+}
+
+#[test]
+fn async_runtime_bounds_parallel_allocators() {
+    assert!((1..=MAX_ASYNC_WORKER_THREADS).contains(&async_worker_threads()));
+    assert_eq!(MAX_ASYNC_WORKER_THREADS, 16);
+    assert_eq!(MAX_BLOCKING_THREADS, 32);
+}
+
+#[test]
+fn extraction_workers_bypass_the_async_runtime() {
+    assert!(is_extract_worker(Some(&Commands::ExtractWorker)));
+    assert!(!is_extract_worker(None));
 }
 
 #[test]

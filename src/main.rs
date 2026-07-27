@@ -143,6 +143,18 @@ impl Drop for Spinner {
 /// STATUS_STACK_OVERFLOW on Windows CI. Running the runtime on a thread with
 /// an explicit stack size gives every platform the same headroom.
 const ASYNC_STACK_BYTES: usize = 16 * 1024 * 1024;
+const MAX_ASYNC_WORKER_THREADS: usize = 16;
+const MAX_BLOCKING_THREADS: usize = 32;
+
+fn async_worker_threads() -> usize {
+    std::thread::available_parallelism()
+        .map_or(1, usize::from)
+        .clamp(1, MAX_ASYNC_WORKER_THREADS)
+}
+
+fn is_extract_worker(command: Option<&Commands>) -> bool {
+    matches!(command, Some(Commands::ExtractWorker))
+}
 
 fn main() {
     let spawned = std::thread::Builder::new()
@@ -180,8 +192,22 @@ fn async_main() -> tracedecay::errors::Result<()> {
         return Ok(());
     }
     let cli = Cli::parse_from(args);
+    // Extraction workers are synchronous subprocesses. Dispatch them before
+    // constructing Tokio: a full sync can spawn many workers, and giving each
+    // one its own async/blocking pools multiplies thread stacks and allocator
+    // arenas without doing any async work.
+    if is_extract_worker(cli.command.as_ref()) {
+        tracedecay::extraction_worker::run_worker();
+    }
+    let worker_threads = async_worker_threads();
+    eprintln!(
+        "[tracedecay] event=async_runtime_config worker_threads={worker_threads} \
+         max_blocking_threads={MAX_BLOCKING_THREADS}"
+    );
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
+        .worker_threads(worker_threads)
+        .max_blocking_threads(MAX_BLOCKING_THREADS)
         .thread_stack_size(ASYNC_STACK_BYTES)
         .build()
         .map_err(|e| tracedecay::errors::TraceDecayError::Config {
@@ -224,7 +250,6 @@ async fn run(cli: Cli) -> tracedecay::errors::Result<()> {
         None => return commands::handle_no_command().await,
     };
 
-    maybe_run_extract_worker(&command);
     let _hook_lease = match hook_cmd::admit_hook_command(&command) {
         hook_cmd::HookAdmission::NotHook => None,
         hook_cmd::HookAdmission::Acquired(lease) => Some(lease),
@@ -235,16 +260,6 @@ async fn run(cli: Cli) -> tracedecay::errors::Result<()> {
     };
     run_startup_preamble(&command).await;
     dispatch_command(command, host_bundle).await
-}
-
-fn maybe_run_extract_worker(command: &Commands) {
-    // Worker mode bypasses every normal startup path (no config load, no
-    // worldwide-counter ping, no agent checks). The token handshake inside
-    // run_worker is the only authentication; this dispatch must happen
-    // before anything else can side-effect on disk or network.
-    if matches!(command, Commands::ExtractWorker) {
-        tracedecay::extraction_worker::run_worker();
-    }
 }
 
 async fn run_startup_preamble(command: &Commands) {

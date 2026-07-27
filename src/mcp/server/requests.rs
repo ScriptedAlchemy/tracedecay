@@ -1596,6 +1596,19 @@ impl McpServer {
         .await;
     }
 
+    fn message_search_worker_is_unavailable(&self, tool_name: &str, arguments: &Value) -> bool {
+        if tool_name != "tracedecay_message_search" {
+            return false;
+        }
+        let user_scope = arguments.get("storage_scope").and_then(Value::as_str) == Some("user");
+        let wake = if user_scope {
+            self.user_session_refresh_wake.as_ref()
+        } else {
+            self.project_session_refresh_wake.as_ref()
+        };
+        wake.is_some_and(|wake| wake.status().unavailable_reason.is_some())
+    }
+
     /// Handles the `tools/call` method, dispatching to the appropriate tool handler.
     pub(crate) async fn handle_tools_call(
         &self,
@@ -1617,7 +1630,10 @@ impl McpServer {
             Err(response) => return response,
         };
 
-        self.publish_tool_call_activity(&tool_name).await;
+        let fast_unavailable = self.message_search_worker_is_unavailable(&tool_name, &arguments);
+        if !fast_unavailable {
+            self.publish_tool_call_activity(&tool_name).await;
+        }
 
         let dispatch = self
             .dispatch_tool_call(
@@ -1631,6 +1647,21 @@ impl McpServer {
                 pre_cancelled,
             )
             .await;
+        if fast_unavailable {
+            let DispatchedToolCall {
+                outcome,
+                elapsed_us,
+                ..
+            } = dispatch;
+            return match outcome {
+                Ok(mut result) => {
+                    Self::attach_tool_timing(&mut result, elapsed_us);
+                    mark_semantic_tool_error(&mut result);
+                    JsonRpcResponse::success(id, result.value)
+                }
+                Err(error) => tool_error_response(id, &tool_name, &error),
+            };
+        }
         self.complete_tool_call(
             id,
             tool_name,

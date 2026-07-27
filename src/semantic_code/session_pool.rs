@@ -1401,7 +1401,7 @@ pub(crate) mod tests {
     fn blocking_acquire_succeeds_after_a_release() {
         let pool = SessionPool::new(
             FakeEmbeddingRuntime::new().with_resident_bytes_per_session(1024),
-            SystemMonotonicClock::default(),
+            ManualClock::new(),
             config(1, Duration::from_mins(1), 1 << 20),
         )
         .expect("valid config");
