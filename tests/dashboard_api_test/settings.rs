@@ -49,7 +49,7 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
                 .is_some_and(|value| !value.is_empty()),
             "settings must expose the pinned configuration revision: {settings}"
         );
-        let mut revision = settings["project"]["configuration_revision_id"]
+        let revision = settings["project"]["configuration_revision_id"]
             .as_str()
             .unwrap_or_else(|| panic!("missing configuration revision: {settings}"))
             .to_owned();
@@ -124,6 +124,29 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
         assert_eq!(global_db_var["active"], true);
         assert!(settings["environment"]["global_accounting_enabled"].is_boolean());
 
+        // A project configuration write is performed by the daemon-owned
+        // configuration control plane. This fixture serves the dashboard
+        // directly, so that control plane is not mounted, and the envelope has
+        // to say so instead of advertising an apply that can only fail. User
+        // settings keep their apply: they are written through the profile
+        // authority every dashboard state carries.
+        let legal_actions = settings_envelope["legal_actions"]
+            .as_array()
+            .unwrap_or_else(|| panic!("expected legal actions: {settings_envelope}"));
+        let advertises = |operation: &str| {
+            legal_actions
+                .iter()
+                .any(|action| action["kind"] == "request_apply" && action["operation"] == operation)
+        };
+        assert!(
+            !advertises("configuration_batch"),
+            "project apply must not be advertised without a control plane: {settings_envelope}"
+        );
+        assert!(
+            advertises("user_settings_mutate"),
+            "user apply is always authorized: {settings_envelope}"
+        );
+
         let project_url = format!("{url}/project");
         let (status, unchanged_envelope) = patch_json_body(
             &agent,
@@ -139,9 +162,15 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
         );
         let unchanged = unchanged_envelope["payload"].clone();
         assert_eq!(unchanged["resync_recommended"], false);
+        assert_eq!(
+            unchanged["project"]["configuration_revision_id"], revision,
+            "a no-op patch changes nothing, so the revision must stand: {unchanged}"
+        );
 
-        let previous_revision = revision.clone();
-        let (status, patched_envelope) = patch_json_body(
+        // A patch that really changes configuration needs the absent control
+        // plane. It is a typed unavailable — never a fabricated success, and
+        // never a write that quietly lands somewhere else.
+        let (status, unavailable) = patch_json_body(
             &agent,
             &project_url,
             &json!({
@@ -152,40 +181,40 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
             }),
         );
         assert_eq!(
-            status, 200,
-            "project mutation through the injected control-plane client failed: {patched_envelope}"
+            status, 503,
+            "a project mutation without its authority must be unavailable: {unavailable}"
         );
-        let patched = patched_envelope["payload"].clone();
-        assert_eq!(patched["resync_recommended"], true);
-        assert_eq!(
-            patched["project"]["config"]["max_file_size"], 2048,
-            "the response must publish the daemon-returned snapshot: {patched}"
-        );
-        revision = patched["project"]["configuration_revision_id"]
-            .as_str()
-            .unwrap_or_else(|| panic!("mutated response omitted revision: {patched}"))
-            .to_owned();
-        assert_ne!(
-            revision, previous_revision,
-            "a project mutation must publish a new configuration revision"
-        );
+        assert_eq!(unavailable["code"], "configuration_authority_unavailable");
         assert_eq!(
             std::fs::read(&legacy_config_path).ok(),
             legacy_config_before,
-            "a typed mutation must not fall back to config.json"
+            "a rejected mutation must not fall back to config.json"
+        );
+        let (status, after_unavailable) = get_json(&agent, &url);
+        assert_eq!(status, 200);
+        assert_eq!(
+            after_unavailable["payload"]["project"]["config"]["max_file_size"], 1_048_576,
+            "an unavailable authority must leave configuration untouched: {after_unavailable}"
+        );
+        assert_eq!(
+            after_unavailable["payload"]["project"]["configuration_revision_id"], revision,
+            "an unavailable authority must not advance the revision: {after_unavailable}"
         );
 
+        // Compare-and-set runs before the authority is consulted, so a stale
+        // revision still conflicts rather than reporting the authority gap.
+        const FOREIGN_REVISION: &str = "configuration-revision-that-never-existed";
         let (status, stale) = patch_json_body(
             &agent,
             &project_url,
             &json!({
-                "expected_revision_id": previous_revision,
+                "expected_revision_id": FOREIGN_REVISION,
                 "track_call_sites": false
             }),
         );
         assert_eq!(status, 409, "stale project patch should conflict: {stale}");
         assert_eq!(stale["code"], "configuration_revision_conflict");
-        assert_eq!(stale["expected_revision_id"], previous_revision);
+        assert_eq!(stale["expected_revision_id"], FOREIGN_REVISION);
         assert_eq!(stale["actual_revision_id"], revision);
 
         let (status, absent) =
@@ -329,8 +358,8 @@ fn settings_dashboard_api_aggregates_and_updates_config() {
         let (status, reloaded_envelope) = get_json(&agent, &url);
         assert_eq!(status, 200);
         let reloaded = reloaded_envelope["payload"].clone();
-        assert_eq!(reloaded["project"]["config"]["max_file_size"], 2048);
-        assert_eq!(reloaded["project"]["config"]["include"][0], ".github/**");
+        assert_eq!(reloaded["project"]["config"]["max_file_size"], 1_048_576);
+        assert_eq!(reloaded["project"]["configuration_revision_id"], revision);
         assert_eq!(reloaded["user"]["upload_enabled"], true);
         assert_eq!(reloaded["user"]["watcher_debounce"], "15s");
     });

@@ -9,15 +9,22 @@ use serde_json::{Value, json};
 use super::DashboardState;
 use super::util::{JsonError, http_detail};
 use crate::application::dashboard_diagnostics::{
-    DashboardDiagnosticsAuthorityV1, DashboardDiagnosticsErrorV1,
+    DashboardDiagnosticsAuthorityV1, DashboardDiagnosticsErrorV1, settings_revision,
 };
 use crate::diagnostics::lsp::adapters::LspAdapterDefinition;
+use crate::diagnostics::lsp::broker::DiagnosticsSnapshot;
 use crate::diagnostics::lsp::settings::IdleBackfillMode;
+use tracedecay_domain::ManifestDigest;
 
 type ApiResult = std::result::Result<Json<Value>, JsonError>;
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SettingsPatch {
+    /// The `settings_revision` the editor read. Required: without it the route
+    /// cannot tell an edit of the current settings from one that would
+    /// overwrite a writer the caller never saw.
+    expected_revision: ManifestDigest,
     #[serde(default)]
     idle_backfill: Option<IdleBackfillMode>,
     #[serde(default)]
@@ -47,7 +54,7 @@ pub(crate) async fn overview(State(state): State<DashboardState>) -> ApiResult {
         .overview()
         .await
         .map_err(authority_error)?;
-    Ok(Json(json!(snapshot)))
+    snapshot_response(&snapshot)
 }
 
 pub(crate) async fn patch_settings(
@@ -57,36 +64,31 @@ pub(crate) async fn patch_settings(
     let patch = serde_json::from_value::<SettingsPatch>(patch).map_err(|error| {
         bad_request(&format!("invalid code diagnostics settings patch: {error}"))
     })?;
-    let authority = authority(&state)?;
-    let mut settings = authority
-        .snapshot()
-        .await
-        .map_err(authority_error)?
-        .settings;
-    if let Some(mode) = patch.idle_backfill {
-        settings.idle_backfill = mode;
-    }
-    for (language, language_patch) in patch.languages {
-        let language_settings = settings.languages.entry(language).or_default();
-        if let Some(enabled) = language_patch.enabled {
-            language_settings.enabled = enabled;
-        }
-        match language_patch.command_override {
-            CommandOverridePatch::Missing => {}
-            CommandOverridePatch::Null => language_settings.command_override = None,
-            CommandOverridePatch::Value(command_override) => {
-                language_settings.command_override = Some(command_override);
+    let snapshot = authority(&state)?
+        .update_settings(&patch.expected_revision, |settings| {
+            if let Some(mode) = patch.idle_backfill {
+                settings.idle_backfill = mode;
             }
-        }
-    }
-    if let Some(custom_adapters) = patch.custom_adapters {
-        settings.custom_adapters = custom_adapters;
-    }
-    let snapshot = authority
-        .update_settings(settings)
+            for (language, language_patch) in patch.languages {
+                let language_settings = settings.languages.entry(language).or_default();
+                if let Some(enabled) = language_patch.enabled {
+                    language_settings.enabled = enabled;
+                }
+                match language_patch.command_override {
+                    CommandOverridePatch::Missing => {}
+                    CommandOverridePatch::Null => language_settings.command_override = None,
+                    CommandOverridePatch::Value(command_override) => {
+                        language_settings.command_override = Some(command_override);
+                    }
+                }
+            }
+            if let Some(custom_adapters) = patch.custom_adapters {
+                settings.custom_adapters = custom_adapters;
+            }
+        })
         .await
         .map_err(authority_error)?;
-    Ok(Json(json!(snapshot)))
+    snapshot_response(&snapshot)
 }
 
 pub(crate) async fn refresh_all(State(state): State<DashboardState>) -> ApiResult {
@@ -94,7 +96,7 @@ pub(crate) async fn refresh_all(State(state): State<DashboardState>) -> ApiResul
         .refresh_all()
         .await
         .map_err(authority_error)?;
-    Ok(Json(json!(snapshot)))
+    snapshot_response(&snapshot)
 }
 
 pub(crate) async fn refresh_language(
@@ -105,7 +107,17 @@ pub(crate) async fn refresh_language(
         .refresh_language(&language)
         .await
         .map_err(authority_error)?;
-    Ok(Json(json!(snapshot)))
+    snapshot_response(&snapshot)
+}
+
+/// The snapshot plus the compare-and-set token for its settings. Every read
+/// publishes it, so an editor always holds the revision its next write must
+/// be checked against.
+fn snapshot_response(snapshot: &DiagnosticsSnapshot) -> ApiResult {
+    let revision = settings_revision(&snapshot.settings).map_err(internal_error)?;
+    let mut payload = json!(snapshot);
+    payload["settings_revision"] = json!(revision);
+    Ok(Json(payload))
 }
 
 fn authority(
@@ -151,7 +163,17 @@ fn internal_error(error: impl ToString) -> JsonError {
 
 fn authority_error(error: DashboardDiagnosticsErrorV1) -> JsonError {
     match &error {
-        DashboardDiagnosticsErrorV1::AdapterUnavailable { .. } => bad_request(&error),
+        DashboardDiagnosticsErrorV1::AdapterUnavailable { .. }
+        | DashboardDiagnosticsErrorV1::LanguageDisabled { .. } => bad_request(&error),
+        DashboardDiagnosticsErrorV1::RevisionConflict { expected, actual } => (
+            StatusCode::CONFLICT,
+            Json(json!({
+                "code": "code_diagnostics_revision_conflict",
+                "detail": error.to_string(),
+                "expected_revision": expected,
+                "actual_revision": actual,
+            })),
+        ),
         DashboardDiagnosticsErrorV1::Runtime(_) => internal_error(error),
     }
 }
@@ -218,9 +240,77 @@ mod tests {
 
         let Json(actual) = overview(State(state)).await.expect("diagnostics overview");
 
-        assert_eq!(actual, json!(expected));
         assert_eq!(actual["settings"]["idle_backfill"], json!("off"));
         assert_eq!(actual["settings"]["languages"]["rust"]["enabled"], false);
+        // Every read publishes the compare-and-set token for the settings it
+        // just reported, so the next write is checked against this exact state.
+        assert_eq!(
+            actual["settings_revision"],
+            json!(settings_revision(&expected.settings).expect("settings revision"))
+        );
+        let mut without_revision = actual.clone();
+        without_revision
+            .as_object_mut()
+            .expect("overview object")
+            .remove("settings_revision");
+        assert_eq!(without_revision, json!(expected));
+    }
+
+    #[tokio::test]
+    async fn settings_patch_rejects_a_revision_the_authority_no_longer_holds() {
+        let _pin = crate::config::PinnedUserDataDir::new();
+        let (_project, _runtime, mut state) = state_for_test().await;
+        state.code_diagnostics_authority = Some(DashboardDiagnosticsAuthorityV1::new(
+            state.project_root.clone(),
+            state.dashboard_root.clone(),
+            Arc::clone(&state.mem_db),
+            Arc::new(tokio::sync::Mutex::new(diagnostic_broker(
+                state.project_root.clone(),
+                CodeDiagnosticsSettings::default(),
+            ))),
+        ));
+
+        let (status, Json(body)) = patch_settings(
+            State(state),
+            Json(json!({
+                "expected_revision": format!("sha256:{}", "0".repeat(64)),
+                "idle_backfill": "off",
+            })),
+        )
+        .await
+        .expect_err("a stale revision must not apply");
+
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["code"], "code_diagnostics_revision_conflict");
+        assert_ne!(body["actual_revision"], body["expected_revision"]);
+    }
+
+    #[tokio::test]
+    async fn settings_patch_without_a_revision_is_rejected_before_any_write() {
+        let _pin = crate::config::PinnedUserDataDir::new();
+        let (_project, _runtime, mut state) = state_for_test().await;
+        state.code_diagnostics_authority = Some(DashboardDiagnosticsAuthorityV1::new(
+            state.project_root.clone(),
+            state.dashboard_root.clone(),
+            Arc::clone(&state.mem_db),
+            Arc::new(tokio::sync::Mutex::new(diagnostic_broker(
+                state.project_root.clone(),
+                CodeDiagnosticsSettings::default(),
+            ))),
+        ));
+
+        let (status, Json(body)) =
+            patch_settings(State(state), Json(json!({ "idle_backfill": "off" })))
+                .await
+                .expect_err("a write with no revision must not apply");
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            body["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("expected_revision")),
+            "the rejection must name the missing revision: {body}"
+        );
     }
 
     #[tokio::test]

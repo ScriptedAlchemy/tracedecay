@@ -245,6 +245,19 @@ const SPECIALIZED: Readonly<Record<string, ReadonlySet<string>>> = {
   environment: new Set(['variables']),
 };
 
+/**
+ * The settings payload inside a `DashboardEnvelopeV1`.
+ *
+ * `/api/settings` and both PATCH routes answer with the envelope, so the
+ * groups this file models live under `payload` and never at the top level.
+ * Reading the envelope itself as settings would render `schema_revision`,
+ * `coverage`, and `freshness` as configuration and, worse, find no revision
+ * identity — which the editor would report as an omitted required field.
+ */
+export function settingsPayload(body: unknown): unknown {
+  return isRecord(body) ? body['payload'] : undefined;
+}
+
 export function buildSettingsModel(payload: unknown): SettingsModel {
   if (!isRecord(payload)) {
     return { sections: [], settingCount: 0, stamps: [], overrides: [], activeOverrides: 0 };

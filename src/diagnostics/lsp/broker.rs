@@ -520,6 +520,10 @@ impl DiagnosticBroker {
         broker
     }
 
+    pub fn settings(&self) -> &CodeDiagnosticsSettings {
+        &self.settings
+    }
+
     pub fn snapshot(&self) -> DiagnosticsSnapshot {
         DiagnosticsSnapshot {
             summary: self.summary(),

@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use tokio::sync::Mutex;
+use tracedecay_domain::{ManifestDigest, canonical_sha256};
 
 use crate::db::Database;
 use crate::diagnostics::lsp::activity::{active_languages_for_files, documents_for_adapter};
@@ -25,8 +26,29 @@ use crate::errors::{Result, TraceDecayError};
 pub(crate) enum DashboardDiagnosticsErrorV1 {
     #[error("no code diagnostics adapter registered for language '{language}'")]
     AdapterUnavailable { language: String },
+    #[error("code diagnostics language is disabled for '{language}'")]
+    LanguageDisabled { language: String },
+    #[error("code diagnostics settings changed after this edit began")]
+    RevisionConflict {
+        expected: ManifestDigest,
+        actual: ManifestDigest,
+    },
     #[error(transparent)]
     Runtime(#[from] TraceDecayError),
+}
+
+/// Content-addressed identity of one code-diagnostics settings state.
+///
+/// These settings are a file the broker also holds in memory, so there is no
+/// store revision to hand out. Digesting the settings themselves gives an
+/// exact compare-and-set token: two writers agree only when they agree about
+/// the whole settings value.
+pub(crate) fn settings_revision(settings: &CodeDiagnosticsSettings) -> Result<ManifestDigest> {
+    canonical_sha256(&("tracedecay.code-diagnostics.settings.v1", settings)).map_err(|error| {
+        TraceDecayError::Config {
+            message: format!("could not compute code diagnostics settings revision: {error}"),
+        }
+    })
 }
 
 type DashboardDiagnosticsResultV1<T> = std::result::Result<T, DashboardDiagnosticsErrorV1>;
@@ -38,6 +60,20 @@ pub(crate) fn diagnostic_broker(
     let mut adapters = builtin_adapters();
     adapters.extend(settings.custom_adapters.clone());
     DiagnosticBroker::new(project_root, adapters, settings)
+}
+
+/// Opens the broker every dashboard mounts when a daemon does not hand it one,
+/// reading the project's persisted analyzer settings. Both the MCP server and
+/// the directly served dashboard route through here so the code-diagnostics
+/// surface does not depend on which entry point started the dashboard.
+pub(crate) async fn open_diagnostic_broker(
+    project_root: PathBuf,
+    dashboard_root: &std::path::Path,
+) -> Arc<Mutex<DiagnosticBroker>> {
+    let settings = crate::diagnostics::lsp::settings::load_settings(dashboard_root)
+        .await
+        .unwrap_or_default();
+    Arc::new(Mutex::new(diagnostic_broker(project_root, settings)))
 }
 
 #[derive(Clone)]
@@ -82,17 +118,35 @@ impl DashboardDiagnosticsAuthorityV1 {
         Ok(self.inner.broker.lock().await.snapshot())
     }
 
+    /// Applies `patch` to the settings the caller last read, or rejects the
+    /// write.
+    ///
+    /// The read, the revision check, and the write all happen under the broker
+    /// lock. Splitting them — reading the settings, editing them, then writing
+    /// the result back — is what let a second writer land between the two and
+    /// be overwritten while both callers were told they had succeeded.
     pub(crate) async fn update_settings(
         &self,
-        settings: CodeDiagnosticsSettings,
+        expected_revision: &ManifestDigest,
+        patch: impl FnOnce(&mut CodeDiagnosticsSettings),
     ) -> DashboardDiagnosticsResultV1<DiagnosticsSnapshot> {
-        save_settings(&self.inner.settings_root, &settings).await?;
-        let mut adapters = builtin_adapters();
-        adapters.extend(settings.custom_adapters.clone());
-        let mut broker = self.inner.broker.lock().await;
-        broker.update_adapters(adapters);
-        broker.update_settings(settings);
-        drop(broker);
+        {
+            let mut broker = self.inner.broker.lock().await;
+            let mut settings = broker.settings().clone();
+            let actual = settings_revision(&settings)?;
+            if actual != *expected_revision {
+                return Err(DashboardDiagnosticsErrorV1::RevisionConflict {
+                    expected: expected_revision.clone(),
+                    actual,
+                });
+            }
+            patch(&mut settings);
+            save_settings(&self.inner.settings_root, &settings).await?;
+            let mut adapters = builtin_adapters();
+            adapters.extend(settings.custom_adapters.clone());
+            broker.update_adapters(adapters);
+            broker.update_settings(settings);
+        }
         self.snapshot().await
     }
 
@@ -121,12 +175,19 @@ impl DashboardDiagnosticsAuthorityV1 {
     async fn refresh_one_reconciled(&self, language: &str) -> DashboardDiagnosticsResultV1<()> {
         let snapshot = self.inner.broker.lock().await.snapshot();
         if !snapshot.settings.language_enabled(language) {
+            // Reconcile the reported engine state, then refuse. `refresh_all`
+            // filters disabled engines out before it gets here, so the only
+            // caller that reaches this is one that named this language — and
+            // answering it with a success snapshot it did nothing to earn
+            // would report a refresh that never ran.
             self.inner
                 .broker
                 .lock()
                 .await
                 .set_language_enabled(language, false);
-            return Ok(());
+            return Err(DashboardDiagnosticsErrorV1::LanguageDisabled {
+                language: language.to_owned(),
+            });
         }
         let Some(adapter) = self.inner.broker.lock().await.adapter_for(language) else {
             return Err(DashboardDiagnosticsErrorV1::AdapterUnavailable {
