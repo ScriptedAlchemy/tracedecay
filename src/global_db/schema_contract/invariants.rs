@@ -68,6 +68,33 @@ pub(in crate::global_db) async fn authority_invariant_triggers_intact(
     trigger_contracts_intact(conn).await
 }
 
+pub(crate) async fn require_foreign_key_audit(conn: &impl Executor) -> crate::errors::Result<()> {
+    conn.execute(
+        "INSERT INTO authority_foreign_key_audit_progress (audit_name, last_table)
+         VALUES (?1, '')
+         ON CONFLICT(audit_name) DO NOTHING",
+        (FOREIGN_KEY_AUDIT_PROGRESS,),
+    )
+    .await
+    .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    Ok(())
+}
+
+async fn foreign_key_audit_required(conn: &impl QueryExecutor) -> crate::errors::Result<bool> {
+    let mut rows = conn
+        .query(
+            "SELECT 1 FROM authority_foreign_key_audit_progress
+             WHERE audit_name = ?1",
+            (FOREIGN_KEY_AUDIT_PROGRESS,),
+        )
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    rows.next()
+        .await
+        .map(|row| row.is_some())
+        .map_err(|error| global_db_operation_error(OPERATION, error))
+}
+
 async fn projection_checkpoint(conn: &impl QueryExecutor) -> crate::errors::Result<i64> {
     let mut rows = conn
         .query(
@@ -134,6 +161,7 @@ pub(crate) async fn ensure_authority_invariants(
         )
         .await;
     }
+    let force_exhaustive = force_exhaustive || foreign_key_audit_required(conn).await?;
     let checkpoint = if !force_exhaustive && trigger_contracts_were_intact {
         match read_audit_checkpoint(conn).await? {
             Some(checkpoint) if audit_checkpoint_is_plausible(conn, checkpoint).await? => {

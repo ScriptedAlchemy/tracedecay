@@ -1,5 +1,6 @@
 //! Explicit offline union of branch-local legacy memory into project memory.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -14,10 +15,14 @@ use std::os::unix::fs::MetadataExt;
 use tracedecay_domain::{FactOwnerV1, ProjectId, SourceStoreId};
 use tracedecay_store::{
     CompatibilityLegacyMemoryCutoverProgressV1, MEMORY_V2_OWNER_ARCHIVE_SCHEMA_V1,
+    plan_memory_v2_owner_merge,
 };
 
 use crate::branch_meta;
 use crate::db::engine::QueryExecutor;
+use crate::db::{
+    MemoryV2ArchiveDatabase, export_memory_v2_owner_archive, list_memory_v2_archive_owners,
+};
 use crate::errors::{Result, TraceDecayError};
 use crate::storage;
 use crate::tracedecay::{TraceDecay, TraceDecayOpenOptions};
@@ -309,40 +314,7 @@ pub fn verify_branch_removal_receipts(
     original_paths: &[PathBuf],
     validation_paths: &[PathBuf],
 ) -> Result<()> {
-    let receipt_path = data_root.join(RECEIPT_FILENAME);
-    let receipt = match fs::read(&receipt_path) {
-        Ok(bytes) => {
-            let receipt: BranchMemoryCutoverReceipt =
-                serde_json::from_slice(&bytes).map_err(|error| {
-                    migration_error(format!(
-                        "project-memory cutover receipt '{}' is invalid: {error}",
-                        receipt_path.display()
-                    ))
-                })?;
-            if receipt.version != 2 || receipt.archive_schema != MEMORY_V2_OWNER_ARCHIVE_SCHEMA_V1 {
-                return Err(migration_error(
-                    "unsupported project-memory cutover receipt",
-                ));
-            }
-            let manifest_path = data_root.join(storage::STORE_MANIFEST_FILENAME);
-            if manifest_path.is_file() {
-                let manifest = storage::read_store_manifest(&manifest_path)?;
-                if manifest.project_id.as_deref() != Some(receipt.project_id.as_str()) {
-                    return Err(migration_error(
-                        "project-memory cutover receipt belongs to a different project",
-                    ));
-                }
-            }
-            Some(receipt)
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => {
-            return Err(migration_error(format!(
-                "cannot read project-memory cutover receipt '{}': {error}",
-                receipt_path.display()
-            )));
-        }
-    };
+    let receipt = read_cutover_receipt(data_root)?;
     // Callers select branch families from unordered sets. Verification refuses
     // on the first uncovered family, so a stable order is what makes the
     // refusal itself deterministic; sorting here keeps that property at the
@@ -356,34 +328,7 @@ pub fn verify_branch_removal_receipts(
                 original.display()
             ))
         })?;
-        let candidate = if original.exists() {
-            original.clone()
-        } else {
-            let original_name = original
-                .file_name()
-                .and_then(|name| name.to_str())
-                .ok_or_else(|| migration_error("branch database filename is not UTF-8"))?;
-            validation_paths
-                .iter()
-                .find(|path| {
-                    path.exists()
-                        && path.parent() == original.parent()
-                        && path
-                            .file_name()
-                            .and_then(|name| name.to_str())
-                            .is_some_and(|name| {
-                                name.starts_with(&format!(".{original_name}.branch-delete-"))
-                                    && name.ends_with(".quarantine")
-                            })
-                })
-                .cloned()
-                .ok_or_else(|| {
-                    migration_error(format!(
-                        "cannot locate quarantined family for '{}'",
-                        original.display()
-                    ))
-                })?
-        };
+        let candidate = branch_validation_candidate(original, validation_paths)?;
         let expected = receipt.as_ref().and_then(|receipt| {
             receipt
                 .sources
@@ -436,7 +381,282 @@ pub fn verify_branch_removal_receipts(
             }
         }
     }
+    verify_branch_removal_archive_closure_blocking(data_root, &original_paths, validation_paths)
+}
+
+fn verify_branch_removal_archive_closure_blocking(
+    data_root: &Path,
+    original_paths: &[PathBuf],
+    validation_paths: &[PathBuf],
+) -> Result<()> {
+    let data_root = data_root.to_path_buf();
+    let original_paths = original_paths.to_vec();
+    let validation_paths = validation_paths.to_vec();
+    std::thread::Builder::new()
+        .name("memory-cutover-removal-audit".to_owned())
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| {
+                    migration_error(format!(
+                        "create branch-removal archive verification runtime: {error}"
+                    ))
+                })?;
+            runtime.block_on(verify_branch_removal_archive_closure(
+                &data_root,
+                &original_paths,
+                &validation_paths,
+            ))
+        })
+        .map_err(|error| {
+            migration_error(format!(
+                "start branch-removal archive verification: {error}"
+            ))
+        })?
+        .join()
+        .map_err(|_| migration_error("branch-removal archive verification panicked"))?
+}
+
+async fn verify_branch_removal_archive_closure(
+    data_root: &Path,
+    original_paths: &[PathBuf],
+    validation_paths: &[PathBuf],
+) -> Result<()> {
+    let Some(receipt) = read_cutover_receipt(data_root)? else {
+        return Ok(());
+    };
+    if receipt
+        .sources
+        .iter()
+        .all(|source| source.archives.is_empty())
+    {
+        return Ok(());
+    }
+
+    let scratch = data_root.join("scratch").join("memory-cutover-removal");
+    storage::PrivateStoreIo::create_dir_all(&scratch)?;
+    let target_path = data_root.join(crate::config::db_filename(data_root));
+    let target = crate::sqlite_read_snapshot::open_in(&target_path, &scratch)
+        .await
+        .map_err(|error| {
+            migration_error(format!(
+                "snapshot current project memory target '{}': {error}",
+                target_path.display()
+            ))
+        })?;
+
+    let mut original_paths = original_paths.to_vec();
+    original_paths.sort();
+    for original in &original_paths {
+        let relative = original.strip_prefix(data_root).map_err(|_| {
+            migration_error(format!(
+                "branch database '{}' escapes its project store",
+                original.display()
+            ))
+        })?;
+        let Some(expected) = receipt
+            .sources
+            .iter()
+            .find(|source| source.relative_path == relative)
+        else {
+            continue;
+        };
+        if expected.archives.is_empty() {
+            continue;
+        }
+
+        let candidate = branch_validation_candidate(original, validation_paths)?;
+        if source_generation(&candidate)? != expected.generation {
+            return Err(migration_error(format!(
+                "branch database '{}' changed after project-memory cutover; deletion refused",
+                original.display()
+            )));
+        }
+        let source = crate::sqlite_read_snapshot::open_in(&candidate, &scratch)
+            .await
+            .map_err(|error| {
+                migration_error(format!(
+                    "snapshot branch memory source '{}': {error}",
+                    candidate.display()
+                ))
+            })?;
+        let source_owners =
+            list_memory_v2_archive_owners(source.connection(), MemoryV2ArchiveDatabase::Main)
+                .await?;
+        let source_owner_keys = source_owners
+            .iter()
+            .map(owner_key)
+            .collect::<Result<BTreeSet<_>>>()?;
+        let proof_owner_keys = expected
+            .archives
+            .iter()
+            .map(|proof| owner_key(&proof.owner))
+            .collect::<Result<BTreeSet<_>>>()?;
+        if source_owner_keys != proof_owner_keys
+            || proof_owner_keys.len() != expected.archives.len()
+        {
+            return Err(migration_error(format!(
+                "branch database '{}' archive receipt does not cover every current owner",
+                original.display()
+            )));
+        }
+
+        for proof in &expected.archives {
+            validate_archive_proof(&receipt, original, proof)?;
+            let source_archive = export_memory_v2_owner_archive(
+                source.connection(),
+                MemoryV2ArchiveDatabase::Main,
+                &proof.owner,
+            )
+            .await?;
+            let source_digest = source_archive
+                .digest()
+                .map_err(|error| migration_error(error.to_string()))?;
+            if source_digest.as_str() != proof.source_digest.as_str() {
+                return Err(migration_error(format!(
+                    "branch database '{}' current archive digest does not match its cutover receipt",
+                    original.display()
+                )));
+            }
+            let target_archive = export_memory_v2_owner_archive(
+                target.connection(),
+                MemoryV2ArchiveDatabase::Main,
+                &proof.owner,
+            )
+            .await?;
+            let plan = plan_memory_v2_owner_merge(&source_archive, &target_archive)
+                .map_err(|error| migration_error(error.to_string()))?;
+            if !plan.inserts().is_empty()
+                || !plan.updates().is_empty()
+                || !plan.conflicts().is_empty()
+            {
+                return Err(migration_error(format!(
+                    "current project memory target does not contain the complete archive from branch database '{}': inserts={}, updates={}, conflicts={}",
+                    original.display(),
+                    plan.inserts().len(),
+                    plan.updates().len(),
+                    plan.conflicts().len()
+                )));
+            }
+        }
+        source
+            .validate_source()
+            .map_err(|error| migration_error(error.to_string()))?;
+    }
+    target
+        .validate_source()
+        .map_err(|error| migration_error(error.to_string()))
+}
+
+fn read_cutover_receipt(data_root: &Path) -> Result<Option<BranchMemoryCutoverReceipt>> {
+    let receipt_path = data_root.join(RECEIPT_FILENAME);
+    let receipt: BranchMemoryCutoverReceipt = match fs::read(&receipt_path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|error| {
+            migration_error(format!(
+                "project-memory cutover receipt '{}' is invalid: {error}",
+                receipt_path.display()
+            ))
+        })?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(migration_error(format!(
+                "cannot read project-memory cutover receipt '{}': {error}",
+                receipt_path.display()
+            )));
+        }
+    };
+    if receipt.version != 2 || receipt.archive_schema != MEMORY_V2_OWNER_ARCHIVE_SCHEMA_V1 {
+        return Err(migration_error(
+            "unsupported project-memory cutover receipt",
+        ));
+    }
+    let manifest_path = data_root.join(storage::STORE_MANIFEST_FILENAME);
+    if manifest_path.is_file() {
+        let manifest = storage::read_store_manifest(&manifest_path)?;
+        if manifest.project_id.as_deref() != Some(receipt.project_id.as_str()) {
+            return Err(migration_error(
+                "project-memory cutover receipt belongs to a different project",
+            ));
+        }
+    }
+    Ok(Some(receipt))
+}
+
+fn branch_validation_candidate(original: &Path, validation_paths: &[PathBuf]) -> Result<PathBuf> {
+    if original.exists() {
+        return Ok(original.to_path_buf());
+    }
+    let original_name = original
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| migration_error("branch database filename is not UTF-8"))?;
+    let matches_quarantine = |path: &Path| {
+        path.exists()
+            && path.parent() == original.parent()
+            && path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| {
+                    name.starts_with(&format!(".{original_name}.branch-delete-"))
+                        && name.ends_with(".quarantine")
+                })
+    };
+    let mut candidates = validation_paths
+        .iter()
+        .filter(|path| matches_quarantine(path))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if let Some(parent) = original.parent() {
+        for entry in fs::read_dir(parent).map_err(|error| {
+            migration_error(format!(
+                "inspect quarantined branch families in '{}': {error}",
+                parent.display()
+            ))
+        })? {
+            let path = entry
+                .map_err(|error| migration_error(error.to_string()))?
+                .path();
+            if matches_quarantine(&path) {
+                candidates.insert(path);
+            }
+        }
+    }
+    if candidates.len() != 1 {
+        return Err(migration_error(format!(
+            "cannot locate exactly one quarantined family for '{}'",
+            original.display()
+        )));
+    }
+    candidates
+        .pop_first()
+        .ok_or_else(|| migration_error("quarantine candidate disappeared"))
+}
+
+fn validate_archive_proof(
+    receipt: &BranchMemoryCutoverReceipt,
+    original: &Path,
+    proof: &crate::migrate::consolidate::sqlite::MemoryV2ArchiveMergeProof,
+) -> Result<()> {
+    let owner_matches = matches!(
+        &proof.owner,
+        FactOwnerV1::Project { project_id } if project_id.as_str() == receipt.project_id
+    );
+    if proof.schema != MEMORY_V2_OWNER_ARCHIVE_SCHEMA_V1
+        || !owner_matches
+        || !is_sha256_digest(&proof.source_digest)
+        || !is_sha256_digest(&proof.target_digest)
+    {
+        return Err(migration_error(format!(
+            "branch database '{}' has an incomplete archive inclusion proof",
+            original.display()
+        )));
+    }
     Ok(())
+}
+
+fn owner_key(owner: &FactOwnerV1) -> Result<String> {
+    serde_json::to_string(owner).map_err(|error| migration_error(error.to_string()))
 }
 
 fn branch_v2_authority_tables(path: &Path) -> Vec<&'static str> {
@@ -738,6 +958,7 @@ mod tests {
     use crate::branch::{
         BranchAdminAction, BranchAdminOutcome, BranchAdminReport, prepare_branch_admin_mutation,
     };
+    use crate::db::{Database, DatabaseAuthority, TestDatabaseRuntimeMode};
 
     /// A project store holding one tracked branch whose SQLite family carries a
     /// durable fact that exists nowhere else.
@@ -749,6 +970,14 @@ mod tests {
 
     impl BranchStoreFixture {
         fn new(branches: &[&str]) -> Self {
+            let fixture = Self::empty(branches);
+            for branch in branches {
+                fixture.seed_branch_only_fact(branch);
+            }
+            fixture
+        }
+
+        fn empty(branches: &[&str]) -> Self {
             let temp = tempfile::tempdir().unwrap();
             let project_root = temp.path().join("repo");
             let data_root = temp.path().join("store");
@@ -764,9 +993,6 @@ mod tests {
                 project_root,
                 data_root,
             };
-            for branch in branches {
-                fixture.seed_branch_only_fact(branch);
-            }
             fixture
         }
 
@@ -859,6 +1085,15 @@ mod tests {
         }
     }
 
+    async fn initialize_test_database(path: &Path) -> Database {
+        let authority =
+            DatabaseAuthority::acquire_test(path, "memory cutover removal test").unwrap();
+        Database::publish_test_runtime(path, &authority, TestDatabaseRuntimeMode::Initialize)
+            .await
+            .unwrap()
+            .0
+    }
+
     #[test]
     fn branch_removal_without_receipt_refuses_and_preserves_branch_only_fact() {
         let fixture = BranchStoreFixture::new(&["feature"]);
@@ -922,6 +1157,82 @@ mod tests {
             "{error}"
         );
         assert_eq!(fixture.branch_only_fact_count("feature"), 1);
+    }
+
+    #[tokio::test]
+    async fn branch_removal_refuses_when_archived_target_closure_is_missing() {
+        let fixture = BranchStoreFixture::empty(&["feature"]);
+        let branch_path = fixture.database_path("feature");
+        let target_path = fixture.data_root.join(crate::config::DB_FILENAME);
+        let target = initialize_test_database(&target_path).await;
+        let source = initialize_test_database(&branch_path).await;
+        let owner = FactOwnerV1::Project {
+            project_id: ProjectId::new("fixture-project").unwrap(),
+        };
+        let source_write = source
+            .begin_write_transaction("seed branch-only V2 archive")
+            .await
+            .unwrap();
+        source_write
+            .execute(
+                "INSERT INTO memory_v2_facts(
+                    fact_id, owner_kind, project_id, owner_json, identity_json, created_at
+                 ) VALUES (?1, 'project', ?2, ?3, ?4, 1)",
+                crate::db::engine::params![
+                    "fact.branch-only",
+                    "fixture-project",
+                    serde_json::to_string(&owner).unwrap(),
+                    "{\"source\":\"branch-only\"}"
+                ],
+            )
+            .await
+            .unwrap();
+        source_write.commit().await.unwrap();
+        source.checkpoint().await.unwrap();
+        source.close();
+
+        let scratch = fixture.data_root.join("scratch").join("test-cutover");
+        storage::PrivateStoreIo::create_dir_all(&scratch).unwrap();
+        let snapshot = crate::sqlite_read_snapshot::open_in(&branch_path, &scratch)
+            .await
+            .unwrap();
+        let proofs = crate::migrate::consolidate::sqlite::merge_branch_legacy_memory_snapshot(
+            &target, &snapshot,
+        )
+        .await
+        .unwrap();
+        snapshot.validate_source().unwrap();
+        drop(snapshot);
+        target.checkpoint().await.unwrap();
+        fixture.write_receipt(vec![BranchMemoryCutoverReceiptSource {
+            relative_path: PathBuf::from("branches/feature.db"),
+            generation: source_generation(&branch_path).unwrap(),
+            legacy_only: false,
+            archives: proofs,
+        }]);
+
+        target.checkpoint().await.unwrap();
+        target.close();
+        let target_connection = rusqlite::Connection::open(&target_path).unwrap();
+        target_connection
+            .execute_batch(
+                "DROP TRIGGER memory_v2_facts_no_delete;
+                 DELETE FROM memory_v2_facts WHERE fact_id = 'fact.branch-only';",
+            )
+            .unwrap();
+        drop(target_connection);
+
+        let error = fixture
+            .remove_branch("feature")
+            .expect_err("a receipt cannot replace current target-closure proof");
+
+        assert!(
+            error
+                .to_string()
+                .contains("current project memory target does not contain"),
+            "{error}"
+        );
+        assert!(branch_path.exists());
     }
 
     #[test]
