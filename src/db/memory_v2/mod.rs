@@ -11,6 +11,7 @@ use crate::errors::{Result, TraceDecayError};
 use crate::privacy::sanitize_provider_metadata_text;
 use crate::tracedecay::current_timestamp;
 
+mod archive;
 mod backfill;
 mod cutover;
 mod repair;
@@ -20,6 +21,10 @@ mod tests;
 mod types;
 mod writers;
 
+pub(crate) use archive::{
+    MemoryV2ArchiveDatabase, export_memory_v2_owner_archive, import_memory_v2_owner_archive,
+    list_memory_v2_archive_owners, plan_memory_v2_owner_archive_import,
+};
 pub(super) use cutover::{
     backfill_memory_v2_batch, finalize_memory_v2_cutover, load_or_capture_memory_v2_frontiers,
     reopen_memory_v2_cutover_for_legacy_union,
