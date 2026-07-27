@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - *(daemon)* bound project open only when a writer is busy
 - *(storage)* keep store inventory off the resolve path
+- *(storage)* sync preserved recovery set on Windows
+- auto-repair corrupt branch stores
 - restore daemon catalog build
 - *(daemon)* raise managed service file limit
 - address follow-up storage and daemon findings
