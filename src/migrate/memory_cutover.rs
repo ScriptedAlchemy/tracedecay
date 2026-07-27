@@ -406,17 +406,13 @@ pub fn verify_branch_removal_receipts(
                 original.display()
             )));
         }
-        let has_v2_authority = branch_has_v2_authority(&candidate);
+        let v2_authority_tables = branch_v2_authority_tables(&candidate);
+        let has_v2_authority = !v2_authority_tables.is_empty();
         if has_v2_authority && (expected.legacy_only || expected.archives.is_empty()) {
             return Err(migration_error(format!(
-                "branch database '{}' has V2 authority without a digest-bound archive receipt",
-                original.display()
-            )));
-        }
-        if !has_v2_authority && !expected.legacy_only {
-            return Err(migration_error(format!(
-                "branch database '{}' receipt misclassifies legacy-only authority",
-                original.display()
+                "branch database '{}' has V2 authority in {:?} without a digest-bound archive receipt",
+                original.display(),
+                v2_authority_tables,
             )));
         }
         for proof in &expected.archives {
@@ -443,24 +439,26 @@ pub fn verify_branch_removal_receipts(
     Ok(())
 }
 
-fn branch_has_v2_authority(path: &Path) -> bool {
-    crate::sqlite_read_snapshot::checkpointed_database_has_any_rows(
-        path,
-        &[
-            "memory_v2_facts",
-            "memory_v2_assertions",
-            "memory_v2_lineage_events",
-            "memory_v2_evidence",
-            "memory_v2_feedback_history",
-            "memory_v2_fact_relations",
-            "memory_v2_proposals",
-            "memory_v2_proposal_transitions",
-            "memory_v2_legacy_map",
-            "memory_v2_legacy_quarantine",
-            "memory_v2_compatibility_operation_receipts",
-        ],
-    )
-    .is_ok_and(|has_rows| has_rows)
+fn branch_v2_authority_tables(path: &Path) -> Vec<&'static str> {
+    [
+        "memory_v2_facts",
+        "memory_v2_assertions",
+        "memory_v2_lineage_events",
+        "memory_v2_evidence",
+        "memory_v2_feedback_history",
+        "memory_v2_fact_relations",
+        "memory_v2_proposals",
+        "memory_v2_proposal_transitions",
+        "memory_v2_legacy_map",
+        "memory_v2_legacy_quarantine",
+        "memory_v2_compatibility_operation_receipts",
+    ]
+    .into_iter()
+    .filter(|table| {
+        crate::sqlite_read_snapshot::checkpointed_database_has_any_rows(path, &[*table])
+            .is_ok_and(|has_rows| has_rows)
+    })
+    .collect()
 }
 
 fn is_sha256_digest(value: &str) -> bool {

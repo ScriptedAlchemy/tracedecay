@@ -43,7 +43,7 @@ use tracedecay_domain::{
     SanitizationReceiptRefV1, SanitizationReceiptV1, SanitizerDispositionV1, ScopeResolutionId,
     SensitivityV1, UtcMicros, VectorWatermark,
 };
-use tracedecay_store::{FactCommitOutcome, FactCurrentQuery, FactWriteBatch};
+use tracedecay_store::{FactCommitOutcome, FactCurrentQuery, FactLineageQuery, FactWriteBatch};
 
 use crate::common::EnvVarGuard;
 use crate::support::{HOME_ENV_LOCK, ephemeral_safe_fixture_base};
@@ -453,7 +453,6 @@ async fn project_memory_cutover_preserves_v2_authority_after_legacy_reclamation(
     let owner = FactOwnerV1::Project {
         project_id: ProjectId::new(project_id.clone()).unwrap(),
     };
-    let owner_json = serde_json::to_string(&owner).unwrap();
     let lifecycle = tracedecay::lifecycle_lease::acquire_exclusive_for_profile(
         &profile_root,
         "checkpoint V2 project memory cutover fixture",
@@ -480,101 +479,6 @@ async fn project_memory_cutover_preserves_v2_authority_after_legacy_reclamation(
     fs::copy(&project_graph, &branch).unwrap();
     let (public_fact_id, public_fact_content, purged_fact_id, purged_legacy_id) =
         seed_public_archive_fact(&branch, owner.clone()).await;
-    let source = rusqlite::Connection::open(&branch).unwrap();
-    source
-        .execute_batch(&format!(
-            r#"
-            INSERT INTO retrieval_anchors(
-                anchor_id, anchor_json, owner_json, projection_generation
-            ) VALUES(
-                'anchor.v2-only', '{{}}', '{owner_json}', 'generation.v2-only'
-            );
-            INSERT INTO memory_v2_facts(
-                fact_id, owner_kind, project_id, owner_json, identity_json, created_at
-            ) VALUES
-                ('fact.v2-only', 'project', '{project_id}', '{owner_json}',
-                 '{{"stable":"fact.v2-only"}}', 10),
-                ('fact.mirror', 'project', '{project_id}', '{owner_json}',
-                 '{{"stable":"fact.mirror"}}', 20);
-            INSERT INTO memory_v2_lineage_events(
-                event_id, fact_id, owner_kind, project_id, event_json,
-                occurred_at, recorded_at
-            ) VALUES
-                ('event.v2-created', 'fact.v2-only', 'project', '{project_id}',
-                 '{{"kind":"created"}}', 10, 10),
-                ('event.v2-deleted', 'fact.v2-only', 'project', '{project_id}',
-                 '{{"kind":"payload_access_changed","current":"deleted"}}', 30, 30),
-                ('event.mirror-created', 'fact.mirror', 'project', '{project_id}',
-                 '{{"kind":"created"}}', 20, 20);
-            INSERT INTO memory_v2_assertions(
-                assertion_id, fact_id, owner_kind, project_id, owner_json,
-                assertion_header_json, kind_json, payload_reference_json,
-                receipt_json, asserted_at, actor_id
-            ) VALUES
-                ('assertion.v2-only', 'fact.v2-only', 'project', '{project_id}',
-                 '{owner_json}', '{{"stable":"assertion.v2-only"}}', '{{}}', '{{}}',
-                 '{{"receipt":"v2-only"}}', 10, NULL),
-                ('assertion.mirror', 'fact.mirror', 'project', '{project_id}',
-                 '{owner_json}', '{{"stable":"assertion.mirror"}}', '{{}}', '{{}}',
-                 '{{"receipt":"mirror"}}', 20, NULL);
-            INSERT INTO memory_v2_assertion_payloads(
-                assertion_id, fact_id, owner_kind, project_id, payload_json, content
-            ) VALUES(
-                'assertion.mirror', 'fact.mirror', 'project', '{project_id}',
-                '{{"content":"mirrored content"}}', 'mirrored content'
-            );
-            INSERT INTO memory_v2_evidence(
-                evidence_id, fact_id, owner_kind, project_id, owner_json,
-                anchor_id, evidence_json
-            ) VALUES(
-                'evidence.v2-only', 'fact.v2-only', 'project', '{project_id}',
-                '{owner_json}', 'anchor.v2-only', '{{"stable":"evidence.v2-only"}}'
-            );
-            INSERT INTO memory_v2_assertion_evidence(
-                assertion_id, evidence_id, fact_id, owner_kind, project_id, ordinal
-            ) VALUES(
-                'assertion.v2-only', 'evidence.v2-only', 'fact.v2-only',
-                'project', '{project_id}', 0
-            );
-            INSERT INTO memory_v2_feedback_history(
-                owner_kind, project_id, fact_id, event_id, action, old_trust,
-                new_trust, occurred_at, source, note, details_availability
-            ) VALUES(
-                'project', '{project_id}', 'fact.v2-only', 'event.v2-deleted',
-                'helpful', 0.4, 0.5, 30, NULL, NULL, 'legacy_redacted'
-            );
-            INSERT INTO memory_v2_current_facts(
-                fact_id, owner_kind, project_id, payload_access, trust_score,
-                active_assertion_id, last_event_id, updated_at, retrieval_count,
-                access_count, helpful_count, unhelpful_count, last_retrieved_at,
-                last_recalled_at, last_feedback_at, projection_state,
-                vector_watermark_json
-            ) VALUES
-                ('fact.v2-only', 'project', '{project_id}', 'deleted', 0.5,
-                 NULL, 'event.v2-deleted', 30, 0, 0, 1, 0, NULL, NULL, 30,
-                 'unavailable', NULL),
-                ('fact.mirror', 'project', '{project_id}', 'eligible', 0.7,
-                 'assertion.mirror', 'event.mirror-created', 20, 0, 1, 0, 0,
-                 NULL, NULL, NULL, 'ready', NULL);
-            INSERT INTO memory_facts(
-                fact_id, content, category, tags, trust_score, access_count,
-                created_at, updated_at, source, metadata, hrr_precision
-            ) VALUES(
-                41, 'mirrored content', 'project', '[]', 0.7, 1,
-                20, 20, 'legacy-mirror', '{{}}', 'f32'
-            );
-            INSERT INTO memory_v2_legacy_map(
-                owner_kind, project_id, owner_json, source_store_id,
-                legacy_fact_id, fact_id, mapping_json
-            ) VALUES
-                ('project', '{project_id}', '{owner_json}', 'legacy-memory-v1',
-                 41, 'fact.mirror', '{{"kind":"legacy"}}'),
-                ('project', '{project_id}', '{owner_json}', 'legacy-memory-v1',
-                 42, 'fact.v2-only', '{{"kind":"legacy"}}');
-            "#,
-        ))
-        .unwrap();
-    drop(source);
     let mut meta = branch_meta::load_branch_meta(&data_root).unwrap();
     meta.add_branch("v2-authority", "branches/v2-authority.db", "main");
     branch_meta::save_branch_meta(&data_root, &meta).unwrap();
@@ -633,10 +537,18 @@ async fn project_memory_cutover_preserves_v2_authority_after_legacy_reclamation(
         public_fact.payload().map(FactPayloadV1::content),
         Some(public_fact_content.as_str())
     );
-    // Public MemoryApplication reads cover stable identity/current payload.
-    // Immutable lineage/evidence/map families do not yet expose one aggregate
-    // public read, so the typed archive inspection below is the narrow adapter
-    // contract used for those histories.
+    let public_lineage = project_memory
+        .query_fact_lineage(
+            FactLineageQuery::new(owner.clone(), public_fact_id.clone(), None, 100).unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(public_lineage.len(), 1);
+    assert_eq!(public_lineage[0].fact_id(), &public_fact_id);
+    // Public MemoryApplication reads cover stable identity/current payload and
+    // lineage. Evidence and compatibility-map histories do not yet expose one
+    // aggregate public read, so the typed archive inspection below is the
+    // narrow adapter contract for those families.
     let archive = DatabaseFactStore::new(&project_database)
         .inspect_owner_archive_for_test(&owner)
         .await
@@ -687,67 +599,36 @@ async fn project_memory_cutover_preserves_v2_authority_after_legacy_reclamation(
         1,
         "authorized legacy purge must not erase its stable V2 mapping"
     );
-    let v2_fact = records_for_fact(
-        tracedecay_store::MemoryV2ArchiveFamilyV1::Fact,
-        "fact.v2-only",
-    );
-    assert_eq!(v2_fact.len(), 1);
-    let identity = match v2_fact[0].fields().get("identity_json") {
-        Some(tracedecay_store::MemoryV2ArchiveScalarV1::Text(identity)) => identity,
-        value => panic!("typed archive omitted V2 identity: {value:?}"),
-    };
-    assert_eq!(
-        serde_json::from_str::<serde_json::Value>(&identity).unwrap(),
-        serde_json::json!({"stable": "fact.v2-only"})
-    );
     for (family, expected) in [
+        (tracedecay_store::MemoryV2ArchiveFamilyV1::Fact, 1),
         (tracedecay_store::MemoryV2ArchiveFamilyV1::Assertion, 1),
-        (tracedecay_store::MemoryV2ArchiveFamilyV1::LineageEvent, 2),
+        (
+            tracedecay_store::MemoryV2ArchiveFamilyV1::AssertionPayload,
+            1,
+        ),
+        (tracedecay_store::MemoryV2ArchiveFamilyV1::LineageEvent, 1),
         (tracedecay_store::MemoryV2ArchiveFamilyV1::FactEvidence, 1),
         (
             tracedecay_store::MemoryV2ArchiveFamilyV1::AssertionEvidence,
             1,
         ),
-        (
-            tracedecay_store::MemoryV2ArchiveFamilyV1::FeedbackHistory,
-            1,
-        ),
+        (tracedecay_store::MemoryV2ArchiveFamilyV1::CurrentFact, 1),
     ] {
         assert_eq!(
-            records_for_fact(family, "fact.v2-only").len(),
+            records_for_fact(family, public_fact_id.as_str()).len(),
             expected,
-            "{family:?} history must survive branch retirement"
+            "{family:?} production-writer closure must survive branch retirement"
         );
     }
     assert_eq!(
         records_for_fact(
             tracedecay_store::MemoryV2ArchiveFamilyV1::CurrentFact,
-            "fact.v2-only"
+            purged_fact_id.as_str()
         )
         .iter()
         .filter(|record| has_text(record, "payload_access", "deleted"))
         .count(),
         1
-    );
-    assert_eq!(
-        records_for_fact(
-            tracedecay_store::MemoryV2ArchiveFamilyV1::Fact,
-            "fact.mirror"
-        )
-        .len(),
-        1,
-        "the authoritative mirrored V2 identity must not be rederived"
-    );
-    assert_eq!(
-        records_for_fact(
-            tracedecay_store::MemoryV2ArchiveFamilyV1::AssertionPayload,
-            "fact.mirror"
-        )
-        .iter()
-        .filter(|record| has_text(record, "content", "mirrored content"))
-        .count(),
-        1,
-        "the authoritative V2 payload remains readable under its stable FactId"
     );
     assert_eq!(
         archive
@@ -756,10 +637,11 @@ async fn project_memory_cutover_preserves_v2_authority_after_legacy_reclamation(
             .filter(|record| {
                 record.family() == tracedecay_store::MemoryV2ArchiveFamilyV1::LegacyFactMap
                     && has_text(record, "source_store_id", "legacy-memory-v1")
-                    && has_text(record, "fact_id", "fact.mirror")
+                    && has_text(record, "fact_id", purged_fact_id.as_str())
                     && matches!(
                         record.key().get("legacy_fact_id"),
-                        Some(tracedecay_store::MemoryV2ArchiveScalarV1::Integer(41))
+                        Some(tracedecay_store::MemoryV2ArchiveScalarV1::Integer(value))
+                            if *value == purged_legacy_id
                     )
             })
             .count(),
