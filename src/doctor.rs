@@ -433,10 +433,10 @@ pub async fn wait_for_daemon_startup_health(
         || daemon_project_status(&project_path),
         |progress| {
             eprintln!(
-                "Waiting for daemon startup health: elapsed={}s state={}{}",
+                "Waiting for daemon startup health convergence: elapsed={}s waiting_on={} change={}",
                 progress.elapsed.as_secs(),
                 progress.detail,
-                if progress.changed { " (changed)" } else { "" },
+                progress.change,
             );
         },
     )
@@ -447,7 +447,22 @@ pub async fn wait_for_daemon_startup_health(
 struct DaemonStartupHealthProgress {
     elapsed: std::time::Duration,
     detail: String,
-    changed: bool,
+    change: String,
+}
+
+#[derive(Debug)]
+enum DaemonStartupHealthOutcome {
+    Ready,
+    Retryable {
+        detail: String,
+    },
+    Terminal {
+        error: crate::errors::TraceDecayError,
+    },
+    DeadlineExceeded {
+        timeout: std::time::Duration,
+        last_detail: String,
+    },
 }
 
 async fn wait_for_daemon_startup_health_with<Probe, ProbeFuture, Progress>(
@@ -468,34 +483,160 @@ where
         .checked_sub(std::time::Duration::from_secs(20))
         .unwrap_or(started);
     loop {
-        let detail = match probe().await {
-            Ok(status) if daemon_startup_health_ready(&status) => return Ok(()),
-            Ok(status) => daemon_startup_health_detail(&status),
-            Err(error) if daemon_startup_error_is_retryable(&error) => error.to_string(),
-            Err(error) => return Err(error),
+        let detail = match classify_daemon_startup_health_result(probe().await) {
+            DaemonStartupHealthOutcome::Ready => return Ok(()),
+            DaemonStartupHealthOutcome::Retryable { detail } => detail,
+            DaemonStartupHealthOutcome::Terminal { error } => return Err(error),
+            deadline @ DaemonStartupHealthOutcome::DeadlineExceeded { .. } => {
+                return Err(daemon_startup_health_failure(deadline));
+            }
         };
         let now = std::time::Instant::now();
         let changed = last_detail.as_deref() != Some(detail.as_str());
         if changed || now.duration_since(last_report) >= std::time::Duration::from_secs(20) {
+            let change = match last_detail.as_deref() {
+                None => "initial observation".to_string(),
+                Some(previous) if previous != detail => format!("changed from {previous}"),
+                Some(_) => "no change since previous poll".to_string(),
+            };
             progress(DaemonStartupHealthProgress {
                 elapsed: now.duration_since(started),
                 detail: detail.clone(),
-                changed,
+                change,
             });
             last_report = now;
         }
         last_detail = Some(detail);
         if now >= deadline {
-            return Err(crate::errors::TraceDecayError::Config {
-                message: format!(
-                    "daemon startup recovery exceeded its {}s deadline before Doctor validation; last state: {}",
-                    timeout.as_secs(),
-                    last_detail.as_deref().unwrap_or("no health response"),
-                ),
-            });
+            let outcome = DaemonStartupHealthOutcome::DeadlineExceeded {
+                timeout,
+                last_detail: last_detail.unwrap_or_else(|| "no health response".to_string()),
+            };
+            return Err(daemon_startup_health_failure(outcome));
         }
         tokio::time::sleep(poll_interval.min(deadline.saturating_duration_since(now))).await;
     }
+}
+
+fn classify_daemon_startup_health_result(
+    result: crate::errors::Result<serde_json::Value>,
+) -> DaemonStartupHealthOutcome {
+    match result {
+        Ok(status) if daemon_startup_health_ready(&status) => DaemonStartupHealthOutcome::Ready,
+        Ok(status) => match daemon_startup_terminal_status_error(&status) {
+            Some(error) => DaemonStartupHealthOutcome::Terminal { error },
+            None => DaemonStartupHealthOutcome::Retryable {
+                detail: daemon_startup_health_detail(&status),
+            },
+        },
+        Err(error) if daemon_startup_error_is_retryable(&error) => {
+            DaemonStartupHealthOutcome::Retryable {
+                detail: error.to_string(),
+            }
+        }
+        Err(error) => {
+            let detail = error.to_string();
+            let error = if daemon_health_reports_sqlite_corruption(&detail) {
+                daemon_startup_corruption_error(&detail, None)
+            } else {
+                error
+            };
+            DaemonStartupHealthOutcome::Terminal { error }
+        }
+    }
+}
+
+fn daemon_startup_health_failure(
+    outcome: DaemonStartupHealthOutcome,
+) -> crate::errors::TraceDecayError {
+    match outcome {
+        DaemonStartupHealthOutcome::Terminal { error } => error,
+        DaemonStartupHealthOutcome::DeadlineExceeded {
+            timeout,
+            last_detail,
+        } => crate::errors::TraceDecayError::Config {
+            message: format!(
+                "daemon startup health deadline-exceeded after {}s before Doctor validation; last retryable state: {last_detail}",
+                timeout.as_secs(),
+            ),
+        },
+        DaemonStartupHealthOutcome::Ready | DaemonStartupHealthOutcome::Retryable { .. } => {
+            crate::errors::TraceDecayError::Config {
+                message: "daemon startup health failure was not terminal".to_string(),
+            }
+        }
+    }
+}
+
+fn daemon_startup_terminal_status_error(
+    status: &serde_json::Value,
+) -> Option<crate::errors::TraceDecayError> {
+    let storage = status.get("storage_health")?;
+    let quick_check_ok = storage
+        .get("quick_check_ok")
+        .and_then(serde_json::Value::as_bool);
+    let quick_check_error = storage
+        .get("quick_check_error")
+        .and_then(serde_json::Value::as_str);
+    if quick_check_ok == Some(false)
+        || quick_check_error.is_some_and(daemon_health_reports_sqlite_corruption)
+    {
+        let problem = quick_check_error.unwrap_or("SQLite quick_check failed without detail");
+        let db_path = storage
+            .get("canonical_db_path")
+            .or_else(|| storage.get("db_path"))
+            .and_then(serde_json::Value::as_str)
+            .map(Path::new);
+        return Some(daemon_startup_corruption_error(problem, db_path));
+    }
+
+    if storage
+        .get("authority_audit_ok")
+        .and_then(serde_json::Value::as_bool)
+        == Some(false)
+    {
+        let reason = storage
+            .get("authority_audit_reason")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("authority invariant failed without detail");
+        return Some(crate::errors::TraceDecayError::Config {
+            message: format!(
+                "terminal daemon startup health failure: observation database authority audit failed: {reason}. Preserve daemon logs and run `tracedecay doctor` with the retained or a newer compatible binary before retrying; do not run an older binary."
+            ),
+        });
+    }
+
+    None
+}
+
+fn daemon_startup_corruption_error(
+    problem: &str,
+    db_path: Option<&Path>,
+) -> crate::errors::TraceDecayError {
+    let remediation = match db_path {
+        Some(db_path) => database_recovery_guidance_for_problem(db_path, problem),
+        None if crate::tracedecay::is_fts_only_corruption(problem) => {
+            "Run `tracedecay daemon restart` with the retained or a newer compatible binary so the sole-writer open path can rebuild `nodes_fts`; then run `tracedecay tool runtime` and `tracedecay doctor`. Do not run an older binary or delete the database.".to_string()
+        }
+        None => "Stop all TraceDecay processes and preserve the database, WAL, and SHM together before attempting repair. Do not run an older binary, `tracedecay init`, `tracedecay sync --force`, or `tracedecay wipe`.".to_string(),
+    };
+    crate::errors::TraceDecayError::Config {
+        message: format!(
+            "terminal daemon startup health failure: {problem}\nRemediation: {remediation}"
+        ),
+    }
+}
+
+fn daemon_health_reports_sqlite_corruption(detail: &str) -> bool {
+    let detail = detail.to_ascii_lowercase();
+    detail.contains("sqlite_corrupt")
+        || detail.contains("database disk image is malformed")
+        || detail.contains("malformed database image")
+        || detail.contains("file is not a database")
+        || detail.contains("fts5: corruption found")
+        || detail.contains("malformed inverted index for fts5")
+        || detail.contains("database corruption")
+        || detail.contains("database is corrupt")
 }
 
 #[allow(deprecated)]
@@ -1030,7 +1171,7 @@ fn database_recovery_guidance_for_problem(db_path: &Path, problem: &str) -> Stri
     format!(
         "The failure is confined to the derived `nodes_fts` index at {}; the authoritative `nodes` table and graph-resident facts must be preserved.\n\
          Do not run `tracedecay init`, `tracedecay sync --force`, or `tracedecay wipe`, and do not delete the database.\n\
-         Once no sync is active, restart the TraceDecay daemon. Its sole-writer open path will rebuild it from the authoritative `nodes` table before serving requests.\n\
+         Once no sync is active, run `tracedecay daemon restart` with the retained or a newer compatible binary. Its sole-writer open path will rebuild it from the authoritative `nodes` table before serving requests.\n\
          Then rerun `tracedecay tool runtime` and `tracedecay doctor`; if quick_check still fails, preserve the DB/WAL/SHM/dirty recovery set and follow the offline recovery guidance.",
         db_path.display(),
     )

@@ -60,6 +60,9 @@ if [[ "$binary_id" == "${TRACEDECAY_DOGFOOD_TEST_FAIL_BINARY:-}" \
     && -n "${TRACEDECAY_DOGFOOD_TEST_DAEMON_MARKER:-}" ]]; then
     rm -f "$TRACEDECAY_DOGFOOD_TEST_DAEMON_MARKER"
   fi
+  if [[ -n "${TRACEDECAY_DOGFOOD_TEST_FAIL_MESSAGE:-}" ]]; then
+    printf '%s\n' "$TRACEDECAY_DOGFOOD_TEST_FAIL_MESSAGE" >&2
+  fi
   exit 42
 fi
 
@@ -693,6 +696,7 @@ if run_case \
   TRACEDECAY_DOGFOOD_TEST_DAEMON_MARKER="$daemon_marker" \
   TRACEDECAY_DOGFOOD_TEST_FAIL_BINARY=new \
   TRACEDECAY_DOGFOOD_TEST_FAIL_COMMAND='post-update --strict --mode dogfood-forward-only' \
+  TRACEDECAY_DOGFOOD_TEST_FAIL_MESSAGE='terminal daemon startup health failure: fts5: corruption found reading blob 412316860480 from table "nodes_fts"' \
   >"$case_output" 2>&1; then
   fail 'post-update failure unexpectedly succeeded'
 fi
@@ -712,6 +716,8 @@ grep -Fq 'previous binary was not restored or executed' "$case_output" ||
   fail 'forward-only diagnostic omitted old-binary warning'
 grep -Fq 'rerun cargo dogfood' "$case_output" ||
   fail 'forward-recovery instruction was not explicit'
+grep -Fq 'terminal daemon startup health failure: fts5: corruption found reading blob 412316860480 from table "nodes_fts"' "$case_output" ||
+  fail 'terminal health failure swallowed the underlying corruption'
 assert_no_temporary_install_files
 
 # A new invocation after a boundary failure must prove inactive recovery with

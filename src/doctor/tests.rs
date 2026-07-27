@@ -365,7 +365,8 @@ fn nodes_fts_corruption_guidance_uses_derived_index_recovery() {
     );
 
     assert!(guidance.contains("derived `nodes_fts` index"));
-    assert!(guidance.contains("restart the TraceDecay daemon"));
+    assert!(guidance.contains("run `tracedecay daemon restart`"));
+    assert!(guidance.contains("retained or a newer compatible binary"));
     assert!(guidance.contains("rebuild it from the authoritative `nodes` table"));
     assert!(guidance.contains("Do not run `tracedecay init`"));
     assert!(!guidance.contains("automatic rebuild is intentionally blocked"));
@@ -1879,4 +1880,167 @@ async fn daemon_startup_health_surfaces_terminal_project_open_failure_immediatel
             message: "daemon tracedecay_runtime timed out during read before deadline".to_owned(),
         }
     ));
+}
+
+#[tokio::test]
+async fn daemon_startup_health_surfaces_terminal_corruption_immediately() {
+    let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let probe_attempts = std::sync::Arc::clone(&attempts);
+    let corrupt = serde_json::json!({
+        "storage_health": {
+            "quick_check_ok": false,
+            "quick_check_error":
+                "fts5: corruption found reading blob 412316860480 from table \"nodes_fts\"",
+            "authority_audit_ok": true,
+            "canonical_db_path": "/isolated/profile/projects/proj_test/tracedecay.db"
+        }
+    });
+    let wait = super::wait_for_daemon_startup_health_with(
+        std::time::Duration::from_secs(30),
+        std::time::Duration::from_millis(1),
+        move || {
+            probe_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let status = corrupt.clone();
+            async move { Ok(status) }
+        },
+        |_| {},
+    );
+    let error = tokio::time::timeout(std::time::Duration::from_millis(100), wait)
+        .await
+        .expect("terminal corruption must not keep polling")
+        .expect_err("terminal corruption must fail dogfood health validation");
+    let message = error.to_string();
+
+    assert!(message.contains("terminal daemon startup health failure"));
+    assert!(
+        message
+            .contains("fts5: corruption found reading blob 412316860480 from table \"nodes_fts\"")
+    );
+    assert!(message.contains("tracedecay daemon restart"));
+    assert!(message.contains("tracedecay tool runtime"));
+    assert!(message.contains("tracedecay doctor"));
+    assert_eq!(
+        attempts.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "terminal corruption must not be retried"
+    );
+}
+
+#[test]
+fn daemon_startup_health_classifies_sqlite_corruption_spellings_as_terminal() {
+    for problem in [
+        "SQLITE_CORRUPT: database page failed validation",
+        "database disk image is malformed",
+        "malformed database image",
+        "file is not a database",
+    ] {
+        let outcome = super::classify_daemon_startup_health_result(Ok(serde_json::json!({
+            "storage_health": {
+                "quick_check_error": problem,
+                "authority_audit_reason": "authority_audit_not_run"
+            }
+        })));
+        assert!(
+            matches!(outcome, super::DaemonStartupHealthOutcome::Terminal { .. }),
+            "{problem:?} must be terminal"
+        );
+    }
+}
+
+#[test]
+fn daemon_startup_health_preserves_corruption_error_and_adds_remediation() {
+    let problem = "fts5: corruption found reading blob 412316860480 from table \"nodes_fts\"";
+    let outcome =
+        super::classify_daemon_startup_health_result(Err(crate::errors::TraceDecayError::Config {
+            message: problem.to_string(),
+        }));
+    let super::DaemonStartupHealthOutcome::Terminal { error } = outcome else {
+        panic!("corruption error must be terminal");
+    };
+    let message = error.to_string();
+    assert!(message.contains(problem));
+    assert!(message.contains("terminal daemon startup health failure"));
+    assert!(message.contains("tracedecay daemon restart"));
+}
+
+#[tokio::test]
+async fn daemon_startup_health_retryable_progress_changes_then_converges() {
+    let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let probe_attempts = std::sync::Arc::clone(&attempts);
+    let reports = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let progress_reports = std::sync::Arc::clone(&reports);
+    super::wait_for_daemon_startup_health_with(
+        std::time::Duration::from_secs(1),
+        std::time::Duration::from_millis(1),
+        move || {
+            let attempt = probe_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            async move {
+                Ok(match attempt {
+                    0 => serde_json::json!({
+                        "storage_health": {
+                            "quick_check_error": "project_store_schema_unsupported",
+                            "authority_audit_reason": "authority_audit_not_run"
+                        }
+                    }),
+                    1 => serde_json::json!({
+                        "storage_health": {
+                            "quick_check_ok": true,
+                            "authority_audit_reason": "authority_audit_not_run"
+                        }
+                    }),
+                    _ => serde_json::json!({
+                        "storage_health": {
+                            "quick_check_ok": true,
+                            "authority_audit_ok": true
+                        }
+                    }),
+                })
+            }
+        },
+        move |progress| {
+            progress_reports.lock().unwrap().push(progress);
+        },
+    )
+    .await
+    .expect("retryable startup health must converge");
+
+    assert_eq!(
+        attempts.load(std::sync::atomic::Ordering::Relaxed),
+        3,
+        "retryable health must continue polling until ready"
+    );
+    let reports = reports.lock().unwrap();
+    assert_eq!(reports.len(), 2);
+    assert_eq!(reports[0].change, "initial observation");
+    assert!(reports[1].change.starts_with("changed from "));
+    assert!(
+        reports[0]
+            .detail
+            .contains("project_store_schema_unsupported")
+    );
+    assert!(reports[1].detail.contains("quick_check_pending"));
+}
+
+#[tokio::test]
+async fn daemon_startup_health_deadline_is_distinct_from_terminal_failure() {
+    let error = super::wait_for_daemon_startup_health_with(
+        std::time::Duration::ZERO,
+        std::time::Duration::from_millis(1),
+        || async {
+            Ok(serde_json::json!({
+                "storage_health": {
+                    "quick_check_error": "project_store_schema_unsupported",
+                    "authority_audit_reason": "authority_audit_not_run"
+                }
+            }))
+        },
+        |_| {},
+    )
+    .await
+    .expect_err("retryable health must fail when its deadline expires");
+
+    let message = error.to_string();
+    assert!(message.contains("deadline-exceeded"));
+    assert!(message.contains("project_store_schema_unsupported"));
+    assert!(!message.contains("terminal daemon startup health failure"));
 }
