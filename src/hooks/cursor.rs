@@ -1189,10 +1189,7 @@ mod tests {
             "workspace_roots": [project_root.clone()],
         });
 
-        assert_eq!(
-            cursor_project_root_from_parsed_event(&parsed),
-            Some(project_root.clone())
-        );
+        assert!(cursor_project_root_from_parsed_event(&parsed).is_none());
         assert_eq!(
             cursor_project_root_from_parsed_event_with_identity(&parsed).await,
             Some(project_root)
