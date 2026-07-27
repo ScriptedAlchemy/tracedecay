@@ -368,6 +368,11 @@ impl TraceDecay {
         self.db.get_all_files().await
     }
 
+    /// Returns all indexed logical file paths without full record metadata.
+    pub async fn get_all_file_paths(&self) -> Result<Vec<String>> {
+        self.db.get_all_file_paths().await
+    }
+
     /// Returns the `#[derive(...)]` names attached to the given node.
     ///
     /// The graph's `DerivesMacro` edges are unreliable here: the resolver

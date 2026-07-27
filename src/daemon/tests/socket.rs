@@ -1031,29 +1031,15 @@ async fn daemon_linked_worktree_route_repairs_primary_identity_and_keeps_alias()
         crate::db::enter_daemon_database_scope(&profile_root, 1, "linked-worktree-route-test")
             .expect("daemon database scope");
     let engine = test_daemon_engine_for_profile(&profile_root);
-    let primary_handshake = DaemonHandshake {
-        project_path: Some(primary.clone()),
-        client_identity: client_identity.clone(),
-        ..test_handshake_defaults()
-    };
-    let primary_server = engine
-        .project_server(&primary_handshake)
+    let project_id = crate::storage::read_enrollment_marker(&primary)
+        .expect("read primary enrollment")
+        .expect("primary enrollment")
+        .project_id;
+    let registry = engine
+        .store_administration
+        .registered_profile_database()
         .await
-        .expect("mount primary daemon owner");
-    let primary_cg = primary_server.cg().await;
-    primary_cg.index_all().await.expect("primary index");
-    primary_cg
-        .db()
-        .checkpoint()
-        .await
-        .expect("primary checkpoint");
-    let project_id = primary_cg
-        .store_layout()
-        .identity
-        .project_id
-        .clone()
-        .expect("profile project id");
-    let registry = Arc::clone(primary_cg.profile_database());
+        .expect("daemon profile registry");
     let mut config = crate::config::load_config(&linked).expect("load project config");
     config.sync.session_start_sync = false;
     crate::config::save_config(&linked, &config)
@@ -1079,7 +1065,17 @@ async fn daemon_linked_worktree_route_repairs_primary_identity_and_keeps_alias()
     engine
         .project_server(&handshake)
         .await
-        .expect("daemon linked-worktree route");
+        .expect("linked worktree must open before the primary route");
+
+    let primary_handshake = DaemonHandshake {
+        project_path: Some(primary.clone()),
+        client_identity: handshake.client_identity.clone(),
+        ..test_handshake_defaults()
+    };
+    engine
+        .project_server(&primary_handshake)
+        .await
+        .expect("primary route must reuse the linked route's typed authority");
 
     let registry = engine
         .store_administration

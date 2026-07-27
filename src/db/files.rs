@@ -142,6 +142,33 @@ impl Database {
         collect_rows(&mut rows, row_to_file, "get_all_files").await
     }
 
+    /// Returns only indexed logical paths.
+    ///
+    /// Startup language discovery needs names, not hashes or metadata. Keeping
+    /// that query narrow avoids materializing every full file record for large
+    /// projects.
+    pub async fn get_all_file_paths(&self) -> Result<Vec<String>> {
+        let mut rows = self
+            .engine_conn()
+            .query("SELECT path FROM files ORDER BY path", ())
+            .await
+            .map_err(|e| TraceDecayError::Database {
+                message: format!("failed to query all file paths: {e}"),
+                operation: "get_all_file_paths".to_string(),
+            })?;
+        let mut paths = Vec::new();
+        while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
+            message: format!("failed to read file path row: {e}"),
+            operation: "get_all_file_paths".to_string(),
+        })? {
+            paths.push(row.get(0).map_err(|e| TraceDecayError::Database {
+                message: format!("failed to map file path row: {e}"),
+                operation: "get_all_file_paths".to_string(),
+            })?);
+        }
+        Ok(paths)
+    }
+
     /// Deletes a file record and its graph data atomically.
     pub async fn delete_file(&self, path: &str) -> Result<()> {
         self.delete_file_transaction(path, std::future::ready(()))
