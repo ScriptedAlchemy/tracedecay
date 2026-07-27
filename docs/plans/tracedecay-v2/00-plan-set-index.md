@@ -1,8 +1,10 @@
 # TraceDecay V2 roadmap
 
 Status: active product rewrite. PR8 is complete. PR9/PR10 retrieval delivery
-and PR12/PR13 production integration are active; PR14 remains blocked until the
-PR12/PR13 product contracts, direct tests, and normal CI are stable.
+and PR12/PR13 production integration are active. PR14 has a substantial
+implemented and focused-suite-verified checkpoint, but acceptance remains
+blocked on the open Plan 11 journeys and on stable PR12/PR13 product contracts,
+direct tests, and normal CI. The repository is not green.
 
 This file owns delivery order. The master and numbered plans define product
 requirements and component boundaries; they are not independent queues and do
@@ -60,6 +62,54 @@ baseline remains provisional/pending). PR8 delivered the shared
 Session/LCM temporal-retrieval kernel, explicit refresh, stable temporal
 pagination, summary lineage, and compatibility delegation. The active slice is
 documented in [NEXT.md](NEXT.md).
+
+**Delivered stabilization checkpoint (2026-07-27).** These are completed
+sub-slices of the active delivery band, not acceptance of PR9–PR14:
+
+- daemon shutdown cancellation now reaches startup transcript discovery,
+  provider ingest, projection drain, and code-index reconciliation, and
+  cancelled startup ingest does not run finalization or downstream backfill;
+- configuration startup forward-repair materializes newly registered defaults
+  into older stored snapshots, and the production configuration client now
+  performs exact-project mutations, republishes the pinned snapshot, and records
+  runtime activation;
+- the dogfood path classifies terminal corruption/authority failures separately
+  from retryable convergence, scopes convergence to the active project store,
+  reuses a source-stamped dashboard build when inputs are unchanged, and reports
+  stage timings;
+- foreground code search serves the prior complete immutable generation without
+  waiting for an in-flight refresh, and bundled-SQLite FTS blob corruption has a
+  direct open-and-self-heal regression;
+- the Memory V2 owner archive covers all 33 authoritative families with
+  physical-adapter parity, referential closure, digest-bound cutover receipts,
+  idempotent import, and public-read/cutover regressions; and
+- the dashboard retains the daemon's production invocation executor, its
+  daemon-hosted Settings mutation is directly tested, and its focused backend
+  suite executes the diagnostics and workspace routes recorded below.
+
+The same day also landed focused repairs for scope drift, temporal migration
+atomicity, runtime authority fixtures/cleanup, host install coverage, generated
+contracts, source-contract reachability, and dead-code result bounds. Those
+clusters reduce known failures; they are not evidence of a completed full
+suite.
+
+**Open operational evidence (owner recorded, 2026-07-27).**
+
+- `cargo dogfood` still does not exit successfully. Doctor currently reports
+  `authority_audit_unavailable`, and Cursor Core has a component-ownership
+  conflict. Plan 09 owns Doctor composition; Plan 27 and the PR12/PR13
+  integration slice own host lifecycle/ownership repair.
+- Semantic search is disabled by an invalid configuration snapshot. Plan 20
+  owns snapshot validity and forward repair; Plan 31 owns semantic activation.
+  Exact, lexical, and graph retrieval remain the required available fallback.
+- A live profile was observed 237 minutes stale (the index later reported
+  285 minutes stale while this reconciliation was being checked). Plan 25 and
+  the active incremental-indexing slice own cadence/freshness diagnosis; the
+  new serve-during-refresh behavior does not close that issue.
+- Roughly eight known test failures remain, and roughly 4,169 tests have not
+  been measured because no full suite run has completed. The active PR12/PR13
+  stabilization slice owns reducing that uncertainty and reporting the next
+  full run truthfully; no PR9–PR14 acceptance follows from focused green suites.
 
 Completed-slice names are historical implementation evidence, not instructions
 to recreate a type, file layout, fixture filename, milestone, or gate. A deleted
@@ -471,24 +521,37 @@ size/read-context support, and reduced automated accessibility violations from
 storage telemetry, Loom, asset serving, and feedback-observation paths are
 implemented.
 
-This checkpoint is **implemented but unverified**: the Rust
-`dashboard_api_test` suite has not completed successfully. Settings CAS,
-Delivery, Explorer routes, Doctor, storage telemetry, Loom, and asset serving
-must retain that status until the suite executes successfully; none may be
-reported as verified from implementation or frontend tests alone.
+**Suite status correction (2026-07-27).** The Rust `dashboard_api_test` suite
+now completes successfully — 58 tests run, 58 passed, on two consecutive
+`--all-features` runs — so the blanket "implemented but unverified" status this
+section attached to Settings CAS, Delivery, Explorer routes, Doctor, storage
+telemetry, Loom, and asset serving is withdrawn. Both 2026-07-26 verification
+qualifications are closed, not merely restated:
 
-**Verification qualifications (2026-07-26).**
+- Loom's backend test is declared (`mod loom;` in the suite's `main.rs`) and
+  `loom_temporal_endpoint_reads_recorded_ends_and_causal_authorities`
+  executes, so it can contribute to a Loom verification claim.
+- `InjectedConfigurationClient` no longer exists. The dashboard now takes a
+  host-supplied `Arc<dyn DaemonInvocationExecutor>`, so a daemon-hosted
+  dashboard carries the daemon's own in-process executor. The in-process test
+  fixture has no control plane and correctly answers a typed
+  `configuration_authority_unavailable` without advertising the apply, and the
+  production write is proven separately by
+  `dashboard_project_settings_commit_through_the_daemon_control_plane`
+  (`tests/pr11_pr12_runtime_acceptance.rs`): it starts the dashboard inside a
+  real daemon — the same route `tracedecay dashboard` takes — and asserts the
+  advertised apply, the commit, the advanced revision, the durable re-read, an
+  untouched `config.json`, and CAS rejection of the superseded revision.
 
-- Loom's only dedicated backend test,
-  `tests/dashboard_api_test/loom.rs`, is not declared by that suite's
-  `main.rs`; it cannot compile or run and therefore cannot contribute to a
-  Loom verification claim.
-- The Settings suite injects a working `InjectedConfigurationClient`, while
-  the installed production `ConfigurationDaemonClient::mutate_direct` returns
-  authority-unavailable for every matching target. A green injected-client
-  test proves route/shape behavior, not a production Settings write. Direct
-  acceptance must exercise the installed production client before Settings
-  mutation is called verified.
+Acceptance remains open. A focused frontend suite, `typecheck`,
+`contracts:check`, and both accessibility gates (`axe:audit`, `axe:explorer`)
+have completed successfully at this checkpoint with zero reported axe
+violations, page errors, or state-assertion failures; exact case counts remain
+run output rather than roadmap status. The accessibility gates are now enforced
+by the `dashboard-assets` CI job rather than run only locally. Still
+unexecuted: the Plan 11 performance budgets, renderer parity/fallback
+measurement, SSE-churn sustain runs, real-Chrome visual review, manual
+NVDA/VoiceOver, and the 12-participant usability study.
 
 **Direct acceptance.** Starting from a real PR13 finding, navigate to retained
 evidence, diagnose an injected operational fault, apply an authorized

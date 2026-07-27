@@ -1,6 +1,6 @@
 # PR8–PR14 plan-status correction ledger
 
-**Status (2026-07-26): authoritative companion to the numbered plans.**
+**Status (2026-07-27): authoritative companion to the numbered plans.**
 
 This file records plan-status adjudications and retractions so later audits do
 not turn abandoned design, later-PR ownership, or unexecuted contract seams
@@ -21,14 +21,47 @@ not inherited merely because the superseded branch entered history.
 
 - PR8 is complete.
 - PR9, PR10, PR12, and PR13 remain active.
-- PR14 remains blocked until the active production contracts, direct tests,
-  and normal CI are stable.
+- PR14 has a substantial implemented and focused-suite-verified checkpoint but
+  remains blocked on its named Plan 11 gaps and until the active production
+  contracts, direct tests, and normal CI are stable.
+- The delivery band is not green: `cargo dogfood` still exits nonzero, semantic
+  search is disabled by an invalid configuration snapshot, incremental-index
+  cadence is suspect after a 237-minute stale observation, roughly eight known
+  test failures remain, and roughly 4,169 tests have never been measured in a
+  completed full-suite run.
 - Plan 32 is PR17-only and SCOPE-OUT for PR8–PR14 audits.
 - Plan 34 is split: the published read-only rename preview is implemented and
   reachable; apply-grade rename is not certified by that preview, and the
   unimplemented API-migration planner/apply journey is a PR11–PR12 band
   deliverable that PR19 consumes. Only PR19's temporary-alias deletion slices
   are SCOPE-OUT.
+
+### Stabilization slices closed 2026-07-27
+
+The following shipped behavior must not be reopened from older "missing" or
+"unverified" text:
+
+- cooperative daemon shutdown reaches startup transcript/provider ingest and
+  code-index reconcile work, with cancelled startup finalization suppressed;
+- configuration startup forward-repairs older snapshots with newly registered
+  defaults, while production exact-project mutations republish the pinned
+  snapshot and record runtime activation;
+- dogfood health distinguishes terminal corruption/authority failure from
+  retryable convergence, scopes convergence to the active project store, and
+  source-stamp-caches the dashboard stage while reporting stage timings;
+- code search serves the prior complete immutable generation while refresh owns
+  the scheduler, and bundled-SQLite FTS blob corruption self-heals on open;
+- Memory V2 owner archives cover all 33 authoritative families with adapter
+  parity, referential closure, digest-bound cutover receipts, idempotent import,
+  and public-read regressions; and
+- the daemon-hosted dashboard retains the production invocation executor and
+  directly commits Settings through the daemon control plane.
+
+These closures do not erase the open operational evidence above. Plan 09 owns
+the Doctor `authority_audit_unavailable` blocker; Plan 27 owns the Cursor Core
+component-ownership conflict; Plans 20/31 own semantic snapshot/activation
+recovery; Plan 25 owns incremental freshness cadence; and the active PR12/PR13
+slice owns the incomplete full-suite evidence.
 
 ## Closed adjudications
 
@@ -66,6 +99,31 @@ the single-app source-stamp and embedded-asset contract. A prior zero
 sub-surfaces may remain unverified or backend-only; the dashboard and embed
 path as a whole are not absent.
 
+### Dashboard suite execution (closed 2026-07-27)
+
+`dashboard_api_test` completes successfully — 58 run, 58 passed, on two
+consecutive `--all-features` runs — so no audit may re-derive a gap from "the
+suite has not completed". The two verification qualifications recorded in
+`00-plan-set-index.md` on 2026-07-26 are closed rather than restated: Loom's
+backend test is declared and executes, and `InjectedConfigurationClient` no
+longer exists. The dashboard takes a host-supplied
+`Arc<dyn DaemonInvocationExecutor>`, so the production Settings write is proven
+by `dashboard_project_settings_commit_through_the_daemon_control_plane`
+(`tests/pr11_pr12_runtime_acceptance.rs`) against a real daemon-hosted
+dashboard, while the control-plane-less in-process fixture correctly withholds
+the apply and answers a typed `configuration_authority_unavailable`.
+
+This closes those two items only. Plan 11 carries the audited list of what PR14
+acceptance still owes, including the absent performance, import-boundary,
+virtualization, and viewport-matrix gates and the named per-workspace
+capability gaps.
+
+One refuted finding, recorded so it is not re-reported: an audit claimed
+`/api/plugins/graph/strata` has no Code-workspace consumer. It does —
+`dashboard/src/workspaces/code/Strata.tsx` reads the route through the
+generated `StructureReadV12Schema`, and `CodePage.tsx` renders it. All five
+Plan 11b structure routes are consumed; do not reopen that as a gap.
+
 ### Later-plan placement
 
 Plan 32 belongs to PR17 and must not be filed as unmet PR14 work. Plan 34 is
@@ -75,8 +133,9 @@ the temporary-alias deletion slices.
 
 ## Numbered-plan corrections
 
-- `00-plan-set-index.md`: Loom's undeclared backend test and the injected-only
-  Settings mutation proof are explicit verification limits.
+- `00-plan-set-index.md`: the former Loom declaration and injected-only
+  Settings verification limits are closed; the roadmap now records the
+  daemon-hosted production mutation proof and the still-open acceptance work.
 - `01-domain-crate.md`, `02-store-crate.md`, `03-capture-crate.md`: completion
   includes both the shared session-observation path and the external-source
   host-observation specialization. Broader acquisition/refetch remains a
@@ -99,12 +158,13 @@ the temporary-alias deletion slices.
   consumed through typed Code-workspace surfaces; the former backend-only gap
   is closed, without converting implementation into acceptance.
 - `12-root-compatibility-migration.md`: Memory V2 cutover coverage is receipted,
-  migrated-fact reclamation is production-reached, and the permanent V1-shaped
-  compatibility projection is distinguished from a superseded writer. Direct
-  init/open/read-only/branch lifecycle entry points now own production
-  maintenance authority. A schema-disposition label is explicitly not
-  migration evidence because the old gate accepted `"merged"` without proving
-  merge SQL.
+  all 33 authoritative owner-archive families have physical adapter and
+  referential-closure coverage, migrated-fact reclamation is production-reached,
+  and the permanent V1-shaped compatibility projection is distinguished from a
+  superseded writer. Direct init/open/read-only/branch lifecycle entry points
+  now own production maintenance authority. A schema-disposition label is
+  explicitly not migration evidence because the old gate accepted `"merged"`
+  without proving merge SQL.
 - `13-research-provenance-and-context-anchors.md`: core anchors are delivered;
   dedicated GitHub-stack targets remain a named PR13 follow-up.
 - `14-historical-failure-regression-matrix.md`: already states that it owns
@@ -118,25 +178,33 @@ the temporary-alias deletion slices.
   conditionally delivered through `lcm_sensitive_redaction_enabled`, defaults
   off for losslessness, is irreversible, and does not rewrite payloads already
   at rest.
-- `20-configuration-control-plane.md`: non-MCP production writes fail
-  authority admission and production activation rows are never created, so
-  user-driven mutation and desired/observed drift are not certified.
+- `20-configuration-control-plane.md`: the former unconditional
+  production-write refusal is closed. The production client issues a
+  short-lived exact-project grant, commits through the control plane,
+  republishes the pinned snapshot, and records runtime activation; the
+  daemon-hosted dashboard path has direct commit/CAS coverage. PR17's complete
+  work-execution snapshot and broader component activation/drift journey remain
+  open, and the live semantic snapshot is currently invalid.
 - `23-session-lcm-temporal-retrieval-and-evaluation.md`: retrieval-time expiry
   and `RetentionWithheld` remain here; retention writers and
   `source_cursor_advances` reclamation belong to Plan 38.
-- `25-code-intelligence-indexing-crate.md`: already states that indexing is a
-  root module and crate extraction is optional and evidence-driven.
-- `26-observability-accounting-and-usage.md`: Observatory and Costs remain
-  implemented but unverified; their canonical model now keeps failed/timed-out
-  outcomes distinct from known zero and withholds values under
-  unavailable/partial coverage.
+- `25-code-intelligence-indexing-crate.md`: indexing remains a root module and
+  crate extraction is optional and evidence-driven. Foreground search now
+  serves the previous complete generation during an in-flight refresh; cadence
+  remains open after the live stale-index incident.
+- `26-observability-accounting-and-usage.md`: the focused backend/frontend
+  suite blocker is closed for Observatory and Costs. Their canonical model
+  keeps failed/timed-out outcomes distinct from known zero and withholds values
+  under unavailable/partial coverage; named presentation, performance, and
+  end-to-end acceptance gaps remain owned by Plan 11/PR14.
 - `27-cross-host-agent-plugin-bundles.md`: four declared safety/evidence guards
   are not production-reached, and Cursor Cloud has no default component set.
 - `31-native-fastembed-semantic-code-search.md`: daemon-owned immutable
   `hf-hub` background acquisition shipped in `dd4adbe2a`, including verified
   online acquisition and packaged offline-cache acceptance. Manual local/HTTPS
-  import APIs remain production-unwired, and semantic results remain omitted
-  until compatible indexing is ready.
+  import APIs remain production-unwired. Semantic results remain omitted on the
+  live profile because its configuration snapshot is invalid; Plan 20 owns
+  snapshot repair and this plan owns successful semantic activation.
 - `32-dynamic-workflow-runtime-and-sdk.md`: explicitly PR17-only.
 - `34-workspace-refactoring-and-api-migration.md`: rename preview is live;
   API migration is an unimplemented PR11–PR12 deliverable consumed by PR19,
@@ -161,7 +229,9 @@ the temporary-alias deletion slices.
   `.corrupt` artifacts
   until `985cc5d4b`, that live branch stores are full graph copies rather than
   lightweight deltas, and that code-index generation publication has no
-  retention pass.
+  retention pass. The storage-budget dashboard checkpoint is no longer blocked
+  on `dashboard_api_test`; that suite now completes, without converting the
+  broader Plan 38 requirements into acceptance.
 
 No numbered plan claims `.tracedecay/domain-symbols.toml` as a delivered
 capability, so the no-op `DOMAIN-EXTRACTORS.md` proposal requires no plan-side

@@ -44,9 +44,66 @@ failures that no longer masquerade as `not mounted`, and unavailable reads
 preserved across Agents, Costs, Knowledge, and Sessions now exist. Explorer
 coordination/source-local query and LCM read context, Loom time boundaries,
 Delivery, Doctor, storage telemetry, asset serving, and feedback observation
-wiring also exist. The Rust `dashboard_api_test` suite has not completed
-successfully, so Settings CAS, Delivery, Explorer routes, Doctor, storage
-telemetry, Loom, and asset serving remain **implemented but unverified**.
+wiring also exist.
+
+**Suite status correction (2026-07-27).** The Rust `dashboard_api_test` suite
+now completes successfully: 58 tests run, 58 passed, on two consecutive
+`cargo nextest run --test dashboard_api_test --all-features` runs. Settings
+CAS, Delivery, Explorer routes, Doctor, storage telemetry, Loom, and asset
+serving are therefore no longer blocked on that suite, and the earlier
+"implemented but unverified" qualification attached to it is withdrawn. Two
+narrower verification limits it used to carry are also closed: the Loom suite
+declares `mod loom;` and its temporal test executes, and the dashboard's
+project-settings write is exercised against the installed production client by
+`dashboard_project_settings_commit_through_the_daemon_control_plane`
+(`tests/pr11_pr12_runtime_acceptance.rs`), which starts the dashboard inside a
+real daemon and asserts the commit, the advanced revision, the durable re-read,
+and CAS rejection of the superseded revision.
+
+Acceptance is still open, and this correction claims only what executed. A
+focused frontend suite, `typecheck`, `contracts:check`, and both accessibility
+gates (`axe:audit` across six viewport/theme combinations and `axe:explorer`)
+have completed successfully at this checkpoint with zero reported axe
+violations, page errors, or state-assertion failures. Exact file/test/scan
+counts remain run output rather than a plan invariant. `axe:audit` and
+`axe:explorer` are now enforced by the `dashboard-assets` CI job;
+`visual:audit`, `visual:topography`, and `live:sweep` remain developer-run.
+
+**Audited open gaps (2026-07-27).** A gate-by-gate and workspace-by-workspace
+audit against the requirements below found these still unmet. They are
+recorded so acceptance is not claimed early. They are capability/test gaps, not
+permission to replace unavailable data with fabricated values.
+
+- **PR14 / Plan 11 owner:** performance budgets
+  (Brotli/LCP/frame p95/heap/SSE sustain), AST import-boundary rules,
+  virtualization mount-count assertions, and MSW fault injection inside
+  Vitest remain absent.
+- **PR14 / Plan 11 owner:** the viewport matrix is partial. Current audits cover
+  320/768/1440 in light and dark, but not 390×844, 1024×768, 1280×720,
+  200%/400% zoom, `prefers-contrast: more`, or forced colors.
+- **PR14 / Plan 11 owner:** Code still lacks diagnostics, affected tests, code
+  health, and branch-aware freshness; Agents lacks its PR14 subagent/handoff
+  context; Sessions lacks raw-message drill-down, compaction boundaries, and
+  replay; Knowledge lacks contradictions, supersession, and curation;
+  Observatory lacks hook hints, event flow, and latency; Automations lacks its
+  existing-runtime run history and artifacts; Costs lacks a latency breakdown;
+  and Loom's zoom/brush/playback helpers are not wired into its UI.
+- **PR14 / Plan 11 owner:** `redacted` and `locked` are defined in `StateChip`
+  but no workspace currently exercises them with supplied backend state.
+- **PR15 / Plan 16 owner:** Explorer's multi-project/repository/worktree pivots
+  remain future multi-root work; PR14 still owns the single-root time pivot.
+- **Owners: PR17 / Plans 24 and 32; PR18 for public handoff:**
+  `RequestCancel` and `RequestExternalHandoff` authority-negative coverage
+  belongs to the executable Work/handoff journey and does not block the PR14
+  twelve-workspace checkpoint.
+
+One audit finding was checked and refuted: `/api/plugins/graph/strata` does
+have a Code-workspace consumer (`Strata.tsx` reads it through
+`StructureReadV12Schema` and `CodePage.tsx` renders it), so the Plan 11b
+statement that all five structure routes are consumed stands.
+
+Also not yet executed: the real-Chrome visual review, manual NVDA/VoiceOver
+completion, and the 12-participant usability study.
 
 **Reachability correction (2026-07-26).** All twelve PR14 workspaces are
 registered as lazy routes in `dashboard/src/app/routes.tsx`, and `build.rs`

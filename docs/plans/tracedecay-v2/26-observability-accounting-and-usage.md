@@ -5,10 +5,14 @@
 Cross-cutting instrumentation is implemented only with each owning product
 slice; this sentence is not a blanket completion certificate. PR14 completes
 the Observatory and Costs experience over the resulting canonical read models.
-As of 2026-07-26 those two dashboard experiences remain **implemented but
-unverified** because the dashboard integration suite has not completed
-successfully. This plan is a product observability contract, not a plan
-compiler or delivery tracker.
+As of 2026-07-27 the focused dashboard backend and frontend suites exercise
+those experiences successfully, so the former suite-blocked "implemented but
+unverified" qualification is withdrawn. PR14 acceptance is still open:
+Observatory lacks hook-hint/event-flow/latency presentation, Costs lacks its
+latency breakdown, and the Plan 11 performance/SSE/usability journeys have not
+executed. Plan 11/PR14 owns those UI gaps; this plan retains the canonical
+measurement and coverage semantics. This plan is a product observability
+contract, not a plan compiler or delivery tracker.
 Its versioned measurements and coverage semantics are the canonical product
 telemetry input to [PR20 performance optimization](33-end-to-end-performance-optimization.md).
 Versioned benchmark, profiler, and operating-system measurements remain valid

@@ -22,6 +22,22 @@ journey must prevent, expose, and recover truthfully from the corruption,
 routing, scope, lifecycle, compatibility, and authority failures
 relevant to that slice.
 
+**Regression-status correction (2026-07-27).** Direct tests now cover
+cooperative cancellation of daemon startup transcript/provider ingest and
+code-index reconcile work; terminal-versus-retryable dogfood startup-health
+classification; active-project convergence scoping; prior-complete generation
+serving during refresh; and bundled-SQLite FTS blob self-heal without treating
+whole-database corruption as repairable. Those observable regressions are
+delivered and their old missing-test language must not be recreated.
+
+Operational acceptance remains open. `cargo dogfood` still fails on Doctor
+`authority_audit_unavailable` and a Cursor Core component-ownership conflict,
+semantic search is disabled by an invalid configuration snapshot, incremental
+index cadence is suspect, and the full suite has not completed. Plan 09 owns
+Doctor composition, Plan 27 owns host component lifecycle, Plans 20/31 own
+semantic configuration/activation, Plan 25 owns index freshness, and the active
+PR12/PR13 slice owns aggregate test stabilization.
+
 Concrete fixture names, record counts, files, and harness layout remain test
 implementation details owned beside the callable DTOs and product tests. Tests
 may consolidate cases when they retain every observable regression class,

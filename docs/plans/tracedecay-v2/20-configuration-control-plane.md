@@ -15,19 +15,24 @@ schema-registry names, exact setting-definition files, migration packets, and
 fixture inventories are not. Missing effective behavior or an unreachable
 mutation is a gap; a renamed/deleted declaration scaffold is not.
 
-**Reachability correction (2026-07-26).** The read model and the canonical
-grant-bearing MCP mutation path exist, but the control plane is not yet
-user-drivable end to end. The installed
-`ProductionConfigurationDaemonClient::mutate_direct` unconditionally returns
-`configuration mutation authority unavailable` for a matching project, so
-non-MCP CLI/dashboard/branch surfaces that use that client cannot write.
-Desired-versus-observed drift is also structurally empty in production:
-`record_component_activation` is called only below the store's `#[cfg(test)]`
-boundary, while the production desired-state advance can update only
-activation rows that already exist. Until production creates activation
-events, `observed_state` has no components to report. Requirements below
-remain owned here; they are not delivered merely because schemas and an
-injected-client test exist.
+**Reachability correction (updated 2026-07-27).** The former production-write
+gap is closed. `ProductionConfigurationDaemonClient::mutate_direct` now rejects
+scope drift, issues a short-lived exact-project grant, commits through the
+canonical control plane, rereads and installs the new pinned snapshot, and
+records the runtime component's activation. The daemon-hosted dashboard retains
+the daemon's in-process `DaemonInvocationExecutor`; direct runtime acceptance
+proves advertised apply, commit, revision advance, durable reread, no fallback
+write to `config.json`, and stale-revision CAS rejection. The control-plane-less
+dashboard fixture still correctly withholds apply and reports typed unavailable.
+
+Startup forward-repair is also delivered for revisions created before the
+current registry gained new defaults: it completes missing registered values
+and provenance before repairing the daemon source binding, while unknown keys,
+ambiguous authority, and conflicting protected bindings still fail closed.
+This does not certify the complete PR17 work-execution snapshot or every
+component's desired/observed lifecycle. The live semantic path is currently
+disabled by an invalid configuration snapshot, so Plan 20 still owns that
+operational repair and Plan 31 owns successful semantic activation.
 
 PR17 adds only the settings needed by the executable work loop. It does not
 create a workflow-specific registry or provider-local configuration source.

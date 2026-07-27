@@ -3,8 +3,11 @@
 Status: active product rewrite. PR8 is complete. PR9/PR10 acceptance and
 PR12/PR13 production integration are active. Draft PR #421 is the consolidated
 delivery vehicle; the former six-separate-PR model for PR8–PR13 is superseded.
-PR14 integration paths have an implemented but unverified checkpoint and PR14
-remains blocked on the active contracts, direct tests, and normal CI.
+PR14 integration paths have an implemented and focused-suite-verified
+checkpoint, but PR14 acceptance remains blocked on the named Plan 11 gaps and
+on stable active contracts, direct tests, and normal CI. The repository is not
+green; [NEXT.md](NEXT.md) records the current dogfood, semantic, index-freshness,
+and incomplete-full-suite blockers with owners.
 
 The authoritative delivery order is [00-plan-set-index.md](00-plan-set-index.md).
 The active production-integration and incremental-indexing slice is
