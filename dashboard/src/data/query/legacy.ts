@@ -9,6 +9,8 @@ import type { WireSchema } from './wireSchema.ts';
 export type LegacyResult<T> =
   | { outcome: 'ok'; data: T }
   | { outcome: 'offline' }
+  | { outcome: 'unauthorized' }
+  | { outcome: 'denied' }
   | { outcome: 'error'; detail: string }
   | { outcome: 'unsupported_schema' };
 
@@ -23,6 +25,12 @@ export async function fetchLegacy<T>(
   } catch {
     return { outcome: 'offline' };
   }
+  // An authorization refusal is its own reading, not an error carrying a
+  // status code. 401 means the daemon accepted no identity for this read and
+  // 403 means it knows the identity and will not serve this scope — two
+  // different next actions for the reader, and neither one is "retry".
+  if (response.status === 401) return { outcome: 'unauthorized' };
+  if (response.status === 403) return { outcome: 'denied' };
   if (!response.ok) {
     return { outcome: 'error', detail: `HTTP ${response.status}` };
   }

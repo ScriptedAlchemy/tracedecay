@@ -7,6 +7,13 @@ command) proves it. Validators never invent passed status into packet files.
 
 Platform lifecycle gates are bound to runner OS identity: Linux junit cannot
 satisfy Windows/macOS, and aggregation requires each OS artifact separately.
+
+Feature-scoped gates are bound the same way to a cargo feature configuration.
+The junit evidence comes from one `--workspace --all-features` run, so it cannot
+witness a reduced build, and a test filtered by name is indistinguishable
+between the two: `structural_checks_ignore_commented_out_symbols` is one #[test]
+that both pr13_host_structure (--all-features) and pr13_lite_grammar_contract
+(--no-default-features --features lite) run. Renaming cannot separate them.
 """
 
 from __future__ import annotations
@@ -27,6 +34,18 @@ PLATFORM_GATE_OS = {
     "platform_windows_lifecycle": "windows",
     "platform_macos_lifecycle": "macos",
 }
+
+
+def command_is_feature_scoped(command: str) -> bool:
+    """True when a gate command proves a REDUCED cargo feature configuration.
+
+    The junit evidence is produced by one `--workspace --all-features` run, so it
+    can only witness gates that also run with all features. A command that opts
+    out of default features is proving that the smaller build compiles and
+    passes, which the all-features run says nothing about, so such a gate must
+    never be closed by a junit name match.
+    """
+    return "--no-default-features" in shlex.split(command)
 
 
 def cargo_filter_from_command(command: str) -> str | None:
@@ -160,6 +179,12 @@ def evaluate_gate(
     if required_os is not None:
         # Default-feature platform lifecycle is OS-bound and never borrowed from
         # another OS or from untagged/all-features junit name matches.
+        return checked_in_state if checked_in_state in CHECKED_IN_GATE_STATES else "awaiting_ci"
+
+    if command_is_feature_scoped(command):
+        # Same principle, bound to features instead of OS: the all-features
+        # junit cannot witness a reduced build, and the test name is shared with
+        # the all-features gate, so only executed evidence closes this one.
         return checked_in_state if checked_in_state in CHECKED_IN_GATE_STATES else "awaiting_ci"
 
     if command.startswith("npm"):

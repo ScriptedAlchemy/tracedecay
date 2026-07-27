@@ -166,7 +166,15 @@ jobs:
 
   release-version-drift:
     name: Release Version Drift
-    if: github.event_name == 'pull_request' && !startsWith(github.head_ref, 'release-plz-')
+    # Also runs on push so the workflow-contract tests below actually protect
+    # master, which is the branch they exist to protect. `on.push.branches` is
+    # already limited to master and feature/holographic-memory, and the
+    # concurrency group keys pushes by ref and PRs by number, so this adds no
+    # duplicate or competing run.
+    if: >-
+      github.event_name == 'push' ||
+      (github.event_name == 'pull_request' &&
+       !startsWith(github.head_ref, 'release-plz-'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -188,6 +196,12 @@ jobs:
         run: bash tests/dogfood_command_test.sh
 
       - name: Check release version drift
+        # PR-only, unchanged. This one queries crates.io and fails whenever
+        # Cargo.toml is ahead of the registry, which is the normal transient
+        # state on master between a release-plz merge and the publish
+        # completing. Running it on master push would go red every release for
+        # reasons unrelated to the commit.
+        if: github.event_name == 'pull_request'
         run: scripts/check-release-drift.sh
 
   test:
@@ -263,18 +277,45 @@ jobs:
           npm --prefix plugin/cursor-native-extension test
           npm --prefix plugin/cursor-native-extension run package
 
+      # These three gates filter by test name, and libtest exits 0 when a filter
+      # matches nothing (unlike the nextest used elsewhere, which has
+      # --no-tests=fail). require-exact-test.sh asserts the count libtest
+      # reports, so a rename, a moved #[cfg], or a feature change fails here
+      # instead of turning the gate into a silent no-op that reports success.
       - name: PR13 lite grammar gate
-        run: >-
-          cargo test --locked --no-default-features --features lite
-          --test pr13_host_bundle_acceptance
-          structural_checks_ignore_commented_out_symbols
-          -- --exact
+        env:
+          RUNNER_OS_ID: ${{ matrix.name == 'Linux' && 'linux' || 'macos' }}
+        run: |
+          set -euo pipefail
+          # The ONLY --no-default-features run. The all-features junit shares
+          # this test's name and cannot witness the lite build, so the validator
+          # refuses to close this gate from junit; the receipt is the evidence.
+          scripts/require-exact-test.sh \
+            cargo test --locked --no-default-features --features lite \
+            --test pr13_host_bundle_acceptance \
+            structural_checks_ignore_commented_out_symbols \
+            -- --exact
+          mkdir -p "pr12-pr13-os-evidence/${RUNNER_OS_ID}"
+          printf '%s\n' \
+            "pr13_lite_grammar_contract: structural_checks_ignore_commented_out_symbols passed under --no-default-features --features lite" \
+            > "pr12-pr13-os-evidence/${RUNNER_OS_ID}/lite_grammar.passed"
 
       - name: PR13 default-feature platform lifecycle
-        run: >-
-          cargo test --locked --test pr13_host_bundle_acceptance
-          receipt_backed_doctor_checks_deployed_digests_registration_and_repair
-          -- --exact
+        env:
+          RUNNER_OS_ID: ${{ matrix.name == 'Linux' && 'linux' || 'macos' }}
+        run: |
+          set -euo pipefail
+          # The ONLY default-feature (not --all-features) run of the lifecycle
+          # test. The receipt is written HERE, by the step that ran it, because
+          # this is the only step that can attest to it.
+          scripts/require-exact-test.sh \
+            cargo test --locked --test pr13_host_bundle_acceptance \
+            receipt_backed_doctor_checks_deployed_digests_registration_and_repair \
+            -- --exact
+          mkdir -p "pr12-pr13-os-evidence/${RUNNER_OS_ID}"
+          printf '%s\n' \
+            "platform_${RUNNER_OS_ID}_lifecycle: receipt_backed_doctor_checks_deployed_digests_registration_and_repair passed under default features" \
+            > "pr12-pr13-os-evidence/${RUNNER_OS_ID}/platform_lifecycle.passed"
 
       - name: Strict PR12/PR13 packets from nextest junit
         env:
@@ -283,6 +324,15 @@ jobs:
           set -euo pipefail
           junit="target/nextest/ci/junit.xml"
           test -f "$junit"
+          # Required, not created. This step never ran the lifecycle test, so it
+          # cannot attest that it ran; it can only refuse to pass
+          # --gate-passed platform_*_lifecycle below without the receipt the
+          # step that DID run it wrote. This used to be an unconditional
+          # `: > platform_lifecycle.passed` after the fact. The lite receipt is
+          # required for the same reason: --gate-passed is now the ONLY way to
+          # close a reduced-feature gate, so it must rest on a real run.
+          test -s "pr12-pr13-os-evidence/${RUNNER_OS_ID}/platform_lifecycle.passed"
+          test -s "pr12-pr13-os-evidence/${RUNNER_OS_ID}/lite_grammar.passed"
           python3 benchmarks/pr13-host-conformance/test_platform_evidence.py
           python3 benchmarks/pr13-host-conformance/validate_packet.py --strict \
             --runner-os "$RUNNER_OS_ID" \
@@ -295,8 +345,6 @@ jobs:
           mkdir -p "pr12-pr13-os-evidence/${RUNNER_OS_ID}"
           cp "$junit" "pr12-pr13-os-evidence/${RUNNER_OS_ID}/junit.xml"
           printf '%s\n' "$RUNNER_OS_ID" > "pr12-pr13-os-evidence/${RUNNER_OS_ID}/runner-os.txt"
-          # Marker proves default-feature lifecycle ran on this OS (not a receipt).
-          : > "pr12-pr13-os-evidence/${RUNNER_OS_ID}/platform_lifecycle.passed"
 
       - name: Upload OS-tagged PR12/PR13 junit
         uses: actions/upload-artifact@v4
@@ -312,6 +360,7 @@ jobs:
       - name: Run in-flight observation crash harness
         if: matrix.name == 'Linux'
         run: >-
+          scripts/require-exact-test.sh
           cargo test --locked --all-features --features test-transport
           --test daemon_fault_harness_test
           killed_daemon_retries_in_flight_claude_observation_once_via_public_apis
@@ -710,25 +759,53 @@ jobs:
           shared-key: ci-pr12-pr13-lite-windows-msvc
           cache-on-failure: true
 
+      # Same libtest no-op hazard as the Linux/macOS `test` job: `cargo test
+      # <name> -- --exact` exits 0 when the filter matches nothing.
       - name: PR13 lite grammar gate
         shell: bash
-        run: >-
-          cargo test --locked --no-default-features --features lite
-          --test pr13_host_bundle_acceptance
-          structural_checks_ignore_commented_out_symbols
-          -- --exact
+        run: |
+          set -euo pipefail
+          # The ONLY --no-default-features run. The all-features junit shares
+          # this test's name and cannot witness the lite build, so the validator
+          # refuses to close this gate from junit; the receipt is the evidence.
+          scripts/require-exact-test.sh \
+            cargo test --locked --no-default-features --features lite \
+            --test pr13_host_bundle_acceptance \
+            structural_checks_ignore_commented_out_symbols \
+            -- --exact
+          mkdir -p pr12-pr13-os-evidence/windows
+          printf '%s\n' \
+            "pr13_lite_grammar_contract: structural_checks_ignore_commented_out_symbols passed under --no-default-features --features lite" \
+            > pr12-pr13-os-evidence/windows/lite_grammar.passed
 
       - name: PR13 default-feature platform lifecycle
         shell: bash
-        run: >-
-          cargo test --locked --test pr13_host_bundle_acceptance
-          receipt_backed_doctor_checks_deployed_digests_registration_and_repair
-          -- --exact
+        run: |
+          set -euo pipefail
+          # The receipt is written HERE, by the step that ran the test, because
+          # this is the only step that can attest to it.
+          scripts/require-exact-test.sh \
+            cargo test --locked --test pr13_host_bundle_acceptance \
+            receipt_backed_doctor_checks_deployed_digests_registration_and_repair \
+            -- --exact
+          mkdir -p pr12-pr13-os-evidence/windows
+          printf '%s\n' \
+            "platform_windows_lifecycle: receipt_backed_doctor_checks_deployed_digests_registration_and_repair passed under default features" \
+            > pr12-pr13-os-evidence/windows/platform_lifecycle.passed
 
       - name: Strict PR12/PR13 packets from Windows junit
         shell: bash
         run: |
           set -euo pipefail
+          # Required, not created. This step never ran the lifecycle test, so it
+          # cannot attest that it ran; it can only refuse to pass
+          # --gate-passed windows:platform_windows_lifecycle below without the
+          # receipt the step that DID run it wrote. This used to be an
+          # unconditional `: > platform_lifecycle.passed` after the fact. The
+          # lite receipt is required for the same reason: --gate-passed is now
+          # the ONLY way to close a reduced-feature gate.
+          test -s pr12-pr13-os-evidence/windows/platform_lifecycle.passed
+          test -s pr12-pr13-os-evidence/windows/lite_grammar.passed
           mapfile -t junit_files < <(find windows-junit -type f -name 'junit.xml' | sort)
           if [[ "${#junit_files[@]}" -eq 0 ]]; then
             echo "missing Windows nextest junit evidence" >&2
@@ -764,7 +841,6 @@ jobs:
           mkdir -p pr12-pr13-os-evidence/windows
           cp windows-merged-junit.xml pr12-pr13-os-evidence/windows/junit.xml
           printf 'windows\n' > pr12-pr13-os-evidence/windows/runner-os.txt
-          : > pr12-pr13-os-evidence/windows/platform_lifecycle.passed
 
       - name: Upload OS-tagged PR12/PR13 junit
         uses: actions/upload-artifact@v4
@@ -800,9 +876,12 @@ jobs:
             --npm-passed check --npm-passed test --npm-passed package
             --gate-passed pr13_lite_grammar_contract
           )
+          # This job runs no cargo at all, so every --gate-passed it asserts
+          # must rest on a receipt written by the job that did the work.
           for os_name in linux windows macos; do
             test -f "pr12-pr13-os-evidence/${os_name}/junit.xml"
             test -f "pr12-pr13-os-evidence/${os_name}/platform_lifecycle.passed"
+            test -s "pr12-pr13-os-evidence/${os_name}/lite_grammar.passed"
             gate_args+=(--junit "${os_name}=pr12-pr13-os-evidence/${os_name}/junit.xml")
             gate_args+=(--gate-passed "${os_name}:platform_${os_name}_lifecycle")
           done

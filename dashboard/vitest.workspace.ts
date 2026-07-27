@@ -13,7 +13,7 @@ export default defineWorkspace([
     test: {
       name: 'node',
       environment: 'node',
-      include: ['codegen/**/*.test.ts', 'src/**/*.test.ts'],
+      include: ['codegen/**/*.test.ts', 'src/**/*.test.ts', 'stories/**/*.test.ts'],
       exclude: ['**/node_modules/**', '**/*.dom.test.{ts,tsx}'],
     },
   },

@@ -111,6 +111,10 @@ function resolvedProjectLabel(
     }
     case 'offline':
       return `registry offline · ${projectId}`;
+    case 'unauthorized':
+      return `registry unauthorized · ${projectId}`;
+    case 'denied':
+      return `registry denied · ${projectId}`;
     case 'error':
       return `registry error · ${projectId}`;
     case 'unsupported_schema':

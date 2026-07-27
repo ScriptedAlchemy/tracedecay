@@ -1458,9 +1458,14 @@ fn map_native_error(error: NativeGitIndexError) -> GitIndexTransactionPortError 
         NativeGitIndexError::PatchDoesNotMatchHunk
         | NativeGitIndexError::CandidateTreeMismatch
         | NativeGitIndexError::CommitIntentMismatch
-        | NativeGitIndexError::StaleRepositoryState
-        | NativeGitIndexError::MalformedOutput { .. }
-        | NativeGitIndexError::Domain(_) => GitIndexTransactionPortError::StalePreview,
+        | NativeGitIndexError::StaleRepositoryState => GitIndexTransactionPortError::StalePreview,
+        // Native output we could not interpret is not evidence that the
+        // caller's snapshot moved. Reporting it as staleness told every caller
+        // to recapture and retry a request that will fail identically, and it
+        // made an adapter defect indistinguishable from ordinary contention.
+        NativeGitIndexError::MalformedOutput { .. } | NativeGitIndexError::Domain(_) => {
+            GitIndexTransactionPortError::NativeFailure
+        }
         NativeGitIndexError::RepositoryUnavailable(_)
         | NativeGitIndexError::GitFailed { .. }
         | NativeGitIndexError::Io(_)
