@@ -525,9 +525,7 @@ impl McpServer {
             return;
         }
 
-        if let Some(worker) = self.project_host_admission_replay.lock().await.take() {
-            worker.shutdown().await;
-        }
+        self.shutdown_background_tasks().await;
 
         let uptime = self.stats.started_at.elapsed();
         let tool_calls = self.stats.tool_calls.load(Ordering::Relaxed);
@@ -581,6 +579,20 @@ impl McpServer {
             uptime_secs = uptime.as_secs(),
             "MCP server shutdown complete"
         );
+    }
+
+    pub(crate) async fn shutdown_background_tasks(&self) {
+        if let Some(worker) = self.project_host_admission_replay.lock().await.take() {
+            worker.shutdown().await;
+        }
+        if let Some(task) = self.startup_catch_up_task.lock().await.take() {
+            task.abort();
+            let _ = task.await;
+            self.startup_catch_up_done.store(true, Ordering::Release);
+        }
+        if let Some(task) = self.startup_transcript_ingest_task.lock().await.take() {
+            let _ = task.await;
+        }
     }
 
     pub(crate) async fn replay_host_admission(

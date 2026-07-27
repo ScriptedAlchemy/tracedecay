@@ -24,6 +24,21 @@ pub(super) struct WriterTestFixtureAuthority {
     _runtime: Arc<crate::application::host_admission::HostAdmissionTestRuntimeV1>,
 }
 
+impl WriterTestFixtureAuthority {
+    pub(super) async fn reopen_project_graph(&self, project_root: &Path) -> TraceDecay {
+        self._runtime
+            .open_project_graph_for_test(
+                project_root,
+                crate::tracedecay::TraceDecayOpenOptions {
+                    profile_root: Some(self._runtime.profile_root_for_test().to_path_buf()),
+                    global_db_path: None,
+                },
+            )
+            .await
+            .expect("reopen registered project graph")
+    }
+}
+
 pub(super) async fn init_indexed_repo() -> (TraceDecay, TempDir, WriterTestFixtureAuthority) {
     let pin = PinnedUserDataDir::new();
     let dir = TempDir::new().expect("temp repo");

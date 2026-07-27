@@ -3,8 +3,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::symlink;
 use std::time::SystemTime;
 
-use rusqlite::Connection as RusqliteConnection;
-
 use super::*;
 use crate::global_db::StoreInstanceUpsert;
 use crate::storage::{
@@ -541,47 +539,22 @@ async fn current_project_store_resolves_profile_shard_via_registry_alias()
     let project_root = dir.path().join("repo");
     std::fs::create_dir_all(&project_root)?;
     let project_root = canonical_temp_path(&project_root);
-    let shard_root =
-        crate::storage::profile_sharded_data_root(&profile_root, "proj_doctor_current");
-    std::fs::create_dir_all(&shard_root)?;
-    std::fs::write(
-        shard_root.join(crate::config::db_filename(&shard_root)),
-        b"graph",
-    )?;
-
-    let runtime =
-        DoctorTestRuntime::open(&profile_root, "doctor current project resolution test").await;
-    let db = runtime.database();
-    let global_db_path = db.db_path().to_path_buf();
-    db.upsert_code_project(
-        "proj_doctor_current",
+    let project_id = tracedecay_store::ProjectId::new("proj_doctor_current")?;
+    let runtime = crate::application::host_admission::HostAdmissionTestRuntimeV1::project(
+        &profile_root,
         &project_root,
-        None,
-        None,
-        Some("main"),
+        project_id,
     )
-    .await
-    .ok_or_else(|| std::io::Error::other("could not upsert project"))?;
-    db.upsert_store_instance(StoreInstanceUpsert {
-        store_id: "store:proj_doctor_current:profile_sharded".to_string(),
-        project_id: "proj_doctor_current".to_string(),
-        store_kind: "code_project".to_string(),
-        storage_mode: "profile_sharded".to_string(),
-        store_relpath: Path::new("projects")
-            .join("proj_doctor_current")
-            .to_string_lossy()
-            .to_string(),
-        manifest_relpath: Some(crate::storage::STORE_MANIFEST_FILENAME.to_string()),
-        last_verified_at: Some(1_800_000_000),
-        last_write_at: Some(1_800_000_000),
-    })
-    .await
-    .ok_or_else(|| std::io::Error::other("could not upsert store"))?;
-
+    .await?;
     let open_options = TraceDecayOpenOptions {
         profile_root: Some(profile_root.clone()),
-        global_db_path: Some(global_db_path),
+        global_db_path: None,
     };
+    let graph = runtime
+        .initialize_project_graph_for_test(&project_root, open_options.clone())
+        .await?;
+    graph.index_all().await?;
+    let shard_root = graph.store_layout().data_root.clone();
 
     // No repo-local `.tracedecay/` index exists, yet the project must not
     // be reported as uninitialized: resolution finds the profile shard.
@@ -1647,7 +1620,7 @@ async fn temporal_fts_health_and_repair_are_explicit_bounded_and_idempotent() {
 }
 
 #[tokio::test]
-async fn temporal_fts_repair_accepts_only_exact_malformed_index_damage() {
+async fn temporal_fts_repair_accepts_exact_blob_index_damage() {
     let dir = tempfile::TempDir::new().unwrap();
     let runtime = DoctorTestRuntime::open(
         &dir.path().join("profile"),
@@ -1703,11 +1676,15 @@ async fn temporal_health_detects_cross_session_ownership() {
     .await;
     let db = runtime.database();
     db.checkpoint_result().await.unwrap();
-    let writer = RusqliteConnection::open(db.db_path()).unwrap();
+    let writer = db.writer_connection().unwrap();
     writer
         .execute_batch(
-            "PRAGMA foreign_keys = OFF;
-             DROP TRIGGER session_summary_sources_owner_guard_v1;
+            "DROP TRIGGER session_summary_sources_owner_guard_v1;
+             INSERT INTO retrieval_anchors (
+                 anchor_id, anchor_json, owner_json, projection_generation
+             ) VALUES
+                 ('anchor-a', '{}', '{}', 'doctor-fixture'),
+                 ('anchor-b', '{}', '{}', 'doctor-fixture');
              INSERT INTO session_summary_nodes (
                  summary_id, session_id, summary_anchor_id, summary_text, index_text,
                  source_horizon_json, publication_json, created_at
@@ -1718,6 +1695,7 @@ async fn temporal_health_detects_cross_session_ownership() {
                  summary_id, source_ordinal, source_kind, source_anchor_id, source_summary_id
              ) VALUES ('summary-b', 0, 'summary', NULL, 'summary-a');",
         )
+        .await
         .unwrap();
     drop(writer);
     db.checkpoint_result().await.unwrap();
@@ -1747,6 +1725,27 @@ fn temporal_fts_classifier_rejects_whole_database_corruption() {
     assert!(
         crate::global_db::SessionTemporalHealthReport::is_allowed_fts_quick_check_for_test(
             "malformed inverted index for FTS5 table main.session_occurrences_fts",
+            true,
+            false,
+        )
+    );
+    assert!(
+        crate::global_db::SessionTemporalHealthReport::is_allowed_fts_quick_check_for_test(
+            "fts5: corruption found reading blob 137438953473 from table \"session_occurrences_fts\"",
+            true,
+            false,
+        )
+    );
+    assert!(
+        !crate::global_db::SessionTemporalHealthReport::is_allowed_fts_quick_check_for_test(
+            "fts5: corruption found reading blob 137438953473 from table \"session_summary_nodes_fts\"",
+            true,
+            false,
+        )
+    );
+    assert!(
+        !crate::global_db::SessionTemporalHealthReport::is_allowed_fts_quick_check_for_test(
+            "fts5: corruption found reading blob unknown from table \"session_occurrences_fts\"",
             true,
             false,
         )

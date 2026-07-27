@@ -38,6 +38,13 @@ fn normalize_rel_paths(paths: &[String]) -> Vec<String> {
     paths.iter().map(|p| normalize_rel_path(p)).collect()
 }
 
+fn is_tracedecay_state_path(path: &str) -> bool {
+    path == crate::config::TRACEDECAY_DIR
+        || path
+            .strip_prefix(crate::config::TRACEDECAY_DIR)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
 fn is_safe_lazy_dependency_path(path: &str) -> bool {
     if !path.starts_with("node_modules/") || path.contains('\\') {
         return false;
@@ -1391,7 +1398,10 @@ impl TraceDecay {
                 {
                     let mut push = |loc: &gix::bstr::BStr, mode: &gix::object::tree::EntryMode| {
                         if !mode.is_tree() {
-                            changed.insert(loc.to_string());
+                            let path = loc.to_string();
+                            if !is_tracedecay_state_path(&path) {
+                                changed.insert(path);
+                            }
                         }
                     };
                     match &change {

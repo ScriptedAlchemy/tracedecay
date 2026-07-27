@@ -22,7 +22,7 @@ use serde_json::Value;
 use tracedecay_domain::{RetrievalAnchorId, SessionId, SignedCursorKeyRefV1};
 
 use crate::application::session::{
-    AuthorizedTemporalExecutionRequest, SessionTemporalExecutionError,
+    AuthorizedTemporalExecutionRequest, SessionDataFreshness, SessionTemporalExecutionError,
     SessionTemporalExecutionPort, SessionTemporalExecutionReport, TemporalExecutionFuture,
 };
 use crate::global_db::RegisteredGlobalDb;
@@ -468,8 +468,60 @@ async fn freeze_participants(
             .map_err(map_control_error)?,
         );
     }
+    drop(rows);
+    if entries.is_empty() {
+        return if authorized_scope_has_sources(read, request).await? {
+            Err(SessionTemporalExecutionError::Unavailable)
+        } else {
+            Err(SessionTemporalExecutionError::Empty {
+                freshness: SessionDataFreshness::Fresh,
+            })
+        };
+    }
     let participants = TemporalParticipantManifest::new(entries).map_err(map_control_error)?;
     Ok((participants, aggregate, shared_cursor_key.flatten()))
+}
+
+async fn authorized_scope_has_sources(
+    read: &TemporalSqlRead<'_>,
+    request: &AuthorizedTemporalExecutionRequest,
+) -> Result<bool, SessionTemporalExecutionError> {
+    let snapshot_request = request.snapshot_request();
+    let provider = snapshot_request.provider_scope();
+    let project_key = snapshot_request
+        .authorized_root()
+        .ok_or(SessionTemporalExecutionError::WrongScope)?
+        .project_key();
+    let mut rows = match snapshot_request.retrieval_scope() {
+        TemporalRetrievalScope::Session(session_id) => {
+            read.query(
+                "SELECT 1
+                 FROM sessions
+                 WHERE session_id = ?1
+                   AND project_key = ?2
+                   AND (?3 IS NULL OR provider = ?3)
+                 LIMIT 1",
+                params![session_id.as_str(), project_key, provider],
+            )
+            .await
+        }
+        TemporalRetrievalScope::AllSessionsInAuthorizedRoot => {
+            read.query(
+                "SELECT 1
+                 FROM sessions
+                 WHERE project_key = ?1
+                   AND (?2 IS NULL OR provider = ?2)
+                 LIMIT 1",
+                params![project_key, provider],
+            )
+            .await
+        }
+    }
+    .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+    rows.next()
+        .await
+        .map(|row| row.is_some())
+        .map_err(|_| SessionTemporalExecutionError::Unavailable)
 }
 
 impl SessionTemporalExecutionPort for RegisteredGlobalDbSessionTemporalExecution<'_> {
@@ -546,11 +598,10 @@ fn map_control_error(
         }) => SessionTemporalExecutionError::Kernel(
             crate::query::temporal::TemporalKernelError::Port(error),
         ),
-        // An authorized root with no active generations is empty, not broken:
-        // freshly ingested sessions become searchable only after an explicit
-        // refresh, and reads must stay side-effect free.
+        // The caller distinguishes a genuinely source-free root from sources
+        // that exist but have not published a searchable generation.
         crate::query::temporal::ports::TemporalPortError::EmptyParticipantManifest => {
-            SessionTemporalExecutionError::Empty
+            SessionTemporalExecutionError::Unavailable
         }
         _ => SessionTemporalExecutionError::Unavailable,
     }

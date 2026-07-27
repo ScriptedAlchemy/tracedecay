@@ -217,6 +217,11 @@ pub(crate) struct DashboardState {
     /// Keeps every project-database authority alive as long as cloned raw
     /// connections remain reachable through this state.
     pub(crate) _database_guards: Vec<Arc<Database>>,
+    /// Read-only telemetry handle attached to the retained active graph runtime.
+    /// This remains distinct from project memory when those stores use
+    /// different files.
+    pub(crate) graph_telemetry_handle:
+        Option<tracedecay_rusqlite_runtime::migration_sql::MigrationSqlHandle>,
     /// Display path of the active code-graph database.
     pub(crate) graph_db_path: String,
     /// Authoritative project-memory handle and process-local writer lane.
@@ -453,6 +458,7 @@ async fn build_state_inner(
         memory_owner,
         graph_conn: mem_db.engine_conn(),
         _database_guards: vec![mem_db.clone()],
+        graph_telemetry_handle: cg.storage_telemetry_handle().ok(),
         graph_db_path: cg.dashboard_db_path().display().to_string(),
         mem_db,
         mem_db_path,

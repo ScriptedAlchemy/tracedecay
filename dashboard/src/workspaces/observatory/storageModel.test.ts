@@ -14,6 +14,8 @@ import {
   refreshOperation,
   storageFindingLabel,
   storeRolesLabel,
+  tableGrowthOmissionPresentation,
+  tableGrowthPresentation,
 } from './storageModel.ts';
 
 const SETTING_KEY = 'sync.retention.v1 store_soft_budgets_bytes';
@@ -123,6 +125,7 @@ describe('Observatory storage read models', () => {
           'stale_branch_dbs',
           'incident_debris_present',
           'retention_backlog',
+          'table_growth',
         ] as const
       ).map(storageFindingLabel),
     ).toEqual([
@@ -131,6 +134,7 @@ describe('Observatory storage read models', () => {
       'Stale branch databases',
       'Incident debris',
       'Retention backlog',
+      'Table growth',
     ]);
     expect(payload.entries[0]?.storage_kind).toBe('over_budget_store');
     expect(payload.entries[0]?.finding.coverage.statement).toBe(
@@ -173,10 +177,45 @@ describe('Observatory storage read models', () => {
             total_bytes: 32768,
             reason: 'first watermark recorded in this daemon lifetime',
           },
+          table_growth: {
+            state: 'baseline_established',
+            coverage: {
+              completeness: 'partial',
+              eligible: 1,
+              examined: 0,
+              matched: null,
+              excluded: null,
+              omitted: 1,
+              unknown: null,
+              denominator: 1,
+              unit: 'store_table_growth_reads',
+              omission_reasons: ['no baseline yet'],
+            },
+            observed_at: 123,
+            tables_observed: 4,
+            omission_reasons: ['no baseline yet'],
+          },
         },
       ],
       budget_note: 'budget note',
       growth_note: 'growth note',
+      table_growth_threshold: {
+        absolute_bytes: 67_108_864,
+        relative_floor_bytes: 1_048_576,
+        relative_percent: 10,
+      },
+      table_growth_coverage: {
+        completeness: 'partial',
+        eligible: 1,
+        examined: 0,
+        matched: null,
+        excluded: null,
+        omitted: 1,
+        unknown: null,
+        denominator: 1,
+        unit: 'store_table_growth_reads',
+        omission_reasons: ['graph.db: no baseline yet'],
+      },
     });
 
     const store = payload.stores[0]!;
@@ -185,6 +224,103 @@ describe('Observatory storage read models', () => {
     expect(store.growth.state).toBe('baseline');
     expect(store.roles).toEqual(['graph', 'memory']);
     expect(store.read.kind).toBe('observed');
+  });
+});
+
+describe('table growth presentation', () => {
+  it('preserves observed omission reasons for partial coverage', () => {
+    const reason = 'new_messages: no previous table watermark exists; baseline pending';
+    const presentation = tableGrowthPresentation({
+      state: 'observed',
+      coverage: {
+        completeness: 'partial',
+        eligible: 1,
+        examined: 0,
+        matched: null,
+        excluded: null,
+        omitted: 1,
+        unknown: null,
+        denominator: 1,
+        unit: 'current_tables',
+        omission_reasons: [reason],
+      },
+      significant_samples: [],
+      omissions: [
+        {
+          kind: 'baseline_pending',
+          table: 'new_messages',
+          current_bytes: 4096,
+          observed_at: 20,
+          reason,
+        },
+      ],
+      omission_reasons: [reason],
+    });
+
+    expect(presentation.notes).toEqual([reason]);
+    expect(presentation.summary).not.toMatch(/zero|no growth/i);
+    // An observed read that could not compare every current table says so in
+    // the summary, so a partial comparison never reads as a complete one.
+    expect(presentation.summary).toContain('partial table coverage');
+    // Partial coverage is still a measurement, not a fault.
+    expect(presentation.tone).toBe('ready');
+  });
+
+  it('omits the partial-coverage wording once every current table was compared', () => {
+    const presentation = tableGrowthPresentation({
+      state: 'observed',
+      coverage: {
+        completeness: 'complete',
+        eligible: 2,
+        examined: 2,
+        matched: null,
+        excluded: null,
+        omitted: 0,
+        unknown: null,
+        denominator: 2,
+        unit: 'current_tables',
+        omission_reasons: [],
+      },
+      significant_samples: [],
+      omissions: [],
+      omission_reasons: [],
+    });
+
+    expect(presentation.summary).not.toContain('partial');
+    expect(presentation.notes).toEqual([]);
+  });
+
+  it('formats below-threshold omission bytes and never invents a baseline delta', () => {
+    expect(
+      tableGrowthOmissionPresentation({
+        kind: 'below_threshold',
+        table: 'metadata',
+        previous_bytes: 104_857_600,
+        current_bytes: 105_381_888,
+        growth_bytes: 524_288,
+        previous_observed_at: 10,
+        current_observed_at: 20,
+        reason: 'observed growth was below the informational significance threshold',
+      }),
+    ).toEqual({
+      kind: 'below_threshold',
+      table: 'metadata',
+      figure: '+512.0 KiB',
+      detail: '100.0 MiB → 100.5 MiB',
+    });
+
+    // A table with no previous watermark has a current size and nothing to
+    // subtract it from: it must never render a delta, signed or zero.
+    const pending = tableGrowthOmissionPresentation({
+      kind: 'baseline_pending',
+      table: 'embeddings',
+      current_bytes: 4_194_304,
+      observed_at: 20,
+      reason: 'embeddings: no previous table watermark exists; baseline pending',
+    });
+    expect(pending.figure).toBe('4.0 MiB now');
+    expect(pending.detail).toBe('no previous watermark · baseline pending');
+    expect(pending.figure).not.toMatch(/^[+−-]/);
   });
 });
 

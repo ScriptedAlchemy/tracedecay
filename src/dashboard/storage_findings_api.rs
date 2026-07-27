@@ -23,12 +23,13 @@ use super::storage_telemetry_api::{
     BUDGET_SETTING_KEY, StoreBudgetSourceSummaryV1, budget_source_summary,
 };
 
-const STORAGE_KINDS: [DoctorStorageFindingKindV1; 5] = [
+const STORAGE_KINDS: [DoctorStorageFindingKindV1; 6] = [
     DoctorStorageFindingKindV1::OverBudgetStore,
     DoctorStorageFindingKindV1::OrphanStore,
     DoctorStorageFindingKindV1::StaleBranchDbs,
     DoctorStorageFindingKindV1::IncidentDebrisPresent,
     DoctorStorageFindingKindV1::RetentionBacklog,
+    DoctorStorageFindingKindV1::TableGrowth,
 ];
 
 /// Whether one Plan 38 producer had enough source evidence to report a real

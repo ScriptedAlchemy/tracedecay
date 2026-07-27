@@ -49,6 +49,7 @@ pub(crate) struct McpServerConstructionContext {
     /// When true (daemon-owned project servers), spawn a cancellable worker that
     /// continues bounded host-admission replay passes until idle.
     pub(crate) own_project_host_admission_replay: bool,
+    pub(crate) startup_catch_up_enabled: bool,
     pub(crate) allow_default_registry_fallback: bool,
     pub(crate) automation_scheduler_reconciler:
         Option<crate::dashboard::AutomationSchedulerReconciler>,
@@ -70,6 +71,8 @@ pub(crate) struct McpServerConstructionContext {
     pub(crate) code_index_search_executor: Option<super::CodeIndexSearchExecutor>,
     pub(crate) code_index_search_authority: Option<super::CodeIndexSearchAuthorityV1>,
     pub(crate) retained_project_graph_resolver: Option<super::RetainedProjectGraphResolver>,
+    pub(crate) application_invocation_executor:
+        Option<Arc<dyn crate::daemon_client::DaemonInvocationExecutor>>,
     #[cfg(any(test, feature = "test-transport"))]
     pub(crate) host_admission_test_runtime:
         Option<Arc<crate::application::host_admission::HostAdmissionTestRuntimeV1>>,
@@ -135,6 +138,7 @@ impl McpServerConstructionContext {
             project_session_refresh_wake: None,
             user_session_refresh_wake: None,
             own_project_host_admission_replay: false,
+            startup_catch_up_enabled: true,
             allow_default_registry_fallback: true,
             automation_scheduler_reconciler: None,
             database_owner_reconciler: None,
@@ -151,6 +155,7 @@ impl McpServerConstructionContext {
             code_index_search_executor: None,
             code_index_search_authority: None,
             retained_project_graph_resolver: None,
+            application_invocation_executor: None,
             #[cfg(any(test, feature = "test-transport"))]
             host_admission_test_runtime: None,
         }
@@ -207,6 +212,7 @@ impl McpServerConstructionContext {
             project_session_refresh_wake: Some(project_session_refresh_wake),
             user_session_refresh_wake: Some(user_session_refresh_wake),
             own_project_host_admission_replay: true,
+            startup_catch_up_enabled: true,
             allow_default_registry_fallback: false,
             automation_scheduler_reconciler: None,
             database_owner_reconciler: Some(database_owner_reconciler),
@@ -223,6 +229,7 @@ impl McpServerConstructionContext {
             code_index_search_executor: None,
             code_index_search_authority: None,
             retained_project_graph_resolver: None,
+            application_invocation_executor: None,
             #[cfg(any(test, feature = "test-transport"))]
             host_admission_test_runtime: None,
         }
@@ -261,6 +268,14 @@ impl McpServerConstructionContext {
         self
     }
 
+    pub(crate) fn with_application_invocation_executor(
+        mut self,
+        executor: Arc<dyn crate::daemon_client::DaemonInvocationExecutor>,
+    ) -> Self {
+        self.application_invocation_executor = Some(executor);
+        self
+    }
+
     pub(crate) fn with_retained_project_graph_resolver(
         mut self,
         resolver: super::RetainedProjectGraphResolver,
@@ -269,12 +284,16 @@ impl McpServerConstructionContext {
         self
     }
 
-    #[cfg(unix)]
     pub(crate) fn with_automation_scheduler_reconciler(
         mut self,
         reconciler: crate::dashboard::AutomationSchedulerReconciler,
     ) -> Self {
         self.automation_scheduler_reconciler = Some(reconciler);
+        self
+    }
+
+    pub(crate) fn with_startup_catch_up_enabled(mut self, enabled: bool) -> Self {
+        self.startup_catch_up_enabled = enabled;
         self
     }
 

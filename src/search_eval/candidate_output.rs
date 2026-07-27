@@ -2078,7 +2078,8 @@ fn prepare_production_query(
     let kernel = CompositionKernel::new(id::<ComponentRevision>(
         crate::query::retrieval::PR9_RANKING_REVISION_V1,
     )?);
-    let fusion_profile = fusion_profile(profile, &budget, false)?;
+    let fallback_profile = pr9_fallback_profile(profile);
+    let fusion_profile = fusion_profile(&fallback_profile, &budget, false)?;
     let pr9_lanes = vec![
         CompositionLaneInput::new(RetrieverKind::ExactLiteral, exact_outcome)
             .map_err(|error| CandidateOutputError::Contract(error.to_string()))?,
@@ -2123,10 +2124,16 @@ fn pr9_fallback_digest_for_query(
     query: &WorkloadQueryV1,
 ) -> Result<String, CandidateOutputError> {
     // PR9-only profile compose for digest stability measurement.
-    let mut pr9_profile = profile.clone();
-    pr9_profile.semantic_weight_ppm = 0;
-    pr9_profile.rerank_weight_ppm = 0;
+    let pr9_profile = pr9_fallback_profile(profile);
     fallback_digest_for_query(published, &pr9_profile, query)
+}
+
+fn pr9_fallback_profile(profile: &ProfileSpecV1) -> ProfileSpecV1 {
+    let mut fallback = profile.clone();
+    fallback.profile_id = "pr9-fallback".to_owned();
+    fallback.semantic_weight_ppm = 0;
+    fallback.rerank_weight_ppm = 0;
+    fallback
 }
 
 fn fallback_digest_for_query(
@@ -3993,6 +4000,32 @@ mod tests {
 
     #[test]
     fn distinct_ten_x_corpus_produces_measured_resource_evidence() {
+        const CHILD_ENV: &str = "TRACEDECAY_RESOURCE_EVIDENCE_TEST_CHILD";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            assert_distinct_ten_x_corpus_produces_measured_resource_evidence();
+            return;
+        }
+
+        let output = std::process::Command::new(
+            std::env::current_exe().expect("resource test binary has a current executable"),
+        )
+        .args([
+            "--exact",
+            "search_eval::candidate_output::tests::distinct_ten_x_corpus_produces_measured_resource_evidence",
+            "--nocapture",
+        ])
+        .env(CHILD_ENV, "1")
+        .output()
+        .expect("run resource measurement in a dedicated process");
+        assert!(
+            output.status.success(),
+            "dedicated resource measurement failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn assert_distinct_ten_x_corpus_produces_measured_resource_evidence() {
         let fixture = authenticated_repo_fixture();
         let fixture_root = &fixture.root;
         let workload = workload();
@@ -4011,7 +4044,15 @@ mod tests {
         } else {
             crate::search_eval::DirectEvaluationStatusV1::Pending
         };
-        assert_eq!(report.status, expected_status);
+        let resources = result
+            .outputs
+            .iter()
+            .map(|output| (&output.partition, &output.resources))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            report.status, expected_status,
+            "unexpected grouped resource evaluation: {resources:#?}"
+        );
         assert!(
             report
                 .profiles
