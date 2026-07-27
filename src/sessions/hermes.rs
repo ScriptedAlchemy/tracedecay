@@ -32,7 +32,8 @@ mod tests;
 
 pub use ingest::{
     HermesSweepOutcome, ProjectIngestDestination, ingest_for_project, ingest_for_project_capped,
-    ingest_for_project_capped_with_admission, ingest_for_projects, ingest_homes,
+    ingest_for_project_capped_with_admission,
+    ingest_for_project_capped_with_admission_and_cancellation, ingest_for_projects, ingest_homes,
     ingest_homes_capped, ingest_homes_capped_with_admission, ingest_homes_for_projects,
     ingest_user_homes, ingest_user_homes_capped, ingest_user_sessions_capped,
 };

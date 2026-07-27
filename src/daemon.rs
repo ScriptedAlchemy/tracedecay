@@ -1266,12 +1266,14 @@ pub async fn run_foreground(_socket_path: PathBuf) -> Result<()> {
         });
     }
     lifecycle.begin_draining();
+    cancel_project_server_startup_ingests(&store_administration).await;
     let _ = timeout(
         DAEMON_TASK_ABORT_DEADLINE,
         http_application_service.shutdown(),
     )
     .await;
     shutdown_portable_project_open_tasks(project_open_gates.as_ref()).await;
+    cancel_project_server_startup_ingests(&store_administration).await;
     invocation.shutdown().await;
     let in_flight_drained = timeout(DAEMON_CLIENT_DRAIN_DEADLINE, lifecycle.wait_for_idle())
         .await
@@ -1431,12 +1433,14 @@ async fn run_foreground_unix(socket_path: PathBuf) -> Result<()> {
         });
     }
     engine.lifecycle.begin_draining();
+    cancel_project_server_startup_ingests(&engine.store_administration).await;
     let _ = timeout(
         DAEMON_TASK_ABORT_DEADLINE,
         http_application_service.shutdown(),
     )
     .await;
     engine.shutdown_project_open_tasks().await;
+    cancel_project_server_startup_ingests(&engine.store_administration).await;
     // Stop accepting and unlink the socket before draining so clients that
     // connect during shutdown get NotFound/ConnectionRefused (which they retry
     // via `connect_with_restart_grace`) instead of a queued connection that
@@ -3412,6 +3416,21 @@ impl DaemonEngine {
         self.lifecycle.begin_draining();
         self.shutdown_background_tasks().await;
         self.shutdown_servers().await;
+    }
+}
+
+async fn cancel_project_server_startup_ingests(store_administration: &StoreAdministration) {
+    let servers = {
+        let registry = store_administration.project_servers().lock().await;
+        let mut seen = HashSet::new();
+        registry
+            .values()
+            .filter(|server| seen.insert(Arc::as_ptr(server) as usize))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    for server in servers {
+        server.cancel_startup_transcript_ingest();
     }
 }
 

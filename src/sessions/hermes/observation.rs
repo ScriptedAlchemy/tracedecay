@@ -429,6 +429,29 @@ pub(crate) fn prepare_observation_row(
     file_identity: u64,
     resume_fingerprint: u64,
 ) -> Result<HermesAdmission, String> {
+    prepare_observation_row_with_cancellation(
+        row,
+        projection,
+        scope,
+        generation,
+        expected_cursor,
+        file_identity,
+        resume_fingerprint,
+        &ObservationCancellation::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn prepare_observation_row_with_cancellation(
+    row: &HermesRow,
+    projection: Option<&HermesProjectionMetadata>,
+    scope: &ObservationScopeV1,
+    generation: ObservationSourceGenerationV1,
+    expected_cursor: Option<ObservationSourceCursorV1>,
+    file_identity: u64,
+    resume_fingerprint: u64,
+    cancellation: &ObservationCancellation,
+) -> Result<HermesAdmission, String> {
     let source = observation_source(row)?;
     let start = expected_cursor.as_ref().map_or(0, |cursor| {
         if cursor.generation() == generation {
@@ -518,7 +541,7 @@ pub(crate) fn prepare_observation_row(
                                 identity,
                                 expected_cursor.clone(),
                                 retention,
-                                ObservationCancellation::default(),
+                                cancellation.clone(),
                             )
                             .map_err(|_| "invalid Hermes capture request".to_string())?
                             .with_resume_checkpoint(file_identity, resume_fingerprint);

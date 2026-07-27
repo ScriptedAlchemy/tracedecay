@@ -21,6 +21,7 @@ use super::events;
 use super::meta::{nested_string_field, session_meta_with_provenance, string_field};
 use super::records::{response_item_tool_name, timestamp_from_record};
 use crate::application::host_admission::{HostAdmissionAuthorities, HostAdmissionFacade};
+use crate::application::observation::ObservationCancellation;
 use crate::privacy::{ObservationRecordParseErrorV1, parse_normalized_observation_record_v1};
 use crate::sessions::jsonl_observation_admission::{
     JsonlFrameAdmission, JsonlObservationAdmissionRequest, PersistedCursorUpdate,
@@ -73,6 +74,25 @@ pub async fn try_admit_codex_jsonl_observations_for_project_with_admission(
     admission: &HostAdmissionFacade<'_>,
     max_new_bytes: Option<u64>,
 ) -> TranscriptIngestResult<CodexJsonlAdmissionProgress> {
+    try_admit_codex_jsonl_observations_for_project_with_admission_and_cancellation(
+        path,
+        project_root,
+        project_id,
+        admission,
+        max_new_bytes,
+        &ObservationCancellation::default(),
+    )
+    .await
+}
+
+pub async fn try_admit_codex_jsonl_observations_for_project_with_admission_and_cancellation(
+    path: &Path,
+    project_root: &Path,
+    project_id: ProjectId,
+    admission: &HostAdmissionFacade<'_>,
+    max_new_bytes: Option<u64>,
+    cancellation: &ObservationCancellation,
+) -> TranscriptIngestResult<CodexJsonlAdmissionProgress> {
     try_admit_codex_jsonl_observations(
         path,
         CodexObservationAdmission::Project {
@@ -81,6 +101,7 @@ pub async fn try_admit_codex_jsonl_observations_for_project_with_admission(
         },
         admission,
         max_new_bytes,
+        cancellation,
     )
     .await
 }
@@ -113,6 +134,25 @@ pub async fn try_admit_codex_jsonl_observations_for_profile_with_admission(
     admission: &HostAdmissionFacade<'_>,
     max_new_bytes: Option<u64>,
 ) -> TranscriptIngestResult<CodexJsonlAdmissionProgress> {
+    try_admit_codex_jsonl_observations_for_profile_with_admission_and_cancellation(
+        path,
+        session_id,
+        registered_roots,
+        admission,
+        max_new_bytes,
+        &ObservationCancellation::default(),
+    )
+    .await
+}
+
+pub async fn try_admit_codex_jsonl_observations_for_profile_with_admission_and_cancellation(
+    path: &Path,
+    session_id: Option<&str>,
+    registered_roots: &[PathBuf],
+    admission: &HostAdmissionFacade<'_>,
+    max_new_bytes: Option<u64>,
+    cancellation: &ObservationCancellation,
+) -> TranscriptIngestResult<CodexJsonlAdmissionProgress> {
     try_admit_codex_jsonl_observations(
         path,
         CodexObservationAdmission::Profile {
@@ -121,6 +161,7 @@ pub async fn try_admit_codex_jsonl_observations_for_profile_with_admission(
         },
         admission,
         max_new_bytes,
+        cancellation,
     )
     .await
 }
@@ -176,7 +217,14 @@ async fn try_admit_codex_jsonl_observations(
     admission_scope: CodexObservationAdmission<'_>,
     admission: &HostAdmissionFacade<'_>,
     max_new_bytes: Option<u64>,
+    cancellation: &ObservationCancellation,
 ) -> TranscriptIngestResult<CodexJsonlAdmissionProgress> {
+    if cancellation.is_cancelled() {
+        return Ok(CodexJsonlAdmissionProgress {
+            bytes_consumed: 0,
+            source_deferred: true,
+        });
+    }
     let parsed_meta = session_meta_with_provenance(path).ok_or_else(|| {
         TranscriptIngestError::InvalidSourceIdentity {
             provider: PROVIDER,
@@ -202,7 +250,8 @@ async fn try_admit_codex_jsonl_observations(
         RetentionClass::new(CODEX_OBSERVATION_RETENTION)?,
     )
     .with_max_new_bytes(max_new_bytes)
-    .with_persisted_cursor_update(PersistedCursorUpdate::Replace);
+    .with_persisted_cursor_update(PersistedCursorUpdate::Replace)
+    .with_cancellation(cancellation.clone());
     let progress = admit_jsonl_observations(
         request,
         |scan| {

@@ -7,11 +7,15 @@ use tracedecay_domain::{ObservationScopeV1, ProjectId};
 
 use crate::agents::hermes::read_config_pinned_project_root;
 use crate::application::host_admission::HostAdmissionFacade;
+use crate::application::observation::ObservationCancellation;
 use crate::sessions::ingest_byte_budget::IngestByteBudget;
 use crate::sessions::shared::{TranscriptIngestStats, path_belongs_to_project};
 
 use super::DEFAULT_HERMES_SWEEP_BYTES;
-use super::coverage::drain_hermes_projections_with_admission;
+use super::coverage::{
+    drain_hermes_projections_with_admission,
+    drain_hermes_projections_with_admission_and_cancellation,
+};
 use super::state_db::{
     try_ingest_state_db_bounded_with_admission, try_ingest_state_db_for_projects,
     try_ingest_user_state_db_bounded_with_admission,
@@ -67,11 +71,35 @@ pub async fn ingest_for_project_capped_with_admission(
     admission: &HostAdmissionFacade<'_>,
     max_new_bytes: Option<u64>,
 ) -> HermesSweepOutcome {
+    ingest_for_project_capped_with_admission_and_cancellation(
+        project_root,
+        project_id,
+        admission,
+        max_new_bytes,
+        &ObservationCancellation::default(),
+    )
+    .await
+}
+
+pub async fn ingest_for_project_capped_with_admission_and_cancellation(
+    project_root: &Path,
+    project_id: ProjectId,
+    admission: &HostAdmissionFacade<'_>,
+    max_new_bytes: Option<u64>,
+    cancellation: &ObservationCancellation,
+) -> HermesSweepOutcome {
     let homes = crate::sessions::home_dir()
         .map(|home| vec![home.join(".hermes")])
         .unwrap_or_default();
-    ingest_homes_capped_with_admission(&homes, project_root, project_id, admission, max_new_bytes)
-        .await
+    ingest_homes_capped_with_admission_and_cancellation(
+        &homes,
+        project_root,
+        project_id,
+        admission,
+        max_new_bytes,
+        cancellation,
+    )
+    .await
 }
 
 /// One project-store destination for a shared Hermes source sweep.
@@ -177,9 +205,34 @@ pub async fn ingest_homes_capped_with_admission(
     admission: &HostAdmissionFacade<'_>,
     max_new_bytes: Option<u64>,
 ) -> HermesSweepOutcome {
+    ingest_homes_capped_with_admission_and_cancellation(
+        hermes_homes,
+        project_root,
+        project_id,
+        admission,
+        max_new_bytes,
+        &ObservationCancellation::default(),
+    )
+    .await
+}
+
+pub async fn ingest_homes_capped_with_admission_and_cancellation(
+    hermes_homes: &[PathBuf],
+    project_root: &Path,
+    project_id: ProjectId,
+    admission: &HostAdmissionFacade<'_>,
+    max_new_bytes: Option<u64>,
+    cancellation: &ObservationCancellation,
+) -> HermesSweepOutcome {
     let mut outcome = HermesSweepOutcome::default();
+    if cancellation.is_cancelled() {
+        return outcome;
+    }
     let mut budget = new_sweep_budget(max_new_bytes);
     for source in candidate_state_dbs(hermes_homes, project_root) {
+        if cancellation.is_cancelled() {
+            break;
+        }
         if budget.exhausted() {
             budget.defer();
             break;
@@ -190,6 +243,7 @@ pub async fn ingest_homes_capped_with_admission(
             project_id.clone(),
             admission,
             &mut budget,
+            cancellation,
         )
         .await
         {
@@ -202,7 +256,14 @@ pub async fn ingest_homes_capped_with_admission(
         }
     }
     let scope = ObservationScopeV1::Project { project_id };
-    if let Err(error) = drain_hermes_projections_with_admission(admission, &scope).await {
+    if !cancellation.is_cancelled()
+        && let Err(error) = drain_hermes_projections_with_admission_and_cancellation(
+            admission,
+            &scope,
+            cancellation,
+        )
+        .await
+    {
         tracing::debug!(error, "Hermes project projection drain deferred");
     }
     outcome.bytes_consumed = budget.consumed();
@@ -229,12 +290,19 @@ pub(crate) async fn ingest_user_sessions_capped_with_admission(
     admission: &HostAdmissionFacade<'_>,
     registered_roots: &[PathBuf],
     max_new_bytes: Option<u64>,
+    cancellation: &ObservationCancellation,
 ) -> HermesSweepOutcome {
     let homes = crate::sessions::home_dir()
         .map(|home| vec![home.join(".hermes")])
         .unwrap_or_default();
-    ingest_user_homes_capped_with_admission(admission, &homes, registered_roots, max_new_bytes)
-        .await
+    ingest_user_homes_capped_with_admission(
+        admission,
+        &homes,
+        registered_roots,
+        max_new_bytes,
+        cancellation,
+    )
+    .await
 }
 
 pub async fn ingest_user_homes(
@@ -253,37 +321,14 @@ pub async fn ingest_user_homes_capped(
     registered_roots: &[PathBuf],
     max_new_bytes: Option<u64>,
 ) -> HermesSweepOutcome {
-    let mut outcome = HermesSweepOutcome::default();
-    let mut budget = new_sweep_budget(max_new_bytes);
-    for source in all_profile_sources(hermes_homes) {
-        if budget.exhausted() {
-            budget.defer();
-            break;
-        }
-        match try_ingest_user_state_db_bounded_with_admission(
-            admission,
-            &source,
-            registered_roots,
-            &mut budget,
-        )
-        .await
-        {
-            Ok(source_stats) => outcome.stats = outcome.stats.merge(source_stats),
-            Err(error) => tracing::debug!(
-                state_db = %source.state_db.display(),
-                error,
-                "skipping projectless Hermes transcript source"
-            ),
-        }
-    }
-    if let Err(error) =
-        drain_hermes_projections_with_admission(admission, &ObservationScopeV1::Profile).await
-    {
-        tracing::debug!(error, "Hermes profile projection drain deferred");
-    }
-    outcome.bytes_consumed = budget.consumed();
-    outcome.deferred_by_byte_cap = budget.deferred();
-    outcome
+    ingest_user_homes_capped_with_admission(
+        admission,
+        hermes_homes,
+        registered_roots,
+        max_new_bytes,
+        &ObservationCancellation::default(),
+    )
+    .await
 }
 
 async fn ingest_user_homes_capped_with_admission(
@@ -291,10 +336,17 @@ async fn ingest_user_homes_capped_with_admission(
     hermes_homes: &[PathBuf],
     registered_roots: &[PathBuf],
     max_new_bytes: Option<u64>,
+    cancellation: &ObservationCancellation,
 ) -> HermesSweepOutcome {
     let mut outcome = HermesSweepOutcome::default();
+    if cancellation.is_cancelled() {
+        return outcome;
+    }
     let mut budget = new_sweep_budget(max_new_bytes);
     for source in all_profile_sources(hermes_homes) {
+        if cancellation.is_cancelled() {
+            break;
+        }
         if budget.exhausted() {
             budget.defer();
             break;
@@ -304,6 +356,7 @@ async fn ingest_user_homes_capped_with_admission(
             &source,
             registered_roots,
             &mut budget,
+            cancellation,
         )
         .await
         {
@@ -315,8 +368,13 @@ async fn ingest_user_homes_capped_with_admission(
             ),
         }
     }
-    if let Err(error) =
-        drain_hermes_projections_with_admission(admission, &ObservationScopeV1::Profile).await
+    if !cancellation.is_cancelled()
+        && let Err(error) = drain_hermes_projections_with_admission_and_cancellation(
+            admission,
+            &ObservationScopeV1::Profile,
+            cancellation,
+        )
+        .await
     {
         tracing::debug!(error, "Hermes profile projection drain deferred");
     }
@@ -364,6 +422,7 @@ pub(crate) async fn ingest_legacy_pinned_profile(
         project_id,
         admission,
         &mut budget,
+        &ObservationCancellation::default(),
     )
     .await?;
     if budget.deferred() {

@@ -13,7 +13,7 @@ use crate::sessions::source::{
     FileDiscoveryReport, ParsedTranscript, SessionDraft, StoredCursor, TranscriptDiscoveryBounds,
     TranscriptIngestResult, TranscriptSource,
 };
-use crate::sessions::{SessionProvider, claude_observation, git_correlation, source};
+use crate::sessions::{SessionProvider, claude_observation, codex, git_correlation, source};
 
 use super::failure::{
     IngestPassBounds, IngestPassCoverage, IngestPassOutcome, allocate_pass_byte_budgets,
@@ -31,6 +31,7 @@ use super::scheduler::{
 };
 use super::startup::{
     StartupUserIngestGuard, TranscriptIngestOutcome,
+    ingest_user_global_sources_for_startup_with_db,
     ingest_user_global_sources_for_startup_with_db_without_registered_authority,
 };
 use super::user::{
@@ -253,6 +254,60 @@ async fn cancelled_user_pass_reports_partial_coverage() {
             .iter()
             .any(|failure| failure.reason_code == "ingest_pass_cancelled")
     );
+}
+
+#[tokio::test]
+async fn cancelled_startup_user_ingest_stops_before_registry_reads() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = profile_test_runtime(&temp).await;
+    let db = runtime
+        .registered_database(HostAdmissionScope::Profile)
+        .unwrap();
+    let cancellation = ObservationCancellation::default();
+    cancellation.cancel();
+
+    let outcome = ingest_user_global_sources_for_startup_with_db(
+        &db.binding().shard_id.brain_id,
+        &db.binding().shard_id.profile_id,
+        db,
+        db,
+        temp.path(),
+        &cancellation,
+    )
+    .await;
+
+    assert_eq!(outcome.stats, TranscriptIngestStats::default());
+    assert!(
+        outcome
+            .failures
+            .iter()
+            .any(|failure| failure.reason_code == "ingest_pass_cancelled")
+    );
+}
+
+#[tokio::test]
+async fn cancelled_codex_provider_stops_before_opening_the_next_jsonl_source() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_id = scheduler_test_project_id();
+    let runtime = project_test_runtime(&temp, temp.path(), project_id.clone()).await;
+    let facade = runtime.facade();
+    let cancellation = ObservationCancellation::default();
+    cancellation.cancel();
+
+    let outcome =
+        codex::try_admit_codex_jsonl_observations_for_project_with_admission_and_cancellation(
+            &temp.path().join("must-not-open.jsonl"),
+            temp.path(),
+            project_id,
+            &facade,
+            None,
+            &cancellation,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(outcome.bytes_consumed, 0);
+    assert!(outcome.source_deferred);
 }
 
 #[tokio::test]

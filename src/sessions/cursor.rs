@@ -164,6 +164,7 @@ fn admit_cursor_jsonl_observations<'a>(
     admission: &'a HostAdmissionFacade<'a>,
     scope: &'a ObservationScopeV1,
     max_new_bytes: Option<u64>,
+    cancellation: &'a ObservationCancellation,
 ) -> Pin<
     Box<dyn Future<Output = TranscriptIngestResult<JsonlObservationAdmissionProgress>> + Send + 'a>,
 > {
@@ -189,7 +190,8 @@ fn admit_cursor_jsonl_observations<'a>(
             scope.clone(),
             RetentionClass::new(CURSOR_OBSERVATION_RETENTION)?,
         )
-        .with_max_new_bytes(max_new_bytes);
+        .with_max_new_bytes(max_new_bytes)
+        .with_cancellation(cancellation.clone());
         let progress = admit_jsonl_observations(
             request,
             |scan| CursorJsonlAdmitState {
@@ -946,11 +948,17 @@ pub async fn try_ingest_cursor_transcript_event_capped_with_admission(
             admission,
             &scope,
             budget.remaining(),
+            &ObservationCancellation::default(),
         )
         .await?;
         budget.record_progress(progress.bytes_consumed, progress.source_deferred);
     }
-    let mut stats = drain_cursor_observation_projections(admission, &scope).await?;
+    let mut stats = drain_cursor_observation_projections(
+        admission,
+        &scope,
+        &ObservationCancellation::default(),
+    )
+    .await?;
     stats.bytes_consumed = budget.consumed();
     stats.source_deferred = budget.deferred();
     Ok(stats)
@@ -1080,11 +1088,17 @@ pub(crate) async fn try_ingest_cursor_user_transcript_event_capped_with_admissio
             admission,
             &scope,
             budget.remaining(),
+            &ObservationCancellation::default(),
         )
         .await?;
         budget.record_progress(progress.bytes_consumed, progress.source_deferred);
     }
-    let mut stats = drain_cursor_observation_projections(admission, &scope).await?;
+    let mut stats = drain_cursor_observation_projections(
+        admission,
+        &scope,
+        &ObservationCancellation::default(),
+    )
+    .await?;
     stats.bytes_consumed = budget.consumed();
     stats.source_deferred = budget.deferred();
     Ok(stats)
@@ -1106,6 +1120,7 @@ pub async fn try_ingest_cursor_project_sweep_capped<S: BuildHasher>(
         admission,
         max_new_bytes,
         skip_session_ids,
+        &ObservationCancellation::default(),
     )
     .await
 }
@@ -1118,6 +1133,7 @@ pub(crate) fn try_ingest_cursor_project_sweep_capped_with_admission<'a, S: Build
     admission: &'a HostAdmissionFacade<'a>,
     max_new_bytes: Option<u64>,
     skip_session_ids: std::collections::HashSet<String, S>,
+    cancellation: &'a ObservationCancellation,
 ) -> Pin<Box<dyn Future<Output = TranscriptIngestResult<CursorTranscriptIngestStats>> + Send + 'a>>
 {
     // Rehash into the default (Send) hasher before boxing so the returned
@@ -1134,6 +1150,7 @@ pub(crate) fn try_ingest_cursor_project_sweep_capped_with_admission<'a, S: Build
             admission,
             max_new_bytes,
             ObservationScopeV1::Project { project_id },
+            cancellation,
         )
         .await
     })
@@ -1153,6 +1170,7 @@ pub async fn try_ingest_cursor_user_sweep_capped<S: BuildHasher>(
         admission,
         max_new_bytes,
         skip_session_ids,
+        &ObservationCancellation::default(),
     )
     .await
 }
@@ -1162,6 +1180,7 @@ pub(crate) async fn try_ingest_cursor_user_sweep_capped_with_admission<S: BuildH
     admission: &HostAdmissionFacade<'_>,
     max_new_bytes: Option<u64>,
     skip_session_ids: std::collections::HashSet<String, S>,
+    cancellation: &ObservationCancellation,
 ) -> TranscriptIngestResult<CursorTranscriptIngestStats> {
     let Some(source) = CursorSweepSource::new() else {
         return Ok(CursorTranscriptIngestStats::default());
@@ -1174,6 +1193,7 @@ pub(crate) async fn try_ingest_cursor_user_sweep_capped_with_admission<S: BuildH
         admission,
         max_new_bytes,
         ObservationScopeV1::Profile,
+        cancellation,
     )
     .await
 }
@@ -1184,12 +1204,23 @@ async fn admit_cursor_sweep_observations_with_admission(
     admission: &HostAdmissionFacade<'_>,
     max_new_bytes: Option<u64>,
     scope: ObservationScopeV1,
+    cancellation: &ObservationCancellation,
 ) -> TranscriptIngestResult<CursorTranscriptIngestStats> {
+    if cancellation.is_cancelled() {
+        return Ok(CursorTranscriptIngestStats {
+            source_deferred: true,
+            ..CursorTranscriptIngestStats::default()
+        });
+    }
     let mut budget = match max_new_bytes {
         Some(limit) => IngestByteBudget::bounded(limit),
         None => IngestByteBudget::unbounded(),
     };
     for path in source.transcript_paths(project_root) {
+        if cancellation.is_cancelled() {
+            budget.defer();
+            break;
+        }
         let Some(parent_session_id) = sweep_parent_session_id(&path) else {
             continue;
         };
@@ -1210,11 +1241,16 @@ async fn admit_cursor_sweep_observations_with_admission(
             admission,
             &scope,
             budget.remaining(),
+            cancellation,
         )
         .await?;
         budget.record_progress(progress.bytes_consumed, progress.source_deferred);
     }
-    let mut stats = drain_cursor_observation_projections(admission, &scope).await?;
+    let mut stats = if cancellation.is_cancelled() {
+        CursorTranscriptIngestStats::default()
+    } else {
+        drain_cursor_observation_projections(admission, &scope, cancellation).await?
+    };
     stats.bytes_consumed = budget.consumed();
     stats.source_deferred = budget.deferred();
     Ok(stats)
@@ -1223,19 +1259,17 @@ async fn admit_cursor_sweep_observations_with_admission(
 async fn drain_cursor_observation_projections(
     admission: &HostAdmissionFacade<'_>,
     scope: &ObservationScopeV1,
+    cancellation: &ObservationCancellation,
 ) -> TranscriptIngestResult<CursorTranscriptIngestStats> {
-    let stats = crate::sessions::claude_observation::drain_projection_queue(
-        admission,
-        scope,
-        &ObservationCancellation::default(),
-    )
-    .await
-    .map_err(|error| match error {
-        crate::sessions::claude_observation::ClaudeObservationIngestError::Transcript(error) => {
-            error
-        }
-        _ => TranscriptIngestError::InvalidFrameState { provider: "cursor" },
-    })?;
+    let stats =
+        crate::sessions::claude_observation::drain_projection_queue(admission, scope, cancellation)
+            .await
+            .map_err(|error| match error {
+                crate::sessions::claude_observation::ClaudeObservationIngestError::Transcript(
+                    error,
+                ) => error,
+                _ => TranscriptIngestError::InvalidFrameState { provider: "cursor" },
+            })?;
     Ok(CursorTranscriptIngestStats {
         sessions_upserted: stats.transcript.sessions_upserted,
         messages_upserted: stats.projection_outputs,
@@ -2263,7 +2297,54 @@ fn dispatch_message_metadata(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::application::host_admission::HostAdmissionTestRuntimeV1;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn cancelled_startup_sweep_defers_before_admitting_cursor_jsonl() {
+        let profile = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let project_id = ProjectId::new("project.cursor-cancelled-startup").unwrap();
+        let runtime =
+            HostAdmissionTestRuntimeV1::project(profile.path(), project.path(), project_id.clone())
+                .await
+                .unwrap();
+        let slug = cursor_project_slug(project.path()).unwrap();
+        let transcript_dir = home
+            .path()
+            .join(".cursor")
+            .join("projects")
+            .join(slug)
+            .join("agent-transcripts")
+            .join("session-cancelled");
+        std::fs::create_dir_all(&transcript_dir).unwrap();
+        std::fs::write(
+            transcript_dir.join("session-cancelled.jsonl"),
+            r#"{"role":"user","message":{"content":"must not ingest"}}"#,
+        )
+        .unwrap();
+        let source = CursorSweepSource::with_home(home.path());
+        let facade = runtime.facade();
+        let cancellation = ObservationCancellation::default();
+        cancellation.cancel();
+
+        let outcome = admit_cursor_sweep_observations_with_admission(
+            &source,
+            project.path(),
+            &facade,
+            None,
+            ObservationScopeV1::Project { project_id },
+            &cancellation,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.sessions_upserted, 0);
+        assert_eq!(outcome.messages_upserted, 0);
+        assert_eq!(outcome.bytes_consumed, 0);
+        assert!(outcome.source_deferred);
+    }
 
     #[test]
     fn host_event_ordering_is_kept_distinct_from_transcript_ordering() {

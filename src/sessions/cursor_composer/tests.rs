@@ -12,7 +12,72 @@ use serde_json::{Value, json};
 use tracedecay_domain::{CanonicalObservationFactV1, CanonicalWorkflowSemanticKindV1};
 use tracedecay_domain::{ObservationScopeV1, ObservationSourceGenerationV1};
 
+use crate::application::host_admission::HostAdmissionTestRuntimeV1;
+use crate::application::observation::ObservationCancellation;
 use crate::sessions::ingest_byte_budget::IngestByteBudget;
+
+#[tokio::test]
+async fn cancelled_composer_sweep_stops_before_scanning_state_database() {
+    let profile = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let state_dir = home
+        .path()
+        .join(".config")
+        .join("Cursor")
+        .join("User")
+        .join("globalStorage");
+    std::fs::create_dir_all(&state_dir).unwrap();
+    let connection = rusqlite::Connection::open(state_dir.join("state.vscdb")).unwrap();
+    connection
+        .execute_batch(
+            "PRAGMA journal_mode=DELETE;
+             CREATE TABLE cursorDiskKV (key TEXT PRIMARY KEY, value TEXT);",
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO cursorDiskKV(key, value) VALUES (?1, ?2)",
+            rusqlite::params![
+                "composerData:cancelled",
+                json!({
+                    "composerId": "cancelled",
+                    "workspaceIdentifier": {
+                        "uri": { "fsPath": project.path().to_string_lossy() }
+                    },
+                    "fullConversationHeadersOnly": []
+                })
+                .to_string()
+            ],
+        )
+        .unwrap();
+    drop(connection);
+    let project_id =
+        tracedecay_domain::ProjectId::new("project.cursor-composer-cancelled").unwrap();
+    let runtime =
+        HostAdmissionTestRuntimeV1::project(profile.path(), project.path(), project_id.clone())
+            .await
+            .unwrap();
+    let facade = runtime.facade();
+    let cancellation = ObservationCancellation::default();
+    cancellation.cancel();
+
+    let outcome = CursorComposerSource::with_home(home.path())
+        .ingest_capped_with_cancellation(
+            &facade,
+            project.path(),
+            project_id,
+            DEFAULT_COMPOSER_ENVELOPE_CAP,
+            None,
+            &cancellation,
+        )
+        .await;
+
+    assert_eq!(outcome.sessions_upserted, 0);
+    assert_eq!(outcome.messages_upserted, 0);
+    assert_eq!(outcome.bytes_consumed, 0);
+    assert!(outcome.owned_session_ids.is_empty());
+}
 
 #[cfg(windows)]
 #[test]

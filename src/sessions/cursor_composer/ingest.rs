@@ -53,13 +53,14 @@ struct ComposerIngestContext<'facade, 'db, 'root> {
     scope: ObservationScopeV1,
     project_root: Option<&'root Path>,
     registered_roots: &'root [PathBuf],
+    cancellation: &'root ObservationCancellation,
 }
 
 async fn drain_composer_projection_queue(context: &ComposerIngestContext<'_, '_, '_>) {
     if let Err(error) = crate::sessions::claude_observation::drain_projection_queue(
         context.facade,
         &context.scope,
-        &ObservationCancellation::default(),
+        context.cancellation,
     )
     .await
     {
@@ -86,6 +87,7 @@ struct ComposerCoverageContext<'facade, 'db> {
     facade: &'facade HostAdmissionFacade<'db>,
     scope: &'facade ObservationScopeV1,
     generation: ObservationSourceGenerationV1,
+    cancellation: &'facade ObservationCancellation,
 }
 
 async fn advance_composer_coverage(
@@ -109,7 +111,7 @@ async fn advance_composer_coverage(
         context.generation,
         reason,
         receipt,
-        &ObservationCancellation::default(),
+        context.cancellation,
     )
     .await
     .map_err(|error| error.to_string())
@@ -195,11 +197,32 @@ impl CursorComposerSource {
         envelope_cap: usize,
         max_new_bytes: Option<u64>,
     ) -> CursorComposerSweepOutcome {
+        self.ingest_capped_with_cancellation(
+            admission,
+            project_root,
+            project_id,
+            envelope_cap,
+            max_new_bytes,
+            &ObservationCancellation::default(),
+        )
+        .await
+    }
+
+    pub async fn ingest_capped_with_cancellation(
+        &self,
+        admission: &HostAdmissionFacade<'_>,
+        project_root: &Path,
+        project_id: ProjectId,
+        envelope_cap: usize,
+        max_new_bytes: Option<u64>,
+        cancellation: &ObservationCancellation,
+    ) -> CursorComposerSweepOutcome {
         let context = ComposerIngestContext {
             facade: admission,
             scope: ObservationScopeV1::Project { project_id },
             project_root: Some(project_root),
             registered_roots: &[],
+            cancellation,
         };
         self.ingest_with_context(&context, envelope_cap, max_new_bytes)
             .await
@@ -229,11 +252,30 @@ impl CursorComposerSource {
         envelope_cap: usize,
         max_new_bytes: Option<u64>,
     ) -> CursorComposerSweepOutcome {
+        self.ingest_user_capped_with_cancellation(
+            admission,
+            registered_roots,
+            envelope_cap,
+            max_new_bytes,
+            &ObservationCancellation::default(),
+        )
+        .await
+    }
+
+    pub async fn ingest_user_capped_with_cancellation(
+        &self,
+        admission: &HostAdmissionFacade<'_>,
+        registered_roots: &[PathBuf],
+        envelope_cap: usize,
+        max_new_bytes: Option<u64>,
+        cancellation: &ObservationCancellation,
+    ) -> CursorComposerSweepOutcome {
         let context = ComposerIngestContext {
             facade: admission,
             scope: ObservationScopeV1::Profile,
             project_root: None,
             registered_roots,
+            cancellation,
         };
         self.ingest_with_context(&context, envelope_cap, max_new_bytes)
             .await
@@ -246,9 +288,15 @@ impl CursorComposerSource {
         max_new_bytes: Option<u64>,
     ) -> CursorComposerSweepOutcome {
         let mut outcome = CursorComposerSweepOutcome::default();
+        if context.cancellation.is_cancelled() {
+            return outcome;
+        }
         let mut byte_budget =
             IngestByteBudget::bounded(max_new_bytes.unwrap_or(DEFAULT_COMPOSER_SWEEP_BYTES));
         drain_composer_projection_queue(context).await;
+        if context.cancellation.is_cancelled() {
+            return outcome;
+        }
         let mut workspace_paths = HashMap::new();
         self.ingest_state_vscdb(
             context,
@@ -258,9 +306,16 @@ impl CursorComposerSource {
             &mut workspace_paths,
         )
         .await;
+        if context.cancellation.is_cancelled() {
+            outcome.bytes_consumed = byte_budget.consumed();
+            outcome.deferred_by_byte_cap = byte_budget.deferred();
+            return outcome;
+        }
         self.ingest_chat_store_dbs(context, &workspace_paths, &mut byte_budget, &mut outcome)
             .await;
-        drain_composer_projection_queue(context).await;
+        if !context.cancellation.is_cancelled() {
+            drain_composer_projection_queue(context).await;
+        }
         outcome.bytes_consumed = byte_budget.consumed();
         outcome.deferred_by_byte_cap = byte_budget.deferred();
         outcome
@@ -274,6 +329,9 @@ impl CursorComposerSource {
         outcome: &mut CursorComposerSweepOutcome,
         workspace_paths: &mut HashMap<String, String>,
     ) {
+        if context.cancellation.is_cancelled() {
+            return;
+        }
         if !self.state_db_path.is_file() {
             return;
         }
@@ -290,6 +348,9 @@ impl CursorComposerSource {
         let mut scanned_this_pass = 0usize;
         let mut scan_after: Option<String> = None;
         'scan: loop {
+            if context.cancellation.is_cancelled() {
+                break;
+            }
             let page =
                 match scan_composer_keys_page(conn, scan_after.as_deref(), COMPOSER_KEY_SCAN_PAGE)
                     .await
@@ -310,6 +371,9 @@ impl CursorComposerSource {
             };
             let page_full = page.len() == COMPOSER_KEY_SCAN_PAGE;
             for (key, nbytes) in page {
+                if context.cancellation.is_cancelled() {
+                    break 'scan;
+                }
                 if scanned_this_pass >= MAX_COMPOSER_STORE_BLOB_VISITS {
                     byte_budget.defer();
                     break 'scan;
@@ -451,6 +515,7 @@ impl CursorComposerSource {
                                 context.scope.clone(),
                                 generation,
                                 envelope_expected_cursor,
+                                context.cancellation,
                             )
                         && let Ok(outcome) = context.facade.capture_observation(request).await
                         && let CaptureObservationOutcome::Persisted {
@@ -464,6 +529,9 @@ impl CursorComposerSource {
                     }
                 }
                 for (position, header) in headers.iter().enumerate() {
+                    if context.cancellation.is_cancelled() {
+                        break;
+                    }
                     let Some(bubble_id) = header.get("bubbleId").and_then(Value::as_str) else {
                         continue;
                     };
@@ -519,6 +587,7 @@ impl CursorComposerSource {
                                     facade: context.facade,
                                     scope: &context.scope,
                                     generation,
+                                    cancellation: context.cancellation,
                                 },
                                 source,
                                 position,
@@ -541,6 +610,7 @@ impl CursorComposerSource {
                                     facade: context.facade,
                                     scope: &context.scope,
                                     generation,
+                                    cancellation: context.cancellation,
                                 },
                                 source,
                                 position,
@@ -581,6 +651,7 @@ impl CursorComposerSource {
                                 generation,
                                 position,
                                 expected_cursor.clone(),
+                                context.cancellation,
                             );
                             let Ok(request) = request else {
                                 if advance_composer_coverage(
@@ -588,6 +659,7 @@ impl CursorComposerSource {
                                         facade: context.facade,
                                         scope: &context.scope,
                                         generation,
+                                        cancellation: context.cancellation,
                                     },
                                     source,
                                     position,
@@ -619,6 +691,7 @@ impl CursorComposerSource {
                                             facade: context.facade,
                                             scope: &context.scope,
                                             generation,
+                                            cancellation: context.cancellation,
                                         },
                                         source,
                                         position,
@@ -638,6 +711,7 @@ impl CursorComposerSource {
                                             facade: context.facade,
                                             scope: &context.scope,
                                             generation,
+                                            cancellation: context.cancellation,
                                         },
                                         source,
                                         position,
@@ -679,6 +753,9 @@ impl CursorComposerSource {
             return;
         };
         for ws_entry in ws_entries.flatten() {
+            if context.cancellation.is_cancelled() {
+                return;
+            }
             if !directory_entry_is_real_dir(&ws_entry) {
                 continue;
             }
@@ -703,6 +780,9 @@ impl CursorComposerSource {
                 continue;
             };
             for agent_entry in agent_entries.flatten() {
+                if context.cancellation.is_cancelled() {
+                    return;
+                }
                 if !directory_entry_is_real_dir(&agent_entry) {
                     continue;
                 }
@@ -724,6 +804,9 @@ impl CursorComposerSource {
         byte_budget: &mut IngestByteBudget,
         outcome: &mut CursorComposerSweepOutcome,
     ) {
+        if context.cancellation.is_cancelled() {
+            return;
+        }
         let Some(ro) = open_readonly_immutable(store_path).await else {
             return;
         };
@@ -782,6 +865,9 @@ impl CursorComposerSource {
         let mut session_accepted = false;
         let mut messages = 0_u64;
         for (ordinal, (role, content, source_bytes)) in ordered.into_iter().enumerate() {
+            if context.cancellation.is_cancelled() {
+                break;
+            }
             let position = ordinal as u64;
             let Ok(expected_cursor) = context
                 .facade
@@ -825,6 +911,7 @@ impl CursorComposerSource {
                 generation,
                 position,
                 expected_cursor.clone(),
+                context.cancellation,
             );
             let Ok(request) = request else {
                 if advance_composer_coverage(
@@ -832,6 +919,7 @@ impl CursorComposerSource {
                         facade: context.facade,
                         scope: &context.scope,
                         generation,
+                        cancellation: context.cancellation,
                     },
                     source.clone(),
                     position,
@@ -861,6 +949,7 @@ impl CursorComposerSource {
                             facade: context.facade,
                             scope: &context.scope,
                             generation,
+                            cancellation: context.cancellation,
                         },
                         source.clone(),
                         position,
@@ -880,6 +969,7 @@ impl CursorComposerSource {
                             facade: context.facade,
                             scope: &context.scope,
                             generation,
+                            cancellation: context.cancellation,
                         },
                         source.clone(),
                         position,

@@ -103,6 +103,7 @@ pub(crate) fn build_cursor_composer_capture_request_for_project(
     generation: ObservationSourceGenerationV1,
     position: u64,
     expected_cursor: Option<ObservationSourceCursorV1>,
+    cancellation: &ObservationCancellation,
 ) -> Result<CaptureObservationRequest, String> {
     let range =
         tracedecay_domain::ObservationSourceRangeV1::new(position, position.saturating_add(1))
@@ -151,7 +152,7 @@ pub(crate) fn build_cursor_composer_capture_request_for_project(
         expected_cursor,
         RetentionClass::new(COMPOSER_OBSERVATION_RETENTION)
             .map_err(|error| format!("invalid Cursor composer retention: {error}"))?,
-        ObservationCancellation::default(),
+        cancellation.clone(),
     )
     .map_err(|error| format!("invalid Cursor composer capture request: {error}"))
 }
@@ -175,6 +176,7 @@ pub fn build_cursor_composer_capture_request(
         generation,
         position,
         expected_cursor,
+        &ObservationCancellation::default(),
     )
 }
 
@@ -265,6 +267,7 @@ pub(crate) fn build_cursor_composer_envelope_capture_request_for_project(
     scope: ObservationScopeV1,
     generation: ObservationSourceGenerationV1,
     expected_cursor: Option<ObservationSourceCursorV1>,
+    cancellation: &ObservationCancellation,
 ) -> Result<CaptureObservationRequest, String> {
     let position = expected_cursor
         .as_ref()
@@ -310,7 +313,7 @@ pub(crate) fn build_cursor_composer_envelope_capture_request_for_project(
         expected_cursor,
         RetentionClass::new(COMPOSER_OBSERVATION_RETENTION)
             .map_err(|error| format!("invalid Cursor composer retention: {error}"))?,
-        ObservationCancellation::default(),
+        cancellation.clone(),
     )
     .map_err(|error| format!("invalid Cursor composer envelope capture request: {error}"))
     .map(|request| request.with_resume_checkpoint(generation.file_id(), checkpoint))
@@ -339,5 +342,6 @@ pub fn build_cursor_composer_envelope_capture_request(
         scope,
         generation,
         expected_cursor,
+        &ObservationCancellation::default(),
     )
 }

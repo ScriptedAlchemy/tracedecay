@@ -102,14 +102,16 @@ pub(super) async fn try_ingest_user_codex_sessions_with_db_bounded(
         if cancellation.is_cancelled() {
             break;
         }
-        let progress = codex::try_admit_codex_jsonl_observations_for_profile_with_admission(
-            &path,
-            session_id.as_deref(),
-            &registered_roots,
-            admission,
-            remaining,
-        )
-        .await?;
+        let progress =
+            codex::try_admit_codex_jsonl_observations_for_profile_with_admission_and_cancellation(
+                &path,
+                session_id.as_deref(),
+                &registered_roots,
+                admission,
+                remaining,
+                cancellation,
+            )
+            .await?;
         deferred_by_byte_cap |= progress.source_deferred;
         bytes_consumed = bytes_consumed.saturating_add(progress.bytes_consumed);
         if let Some(available) = remaining {
@@ -140,25 +142,45 @@ pub(super) async fn try_ingest_user_cursor_sessions_with_db_bounded(
     registered_roots: Vec<PathBuf>,
     admission: &HostAdmissionFacade<'_>,
     max_new_bytes: Option<u64>,
+    cancellation: &ObservationCancellation,
 ) -> source::TranscriptIngestResult<BoundedProviderOutcome> {
+    if cancellation.is_cancelled() {
+        return Ok(BoundedProviderOutcome {
+            stats: TranscriptIngestStats::default(),
+            bytes_consumed: 0,
+            deferred_by_byte_cap: false,
+        });
+    }
     let composer = if let Some(source) = cursor_composer::CursorComposerSource::new() {
         source
-            .ingest_user_capped(
+            .ingest_user_capped_with_cancellation(
                 admission,
                 &registered_roots,
                 cursor_composer::DEFAULT_COMPOSER_ENVELOPE_CAP,
                 max_new_bytes,
+                cancellation,
             )
             .await
     } else {
         cursor_composer::CursorComposerSweepOutcome::default()
     };
+    if cancellation.is_cancelled() {
+        return Ok(BoundedProviderOutcome {
+            stats: TranscriptIngestStats {
+                sessions_upserted: composer.sessions_upserted,
+                messages_upserted: composer.messages_upserted,
+            },
+            bytes_consumed: composer.bytes_consumed,
+            deferred_by_byte_cap: composer.deferred_by_byte_cap,
+        });
+    }
     let remaining = max_new_bytes.map(|limit| limit.saturating_sub(composer.bytes_consumed));
     let sweep = cursor::try_ingest_cursor_user_sweep_capped_with_admission(
         &registered_roots,
         admission,
         remaining,
         composer.owned_session_ids,
+        cancellation,
     )
     .await?;
     Ok(BoundedProviderOutcome {
@@ -250,13 +272,34 @@ pub(super) async fn ingest_user_global_sources_for_provider_with_roots(
     provider: Option<SessionProvider>,
     roots: Vec<PathBuf>,
 ) -> TranscriptIngestOutcome {
+    ingest_user_global_sources_for_provider_with_roots_and_cancellation(
+        brain_id,
+        profile_id,
+        registered,
+        profile_root,
+        provider,
+        roots,
+        &ObservationCancellation::default(),
+    )
+    .await
+}
+
+pub(super) async fn ingest_user_global_sources_for_provider_with_roots_and_cancellation(
+    brain_id: &BrainId,
+    profile_id: &UserProfileId,
+    registered: &RegisteredGlobalDb,
+    profile_root: &Path,
+    provider: Option<SessionProvider>,
+    roots: Vec<PathBuf>,
+    cancellation: &ObservationCancellation,
+) -> TranscriptIngestOutcome {
     ingest_user_global_sources_for_provider_with_roots_bounded(
         (brain_id, profile_id, registered),
         profile_root,
         provider,
         roots,
         default_ingest_pass_bounds(),
-        &ObservationCancellation::default(),
+        cancellation,
     )
     .await
     .into_transcript_outcome()

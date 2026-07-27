@@ -22,7 +22,7 @@ use crate::sessions::source::SqliteFileIdentityError;
 
 use super::observation::{
     HermesAdmission, HermesAdmissionAction, HermesProjectionMetadata, observation_source,
-    prepare_observation_row,
+    prepare_observation_row_with_cancellation,
 };
 use super::rows::HermesRow;
 use super::{MAX_HERMES_PROJECTIONS_PER_DRAIN, PROVIDER};
@@ -60,6 +60,7 @@ async fn advance_coverage(
     receipt: Option<tracedecay_domain::SanitizationReceiptV1>,
     file_identity: u64,
     resume_fingerprint: u64,
+    cancellation: &ObservationCancellation,
 ) -> Result<(), String> {
     let advance = match receipt {
         Some(receipt) => ObservationCursorAdvance::for_ordering_with_sanitization_receipt(
@@ -85,7 +86,7 @@ async fn advance_coverage(
     .map_err(|_| "invalid Hermes coverage transition".to_string())?
     .with_resume_checkpoint(file_identity, resume_fingerprint);
     facade
-        .advance_non_durable_source_cursor(advance, ObservationCancellation::default())
+        .advance_non_durable_source_cursor(advance, cancellation.clone())
         .await
         .map(|_| ())
         .map_err(host_admission_error)
@@ -110,12 +111,28 @@ pub(crate) async fn drain_hermes_projections_with_admission(
     facade: &HostAdmissionFacade<'_>,
     scope: &ObservationScopeV1,
 ) -> Result<(), String> {
+    drain_hermes_projections_with_admission_and_cancellation(
+        facade,
+        scope,
+        &ObservationCancellation::default(),
+    )
+    .await
+}
+
+pub(crate) async fn drain_hermes_projections_with_admission_and_cancellation(
+    facade: &HostAdmissionFacade<'_>,
+    scope: &ObservationScopeV1,
+    cancellation: &ObservationCancellation,
+) -> Result<(), String> {
     loop {
+        if cancellation.is_cancelled() {
+            return Ok(());
+        }
         let outcome = facade
             .drain_projection_queue(
                 PROVIDER,
                 scope,
-                &ObservationCancellation::default(),
+                cancellation,
                 MAX_HERMES_PROJECTIONS_PER_DRAIN,
             )
             .await
@@ -166,14 +183,44 @@ pub(crate) async fn admit_rows_with_admission(
     resume_fingerprint: u64,
     route: impl Fn(&HermesRow) -> Option<HermesProjectionMetadata>,
 ) -> Result<TranscriptIngestStats, String> {
+    admit_rows_with_admission_and_cancellation(
+        facade,
+        rows,
+        scope,
+        generation,
+        file_identity,
+        resume_fingerprint,
+        route,
+        &ObservationCancellation::default(),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn admit_rows_with_admission_and_cancellation(
+    facade: &HostAdmissionFacade<'_>,
+    rows: &[HermesRow],
+    scope: ObservationScopeV1,
+    generation: ObservationSourceGenerationV1,
+    file_identity: u64,
+    resume_fingerprint: u64,
+    route: impl Fn(&HermesRow) -> Option<HermesProjectionMetadata>,
+    cancellation: &ObservationCancellation,
+) -> Result<TranscriptIngestStats, String> {
     let mut stats = TranscriptIngestStats::default();
     let mut sessions = BTreeSet::new();
     for row in rows {
+        if cancellation.is_cancelled() {
+            break;
+        }
         let source = observation_source(row)?;
         let expected_cursor = facade
             .get_source_cursor(&source, &scope)
             .await
             .map_err(host_admission_error)?;
+        if cancellation.is_cancelled() {
+            break;
+        }
         let end = u64::try_from(row.id).map_err(|_| "invalid Hermes SQLite row id".to_string())?;
         if expected_cursor
             .as_ref()
@@ -181,7 +228,7 @@ pub(crate) async fn admit_rows_with_admission(
         {
             continue;
         }
-        let admission = prepare_observation_row(
+        let admission = prepare_observation_row_with_cancellation(
             row,
             route(row).as_ref(),
             &scope,
@@ -189,6 +236,7 @@ pub(crate) async fn admit_rows_with_admission(
             expected_cursor,
             file_identity,
             resume_fingerprint,
+            cancellation,
         )?;
         let HermesAdmission {
             source,
@@ -209,6 +257,7 @@ pub(crate) async fn admit_rows_with_admission(
                     None,
                     file_identity,
                     resume_fingerprint,
+                    cancellation,
                 )
                 .await?;
             }
@@ -236,6 +285,7 @@ pub(crate) async fn admit_rows_with_admission(
                             Some(receipt),
                             file_identity,
                             resume_fingerprint,
+                            cancellation,
                         )
                         .await?;
                     }
@@ -251,6 +301,7 @@ pub(crate) async fn admit_rows_with_admission(
                             Some(receipt),
                             file_identity,
                             resume_fingerprint,
+                            cancellation,
                         )
                         .await?;
                     }
