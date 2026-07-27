@@ -3132,7 +3132,7 @@ async fn pinned_generation_from_another_worktree_is_unavailable() {
 }
 
 #[tokio::test]
-async fn planned_unimplemented_operation_is_generation_bound_unsupported() {
+async fn symbol_search_is_generation_bound_and_uses_mounted_authority() {
     let fixture = GitFixture::new(&[("src/lib.rs", "pub fn alpha() {}\n")]);
     let store = TempDir::new().expect("store root");
     let registry = CodeIndexSchedulerRegistryV1::new(1);
@@ -3157,6 +3157,13 @@ async fn planned_unimplemented_operation_is_generation_bound_unsupported() {
             .clone()
             .expect("worktree identity"),
     );
+    mount_query_authority(
+        &registry,
+        fixture.path(),
+        &context,
+        latest.generation.manifest().privacy_domain.clone(),
+    )
+    .await;
     let query = EphemeralSanitizedQueryViewV1::sanitize(
         "alpha",
         SanitizerRevision::new("sanitizer.query.fixture").expect("sanitizer"),
@@ -3178,12 +3185,15 @@ async fn planned_unimplemented_operation_is_generation_bound_unsupported() {
             &request,
         )
         .await;
-    let RetrievalPortOutcome::Unavailable(evidence) = outcome else {
-        panic!("planned operation without a production owner must be unavailable");
+    let RetrievalPortOutcome::Completed(evidence) = outcome else {
+        panic!("mounted symbol-search authority must complete, got {outcome:?}");
     };
-    assert_eq!(evidence.temporal.source_generation, Some(generation));
-    assert_eq!(evidence.omissions.len(), 1);
-    assert_eq!(evidence.omissions[0].reason, OmissionReason::Unsupported);
+    let page = evidence.payload.expect("symbol-search page");
+    assert_eq!(page.generation, generation);
+    assert!(
+        page.items.iter().any(|symbol| symbol.name == "alpha"),
+        "implemented symbol search must return the indexed symbol"
+    );
     registry.shutdown().await;
 }
 
@@ -3459,7 +3469,11 @@ async fn compiler_diagnostics_published_under_registry_identity_are_admitted_by_
     assert_eq!(parsed.len(), 1, "fixture cargo output must parse");
 
     let outcome = {
-        let store = DiagnosticsStore::new(database.conn());
+        let writer = database
+            .writer_connection("publish compiler diagnostic fixture")
+            .await
+            .expect("diagnostics writer");
+        let store = DiagnosticsStore::new(writer.engine_connection());
         publish_compiler_diagnostics_through_code_index_v1(
             fixture.path(),
             Some(&registry as &dyn CodeIndexPublicationIdentityPortV1),

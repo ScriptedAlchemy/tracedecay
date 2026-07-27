@@ -2975,6 +2975,8 @@ impl<'db> GlobalDbConfigurationControlStore<'db> {
 /// creates a scoped borrowed adapter for each operation. It therefore reuses
 /// the canonical transaction, revision, and compare-and-swap implementation
 /// without opening another database or resolving configuration independently.
+/// It does not extend the owning daemon's database-authority lease: writes fail
+/// closed after that owner exits.
 #[derive(Clone)]
 pub struct OwnedGlobalDbConfigurationControlStore {
     /// The exact daemon-registered project-runtime database handle. Production
@@ -4683,12 +4685,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn owned_global_control_adapter_retains_runtime_db_and_preserves_cas() {
+    async fn owned_global_control_adapter_preserves_cas_while_daemon_scope_is_active() {
         let (_directory, runtime, root) = global_setup().await;
         let store = runtime
             .project_configuration_control_store_for_test()
             .unwrap();
-        drop(runtime);
 
         assert_eq!(store.current().await.unwrap().revision_id, root.revision_id);
 
@@ -4727,6 +4728,32 @@ mod tests {
                 )
                 .await,
             Err(ConfigurationError::RevisionConflict)
+        );
+    }
+
+    #[tokio::test]
+    async fn owned_global_control_adapter_rejects_writes_after_daemon_scope_ends() {
+        let (_directory, runtime, root) = global_setup().await;
+        let store = runtime
+            .project_configuration_control_store_for_test()
+            .unwrap();
+        drop(runtime);
+
+        let authority = control_authority(
+            ConfigurationMutationOperationV1::DirectMutation,
+            &root.revision_id,
+        );
+        let mutation = DirectConfigurationMutation::Set {
+            layer: direct_project_layer(),
+            key: SettingKey::new("diagnostics.prewarm.v1").unwrap(),
+            value: ConfigurationValueV1::Boolean(true),
+        };
+
+        assert_eq!(
+            store
+                .commit_direct(&authority, &mutation, &root.revision_id)
+                .await,
+            Err(ConfigurationError::Unavailable)
         );
     }
 

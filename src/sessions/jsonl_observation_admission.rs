@@ -379,6 +379,21 @@ pub(crate) async fn admit_jsonl_observations<State>(
         bytes_consumed: raw.read_through.saturating_sub(raw.start_offset),
         source_deferred: raw.deferred.is_some(),
     };
+    let total_frames = raw.frames.len();
+    let retained_frame_bytes = raw.frames.iter().fold(0_u64, |total, frame| {
+        total.saturating_add(u64::try_from(frame.bytes.len()).unwrap_or(u64::MAX))
+    });
+    tracing::warn!(
+        event = "transcript_admission_batch",
+        phase = "capturing",
+        provider,
+        path = %path.display(),
+        total_frames,
+        retained_frame_bytes,
+        bytes_consumed = progress.bytes_consumed,
+        source_deferred = progress.source_deferred,
+        "transcript admission batch started"
+    );
     if cancellation.is_cancelled() {
         progress.source_deferred = true;
         return Ok(progress);
@@ -402,10 +417,22 @@ pub(crate) async fn admit_jsonl_observations<State>(
     };
     let mut skipped = raw.skipped.into_iter().peekable();
 
-    for frame in raw.frames {
+    for (frame_index, frame) in raw.frames.into_iter().enumerate() {
         if active.cancellation.is_cancelled() {
             progress.source_deferred = true;
             break;
+        }
+        if frame_index % 256 == 0 {
+            tracing::warn!(
+                event = "transcript_admission_batch",
+                phase = "capturing",
+                provider,
+                path = %path.display(),
+                completed_frames = frame_index,
+                total_frames,
+                source_offset = frame.offset,
+                "transcript admission batch progress"
+            );
         }
         while skipped
             .peek()
@@ -484,6 +511,17 @@ pub(crate) async fn admit_jsonl_observations<State>(
                 .await?;
         }
     }
+    tracing::warn!(
+        event = "transcript_admission_batch",
+        phase = "complete",
+        provider,
+        path = %path.display(),
+        total_frames,
+        retained_frame_bytes,
+        bytes_consumed = progress.bytes_consumed,
+        source_deferred = progress.source_deferred,
+        "transcript admission batch finished"
+    );
     Ok(progress)
 }
 

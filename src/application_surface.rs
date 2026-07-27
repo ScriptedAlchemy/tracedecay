@@ -1329,6 +1329,11 @@ struct HttpOperationCancelResponse {
     status: &'static str,
 }
 
+#[derive(Deserialize)]
+struct HttpOperationPath {
+    operation_id: String,
+}
+
 fn http_operation_event_router(
     authority: OperationEventAuthority,
     active_project_id: ProjectId,
@@ -1424,7 +1429,7 @@ fn plan26_sse_stream_event<T>(event: &StreamEvent<T>) -> Option<(Plan26SseLifecy
 
 async fn http_operation_events(
     State(state): State<HttpOperationEventState>,
-    AxumPath(operation_id): AxumPath<String>,
+    AxumPath(HttpOperationPath { operation_id }): AxumPath<HttpOperationPath>,
     Extension(request_id): Extension<RequestId>,
     Extension(controls): Extension<HttpApplicationControls>,
     Query(query): Query<HttpOperationEventQuery>,
@@ -1603,7 +1608,7 @@ async fn http_operation_events(
 
 async fn http_operation_cancel(
     State(state): State<HttpOperationEventState>,
-    AxumPath(operation_id): AxumPath<String>,
+    AxumPath(HttpOperationPath { operation_id }): AxumPath<HttpOperationPath>,
     Extension(request_id): Extension<RequestId>,
     Extension(controls): Extension<HttpApplicationControls>,
 ) -> Response {

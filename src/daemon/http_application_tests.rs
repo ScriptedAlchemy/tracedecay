@@ -306,7 +306,11 @@ async fn daemon_http_authenticated_operations_cancel_and_resume_through_canonica
         Some(&origin),
     )
     .await;
-    assert_eq!(status(&cancelled), StatusCode::ACCEPTED);
+    assert_eq!(
+        status(&cancelled),
+        StatusCode::ACCEPTED,
+        "unexpected cancel response: {cancelled}"
+    );
     assert!(cancelled.contains("\"status\":\"requested\""));
     assert!(emitter.is_cancelled());
     emitter

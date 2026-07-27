@@ -552,11 +552,6 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
         .open_project_server(&handshake)
         .await
         .expect("mount project owner");
-    git(repository.path(), &["add", "."]);
-    git(
-        repository.path(),
-        &["commit", "--quiet", "-m", "daemon enrollment"],
-    );
     std::fs::write(repository.path().join("packet.txt"), "base\nnext\n").expect("changed file");
     git(repository.path(), &["add", "packet.txt"]);
     let project_id =

@@ -889,6 +889,7 @@ impl TraceDecay {
         // Check integrity and rebuild if necessary.
         let crashed = has_dirty_sentinel_at(&active_graph_layout.dirty_path)
             || has_dirty_sentinel_at(&store_layout.dirty_path);
+        let mut crash_preflight_healthy = false;
         if crashed {
             eprintln!(
                 "[tracedecay] previous operation was interrupted — checking database integrity…"
@@ -928,7 +929,7 @@ impl TraceDecay {
                     let integrity = verification.quick_check_report().await;
                     verification.close();
                     match integrity {
-                        Ok(None) => {}
+                        Ok(None) => crash_preflight_healthy = true,
                         Ok(Some(problem)) if is_fts_only_corruption(&problem) => {}
                         Ok(Some(problem)) => {
                             print_corruption_warning(&db_path);
@@ -1018,22 +1019,29 @@ impl TraceDecay {
         // Classify its complete quick-check report after open and schedule the
         // existing rebuild through the canonical writer lane. Non-FTS damage
         // fails closed without entering either repair path.
-        match db.repair_fts_after_open().await {
-            Ok(Some(problem)) => {
-                eprintln!(
-                    "[tracedecay] repaired FTS index after post-open health check ({problem})"
-                );
-            }
-            Ok(None) => {}
-            Err(error) => {
-                print_corruption_warning(&db_path);
-                return Err(recovery_required_error(&db_path, error));
+        // The crash preflight already ran the same complete quick-check while
+        // holding both recovery locks. Repeating it after the writable mount
+        // doubles peak SQLite scratch memory without adding evidence. Ordinary
+        // opens still run this retained-handle check so live-writer FTS damage
+        // without a dirty marker remains detectable.
+        if !crash_preflight_healthy {
+            match db.repair_fts_after_open().await {
+                Ok(Some(problem)) => {
+                    eprintln!(
+                        "[tracedecay] repaired FTS index after post-open health check ({problem})"
+                    );
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    print_corruption_warning(&db_path);
+                    return Err(recovery_required_error(&db_path, error));
+                }
             }
         }
 
         // If the sentinel was set but the database opened successfully, run a
         // quick integrity check.
-        if crashed {
+        if crashed && !crash_preflight_healthy {
             let mut integrity = db.quick_check_report().await;
             // An interrupted bulk load can desync the FTS5 inverted index from
             // its content table. That damage is fully derivable: rebuild it in

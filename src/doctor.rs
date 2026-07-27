@@ -403,6 +403,19 @@ fn describe_resolved_store(layout: &StoreLayout) -> String {
 }
 
 async fn daemon_project_status(project_path: &Path) -> crate::errors::Result<serde_json::Value> {
+    daemon_project_status_with_deadline(
+        project_path,
+        tokio::time::Instant::now() + std::time::Duration::from_secs(10),
+        false,
+    )
+    .await
+}
+
+async fn daemon_project_status_with_deadline(
+    project_path: &Path,
+    startup_deadline: tokio::time::Instant,
+    report_admission: bool,
+) -> crate::errors::Result<serde_json::Value> {
     let handshake = crate::daemon::DaemonHandshake::for_current_client(
         Some(project_path.to_path_buf()),
         None,
@@ -413,11 +426,26 @@ async fn daemon_project_status(project_path: &Path) -> crate::errors::Result<ser
     // failure. The ordinary Doctor helper intentionally falls back to a cold
     // snapshot on daemon errors, which is useful for diagnostics but would
     // conceal a cached non-retryable warm-up failure here.
+    let admission_deadline = (tokio::time::Instant::now()
+        + std::time::Duration::from_secs(10))
+    .min(startup_deadline);
+    crate::daemon::call_default_tool_within(
+        &handshake,
+        "tracedecay_status",
+        daemon_admission_args(),
+        admission_deadline,
+    )
+    .await?;
+    if report_admission {
+        eprintln!(
+            "Daemon project admitted; waiting for runtime integrity telemetry within the startup deadline."
+        );
+    }
     let result = crate::daemon::call_default_tool_within(
         &handshake,
         "tracedecay_runtime",
         daemon_runtime_args(),
-        tokio::time::Instant::now() + std::time::Duration::from_secs(10),
+        startup_deadline,
     )
     .await?;
     daemon_runtime_status(&result)
@@ -427,10 +455,11 @@ pub async fn wait_for_daemon_startup_health(
     timeout: std::time::Duration,
 ) -> crate::errors::Result<()> {
     let project_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let startup_deadline = tokio::time::Instant::now() + timeout;
     wait_for_daemon_startup_health_with(
         timeout,
         std::time::Duration::from_millis(500),
-        || daemon_project_status(&project_path),
+        || daemon_project_status_with_deadline(&project_path, startup_deadline, true),
         |progress| {
             eprintln!(
                 "Waiting for daemon startup health convergence: elapsed={}s waiting_on={} change={}",
@@ -692,6 +721,13 @@ fn daemon_startup_health_ready(status: &serde_json::Value) -> bool {
         .and_then(|storage| storage.get("quick_check_ok"))
         .and_then(serde_json::Value::as_bool)
         == Some(true)
+}
+
+fn daemon_admission_args() -> serde_json::Value {
+    serde_json::json!({
+        "format": "json",
+        "include_branch_diagnostics": false,
+    })
 }
 
 fn daemon_runtime_args() -> serde_json::Value {

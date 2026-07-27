@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 #[cfg(any(test, feature = "test-transport"))]
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 #[cfg(any(test, feature = "test-transport"))]
 use sha2::{Digest, Sha256};
@@ -194,6 +194,8 @@ enum DatabaseHealth {
     FtsOnlyCorruption(String),
     Corrupt(String),
 }
+
+static DATABASE_HEALTH_GATE: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
 /// A writer connection that cannot outlive the canonical database's writer
 /// lane. It is another capability over the same physical attachment, never a
@@ -1615,6 +1617,20 @@ impl Database {
     }
 
     async fn health_on_fresh_reader(&self, operation: &str) -> Result<DatabaseHealth> {
+        let queued_at = std::time::Instant::now();
+        let _health_guard = DATABASE_HEALTH_GATE
+            .get_or_init(|| tokio::sync::Mutex::new(()))
+            .lock()
+            .await;
+        let wait_ms = u64::try_from(queued_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        tracing::warn!(
+            event = "database_health_check",
+            phase = "start",
+            operation,
+            wait_ms,
+            "database health check started"
+        );
+        let started_at = std::time::Instant::now();
         let snapshot =
             self.inner
                 .conn
@@ -1624,7 +1640,17 @@ impl Database {
                     message: format!("failed to begin database health snapshot: {e}"),
                     operation: operation.to_string(),
                 })?;
-        database_health(&snapshot, operation).await
+        let result = database_health(&snapshot, operation).await;
+        let elapsed_ms = u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        tracing::warn!(
+            event = "database_health_check",
+            phase = "complete",
+            operation,
+            elapsed_ms,
+            healthy = matches!(&result, Ok(DatabaseHealth::Healthy)),
+            "database health check finished"
+        );
+        result
     }
 
     pub(crate) async fn rebuild_fts_unguarded(

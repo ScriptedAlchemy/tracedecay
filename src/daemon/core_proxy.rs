@@ -246,13 +246,13 @@ async fn proxy_host_input_to_daemon(
                                 pending.push_back(line);
                             }
                             if pending.is_empty() {
-                                return Ok(());
+                                break daemon_request.await;
                             }
                         }
                     }
                     next = input.recv() => {
                         let Some(next) = next else {
-                            return Ok(());
+                            break daemon_request.await;
                         };
                         pending.push_back(next);
                     }

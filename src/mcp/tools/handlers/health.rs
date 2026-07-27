@@ -985,12 +985,12 @@ pub(super) async fn handle_runtime(
     project_session_db: Option<&crate::global_db::RegisteredGlobalDb>,
     doctor_report_reader: Option<&crate::dashboard::DoctorReportReader>,
 ) -> Result<ToolResult> {
-    let snap = crate::runtime_telemetry::collect(cg).await?;
-    let mut value = serde_json::to_value(&snap).unwrap_or_else(|_| json!({}));
     let authority_audit = args
         .get("authority_audit")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    let snap = crate::runtime_telemetry::collect_with_integrity(cg, authority_audit).await?;
+    let mut value = serde_json::to_value(&snap).unwrap_or_else(|_| json!({}));
     // Doctor historically keys temporal health off `authority_audit`. Keep that
     // coupling, and also allow an explicit independent opt-in.
     let include_session_temporal_health = authority_audit

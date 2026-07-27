@@ -135,6 +135,15 @@ pub(super) fn safe_extract(
 /// Tuple shape produced per file by both extraction paths.
 type ExtractTuple = (String, ExtractionResult, String, u64, i64);
 
+const MAX_EXTRACTION_WORKERS: usize = 8;
+
+fn bounded_extraction_workers(available: usize, file_count: usize) -> usize {
+    available
+        .max(1)
+        .min(MAX_EXTRACTION_WORKERS)
+        .min(file_count.max(1))
+}
+
 /// Extract every file in `files`, isolating each extraction in a subprocess
 /// when possible. Subprocess isolation contains C/C++ grammar aborts that
 /// `catch_unwind` cannot intercept; it is the primary defense against
@@ -151,8 +160,17 @@ fn extract_files_isolated(
     registry: &crate::extraction::LanguageRegistry,
     files: Vec<String>,
 ) -> (Vec<ExtractTuple>, Vec<(String, String)>) {
+    if files.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
     if should_use_subprocess() {
-        let workers = std::thread::available_parallelism().map_or(4, std::num::NonZeroUsize::get);
+        let available = std::thread::available_parallelism().map_or(4, std::num::NonZeroUsize::get);
+        let workers = bounded_extraction_workers(available, files.len());
+        eprintln!(
+            "[tracedecay] event=extraction_worker_pool workers={workers} \
+             available_parallelism={available} files={}",
+            files.len()
+        );
         let timeout = std::time::Duration::from_secs(
             crate::user_config::UserConfig::load().extraction_timeout_secs,
         );
@@ -1456,3 +1474,18 @@ impl TraceDecay {
 mod freshness_tests;
 #[cfg(test)]
 mod path_normalization_tests;
+
+#[cfg(test)]
+mod worker_pool_tests {
+    use super::{MAX_EXTRACTION_WORKERS, bounded_extraction_workers};
+
+    #[test]
+    fn extraction_worker_count_bounds_parallel_allocators() {
+        assert_eq!(
+            bounded_extraction_workers(96, 2_467),
+            MAX_EXTRACTION_WORKERS
+        );
+        assert_eq!(bounded_extraction_workers(96, 3), 3);
+        assert_eq!(bounded_extraction_workers(0, 0), 1);
+    }
+}
