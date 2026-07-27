@@ -18,14 +18,33 @@ export function LegacyBoundary<T>({
   if (pending) return <CenteredState title={title} kind="loading" />;
   if (!result) return <CenteredState title={title} kind="unknown" />;
   if (result.outcome === 'ok') return <>{children(result.data)}</>;
-  const kind: DomainStateKind =
-    result.outcome === 'offline'
-      ? 'offline'
-      : result.outcome === 'error'
-        ? 'error'
-        : 'unsupported_schema';
   const detail = result.outcome === 'error' ? result.detail : undefined;
-  return <CenteredState title={title} kind={kind} detail={detail} />;
+  return <CenteredState title={title} kind={failureKind(result)} detail={detail} />;
+}
+
+/** The domain state a non-ok legacy read renders as.
+ *
+ * Exhaustive over the failure outcomes, so a new one added to `LegacyResult`
+ * fails to build here rather than falling into whichever arm a chain of
+ * ternaries happened to end on — which is how 401 and 403 spent their whole
+ * life rendering as a generic error whose only discriminator was status text. */
+function failureKind(result: Exclude<LegacyResult<unknown>, { outcome: 'ok' }>): DomainStateKind {
+  switch (result.outcome) {
+    case 'offline':
+      return 'offline';
+    case 'unauthorized':
+      return 'unauthorized';
+    case 'denied':
+      return 'denied';
+    case 'error':
+      return 'error';
+    case 'unsupported_schema':
+      return 'unsupported_schema';
+    default: {
+      const exhaustive: never = result;
+      return exhaustive;
+    }
+  }
 }
 
 /** Crafted truthful states (plan 11a): one sentence of what this state means
@@ -40,6 +59,17 @@ const STATE_GUIDANCE: Partial<Record<DomainStateKind, { sentence: string; action
   error: {
     sentence: 'The read failed and nothing is being invented in its place.',
     action: 'Retry, or check the daemon log if it persists.',
+  },
+  // Split from `error` because the two refusals need opposite next actions,
+  // and neither of them is "retry": no identity was accepted at all, versus an
+  // identity that was accepted and is not allowed to see this.
+  unauthorized: {
+    sentence: 'The daemon accepted no identity for this read, so it refused to answer.',
+    action: 'Authenticate to the daemon, then refresh.',
+  },
+  denied: {
+    sentence: 'The daemon knows this identity and does not permit it to read this scope.',
+    action: 'Switch to a scope you hold, or grant this one access.',
   },
   unknown: {
     sentence: 'No response has been recorded for this surface yet.',

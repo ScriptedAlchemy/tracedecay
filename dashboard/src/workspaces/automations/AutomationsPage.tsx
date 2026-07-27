@@ -314,6 +314,10 @@ function controlFailure(result: LegacyResult<SchedulerStatus> | undefined): stri
       return null;
     case 'offline':
       return 'The daemon did not answer, so the scheduler was not changed.';
+    case 'unauthorized':
+      return 'The daemon accepted no identity for the change, so the scheduler was not changed.';
+    case 'denied':
+      return 'This identity is not permitted to control the scheduler, so it was not changed.';
     case 'error':
       return `The daemon refused the change (${result.detail}).`;
     case 'unsupported_schema':
