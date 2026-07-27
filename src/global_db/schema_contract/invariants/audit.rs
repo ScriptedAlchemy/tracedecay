@@ -1437,7 +1437,6 @@ mod tests {
                  WHERE type = 'index'
                    AND name IN (
                        'idx_observations_identity_receipt',
-                       'idx_observations_receipt_id',
                        'idx_projection_dispositions_observation_receipt'
                    )
                  ORDER BY name",
@@ -1454,7 +1453,6 @@ mod tests {
             indexes,
             [
                 "idx_observations_identity_receipt",
-                "idx_observations_receipt_id",
                 "idx_projection_dispositions_observation_receipt"
             ]
         );
