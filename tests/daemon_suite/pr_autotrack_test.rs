@@ -637,6 +637,18 @@ async fn receipt_durability_failure_blocks_cleanup_until_durable_retry() {
     assert!(database.is_file());
     assert!(!data_root.join("memory-branch-cutover.json").exists());
 
+    tracedecay::migrate::memory_cutover::set_cutover_fault_for_test(
+        tracedecay::migrate::memory_cutover::CutoverFaultForTest::ReceiptAfterRename,
+    );
+    let blocked_after_rename = reconcile(&graph, &project, &data_root, &closed, 10).await;
+    assert!(blocked_after_rename.untracked.is_empty());
+    assert!(load_branch_meta(&data_root).unwrap().is_tracked(label));
+    assert!(database.is_file());
+    assert!(
+        !data_root.join("memory-branch-cutover.json").exists(),
+        "rename-to-parent-sync failure must roll back the unusable receipt"
+    );
+
     let retried = reconcile(&graph, &project, &data_root, &closed, 10).await;
     assert_eq!(retried.untracked, vec![label.to_string()]);
     assert!(!database.exists());

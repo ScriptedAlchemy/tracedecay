@@ -28,11 +28,11 @@
 **Interfaces:**
 - Produces `MemoryV2OwnerArchiveV1`, `MemoryV2ArchiveRecordV1`, `MemoryV2ArchiveFamilyV1`, `MemoryV2OwnerMergePlanV1`, and `plan_memory_v2_owner_merge`.
 
-- [ ] Add pure tests for version rejection, owner mismatch, complete authoritative family membership, deterministic canonical ordering/digest, identical replay, new rows, stale legacy map retention, and every same-key conflict.
-- [ ] Run the archive tests and confirm they fail because the types are absent.
-- [ ] Implement validated typed scalars, named identity fields, explicit references, canonical ordering/digest, and a non-mutating merge planner.
-- [ ] Run the archive tests until green.
-- [ ] Commit as `feat(memory): add typed V2 owner archive`.
+- [x] Add pure tests for version rejection, owner mismatch, complete authoritative family membership, deterministic canonical ordering/digest, identical replay, new rows, stale legacy map retention, and every same-key conflict.
+- [x] Run the archive tests and confirm they fail because the types are absent.
+- [x] Implement validated typed scalars, named identity fields, explicit references, canonical ordering/digest, and a non-mutating merge planner.
+- [x] Run the archive tests until green.
+- [x] Commit as `feat(memory): add typed V2 owner archive`.
 
 ### Task 2: SQLite exporter/importer ports
 
@@ -48,9 +48,9 @@
 
 - [ ] Seed a comprehensive owner through production writers, including purge, feedback, relations, proposals, mappings, quarantine, retrieval provenance, and evidence assembly.
 - [ ] Write failing export/import contract tests that delete the source and query current facts and lineage through `MemoryApplication`.
-- [ ] Implement adapter-local row decoding, closure validation, FK-safe transactional import, exact conflict checks, and derived-state rebuild.
-- [ ] Run only archive store contract tests until green.
-- [ ] Commit as `feat(memory): add V2 archive store ports`.
+- [x] Implement adapter-local row decoding, closure validation, FK-safe transactional import, exact conflict checks, and derived-state rebuild.
+- [x] Run only archive store contract tests until green.
+- [x] Commit as `feat(memory): add V2 archive store ports`.
 
 ### Task 3: Durable cutover protocol
 
@@ -63,10 +63,10 @@
 - Consumes archive export/import ports.
 - Produces a versioned receipt binding source path/generation, archive digest, and verified target digest.
 
-- [ ] Write failing target-barrier, receipt-sync, committed-merge retry, and durable-receipt resume tests.
-- [ ] Replace lifecycle raw merge with archive export, plan, import, public readback, database/WAL durability, and durable receipt publication.
-- [ ] Verify both injected failures retain the source and expose no usable receipt.
-- [ ] Commit as `fix(memory): make V2 cutover receipt durable`.
+- [x] Write failing target-barrier, receipt-sync, committed-merge retry, and durable-receipt resume tests.
+- [x] Replace lifecycle raw merge with archive export, plan, import, public readback, database/WAL durability, and durable receipt publication.
+- [x] Verify both injected failures retain the source and expose no usable receipt.
+- [x] Commit as `fix(memory): make V2 cutover receipt durable`.
 
 ### Task 4: PR lifecycle proof
 

@@ -590,6 +590,26 @@ async fn project_memory_cutover_preserves_v2_authority_after_legacy_reclamation(
         .await
         .unwrap();
     assert!(applied.applied);
+    let receipt_path = data_root.join("memory-branch-cutover.json");
+    let receipt_bytes = fs::read(&receipt_path).unwrap();
+    let mut wrong_project_receipt: serde_json::Value =
+        serde_json::from_slice(&receipt_bytes).unwrap();
+    wrong_project_receipt["project_id"] = serde_json::json!("proj_other");
+    fs::write(
+        &receipt_path,
+        serde_json::to_vec_pretty(&wrong_project_receipt).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        tracedecay::migrate::memory_cutover::verify_branch_removal_receipts(
+            &data_root,
+            std::slice::from_ref(&branch),
+            &[],
+        )
+        .is_err(),
+        "a receipt copied from another project must fail closed"
+    );
+    fs::write(&receipt_path, receipt_bytes).unwrap();
     tracedecay::migrate::memory_cutover::verify_branch_removal_receipts(
         &data_root,
         std::slice::from_ref(&branch),
