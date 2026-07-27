@@ -146,7 +146,17 @@ export function ExplorerSplit({
           className="flex min-h-[var(--pane-min-height)] min-w-0 flex-1 flex-col overflow-hidden"
           onKeyDown={onResultsKeyDown}
         >
-          <div className="min-h-0 flex-1 overflow-auto">{list}</div>
+          {/* Named, because Plan 11 licenses internal scrolling for LABELLED
+            * regions only, and this is the element that actually scrolls — the
+            * section around it is `overflow-hidden`, so its own name never
+            * reaches the scroll container a reader operates. */}
+          <div
+            role="region"
+            aria-label="Result rows"
+            className="min-h-0 flex-1 overflow-auto"
+          >
+            {list}
+          </div>
         </section>
         {inspector ? (
           <aside

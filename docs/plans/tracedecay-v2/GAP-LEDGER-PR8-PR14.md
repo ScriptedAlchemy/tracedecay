@@ -118,15 +118,44 @@ dashboard, while the control-plane-less in-process fixture correctly withholds
 the apply and answers a typed `configuration_authority_unavailable`.
 
 This closes those two items only. Plan 11 carries the audited list of what PR14
-acceptance still owes, including the absent performance, import-boundary,
-virtualization, and viewport-matrix gates and the named per-workspace
-capability gaps.
+acceptance still owes. That list has since narrowed: as of 2026-07-27 the
+import-boundary, virtualization, viewport-matrix, and accessibility
+route-coverage gates have all landed, so the runtime performance budgets and the
+named per-workspace capability gaps are what remain. Plan 11 holds the current
+statement; do not re-derive a closed gate from this paragraph.
 
 One refuted finding, recorded so it is not re-reported: an audit claimed
 `/api/plugins/graph/strata` has no Code-workspace consumer. It does —
 `dashboard/src/workspaces/code/Strata.tsx` reads the route through the
 generated `StructureReadV12Schema`, and `CodePage.tsx` renders it. All five
 Plan 11b structure routes are consumed; do not reopen that as a gap.
+
+### Symbol-graph continuation cutover (closed 2026-07-27)
+
+Plan 21 declares cursor and resume parity across CLI, MCP, and HTTP as a
+delivered PR12 core requirement, and Plan 05 lists opaque-cursor authentication
+as delivered. Both were accurate about their own layer and inaccurate as a
+statement about the shipped product: until `97d6499ce`, every shipped code-read
+surface pinned the page to `PageRequest::first(DEFAULT_PAGE_SIZE)`. The
+server-side resume logic in `src/daemon/code_index_scheduler/queries.rs` was
+fully built and fully unreachable, a first page returned a `next_cursor` and
+`truncated: true` that no caller could spend, and HTTP silently discarded
+`?cursor=` for code reads.
+
+The fix routes continuation through `CallableCodeSurfaceMeta::into_application`
+— one choke point covering all fourteen code operations — folds the HTTP
+transport cursor into the same field, and advertises `cursor` in the MCP schema
+only now that it is honored. The pr12 reachability test resumes page two through
+MCP and the installed CLI binary and asserts the second page continues rather
+than restarts; the author reports 6/6 green and falsified the assertion by
+resuming with `None`. As with every 2026-07-27 commit, that is scoped local
+evidence and not CI.
+
+Record this as a delivered claim that was inaccurate until 2026-07-27 and is now
+closed, not as an unbuilt capability. One item is deliberately left open: page
+size remains a fixed invocation control at ten, with no advertised page-size
+parameter, so the surface offers no affordance it does not honor. Do not file
+the absent page-size parameter as a parity gap.
 
 ### Later-plan placement
 
@@ -144,6 +173,10 @@ the temporary-alias deletion slices.
   includes both the shared session-observation path and the external-source
   host-observation specialization. Broader acquisition/refetch remains a
   retained, unmounted seam.
+- `05-query-crate.md`: opaque-cursor authentication and validation are delivered
+  in-crate and were never the defect. What was missing until 2026-07-27 was a
+  shipped code-read surface able to supply one; see the continuation-cutover
+  adjudication above. No audit may read that correction as a Plan 05 overclaim.
 - `08-tool-catalog-crate.md`: host discovery no longer advertises
   handle-gated feedback operations or unsupported symbol-search `AsOf`;
   internal handlers are not mistaken for host-constructible requests.
@@ -155,7 +188,11 @@ the temporary-alias deletion slices.
 - `11-dashboard-frontend.md`: twelve-workspace/embed reachability is recorded;
   abandoned projection names are removed; live Rust `EvidencePacket` is
   protected. Generated graph contracts/consumers, generated Explorer query
-  schemas, and typed scheduler pause/resume controls are now recorded.
+  schemas, and typed scheduler pause/resume controls are now recorded. As of
+  2026-07-27 the accessibility gate reaches all twelve workspaces, and the
+  trapped-pane and touch-target defects it exposed are fixed in `15ef9f578` and
+  `c42e18917`. The plan holds the run output, the counts, and the untested CI
+  timeout margin.
 - `11a-dashboard-design.md`: the visual audit now exits nonzero on render
   failure, uncaught page errors, axe violations, or pixel drift.
 - `11b-structure-visualization.md`: all five endpoints are registered and now
@@ -189,6 +226,10 @@ the temporary-alias deletion slices.
   daemon-hosted dashboard path has direct commit/CAS coverage. PR17's complete
   work-execution snapshot and broader component activation/drift journey remain
   open, and the live semantic snapshot is currently invalid.
+- `21-cli-mcp-tool-surface-and-output-unification.md`: the cursor half of the
+  declared CLI/MCP/HTTP parity was inaccurate as delivered until `97d6499ce`
+  closed it on 2026-07-27. Page size remains a fixed invocation control and is
+  deliberately not a caller-supplied parameter.
 - `23-session-lcm-temporal-retrieval-and-evaluation.md`: retrieval-time expiry
   and `RetentionWithheld` remain here; retention writers and
   `source_cursor_advances` reclamation belong to Plan 38.
@@ -217,6 +258,17 @@ the temporary-alias deletion slices.
   the daemon gateway, `src/lsp_bridge.rs`, `src/diagnostics/lsp/`, and
   `tracedecay lsp servers|bridge`; the old `--no-lsp`/environment/config/module
   proposal is not a missing plan requirement.
+- `36-git-aware-change-context-and-index-transactions.md`: carries an open
+  portability gap recorded 2026-07-27. The daemon canonicalizes
+  `repository_root` before building the assembler
+  (`src/daemon/git_transactions/owner.rs`, around line 460) while callers
+  capture snapshots from uncanonicalized paths. On Linux with a real `/tmp`
+  the two agree, so the defect is latent there; on any host whose repository
+  path traverses a symlink — macOS `/tmp` → `/private/tmp` is the canonical
+  case — daemon recapture and caller snapshot diverge and `git_preview` would
+  misreport `stale_preview`. The honest repair is to canonicalize consistently
+  at snapshot construction. Loosening the comparison to make the paths match is
+  the wrong fix and must not be adopted.
 - `38-storage-retention-size-and-efficiency.md` and `NEXT.md`: raw LCM
   offload/drop, projected-message dedupe, legacy session/raw pruning, and
   observation-evidence release now have bounded defaults. Superseded
@@ -245,11 +297,13 @@ correction.
 
 Everything recorded in the three sections below landed on
 `codex/tracedecay-total-redesign-plan` during the night of 2026-07-27. **None of
-the 24 commits has been validated by CI.** PR #421 has been in a conflicting
-state since 05:13 UTC, and `pull_request` workflows cannot build a merge ref for
-a conflicting pull request, so no CI run has started since 01:24 UTC — a gap now
-covering roughly 60 commits. `gh pr view 421` still reports
-`mergeable: CONFLICTING`.
+it has been validated by CI.** PR #421 has been in a conflicting state since
+05:13 UTC, and `pull_request` workflows cannot build a merge ref for a
+conflicting pull request, so no CI run has started since 01:24 UTC. That
+unvalidated batch was roughly 60 commits when this section was first written at
+22:33 and stood at 101 non-merge commits at 23:40; it only grows while the pull
+request conflicts. `gh pr view 421` reported `mergeable: CONFLICTING` at both
+readings.
 
 Local verification during that window was scoped and contended. Several lanes
 committed on `cargo check` plus a filtered test run rather than a completed
@@ -322,7 +376,7 @@ not as new test design.
 
 ## Gates that attest to what they never checked
 
-Six independent lanes each found the same failure family on 2026-07-27: a gate
+Seven independent lanes each found the same failure family on 2026-07-27: a gate
 that reports success without having exercised the thing it names. Recording the
 family so future gate review looks for it directly.
 
@@ -342,12 +396,23 @@ family so future gate review looks for it directly.
 6. `tests/pr12_production_reachability.rs` asserts that a symbol *name appears
    in source text* rather than that the path executes. That is why symbol-graph
    pagination was dead from the day it was written without any gate noticing.
+7. The dashboard axe gate reported zero violations while holding scenarios for
+   only 7 of the 12 workspaces. A page no scenario visits cannot report a
+   violation, so those zeros under-reported by construction rather than by
+   defect. Extending it to all twelve in `666ff456d` immediately exposed a
+   trapped configuration pane and four real touch-target failures. This instance
+   is not name-filter shaped, which is why it survived so long: the gate ran, it
+   passed honestly, and its scope was the untrue part.
 
 The asymmetry that hides this family: **libtest exits 0 when a name filter
 matches nothing, while nextest can be made to fail on an empty filter.** A
 dangling `cargo test --exact` is therefore silently vacuous forever, and stays
 green through the deletion of the very test it names. Treat a name-filtered gate
 as unverified until something proves the filter selects a nonempty set.
+
+Instance 7 generalizes that rule beyond filters: read a green gate's scope
+against the surface it claims to cover, because a gate can pass truthfully and
+still leave most of its subject unvisited.
 
 ## Product defects found and fixed 2026-07-27
 
