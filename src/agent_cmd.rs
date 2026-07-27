@@ -57,6 +57,7 @@ pub(crate) async fn handle_host_bundle_component_command(
         })?;
     let mut user_config = tracedecay::user_config::UserConfig::load();
     tracedecay::agents::migrate_installed_agents(&home, &mut user_config);
+    let explicitly_scoped = agent.is_some();
     let agent_ids = match agent {
         Some(agent) => vec![agent],
         None if operation == HostBundleCliOperation::Install => {
@@ -78,12 +79,17 @@ pub(crate) async fn handle_host_bundle_component_command(
         })?
         .as_secs();
     for agent_id in &agent_ids {
-        let component_set = canonical_host_component_set(agent_id, options.component, now_unix)?
-            .ok_or_else(|| tracedecay::errors::TraceDecayError::Config {
-                message: format!(
-                    "agent {agent_id:?} has no canonical first-party host component set"
-                ),
-            })?;
+        let component_set = canonical_host_component_set(agent_id, options.component, now_unix)?;
+        let Some(component_set) = component_set else {
+            if explicitly_scoped {
+                return Err(tracedecay::errors::TraceDecayError::Config {
+                    message: format!(
+                        "agent {agent_id:?} has no canonical first-party host component set"
+                    ),
+                });
+            }
+            continue;
+        };
         if options.dry_run {
             dry_run_canonical_component_set(
                 agent_id,
@@ -128,8 +134,7 @@ fn canonical_host_component_set(
 > {
     let host = match host_kind_for_agent(agent) {
         Ok(host) => host,
-        Err(_) if component.is_none() => return Ok(None),
-        Err(error) => return Err(error),
+        Err(_) => return Ok(None),
     };
     let requested = component.map(host_bundle_component).map_or_else(
         || tracedecay::agents::host_bundle_registry::default_components(host),
@@ -2269,6 +2274,15 @@ mod tests {
         assert!(
             kiro.is_none(),
             "a degraded hook route must not become a supported component set"
+        );
+        assert!(
+            canonical_host_component_set(
+                "gemini",
+                Some(crate::cli::HostBundleComponentArg::Core),
+                0,
+            )
+            .expect("native-only agents are skipped by aggregate component lifecycle")
+            .is_none()
         );
     }
 
