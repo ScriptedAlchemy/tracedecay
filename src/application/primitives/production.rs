@@ -976,25 +976,39 @@ fn update_storage_status_history(
     if clock_regressed {
         history.clear();
     }
-    history.push(StorageStatusHistoryPointV1 {
-        observed_at,
-        database_bytes,
-    });
-    if history.len() > MAX_STORAGE_STATUS_HISTORY_POINTS {
-        history.drain(..history.len() - MAX_STORAGE_STATUS_HISTORY_POINTS);
+    // The series records store-size changes, not reads. Re-observing the same
+    // size adds no information, and appending per read would both amplify
+    // writes and make this evidence operation non-idempotent, so the same
+    // authorized status read could never agree across CLI, MCP, and HTTP.
+    let recorded = !history
+        .last()
+        .is_some_and(|sample| sample.database_bytes == database_bytes);
+    if recorded {
+        history.push(StorageStatusHistoryPointV1 {
+            observed_at,
+            database_bytes,
+        });
+        if history.len() > MAX_STORAGE_STATUS_HISTORY_POINTS {
+            history.drain(..history.len() - MAX_STORAGE_STATUS_HISTORY_POINTS);
+        }
     }
-    let durable = DurableStorageStatusHistoryV1 {
-        revision: STORAGE_STATUS_HISTORY_REVISION_V1,
-        project_id,
-        store_path,
-        samples: history.clone(),
-    };
-    let persisted = serde_json::to_vec_pretty(&durable).ok().and_then(|bytes| {
-        std::fs::create_dir_all(history_path.parent().unwrap_or_else(|| Path::new("."))).ok()?;
-        let temp = history_path.with_extension(format!("tmp-{}-{observed_at}", std::process::id()));
-        crate::storage::PrivateStoreIo::write_file_atomically(history_path, &temp, &bytes).ok()
-    });
-    let coverage = if persisted.is_none() {
+    let persisted = !recorded
+        || serde_json::to_vec_pretty(&DurableStorageStatusHistoryV1 {
+            revision: STORAGE_STATUS_HISTORY_REVISION_V1,
+            project_id,
+            store_path,
+            samples: history.clone(),
+        })
+        .ok()
+        .and_then(|bytes| {
+            std::fs::create_dir_all(history_path.parent().unwrap_or_else(|| Path::new(".")))
+                .ok()?;
+            let temp =
+                history_path.with_extension(format!("tmp-{}-{observed_at}", std::process::id()));
+            crate::storage::PrivateStoreIo::write_file_atomically(history_path, &temp, &bytes).ok()
+        })
+        .is_some();
+    let coverage = if !persisted {
         "current_sample_only_history_persistence_failed"
     } else if invalid_stored_history {
         "durable_project_store_history_reset_invalid"
@@ -2866,6 +2880,40 @@ mod affected_tests_tests {
         assert_eq!(second[0].database_bytes, 4096);
         assert_eq!(second[1].database_bytes, 8192);
         assert_eq!(second_coverage, "durable_project_store_history");
+    }
+
+    #[test]
+    fn storage_status_history_records_changes_not_reads() {
+        let directory = tempfile::tempdir().expect("history tempdir");
+        let history_path = directory.path().join("storage-status-history-v1.json");
+        let project_id = Some("project.storage-status".to_owned());
+        let store_path = "/project/.tracedecay/graph.db".to_owned();
+
+        let (first, _) = update_storage_status_history(
+            &history_path,
+            project_id.clone(),
+            store_path.clone(),
+            4096,
+            1,
+        );
+        let (repeated, repeated_coverage) = update_storage_status_history(
+            &history_path,
+            project_id.clone(),
+            store_path.clone(),
+            4096,
+            2,
+        );
+
+        assert_eq!(first, repeated, "an unchanged store must read idempotently");
+        assert_eq!(repeated.len(), 1);
+        assert_eq!(repeated[0].observed_at, 1);
+        assert_eq!(repeated_coverage, "durable_project_store_history");
+
+        let (changed, _) =
+            update_storage_status_history(&history_path, project_id, store_path, 8192, 3);
+        assert_eq!(changed.len(), 2);
+        assert_eq!(changed[1].database_bytes, 8192);
+        assert_eq!(changed[1].observed_at, 3);
     }
 
     #[test]

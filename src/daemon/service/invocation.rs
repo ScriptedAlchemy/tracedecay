@@ -2381,6 +2381,9 @@ fn callable_code_request_context(
             retry: RetryDirective::Never,
             legal_actions: Vec::new(),
         })?;
+    // Correlation IDs stay on the RequestContext. The route authority is a
+    // function of the access and the operation, so the same authorized call
+    // resolves the same grant from any surface and across durable retries.
     let grant_digest = canonical_sha256(&(
         "tracedecay.daemon.callable-code-grant.v1",
         scope,
@@ -2388,7 +2391,6 @@ fn callable_code_request_context(
         &access.configuration_digest,
         operation.capability_id(),
         operation.use_case_id(),
-        request_id.as_str(),
     ))
     .map_err(|_| {
         ApplicationProblem::unavailable(SafeDiagnostic {

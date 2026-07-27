@@ -557,8 +557,11 @@ async fn assert_application_transport_parity(
         Value::String(expected_contract)
     );
     assert_eq!(cli["contract"]["schema_revision"], 1);
-    assert_eq!(cli["outcome"], "evidence");
-    assert_eq!(cli["value"]["execution"]["termination"], "completed");
+    assert_eq!(cli["outcome"]["outcome"], "evidence");
+    assert_eq!(
+        cli["outcome"]["value"]["execution"]["termination"],
+        "completed"
+    );
 
     let mut cli_envelope = cli.clone();
     let mut mcp_envelope =
@@ -574,7 +577,7 @@ async fn assert_application_transport_parity(
     let mcp_payload = successful_application(&mcp);
     let http_payload = successful_application(&http);
     assert_eq!(mcp_payload, http_payload);
-    assert_eq!(cli["value"]["payload"], *mcp_payload);
+    assert_eq!(cli["outcome"]["value"]["payload"], *mcp_payload);
     assert_eq!(
         cli["scope"]["project_id"],
         serde_json::to_value(&mcp.result.as_ref().expect("MCP result").scope.project_id)
@@ -653,8 +656,8 @@ async fn run_application_http(fixture: &RuntimeFixture, path: &str, arguments: &
 
 fn successful_http_payload(result: &Value) -> &Value {
     assert_eq!(result["kind"], "success");
-    assert_eq!(result["value"]["outcome"], "evidence");
-    &result["value"]["value"]["payload"]
+    assert_eq!(result["value"]["outcome"]["outcome"], "evidence");
+    &result["value"]["outcome"]["value"]["payload"]
 }
 
 fn assert_command_success(label: &str, output: &Output) {
@@ -990,9 +993,12 @@ async fn project_open_application_boundary() {
     let cli = run_storage_status(fixture.home(), &fixture.project, true);
     assert_command_success("CLI storage_status", &cli);
     let cli_value: Value = serde_json::from_slice(&cli.stdout).expect("CLI application JSON");
-    assert_eq!(cli_value["outcome"], "evidence");
+    assert_eq!(cli_value["outcome"]["outcome"], "evidence");
     assert!(cli_value["scope"]["project_id"].as_str().is_some());
-    assert_eq!(cli_value["value"]["execution"]["termination"], "completed");
+    assert_eq!(
+        cli_value["outcome"]["value"]["execution"]["termination"],
+        "completed"
+    );
 
     let mcp = resolve_mcp_application_surface(
         ApplicationSurfaceOperation::StorageStatus,
@@ -1104,7 +1110,7 @@ async fn production_primitive_code_routes_have_cli_mcp_http_parity() {
             "file": "src/auth/login.rs",
             "span": { "start_byte": 0, "end_byte": source_len },
             "meta": {
-                "temporal": "current",
+                "temporal": { "kind": "current" },
                 "page": { "page_size": 10, "cursor": null },
                 "projection": "references_only",
                 "order": "source_position",
@@ -1830,7 +1836,7 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
     let mcp_payload = successful_application(&mcp);
     let http_payload = successful_http_payload(&http);
     assert_eq!(mcp_payload, http_payload);
-    assert_eq!(cli["value"]["payload"], *mcp_payload);
+    assert_eq!(cli["outcome"]["value"]["payload"], *mcp_payload);
     assert_eq!(
         http["value"]["scope"],
         serde_json::to_value(&mcp.result.as_ref().expect("MCP result").scope)
@@ -1913,8 +1919,11 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
             cli["contract"]["schema_id"],
             Value::String(expected_contract.to_owned())
         );
-        assert_eq!(cli["outcome"], "evidence");
-        assert_eq!(cli["value"]["execution"]["termination"], "completed");
+        assert_eq!(cli["outcome"]["outcome"], "evidence");
+        assert_eq!(
+            cli["outcome"]["value"]["execution"]["termination"],
+            "completed"
+        );
         assert_eq!(http["value"]["contract"]["schema_id"], expected_contract);
         assert_eq!(
             http["value"]["binding_id"],
@@ -1928,7 +1937,7 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
             operation.as_str()
         );
         assert_eq!(successful_http_payload(&http), projected_payload);
-        assert_eq!(cli["value"]["payload"], *projected_payload);
+        assert_eq!(cli["outcome"]["value"]["payload"], *projected_payload);
 
         let mut cli_envelope = cli.clone();
         let mut mcp_envelope =
@@ -2323,32 +2332,34 @@ async fn primitive_config_markdown_json_parity() {
     assert_exact_markdown_field(
         &markdown,
         "Freshness",
-        json["value"]["temporal"]["freshness"]
+        json["outcome"]["value"]["temporal"]["freshness"]
             .as_str()
             .expect("JSON freshness"),
     );
     assert_exact_markdown_field(
         &markdown,
         "Coverage",
-        json["value"]["coverage"]["completeness"]
+        json["outcome"]["value"]["coverage"]["completeness"]
             .as_str()
             .expect("JSON coverage"),
     );
     assert_exact_markdown_field(
         &markdown,
         "Page returned",
-        &json["value"]["page"]["returned"].to_string(),
+        &json["outcome"]["value"]["page"]["returned"].to_string(),
     );
-    let page_total = json["value"]["page"]["total"]
+    let page_total = json["outcome"]["value"]["page"]["total"]
         .as_u64()
         .map_or_else(|| "unknown".to_owned(), |total| total.to_string());
     assert_exact_markdown_field(&markdown, "Page total", &page_total);
-    let cursor = json["value"]["page"]["cursor"].as_str().unwrap_or("none");
+    let cursor = json["outcome"]["value"]["page"]["cursor"]
+        .as_str()
+        .unwrap_or("none");
     assert_exact_markdown_field(&markdown, "Cursor", cursor);
     assert_exact_markdown_field(&markdown, "Termination", "completed");
     assert_exact_markdown_field(&markdown, "Cancellation stage", "none");
 
-    let payload = &json["value"]["payload"];
+    let payload = &json["outcome"]["value"]["payload"];
     let payload_bytes = serde_json::to_vec(payload)
         .expect("serialize JSON payload")
         .len();
@@ -2359,9 +2370,9 @@ async fn primitive_config_markdown_json_parity() {
         markdown.lines().any(|line| line == payload_summary),
         "missing exact Markdown payload summary {payload_summary:?}\n{markdown}"
     );
-    assert_eq!(json["outcome"], "evidence");
+    assert_eq!(json["outcome"]["outcome"], "evidence");
     assert_eq!(
-        &json["value"]["payload"],
+        &json["outcome"]["value"]["payload"],
         successful_application(&json_result)
     );
 }
