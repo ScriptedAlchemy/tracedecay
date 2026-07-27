@@ -299,7 +299,7 @@ mod tests {
         .await
         .unwrap();
 
-        let target = open_target_memory_db(&cg, &json!({}), None, true)
+        let target = open_target_memory_db(&cg, &json!({}), None)
             .await
             .unwrap();
 
