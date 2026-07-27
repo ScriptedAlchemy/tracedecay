@@ -4,7 +4,7 @@
 
 use serde_json::{Value, json};
 
-use crate::support::{handle_real_server_tool_call, open_active_project_session_db};
+use crate::support::{handle_real_server_tool_call, open_active_project_scoped_runtime};
 use tracedecay::application::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay::global_db::AnalyticsEventInsert;
 use tracedecay::mcp::{McpServer, handle_tool_call};
@@ -76,7 +76,7 @@ async fn analytics_reports_tool_tiers_top_tools_and_zero_call_tools() {
     let project_id = HostAdmissionTestRuntimeV1::canonical_project_key(cg.project_root());
     let now = current_timestamp();
 
-    let runtime = open_active_project_session_db(&cg).await;
+    let runtime = open_active_project_scoped_runtime(&cg).await;
     runtime
         .append_profile_analytics_events_for_test(&[
             tool_call_event(&project_id, "tracedecay_grep", "ok", now - 60),
@@ -292,7 +292,7 @@ async fn analytics_aggregates_sections_before_any_event_sample_cap() {
     let (cg, _env) = crate::mcp_handler_test::setup_project().await;
     let project_id = HostAdmissionTestRuntimeV1::canonical_project_key(cg.project_root());
     let timestamp = current_timestamp() - 60;
-    let runtime = open_active_project_session_db(&cg).await;
+    let runtime = open_active_project_scoped_runtime(&cg).await;
 
     let events = vec![
         hint_event(&project_id, "hint_emitted", None, timestamp),

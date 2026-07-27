@@ -250,7 +250,15 @@ async fn project_context_surfaces_registry_read_failure_as_tool_error() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let registry_dir = test_temp_dir();
     let registry_path = registry_dir.path().join("global.db");
-    let runtime = HostAdmissionTestRuntimeV1::profile(registry_dir.path())
+    let runtime =
+        HostAdmissionTestRuntimeV1::project_scoped(registry_dir.path(), cg.project_root(), {
+            cg.store_layout()
+                .identity
+                .project_id
+                .as_deref()
+                .and_then(|value| tracedecay_domain::ProjectId::new(value.to_string()).ok())
+                .expect("test project identity")
+        })
         .await
         .unwrap();
     runtime
@@ -280,15 +288,16 @@ async fn project_context_surfaces_registry_read_failure_as_tool_error() {
     )
     .await;
 
-    let result = handle_real_server_tool_call(
+    let response = handle_real_server_tool_call_raw(
         &server,
         "tracedecay_project_context",
         json!({"path": "registered-alias", "format": "json"}),
     )
     .await;
 
-    assert_eq!(result["isError"], true, "{result}");
-    let message = extract_real_server_text(&result);
+    let message = response["error"]["message"]
+        .as_str()
+        .unwrap_or_else(|| panic!("registry read failure should surface as an error: {response}"));
     assert!(
         message.contains("resolve project identity alias") || message.contains("project_aliases"),
         "{message}"
@@ -300,7 +309,15 @@ async fn project_search_surfaces_registry_read_failure_as_tool_error() {
     let (cg, _env, _dir) = setup_empty_project().await;
     let registry_dir = test_temp_dir();
     let registry_path = registry_dir.path().join("global.db");
-    let runtime = HostAdmissionTestRuntimeV1::profile(registry_dir.path())
+    let runtime =
+        HostAdmissionTestRuntimeV1::project_scoped(registry_dir.path(), cg.project_root(), {
+            cg.store_layout()
+                .identity
+                .project_id
+                .as_deref()
+                .and_then(|value| tracedecay_domain::ProjectId::new(value.to_string()).ok())
+                .expect("test project identity")
+        })
         .await
         .unwrap();
     runtime
@@ -326,18 +343,16 @@ async fn project_search_surfaces_registry_read_failure_as_tool_error() {
     )
     .await;
 
-    let result = handle_real_server_tool_call(
+    let response = handle_real_server_tool_call_raw(
         &server,
         "tracedecay_project_search",
         json!({"query": "broken", "format": "json"}),
     )
     .await;
 
-    assert_eq!(
-        result["isError"], true,
-        "registry read failure must not become a successful empty search: {result}"
-    );
-    let message = extract_real_server_text(&result);
+    let message = response["error"]["message"].as_str().unwrap_or_else(|| {
+        panic!("registry read failure must not become a successful empty search: {response}")
+    });
     assert!(
         message.contains("search code projects") || message.contains("project_aliases"),
         "{message}"
@@ -375,7 +390,7 @@ async fn project_registry_tools_prefer_injected_registry_over_process_default() 
         .as_deref()
         .and_then(|value| tracedecay_domain::ProjectId::new(value.to_string()).ok())
         .expect("test project identity");
-    let client_runtime = HostAdmissionTestRuntimeV1::project(
+    let client_runtime = HostAdmissionTestRuntimeV1::project_scoped(
         client_registry_dir.path(),
         cg.project_root(),
         project_id,
@@ -448,9 +463,10 @@ async fn project_registry_tools_prefer_injected_registry_over_process_default() 
 async fn selected_project_read_skips_cache_write_for_read_only_store() {
     let project_dir = test_temp_dir();
     let (cg, _env) = init_test_project(project_dir.path()).await;
-    let registry_dir = test_temp_dir();
-    let registry_path = registry_dir.path().join("global.db");
-    let _env_guard = GlobalDbEnvGuard::set(&registry_path);
+    // Both graphs and the registry share one profile: a test runtime only
+    // mounts stores inside its own profile root, so a registry parked in a
+    // separate directory could never reach either graph.
+    let profile_root = tracedecay::storage::default_profile_root().unwrap();
     let target_dir = test_temp_dir();
     let target_project = target_dir.path();
 
@@ -469,24 +485,46 @@ async fn selected_project_read_skips_cache_write_for_read_only_store() {
         .and_then(|value| tracedecay_domain::ProjectId::new(value.to_string()).ok())
         .expect("test project identity");
     let registry =
-        HostAdmissionTestRuntimeV1::project(registry_dir.path(), cg.project_root(), project_id)
+        HostAdmissionTestRuntimeV1::project_scoped(&profile_root, cg.project_root(), project_id)
             .await
             .unwrap();
     registry
         .upsert_code_project("proj_read", target_project, None, None, Some("main"))
         .await
         .unwrap();
-    let _target_cg = TestTraceDecay::new(
+    let target_cg = TestTraceDecay::new(
         fixture::init_project_from_template(target_project)
             .await
             .unwrap(),
     );
-    let server = tracedecay::mcp::McpServer::new_with_host_admission_test_runtime_for_test(
+    let target_project_id = target_cg
+        .store_layout()
+        .identity
+        .project_id
+        .as_deref()
+        .and_then(|value| tracedecay_domain::ProjectId::new(value.to_string()).ok())
+        .expect("target project identity");
+    let target_runtime =
+        HostAdmissionTestRuntimeV1::project_scoped(&profile_root, target_project, target_project_id)
+            .await
+            .unwrap();
+    let target_graph = target_runtime
+        .open_project_graph_read_only_for_test(
+            target_project,
+            tracedecay::tracedecay::TraceDecayOpenOptions {
+                global_db_path: Some(profile_root.join("global.db")),
+                profile_root: Some(profile_root.clone()),
+            },
+        )
+        .await
+        .expect("target project graph opens through its own scoped runtime");
+    let server = tracedecay::mcp::McpServer::new_with_retained_test_graphs_for_test(
         tracedecay::tracedecay::TraceDecay::open(cg.project_root())
             .await
             .unwrap(),
         None,
         registry,
+        vec![std::sync::Arc::new(target_graph)],
     )
     .await;
 

@@ -42,7 +42,13 @@ export function ScopeBar({ onOpenPalette }: { onOpenPalette?: () => void }) {
   const projectLabel =
     scope.kind === 'project' ? resolvedProjectLabel(scope.projectId, registry.data) : undefined;
   return (
-    <header className="flex h-12 shrink-0 items-stretch border-b border-edge-subtle bg-surface-1">
+    // Every control on this bar is stretched to the bar's own height, so the
+    // bar's height IS their touch target. `h-12` is 3rem, and the root font
+    // size is 14px, so it measured 42px — 41px of content once the hairline is
+    // taken out — and put the palette, scope and theme controls under the
+    // minimum together. Sized from the token plus that hairline, so the
+    // content box lands exactly on 44. `NavRail`'s brand block matches it.
+    <header className="flex h-[calc(var(--touch-target-min)+1px)] shrink-0 items-stretch border-b border-edge-subtle bg-surface-1">
       <div
         className="flex min-w-0 flex-1 items-stretch overflow-hidden"
         aria-label="Active scope"
@@ -87,7 +93,8 @@ export function ScopeBar({ onOpenPalette }: { onOpenPalette?: () => void }) {
         type="button"
         onClick={toggleTheme}
         aria-label="Toggle theme"
-        className="flex w-11 shrink-0 items-center justify-center text-text-muted hover:bg-surface-2 hover:text-text-primary"
+        // `w-11` was written for 44 and rendered 38.5; the glyph is unchanged.
+        className="flex w-[var(--touch-target-min)] shrink-0 items-center justify-center text-text-muted hover:bg-surface-2 hover:text-text-primary"
       >
         <Sun aria-hidden size={14} className="hidden [[data-theme=light]_&]:block" />
         <Moon aria-hidden size={14} className="[[data-theme=light]_&]:hidden" />
@@ -111,6 +118,10 @@ function resolvedProjectLabel(
     }
     case 'offline':
       return `registry offline · ${projectId}`;
+    case 'unauthorized':
+      return `registry unauthorized · ${projectId}`;
+    case 'denied':
+      return `registry denied · ${projectId}`;
     case 'error':
       return `registry error · ${projectId}`;
     case 'unsupported_schema':

@@ -176,6 +176,39 @@ function laneEvidence(lane: Lane | undefined): EvidenceQuality {
   return lane.reportedTotal != null ? 'measured' : 'associated';
 }
 
+/**
+ * The state a browse lane reports for itself.
+ *
+ * Exhaustive, because a browse lane's outcome comes straight off `fetchLegacy`
+ * and so inherits every reading that helper can produce. It used to be a
+ * `=== 'offline' ? 'offline' : 'error'` ternary, which meant an authorization
+ * refusal on one memory read as that memory being broken.
+ */
+function laneStateKind(outcome: Lane['outcome']): DomainStateKind {
+  switch (outcome) {
+    case 'ok':
+      return 'ready';
+    case 'pending':
+      return 'loading';
+    case 'unknown':
+      return 'unknown';
+    case 'offline':
+      return 'offline';
+    case 'unauthorized':
+      return 'unauthorized';
+    case 'denied':
+      return 'denied';
+    case 'unsupported_schema':
+      return 'unsupported_schema';
+    case 'error':
+      return 'error';
+    default: {
+      const exhaustive: never = outcome;
+      return exhaustive;
+    }
+  }
+}
+
 function sourceStateKind(outcome: ExplorerSourceProgress['outcome']): DomainStateKind {
   switch (outcome) {
     case 'pending':
@@ -540,7 +573,7 @@ export function ExplorerPage() {
                 <MetaLabel>Unanswered</MetaLabel>
                 {failedLanes.map((lane) => (
                   <p key={lane.id} className="flex items-center gap-1.5 text-2xs text-text-muted">
-                    <StateChip kind={lane.outcome === 'offline' ? 'offline' : 'error'} />
+                    <StateChip kind={laneStateKind(lane.outcome)} />
                     <span>{LANES.find((l) => l.id === lane.id)?.label}</span>
                   </p>
                 ))}
@@ -688,7 +721,7 @@ function LaneReadout({
         </span>
       ) : (
         <span className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
-          <StateChip kind={lane?.outcome === 'offline' ? 'offline' : 'error'} />
+          <StateChip kind={laneStateKind(lane?.outcome ?? 'unknown')} />
           <span className="text-2xs leading-tight text-text-muted">no count reported</span>
         </span>
       )}
@@ -788,7 +821,7 @@ function PlannerRunPanel({
           type="button"
           onClick={onCancel}
           disabled={cancelling}
-          className="flex min-h-11 items-center justify-center border border-edge-subtle px-3 text-2xs text-text-secondary hover:border-accent hover:text-text-primary disabled:opacity-50"
+          className="flex min-h-[var(--touch-target-min)] items-center justify-center border border-edge-subtle px-3 text-2xs text-text-secondary hover:border-accent hover:text-text-primary disabled:opacity-50"
         >
           {cancelling ? 'Requesting cancellation…' : 'Cancel this run'}
         </button>
@@ -1132,7 +1165,7 @@ function EmptyResults({
         <button
           type="button"
           onClick={onClearFacet}
-          className="min-h-11 rounded-[var(--radius-chip)] border border-edge-subtle px-3 py-1 text-2xs text-text-secondary hover:border-accent hover:text-text-primary"
+          className="min-h-[var(--touch-target-min)] rounded-[var(--radius-chip)] border border-edge-subtle px-3 py-1 text-2xs text-text-secondary hover:border-accent hover:text-text-primary"
         >
           Clear the pivot
         </button>
@@ -1171,7 +1204,7 @@ function EmptyResults({
         <button
           type="button"
           onClick={onClearQuery}
-          className="min-h-11 rounded-[var(--radius-chip)] border border-edge-subtle px-3 py-1 text-2xs text-text-secondary hover:border-accent hover:text-text-primary"
+          className="min-h-[var(--touch-target-min)] rounded-[var(--radius-chip)] border border-edge-subtle px-3 py-1 text-2xs text-text-secondary hover:border-accent hover:text-text-primary"
         >
           Back to browsing
         </button>

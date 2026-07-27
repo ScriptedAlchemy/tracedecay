@@ -45,6 +45,12 @@ import { formatStamp, splitCount } from '../../ui/format.ts';
  * corpus into the browser. */
 const PAGE_SIZE = 100;
 
+/** The pager's visible bezel. It stays 24px tall — it annotates a message
+ * range rather than heading the panel — and `.td-hit` on the button around it
+ * supplies the 44px target. */
+const PAGER_BEZEL =
+  'inline-flex items-center gap-1 border border-edge-subtle bg-surface-2 px-2 py-1 text-3xs text-text-secondary group-hover:text-text-primary';
+
 export function SessionInspector({
   sessionId,
   onClose,
@@ -320,14 +326,16 @@ function RawMessages({
         trailing={
           <button
             type="button"
-            className="shrink-0 border border-edge-subtle bg-surface-2 px-1.5 py-0.5 text-3xs text-text-secondary hover:text-text-primary"
+            className="td-hit group shrink-0"
             onClick={() => onOrderChange(order === 'asc' ? 'desc' : 'asc')}
             // The order itself leads, because it is this control's visible
             // label: an accessible name that omits the visible text leaves a
             // speech-control user with nothing they can say (WCAG 2.5.3).
             aria-label={`Order ${payload.order} — switch to ${order === 'asc' ? 'newest first' : 'oldest first'}`}
           >
-            {payload.order}
+            <span className="border border-edge-subtle bg-surface-2 px-1.5 py-0.5 text-3xs text-text-secondary group-hover:text-text-primary">
+              {payload.order}
+            </span>
           </button>
         }
       >
@@ -378,21 +386,25 @@ function RawMessages({
       <div className="flex items-center gap-2">
         <button
           type="button"
-          className="inline-flex items-center gap-1 border border-edge-subtle bg-surface-2 px-2 py-1 text-3xs text-text-secondary hover:text-text-primary disabled:opacity-40"
+          className="td-hit group disabled:opacity-40"
           disabled={offset === 0}
           onClick={() => onOffsetChange(Math.max(0, offset - PAGE_SIZE))}
         >
-          <ChevronLeft aria-hidden size={11} />
-          Previous page
+          <span className={PAGER_BEZEL}>
+            <ChevronLeft aria-hidden size={11} />
+            Previous page
+          </span>
         </button>
         <button
           type="button"
-          className="inline-flex items-center gap-1 border border-edge-subtle bg-surface-2 px-2 py-1 text-3xs text-text-secondary hover:text-text-primary disabled:opacity-40"
+          className="td-hit group disabled:opacity-40"
           disabled={!payload.has_more_messages}
           onClick={() => onOffsetChange(offset + PAGE_SIZE)}
         >
-          Next page
-          <ChevronRight aria-hidden size={11} />
+          <span className={PAGER_BEZEL}>
+            Next page
+            <ChevronRight aria-hidden size={11} />
+          </span>
         </button>
       </div>
     </div>

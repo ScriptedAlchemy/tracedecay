@@ -120,9 +120,11 @@ export function ScopedBrain({ projectId, label }: { projectId: string; label: st
         <button
           type="button"
           onClick={selectAllProjects}
-          className="ml-auto shrink-0 border border-edge-subtle px-2 py-1 text-2xs text-text-secondary hover:bg-surface-2 hover:text-text-primary"
+          className="td-hit group ml-auto shrink-0"
         >
-          all projects
+          <span className="border border-edge-subtle px-2 py-1 text-2xs text-text-secondary group-hover:bg-surface-2 group-hover:text-text-primary">
+            all projects
+          </span>
         </button>
       </div>
       <div className="flex min-h-0 flex-1 flex-col lg:flex-row">

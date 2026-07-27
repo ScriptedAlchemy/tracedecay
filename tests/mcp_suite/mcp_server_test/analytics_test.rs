@@ -5,19 +5,10 @@ use crate::mcp_server_test::support::*;
 use serde_json::json;
 
 #[tokio::test]
-// Intentional: serializes env-mutating savings tests; #[tokio::test]
-// defaults to a current-thread runtime, so no executor thread blocks.
-#[allow(clippy::await_holding_lock)]
 async fn search_call_writes_savings_ledger_row() {
-    let _env_guard = SAVINGS_ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let tmp_global = persistent_temp_dir();
-    let _env = isolated_savings_env(&tmp_global.join("global.db"));
-
-    let (server, proj_tmp) = setup_server().await;
-    let server_handle = server.clone();
-    let db_path = locked_global_db_path();
+    let fixture = setup_accounted_server().await;
+    let (server, server_handle) = (fixture.server.clone(), fixture.server.clone());
+    let (proj_tmp, db_path) = (&fixture.project, &fixture.global_db_path);
 
     let responses = run_server_with_messages(
         server,
@@ -40,23 +31,14 @@ async fn search_call_writes_savings_ledger_row() {
     let resp = parse_response(resp_str);
     assert!(resp["error"].is_null(), "search should not error");
 
-    settled_ledger_total(&server_handle, &db_path, proj_tmp.path(), 1).await;
+    settled_ledger_total(&server_handle, db_path, proj_tmp.path(), 1).await;
 }
 
 #[tokio::test]
-// Intentional: serializes env-mutating savings tests; #[tokio::test]
-// defaults to a current-thread runtime, so no executor thread blocks.
-#[allow(clippy::await_holding_lock)]
 async fn search_call_writes_mcp_runtime_analytics_event() {
-    let _env_guard = SAVINGS_ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let tmp_global = persistent_temp_dir();
-    let _env = isolated_savings_env(&tmp_global.join("global.db"));
-
-    let (server, proj_tmp) = setup_savings_project().await;
-    let server_handle = server.clone();
-    let db_path = locked_global_db_path();
+    let fixture = setup_accounted_savings_server().await;
+    let (server, server_handle) = (fixture.server.clone(), fixture.server.clone());
+    let (proj_tmp, db_path) = (&fixture.project, &fixture.global_db_path);
     let project_path = proj_tmp
         .path()
         .canonicalize()
@@ -78,14 +60,14 @@ async fn search_call_writes_mcp_runtime_analytics_event() {
     assert!(resp["error"].is_null(), "search should not error");
     let (before, after) = parse_metrics_line(&resp).expect("metrics line present");
 
-    settled_ledger_total(&server_handle, &db_path, proj_tmp.path(), 1).await;
+    settled_ledger_total(&server_handle, db_path, proj_tmp.path(), 1).await;
     assert_eq!(
-        mcp_runtime_event_count(&db_path, "mcp-session-9002").await,
+        mcp_runtime_event_count(db_path, "mcp-session-9002").await,
         1,
         "one MCP runtime analytics event should be recorded per tool call"
     );
     let event = expect_mcp_runtime_event(
-        &db_path,
+        db_path,
         "tracedecay_search",
         "mcp-session-9002",
         "durable MCP runtime analytics event",
@@ -111,19 +93,10 @@ async fn search_call_writes_mcp_runtime_analytics_event() {
 }
 
 #[tokio::test]
-// Intentional: serializes env-mutating savings tests; #[tokio::test]
-// defaults to a current-thread runtime, so no executor thread blocks.
-#[allow(clippy::await_holding_lock)]
 async fn context_call_writes_memory_match_analytics_without_fact_bodies() {
-    let _env_guard = SAVINGS_ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let tmp_global = persistent_temp_dir();
-    let _env = isolated_savings_env(&tmp_global.join("global.db"));
-
-    let (server, _proj_tmp) = setup_server().await;
-    let server_handle = server.clone();
-    let db_path = locked_global_db_path();
+    let fixture = setup_accounted_server().await;
+    let (server, server_handle) = (fixture.server.clone(), fixture.server.clone());
+    let db_path = &fixture.global_db_path;
 
     let fact_content =
         "Durable context memory analytics should report counts without leaking fact bodies.";
@@ -168,7 +141,7 @@ async fn context_call_writes_memory_match_analytics_without_fact_bodies() {
 
     server_handle.ledger_writes_settled().await;
     let event = expect_mcp_runtime_event(
-        &db_path,
+        db_path,
         "tracedecay_context",
         "mcp-session-9006",
         "durable context MCP runtime analytics event",
@@ -191,19 +164,10 @@ async fn context_call_writes_memory_match_analytics_without_fact_bodies() {
 }
 
 #[tokio::test]
-// Intentional: serializes env-mutating savings tests; #[tokio::test]
-// defaults to a current-thread runtime, so no executor thread blocks.
-#[allow(clippy::await_holding_lock)]
 async fn failed_tool_call_writes_mcp_runtime_analytics_event() {
-    let _env_guard = SAVINGS_ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let tmp_global = persistent_temp_dir();
-    let _env = isolated_savings_env(&tmp_global.join("global.db"));
-
-    let (server, _proj_tmp) = setup_server().await;
-    let server_handle = server.clone();
-    let db_path = locked_global_db_path();
+    let fixture = setup_accounted_server().await;
+    let (server, server_handle) = (fixture.server.clone(), fixture.server.clone());
+    let db_path = &fixture.global_db_path;
 
     let resp = call_tool(
         server,
@@ -217,12 +181,12 @@ async fn failed_tool_call_writes_mcp_runtime_analytics_event() {
 
     server_handle.ledger_writes_settled().await;
     assert_eq!(
-        mcp_runtime_event_count(&db_path, "mcp-session-9003").await,
+        mcp_runtime_event_count(db_path, "mcp-session-9003").await,
         1,
         "failed MCP tool calls should still record analytics"
     );
     let event = expect_mcp_runtime_event(
-        &db_path,
+        db_path,
         "tracedecay_not_a_real_tool",
         "mcp-session-9003",
         "durable failed MCP runtime analytics event",
@@ -247,19 +211,10 @@ async fn failed_tool_call_writes_mcp_runtime_analytics_event() {
 }
 
 #[tokio::test]
-// Intentional: serializes env-mutating savings tests; #[tokio::test]
-// defaults to a current-thread runtime, so no executor thread blocks.
-#[allow(clippy::await_holding_lock)]
 async fn skill_view_call_writes_skill_arguments_to_mcp_runtime_analytics() {
-    let _env_guard = SAVINGS_ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let tmp_global = persistent_temp_dir();
-    let _env = isolated_savings_env(&tmp_global.join("global.db"));
-
-    let (server, _proj_tmp) = setup_server().await;
-    let server_handle = server.clone();
-    let db_path = locked_global_db_path();
+    let fixture = setup_accounted_server().await;
+    let (server, server_handle) = (fixture.server.clone(), fixture.server.clone());
+    let db_path = &fixture.global_db_path;
 
     let resp = call_tool(
         server,
@@ -279,7 +234,7 @@ async fn skill_view_call_writes_skill_arguments_to_mcp_runtime_analytics() {
 
     server_handle.ledger_writes_settled().await;
     let event = expect_mcp_runtime_event(
-        &db_path,
+        db_path,
         "tracedecay_skill_view",
         "mcp-session-9004",
         "durable skill-view MCP runtime analytics event",
@@ -294,19 +249,10 @@ async fn skill_view_call_writes_skill_arguments_to_mcp_runtime_analytics() {
 }
 
 #[tokio::test]
-// Intentional: serializes env-mutating savings tests; #[tokio::test]
-// defaults to a current-thread runtime, so no executor thread blocks.
-#[allow(clippy::await_holding_lock)]
 async fn semantic_tool_failure_writes_error_mcp_runtime_analytics_event() {
-    let _env_guard = SAVINGS_ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let tmp_global = persistent_temp_dir();
-    let _env = isolated_savings_env(&tmp_global.join("global.db"));
-
-    let (server, _proj_tmp) = setup_server().await;
-    let server_handle = server.clone();
-    let db_path = locked_global_db_path();
+    let fixture = setup_accounted_server().await;
+    let (server, server_handle) = (fixture.server.clone(), fixture.server.clone());
+    let db_path = &fixture.global_db_path;
 
     let resp = call_tool(
         server,
@@ -325,7 +271,7 @@ async fn semantic_tool_failure_writes_error_mcp_runtime_analytics_event() {
 
     server_handle.ledger_writes_settled().await;
     let event = expect_mcp_runtime_event(
-        &db_path,
+        db_path,
         "tracedecay_changelog",
         "mcp-session-9004",
         "durable semantic-failure MCP runtime analytics event",
@@ -337,19 +283,10 @@ async fn semantic_tool_failure_writes_error_mcp_runtime_analytics_event() {
 }
 
 #[tokio::test]
-// Intentional: serializes env-mutating savings tests; #[tokio::test]
-// defaults to a current-thread runtime, so no executor thread blocks.
-#[allow(clippy::await_holding_lock)]
 async fn structural_edit_failure_writes_real_failure_reason_to_analytics() {
-    let _env_guard = SAVINGS_ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let tmp_global = persistent_temp_dir();
-    let _env = isolated_savings_env(&tmp_global.join("global.db"));
-
-    let (server, _proj_tmp) = setup_server().await;
-    let server_handle = server.clone();
-    let db_path = locked_global_db_path();
+    let fixture = setup_accounted_server().await;
+    let (server, server_handle) = (fixture.server.clone(), fixture.server.clone());
+    let db_path = &fixture.global_db_path;
 
     // An anchor mismatch (str_replace's `old_str` not present in the file) is
     // a structural failure the handler already knows about via
@@ -374,7 +311,7 @@ async fn structural_edit_failure_writes_real_failure_reason_to_analytics() {
 
     server_handle.ledger_writes_settled().await;
     let event = expect_mcp_runtime_event(
-        &db_path,
+        db_path,
         "tracedecay_str_replace",
         "mcp-session-9005",
         "durable structural-failure MCP runtime analytics event",
@@ -399,27 +336,19 @@ async fn structural_edit_failure_writes_real_failure_reason_to_analytics() {
 /// (dashboards showed "no events yet" while lifetime counters kept growing
 /// through the ungated CLI paths).
 #[tokio::test]
-// Intentional: serializes env-mutating savings tests; #[tokio::test]
-// defaults to a current-thread runtime, so no executor thread blocks.
-#[allow(clippy::await_holding_lock)]
 async fn ledger_records_by_default_without_env_opt_in() {
     let _env_guard = SAVINGS_ENV_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let tmp_global = persistent_temp_dir();
-    let mut env = vec![EnvVarGuard::set(
-        "TRACEDECAY_GLOBAL_DB",
-        tmp_global.join("global.db").as_os_str(),
-    )];
     // Simulate a real (non-cargo) launch: neither the opt-in nor the
     // cargo-test opt-out is present, so the default-on path is exercised.
-    env.push(EnvVarGuard::unset("TRACEDECAY_ENABLE_GLOBAL_DB"));
-    env.push(EnvVarGuard::unset("TRACEDECAY_DISABLE_GLOBAL_DB"));
+    let _enable = EnvVarGuard::unset("TRACEDECAY_ENABLE_GLOBAL_DB");
+    let _disable = EnvVarGuard::unset("TRACEDECAY_DISABLE_GLOBAL_DB");
     assert!(tracedecay::global_db::global_accounting_enabled());
 
-    let (server, proj_tmp) = setup_server().await;
-    let server_handle = server.clone();
-    let db_path = locked_global_db_path();
+    let fixture = setup_accounted_server().await;
+    let (server, server_handle) = (fixture.server.clone(), fixture.server.clone());
+    let (proj_tmp, db_path) = (&fixture.project, &fixture.global_db_path);
 
     let responses = run_server_with_messages(
         server,
@@ -441,7 +370,7 @@ async fn ledger_records_by_default_without_env_opt_in() {
     let resp = parse_response(resp_str);
     assert!(resp["error"].is_null(), "search should not error");
 
-    settled_ledger_total(&server_handle, &db_path, proj_tmp.path(), 1).await;
+    settled_ledger_total(&server_handle, db_path, proj_tmp.path(), 1).await;
 }
 
 /// The explicit opt-outs must still work: a falsy
@@ -477,19 +406,10 @@ fn global_accounting_env_overrides() {
 /// zero. Guards against the historical bug where the counters accumulated
 /// the gross "before" estimate even when the response carried the whole file.
 #[tokio::test]
-// Intentional: serializes env-mutating savings tests; #[tokio::test]
-// defaults to a current-thread runtime, so no executor thread blocks.
-#[allow(clippy::await_holding_lock)]
 async fn full_file_read_credits_zero_net_savings() {
-    let _env_guard = SAVINGS_ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let tmp_global = persistent_temp_dir();
-    let _env = isolated_savings_env(&tmp_global.join("global.db"));
-
-    let (server, proj_tmp) = setup_savings_project().await;
-    let server_handle = server.clone();
-    let db_path = locked_global_db_path();
+    let fixture = setup_accounted_savings_server().await;
+    let (server, server_handle) = (fixture.server.clone(), fixture.server.clone());
+    let (proj_tmp, db_path) = (&fixture.project, &fixture.global_db_path);
     let project_path = proj_tmp.path().to_path_buf();
 
     let responses = run_server_with_messages(
@@ -521,7 +441,7 @@ async fn full_file_read_credits_zero_net_savings() {
         "full-file response ({after}) should be at least the raw estimate ({before})"
     );
 
-    let total = settled_ledger_total(&server_handle, &db_path, &project_path, 1).await;
+    let total = settled_ledger_total(&server_handle, db_path, &project_path, 1).await;
     assert_eq!(
         total.saved_tokens, 0,
         "ledger must not count a full-file read as savings"
@@ -542,19 +462,10 @@ async fn full_file_read_credits_zero_net_savings() {
 /// saving (before - after) per call, so after a single compressed call the
 /// per-project counter equals the ledger total.
 #[tokio::test]
-// Intentional: serializes env-mutating savings tests; #[tokio::test]
-// defaults to a current-thread runtime, so no executor thread blocks.
-#[allow(clippy::await_holding_lock)]
 async fn lifetime_counter_matches_ledger_net_savings() {
-    let _env_guard = SAVINGS_ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let tmp_global = persistent_temp_dir();
-    let _env = isolated_savings_env(&tmp_global.join("global.db"));
-
-    let (server, proj_tmp) = setup_savings_project().await;
-    let server_handle = server.clone();
-    let db_path = locked_global_db_path();
+    let fixture = setup_accounted_savings_server().await;
+    let (server, server_handle) = (fixture.server.clone(), fixture.server.clone());
+    let (proj_tmp, db_path) = (&fixture.project, &fixture.global_db_path);
     let project_path = proj_tmp.path().to_path_buf();
 
     let responses = run_server_with_messages(
@@ -583,7 +494,7 @@ async fn lifetime_counter_matches_ledger_net_savings() {
         "compressed search should save tokens (before={before}, after={after})"
     );
 
-    let total = settled_ledger_total(&server_handle, &db_path, &project_path, 1).await;
+    let total = settled_ledger_total(&server_handle, db_path, &project_path, 1).await;
     assert_eq!(
         total.saved_tokens,
         before - after,

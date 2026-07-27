@@ -162,10 +162,36 @@
     inset 0 1px 0 var(--raw-membrane-lift), 0 18px 44px -28px var(--raw-depth);
 
   /* ---- rhythm ----
-   * 36px data row: the VirtualList windowing estimate is derived from this, so
-   * the two can never drift apart again. */
-  --row-height-data: 36px;
+   * WCAG 2.5.5 / Plan 11: the smallest an operable target may render, in CSS
+   * pixels.
+   *
+   * It is px, and every control must reach it through THIS token rather than
+   * through Tailwind's spacing scale, because `html { font-size: 14px }` and
+   * that scale is rem-based: `min-h-11` and `size-11` are written because 11 x
+   * 4px reads as 44, and they render at 38.5. Four controls in this codebase
+   * asked for 44 that way and silently got 38.5. A px token cannot be rescaled
+   * by the root font size, so a control sized from it is 44 whatever the type
+   * scale does. */
   --touch-target-min: 44px;
+  /* The data row is also the largest control on most surfaces — selecting a
+   * row IS the interaction — so its height is the touch minimum rather than a
+   * separately chosen number. It was 36px, which is under that minimum in
+   * every list we ship. `VirtualList` reads this same token at runtime for its
+   * windowing estimate, so the row and the virtualizer cannot drift apart. */
+  --row-height-data: 44px;
+  /* The floor under any pane that scrolls its own content.
+   *
+   * A `flex-1` scroll container has an automatic minimum size of zero, so when
+   * its siblings claim more than the viewport can give — a stacked filter rail
+   * at 320px, a pinned canvas at 400% zoom — the pane resolves to `height: 0`.
+   * That clips every row AND removes the scrollbar that would reach them, so
+   * the content is not off-screen, it is gone, while the caption above still
+   * counts it. This floor stops the division: the pane keeps a readable height
+   * and the overflow goes to the page scroller (`main#td-main`) instead.
+   *
+   * 240px is roughly five data rows plus a caption — enough that the pane
+   * reads as a list with more below it rather than as a sliver. */
+  --pane-min-height: 240px;
   /* Instrument geometry: bezels are milled square. Both radius token names
    * survive so existing call sites keep compiling; both resolve to a hard
    * corner now. */

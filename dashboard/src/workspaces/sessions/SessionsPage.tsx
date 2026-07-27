@@ -87,7 +87,7 @@ export function SessionsPage() {
               onChange={(event) => setQuery(event.target.value)}
               placeholder="Search transcripts"
               aria-label="Search transcripts"
-              className="h-8 w-full rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-2 pl-7 pr-2 text-xs text-text-primary placeholder:text-text-muted focus:border-accent/60 focus:outline-none"
+              className="h-[calc(var(--touch-target-min)+2px)] w-full rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-2 pl-7 pr-2 text-xs text-text-primary placeholder:text-text-muted focus:border-accent/60 focus:outline-none"
             />
           </form>
         <LegacyBoundary title="LCM" pending={timeline.isPending} result={timeline.data}>

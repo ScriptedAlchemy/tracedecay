@@ -206,6 +206,31 @@
     color: var(--raw-text-secondary);
   }
 
+  /* ---- the compact control ----
+   * How a deliberately small bezel reaches the 44px touch minimum without
+   * being redrawn at 44px.
+   *
+   * Several controls here are compact by design — a 24px `Refresh` in a panel
+   * header, a 17px scheduler chip, a 20px order toggle — because this console
+   * is a dense instrument and a row of 44px slabs is a different product. The
+   * minimum is about what a finger can land on, not about how large the chrome
+   * looks, so the two are separated: the ELEMENT becomes a transparent 44x44
+   * hit area and an inner span goes on drawing the bezel at exactly the size
+   * it was designed. Nothing on screen changes; the target it reports is now
+   * the target a pointer actually gets.
+   *
+   * Deliberately NOT a pseudo-element on the small box. The gate measures the
+   * element's own border box, and an `::after` that merely overlaps a larger
+   * area would report 24px while claiming 44 — a hit area the harness cannot
+   * see is indistinguishable from one that does not exist. */
+  .td-hit {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: var(--touch-target-min);
+    min-width: var(--touch-target-min);
+  }
+
   /* ---- elevation planes (see tokens.css) ---- */
   /* Recessed: milled out of the face. Things you look into. */
   .td-well {
