@@ -1,9 +1,9 @@
 use super::schema_contract::{
-    authority_invariant_triggers_intact, ensure_authority_invariant_schema,
-    ensure_authority_invariants, restore_immutability_after_canonical_repair,
-    suspend_immutability_for_canonical_repair, suspend_session_invariants_for_schema_upgrade,
-    validate_authority_rows_exhaustive, validate_authority_schema_contract,
-    validate_registry_schema_contract,
+    authority_invariant_triggers_intact, ensure_authority_audit_checkpoint_schema,
+    ensure_authority_invariant_schema, ensure_authority_invariants,
+    restore_immutability_after_canonical_repair, suspend_immutability_for_canonical_repair,
+    suspend_session_invariants_for_schema_upgrade, validate_authority_rows_exhaustive,
+    validate_authority_schema_contract, validate_registry_schema_contract,
 };
 use super::{
     configuration, ensure_code_project_native_root_columns, ensure_parse_offset_columns,
@@ -225,72 +225,96 @@ pub(crate) async fn ensure_registered_schema(conn: &Connection) -> crate::errors
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
 
-    transaction
-        .execute_batch(REGISTRY_SCHEMA)
-        .await
-        .map_err(|error| global_db_operation_error("initialize global project registry", error))?;
-    ensure_code_project_native_root_columns(&transaction)
-        .await
-        .map_err(|error| global_db_operation_error("ensure native project roots", error))?;
-    project_registry::migrate_project_rows_to_canonical_keys(&transaction)
-        .await
-        .map_err(|error| global_db_operation_error("migrate canonical project keys", error))?;
-    validate_registry_schema_contract(&transaction).await?;
+    let migration = async {
+        transaction
+            .execute_batch(REGISTRY_SCHEMA)
+            .await
+            .map_err(|error| {
+                global_db_operation_error("initialize global project registry", error)
+            })?;
+        ensure_code_project_native_root_columns(&transaction)
+            .await
+            .map_err(|error| global_db_operation_error("ensure native project roots", error))?;
+        project_registry::migrate_project_rows_to_canonical_keys(&transaction)
+            .await
+            .map_err(|error| global_db_operation_error("migrate canonical project keys", error))?;
+        validate_registry_schema_contract(&transaction).await?;
 
-    configuration::ensure_configuration_schema(&transaction)
-        .await
-        .map_err(|error| global_db_operation_error("initialize configuration schema", error))?;
-    git_index_transactions::ensure_git_index_transaction_schema(&transaction).await?;
+        configuration::ensure_configuration_schema(&transaction)
+            .await
+            .map_err(|error| global_db_operation_error("initialize configuration schema", error))?;
+        git_index_transactions::ensure_git_index_transaction_schema(&transaction).await?;
 
-    transaction
-        .execute_batch(TRANSCRIPT_SCHEMA)
-        .await
-        .map_err(|error| global_db_operation_error("initialize transcript schema", error))?;
-    ensure_session_parent_columns(&transaction)
-        .await
-        .map_err(|error| global_db_operation_error("ensure session parent columns", error))?;
-    ensure_parse_offset_columns(&transaction)
-        .await
-        .map_err(|error| global_db_operation_error("ensure parse offset columns", error))?;
+        transaction
+            .execute_batch(TRANSCRIPT_SCHEMA)
+            .await
+            .map_err(|error| global_db_operation_error("initialize transcript schema", error))?;
+        ensure_session_parent_columns(&transaction)
+            .await
+            .map_err(|error| global_db_operation_error("ensure session parent columns", error))?;
+        ensure_parse_offset_columns(&transaction)
+            .await
+            .map_err(|error| global_db_operation_error("ensure parse offset columns", error))?;
 
-    suspend_session_invariants_for_schema_upgrade(&transaction).await?;
-    session_temporal::ensure_session_temporal_schema(&transaction).await?;
-    observation::ensure_observation_schema(&transaction).await?;
-    observation_projection::ensure_observation_projection_schema(&transaction)
-        .await
-        .map_err(|error| global_db_operation_error("initialize observation projection", error))?;
-    crate::db::install_external_source_schema(
-        &transaction,
-        "initialize registered external source state",
-    )
-    .await?;
-    ensure_authority_invariant_schema(&transaction).await?;
+        ensure_authority_audit_checkpoint_schema(&transaction).await?;
+        suspend_session_invariants_for_schema_upgrade(&transaction).await?;
+        session_temporal::ensure_session_temporal_schema(&transaction).await?;
+        observation::ensure_observation_schema(&transaction).await?;
+        observation_projection::ensure_observation_projection_schema(&transaction)
+            .await
+            .map_err(|error| {
+                global_db_operation_error("initialize observation projection", error)
+            })?;
+        crate::db::install_external_source_schema(
+            &transaction,
+            "initialize registered external source state",
+        )
+        .await?;
+        ensure_authority_invariant_schema(&transaction).await?;
 
-    crate::sessions::lcm::schema::ensure_lcm_schema_in_transaction(&transaction)
-        .await
-        .map_err(|error| global_db_operation_error("initialize LCM schema", error))?;
-    crate::sessions::git_correlation::ensure_git_correlation_schema_in_transaction(&transaction)
+        crate::sessions::lcm::schema::ensure_lcm_schema_in_transaction(&transaction)
+            .await
+            .map_err(|error| global_db_operation_error("initialize LCM schema", error))?;
+        crate::sessions::git_correlation::ensure_git_correlation_schema_in_transaction(
+            &transaction,
+        )
         .await
         .map_err(|error| global_db_operation_error("initialize git correlation schema", error))?;
-    crate::sessions::workflow_index::ensure_workflow_index_schema(&transaction)
-        .await
-        .map_err(|error| global_db_operation_error("initialize workflow index schema", error))?;
-    if let Err(error) =
-        crate::sessions::transcript_backfill::backfill_transcript_facts(&transaction).await
-    {
-        if !error.atomicity_preserved() {
-            return Err(global_db_operation_error(
-                "roll back transcript facts backfill",
-                error,
-            ));
+        crate::sessions::workflow_index::ensure_workflow_index_schema(&transaction)
+            .await
+            .map_err(|error| {
+                global_db_operation_error("initialize workflow index schema", error)
+            })?;
+        if let Err(error) =
+            crate::sessions::transcript_backfill::backfill_transcript_facts(&transaction).await
+        {
+            if !error.atomicity_preserved() {
+                return Err(global_db_operation_error(
+                    "roll back transcript facts backfill",
+                    error,
+                ));
+            }
+            tracing::warn!(error = %error, "transcript facts backfill deferred until a later open");
         }
-        tracing::warn!(error = %error, "transcript facts backfill deferred until a later open");
+        crate::errors::Result::Ok(())
     }
+    .await;
 
-    transaction
-        .commit()
-        .await
-        .map_err(|error| global_db_operation_error("commit registered global schema", error))?;
+    match migration {
+        Ok(()) => transaction
+            .commit()
+            .await
+            .map_err(|error| global_db_operation_error("commit registered global schema", error))?,
+        Err(error) => {
+            return match transaction.rollback().await {
+                Ok(()) => Err(error),
+                Err(rollback_error) => Err(global_db_operation_error(
+                    "roll back registered global schema",
+                    std::io::Error::other(format!("{error}; rollback failed: {rollback_error}")),
+                )),
+            };
+        }
+    }
 
     observation_projection::ensure_observation_projection_performance_indexes(conn)
         .await

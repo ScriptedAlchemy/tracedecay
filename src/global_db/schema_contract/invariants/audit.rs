@@ -50,6 +50,7 @@ pub(super) struct AuditProgress {
 pub(super) async fn ensure_audit_checkpoint_schema(
     conn: &impl Executor,
 ) -> crate::errors::Result<()> {
+    validate_existing_audit_checkpoint_baseline(conn).await?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS authority_audit_checkpoints (
             audit_name TEXT PRIMARY KEY,
@@ -142,6 +143,60 @@ pub(super) async fn ensure_audit_checkpoint_schema(
         )
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    }
+    Ok(())
+}
+
+async fn validate_existing_audit_checkpoint_baseline(
+    conn: &impl QueryExecutor,
+) -> crate::errors::Result<()> {
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) FROM sqlite_schema
+             WHERE type = 'table' AND name = 'authority_audit_checkpoints'",
+            (),
+        )
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    let exists = rows
+        .next()
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?
+        .ok_or_else(|| authority_violation("audit checkpoint catalog query returned no row"))?
+        .get::<i64>(0)
+        .map_err(|error| global_db_operation_error(OPERATION, error))?
+        != 0;
+    drop(rows);
+    if !exists {
+        return Ok(());
+    }
+
+    const REQUIRED_BASELINE_COLUMNS: i64 = 13;
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) FROM pragma_table_xinfo('authority_audit_checkpoints')
+             WHERE name IN (
+                'audit_name', 'audit_version', 'receipt_rowid',
+                'observation_sequence', 'provenance_rowid', 'disposition_rowid',
+                'alias_rowid', 'projection_checkpoint', 'last_receipts_audited',
+                'last_observations_audited', 'last_provenance_audited',
+                'last_dispositions_audited', 'last_aliases_audited'
+             )",
+            (),
+        )
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    let found = rows
+        .next()
+        .await
+        .map_err(|error| global_db_operation_error(OPERATION, error))?
+        .ok_or_else(|| authority_violation("audit checkpoint shape query returned no row"))?
+        .get::<i64>(0)
+        .map_err(|error| global_db_operation_error(OPERATION, error))?;
+    if found != REQUIRED_BASELINE_COLUMNS {
+        return Err(authority_violation(
+            "authority audit checkpoint table is missing required baseline columns",
+        ));
     }
     Ok(())
 }

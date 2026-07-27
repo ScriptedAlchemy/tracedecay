@@ -260,13 +260,13 @@ async fn temporal_schema_trigger_installation_is_atomic() {
     drop(conn);
     drop(raw_db);
 
-    assert!(
-        open_global_db(&db_path).await.is_err(),
-        "an invariant-installation failure must reject the temporal migration"
-    );
+    let migration_error = match open_global_db(&db_path).await {
+        Ok(_) => panic!("an invariant-installation failure must reject the temporal migration"),
+        Err(error) => error,
+    };
     assert!(
         !table_exists(&db_path, "session_temporal_schema_migrations").await,
-        "the temporal marker must not commit before invariant triggers install"
+        "the temporal marker must not commit before invariant triggers install: {migration_error}"
     );
     assert!(
         !table_exists(&db_path, "session_summary_nodes").await,

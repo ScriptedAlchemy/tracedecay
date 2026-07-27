@@ -16,7 +16,10 @@ pub(super) use invariants::{
     suspend_immutability_for_canonical_repair, suspend_session_invariants_for_schema_upgrade,
     validate_authority_rows_exhaustive, validate_session_temporal_repair_authority,
 };
-pub(crate) use invariants::{ensure_authority_invariant_schema, ensure_authority_invariants};
+pub(crate) use invariants::{
+    ensure_authority_audit_checkpoint_schema, ensure_authority_invariant_schema,
+    ensure_authority_invariants,
+};
 pub(crate) use validation::validate_registry_schema_contract;
 pub(super) use validation::{
     validate_authority_schema_contract, validate_observation_migration_source,
