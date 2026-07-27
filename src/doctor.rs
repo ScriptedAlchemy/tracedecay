@@ -418,33 +418,121 @@ pub async fn wait_for_daemon_startup_health(
     timeout: std::time::Duration,
 ) -> crate::errors::Result<()> {
     let project_path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let deadline = std::time::Instant::now() + timeout;
-    let mut last_progress = std::time::Instant::now();
+    wait_for_daemon_startup_health_with(
+        timeout,
+        std::time::Duration::from_millis(500),
+        || daemon_project_status(&project_path),
+        |progress| {
+            eprintln!(
+                "Waiting for daemon startup health: elapsed={}s state={}{}",
+                progress.elapsed.as_secs(),
+                progress.detail,
+                if progress.changed { " (changed)" } else { "" },
+            );
+        },
+    )
+    .await
+}
+
+#[derive(Debug)]
+struct DaemonStartupHealthProgress {
+    elapsed: std::time::Duration,
+    detail: String,
+    changed: bool,
+}
+
+async fn wait_for_daemon_startup_health_with<Probe, ProbeFuture, Progress>(
+    timeout: std::time::Duration,
+    poll_interval: std::time::Duration,
+    mut probe: Probe,
+    mut progress: Progress,
+) -> crate::errors::Result<()>
+where
+    Probe: FnMut() -> ProbeFuture,
+    ProbeFuture: std::future::Future<Output = crate::errors::Result<serde_json::Value>>,
+    Progress: FnMut(DaemonStartupHealthProgress),
+{
+    let started = std::time::Instant::now();
+    let deadline = started + timeout;
+    let mut last_detail = None;
+    let mut last_report = started
+        .checked_sub(std::time::Duration::from_secs(20))
+        .unwrap_or(started);
     loop {
-        if daemon_project_status(&project_path)
-            .await
-            .is_ok_and(|status| daemon_startup_health_ready(&status))
-        {
-            return Ok(());
-        }
+        let detail = match probe().await {
+            Ok(status) if daemon_startup_health_ready(&status) => return Ok(()),
+            Ok(status) => daemon_startup_health_detail(&status),
+            Err(error) if daemon_startup_error_is_retryable(&error) => error.to_string(),
+            Err(error) => return Err(error),
+        };
         let now = std::time::Instant::now();
+        let changed = last_detail.as_deref() != Some(detail.as_str());
+        if changed || now.duration_since(last_report) >= std::time::Duration::from_secs(20) {
+            progress(DaemonStartupHealthProgress {
+                elapsed: now.duration_since(started),
+                detail: detail.clone(),
+                changed,
+            });
+            last_report = now;
+        }
+        last_detail = Some(detail);
         if now >= deadline {
             return Err(crate::errors::TraceDecayError::Config {
-                message: "daemon startup recovery did not converge before Doctor validation"
-                    .to_string(),
+                message: format!(
+                    "daemon startup recovery exceeded its {}s deadline before Doctor validation; last state: {}",
+                    timeout.as_secs(),
+                    last_detail.as_deref().unwrap_or("no health response"),
+                ),
             });
         }
-        if now.duration_since(last_progress) >= std::time::Duration::from_secs(20) {
-            eprintln!(
-                "Waiting for daemon schema migration and compatibility projections to converge…"
-            );
-            last_progress = now;
-        }
-        tokio::time::sleep(
-            std::time::Duration::from_millis(500).min(deadline.saturating_duration_since(now)),
-        )
-        .await;
+        tokio::time::sleep(poll_interval.min(deadline.saturating_duration_since(now))).await;
     }
+}
+
+#[allow(deprecated)]
+fn daemon_startup_error_is_retryable(error: &crate::errors::TraceDecayError) -> bool {
+    match error {
+        crate::errors::TraceDecayError::Io(error) => matches!(
+            error.kind(),
+            std::io::ErrorKind::NotFound
+                | std::io::ErrorKind::ConnectionRefused
+                | std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::BrokenPipe
+                | std::io::ErrorKind::TimedOut
+                | std::io::ErrorKind::WouldBlock
+        ),
+        crate::errors::TraceDecayError::Config { message } => {
+            (message.contains("daemon socket") && message.contains("not available"))
+                || message.contains("still warming up")
+                || message.contains("restart grace")
+        }
+        crate::errors::TraceDecayError::File { .. }
+        | crate::errors::TraceDecayError::Parse { .. }
+        | crate::errors::TraceDecayError::Database { .. }
+        | crate::errors::TraceDecayError::DatabaseOperation { .. }
+        | crate::errors::TraceDecayError::Search { .. }
+        | crate::errors::TraceDecayError::SyncLock { .. }
+        | crate::errors::TraceDecayError::Sqlite(_)
+        | crate::errors::TraceDecayError::Json(_) => false,
+    }
+}
+
+fn daemon_startup_health_detail(status: &serde_json::Value) -> String {
+    let storage = status.get("storage_health");
+    let quick = storage
+        .and_then(|storage| storage.get("quick_check_error"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("quick_check_pending");
+    let authority = storage
+        .and_then(|storage| storage.get("authority_audit_reason"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("authority_audit_pending");
+    let temporal = status
+        .get("session_temporal_health")
+        .and_then(|health| health.get("reason").or_else(|| health.get("status")))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("temporal_health_pending");
+    format!("storage={quick}, authority={authority}, temporal={temporal}")
 }
 
 fn daemon_startup_health_ready(status: &serde_json::Value) -> bool {

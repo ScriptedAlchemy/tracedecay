@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use tracedecay_domain::{CodeGenerationId, ManifestDigest, RepositoryId, WorktreeId};
@@ -44,6 +44,8 @@ pub(super) struct MountedCodeIndexWorktreeV1 {
         Arc<super::semantic_query_runtime::SemanticQueryAuthorityV1>,
     )>,
     pub(super) scheduler: Arc<Mutex<CodeIndexWorktreeSchedulerV1>>,
+    wake: Arc<tokio::sync::Notify>,
+    shutting_down: Arc<AtomicBool>,
     pub(super) semantic_evaluation_publication_gate: Arc<tokio::sync::Mutex<()>>,
     pub(super) task: tokio::task::JoinHandle<()>,
 }
@@ -201,6 +203,7 @@ impl CodeIndexSchedulerRegistryV1 {
         };
         let worker_scheduler = Arc::clone(&scheduler);
         let worker_wake = Arc::clone(&wake);
+        let worker_shutting_down = Arc::clone(&shutting_down);
         let worker_semantic_evaluation_publication_gate =
             Arc::clone(&semantic_evaluation_publication_gate);
         let worker_background_reconcile_admission =
@@ -210,7 +213,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let task = tokio::spawn(async move {
             loop {
                 worker_wake.notified().await;
-                if shutting_down.load(Ordering::Acquire) {
+                if worker_shutting_down.load(Ordering::Acquire) {
                     return;
                 }
                 let _semantic_evaluation_publication =
@@ -222,7 +225,7 @@ impl CodeIndexSchedulerRegistryV1 {
                 else {
                     return;
                 };
-                if shutting_down.load(Ordering::Acquire) {
+                if worker_shutting_down.load(Ordering::Acquire) {
                     return;
                 }
                 let scheduler = Arc::clone(&worker_scheduler);
@@ -240,7 +243,7 @@ impl CodeIndexSchedulerRegistryV1 {
                         evidence,
                     );
                 }
-                if shutting_down.load(Ordering::Acquire) {
+                if worker_shutting_down.load(Ordering::Acquire) {
                     return;
                 }
                 // A task panic must not permanently retire the mounted
@@ -262,6 +265,8 @@ impl CodeIndexSchedulerRegistryV1 {
                 pr9_query_authority: None,
                 semantic_query_authority: None,
                 scheduler,
+                wake,
+                shutting_down,
                 semantic_evaluation_publication_gate,
                 task,
             },
@@ -692,12 +697,8 @@ impl CodeIndexSchedulerRegistryV1 {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear();
         for worktree in mounted.values() {
-            let scheduler = worktree
-                .scheduler
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            scheduler.shutting_down.store(true, Ordering::Release);
-            scheduler.wake.notify_one();
+            worktree.shutting_down.store(true, Ordering::Release);
+            worktree.wake.notify_one();
         }
         for (_, worktree) in mounted {
             let _ = worktree.task.await;

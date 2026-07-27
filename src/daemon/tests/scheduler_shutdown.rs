@@ -585,3 +585,76 @@ async fn panicked_retired_tasks_release_both_scheduler_registrations() {
             .is_empty()
     );
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn scheduler_shutdown_does_not_wait_for_contended_administration_gate() {
+    let engine = DaemonEngine::default();
+    let key = ProjectServerKey {
+        owner: StoreOwnerKey {
+            profile_root: PathBuf::from("/profiles/shutdown-gate-test"),
+            global_db_path: PathBuf::from("/profiles/shutdown-gate-test/global.db"),
+            project_id: Some("shutdown-gate-test".to_string()),
+            store_root: PathBuf::from("/stores/shutdown-gate-test"),
+            graph_db_path: PathBuf::from("/stores/shutdown-gate-test/graph.db"),
+        },
+        scope_prefix: None,
+    };
+    engine
+        .store_administration
+        .automation_schedulers()
+        .lock()
+        .await
+        .insert(
+            key.clone(),
+            test_automation_scheduler_handle(tokio::spawn(std::future::pending::<()>())),
+        );
+    engine
+        .store_administration
+        .memory_repair_schedulers()
+        .lock()
+        .await
+        .insert(
+            key,
+            MemoryRepairSchedulerHandle::for_test(tokio::spawn(std::future::pending::<()>())),
+        );
+    let (gate_entered_tx, gate_entered_rx) = tokio::sync::oneshot::channel();
+    let (gate_release_tx, gate_release_rx) = tokio::sync::oneshot::channel();
+    let administration = engine.store_administration.clone();
+    let gate_holder = tokio::spawn(async move {
+        administration
+            .with_writer(|| async move {
+                let _ = gate_entered_tx.send(());
+                let _ = gate_release_rx.await;
+            })
+            .await;
+    });
+    gate_entered_rx
+        .await
+        .expect("administration gate holder started");
+
+    engine.lifecycle.begin_draining();
+    let shutdown_engine = engine.clone();
+    let mut shutdown = tokio::spawn(async move {
+        tokio::join!(
+            shutdown_engine.shutdown_automation_schedulers(),
+            shutdown_engine.shutdown_memory_repair_schedulers(),
+        );
+    });
+    let completed_without_gate =
+        tokio::time::timeout(std::time::Duration::from_millis(250), &mut shutdown)
+            .await
+            .is_ok();
+    let _ = gate_release_tx.send(());
+    gate_holder.await.expect("administration gate holder exits");
+    if !completed_without_gate {
+        shutdown
+            .await
+            .expect("scheduler shutdown exits after gate release");
+    }
+
+    assert!(
+        completed_without_gate,
+        "normal scheduler shutdown must not queue behind unrelated writer administration"
+    );
+}

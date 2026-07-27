@@ -1842,3 +1842,36 @@ fn daemon_startup_health_waits_for_storage_and_temporal_convergence() {
     });
     assert!(!super::daemon_startup_health_ready(&migrating));
 }
+
+#[tokio::test]
+async fn daemon_startup_health_surfaces_terminal_project_open_failure_immediately() {
+    let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let probe_attempts = std::sync::Arc::clone(&attempts);
+    let error = super::wait_for_daemon_startup_health_with(
+        std::time::Duration::from_secs(30),
+        std::time::Duration::from_millis(1),
+        move || {
+            probe_attempts.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            async {
+                Err(crate::errors::TraceDecayError::Config {
+                    message: "project-open source access denied: project-open source binding authority is inconsistent with the application contract".to_owned(),
+                })
+            }
+        },
+        |_| {},
+    )
+    .await
+    .expect_err("terminal project-open error must fail the dogfood health wait");
+
+    assert!(
+        error
+            .to_string()
+            .contains("project-open source binding authority"),
+        "underlying terminal error must be preserved: {error}"
+    );
+    assert_eq!(
+        attempts.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "terminal failure must not be polled until the deadline"
+    );
+}
