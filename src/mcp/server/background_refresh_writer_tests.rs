@@ -10,7 +10,7 @@ use std::time::Duration;
 
 #[tokio::test]
 async fn read_refresh_uses_injected_writer_without_direct_fallback() {
-    let (cg, dir, _pin) = init_indexed_repo().await;
+    let (cg, dir, authority) = init_indexed_repo().await;
     let root = dir.path().to_path_buf();
     // `init_indexed_repo` persists `session_start_sync = false`, but the handle
     // it returns still carries the init-time config snapshot (default true).
@@ -19,9 +19,7 @@ async fn read_refresh_uses_injected_writer_without_direct_fallback() {
     // injected writer, leaving this test's explicit read refresh as the only
     // observed call.
     drop(cg);
-    let cg = crate::tracedecay::TraceDecay::open(&root)
-        .await
-        .expect("reopen project with persisted startup-sync config");
+    let cg = authority.reopen_project_graph(&root).await;
     let source_path = root.join("src/a.rs");
     std::fs::write(&source_path, "pub fn a() { println!(\"changed\"); }\n").expect("modify source");
     std::fs::File::options()
@@ -57,6 +55,13 @@ async fn read_refresh_uses_injected_writer_without_direct_fallback() {
             .with_background_refresh_writer(refresh_writer),
     )
     .await;
+    assert!(
+        server
+            .wait_for_startup_catch_up(Duration::from_secs(5))
+            .await,
+        "startup catch-up settles before the explicit read refresh"
+    );
+    observed.lock().expect("recording lock").clear();
     let snapshot = server.cg_snapshot().await;
     server
         .background_refresh_running
@@ -100,14 +105,12 @@ async fn read_refresh_uses_injected_writer_without_direct_fallback() {
 
 #[tokio::test]
 async fn concurrent_startup_catchups_use_injected_writer_authority() {
-    let (first_cg, dir, _pin) = init_indexed_repo().await;
+    let (first_cg, dir, authority) = init_indexed_repo().await;
     let root = dir.path().to_path_buf();
     let mut config = crate::config::load_config(&root).expect("load config");
     config.sync.session_start_sync = true;
     crate::config::save_config(&root, &config).expect("enable startup sync");
-    let second_cg = crate::tracedecay::TraceDecay::open(&root)
-        .await
-        .expect("open second project handle");
+    let second_cg = authority.reopen_project_graph(&root).await;
 
     let gate = Arc::new(tokio::sync::Mutex::new(()));
     let calls = Arc::new(AtomicUsize::new(0));
