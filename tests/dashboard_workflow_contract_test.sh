@@ -166,7 +166,10 @@ if filter_match is None:
     raise SystemExit("windows-pr8-temporal-durable must define a $filter expression")
 durable_filter = filter_match.group(1)
 
-if "--no-tests=fail" not in durable_job:
+durable_commands = "\n".join(
+    line for line in durable_job.splitlines() if not line.lstrip().startswith("#")
+)
+if "--no-tests=fail" not in durable_commands:
     raise SystemExit(
         "windows-pr8-temporal-durable must pass --no-tests=fail so a filter that "
         "matches nothing at all fails instead of reporting success"
@@ -297,6 +300,72 @@ for job_name, guarded_gates in gate_jobs.items():
             f"{job_name}'s PR13 default-feature platform lifecycle step must "
             "write platform_lifecycle.passed itself"
         )
+
+    # pr13_lite_grammar_contract is feature-scoped: the --all-features junit
+    # shares its test name and cannot witness the lite build, so the validator
+    # refuses to close it from junit and --gate-passed is the only route. That
+    # flag therefore has to rest on a receipt from the step that ran the lite
+    # build, exactly like the platform lifecycle one.
+    lite_step = block.split("- name: PR13 lite grammar gate", 1)
+    if len(lite_step) != 2:
+        raise SystemExit(f"{job_name} must keep the PR13 lite grammar gate")
+    lite_body = lite_step[1].split("- name: ", 1)[0]
+    if "lite_grammar.passed" not in lite_body:
+        raise SystemExit(
+            f"{job_name}'s PR13 lite grammar gate must write lite_grammar.passed "
+            "itself; --gate-passed pr13_lite_grammar_contract rests on it"
+        )
+    # Check the cargo invocation itself. Both the step comment and the receipt
+    # text name the flag, so scanning the whole step body would pass even after
+    # the command silently changed to --all-features.
+    lite_commands = "\n".join(
+        line for line in lite_body.splitlines() if not line.lstrip().startswith("#")
+    )
+    lite_folded = re.sub(r"\s+", " ", lite_commands.replace("\\\n", " "))
+    invocation = re.search(r"cargo test (.*?) --test ", lite_folded)
+    if invocation is None:
+        raise SystemExit(
+            f"{job_name}'s PR13 lite grammar gate must run a `cargo test --test` "
+            "invocation"
+        )
+    if "--no-default-features" not in invocation.group(1):
+        raise SystemExit(
+            f"{job_name}'s PR13 lite grammar gate must keep --no-default-features "
+            f"(found: cargo test {invocation.group(1)}). Without it the gate stops "
+            "being feature-scoped and becomes closable by the all-features junit "
+            "again, which is the hole this receipt exists to close"
+        )
+    if not re.search(r"test -s \"?pr12-pr13-os-evidence/\S*lite_grammar\.passed", block):
+        raise SystemExit(
+            f"{job_name} must REQUIRE lite_grammar.passed before passing "
+            "--gate-passed pr13_lite_grammar_contract"
+        )
+
+# The aggregate job runs no cargo at all, so every --gate-passed it asserts has
+# to rest on a receipt downloaded from the job that did the work.
+aggregate_job = job_block(ci, "pr12-pr13-platform-aggregate")
+if "--gate-passed pr13_lite_grammar_contract" in aggregate_job and not re.search(
+    r"test -s \"pr12-pr13-os-evidence/\$\{os_name\}/lite_grammar\.passed\"", aggregate_job
+):
+    raise SystemExit(
+        "pr12-pr13-platform-aggregate asserts --gate-passed "
+        "pr13_lite_grammar_contract but never ran the lite build, so it must "
+        "require each OS lite_grammar.passed receipt"
+    )
+
+# --------------------------------------------------------------------------
+# The workflow-contract tests must protect master, not just pull requests.
+# --------------------------------------------------------------------------
+drift_job = job_block(ci, "release-version-drift")
+if "bash tests/dashboard_workflow_contract_test.sh" not in drift_job:
+    raise SystemExit(
+        "release-version-drift must keep running this contract test"
+    )
+if "github.event_name == 'push'" not in drift_job:
+    raise SystemExit(
+        "release-version-drift must run on push as well as pull_request, or "
+        "these contract checks never run on master"
+    )
 
 # A boundary step wired to an empty rule set passes every time and proves
 # nothing, so the gate's contents are part of the contract, not just its
