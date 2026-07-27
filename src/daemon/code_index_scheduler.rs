@@ -155,7 +155,8 @@ impl SharedCodeIndexBytePoolV1 {
 
 #[derive(Clone)]
 struct DaemonCodeIndexPublicationStoreV1 {
-    active: Arc<Mutex<Option<CodeIndexPublishedGenerationV1>>>,
+    active: Arc<Mutex<Option<Arc<CodeIndexPublishedGenerationV1>>>>,
+    active_encoded_bytes: Arc<AtomicU64>,
     active_path: PathBuf,
     generations_root: PathBuf,
     expected_sanitizer_revision: SanitizerRevision,
@@ -170,6 +171,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
         std::fs::create_dir_all(&generations_root)?;
         Ok(Self {
             active: Arc::new(Mutex::new(None)),
+            active_encoded_bytes: Arc::new(AtomicU64::new(0)),
             active_path: store_root.join("active-code-generation-v1.json"),
             generations_root,
             expected_sanitizer_revision,
@@ -217,8 +219,8 @@ impl DaemonCodeIndexPublicationStoreV1 {
     fn load_generation(
         &self,
         generation_id: &CodeGenerationId,
-    ) -> Result<Option<CodeIndexPublishedGenerationV1>, CodeIndexPublicationStoreErrorV1> {
-        if let Some(active) = self.load_active()?
+    ) -> Result<Option<Arc<CodeIndexPublishedGenerationV1>>, CodeIndexPublicationStoreErrorV1> {
+        if let Some(active) = self.load_active_shared()?
             && active.manifest().generation_id == *generation_id
         {
             return Ok(Some(active));
@@ -264,7 +266,7 @@ impl DaemonCodeIndexPublicationStoreV1 {
             if generation.manifest().generation_id != *generation_id {
                 continue;
             }
-            if matched.replace(generation).is_some() {
+            if matched.replace(Arc::new(generation)).is_some() {
                 return Err(Self::unavailable(
                     "multiple immutable code-generation files claim one generation identity",
                 ));
@@ -272,19 +274,17 @@ impl DaemonCodeIndexPublicationStoreV1 {
         }
         Ok(matched)
     }
-}
 
-impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
-    fn load_active(
+    fn load_active_shared(
         &self,
-    ) -> Result<Option<CodeIndexPublishedGenerationV1>, CodeIndexPublicationStoreErrorV1> {
+    ) -> Result<Option<Arc<CodeIndexPublishedGenerationV1>>, CodeIndexPublicationStoreErrorV1> {
         let mut active = self.active.lock().map_err(|_| {
             CodeIndexPublicationStoreErrorV1::Unavailable(
                 "daemon publication lock is poisoned".to_owned(),
             )
         })?;
-        if active.is_some() {
-            return Ok(active.clone());
+        if let Some(generation) = active.as_ref() {
+            return Ok(Some(Arc::clone(generation)));
         }
         let pointer_bytes = match std::fs::read(&self.active_path) {
             Ok(bytes) => bytes,
@@ -319,8 +319,26 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
                 "active code-generation pointer does not match the sealed generation",
             ));
         }
-        *active = Some(generation.clone());
+        let encoded_bytes = u64::try_from(generation_bytes.len()).unwrap_or(u64::MAX);
+        let generation = Arc::new(generation);
+        self.active_encoded_bytes
+            .store(encoded_bytes, Ordering::Release);
+        *active = Some(Arc::clone(&generation));
         Ok(Some(generation))
+    }
+
+    fn active_encoded_bytes(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.active_encoded_bytes)
+    }
+}
+
+impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
+    fn load_active(
+        &self,
+    ) -> Result<Option<CodeIndexPublishedGenerationV1>, CodeIndexPublicationStoreErrorV1> {
+        Ok(self
+            .load_active_shared()?
+            .map(|generation| generation.as_ref().clone()))
     }
 
     fn publish_atomically(
@@ -334,7 +352,7 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
             .ok_or_else(|| Self::unavailable("active code-generation pointer has no store root"))?;
         let _store_lock =
             acquire_code_generation_store_lock(store_root).map_err(Self::unavailable)?;
-        let _ = self.load_active()?;
+        let _ = self.load_active_shared()?;
         let mut active = self.active.lock().map_err(|_| {
             CodeIndexPublicationStoreErrorV1::Unavailable(
                 "daemon publication lock is poisoned".to_owned(),
@@ -405,7 +423,11 @@ impl CodeIndexAtomicPublicationPort for DaemonCodeIndexPublicationStoreV1 {
                 .parent()
                 .ok_or_else(|| Self::unavailable("active pointer has no parent directory"))?,
         )?;
-        *active = Some(generation);
+        self.active_encoded_bytes.store(
+            u64::try_from(generation_bytes.len()).unwrap_or(u64::MAX),
+            Ordering::Release,
+        );
+        *active = Some(Arc::new(generation));
         Ok(())
     }
 }
@@ -533,7 +555,7 @@ pub(super) enum CodeIndexReconcileOutcomeV1 {
 
 #[derive(Clone)]
 pub(in crate::daemon) struct LatestCompleteCodeIndexV1 {
-    generation: CodeIndexPublishedGenerationV1,
+    generation: Arc<CodeIndexPublishedGenerationV1>,
     query_owners: Arc<OnceLock<ProductionCodeIndexQueryOwnersV1>>,
 }
 
@@ -560,7 +582,7 @@ pub(super) struct ProductionCodeIndexQueryOwnersV1 {
 
 impl LatestCompleteCodeIndexV1 {
     pub(in crate::daemon) fn generation(&self) -> &CodeIndexPublishedGenerationV1 {
-        &self.generation
+        self.generation.as_ref()
     }
 
     fn semantic_evaluation_snapshot(&self) -> SemanticEvaluationCodeSnapshotV1 {
@@ -708,6 +730,14 @@ pub(super) enum CodeIndexSchedulerErrorV1 {
     Privacy(String),
 }
 
+struct AtomicFlagReset(Arc<AtomicBool>);
+
+impl Drop for AtomicFlagReset {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
 pub(super) struct CodeIndexWorktreeSchedulerV1 {
     project_root: PathBuf,
     /// The exact indexing identity this worktree is bound to. Re-resolved
@@ -737,6 +767,7 @@ pub(super) struct CodeIndexWorktreeSchedulerV1 {
     wake: Arc<tokio::sync::Notify>,
     epoch: Arc<AtomicU64>,
     shutting_down: Arc<AtomicBool>,
+    reconcile_in_progress: Arc<AtomicBool>,
     latest_content_identity: Option<ContentDigest>,
     query_owners: Mutex<
         Option<(
@@ -795,7 +826,9 @@ impl CodeIndexWorktreeSchedulerV1 {
         )
         .map_err(|error| CodeIndexSchedulerErrorV1::ProductionOpen(error.to_string()))?
         .with_physical_artifact_pool(byte_pool.physical_artifacts.clone());
-        let restored = owner.active_generation()?;
+        let restored = publication
+            .load_active_shared()
+            .map_err(CodeIndexProductionErrorV1::Publication)?;
         // Identity backstop: a restored generation may only be adopted when it
         // was produced under this exact repository AND worktree. A matching path
         // or branch label is never sufficient; cross-worktree reuse is refused.
@@ -833,6 +866,7 @@ impl CodeIndexWorktreeSchedulerV1 {
             wake,
             epoch,
             shutting_down: Arc::new(AtomicBool::new(false)),
+            reconcile_in_progress: Arc::new(AtomicBool::new(false)),
             latest_content_identity,
             query_owners: Mutex::new(None),
             semantic_schedule: None,
@@ -874,6 +908,8 @@ impl CodeIndexWorktreeSchedulerV1 {
         if self.shutting_down.load(Ordering::Acquire) {
             return Err(cancelled_code_index_reconcile());
         }
+        self.reconcile_in_progress.store(true, Ordering::Release);
+        let _reconcile_guard = AtomicFlagReset(Arc::clone(&self.reconcile_in_progress));
         // Re-resolve exact identity before indexing (tier-3 backstop). The
         // worktree must still be the same structural identity this scheduler is
         // bound to; a HEAD move under the same worktree is allowed and simply
@@ -903,8 +939,9 @@ impl CodeIndexWorktreeSchedulerV1 {
             let mut captured = self.capture_authoritative_snapshot()?;
             self.retained_snapshot_bytes = std::mem::take(&mut captured.retained_bytes);
             let latest_snapshot = self
-                .owner
-                .active_generation()?
+                .publication
+                .load_active_shared()
+                .map_err(CodeIndexProductionErrorV1::Publication)?
                 .map(|generation| generation.snapshot().clone());
             let unchanged_source = latest_snapshot.as_ref().is_some_and(|latest| {
                 latest.reference == captured.snapshot.reference
@@ -958,6 +995,23 @@ impl CodeIndexWorktreeSchedulerV1 {
                 }
                 Err(error) => return Err(error.into()),
             };
+            let published_generation = self
+                .publication
+                .load_active_shared()
+                .map_err(CodeIndexProductionErrorV1::Publication)?
+                .ok_or_else(|| {
+                    CodeIndexSchedulerErrorV1::Identity(
+                        "published code generation is absent from the publication cache".to_owned(),
+                    )
+                })?;
+            if published_generation.manifest().generation_id != generation.manifest().generation_id
+            {
+                return Err(CodeIndexSchedulerErrorV1::Identity(
+                    "published code generation cache does not match the completed build".to_owned(),
+                ));
+            }
+            drop(generation);
+            let generation = published_generation;
             self.latest_content_identity = Some(captured.snapshot.content_identity.clone());
             self.mark_reconciled(sampled_metadata.clone(), sampled_signature.clone());
 
@@ -1135,8 +1189,8 @@ impl CodeIndexWorktreeSchedulerV1 {
     }
 
     pub fn latest_complete(&self) -> Option<LatestCompleteCodeIndexV1> {
-        self.owner
-            .active_generation()
+        self.publication
+            .load_active_shared()
             .ok()
             .flatten()
             .map(|generation| {
@@ -1173,6 +1227,14 @@ impl CodeIndexWorktreeSchedulerV1 {
                 })
             })
             .map_err(|error| CodeIndexProductionErrorV1::Publication(error).into())
+    }
+
+    pub(super) fn reconcile_in_progress(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.reconcile_in_progress)
+    }
+
+    pub(super) fn active_generation_encoded_bytes(&self) -> Arc<AtomicU64> {
+        self.publication.active_encoded_bytes()
     }
 
     fn capture_authoritative_snapshot(
@@ -1370,6 +1432,8 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 #[cfg(test)]
+mod memory_tests;
+#[cfg(test)]
 mod overlay_ephemerality_tests;
 #[cfg(test)]
 mod tests;
@@ -1386,3 +1450,4 @@ pub(crate) mod semantic_query_runtime;
 // stay stable for the daemon and MCP server that mount and query worktrees.
 pub(crate) use registry::CodeIndexSchedulerRegistryV1;
 pub(crate) type CodeIndexGenerationPublishedV1 = registry::CodeIndexGenerationPublishedV1;
+pub(crate) type CodeIndexSchedulerMemoryStatsV1 = registry::CodeIndexSchedulerMemoryStatsV1;

@@ -143,19 +143,45 @@ impl ExactExtractionAuthorityV1 {
         Self::mint(&chunks.chunks)
     }
 
-    pub fn admit(
-        &self,
-        chunk: CodeSearchChunkV1,
-    ) -> Result<ExtractionAdmittedCodeSearchChunkV1, ChunkingFailureV1> {
+    fn validate_chunk(&self, chunk: &CodeSearchChunkV1) -> Result<(), ChunkingFailureV1> {
         chunk
             .validate()
             .map_err(|error| ChunkingFailureV1::NonCanonicalIdentity(error.to_string()))?;
-        let digest = canonical_digest(EXACT_EXTRACTION_AUTHORITY_SEPARATOR, &chunk)?;
+        let digest = canonical_digest(EXACT_EXTRACTION_AUTHORITY_SEPARATOR, chunk)?;
         if self.chunk_digests.get(&chunk.id) != Some(&digest) {
             return Err(ChunkingFailureV1::NonCanonicalIdentity(
                 "chunk does not match parser-backed exact extraction authority".to_owned(),
             ));
         }
+        Ok(())
+    }
+
+    pub(crate) fn validate_all(
+        &self,
+        chunks: &[CodeSearchChunkV1],
+    ) -> Result<(), ChunkingFailureV1> {
+        if chunks.len() != self.chunk_digests.len() {
+            return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                "chunk set does not match parser-backed exact extraction authority".to_owned(),
+            ));
+        }
+        let mut seen = BTreeSet::new();
+        for chunk in chunks {
+            if !seen.insert(&chunk.id) {
+                return Err(ChunkingFailureV1::NonCanonicalIdentity(
+                    "chunk set repeats parser-backed exact extraction identity".to_owned(),
+                ));
+            }
+            self.validate_chunk(chunk)?;
+        }
+        Ok(())
+    }
+
+    pub fn admit(
+        &self,
+        chunk: CodeSearchChunkV1,
+    ) -> Result<ExtractionAdmittedCodeSearchChunkV1, ChunkingFailureV1> {
+        self.validate_chunk(&chunk)?;
         Ok(ExtractionAdmittedCodeSearchChunkV1 { chunk })
     }
 
@@ -190,7 +216,7 @@ impl ExactExtractionAuthorityV1 {
                 "carried exact chunks changed logical identity or content".to_owned(),
             ));
         }
-        self.admit_all(prior.chunks.clone())?;
+        self.validate_all(&prior.chunks)?;
         Self::mint(&current.chunks)
     }
 }

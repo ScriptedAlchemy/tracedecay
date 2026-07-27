@@ -249,6 +249,12 @@ struct PersistedFileGenerationArtifactsV1 {
     artifacts: CodeFileIndexArtifactsV1,
 }
 
+#[derive(Serialize)]
+struct PersistedFileGenerationArtifactsRefV1<'a> {
+    extraction: &'a ExtractionBatchV1,
+    artifacts: &'a CodeFileIndexArtifactsV1,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PersistedPublishedGenerationV1 {
@@ -263,11 +269,30 @@ struct PersistedPublishedGenerationV1 {
     projection_receipt: ProjectionBatchReceiptV1,
 }
 
+#[derive(Serialize)]
+struct PersistedPublishedGenerationRefV1<'a> {
+    format_revision: u32,
+    manifest: &'a CodeGenerationManifestV1,
+    snapshot: &'a SanitizedCodeSnapshotV1,
+    files: Vec<PersistedFileGenerationArtifactsRefV1<'a>>,
+    lineage: &'a [SymbolLineageCandidateV1],
+    coverage: CoverageSummaryV1,
+    capability: &'a CodeIndexCapabilityManifestV1,
+    projection_request: &'a ProjectionBatchRequestV1,
+    projection_receipt: &'a ProjectionBatchReceiptV1,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SealedPublishedGenerationEnvelopeV1 {
     state_digest: ManifestDigest,
     generation: PersistedPublishedGenerationV1,
+}
+
+#[derive(Serialize)]
+struct SealedPublishedGenerationEnvelopeRefV1<'a> {
+    state_digest: &'a ManifestDigest,
+    generation: PersistedPublishedGenerationRefV1<'a>,
 }
 
 impl FileGenerationArtifactsV1 {
@@ -600,28 +625,28 @@ impl CodeIndexPublishedGenerationV1 {
     /// recomputed from the validated parser-produced chunks during restore.
     pub(crate) fn encode_sealed(&self) -> Result<Vec<u8>, CodeIndexProductionErrorV1> {
         self.validate()?;
-        let generation = PersistedPublishedGenerationV1 {
+        let generation = PersistedPublishedGenerationRefV1 {
             format_revision: SEALED_GENERATION_FORMAT_REVISION_V1,
-            manifest: self.manifest.clone(),
-            snapshot: self.snapshot.clone(),
+            manifest: &self.manifest,
+            snapshot: &self.snapshot,
             files: self
                 .files
                 .iter()
-                .map(|file| PersistedFileGenerationArtifactsV1 {
-                    extraction: file.extraction.clone(),
-                    artifacts: file.artifacts.clone(),
+                .map(|file| PersistedFileGenerationArtifactsRefV1 {
+                    extraction: &file.extraction,
+                    artifacts: &file.artifacts,
                 })
                 .collect(),
-            lineage: self.lineage.clone(),
+            lineage: &self.lineage,
             coverage: self.coverage,
-            capability: self.capability.clone(),
-            projection_request: self.projection.request().clone(),
-            projection_receipt: self.projection.receipt().clone(),
+            capability: &self.capability,
+            projection_request: self.projection.request(),
+            projection_receipt: self.projection.receipt(),
         };
         let state_digest = canonical_sha256(&generation)
             .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
-        serde_json::to_vec(&SealedPublishedGenerationEnvelopeV1 {
-            state_digest,
+        serde_json::to_vec(&SealedPublishedGenerationEnvelopeRefV1 {
+            state_digest: &state_digest,
             generation,
         })
         .map_err(|error| {
@@ -720,7 +745,7 @@ impl CodeIndexPublishedGenerationV1 {
             .validate()
             .map_err(|error| CodeIndexProductionErrorV1::Contract(error.to_string()))?;
 
-        let mut files = self.files.clone();
+        let mut files = self.files.iter().collect::<Vec<_>>();
         files.sort_by(|left, right| {
             left.artifacts
                 .chunks
@@ -749,32 +774,55 @@ impl CodeIndexPublishedGenerationV1 {
                 ));
             }
             file.exact_authority
-                .admit_all(file.artifacts.chunks.chunks.clone())
+                .validate_all(&file.artifacts.chunks.chunks)
                 .map_err(CodeIndexProductionErrorV1::Chunk)?;
         }
-        let chunks = GenerationChunkManifestV1::new(
-            self.manifest.generation_id.clone(),
-            files
+        let mut chunks = files
+            .iter()
+            .flat_map(|file| file.artifacts.chunks.chunks.iter())
+            .collect::<Vec<_>>();
+        chunks.sort_by(|left, right| left.id.cmp(&right.id));
+        let chunks_match = chunks.len() == self.chunks.chunks().len()
+            && chunks
                 .iter()
-                .map(|file| file.artifacts.chunks.clone())
-                .collect(),
-        )
-        .map_err(CodeIndexProductionErrorV1::Increment)?;
-        let symbols = GenerationSymbolIndexV1::new(
-            self.manifest.generation_id.clone(),
-            files
+                .zip(self.chunks.chunks())
+                .all(|(left, right)| *left == right);
+        let mut symbols = files
+            .iter()
+            .flat_map(|file| file.artifacts.symbols.iter())
+            .collect::<Vec<_>>();
+        symbols.sort_by(|left, right| left.occurrence.cmp(&right.occurrence));
+        let symbols_match = symbols.len() == self.symbols.symbols.len()
+            && symbols
                 .iter()
-                .flat_map(|file| file.artifacts.symbols.clone())
-                .collect(),
-        )
-        .map_err(CodeIndexProductionErrorV1::Lineage)?;
-        if chunks != self.chunks || symbols != self.symbols {
+                .zip(&self.symbols.symbols)
+                .all(|(left, right)| *left == right);
+        if !chunks_match || !symbols_match {
             return Err(CodeIndexProductionErrorV1::Contract(
                 "published generation does not match file artifacts".to_owned(),
             ));
         }
-        let (edges, edge_abstentions) = collect_edge_evidence(&files);
-        if edges != self.edges || edge_abstentions != self.edge_abstentions {
+        let mut edges = files
+            .iter()
+            .flat_map(|file| file.artifacts.edges.iter())
+            .collect::<Vec<_>>();
+        edges.sort_by(|left, right| edge_order(left, right));
+        let edges_match = edges.len() == self.edges.len()
+            && edges
+                .iter()
+                .zip(&self.edges)
+                .all(|(left, right)| *left == right);
+        let mut edge_abstentions = files
+            .iter()
+            .flat_map(|file| file.artifacts.edge_abstentions.iter())
+            .collect::<Vec<_>>();
+        edge_abstentions.sort();
+        let abstentions_match = edge_abstentions.len() == self.edge_abstentions.len()
+            && edge_abstentions
+                .iter()
+                .zip(&self.edge_abstentions)
+                .all(|(left, right)| *left == right);
+        if !edges_match || !abstentions_match {
             return Err(CodeIndexProductionErrorV1::Contract(
                 "published graph evidence does not match file artifacts".to_owned(),
             ));
@@ -1508,6 +1556,26 @@ fn projection_request(
     Ok(request)
 }
 
+fn edge_order(
+    left: &CanonicalRelationEdgeV1,
+    right: &CanonicalRelationEdgeV1,
+) -> std::cmp::Ordering {
+    (
+        &left.from_occurrence,
+        &left.to_occurrence,
+        left.kind,
+        left.evidence_span.start_byte,
+        left.evidence_span.end_byte,
+    )
+        .cmp(&(
+            &right.from_occurrence,
+            &right.to_occurrence,
+            right.kind,
+            right.evidence_span.start_byte,
+            right.evidence_span.end_byte,
+        ))
+}
+
 fn collect_edge_evidence(
     files: &[FileGenerationArtifactsV1],
 ) -> (Vec<CanonicalRelationEdgeV1>, Vec<CodeIndexEdgeAbstentionV1>) {
@@ -1515,22 +1583,7 @@ fn collect_edge_evidence(
         .iter()
         .flat_map(|file| file.artifacts.edges.clone())
         .collect::<Vec<_>>();
-    edges.sort_by(|left, right| {
-        (
-            &left.from_occurrence,
-            &left.to_occurrence,
-            left.kind,
-            left.evidence_span.start_byte,
-            left.evidence_span.end_byte,
-        )
-            .cmp(&(
-                &right.from_occurrence,
-                &right.to_occurrence,
-                right.kind,
-                right.evidence_span.start_byte,
-                right.evidence_span.end_byte,
-            ))
-    });
+    edges.sort_by(edge_order);
     let mut abstentions = files
         .iter()
         .flat_map(|file| file.artifacts.edge_abstentions.clone())
