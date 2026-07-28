@@ -1036,31 +1036,8 @@ impl McpServer {
         );
         let project_reader_preselected = routed.selected_project.is_some();
 
-        // Notification-free freshness is useful before tools that edit source
-        // files in the index. Read-only graph queries should not block behind
-        // a full project walk; on very large indexes (especially when
-        // node_modules was intentionally included) that turns diagnostics and
-        // search into sync operations.
-        if !project_reader_preselected && needs_lazy_sync_before_dispatch(tool_name) {
-            self.maybe_sync_if_stale().await;
-        } else if !project_reader_preselected {
-            // D4: sync-on-read (never blocking). Read tools serve the current
-            // answer IMMEDIATELY and, when the read-refresh cooldown has
-            // elapsed, kick a single-flighted background refresh so the *next*
-            // read sees fresh data. This heals read-only sessions that never
-            // touch an edit tool without ever making a query wait behind a
-            // project walk.
-            self.maybe_spawn_read_refresh(&cg);
-        }
-
-        self.stats.tool_calls.fetch_add(1, Ordering::Relaxed);
-        tracing::trace!(tool_name, "dispatching MCP tool call");
-        if let Ok(mut counts) = self.tool_call_counts.lock() {
-            *counts.entry(tool_name.to_string()).or_insert(0) += 1;
-        }
-        if publish_activity {
-            self.publish_tool_call_activity(tool_name, &cg).await;
-        }
+        self.begin_tool_dispatch(tool_name, &cg, project_reader_preselected, publish_activity)
+            .await;
 
         let server_stats = if tool_name == "tracedecay_status" {
             Some(self.server_stats_json().await)
@@ -1105,6 +1082,42 @@ impl McpServer {
             selected_owner,
             outcome,
             elapsed_us: handler_start.map(|t| t.elapsed().as_micros() as u64),
+        }
+    }
+
+    /// Applies the pre-dispatch freshness policy and records the call in the
+    /// server counters and the activity lane.
+    async fn begin_tool_dispatch(
+        &self,
+        tool_name: &str,
+        cg: &Arc<TraceDecay>,
+        project_reader_preselected: bool,
+        publish_activity: bool,
+    ) {
+        // Notification-free freshness is useful before tools that edit source
+        // files in the index. Read-only graph queries should not block behind
+        // a full project walk; on very large indexes (especially when
+        // node_modules was intentionally included) that turns diagnostics and
+        // search into sync operations.
+        if !project_reader_preselected && needs_lazy_sync_before_dispatch(tool_name) {
+            self.maybe_sync_if_stale().await;
+        } else if !project_reader_preselected {
+            // D4: sync-on-read (never blocking). Read tools serve the current
+            // answer IMMEDIATELY and, when the read-refresh cooldown has
+            // elapsed, kick a single-flighted background refresh so the *next*
+            // read sees fresh data. This heals read-only sessions that never
+            // touch an edit tool without ever making a query wait behind a
+            // project walk.
+            self.maybe_spawn_read_refresh(cg);
+        }
+
+        self.stats.tool_calls.fetch_add(1, Ordering::Relaxed);
+        tracing::trace!(tool_name, "dispatching MCP tool call");
+        if let Ok(mut counts) = self.tool_call_counts.lock() {
+            *counts.entry(tool_name.to_string()).or_insert(0) += 1;
+        }
+        if publish_activity {
+            self.publish_tool_call_activity(tool_name, cg).await;
         }
     }
 
@@ -1665,6 +1678,28 @@ impl McpServer {
         wake.is_some_and(|wake| wake.status().unavailable_reason.is_some())
     }
 
+    /// Finishes a dispatch that bypassed success accounting because the backing
+    /// worker was already known to be unavailable.
+    fn finish_unavailable_tool_call(
+        id: Value,
+        tool_name: &str,
+        dispatch: DispatchedToolCall,
+    ) -> JsonRpcResponse {
+        let DispatchedToolCall {
+            outcome,
+            elapsed_us,
+            ..
+        } = dispatch;
+        match outcome {
+            Ok(mut result) => {
+                Self::attach_tool_timing(&mut result, elapsed_us);
+                mark_semantic_tool_error(&mut result);
+                JsonRpcResponse::success(id, result.value)
+            }
+            Err(error) => tool_error_response(id, tool_name, &error),
+        }
+    }
+
     /// Handles the `tools/call` method, dispatching to the appropriate tool handler.
     pub(crate) async fn handle_tools_call(
         &self,
@@ -1701,19 +1736,7 @@ impl McpServer {
             )
             .await;
         if fast_unavailable {
-            let DispatchedToolCall {
-                outcome,
-                elapsed_us,
-                ..
-            } = dispatch;
-            return match outcome {
-                Ok(mut result) => {
-                    Self::attach_tool_timing(&mut result, elapsed_us);
-                    mark_semantic_tool_error(&mut result);
-                    JsonRpcResponse::success(id, result.value)
-                }
-                Err(error) => tool_error_response(id, &tool_name, &error),
-            };
+            return Self::finish_unavailable_tool_call(id, &tool_name, dispatch);
         }
         self.complete_tool_call(
             id,
