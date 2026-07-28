@@ -24,9 +24,9 @@ use crate::application::context::{
 };
 use crate::application::session::{
     AuthorizationGrantId, SessionAccess, SessionAuthorizationError, SessionAuthorizationGrant,
-    SessionRetrievalConfiguration, SessionRetrievalOutcome, SessionRetrievalScope,
-    SessionRetrievalService, SessionScopeAuthorizationRequest, SessionScopeAuthorizer,
-    SessionTemporalExecutionError, SessionTemporalQuery,
+    SessionDataFreshness, SessionRetrievalConfiguration, SessionRetrievalOutcome,
+    SessionRetrievalScope, SessionRetrievalService, SessionScopeAuthorizationRequest,
+    SessionScopeAuthorizer, SessionTemporalExecutionError, SessionTemporalQuery,
 };
 use crate::daemon::session_temporal_refresh_scheduler::{
     SessionTemporalRefreshBlocker, SessionTemporalRefreshRetryClass,
