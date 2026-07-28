@@ -592,10 +592,10 @@ fn authorize_maintenance(_: AuthContext<'_>) -> Authorization {
     Authorization::Allow
 }
 
-/// Schema-introspection pragmas that only read metadata and cannot mutate the
+/// Schema-introspection and integrity-diagnostic pragmas that cannot mutate the
 /// database, file, or connection configuration. These stay available even to
-/// read-only lanes (for example the immutable Doctor health reader) so column
-/// and index shape audits work without opening a writable connection.
+/// read-only lanes (for example the immutable Doctor health reader) so health
+/// and shape audits work without opening a writable connection.
 fn is_read_only_introspection_pragma(pragma_name: &str) -> bool {
     const READ_ONLY_INTROSPECTION_PRAGMAS: &[&str] = &[
         "collation_list",
@@ -606,8 +606,10 @@ fn is_read_only_introspection_pragma(pragma_name: &str) -> bool {
         "index_info",
         "index_list",
         "index_xinfo",
+        "integrity_check",
         "module_list",
         "pragma_list",
+        "quick_check",
         "table_info",
         "table_list",
         "table_xinfo",

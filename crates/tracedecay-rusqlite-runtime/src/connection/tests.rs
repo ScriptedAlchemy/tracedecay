@@ -111,6 +111,38 @@ fn reader_mode_is_private_query_only_and_denies_writes() {
 }
 
 #[test]
+fn reader_authorizer_allows_integrity_diagnostics_and_denies_mutating_pragmas() {
+    let file = database();
+    let writer = open(file.path(), ConnectionMode::Writer).expect("prepare WAL database");
+    drop(writer);
+    let connection = open(file.path(), ConnectionMode::Reader).expect("reader policy");
+
+    for pragma in [
+        "PRAGMA quick_check",
+        "PRAGMA quick_check(1000)",
+        "PRAGMA integrity_check",
+        "PRAGMA integrity_check(1000)",
+    ] {
+        let result = connection
+            .query_row(pragma, [], |row| row.get::<_, String>(0))
+            .unwrap_or_else(|error| panic!("{pragma} must be authorized: {error}"));
+        assert_eq!(result, "ok", "{pragma} must report a healthy database");
+    }
+
+    for pragma in [
+        "PRAGMA application_id = 1",
+        "PRAGMA cache_size = 1000",
+        "PRAGMA journal_mode = DELETE",
+        "PRAGMA user_version = 1",
+    ] {
+        assert!(
+            connection.execute_batch(pragma).is_err(),
+            "{pragma} must remain denied"
+        );
+    }
+}
+
+#[test]
 fn immutable_reader_applies_full_reader_policy_without_sidecars() {
     let file = database();
     let wal = sidecar_path(file.path(), "-wal");

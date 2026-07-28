@@ -2973,9 +2973,6 @@ mod tests {
     fn mutating_no_argument_pragmas_are_denied() {
         let fixture = fixture('a', 'a');
         let channel = MigrationSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
-        channel
-            .execute_batch("CREATE TABLE pragma_probe (value INTEGER)".to_owned())
-            .unwrap();
 
         for pragma in [
             "PRAGMA cache_flush",
@@ -2996,15 +2993,29 @@ mod tests {
                 "{pragma} must be denied, got {error:?}"
             );
         }
+    }
 
-        let transaction = channel.begin_deferred().unwrap();
-        let rows = transaction
-            .query(statement("PRAGMA quick_check", vec![]))
+    #[test]
+    fn migration_read_policy_allows_integrity_diagnostic_arguments() {
+        let fixture = fixture('a', 'a');
+        let channel = MigrationSqlHandle::attach(&fixture.writer, &fixture.readers).unwrap();
+        channel
+            .execute_batch("CREATE TABLE pragma_probe (value INTEGER)".to_owned())
             .unwrap();
-        assert_eq!(
-            rows.rows[0].values,
-            vec![MigrationSqlValue::Text("ok".to_owned())]
-        );
+        let transaction = channel.begin_deferred().unwrap();
+        for pragma in [
+            "PRAGMA quick_check",
+            "PRAGMA quick_check(1000)",
+            "PRAGMA integrity_check",
+            "PRAGMA integrity_check(1000)",
+        ] {
+            let rows = transaction.query(statement(pragma, vec![])).unwrap();
+            assert_eq!(
+                rows.rows[0].values,
+                vec![MigrationSqlValue::Text("ok".to_owned())],
+                "{pragma} must remain classified as a read-only diagnostic"
+            );
+        }
         let table_info = transaction
             .query(statement("PRAGMA table_info(pragma_probe)", vec![]))
             .unwrap();
