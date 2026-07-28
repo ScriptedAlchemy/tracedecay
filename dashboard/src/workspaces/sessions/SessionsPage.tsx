@@ -165,21 +165,31 @@ export function SessionsPage() {
                       : ''}
                   </p>
                   {hits.map((hit, i) => {
-                    const id = String(hit['message_id'] ?? hit['store_id'] ?? i);
                     const provider = String(hit['source'] ?? hit['provider'] ?? '');
+                    const storeId = hit['store_id'];
+                    const messageId = hit['message_id'];
+                    const id =
+                      storeId != null
+                        ? String(storeId)
+                        : messageId != null
+                          ? `${provider}:${String(messageId)}`
+                          : String(i);
                     const role = String(hit['role'] ?? '');
                     const snippet = String(hit['snippet'] ?? hit['content'] ?? '');
                     const when = hit['timestamp'] ? formatStamp(Number(hit['timestamp'])) : '';
+                    const selectedProvider = String(
+                      selected?.['source'] ?? selected?.['provider'] ?? '',
+                    );
                     return (
                       <DataRow
                         key={id}
                         selected={
                           selected != null &&
-                          ((hit['message_id'] != null &&
-                            selected['message_id'] === hit['message_id']) ||
-                            (hit['message_id'] == null &&
-                              hit['store_id'] != null &&
-                              selected['store_id'] === hit['store_id']))
+                          (storeId != null
+                            ? selected['store_id'] === storeId
+                            : messageId != null &&
+                              selected['message_id'] === messageId &&
+                              selectedProvider === provider)
                         }
                         onSelect={() => setSelected(hit)}
                       >
