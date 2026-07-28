@@ -180,7 +180,14 @@ export function SessionsPage() {
                     return (
                       <DataRow
                         key={id}
-                        selected={selected === hit}
+                        selected={
+                          selected != null &&
+                          ((hit['message_id'] != null &&
+                            selected['message_id'] === hit['message_id']) ||
+                            (hit['message_id'] == null &&
+                              hit['store_id'] != null &&
+                              selected['store_id'] === hit['store_id']))
+                        }
                         onSelect={() => setSelected(hit)}
                       >
                         <span className="td-legend w-14 shrink-0 truncate max-md:hidden">
@@ -242,7 +249,14 @@ export function SessionsPage() {
                     : '';
                   return (
                     <DataRow
-                      selected={selected === row}
+                      selected={
+                        selected != null &&
+                        ((row['session_id'] != null &&
+                          selected['session_id'] === row['session_id']) ||
+                          (row['session_id'] == null &&
+                            row['id'] != null &&
+                            selected['id'] === row['id']))
+                      }
                       onSelect={() => setSelected(row)}
                     >
                       {/* The session id carries the provider as its own prefix,
@@ -290,7 +304,11 @@ export function SessionsPage() {
         </LegacyBoundary>
         )
       }
-      inspector={<SelectedRecord record={selected} onClose={() => setSelected(null)} />}
+      inspector={
+        selected ? (
+          <SelectedRecord record={selected} onClose={() => setSelected(null)} />
+        ) : undefined
+      }
     />
   );
 }
