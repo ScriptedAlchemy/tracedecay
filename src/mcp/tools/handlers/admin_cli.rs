@@ -62,12 +62,20 @@ enum AdminCliAction {
     StorageReport {
         project_id: Option<String>,
         project_root: Option<PathBuf>,
+        #[serde(default)]
+        cursor: Option<String>,
+        #[serde(default = "default_storage_report_page_limit")]
+        limit: usize,
     },
     GainQuery {
         project_arg: Option<PathBuf>,
         since: i64,
         history: bool,
     },
+}
+
+const fn default_storage_report_page_limit() -> usize {
+    8
 }
 
 struct AdminCliContext<'a> {
@@ -322,10 +330,18 @@ async fn dispatch_admin_cli(
         AdminCliAction::StorageReport {
             project_id,
             project_root,
+            cursor,
+            limit,
         } => {
             let profile_root = context.require_profile_root()?;
             let report = match (project_id, project_root) {
                 (Some(project_id), Some(project_root)) => {
+                    if cursor.is_some() {
+                        return Err(TraceDecayError::Config {
+                            message: "project-scoped storage_report does not accept a cursor"
+                                .to_owned(),
+                        });
+                    }
                     crate::retention::storage_report::build_project_storage_report_from_daemon(
                         profile_root,
                         &project_id,
@@ -334,8 +350,11 @@ async fn dispatch_admin_cli(
                     .await?
                 }
                 (None, None) => {
-                    crate::retention::storage_report::build_storage_report_from_registered_global_db(
-                        profile_root, global_db,
+                    crate::retention::storage_report::build_storage_report_page_from_registered_global_db(
+                        profile_root,
+                        global_db,
+                        cursor.as_deref(),
+                        limit,
                     )
                     .await?
                 }
@@ -678,6 +697,7 @@ mod tests {
             Ok(AdminCliAction::StorageReport {
                 project_id: None,
                 project_root: None,
+                ..
             })
         ));
         assert!(matches!(

@@ -1729,7 +1729,6 @@ async fn branch_list_reads_profile_sharded_branch_meta() {
     write_git_fixture(project.path());
     write_profile_sharded_fixture(home.path(), project.path());
     let shard_root = profile_shard_root(home.path());
-    write_branch_meta(&shard_root, &[], false);
     let runtime = HostAdmissionTestRuntimeV1::profile(profile_root(home.path()))
         .await
         .unwrap();
@@ -1737,7 +1736,38 @@ async fn branch_list_reads_profile_sharded_branch_meta() {
     runtime.checkpoint_profile_database_for_test().await;
     drop(runtime);
 
-    let mut command = tracedecay_command(home.path(), project.path());
+    let _daemon = crate::common::spawn_tracedecay_daemon(home.path());
+    let mut warm = tracedecay_command_without_daemon(home.path(), project.path());
+    warm.args(["status", "--json"]);
+    let warm_output = run_with_timeout(warm, cli_timeout());
+    assert!(
+        warm_output.status.success(),
+        "fixture project should mount before branch metadata expands"
+    );
+
+    let tracked_branches = (0..300)
+        .map(|index| {
+            (
+                format!("feature/branch-{index:03}-with-enough-detail-to-exercise-status-bounds"),
+                format!("branches/feature_branch_{index:03}.db"),
+            )
+        })
+        .collect::<Vec<_>>();
+    for (name, _) in &tracked_branches {
+        git(project.path(), &["branch", name]);
+    }
+    let tracked_branch_refs = tracked_branches
+        .iter()
+        .map(|(name, path)| (name.as_str(), path.as_str()))
+        .collect::<Vec<_>>();
+    write_branch_meta(&shard_root, &tracked_branch_refs, false);
+    for (_, path) in &tracked_branches {
+        let db_path = shard_root.join(path);
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        std::fs::write(db_path, b"branch fixture").unwrap();
+    }
+
+    let mut command = tracedecay_command_without_daemon(home.path(), project.path());
     command.args(["branch", "list"]);
     let output = run_with_timeout(command, cli_timeout());
 
@@ -1751,6 +1781,10 @@ async fn branch_list_reads_profile_sharded_branch_meta() {
     assert!(
         stderr.contains("Default branch: main"),
         "branch list should read profile-sharded branch metadata\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("feature/branch-299-with-enough-detail-to-exercise-status-bounds"),
+        "branch list should receive the complete explicitly requested branch diagnostics\nstderr:\n{stderr}"
     );
     assert!(
         !stderr.contains("No branch tracking configured"),
@@ -1831,7 +1865,7 @@ async fn gitignore_reads_effective_config_for_primary_and_linked_worktrees() {
 }
 
 #[tokio::test]
-async fn automation_facts_list_reports_missing_proposal_bank_as_unavailable() {
+async fn automation_facts_list_reports_incompatible_proposal_bank_as_unavailable() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     write_git_fixture(project.path());
@@ -1849,9 +1883,11 @@ async fn automation_facts_list_reports_missing_proposal_bank_as_unavailable() {
     graph_db
         .execute_batch(
             "DROP TABLE IF EXISTS memory_v2_proposal_current;
-             DROP TABLE IF EXISTS memory_v2_proposals;",
+             DROP TABLE IF EXISTS memory_v2_proposals;
+             CREATE TABLE memory_v2_proposal_current (proposal_id TEXT PRIMARY KEY);
+             CREATE TABLE memory_v2_proposals (proposal_id TEXT PRIMARY KEY);",
         )
-        .expect("remove compatibility proposal bank from fixture");
+        .expect("install incompatible compatibility proposal bank fixture");
     drop(graph_db);
 
     let _daemon = crate::common::spawn_tracedecay_daemon(home.path());
@@ -1870,7 +1906,7 @@ async fn automation_facts_list_reports_missing_proposal_bank_as_unavailable() {
     assert_eq!(payload["availability"]["state"], "unavailable");
     assert_eq!(
         payload["availability"]["reason"],
-        "compatibility_proposal_bank_absent"
+        "compatibility_proposal_authority_incompatible"
     );
     assert_eq!(payload["count"], 0);
     assert_eq!(payload["proposals"], serde_json::json!([]));
@@ -2550,10 +2586,26 @@ async fn migrate_storage_report_uses_active_daemon_authority_without_hanging() {
     let project = TempDir::new().unwrap();
     write_git_fixture(project.path());
     write_profile_sharded_fixture(home.path(), project.path());
-    let runtime = HostAdmissionTestRuntimeV1::profile(profile_root(home.path()))
+    let profile_root = profile_root(home.path());
+    let runtime = HostAdmissionTestRuntimeV1::profile(&profile_root)
         .await
         .unwrap();
     register_profile_sharded_store(&runtime, project.path(), "proj_cli").await;
+    for index in 0..4 {
+        let project_id = format!("proj_storage_page_{index}");
+        let project_root = home.path().join(format!("storage-project-{index}"));
+        std::fs::create_dir_all(&project_root).unwrap();
+        runtime
+            .upsert_code_project(&project_id, &project_root, None, None, Some("main"))
+            .await
+            .expect("paged storage project should register");
+        let data_root = profile_root.join("projects").join(&project_id);
+        std::fs::create_dir_all(&data_root).unwrap();
+        let connection = rusqlite::Connection::open(data_root.join("tracedecay.db")).unwrap();
+        connection
+            .execute_batch("CREATE TABLE fixture (id INTEGER PRIMARY KEY);")
+            .unwrap();
+    }
     runtime.checkpoint_profile_database_for_test().await;
     drop(runtime);
 
@@ -2574,5 +2626,7 @@ async fn migrate_storage_report_uses_active_daemon_authority_without_hanging() {
         String::from_utf8_lossy(&output.stderr)
     );
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("report json");
-    assert_eq!(report["stores"][0]["project_id"], "proj_cli");
+    assert_eq!(report["stores"].as_array().unwrap().len(), 5);
+    assert_eq!(report["coverage"]["state"], "complete");
+    assert_eq!(report["coverage"]["next_cursor"], serde_json::Value::Null);
 }

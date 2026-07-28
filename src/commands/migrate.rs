@@ -762,21 +762,65 @@ async fn brokered_storage_report(
     project_id: Option<&str>,
     project_root: Option<&Path>,
 ) -> tracedecay::errors::Result<tracedecay::retention::storage_report::StorageReport> {
-    let request = super::daemon::daemon_tool_json(
-        None,
-        "tracedecay_admin_cli",
-        serde_json::json!({
-            "action": "storage_report",
-            "project_id": project_id,
-            "project_root": project_root,
-        }),
-    );
-    let value = tokio::time::timeout(Duration::from_secs(10), request)
-        .await
-        .map_err(|_| tracedecay::errors::TraceDecayError::Config {
-            message: "daemon storage report authority timed out after 10 seconds".to_string(),
-        })??;
-    serde_json::from_value(value).map_err(Into::into)
+    const PAGE_LIMIT: usize = 8;
+    const MAX_PAGES: usize = 4096;
+
+    let mut report = tracedecay::retention::storage_report::StorageReport::default();
+    let mut cursor = None;
+    for _ in 0..MAX_PAGES {
+        let request = super::daemon::daemon_tool_json(
+            None,
+            "tracedecay_admin_cli",
+            serde_json::json!({
+                "action": "storage_report",
+                "project_id": project_id,
+                "project_root": project_root,
+                "cursor": cursor,
+                "limit": PAGE_LIMIT,
+            }),
+        );
+        let value = tokio::time::timeout(Duration::from_secs(10), request)
+            .await
+            .map_err(|_| tracedecay::errors::TraceDecayError::Config {
+                message: "daemon storage report authority timed out after 10 seconds".to_string(),
+            })??;
+        let page: tracedecay::retention::storage_report::StorageReport =
+            serde_json::from_value(value)?;
+        merge_storage_report_page(&mut report, page);
+        if report.coverage.state
+            == tracedecay::retention::storage_report::StorageReportCoverageState::Complete
+        {
+            return Ok(report);
+        }
+        cursor = report.coverage.next_cursor.clone();
+        if cursor.is_none() {
+            return Err(tracedecay::errors::TraceDecayError::Config {
+                message: "partial daemon storage report omitted its continuation cursor".to_owned(),
+            });
+        }
+    }
+    Ok(report)
+}
+
+fn merge_storage_report_page(
+    report: &mut tracedecay::retention::storage_report::StorageReport,
+    page: tracedecay::retention::storage_report::StorageReport,
+) {
+    if report.profile_root.is_empty() {
+        report.profile_root = page.profile_root;
+    }
+    report.stores.extend(page.stores);
+    report
+        .code_generation_retention
+        .extend(page.code_generation_retention);
+    report.unregistered_dir_count = report
+        .unregistered_dir_count
+        .saturating_add(page.unregistered_dir_count);
+    report.unregistered_bytes = report
+        .unregistered_bytes
+        .saturating_add(page.unregistered_bytes);
+    report.global_db_bytes = report.global_db_bytes.max(page.global_db_bytes);
+    report.coverage = page.coverage;
 }
 
 /// Read-only per-store size / free-page-ratio / unregistered-directory report
@@ -886,6 +930,18 @@ async fn handle_migrate_storage_report(
         println!(
             "  run the daemon's automatic sweep, or `tracedecay tool tracedecay_admin_cli` \
              orphan-store collection, to reclaim unregistered directories"
+        );
+    }
+    if report.coverage.state
+        == tracedecay::retention::storage_report::StorageReportCoverageState::Partial
+    {
+        println!(
+            "  coverage: partial; resume with cursor {}",
+            report
+                .coverage
+                .next_cursor
+                .as_deref()
+                .unwrap_or("<missing>")
         );
     }
     Ok(())
