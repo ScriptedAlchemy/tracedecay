@@ -50,7 +50,12 @@ fn host_capture_request(scope: ObservationScopeV1, record_id: &str) -> CaptureOb
     let encoded = serde_json::to_vec(&json!({ "text": "host provenance fixture" })).unwrap();
     let range = ObservationSourceRangeV1::new(0, u64::try_from(encoded.len()).unwrap()).unwrap();
     let ordering_domain = ObservationOrderingDomainV1::SqliteRowId;
-    let session_id = "session.host-provenance".to_owned();
+    // One source lane per record. Every fixture frame starts at offset 0 with
+    // no expected cursor, so sharing a session would make the second distinct
+    // record collide with the first record's advanced cursor and short-circuit
+    // as `cursor_conflict` before the authority is ever consulted. Replays
+    // still resolve as exact duplicates because they reuse `record_id`.
+    let session_id = format!("session.{record_id}");
     let envelope_session = session_id.clone();
     let envelope_record = record_id.to_owned();
     let parsed =
@@ -455,6 +460,7 @@ async fn registered_profile_runtime_is_required_and_mismatch_never_falls_back() 
     ))
     .await;
     assert_eq!(revoked.status, HostAdmissionStatus::Unavailable);
+    assert_eq!(revoked.reason_code, Some("authority_write_failed"));
     let _inspection_scope = crate::db::enter_daemon_database_scope(
         identity.profile_root(),
         1,
@@ -595,6 +601,7 @@ async fn registered_project_runtime_is_exact_and_revocation_never_falls_back() {
     ))
     .await;
     assert_eq!(revoked.status, HostAdmissionStatus::Unavailable);
+    assert_eq!(revoked.reason_code, Some("authority_write_failed"));
     let _inspection_scope = crate::db::enter_daemon_database_scope(
         identity.profile_root(),
         1,
