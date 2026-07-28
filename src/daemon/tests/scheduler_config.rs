@@ -6,6 +6,30 @@ use crate::automation::config::{
     AutomationBackend, AutomationConfigPatch, AutomationTaskPatch, save_project_config,
 };
 
+/// Caches a project server wired the way the daemon's own project-open path
+/// wires it: with the automation scheduler reconciler installed. Without the
+/// reconciler a cached owner answers every broadcast with `OwnerUnavailable`,
+/// so a reconcile fan-out looks successful while starting no scheduler.
+#[cfg(unix)]
+async fn cached_project_server_with_reconciler(
+    engine: &DaemonEngine,
+    cg: crate::tracedecay::TraceDecay,
+    key: ProjectServerKey,
+    project_path: PathBuf,
+    handshake: DaemonHandshake,
+) -> Arc<crate::mcp::McpServer> {
+    let reconciler = engine.automation_scheduler_reconciler(
+        Arc::new(tokio::sync::Mutex::new(key)),
+        Arc::new(tokio::sync::Mutex::new(project_path)),
+        handshake,
+    );
+    crate::mcp::McpServer::new_with_context(
+        crate::mcp::server::McpServerConstructionContext::direct(cg, None)
+            .with_automation_scheduler_reconciler(reconciler),
+    )
+    .await
+}
+
 #[cfg(unix)]
 struct AutomationExitBarrierRelease(Arc<AutomationSchedulerExitBarrier>);
 
@@ -728,7 +752,14 @@ async fn profile_reconcile_broadcasts_to_cached_projects_without_opening_uncache
     .expect("open first cached project through daemon authority");
     let first_key = ProjectServerKey::from_open_project(&first_cg, &first_handshake)
         .expect("first cached owner key");
-    let first_server = crate::mcp::McpServer::new_with_global_db(first_cg, None, None).await;
+    let first_server = cached_project_server_with_reconciler(
+        &engine,
+        first_cg,
+        first_key.clone(),
+        first_project.clone(),
+        first_handshake.clone(),
+    )
+    .await;
     let first_cg = first_server.cg().await;
     let second_cg = super::super::open_project_for_handshake(
         &second_project,
@@ -739,7 +770,14 @@ async fn profile_reconcile_broadcasts_to_cached_projects_without_opening_uncache
     .expect("open second cached project through daemon authority");
     let second_key = ProjectServerKey::from_open_project(&second_cg, &second_handshake)
         .expect("second cached owner key");
-    let second_server = crate::mcp::McpServer::new_with_global_db(second_cg, None, None).await;
+    let second_server = cached_project_server_with_reconciler(
+        &engine,
+        second_cg,
+        second_key.clone(),
+        second_project.clone(),
+        second_handshake.clone(),
+    )
+    .await;
     let second_cg = second_server.cg().await;
     {
         let mut owners = engine.store_administration.project_servers().lock().await;
