@@ -679,88 +679,100 @@ async fn applied_manifest_retirement_handles_retry_states_and_fails_closed() {
     assert!(target_retired.is_file());
 }
 
-/// Drives one publish-boundary interruption: stopping at `stop` fails, then a
-/// resume completes and moves the repository-identity marker to the
-/// destination. Split into one test per boundary so nextest parallelizes them.
-async fn run_destination_preparation_restart(stop: prepare::PrepareStop) {
+#[tokio::test]
+async fn destination_preparation_restarts_after_every_publish_boundary() {
     let fixture = fixture().await;
     let options = fixture.options();
     let report = plan(&options).await.unwrap();
 
-    let error = apply_with_prepare_stop(&options, &report.confirmation_token, stop)
-        .await
-        .unwrap_err();
-    assert!(
-        error.to_string().contains("synthetic interruption"),
-        "{stop:?}: {error}"
-    );
-
+    // Advance the same migration through every restart boundary. Each call
+    // proves that the previous interruption is resumable without rebuilding
+    // identical source and target shards for the next boundary.
+    for stop in [
+        prepare::PrepareStop::TargetCopy,
+        prepare::PrepareStop::SourceBranch(1),
+        prepare::PrepareStop::BranchMetaWrite,
+        prepare::PrepareStop::Publish,
+    ] {
+        let error = apply_with_prepare_stop(&options, &report.confirmation_token, stop)
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("synthetic interruption"),
+            "{stop:?}: {error}"
+        );
+        assert_eq!(
+            load_ledger(&report.ledger_path).unwrap().unwrap().state,
+            ConsolidationState::BackupsReady,
+            "{stop:?}: destination preparation advanced the durable ledger"
+        );
+        assert_eq!(
+            storage::read_repository_identity_marker(&fixture.project)
+                .unwrap()
+                .unwrap()
+                .project_id,
+            fixture.target_id,
+            "{stop:?}: marker moved before destination preparation completed"
+        );
+    }
     let applied = apply(&options, &report.confirmation_token).await.unwrap();
-    assert_eq!(applied.state, ConsolidationState::Applied, "{stop:?}");
+    assert_eq!(applied.state, ConsolidationState::Applied);
     assert_eq!(
         storage::read_repository_identity_marker(&fixture.project)
             .unwrap()
             .unwrap()
             .project_id,
         applied.destination_project_id,
-        "{stop:?}"
+        "marker did not move after every destination preparation boundary resumed"
     );
 }
 
 #[tokio::test]
-async fn destination_preparation_restarts_after_target_copy() {
-    run_destination_preparation_restart(prepare::PrepareStop::TargetCopy).await;
-}
-
-#[tokio::test]
-async fn destination_preparation_restarts_after_source_branch() {
-    run_destination_preparation_restart(prepare::PrepareStop::SourceBranch(1)).await;
-}
-
-#[tokio::test]
-async fn destination_preparation_restarts_after_branch_meta_write() {
-    run_destination_preparation_restart(prepare::PrepareStop::BranchMetaWrite).await;
-}
-
-#[tokio::test]
-async fn destination_preparation_restarts_after_publish() {
-    run_destination_preparation_restart(prepare::PrepareStop::Publish).await;
-}
-
-/// Drives one durable-state interruption: stopping at `stop` fails and leaves
-/// the identity marker on the source until the final state, then a resume
-/// completes and moves it to the destination. Split into one test per state so
-/// nextest parallelizes them.
-async fn run_consolidation_restart(stop: ConsolidationState) {
+async fn consolidation_restarts_after_every_durable_state() {
     let fixture = fixture().await;
     let options = fixture.options();
     let report = plan(&options).await.unwrap();
 
-    let error = apply_with_stop(&options, &report.confirmation_token, Some(stop.clone()))
-        .await
-        .unwrap_err();
-    assert!(
-        error.to_string().contains("synthetic interruption"),
-        "{stop:?}: {error}"
-    );
-    assert_eq!(
-        storage::read_repository_identity_marker(&fixture.project)
-            .unwrap()
-            .unwrap()
-            .project_id,
-        fixture.target_id,
-        "{stop:?}: marker moved before the final state"
-    );
-
+    // Walk one ledger through every durable state so each invocation is a real
+    // restart from the preceding state instead of repeating completed phases
+    // on an identical fixture.
+    for stop in [
+        ConsolidationState::BackupsReady,
+        ConsolidationState::DestinationReady,
+        ConsolidationState::DatabasesMerged,
+        ConsolidationState::ArtifactsMerged,
+        ConsolidationState::Registered,
+    ] {
+        let error = apply_with_stop(&options, &report.confirmation_token, Some(stop.clone()))
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("synthetic interruption"),
+            "{stop:?}: {error}"
+        );
+        assert_eq!(
+            load_ledger(&report.ledger_path).unwrap().unwrap().state,
+            stop,
+            "restart did not durably reach {stop:?}"
+        );
+        assert_eq!(
+            storage::read_repository_identity_marker(&fixture.project)
+                .unwrap()
+                .unwrap()
+                .project_id,
+            fixture.target_id,
+            "{stop:?}: marker moved before the final state"
+        );
+    }
     let applied = apply(&options, &report.confirmation_token).await.unwrap();
-    assert_eq!(applied.state, ConsolidationState::Applied, "{stop:?}");
+    assert_eq!(applied.state, ConsolidationState::Applied);
     assert_eq!(
         storage::read_repository_identity_marker(&fixture.project)
             .unwrap()
             .unwrap()
             .project_id,
         applied.destination_project_id,
-        "{stop:?}"
+        "marker did not move after every durable state resumed"
     );
 }
 
@@ -935,31 +947,6 @@ async fn destination_ready_resume_keeps_exact_artifact_identity() {
         source_databases_after, source_databases_before,
         "exact-identity resume changed a source SQLite family"
     );
-}
-
-#[tokio::test]
-async fn consolidation_restarts_after_backups_ready() {
-    run_consolidation_restart(ConsolidationState::BackupsReady).await;
-}
-
-#[tokio::test]
-async fn consolidation_restarts_after_destination_ready() {
-    run_consolidation_restart(ConsolidationState::DestinationReady).await;
-}
-
-#[tokio::test]
-async fn consolidation_restarts_after_databases_merged() {
-    run_consolidation_restart(ConsolidationState::DatabasesMerged).await;
-}
-
-#[tokio::test]
-async fn consolidation_restarts_after_artifacts_merged() {
-    run_consolidation_restart(ConsolidationState::ArtifactsMerged).await;
-}
-
-#[tokio::test]
-async fn consolidation_restarts_after_registered() {
-    run_consolidation_restart(ConsolidationState::Registered).await;
 }
 
 #[tokio::test]

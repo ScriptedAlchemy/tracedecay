@@ -387,6 +387,25 @@ pub fn get_catalog_filtered_tool_definitions_with_budget(
         .collect())
 }
 
+pub fn get_catalog_filtered_tool_definitions_with_warming_budget(
+    budget: u8,
+    profile_id: &ProfileId,
+    authorized_capabilities: &BTreeSet<CapabilityId>,
+    available_scope: &BTreeSet<ScopeDimension>,
+    registry_mode: ToolRegistryMode,
+) -> Result<Vec<ToolDefinition>, crate::application_surface::ApplicationSurfaceAdapterError> {
+    let mut definitions = get_catalog_filtered_tool_definitions_with_budget(
+        0,
+        budget,
+        profile_id,
+        authorized_capabilities,
+        available_scope,
+        registry_mode,
+    )?;
+    apply_context_warming_budget(&mut definitions, budget);
+    Ok(definitions)
+}
+
 pub fn default_catalog_discovery_authority()
 -> Result<BTreeSet<CapabilityId>, crate::application_surface::ApplicationSurfaceAdapterError> {
     Ok(crate::application_surface::application_surface_catalog()?
@@ -412,7 +431,12 @@ pub fn project_catalog_discovery_scope() -> BTreeSet<ScopeDimension> {
 /// a daemon opens the project graph needed to calculate the exact node count.
 pub fn get_tool_definitions_with_warming_budget(budget: u8) -> Vec<ToolDefinition> {
     let mut defs = get_tool_definitions();
-    for def in &mut defs {
+    apply_context_warming_budget(&mut defs, budget);
+    defs
+}
+
+fn apply_context_warming_budget(defs: &mut [ToolDefinition], budget: u8) {
+    for def in defs {
         if def.name == "tracedecay_context" {
             def.description = format!(
                 "Build an AI-ready context for a task description. Returns relevant symbols, \
@@ -428,7 +452,6 @@ pub fn get_tool_definitions_with_warming_budget(budget: u8) -> Vec<ToolDefinitio
             );
         }
     }
-    defs
 }
 
 /// Returns the list of all tool definitions exposed by this MCP server.

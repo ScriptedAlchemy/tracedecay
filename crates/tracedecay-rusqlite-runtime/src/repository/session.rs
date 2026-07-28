@@ -11,7 +11,7 @@ use tracedecay_domain::{
 };
 use tracedecay_store::{
     SessionFrozenWatermarksV1, SessionReadOperationV1, SessionReadResultV1,
-    SessionTemporalProjectionBatchV1,
+    SessionSummaryPublicationRequestV1, SessionTemporalProjectionBatchV1,
 };
 
 use super::support::{canonical_digest, decode, encode, invalid, u64_to_i64, usize_to_i64};
@@ -163,6 +163,61 @@ impl SessionExecutor {
                 committed_at,
             ],
         )?;
+        Ok(())
+    }
+
+    pub fn execute_summary_write(
+        &mut self,
+        savepoint: &Savepoint<'_>,
+        request: &SessionSummaryPublicationRequestV1,
+    ) -> rusqlite::Result<()> {
+        let summary = request.summary();
+        if let Some(existing) = read_summary(savepoint, summary.summary_id())? {
+            return if existing == *summary {
+                Ok(())
+            } else {
+                Err(invalid("immutable session summary identity conflict"))
+            };
+        }
+        savepoint.execute(
+            "INSERT INTO session_summary_nodes (
+                summary_id, session_id, summary_anchor_id, summary_text, index_text,
+                source_horizon_json, publication_json, created_at
+             ) VALUES (?1, ?2, ?3, '', '', ?4, ?5, ?6)",
+            params![
+                summary.summary_id().as_str(),
+                summary.session_id().as_str(),
+                summary.summary_anchor_id().as_str(),
+                encode(&summary.source_horizon())?,
+                summary.publication().map(encode).transpose()?,
+                summary.created_at().0,
+            ],
+        )?;
+        for (ordinal, anchor) in summary.source_anchors().iter().enumerate() {
+            savepoint.execute(
+                "INSERT INTO session_summary_sources (
+                    summary_id, source_ordinal, source_kind,
+                    source_anchor_id, source_summary_id
+                 ) VALUES (?1, ?2, 'anchor', ?3, NULL)",
+                params![
+                    summary.summary_id().as_str(),
+                    usize_to_i64(ordinal, "summary source ordinal")?,
+                    anchor.as_str(),
+                ],
+            )?;
+        }
+        if let Some(predecessor) = summary.predecessor_summary_id() {
+            savepoint.execute(
+                "INSERT INTO session_summary_successors (
+                    predecessor_summary_id, successor_summary_id, created_at
+                 ) VALUES (?1, ?2, ?3)",
+                params![
+                    predecessor.as_str(),
+                    summary.summary_id().as_str(),
+                    summary.created_at().0,
+                ],
+            )?;
+        }
         Ok(())
     }
 
