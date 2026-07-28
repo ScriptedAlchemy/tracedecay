@@ -1,6 +1,7 @@
 import { OverviewCard, OverviewGrid } from '../../ui/archetypes/OverviewGrid';
 import { LegacyBoundary } from '../../ui/LegacyStates.tsx';
 import { Meter, ReadoutBar } from '../../ui/instrument.tsx';
+import { formatCount, splitCount } from '../../ui/format.ts';
 import { useLegacy } from '../../data/query/useLegacy.ts';
 import {
   SavingsOverviewPayloadSchema,
@@ -74,9 +75,18 @@ function SavingsLedger() {
         const perTurn = data.turns.available
           ? costPerTurn(data.turns.total_cost_usd, data.turns.turn_count)
           : null;
-        const projectTitle = lifetime?.projects_truncated
-          ? `Savings by project (top ${(lifetime.projects?.length ?? lifetime.projects_limit ?? 0).toLocaleString()} of ${(lifetime.project_total ?? 0).toLocaleString()} projects)`
-          : 'Savings by project (lifetime)';
+        // The truncated title needs both counts to say anything; the contract
+        // makes them non-null whenever the counters block itself is, so the
+        // rows served stand in only when the slice came back empty. Neither end
+        // is coalesced to zero — "top 0 of 0 projects" is a sentence about no
+        // data, not about a capped slice.
+        const shownProjects = lifetime
+          ? lifetime.projects.length || lifetime.projects_limit
+          : null;
+        const projectTitle =
+          lifetime?.projects_truncated && shownProjects != null
+            ? `Savings by project (top ${shownProjects.toLocaleString()} of ${lifetime.project_total.toLocaleString()} projects)`
+            : 'Savings by project (lifetime)';
         return (
           <>
             <p className="border-b border-edge-subtle px-4 py-1.5 text-2xs text-text-muted">
@@ -124,13 +134,7 @@ function SavingsLedger() {
               ]}
             />
             {!data.turns.available ? (
-              <p
-                role="status"
-                className="border-b border-state-error/30 bg-state-error/5 px-4 py-2 text-xs text-state-error"
-              >
-                Priced turn ledger read failed
-                {data.turns.error ? `: ${data.turns.error}` : '.'}
-              </p>
+              <ReadFailure band label="Priced turn ledger read failed" detail={data.turns.error} />
             ) : null}
 
             {/* The four windows are nested: today is inside 7d is inside 30d
@@ -171,13 +175,7 @@ function SavingsLedger() {
               ]}
             />
             {!data.savings.available ? (
-              <p
-                role="status"
-                className="border-b border-state-error/30 bg-state-error/5 px-4 py-2 text-xs text-state-error"
-              >
-                Savings ledger read failed
-                {data.savings.error ? `: ${data.savings.error}` : '.'}
-              </p>
+              <ReadFailure band label="Savings ledger read failed" detail={data.savings.error} />
             ) : null}
 
             <OverviewGrid>
@@ -215,14 +213,29 @@ function SavingsLedger() {
                 ) : coverage ? (
                   <figure className="flex flex-col gap-2">
                     <p className="text-xs leading-relaxed text-text-primary">
-                      {Math.round(coverage.measuredShare * 100)}% of{' '}
-                      {coverage.messages.toLocaleString()} messages carry token counts the
-                      provider reported. The remainder separates locally tokenized messages
-                      from estimates; together those sources form the{' '}
-                      <span className="td-value">
-                        {String(data.sessions.cost_basis ?? 'mixed')}
-                      </span>{' '}
-                      cost basis.
+                      {coverage.measuredShare != null ? (
+                        <>
+                          {Math.round(coverage.measuredShare * 100)}% of{' '}
+                          {coverage.messages.toLocaleString()} messages carry token counts
+                          the provider reported. The remainder separates locally tokenized
+                          messages from estimates; together those sources form the{' '}
+                          <span className="td-value">
+                            {String(data.sessions.cost_basis ?? 'mixed')}
+                          </span>{' '}
+                          cost basis.
+                        </>
+                      ) : (
+                        <>
+                          The ledger holds {coverage.messages.toLocaleString()} messages and
+                          reported no provider-measured count among them, so the measured
+                          share is unknown — not none. The rows below print only the classes
+                          the ledger did report, against the{' '}
+                          <span className="td-value">
+                            {String(data.sessions.cost_basis ?? 'mixed')}
+                          </span>{' '}
+                          cost basis it names.
+                        </>
+                      )}
                     </p>
                     <ShareRow
                       label="provider-reported"
@@ -247,10 +260,9 @@ function SavingsLedger() {
                     {data.sessions.estimated ? (
                       <p className="text-2xs leading-relaxed text-text-secondary">
                         The estimated side accounts for{' '}
-                        {formatTokens(data.sessions.estimated.input_tokens ?? 0)} input and{' '}
-                        {formatTokens(data.sessions.estimated.output_tokens ?? 0)} output
-                        tokens — the part of the spend above that is inferred rather than
-                        reported.
+                        {formatTokens(data.sessions.estimated.input_tokens)} input and{' '}
+                        {formatTokens(data.sessions.estimated.output_tokens)} output tokens —
+                        the part of the spend above that is inferred rather than reported.
                       </p>
                     ) : null}
                     <figcaption className="text-3xs leading-relaxed text-text-muted">
@@ -337,11 +349,14 @@ function TokenMixPlate({
             </span>
           </div>
         ))}
+        {/* The denominator is only worth stating when the ledger served it. A
+          * "0 messages in 0 sessions" caption under real token figures reads as
+          * a measurement of an empty ledger, which is the opposite of what an
+          * unreported count means. */}
         <figcaption className="text-3xs leading-relaxed text-text-muted">
-          The provider-reported token breakdown across{' '}
-          {(sessions.messages ?? 0).toLocaleString()} messages in{' '}
-          {(sessions.session_count ?? 0).toLocaleString()} sessions — a different, wider
-          denominator than the priced turn ledger above.
+          {sessions.messages != null && sessions.session_count != null
+            ? `The provider-reported token breakdown across ${sessions.messages.toLocaleString()} messages in ${sessions.session_count.toLocaleString()} sessions — a different, wider denominator than the priced turn ledger above.`
+            : 'The provider-reported token breakdown, over a span of messages and sessions the ledger did not report — a different, wider denominator than the priced turn ledger above.'}
         </figcaption>
       </figure>
     </div>
@@ -440,62 +455,84 @@ function ProjectSpreadPlate({ spread }: { spread: ProjectSpread }) {
   );
 }
 
-/** One part of a known whole, printed and given a length. */
+/** One part of a known whole, printed and given a length.
+ *
+ * A `null` value is a class the ledger never reported, which is a different
+ * fact from a class it counted at zero: the row says so in words, prints an em
+ * dash rather than a figure, and leaves the rail unfilled. */
 function ShareRow({
   label,
   value,
   total,
 }: {
   label: string;
-  value: number;
+  value: number | null;
   total: number;
 }) {
   return (
     <div className="flex items-center gap-2 text-xs">
       <span className="min-w-0 flex-1 truncate text-text-primary">{label}</span>
+      {value == null ? (
+        <span className="td-legend shrink-0 text-text-muted">not reported</span>
+      ) : null}
       <Meter
-        fraction={total > 0 ? value / total : null}
+        fraction={value != null && total > 0 ? value / total : null}
         className="h-[3px] w-20 shrink-0 max-sm:hidden"
       />
       <span
         className="td-value w-14 shrink-0 text-right text-2xs text-text-secondary"
         data-cell="numeric"
       >
-        {value.toLocaleString()}
+        {value != null ? value.toLocaleString() : '—'}
       </span>
     </div>
   );
 }
 
-function ReadFailure({ label, detail }: { label: string; detail?: string | null | undefined }) {
+/** A read that failed, said where its reading would have gone.
+ *
+ * `band` is the page-width form for the rows that sit outside a card, directly
+ * under the readout whose figures the failure explains; the default is the
+ * inline form a card body carries. The two are a class list rather than a `cn`
+ * merge because they disagree on text size, and `cn` is a plain joiner with no
+ * conflict resolution. */
+function ReadFailure({
+  label,
+  detail,
+  band = false,
+}: {
+  label: string;
+  detail?: string | null | undefined;
+  band?: boolean;
+}) {
   return (
-    <p role="status" className="text-2xs leading-relaxed text-state-error">
+    <p
+      role="status"
+      className={
+        band
+          ? 'border-b border-state-error/30 bg-state-error/5 px-4 py-2 text-xs text-state-error'
+          : 'text-2xs leading-relaxed text-state-error'
+      }
+    >
       {label}
       {detail ? `: ${detail}` : '.'}
     </p>
   );
 }
 
-function formatTokens(tokens: number): string {
-  if (tokens >= 1_000_000_000) return `${(tokens / 1_000_000_000).toFixed(1)}B`;
-  if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}M`;
-  if (tokens >= 1_000) return `${(tokens / 1_000).toFixed(1)}k`;
-  return tokens.toLocaleString();
-}
+/** Tokens abbreviate from a thousand rather than the shared default of ten,
+ * because four-figure token counts are the exception on this surface and a
+ * column of them at full width buys nothing. The magnitude language itself —
+ * and the em dash for an absent value — is the dashboard's, not this page's. */
+const TOKEN_THOUSANDS_AT = 1_000;
 
-/** The same magnitude language with the unit split off, so the display tier can
- * set the figure large and its unit small on the shared baseline. */
-function splitTokens(tokens: number | null | undefined): {
-  value: string;
-  unit?: string;
-} {
-  if (tokens == null || !Number.isFinite(tokens)) return { value: '—' };
-  if (tokens >= 1_000_000_000)
-    return { value: (tokens / 1_000_000_000).toFixed(1), unit: 'B' };
-  if (tokens >= 1_000_000) return { value: (tokens / 1_000_000).toFixed(1), unit: 'M' };
-  if (tokens >= 1_000) return { value: (tokens / 1_000).toFixed(1), unit: 'K' };
-  return { value: tokens.toLocaleString() };
-}
+const formatTokens = (tokens: number | null | undefined): string =>
+  formatCount(tokens, TOKEN_THOUSANDS_AT);
+
+/** The same language with the unit split off, so the display tier can set the
+ * figure large and its unit small on the shared baseline. */
+const splitTokens = (tokens: number | null | undefined): { value: string; unit?: string } =>
+  splitCount(tokens, TOKEN_THOUSANDS_AT);
 
 /** A window's share of the lifetime figure it is nested inside. Null whenever
  * either end is missing — an absent denominator must never render as a full

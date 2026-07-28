@@ -159,11 +159,35 @@ describe('summarizeCoverage', () => {
       unknown_model_messages: 187_066,
     })!;
     // "cost_basis: mixed" in one word; this is what the mix actually is.
-    expect(Math.round(coverage.measuredShare * 100)).toBe(8);
+    expect(Math.round(coverage.measuredShare! * 100)).toBe(8);
     expect(coverage.tokenized).toBe(400_000);
-    expect(coverage.estimated + coverage.tokenized + coverage.usage).toBe(
+    expect(coverage.estimated! + coverage.tokenized! + coverage.usage!).toBe(
       coverage.messages,
     );
+  });
+
+  /** An endpoint that never reported a class and one that counted the class at
+   * zero were indistinguishable while every field was coalesced: both arrived
+   * as `0`, and the provider share of a ledger nobody measured came out as a
+   * confident 0%. */
+  it('keeps a class the ledger never reported apart from one it counted at zero', () => {
+    const coverage = summarizeCoverage({
+      messages: 41_204,
+      tokenized_messages: 0,
+    })!;
+    expect(coverage.messages).toBe(41_204);
+    expect(coverage.usage).toBeNull();
+    expect(coverage.measuredShare).toBeNull();
+    // Served, and served as none — the one figure here that is a measurement.
+    expect(coverage.tokenized).toBe(0);
+    expect(coverage.estimated).toBeNull();
+    expect(coverage.unknownModel).toBeNull();
+  });
+
+  it('still measures the share when only the other classes are missing', () => {
+    const coverage = summarizeCoverage({ messages: 200, usage_messages: 50 })!;
+    expect(coverage.measuredShare).toBe(0.25);
+    expect(coverage.estimated).toBeNull();
   });
 
   it('has nothing to measure with no messages', () => {

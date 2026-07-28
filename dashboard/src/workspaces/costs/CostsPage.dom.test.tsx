@@ -27,6 +27,33 @@ describe('CostsPage truth claims', () => {
     expect(screen.queryByText(/they share one cache/i)).toBeNull();
   });
 
+  it('reports an unreported message class as unreported, not as zero coverage', async () => {
+    const payload = structuredClone(
+      FIXTURES['/api/plugins/savings/overview'],
+    ) as Record<string, unknown>;
+    const sessions = payload['sessions'] as Record<string, unknown>;
+    // The block is available and holds messages, but the per-class counts and
+    // the session count never came back. Coalescing them printed "0% of 41,204
+    // messages carry token counts the provider reported" over four zeroes.
+    sessions['messages'] = 41_204;
+    sessions['usage_messages'] = null;
+    sessions['tokenized_messages'] = null;
+    sessions['estimated_messages'] = null;
+    sessions['unknown_model_messages'] = null;
+    sessions['session_count'] = null;
+
+    renderCosts(payload);
+
+    expect(await screen.findByText(/the measured share is unknown/i)).toBeTruthy();
+    expect(screen.queryByText(/0% of/i)).toBeNull();
+    expect(screen.getAllByText('not reported').length).toBe(4);
+    // The wider denominator is stated only where it was served.
+    expect(screen.queryByText(/0 messages in 0 sessions/i)).toBeNull();
+    expect(
+      screen.getByText(/messages and sessions the ledger did not report/i),
+    ).toBeTruthy();
+  });
+
   it('renders failed turn reads as unavailable instead of actual zero spend', async () => {
     const payload = structuredClone(
       FIXTURES['/api/plugins/savings/overview'],

@@ -26,6 +26,43 @@ describe('AgentsPage read coverage', () => {
     expect(screen.queryByText(/no tool families reported/i)).toBeNull();
   });
 
+  /** An unreported window size used to be substituted with the categorized
+   * total, which made the two agree by construction: the uncategorized
+   * remainder came out as zero and the whole disclosure disappeared, so unknown
+   * coverage read as complete coverage. The composition caption had the mirror
+   * defect — "share of 0" under counts that were really served. */
+  it('does not let an unreported window size read as complete categorization', async () => {
+    stubAnalytics({
+      usage: usageSummary({
+        source: 'analytics_events',
+        message_count: 6,
+        event_count: null,
+        by_category: [
+          { kind: 'tool', category: 'shell', events: 4 },
+          { kind: 'tool', category: 'read', events: 2 },
+        ],
+      }),
+      diagnostics: {
+        available: true,
+        by_event_kind: [{ event_kind: 'pre_tool_use', count: 4 }],
+        by_outcome: [{ outcome: 'ok', count: 4 }],
+        by_mcp_tool: [],
+        recent_events: [],
+      },
+      underused: { available: true, families: [] },
+    });
+    renderAgents();
+
+    expect(
+      await screen.findByText(/window's own event count was not reported/i),
+    ).toBeTruthy();
+    // The quantified disclosure needs a window size; only the unknown reading
+    // is on screen, and no count of uncategorized events is claimed.
+    expect(screen.queryByText(/events in the window carry no tool/i)).toBeNull();
+    expect(screen.queryByText(/share of 0$/)).toBeNull();
+    expect(screen.getAllByText(/window total unreported/i).length).toBe(2);
+  });
+
   it('discloses that hook counts come from a truncated recent suffix', async () => {
     stubAnalytics({
       usage: usageSummary({
