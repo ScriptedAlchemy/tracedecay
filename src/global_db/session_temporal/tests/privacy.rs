@@ -253,7 +253,8 @@ async fn registered_sanitized_temporal_state_stays_private_across_reopen() {
 
     let (
         SessionRetrievalOutcome::Complete {
-            items: before_items, ..
+            items: before_items,
+            ..
         },
         SessionRetrievalOutcome::Complete {
             items: after_items, ..
@@ -263,11 +264,15 @@ async fn registered_sanitized_temporal_state_stays_private_across_reopen() {
         panic!("privacy retrieval across reopen was not complete: {before:?} / {after:?}");
     };
     assert_eq!(
-        before_items[0].context.rendered,
-        after_items[0].context.rendered,
+        before_items[0].context.rendered, after_items[0].context.rendered,
         "a reopen must not change what the sanitized context renders"
     );
-    assert!(after_items[0].context.rendered.contains(SAFE_PRIVACY_PAYLOAD));
+    assert!(
+        after_items[0]
+            .context
+            .rendered
+            .contains(SAFE_PRIVACY_PAYLOAD)
+    );
     assert!(
         !format!("{after:?}").contains(PRIVACY_CANARY),
         "the canary must not surface after a reopen"
