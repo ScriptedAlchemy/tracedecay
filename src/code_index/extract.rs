@@ -9,6 +9,8 @@
 //! constructs are preserved as evidence; extraction never invents successful
 //! structure.
 
+use std::sync::Arc;
+
 use serde::Serialize;
 use tracedecay_domain::{
     ExtractionBatchV1, ExtractionCoverageV1, ExtractionFailureV1, LanguageDescriptorV1,
@@ -16,6 +18,7 @@ use tracedecay_domain::{
 };
 
 use super::{intake::ReceiptBoundCodeFileV1, languages::canonical_language_id};
+use crate::types::ExtractionResult;
 
 /// Cancellation checkpoint for extraction (the code-index-local spelling of
 /// the Plan 25 `CancellationToken`). Application adapts its cancellation
@@ -36,19 +39,43 @@ impl ExtractionCancellation for NeverCancelled {
     }
 }
 
+/// One canonical extraction batch paired with the sanitized parser rows that
+/// produced it. The parser rows remain code-index-local so downstream
+/// chunking can reuse them without widening the durable domain contract.
+#[derive(Debug)]
+pub struct ExtractedCodeFileV1 {
+    batch: ExtractionBatchV1,
+    parse_artifacts: ExtractionResult,
+}
+
+impl ExtractedCodeFileV1 {
+    pub fn batch(&self) -> &ExtractionBatchV1 {
+        &self.batch
+    }
+
+    pub(crate) fn parse_artifacts(&self) -> &ExtractionResult {
+        &self.parse_artifacts
+    }
+
+    pub(crate) fn into_parts(self) -> (ExtractionBatchV1, ExtractionResult) {
+        (self.batch, self.parse_artifacts)
+    }
+}
+
 /// The language extractor contract (Plan 25). Language-specific logic stays
 /// behind this small interface while identity, lineage, and output contracts
 /// are shared.
 pub trait LanguageExtractor {
-    /// Extract one canonical batch from one receipt-bound file under one
-    /// descriptor. Identical input, registry, and extractor revisions produce
-    /// stable canonical rows and digests on every supported host.
+    /// Extract one canonical batch and its parser rows from one receipt-bound
+    /// file under one descriptor. Identical input, registry, and extractor
+    /// revisions produce stable canonical rows and digests on every supported
+    /// host.
     fn extract(
         &self,
         file: &ReceiptBoundCodeFileV1,
         descriptor: &LanguageDescriptorV1,
         cancellation: &dyn ExtractionCancellation,
-    ) -> Result<ExtractionBatchV1, ExtractionFailureV1>;
+    ) -> Result<ExtractedCodeFileV1, ExtractionFailureV1>;
 }
 
 /// Domain separator for the canonical extraction-rows digest.
@@ -68,19 +95,26 @@ pub const MAX_EXTRACTION_SOURCE_BYTES: usize = 1024 * 1024;
 /// canonically ordered before hashing, so identical sanitized input under
 /// identical descriptor revisions produces identical digests.
 pub struct TreeSitterExtractor {
-    parsers: crate::extraction::LanguageRegistry,
+    parsers: Arc<crate::extraction::LanguageRegistry>,
 }
 
 impl TreeSitterExtractor {
     /// Create the adapter over a freshly built extraction registry.
     pub fn new() -> Self {
         Self {
-            parsers: crate::extraction::LanguageRegistry::new(),
+            parsers: Arc::new(crate::extraction::LanguageRegistry::new()),
         }
     }
 
     /// Create the adapter over an existing extraction registry.
     pub fn from_registry(parsers: crate::extraction::LanguageRegistry) -> Self {
+        Self {
+            parsers: Arc::new(parsers),
+        }
+    }
+
+    /// Share one generation-scoped registry with downstream chunking.
+    pub fn from_shared_registry(parsers: Arc<crate::extraction::LanguageRegistry>) -> Self {
         Self { parsers }
     }
 
@@ -190,7 +224,7 @@ impl LanguageExtractor for TreeSitterExtractor {
         file: &ReceiptBoundCodeFileV1,
         descriptor: &LanguageDescriptorV1,
         cancellation: &dyn ExtractionCancellation,
-    ) -> Result<ExtractionBatchV1, ExtractionFailureV1> {
+    ) -> Result<ExtractedCodeFileV1, ExtractionFailureV1> {
         if cancellation.is_cancelled() {
             return Err(ExtractionFailureV1::Cancelled);
         }
@@ -292,20 +326,23 @@ impl LanguageExtractor for TreeSitterExtractor {
         };
         let rows_digest = rows_digest(file, descriptor, &result)?;
 
-        Ok(ExtractionBatchV1 {
-            generation_id: file.generation_id.clone(),
-            file_occurrence_id: file.file.file_occurrence_id.clone(),
-            language: descriptor.language.clone(),
-            descriptor_revision: descriptor.descriptor_revision.clone(),
-            grammar_revision: descriptor.grammar_revision.clone(),
-            extractor_revision: descriptor.extractor_revision.clone(),
-            content_digest: file.file.content_digest.clone(),
-            parse_outcome,
-            parsed_ranges,
-            error_ranges: Vec::new(),
-            unsupported_ranges,
-            coverage,
-            rows_digest,
+        Ok(ExtractedCodeFileV1 {
+            batch: ExtractionBatchV1 {
+                generation_id: file.generation_id.clone(),
+                file_occurrence_id: file.file.file_occurrence_id.clone(),
+                language: descriptor.language.clone(),
+                descriptor_revision: descriptor.descriptor_revision.clone(),
+                grammar_revision: descriptor.grammar_revision.clone(),
+                extractor_revision: descriptor.extractor_revision.clone(),
+                content_digest: file.file.content_digest.clone(),
+                parse_outcome,
+                parsed_ranges,
+                error_ranges: Vec::new(),
+                unsupported_ranges,
+                coverage,
+                rows_digest,
+            },
+            parse_artifacts: result,
         })
     }
 }
@@ -384,9 +421,10 @@ mod tests {
     fn extracts_a_complete_batch_with_coverage_evidence() {
         let extractor = TreeSitterExtractor::new();
         let file = validated_file("src/lib.rs", RUST_SOURCE.as_bytes());
-        let batch = extractor
+        let extraction = extractor
             .extract(&file, &rust_descriptor(), &NeverCancelled)
             .expect("extraction succeeds");
+        let batch = extraction.batch();
 
         assert_eq!(batch.parse_outcome, ParseOutcomeV1::Complete);
         assert_eq!(batch.language.as_str(), "rust");
@@ -419,18 +457,32 @@ mod tests {
             .expect("second extraction");
         // Operational timestamps differ between runs; the canonical digest
         // must not.
-        assert_eq!(first.rows_digest, second.rows_digest);
-        assert_eq!(first, second);
+        assert_eq!(first.batch().rows_digest, second.batch().rows_digest);
+        assert_eq!(first.batch(), second.batch());
+    }
+
+    #[test]
+    fn canonical_rows_digest_matches_pinned_identity() {
+        let extractor = TreeSitterExtractor::new();
+        let file = validated_file("src/lib.rs", RUST_SOURCE.as_bytes());
+        let extraction = extractor
+            .extract(&file, &rust_descriptor(), &NeverCancelled)
+            .expect("extraction succeeds");
+
+        assert_eq!(
+            extraction.batch().rows_digest.as_str(),
+            "sha256:e9812b169bc0d1bdbfc013132ec4a808dfdd7d982822b78ee929986a19d940d3"
+        );
     }
 
     #[test]
     fn cancellation_is_checked_at_deterministic_boundaries() {
         let extractor = TreeSitterExtractor::new();
         let file = validated_file("src/lib.rs", RUST_SOURCE.as_bytes());
-        assert_eq!(
+        assert!(matches!(
             extractor.extract(&file, &rust_descriptor(), &AlwaysCancelled),
             Err(ExtractionFailureV1::Cancelled)
-        );
+        ));
     }
 
     #[test]
@@ -441,12 +493,12 @@ mod tests {
         let mut unavailable = descriptor.clone();
         unavailable.extensions = vec!["unknownext".to_owned()];
         let unknown_extension = validated_file("src/data.unknownext", b"nothing");
-        assert_eq!(
+        assert!(matches!(
             extractor.extract(&unknown_extension, &unavailable, &NeverCancelled),
             Err(ExtractionFailureV1::GrammarUnavailable {
-                language: descriptor.language.clone(),
-            })
-        );
+                language
+            }) if language == descriptor.language
+        ));
 
         let python = StaticLanguageRegistry::new()
             .descriptor(&tracedecay_domain::LanguageId::new("python").expect("valid id"))

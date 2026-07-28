@@ -1020,11 +1020,23 @@ where
         };
         self.checkpoint(control)?;
 
+        let parser_registry = Arc::new(crate::extraction::LanguageRegistry::new());
+        let extractor = TreeSitterExtractor::from_shared_registry(Arc::clone(&parser_registry));
+        let chunker = DeterministicCodeChunker::from_shared_registry(
+            manifest.generation_id.clone(),
+            self.config.repository.clone(),
+            self.config.sanitizer_revision.clone(),
+            self.config.policy_revision.clone(),
+            self.config.chunker_revision.clone(),
+            parser_registry,
+        );
         let staged = match (active.as_ref(), increment.as_ref()) {
             (Some(active), Some(increment)) => self.materialize_increment(
                 &intake,
                 &capability,
                 &manifest,
+                &extractor,
+                &chunker,
                 active,
                 increment,
                 &captured_files,
@@ -1034,6 +1046,8 @@ where
                 &intake,
                 &capability,
                 &manifest,
+                &extractor,
+                &chunker,
                 &validated.snapshot,
                 &captured_files,
                 control,
@@ -1142,6 +1156,8 @@ where
         intake: &SanitizedCodeIntake<StaticLanguageRegistry>,
         capability: &SanitizedSnapshotCapabilityV1,
         manifest: &CodeGenerationManifestV1,
+        extractor: &TreeSitterExtractor,
+        chunker: &DeterministicCodeChunker,
         file: &SanitizedCodeFileV1,
         captured_files: &BTreeMap<FileOccurrenceId, CodeIndexCapturedFileV1>,
         control: &dyn CodeIndexExecutionControlV1,
@@ -1194,7 +1210,7 @@ where
             return Ok(reused);
         }
         let cancellation = ExtractionControlBridge { control };
-        let extraction = TreeSitterExtractor::new()
+        let extraction = extractor
             .extract(&receipt_bound, descriptor, &cancellation)
             .map_err(|error| match error {
                 ExtractionFailureV1::Cancelled | ExtractionFailureV1::TimedOut => {
@@ -1203,22 +1219,20 @@ where
                 error => CodeIndexProductionErrorV1::Extraction(error),
             })?;
         self.checkpoint(control)?;
-        let chunker = DeterministicCodeChunker::new(
-            manifest.generation_id.clone(),
-            self.config.repository.clone(),
-            self.config.sanitizer_revision.clone(),
-            self.config.policy_revision.clone(),
-            self.config.chunker_revision.clone(),
-            crate::extraction::LanguageRegistry::new(),
-        )
-        .with_sensitivity_level(captured.sensitivity_level);
         let (artifacts, exact_authority) = chunker
-            .index_file_with_authority(&receipt_bound, &extraction, descriptor, &cancellation)
+            .index_file_with_authority_from_extraction(
+                &receipt_bound,
+                &extraction,
+                descriptor,
+                captured.sensitivity_level,
+                &cancellation,
+            )
             .map_err(|error| match error {
                 ChunkingFailureV1::Cancelled => self.interruption_error(control),
                 error => CodeIndexProductionErrorV1::Chunk(error),
             })?;
         self.checkpoint(control)?;
+        let (extraction, _) = extraction.into_parts();
         let artifact = FileGenerationArtifactsV1 {
             extraction,
             artifacts,
@@ -1229,11 +1243,14 @@ where
         Ok(artifact)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn materialize_full(
         &self,
         intake: &SanitizedCodeIntake<StaticLanguageRegistry>,
         capability: &SanitizedSnapshotCapabilityV1,
         manifest: &CodeGenerationManifestV1,
+        extractor: &TreeSitterExtractor,
+        chunker: &DeterministicCodeChunker,
         snapshot: &SanitizedCodeSnapshotV1,
         captured_files: &BTreeMap<FileOccurrenceId, CodeIndexCapturedFileV1>,
         control: &dyn CodeIndexExecutionControlV1,
@@ -1245,6 +1262,8 @@ where
                     intake,
                     capability,
                     manifest,
+                    extractor,
+                    chunker,
                     file,
                     captured_files,
                     control,
@@ -1260,6 +1279,8 @@ where
         intake: &SanitizedCodeIntake<StaticLanguageRegistry>,
         capability: &SanitizedSnapshotCapabilityV1,
         manifest: &CodeGenerationManifestV1,
+        extractor: &TreeSitterExtractor,
+        chunker: &DeterministicCodeChunker,
         active: &CodeIndexPublishedGenerationV1,
         increment: &super::generations::GenerationIncrementPlanV1,
         captured_files: &BTreeMap<FileOccurrenceId, CodeIndexCapturedFileV1>,
@@ -1319,6 +1340,8 @@ where
                             intake,
                             capability,
                             manifest,
+                            extractor,
+                            chunker,
                             file,
                             captured_files,
                             control,
@@ -1331,6 +1354,8 @@ where
                         intake,
                         capability,
                         manifest,
+                        extractor,
+                        chunker,
                         file,
                         captured_files,
                         control,
