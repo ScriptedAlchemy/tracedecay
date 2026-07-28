@@ -594,10 +594,39 @@ pub const LCM_COMPRESSION_BOUNDARY_COOLDOWN_SECONDS: i64 = 60;
 /// Raw-store size diagnostics mirroring the hermes-lcm `lcm_status` `store`
 /// block. `estimated_tokens` uses the engine's deterministic whitespace
 /// token estimate over stored message content.
+///
+/// `messages` is the exact row count. The token estimate has to read every
+/// message body, which on a multi-gigabyte profile store cannot finish inside
+/// a request deadline, so `token_estimate` states how much of the store the
+/// reported estimate actually covers.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LcmStoreStatus {
     pub messages: i64,
     pub estimated_tokens: i64,
+    pub token_estimate: LcmStoreTokenCoverage,
+}
+
+/// Coverage of the raw-store token estimate.
+///
+/// A partial estimate is a typed state, never a smaller number presented as
+/// the whole store: `complete` is false, `scanned_messages` reports how many
+/// bodies were summed, and `next_after_store_id` resumes the scan.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LcmStoreTokenCoverage {
+    pub complete: bool,
+    pub scanned_messages: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_after_store_id: Option<i64>,
+}
+
+impl LcmStoreTokenCoverage {
+    pub(crate) const fn complete(scanned_messages: i64) -> Self {
+        Self {
+            complete: true,
+            scanned_messages,
+            next_after_store_id: None,
+        }
+    }
 }
 
 /// Per-depth summary counters mirroring the hermes-lcm `lcm_status`
