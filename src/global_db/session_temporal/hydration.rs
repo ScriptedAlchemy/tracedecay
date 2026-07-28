@@ -244,27 +244,52 @@ pub(super) async fn session_message_from_hydrated_bytes(
     read: &TemporalSqlRead<'_>,
     snapshot: &TemporalExecutionSnapshot,
     anchor_id: &RetrievalAnchorId,
+    expected_provider: &str,
+    expected_session: &str,
     bytes: &[u8],
 ) -> Result<SessionMessageRecord, HydrationError> {
     let text = String::from_utf8(bytes.to_vec()).map_err(|_| HydrationError::Unavailable)?;
 
     let generation =
         i64::try_from(snapshot.watermarks().generation).map_err(|_| HydrationError::Unavailable)?;
+    let project_key = snapshot
+        .request()
+        .authorized_root()
+        .ok_or(HydrationError::Unavailable)?
+        .project_key();
     let mut rows = match snapshot.retrieval_scope() {
         TemporalRetrievalScope::Session(session_id) => {
+            if session_id.as_str() != expected_session {
+                return Err(HydrationError::Unavailable);
+            }
             read.query(
                 "SELECT occurrence.message_id, occurrence.role,
                         occurrence.projection_output_ordinal,
-                        observation.observation_json
-                 FROM session_occurrences occurrence
-                 JOIN observations observation
-                   ON observation.observation_id = occurrence.source_observation_id
+                        source.provider, occurrence.session_id,
+                        message.timestamp, message.kind, message.model,
+                        message.tool_names, message.source_path, message.source_offset,
+                        message.metadata_json, message.role, message.session_id
+                 FROM session_occurrences AS occurrence
+                 JOIN sessions AS source
+                   ON source.session_id = occurrence.session_id
+                 LEFT JOIN session_messages AS message
+                   ON message.provider = source.provider
+                  AND message.message_id = occurrence.message_id
+                  AND message.session_id = occurrence.session_id
                  WHERE occurrence.session_id = ?1
                    AND occurrence.generation = ?2
                    AND occurrence.retrieval_anchor_id = ?3
+                   AND source.project_key = ?4
+                   AND source.provider = ?5
                  ORDER BY occurrence.occurrence_id
                  LIMIT 2",
-                params![session_id.as_str(), generation, anchor_id.as_str()],
+                params![
+                    session_id.as_str(),
+                    generation,
+                    anchor_id.as_str(),
+                    project_key,
+                    expected_provider
+                ],
             )
             .await
         }
@@ -272,18 +297,33 @@ pub(super) async fn session_message_from_hydrated_bytes(
             read.query(
                 "SELECT occurrence.message_id, occurrence.role,
                         occurrence.projection_output_ordinal,
-                        observation.observation_json
-                 FROM session_occurrences occurrence
-                 JOIN session_temporal_generations generation
+                        source.provider, occurrence.session_id,
+                        message.timestamp, message.kind, message.model,
+                        message.tool_names, message.source_path, message.source_offset,
+                        message.metadata_json, message.role, message.session_id
+                 FROM session_occurrences AS occurrence
+                 JOIN session_temporal_generations AS generation
                    ON generation.session_id = occurrence.session_id
                   AND generation.generation = occurrence.generation
                   AND generation.state = 'active'
-                 JOIN observations observation
-                   ON observation.observation_id = occurrence.source_observation_id
+                 JOIN sessions AS source
+                   ON source.session_id = occurrence.session_id
+                 LEFT JOIN session_messages AS message
+                   ON message.provider = source.provider
+                  AND message.message_id = occurrence.message_id
+                  AND message.session_id = occurrence.session_id
                  WHERE occurrence.retrieval_anchor_id = ?1
+                   AND source.project_key = ?2
+                   AND occurrence.session_id = ?3
+                   AND source.provider = ?4
                  ORDER BY occurrence.session_id, occurrence.occurrence_id
                  LIMIT 2",
-                [anchor_id.as_str()],
+                params![
+                    anchor_id.as_str(),
+                    project_key,
+                    expected_session,
+                    expected_provider
+                ],
             )
             .await
         }
@@ -297,23 +337,46 @@ pub(super) async fn session_message_from_hydrated_bytes(
     let message_id: String = row.get(0).map_err(|_| HydrationError::Unavailable)?;
     let role: String = row.get(1).map_err(|_| HydrationError::Unavailable)?;
     let ordinal: i64 = row.get(2).map_err(|_| HydrationError::Unavailable)?;
-    let observation_json: String = row.get(3).map_err(|_| HydrationError::Unavailable)?;
-    if rows
-        .next()
-        .await
-        .map_err(|_| HydrationError::Unavailable)?
-        .is_some()
+    let provider: String = row.get(3).map_err(|_| HydrationError::Unavailable)?;
+    let session_id: String = row.get(4).map_err(|_| HydrationError::Unavailable)?;
+    let timestamp = row.get(5).ok();
+    let kind = row.get(6).ok().or_else(|| Some("message".to_string()));
+    let model = row.get(7).ok();
+    let tool_names = row.get(8).ok();
+    let source_path = row.get(9).ok();
+    let source_offset = row.get(10).ok();
+    let metadata_json = row.get(11).ok();
+    let compatibility_role: Option<String> = row.get(12).ok();
+    let compatibility_session: Option<String> = row.get(13).ok();
+    if compatibility_role
+        .as_deref()
+        .is_some_and(|compatibility_role| compatibility_role != role)
+        || compatibility_session
+            .as_deref()
+            .is_some_and(|compatibility_session| compatibility_session != session_id)
+        || rows
+            .next()
+            .await
+            .map_err(|_| HydrationError::Unavailable)?
+            .is_some()
     {
         return Err(HydrationError::Unavailable);
     }
-    let observation: DurableObservationV1 =
-        serde_json::from_str(&observation_json).map_err(|_| HydrationError::Unavailable)?;
-    let message = canonical_projected_message(&observation, &message_id, ordinal)
-        .ok_or(HydrationError::Unavailable)?;
-    if message.role != role || message.text != text {
-        return Err(HydrationError::Unavailable);
-    }
-    Ok(message)
+    Ok(SessionMessageRecord {
+        provider,
+        message_id,
+        session_id,
+        role,
+        timestamp,
+        ordinal,
+        text,
+        kind,
+        model,
+        tool_names,
+        source_path,
+        source_offset,
+        metadata_json,
+    })
 }
 
 fn canonical_projected_message(

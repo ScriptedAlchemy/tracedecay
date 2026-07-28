@@ -90,6 +90,8 @@ impl<'db> RegisteredGlobalDbSessionTemporalExecution<'db> {
         &self,
         snapshot: &TemporalExecutionSnapshot,
         anchor_id: &RetrievalAnchorId,
+        provider: &str,
+        session_id: &str,
         content: &[u8],
     ) -> Result<SessionMessageRecord, SessionTemporalExecutionError> {
         let read = self
@@ -101,6 +103,8 @@ impl<'db> RegisteredGlobalDbSessionTemporalExecution<'db> {
             &TemporalSqlRead::registered(&read),
             snapshot,
             anchor_id,
+            provider,
+            session_id,
             content,
         )
         .await
