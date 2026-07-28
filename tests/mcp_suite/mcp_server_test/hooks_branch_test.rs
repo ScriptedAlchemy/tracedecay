@@ -638,6 +638,23 @@ async fn hook_route_records_spans_and_ingest_attributes_commits() {
         )
         .await
         .unwrap();
+    // Path-selector resolution (the authority the hook route now shares with
+    // tool reads) resolves identity to a *store*, not just a project row; a
+    // template-seeded fixture skips enrollment, so register the store the
+    // graph actually opened.
+    registry
+        .upsert_store_instance(tracedecay::global_db::StoreInstanceUpsert {
+            store_id: format!("store_{}", project_id.as_str()),
+            project_id: project_id.as_str().to_string(),
+            store_kind: "code_project".to_string(),
+            storage_mode: "profile_sharded".to_string(),
+            store_relpath: format!("projects/{}", project_id.as_str()),
+            manifest_relpath: None,
+            last_verified_at: None,
+            last_write_at: None,
+        })
+        .await
+        .expect("project store registers");
     let server = McpServer::new_with_host_admission_test_runtime_for_test(cg, None, registry).await;
 
     let session_id = "sess-live";
