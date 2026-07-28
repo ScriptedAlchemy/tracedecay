@@ -72,6 +72,10 @@ pub(super) fn def_circular() -> ToolDefinition {
                 "limit": {
                     "type": "number",
                     "description": "Maximum number of cycles to report, largest first (default: 25, max: 200). The response always states the total detected and how many were omitted."
+                },
+                "member_limit": {
+                    "type": "number",
+                    "description": "Maximum member files listed per reported cycle (default: 12, max: 200). Each entry states its true member_count and omitted_member_count."
                 }
             }
         }),
@@ -99,10 +103,19 @@ pub(super) fn def_unused_imports() -> ToolDefinition {
     def(
         "tracedecay_unused_imports",
         "Unused Imports",
-        "Find import/use nodes that are never referenced by any other node.",
+        "Find import/use nodes that are never referenced by any other node. The walk is paged: the response reports whether it is complete and, when partial, a next_cursor to resume from.",
         json!({
             "type": "object",
-            "properties": {}
+            "properties": {
+                "limit": {
+                    "type": "number",
+                    "description": "Maximum unused imports to report in one page (default: 100, max: 500)"
+                },
+                "cursor": {
+                    "type": "string",
+                    "description": "Resume cursor from a previous partial response's next_cursor"
+                }
+            }
         }),
     )
 }

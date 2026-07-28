@@ -659,10 +659,29 @@ pub(super) fn unused_imports_md(value: &Value) -> String {
         .and_then(Value::as_u64)
         .unwrap_or(imports.len() as u64);
     md.field("Unused import count", &count.to_string());
+    // A paged walk must never read as a whole-repository verdict: state the
+    // scanned scope and how to resume before listing findings.
+    let complete = value.get("complete").and_then(Value::as_bool);
+    if let Some(scanned) = value.get("scanned_files").and_then(Value::as_u64) {
+        md.field("Files scanned", &scanned.to_string());
+    }
+    if complete == Some(false) {
+        md.field("Coverage", "partial");
+        if let Some(reason) = value.get("partial_reason").and_then(Value::as_str) {
+            md.field("Partial reason", reason);
+        }
+        if let Some(cursor) = value.get("next_cursor").and_then(Value::as_str) {
+            md.field("Resume with cursor", cursor);
+        }
+    }
     md.blank();
 
     if imports.is_empty() {
-        md.empty_note("No unused imports found.");
+        if complete == Some(false) {
+            md.empty_note("No unused imports in the scanned page; the walk is incomplete.");
+        } else {
+            md.empty_note("No unused imports found.");
+        }
         return md.render();
     }
 
