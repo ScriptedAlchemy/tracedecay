@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import { logFraction } from '../../viz/scale.ts';
 import {
   costPerTurn,
-  logFraction,
   summarizeCoverage,
   summarizeProjectSpread,
   summarizeTokenMix,
@@ -125,7 +125,10 @@ describe('summarizeTokenMix', () => {
   });
 });
 
-describe('logFraction', () => {
+/** The shared band, pinned against this surface's magnitudes: token classes run
+ * 1,500-to-1, three orders of magnitude above the event counts `viz/scale.test`
+ * covers, and the smallest class still has to draw a length. */
+describe('logFraction over ledger magnitudes', () => {
   it('keeps the smallest live token class visible against the largest', () => {
     const smallest = logFraction(243_694_418, 365_936_726_111)!;
     expect(smallest).toBeGreaterThan(0.7);

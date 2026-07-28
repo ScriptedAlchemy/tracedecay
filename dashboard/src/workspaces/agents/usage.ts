@@ -69,23 +69,6 @@ export function summarizeDominance(
   };
 }
 
-/**
- * A value's position on a log-scaled band, 0–1.
- *
- * `log1p` rather than `log` so a count of zero maps to zero instead of negative
- * infinity, and so the scale is defined for every non-negative integer the
- * endpoint can serve. A row with one event lands at 8% of the band against a
- * ceiling of 6,774 — visible, ranked, and honestly labelled as logarithmic —
- * where a linear scale puts it at 0.015% and draws nothing at all.
- */
-export function logFraction(value: number, ceiling: number): number | null {
-  if (!Number.isFinite(value) || !Number.isFinite(ceiling) || ceiling <= 0) return null;
-  const clamped = Math.max(0, value);
-  const denominator = Math.log1p(ceiling);
-  if (denominator <= 0) return null;
-  return Math.max(0, Math.min(1, Math.log1p(clamped) / denominator));
-}
-
 /** A share as a whole-number percent, or null when the share is unknown. */
 export function percent(share: number | null | undefined): number | null {
   if (share == null || !Number.isFinite(share)) return null;

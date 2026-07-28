@@ -143,16 +143,6 @@ export function summarizeTokenMix(actual: {
   };
 }
 
-/** Position on a log band, 0–1 — see `agents/usage.ts` for why a linear rail
- * cannot draw these. Null rather than a fabricated length when there is no
- * ceiling to measure against. */
-export function logFraction(value: number, ceiling: number): number | null {
-  if (!Number.isFinite(value) || !Number.isFinite(ceiling) || ceiling <= 0) return null;
-  const denominator = Math.log1p(ceiling);
-  if (denominator <= 0) return null;
-  return Math.max(0, Math.min(1, Math.log1p(Math.max(0, value)) / denominator));
-}
-
 /** Cost per turn, derived. Null when either side is missing — a dash is a
  * reading, a zero is a claim. */
 export function costPerTurn(
