@@ -258,21 +258,21 @@ async fn resolve_project_registry_context(
         // was recorded still selects, instead of reporting an unregistered
         // project.
         if let Some(context) = db.project_registry_context_by_alias(selector_path).await? {
-            return Ok(ProjectSelectorResolution::Resolved(context));
+            return sole_claimant_of_its_root(db, context).await;
         }
         let git_common_dir = crate::worktree::git_common_dir(selector_path);
         if let Some(context) = db
             .project_registry_context_by_identity(selector_path, git_common_dir.as_deref())
             .await?
         {
-            return Ok(ProjectSelectorResolution::Resolved(context));
+            return sole_claimant_of_its_root(db, context).await;
         }
         let canonical_path = selector_path
             .canonicalize()
             .unwrap_or_else(|_| selector_path.to_path_buf());
         for parent in canonical_path.ancestors().skip(1) {
             if let Some(context) = db.project_registry_context_by_alias(parent).await? {
-                return Ok(ProjectSelectorResolution::Resolved(context));
+                return sole_claimant_of_its_root(db, context).await;
             }
         }
     }
@@ -280,6 +280,36 @@ async fn resolve_project_registry_context(
         return Ok(ProjectSelectorResolution::Unresolved);
     };
     unique_project_basename_context(db, basename).await
+}
+
+/// Keeps a path-resolved context only while one registered project claims its
+/// canonical root.
+///
+/// A path maps to exactly one row in the alias table, so registering a second
+/// project at the same root silently rebinds that path. Serving whichever
+/// project the alias last named would answer for an arbitrary one, so a root
+/// several projects claim is reported as ambiguous instead.
+async fn sole_claimant_of_its_root(
+    db: &RegisteredGlobalDb,
+    context: ProjectRegistryContext,
+) -> Result<ProjectSelectorResolution> {
+    let canonical_root = context.project.canonical_root.clone();
+    let mut claimants = Vec::new();
+    for project in db
+        .try_search_code_projects(&canonical_root, usize::MAX)
+        .await?
+    {
+        if project.canonical_root == canonical_root && !claimants.contains(&project.project_id) {
+            claimants.push(project.project_id);
+        }
+    }
+    if claimants.len() > 1 {
+        claimants.sort();
+        return Ok(ProjectSelectorResolution::Ambiguous {
+            candidates: claimants,
+        });
+    }
+    Ok(ProjectSelectorResolution::Resolved(context))
 }
 
 async fn unique_project_basename_context(
@@ -358,6 +388,9 @@ fn unresolved_project_selector_error(
     }
 }
 
+/// An ambiguous selector still resolved no single project, so it keeps the
+/// unresolved wording callers and hosts match on, and adds which registrations
+/// collided so the caller can disambiguate instead of re-searching.
 fn ambiguous_project_selector_error(
     project_id: Option<&str>,
     project_path: Option<&str>,
@@ -366,7 +399,7 @@ fn ambiguous_project_selector_error(
     let selector = selector_label(project_id, project_path);
     TraceDecayError::Config {
         message: format!(
-            "registered project selector ({selector}) is ambiguous across {} registered projects ({}); pass project_id or the full project_path",
+            "registered project not found for selector ({selector}): the selector is ambiguous across {} registered projects ({}); pass project_id or the full project_path",
             candidates.len(),
             candidates.join(", ")
         ),
