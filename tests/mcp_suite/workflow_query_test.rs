@@ -244,9 +244,13 @@ async fn workflows_query_surface_end_to_end() {
     // so the ingest sweep attributes the run to this project.
     write_workflow_fixture(&home, cg.project_root());
 
-    let marker = tracedecay::storage::read_repository_identity_marker(cg.project_root())
+    // The isolated fixture checkout is not a git repository, so the repository
+    // identity marker (which lives in the git common dir) never exists here.
+    // The enrollment marker `init` wrote is this checkout's naming authority
+    // and carries the same project id the store was opened under.
+    let marker = tracedecay::storage::read_enrollment_marker(cg.project_root())
         .unwrap_or_else(|error| panic!("read project identity: {error}"))
-        .unwrap_or_else(|| panic!("project identity marker"));
+        .unwrap_or_else(|| panic!("project enrollment marker"));
     let project_id =
         ProjectId::new(marker.project_id).unwrap_or_else(|error| panic!("project id: {error}"));
     let runtime = HostAdmissionTestRuntimeV1::project(
