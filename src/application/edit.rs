@@ -1222,17 +1222,6 @@ async fn resolve_source_edit_preview(
 /// Resolve one retained `EffectUnknown` only after an authorized inspection
 /// explicitly proves either the exact committed state or the exact rollback
 /// state. A mismatch retains the journal and its uncertainty.
-pub async fn reconcile_source_edit_effect_unknown<A>(
-    graph: &TraceDecay,
-    request: SourceEditReconciliationRequestV1,
-    authorization: &A,
-) -> Result<SourceEditApplicationResult>
-where
-    A: SourceEditAuthorizationPort,
-{
-    reconcile_source_edit_effect_unknown_inner(graph, request, authorization, None).await
-}
-
 pub async fn reconcile_source_edit_effect_unknown_with_control<A>(
     graph: &TraceDecay,
     request: SourceEditReconciliationRequestV1,
@@ -1814,39 +1803,6 @@ fn persist_interrupted_reconciliation_attempt(
         stop.observation.observed_at,
         stop.termination,
         Some(stop.observation),
-    )?;
-    durability.persist_reconciliation_receipt(&record)?;
-    Ok(record.into_live_application_result(outcome, None))
-}
-
-fn persist_failed_reconciliation_attempt(
-    durability: &SourceEditDurability,
-    journal: &SourceEditJournalV1,
-    request: &SourceEditReconciliationRequestV1,
-    attempt: &SourceEditReconciliationAttemptV1<'_>,
-) -> Result<SourceEditApplicationResult> {
-    if let Some(stored) =
-        durability.load_reconciliation_receipt(&request.attempt_idempotency_key)?
-    {
-        if stored.input_digest != *attempt.input_digest {
-            return Err(config_error(
-                "source edit reconciliation attempt idempotency key conflicts with a prior input",
-            ));
-        }
-        return Ok(stored.into_application_result(true));
-    }
-    let outcome = SourceEditOutcome::Failed {
-        message: "source edit reconciliation failed before the effect".to_owned(),
-    };
-    let record = reconciliation_attempt_record(
-        journal,
-        request,
-        attempt,
-        &outcome,
-        None,
-        now_micros(),
-        EffectTermination::Failed,
-        None,
     )?;
     durability.persist_reconciliation_receipt(&record)?;
     Ok(record.into_live_application_result(outcome, None))

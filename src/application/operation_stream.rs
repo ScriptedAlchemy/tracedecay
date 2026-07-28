@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, LazyLock, OnceLock};
 use std::task::{Context, Poll};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -43,6 +43,17 @@ use crate::query::temporal::resolution::ValidatedAuthorization;
 
 const RESUME_KEY_RANDOM_BYTES: usize = 16;
 const RESUME_KEY_MATERIAL_BYTES: usize = 32;
+
+/// Every operation-event problem shares this contract, so its schema identity
+/// is validated once per process instead of on each envelope conversion.
+static OPERATION_EVENT_PROBLEM_CONTRACT: LazyLock<ResultContractRef> = LazyLock::new(|| {
+    ResultContractRef::new(
+        SchemaId::new("schema.tracedecay.operation-event.problem.v1")
+            .unwrap_or_else(|_| panic!("the operation-event problem schema id is static")),
+        1,
+    )
+    .unwrap_or_else(|_| panic!("the operation-event problem contract is static"))
+});
 
 fn current_micros_for_cancellation() -> UtcMicros {
     UtcMicros(
@@ -272,14 +283,12 @@ impl OperationEventError {
                 .unwrap_or_else(|_| panic!("operation-event diagnostics are static")),
             ),
         };
-        let contract = ResultContractRef::new(
-            SchemaId::new("schema.tracedecay.operation-event.problem.v1")
-                .unwrap_or_else(|_| panic!("the operation-event problem schema id is static")),
-            1,
+        let envelope = ApplicationProblemEnvelope::new(
+            OPERATION_EVENT_PROBLEM_CONTRACT.clone(),
+            request_id,
+            problem,
         )
-        .unwrap_or_else(|_| panic!("the operation-event problem contract is static"));
-        let envelope = ApplicationProblemEnvelope::new(contract, request_id, problem)
-            .with_owning_layer(ProblemOwningLayer::Runtime);
+        .with_owning_layer(ProblemOwningLayer::Runtime);
         if saturated {
             envelope
                 .with_retry_after_millis(Some(250))

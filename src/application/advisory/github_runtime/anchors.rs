@@ -1,4 +1,6 @@
+use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
+#[cfg(test)]
 use std::process::Command;
 use std::sync::Arc;
 
@@ -10,6 +12,7 @@ use tracedecay_domain::feedback::{
     FeedbackScopeV1, GitHubReviewCurrentBranchRemapV1, GitHubReviewImmutableAnchorV1,
     GitHubReviewRemapStateV1,
 };
+use tracedecay_domain::git::GitOidV1;
 use tracedecay_domain::{
     CommitId, ContentDigest, FileOccurrenceId, ManifestDigest, RetrievalAnchorId, SourceSpan,
     canonical_sha256,
@@ -22,6 +25,7 @@ use super::{
 use crate::application::advisory::{GitHubCurrentBranchRemapper, context_matches_scope};
 use crate::db::Database;
 use crate::db::engine::params;
+use crate::git_intelligence::{GitHistoricalBlobRequestV1, GitReadPort, NativeGitIntelligence};
 
 const ANCHOR_KEY_PREFIX_V1: &str = "feedback.github-review.anchor.v1.";
 const ANCHOR_ID_DOMAIN_V1: &str = "tracedecay.pr13.github.code-anchor.v1";
@@ -62,6 +66,52 @@ struct StoredGitHubReviewBodyV1 {
     provider_body_digest: ManifestDigest,
     retained_body_digest: ManifestDigest,
     retained_body: String,
+}
+
+struct HistoricalBlobLineIndexV1 {
+    bytes: Vec<u8>,
+    line_starts: Vec<usize>,
+}
+
+impl HistoricalBlobLineIndexV1 {
+    fn new(bytes: Vec<u8>) -> Self {
+        let mut line_starts = vec![0_usize];
+        line_starts.extend(
+            bytes
+                .iter()
+                .enumerate()
+                .filter_map(|(index, byte)| (*byte == b'\n').then_some(index + 1)),
+        );
+        Self { bytes, line_starts }
+    }
+
+    fn source_span(
+        &self,
+        start_line: Option<u64>,
+        end_line: Option<u64>,
+    ) -> Option<Option<SourceSpan>> {
+        let Some(end_line) = end_line else {
+            return Some(None);
+        };
+        let start_line = start_line.unwrap_or(end_line);
+        if start_line == 0 || end_line < start_line {
+            return None;
+        }
+        let start = *self
+            .line_starts
+            .get(usize::try_from(start_line - 1).ok()?)?;
+        let end = self
+            .line_starts
+            .get(usize::try_from(end_line).ok()?)
+            .copied()
+            .unwrap_or(self.bytes.len());
+        let span = SourceSpan {
+            start_byte: u64::try_from(start).ok()?,
+            end_byte: u64::try_from(end).ok()?,
+        };
+        span.validate().ok()?;
+        Some(Some(span))
+    }
 }
 
 /// Sanitized review prose returned only after exact route and GitHub source
@@ -125,51 +175,106 @@ impl ProjectGitHubAnchorAuthorityV1 {
         self
     }
 
-    async fn resolve_seed(
+    async fn resolve_seeds(
+        &self,
+        request: &GitHubReviewReadRequestV1,
+        seeds: &[GitHubReviewAnchorSeedV1],
+    ) -> Option<Vec<GitHubCanonicalReviewAnchorsV1>> {
+        let mut missing = BTreeMap::new();
+        for seed in seeds {
+            if request.scope != self.scope
+                || !valid_relative_path(&seed.path)
+                || !safe_github_review_url(&seed.safe_url)
+            {
+                return None;
+            }
+            let existing_id = original_anchor_id(&self.scope, seed).ok()?;
+            if self.load(&existing_id).await?.is_none() {
+                missing.insert(
+                    (
+                        seed.original_commit_id.as_str().to_owned(),
+                        seed.path.clone(),
+                    ),
+                    (),
+                );
+            }
+        }
+
+        let mut blobs = BTreeMap::new();
+        for key in missing.into_keys() {
+            let blob_key = key.clone();
+            let project_root = Arc::clone(&self.project_root);
+            let scope = self.scope.clone();
+            let bytes = tokio::task::spawn_blocking(move || {
+                let commit = CommitId::new(blob_key.0).ok()?;
+                git_historical_blob(&project_root, &scope, &commit, &blob_key.1)
+            })
+            .await
+            .ok()
+            .flatten();
+            blobs.insert(key, bytes.map(HistoricalBlobLineIndexV1::new));
+        }
+
+        let mut resolved = Vec::with_capacity(seeds.len());
+        for seed in seeds {
+            let existing_id = original_anchor_id(&self.scope, seed).ok()?;
+            let anchors = match self.load(&existing_id).await? {
+                Some(stored) => self.resolve_stored_seed(request, seed, stored).await,
+                None => {
+                    let key = (
+                        seed.original_commit_id.as_str().to_owned(),
+                        seed.path.clone(),
+                    );
+                    let blob = blobs.get(&key).and_then(Option::as_ref)?;
+                    self.resolve_new_seed(request, seed, existing_id, blob)
+                        .await
+                }
+            }?;
+            resolved.push(anchors);
+        }
+        Some(resolved)
+    }
+
+    async fn resolve_stored_seed(
         &self,
         request: &GitHubReviewReadRequestV1,
         seed: &GitHubReviewAnchorSeedV1,
+        stored: StoredGitHubAnchorV1,
     ) -> Option<GitHubCanonicalReviewAnchorsV1> {
-        if request.scope != self.scope
-            || !valid_relative_path(&seed.path)
-            || !safe_github_review_url(&seed.safe_url)
-        {
+        if !same_original_locator(&stored.seed, seed) {
             return None;
         }
-        let existing_id = original_anchor_id(&self.scope, seed).ok()?;
-        if let Some(stored) = self.load(&existing_id).await? {
-            if !same_original_locator(&stored.seed, seed) {
-                return None;
-            }
-            let original = stored.anchors.original;
-            let initial_remap = self.remap_original(&original, &self.scope).await?;
-            let anchors = GitHubCanonicalReviewAnchorsV1 {
-                original,
-                initial_remap,
-                author_anchor: related_anchor("author", &self.scope, seed, &seed.author_node_id)?,
-                body_anchor: related_anchor("body", &self.scope, seed, seed.body_digest.as_str())?,
-                safe_url_anchor: if seed.safe_url.is_empty() {
-                    None
-                } else {
-                    Some(related_anchor("url", &self.scope, seed, &seed.safe_url)?)
-                },
-            };
-            let body = stored_body(request, seed, &anchors)?;
-            return self.persist_body(&body).await.then_some(anchors);
-        }
-        let project_root = Arc::clone(&self.project_root);
-        let commit = seed.original_commit_id.clone();
-        let path = seed.path.clone();
-        let bytes = tokio::task::spawn_blocking(move || git_blob(&project_root, &commit, &path))
-            .await
-            .ok()??;
-        let content_digest = content_digest(&bytes)?;
+        let original = stored.anchors.original;
+        let initial_remap = self.remap_original(&original, &self.scope).await?;
+        let anchors = GitHubCanonicalReviewAnchorsV1 {
+            original,
+            initial_remap,
+            author_anchor: related_anchor("author", &self.scope, seed, &seed.author_node_id)?,
+            body_anchor: related_anchor("body", &self.scope, seed, seed.body_digest.as_str())?,
+            safe_url_anchor: if seed.safe_url.is_empty() {
+                None
+            } else {
+                Some(related_anchor("url", &self.scope, seed, &seed.safe_url)?)
+            },
+        };
+        let body = stored_body(request, seed, &anchors)?;
+        self.persist_body(&body).await.then_some(anchors)
+    }
+
+    async fn resolve_new_seed(
+        &self,
+        request: &GitHubReviewReadRequestV1,
+        seed: &GitHubReviewAnchorSeedV1,
+        existing_id: RetrievalAnchorId,
+        blob: &HistoricalBlobLineIndexV1,
+    ) -> Option<GitHubCanonicalReviewAnchorsV1> {
+        let content_digest = content_digest(&blob.bytes)?;
         let original = immutable_anchor(
             &self.scope,
             &seed.original_commit_id,
             &seed.path,
             &content_digest,
-            source_span(&bytes, seed.original_start_line, seed.original_line)?,
+            blob.source_span(seed.original_start_line, seed.original_line)?,
             Some(existing_id.clone()),
         )?;
         if original.retrieval_anchor_id != existing_id {
@@ -484,7 +589,19 @@ impl GitHubCanonicalReviewAnchorAuthorityV1 for ProjectGitHubAnchorAuthorityV1 {
         request: &'a GitHubReviewReadRequestV1,
         seed: &'a GitHubReviewAnchorSeedV1,
     ) -> FeedbackPortFuture<'a, Option<GitHubCanonicalReviewAnchorsV1>> {
-        Box::pin(async move { self.resolve_seed(request, seed).await })
+        Box::pin(async move {
+            self.resolve_seeds(request, std::slice::from_ref(seed))
+                .await?
+                .pop()
+        })
+    }
+
+    fn resolve_many<'a>(
+        &'a self,
+        request: &'a GitHubReviewReadRequestV1,
+        seeds: &'a [GitHubReviewAnchorSeedV1],
+    ) -> FeedbackPortFuture<'a, Option<Vec<GitHubCanonicalReviewAnchorsV1>>> {
+        Box::pin(async move { self.resolve_seeds(request, seeds).await })
     }
 }
 
@@ -511,6 +628,14 @@ impl GitHubCanonicalReviewAnchorAuthorityV1 for Arc<ProjectGitHubAnchorAuthority
         seed: &'a GitHubReviewAnchorSeedV1,
     ) -> FeedbackPortFuture<'a, Option<GitHubCanonicalReviewAnchorsV1>> {
         self.as_ref().resolve(request, seed)
+    }
+
+    fn resolve_many<'a>(
+        &'a self,
+        request: &'a GitHubReviewReadRequestV1,
+        seeds: &'a [GitHubReviewAnchorSeedV1],
+    ) -> FeedbackPortFuture<'a, Option<Vec<GitHubCanonicalReviewAnchorsV1>>> {
+        self.as_ref().resolve_many(request, seeds)
     }
 }
 
@@ -754,78 +879,41 @@ fn remap_state(
     Some(remap)
 }
 
-fn source_span(
-    bytes: &[u8],
-    start_line: Option<u64>,
-    end_line: Option<u64>,
-) -> Option<Option<SourceSpan>> {
-    let Some(end_line) = end_line else {
-        return Some(None);
-    };
-    let start_line = start_line.unwrap_or(end_line);
-    if start_line == 0 || end_line < start_line {
-        return None;
-    }
-    let mut starts = vec![0_usize];
-    starts.extend(
-        bytes
-            .iter()
-            .enumerate()
-            .filter_map(|(index, byte)| (*byte == b'\n').then_some(index + 1)),
+fn git_historical_blob(
+    project_root: &Path,
+    scope: &FeedbackScopeV1,
+    commit: &CommitId,
+    path: &str,
+) -> Option<Vec<u8>> {
+    let commit = GitOidV1::new(commit.as_str().to_owned()).ok()?;
+    let port = NativeGitIntelligence::new(
+        project_root.to_path_buf(),
+        scope.repository_id.clone(),
+        scope.worktree_id.clone(),
     );
-    let start = *starts.get(usize::try_from(start_line - 1).ok()?)?;
-    let end = starts
-        .get(usize::try_from(end_line).ok()?)
-        .copied()
-        .unwrap_or(bytes.len());
-    let span = SourceSpan {
-        start_byte: u64::try_from(start).ok()?,
-        end_byte: u64::try_from(end).ok()?,
-    };
-    span.validate().ok()?;
-    Some(Some(span))
-}
-
-fn git_blob(project_root: &Path, commit: &CommitId, path: &str) -> Option<Vec<u8>> {
-    if !valid_git_oid(commit.as_str()) || !valid_relative_path(path) {
+    let blob = GitReadPort::historical_blob(
+        &port,
+        &GitHistoricalBlobRequestV1 {
+            commit: commit.clone(),
+            path: path.to_owned(),
+            max_bytes: MAX_GIT_BLOB_BYTES_V1 as u64,
+            include_bytes: true,
+        },
+    )
+    .ok()?;
+    if &blob.repository != &scope.repository_id
+        || &blob.worktree != &scope.worktree_id
+        || &blob.commit != &commit
+        || blob.path.as_str() != path
+    {
         return None;
     }
-    let object = format!("{}:{path}", commit.as_str());
-    let size = Command::new("git")
-        .arg("-C")
-        .arg(project_root)
-        .args(["cat-file", "-s"])
-        .arg(&object)
-        .output()
-        .ok()?;
-    if !size.status.success() {
-        return None;
-    }
-    let size = String::from_utf8(size.stdout)
-        .ok()?
-        .trim()
-        .parse::<usize>()
-        .ok()?;
-    if size > MAX_GIT_BLOB_BYTES_V1 {
-        return None;
-    }
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(project_root)
-        .args(["cat-file", "blob"])
-        .arg(object)
-        .output()
-        .ok()?;
-    (output.status.success() && output.stdout.len() == size).then_some(output.stdout)
+    blob.bytes
 }
 
 fn content_digest(bytes: &[u8]) -> Option<ContentDigest> {
     let digest = Sha256::digest(bytes);
     ContentDigest::new(format!("sha256:{}", hex::encode(digest))).ok()
-}
-
-fn valid_git_oid(value: &str) -> bool {
-    matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 #[cfg(test)]
@@ -935,7 +1023,8 @@ mod tests {
         run_git(root, &["config", "user.email", "tests@example.invalid"]);
         run_git(root, &["config", "user.name", "TraceDecay Tests"]);
         std::fs::create_dir_all(root.join("src")).unwrap();
-        std::fs::write(root.join("src/lib.rs"), "pub fn reviewed() {}\n").unwrap();
+        let source = "pub fn reviewed() {}\npub fn batched() {}\n";
+        std::fs::write(root.join("src/lib.rs"), source).unwrap();
         run_git(root, &["add", "src/lib.rs"]);
         run_git(root, &["commit", "-m", "test: seed reviewed source"]);
         let output = Command::new("git")
@@ -977,16 +1066,70 @@ mod tests {
                     .to_owned(),
             path: "src/lib.rs".to_owned(),
             original_commit_id: head.clone(),
-            observed_commit_id: head,
+            observed_commit_id: head.clone(),
             original_start_line: Some(1),
             original_line: Some(1),
             current_start_line: Some(1),
             current_line: Some(1),
         };
-        let anchors = authority
-            .resolve(&request, &seed)
+        let second_seed = GitHubReviewAnchorSeedV1 {
+            comment_id: GitHubReviewCommentIdV1::new("3556767424").unwrap(),
+            author_node_id: "BOT_kgDOC98s_g".to_owned(),
+            body_digest: provider_body_digest.clone(),
+            retained_body: retained_body.clone(),
+            safe_url:
+                "https://github.com/ScriptedAlchemy/tracedecay/pull/421#discussion_r3556767424"
+                    .to_owned(),
+            path: "src/lib.rs".to_owned(),
+            original_commit_id: head.clone(),
+            observed_commit_id: head,
+            original_start_line: Some(2),
+            original_line: Some(2),
+            current_start_line: Some(2),
+            current_line: Some(2),
+        };
+        let batch = authority
+            .resolve_many(&request, &[seed, second_seed])
             .await
-            .expect("canonical body anchor");
+            .expect("canonical body anchors");
+        assert_eq!(batch.len(), 2);
+        assert_eq!(
+            batch[0].original.span,
+            Some(SourceSpan {
+                start_byte: 0,
+                end_byte: "pub fn reviewed() {}\n".len() as u64,
+            })
+        );
+        assert_eq!(
+            batch[1].original.span,
+            Some(SourceSpan {
+                start_byte: "pub fn reviewed() {}\n".len() as u64,
+                end_byte: source.len() as u64,
+            })
+        );
+        let unavailable_seed = GitHubReviewAnchorSeedV1 {
+            comment_id: GitHubReviewCommentIdV1::new("3556767425").unwrap(),
+            author_node_id: "BOT_kgDOC98s_g".to_owned(),
+            body_digest: provider_body_digest.clone(),
+            retained_body: retained_body.clone(),
+            safe_url:
+                "https://github.com/ScriptedAlchemy/tracedecay/pull/421#discussion_r3556767425"
+                    .to_owned(),
+            path: "src/missing.rs".to_owned(),
+            original_commit_id: scope.head_commit_id.clone(),
+            observed_commit_id: scope.head_commit_id.clone(),
+            original_start_line: Some(1),
+            original_line: Some(1),
+            current_start_line: Some(1),
+            current_line: Some(1),
+        };
+        assert!(
+            authority
+                .resolve_many(&request, &[unavailable_seed])
+                .await
+                .is_none()
+        );
+        let anchors = batch[0].clone();
         let context = request_context(&scope, scope.project_id.clone());
         let access = Access::new([
             GitHubProviderLifecycleV1::Ready,

@@ -8,7 +8,10 @@
 //! windows with pinned size/overlap are used. Extractor enumeration order
 //! and mutable line numbers cannot affect `CodeSearchChunkId`.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -23,9 +26,11 @@ use tracedecay_domain::{
 };
 
 use super::{
-    extract::ExtractionCancellation, intake::ReceiptBoundCodeFileV1, lineage::LineageSymbolRecordV1,
+    extract::{ExtractedCodeFileV1, ExtractionCancellation},
+    intake::ReceiptBoundCodeFileV1,
+    lineage::LineageSymbolRecordV1,
 };
-use crate::types::{Edge, EdgeKind, Node, NodeKind, UnresolvedRef};
+use crate::types::{Edge, EdgeKind, ExtractionResult, Node, NodeKind, UnresolvedRef};
 
 /// Chunker failures. Partial coverage is evidence, not an error; errors are
 /// reserved for contract violations.
@@ -483,14 +488,12 @@ pub const EXACT_EXTRACTION_AUTHORITY_SEPARATOR: &str = "tracedecay.exact-extract
 
 /// The deterministic five-grain chunker.
 ///
-/// The frozen `CodeChunker` port receives only the extraction *evidence*
-/// batch (`ExtractionBatchV1` carries digests, ranges, and coverage, never
-/// rows), so structural symbol spans are re-derived through the established
-/// `crate::extraction` parser registry — the same parser acquisition path the
-/// extractor adapter uses — rather than a parallel parse. Batch consistency
-/// is verified before any structural work: a batch that does not match the
-/// descriptor and file content identity is rejected, so the re-derived
-/// structure is always the structure the batch attests to.
+/// The compatibility `CodeChunker` port accepts only extraction evidence and
+/// therefore re-parses. Production indexing uses
+/// [`Self::index_file_with_authority_from_extraction`] to consume the exact
+/// sanitized parser rows that produced that evidence, avoiding a second parse.
+/// Both paths validate batch, descriptor, and file identity before structural
+/// work and share the same canonical materialization.
 ///
 /// Construct one chunker per generation: generation identity, repository
 /// identity, sanitizer revision, policy revision, and chunker revision are
@@ -502,7 +505,7 @@ pub struct DeterministicCodeChunker {
     policy_revision: PolicyRevisionId,
     sensitivity_level: SensitivityLevelV1,
     chunker_revision: ChunkerRevision,
-    extractors: crate::extraction::LanguageRegistry,
+    extractors: Arc<crate::extraction::LanguageRegistry>,
 }
 
 impl DeterministicCodeChunker {
@@ -516,6 +519,25 @@ impl DeterministicCodeChunker {
         policy_revision: PolicyRevisionId,
         chunker_revision: ChunkerRevision,
         extractors: crate::extraction::LanguageRegistry,
+    ) -> Self {
+        Self::from_shared_registry(
+            generation_id,
+            repository,
+            sanitizer_revision,
+            policy_revision,
+            chunker_revision,
+            Arc::new(extractors),
+        )
+    }
+
+    /// Create a generation-bound chunker over a shared parser registry.
+    pub fn from_shared_registry(
+        generation_id: CodeGenerationId,
+        repository: RepositoryId,
+        sanitizer_revision: SanitizerRevision,
+        policy_revision: PolicyRevisionId,
+        chunker_revision: ChunkerRevision,
+        extractors: Arc<crate::extraction::LanguageRegistry>,
     ) -> Self {
         Self {
             generation_id,
@@ -562,6 +584,29 @@ impl DeterministicCodeChunker {
         cancellation: &dyn ExtractionCancellation,
     ) -> Result<(CodeFileIndexArtifactsV1, ExactExtractionAuthorityV1), ChunkingFailureV1> {
         let result = self.index_file(file, batch, descriptor, cancellation)?;
+        let authority = ExactExtractionAuthorityV1::mint(&result.chunks.chunks)?;
+        Ok((result, authority))
+    }
+
+    /// Index one file from the parser rows that produced its extraction batch.
+    /// The opaque output type prevents callers from pairing a batch with rows
+    /// from a different parse.
+    pub fn index_file_with_authority_from_extraction(
+        &self,
+        file: &ReceiptBoundCodeFileV1,
+        extraction: &ExtractedCodeFileV1,
+        descriptor: &LanguageDescriptorV1,
+        sensitivity_level: SensitivityLevelV1,
+        cancellation: &dyn ExtractionCancellation,
+    ) -> Result<(CodeFileIndexArtifactsV1, ExactExtractionAuthorityV1), ChunkingFailureV1> {
+        let result = self.build_file_artifacts_with_parse(
+            file,
+            extraction.batch(),
+            descriptor,
+            Some(extraction.parse_artifacts()),
+            sensitivity_level,
+            cancellation,
+        )?;
         let authority = ExactExtractionAuthorityV1::mint(&result.chunks.chunks)?;
         Ok((result, authority))
     }
@@ -1092,6 +1137,26 @@ impl DeterministicCodeChunker {
         descriptor: &LanguageDescriptorV1,
         cancellation: &dyn ExtractionCancellation,
     ) -> Result<CodeFileIndexArtifactsV1, ChunkingFailureV1> {
+        self.build_file_artifacts_with_parse(
+            file,
+            batch,
+            descriptor,
+            None,
+            self.sensitivity_level,
+            cancellation,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_file_artifacts_with_parse(
+        &self,
+        file: &ReceiptBoundCodeFileV1,
+        batch: &ExtractionBatchV1,
+        descriptor: &LanguageDescriptorV1,
+        parse_artifacts: Option<&ExtractionResult>,
+        sensitivity_level: SensitivityLevelV1,
+        cancellation: &dyn ExtractionCancellation,
+    ) -> Result<CodeFileIndexArtifactsV1, ChunkingFailureV1> {
         if cancellation.is_cancelled() {
             return Err(ChunkingFailureV1::Cancelled);
         }
@@ -1121,6 +1186,8 @@ impl DeterministicCodeChunker {
                     file,
                     batch,
                     descriptor,
+                    parse_artifacts,
+                    sensitivity_level,
                     cancellation,
                     reason.clone(),
                 );
@@ -1147,16 +1214,27 @@ impl DeterministicCodeChunker {
             artifacts.validate()?;
             return Ok(artifacts);
         }
-        self.build_partial_artifacts(file, batch, descriptor, cancellation, String::new())
+        self.build_partial_artifacts(
+            file,
+            batch,
+            descriptor,
+            parse_artifacts,
+            sensitivity_level,
+            cancellation,
+            String::new(),
+        )
     }
 
     /// Shared complete/partial chunk production. `partial_reason` is empty
     /// for complete parses.
+    #[allow(clippy::too_many_arguments)]
     fn build_partial_artifacts(
         &self,
         file: &ValidatedCodeFileV1,
         batch: &ExtractionBatchV1,
         descriptor: &LanguageDescriptorV1,
+        parse_artifacts: Option<&ExtractionResult>,
+        sensitivity_level: SensitivityLevelV1,
         cancellation: &dyn ExtractionCancellation,
         partial_reason: String,
     ) -> Result<CodeFileIndexArtifactsV1, ChunkingFailureV1> {
@@ -1189,22 +1267,27 @@ impl DeterministicCodeChunker {
             ));
         }
         let source = &full_source[..parsed_prefix_end];
-        let extractor = self
-            .extractors
-            .extractor_for_file(&file.file.logical_path)
-            .or_else(|| {
-                descriptor.extensions.iter().find_map(|extension| {
-                    self.extractors
-                        .extractor_for_file(&format!("probe.{extension}"))
+        let mut reparsed;
+        let result = if let Some(parse_artifacts) = parse_artifacts {
+            parse_artifacts
+        } else {
+            let extractor = self
+                .extractors
+                .extractor_for_file(&file.file.logical_path)
+                .or_else(|| {
+                    descriptor.extensions.iter().find_map(|extension| {
+                        self.extractors
+                            .extractor_for_file(&format!("probe.{extension}"))
+                    })
                 })
-            })
-            .ok_or(ChunkingFailureV1::DescriptorMismatch)?;
-        if cancellation.is_cancelled() {
-            return Err(ChunkingFailureV1::Cancelled);
-        }
-
-        let mut result = extractor.extract(&file.file.logical_path, source);
-        result.sanitize();
+                .ok_or(ChunkingFailureV1::DescriptorMismatch)?;
+            if cancellation.is_cancelled() {
+                return Err(ChunkingFailureV1::Cancelled);
+            }
+            reparsed = extractor.extract(&file.file.logical_path, source);
+            reparsed.sanitize();
+            &reparsed
+        };
         if cancellation.is_cancelled() {
             return Err(ChunkingFailureV1::Cancelled);
         }
@@ -1226,6 +1309,7 @@ impl DeterministicCodeChunker {
             descriptor,
             &file_identity,
             &symbol_rows,
+            sensitivity_level,
             cancellation,
         )?;
         let symbols = self.lineage_symbols(source, &file_identity, &symbol_rows)?;
@@ -1407,6 +1491,7 @@ impl DeterministicCodeChunker {
         descriptor: &LanguageDescriptorV1,
         file_identity: &FileIdentityDigest,
         symbols: &[SymbolRow],
+        sensitivity_level: SensitivityLevelV1,
         cancellation: &dyn ExtractionCancellation,
     ) -> Result<Vec<CodeSearchChunkV1>, ChunkingFailureV1> {
         // Per-symbol emission plan: primary grain (body or member), split
@@ -1640,7 +1725,7 @@ impl DeterministicCodeChunker {
                 chunker_revision: self.chunker_revision.clone(),
                 sanitizer_revision: self.sanitizer_revision.clone(),
                 sensitivity: SensitivityDecision {
-                    level: self.sensitivity_level,
+                    level: sensitivity_level,
                     policy_revision: self.policy_revision.clone(),
                 },
                 exact_terms,
@@ -1838,6 +1923,11 @@ fn emit_windows(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
     use super::*;
     use tracedecay_domain::{
         BoundedSanitizedText, ChunkerRevision, CodeGenerationId, CodeSearchChunkAnchorV1,
@@ -1849,7 +1939,10 @@ mod tests {
         SymbolIdentityDigest, SymbolOccurrenceId, UtcMicros, ValidatedCodeFileV1,
     };
 
-    use crate::code_index::extract::{ExtractionCancellation, NeverCancelled};
+    use crate::code_index::extract::{
+        ExtractionCancellation, LanguageExtractor as CanonicalLanguageExtractor, NeverCancelled,
+        TreeSitterExtractor,
+    };
     use crate::code_index::intake::{CodeIndexIntake, SanitizedCodeIntake};
     use crate::code_index::languages::{LanguageRegistry, StaticLanguageRegistry};
 
@@ -2169,6 +2262,72 @@ mod tests {
         let first = chunk_source(RUST_SOURCE);
         let second = chunk_source(RUST_SOURCE);
         assert_eq!(first, second);
+    }
+
+    struct CountingRustExtractor {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl crate::extraction::LanguageExtractor for CountingRustExtractor {
+        fn extensions(&self) -> &[&str] {
+            crate::extraction::RustExtractor.extensions()
+        }
+
+        fn language_name(&self) -> &str {
+            crate::extraction::RustExtractor.language_name()
+        }
+
+        fn extract(&self, file_path: &str, source: &str) -> crate::types::ExtractionResult {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            crate::extraction::RustExtractor.extract(file_path, source)
+        }
+    }
+
+    #[test]
+    fn extraction_artifacts_feed_chunking_without_a_second_parse() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let registry = Arc::new(
+            crate::extraction::LanguageRegistry::from_extractors_for_test(vec![Box::new(
+                CountingRustExtractor {
+                    calls: Arc::clone(&calls),
+                },
+            )]),
+        );
+        let extractor = TreeSitterExtractor::from_shared_registry(Arc::clone(&registry));
+        let file = validated_file("src/lib.rs", RUST_SOURCE.as_bytes());
+        let descriptor = rust_descriptor();
+        let extraction = extractor
+            .extract(&file, &descriptor, &NeverCancelled)
+            .expect("extraction succeeds");
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+
+        let shared_chunker = DeterministicCodeChunker::from_shared_registry(
+            id("generation.fixture"),
+            id("repo.fixture"),
+            id("sanitizer.v1"),
+            id("policy.v1"),
+            id("chunker.v1"),
+            registry,
+        );
+        let (actual, _) = shared_chunker
+            .index_file_with_authority_from_extraction(
+                &file,
+                &extraction,
+                &descriptor,
+                SensitivityLevelV1::Public,
+                &NeverCancelled,
+            )
+            .expect("chunking reuses parse artifacts");
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            1,
+            "chunking must not invoke the parser again"
+        );
+
+        let expected = chunker()
+            .index_file(&file, extraction.batch(), &descriptor, &NeverCancelled)
+            .expect("legacy chunking succeeds");
+        assert_eq!(actual, expected, "parse reuse must preserve every artifact");
     }
 
     #[test]

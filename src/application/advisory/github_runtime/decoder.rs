@@ -109,12 +109,43 @@ pub struct GitHubReviewAnchorSeedV1 {
     pub current_line: Option<u64>,
 }
 
+struct GitHubReviewItemDraftV1 {
+    provider_lifecycle: GitHubReviewLifecycleV1,
+    comment_id: GitHubReviewCommentIdV1,
+    review_id: Option<GitHubReviewIdV1>,
+    thread_id: Option<GitHubReviewThreadIdV1>,
+    reply_to_comment_id: Option<GitHubReviewCommentIdV1>,
+    author_kind: String,
+    author_association: String,
+    review_state: GitHubReviewStateV1,
+    version_digest: ManifestDigest,
+    body_digest: ManifestDigest,
+    seed: GitHubReviewAnchorSeedV1,
+}
+
 pub trait GitHubCanonicalReviewAnchorAuthorityV1 {
     fn resolve<'a>(
         &'a self,
         request: &'a GitHubReviewReadRequestV1,
         seed: &'a GitHubReviewAnchorSeedV1,
     ) -> FeedbackPortFuture<'a, Option<GitHubCanonicalReviewAnchorsV1>>;
+
+    fn resolve_many<'a>(
+        &'a self,
+        request: &'a GitHubReviewReadRequestV1,
+        seeds: &'a [GitHubReviewAnchorSeedV1],
+    ) -> FeedbackPortFuture<'a, Option<Vec<GitHubCanonicalReviewAnchorsV1>>>
+    where
+        Self: Sync,
+    {
+        Box::pin(async move {
+            let mut anchors = Vec::with_capacity(seeds.len());
+            for seed in seeds {
+                anchors.push(self.resolve(request, seed).await?);
+            }
+            Some(anchors)
+        })
+    }
 }
 
 pub struct GitHubOfficialResponseDecoderV1<A> {
@@ -175,7 +206,7 @@ where
 
 impl<A> GitHubOfficialResponseDecoderV1<A>
 where
-    A: GitHubCanonicalReviewAnchorAuthorityV1,
+    A: GitHubCanonicalReviewAnchorAuthorityV1 + Sync,
 {
     fn ingress(
         &self,
@@ -239,27 +270,19 @@ where
         observed_at: UtcMicros,
     ) -> Option<Vec<GitHubReviewItemV1>> {
         let comments = serde_json::from_slice::<Vec<RestReviewCommentV1>>(body).ok()?;
-        let mut items = Vec::with_capacity(comments.len());
+        let mut drafts = Vec::with_capacity(comments.len());
         let mut comment_ids = BTreeSet::new();
         for comment in comments {
             if !comment_ids.insert(comment.id) {
                 return None;
             }
-            items.push(
-                self.rest_comment_item(request, comment, outcome, observed_at)
-                    .await?,
-            );
+            drafts.push(self.rest_comment_draft(comment)?);
         }
-        Some(items)
+        self.anchored_items(request, drafts, outcome, observed_at)
+            .await
     }
 
-    async fn rest_comment_item(
-        &self,
-        request: &GitHubReviewReadRequestV1,
-        comment: RestReviewCommentV1,
-        outcome: GitHubReviewIngressProviderOutcomeV1,
-        observed_at: UtcMicros,
-    ) -> Option<GitHubReviewItemV1> {
+    fn rest_comment_draft(&self, comment: RestReviewCommentV1) -> Option<GitHubReviewItemDraftV1> {
         let provider_lifecycle = rest_lifecycle(&comment);
         let comment_id = GitHubReviewCommentIdV1::new(comment.id.to_string()).ok()?;
         let review_id = comment
@@ -302,7 +325,70 @@ where
             current_start_line: comment.start_line,
             current_line: comment.line,
         };
-        let anchors = self.anchors.resolve(request, &seed).await?;
+        Some(GitHubReviewItemDraftV1 {
+            provider_lifecycle,
+            comment_id,
+            review_id,
+            thread_id: None,
+            reply_to_comment_id: comment
+                .in_reply_to_id
+                .map(|id| GitHubReviewCommentIdV1::new(id.to_string()))
+                .transpose()
+                .ok()?,
+            author_kind: user_kind,
+            author_association: association,
+            review_state: GitHubReviewStateV1::Unknown,
+            version_digest,
+            body_digest,
+            seed,
+        })
+    }
+
+    async fn anchored_items(
+        &self,
+        request: &GitHubReviewReadRequestV1,
+        drafts: Vec<GitHubReviewItemDraftV1>,
+        outcome: GitHubReviewIngressProviderOutcomeV1,
+        observed_at: UtcMicros,
+    ) -> Option<Vec<GitHubReviewItemV1>> {
+        let seeds = drafts
+            .iter()
+            .map(|draft| draft.seed.clone())
+            .collect::<Vec<_>>();
+        let anchors = self.anchors.resolve_many(request, &seeds).await?;
+        if anchors.len() != drafts.len() {
+            return None;
+        }
+        drafts
+            .into_iter()
+            .zip(anchors)
+            .map(|(draft, anchors)| {
+                self.item_from_draft(request, draft, anchors, outcome, observed_at)
+            })
+            .collect()
+    }
+
+    fn item_from_draft(
+        &self,
+        request: &GitHubReviewReadRequestV1,
+        draft: GitHubReviewItemDraftV1,
+        anchors: GitHubCanonicalReviewAnchorsV1,
+        outcome: GitHubReviewIngressProviderOutcomeV1,
+        observed_at: UtcMicros,
+    ) -> Option<GitHubReviewItemV1> {
+        let GitHubReviewItemDraftV1 {
+            provider_lifecycle,
+            comment_id,
+            review_id,
+            thread_id,
+            reply_to_comment_id,
+            author_kind,
+            author_association,
+            review_state,
+            version_digest,
+            body_digest,
+            seed,
+        } = draft;
         if !anchors.validate()
             || anchors.original.repository_id != request.scope.repository_id
             || anchors.original.commit_id != seed.original_commit_id
@@ -316,17 +402,13 @@ where
             repository_id: request.scope.repository_id.clone(),
             pull_request_id: request.pull_request_id.clone(),
             review_id,
-            thread_id: None,
+            thread_id,
             comment_id,
-            reply_to_comment_id: comment
-                .in_reply_to_id
-                .map(|id| GitHubReviewCommentIdV1::new(id.to_string()))
-                .transpose()
-                .ok()?,
+            reply_to_comment_id,
             version_digest,
             author_anchor: anchors.author_anchor,
-            author_class: author_class(&user_kind, &association),
-            review_state: GitHubReviewStateV1::Unknown,
+            author_class: author_class(&author_kind, &author_association),
+            review_state,
             body_digest,
             body_anchor: anchors.body_anchor,
             safe_url_anchor: anchors.safe_url_anchor,
@@ -355,7 +437,7 @@ where
         {
             return None;
         }
-        let mut items = Vec::new();
+        let mut drafts = Vec::new();
         let mut thread_ids = BTreeSet::new();
         let mut comment_ids = BTreeSet::new();
         for mut thread in pull_request.review_threads.nodes {
@@ -367,23 +449,18 @@ where
                 if !comment_ids.insert(comment.database_id) {
                     return None;
                 }
-                items.push(
-                    self.graphql_comment_item(request, &thread, comment, outcome, observed_at)
-                        .await?,
-                );
+                drafts.push(self.graphql_comment_draft(&thread, comment)?);
             }
         }
-        Some(items)
+        self.anchored_items(request, drafts, outcome, observed_at)
+            .await
     }
 
-    async fn graphql_comment_item(
+    fn graphql_comment_draft(
         &self,
-        request: &GitHubReviewReadRequestV1,
         thread: &GraphQlReviewThreadV1,
         comment: GraphQlReviewCommentV1,
-        outcome: GitHubReviewIngressProviderOutcomeV1,
-        observed_at: UtcMicros,
-    ) -> Option<GitHubReviewItemV1> {
+    ) -> Option<GitHubReviewItemDraftV1> {
         let provider_lifecycle = graphql_lifecycle(thread, &comment);
         let comment_id = GitHubReviewCommentIdV1::new(comment.database_id.to_string()).ok()?;
         let review_id = comment
@@ -416,6 +493,24 @@ where
         self.identity
             .admits_review_url(&comment.url)
             .then_some(())?;
+        let author_kind = comment
+            .author
+            .as_ref()
+            .and_then(|author| author.kind.as_deref())
+            .unwrap_or("User")
+            .to_owned();
+        let reply_to_comment_id = comment
+            .reply_to
+            .and_then(|reply| reply.database_id)
+            .map(|id| GitHubReviewCommentIdV1::new(id.to_string()))
+            .transpose()
+            .ok()?;
+        let review_state = comment
+            .pull_request_review
+            .as_ref()
+            .and_then(|review| review.state.as_deref())
+            .and_then(review_state)
+            .unwrap_or(GitHubReviewStateV1::Unknown);
         let seed = GitHubReviewAnchorSeedV1 {
             comment_id: comment_id.clone(),
             author_node_id: comment.author.as_ref()?.login.clone(),
@@ -430,52 +525,18 @@ where
             current_start_line: thread.start_line,
             current_line: thread.line,
         };
-        let anchors = self.anchors.resolve(request, &seed).await?;
-        if !anchors.validate()
-            || anchors.original.repository_id != request.scope.repository_id
-            || anchors.original.commit_id != seed.original_commit_id
-            || anchors.initial_remap.current_scope != request.scope
-        {
-            return None;
-        }
-        let lifecycle = canonical_lifecycle(provider_lifecycle, &anchors.initial_remap);
-        Some(GitHubReviewItemV1 {
-            provider: self.identity.provider.clone(),
-            repository_id: request.scope.repository_id.clone(),
-            pull_request_id: request.pull_request_id.clone(),
+        Some(GitHubReviewItemDraftV1 {
+            provider_lifecycle,
+            comment_id,
             review_id,
             thread_id: Some(GitHubReviewThreadIdV1::new(thread.id.clone()).ok()?),
-            comment_id,
-            reply_to_comment_id: comment
-                .reply_to
-                .and_then(|reply| reply.database_id)
-                .map(|id| GitHubReviewCommentIdV1::new(id.to_string()))
-                .transpose()
-                .ok()?,
+            reply_to_comment_id,
+            author_kind,
+            author_association: comment.author_association,
+            review_state,
             version_digest,
-            author_anchor: anchors.author_anchor,
-            author_class: author_class(
-                comment
-                    .author
-                    .as_ref()
-                    .and_then(|author| author.kind.as_deref())
-                    .unwrap_or("User"),
-                &comment.author_association,
-            ),
-            review_state: comment
-                .pull_request_review
-                .as_ref()
-                .and_then(|review| review.state.as_deref())
-                .and_then(review_state)
-                .unwrap_or(GitHubReviewStateV1::Unknown),
             body_digest,
-            body_anchor: anchors.body_anchor,
-            safe_url_anchor: anchors.safe_url_anchor,
-            safe_url: (!seed.safe_url.is_empty()).then_some(seed.safe_url),
-            lifecycle,
-            provider_outcome: outcome,
-            remap: anchors.initial_remap,
-            observed_at,
+            seed,
         })
     }
 }
@@ -610,4 +671,157 @@ fn valid_repository_segment(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use serde_json::{Value, json};
+    use tracedecay_domain::feedback::{FeedbackScopeV1, GitHubPullRequestIdV1};
+    use tracedecay_domain::{ContentDigest, FileOccurrenceId, ProjectId, RepositoryId, WorktreeId};
+
+    use super::*;
+
+    #[derive(Default)]
+    struct BatchAnchors {
+        resolve_calls: AtomicUsize,
+        batch_calls: AtomicUsize,
+    }
+
+    impl GitHubCanonicalReviewAnchorAuthorityV1 for BatchAnchors {
+        fn resolve<'a>(
+            &'a self,
+            _request: &'a GitHubReviewReadRequestV1,
+            _seed: &'a GitHubReviewAnchorSeedV1,
+        ) -> FeedbackPortFuture<'a, Option<GitHubCanonicalReviewAnchorsV1>> {
+            self.resolve_calls.fetch_add(1, Ordering::Relaxed);
+            Box::pin(async { None })
+        }
+
+        fn resolve_many<'a>(
+            &'a self,
+            request: &'a GitHubReviewReadRequestV1,
+            seeds: &'a [GitHubReviewAnchorSeedV1],
+        ) -> FeedbackPortFuture<'a, Option<Vec<GitHubCanonicalReviewAnchorsV1>>> {
+            self.batch_calls.fetch_add(1, Ordering::Relaxed);
+            Box::pin(async move {
+                seeds
+                    .iter()
+                    .map(|seed| fixture_anchors(request, seed))
+                    .collect()
+            })
+        }
+    }
+
+    fn fixture_anchors(
+        request: &GitHubReviewReadRequestV1,
+        seed: &GitHubReviewAnchorSeedV1,
+    ) -> Option<GitHubCanonicalReviewAnchorsV1> {
+        let original = GitHubReviewImmutableAnchorV1 {
+            repository_id: request.scope.repository_id.clone(),
+            commit_id: seed.original_commit_id.clone(),
+            retrieval_anchor_id: RetrievalAnchorId::new(format!(
+                "anchor.fixture.github.{}",
+                seed.comment_id.as_str()
+            ))
+            .ok()?,
+            file: FileOccurrenceId::new(format!(
+                "file.fixture.github.{}",
+                seed.comment_id.as_str()
+            ))
+            .ok()?,
+            content_digest: ContentDigest::new(format!("sha256:{}", "c".repeat(64))).ok()?,
+            span: None,
+            symbol: None,
+        };
+        Some(GitHubCanonicalReviewAnchorsV1 {
+            initial_remap: GitHubReviewCurrentBranchRemapV1::unmapped(
+                original.clone(),
+                request.scope.clone(),
+            )
+            .ok()?,
+            original,
+            author_anchor: RetrievalAnchorId::new(format!(
+                "anchor.fixture.github.author.{}",
+                seed.comment_id.as_str()
+            ))
+            .ok()?,
+            body_anchor: RetrievalAnchorId::new(format!(
+                "anchor.fixture.github.body.{}",
+                seed.comment_id.as_str()
+            ))
+            .ok()?,
+            safe_url_anchor: Some(
+                RetrievalAnchorId::new(format!(
+                    "anchor.fixture.github.url.{}",
+                    seed.comment_id.as_str()
+                ))
+                .ok()?,
+            ),
+        })
+    }
+
+    fn request() -> GitHubReviewReadRequestV1 {
+        GitHubReviewReadRequestV1 {
+            operation: GitHubReviewReadOperationV1::RestListPullRequestReviewComments,
+            scope: FeedbackScopeV1 {
+                project_id: ProjectId::new("project.github.batch").unwrap(),
+                repository_id: RepositoryId::new("repository.github.batch").unwrap(),
+                worktree_id: WorktreeId::new("worktree.github.batch").unwrap(),
+                branch_ref: "refs/heads/github-batch".to_owned(),
+                head_commit_id: CommitId::new("e9170a2df3c6be51d25454c2e84592c6915be136").unwrap(),
+            },
+            pull_request_id: GitHubPullRequestIdV1::new("4026204542").unwrap(),
+        }
+    }
+
+    #[tokio::test]
+    async fn rest_comments_resolve_anchors_in_one_batch() {
+        let request = request();
+        let anchors = BatchAnchors::default();
+        let decoder = GitHubOfficialResponseDecoderV1::new(
+            GitHubReviewProviderIdentityV1 {
+                provider: ProviderId::new("provider.github").unwrap(),
+                repository_owner: "ScriptedAlchemy".to_owned(),
+                repository_name: "tracedecay".to_owned(),
+                pull_request_number: 421,
+                base_commit_id: CommitId::new("986f25cca6d2e703e889fb57326696b0d92c965f").unwrap(),
+                head_commit_id: request.scope.head_commit_id.clone(),
+                merge_base_commit_id: CommitId::new("986f25cca6d2e703e889fb57326696b0d92c965f")
+                    .unwrap(),
+            },
+            anchors,
+        )
+        .unwrap();
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../fixtures/pr13_branch_pr/review_comment.json"
+        ))
+        .unwrap();
+        let first = fixture["response"].clone();
+        let mut second = first.clone();
+        second["id"] = json!(3556767424_u64);
+        second["node_id"] = json!("PRRC_kwDOSzKG2s7T__bA");
+        second["body"] = json!("Batch the shared source anchor lookup.");
+        second["html_url"] =
+            json!("https://github.com/ScriptedAlchemy/tracedecay/pull/421#discussion_r3556767424");
+
+        let ingress = decoder
+            .decode(
+                &request,
+                &GitHubReadNetworkMetadataV1 {
+                    retry_at: None,
+                    status: GitHubReadNetworkStatusV1::Ok,
+                    etag: None,
+                    next_cursor: None,
+                    rate_limit: None,
+                },
+                serde_json::to_vec(&vec![first, second]).unwrap().as_slice(),
+            )
+            .await
+            .expect("both review comments must decode");
+        assert_eq!(ingress.items.len(), 2);
+        assert_eq!(decoder.anchors.batch_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(decoder.anchors.resolve_calls.load(Ordering::Relaxed), 0);
+    }
 }
