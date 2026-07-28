@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useId, useState } from 'react';
 import { cn } from './cn';
 
 export interface ActivityBucket {
@@ -67,7 +67,7 @@ export function ActivityColumns({
                 'transition-opacity duration-[var(--dur-state)]',
                 active === null || active === i ? 'opacity-100' : 'opacity-35',
               )}
-              fill={active === i ? 'var(--raw-accent)' : 'var(--raw-accent)'}
+              fill="var(--raw-accent)"
               fillOpacity={active === i ? 1 : 0.55}
               onMouseEnter={() => setActive(i)}
             />
@@ -89,11 +89,20 @@ export function CapacityBar({
   freeBytes: number | null;
   className?: string;
 }) {
+  // One hatch pattern per instance: a fixed id makes every bar on the page
+  // resolve `url(#…)` against whichever instance rendered first, and
+  // `ObservatoryPage` draws one bar per store.
+  const hatchId = useId();
   if (usedBytes == null) {
     return <span className="text-2xs text-text-muted">size unknown</span>;
   }
-  const free = freeBytes ?? 0;
-  const freeFraction = usedBytes > 0 ? Math.min(free / usedBytes, 1) : 0;
+  // An absent free-page figure is not zero free pages. Coercing it drew a
+  // completely filled bar announcing "0.0% free pages" — a measurement of a
+  // full store — for a store whose pages nobody sampled.
+  if (freeBytes == null) {
+    return <span className="text-2xs text-text-muted">free pages unknown</span>;
+  }
+  const freeFraction = usedBytes > 0 ? Math.min(freeBytes / usedBytes, 1) : 0;
   return (
     <div
       className={cn('relative h-2 overflow-hidden rounded-full bg-surface-3', className)}
@@ -106,11 +115,11 @@ export function CapacityBar({
       />
       <svg className="absolute inset-y-0 right-0" style={{ width: `${freeFraction * 100}%` }}>
         <defs>
-          <pattern id="td-hatch" width="4" height="4" patternUnits="userSpaceOnUse">
+          <pattern id={hatchId} width="4" height="4" patternUnits="userSpaceOnUse">
             <path d="M0 4 L4 0" stroke="var(--raw-state-stale)" strokeWidth="1" />
           </pattern>
         </defs>
-        <rect width="100%" height="100%" fill="url(#td-hatch)" opacity="0.8" />
+        <rect width="100%" height="100%" fill={`url(#${hatchId})`} opacity="0.8" />
       </svg>
     </div>
   );
