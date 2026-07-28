@@ -363,9 +363,7 @@ impl TraceDecay {
             return;
         }
 
-        eprintln!(
-            "[tracedecay] schema changed — rebuilding {total} files in the background"
-        );
+        eprintln!("[tracedecay] schema changed — rebuilding {total} files in the background");
         let result = self
             .index_all_with_progress(|current, total, file| {
                 if current == total || current % 250 == 0 {
@@ -400,11 +398,10 @@ impl TraceDecay {
         &self,
         status: &MigrationReindexStatusV1,
     ) -> Result<()> {
-        let encoded =
-            serde_json::to_string(status).map_err(|error| TraceDecayError::Database {
-                operation: "write migration re-index state".to_owned(),
-                message: error.to_string(),
-            })?;
+        let encoded = serde_json::to_string(status).map_err(|error| TraceDecayError::Database {
+            operation: "write migration re-index state".to_owned(),
+            message: error.to_string(),
+        })?;
         self.db
             .set_metadata(MIGRATION_REINDEX_STATE_KEY, &encoded)
             .await

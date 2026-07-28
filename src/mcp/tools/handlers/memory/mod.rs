@@ -108,13 +108,7 @@ pub(super) async fn open_target_memory_db<'a>(
         let profile_root = profile_root_for_global_db(global_db)?;
         return open_user_memory_target(cg.store_runtime_registry(), &profile_root).await;
     }
-    let Some(context) = project_registry_context(
-        args,
-        &["project_path"],
-        global_db,
-    )
-    .await?
-    else {
+    let Some(context) = project_registry_context(args, &["project_path"], global_db).await? else {
         return Ok(TargetMemoryDb {
             db: cg.project_memory_db().await?,
             project_root: cg.project_root().to_path_buf(),
@@ -299,9 +293,7 @@ mod tests {
         .await
         .unwrap();
 
-        let target = open_target_memory_db(&cg, &json!({}), None)
-            .await
-            .unwrap();
+        let target = open_target_memory_db(&cg, &json!({}), None).await.unwrap();
 
         assert!(matches!(target.db, ProjectMemoryDbHandle::Active(_)));
         assert!(std::ptr::eq(target.db(), cg.db()));
@@ -365,9 +357,7 @@ mod tests {
         });
 
         for _ in 0..2 {
-            handle_fact_feedback(&cg, args.clone(), None)
-                .await
-                .unwrap();
+            handle_fact_feedback(&cg, args.clone(), None).await.unwrap();
         }
 
         let history = active_memory(&cg)

@@ -1105,9 +1105,7 @@ impl ProjectScopedTestRuntimeV1 {
     /// Checked promotion for runtimes whose scope is not known statically,
     /// such as one recovered from an already-open graph.
     #[doc(hidden)]
-    pub fn new(
-        runtime: impl Into<Arc<HostAdmissionTestRuntimeV1>>,
-    ) -> crate::errors::Result<Self> {
+    pub fn new(runtime: impl Into<Arc<HostAdmissionTestRuntimeV1>>) -> crate::errors::Result<Self> {
         let runtime = runtime.into();
         if runtime.project_id.is_none() || runtime.project_registered.is_none() {
             return Err(crate::errors::TraceDecayError::Config {
@@ -1230,7 +1228,9 @@ impl HostAdmissionTestRuntimeV1 {
         project_root: impl AsRef<Path>,
         project_id: ProjectId,
     ) -> crate::errors::Result<ProjectScopedTestRuntimeV1> {
-        ProjectScopedTestRuntimeV1::new(Self::project(profile_root, project_root, project_id).await?)
+        ProjectScopedTestRuntimeV1::new(
+            Self::project(profile_root, project_root, project_id).await?,
+        )
     }
 
     async fn open(
@@ -1334,9 +1334,9 @@ impl HostAdmissionTestRuntimeV1 {
         project_root: &Path,
         open_options: crate::tracedecay::TraceDecayOpenOptions,
     ) -> crate::errors::Result<crate::tracedecay::TraceDecay> {
-        let (store_layout, project_database) =
-            self.registered_project_open_inputs(project_root, &open_options)
-                .await?;
+        let (store_layout, project_database) = self
+            .registered_project_open_inputs(project_root, &open_options)
+            .await?;
         crate::tracedecay::TraceDecay::open_with_registered_configuration(
             project_root,
             open_options,

@@ -504,10 +504,13 @@ async fn selected_project_read_skips_cache_write_for_read_only_store() {
         .as_deref()
         .and_then(|value| tracedecay_domain::ProjectId::new(value.to_string()).ok())
         .expect("target project identity");
-    let target_runtime =
-        HostAdmissionTestRuntimeV1::project_scoped(&profile_root, target_project, target_project_id)
-            .await
-            .unwrap();
+    let target_runtime = HostAdmissionTestRuntimeV1::project_scoped(
+        &profile_root,
+        target_project,
+        target_project_id,
+    )
+    .await
+    .unwrap();
     let target_graph = target_runtime
         .open_project_graph_read_only_for_test(
             target_project,

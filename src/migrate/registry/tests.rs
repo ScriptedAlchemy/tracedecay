@@ -36,10 +36,7 @@ async fn register_both_generations(db: &RegisteredGlobalDb, project: &Path) {
         )
         .await
         .expect("register code project");
-    transaction
-        .commit()
-        .await
-        .expect("commit registry fixture");
+    transaction.commit().await.expect("commit registry fixture");
 }
 
 async fn code_project_registered(db: &RegisteredGlobalDb) -> bool {
@@ -77,14 +74,14 @@ async fn registry_gc_deletes_both_registry_generations_in_one_commit() {
     )
     .await
     .expect("delete registry cleanup plan");
-    transaction
-        .commit()
-        .await
-        .expect("commit registry cleanup");
+    transaction.commit().await.expect("commit registry cleanup");
 
     assert_eq!(deleted, (1, 1));
     assert!(!code_project_registered(&harness.registered).await);
-    assert_eq!(harness.registered.get_project_tokens(&project).await, Some(0));
+    assert_eq!(
+        harness.registered.get_project_tokens(&project).await,
+        Some(0)
+    );
 }
 
 /// The atomicity claim. The `code_projects` delete runs first and succeeds; the
@@ -175,10 +172,7 @@ async fn registry_gc_transaction_serializes_a_concurrent_project_refresh() {
     )
     .await
     .expect("delete registry cleanup plan");
-    transaction
-        .commit()
-        .await
-        .expect("commit registry cleanup");
+    transaction.commit().await.expect("commit registry cleanup");
     assert_eq!(deleted, (1, 1));
 
     let refreshed = tokio::time::timeout(std::time::Duration::from_secs(5), refresh)

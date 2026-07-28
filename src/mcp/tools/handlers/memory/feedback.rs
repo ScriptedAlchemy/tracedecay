@@ -29,8 +29,7 @@ pub(in crate::mcp::tools::handlers) async fn handle_fact_feedback(
         .or_else(|| args.get("reason"))
         .and_then(Value::as_str)
         .map(ToOwned::to_owned);
-    let target_memory =
-        open_target_memory_db(cg, &args, global_db).await?;
+    let target_memory = open_target_memory_db(cg, &args, global_db).await?;
     let request = FeedbackRequest {
         fact_id: fact_id(&args)?,
         action: feedback_action(&args)?,

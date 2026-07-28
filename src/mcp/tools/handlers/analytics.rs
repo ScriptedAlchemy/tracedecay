@@ -227,12 +227,7 @@ async fn resolve_scope(
     global_db: Option<&RegisteredGlobalDb>,
     all_projects: bool,
 ) -> Result<ResolvedScope> {
-    let context = project_registry_context(
-        args,
-        &["project_path"],
-        global_db,
-    )
-    .await?;
+    let context = project_registry_context(args, &["project_path"], global_db).await?;
     let (project_root, project_display) = match &context {
         // Resolving the selector through the registry's project_aliases join
         // (rather than trusting the raw selector path verbatim) keeps
@@ -274,13 +269,7 @@ pub(super) async fn handle_analytics(
         config_error("registered global analytics store is unavailable for tracedecay_analytics")
     })?;
 
-    let scope = resolve_scope(
-        cg,
-        &args,
-        global_db,
-        all_projects,
-    )
-    .await?;
+    let scope = resolve_scope(cg, &args, global_db, all_projects).await?;
 
     let since = current_timestamp().saturating_sub(window_days.saturating_mul(86_400));
     let event_count = gdb
@@ -422,16 +411,15 @@ async fn facts_section(
     args: &Value,
     global_db: Option<&RegisteredGlobalDb>,
 ) -> Value {
-    let target =
-        match open_target_memory_db(cg, args, global_db).await {
-            Ok(target) => target,
-            Err(err) => {
-                return json!({
-                    "available": false,
-                    "reason": err.to_string(),
-                });
-            }
-        };
+    let target = match open_target_memory_db(cg, args, global_db).await {
+        Ok(target) => target,
+        Err(err) => {
+            return json!({
+                "available": false,
+                "reason": err.to_string(),
+            });
+        }
+    };
     let memory = match memory_application(&target) {
         Ok(memory) => memory,
         Err(err) => {

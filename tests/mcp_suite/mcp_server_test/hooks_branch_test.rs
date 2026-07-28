@@ -54,13 +54,14 @@ async fn hook_event_workspace_context_routes_followup_graph_reads() {
         .as_deref()
         .and_then(|value| tracedecay_domain::ProjectId::new(value.to_string()).ok())
         .expect("active project identity");
-    let registry_db = tracedecay::application::host_admission::HostAdmissionTestRuntimeV1::project_scoped(
-        &profile_root,
-        active_project,
-        active_project_id,
-    )
-    .await
-    .expect("registered project runtime opens");
+    let registry_db =
+        tracedecay::application::host_admission::HostAdmissionTestRuntimeV1::project_scoped(
+            &profile_root,
+            active_project,
+            active_project_id,
+        )
+        .await
+        .expect("registered project runtime opens");
     registry_db
         .upsert_code_project("proj_hook_active", active_project, None, None, Some("main"))
         .await
@@ -267,13 +268,14 @@ async fn hook_route_records_spans_and_ingest_attributes_commits() {
         .and_then(|value| tracedecay_domain::ProjectId::new(value.to_string()).ok())
         .expect("project identity");
     let profile_root = tracedecay::storage::default_profile_root().unwrap();
-    let registry = tracedecay::application::host_admission::HostAdmissionTestRuntimeV1::project_scoped(
-        &profile_root,
-        &project_root,
-        project_id.clone(),
-    )
-    .await
-    .unwrap();
+    let registry =
+        tracedecay::application::host_admission::HostAdmissionTestRuntimeV1::project_scoped(
+            &profile_root,
+            &project_root,
+            project_id.clone(),
+        )
+        .await
+        .unwrap();
     registry
         .upsert_code_project(
             "proj_live",

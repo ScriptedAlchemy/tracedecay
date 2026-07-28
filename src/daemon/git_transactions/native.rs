@@ -454,7 +454,10 @@ impl GitIndexPreviewAssembler for NativeGitIndexPreviewAssembler {
         };
         let current = self.capture_snapshot(&request.repository_snapshot, &runner, &lock)?;
         if current != request.repository_snapshot {
-            if let (Ok(serde_json::Value::Object(recaptured)), Ok(serde_json::Value::Object(requested))) = (
+            if let (
+                Ok(serde_json::Value::Object(recaptured)),
+                Ok(serde_json::Value::Object(requested)),
+            ) = (
                 serde_json::to_value(&current),
                 serde_json::to_value(&request.repository_snapshot),
             ) {

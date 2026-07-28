@@ -553,9 +553,7 @@ pub(super) async fn handle_project_list(
     global_db: Option<&RegisteredGlobalDb>,
 ) -> Result<ToolResult> {
     let limit = bounded_limit(&args, 25, 100);
-    let Some((registry_path, db)) =
-        open_project_registry_read_only(global_db).await?
-    else {
+    let Some((registry_path, db)) = open_project_registry_read_only(global_db).await? else {
         let mut payload = registry_missing_payload();
         let (title, summary, project_tree) = empty_registry_view_payload("registered projects");
         payload["title"] = title;
@@ -603,9 +601,7 @@ pub(super) async fn handle_project_search(
                 message: "missing required parameter: query".to_string(),
             })?;
     let limit = bounded_limit(&args, 10, 50);
-    let Some((registry_path, db)) =
-        open_project_registry_read_only(global_db).await?
-    else {
+    let Some((registry_path, db)) = open_project_registry_read_only(global_db).await? else {
         let mut payload = registry_missing_payload();
         let (title, summary, project_tree) =
             empty_registry_view_payload(&format!("projects matching \"{query}\""));
@@ -659,9 +655,7 @@ pub(super) async fn handle_project_context(
     args: Value,
     global_db: Option<&RegisteredGlobalDb>,
 ) -> Result<ToolResult> {
-    let Some((registry_path, db)) =
-        open_project_registry_read_only(global_db).await?
-    else {
+    let Some((registry_path, db)) = open_project_registry_read_only(global_db).await? else {
         return Ok(project_registry_result(
             cg,
             &args,

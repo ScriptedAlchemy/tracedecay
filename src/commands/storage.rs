@@ -391,7 +391,10 @@ pub(crate) async fn handle_list(all: bool) -> tracedecay::errors::Result<()> {
     );
     if !token_errors.is_empty() {
         eprintln!();
-        eprintln!("Token totals could not be read for {} project(s):", token_errors.len());
+        eprintln!(
+            "Token totals could not be read for {} project(s):",
+            token_errors.len()
+        );
         for error in &token_errors {
             eprintln!("  {error}");
         }
