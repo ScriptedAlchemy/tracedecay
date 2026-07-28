@@ -116,10 +116,13 @@ suite.
   batch of repairs included — are verified only by scoped, contended local runs.
   Nothing in that batch may be reported as CI-validated.
 - Commit `9e3ca9fd2` deleted 124 first-party tests, 75 of which cover behavior
-  that still ships, and three of those intersect claims recorded as delivered.
-  `GAP-LEDGER-PR8-PR14.md` records them as verification-coverage corrections
-  rather than retractions, together with the six instances of gates that
-  attested to something they never checked.
+  that still ships. `GAP-LEDGER-PR8-PR14.md` records them as verification-
+  coverage corrections rather than retractions, together with the seven
+  instances of gates that attested to something they never checked. The
+  restoration completed on 2026-07-28 across five commit groups, each with a
+  falsifiability probe; one leg — a generation rebuild after reopen — remains
+  open, and one earlier finding was corrected because the coverage it called
+  lost had in fact been migrated in-crate.
 
 Completed-slice names are historical implementation evidence, not instructions
 to recreate a type, file layout, fixture filename, milestone, or gate. A deleted
@@ -132,9 +135,12 @@ be rebuilt.
 
 That rule protects deleted scaffolds, not deleted assertions. A direct test that
 covered retained shipping behavior is exactly the "missing direct regression"
-case above, so the 2026-07-24 deletions are a restoration backlog against
-known-good prior coverage. Restoring them changes no delivered claim and
-authorizes no reimplementation of the behavior they asserted.
+case above, so the 2026-07-24 deletions were a restoration backlog against
+known-good prior coverage, worked off on 2026-07-28. Restoring them changed no
+delivered claim and authorized no reimplementation of the behavior they
+asserted. The converse also holds and cost this audit one wrong finding: a
+deleted test *path* is not a deleted assertion, so establish that coverage did
+not simply move before filing it as lost.
 
 ## Delivery rules and practical safety baseline
 
