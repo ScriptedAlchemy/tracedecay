@@ -687,27 +687,6 @@ pub(super) fn def_read() -> ToolDefinition {
     )
 }
 
-#[allow(dead_code)] // Plan 21 file_dependents tool def — not yet registered
-pub(super) fn def_file_dependents() -> ToolDefinition {
-    def(
-        "tracedecay_file_dependents",
-        "File Dependents",
-        "List every indexed file that imports or otherwise depends on the \
-         given file. Path is interpreted relative to the project root. \
-         Useful for impact analysis on file-level changes.",
-        json!({
-            "type": "object",
-            "properties": {
-                "file": {
-                    "type": "string",
-                    "description": "Path to the file (relative to project root)."
-                }
-            },
-            "required": ["file"]
-        }),
-    )
-}
-
 pub(super) fn def_find_exact_symbol() -> ToolDefinition {
     def(
         "tracedecay_find_exact_symbol",
