@@ -2473,6 +2473,7 @@ fn now_micros() -> UtcMicros {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tracedecay_domain::RepositoryId;
 
     #[test]
     fn production_project_owner_grants_every_cataloged_git_read() {
