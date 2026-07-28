@@ -724,11 +724,37 @@ fn daemon_startup_health_detail(status: &serde_json::Value) -> String {
 }
 
 fn daemon_startup_health_ready(status: &serde_json::Value) -> bool {
-    status
+    let Some(storage) = status
         .get("storage_health")
-        .and_then(|storage| storage.get("quick_check_ok"))
+        .and_then(serde_json::Value::as_object)
+    else {
+        return false;
+    };
+    let mounted = storage
+        .get("canonical_db_path")
+        .and_then(serde_json::Value::as_str)
+        .is_some()
+        && storage
+            .get("daemon_owner_pid")
+            .and_then(serde_json::Value::as_u64)
+            .is_some()
+        && storage
+            .get("daemon_version")
+            .and_then(serde_json::Value::as_str)
+            .is_some();
+    let integrity_failed = storage
+        .get("quick_check_ok")
         .and_then(serde_json::Value::as_bool)
-        == Some(true)
+        == Some(false)
+        || storage
+            .get("quick_check_error")
+            .and_then(serde_json::Value::as_str)
+            .is_some()
+        || storage
+            .get("authority_audit_ok")
+            .and_then(serde_json::Value::as_bool)
+            == Some(false);
+    mounted && !integrity_failed
 }
 
 fn daemon_admission_args() -> serde_json::Value {
@@ -741,8 +767,8 @@ fn daemon_admission_args() -> serde_json::Value {
 fn daemon_runtime_args() -> serde_json::Value {
     serde_json::json!({
         "format": "json",
-        "authority_audit": true,
-        "doctor_report": true,
+        "authority_audit": false,
+        "doctor_report": false,
         "session_ingest_health": false,
     })
 }

@@ -1186,13 +1186,13 @@ fn selected_not_downloaded_is_offline_healthy_with_retry_guidance() {
 }
 
 #[test]
-fn daemon_runtime_request_enables_authority_audit() {
+fn daemon_runtime_request_keeps_startup_probe_bounded() {
     assert_eq!(
         super::daemon_runtime_args(),
         serde_json::json!({
             "format": "json",
-            "authority_audit": true,
-            "doctor_report": true,
+            "authority_audit": false,
+            "doctor_report": false,
             "session_ingest_health": false,
         })
     );
@@ -1832,6 +1832,9 @@ fn doctor_result_preserves_daemon_and_storage_errors() {
 fn daemon_startup_health_gates_only_current_project_storage() {
     let healthy = serde_json::json!({
         "storage_health": {
+            "canonical_db_path": "/profile/project.db",
+            "daemon_owner_pid": 1234,
+            "daemon_version": "0.0.67+test",
             "quick_check_ok": true,
             "quick_check_error": null
         },
@@ -1850,8 +1853,30 @@ fn daemon_startup_health_gates_only_current_project_storage() {
     );
     assert_eq!(super::daemon_startup_health_detail(&healthy), "storage=ok");
 
+    let bounded_probe = serde_json::json!({
+        "storage_health": {
+            "canonical_db_path": "/profile/project.db",
+            "daemon_owner_pid": 1234,
+            "daemon_version": "0.0.67+test",
+            "quick_check_ok": null,
+            "quick_check_error": null,
+            "authority_audit_ok": null
+        }
+    });
+    assert!(
+        super::daemon_startup_health_ready(&bounded_probe),
+        "mounted daemon telemetry is operationally ready while exhaustive integrity audits remain pending"
+    );
+    assert_eq!(
+        super::daemon_startup_health_detail(&bounded_probe),
+        "storage=quick_check_pending"
+    );
+
     let migrating = serde_json::json!({
         "storage_health": {
+            "canonical_db_path": "/profile/project.db",
+            "daemon_owner_pid": 1234,
+            "daemon_version": "0.0.67+test",
             "quick_check_error": "project_store_schema_unsupported"
         }
     });
@@ -2073,11 +2098,11 @@ fn daemon_startup_health_classifies_sqlite_corruption_spellings_as_terminal() {
 }
 
 #[test]
-fn doctor_runtime_requests_authority_and_report_without_cold_route() {
+fn startup_runtime_probe_defers_exhaustive_audits() {
     let args = super::daemon_runtime_args();
 
-    assert_eq!(args["authority_audit"], serde_json::json!(true));
-    assert_eq!(args["doctor_report"], serde_json::json!(true));
+    assert_eq!(args["authority_audit"], serde_json::json!(false));
+    assert_eq!(args["doctor_report"], serde_json::json!(false));
     assert_eq!(args["session_ingest_health"], serde_json::json!(false));
 }
 
