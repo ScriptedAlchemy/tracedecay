@@ -48,6 +48,16 @@ jobs:
         working-directory: dashboard
         run: npm run build
 
+      # `build.rs` writes this stamp when it drives the npm build; the direct
+      # npm build above skips it, so reproduce the exact stamp with the same
+      # Rust module. Downstream consumers (dogfood, freshness checks) require
+      # the artifact to ship a stamp that truthfully matches these sources.
+      - name: Write dashboard source stamp
+        run: |
+          rustc --edition 2024 -O build-support/write_dashboard_stamp.rs \
+            -o "${RUNNER_TEMP}/write-dashboard-stamp"
+          "${RUNNER_TEMP}/write-dashboard-stamp" . > dashboard/app-dist/.source-stamp
+
       - name: Test dashboard bundle guard
         run: bash tests/dashboard_bundle_check_test.sh
 
@@ -166,6 +176,10 @@ jobs:
 
   release-version-drift:
     name: Release Version Drift
+    # The dogfood command contract test below exercises the checkout's built
+    # dashboard bundle and its .source-stamp, so this job consumes the same
+    # artifact every Rust job uses instead of rebuilding the dashboard.
+    needs: dashboard-assets
     # Also runs on push so the workflow-contract tests below actually protect
     # master, which is the branch they exist to protect. `on.push.branches` is
     # already limited to master and feature/holographic-memory, and the
@@ -178,6 +192,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+
+      - name: Download dashboard artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dashboard-app-dist
+          path: dashboard/app-dist
 
       - uses: actions/setup-python@v6
         with:
