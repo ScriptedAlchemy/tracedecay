@@ -813,6 +813,9 @@ fn merge_storage_report_page(
     report
         .code_generation_retention
         .extend(page.code_generation_retention);
+    report
+        .code_generation_retention_availability
+        .extend(page.code_generation_retention_availability);
     report.unregistered_dir_count = report
         .unregistered_dir_count
         .saturating_add(page.unregistered_dir_count);
@@ -918,6 +921,17 @@ async fn handle_migrate_storage_report(
                 generation.generation_file,
                 generation.size_bytes,
                 generation.sealed_at_micros
+            );
+        }
+    }
+    for availability in &report.code_generation_retention_availability {
+        if availability.state
+            == tracedecay::retention::storage_report::StorageReportAvailabilityState::Unavailable
+        {
+            println!(
+                "  code-index retention unavailable for {}: {}",
+                availability.project_id,
+                availability.reason.as_deref().unwrap_or("unspecified")
             );
         }
     }

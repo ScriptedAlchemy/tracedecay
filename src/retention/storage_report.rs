@@ -36,6 +36,8 @@ const GLOBAL_DB_FILENAME: &str = "global.db";
 const PROJECT_CURSOR_PREFIX: &str = "projects:";
 const DIRECTORY_CURSOR_PREFIX: &str = "directories:";
 pub const MAX_STORAGE_REPORT_PAGE_LIMIT: usize = 64;
+const CODE_GENERATION_RETENTION_DIGEST_SCAN_MAX_BYTES: u64 = 32 * 1024 * 1024;
+const CODE_GENERATIONS_DIRECTORY: &str = "code-generations-v1";
 
 /// How long a size sample will wait on a lock before giving up and reporting
 /// the store's free-page fields as unsampled. A live daemon writing to the
@@ -66,6 +68,8 @@ pub struct StorageReport {
     pub profile_root: String,
     pub stores: Vec<StoreSizeReportEntry>,
     pub code_generation_retention: Vec<CodeGenerationRetentionDryRunEntry>,
+    #[serde(default)]
+    pub code_generation_retention_availability: Vec<CodeGenerationRetentionAvailabilityEntry>,
     pub unregistered_dir_count: usize,
     pub unregistered_bytes: u64,
     pub global_db_bytes: u64,
@@ -111,6 +115,22 @@ pub struct CodeGenerationRetentionDryRunEntry {
     pub collectable_generations: Vec<CodeGenerationRetentionGenerationV1>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StorageReportAvailabilityState {
+    Available,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct CodeGenerationRetentionAvailabilityEntry {
+    pub project_id: String,
+    pub store_root: String,
+    pub state: StorageReportAvailabilityState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
 /// Builds the report by reading `global.db`'s `code_projects` table and every
 /// registered project's graph database, then scanning `projects/` bottom-up
 /// for directories with no matching registry row. Read-only throughout.
@@ -120,6 +140,7 @@ pub async fn build_storage_report(profile_root: &Path) -> crate::errors::Result<
     let mut registered_ids = HashSet::new();
     let mut stores = Vec::new();
     let mut code_generation_retention = Vec::new();
+    let mut code_generation_retention_availability = Vec::new();
 
     if global_db_path.exists() {
         // The snapshot layer creates only the final scratch component, so its
@@ -157,6 +178,7 @@ pub async fn build_storage_report(profile_root: &Path) -> crate::errors::Result<
                 &canonical_root,
                 &mut stores,
                 &mut code_generation_retention,
+                &mut code_generation_retention_availability,
             )?;
         }
     }
@@ -169,6 +191,7 @@ pub async fn build_storage_report(profile_root: &Path) -> crate::errors::Result<
         profile_root: profile_root.display().to_string(),
         stores,
         code_generation_retention,
+        code_generation_retention_availability,
         unregistered_dir_count,
         unregistered_bytes,
         global_db_bytes,
@@ -223,6 +246,7 @@ pub async fn build_storage_report_page_from_registered_global_db(
                     &project.canonical_root,
                     &mut report.stores,
                     &mut report.code_generation_retention,
+                    &mut report.code_generation_retention_availability,
                 )?;
             }
             Ok(report)
@@ -330,18 +354,21 @@ pub fn build_project_storage_report(
     })?;
     let mut stores = Vec::new();
     let mut code_generation_retention = Vec::new();
+    let mut code_generation_retention_availability = Vec::new();
     append_project_report(
         profile_root,
         project_id,
         &canonical_root.to_string_lossy(),
         &mut stores,
         &mut code_generation_retention,
+        &mut code_generation_retention_availability,
     )?;
     let global_db_path = profile_root.join(GLOBAL_DB_FILENAME);
     Ok(StorageReport {
         profile_root: profile_root.display().to_string(),
         stores,
         code_generation_retention,
+        code_generation_retention_availability,
         unregistered_dir_count: 0,
         unregistered_bytes: 0,
         global_db_bytes: std::fs::metadata(global_db_path).map_or(0, |metadata| metadata.len()),
@@ -355,6 +382,7 @@ fn append_project_report(
     canonical_root: &str,
     stores: &mut Vec<StoreSizeReportEntry>,
     code_generation_retention: &mut Vec<CodeGenerationRetentionDryRunEntry>,
+    code_generation_retention_availability: &mut Vec<CodeGenerationRetentionAvailabilityEntry>,
 ) -> crate::errors::Result<()> {
     let data_root = profile_root.join("projects").join(project_id);
     let graph_db_path = data_root.join(crate::config::DB_FILENAME);
@@ -373,6 +401,18 @@ fn append_project_report(
         .join("active-code-generation-v1.json")
         .is_file()
     {
+        return Ok(());
+    }
+    if generation_digest_scan_exceeds_budget(
+        &code_index_store_root,
+        CODE_GENERATION_RETENTION_DIGEST_SCAN_MAX_BYTES,
+    )? {
+        code_generation_retention_availability.push(CodeGenerationRetentionAvailabilityEntry {
+            project_id: project_id.to_owned(),
+            store_root: code_index_store_root.display().to_string(),
+            state: StorageReportAvailabilityState::Unavailable,
+            reason: Some("generation_digest_scan_budget_exceeded".to_owned()),
+        });
         return Ok(());
     }
     let readable_sources =
@@ -403,7 +443,43 @@ fn append_project_report(
         collectable_generation_bytes: plan.collectable_generation_bytes(),
         collectable_generations: plan.collectable_generations,
     });
+    code_generation_retention_availability.push(CodeGenerationRetentionAvailabilityEntry {
+        project_id: project_id.to_owned(),
+        store_root: code_index_store_root.display().to_string(),
+        state: StorageReportAvailabilityState::Available,
+        reason: None,
+    });
     Ok(())
+}
+
+fn generation_digest_scan_exceeds_budget(
+    store_root: &Path,
+    maximum_bytes: u64,
+) -> crate::errors::Result<bool> {
+    let entries = std::fs::read_dir(store_root.join(CODE_GENERATIONS_DIRECTORY))
+        .map_err(|error| report_error("list code-generation retention files", error))?;
+    let mut bytes = 0u64;
+    for entry in entries {
+        let entry =
+            entry.map_err(|error| report_error("read code-generation retention entry", error))?;
+        if !entry
+            .file_type()
+            .map_err(|error| report_error("read code-generation retention file type", error))?
+            .is_file()
+        {
+            continue;
+        }
+        bytes = bytes.saturating_add(
+            entry
+                .metadata()
+                .map_err(|error| report_error("size code-generation retention file", error))?
+                .len(),
+        );
+        if bytes > maximum_bytes {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// A store's sampled size. `total_bytes` is always available (filesystem
@@ -700,5 +776,38 @@ mod tests {
         assert_eq!(report.stores[0].canonical_root, "/repos/a");
         assert!(report.code_generation_retention.is_empty());
         assert!(!profile_root.join(GLOBAL_DB_FILENAME).exists());
+    }
+
+    #[test]
+    fn oversized_generation_digest_scan_is_typed_unavailable() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let profile_root = tmp.path().join("profile");
+        std::fs::create_dir_all(&profile_root).unwrap();
+        seed_graph_db(&profile_root, "proj_a");
+        let canonical_root = Path::new("/repos/a");
+        let data_root = profile_root.join("projects").join("proj_a");
+        let store_root =
+            scoped_code_index_store_root(&data_root.join("code-index-v1"), canonical_root);
+        let generations = store_root.join("code-generations-v1");
+        std::fs::create_dir_all(&generations).unwrap();
+        std::fs::write(store_root.join("active-code-generation-v1.json"), b"{}").unwrap();
+        let oversized = std::fs::File::create(generations.join("generation-oversized.json"))
+            .expect("oversized generation fixture");
+        oversized
+            .set_len(64 * 1024 * 1024)
+            .expect("sparse oversized generation");
+
+        let report = build_project_storage_report(&profile_root, "proj_a", canonical_root).unwrap();
+        let payload = serde_json::to_value(report).unwrap();
+
+        assert_eq!(
+            payload["code_generation_retention_availability"][0]["state"], "unavailable",
+            "an intentionally skipped digest scan must not look like an empty retention plan: \
+             {payload}"
+        );
+        assert_eq!(
+            payload["code_generation_retention_availability"][0]["reason"],
+            "generation_digest_scan_budget_exceeded"
+        );
     }
 }

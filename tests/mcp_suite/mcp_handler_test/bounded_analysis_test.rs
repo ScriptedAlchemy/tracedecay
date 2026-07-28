@@ -43,7 +43,9 @@ fn write_wide_cycle(project: &std::path::Path, module_count: usize, prefix: &str
     fs::create_dir_all(&source_dir).unwrap();
     let names: Vec<String> = (0..module_count)
         .map(|index| {
-            format!("{prefix}_deeply_nested_workspace_module_with_a_realistically_long_name_{index:04}")
+            format!(
+                "{prefix}_deeply_nested_workspace_module_with_a_realistically_long_name_{index:04}"
+            )
         })
         .collect();
     let mut lib = String::new();
@@ -256,6 +258,53 @@ async fn unused_imports_pages_with_continuation_evidence() {
             .filter_map(|import| import["id"].as_str())
             .all(|id| !first_ids.contains(&id)),
         "continuation must not repeat the first page: {second}"
+    );
+}
+
+/// The default page is also a declared bound. A caller that omits `limit`
+/// must not receive a transport handle instead of the first resumable page.
+#[tokio::test]
+async fn unused_imports_default_page_fits_the_response_budget() {
+    let dir = test_temp_dir();
+    let project = dir.path();
+    let source_dir = project.join("src");
+    fs::create_dir_all(&source_dir).unwrap();
+    let names = (0..120)
+        .map(|index| format!("realistically_long_workspace_module_{index:03}"))
+        .collect::<Vec<_>>();
+    let mut lib = String::new();
+    for name in &names {
+        let _ = writeln!(lib, "pub mod {name};");
+    }
+    fs::write(source_dir.join("lib.rs"), lib).unwrap();
+    for name in names {
+        fs::write(
+            source_dir.join(format!("{name}.rs")),
+            "use std::collections::BTreeMap;\nuse std::collections::HashMap;\n\
+             pub fn used() -> HashMap<u32, u32> { HashMap::new() }\n",
+        )
+        .unwrap();
+    }
+    let (cg, _env) = init_test_project(project).await;
+    cg.index_all().await.unwrap();
+
+    let result = handle_tool_call(
+        &cg,
+        "tracedecay_unused_imports",
+        json!({"format": "json"}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let text = extract_text(&result.value);
+
+    assert_not_truncated(text, "tracedecay_unused_imports");
+    let payload: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(payload["complete"], json!(false), "payload: {payload}");
+    assert!(
+        payload["next_cursor"].as_str().is_some(),
+        "the default page must remain resumable: {payload}"
     );
 }
 
