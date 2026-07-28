@@ -345,19 +345,9 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
                             // in it: slugifying stripped the punctuation and cut it
                             // mid-word, and a message happening to contain "stale"
                             // steered rename candidates down the wrong branch.
-                            // The bounded human-readable message rides in `detail`
-                            // to LSP callers; the event line keeps the full text
-                            // on the daemon's stderr channel.
-                            eprintln!(
-                                "[tracedecay] event=analyzer_start_failed error={error}"
-                            );
-                            LspSemanticOperationOutcome::Partial {
-                                value: serde_json::Value::Null,
-                                coverage: "analyzer-start-failed".to_owned(),
-                                detail: LspSemanticOperationOutcome::bounded_detail(
-                                    &error.to_string(),
-                                ),
-                            }
+                            // Callers receive only a static typed template; the
+                            // daemon-local event keeps the full operational error.
+                            analyzer_start_failure(&error)
                         }
                     }
                 }
@@ -384,6 +374,15 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
     }
 }
 
+fn analyzer_start_failure(error: &TraceDecayError) -> LspSemanticOperationOutcome {
+    eprintln!("[tracedecay] event=analyzer_start_failed error={error}");
+    LspSemanticOperationOutcome::Partial {
+        value: serde_json::Value::Null,
+        coverage: "analyzer-start-failed".to_owned(),
+        detail: Some(LspSemanticOperationOutcome::ANALYZER_START_FAILED_DETAIL),
+    }
+}
+
 fn semantic_operation_outcome(
     result: std::result::Result<serde_json::Value, LspSemanticRequestError>,
 ) -> LspSemanticOperationOutcome {
@@ -392,11 +391,31 @@ fn semantic_operation_outcome(
         Err(LspSemanticRequestError::Remote {
             code: Some(-32601), ..
         }) => LspSemanticOperationOutcome::Unavailable,
-        Err(error) => LspSemanticOperationOutcome::Partial {
-            value: serde_json::Value::Null,
-            coverage: error.coverage_token().to_owned(),
-            detail: LspSemanticOperationOutcome::bounded_detail(&error.to_string()),
-        },
+        Err(error) => {
+            eprintln!("[tracedecay] event=analyzer_semantic_request_failed error={error}");
+            let detail = match &error {
+                LspSemanticRequestError::Cancelled => {
+                    LspSemanticOperationOutcome::ANALYZER_CANCELLED_DETAIL
+                }
+                LspSemanticRequestError::TimedOut => {
+                    LspSemanticOperationOutcome::ANALYZER_TIMEOUT_DETAIL
+                }
+                LspSemanticRequestError::Remote { .. } => {
+                    LspSemanticOperationOutcome::ANALYZER_REMOTE_ERROR_DETAIL
+                }
+                LspSemanticRequestError::Transport { .. } => {
+                    LspSemanticOperationOutcome::ANALYZER_TRANSPORT_FAILED_DETAIL
+                }
+                LspSemanticRequestError::InvalidResponse { .. } => {
+                    LspSemanticOperationOutcome::ANALYZER_INVALID_RESPONSE_DETAIL
+                }
+            };
+            LspSemanticOperationOutcome::Partial {
+                value: serde_json::Value::Null,
+                coverage: error.coverage_token().to_owned(),
+                detail: Some(detail),
+            }
+        }
     }
 }
 
@@ -1081,6 +1100,93 @@ fn command_candidates(command: &str) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::diagnostics::lsp::adapters::DiagnosticMode;
+
+    fn assert_safe_partial_detail(
+        outcome: LspSemanticOperationOutcome,
+        expected_coverage: &str,
+        expected_detail: &str,
+    ) {
+        let LspSemanticOperationOutcome::Partial {
+            coverage, detail, ..
+        } = outcome
+        else {
+            panic!("expected partial semantic outcome");
+        };
+        assert_eq!(coverage, expected_coverage);
+        assert_eq!(detail.as_deref(), Some(expected_detail));
+        for forbidden in [
+            "bearer-secret",
+            "YWxpY2U6c2VjcmV0",
+            "alice:hunter2",
+            "bob:password",
+            "/home/alice",
+            r"C:\Users\alice",
+            "密碼",
+            "🔐",
+        ] {
+            assert!(
+                !detail
+                    .as_deref()
+                    .expect("typed analyzer failure detail")
+                    .contains(forbidden),
+                "caller detail leaked {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn analyzer_failure_details_never_copy_raw_errors() {
+        let sensitive = concat!(
+            "stderr first line\n",
+            "Authorization: Bearer bearer-secret\n",
+            "Authorization: Basic YWxpY2U6c2VjcmV0\n",
+            "https://alice:hunter2@example.test/private\n",
+            "file://bob:password@localhost/home/bob/private.rs\n",
+            "/home/alice/.ssh/id_rsa\n",
+            r"C:\Users\alice\AppData\secret.txt",
+            "\nUTF-8: 密碼 🔐"
+        );
+
+        assert_safe_partial_detail(
+            analyzer_start_failure(&TraceDecayError::Config {
+                message: sensitive.to_owned(),
+            }),
+            "analyzer-start-failed",
+            LspSemanticOperationOutcome::ANALYZER_START_FAILED_DETAIL,
+        );
+        assert_safe_partial_detail(
+            semantic_operation_outcome(Err(LspSemanticRequestError::Remote {
+                code: Some(-32603),
+                message: sensitive.to_owned(),
+            })),
+            "analyzer-remote-error",
+            LspSemanticOperationOutcome::ANALYZER_REMOTE_ERROR_DETAIL,
+        );
+        assert_safe_partial_detail(
+            semantic_operation_outcome(Err(LspSemanticRequestError::Transport {
+                class: sensitive.to_owned(),
+            })),
+            "analyzer-transport-failed",
+            LspSemanticOperationOutcome::ANALYZER_TRANSPORT_FAILED_DETAIL,
+        );
+        assert_safe_partial_detail(
+            semantic_operation_outcome(Err(LspSemanticRequestError::InvalidResponse {
+                class: sensitive.to_owned(),
+            })),
+            "analyzer-invalid-response",
+            LspSemanticOperationOutcome::ANALYZER_INVALID_RESPONSE_DETAIL,
+        );
+        assert_safe_partial_detail(
+            semantic_operation_outcome(Err(LspSemanticRequestError::TimedOut)),
+            "analyzer-timeout",
+            LspSemanticOperationOutcome::ANALYZER_TIMEOUT_DETAIL,
+        );
+        assert_safe_partial_detail(
+            semantic_operation_outcome(Err(LspSemanticRequestError::Cancelled)),
+            "analyzer-cancelled",
+            LspSemanticOperationOutcome::ANALYZER_CANCELLED_DETAIL,
+        );
+    }
 
     #[test]
     fn semantic_remote_method_missing_remains_unavailable() {

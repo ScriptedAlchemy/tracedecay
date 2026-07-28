@@ -875,11 +875,14 @@ fn graph_projection_outcome(result: Result<GraphProjection>) -> LspSemanticOpera
             coverage: "graph-results-truncated".to_owned(),
             detail: None,
         },
-        Err(error) => LspSemanticOperationOutcome::Partial {
-            value: Value::Null,
-            coverage: "graph-read-failed".to_owned(),
-            detail: LspSemanticOperationOutcome::bounded_detail(&error.to_string()),
-        },
+        Err(error) => {
+            eprintln!("[tracedecay] event=graph_semantic_read_failed error={error}");
+            LspSemanticOperationOutcome::Partial {
+                value: Value::Null,
+                coverage: "graph-read-failed".to_owned(),
+                detail: Some(LspSemanticOperationOutcome::GRAPH_READ_FAILED_DETAIL),
+            }
+        }
     }
 }
 
@@ -1373,6 +1376,47 @@ mod tests {
                     message: message.to_owned(),
                 }))),
                 "graph-read-failed"
+            );
+        }
+    }
+
+    #[test]
+    fn graph_failure_detail_never_copies_raw_errors() {
+        let sensitive = concat!(
+            "graph stderr\n",
+            "Authorization: Bearer bearer-secret\n",
+            "file://alice:hunter2@localhost/home/alice/private.rs\n",
+            r"C:\Users\alice\private.rs",
+            "\nUTF-8: 密碼 🔐"
+        );
+        let LspSemanticOperationOutcome::Partial {
+            coverage, detail, ..
+        } = graph_projection_outcome(Err(TraceDecayError::Config {
+            message: sensitive.to_owned(),
+        }))
+        else {
+            panic!("expected graph read failure");
+        };
+
+        assert_eq!(coverage, "graph-read-failed");
+        assert_eq!(
+            detail.as_deref(),
+            Some(LspSemanticOperationOutcome::GRAPH_READ_FAILED_DETAIL)
+        );
+        for forbidden in [
+            "bearer-secret",
+            "alice:hunter2",
+            "/home/alice",
+            r"C:\Users\alice",
+            "密碼",
+            "🔐",
+        ] {
+            assert!(
+                !detail
+                    .as_deref()
+                    .expect("typed graph failure detail")
+                    .contains(forbidden),
+                "caller detail leaked {forbidden}"
             );
         }
     }

@@ -468,46 +468,24 @@ pub enum LspSemanticOperationOutcome {
         /// Short stable identifier callers match on (e.g.
         /// `analyzer-start-failed`); never carries free-form text.
         coverage: String,
-        /// Bounded human-readable failure message for the coverage token,
-        /// surfaced verbatim to LSP callers in the JSON-RPC error `data`.
-        detail: Option<String>,
+        /// Allowlisted static failure template surfaced to LSP callers in the
+        /// JSON-RPC error `data`; never carries analyzer or graph error text.
+        detail: Option<&'static str>,
     },
     RenameCandidate(RenameCandidateResult),
     Unavailable,
 }
 
 impl LspSemanticOperationOutcome {
-    /// Maximum bytes of human-readable failure text carried in
-    /// [`LspSemanticOperationOutcome::Partial::detail`].
-    const MAX_PARTIAL_DETAIL_BYTES: usize = 256;
-
-    /// Bounds a human-readable failure message for the `Partial.detail`
-    /// channel: one line, capped at a UTF-8 boundary; empty input yields
-    /// `None`.
-    pub fn bounded_detail(message: &str) -> Option<String> {
-        let message = message.trim();
-        if message.is_empty() {
-            return None;
-        }
-        let mut detail: String = message
-            .chars()
-            .map(|character| {
-                if character.is_control() {
-                    ' '
-                } else {
-                    character
-                }
-            })
-            .collect();
-        if detail.len() > Self::MAX_PARTIAL_DETAIL_BYTES {
-            let mut end = Self::MAX_PARTIAL_DETAIL_BYTES;
-            while !detail.is_char_boundary(end) {
-                end -= 1;
-            }
-            detail.truncate(end);
-        }
-        Some(detail)
-    }
+    pub const ANALYZER_START_FAILED_DETAIL: &'static str = "Analyzer failed to start.";
+    pub const ANALYZER_CANCELLED_DETAIL: &'static str = "Analyzer request was cancelled.";
+    pub const ANALYZER_TIMEOUT_DETAIL: &'static str = "Analyzer request timed out.";
+    pub const ANALYZER_REMOTE_ERROR_DETAIL: &'static str =
+        "Analyzer request failed with a remote error.";
+    pub const ANALYZER_TRANSPORT_FAILED_DETAIL: &'static str = "Analyzer transport failed.";
+    pub const ANALYZER_INVALID_RESPONSE_DETAIL: &'static str =
+        "Analyzer returned an invalid response.";
+    pub const GRAPH_READ_FAILED_DETAIL: &'static str = "Graph semantic read failed.";
 }
 
 /// Canonical asynchronous owner for one retained standard analyzer request.
@@ -817,7 +795,7 @@ fn project_semantic_outcome(
             SemanticProviderOutcome::Partial {
                 value,
                 coverage,
-                detail,
+                detail: detail.map(str::to_owned),
             }
         }
         LspSemanticOperationOutcome::RenameCandidate(value) => {
@@ -1641,8 +1619,68 @@ mod tests {
         ContextProducerState, ContextProjectionEnvelope, ContextProjectionIdentity,
         ContextProjectionKind, ContextProjectionRegistration,
     };
+    use super::super::rpc::{response_value, semantic_response_value};
     use serde_json::json;
     use std::sync::atomic::AtomicBool;
+
+    #[test]
+    fn serialized_semantic_failures_use_only_static_optional_detail() {
+        let templates = [
+            LspSemanticOperationOutcome::ANALYZER_START_FAILED_DETAIL,
+            LspSemanticOperationOutcome::ANALYZER_CANCELLED_DETAIL,
+            LspSemanticOperationOutcome::ANALYZER_TIMEOUT_DETAIL,
+            LspSemanticOperationOutcome::ANALYZER_REMOTE_ERROR_DETAIL,
+            LspSemanticOperationOutcome::ANALYZER_TRANSPORT_FAILED_DETAIL,
+            LspSemanticOperationOutcome::ANALYZER_INVALID_RESPONSE_DETAIL,
+            LspSemanticOperationOutcome::GRAPH_READ_FAILED_DETAIL,
+        ];
+        for detail in templates {
+            let failure = response_value(
+                GatewayResponse::Partial {
+                    value: SemanticResponse::Hover(None),
+                    coverage: "fixed-coverage".to_owned(),
+                    detail: Some(detail.to_owned()),
+                },
+                semantic_response_value,
+            )
+            .expect_err("partial semantic response");
+            assert_eq!(failure.code, -32802);
+            assert_eq!(failure.data["retriggerRequest"], true);
+            assert_eq!(failure.data["detail"], detail);
+
+            let serialized = serde_json::to_string(&failure.data).expect("serialized error data");
+            for forbidden in [
+                "bearer-secret",
+                "YWxpY2U6c2VjcmV0",
+                "alice:hunter2",
+                "bob:password",
+                "file://",
+                "/home/alice",
+                r"C:\Users\alice",
+                "密碼",
+                "🔐",
+                "\\n",
+            ] {
+                assert!(
+                    !serialized.contains(forbidden),
+                    "serialized caller detail leaked {forbidden}"
+                );
+            }
+        }
+
+        let failure = response_value(
+            GatewayResponse::Partial {
+                value: SemanticResponse::Hover(None),
+                coverage: "fixed-coverage".to_owned(),
+                detail: None,
+            },
+            semantic_response_value,
+        )
+        .expect_err("partial semantic response");
+        assert_eq!(failure.code, -32802);
+        assert_eq!(failure.data["retriggerRequest"], true);
+        assert!(failure.data.get("detail").is_none());
+    }
 
     struct Diagnostics;
 
