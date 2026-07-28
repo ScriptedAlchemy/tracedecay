@@ -20,7 +20,7 @@ pub use cycle_production::{
 };
 pub use cycle_runtime::{
     Pr12CanonicalFeedbackResultV1, Pr12FeedbackCycleInvocation, Pr12FeedbackCycleLspInput,
-    Pr12FeedbackCycleLspRegistration, Pr12FeedbackCycleRuntime, Pr12FeedbackCycleRuntimeError,
-    Pr12FeedbackFindingHandlesV1, open_pr12_feedback_cycle_runtime,
+    Pr12FeedbackCycleRuntime, Pr12FeedbackCycleRuntimeError, Pr12FeedbackFindingHandlesV1,
+    open_pr12_feedback_cycle_runtime,
 };
 pub use production::ProductionFeedbackRuntimeStateV1;

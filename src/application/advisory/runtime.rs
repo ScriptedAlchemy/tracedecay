@@ -12,14 +12,13 @@ use std::time::Instant;
 use thiserror::Error;
 use tracedecay_application::feedback::{
     CiFailureLocalizationPort, CiFailureLocalizationPortOutcomeV1, FeedbackCompletedPublicationV1,
-    FeedbackCycleAdvisoryV1, FeedbackCycleExecutionRequest, FeedbackPortFuture,
-    GitHubReviewReadRequestV1, ProximityEvaluationRequestV1,
+    FeedbackCycleAdvisoryV1, FeedbackCycleExecutionRequest, GitHubReviewReadRequestV1,
+    ProximityEvaluationRequestV1,
 };
 use tracedecay_application::{
     AdvisoryFindingContributionBatchV1, AdvisoryFindingContributorV1,
     AdvisoryFindingValidityWindowV1, ApplicationContractError, RequestContext, ResolvedScope,
 };
-use tracedecay_domain::RetrievalAnchorId;
 use tracedecay_domain::feedback::{
     CiFailureCoverageV1, CiFailureLocalizationResultV1, CiFailureLocalizationStateV1,
     FeedbackFindingV1, FeedbackScopeV1, GitHubReviewIngressProviderOutcomeV1,
@@ -46,10 +45,7 @@ use super::ci_runtime::{
     CiExactEvidenceAuthorityV1, CiReadOnlyProviderArchiveV1, ConcreteCiFailureLocalizationOwnerV1,
     ProductionCiFailureDiscoveryOutcomeV1,
 };
-use super::github_runtime::{
-    GitHubReviewBodyEvidenceAuthorityV1, GitHubReviewBodyReadOutcomeV1,
-    GitHubSourceAccessAuthorityV1,
-};
+use super::github_runtime::GitHubSourceAccessAuthorityV1;
 use super::proximity_runtime::{
     ConcretePr13ProximityRuntimeOwnerV1, Pr13ProximityRuntimeOutcomeV1,
 };
@@ -383,23 +379,6 @@ where
         &self,
     ) -> Arc<dyn Plan26FeedbackObservationEmitterV1 + Send + Sync> {
         Arc::clone(&self.observations)
-    }
-
-    /// Expands retained GitHub prose only through the mounted project
-    /// authority, which rechecks exact scope and current source access.
-    pub fn expand_github_review_body<'a>(
-        &'a self,
-        context: &'a RequestContext,
-        request: &'a GitHubReviewReadRequestV1,
-        body_anchor: &'a RetrievalAnchorId,
-    ) -> FeedbackPortFuture<'a, GitHubReviewBodyReadOutcomeV1>
-    where
-        GA: GitHubReviewBodyEvidenceAuthorityV1,
-    {
-        match self.github.as_ref() {
-            Some(github) => github.expand_retained_body(context, request, body_anchor),
-            None => Box::pin(async { GitHubReviewBodyReadOutcomeV1::Unavailable }),
-        }
     }
 
     pub async fn run_once(

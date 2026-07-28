@@ -9,8 +9,7 @@ use tracedecay_store::{
     CompatibilityFactAddAliasV1, CompatibilityFactCurationBatchV1,
     CompatibilityFactCurationOperationV1, CompatibilityFactCurationReceiptV1,
     CompatibilityFactFeedbackHistoryQueryV1, CompatibilityFactFeedbackHistoryV1,
-    CompatibilityFactHistoryQueryV1, CompatibilityFactHistoryV1, CompatibilityFactLinkV1,
-    CompatibilityFactMergeCommandV1, CompatibilityFactMergeEntitiesV1,
+    CompatibilityFactLinkV1, CompatibilityFactMergeCommandV1, CompatibilityFactMergeEntitiesV1,
     CompatibilityFactMergeOutcomeV1, CompatibilityFactNormalizeTagsV1,
     CompatibilityFactRepairVectorV1, CompatibilityLegacyEntityTargetV1,
     CompatibilityMemoryRepairCommandV1, CompatibilityMemoryRepairStatsV1,
@@ -99,19 +98,6 @@ impl<A: FactCompatibilityStore> MemoryApplication<A> {
             });
         }
         Ok(detail)
-    }
-
-    pub async fn dashboard_history_v1(
-        &self,
-        fact_id: i64,
-        limit: usize,
-    ) -> Result<CompatibilityFactHistoryV1, MemoryApplicationError> {
-        self.get_compatibility_history(CompatibilityFactHistoryQueryV1::new(
-            self.legacy_compatibility_target(fact_id)?,
-            None,
-            limit,
-        )?)
-        .await
     }
 
     /// Numeric dashboard trust-history route retaining typed repair progress.
