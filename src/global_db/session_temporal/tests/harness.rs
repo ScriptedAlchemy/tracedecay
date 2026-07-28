@@ -249,6 +249,40 @@ impl RegisteredTemporalHarness {
             .expect("seed quarantined legacy source");
     }
 
+    /// Reopens the profile sessions store through the registry, so a test can
+    /// assert a property survives losing and re-acquiring the handle rather
+    /// than only rebuilding the objects layered over one.
+    pub(super) async fn remount(&self) -> Arc<RegisteredGlobalDb> {
+        self._registry
+            .profile_sessions()
+            .await
+            .expect("remounted profile sessions")
+    }
+
+    /// Every full-text sink the schema currently defines. Enumerated rather
+    /// than listed so a sink added later is swept without editing the test.
+    pub(super) async fn full_text_sinks(&self) -> Vec<String> {
+        let snapshot = self
+            .registered
+            .read_snapshot()
+            .await
+            .expect("registered read snapshot");
+        let mut rows = snapshot
+            .query(
+                "SELECT name FROM sqlite_master
+                 WHERE type = 'table' AND sql LIKE '%USING fts5%'
+                 ORDER BY name",
+                (),
+            )
+            .await
+            .expect("query full-text sinks");
+        let mut sinks = Vec::new();
+        while let Some(row) = rows.next().await.expect("full-text sink row") {
+            sinks.push(row.get::<String>(0).expect("sink name column"));
+        }
+        sinks
+    }
+
     pub(super) async fn count(&self, sql: &str) -> i64 {
         let snapshot = self
             .registered
