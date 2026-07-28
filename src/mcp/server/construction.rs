@@ -370,16 +370,23 @@ impl McpServerConstructionContext {
 
 #[cfg(test)]
 mod tests {
+    use std::process::Command;
+
     use super::*;
 
     #[tokio::test]
     async fn direct_context_installs_only_the_explicit_search_executor() {
-        let project = tempfile::tempdir_in(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .expect("repository parent"),
-        )
-        .expect("project");
+        let project = tempfile::tempdir().expect("project");
+        let git_init = Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(project.path())
+            .output()
+            .expect("git init");
+        assert!(
+            git_init.status.success(),
+            "git init failed: {}",
+            String::from_utf8_lossy(&git_init.stderr)
+        );
         let (cg, _runtime) = TraceDecay::init_test_fixture_with_registered_runtime(
             project.path(),
             "project.mcp-construction",

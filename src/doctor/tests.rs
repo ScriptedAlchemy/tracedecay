@@ -1193,7 +1193,7 @@ fn daemon_runtime_request_enables_authority_audit() {
             "format": "json",
             "authority_audit": true,
             "doctor_report": true,
-            "session_ingest_health": true,
+            "session_ingest_health": false,
         })
     );
 }
