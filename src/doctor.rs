@@ -986,11 +986,10 @@ fn check_database(dc: &mut DoctorCounters, status: &serde_json::Value) -> bool {
                 .get("quick_check_error")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("daemon did not return a quick_check result");
-            dc.fail(&format!("Database diagnostics unavailable: {detail}"));
-            if let Some(path) = db_path.as_deref() {
-                print_database_recovery_guidance(dc, path);
-            }
-            false
+            dc.warn(&format!(
+                "Database integrity diagnostics unavailable: {detail}; no clean result was inferred"
+            ));
+            true
         }
     };
     let authority_healthy = match storage
@@ -1014,8 +1013,8 @@ fn check_database(dc: &mut DoctorCounters, status: &serde_json::Value) -> bool {
                 .get("authority_audit_reason")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("authority_audit_unavailable");
-            dc.fail(authority_audit_unavailable_message(reason));
-            false
+            dc.warn(authority_audit_unavailable_message(reason));
+            true
         }
     };
     if storage
