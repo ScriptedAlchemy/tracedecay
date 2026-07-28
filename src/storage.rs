@@ -47,13 +47,13 @@ enum DurableAtomicWritePhase {
     AfterRename = 2,
 }
 
-fn inject_durable_atomic_write_fault(phase: DurableAtomicWritePhase) -> io::Result<()> {
+fn inject_durable_atomic_write_fault(_phase: DurableAtomicWritePhase) -> io::Result<()> {
     #[cfg(any(test, feature = "test-transport"))]
     if DURABLE_ATOMIC_WRITE_FAULT
-        .compare_exchange(phase as u8, 0, Ordering::SeqCst, Ordering::SeqCst)
+        .compare_exchange(_phase as u8, 0, Ordering::SeqCst, Ordering::SeqCst)
         .is_ok()
     {
-        return Err(io::Error::other(match phase {
+        return Err(io::Error::other(match _phase {
             DurableAtomicWritePhase::AfterTempSync => {
                 "injected durable atomic write failure after temp sync"
             }
