@@ -506,14 +506,10 @@ impl StoreRuntimeHandle {
         &self,
         operation: &'static str,
     ) -> Result<u64, StoreRuntimeRegistryFailure> {
-        if let Some(authority) = self.inner.database_authority.as_ref() {
-            authority
-                .require_active_write_scope(operation)
-                .map_err(|error| StoreRuntimeRegistryFailure::PhysicalRuntimeFailed {
-                    operation,
-                    message: error.to_string(),
-                })?;
-        }
+        // File identity is read authority, not write authority. Writable entry
+        // points revalidate the retained capability in
+        // `validate_database_write_authority`; read-only facades must remain
+        // usable after that writer scope is revoked.
         let current_file_identity = crate::sessions::source::sqlite_generation_identity(
             self.locator().path(),
         )
@@ -813,6 +809,21 @@ impl StoreRuntimeRegistry {
                         .flatten()
                 })
                 .unwrap_or(StoreRuntimeLookup::Missing { key: Box::new(key) }),
+        }
+    }
+
+    /// Returns an exact already-published runtime for a read-only facade.
+    ///
+    /// This does not revalidate or expose its retained writer authority. Any
+    /// later write still enters the ordinary actor-time authority gates.
+    pub(crate) fn retained_runtime_for_read(
+        &self,
+        key: &StoreRuntimeKey,
+    ) -> Option<StoreRuntimeHandle> {
+        let state = self.lock_state();
+        match state.entries.get(key) {
+            Some(RegistryEntry::Ready(ready)) => Some(ready.handle.clone()),
+            Some(RegistryEntry::Opening(_) | RegistryEntry::Evicting(_)) | None => None,
         }
     }
 

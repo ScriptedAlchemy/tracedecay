@@ -357,12 +357,12 @@ impl DaemonSessionRuntimeRegistryV1 {
         &self,
         shard_id: StoreShardIdV1,
         database_path: PathBuf,
-        database_authority: Option<DatabaseAuthority>,
+        mut database_authority: Option<DatabaseAuthority>,
         initialize_if_missing: bool,
     ) -> Result<StoreRuntimeHandle> {
         self.resolver
             .register_code_authority(
-                LocalCodeStoreAuthorityV1::new(shard_id.clone(), database_path).map_err(
+                LocalCodeStoreAuthorityV1::new(shard_id.clone(), database_path.clone()).map_err(
                     |error| {
                         session_registry_error(
                             "construct code-shard authority",
@@ -374,6 +374,23 @@ impl DaemonSessionRuntimeRegistryV1 {
             .map_err(|error| {
                 session_registry_error("register code-shard authority", format!("{error:?}"))
             })?;
+        if database_authority.is_none() && !initialize_if_missing {
+            let key = StoreRuntimeKey::new(shard_id.clone(), self.incarnation);
+            if let Some(runtime) = self.registry.retained_runtime_for_read(&key) {
+                if runtime.locator().path() != database_path {
+                    return Err(session_registry_error(
+                        "reuse read-only code-shard runtime",
+                        "retained runtime locator differs from the registered database path"
+                            .to_owned(),
+                    ));
+                }
+                return Ok(runtime);
+            }
+            database_authority = Some(DatabaseAuthority::for_owned_runtime(
+                &database_path,
+                "publish registered read-only code-shard runtime",
+            )?);
+        }
         open_runtime(
             &self.registry,
             self.resolver.as_ref(),
@@ -1007,6 +1024,109 @@ mod tests {
             .expect("non-git graph runtime");
 
         assert_eq!(database.database_path(), database_path);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn read_only_branch_reuses_daemon_publication_without_write_authority() {
+        let temporary = tempfile::tempdir().expect("temporary project parent");
+        let root = temporary
+            .path()
+            .canonicalize()
+            .expect("canonical fixture root");
+        let profile_root = root.join("profile");
+        let project_root = root.join("project");
+        std::fs::create_dir_all(&project_root).expect("project root");
+        gix::init(&project_root).expect("initialize project repository");
+        let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
+            .expect("durable profile identity");
+        let database_scope =
+            crate::db::enter_daemon_database_scope(&profile_root, 11, "branch publication")
+                .expect("daemon database scope");
+        let registry = DaemonSessionRuntimeRegistryV1::open(identity)
+            .await
+            .expect("session runtime registry");
+        let project_id = ProjectId::new("project.branch-publication").expect("project id");
+        let branch_root = profile_root.join("projects/project.branch-publication/branches");
+        std::fs::create_dir_all(&branch_root).expect("branch database directory");
+        let main_path = branch_root.join("main.db");
+        let unpublished_path = branch_root.join("unpublished.db");
+        rusqlite::Connection::open(&unpublished_path)
+            .expect("seed unpublished branch database")
+            .execute_batch("CREATE TABLE seed(value INTEGER);")
+            .expect("seed unpublished branch schema");
+
+        let main_authority =
+            DatabaseAuthority::for_runtime(&main_path, "publish daemon-owned branch")
+                .expect("daemon branch authority");
+        assert_eq!(
+            main_authority.role(),
+            crate::db::DatabaseAuthorityRole::Daemon
+        );
+        let main = registry
+            .code_graph_branch(
+                &project_root,
+                project_id.clone(),
+                "main",
+                main_path.clone(),
+                main_authority,
+                DatabaseAccessMode::ReadWrite,
+            )
+            .await
+            .expect("daemon-owned branch publication");
+        let publication_id = main.retained_runtime().publication().publication_id.clone();
+        let unpublished_authority =
+            DatabaseAuthority::for_runtime(&unpublished_path, "reserve unpublished branch")
+                .expect("unpublished daemon branch authority");
+        drop(database_scope);
+
+        let read_only = registry
+            .code_graph_branch_registered(
+                &project_root,
+                project_id.clone(),
+                "main",
+                main_path.clone(),
+                DatabaseAccessMode::ReadOnly,
+            )
+            .await
+            .expect("read-only facade over retained daemon publication");
+        assert_eq!(read_only.database_path(), main_path);
+        assert_eq!(
+            read_only.retained_runtime().publication().publication_id,
+            publication_id,
+            "read-only publication must reuse the exact retained runtime"
+        );
+        let write_error = match read_only
+            .begin_write_transaction("write through read-only branch facade")
+            .await
+        {
+            Ok(_) => panic!("read-only branch facade unexpectedly admitted a write"),
+            Err(error) => error,
+        };
+        assert!(
+            write_error.to_string().contains("read-only"),
+            "unexpected read-only denial: {write_error}"
+        );
+
+        let unpublished_error = match registry
+            .code_graph_branch_registered(
+                &project_root,
+                project_id,
+                "unpublished",
+                unpublished_path,
+                DatabaseAccessMode::ReadOnly,
+            )
+            .await
+        {
+            Ok(_) => panic!("unpublished branch inherited synthetic write authority"),
+            Err(error) => error,
+        };
+        assert!(
+            unpublished_error
+                .to_string()
+                .contains("managed-daemon or exclusive-maintenance authority"),
+            "unexpected unpublished branch denial: {unpublished_error}"
+        );
+        drop(unpublished_authority);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
