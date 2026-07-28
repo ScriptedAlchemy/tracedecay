@@ -723,6 +723,42 @@ fn database_owner_registry_evicts_lru_idle_and_protects_active_leases() {
     drop(inserted_lease);
 }
 
+#[test]
+fn database_owner_registry_hides_bounded_insert_until_owner_registration_finishes() {
+    let key = ProjectServerKey {
+        owner: StoreOwnerKey {
+            profile_root: PathBuf::from("/profile"),
+            global_db_path: PathBuf::from("/profile/global.db"),
+            project_id: Some("pending".to_owned()),
+            store_root: PathBuf::from("/store/pending"),
+            graph_db_path: PathBuf::from("/store/pending/graph.db"),
+        },
+        scope_prefix: None,
+    };
+    let route = ProjectRouteKey {
+        profile_root: PathBuf::from("/profile"),
+        global_db_path: PathBuf::from("/profile/global.db"),
+        project_path: PathBuf::from("/project/pending"),
+        scope_prefix: None,
+    };
+    let mut registry = DatabaseOwnerRegistry::<Arc<u8>>::default();
+
+    let (_, inserted) = registry
+        .bind_or_insert_route_bounded(route.clone(), key.clone(), Arc::new(1), 1, |_| false)
+        .expect("pending owner should fit");
+
+    assert!(inserted);
+    assert!(
+        registry.get_route_and_touch(&route).is_none(),
+        "a route must remain hidden until every project-open owner is registered"
+    );
+    assert!(registry.mark_ready(&key));
+    assert!(
+        registry.get_route_and_touch(&route).is_some(),
+        "completed owner registration must publish the cached route"
+    );
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn project_rekey_cancels_stale_repair_owner_and_acquires_new_owner_once() {
