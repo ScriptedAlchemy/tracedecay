@@ -35,9 +35,10 @@ pub(crate) use access::{DaemonDatabaseScope, MaintenanceDatabaseScope};
 pub use access::{DatabaseAuthority, DatabaseAuthorityRole};
 pub(crate) use access::{
     DatabaseDeletionFence, DatabaseDeletionStates, WriterOwnership, database_path_is_tombstoned,
-    enter_daemon_database_scope, enter_owned_maintenance_database_scope, is_lock_contended,
-    probe_writer_owner,
+    enter_daemon_database_scope, is_lock_contended, probe_writer_owner,
 };
+#[cfg(not(any(test, feature = "test-transport")))]
+pub(crate) use access::enter_owned_maintenance_database_scope;
 #[cfg(any(test, feature = "test-transport"))]
 pub use connection::TestDatabaseRuntimeMode;
 pub use connection::{Database, SQLITE_UNSAFE_FAST_ENV};
