@@ -429,18 +429,28 @@ pub(crate) async fn send_daemon_request_line(
     .await
 }
 
-fn responses_are_project_warming(responses: &[String]) -> bool {
+fn responses_are_project_open_retryable(responses: &[String]) -> bool {
     responses.len() == 1
         && serde_json::from_str::<serde_json::Value>(&responses[0])
             .ok()
-            .and_then(|response| {
-                response
-                    .get("error")?
-                    .get("message")?
-                    .as_str()
-                    .map(str::to_owned)
+            .and_then(|response| response.get("error").cloned())
+            .is_some_and(|error| {
+                let warming = error
+                    .get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|message| message.contains(PROJECT_WARMING_RETRY_HINT));
+                let capacity = error
+                    .pointer("/data/kind")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|kind| {
+                        matches!(
+                            kind,
+                            "project_open_task_capacity_reached"
+                                | "project_server_capacity_reached"
+                        )
+                    });
+                warming || capacity
             })
-            .is_some_and(|message| message.contains(PROJECT_WARMING_RETRY_HINT))
 }
 
 async fn send_daemon_request_line_with_project_warming_retry(
@@ -450,7 +460,7 @@ async fn send_daemon_request_line_with_project_warming_retry(
 ) -> Result<Vec<String>> {
     let deadline = Instant::now() + PROJECT_WARMING_RETRY_GRACE;
     let mut responses = send_daemon_request_line(socket_path, handshake, line).await?;
-    while responses_are_project_warming(&responses) {
+    while responses_are_project_open_retryable(&responses) {
         let Some(remaining) = deadline
             .checked_duration_since(Instant::now())
             .filter(|remaining| !remaining.is_zero())
@@ -670,4 +680,70 @@ pub async fn proxy_stdio_to_default_daemon(
 ) -> Result<()> {
     let socket_path = default_available_socket_path()?;
     proxy_stdio_to_daemon(&socket_path, handshake, replay_line).await
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::responses_are_project_open_retryable;
+
+    #[test]
+    fn dogfood_recovery_project_open_retry_accepts_warming_and_capacity_errors() {
+        let retryable = [
+            json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "error": {
+                    "code": -32603,
+                    "message": "project is warming in the background; retry the same tool shortly"
+                }
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "error": {
+                    "code": -32603,
+                    "message": "daemon project open task capacity reached",
+                    "data": {
+                        "kind": "project_open_task_capacity_reached",
+                        "retryable": true,
+                        "capacity": 8
+                    }
+                }
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "error": {
+                    "code": -32603,
+                    "message": "daemon project server capacity reached",
+                    "data": {
+                        "kind": "project_server_capacity_reached",
+                        "retryable": true,
+                        "capacity": 8
+                    }
+                }
+            }),
+        ];
+
+        for response in retryable {
+            assert!(responses_are_project_open_retryable(
+                &[response.to_string()]
+            ));
+        }
+        assert!(!responses_are_project_open_retryable(&[json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "error": {
+                "code": -32603,
+                "message": "permanent project open failure",
+                "data": {
+                    "kind": "project_open_failed",
+                    "retryable": false
+                }
+            }
+        })
+        .to_string()]));
+    }
 }
