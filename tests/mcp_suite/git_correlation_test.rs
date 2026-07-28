@@ -116,12 +116,18 @@ fn extract_json(result: &tracedecay::mcp::ToolResult) -> Value {
     serde_json::from_str(text).unwrap_or_else(|e| panic!("tool result should be JSON: {e}\n{text}"))
 }
 
-async fn call(cg: &TraceDecay, tool: &str, mut args: Value) -> Value {
+async fn call(
+    runtime: &HostAdmissionTestRuntimeV1,
+    cg: &TraceDecay,
+    tool: &str,
+    mut args: Value,
+) -> Value {
     if let Some(obj) = args.as_object_mut() {
         obj.entry("format".to_string())
             .or_insert_with(|| json!("json"));
     }
-    let result = tracedecay::mcp::handle_tool_call(cg, tool, args, None, None)
+    let result = runtime
+        .call_mcp_tool_for_test(cg, tool, args, None, None)
         .await
         .unwrap_or_else(|e| panic!("{tool} should succeed: {e}"));
     extract_json(&result)
@@ -190,6 +196,7 @@ async fn sessions_for_and_diagnostics_flag_empty_correlation_index() {
 
     // sessions_for on an empty index: no results, explicitly flagged empty.
     let empty = call(
+        &runtime,
         &cg,
         "tracedecay_sessions_for",
         json!({ "git_ref": "branch", "value": "main" }),
@@ -206,7 +213,7 @@ async fn sessions_for_and_diagnostics_flag_empty_correlation_index() {
     );
 
     // diagnostics surfaces the same empty-index health.
-    let diag_empty = call(&cg, "tracedecay_diagnostics", json!({})).await;
+    let diag_empty = call(&runtime, &cg, "tracedecay_diagnostics", json!({})).await;
     assert_eq!(
         diag_empty["session_correlation"]["index_empty"], true,
         "{diag_empty}"
@@ -221,6 +228,7 @@ async fn sessions_for_and_diagnostics_flag_empty_correlation_index() {
 
     // A ref with no matching span now reads as "no match", not "empty index".
     let no_match = call(
+        &runtime,
         &cg,
         "tracedecay_sessions_for",
         json!({ "git_ref": "branch", "value": "does-not-exist" }),
@@ -236,7 +244,7 @@ async fn sessions_for_and_diagnostics_flag_empty_correlation_index() {
     );
 
     // diagnostics now reports a populated index.
-    let diag_populated = call(&cg, "tracedecay_diagnostics", json!({})).await;
+    let diag_populated = call(&runtime, &cg, "tracedecay_diagnostics", json!({})).await;
     assert_eq!(
         diag_populated["session_correlation"]["index_empty"], false,
         "{diag_populated}"

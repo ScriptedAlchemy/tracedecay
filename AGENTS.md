@@ -51,8 +51,9 @@ agent hosts through MCP, hooks, LSP, and an embedded dashboard.
 
 - In shared checkouts, honor active file ownership: re-read before editing,
   commit only self-consistent owned paths, and never sweep in peer work.
-- Before launching Cargo, check for an equivalent active run; reuse or wait
-  for it, avoid overlapping broad builds, and never kill peer build processes.
+- Before launching Cargo, check for an equivalent active run; reuse or wait,
+  batch the narrowest checks, avoid overlapping broad builds, and never kill
+  peer build processes.
 - Require falsifiable verification and root-cause fixes; do not weaken
   assertions, raise timeouts, ignore tests, or mask gate failures.
 - Keep every user-facing state truthful: unavailable, unsupported, partial,
@@ -65,6 +66,8 @@ agent hosts through MCP, hooks, LSP, and an embedded dashboard.
   and coordinate shared integration centrally.
 - Commit coherent completed fixes incrementally with explanatory conventional
   messages instead of holding a large mixed working tree.
+- Keep `cargo dogfood` as the fast development-build path; do not add a
+  separate release-dogfood mode for local iteration.
 
 ## Learned Workspace Facts
 
@@ -80,3 +83,10 @@ agent hosts through MCP, hooks, LSP, and an embedded dashboard.
   transport errors or successful empty results.
 - Dogfood targets the real managed profile; back up live databases before
   mutation and never run a second daemon against that profile.
+- Root-wide LCM retrieval hydrates canonical records from each message's
+  owning store; ranked candidate metadata is not an authoritative backfill.
+- `workspaceOpen` follow-up reads use daemon-wide typed route authority;
+  linked-worktree requests retain registered identity and never fall back to
+  the active graph.
+- Recovery may clear only the exact dirty marker adopted under its sync lease;
+  compare-and-swap must preserve foreign or newer markers.

@@ -1441,8 +1441,11 @@ pub mod tests {
             .execute(
                 "INSERT INTO retrieval_anchors (
                     anchor_id, anchor_json, owner_json, projection_generation
-                 ) VALUES ('retrieval.source.fixture', '{}', ?1, 'source.fixture')",
-                [encode(&write.owner.owner).unwrap()],
+                 ) VALUES (?1, '{}', ?2, 'source.fixture')",
+                params![
+                    write.occurrences[0].exact_source_anchor.as_str(),
+                    encode(&write.owner.owner).unwrap(),
+                ],
             )
             .unwrap();
         let mut executor = EvidenceAssemblyExecutor;
@@ -1616,8 +1619,11 @@ pub mod tests {
             .execute(
                 "INSERT INTO retrieval_anchors (
                     anchor_id, anchor_json, owner_json, projection_generation
-                 ) VALUES ('retrieval.source.fixture', '{}', ?1, 'source.fixture')",
-                [encode(&write.owner.owner).unwrap()],
+                 ) VALUES (?1, '{}', ?2, 'source.fixture')",
+                params![
+                    write.occurrences[0].exact_source_anchor.as_str(),
+                    encode(&write.owner.owner).unwrap(),
+                ],
             )
             .unwrap();
         let mut executor = EvidenceAssemblyExecutor;
