@@ -1575,7 +1575,7 @@ fn domain_symbol_rules_warning(project_path: &Path) -> Option<String> {
     })
 }
 
-/// Check for project configuration that TraceDecay does not act on.
+/// Check for project configuration that `TraceDecay` does not act on.
 fn check_inert_project_config(dc: &mut DoctorCounters, project_path: &Path) {
     if let Some(warning) = domain_symbol_rules_warning(project_path) {
         dc.warn(&warning);
