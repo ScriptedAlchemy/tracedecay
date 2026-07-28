@@ -257,16 +257,19 @@ impl GitReadAuthorityV1 {
                 scope: self.scope.clone(),
                 result,
             },
-            Err(HistoricalQueryError::MissingAuthorization)
-            | Err(HistoricalQueryError::InvalidAuthorization)
-            | Err(HistoricalQueryError::UnauthorizedCommit(_))
-            | Err(HistoricalQueryError::UnauthorizedPath(_)) => {
+            Err(
+                HistoricalQueryError::MissingAuthorization
+                    | HistoricalQueryError::InvalidAuthorization
+                    | HistoricalQueryError::UnauthorizedCommit(_)
+                    | HistoricalQueryError::UnauthorizedPath(_),
+            ) => {
                 HistoricalGitReadOutcomeV1::Unavailable {
                     reason: HistoricalGitReadUnavailableReasonV1::NotAuthorized,
                 }
             }
-            Err(HistoricalQueryError::ScopeMismatch)
-            | Err(HistoricalQueryError::ProviderScopeMismatch) => {
+            Err(
+                HistoricalQueryError::ScopeMismatch | HistoricalQueryError::ProviderScopeMismatch,
+            ) => {
                 HistoricalGitReadOutcomeV1::Unavailable {
                     reason: HistoricalGitReadUnavailableReasonV1::ScopeMismatch,
                 }

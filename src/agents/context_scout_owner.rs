@@ -482,8 +482,10 @@ impl ProjectContextScoutOwnerV1 {
         let configured_model_available = status.model_path.is_some()
             && !matches!(
                 status.last_model_outcome,
-                None | Some(ContextScoutModelRunOutcomeV1::Disabled)
-                    | Some(ContextScoutModelRunOutcomeV1::Unavailable)
+                None | Some(
+                    ContextScoutModelRunOutcomeV1::Disabled
+                        | ContextScoutModelRunOutcomeV1::Unavailable
+                )
             );
         Ok(ContextScoutCapabilityStateV1 {
             state: status.state,

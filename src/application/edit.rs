@@ -1473,7 +1473,7 @@ fn reconcile_prepared_source_edit_controlled(
         );
     }
     let ended_at = now_micros();
-    let (outcome, record) = match request.disposition.clone() {
+    let (_outcome, record) = match request.disposition.clone() {
         SourceEditReconciliationDispositionV1::ConfirmCommitted { committed_state } => {
             let predicted_state = journal.predicted_state.as_ref().ok_or_else(|| {
                 config_error(

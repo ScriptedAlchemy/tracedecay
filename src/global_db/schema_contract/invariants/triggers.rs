@@ -1800,7 +1800,7 @@ pub(in crate::global_db) async fn suspend_session_invariants_for_schema_upgrade(
 
 #[cfg(test)]
 mod tests {
-    use crate::db::engine::{Executor, params};
+    use crate::db::engine::params;
     use crate::global_db::tests::harness::RegisteredGlobalDbHarness;
 
     /// Registry rows the identity triggers key off. `upsert_code_project`

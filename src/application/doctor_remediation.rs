@@ -316,17 +316,13 @@ impl DoctorRemediationAuthorityV1 {
                 matches!(
                     (reference.kind(), *kind, preview_available),
                     (
-                        DoctorRemediationKindV1::Preview,
+                        DoctorRemediationKindV1::Preview | DoctorRemediationKindV1::Action,
                         DoctorRemediationLegalActionV1::RequestPreview,
                         true
                     ) | (
                         DoctorRemediationKindV1::Action,
                         DoctorRemediationLegalActionV1::RequestApply,
                         _
-                    ) | (
-                        DoctorRemediationKindV1::Action,
-                        DoctorRemediationLegalActionV1::RequestPreview,
-                        true
                     )
                 )
             })
@@ -585,8 +581,10 @@ impl DoctorRemediationAuthorityV1 {
             Err(DoctorRemediationDispatchErrorV1::Denied) => {
                 DoctorRemediationVerificationV1::Denied
             }
-            Err(DoctorRemediationDispatchErrorV1::OwnerUnavailable)
-            | Err(DoctorRemediationDispatchErrorV1::Unsupported) => {
+            Err(
+                DoctorRemediationDispatchErrorV1::OwnerUnavailable
+                    | DoctorRemediationDispatchErrorV1::Unsupported,
+            ) => {
                 DoctorRemediationVerificationV1::Unavailable
             }
             Err(error) => return Err(error),
