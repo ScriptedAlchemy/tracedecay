@@ -8,7 +8,10 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::{future::Future, time::Duration};
+use std::{
+    future::Future,
+    time::{Duration, Instant},
+};
 
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
@@ -92,6 +95,59 @@ pub(super) enum MemoryRepairPassDecision {
 /// delay starts at 25ms and doubles per consecutive advanced tick until this
 /// shift (or the curve's absolute ceiling) is reached.
 const MEMORY_REPAIR_BACKOFF_SHIFT_CAP: u32 = 6;
+const SESSION_TEMPORAL_MIN_PAGE_ROWS: usize = 256;
+const SESSION_TEMPORAL_MAX_PAGE_ROWS: usize = 4_096;
+const SESSION_TEMPORAL_TARGET_PAGE_LATENCY: Duration = Duration::from_millis(125);
+const SESSION_TEMPORAL_SLOW_PAGE_LATENCY: Duration = Duration::from_millis(250);
+const SESSION_TEMPORAL_MAX_PAGES_PER_TICK: usize = 16;
+const SESSION_TEMPORAL_MAX_TICK_ELAPSED: Duration = Duration::from_secs(2);
+
+fn next_session_temporal_page_rows(current_rows: usize, elapsed: Duration) -> usize {
+    let current_rows = current_rows.clamp(
+        SESSION_TEMPORAL_MIN_PAGE_ROWS,
+        SESSION_TEMPORAL_MAX_PAGE_ROWS,
+    );
+    let ratio = if elapsed > SESSION_TEMPORAL_SLOW_PAGE_LATENCY {
+        0.5
+    } else {
+        (SESSION_TEMPORAL_TARGET_PAGE_LATENCY.as_secs_f64()
+            / elapsed.as_secs_f64().max(f64::EPSILON))
+        .clamp(0.5, 2.0)
+    };
+    ((current_rows as f64 * ratio).round() as usize).clamp(
+        SESSION_TEMPORAL_MIN_PAGE_ROWS,
+        SESSION_TEMPORAL_MAX_PAGE_ROWS,
+    )
+}
+
+async fn run_session_temporal_repair_pager_with<Tick, TickFuture>(
+    mut tick: Tick,
+) -> Result<MemoryRepairPassDecision>
+where
+    Tick: FnMut(usize) -> TickFuture,
+    TickFuture: Future<Output = Result<crate::global_db::SessionTemporalRepairOutcome>>,
+{
+    let tick_started = Instant::now();
+    let mut page_rows = SESSION_TEMPORAL_MIN_PAGE_ROWS;
+    for _ in 0..SESSION_TEMPORAL_MAX_PAGES_PER_TICK {
+        let page_started = Instant::now();
+        let outcome = tick(page_rows).await?;
+        let page_elapsed = page_started.elapsed();
+        match outcome {
+            crate::global_db::SessionTemporalRepairOutcome::Pending { .. } => {
+                page_rows = next_session_temporal_page_rows(page_rows, page_elapsed);
+            }
+            crate::global_db::SessionTemporalRepairOutcome::Complete
+            | crate::global_db::SessionTemporalRepairOutcome::NotRequired => {
+                return Ok(MemoryRepairPassDecision::Idle);
+            }
+        }
+        if tick_started.elapsed() >= SESSION_TEMPORAL_MAX_TICK_ELAPSED {
+            break;
+        }
+    }
+    Ok(MemoryRepairPassDecision::Advanced)
+}
 
 impl DaemonEngine {
     /// Starts one daemon-owned compatibility-memory repair loop for this exact
@@ -468,33 +524,48 @@ async fn run_maintenance_repair_scheduler_tick(
     let database = administration
         .registered_project_session_database(project_path, cg.store_layout())
         .await?;
-    let session =
-        match crate::global_db::advance_session_temporal_store_repair(database.as_ref()).await? {
-            crate::global_db::SessionTemporalRepairOutcome::Pending { stage } => {
-                log_daemon_event(
-                    "session_temporal_repair",
-                    &[
-                        ("project", project_path.display().to_string()),
-                        ("outcome", "pending".to_string()),
-                        ("stage", format!("{stage:?}")),
-                    ],
-                );
-                MemoryRepairPassDecision::Advanced
+    let session = run_session_temporal_repair_pager_with({
+        let database = Arc::clone(&database);
+        let project_path = project_path.to_path_buf();
+        move |page_rows| {
+            let database = Arc::clone(&database);
+            let project_path = project_path.clone();
+            async move {
+                let outcome =
+                    crate::global_db::advance_session_temporal_store_repair_with_page_rows(
+                        database.as_ref(),
+                        i64::try_from(page_rows)
+                            .expect("bounded session temporal page size fits in i64"),
+                    )
+                    .await?;
+                match outcome {
+                    crate::global_db::SessionTemporalRepairOutcome::Pending { stage } => {
+                        log_daemon_event(
+                            "session_temporal_repair",
+                            &[
+                                ("project", project_path.display().to_string()),
+                                ("outcome", "pending".to_string()),
+                                ("stage", format!("{stage:?}")),
+                                ("page_rows", page_rows.to_string()),
+                            ],
+                        );
+                    }
+                    crate::global_db::SessionTemporalRepairOutcome::Complete => {
+                        log_daemon_event(
+                            "session_temporal_repair",
+                            &[
+                                ("project", project_path.display().to_string()),
+                                ("outcome", "complete".to_string()),
+                            ],
+                        );
+                    }
+                    crate::global_db::SessionTemporalRepairOutcome::NotRequired => {}
+                }
+                Ok(outcome)
             }
-            crate::global_db::SessionTemporalRepairOutcome::Complete => {
-                log_daemon_event(
-                    "session_temporal_repair",
-                    &[
-                        ("project", project_path.display().to_string()),
-                        ("outcome", "complete".to_string()),
-                    ],
-                );
-                MemoryRepairPassDecision::Idle
-            }
-            crate::global_db::SessionTemporalRepairOutcome::NotRequired => {
-                MemoryRepairPassDecision::Idle
-            }
-        };
+        }
+    })
+    .await?;
     let transcript = match crate::sessions::transcript_backfill::advance_transcript_facts_backfill(
         database.as_ref(),
     )
@@ -642,12 +713,15 @@ mod tests {
     use std::collections::VecDeque;
     use std::path::Path;
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     use super::{
         MemoryRepairPassDecision, MemoryRepairTickOutcome, combine_repair_decisions,
-        memory_repair_pass_advanced, run_memory_repair_scheduler_loop_with,
+        memory_repair_pass_advanced, next_session_temporal_page_rows,
+        run_memory_repair_scheduler_loop_with, run_session_temporal_repair_pager_with,
     };
     use crate::errors::TraceDecayError;
+    use crate::global_db::{SessionTemporalRepairOutcome, SessionTemporalRepairStage};
 
     #[test]
     fn dogfood_recovery_session_repair_keeps_shared_maintenance_loop_alive() {
@@ -693,6 +767,82 @@ mod tests {
                 "{outcome:?} must keep ticking when the store reports saturation"
             );
         }
+    }
+
+    #[test]
+    fn session_temporal_page_rows_tracks_the_target_without_large_jumps() {
+        assert_eq!(
+            next_session_temporal_page_rows(256, Duration::from_millis(62)),
+            512
+        );
+        assert_eq!(
+            next_session_temporal_page_rows(1_024, Duration::from_millis(250)),
+            512
+        );
+        assert_eq!(
+            next_session_temporal_page_rows(2_048, Duration::from_millis(125)),
+            2_048
+        );
+    }
+
+    #[test]
+    fn session_temporal_page_rows_stays_within_safe_bounds() {
+        assert_eq!(
+            next_session_temporal_page_rows(256, Duration::from_millis(1)),
+            512
+        );
+        assert_eq!(
+            next_session_temporal_page_rows(4_096, Duration::from_millis(1)),
+            4_096
+        );
+        assert_eq!(
+            next_session_temporal_page_rows(256, Duration::from_secs(2)),
+            256
+        );
+    }
+
+    #[tokio::test]
+    async fn session_temporal_pager_binds_each_scheduler_tick() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let decision = run_session_temporal_repair_pager_with({
+            let calls = Arc::clone(&calls);
+            move |_| {
+                calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                std::future::ready(Ok(SessionTemporalRepairOutcome::Pending {
+                    stage: SessionTemporalRepairStage::AuthorityEffects,
+                }))
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(decision, MemoryRepairPassDecision::Advanced);
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::Relaxed),
+            super::SESSION_TEMPORAL_MAX_PAGES_PER_TICK
+        );
+    }
+
+    #[tokio::test]
+    async fn session_temporal_pager_stops_on_completion() {
+        let outcomes = Arc::new(Mutex::new(VecDeque::from([
+            SessionTemporalRepairOutcome::Pending {
+                stage: SessionTemporalRepairStage::AuthorityEffects,
+            },
+            SessionTemporalRepairOutcome::Complete,
+        ])));
+        let decision = run_session_temporal_repair_pager_with({
+            let outcomes = Arc::clone(&outcomes);
+            move |_| {
+                let outcome = outcomes.lock().unwrap().pop_front().unwrap();
+                std::future::ready(Ok(outcome))
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(decision, MemoryRepairPassDecision::Idle);
+        assert!(outcomes.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

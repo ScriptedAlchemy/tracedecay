@@ -547,6 +547,20 @@ pub(in crate::global_db) async fn validate_session_temporal_effect_authority_pag
     conn: &impl QueryExecutor,
     after_rowid: i64,
 ) -> crate::errors::Result<(i64, bool)> {
+    validate_session_temporal_effect_authority_page_with_limit(
+        conn,
+        after_rowid,
+        SESSION_TEMPORAL_REPAIR_AUDIT_PAGE_ROWS,
+    )
+    .await
+}
+
+pub(in crate::global_db) async fn validate_session_temporal_effect_authority_page_with_limit(
+    conn: &impl QueryExecutor,
+    after_rowid: i64,
+    page_rows: i64,
+) -> crate::errors::Result<(i64, bool)> {
+    debug_assert!(page_rows > 0);
     let mut rows = conn
         .query(
             "SELECT effect.rowid, observation.observation_id IS NULL
@@ -558,7 +572,7 @@ pub(in crate::global_db) async fn validate_session_temporal_effect_authority_pag
              WHERE effect.rowid > ?1
              ORDER BY effect.rowid
              LIMIT ?2",
-            params![after_rowid, SESSION_TEMPORAL_REPAIR_AUDIT_PAGE_ROWS],
+            params![after_rowid, page_rows],
         )
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
@@ -584,13 +598,27 @@ pub(in crate::global_db) async fn validate_session_temporal_effect_authority_pag
         }
         count += 1;
     }
-    Ok((last_rowid, count < SESSION_TEMPORAL_REPAIR_AUDIT_PAGE_ROWS))
+    Ok((last_rowid, count < page_rows))
 }
 
 pub(in crate::global_db) async fn validate_session_temporal_receipt_authority_page(
     conn: &impl QueryExecutor,
     after_rowid: i64,
 ) -> crate::errors::Result<(i64, bool)> {
+    validate_session_temporal_receipt_authority_page_with_limit(
+        conn,
+        after_rowid,
+        SESSION_TEMPORAL_REPAIR_AUDIT_PAGE_ROWS,
+    )
+    .await
+}
+
+pub(in crate::global_db) async fn validate_session_temporal_receipt_authority_page_with_limit(
+    conn: &impl QueryExecutor,
+    after_rowid: i64,
+    page_rows: i64,
+) -> crate::errors::Result<(i64, bool)> {
+    debug_assert!(page_rows > 0);
     let mut rows = conn
         .query(
             "SELECT receipt.rowid,
@@ -615,7 +643,7 @@ pub(in crate::global_db) async fn validate_session_temporal_receipt_authority_pa
              WHERE receipt.rowid > ?1
              ORDER BY receipt.rowid
              LIMIT ?2",
-            params![after_rowid, SESSION_TEMPORAL_REPAIR_AUDIT_PAGE_ROWS],
+            params![after_rowid, page_rows],
         )
         .await
         .map_err(|error| global_db_operation_error(OPERATION, error))?;
@@ -641,7 +669,7 @@ pub(in crate::global_db) async fn validate_session_temporal_receipt_authority_pa
         }
         count += 1;
     }
-    Ok((last_rowid, count < SESSION_TEMPORAL_REPAIR_AUDIT_PAGE_ROWS))
+    Ok((last_rowid, count < page_rows))
 }
 
 #[cfg(test)]
@@ -651,6 +679,7 @@ mod tests {
     use super::{
         FOREIGN_KEY_AUDIT_PROGRESS, foreign_key_violation_exists_read_only,
         foreign_key_violation_exists_resumable, validate_session_temporal_effect_authority_page,
+        validate_session_temporal_effect_authority_page_with_limit,
     };
     use crate::db::engine::TestConnection;
 
@@ -710,6 +739,13 @@ mod tests {
                 .unwrap();
         assert_eq!(second_cursor, 257);
         assert!(second_complete);
+
+        let (adaptive_cursor, adaptive_complete) =
+            validate_session_temporal_effect_authority_page_with_limit(&connection, 0, 512)
+                .await
+                .unwrap();
+        assert_eq!(adaptive_cursor, 257);
+        assert!(adaptive_complete);
     }
 
     #[tokio::test]

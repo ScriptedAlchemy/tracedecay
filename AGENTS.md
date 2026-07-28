@@ -71,6 +71,11 @@ agent hosts through MCP, hooks, LSP, and an embedded dashboard.
   separate release-dogfood mode for local iteration.
 - Resolve conflicts and integrate parallel work from relevant transcripts,
   plans, and Git history so intent—not whichever side is newer—wins.
+- For V2 delivery, prioritize Plan 12's leaves-first root-crate breakup before
+  remaining product work; measure each extraction and keep production callers
+  reachable.
+- Put Work (Plans 24 and 32) in PR14, and use desktop-first—not desktop-only—
+  dashboard acceptance without dropping responsive accessibility or function.
 
 ## Learned Workspace Facts
 
@@ -99,3 +104,6 @@ agent hosts through MCP, hooks, LSP, and an embedded dashboard.
   the active graph.
 - Recovery may clear only the exact dirty marker adopted under its sync lease;
   compare-and-swap must preserve foreign or newer markers.
+- V2 planning authority flows from `00-plan-set-index.md` through `NEXT.md` and
+  the gap ledgers; numbered plans define requirements, not an implementation
+  queue, and historical checkpoints are not rebuild instructions.

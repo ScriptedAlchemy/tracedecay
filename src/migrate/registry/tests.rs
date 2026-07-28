@@ -10,10 +10,12 @@
 use std::path::Path;
 
 use crate::db::engine::params;
-use crate::global_db::{GraphScopeUpsert, RegisteredGlobalDb};
 use crate::global_db::tests::harness::RegisteredGlobalDbHarness;
+use crate::global_db::{GraphScopeUpsert, RegisteredGlobalDb};
 
-use super::{delete_registry_gc_candidates_in_transaction, graph_scope_location_drift_is_repairable};
+use super::{
+    delete_registry_gc_candidates_in_transaction, graph_scope_location_drift_is_repairable,
+};
 
 const PROJECT_ID: &str = "proj_gc";
 const TOKENS: u64 = 11;

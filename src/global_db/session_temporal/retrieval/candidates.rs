@@ -398,14 +398,9 @@ pub(super) async fn require_candidate_root_authority(
     project_key: &str,
     provider: Option<&str>,
 ) -> Result<(), TemporalPortError> {
-    resolve_root_authority(
-        conn,
-        std::slice::from_ref(candidate),
-        project_key,
-        provider,
-    )
-    .await?
-    .require(0)
+    resolve_root_authority(conn, std::slice::from_ref(candidate), project_key, provider)
+        .await?
+        .require(0)
 }
 
 #[allow(clippy::too_many_arguments)]

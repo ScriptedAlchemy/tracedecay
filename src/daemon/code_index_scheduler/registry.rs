@@ -207,8 +207,7 @@ impl CodeIndexSchedulerRegistryV1 {
         let worktree_id = opened.identity().worktree_id().clone();
         let reconcile_in_progress = opened.reconcile_in_progress();
         let active_generation_encoded_bytes = opened.active_generation_encoded_bytes();
-        let needs_initial_reconcile =
-            active_generation_encoded_bytes.load(Ordering::Acquire) == 0;
+        let needs_initial_reconcile = active_generation_encoded_bytes.load(Ordering::Acquire) == 0;
         let serving_generation = Arc::new(RwLock::new(None));
         let scheduler = Arc::new(Mutex::new(opened));
         let semantic_evaluation_publication_gate = Arc::new(tokio::sync::Mutex::new(()));
