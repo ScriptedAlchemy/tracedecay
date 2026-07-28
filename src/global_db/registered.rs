@@ -41,6 +41,38 @@ impl RegisteredGlobalDb {
         Self::finish_attach(runtime, write_connection, authority).await
     }
 
+    /// Installs only admission-critical schema before publishing a daemon
+    /// runtime. The returned plan owns resumable historical convergence.
+    pub(crate) async fn migrate_and_attach_for_daemon(
+        runtime: StoreRuntimeHandle,
+        expected_binding: tracedecay_store::StoreRuntimeBindingV1,
+        expected_locator: tracedecay_store::VerifiedStoreLocatorV1,
+        authority: DatabaseAuthority,
+    ) -> crate::errors::Result<(
+        Self,
+        Option<super::schema_stages::RegisteredSchemaConvergence>,
+    )> {
+        let write_connection =
+            registered_connection(&runtime, &expected_binding, &expected_locator, &authority)?;
+        let convergence = if runtime.schema_migrated() {
+            None
+        } else {
+            Some(
+                super::schema_stages::ensure_registered_schema_for_admission(&write_connection)
+                    .await?,
+            )
+        };
+        let database = Self::finish_attach(runtime, write_connection, authority).await?;
+        Ok((database, convergence))
+    }
+
+    pub(crate) async fn converge_schema(
+        &self,
+        convergence: super::schema_stages::RegisteredSchemaConvergence,
+    ) -> crate::errors::Result<()> {
+        super::schema_stages::converge_registered_schema(&self.write_connection, convergence).await
+    }
+
     pub(super) async fn attach(
         runtime: StoreRuntimeHandle,
         expected_binding: tracedecay_store::StoreRuntimeBindingV1,
