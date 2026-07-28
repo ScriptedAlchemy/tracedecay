@@ -1,5 +1,5 @@
 import { OverviewCard, OverviewGrid } from '../../ui/archetypes/OverviewGrid';
-import { LegacyBoundary } from '../../ui/LegacyStates.tsx';
+import { LegacyBoundary, ReadFailure } from '../../ui/LegacyStates.tsx';
 import { Meter, MeterRow, ReadoutBar } from '../../ui/instrument.tsx';
 import { formatCount, splitCount } from '../../ui/format.ts';
 import { useLegacy } from '../../data/query/useLegacy.ts';
@@ -480,37 +480,6 @@ function ShareRow({
         {value != null ? value.toLocaleString() : '—'}
       </span>
     </div>
-  );
-}
-
-/** A read that failed, said where its reading would have gone.
- *
- * `band` is the page-width form for the rows that sit outside a card, directly
- * under the readout whose figures the failure explains; the default is the
- * inline form a card body carries. The two are a class list rather than a `cn`
- * merge because they disagree on text size, and `cn` is a plain joiner with no
- * conflict resolution. */
-function ReadFailure({
-  label,
-  detail,
-  band = false,
-}: {
-  label: string;
-  detail?: string | null | undefined;
-  band?: boolean;
-}) {
-  return (
-    <p
-      role="status"
-      className={
-        band
-          ? 'border-b border-state-error/30 bg-state-error/5 px-4 py-2 text-xs text-state-error'
-          : 'text-2xs leading-relaxed text-state-error'
-      }
-    >
-      {label}
-      {detail ? `: ${detail}` : '.'}
-    </p>
   );
 }
 
