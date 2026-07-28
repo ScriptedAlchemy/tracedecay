@@ -906,7 +906,11 @@ impl TraceDecay {
             &store_layout.data_root,
             graph_scope.as_deref(),
         );
-        let serving_branch = active_branch.as_ref().and(mounted_graph_scope.clone());
+        let serving_branch = if active_branch.is_none() && graph_scope.is_some() {
+            None
+        } else {
+            mounted_graph_scope.clone()
+        };
 
         // Sync state belongs to the concrete graph DB, not the repository-wide
         // store root. Different tracked branches have independent databases
@@ -958,8 +962,7 @@ impl TraceDecay {
         // even when the subsequent integrity check rejects the main database.
         // Preserve an obviously invalid derived store before any SQLite handle
         // can alter the forensic copy.
-        if crashed
-            && repair_corrupt_branch
+        if repair_corrupt_branch
             && matches!(
                 crate::storage::has_sqlite_database_header(&db_path),
                 Ok(false)
@@ -1489,7 +1492,11 @@ impl TraceDecay {
             &store_layout.data_root,
             graph_scope.as_deref(),
         );
-        let serving_branch = active_branch.as_ref().and(mounted_graph_scope.clone());
+        let serving_branch = if active_branch.is_none() && graph_scope.is_some() {
+            None
+        } else {
+            mounted_graph_scope.clone()
+        };
         let active_graph_layout = active_graph_layout(&db_path);
 
         if !db_path.exists() {
@@ -1771,8 +1778,13 @@ impl TraceDecay {
             });
         };
 
-        let sync_result =
-            Self::sync_new_branch_with_retries(project_root, branch_name, open_options).await;
+        let sync_result = Self::sync_new_branch_with_retries(
+            project_root,
+            branch_name,
+            tracedecay_dir,
+            open_options,
+        )
+        .await;
         if let Err(TraceDecayError::SyncLock { .. }) = sync_result {
             return Ok(branch::BranchAddOutcome::Deferred);
         } else if let Err(e) = sync_result {
@@ -1793,22 +1805,49 @@ impl TraceDecay {
     async fn sync_new_branch_with_retries(
         project_root: &Path,
         branch_name: &str,
+        expected_data_root: &Path,
         open_options: TraceDecayOpenOptions,
     ) -> Result<()> {
-        let mut attempts = 0;
-        loop {
-            let cg =
-                Self::open_branch_with_options(project_root, branch_name, open_options.clone())
-                    .await?;
-            match cg.sync().await {
-                Ok(_) => return Ok(()),
-                Err(TraceDecayError::SyncLock { .. }) if attempts < 20 => {
-                    attempts += 1;
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                }
-                Err(e) => return Err(e),
-            }
+        #[cfg(any(test, feature = "test-transport"))]
+        let _test_runtime = Self::standalone_test_runtime(project_root, &open_options).await?;
+
+        let profile_root = open_options.resolved_profile_root()?;
+        let identity = crate::daemon::profile_identity::load_or_create(&profile_root)?;
+        let runtime_registry = Arc::new(DaemonSessionRuntimeRegistryV1::open(identity).await?);
+        let profile_database = runtime_registry.profile_database().await?;
+        let store_layout = Self::resolve_registered_configuration_layout(
+            project_root,
+            &open_options,
+            profile_database.as_ref(),
+            false,
+        )
+        .await?;
+        if store_layout.data_root != expected_data_root {
+            return Err(TraceDecayError::Config {
+                message: "branch sync resolved a different registered project store".to_owned(),
+            });
         }
+        let project_id = Self::registered_project_id(&store_layout)?;
+        let enrollment_roots = Self::registered_enrollment_roots(
+            project_root,
+            &store_layout,
+            &project_id,
+            profile_database.as_ref(),
+        )
+        .await?;
+        let configuration_database = runtime_registry
+            .project_sessions(project_id, enrollment_roots)
+            .await?;
+        Self::sync_new_branch_with_registered_configuration(
+            project_root,
+            branch_name,
+            open_options,
+            store_layout,
+            configuration_database,
+            profile_database,
+            runtime_registry,
+        )
+        .await
     }
 
     async fn sync_new_branch_with_registered_configuration(
