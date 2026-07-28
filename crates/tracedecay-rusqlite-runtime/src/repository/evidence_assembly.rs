@@ -953,16 +953,20 @@ pub mod tests {
         EvidenceSpanCatalogBindingV1, EvidenceSpanHorizonV1, EvidenceSpanIdentityProjectionV1,
         EvidenceSpanMemberReceiptBindingV1, EvidenceSpanProjectionReceiptIdentityProjectionV1,
         EvidenceSpanProjectionReceiptV1, EvidenceSpanRecordV1, EvidenceSpanRunV1,
-        PrivacyBoundRequestDigestV1, PrivacyBoundRequestEnvelopeV1, RetrievalAnchorReadOperationV1,
-        RetrievalAnchorReadResultV1, RetrieverContributionIdentityProjectionV1,
-        RetrieverIdentityV1, RetrieverWatermarkBindingV1, SanitizedObservationByteRangeV1,
+        PrivacyBoundRequestDigestV1, PrivacyBoundRequestEnvelopeV1,
+        RetrieverContributionIdentityProjectionV1, RetrieverIdentityV1,
+        RetrieverWatermarkBindingV1, SanitizedObservationByteRangeV1,
         SourceCapabilityCatalogBindingV1, SourceOccurrenceCoordinateV1,
         SourceOccurrenceIdentityProjectionV1, SourceOccurrenceKindV1,
-        SourceOccurrenceSanitizationV1, StoredRetrievalAnchorRecordV1,
-        VerifiedSourceOrderingProofV1, derive_canonical_source_occurrence_set_id_v1,
+        SourceOccurrenceSanitizationV1, VerifiedSourceOrderingProofV1,
+        derive_canonical_source_occurrence_set_id_v1,
         derive_evidence_assembly_publication_receipt_id_v1, derive_evidence_span_id_v1,
         derive_evidence_span_projection_receipt_id_v1, derive_retriever_contribution_id_v1,
         derive_source_occurrence_id_v1,
+    };
+    #[cfg(test)]
+    use tracedecay_store::{
+        RetrievalAnchorReadOperationV1, RetrievalAnchorReadResultV1, StoredRetrievalAnchorRecordV1,
     };
 
     const DIGEST: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -1338,6 +1342,7 @@ pub mod tests {
         .1
     }
 
+    #[cfg(test)]
     fn install(connection: &rusqlite::Connection) {
         connection
             .execute_batch(
@@ -1401,6 +1406,7 @@ pub mod tests {
             .unwrap();
     }
 
+    #[cfg(test)]
     fn evidence_table_counts(connection: &rusqlite::Connection) -> Vec<i64> {
         [
             "retrieval_anchors",

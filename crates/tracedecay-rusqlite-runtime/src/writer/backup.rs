@@ -199,7 +199,7 @@ pub(super) fn run_online_backup(
     let completed = match backup_sqlite(
         source,
         &mut filesystem,
-        SqliteBackupOptions::default(),
+        SqliteBackupOptions,
         &control,
         |_| {},
     ) {
