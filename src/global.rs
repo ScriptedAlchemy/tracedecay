@@ -174,16 +174,8 @@ pub(crate) async fn gather_target_projects(
     home_tracedecay: &Option<std::path::PathBuf>,
 ) -> tracedecay::errors::Result<Vec<std::path::PathBuf>> {
     if all {
-        let cwd = std::env::current_dir().map_err(|error| {
-            tracedecay::errors::TraceDecayError::Config {
-                message: format!(
-                    "failed to determine current directory for registry discovery: {error}"
-                ),
-            }
-        })?;
-        let project_root = tracedecay::config::discover_project_root(&cwd);
         let payload = call_admin_cli(
-            project_root.as_deref(),
+            None,
             serde_json::json!({
                 "action": "registry_list",
                 "limit": 100_000,

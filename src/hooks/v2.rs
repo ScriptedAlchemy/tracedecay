@@ -20,6 +20,12 @@ use super::analytics::HookTimingSpan;
 
 pub(crate) enum HookV2Dispatch {
     NotApplicable,
+    /// Hook V2 recognised the event but could not take ownership of it — no
+    /// published binding, an unreadable store layout, or an envelope it could
+    /// not decode. The disposition is still worth recording, but the event has
+    /// not been admitted anywhere, so callers must fall back to their pre-V2
+    /// daemon notification rather than treat the event as delivered.
+    Unavailable(HookTransportDispositionV1),
     Handled {
         guidance: Option<String>,
         disposition: HookTransportDispositionV1,
@@ -33,6 +39,10 @@ impl HookV2Dispatch {
     ) -> Option<Option<String>> {
         match self {
             Self::NotApplicable => None,
+            Self::Unavailable(disposition) => {
+                telemetry.note_hook_v2_disposition(disposition);
+                None
+            }
             Self::Handled {
                 guidance,
                 disposition,
@@ -529,12 +539,7 @@ pub(crate) async fn dispatch(
         ) => {
             return HookV2Dispatch::NotApplicable;
         }
-        Err(_) => {
-            return HookV2Dispatch::Handled {
-                guidance: None,
-                disposition: HookTransportDispositionV1::CatchupRequired,
-            };
-        }
+        Err(_) => return unavailable(),
     };
     dispatch_decoded(host, event_json, project_root, decoded, started).await
 }
@@ -952,10 +957,7 @@ fn now_utc() -> UtcMicros {
 }
 
 fn unavailable() -> HookV2Dispatch {
-    HookV2Dispatch::Handled {
-        guidance: None,
-        disposition: HookTransportDispositionV1::CatchupRequired,
-    }
+    HookV2Dispatch::Unavailable(HookTransportDispositionV1::CatchupRequired)
 }
 
 #[cfg(test)]

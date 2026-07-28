@@ -735,7 +735,7 @@ fn unsupported_state(
                 | RepositoryWorkingTreeStateV1::Mixed => {
                     if snapshot.operation_state != tracedecay_domain::GitOperationStateV1::None {
                         Some(GitIndexUnsupportedStateV1::InProgressOperation)
-                    } else if !snapshot.coverage.is_complete() {
+                    } else if snapshot.coverage.leaves_state_unread() {
                         Some(GitIndexUnsupportedStateV1::UnreadableWorkingTree)
                     } else {
                         None

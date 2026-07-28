@@ -441,19 +441,7 @@ async fn migrate_inner(conn: &Connection, exclusive_maintenance: bool) -> Result
     match result {
         Ok(()) => {
             if !graph_reindex_required(current, LATEST_VERSION) {
-                transaction
-                    .execute(
-                        "INSERT INTO metadata (key, value) VALUES (?1, ?2)
-                         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                        (GRAPH_GENERATION_SCHEMA_KEY, LATEST_VERSION.to_string()),
-                    )
-                    .await
-                    .map_err(|error| TraceDecayError::Database {
-                        message: format!(
-                            "failed to carry graph generation through compatible migration: {error}"
-                        ),
-                        operation: "migrate".to_string(),
-                    })?;
+                carry_graph_generation_stamp(&transaction).await?;
             }
             transaction
                 .commit()
@@ -470,6 +458,51 @@ async fn migrate_inner(conn: &Connection, exclusive_maintenance: bool) -> Result
             Err(e)
         }
     }
+}
+
+/// Stamps the published graph generation after a migration chain that left the
+/// graph rows trustworthy, so a later open does not mistake a missing stamp for
+/// a lost generation.
+///
+/// Only databases that own graph tables carry `metadata`; it arrives with V2 or
+/// with the fresh schema. A memory-only database legitimately starts above that
+/// version without the table and has no graph generation to stamp, so probe
+/// before writing instead of assuming every migrated database owns the graph.
+async fn carry_graph_generation_stamp(conn: &Transaction) -> Result<()> {
+    let owns_graph_metadata = {
+        let mut rows = conn
+            .query(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata'",
+                (),
+            )
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("failed to probe sqlite_master for graph metadata: {error}"),
+                operation: "migrate".to_string(),
+            })?;
+        rows.next()
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("failed to read graph metadata probe row: {error}"),
+                operation: "migrate".to_string(),
+            })?
+            .is_some()
+    };
+    if !owns_graph_metadata {
+        return Ok(());
+    }
+
+    conn.execute(
+        "INSERT INTO metadata (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (GRAPH_GENERATION_SCHEMA_KEY, LATEST_VERSION.to_string()),
+    )
+    .await
+    .map_err(|error| TraceDecayError::Database {
+        message: format!("failed to carry graph generation through compatible migration: {error}"),
+        operation: "migrate".to_string(),
+    })?;
+    Ok(())
 }
 
 /// Applies migrations sequentially from `current` up to `LATEST_VERSION`.

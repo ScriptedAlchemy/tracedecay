@@ -500,10 +500,11 @@ mod tests {
             all_skills + 5 + GENERATED_CLAUDE_AGENT_FILES.len() + 13
         );
         // Cursor: cursor-subset skills + 4 manifest (dot + mcp + hooks +
-        //   README) + 2 rules + native agents + 13 native commands.
+        //   README) + rules + native agents + 13 native commands.
+        // Memory lives in ~/.cursor/rules/, not the plugin inventory.
         assert_eq!(
             cursor_files().len(),
-            cursor_skills + 4 + 2 + GENERATED_CURSOR_AGENT_FILES.len() + 13
+            cursor_skills + 4 + CURSOR_RULE_FILES.len() + GENERATED_CURSOR_AGENT_FILES.len() + 13
         );
         // Codex: skills + 4 manifest (dot + mcp + hooks + README).
         assert_eq!(codex_files().len(), all_skills + 4);

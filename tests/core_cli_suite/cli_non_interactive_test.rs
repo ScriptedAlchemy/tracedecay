@@ -477,7 +477,7 @@ fn explicit_kimi_install_fails_with_interactive_remediation() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("interactive `/plugins` host API"));
     assert!(stderr.contains("/plugins install"));
-    assert!(stderr.contains("made no Kimi host-state changes"));
+    assert!(stderr.contains("made no current plugin registration changes"));
     assert!(
         canonical_temp_path(home.path())
             .join(".tracedecay/host-bundle-stage/kimi/tracedecay/.kimi-plugin/plugin.json")
@@ -1180,6 +1180,20 @@ async fn status_surfaces_split_identity_conflict_without_suggesting_init() {
         write_store_manifest(&layout).unwrap();
     }
     write_repository_identity_marker(&project_root, "proj_status_selected").unwrap();
+    write_enrollment_marker(
+        &project_root,
+        &EnrollmentMarker {
+            project_id: "proj_status_selected".to_string(),
+            storage_mode: StorageMode::ProfileSharded,
+        },
+    )
+    .unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::profile(profile_root(home.path()))
+        .await
+        .unwrap();
+    register_profile_sharded_store(&runtime, &project_root, "proj_status_selected").await;
+    runtime.checkpoint_profile_database_for_test().await;
+    drop(runtime);
 
     let selected_db = profile_root(home.path()).join("projects/proj_status_selected/tracedecay.db");
     let legacy_db = profile_root(home.path()).join("projects/proj_status_legacy/tracedecay.db");
@@ -1636,14 +1650,20 @@ async fn wipe_all_removes_registry_backed_profile_shard_without_enrollment_marke
     );
 }
 
-#[test]
-fn branch_list_reads_profile_sharded_branch_meta() {
+#[tokio::test]
+async fn branch_list_reads_profile_sharded_branch_meta() {
     let home = TempDir::new().unwrap();
     let project = TempDir::new().unwrap();
     write_git_fixture(project.path());
     write_profile_sharded_fixture(home.path(), project.path());
     let shard_root = profile_shard_root(home.path());
     write_branch_meta(&shard_root, &[], false);
+    let runtime = HostAdmissionTestRuntimeV1::profile(profile_root(home.path()))
+        .await
+        .unwrap();
+    register_profile_sharded_store(&runtime, project.path(), "proj_cli").await;
+    runtime.checkpoint_profile_database_for_test().await;
+    drop(runtime);
 
     let mut command = tracedecay_command(home.path(), project.path());
     command.args(["branch", "list"]);
