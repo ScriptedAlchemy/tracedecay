@@ -300,7 +300,7 @@ pub(super) fn preview_conflict_risk(preview: &GitIndexPreviewV1) -> GitConflictR
     {
         return GitConflictRiskV1::Confirmed;
     }
-    if !snapshot.coverage.is_complete()
+    if snapshot.coverage.leaves_state_unread()
         || !matches!(
             snapshot.index.state,
             RepositoryIndexStateV1::Clean | RepositoryIndexStateV1::Staged
