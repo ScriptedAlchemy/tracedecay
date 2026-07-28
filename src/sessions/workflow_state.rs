@@ -40,17 +40,18 @@ pub async fn list_unfinished(
     let limit = limit.clamp(1, 250) as i64;
     let mut rows = snapshot
         .query(
-            "SELECT provider, session_id, message_id, ordinal, content,
-                    COALESCE(snippet_text, ''), COALESCE(metadata_json, '')
-             FROM lcm_raw_messages
-             WHERE lower(content) LIKE '%session limit%'
-                OR lower(content) LIKE '%blocked%'
-                OR lower(content) LIKE '%interrupted%'
-                OR lower(content) LIKE '%runs:0%'
-                OR lower(content) LIKE '%\"runs\":0%'
-             ORDER BY COALESCE(timestamp, 0) DESC, store_id DESC
-             LIMIT ?1",
-            params![limit],
+            "SELECT raw.provider, raw.session_id, raw.message_id, raw.ordinal, raw.content,
+                    COALESCE(raw.snippet_text, ''), COALESCE(raw.metadata_json, '')
+             FROM lcm_raw_messages_fts
+             JOIN lcm_raw_messages AS raw
+               ON raw.store_id = lcm_raw_messages_fts.rowid
+             WHERE lcm_raw_messages_fts MATCH ?1
+             ORDER BY COALESCE(raw.timestamp, 0) DESC, raw.store_id DESC
+             LIMIT ?2",
+            params![
+                r#""session limit" OR blocked OR interrupted OR "runs 0""#,
+                limit
+            ],
         )
         .await
         .map_err(|e| e.to_string())?;

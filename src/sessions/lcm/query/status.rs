@@ -161,20 +161,29 @@ async fn status_counts(
 ) -> Result<StatusCounts, LcmError> {
     let mut rows = conn
         .query(
-            "WITH status_providers(provider, session_id) AS (
-                 SELECT provider, session_id FROM lcm_raw_messages
-                 UNION
-                 SELECT provider, session_id FROM lcm_summary_nodes
-                 UNION
-                 SELECT provider, session_id FROM lcm_external_payloads
-                 UNION
-                 SELECT provider, current_session_id AS session_id FROM lcm_lifecycle_state
-             )
-             SELECT
-                 (SELECT COUNT(DISTINCT provider)
-                    FROM status_providers
-                   WHERE (?1 = 'all' OR provider = ?1)
-                     AND (?2 IS NULL OR session_id = ?2)),
+            "SELECT
+                 CASE WHEN
+                     EXISTS (
+                         SELECT 1 FROM lcm_raw_messages
+                          WHERE (?1 = 'all' OR provider = ?1)
+                            AND (?2 IS NULL OR session_id = ?2)
+                     )
+                     OR EXISTS (
+                         SELECT 1 FROM lcm_summary_nodes
+                          WHERE (?1 = 'all' OR provider = ?1)
+                            AND (?2 IS NULL OR session_id = ?2)
+                     )
+                     OR EXISTS (
+                         SELECT 1 FROM lcm_external_payloads
+                          WHERE (?1 = 'all' OR provider = ?1)
+                            AND (?2 IS NULL OR session_id = ?2)
+                     )
+                     OR EXISTS (
+                         SELECT 1 FROM lcm_lifecycle_state
+                          WHERE (?1 = 'all' OR provider = ?1)
+                            AND (?2 IS NULL OR current_session_id = ?2)
+                     )
+                 THEN 1 ELSE 0 END,
                  (SELECT COUNT(*)
                     FROM lcm_raw_messages
                    WHERE (?1 = 'all' OR provider = ?1)
