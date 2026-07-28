@@ -481,15 +481,16 @@ fn bounded_limit(args: &Value, default: usize, max: usize) -> usize {
         .map_or(default, |value| value.clamp(1, max))
 }
 
-async fn open_project_registry_read_only(
+/// Resolves the mounted client project registry, if any. `None` is the
+/// typed missing-registry state: a direct server without a mounted registry
+/// is expected (fresh profile, no daemon), so the registry tools report it
+/// as a stable `not_found` payload rather than a tool error. This never
+/// opens a default registry itself — the fallback removed in the
+/// RegisteredGlobalDb cutover stays removed.
+fn open_project_registry_read_only(
     global_db: Option<&RegisteredGlobalDb>,
-) -> Result<Option<(PathBuf, &RegisteredGlobalDb)>> {
-    if let Some(db) = global_db {
-        return Ok(Some((db.db_path().to_path_buf(), db)));
-    }
-    Err(TraceDecayError::Config {
-        message: "client project registry is unavailable for selector resolution".to_string(),
-    })
+) -> Option<(PathBuf, &RegisteredGlobalDb)> {
+    global_db.map(|db| (db.db_path().to_path_buf(), db))
 }
 
 fn project_registry_result(cg: &TraceDecay, args: &Value, payload: &Value) -> ToolResult {
@@ -568,7 +569,7 @@ pub(super) async fn handle_project_list(
     global_db: Option<&RegisteredGlobalDb>,
 ) -> Result<ToolResult> {
     let limit = bounded_limit(&args, 25, 100);
-    let Some((registry_path, db)) = open_project_registry_read_only(global_db).await? else {
+    let Some((registry_path, db)) = open_project_registry_read_only(global_db) else {
         let mut payload = registry_missing_payload();
         let (title, summary, project_tree) = empty_registry_view_payload("registered projects");
         payload["title"] = title;
@@ -616,7 +617,7 @@ pub(super) async fn handle_project_search(
                 message: "missing required parameter: query".to_string(),
             })?;
     let limit = bounded_limit(&args, 10, 50);
-    let Some((registry_path, db)) = open_project_registry_read_only(global_db).await? else {
+    let Some((registry_path, db)) = open_project_registry_read_only(global_db) else {
         let mut payload = registry_missing_payload();
         let (title, summary, project_tree) =
             empty_registry_view_payload(&format!("projects matching \"{query}\""));
@@ -670,7 +671,7 @@ pub(super) async fn handle_project_context(
     args: Value,
     global_db: Option<&RegisteredGlobalDb>,
 ) -> Result<ToolResult> {
-    let Some((registry_path, db)) = open_project_registry_read_only(global_db).await? else {
+    let Some((registry_path, db)) = open_project_registry_read_only(global_db) else {
         return Ok(project_registry_result(
             cg,
             &args,
