@@ -9,7 +9,10 @@ use serde_json::Value;
 use crate::db::engine::{Connection, TransactionBehavior};
 use crate::db::engine::{Executor, QueryExecutor, params};
 
-use super::{LcmError, LcmGcConfig, maintenance, payload, schema};
+use super::{
+    LCM_SCAN_PAGE_MAX_BYTES, LCM_SCAN_PAGE_ROWS, LcmError, LcmGcConfig, maintenance, payload,
+    schema,
+};
 
 mod orphan_scan;
 mod pending_delete;
@@ -185,32 +188,81 @@ pub async fn referenced_payload_refs(
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<BTreeSet<String>, LcmError> {
+    // Read through byte-bounded `store_id` keyset pages: the raw-message text
+    // for a whole profile exceeds what the SQLite runtime will materialize for
+    // one query. Every page folds into the same set, so the answer stays the
+    // complete reference closure.
     let mut refs = BTreeSet::new();
-    let mut rows = conn
-        .query(
-            "SELECT storage_kind, payload_ref, content, snippet_text, index_text, metadata_json
-         FROM lcm_raw_messages
-         WHERE (?1 = 'all' OR provider = ?1)
-           AND (?2 IS NULL OR session_id = ?2)",
-            params![provider, session_id],
-        )
-        .await?;
-    while let Some(row) = rows.next().await? {
-        let storage_kind: String = row.get(0)?;
-        let payload_ref: Option<String> = row.get(1).unwrap_or(None);
-        if storage_kind == "external"
-            && let Some(payload_ref) = payload_ref
-        {
-            refs.insert(payload_ref);
-        }
-        for index in 2..6 {
-            let value: Option<String> = row.get(index).unwrap_or(None);
-            if let Some(value) = value.as_deref() {
-                refs.extend(extract_live_payload_refs_from_text(value));
+    let mut after_store_id = 0_i64;
+    loop {
+        let mut rows = conn
+            .query(
+                "WITH page AS (
+                     SELECT store_id, storage_kind, payload_ref,
+                            content, snippet_text, index_text, metadata_json
+                     FROM lcm_raw_messages
+                     WHERE (?1 = 'all' OR provider = ?1)
+                       AND (?2 IS NULL OR session_id = ?2)
+                       AND store_id > ?3
+                     ORDER BY store_id
+                     LIMIT ?4
+                 ),
+                 bounded AS (
+                     SELECT store_id, storage_kind, payload_ref,
+                            content, snippet_text, index_text, metadata_json,
+                            ROW_NUMBER() OVER (ORDER BY store_id) AS page_row,
+                            SUM(length(CAST(COALESCE(content, '') AS BLOB))
+                                + length(CAST(COALESCE(snippet_text, '') AS BLOB))
+                                + length(CAST(COALESCE(index_text, '') AS BLOB))
+                                + length(CAST(COALESCE(metadata_json, '') AS BLOB)))
+                                OVER (ORDER BY store_id) AS cumulative_bytes
+                     FROM page
+                 )
+                 SELECT store_id, storage_kind, payload_ref,
+                        content, snippet_text, index_text, metadata_json
+                 FROM bounded
+                 WHERE cumulative_bytes <= ?5 OR page_row = 1
+                 ORDER BY store_id",
+                params![
+                    provider,
+                    session_id,
+                    after_store_id,
+                    LCM_SCAN_PAGE_ROWS,
+                    LCM_SCAN_PAGE_MAX_BYTES
+                ],
+            )
+            .await?;
+        let mut page_rows = 0_usize;
+        while let Some(row) = rows.next().await? {
+            let store_id: i64 = row.get(0)?;
+            if store_id <= after_store_id {
+                return Err(LcmError::Db(
+                    "LCM referenced payload scan page did not advance".to_string(),
+                ));
+            }
+            after_store_id = store_id;
+            page_rows += 1;
+            let storage_kind: String = row.get(1)?;
+            let payload_ref: Option<String> = row.get(2).unwrap_or(None);
+            if storage_kind == "external"
+                && let Some(payload_ref) = payload_ref
+            {
+                refs.insert(payload_ref);
+            }
+            for index in 3..7 {
+                let value: Option<String> = row.get(index).unwrap_or(None);
+                if let Some(value) = value.as_deref() {
+                    refs.extend(extract_live_payload_refs_from_text(value));
+                }
             }
         }
+        drop(rows);
+        // A byte-bounded page can stop short of the row budget, so only an
+        // empty page proves the scan is complete.
+        if page_rows == 0 {
+            return Ok(refs);
+        }
     }
-    Ok(refs)
 }
 
 fn extract_live_payload_refs_from_text(text: &str) -> Vec<String> {

@@ -65,6 +65,25 @@ async fn test_get_all_nodes() {
     assert_eq!(all.len(), 5);
 }
 
+/// The SQLite runtime refuses to materialize a whole-table read of this size in
+/// one query, so `get_all_nodes` has to page. The scan must still be complete.
+#[tokio::test]
+async fn test_get_all_nodes_pages_beyond_runtime_materialization_limit() {
+    const NODES: usize = 10_001;
+    let db = setup_db().await;
+
+    let nodes: Vec<Node> = (0..NODES)
+        .map(|i| sample_node(&format!("paged-{i:06}"), &format!("func_{i}"), "src/lib.rs"))
+        .collect();
+    db.insert_nodes(&nodes).await.expect("insert_nodes failed");
+
+    let all = db.get_all_nodes().await.expect("get_all_nodes failed");
+
+    assert_eq!(all.len(), NODES);
+    let ids: std::collections::HashSet<&str> = all.iter().map(|node| node.id.as_str()).collect();
+    assert_eq!(ids.len(), NODES, "paging must not duplicate or drop nodes");
+}
+
 #[tokio::test]
 async fn test_get_all_edges() {
     let db = setup_db().await;

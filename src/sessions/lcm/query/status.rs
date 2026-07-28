@@ -916,4 +916,76 @@ mod tests {
         assert_eq!(status.messages, 10001);
         assert_eq!(status.estimated_tokens, 20002);
     }
+
+    #[tokio::test]
+    async fn payload_health_pages_more_rows_than_runtime_materialization_limit() {
+        const ROWS: i64 = 10_001;
+        let (_database_dir, conn) = test_lcm_connection().await;
+        let storage = TempDir::new().expect("storage tempdir");
+        conn.execute(
+            "INSERT INTO sessions(provider, session_id, project_key, project_path)
+             VALUES ('cursor', 'session-paged-payloads', '/project', '/project')",
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            &format!(
+                "WITH RECURSIVE fixture(value) AS (
+                     SELECT 1
+                     UNION ALL
+                     SELECT value + 1 FROM fixture WHERE value < {ROWS}
+                 )
+                 INSERT INTO lcm_raw_messages (
+                     provider, message_id, session_id, role, ordinal, timestamp,
+                     content, content_hash, storage_kind, payload_ref, snippet_text,
+                     index_text, legacy_source, legacy_truncated, metadata_json
+                 )
+                 SELECT 'cursor', printf('message-%05d', value), 'session-paged-payloads',
+                        'assistant', value, value, 'one token',
+                        printf('hash-%05d', value), 'external',
+                        printf('payload-%05d', value), 'one token',
+                        'one token', 0, 0, NULL
+                 FROM fixture"
+            ),
+            (),
+        )
+        .await
+        .unwrap();
+        conn.execute(
+            &format!(
+                "WITH RECURSIVE fixture(value) AS (
+                     SELECT 1
+                     UNION ALL
+                     SELECT value + 1 FROM fixture WHERE value < {ROWS}
+                 )
+                 INSERT INTO lcm_external_payloads (
+                     payload_ref, provider, session_id, message_id, kind,
+                     content_hash, byte_count, char_count
+                 )
+                 SELECT printf('payload-%05d', value), 'cursor', 'session-paged-payloads',
+                        printf('message-%05d', value), 'tool_output',
+                        printf('hash-%05d', value), 16, 16
+                 FROM fixture"
+            ),
+            (),
+        )
+        .await
+        .unwrap();
+
+        let (status, _work) = aggregate_provider_status_with_work(
+            &*conn,
+            storage.path(),
+            None,
+            false,
+            &LcmGcConfig::default(),
+        )
+        .await
+        .expect("aggregate status must page instead of exceeding the materialization limit");
+
+        assert_eq!(status.raw_message_count, ROWS);
+        assert_eq!(status.external_payload_count, ROWS);
+        // Every reference is live, so nothing is reported as unreferenced.
+        assert_eq!(status.unreferenced_payload_count, 0);
+    }
 }

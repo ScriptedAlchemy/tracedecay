@@ -22,6 +22,10 @@ pub struct NodeMetrics {
     pub depth: usize,
 }
 
+/// Distinct file-pair rows requested per page of the whole-graph adjacency
+/// scan. Stays under the SQLite runtime's per-query materialization admission.
+const ADJACENCY_SCAN_PAGE_ROWS: i64 = 2_000;
+
 /// Bounded whole-graph file adjacency plus the rows examined to build it.
 #[derive(Debug)]
 pub struct FileAdjacencyScan {
@@ -483,22 +487,19 @@ impl<'a> GraphQueryManager<'a> {
         &self,
         path_prefix: Option<&str>,
     ) -> Result<HashMap<String, HashSet<String>>> {
+        // Read the distinct pairs through keyset pages: the whole join exceeds
+        // what the SQLite runtime will materialize for a single query on a real
+        // project. Every page is aggregated into the same adjacency map, so the
+        // result stays a complete measurement.
         let sql = "SELECT DISTINCT n1.file_path AS src_file, n2.file_path AS tgt_file \
                    FROM edges e \
                    JOIN nodes n1 ON e.source = n1.id \
                    JOIN nodes n2 ON e.target = n2.id \
                    WHERE e.kind IN ('calls', 'uses') \
-                   AND n1.file_path != n2.file_path";
-
-        let mut rows =
-            self.db
-                .conn()
-                .query(sql, ())
-                .await
-                .map_err(|e| TraceDecayError::Database {
-                    message: format!("failed to query file adjacency: {e}"),
-                    operation: "build_file_adjacency".to_string(),
-                })?;
+                   AND n1.file_path != n2.file_path \
+                   AND (n1.file_path > ?1 OR (n1.file_path = ?1 AND n2.file_path > ?2)) \
+                   ORDER BY src_file, tgt_file \
+                   LIMIT ?3";
 
         // Normalise the prefix once: ensure it ends with '/'.
         let prefix: Option<String> = path_prefix.map(|p| {
@@ -510,21 +511,43 @@ impl<'a> GraphQueryManager<'a> {
         });
 
         let mut adj: HashMap<String, HashSet<String>> = HashMap::new();
+        let mut cursor = (String::new(), String::new());
+        loop {
+            let mut rows = self
+                .db
+                .conn()
+                .query(
+                    sql,
+                    (cursor.0.clone(), cursor.1.clone(), ADJACENCY_SCAN_PAGE_ROWS),
+                )
+                .await
+                .map_err(|e| TraceDecayError::Database {
+                    message: format!("failed to query file adjacency: {e}"),
+                    operation: "build_file_adjacency".to_string(),
+                })?;
 
-        while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
-            message: format!("failed to read adjacency row: {e}"),
-            operation: "build_file_adjacency".to_string(),
-        })? {
-            let src: String = row.get(0).unwrap_or_default();
-            let tgt: String = row.get(1).unwrap_or_default();
+            let mut page_rows = 0_i64;
+            while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
+                message: format!("failed to read adjacency row: {e}"),
+                operation: "build_file_adjacency".to_string(),
+            })? {
+                let src: String = row.get(0).unwrap_or_default();
+                let tgt: String = row.get(1).unwrap_or_default();
+                cursor = (src.clone(), tgt.clone());
+                page_rows += 1;
 
-            if let Some(ref pfx) = prefix
-                && (!src.starts_with(pfx.as_str()) || !tgt.starts_with(pfx.as_str()))
-            {
-                continue;
+                if let Some(ref pfx) = prefix
+                    && (!src.starts_with(pfx.as_str()) || !tgt.starts_with(pfx.as_str()))
+                {
+                    continue;
+                }
+
+                adj.entry(src).or_default().insert(tgt);
             }
-
-            adj.entry(src).or_default().insert(tgt);
+            drop(rows);
+            if page_rows < ADJACENCY_SCAN_PAGE_ROWS {
+                break;
+            }
         }
 
         // Ensure every known file appears as a key (even leaf nodes with no deps).
