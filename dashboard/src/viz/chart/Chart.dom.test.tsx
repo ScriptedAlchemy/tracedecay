@@ -55,7 +55,7 @@ const TOKENS: Record<string, string> = {
 const OPTION: EChartsOption = {
   xAxis: { type: 'category', data: ['a', 'b'] },
   yAxis: { type: 'value' },
-  series: [{ type: 'bar', data: [1, 2] }],
+  series: [{ type: 'line', data: [1, 2] }],
 };
 
 /** Resolve the OS media query to a fixed answer for the duration of a case. */
@@ -155,6 +155,11 @@ describe('Chart theming and motion', () => {
  * ECharts chunk inside plan 11's per-chunk budget. ECharts answers an
  * unregistered series with an empty canvas rather than an error, so the cost of
  * that narrowing is a chart-shaped blank standing in for a real measurement.
+ *
+ * `line` is the only registered type. `bar` was registered too until nothing in
+ * the product drew one, so it is asserted here alongside the types that were
+ * never registered: the guard has to cover whatever the chunk drops, or the next
+ * narrowing lands as blank canvases instead of a notice.
  */
 describe('Chart registered-series guard', () => {
   beforeEach(() => {
@@ -178,6 +183,19 @@ describe('Chart registered-series guard', () => {
     expect((await lastOption()).series).toBeTruthy();
   });
 
+  it('names a de-registered bar series instead of mounting a blank canvas', async () => {
+    const { queryByRole, getByText } = render(
+      <Chart
+        option={{ series: [{ type: 'bar', data: [1] }] } as EChartsOption}
+        ariaLabel="events per day"
+      />,
+    );
+
+    expect(getByText(/cannot draw a bar series/i)).toBeTruthy();
+    expect(queryByRole('img')).toBeNull();
+    await waitFor(() => expect(applied.length).toBe(0));
+  });
+
   it('names an unregistered series instead of mounting a blank canvas', async () => {
     const { queryByRole, getByText } = render(
       <Chart
@@ -199,7 +217,7 @@ describe('Chart registered-series guard', () => {
         option={
           {
             series: [
-              { type: 'bar', data: [1] },
+              { type: 'line', data: [1] },
               { type: 'pie', data: [] },
               { type: 'pie', data: [] },
             ],

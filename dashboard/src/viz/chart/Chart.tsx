@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { EChartsOption, ECharts } from 'echarts';
 import { useReducedMotion } from '../trace/reducedMotion.ts';
 import { isRegisteredSeries } from './echarts.ts';
@@ -113,7 +113,9 @@ export function Chart({
   // effect here at all — and a reader who pinned "Full" was overridden by the
   // OS. The media query is one input to that decision, not the decision.
   const { reduced } = useReducedMotion();
-  const unsupported = unsupportedSeries(option);
+  // Pure over `option`, so its identity is the whole cache key — a caller that
+  // stabilizes the option literal stops re-scanning its series on every render.
+  const unsupported = useMemo(() => unsupportedSeries(option), [option]);
 
   useEffect(() => {
     // Null whenever the option carries an unsupported series, because that
