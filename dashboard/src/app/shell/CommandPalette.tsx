@@ -1,6 +1,6 @@
 import * as Dialog from '@radix-ui/react-dialog';
 import { Command as CommandIcon, CornerDownLeft, Search } from 'lucide-react';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { WORKSPACES } from '../routes';
 import { cn } from '../../ui/cn';
@@ -19,7 +19,9 @@ interface PaletteEntry {
 
 /** Command palette (plan 11a): scope-aware search across workspaces (and,
  * as slices land, entities, saved deep links, and legal actions only).
- * Results carry the same truth metadata as lists. */
+ * Results carry the same truth metadata as lists.
+ * Lazy-loaded from Shell after first open so @radix-ui/react-dialog stays out
+ * of the initial shell chunk. */
 export function CommandPalette({
   open,
   onOpenChange,
@@ -31,7 +33,6 @@ export function CommandPalette({
   const selectProject = useScope((s) => s.selectProject);
   const [query, setQuery] = useState('');
   const [active, setActive] = useState(0);
-  const inputRef = useRef<HTMLInputElement>(null);
   // Entities: registered projects become scope-setting results. Fetched only
   // while the palette is open; a failed registry read simply yields no
   // project rows (workspace navigation never depends on it).
@@ -110,7 +111,6 @@ export function CommandPalette({
           <div className="flex items-center gap-2 border-b border-edge-subtle px-3">
             <Search aria-hidden size={14} className="text-text-muted" />
             <input
-              ref={inputRef}
               autoFocus
               value={query}
               onChange={(e) => setQuery(e.target.value)}
@@ -155,18 +155,4 @@ export function CommandPalette({
       </Dialog.Portal>
     </Dialog.Root>
   );
-}
-
-/** Global Cmd/Ctrl-K binding. */
-export function usePaletteHotkey(setOpen: (open: boolean) => void) {
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
-        e.preventDefault();
-        setOpen(true);
-      }
-    };
-    window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
-  }, [setOpen]);
 }
