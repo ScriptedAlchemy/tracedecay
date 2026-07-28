@@ -23,6 +23,8 @@ mod test_profile_isolation_test;
 #[cfg(unix)]
 mod tool_daemon_test;
 mod tool_first_touch_test;
+#[cfg(unix)]
+mod tool_surface_transport_test;
 mod tracedecay_test;
 mod user_config_test;
 mod walk_up_test;
