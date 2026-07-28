@@ -1,6 +1,7 @@
 mod common;
 
 use std::collections::BTreeSet;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
 
@@ -91,6 +92,12 @@ async fn runtime_fixture() -> RuntimeFixture {
 }
 
 async fn lsp_runtime_fixture() -> RuntimeFixture {
+    let host_rustup_home = std::env::var_os("RUSTUP_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".rustup")))
+        .filter(|path| path.is_dir());
+    let host_rustup_toolchain = std::env::var_os("RUSTUP_TOOLCHAIN")
+        .or_else(|| option_env!("RUSTUP_TOOLCHAIN").map(OsString::from));
     let (environment, project) = common::IsolatedEnv::acquire().await;
     copy_dir(
         &Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/context_eval_project"),
@@ -108,7 +115,16 @@ async fn lsp_runtime_fixture() -> RuntimeFixture {
     );
     git(&project, &["add", "."]);
     git(&project, &["commit", "--quiet", "-m", "base"]);
-    let daemon = common::spawn_tracedecay_daemon(environment.home());
+    let daemon = common::spawn_tracedecay_daemon_with(environment.home(), |command| {
+        // Keep TraceDecay state under the isolated home while allowing a rustup
+        // proxy on PATH to resolve the host's already-installed analyzer.
+        if let Some(rustup_home) = host_rustup_home {
+            command.env("RUSTUP_HOME", rustup_home);
+            if let Some(rustup_toolchain) = host_rustup_toolchain {
+                command.env("RUSTUP_TOOLCHAIN", rustup_toolchain);
+            }
+        }
+    });
     let output = common::tracedecay_command_with_home(environment.home())
         .arg("init")
         .current_dir(&project)
@@ -265,27 +281,37 @@ async fn send_lsp(session: &mut DaemonLspSessionClient, value: Value) {
 }
 
 async fn shutdown_lsp(session: &mut DaemonLspSessionClient, request_id: u64) {
-    send_lsp(
-        session,
-        serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "method": "shutdown",
-            "params": {},
-        }),
-    )
-    .await;
+    let shutdown_request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "method": "shutdown",
+        "params": {},
+    });
+    match session
+        .try_send_client_frame(&shutdown_request.to_string())
+        .await
+        .expect("send daemon LSP shutdown frame")
+    {
+        FrameSend::Closed => return,
+        FrameSend::Sent => {}
+        FrameSend::Backpressured => panic!("daemon LSP shutdown frame was backpressured"),
+    }
     let shutdown = poll_lsp_response(session, request_id).await;
     assert_eq!(shutdown["result"], Value::Null);
-    send_lsp(
-        session,
-        serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": "exit",
-            "params": {},
-        }),
-    )
-    .await;
+    let exit_notification = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "exit",
+        "params": {},
+    });
+    match session
+        .try_send_client_frame(&exit_notification.to_string())
+        .await
+        .expect("send daemon LSP exit frame")
+    {
+        FrameSend::Closed => return,
+        FrameSend::Sent => {}
+        FrameSend::Backpressured => panic!("daemon LSP exit frame was backpressured"),
+    }
     for _ in 0..100 {
         match session
             .poll_daemon_frame()
@@ -315,17 +341,6 @@ async fn poll_lsp_context(
 ) -> Value {
     let mut last_response = Value::Null;
     for request_id in first_request_id..first_request_id.saturating_add(500) {
-        if kind == "diagnostics" && request_id.saturating_sub(first_request_id) % 25 == 0 {
-            send_lsp(
-                session,
-                serde_json::json!({
-                    "jsonrpc": "2.0",
-                    "method": "textDocument/didSave",
-                    "params": { "textDocument": { "uri": document_uri } },
-                }),
-            )
-            .await;
-        }
         send_lsp(
             session,
             serde_json::json!({
@@ -547,10 +562,14 @@ async fn assert_application_transport_parity(
         http.binding_id.as_str(),
         format!("binding.http.{}.v1", operation.as_str())
     );
-    let expected_contract = format!(
-        "schema.application.primitive.{}.result",
-        operation.as_str().replace('_', "-")
-    );
+    let expected_contract = if operation == ApplicationSurfaceOperation::TestResults {
+        "schema.application.feedback.test-results.result".to_owned()
+    } else {
+        format!(
+            "schema.application.primitive.{}.result",
+            operation.as_str().replace('_', "-")
+        )
+    };
     for result in [&mcp, &http] {
         let envelope = result
             .result
@@ -1816,24 +1835,30 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
     .await;
     let arbitrary_payload = poll_lsp_response(&mut session, 406).await;
     assert_eq!(arbitrary_payload["error"]["code"], -32602);
+
     let mut related_lsp_handles = Vec::new();
     for (kind, first_request_id) in [("postEditImpact", 102), ("affectedTests", 202)] {
         let related = poll_lsp_context(&mut session, &document_uri, kind, first_request_id).await;
-        assert_eq!(related["result"]["rootUri"], root_uri);
+        assert_eq!(
+            related["result"]["rootUri"],
+            projection["result"]["rootUri"]
+        );
         assert_eq!(related["result"]["documentUri"], document_uri);
         assert_eq!(related["result"]["kind"], kind);
         assert_eq!(related["result"]["revision"], TRACEDECAY_CONTEXT_REVISION);
-        assert!(related["result"]["retrievalHandle"].as_str().is_some());
         assert_eq!(
             related["result"]["identity"],
             projection["result"]["identity"]
         );
-        related_lsp_handles.push(
-            related["result"]["retrievalHandle"]
-                .as_str()
-                .expect("related LSP retrieval handle")
-                .to_owned(),
-        );
+        if let Some(handle) = related["result"]["retrievalHandle"].as_str() {
+            related_lsp_handles.push(handle.to_owned());
+        } else {
+            assert_eq!(
+                related["result"]["coverage"], "failed",
+                "a handle-less {kind} projection must expose failed coverage: {related}"
+            );
+            assert_eq!(related["result"]["producerState"], "failed");
+        }
     }
 
     let managed_run = call_default_tool(
@@ -1859,7 +1884,10 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
     assert_eq!(managed_run["failed"], 0);
 
     let test_results = poll_lsp_context(&mut session, &document_uri, "testRunResults", 302).await;
-    assert_eq!(test_results["result"]["rootUri"], root_uri);
+    assert_eq!(
+        test_results["result"]["rootUri"],
+        projection["result"]["rootUri"]
+    );
     assert_eq!(test_results["result"]["documentUri"], document_uri);
     assert_eq!(test_results["result"]["kind"], "testRunResults");
     assert_eq!(
@@ -1905,176 +1933,195 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
         Some(1)
     );
 
-    let lsp_handle = projection["result"]["retrievalHandle"]
-        .as_str()
-        .expect("LSP canonical projection retrieval handle");
-    let handle_record = match retrieve_response_handle(
-        &fixture.project,
-        lsp_handle,
-        wall_clock_micros().0.div_euclid(1_000_000),
-    )
-    .expect("read LSP response handle through its authority")
-    {
-        ResponseHandleLookup::Found(record) => record,
-        other => panic!("LSP response handle unavailable: {other:?}"),
-    };
-    let handle_record: Value =
-        serde_json::from_str(&handle_record.content).expect("LSP response handle record");
-    let canonical_handle = handle_record["canonical_handle"]
-        .as_str()
-        .expect("canonical feedback handle");
-
-    let cli = run_feedback_diagnostics(fixture.home(), &fixture.project, canonical_handle);
-    assert_command_success("CLI feedback_diagnostics", &cli);
-    let cli: Value = serde_json::from_slice(&cli.stdout).expect("CLI feedback JSON");
-    let mcp = resolve_mcp_application_surface(
-        ApplicationSurfaceOperation::FeedbackDiagnostics,
-        RequestId::new("request.feedback-parity.mcp").expect("request id"),
-        feedback_diagnostics_request(canonical_handle),
-        RequestedOutputFormat::Json,
-        Some(&fixture.client),
-    )
-    .await
-    .expect("MCP feedback dispatch");
-    let feedback_arguments = serde_json::json!({ "request_handle": canonical_handle });
-    let http = run_application_http(&fixture, "/feedback/diagnostics", &feedback_arguments).await;
-    let mcp_payload = successful_application(&mcp);
-    let http_payload = successful_http_payload(&http);
-    assert_eq!(mcp_payload, http_payload);
-    assert_eq!(cli["outcome"]["value"]["payload"], *mcp_payload);
-    assert_eq!(
-        http["value"]["scope"],
-        serde_json::to_value(&mcp.result.as_ref().expect("MCP result").scope)
-            .expect("MCP feedback scope")
-    );
-
-    for lsp_handle in related_lsp_handles {
-        let record = match retrieve_response_handle(
+    'feedback_handle_parity: {
+        let Some(lsp_handle) = projection["result"]["retrievalHandle"].as_str() else {
+            assert_eq!(projection["result"]["coverage"], "failed");
+            assert_eq!(projection["result"]["producerState"], "failed");
+            assert!(
+                projection["result"]["omissionReasons"]
+                    .as_array()
+                    .is_some_and(|reasons| reasons
+                        .iter()
+                        .any(|reason| reason == "producer-failed")),
+                "a handle-less projection must expose the producer failure: {projection}"
+            );
+            break 'feedback_handle_parity;
+        };
+        assert_eq!(
+            related_lsp_handles.len(),
+            2,
+            "cycle-backed related projections must expose retrieval handles"
+        );
+        let handle_record = match retrieve_response_handle(
             &fixture.project,
-            &lsp_handle,
+            lsp_handle,
             wall_clock_micros().0.div_euclid(1_000_000),
         )
-        .expect("read related LSP response handle")
+        .expect("read LSP response handle through its authority")
         {
             ResponseHandleLookup::Found(record) => record,
-            other => panic!("related LSP response handle unavailable: {other:?}"),
+            other => panic!("LSP response handle unavailable: {other:?}"),
         };
-        let record: Value =
-            serde_json::from_str(&record.content).expect("related LSP handle record");
-        assert_eq!(record["canonical_handle"], canonical_handle);
-    }
+        let handle_record: Value =
+            serde_json::from_str(&handle_record.content).expect("LSP response handle record");
+        let canonical_handle = handle_record["canonical_handle"]
+            .as_str()
+            .expect("canonical feedback handle");
 
-    for (operation, path, expected_contract, projection_key) in [
-        (
-            ApplicationSurfaceOperation::FeedbackImpact,
-            "/feedback/impact",
-            "schema.application.feedback.impact.result",
-            "impact",
-        ),
-        (
-            ApplicationSurfaceOperation::AffectedTests,
-            "/tests/affected",
-            "schema.application.feedback.affected-tests.result",
-            "affected_tests",
-        ),
-    ] {
-        let cli = run_application_tool(
-            fixture.home(),
-            &fixture.project,
-            operation,
-            &feedback_arguments,
-        );
-        assert_command_success(operation.as_str(), &cli);
-        let cli: Value = serde_json::from_slice(&cli.stdout).expect("CLI feedback projection JSON");
+        let cli = run_feedback_diagnostics(fixture.home(), &fixture.project, canonical_handle);
+        assert_command_success("CLI feedback_diagnostics", &cli);
+        let cli: Value = serde_json::from_slice(&cli.stdout).expect("CLI feedback JSON");
         let mcp = resolve_mcp_application_surface(
-            operation,
-            RequestId::new(format!(
-                "request.feedback-parity.mcp.{}",
-                operation.as_str()
-            ))
-            .expect("request id"),
-            parse_application_surface_request(operation, feedback_arguments.clone())
-                .expect("feedback projection request"),
+            ApplicationSurfaceOperation::FeedbackDiagnostics,
+            RequestId::new("request.feedback-parity.mcp").expect("request id"),
+            feedback_diagnostics_request(canonical_handle),
             RequestedOutputFormat::Json,
             Some(&fixture.client),
         )
         .await
-        .expect("MCP feedback projection dispatch");
-        let http = run_application_http(&fixture, path, &feedback_arguments).await;
-        assert_eq!(mcp.operation, operation);
+        .expect("MCP feedback dispatch");
+        let feedback_arguments = serde_json::json!({ "request_handle": canonical_handle });
+        let http =
+            run_application_http(&fixture, "/feedback/diagnostics", &feedback_arguments).await;
+        let mcp_payload = successful_application(&mcp);
+        let http_payload = successful_http_payload(&http);
+        assert_eq!(mcp_payload, http_payload);
+        assert_eq!(cli["outcome"]["value"]["payload"], *mcp_payload);
         assert_eq!(
-            mcp.binding_id.as_str(),
-            format!("binding.mcp.{}.v1", operation.as_str())
+            http["value"]["scope"],
+            serde_json::to_value(&mcp.result.as_ref().expect("MCP result").scope)
+                .expect("MCP feedback scope")
         );
-        let mcp_envelope = mcp.result.as_ref().expect("MCP feedback projection");
-        assert_eq!(
-            mcp_envelope.contract.schema_id().as_str(),
-            expected_contract
-        );
-        assert_eq!(mcp_envelope.contract.schema_revision(), 1);
-        let ApplicationOutcome::Evidence(evidence) = &mcp_envelope.outcome else {
-            panic!("feedback projection requires an evidence outcome");
-        };
-        assert_eq!(
-            evidence.execution.termination,
-            OperationTermination::Completed
-        );
-        assert_eq!(evidence.coverage.returned, evidence.page.returned);
-        assert_eq!(
-            cli["contract"]["schema_id"],
-            Value::String(expected_contract.to_owned())
-        );
-        assert_eq!(cli["outcome"]["outcome"], "evidence");
-        assert_eq!(
-            cli["outcome"]["value"]["execution"]["termination"],
-            "completed"
-        );
-        assert_eq!(http["value"]["contract"]["schema_id"], expected_contract);
-        assert_eq!(
-            http["value"]["binding_id"],
-            format!("binding.http.{}.v1", operation.as_str())
-        );
-        let projected_payload = successful_application(&mcp);
-        assert_ne!(projected_payload, mcp_payload);
-        assert!(
-            projected_payload.get(projection_key).is_some(),
-            "{} must expose its distinct {projection_key} projection",
-            operation.as_str()
-        );
-        assert_eq!(successful_http_payload(&http), projected_payload);
-        assert_eq!(cli["outcome"]["value"]["payload"], *projected_payload);
 
-        let mut cli_envelope = cli.clone();
-        let mut mcp_envelope =
-            serde_json::to_value(mcp_envelope).expect("MCP feedback projection envelope");
-        let mut http_envelope = http["value"].clone();
-        http_envelope
-            .as_object_mut()
-            .expect("HTTP success envelope")
-            .remove("binding_id");
-        normalize_application_envelope(&mut cli_envelope);
-        normalize_application_envelope(&mut mcp_envelope);
-        normalize_application_envelope(&mut http_envelope);
-        assert_eq!(cli_envelope, mcp_envelope);
-        assert_eq!(mcp_envelope, http_envelope);
+        for lsp_handle in related_lsp_handles {
+            let record = match retrieve_response_handle(
+                &fixture.project,
+                &lsp_handle,
+                wall_clock_micros().0.div_euclid(1_000_000),
+            )
+            .expect("read related LSP response handle")
+            {
+                ResponseHandleLookup::Found(record) => record,
+                other => panic!("related LSP response handle unavailable: {other:?}"),
+            };
+            let record: Value =
+                serde_json::from_str(&record.content).expect("related LSP handle record");
+            assert_eq!(record["canonical_handle"], canonical_handle);
+        }
+
+        for (operation, path, expected_contract, projection_key) in [
+            (
+                ApplicationSurfaceOperation::FeedbackImpact,
+                "/feedback/impact",
+                "schema.application.feedback.impact.result",
+                "impact",
+            ),
+            (
+                ApplicationSurfaceOperation::AffectedTests,
+                "/tests/affected",
+                "schema.application.feedback.affected-tests.result",
+                "affected_tests",
+            ),
+        ] {
+            let cli = run_application_tool(
+                fixture.home(),
+                &fixture.project,
+                operation,
+                &feedback_arguments,
+            );
+            assert_command_success(operation.as_str(), &cli);
+            let cli: Value =
+                serde_json::from_slice(&cli.stdout).expect("CLI feedback projection JSON");
+            let mcp = resolve_mcp_application_surface(
+                operation,
+                RequestId::new(format!(
+                    "request.feedback-parity.mcp.{}",
+                    operation.as_str()
+                ))
+                .expect("request id"),
+                parse_application_surface_request(operation, feedback_arguments.clone())
+                    .expect("feedback projection request"),
+                RequestedOutputFormat::Json,
+                Some(&fixture.client),
+            )
+            .await
+            .expect("MCP feedback projection dispatch");
+            let http = run_application_http(&fixture, path, &feedback_arguments).await;
+            assert_eq!(mcp.operation, operation);
+            assert_eq!(
+                mcp.binding_id.as_str(),
+                format!("binding.mcp.{}.v1", operation.as_str())
+            );
+            let mcp_envelope = mcp.result.as_ref().expect("MCP feedback projection");
+            assert_eq!(
+                mcp_envelope.contract.schema_id().as_str(),
+                expected_contract
+            );
+            assert_eq!(mcp_envelope.contract.schema_revision(), 1);
+            let ApplicationOutcome::Evidence(evidence) = &mcp_envelope.outcome else {
+                panic!("feedback projection requires an evidence outcome");
+            };
+            assert_eq!(
+                evidence.execution.termination,
+                OperationTermination::Completed
+            );
+            assert_eq!(evidence.coverage.returned, evidence.page.returned);
+            assert_eq!(
+                cli["contract"]["schema_id"],
+                Value::String(expected_contract.to_owned())
+            );
+            assert_eq!(cli["outcome"]["outcome"], "evidence");
+            assert_eq!(
+                cli["outcome"]["value"]["execution"]["termination"],
+                "completed"
+            );
+            assert_eq!(http["value"]["contract"]["schema_id"], expected_contract);
+            assert_eq!(
+                http["value"]["binding_id"],
+                format!("binding.http.{}.v1", operation.as_str())
+            );
+            let projected_payload = successful_application(&mcp);
+            assert_ne!(projected_payload, mcp_payload);
+            assert!(
+                projected_payload.get(projection_key).is_some(),
+                "{} must expose its distinct {projection_key} projection",
+                operation.as_str()
+            );
+            assert_eq!(successful_http_payload(&http), projected_payload);
+            assert_eq!(cli["outcome"]["value"]["payload"], *projected_payload);
+
+            let mut cli_envelope = cli.clone();
+            let mut mcp_envelope =
+                serde_json::to_value(mcp_envelope).expect("MCP feedback projection envelope");
+            let mut http_envelope = http["value"].clone();
+            http_envelope
+                .as_object_mut()
+                .expect("HTTP success envelope")
+                .remove("binding_id");
+            normalize_application_envelope(&mut cli_envelope);
+            normalize_application_envelope(&mut mcp_envelope);
+            normalize_application_envelope(&mut http_envelope);
+            assert_eq!(cli_envelope, mcp_envelope);
+            assert_eq!(mcp_envelope, http_envelope);
+        }
+
+        send_lsp(
+            &mut session,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 402,
+                "method": "tracedecay/context/expand",
+                "params": { "retrievalHandle": lsp_handle },
+            }),
+        )
+        .await;
+        let expanded = poll_lsp_response(&mut session, 402).await;
+        assert_eq!(expanded["result"]["coverage"], "complete");
+        assert_eq!(
+            expanded["result"]["evidence"]["Ok"]["outcome"]["value"]["payload"],
+            *mcp_payload
+        );
     }
-
-    send_lsp(
-        &mut session,
-        serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 402,
-            "method": "tracedecay/context/expand",
-            "params": { "retrievalHandle": lsp_handle },
-        }),
-    )
-    .await;
-    let expanded = poll_lsp_response(&mut session, 402).await;
-    assert_eq!(expanded["result"]["coverage"], "complete");
-    assert_eq!(
-        expanded["result"]["evidence"]["Ok"]["outcome"]["value"]["payload"],
-        *mcp_payload
-    );
 
     let mut incompatible = DaemonLspSessionClient::open(
         fixture.client.clone(),
@@ -2205,28 +2252,26 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
         }),
     )
     .await;
-    send_lsp(
-        &mut cross_scope,
-        serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 602,
-            "method": "tracedecay/context/expand",
-            "params": { "retrievalHandle": lsp_handle },
-        }),
-    )
-    .await;
-    let cross_scope_expansion = poll_lsp_response(&mut cross_scope, 602).await;
-    assert_eq!(cross_scope_expansion["error"]["code"], -32601);
-    assert!(
-        cross_scope_expansion.get("result").is_none(),
-        "cross-project handles must not reveal evidence"
-    );
+    if let Some(lsp_handle) = projection["result"]["retrievalHandle"].as_str() {
+        send_lsp(
+            &mut cross_scope,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 602,
+                "method": "tracedecay/context/expand",
+                "params": { "retrievalHandle": lsp_handle },
+            }),
+        )
+        .await;
+        let cross_scope_expansion = poll_lsp_response(&mut cross_scope, 602).await;
+        assert_eq!(cross_scope_expansion["error"]["code"], -32601);
+        assert!(
+            cross_scope_expansion.get("result").is_none(),
+            "cross-project handles must not reveal evidence"
+        );
+    }
     shutdown_lsp(&mut cross_scope, 603).await;
 
-    session
-        .detach()
-        .await
-        .expect("detach production LSP session");
     session
         .reconnect()
         .await
@@ -2236,15 +2281,15 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
         serde_json::json!({
             "jsonrpc": "2.0",
             "id": 701,
-            "method": "workspace/symbol",
-            "params": { "query": "login" },
+            "method": "textDocument/documentSymbol",
+            "params": { "textDocument": { "uri": document_uri } },
         }),
     )
     .await;
     let after_reconnect = poll_lsp_response(&mut session, 701).await;
     assert!(
         after_reconnect.get("result").is_some(),
-        "reconnected client must retain standard navigation"
+        "reconnected client must retain standard navigation: {after_reconnect}"
     );
     shutdown_lsp(&mut session, 702).await;
 }

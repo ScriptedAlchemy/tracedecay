@@ -454,7 +454,12 @@ impl FeedbackCyclePort for Pr12FeedbackCycleAdapter {
         let authority = Arc::clone(&self.authority);
         let _task = self.runtime.spawn(async move {
             let _permit = permit;
-            let _ = authority.execute(request).await;
+            if let Err(error) = authority.execute(request).await {
+                eprintln!(
+                    "[tracedecay] event=lsp_feedback_cycle_failed failure_class={}",
+                    error.class()
+                );
+            }
         });
         FeedbackCycleResponse::Accepted
     }
