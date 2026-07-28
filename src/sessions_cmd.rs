@@ -9,7 +9,7 @@ use crate::{
     },
     resolve_cli_project_root,
 };
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 const SESSION_REFRESH_TOOL: &str = "tracedecay_session_refresh";
 const PROJECT_CONTEXT_TOOL: &str = "tracedecay_project_context";
@@ -17,6 +17,45 @@ const ACTIVE_PROJECT_TOOL: &str = "tracedecay_active_project";
 const DEFAULT_REFRESH_PROFILE_ID: &str = "profile.primary";
 const DEFAULT_REFRESH_TEMPORAL_MODE: &str = "current";
 const DEFAULT_REFRESH_GRAIN: &str = "logical_message";
+
+fn message_search_rpc_args(args: SessionsSearchArgs) -> Value {
+    let SessionsSearchArgs {
+        query,
+        provider,
+        scope,
+        message_type,
+        parent_session_id,
+        limit,
+        since,
+        until,
+        project_id: _,
+        project_path: _,
+        branch,
+        worktree,
+        commit,
+    } = args;
+    let mut arguments = Map::from_iter([
+        ("query".to_string(), Value::String(query)),
+        ("scope".to_string(), Value::String(scope)),
+        ("message_type".to_string(), Value::String(message_type)),
+        ("limit".to_string(), json!(limit)),
+        ("format".to_string(), Value::String("json".to_string())),
+    ]);
+    for (key, value) in [
+        ("provider", provider),
+        ("parent_session_id", parent_session_id),
+        ("since", since),
+        ("until", until),
+        ("branch", branch),
+        ("worktree", worktree),
+        ("commit", commit),
+    ] {
+        if let Some(value) = value {
+            arguments.insert(key.to_string(), Value::String(value));
+        }
+    }
+    Value::Object(arguments)
+}
 
 pub(crate) async fn handle_sessions_action(
     action: SessionsAction,
@@ -45,39 +84,13 @@ pub(crate) async fn handle_sessions_action(
             );
         }
         SessionsAction::Search(args) => {
-            let SessionsSearchArgs {
-                query,
-                provider,
-                scope,
-                message_type,
-                parent_session_id,
-                limit,
-                since,
-                until,
-                project_id,
-                project_path,
-                branch,
-                worktree,
-                commit,
-            } = *args;
+            let project_id = args.project_id.clone();
+            let project_path = args.project_path.clone();
             let project_path = resolve_cli_project_root(None, project_id, project_path).await?;
             let payload = call_daemon_tool(
                 &project_path,
                 "tracedecay_message_search",
-                json!({
-                    "query": query,
-                    "provider": provider,
-                    "scope": scope,
-                    "message_type": message_type,
-                    "parent_session_id": parent_session_id,
-                    "limit": limit,
-                    "since": since,
-                    "until": until,
-                    "branch": branch,
-                    "worktree": worktree,
-                    "commit": commit,
-                    "format": "json",
-                }),
+                message_search_rpc_args(*args),
             )
             .await?;
             for result in payload["results"].as_array().into_iter().flatten() {
@@ -843,9 +856,76 @@ mod tests {
     use super::{
         SessionRefreshDaemonFuture, SessionRefreshDaemonTransport, SessionRefreshMode,
         SessionRefreshOutcome, SessionRefreshSelectors, dispatch_session_refresh,
-        execute_session_refresh, session_refresh_human_outcome,
+        execute_session_refresh, message_search_rpc_args, session_refresh_human_outcome,
     };
-    use crate::cli::Cli;
+    use crate::cli::{Cli, SessionsSearchArgs};
+
+    #[test]
+    fn message_search_rpc_args_omit_absent_optional_filters() {
+        let args = message_search_rpc_args(SessionsSearchArgs {
+            query: "dogfood".to_string(),
+            provider: None,
+            scope: "all".to_string(),
+            message_type: "all".to_string(),
+            parent_session_id: None,
+            limit: 3,
+            since: None,
+            until: None,
+            project_id: None,
+            project_path: None,
+            branch: None,
+            worktree: None,
+            commit: None,
+        });
+
+        assert_eq!(
+            args,
+            json!({
+                "query": "dogfood",
+                "scope": "all",
+                "message_type": "all",
+                "limit": 3,
+                "format": "json",
+            })
+        );
+    }
+
+    #[test]
+    fn message_search_rpc_args_preserve_explicit_typed_filters() {
+        let args = message_search_rpc_args(SessionsSearchArgs {
+            query: "dogfood".to_string(),
+            provider: Some("cursor".to_string()),
+            scope: "subagents_only".to_string(),
+            message_type: "direct_user".to_string(),
+            parent_session_id: Some("parent-1".to_string()),
+            limit: 5,
+            since: Some("last hour".to_string()),
+            until: Some("2026-07-28T00:00:00Z".to_string()),
+            project_id: None,
+            project_path: None,
+            branch: Some("master".to_string()),
+            worktree: Some("/repos/worktree".to_string()),
+            commit: Some("abc123".to_string()),
+        });
+
+        assert_eq!(
+            args,
+            json!({
+                "query": "dogfood",
+                "provider": "cursor",
+                "scope": "subagents_only",
+                "message_type": "direct_user",
+                "parent_session_id": "parent-1",
+                "limit": 5,
+                "since": "last hour",
+                "until": "2026-07-28T00:00:00Z",
+                "branch": "master",
+                "worktree": "/repos/worktree",
+                "commit": "abc123",
+                "format": "json",
+            })
+        );
+    }
 
     fn project_selectors() -> SessionRefreshSelectors {
         SessionRefreshSelectors {

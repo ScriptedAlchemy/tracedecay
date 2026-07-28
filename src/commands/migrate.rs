@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use crate::cli::MigrateAction;
 
@@ -757,32 +758,66 @@ async fn handle_migrate_registry_gc(
     print_registry_gc_report(report, json)
 }
 
+async fn brokered_storage_report(
+    project_id: Option<&str>,
+    project_root: Option<&Path>,
+) -> tracedecay::errors::Result<tracedecay::retention::storage_report::StorageReport> {
+    let request = super::daemon::daemon_tool_json(
+        None,
+        "tracedecay_admin_cli",
+        serde_json::json!({
+            "action": "storage_report",
+            "project_id": project_id,
+            "project_root": project_root,
+        }),
+    );
+    let value = tokio::time::timeout(Duration::from_secs(10), request)
+        .await
+        .map_err(|_| tracedecay::errors::TraceDecayError::Config {
+            message: "daemon storage report authority timed out after 10 seconds".to_string(),
+        })??;
+    serde_json::from_value(value).map_err(Into::into)
+}
+
 /// Read-only per-store size / free-page-ratio / unregistered-directory report
-/// (plan 38 §7). Reads `global.db` through `sqlite_read_snapshot` and project
-/// graph databases through strictly read-only handles — never through a daemon
-/// broker or a write path, so this works with no daemon running.
+/// (plan 38 §7). The active profile routes through the daemon's retained
+/// authority; explicit offline profiles retain the bounded read-only path.
 async fn handle_migrate_storage_report(
     profile_root: Option<String>,
     project_id: Option<String>,
     project_root: Option<String>,
     json: bool,
 ) -> tracedecay::errors::Result<()> {
+    let default_profile_root = tracedecay::storage::default_profile_root()?;
     let profile_root = match profile_root {
         Some(path) => PathBuf::from(path),
-        None => tracedecay::storage::default_profile_root()?,
+        None => default_profile_root.clone(),
     };
-    let report = match (project_id, project_root) {
-        (Some(project_id), Some(project_root)) => {
-            tracedecay::retention::storage_report::build_project_storage_report(
-                &profile_root,
-                &project_id,
-                Path::new(&project_root),
-            )?
+    let daemon_owns_profile = profile_root == default_profile_root;
+    let project_root = project_root.map(PathBuf::from);
+    let report = if daemon_owns_profile && tracedecay::daemon::daemon_reachable() {
+        brokered_storage_report(project_id.as_deref(), project_root.as_deref()).await?
+    } else {
+        let offline = match (&project_id, &project_root) {
+            (Some(project_id), Some(project_root)) => {
+                tracedecay::retention::storage_report::build_project_storage_report(
+                    &profile_root,
+                    project_id,
+                    project_root,
+                )
+            }
+            (None, None) => {
+                tracedecay::retention::storage_report::build_storage_report(&profile_root).await
+            }
+            _ => unreachable!("clap requires project id and root together"),
+        };
+        match offline {
+            Ok(report) => report,
+            Err(_) if daemon_owns_profile && tracedecay::daemon::daemon_reachable() => {
+                brokered_storage_report(project_id.as_deref(), project_root.as_deref()).await?
+            }
+            Err(error) => return Err(error),
         }
-        (None, None) => {
-            tracedecay::retention::storage_report::build_storage_report(&profile_root).await?
-        }
-        _ => unreachable!("clap requires project id and root together"),
     };
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);

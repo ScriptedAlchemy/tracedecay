@@ -4,10 +4,15 @@ use crate::db::engine::{Value, params, params_from_iter};
 use super::connection::{Database, DatabaseWriteTransaction};
 use super::rows::row_to_node;
 use super::sql::{
-    build_qmark_placeholders, collect_rows, opt_str, push_int, push_opt_quoted, push_quoted,
+    build_qmark_placeholders, collect_rowid_pages, collect_rows, opt_str, push_int,
+    push_opt_quoted, push_quoted,
 };
 use crate::errors::{Result, TraceDecayError};
 use crate::types::*;
+
+/// Columns `row_to_node` reads, and therefore the index of the trailing
+/// `rowid` cursor column in a paged node scan.
+const NODE_COLUMNS: i32 = 23;
 
 impl Database {
     /// Inserts or replaces a single node.
@@ -279,7 +284,7 @@ impl Database {
         // runtime request per node while preserving the surrounding atomic
         // full-index replacement.
         const ROWS_PER_INSERT: usize = 32;
-        const COLUMNS: usize = 23;
+        const COLUMNS: usize = NODE_COLUMNS as usize;
         for chunk in nodes.chunks(ROWS_PER_INSERT) {
             let values_clause = (0..chunk.len())
                 .map(|row| {
@@ -466,23 +471,21 @@ impl Database {
     }
 
     /// Returns every node in the database.
+    ///
+    /// Read through `rowid` keyset pages: whole-table reads on a real project
+    /// exceed what the SQLite runtime will materialize for one query.
     pub async fn get_all_nodes(&self) -> Result<Vec<Node>> {
-        let mut rows = self
-            .engine_conn()
-            .query(
-                "SELECT id, kind, name, qualified_name, file_path,
+        collect_rowid_pages(
+            &self.engine_conn(),
+            "SELECT id, kind, name, qualified_name, file_path,
                     start_line, end_line, start_column, end_column,
-                    docstring, signature, visibility, is_async, branches, loops, returns, max_nesting, unsafe_blocks, unchecked_calls, assertions, updated_at, attrs_start_line, parent_id
-                 FROM nodes",
-                (),
-            )
-            .await
-            .map_err(|e| TraceDecayError::Database {
-                message: format!("failed to query all nodes: {e}"),
-                operation: "get_all_nodes".to_string(),
-            })?;
-
-        collect_rows(&mut rows, row_to_node, "get_all_nodes").await
+                    docstring, signature, visibility, is_async, branches, loops, returns, max_nesting, unsafe_blocks, unchecked_calls, assertions, updated_at, attrs_start_line, parent_id, rowid
+             FROM nodes WHERE rowid > ?1 ORDER BY rowid LIMIT ?2",
+            NODE_COLUMNS,
+            row_to_node,
+            "get_all_nodes",
+        )
+        .await
     }
 
     /// Deletes all nodes (and cascading edges, unresolved refs, vectors) for a file.

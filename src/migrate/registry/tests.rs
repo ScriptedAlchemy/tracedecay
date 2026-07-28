@@ -10,13 +10,35 @@
 use std::path::Path;
 
 use crate::db::engine::params;
-use crate::global_db::RegisteredGlobalDb;
+use crate::global_db::{GraphScopeUpsert, RegisteredGlobalDb};
 use crate::global_db::tests::harness::RegisteredGlobalDbHarness;
 
-use super::delete_registry_gc_candidates_in_transaction;
+use super::{delete_registry_gc_candidates_in_transaction, graph_scope_location_drift_is_repairable};
 
 const PROJECT_ID: &str = "proj_gc";
 const TOKENS: u64 = 11;
+
+#[test]
+fn graph_scope_location_drift_requires_the_same_immutable_owner() {
+    let expected = GraphScopeUpsert {
+        graph_scope_id: "store:project:profile_sharded:branch:feature".to_string(),
+        project_id: "project".to_string(),
+        store_id: "store:project:profile_sharded".to_string(),
+        branch_name: "feature".to_string(),
+        db_relpath: "projects/project/branches/current.db".to_string(),
+        parent_scope_id: Some("parent-current".to_string()),
+        last_synced_at: Some(2),
+        writable: true,
+    };
+    assert!(graph_scope_location_drift_is_repairable(
+        r#"["project","store:project:profile_sharded","feature","projects/project/branches/old.db","parent-old"]"#,
+        &expected,
+    ));
+    assert!(!graph_scope_location_drift_is_repairable(
+        r#"["other-project","store:project:profile_sharded","feature","projects/project/branches/old.db","parent-old"]"#,
+        &expected,
+    ));
+}
 
 /// Registers a project in both generations. The `code_projects` row is written
 /// directly because `upsert_code_project` refuses an ephemeral root, and the

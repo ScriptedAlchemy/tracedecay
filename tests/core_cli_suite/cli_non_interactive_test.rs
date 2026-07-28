@@ -259,6 +259,63 @@ fn sessions_unfinished_lists_workflow_state_evidence() {
     assert!(stdout.contains("missing deploy credentials"), "{stdout}");
 }
 
+#[test]
+fn sessions_search_omits_absent_optional_filters_and_preserves_provider() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let project_root = canonical_temp_path(project.path());
+    std::fs::write(project_root.join("lib.rs"), "pub fn indexed() {}\n").unwrap();
+    init_project_fixture(home.path(), &project_root);
+    let project_id = default_profile_project_id(&project_root);
+
+    create_runtime().block_on(async {
+        let runtime = HostAdmissionTestRuntimeV1::project(
+            profile_root(home.path()),
+            &project_root,
+            ProjectId::new(project_id).expect("valid fixture project id"),
+        )
+        .await
+        .expect("registered project runtime");
+        runtime
+            .upsert_session_for_test(
+                HostAdmissionScope::Project,
+                &global_session("cursor", "session-search", "proj_cli"),
+            )
+            .await
+            .expect("session fixture write");
+        runtime
+            .upsert_session_message_for_test(
+                HostAdmissionScope::Project,
+                &MessageRecordBuilder::new(
+                    "cursor",
+                    "message-search",
+                    "session-search",
+                    "assistant",
+                    1,
+                    "dogfood recovery evidence",
+                    "message",
+                )
+                .build(),
+            )
+            .await
+            .expect("session message fixture write");
+    });
+
+    let _daemon = crate::common::spawn_tracedecay_daemon(home.path());
+    for extra_args in [vec![], vec!["--provider", "cursor"]] {
+        let mut command = tracedecay_command_without_daemon(home.path(), &project_root);
+        command.args(["sessions", "search", "dogfood", "--limit", "3"]);
+        command.args(extra_args);
+        let output = run_with_timeout(command, cli_timeout());
+        assert!(
+            output.status.success(),
+            "sessions search should accept omitted optional filters\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
 fn write_profile_sharded_fixture(home: &std::path::Path, project: &std::path::Path) {
     let project = canonical_temp_path(project);
     let shard_root = profile_shard_root(home);
@@ -1701,6 +1758,124 @@ async fn branch_list_reads_profile_sharded_branch_meta() {
     );
 }
 
+#[tokio::test]
+async fn gitignore_reads_effective_config_for_primary_and_linked_worktrees() {
+    let home = TempDir::new().unwrap();
+    let dir = TempDir::new().unwrap();
+    let main = canonical_temp_path(&dir.path().join("main"));
+    let linked = canonical_temp_path(&dir.path().join("linked"));
+    std::fs::create_dir_all(&main).unwrap();
+    git(&main, &["init", "-b", "main"]);
+    std::fs::write(main.join("README.md"), "gitignore fixture\n").unwrap();
+    commit_all(&main, "initial commit");
+    git(
+        &main,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "feature/gitignore",
+            linked.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    write_profile_sharded_fixture(home.path(), &main);
+
+    let runtime = HostAdmissionTestRuntimeV1::profile(profile_root(home.path()))
+        .await
+        .unwrap();
+    runtime
+        .upsert_code_project(
+            "proj_cli",
+            &main,
+            Some(&main.join(".git")),
+            None,
+            Some("main"),
+        )
+        .await
+        .expect("code project should upsert with git common-dir alias");
+    runtime
+        .upsert_store_instance(StoreInstanceUpsert {
+            store_id: "store:proj_cli:profile_sharded".to_string(),
+            project_id: "proj_cli".to_string(),
+            store_kind: "code_project".to_string(),
+            storage_mode: "profile_sharded".to_string(),
+            store_relpath: "projects/proj_cli".to_string(),
+            manifest_relpath: Some(STORE_MANIFEST_FILENAME.to_string()),
+            last_verified_at: Some(1_800_000_000),
+            last_write_at: Some(1_800_000_000),
+        })
+        .await
+        .expect("store instance should upsert");
+    runtime.checkpoint_profile_database_for_test().await;
+    drop(runtime);
+
+    let _daemon = crate::common::spawn_tracedecay_daemon(home.path());
+    for project_root in [&main, &linked] {
+        let mut command = tracedecay_command_without_daemon(home.path(), project_root);
+        command.arg("gitignore");
+        let output = run_with_timeout(command, cli_timeout());
+        assert!(
+            output.status.success(),
+            "gitignore should resolve effective configuration for {}\nstdout:\n{}\nstderr:\n{}",
+            project_root.display(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("gitignore: on"),
+            "gitignore should report the daemon-authoritative default for {}",
+            project_root.display()
+        );
+    }
+}
+
+#[tokio::test]
+async fn automation_facts_list_reports_missing_proposal_bank_as_unavailable() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    write_git_fixture(project.path());
+    write_profile_sharded_fixture(home.path(), project.path());
+    let runtime = HostAdmissionTestRuntimeV1::profile(profile_root(home.path()))
+        .await
+        .unwrap();
+    register_profile_sharded_store(&runtime, project.path(), "proj_cli").await;
+    runtime.checkpoint_profile_database_for_test().await;
+    drop(runtime);
+
+    let graph_db =
+        rusqlite::Connection::open(profile_shard_root(home.path()).join("tracedecay.db"))
+            .expect("fixture graph database");
+    graph_db
+        .execute_batch(
+            "DROP TABLE IF EXISTS memory_v2_proposal_current;
+             DROP TABLE IF EXISTS memory_v2_proposals;",
+        )
+        .expect("remove compatibility proposal bank from fixture");
+    drop(graph_db);
+
+    let _daemon = crate::common::spawn_tracedecay_daemon(home.path());
+    let mut command = tracedecay_command_without_daemon(home.path(), project.path());
+    command.args(["automation", "facts", "list"]);
+    let output = run_with_timeout(command, cli_timeout());
+
+    assert!(
+        output.status.success(),
+        "fact list should return typed unavailable evidence\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let payload: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("fact list json");
+    assert_eq!(payload["availability"]["state"], "unavailable");
+    assert_eq!(
+        payload["availability"]["reason"],
+        "compatibility_proposal_bank_absent"
+    );
+    assert_eq!(payload["count"], 0);
+    assert_eq!(payload["proposals"], serde_json::json!([]));
+}
+
 #[test]
 fn branch_add_writes_new_branch_db_into_profile_shard() {
     let home = TempDir::new().unwrap();
@@ -2367,4 +2542,37 @@ fn migrate_storage_report_prints_registered_store_size_and_unregistered_backlog(
     assert!(report["stores"][0]["total_bytes"].as_u64().unwrap() > 0);
     assert_eq!(report["unregistered_dir_count"], 1);
     assert!(report["unregistered_bytes"].as_u64().unwrap() >= 4096);
+}
+
+#[tokio::test]
+async fn migrate_storage_report_uses_active_daemon_authority_without_hanging() {
+    let home = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    write_git_fixture(project.path());
+    write_profile_sharded_fixture(home.path(), project.path());
+    let runtime = HostAdmissionTestRuntimeV1::profile(profile_root(home.path()))
+        .await
+        .unwrap();
+    register_profile_sharded_store(&runtime, project.path(), "proj_cli").await;
+    runtime.checkpoint_profile_database_for_test().await;
+    drop(runtime);
+
+    let _daemon = crate::common::spawn_tracedecay_daemon(home.path());
+    let mut command = tracedecay_command_without_daemon(home.path(), project.path());
+    command.args(["migrate", "storage-report", "--json"]);
+    let started = Instant::now();
+    let output = run_with_timeout(command, Duration::from_secs(15));
+
+    assert!(
+        started.elapsed() < Duration::from_secs(15),
+        "active-daemon storage report must complete within its bounded timeout"
+    );
+    assert!(
+        output.status.success(),
+        "active-daemon storage report should succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).expect("report json");
+    assert_eq!(report["stores"][0]["project_id"], "proj_cli");
 }

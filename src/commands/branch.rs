@@ -6,6 +6,13 @@ use crate::cli::BranchAction;
 
 use super::daemon::daemon_tool_json;
 
+fn branch_list_rpc_args() -> serde_json::Value {
+    serde_json::json!({
+        "format": "json",
+        "include_branch_diagnostics": true,
+    })
+}
+
 pub(crate) async fn handle_branch_action(action: BranchAction) -> tracedecay::errors::Result<()> {
     use tracedecay::branch;
     use tracedecay::branch_meta;
@@ -16,7 +23,7 @@ pub(crate) async fn handle_branch_action(action: BranchAction) -> tracedecay::er
             let status = daemon_tool_json(
                 Some(&project_path),
                 "tracedecay_status",
-                serde_json::json!({ "format": "json" }),
+                branch_list_rpc_args(),
             )
             .await?;
             let diagnostics = status.get("branch_diagnostics").ok_or_else(|| {
@@ -398,7 +405,20 @@ async fn resolve_branch_data_root(project_path: &Path) -> tracedecay::errors::Re
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::{parse_daemon_branch_add_outcome, parse_daemon_branch_admin_report};
+    use super::{
+        branch_list_rpc_args, parse_daemon_branch_add_outcome, parse_daemon_branch_admin_report,
+    };
+
+    #[test]
+    fn branch_list_requests_expensive_diagnostics_explicitly() {
+        assert_eq!(
+            branch_list_rpc_args(),
+            serde_json::json!({
+                "format": "json",
+                "include_branch_diagnostics": true,
+            })
+        );
+    }
 
     #[test]
     fn daemon_branch_add_outcomes_are_strictly_decoded() {

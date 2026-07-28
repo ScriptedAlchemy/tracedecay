@@ -1027,6 +1027,75 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn code_database_replacement_rebinds_after_runtime_retirement() {
+        let temporary = tempfile::tempdir().expect("temporary project parent");
+        let root = temporary
+            .path()
+            .canonicalize()
+            .expect("canonical fixture root");
+        let profile_root = root.join("profile");
+        let project_root = root.join("project");
+        std::fs::create_dir_all(&project_root).expect("project root");
+        let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
+            .expect("durable profile identity");
+        let _database_scope =
+            crate::db::enter_daemon_database_scope(&profile_root, 12, "code replacement")
+                .expect("daemon database scope");
+        let registry = DaemonSessionRuntimeRegistryV1::open(identity)
+            .await
+            .expect("session runtime registry");
+        let database_path = profile_root.join("stores/replaced-worktree.db");
+        std::fs::create_dir_all(database_path.parent().expect("database parent"))
+            .expect("database directory");
+        let project_id = ProjectId::new("project.replaced-worktree").expect("project id");
+        let authority =
+            DatabaseAuthority::for_runtime(&database_path, "publish original code database")
+                .expect("original database authority");
+        let database = registry
+            .code_graph_worktree(
+                &project_root,
+                project_id.clone(),
+                database_path.clone(),
+                authority,
+                DatabaseAccessMode::ReadWrite,
+            )
+            .await
+            .expect("original code database");
+        database
+            .checkpoint()
+            .await
+            .expect("checkpoint original database");
+        drop(database);
+
+        registry
+            .close_code_graph_paths([database_path.clone()])
+            .await
+            .expect("retire original code runtime before replacement");
+        let preserved_path = database_path.with_extension("db.preserved");
+        std::fs::rename(&database_path, &preserved_path).expect("preserve original database");
+        rusqlite::Connection::open(&database_path)
+            .expect("create replacement database")
+            .execute_batch("CREATE TABLE replacement(value INTEGER);")
+            .expect("seed replacement database");
+
+        let rebound = registry
+            .code_graph_worktree(
+                &project_root,
+                project_id,
+                database_path.clone(),
+                DatabaseAuthority::for_runtime(
+                    &database_path,
+                    "publish replacement after retirement",
+                )
+                .expect("rebound database authority"),
+                DatabaseAccessMode::ReadWrite,
+            )
+            .await
+            .expect("replacement code database must publish after retirement");
+        assert_eq!(rebound.database_path(), database_path);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn read_only_branch_reuses_daemon_publication_without_write_authority() {
         let temporary = tempfile::tempdir().expect("temporary project parent");
         let root = temporary

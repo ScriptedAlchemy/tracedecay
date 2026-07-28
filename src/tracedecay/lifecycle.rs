@@ -1374,6 +1374,18 @@ impl TraceDecay {
     ) -> Result<Self> {
         let detail = detail.to_string();
         if repair_corrupt_branch {
+            if let Err(close_error) = runtime_registry
+                .close_code_graph_paths([db_path.to_path_buf()])
+                .await
+            {
+                print_corruption_warning(db_path);
+                return Err(recovery_required_error(
+                    db_path,
+                    format!(
+                        "{detail}; automatic derived-branch repair could not retire the registered runtime before replacing the database: {close_error}"
+                    ),
+                ));
+            }
             let active_graph_layout = active_graph_layout(db_path);
             let repair_result = (|| {
                 let _sync_locks = try_acquire_graph_sync_locks(

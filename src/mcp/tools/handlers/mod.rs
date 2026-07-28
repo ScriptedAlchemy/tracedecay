@@ -1160,7 +1160,7 @@ async fn dispatch_application_surface_tools(
         application_surface::handle_application_surface(
             cg,
             operation,
-            &normalized_args,
+            normalized_args,
             options.application_invocation_executor,
             options.application_request_id.clone(),
             options.application_deadline.clone(),

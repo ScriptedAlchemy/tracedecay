@@ -24,10 +24,7 @@ use super::MAX_RESPONSE_CHARS;
 const MARKDOWN_TRUNCATION_RESERVED_CHARS: usize = 2_048;
 
 fn parse_format(args: &Value) -> RequestedOutputFormat {
-    match args.get("format").and_then(Value::as_str) {
-        Some(v) if v.eq_ignore_ascii_case("json") => RequestedOutputFormat::Json,
-        _ => RequestedOutputFormat::Markdown,
-    }
+    crate::application_surface::requested_output_format(args)
 }
 
 /// True when the caller explicitly opted into JSON output via `format: "json"`.
@@ -51,7 +48,19 @@ pub(super) fn finalize<F>(project_root: Option<&Path>, args: &Value, value: &Val
 where
     F: FnOnce() -> String,
 {
-    match parse_format(args) {
+    finalize_with_format(project_root, parse_format(args), value, md)
+}
+
+pub(super) fn finalize_with_format<F>(
+    project_root: Option<&Path>,
+    format: RequestedOutputFormat,
+    value: &Value,
+    md: F,
+) -> String
+where
+    F: FnOnce() -> String,
+{
+    match format {
         RequestedOutputFormat::Json => {
             let json = serde_json::to_string(value).unwrap_or_default();
             truncated_json_envelope_with_handle(project_root, &json)

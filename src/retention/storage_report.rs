@@ -40,7 +40,7 @@ const GLOBAL_DB_FILENAME: &str = "global.db";
 const SAMPLE_BUSY_TIMEOUT: Duration = Duration::from_millis(200);
 
 /// One registered profile-sharded store's size/free-page snapshot.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct StoreSizeReportEntry {
     pub project_id: String,
     pub canonical_root: String,
@@ -58,7 +58,7 @@ pub struct StoreSizeReportEntry {
 /// summary (plan 38 §2's disjoint on-disk-only audit class, sized here rather
 /// than classified — the daemon sweep and `sweep_unregistered_stores` own
 /// collection).
-#[derive(Debug, Clone, Default, serde::Serialize)]
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 pub struct StorageReport {
     pub profile_root: String,
     pub stores: Vec<StoreSizeReportEntry>,
@@ -69,7 +69,7 @@ pub struct StorageReport {
 }
 
 /// Read-only mark-and-sweep preview for one code-index scope.
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct CodeGenerationRetentionDryRunEntry {
     pub project_id: String,
     pub store_root: String,
@@ -146,6 +146,64 @@ pub async fn build_storage_report(profile_root: &Path) -> crate::errors::Result<
         unregistered_bytes,
         global_db_bytes,
     })
+}
+
+/// Builds the report through the daemon's retained global registry authority.
+///
+/// Per-store sizes remain bounded read-only filesystem/SQLite samples, but
+/// the global registry is never reopened while the daemon owns it.
+pub async fn build_storage_report_from_registered_global_db(
+    profile_root: &Path,
+    global_db: &crate::global_db::RegisteredGlobalDb,
+) -> crate::errors::Result<StorageReport> {
+    let mut projects = global_db.list_code_projects(usize::MAX).await?;
+    projects.sort_by(|left, right| left.project_id.cmp(&right.project_id));
+    let profile_root = profile_root.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let mut registered_ids = HashSet::with_capacity(projects.len());
+        let mut stores = Vec::new();
+        let mut code_generation_retention = Vec::new();
+        for project in projects {
+            registered_ids.insert(project.project_id.clone());
+            append_project_report(
+                &profile_root,
+                &project.project_id,
+                &project.canonical_root,
+                &mut stores,
+                &mut code_generation_retention,
+            )?;
+        }
+        let (unregistered_dir_count, unregistered_bytes) =
+            scan_unregistered_dirs(&profile_root, &registered_ids);
+        let global_db_path = profile_root.join(GLOBAL_DB_FILENAME);
+        Ok(StorageReport {
+            profile_root: profile_root.display().to_string(),
+            stores,
+            code_generation_retention,
+            unregistered_dir_count,
+            unregistered_bytes,
+            global_db_bytes: std::fs::metadata(global_db_path).map_or(0, |metadata| metadata.len()),
+        })
+    })
+    .await
+    .map_err(|error| report_error("join daemon-backed storage report", error))?
+}
+
+/// Builds one project-scoped report on the daemon's blocking pool so bounded
+/// read-only SQLite samples cannot stall the async authority loop.
+pub async fn build_project_storage_report_from_daemon(
+    profile_root: &Path,
+    project_id: &str,
+    canonical_root: &Path,
+) -> crate::errors::Result<StorageReport> {
+    let profile_root = profile_root.to_path_buf();
+    let project_id = project_id.to_owned();
+    let canonical_root = canonical_root.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        build_project_storage_report(&profile_root, &project_id, &canonical_root)
+    })
+    .await
+    .map_err(|error| report_error("join daemon-backed project storage report", error))?
 }
 
 /// Build the same read-only report for one explicitly identified shard without
