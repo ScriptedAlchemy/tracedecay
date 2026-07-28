@@ -47,7 +47,7 @@ impl RegisteredGlobalDbHarness {
             .expect("registered database storage root")
     }
 
-    pub(super) async fn mount(&self) -> Arc<RegisteredGlobalDb> {
+    pub(crate) async fn mount(&self) -> Arc<RegisteredGlobalDb> {
         self.registry
             .profile_sessions()
             .await

@@ -1,0 +1,193 @@
+//! Atomicity coverage for registry garbage collection.
+//!
+//! A project is registered in two generations — the `code_projects` registry
+//! and the older `projects` accounting table — and collection has to remove
+//! both or neither. A half-applied sweep either strips a live project's
+//! registry row while its accounting row keeps it addressable, or leaves an
+//! orphan behind for the next sweep to trip over. The transaction is the only
+//! thing holding those two deletes together, so it is what these pin.
+
+use std::path::Path;
+
+use crate::db::engine::{Executor, QueryExecutor, params};
+use crate::global_db::RegisteredGlobalDb;
+use crate::global_db::tests::harness::RegisteredGlobalDbHarness;
+
+use super::delete_registry_gc_candidates_in_transaction;
+
+const PROJECT_ID: &str = "proj_gc";
+const TOKENS: u64 = 11;
+
+/// Registers a project in both generations. The `code_projects` row is written
+/// directly because `upsert_code_project` refuses an ephemeral root, and the
+/// row's provenance is irrelevant to what collection must do with it.
+async fn register_both_generations(db: &RegisteredGlobalDb, project: &Path) {
+    db.upsert(project, TOKENS).await;
+    let transaction = db
+        .begin_write_transaction()
+        .await
+        .expect("begin registry fixture transaction");
+    transaction
+        .execute(
+            "INSERT INTO code_projects
+             (project_id, canonical_root, display_root, created_at, last_seen_at)
+             VALUES (?1, ?2, ?2, 1, 1)",
+            params![PROJECT_ID, project.to_string_lossy().as_ref()],
+        )
+        .await
+        .expect("register code project");
+    transaction
+        .commit()
+        .await
+        .expect("commit registry fixture");
+}
+
+async fn code_project_registered(db: &RegisteredGlobalDb) -> bool {
+    let snapshot = db.read_snapshot().await.expect("open registry snapshot");
+    let mut rows = snapshot
+        .query(
+            "SELECT 1 FROM code_projects WHERE project_id = ?1",
+            params![PROJECT_ID],
+        )
+        .await
+        .expect("query code project registration");
+    rows.next()
+        .await
+        .expect("read code project registration")
+        .is_some()
+}
+
+/// The ordinary sweep: one transaction removes the project from both
+/// generations and reports one deletion from each.
+#[tokio::test]
+async fn registry_gc_deletes_both_registry_generations_in_one_commit() {
+    let harness = RegisteredGlobalDbHarness::open("registry-gc-commit").await;
+    let project = harness.registered.db_path().parent().unwrap().join("gone");
+    register_both_generations(&harness.registered, &project).await;
+
+    let transaction = harness
+        .registered
+        .begin_write_transaction()
+        .await
+        .expect("begin registry cleanup transaction");
+    let deleted = delete_registry_gc_candidates_in_transaction(
+        &transaction,
+        &[PROJECT_ID.to_string()],
+        std::slice::from_ref(&project),
+    )
+    .await
+    .expect("delete registry cleanup plan");
+    transaction
+        .commit()
+        .await
+        .expect("commit registry cleanup");
+
+    assert_eq!(deleted, (1, 1));
+    assert!(!code_project_registered(&harness.registered).await);
+    assert_eq!(harness.registered.get_project_tokens(&project).await, Some(0));
+}
+
+/// The atomicity claim. The `code_projects` delete runs first and succeeds; the
+/// `projects` delete then aborts. Rolling back has to take the first delete
+/// with it, or the sweep leaves a project addressable through its accounting
+/// row with no registry row behind it.
+#[tokio::test]
+async fn registry_gc_rolls_back_both_generations_when_one_delete_fails() {
+    let harness = RegisteredGlobalDbHarness::open("registry-gc-rollback").await;
+    let project = harness.registered.db_path().parent().unwrap().join("gone");
+    register_both_generations(&harness.registered, &project).await;
+
+    let transaction = harness
+        .registered
+        .begin_write_transaction()
+        .await
+        .expect("begin registry cleanup transaction");
+    transaction
+        .execute(
+            "CREATE TRIGGER reject_registry_gc
+             BEFORE DELETE ON projects
+             BEGIN SELECT RAISE(ABORT, 'forced registry cleanup failure'); END",
+            (),
+        )
+        .await
+        .expect("install failure trigger");
+
+    let result = delete_registry_gc_candidates_in_transaction(
+        &transaction,
+        &[PROJECT_ID.to_string()],
+        std::slice::from_ref(&project),
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "the aborted storage delete must fail the sweep"
+    );
+    transaction
+        .rollback()
+        .await
+        .expect("roll back the failed registry cleanup");
+
+    assert!(
+        code_project_registered(&harness.registered).await,
+        "a failed sweep must not leave the code registry generation deleted"
+    );
+    assert_eq!(
+        harness.registered.get_project_tokens(&project).await,
+        Some(TOKENS)
+    );
+}
+
+/// Collection and re-registration race on every daemon that sweeps while an
+/// agent is active. The sweep's write transaction must serialize the refresh
+/// rather than interleave with it, so the refresh lands whole afterwards
+/// instead of resurrecting one generation and not the other.
+#[tokio::test]
+async fn registry_gc_transaction_serializes_a_concurrent_project_refresh() {
+    let harness = RegisteredGlobalDbHarness::open("registry-gc-serialize").await;
+    let project = harness.registered.db_path().parent().unwrap().join("gone");
+    register_both_generations(&harness.registered, &project).await;
+
+    let transaction = harness
+        .registered
+        .begin_write_transaction()
+        .await
+        .expect("begin registry cleanup transaction");
+
+    let concurrent_db = harness.mount().await;
+    let concurrent_project = project.clone();
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let refresh = tokio::spawn(async move {
+        let _ = started_tx.send(());
+        concurrent_db.upsert(&concurrent_project, 22).await;
+        concurrent_db.get_project_tokens(&concurrent_project).await
+    });
+    started_rx.await.unwrap();
+    tokio::task::yield_now().await;
+    assert!(
+        !refresh.is_finished(),
+        "the refresh must block on the sweep's write transaction"
+    );
+
+    let deleted = delete_registry_gc_candidates_in_transaction(
+        &transaction,
+        &[PROJECT_ID.to_string()],
+        std::slice::from_ref(&project),
+    )
+    .await
+    .expect("delete registry cleanup plan");
+    transaction
+        .commit()
+        .await
+        .expect("commit registry cleanup");
+    assert_eq!(deleted, (1, 1));
+
+    let refreshed = tokio::time::timeout(std::time::Duration::from_secs(5), refresh)
+        .await
+        .expect("the concurrent refresh must resume once the sweep commits")
+        .expect("the concurrent refresh task must complete");
+    assert_eq!(
+        refreshed,
+        Some(22),
+        "the refresh lands whole after the sweep rather than interleaving with it"
+    );
+}
