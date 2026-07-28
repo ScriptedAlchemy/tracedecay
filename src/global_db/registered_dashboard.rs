@@ -82,6 +82,72 @@ impl RegisteredGlobalDb {
         Ok(projects)
     }
 
+    pub(crate) async fn list_code_projects_after(
+        &self,
+        after_project_id: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<CodeProjectRecord>> {
+        let snapshot = self.dashboard_snapshot("list code projects page").await?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let mut rows = match after_project_id {
+            Some(after_project_id) => {
+                snapshot
+                    .query(
+                        "SELECT project_id, canonical_root, display_root, git_common_dir,
+                                git_remote_url, default_branch, created_at, last_seen_at
+                         FROM code_projects
+                         WHERE project_id > ?1
+                         ORDER BY project_id
+                         LIMIT ?2",
+                        crate::db::engine::params![after_project_id, limit],
+                    )
+                    .await
+            }
+            None => {
+                snapshot
+                    .query(
+                        "SELECT project_id, canonical_root, display_root, git_common_dir,
+                                git_remote_url, default_branch, created_at, last_seen_at
+                         FROM code_projects
+                         ORDER BY project_id
+                         LIMIT ?1",
+                        [limit],
+                    )
+                    .await
+            }
+        }
+        .map_err(|error| dashboard_error("list code projects page", error))?;
+        let mut projects = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| dashboard_error("read code project page", error))?
+        {
+            projects.push(
+                decode_code_project(&row)
+                    .ok_or_else(|| dashboard_decode_error("decode code project registry row"))?,
+            );
+        }
+        Ok(projects)
+    }
+
+    pub(crate) async fn code_project_exists(&self, project_id: &str) -> Result<bool> {
+        let snapshot = self
+            .dashboard_snapshot("check code project registration")
+            .await?;
+        let mut rows = snapshot
+            .query(
+                "SELECT 1 FROM code_projects WHERE project_id = ?1 LIMIT 1",
+                [project_id],
+            )
+            .await
+            .map_err(|error| dashboard_error("check code project registration", error))?;
+        rows.next()
+            .await
+            .map(|row| row.is_some())
+            .map_err(|error| dashboard_error("read code project registration", error))
+    }
+
     pub(crate) async fn project_registry_context_by_id(
         &self,
         project_id: &str,

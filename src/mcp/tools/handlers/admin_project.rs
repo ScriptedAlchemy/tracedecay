@@ -5,7 +5,8 @@ use serde_json::{Map, Value, json};
 use tracedecay_domain::{ActorId, ProvenanceId};
 use tracedecay_store::{
     CompatibilityFactProposalPromotionV1, CompatibilityFactProposalRecordV1,
-    CompatibilityFactProposalStateV1, FactCompatibilityStoreError, FactStoreError,
+    CompatibilityFactProposalStateV1, FactCompatibilityStoreError, FactProposalStoreError,
+    FactStoreError,
 };
 
 use crate::application::memory::{MemoryApplication, MemoryApplicationError};
@@ -117,28 +118,46 @@ fn memory_application_error(error: MemoryApplicationError) -> TraceDecayError {
 }
 
 fn fact_list_unavailable_payload(error: &MemoryApplicationError) -> Option<Value> {
-    let MemoryApplicationError::Compatibility(FactCompatibilityStoreError::Store(
-        FactStoreError::Storage { source, .. },
-    )) = error
-    else {
-        return None;
+    let reason = match error {
+        MemoryApplicationError::Compatibility(FactCompatibilityStoreError::Store(
+            FactStoreError::Storage { source, .. },
+        ))
+        | MemoryApplicationError::Compatibility(FactCompatibilityStoreError::Proposal(
+            FactProposalStoreError::Store(FactStoreError::Storage { source, .. }),
+        ))
+        | MemoryApplicationError::Compatibility(FactCompatibilityStoreError::Proposal(
+            FactProposalStoreError::Storage { source, .. },
+        )) => {
+            let message = source.to_string();
+            if message.contains("no such table")
+                && ["memory_v2_proposal_current", "memory_v2_proposals"]
+                    .iter()
+                    .any(|table| message.contains(table))
+            {
+                "compatibility_proposal_bank_absent"
+            } else if message.contains("no such column") {
+                "compatibility_proposal_authority_incompatible"
+            } else {
+                "compatibility_proposal_authority_unavailable"
+            }
+        }
+        MemoryApplicationError::Compatibility(FactCompatibilityStoreError::Store(
+            FactStoreError::Contract(_),
+        ))
+        | MemoryApplicationError::Compatibility(FactCompatibilityStoreError::Proposal(
+            FactProposalStoreError::Store(FactStoreError::Contract(_)),
+        )) => "compatibility_proposal_authority_incompatible",
+        _ => return None,
     };
-    let message = source.to_string();
-    let proposal_bank_absent = message.contains("no such table")
-        && ["memory_v2_proposal_current", "memory_v2_proposals"]
-            .iter()
-            .any(|table| message.contains(table));
-    proposal_bank_absent.then(|| {
-        json!({
-            "availability": {
-                "state": "unavailable",
-                "reason": "compatibility_proposal_bank_absent",
-            },
-            "count": 0,
-            "proposals": [],
-            "next_after_proposal_id": null,
-        })
-    })
+    Some(json!({
+        "availability": {
+            "state": "unavailable",
+            "reason": reason,
+        },
+        "count": 0,
+        "proposals": [],
+        "next_after_proposal_id": null,
+    }))
 }
 
 fn parse_proposal_id(value: String) -> Result<ProvenanceId> {

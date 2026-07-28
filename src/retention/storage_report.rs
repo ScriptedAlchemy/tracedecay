@@ -33,6 +33,9 @@ use super::code_index_generations::{
 };
 
 const GLOBAL_DB_FILENAME: &str = "global.db";
+const PROJECT_CURSOR_PREFIX: &str = "projects:";
+const DIRECTORY_CURSOR_PREFIX: &str = "directories:";
+pub const MAX_STORAGE_REPORT_PAGE_LIMIT: usize = 64;
 
 /// How long a size sample will wait on a lock before giving up and reporting
 /// the store's free-page fields as unsampled. A live daemon writing to the
@@ -66,6 +69,30 @@ pub struct StorageReport {
     pub unregistered_dir_count: usize,
     pub unregistered_bytes: u64,
     pub global_db_bytes: u64,
+    pub coverage: StorageReportCoverage,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StorageReportCoverageState {
+    #[default]
+    Complete,
+    Partial,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct StorageReportCoverage {
+    pub state: StorageReportCoverageState,
+    pub next_cursor: Option<String>,
+}
+
+impl StorageReportCoverage {
+    fn partial(next_cursor: String) -> Self {
+        Self {
+            state: StorageReportCoverageState::Partial,
+            next_cursor: Some(next_cursor),
+        }
+    }
 }
 
 /// Read-only mark-and-sweep preview for one code-index scope.
@@ -145,48 +172,130 @@ pub async fn build_storage_report(profile_root: &Path) -> crate::errors::Result<
         unregistered_dir_count,
         unregistered_bytes,
         global_db_bytes,
+        coverage: StorageReportCoverage::default(),
     })
 }
 
-/// Builds the report through the daemon's retained global registry authority.
-///
-/// Per-store sizes remain bounded read-only filesystem/SQLite samples, but
-/// the global registry is never reopened while the daemon owns it.
-pub async fn build_storage_report_from_registered_global_db(
+/// Builds one bounded page through the daemon's retained global registry
+/// authority. Registered projects and top-level profile directories are
+/// separate cursor phases so neither the registry query nor the filesystem
+/// census performs an unbounded profile-wide scan.
+pub async fn build_storage_report_page_from_registered_global_db(
     profile_root: &Path,
     global_db: &crate::global_db::RegisteredGlobalDb,
+    cursor: Option<&str>,
+    limit: usize,
 ) -> crate::errors::Result<StorageReport> {
-    let mut projects = global_db.list_code_projects(usize::MAX).await?;
-    projects.sort_by(|left, right| left.project_id.cmp(&right.project_id));
-    let profile_root = profile_root.to_path_buf();
-    tokio::task::spawn_blocking(move || {
-        let mut registered_ids = HashSet::with_capacity(projects.len());
-        let mut stores = Vec::new();
-        let mut code_generation_retention = Vec::new();
-        for project in projects {
-            registered_ids.insert(project.project_id.clone());
-            append_project_report(
-                &profile_root,
-                &project.project_id,
-                &project.canonical_root,
-                &mut stores,
-                &mut code_generation_retention,
-            )?;
-        }
-        let (unregistered_dir_count, unregistered_bytes) =
-            scan_unregistered_dirs(&profile_root, &registered_ids);
-        let global_db_path = profile_root.join(GLOBAL_DB_FILENAME);
-        Ok(StorageReport {
-            profile_root: profile_root.display().to_string(),
-            stores,
-            code_generation_retention,
-            unregistered_dir_count,
-            unregistered_bytes,
-            global_db_bytes: std::fs::metadata(global_db_path).map_or(0, |metadata| metadata.len()),
+    let limit = limit.clamp(1, MAX_STORAGE_REPORT_PAGE_LIMIT);
+    let global_db_bytes = std::fs::metadata(profile_root.join(GLOBAL_DB_FILENAME))
+        .map_or(0, |metadata| metadata.len());
+    let cursor = cursor.unwrap_or(PROJECT_CURSOR_PREFIX);
+    if let Some(after_project_id) = cursor.strip_prefix(PROJECT_CURSOR_PREFIX) {
+        let mut projects = global_db
+            .list_code_projects_after(
+                (!after_project_id.is_empty()).then_some(after_project_id),
+                limit.saturating_add(1),
+            )
+            .await?;
+        let has_more = projects.len() > limit;
+        projects.truncate(limit);
+        let next_cursor = if has_more {
+            projects
+                .last()
+                .map(|project| format!("{PROJECT_CURSOR_PREFIX}{}", project.project_id))
+        } else {
+            Some(DIRECTORY_CURSOR_PREFIX.to_owned())
+        };
+        let profile_root = profile_root.to_path_buf();
+        return tokio::task::spawn_blocking(move || {
+            let mut report = StorageReport {
+                profile_root: profile_root.display().to_string(),
+                global_db_bytes,
+                coverage: StorageReportCoverage::partial(
+                    next_cursor.expect("project page always has a continuation"),
+                ),
+                ..StorageReport::default()
+            };
+            for project in projects {
+                append_project_report(
+                    &profile_root,
+                    &project.project_id,
+                    &project.canonical_root,
+                    &mut report.stores,
+                    &mut report.code_generation_retention,
+                )?;
+            }
+            Ok(report)
         })
+        .await
+        .map_err(|error| report_error("join daemon-backed storage report page", error))?;
+    }
+    let Some(after_directory) = cursor.strip_prefix(DIRECTORY_CURSOR_PREFIX) else {
+        return Err(crate::errors::TraceDecayError::Config {
+            message: "invalid daemon storage report cursor".to_owned(),
+        });
+    };
+    let profile_root_buf = profile_root.to_path_buf();
+    let after_directory = after_directory.to_owned();
+    let (directories, has_more) = tokio::task::spawn_blocking(move || {
+        list_project_directories_page(&profile_root_buf, &after_directory, limit)
     })
     .await
-    .map_err(|error| report_error("join daemon-backed storage report", error))?
+    .map_err(|error| report_error("join storage directory page", error))?;
+    let mut unregistered = Vec::new();
+    for (name, path) in &directories {
+        if !global_db.code_project_exists(name).await? {
+            unregistered.push(path.clone());
+        }
+    }
+    let (unregistered_dir_count, unregistered_bytes) = tokio::task::spawn_blocking(move || {
+        let bytes = unregistered.iter().fold(0u64, |total, path| {
+            total.saturating_add(super::orphan_stores::dir_size_bytes(path))
+        });
+        (unregistered.len(), bytes)
+    })
+    .await
+    .map_err(|error| report_error("join unregistered storage page", error))?;
+    let next_cursor = has_more
+        .then(|| {
+            directories
+                .last()
+                .map(|(name, _)| format!("{DIRECTORY_CURSOR_PREFIX}{name}"))
+        })
+        .flatten();
+    Ok(StorageReport {
+        profile_root: profile_root.display().to_string(),
+        unregistered_dir_count,
+        unregistered_bytes,
+        global_db_bytes,
+        coverage: next_cursor.map_or_else(
+            StorageReportCoverage::default,
+            StorageReportCoverage::partial,
+        ),
+        ..StorageReport::default()
+    })
+}
+
+fn list_project_directories_page(
+    profile_root: &Path,
+    after_directory: &str,
+    limit: usize,
+) -> (Vec<(String, std::path::PathBuf)>, bool) {
+    let Ok(entries) = std::fs::read_dir(profile_root.join("projects")) else {
+        return (Vec::new(), false);
+    };
+    let mut directories = entries
+        .flatten()
+        .filter_map(|entry| {
+            entry.file_type().ok().filter(std::fs::FileType::is_dir)?;
+            let name = entry.file_name().into_string().ok()?;
+            (name.as_str() > after_directory).then(|| (name, entry.path()))
+        })
+        .collect::<Vec<_>>();
+    directories.sort_by(|left, right| left.0.cmp(&right.0));
+    let has_more = directories.len() > limit;
+    directories.truncate(limit);
+    (directories, has_more)
 }
 
 /// Builds one project-scoped report on the daemon's blocking pool so bounded
@@ -236,6 +345,7 @@ pub fn build_project_storage_report(
         unregistered_dir_count: 0,
         unregistered_bytes: 0,
         global_db_bytes: std::fs::metadata(global_db_path).map_or(0, |metadata| metadata.len()),
+        coverage: StorageReportCoverage::default(),
     })
 }
 

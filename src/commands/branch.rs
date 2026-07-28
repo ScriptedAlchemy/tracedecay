@@ -10,6 +10,9 @@ fn branch_list_rpc_args() -> serde_json::Value {
     serde_json::json!({
         "format": "json",
         "include_branch_diagnostics": true,
+        "include_storage_health": false,
+        "include_session_ingest": false,
+        "include_staleness": false,
     })
 }
 
@@ -416,6 +419,9 @@ mod tests {
             serde_json::json!({
                 "format": "json",
                 "include_branch_diagnostics": true,
+                "include_storage_health": false,
+                "include_session_ingest": false,
+                "include_staleness": false,
             })
         );
     }
