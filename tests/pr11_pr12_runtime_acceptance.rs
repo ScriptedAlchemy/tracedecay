@@ -224,7 +224,13 @@ fn git_stdout(project: &Path, args: &[&str]) -> String {
 }
 
 async fn poll_lsp_response(session: &mut DaemonLspSessionClient, response_id: u64) -> Value {
-    for _ in 0..200 {
+    // Semantic requests are answered asynchronously: while an operation is in
+    // flight the gateway writes no frame at all, so silence means "not yet"
+    // rather than "never" and a client has to keep reading. The old bound of
+    // 200 polls gave up after roughly two seconds, which a real analyzer's
+    // cold start — sysroot load and crate graph build — cannot beat.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+    while std::time::Instant::now() < deadline {
         match session
             .poll_daemon_frame()
             .await
@@ -245,7 +251,7 @@ async fn poll_lsp_response(session: &mut DaemonLspSessionClient, response_id: u6
             FramePoll::Closed => panic!("daemon LSP session closed before response {response_id}"),
         }
     }
-    panic!("daemon LSP response {response_id} timed out")
+    panic!("daemon LSP response {response_id} timed out after 90s")
 }
 
 async fn send_lsp(session: &mut DaemonLspSessionClient, value: Value) {
@@ -1743,17 +1749,35 @@ async fn production_lsp_negotiates_and_projects_canonical_context() {
             }),
         ),
     ] {
-        send_lsp(
-            &mut session,
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "method": method,
-                "params": params,
-            }),
-        )
-        .await;
-        let navigation = poll_lsp_response(&mut session, request_id).await;
+        // A warming analyzer is answered with ServerCancelled carrying
+        // retriggerRequest, which is the gateway's "ask again" signal rather
+        // than a failure. A compliant client re-sends on it, under one outer
+        // budget, instead of treating the first not-ready reply as the answer.
+        // Each attempt needs its own id; the gateway rejects a duplicate.
+        let retrigger_deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+        let mut attempt = 0_u64;
+        let navigation = loop {
+            let attempt_id = request_id + attempt * 10_000;
+            send_lsp(
+                &mut session,
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": attempt_id,
+                    "method": method,
+                    "params": params.clone(),
+                }),
+            )
+            .await;
+            let response = poll_lsp_response(&mut session, attempt_id).await;
+            let retrigger = response["error"]["data"]["retriggerRequest"]
+                .as_bool()
+                .unwrap_or(false);
+            if !retrigger || std::time::Instant::now() >= retrigger_deadline {
+                break response;
+            }
+            attempt += 1;
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        };
         assert!(
             navigation.get("result").is_some(),
             "{method} must return a standard LSP result: {navigation}"
