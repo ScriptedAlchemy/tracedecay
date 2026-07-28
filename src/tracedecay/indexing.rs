@@ -1584,7 +1584,6 @@ impl TraceDecay {
                     extract_files_isolated(project_root, registry, paths.to_vec());
                 skipped.extend(batch_skipped);
                 let mut batch_edges = Vec::new();
-                let mut batch_paths = Vec::new();
                 for (file_path, result, hash, size, mtime) in &extractions {
                     indexed += 1;
                     on_progress(indexed, to_index.len(), file_path);
@@ -1606,16 +1605,14 @@ impl TraceDecay {
                         })
                         .await?;
                     batch_edges.extend(result.edges.iter().cloned());
-                    batch_paths.push(file_path.clone());
                 }
                 for page in batch_edges.chunks(BRANCH_SYNC_WRITE_PAGE_ROWS) {
                     self.db.insert_edges(page).await?;
                 }
-                if !batch_paths.is_empty() {
-                    let (short, keys) = reindexed_symbol_scope(&extractions);
-                    self.reresolve_after_reindex(&batch_paths, &short, &keys)
-                        .await?;
-                }
+                // Checkpointed daemon sync persists unresolved refs above but
+                // deliberately avoids the global resolver, which loads every
+                // graph node. Explicit/non-checkpointed sync retains the full
+                // cross-file resolution contract.
             }
             if built_from_empty {
                 self.db
