@@ -259,21 +259,17 @@ impl GitReadAuthorityV1 {
             },
             Err(
                 HistoricalQueryError::MissingAuthorization
-                    | HistoricalQueryError::InvalidAuthorization
-                    | HistoricalQueryError::UnauthorizedCommit(_)
-                    | HistoricalQueryError::UnauthorizedPath(_),
-            ) => {
-                HistoricalGitReadOutcomeV1::Unavailable {
-                    reason: HistoricalGitReadUnavailableReasonV1::NotAuthorized,
-                }
-            }
+                | HistoricalQueryError::InvalidAuthorization
+                | HistoricalQueryError::UnauthorizedCommit(_)
+                | HistoricalQueryError::UnauthorizedPath(_),
+            ) => HistoricalGitReadOutcomeV1::Unavailable {
+                reason: HistoricalGitReadUnavailableReasonV1::NotAuthorized,
+            },
             Err(
                 HistoricalQueryError::ScopeMismatch | HistoricalQueryError::ProviderScopeMismatch,
-            ) => {
-                HistoricalGitReadOutcomeV1::Unavailable {
-                    reason: HistoricalGitReadUnavailableReasonV1::ScopeMismatch,
-                }
-            }
+            ) => HistoricalGitReadOutcomeV1::Unavailable {
+                reason: HistoricalGitReadUnavailableReasonV1::ScopeMismatch,
+            },
             Err(_) => HistoricalGitReadOutcomeV1::Unavailable {
                 reason: HistoricalGitReadUnavailableReasonV1::ReadFailed,
             },
