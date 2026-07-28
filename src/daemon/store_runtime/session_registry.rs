@@ -106,6 +106,17 @@ impl RegisteredSchemaConvergenceMaintenance {
                 Some(convergence) => database.converge_schema(convergence).await,
                 None => Ok(()),
             };
+            if let Err(error) = database.release_connection_memory().await {
+                crate::daemon::log_daemon_event(
+                    "registered_schema_convergence_memory_release",
+                    &[
+                        ("outcome", "degraded".to_owned()),
+                        ("database", database.db_path().display().to_string()),
+                        ("shard", format!("{task_shard_id:?}")),
+                        ("error", error.to_string()),
+                    ],
+                );
+            }
             let status = match result {
                 Ok(()) => {
                     crate::daemon::log_daemon_event(

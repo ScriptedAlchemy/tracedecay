@@ -73,6 +73,13 @@ impl RegisteredGlobalDb {
         super::schema_stages::converge_registered_schema(&self.write_connection, convergence).await
     }
 
+    pub(crate) async fn release_connection_memory(&self) -> crate::errors::Result<()> {
+        self.write_connection
+            .execute_batch("PRAGMA shrink_memory")
+            .await
+            .map_err(|error| registered_error("release registered database memory", error))
+    }
+
     pub(super) async fn attach(
         runtime: StoreRuntimeHandle,
         expected_binding: tracedecay_store::StoreRuntimeBindingV1,
