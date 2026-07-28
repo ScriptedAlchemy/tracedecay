@@ -3,7 +3,7 @@ use std::path::Path;
 use super::*;
 
 const STORE_STATUS_PAGE_SIZE: i64 = 512;
-const STORE_STATUS_TOKEN_SCAN_MAX_BYTES: i64 = 32 * 1024 * 1024;
+const STORE_STATUS_TOKEN_SCAN_MAX_BYTES: i64 = 1024 * 1024;
 
 /// Message bodies summed for the replay token estimate in one status call.
 ///
