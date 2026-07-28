@@ -737,6 +737,7 @@ impl McpServer {
             code_index_search_executor,
             code_index_search_authority,
             retained_project_graph_resolver,
+            project_routes,
             application_invocation_executor,
             #[cfg(any(test, feature = "test-transport"))]
             host_admission_test_runtime,
@@ -940,7 +941,7 @@ impl McpServer {
             #[cfg(any(test, feature = "test-transport"))]
             _host_admission_test_runtime: host_admission_test_runtime,
             initialize_root_routing_enabled: AtomicBool::new(true),
-            hook_project_routes: SharedHookProjectRouteCache::default(),
+            hook_project_routes: project_routes,
             version_cache: std::sync::Mutex::new(VersionCheckState {
                 latest: None,
                 checked_at: None,

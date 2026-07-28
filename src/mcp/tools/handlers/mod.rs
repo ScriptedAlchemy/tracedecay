@@ -289,32 +289,63 @@ fn rejected_tool_project_selector_present(tool_name: &str, args: &Value) -> bool
     project_selector_present(args, top_level_path_keys)
 }
 
-async fn selected_registered_project_reader(
+pub(crate) async fn selected_registered_project_reader(
     tool_name: &str,
     args: &Value,
     global_db: Option<&RegisteredGlobalDb>,
     resolver: Option<&crate::mcp::server::RetainedProjectGraphResolver>,
-) -> Result<Option<Arc<TraceDecay>>> {
+) -> Result<Option<crate::mcp::project_route::ResolvedProjectRoute>> {
     if !tool_dispatches_registered_project_reader(tool_name) {
         return Ok(None);
     }
     let Some(context) =
-        project_registry_context(args, &["project_path", "project_root"], global_db).await?
+        project_registry_context(args, &["project_path", "project_root"], global_db)
+            .await
+            .map_err(|error| {
+                crate::mcp::project_route::ProjectRouteFailure::from_selection_error(&error)
+                    .into_error()
+            })?
     else {
         return Ok(None);
     };
 
     let Some(resolver) = resolver else {
-        return Err(TraceDecayError::Config {
-            message: "registered project graph is not mounted by the daemon".to_string(),
-        });
+        return Err(TraceDecayError::project_route(
+            "project_route_unavailable",
+            true,
+            "registered project graph resolver is unavailable",
+        ));
     };
-    resolver(Path::new(&context.project.canonical_root).to_path_buf())
-        .await
-        .map(Some)
-        .ok_or_else(|| TraceDecayError::Config {
-            message: "registered project graph is not mounted by the daemon".to_string(),
+    let requested_path = args
+        .get("project_selector")
+        .and_then(Value::as_object)
+        .and_then(|selector| {
+            selector
+                .get("path")
+                .or_else(|| selector.get("project_path"))
         })
+        .or_else(|| args.get("project_path"))
+        .or_else(|| args.get("project_root"))
+        .and_then(Value::as_str)
+        .map(Path::new)
+        .and_then(|path| crate::worktree::git_worktree_root(path).or_else(|| path.canonicalize().ok()))
+        .unwrap_or_else(|| Path::new(&context.project.canonical_root).to_path_buf());
+    let graph = resolver(requested_path.clone()).await.ok_or_else(|| {
+        TraceDecayError::project_route(
+            "project_route_unavailable",
+            true,
+            format!(
+                "registered project '{}' is not mounted for workspace {}",
+                context.project.project_id,
+                requested_path.display()
+            ),
+        )
+    })?;
+    Ok(Some(crate::mcp::project_route::ResolvedProjectRoute {
+        graph,
+        owner: context,
+        requested_root: requested_path,
+    }))
 }
 
 fn handle_retrieve(cg: &TraceDecay, args: &Value) -> Result<ToolResult> {
@@ -471,6 +502,7 @@ pub struct ToolCallRegistryOptions<'a> {
         Option<crate::mcp::server::SourceEditReconciliationExecutor>,
     pub code_index_search_authority: Option<crate::mcp::server::CodeIndexSearchAuthorityV1>,
     pub retained_project_graph_resolver: Option<crate::mcp::server::RetainedProjectGraphResolver>,
+    pub preselected_project_reader: bool,
     pub session_authorities: SessionAuthorities<'a>,
 }
 
@@ -502,6 +534,7 @@ impl Default for ToolCallRegistryOptions<'_> {
             source_edit_reconciliation_executor: None,
             code_index_search_authority: None,
             retained_project_graph_resolver: None,
+            preselected_project_reader: false,
             session_authorities: SessionAuthorities::default(),
         }
     }
@@ -585,21 +618,26 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
             json!(project_path.to_string_lossy().to_string()),
         );
     }
-    let selected_cg = selected_registered_project_reader(
-        tool_name,
-        &args,
-        options.global_db,
-        options.retained_project_graph_resolver.as_ref(),
-    )
-    .await?;
-    let selected_scope_prefix = if selected_cg.is_some() {
+    let selected_project = if options.preselected_project_reader {
+        None
+    } else {
+        selected_registered_project_reader(
+            tool_name,
+            &args,
+            options.global_db,
+            options.retained_project_graph_resolver.as_ref(),
+        )
+        .await?
+    };
+    let selected_scope_prefix = if options.preselected_project_reader || selected_project.is_some() {
         None
     } else {
         scope_prefix
     };
-    let cg = selected_cg.as_deref().unwrap_or(cg);
-    let active_project_session_db = selected_cg
-        .is_none()
+    let cg = selected_project
+        .as_ref()
+        .map_or(cg, |selected| selected.graph.as_ref());
+    let active_project_session_db = (!options.preselected_project_reader && selected_project.is_none())
         .then(|| {
             options
                 .registered_project_session_db

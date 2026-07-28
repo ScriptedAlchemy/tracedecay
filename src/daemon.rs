@@ -4554,6 +4554,7 @@ async fn production_project_server(
             project_session_refresh_wake,
             user_session_refresh_wake,
             database_owner_reconciler,
+            project_routes: store_administration.project_routes(),
             writers: crate::mcp::server::McpServerWriters::daemon_owned(
                 coordinated_dashboard_automation_writer(store_administration.clone()),
                 coordinated_hook_branch_writer(store_administration.clone()),

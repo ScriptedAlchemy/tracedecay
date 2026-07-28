@@ -281,6 +281,7 @@ pub(super) struct StoreAdministration {
     >,
     gate: Arc<tokio::sync::Mutex<()>>,
     project_servers: Arc<tokio::sync::Mutex<DatabaseOwnerRegistry>>,
+    project_routes: crate::mcp::project_route::SharedHookProjectRouteCache,
     host_admission_brokers: Arc<
         tokio::sync::Mutex<
             HashMap<PathBuf, crate::application::host_admission::SharedHostAdmissionBroker>,
@@ -309,6 +310,7 @@ impl Default for StoreAdministration {
             session_runtime_registries: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             gate: Arc::new(tokio::sync::Mutex::new(())),
             project_servers: Arc::new(tokio::sync::Mutex::new(DatabaseOwnerRegistry::default())),
+            project_routes: crate::mcp::project_route::SharedHookProjectRouteCache::default(),
             host_admission_brokers: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             host_admission_broker_gate: Arc::new(tokio::sync::Mutex::new(())),
             profile_host_admission_replay: Arc::new(ProfileHostAdmissionReplayRegistry::default()),
@@ -331,6 +333,12 @@ impl Default for StoreAdministration {
 }
 
 impl StoreAdministration {
+    pub(super) fn project_routes(
+        &self,
+    ) -> crate::mcp::project_route::SharedHookProjectRouteCache {
+        self.project_routes.clone()
+    }
+
     pub(super) async fn for_retained_project_graph(
         graph: &crate::tracedecay::TraceDecay,
     ) -> Result<Self> {

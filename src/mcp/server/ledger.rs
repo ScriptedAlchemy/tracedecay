@@ -356,16 +356,27 @@ impl McpServer {
         else {
             return;
         };
-        // Resolve the project for this route the same way route caching does;
-        // spans belong to that project's store, not this server's checkout.
         let route_cwd = route.cwd.as_deref().or(event.cwd.as_deref());
         let Some(cwd) = route_cwd else {
             return;
         };
-        let Ok(Some(project_root)) = self.registered_project_for_route_cwd(cwd).await else {
+        let arguments = json!({
+            "project_selector": {
+                "path": cwd.to_string_lossy(),
+            }
+        });
+        let Ok(Some(selected)) =
+            crate::mcp::tools::handlers::selected_registered_project_reader(
+                "tracedecay_files",
+                &arguments,
+                self.registry_db.as_deref(),
+                self.retained_project_graph_resolver.as_ref(),
+            )
+            .await
+        else {
             return;
         };
-        let project_root = PathBuf::from(project_root);
+        let project_root = selected.graph.project_root().to_path_buf();
         let active_project_root = self.cg_snapshot().await.project_root().to_path_buf();
         if RegisteredGlobalDb::canonical_project_key(&project_root)
             != RegisteredGlobalDb::canonical_project_key(&active_project_root)

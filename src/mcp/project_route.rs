@@ -1,18 +1,107 @@
 use std::collections::{HashMap, VecDeque};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use serde_json::{Value, json};
 
 use super::hook_events;
 use super::tools::tool_dispatches_registered_project_reader;
+use crate::global_db::ProjectRegistryContext;
+use crate::tracedecay::TraceDecay;
 
 const MAX_HOOK_ROUTE_CACHE_ENTRIES: usize = 256;
+
+#[derive(Clone)]
+pub(crate) struct ResolvedProjectRoute {
+    pub(crate) graph: Arc<TraceDecay>,
+    pub(crate) owner: ProjectRegistryContext,
+    pub(crate) requested_root: PathBuf,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProjectRouteFailureKind {
+    NotFound,
+    NotAuthorized,
+    Ambiguous,
+    Unavailable,
+}
+
+impl ProjectRouteFailureKind {
+    pub(crate) const fn reason_code(self) -> &'static str {
+        match self {
+            Self::NotFound => "project_route_not_found",
+            Self::NotAuthorized => "project_route_not_authorized",
+            Self::Ambiguous => "project_route_ambiguous",
+            Self::Unavailable => "project_route_unavailable",
+        }
+    }
+
+    pub(crate) const fn retryable(self) -> bool {
+        matches!(self, Self::Unavailable)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ProjectRouteFailure {
+    pub(crate) kind: ProjectRouteFailureKind,
+    pub(crate) detail: String,
+}
+
+impl ProjectRouteFailure {
+    pub(crate) fn into_error(self) -> crate::errors::TraceDecayError {
+        crate::errors::TraceDecayError::project_route(
+            self.kind.reason_code(),
+            self.kind.retryable(),
+            self.detail,
+        )
+    }
+
+    pub(crate) fn from_selection_error(error: &crate::errors::TraceDecayError) -> Self {
+        let detail = error.to_string();
+        let kind = match error {
+            crate::errors::TraceDecayError::ProjectRoute { reason_code, .. } => {
+                match reason_code.as_str() {
+                    "project_route_not_found" => ProjectRouteFailureKind::NotFound,
+                    "project_route_not_authorized" => ProjectRouteFailureKind::NotAuthorized,
+                    "project_route_ambiguous" => ProjectRouteFailureKind::Ambiguous,
+                    _ => ProjectRouteFailureKind::Unavailable,
+                }
+            }
+            crate::errors::TraceDecayError::Config { message }
+                if message.contains("not found for selector") =>
+            {
+                ProjectRouteFailureKind::NotFound
+            }
+            crate::errors::TraceDecayError::Config { message }
+                if message.contains("ambiguous") || message.contains("multiple stores") =>
+            {
+                ProjectRouteFailureKind::Ambiguous
+            }
+            crate::errors::TraceDecayError::Config { message }
+                if message.contains("registry is unavailable")
+                    || message.contains("profile identity") =>
+            {
+                ProjectRouteFailureKind::NotAuthorized
+            }
+            _ => ProjectRouteFailureKind::Unavailable,
+        };
+        Self { kind, detail }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) enum WorkspaceProjectRoute {
+    Resolved(ResolvedProjectRoute),
+    Failed(ProjectRouteFailure),
+}
 
 #[derive(Clone, Default)]
 pub(crate) struct HookProjectRouteCache {
     project_path: Option<String>,
     paths_by_session: HashMap<String, String>,
     paths_by_thread: HashMap<String, String>,
+    routes_by_session: HashMap<String, WorkspaceProjectRoute>,
+    routes_by_thread: HashMap<String, WorkspaceProjectRoute>,
     threads_by_session: HashMap<String, String>,
     session_by_thread: HashMap<String, String>,
     session_order: VecDeque<String>,
@@ -24,7 +113,7 @@ impl HookProjectRouteCache {
         event
             .route
             .as_ref()
-            .and_then(|route| route.cwd.as_deref())
+            .and_then(|route| route.worktree.as_deref().or(route.cwd.as_deref()))
             .or(event.cwd.as_deref())
     }
 
@@ -56,6 +145,51 @@ impl HookProjectRouteCache {
         }
     }
 
+    pub(crate) fn observe_workspace_route(
+        &mut self,
+        event: &hook_events::HookEvent,
+        route: WorkspaceProjectRoute,
+    ) {
+        self.project_path = match &route {
+            WorkspaceProjectRoute::Resolved(resolved) => {
+                Some(resolved.requested_root.to_string_lossy().into_owned())
+            }
+            WorkspaceProjectRoute::Failed(_) => None,
+        };
+        let Some(metadata) = event.route.as_ref() else {
+            return;
+        };
+        if let Some(session_id) = metadata
+            .session_id
+            .as_deref()
+            .filter(|identity| !identity.is_empty())
+        {
+            self.insert_session_workspace_route(session_id.to_owned(), route.clone());
+            if let Some(thread_id) = metadata
+                .thread_id
+                .as_deref()
+                .filter(|identity| !identity.is_empty())
+                && let Some(old_thread_id) = self
+                    .threads_by_session
+                    .insert(session_id.to_owned(), thread_id.to_owned())
+                && old_thread_id != thread_id
+            {
+                self.remove_thread_route(&old_thread_id);
+            }
+        }
+        if let Some(thread_id) = metadata
+            .thread_id
+            .as_deref()
+            .filter(|identity| !identity.is_empty())
+        {
+            self.insert_thread_workspace_route(
+                thread_id.to_owned(),
+                route,
+                metadata.session_id.as_deref(),
+            );
+        }
+    }
+
     pub(crate) fn apply_to_tool_arguments(&self, tool_name: &str, mut arguments: Value) -> Value {
         if !tool_dispatches_registered_project_reader(tool_name)
             || arguments_have_project_selector(&arguments)
@@ -72,6 +206,49 @@ impl HookProjectRouteCache {
             );
         }
         arguments
+    }
+
+    pub(crate) fn route_tool_arguments(
+        &self,
+        tool_name: &str,
+        arguments: Value,
+    ) -> crate::errors::Result<(Value, Option<ResolvedProjectRoute>)> {
+        if !tool_dispatches_registered_project_reader(tool_name)
+            || arguments_have_project_selector(&arguments)
+        {
+            return Ok((arguments, None));
+        }
+        let route = self.workspace_route_for_arguments(&arguments);
+        match route {
+            Some(WorkspaceProjectRoute::Resolved(resolved)) => {
+                let mut arguments = arguments;
+                if let Some(map) = arguments.as_object_mut() {
+                    map.insert(
+                        "project_selector".to_string(),
+                        json!({ "path": resolved.requested_root }),
+                    );
+                }
+                Ok((arguments, Some(resolved.clone())))
+            }
+            Some(WorkspaceProjectRoute::Failed(failure)) => {
+                Err(failure.clone().into_error())
+            }
+            None => Ok((self.apply_to_tool_arguments(tool_name, arguments), None)),
+        }
+    }
+
+    fn workspace_route_for_arguments(&self, arguments: &Value) -> Option<&WorkspaceProjectRoute> {
+        if let Some(thread_id) = mcp_route_thread_id(arguments)
+            && let Some(route) = self.routes_by_thread.get(&thread_id)
+        {
+            return Some(route);
+        }
+        if let Some(session_id) = mcp_analytics_session_id(arguments)
+            && let Some(route) = self.routes_by_session.get(&session_id)
+        {
+            return Some(route);
+        }
+        None
     }
 
     fn project_path_for_arguments(&self, arguments: &Value) -> Option<&str> {
@@ -103,6 +280,18 @@ impl HookProjectRouteCache {
         self.evict_old_session_routes();
     }
 
+    fn insert_session_workspace_route(
+        &mut self,
+        session_id: String,
+        route: WorkspaceProjectRoute,
+    ) {
+        if !self.routes_by_session.contains_key(&session_id) {
+            self.session_order.push_back(session_id.clone());
+        }
+        self.routes_by_session.insert(session_id, route);
+        self.evict_old_session_routes();
+    }
+
     fn insert_thread_route(
         &mut self,
         thread_id: String,
@@ -128,8 +317,34 @@ impl HookProjectRouteCache {
         self.evict_old_thread_routes();
     }
 
+    fn insert_thread_workspace_route(
+        &mut self,
+        thread_id: String,
+        route: WorkspaceProjectRoute,
+        session_id: Option<&str>,
+    ) {
+        if !self.routes_by_thread.contains_key(&thread_id) {
+            self.thread_order.push_back(thread_id.clone());
+        }
+        if let Some(session_id) = session_id
+            && let Some(old_session_id) = self
+                .session_by_thread
+                .insert(thread_id.clone(), session_id.to_string())
+            && old_session_id != session_id
+            && self
+                .threads_by_session
+                .get(&old_session_id)
+                .is_some_and(|old_thread_id| old_thread_id == &thread_id)
+        {
+            self.threads_by_session.remove(&old_session_id);
+        }
+        self.routes_by_thread.insert(thread_id, route);
+        self.evict_old_thread_routes();
+    }
+
     fn remove_thread_route(&mut self, thread_id: &str) {
         self.paths_by_thread.remove(thread_id);
+        self.routes_by_thread.remove(thread_id);
         if let Some(session_id) = self.session_by_thread.remove(thread_id)
             && self
                 .threads_by_session
@@ -141,11 +356,18 @@ impl HookProjectRouteCache {
     }
 
     fn evict_old_session_routes(&mut self) {
-        while self.paths_by_session.len() > MAX_HOOK_ROUTE_CACHE_ENTRIES {
+        while self
+            .paths_by_session
+            .len()
+            .max(self.routes_by_session.len())
+            > MAX_HOOK_ROUTE_CACHE_ENTRIES
+        {
             let Some(session_id) = self.session_order.pop_front() else {
                 break;
             };
-            if self.paths_by_session.remove(&session_id).is_some()
+            let removed_path = self.paths_by_session.remove(&session_id).is_some();
+            let removed_route = self.routes_by_session.remove(&session_id).is_some();
+            if (removed_path || removed_route)
                 && let Some(thread_id) = self.threads_by_session.remove(&session_id)
             {
                 self.remove_thread_route(&thread_id);
@@ -154,7 +376,12 @@ impl HookProjectRouteCache {
     }
 
     fn evict_old_thread_routes(&mut self) {
-        while self.paths_by_thread.len() > MAX_HOOK_ROUTE_CACHE_ENTRIES {
+        while self
+            .paths_by_thread
+            .len()
+            .max(self.routes_by_thread.len())
+            > MAX_HOOK_ROUTE_CACHE_ENTRIES
+        {
             let Some(thread_id) = self.thread_order.pop_front() else {
                 break;
             };
