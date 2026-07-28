@@ -71,16 +71,15 @@ pub(crate) use production::{
     project_semantic_production_runtime, project_semantic_source_generation,
     register_project_semantic_runtime, unregister_project_semantic_runtime,
 };
-#[cfg(test)]
 pub(crate) use redundancy::{
-    SemanticRedundancyGenerationV1, SemanticRedundancyProfileV1, SemanticRedundancyVectorV1,
-};
-pub(crate) use redundancy::{
-    project_semantic_redundancy_generation, register_project_semantic_redundancy_authority,
+    SemanticRedundancyGenerationV1, project_semantic_redundancy_generation,
+    register_project_semantic_redundancy_authority,
     register_project_semantic_redundancy_generation,
     unregister_project_semantic_redundancy_authority,
     unregister_project_semantic_redundancy_generation,
 };
+#[cfg(test)]
+pub(crate) use redundancy::{SemanticRedundancyProfileV1, SemanticRedundancyVectorV1};
 
 #[cfg(test)]
 mod tests;
