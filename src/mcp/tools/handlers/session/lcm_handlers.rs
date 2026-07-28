@@ -17,9 +17,7 @@ use super::message_search::{
     SessionTemporalMetadataView,
 };
 use super::*;
-use crate::application::session::{
-    SessionDataFreshness, SessionRetrievalScope, SessionTemporalQuery,
-};
+use crate::application::session::{SessionRetrievalScope, SessionTemporalQuery};
 use crate::query::temporal::context::ContextBudget;
 use crate::query::temporal::ranking::DiversityLimits;
 use crate::sessions::lcm::{

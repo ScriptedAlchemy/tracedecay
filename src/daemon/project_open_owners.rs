@@ -34,7 +34,7 @@ use tracedecay_domain::feedback::{
 };
 use tracedecay_domain::{
     ActorId, CapabilityId as DomainCapabilityId, CommitId, LocatorDigest, ProjectId, ProviderId,
-    RefId, RepositoryId, UtcMicros, canonical_sha256,
+    RefId, UtcMicros, canonical_sha256,
 };
 use tracedecay_hooks::{HookFeedbackDeliveryRouteV1, HookFeedbackRollbackSwitchV1, HookHostV1};
 use tracedecay_tool_catalog::CapabilityId;

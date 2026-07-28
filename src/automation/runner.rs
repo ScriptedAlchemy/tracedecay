@@ -84,6 +84,7 @@ use retrieval::{
 use session_reflector::{auto_apply_session_fact_proposals, validate_session_fact_proposals};
 
 pub use evidence::{AutomationTemporalEvidence, AutomationTemporalEvidenceItem};
+#[cfg(unix)]
 pub(crate) use retrieval::registered_project_automation_retrieval;
 pub use retrieval::{
     AuthorizedAutomationSessionRetrieval, AutomationSessionRetrieval,

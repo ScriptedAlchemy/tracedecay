@@ -67,7 +67,6 @@ pub mod memory_curate;
 mod memory_service;
 mod projects;
 mod read_model;
-pub(crate) use read_model::DashboardLegalActionKindV1;
 mod savings_api;
 mod savings_pricing;
 mod settings_api;

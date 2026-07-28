@@ -18,13 +18,13 @@ mod redundancy;
 
 pub(crate) use accepted_profile_authority::{
     RegisteredSemanticAcceptedProfileAuthorityV1, SemanticAcceptedProfileAuthorityErrorV1,
-    SemanticAcceptedProfileAuthorityPortV1, SemanticAcceptedProfileAuthorityRecordV1,
+    SemanticAcceptedProfileAuthorityPortV1,
 };
 pub(crate) use bundled_pr9::bundled_pr9_authority;
 pub use config_backend::ConfigurationLinkedSemanticRuntimeBackendV1;
 pub use config_store::ProductionSemanticRetrievalConfigurationStoreV1;
 pub(crate) use configuration_operation::{
-    ProductionSemanticConfigurationOperationV1, SemanticEvaluatedProfilePublicationV1,
+    ProductionSemanticConfigurationOperationV1,
     SemanticEvaluationAuthorityPublicationV1, SemanticEvaluationPublicationSnapshotPortV1,
     SemanticEvaluationPublicationSnapshotV1, SemanticProtectedActivationOperationV1,
     SemanticProtectedRollbackOperationV1,
@@ -71,8 +71,11 @@ pub(crate) use production::{
     project_semantic_production_runtime, project_semantic_source_generation,
     register_project_semantic_runtime, unregister_project_semantic_runtime,
 };
+#[cfg(test)]
 pub(crate) use redundancy::{
     SemanticRedundancyGenerationV1, SemanticRedundancyProfileV1, SemanticRedundancyVectorV1,
+};
+pub(crate) use redundancy::{
     project_semantic_redundancy_generation, register_project_semantic_redundancy_authority,
     register_project_semantic_redundancy_generation,
     unregister_project_semantic_redundancy_authority,

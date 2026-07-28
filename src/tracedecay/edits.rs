@@ -1763,8 +1763,10 @@ mod tests {
     use super::{
         SourceEditFileAuthority, capture_planned_source_edit, capture_source_edit_plan,
         leading_doc_or_attr, narrow_symbol_for_edit, publish_planned_source_edit,
-        read_source_edit_candidate, reconstruct_ast_grep_rewrite, rollback_api_migration_files,
+        reconstruct_ast_grep_rewrite, rollback_api_migration_files,
     };
+    #[cfg(unix)]
+    use super::read_source_edit_candidate;
     use crate::types::{Node, NodeKind, Visibility};
     use tempfile::tempdir;
 
