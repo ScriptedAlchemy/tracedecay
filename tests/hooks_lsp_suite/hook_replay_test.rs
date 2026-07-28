@@ -18,7 +18,16 @@ use tracedecay::application::host_admission::HostAdmissionTestRuntimeV1;
 use tracedecay::global_db::AnalyticsEventQuery;
 use tracedecay::storage::{StorageMode, default_profile_sharded_layout};
 
-use crate::common::{git_program, spawn_tracedecay_daemon, tracedecay_command_with_home};
+use crate::common::{git_program, spawn_tracedecay_daemon_with, tracedecay_command_with_home};
+
+/// `.cargo/config.toml` sets `TRACEDECAY_DISABLE_GLOBAL_DB=1` so cargo-launched
+/// processes never touch the operator's real accounting store. This test's
+/// subject is the bridge from hook JSONL into the durable `analytics_events`
+/// table, which lives in the registered profile accounting database, so it must
+/// opt back in — against its own hermetic temp profile, never a live one.
+fn enable_profile_accounting(command: &mut Command) -> &mut Command {
+    command.env("TRACEDECAY_ENABLE_GLOBAL_DB", "1")
+}
 
 struct Replay {
     subcommand: &'static str,
@@ -170,6 +179,7 @@ fn replays(root: &str) -> Vec<Replay> {
 fn run_replay(home: &Path, project_root: &Path, replay: &Replay) {
     let mut command: Command = {
         let mut c = tracedecay_command_with_home(home);
+        enable_profile_accounting(&mut c);
         c.arg(replay.subcommand)
             .current_dir(project_root)
             .stdin(Stdio::piped())
@@ -247,8 +257,10 @@ async fn replayed_provider_hooks_record_attributed_rows_and_bridge_to_analytics_
                 .success()
         );
     }
-    let daemon = spawn_tracedecay_daemon(&home_root);
-    let init = tracedecay_command_with_home(&home_root)
+    let daemon = spawn_tracedecay_daemon_with(&home_root, |command| {
+        enable_profile_accounting(command);
+    });
+    let init = enable_profile_accounting(&mut tracedecay_command_with_home(&home_root))
         .arg("init")
         .current_dir(&project_root)
         .output()
@@ -309,7 +321,7 @@ async fn replayed_provider_hooks_record_attributed_rows_and_bridge_to_analytics_
     );
 
     // Bridge: `analytics sync` imports the JSONL rows into the durable table.
-    let sync = tracedecay_command_with_home(&home_root)
+    let sync = enable_profile_accounting(&mut tracedecay_command_with_home(&home_root))
         .args(["analytics", "sync"])
         .current_dir(&project_root)
         .output()
