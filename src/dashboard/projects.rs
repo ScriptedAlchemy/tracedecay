@@ -88,7 +88,7 @@ impl DashboardRuntime {
             context.clone(),
             project_root.clone(),
         );
-        let cg = resolver(request).await.ok_or_else(|| {
+        let cg = resolver(request).await?.ok_or_else(|| {
             config_error(format!(
                 "registered project graph is not mounted: {project_id}"
             ))

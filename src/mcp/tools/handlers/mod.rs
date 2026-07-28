@@ -336,7 +336,7 @@ pub(crate) async fn selected_registered_project_reader(
         context.clone(),
         requested_path.clone(),
     );
-    let graph = resolver(request.clone()).await.ok_or_else(|| {
+    let graph = resolver(request.clone()).await?.ok_or_else(|| {
         TraceDecayError::project_route(
             "project_route_unavailable",
             true,
@@ -1576,7 +1576,7 @@ mod tests {
         );
         let resolver: crate::mcp::server::RetainedProjectGraphResolver = Arc::new(move |request| {
             let graph = graphs.get(&request.registered_root).cloned();
-            Box::pin(async move { graph })
+            Box::pin(async move { Ok(graph) })
         });
         ToolCallRegistryOptions {
             global_db: Some(registry.database.as_ref()),

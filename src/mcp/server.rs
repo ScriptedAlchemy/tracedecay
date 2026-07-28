@@ -276,7 +276,13 @@ pub(crate) type SourceEditReconciliationExecutor =
     Arc<dyn Fn(SourceEditReconciliationInvocationV1) -> SourceEditFuture + Send + Sync + 'static>;
 
 pub(crate) type RetainedProjectGraphFuture =
-    std::pin::Pin<Box<dyn std::future::Future<Output = Option<Arc<TraceDecay>>> + Send + 'static>>;
+    std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = crate::errors::Result<Option<Arc<TraceDecay>>>>
+                + Send
+                + 'static,
+        >,
+    >;
 
 #[derive(Clone)]
 pub(crate) struct RetainedProjectGraphRequest {
@@ -704,7 +710,7 @@ impl McpServer {
                 });
                 let graph = matches.next().map(|(_, graph)| Arc::clone(graph));
                 let graph = matches.next().is_none().then_some(graph).flatten();
-                Box::pin(async move { graph })
+                Box::pin(async move { Ok(graph) })
             });
             context = context.with_retained_project_graph_resolver(resolver);
         }
