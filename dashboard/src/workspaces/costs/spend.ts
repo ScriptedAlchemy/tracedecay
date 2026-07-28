@@ -166,12 +166,17 @@ export function costPerTurn(
 
 export interface LedgerCoverage {
   messages: number;
-  usage: number;
-  tokenized: number;
-  estimated: number;
-  unknownModel: number;
-  /** Share of messages whose token counts came from the provider, 0–1. */
-  measuredShare: number;
+  /** Each class is null when the ledger served no count for it. A class the
+   * ledger never reported is not a class that measured zero, and the two must
+   * not arrive here as the same number. */
+  usage: number | null;
+  tokenized: number | null;
+  estimated: number | null;
+  unknownModel: number | null;
+  /** Share of messages whose token counts came from the provider, 0–1. Null
+   * when the provider-reported class itself went unreported — there is then no
+   * share to state, rather than a share of nothing. */
+  measuredShare: number | null;
 }
 
 /**
@@ -187,15 +192,20 @@ export function summarizeCoverage(sessions: {
   estimated_messages?: number | null | undefined;
   unknown_model_messages?: number | null | undefined;
 }): LedgerCoverage | null {
-  const messages = sessions.messages ?? 0;
-  if (!Number.isFinite(messages) || messages <= 0) return null;
-  const usage = sessions.usage_messages ?? 0;
+  const messages = served(sessions.messages);
+  if (messages == null || messages <= 0) return null;
+  const usage = served(sessions.usage_messages);
   return {
     messages,
     usage,
-    tokenized: sessions.tokenized_messages ?? 0,
-    estimated: sessions.estimated_messages ?? 0,
-    unknownModel: sessions.unknown_model_messages ?? 0,
-    measuredShare: usage / messages,
+    tokenized: served(sessions.tokenized_messages),
+    estimated: served(sessions.estimated_messages),
+    unknownModel: served(sessions.unknown_model_messages),
+    measuredShare: usage == null ? null : usage / messages,
   };
+}
+
+/** A count the ledger actually served, or null. */
+function served(value: number | null | undefined): number | null {
+  return value != null && Number.isFinite(value) ? value : null;
 }

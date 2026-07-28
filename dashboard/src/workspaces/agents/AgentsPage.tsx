@@ -209,10 +209,10 @@ export function AgentsPage() {
                 ) : window.events == null && rows.length === 0 ? (
                   <UnavailableRead label="Categorized usage events unavailable" />
                 ) : (
-                  <CategoryComposition
-                    dominance={dominance}
-                    counted={window.events ?? dominance.total}
-                  />
+                  // The window's own count, or null. Substituting the
+                  // categorized total made the two agree by construction, which
+                  // is a claim that every event was categorized.
+                  <CategoryComposition dominance={dominance} counted={window.events} />
                 )}
               </OverviewCard>
 
@@ -261,7 +261,7 @@ export function AgentsPage() {
                       <WindowComposition
                         kinds={payload.by_event_kind ?? []}
                         outcomes={payload.by_outcome ?? []}
-                        counted={payload.event_count ?? window.events ?? 0}
+                        counted={payload.event_count ?? window.events}
                       />
                     )
                   }
@@ -274,7 +274,7 @@ export function AgentsPage() {
                     hintData.available === false ? (
                       <UnavailableRead label="Hint diagnostics unavailable" />
                     ) : (
-                      <FamilyList rows={(hintData.families ?? []) as FamilyRow[]} />
+                      <FamilyList rows={hintData.families ?? []} />
                     )
                   }
                 </LegacyBoundary>
@@ -310,7 +310,9 @@ function CategoryComposition({
   counted,
 }: {
   dominance: ReturnType<typeof summarizeDominance>;
-  counted: number;
+  /** The window's total event count, or null when the endpoint served none —
+   * in which case how much of the window these categories cover is unknown. */
+  counted: number | null;
 }) {
   const { leader, leaderShare, rest, total, spread } = dominance;
   if (!leader || total === 0) {
@@ -318,7 +320,7 @@ function CategoryComposition({
   }
   const share = percent(leaderShare);
   const smallest = rest[rest.length - 1];
-  const uncategorized = Math.max(0, counted - total);
+  const uncategorized = counted != null ? Math.max(0, counted - total) : null;
   const restCeiling = rest.reduce((max, row) => Math.max(max, row.events), 0);
   return (
     <div className="flex flex-col gap-3">
@@ -331,7 +333,14 @@ function CategoryComposition({
           ? `, and ${Math.round(spread).toLocaleString()}× the smallest (${smallest.category}, ${smallest.events.toLocaleString()}).`
           : '.'}
       </p>
-      {uncategorized > 0 ? (
+      {counted == null ? (
+        <p className="text-2xs leading-relaxed text-text-muted">
+          The window's own event count was not reported, so how many of its events
+          carry no tool or skill to categorize is unknown — these{' '}
+          {total.toLocaleString()} categorized events are not known to be all of
+          them.
+        </p>
+      ) : uncategorized != null && uncategorized > 0 ? (
         <p className="text-2xs leading-relaxed text-text-muted">
           {uncategorized.toLocaleString()} of the {counted.toLocaleString()} events in
           the window carry no tool or skill to categorize (hook routing), so they are
@@ -522,7 +531,9 @@ function WindowComposition({
 }: {
   kinds: ReadonlyArray<Record<string, unknown>>;
   outcomes: ReadonlyArray<Record<string, unknown>>;
-  counted: number;
+  /** The denominator these shares are of, or null when neither the diagnostics
+   * fold nor the usage read served a window count. */
+  counted: number | null;
 }) {
   const kindRows = kinds
     .map((row) => ({ label: String(row['event_kind'] ?? ''), count: Number(row['count'] ?? 0) }))
@@ -544,7 +555,10 @@ function WindowComposition({
 }
 
 /** A small set of parts of one known whole. Linear is correct here — these
- * shares are of the same denominator and none of them is a sliver. */
+ * shares are of the same denominator and none of them is a sliver.
+ *
+ * When the denominator was not served the counts are still real, so they are
+ * printed; it is the "share of N" clause that goes, because there is no N. */
 function ShareRows({
   legend,
   rows,
@@ -552,19 +566,20 @@ function ShareRows({
 }: {
   legend: string;
   rows: ReadonlyArray<{ label: string; count: number }>;
-  total: number;
+  total: number | null;
 }) {
   if (rows.length === 0) return null;
   return (
     <figure className="flex flex-col gap-1.5">
       <figcaption className="td-legend">
-        {legend} · share of {total.toLocaleString()}
+        {legend}
+        {total != null ? ` · share of ${total.toLocaleString()}` : ' · window total unreported'}
       </figcaption>
       {rows.map((row) => (
         <div key={row.label} className="flex items-center gap-2 text-xs">
           <span className="min-w-0 flex-1 truncate text-text-primary">{row.label}</span>
           <Meter
-            fraction={total > 0 ? row.count / total : null}
+            fraction={total != null && total > 0 ? row.count / total : null}
             className="h-[3px] w-20 shrink-0 max-sm:hidden"
           />
           <span
