@@ -1089,10 +1089,22 @@ impl DaemonSessionRetrievalService {
             source_limit: command.source_limit(),
         };
         let rendered = executor.render_lcm_expand(request, canonical_content).await;
-        let expansion = match rendered {
+        let mut expansion = match rendered {
             Ok(expansion) => expansion,
             Err(error) => return expand_execution_error(error),
         };
+        if let Err(error) = executor
+            .hydrate_lcm_summary_sources(
+                &result.snapshot,
+                command.provider(),
+                command.session_id(),
+                command.content_slice(),
+                &mut expansion,
+            )
+            .await
+        {
+            return expand_execution_error(error);
+        }
         let mut temporal = self.lcm_temporal_view(&result);
         if let Some(offset) = expansion
             .source_pagination

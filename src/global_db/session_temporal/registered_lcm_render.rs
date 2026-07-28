@@ -2,6 +2,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use tracedecay_domain::HydrationStateV1;
+
 use crate::db::engine::{ReadSnapshot, Row, Value, params, params_from_iter};
 use crate::sessions::lcm::{
     LcmContentRange, LcmContentSlice, LcmDescribeExternalPayload, LcmDescribeRequest,
@@ -617,6 +619,7 @@ async fn load_summary_sources(
                 }
                 out.push(LcmExpandedSummarySource {
                     source_ref: source_ref.clone(),
+                    state: HydrationStateV1::RetainedButUnavailable,
                     content: String::new(),
                     content_range: None,
                     content_truncated: false,
@@ -634,6 +637,7 @@ async fn load_summary_sources(
                 }
                 out.push(LcmExpandedSummarySource {
                     source_ref: source_ref.clone(),
+                    state: HydrationStateV1::RetainedButUnavailable,
                     content: String::new(),
                     content_range: None,
                     content_truncated: false,

@@ -1,5 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use tracedecay_domain::HydrationStateV1;
+
 use crate::{
     db::engine::{Executor, QueryExecutor, Value, params},
     global_db::session_temporal_operations,
@@ -89,6 +91,11 @@ async fn expand_summary_node_with_content(
                 }
                 sources.push(LcmExpandedSummarySource {
                     source_ref: source_ref.clone(),
+                    state: if include_content {
+                        HydrationStateV1::Available
+                    } else {
+                        HydrationStateV1::RetainedButUnavailable
+                    },
                     content: raw.content.clone(),
                     content_range: None,
                     content_truncated: false,
@@ -108,6 +115,11 @@ async fn expand_summary_node_with_content(
                 }
                 sources.push(LcmExpandedSummarySource {
                     source_ref: source_ref.clone(),
+                    state: if include_content {
+                        HydrationStateV1::Available
+                    } else {
+                        HydrationStateV1::RetainedButUnavailable
+                    },
                     content: child.summary_text.clone(),
                     content_range: None,
                     content_truncated: false,
