@@ -167,37 +167,6 @@ impl std::fmt::Display for LspSemanticRequestError {
     }
 }
 
-/// Human-readable companion to [`LspSemanticRequestError::class`].
-///
-/// `class` is the stable token callers match on; this is the sentence that
-/// rides alongside it in a partial outcome's `detail`. Only the analyzer's own
-/// protocol-level failure text is reproduced — never document content — and
-/// `LspSemanticOperationOutcome::bounded_detail` caps what reaches a caller.
-impl std::fmt::Display for LspSemanticRequestError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Cancelled => formatter.write_str("analyzer request was cancelled"),
-            Self::TimedOut => formatter.write_str("analyzer request timed out"),
-            Self::Remote {
-                code: Some(code),
-                message,
-            } => write!(formatter, "analyzer reported error {code}: {message}"),
-            Self::Remote {
-                code: None,
-                message,
-            } => {
-                write!(formatter, "analyzer reported an error: {message}")
-            }
-            Self::Transport { class } => {
-                write!(formatter, "analyzer transport failed: {class}")
-            }
-            Self::InvalidResponse { class } => {
-                write!(formatter, "analyzer returned an unusable response: {class}")
-            }
-        }
-    }
-}
-
 pub async fn collect_document_diagnostics(
     command: &str,
     args: &[String],
