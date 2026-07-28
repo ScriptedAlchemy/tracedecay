@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Search, Waypoints } from 'lucide-react';
+import { Waypoints } from 'lucide-react';
 import {
   DataRow,
   ExplorerSplit,
@@ -9,6 +9,7 @@ import {
 import { CenteredState, LegacyBoundary } from '../../ui/LegacyStates.tsx';
 import { ActivityColumns } from '../../ui/ActivityColumns.tsx';
 import { Meter, Readout } from '../../ui/instrument.tsx';
+import { SearchField } from '../../ui/search/SearchField.tsx';
 import { VirtualList } from '../../ui/VirtualList.tsx';
 import { cn } from '../../ui/cn';
 import { elideStart, splitCount } from '../../ui/format.ts';
@@ -100,26 +101,19 @@ export function CodePage() {
     <ExplorerSplit
       filters={
         <div className="flex flex-col gap-3">
-          <form
-            className="relative"
-            onSubmit={(e) => {
-              e.preventDefault();
-              setSubmitted(query.trim());
+          <SearchField
+            value={query}
+            onChange={setQuery}
+            onSubmit={() => setSubmitted(query.trim())}
+            onClear={() => {
+              setQuery('');
+              setSubmitted('');
             }}
-          >
-            <Search
-              aria-hidden
-              size={13}
-              className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-text-muted"
-            />
-            <input
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search symbols"
-              aria-label="Symbol search"
-              className="h-[calc(var(--touch-target-min)+2px)] w-full rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-2 pl-7 pr-2 text-xs text-text-primary placeholder:text-text-muted focus:border-accent/60 focus:outline-none"
-            />
-          </form>
+            label="Symbol search"
+            placeholder="Search symbols"
+            hint="press / to focus, Esc to clear"
+            submitted={submitted}
+          />
           <LegacyBoundary title="Graph" pending={overview.isPending} result={overview.data}>
             {(data) => {
               if (

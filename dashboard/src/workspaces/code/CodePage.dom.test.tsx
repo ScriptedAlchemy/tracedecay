@@ -62,7 +62,7 @@ describe('CodePage legacy graph zero states', () => {
     expect(await screen.findByText(/graph slice is unverified/i)).toBeTruthy();
     expect(screen.queryByTestId('graph-canvas')).toBeNull();
 
-    await user.type(screen.getByRole('textbox', { name: /symbol search/i }), 'missing');
+    await user.type(screen.getByRole('searchbox', { name: /symbol search/i }), 'missing');
     await user.keyboard('{Enter}');
 
     expect(await screen.findByText(/search result is unverified/i)).toBeTruthy();

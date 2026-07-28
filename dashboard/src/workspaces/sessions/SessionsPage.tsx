@@ -1,5 +1,4 @@
 import { useState } from 'react';
-import { Search } from 'lucide-react';
 import { z } from 'zod';
 import {
   DataRow,
@@ -10,6 +9,7 @@ import {
 import { LegacyBoundary } from '../../ui/LegacyStates.tsx';
 import { ActivityColumns } from '../../ui/ActivityColumns.tsx';
 import { Meter, Readout } from '../../ui/instrument.tsx';
+import { SearchField } from '../../ui/search/SearchField.tsx';
 import { formatStamp, splitCount } from '../../ui/format.ts';
 import { VirtualList } from '../../ui/VirtualList.tsx';
 import { AnyObject } from '../../data/query/legacy.ts';
@@ -70,26 +70,19 @@ export function SessionsPage() {
       }
       filters={
         <div className="flex flex-col gap-3">
-          <form
-            className="relative"
-            onSubmit={(event) => {
-              event.preventDefault();
-              setSubmitted(query.trim());
+          <SearchField
+            value={query}
+            onChange={setQuery}
+            onSubmit={() => setSubmitted(query.trim())}
+            onClear={() => {
+              setQuery('');
+              setSubmitted('');
             }}
-          >
-            <Search
-              aria-hidden
-              size={13}
-              className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-text-muted"
-            />
-            <input
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="Search transcripts"
-              aria-label="Search transcripts"
-              className="h-[calc(var(--touch-target-min)+2px)] w-full rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-2 pl-7 pr-2 text-xs text-text-primary placeholder:text-text-muted focus:border-accent/60 focus:outline-none"
-            />
-          </form>
+            label="Search transcripts"
+            placeholder="Search transcripts"
+            hint="press / to focus, Esc to clear"
+            submitted={submitted}
+          />
         <LegacyBoundary title="LCM" pending={timeline.isPending} result={timeline.data}>
           {(data) => {
             if (data.exists === false) {
