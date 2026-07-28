@@ -2075,6 +2075,9 @@ impl TraceDecay {
             &configuration.target,
             configuration_runtime.client(),
         );
+        let internal_detached_scope = crate::worktree::detached_worktree_graph_scope(project_root)
+            .as_deref()
+            == Some(branch_name);
         Ok(Self {
             db,
             profile_database,
@@ -2086,8 +2089,8 @@ impl TraceDecay {
             active_graph_layout,
             open_options,
             registry: LanguageRegistry::new(),
-            active_branch: Some(branch_name.to_string()),
-            serving_branch: Some(branch_name.to_string()),
+            active_branch: (!internal_detached_scope).then(|| branch_name.to_string()),
+            serving_branch: (!internal_detached_scope).then(|| branch_name.to_string()),
             fallback_warning: None,
             read_only,
             context_scout_owner: None,
