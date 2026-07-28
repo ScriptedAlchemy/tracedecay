@@ -5,8 +5,9 @@ use crate::global_db::RegisteredGlobalDb;
 
 use super::{
     AUTO_BACKFILL_WATERMARK_KEY, CommitEvidence, CommitRelation, CommitSessionRecord,
-    DEFAULT_SPAN_MERGE_GAP_SECS, GitCorrelationError, SpanObservation, SpanOverlapKind, SpanSource,
-    normalize_worktree,
+    DEFAULT_SPAN_MERGE_GAP_SECS, GitCorrelationError, ScannedCommit, SpanObservation,
+    SpanOverlapKind, SpanScanTarget, SpanSource, TargetScan, normalize_worktree,
+    run_commit_attribution_sweep,
 };
 
 // Historical backfill for sessions that predate live span recording.
@@ -428,9 +429,6 @@ pub(crate) async fn run_incremental_backfill(
         .await
         .map_err(GitCorrelationError::Db)?;
     drop(snapshot);
-    if rows.is_empty() {
-        return Ok(stats);
-    }
 
     // `since` is left at 0: the query already excludes anything at or below the
     // watermark, so a second time floor would only drop legitimately-new spans.
@@ -441,29 +439,87 @@ pub(crate) async fn run_incremental_backfill(
         max_commits_per_repo: BackfillOptions::default().max_commits_per_repo,
         dry_run: false,
     };
-    backfill_rows(session_store, git, &opts, &rows, &[], &mut stats).await?;
+    if !rows.is_empty() {
+        backfill_rows(session_store, git, &opts, &rows, &[], &mut stats).await?;
 
-    // Advance the watermark to the newest activity attempted this pass. Rows are
-    // ordered oldest-first, so the last row carries the max; fall back to a scan
-    // to stay correct if the query's ordering ever changes.
-    let new_watermark = rows
-        .iter()
-        .filter_map(SessionActivityRow::activity_sort_key)
-        .max();
-    if let Some(new_watermark) = new_watermark
-        && new_watermark > watermark
-    {
-        let transaction = session_store
-            .begin_write_transaction()
-            .await
-            .map_err(|error| GitCorrelationError::Db(error.to_string()))?;
-        super::write_meta_value(&transaction, AUTO_BACKFILL_WATERMARK_KEY, new_watermark).await?;
-        transaction
-            .commit()
-            .await
-            .map_err(|error| GitCorrelationError::Db(error.to_string()))?;
+        // Advance the watermark to the newest activity attempted this pass.
+        // Rows are ordered oldest-first, so the last row carries the max; fall
+        // back to a scan to stay correct if the query's ordering ever changes.
+        let new_watermark = rows
+            .iter()
+            .filter_map(SessionActivityRow::activity_sort_key)
+            .max();
+        if let Some(new_watermark) = new_watermark
+            && new_watermark > watermark
+        {
+            let transaction = session_store
+                .begin_write_transaction()
+                .await
+                .map_err(|error| GitCorrelationError::Db(error.to_string()))?;
+            super::write_meta_value(&transaction, AUTO_BACKFILL_WATERMARK_KEY, new_watermark)
+                .await?;
+            transaction
+                .commit()
+                .await
+                .map_err(|error| GitCorrelationError::Db(error.to_string()))?;
+        }
     }
+
+    // Sweep commit attribution over span targets written since the last sweep.
+    // This is the only attribution path for spans recorded live by the hook
+    // route: those sessions have no transcript rows, so the session-driven
+    // backfill above never sees them, and without this sweep their commits
+    // would stay unattributed until a transcript ingest happens to run. The
+    // sweep keeps its own watermark and is idempotent, so running it on every
+    // pass (including passes with zero new session rows) is safe.
+    let transaction = session_store
+        .begin_write_transaction()
+        .await
+        .map_err(|error| GitCorrelationError::Db(error.to_string()))?;
+    stats.commits_attributed +=
+        run_commit_attribution_sweep(&transaction, opts.merge_gap_secs, |target| {
+            scan_span_target(git, target, opts.merge_gap_secs, opts.max_commits_per_repo)
+        })
+        .await?;
+    transaction
+        .commit()
+        .await
+        .map_err(|error| GitCorrelationError::Db(error.to_string()))?;
     Ok(stats)
+}
+
+/// Scans one span target's branch history through the backfill's git source,
+/// mirroring the ingest-time sweep's scanner: commits on the recorded branch
+/// (or `HEAD` for detached spans) inside the gap-widened span window. Reports
+/// [`TargetScan::Unavailable`] — not an empty list — when the worktree is gone
+/// or git fails, so the sweep holds its watermark and retries the target.
+fn scan_span_target(
+    git: &dyn GitReflogSource,
+    target: &SpanScanTarget,
+    gap_secs: i64,
+    max_commits: usize,
+) -> TargetScan {
+    let worktree = std::path::Path::new(&target.worktree);
+    if !worktree.is_dir() {
+        return TargetScan::Unavailable;
+    }
+    let since = target.window_start.saturating_sub(gap_secs);
+    let until = target.window_end.saturating_add(gap_secs);
+    let branch = target
+        .branch
+        .as_deref()
+        .filter(|branch| !branch.is_empty())
+        .unwrap_or("HEAD");
+    let Some(log_text) = git.commit_log(worktree, branch, since) else {
+        return TargetScan::Unavailable;
+    };
+    TargetScan::Scanned(
+        parse_commit_log(&log_text, max_commits)
+            .into_iter()
+            .filter(|&(_, committed_at)| committed_at <= until)
+            .map(|(sha, committed_at)| ScannedCommit { sha, committed_at })
+            .collect(),
+    )
 }
 
 /// Shared per-session backfill loop used by both the exhaustive
