@@ -1,37 +1,23 @@
-use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
-use tracedecay_application::feedback::{
-    FeedbackCompletedPublicationV1, FeedbackCycleExecutionResult,
-};
 use tracedecay_application::{
     DisclosureClass, RequestAdmission, RequestContext as ProductRequestContext,
 };
 use tracedecay_domain::{
-    DurableObservationV1, FactOwnerV1, ManifestDigest, RetrievalAnchorId, RetrievalAnchorRecordV2,
-    TemporalCoverageCountsV1, TemporalModeV1, UtcMicros, canonical_sha256,
+    ManifestDigest, RetrievalAnchorId, RetrievalAnchorRecordV2, TemporalModeV1, UtcMicros,
+    canonical_sha256,
 };
 
-use crate::application::anchor_resolution::EvidenceAnchorReportResolver;
-use crate::application::context::RequestContext as SessionRequestContext;
-use crate::application::session::{
-    SessionRetrievalOutcome, SessionRetrievalService, SessionScopeAuthorizer,
-    SessionTemporalExecutionPort, SessionTemporalQuery,
-};
 use crate::daemon::store_runtime::registry::StoreRuntimeHandle;
 use crate::db::engine::{Executor, QueryExecutor, Rows, Value, params};
 use crate::db::{Database, DatabaseAccessMode};
 use crate::global_db::RegisteredGlobalDb;
-use crate::query::temporal::TemporalKernelResult;
-use crate::query::temporal::context::VersionedTokenEstimator;
 
 const MAX_ASSEMBLY_MEMBERS: usize = 4_096;
-const MAX_SESSION_SOURCE_ROWS: usize = 16_384;
-const MAX_DERIVED_PUBLICATIONS: usize = 256;
 const OCCURRENCE_ID_DOMAIN: &str = "tracedecay.evidence.source-occurrence.v1";
 const OCCURRENCE_SET_ID_DOMAIN: &str = "tracedecay.evidence.occurrence-set.v1";
 const SPAN_ID_DOMAIN: &str = "tracedecay.evidence.span.v1";
@@ -39,8 +25,6 @@ const PROJECTION_RECEIPT_ID_DOMAIN: &str = "tracedecay.evidence.projection-recei
 const CONTRIBUTION_ID_DOMAIN: &str = "tracedecay.evidence.retriever-contribution.v1";
 const PUBLICATION_RECEIPT_ID_DOMAIN: &str = "tracedecay.evidence.publication-receipt.v1";
 const DERIVED_ANCHOR_ID_DOMAIN: &str = "tracedecay.evidence.derived-anchor.v1";
-const REQUEST_DIGEST_DOMAIN: &[u8] = b"tracedecay.evidence.request.v1\0";
-const IDEMPOTENCY_KEY_DOMAIN: &[u8] = b"tracedecay.evidence.idempotency.v1\0";
 
 macro_rules! evidence_id {
     ($($name:ident),+ $(,)?) => {$(
@@ -121,44 +105,6 @@ impl EvidenceOwnerBinding {
         Ok(Self {
             project_id: context.scope().project_id.as_str().to_owned(),
             scope_digest: context.scope().scope_digest.as_str().to_owned(),
-            privacy_domain_id,
-            key_epoch,
-        })
-    }
-
-    pub fn for_session_context(
-        context: &SessionRequestContext,
-        privacy_domain_id: impl Into<String>,
-        key_epoch: u64,
-    ) -> Result<Self, EvidenceAssemblyError> {
-        let project_id = context
-            .identity()
-            .project_id()
-            .ok_or(EvidenceAssemblyError::BoundaryMismatch)?;
-        let privacy_domain_id = privacy_domain_id.into();
-        validate_label(&privacy_domain_id, "privacy domain")?;
-        if key_epoch == 0 {
-            return Err(EvidenceAssemblyError::Invalid("privacy key epoch"));
-        }
-        let route = context
-            .identity()
-            .git_route()
-            .ok_or(EvidenceAssemblyError::BoundaryMismatch)?;
-        let scope_digest = sha256_text(&[
-            context.identity().profile_id().as_str(),
-            project_id.as_str(),
-            context.identity().store_id().as_str(),
-            context.identity().root_id().as_str(),
-            route.repository_id().as_str(),
-            route.worktree_id().as_str(),
-            route.branch_id().as_str(),
-            &hex::encode(context.capability_digest().as_bytes()),
-            &hex::encode(context.policy_digest().as_bytes()),
-            &hex::encode(context.configuration_digest().as_bytes()),
-        ]);
-        Ok(Self {
-            project_id: project_id.as_str().to_owned(),
-            scope_digest,
             privacy_domain_id,
             key_epoch,
         })
@@ -474,36 +420,6 @@ pub struct EvidenceAssemblyCoverage {
     unknown: u64,
     redacted: u64,
     complete: bool,
-}
-
-impl EvidenceAssemblyCoverage {
-    fn from_temporal(counts: TemporalCoverageCountsV1, selected: usize) -> Self {
-        let selected = u64::try_from(selected).unwrap_or(u64::MAX);
-        let eligible = counts.total().unwrap_or(u64::MAX);
-        Self {
-            eligible,
-            selected,
-            omitted: eligible.saturating_sub(selected),
-            hidden: counts.hidden,
-            unknown: counts.unknown,
-            redacted: counts.redacted,
-            complete: !counts.has_withheld_or_unknown() && selected == counts.visible,
-        }
-    }
-
-    fn from_feedback(publication: &FeedbackCompletedPublicationV1, selected: usize) -> Self {
-        let selected = u64::try_from(selected).unwrap_or(u64::MAX);
-        let cycle = &publication.result;
-        Self {
-            eligible: cycle.total_findings.max(selected),
-            selected,
-            omitted: cycle.omitted_findings,
-            hidden: 0,
-            unknown: 0,
-            redacted: 0,
-            complete: cycle.omitted_findings == 0 && selected >= cycle.returned_findings,
-        }
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -1529,179 +1445,6 @@ impl EvidenceAssemblyService {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub async fn retrieve_and_publish_session<A, P, E>(
-        &self,
-        context: &SessionRequestContext,
-        retrieval: &SessionRetrievalService<A, P, E>,
-        query: SessionTemporalQuery,
-        policy: SessionEvidencePolicy,
-        privacy_domain_id: impl Into<String>,
-        key_epoch: u64,
-        privacy_key: &[u8],
-        raw_idempotency_key: &[u8],
-        created_at: UtcMicros,
-    ) -> Result<Vec<EvidenceAssemblyPublicationOutcome>, EvidenceAssemblyError>
-    where
-        A: SessionScopeAuthorizer,
-        P: SessionTemporalExecutionPort,
-        E: VersionedTokenEstimator + Sync,
-    {
-        if policy.max_members == 0 || policy.max_members > MAX_ASSEMBLY_MEMBERS {
-            return Err(EvidenceAssemblyError::MemberLimit);
-        }
-        let owner =
-            EvidenceOwnerBinding::for_session_context(context, privacy_domain_id, key_epoch)?;
-        let outcome = retrieval.retrieve(context, query).await;
-        let results = match outcome {
-            SessionRetrievalOutcome::Complete { items, .. }
-            | SessionRetrievalOutcome::Partial { items, .. } => items,
-            SessionRetrievalOutcome::CompleteZero { .. } => {
-                return Err(EvidenceAssemblyError::NoEvidence);
-            }
-            SessionRetrievalOutcome::Stale { .. }
-            | SessionRetrievalOutcome::WrongScope
-            | SessionRetrievalOutcome::Locked
-            | SessionRetrievalOutcome::Redacted
-            | SessionRetrievalOutcome::Deleted
-            | SessionRetrievalOutcome::Denied
-            | SessionRetrievalOutcome::Unavailable
-            | SessionRetrievalOutcome::CursorManifestLimitExceeded { .. }
-            | SessionRetrievalOutcome::BudgetExhausted
-            | SessionRetrievalOutcome::Cancelled => {
-                return Err(EvidenceAssemblyError::SessionRetrievalUnavailable);
-            }
-        };
-        let mut publications = Vec::new();
-        for (result_ordinal, result) in results.iter().enumerate() {
-            let runs = self
-                .session_occurrence_runs(&owner, result, &policy)
-                .await?;
-            for (run_ordinal, occurrences) in runs.into_iter().enumerate() {
-                if publications.len() >= MAX_DERIVED_PUBLICATIONS {
-                    return Err(EvidenceAssemblyError::MemberLimit);
-                }
-                let selected_count = occurrences.len();
-                let request_digest = privacy_bound_digest(
-                    REQUEST_DIGEST_DOMAIN,
-                    privacy_key,
-                    &owner,
-                    &(
-                        result.snapshot.request_digest().as_str(),
-                        result.snapshot.temporal_mode(),
-                        result.snapshot.participant_manifest(),
-                        &policy.algorithm_revision,
-                        &policy.adjacency_revision,
-                    ),
-                )?;
-                let scoped_raw_key = (
-                    raw_idempotency_key,
-                    u64::try_from(result_ordinal).unwrap_or(u64::MAX),
-                    u64::try_from(run_ordinal).unwrap_or(u64::MAX),
-                );
-                let idempotency_key = privacy_bound_digest(
-                    IDEMPOTENCY_KEY_DOMAIN,
-                    privacy_key,
-                    &owner,
-                    &scoped_raw_key,
-                )?;
-                let watermarks = result.snapshot.watermarks();
-                let write = build_write(
-                    owner.clone(),
-                    idempotency_key,
-                    occurrences,
-                    match policy.kind {
-                        SessionDerivedEvidenceKind::Span => EvidenceSpanProducerKind::SessionSpan,
-                        SessionDerivedEvidenceKind::Burst => EvidenceSpanProducerKind::SessionBurst,
-                    },
-                    &policy.algorithm_revision,
-                    &policy.adjacency_revision,
-                    request_digest,
-                    "session_temporal",
-                    result.snapshot.temporal_mode(),
-                    RetrieverWatermarkBinding {
-                        source: watermarks.source.to_string(),
-                        projection: watermarks.projection.to_string(),
-                        index: watermarks.index.to_string(),
-                        summary: watermarks.summary.to_string(),
-                    },
-                    EvidenceAssemblyCoverage::from_temporal(result.coverage, selected_count),
-                    created_at,
-                )?;
-                publications.push(self.publish_or_replay(write).await?);
-            }
-        }
-        if publications.is_empty() {
-            return Err(EvidenceAssemblyError::NoEvidence);
-        }
-        Ok(publications)
-    }
-
-    pub async fn publish_feedback_result(
-        &self,
-        context: &ProductRequestContext,
-        result: &FeedbackCycleExecutionResult,
-        privacy_domain_id: impl Into<String>,
-        key_epoch: u64,
-        privacy_key: &[u8],
-        raw_idempotency_key: &[u8],
-        created_at: UtcMicros,
-    ) -> Result<EvidenceAssemblyPublicationOutcome, EvidenceAssemblyError> {
-        let publication = result
-            .publication
-            .as_ref()
-            .ok_or(EvidenceAssemblyError::NoEvidence)?;
-        publication
-            .validate()
-            .map_err(|_| EvidenceAssemblyError::Invalid("PR12 feedback publication"))?;
-        let owner =
-            EvidenceOwnerBinding::for_feedback_context(context, privacy_domain_id, key_epoch)?;
-        owner.validate_feedback_context(context)?;
-        if publication.authorized_scope != *context.scope() {
-            return Err(EvidenceAssemblyError::UnauthorizedOrUnknown);
-        }
-        let occurrences = feedback_occurrences(owner.clone(), publication)?;
-        let request_digest = privacy_bound_digest(
-            REQUEST_DIGEST_DOMAIN,
-            privacy_key,
-            &owner,
-            &(
-                publication.result.result_id.as_str(),
-                publication.result.policy_digest.as_str(),
-                publication.result.configuration_digest.as_str(),
-            ),
-        )?;
-        let idempotency_key = privacy_bound_digest(
-            IDEMPOTENCY_KEY_DOMAIN,
-            privacy_key,
-            &owner,
-            &raw_idempotency_key,
-        )?;
-        let write = build_write(
-            owner,
-            idempotency_key,
-            occurrences.clone(),
-            EvidenceSpanProducerKind::FeedbackCycle,
-            "pr12-feedback-v1",
-            "feedback-result-order-v1",
-            request_digest,
-            "pr12_feedback",
-            TemporalModeV1::Current,
-            RetrieverWatermarkBinding {
-                source: publication.result.result_id.as_str().to_owned(),
-                projection: canonical_sha256(&publication.runtime)
-                    .map_err(contract_error)?
-                    .as_str()
-                    .to_owned(),
-                index: publication.result.policy_digest.as_str().to_owned(),
-                summary: publication.result.configuration_digest.as_str().to_owned(),
-            },
-            EvidenceAssemblyCoverage::from_feedback(publication, occurrences.len()),
-            created_at,
-        )?;
-        self.publish_or_replay(write).await
-    }
-
     pub async fn drilldown_contribution(
         &self,
         context: &ProductRequestContext,
@@ -1795,227 +1538,6 @@ impl EvidenceAssemblyService {
         })
     }
 
-    pub async fn drilldown_contribution_authorized<R>(
-        &self,
-        context: &ProductRequestContext,
-        source_owner: FactOwnerV1,
-        resolver: &R,
-        contribution_id: &RetrieverContributionId,
-        start_ordinal: u64,
-        page_size: u64,
-    ) -> Result<EvidenceDrilldownPage, EvidenceAssemblyError>
-    where
-        R: EvidenceAnchorReportResolver,
-    {
-        let mut page = self
-            .drilldown_contribution(context, contribution_id, start_ordinal, page_size)
-            .await?;
-        for source in &mut page.exact_sources {
-            let report = resolver
-                .resolve_evidence_anchor_report(
-                    source_owner.clone(),
-                    source.occurrence.exact_source_anchor().clone(),
-                )
-                .await
-                .map_err(|_| EvidenceAssemblyError::UnauthorizedOrUnknown)?;
-            source.anchor = report.record().cloned();
-            source.disposition = if source.anchor.is_some() {
-                ExactSourceDisposition::Available
-            } else {
-                ExactSourceDisposition::Unavailable
-            };
-        }
-        Ok(page)
-    }
-
-    async fn session_occurrence_runs(
-        &self,
-        owner: &EvidenceOwnerBinding,
-        result: &TemporalKernelResult,
-        policy: &SessionEvidencePolicy,
-    ) -> Result<Vec<Vec<SourceOccurrenceRecord>>, EvidenceAssemblyError> {
-        let selected = result
-            .ranked
-            .iter()
-            .map(|candidate| candidate.anchor_id.as_str().to_owned())
-            .collect::<BTreeSet<_>>();
-        if selected.is_empty() {
-            return Err(EvidenceAssemblyError::NoEvidence);
-        }
-        let snapshot = self
-            .session_database
-            .read_snapshot()
-            .await
-            .map_err(storage_error)?;
-        let mut found = BTreeMap::<String, SourceOccurrenceRecord>::new();
-        for participant in result.snapshot.participant_manifest().entries() {
-            let mut rows = snapshot
-                .query(
-                    "SELECT effect.observation_sequence,
-                            occurrence.projection_output_ordinal,
-                            occurrence.retrieval_anchor_id,
-                            observation.observation_json
-                     FROM session_occurrences occurrence
-                     JOIN session_temporal_observation_effects effect
-                       ON effect.observation_id = occurrence.source_observation_id
-                     JOIN observations observation
-                       ON observation.observation_id = occurrence.source_observation_id
-                     WHERE occurrence.session_id = ?1
-                       AND occurrence.generation = ?2
-                     ORDER BY effect.observation_sequence,
-                              occurrence.projection_output_ordinal,
-                              occurrence.occurrence_id
-                     LIMIT ?3",
-                    params![
-                        participant.session_id().as_str(),
-                        i64_from_u64(participant.generation())?,
-                        i64::try_from(MAX_SESSION_SOURCE_ROWS + 1)
-                            .map_err(|_| EvidenceAssemblyError::MemberLimit)?
-                    ],
-                )
-                .await
-                .map_err(storage_error)?;
-            let mut source_order = 0_u64;
-            let mut row_count = 0_usize;
-            while let Some(row) = rows.next().await.map_err(storage_error)? {
-                row_count = row_count.saturating_add(1);
-                if row_count > MAX_SESSION_SOURCE_ROWS {
-                    return Err(EvidenceAssemblyError::MemberLimit);
-                }
-                let observation_sequence = u64_from_i64(
-                    row.get::<i64>(0).map_err(storage_error)?,
-                    "observation sequence",
-                )?;
-                let projection_output_ordinal = u64_from_i64(
-                    row.get::<i64>(1).map_err(storage_error)?,
-                    "projection output ordinal",
-                )?;
-                let anchor_text: String = row.get(2).map_err(storage_error)?;
-                let observation_json: String = row.get(3).map_err(storage_error)?;
-                if selected.contains(&anchor_text) {
-                    let observation: DurableObservationV1 = deserialize(&observation_json)?;
-                    let timeline = SourceTimelineKey::new(
-                        observation.source().provider().as_str(),
-                        observation.source().source_key().as_str(),
-                        format!("session-generation:{}", participant.generation()),
-                        "observation_sequence_projection_output_ordinal",
-                    )?;
-                    let anchor = RetrievalAnchorId::new(anchor_text.clone())
-                        .map_err(|_| EvidenceAssemblyError::Invalid("session source anchor"))?;
-                    let occurrence = SourceOccurrenceRecord::new(
-                        owner.clone(),
-                        timeline,
-                        anchor,
-                        Some(observation.observation_id().as_str().to_owned()),
-                        SourceOccurrenceCoordinate::new(
-                            observation_sequence,
-                            projection_output_ordinal,
-                            source_order,
-                        ),
-                        SourceOccurrenceKind::SessionOccurrence,
-                        &policy.algorithm_revision,
-                    )?;
-                    if found.insert(anchor_text, occurrence).is_some() {
-                        return Err(EvidenceAssemblyError::BoundaryMismatch);
-                    }
-                }
-                source_order = source_order
-                    .checked_add(1)
-                    .ok_or(EvidenceAssemblyError::MemberLimit)?;
-            }
-        }
-        if found.len() != selected.len() {
-            return Err(EvidenceAssemblyError::SourceAnchorUnavailable(
-                "session retrieval candidate".to_owned(),
-            ));
-        }
-        let mut ordered = found.into_values().collect::<Vec<_>>();
-        ordered.sort_by(|left, right| {
-            left.timeline
-                .provider_id
-                .cmp(&right.timeline.provider_id)
-                .then_with(|| left.timeline.source_id.cmp(&right.timeline.source_id))
-                .then_with(|| {
-                    left.timeline
-                        .source_generation
-                        .cmp(&right.timeline.source_generation)
-                })
-                .then_with(|| left.source_order().cmp(&right.source_order()))
-        });
-        let mut runs: Vec<Vec<SourceOccurrenceRecord>> = Vec::new();
-        for occurrence in ordered {
-            let extends = runs.last().and_then(|run| run.last()).is_some_and(|prior| {
-                prior.timeline == occurrence.timeline
-                    && prior.source_order().checked_add(1) == Some(occurrence.source_order())
-            });
-            if extends {
-                if let Some(run) = runs.last_mut() {
-                    run.push(occurrence);
-                }
-            } else {
-                runs.push(vec![occurrence]);
-            }
-        }
-        let bounded = runs
-            .into_iter()
-            .map(|mut run| {
-                if run.len() > policy.max_members {
-                    run.truncate(policy.max_members);
-                }
-                run
-            })
-            .collect::<Vec<_>>();
-        if bounded.len() > MAX_DERIVED_PUBLICATIONS {
-            return Err(EvidenceAssemblyError::MemberLimit);
-        }
-        match policy.kind {
-            SessionDerivedEvidenceKind::Span => Ok(bounded),
-            SessionDerivedEvidenceKind::Burst => {
-                Ok(bounded.into_iter().filter(|run| !run.is_empty()).collect())
-            }
-        }
-    }
-
-    async fn publish_or_replay(
-        &self,
-        write: EvidenceAssemblyWrite,
-    ) -> Result<EvidenceAssemblyPublicationOutcome, EvidenceAssemblyError> {
-        for occurrence in &write.ordered_occurrences {
-            if self
-                .load_current_source_anchor(occurrence.exact_source_anchor())
-                .await?
-                .is_none()
-            {
-                return Err(EvidenceAssemblyError::SourceAnchorUnavailable(
-                    occurrence.exact_source_anchor().as_str().to_owned(),
-                ));
-            }
-        }
-        let receipt = EvidenceAssemblyPublicationReceipt::from_write(&write)?;
-        let transaction = self
-            .project_database
-            .begin_write_transaction("publish evidence assembly")
-            .await
-            .map_err(storage_error)?;
-        match replay_receipt(&transaction, &write).await {
-            Ok(Some(existing)) => {
-                transaction.rollback().await.map_err(storage_error)?;
-                return Ok(EvidenceAssemblyPublicationOutcome::Replayed(existing));
-            }
-            Ok(None) => {}
-            Err(error) => {
-                transaction.rollback().await.map_err(storage_error)?;
-                return Err(error);
-            }
-        }
-        if let Err(error) = persist_write(&transaction, &write, &receipt).await {
-            transaction.rollback().await.map_err(storage_error)?;
-            return Err(error);
-        }
-        transaction.commit().await.map_err(storage_error)?;
-        Ok(EvidenceAssemblyPublicationOutcome::Published(receipt))
-    }
-
     async fn load_current_source_anchor(
         &self,
         anchor_id: &RetrievalAnchorId,
@@ -2033,53 +1555,7 @@ impl EvidenceAssemblyService {
     }
 }
 
-fn feedback_occurrences(
-    owner: EvidenceOwnerBinding,
-    publication: &FeedbackCompletedPublicationV1,
-) -> Result<Vec<SourceOccurrenceRecord>, EvidenceAssemblyError> {
-    let mut sources = Vec::<(RetrievalAnchorId, SourceOccurrenceKind)>::new();
-    let mut seen = BTreeSet::new();
-    for finding in &publication.result.findings {
-        if let Some(anchor) = &finding.retrieval_anchor_id
-            && seen.insert(anchor.clone())
-        {
-            sources.push((anchor.clone(), SourceOccurrenceKind::FeedbackFinding));
-        }
-    }
-    if let Some(impact) = &publication.result.impact {
-        for anchor in &impact.evidence_anchors {
-            if seen.insert(anchor.clone()) {
-                sources.push((anchor.clone(), SourceOccurrenceKind::FeedbackImpact));
-            }
-        }
-    }
-    if sources.is_empty() {
-        return Err(EvidenceAssemblyError::NoEvidence);
-    }
-    let timeline = SourceTimelineKey::new(
-        "pr12_feedback",
-        publication.result.result_id.as_str(),
-        format!("feedback-result:{}", publication.result.result_id.as_str()),
-        "feedback_result_member_order",
-    )?;
-    sources
-        .into_iter()
-        .enumerate()
-        .map(|(ordinal, (anchor, kind))| {
-            let ordinal = u64::try_from(ordinal).map_err(|_| EvidenceAssemblyError::MemberLimit)?;
-            SourceOccurrenceRecord::new(
-                owner.clone(),
-                timeline.clone(),
-                anchor,
-                None,
-                SourceOccurrenceCoordinate::new(ordinal, 0, ordinal),
-                kind,
-                "pr12-feedback-v1",
-            )
-        })
-        .collect()
-}
-
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn build_write(
     owner: EvidenceOwnerBinding,
@@ -2565,25 +2041,6 @@ fn derived_anchor_id(
     )?;
     RetrievalAnchorId::new(id)
         .map_err(|_| EvidenceAssemblyError::Invalid("derived retrieval anchor id"))
-}
-
-fn privacy_bound_digest<T: Serialize>(
-    domain: &[u8],
-    privacy_key: &[u8],
-    owner: &EvidenceOwnerBinding,
-    material: &T,
-) -> Result<String, EvidenceAssemblyError> {
-    if privacy_key.is_empty() {
-        return Err(EvidenceAssemblyError::Invalid("privacy key"));
-    }
-    let encoded = serde_json::to_vec(&(owner, material))
-        .map_err(|error| EvidenceAssemblyError::Serialization(error.to_string()))?;
-    let mut digest = Sha256::new();
-    digest.update(domain);
-    digest.update((privacy_key.len() as u64).to_be_bytes());
-    digest.update(privacy_key);
-    digest.update(encoded);
-    Ok(format!("sha256:{}", hex::encode(digest.finalize())))
 }
 
 fn sha256_text(parts: &[&str]) -> String {
