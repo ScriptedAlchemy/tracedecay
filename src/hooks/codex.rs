@@ -328,7 +328,12 @@ pub async fn hook_codex_stop() -> i32 {
     let hook_telemetry = record_hook_invoked(root.as_deref(), HintAgent::Codex, "Stop", &event);
     if let Some(root) = root.as_deref()
         && let Some(guidance) =
-            super::v2::dispatch(tracedecay_hooks::HookHostV1::Codex, &event, root)
+            super::v2::dispatch(
+                tracedecay_hooks::HookHostV1::Codex,
+                &event,
+                root,
+                Some(&hook_telemetry),
+            )
                 .await
                 .into_recorded_guidance(&hook_telemetry)
     {

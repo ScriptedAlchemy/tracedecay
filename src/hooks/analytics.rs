@@ -156,11 +156,17 @@ impl HookTimingSpan {
         payload_bytes: Option<u64>,
     ) -> Self {
         // Hooks must not synchronously open a store, contact the daemon, or
-        // parse legacy configuration. A daemon-published snapshot is the only
-        // source; absent authority disables optional telemetry fail-closed.
+        // parse legacy configuration, so a daemon-published snapshot is the
+        // only authority consulted here. A hook subprocess starts with an
+        // empty snapshot cache, so treating "no authority" as "off" silenced
+        // every `hook_completed` row in production while `hook_invoked` — the
+        // other half of the same span, written by the same unconditional
+        // recorder — kept flowing. That renders every real hook as invoked but
+        // never finished. Only an authority that explicitly says timings are
+        // off suppresses the completion row.
         let enabled = root
             .and_then(|root| crate::config::cached_telemetry_config(root).ok())
-            .is_some_and(|telemetry| telemetry.timings);
+            .is_none_or(|telemetry| telemetry.timings);
         Self {
             root: root.map(Path::to_path_buf),
             agent,
@@ -841,8 +847,13 @@ mod tests {
         );
     }
 
+    /// A hook subprocess never has a published snapshot — nothing in the hook
+    /// path opens a store or contacts the daemon before the span is built — so
+    /// treating absence as "timings off" suppressed `hook_completed` for every
+    /// real hook while `hook_invoked` kept being written. Absence must behave
+    /// like the invocation half; only an authority that says off turns it off.
     #[test]
-    fn missing_runtime_configuration_disables_timing_span() {
+    fn timing_span_follows_the_published_snapshot_and_defaults_to_recording() {
         let project = tempfile::tempdir().unwrap();
         let project_root = project.path().canonicalize().unwrap();
         let span = HookTimingSpan::new(
@@ -852,11 +863,75 @@ mod tests {
             None,
             None,
         );
-
         assert!(
-            !span.enabled,
-            "hook timing must fail closed until the daemon publishes a snapshot"
+            span.enabled,
+            "no published snapshot must not silence the completion half of the span"
         );
+
+        publish_telemetry_timings(&project_root, "project.hook-timings-disabled", false);
+        let disabled = HookTimingSpan::new(
+            Some(&project_root),
+            HintAgent::Claude,
+            "disabledConfiguration",
+            None,
+            None,
+        );
+        assert!(
+            !disabled.enabled,
+            "an authority that disables timings must disable the span"
+        );
+
+        publish_telemetry_timings(&project_root, "project.hook-timings-enabled", true);
+        let enabled = HookTimingSpan::new(
+            Some(&project_root),
+            HintAgent::Claude,
+            "enabledConfiguration",
+            None,
+            None,
+        );
+        assert!(
+            enabled.enabled,
+            "an authority that enables timings must enable the span"
+        );
+    }
+
+    fn publish_telemetry_timings(project_root: &Path, project_id: &str, timings: bool) {
+        use std::collections::BTreeMap;
+        use tracedecay_domain::configuration::{
+            ConfigurationLayerIdV1, ConfigurationRevisionId, ConfigurationValueV1, SettingKey,
+            TELEMETRY_TIMINGS_SETTING_KEY,
+        };
+
+        let project_id = tracedecay_domain::ProjectId::new(project_id.to_owned()).unwrap();
+        let revision_id =
+            ConfigurationRevisionId::new(format!("revision.{project_id}.timings")).unwrap();
+        let snapshot = crate::config::resolver::resolve_configuration(
+            &crate::config::registry::ConfigurationRegistry::core().unwrap(),
+            &[crate::config::resolver::ConfigurationLayerV1 {
+                layer: ConfigurationLayerIdV1::Project {
+                    project_id: project_id.clone(),
+                },
+                revision_id: revision_id.clone(),
+                entries: BTreeMap::from([(
+                    SettingKey::new(TELEMETRY_TIMINGS_SETTING_KEY).unwrap(),
+                    ConfigurationValueV1::Boolean(timings),
+                )]),
+            }],
+        )
+        .unwrap()
+        .snapshot;
+        crate::config::install_pinned_runtime_configuration(
+            crate::config::PinnedRuntimeConfiguration::new(
+                crate::config::RuntimeConfigurationTarget {
+                    project_id,
+                    project_root: project_root.to_path_buf(),
+                },
+                revision_id,
+                snapshot,
+            )
+            .unwrap(),
+        )
+        .unwrap();
     }
 
     #[test]

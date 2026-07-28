@@ -88,6 +88,7 @@ pub async fn hook_kimi_v2(event_json: &str, project_root: &Path) -> Option<Strin
         tracedecay_hooks::HookHostV1::KimiCode,
         event_json,
         project_root,
+        Some(&telemetry),
     )
     .await
     .into_recorded_guidance(&telemetry)
@@ -97,12 +98,13 @@ pub async fn hook_kimi_v2(event_json: &str, project_root: &Path) -> Option<Strin
 pub async fn hook_opencode_v2_event(event_json: &str, project_root: &Path) -> Option<String> {
     let telemetry = record_other_hook_invoked(Some(project_root), "openCodeV2Event", event_json);
     let dispatch = if tracedecay_hooks::decode_opencode_lsp_event(event_json.as_bytes()).is_ok() {
-        v2::dispatch_opencode_lsp_updated(event_json, project_root).await
+        v2::dispatch_opencode_lsp_updated(event_json, project_root, Some(&telemetry)).await
     } else {
         v2::dispatch(
             tracedecay_hooks::HookHostV1::OpenCode,
             event_json,
             project_root,
+            Some(&telemetry),
         )
         .await
     };
@@ -112,7 +114,7 @@ pub async fn hook_opencode_v2_event(event_json: &str, project_root: &Path) -> Op
 pub async fn hook_opencode_v2_tool_after(event_json: &str, project_root: &Path) -> Option<String> {
     let telemetry =
         record_other_hook_invoked(Some(project_root), "openCodeV2ToolAfter", event_json);
-    v2::dispatch_opencode_tool_after(event_json, project_root)
+    v2::dispatch_opencode_tool_after(event_json, project_root, Some(&telemetry))
         .await
         .into_recorded_guidance(&telemetry)
         .flatten()
@@ -367,6 +369,7 @@ pub async fn hook_hermes_terminal_receipt() -> i32 {
             tracedecay_hooks::HookHostV1::Hermes,
             &event_json,
             project_root,
+            Some(&hook_telemetry),
         )
         .await
         .into_recorded_guidance(&hook_telemetry)

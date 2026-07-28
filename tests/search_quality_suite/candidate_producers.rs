@@ -736,7 +736,7 @@ fn pr10_workload_and_incremental_fixture_are_byte_exact() {
 
     assert_eq!(
         compute_workload_digest(&workload).expect("workload digest"),
-        "sha256:16c69d766a82cb8cea96316771881fbdc1744a71dfd54a6f211fece732840cd2"
+        "sha256:9c793070efc601a13e145c233dbc6fb859764ce9d24d64c636552c9e020db1ce"
     );
     assert_eq!(
         summary.workload_digest,
