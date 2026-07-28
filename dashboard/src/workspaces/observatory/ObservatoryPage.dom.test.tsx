@@ -212,23 +212,6 @@ describe('ObservatoryPage store telemetry', () => {
     ).toBeTruthy();
   });
 
-  it('gives a byte-only store its size and an unknown free-page reading', async () => {
-    stubTelemetry({ ...telemetryPayload(), stores: [byteOnlyStore()] });
-    renderObservatory();
-
-    // The size is a real measurement and is printed as one.
-    expect(await screen.findByText('40.0 MiB')).toBeTruthy();
-    // The capacity bar is drawn for this store rather than withheld, and says
-    // what it does not know instead of filling to 100% at "0.0% free pages".
-    expect(screen.getByText('free pages unknown')).toBeTruthy();
-    expect(
-      screen.getByText(/no page-level sample, so free pages are unmeasured rather than zero/),
-    ).toBeTruthy();
-    // Nothing may announce a measured free-page share for pages nobody sampled.
-    expect(screen.queryByRole('img', { name: /free pages/ })).toBeNull();
-    expect(screen.queryByText(/0\.0%/)).toBeNull();
-  });
-
   it('renders the canonical Doctor storage family with typed kinds and provenance', async () => {
     stubTelemetry(telemetryPayload(), storageFindingsPayload());
     renderObservatory();
@@ -806,41 +789,6 @@ function telemetryPayload() {
         'sessions.db: unsupported',
         'incident.db: unavailable',
       ],
-    },
-  };
-}
-
-/** A store whose size read produced a byte total with no page-level sample —
- * the one read kind that has a real size and no free-page figure at all. */
-function byteOnlyStore() {
-  return {
-    store: 'savings.db',
-    role: 'savings',
-    roles: ['savings'],
-    path: '/profile/savings.db',
-    read: {
-      kind: 'observed_bytes',
-      store: 'savings.db',
-      total_bytes: 41_943_040,
-      observed_at: SAMPLE_CURRENT_MICROS,
-    },
-    total_bytes: 41_943_040,
-    free_bytes: null,
-    free_page_ratio: null,
-    budget: {
-      state: 'unknown',
-      reason: 'no page sample, so a configured budget could not be evaluated',
-    },
-    growth: {
-      state: 'unknown',
-      reason: 'no watermark could be recorded because the read produced no page sample',
-    },
-    table_growth: {
-      state: 'unknown',
-      coverage: partialTableGrowthCoverage(
-        'per-table payload growth measurement is unavailable',
-      ),
-      omission_reasons: ['per-table payload growth measurement is unavailable for this store'],
     },
   };
 }

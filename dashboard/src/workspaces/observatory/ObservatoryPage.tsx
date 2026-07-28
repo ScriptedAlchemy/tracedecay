@@ -295,8 +295,10 @@ function StoreCard({
 }) {
   // `observed` is a full page-level sample. `observed_bytes` is a real total
   // size with no page sample behind it, so free pages are UNKNOWN rather than
-  // zero. Both have a size worth printing; only the sampled read knows how much
-  // of that size is free, which is why the card still says which one it got.
+  // zero — and `CapacityBar` reads a null `freeBytes` as zero free space, which
+  // would draw a full bar and announce "0.0% free pages" for a store nobody
+  // measured. So a byte-only read gets the figures it actually has and says
+  // what it is missing.
   const sampled = entry.read.kind === 'observed';
   const sized = sampled || entry.read.kind === 'observed_bytes';
   return (
@@ -310,7 +312,9 @@ function StoreCard({
         </div>
         {sized ? (
           <>
-            <CapacityBar usedBytes={entry.total_bytes} freeBytes={entry.free_bytes} />
+            {sampled ? (
+              <CapacityBar usedBytes={entry.total_bytes} freeBytes={entry.free_bytes} />
+            ) : null}
             <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs tabular">
               <dt className="text-text-muted">size</dt>
               <dd data-cell="numeric">{formatBytes(entry.total_bytes)}</dd>
