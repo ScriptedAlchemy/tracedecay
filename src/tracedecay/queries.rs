@@ -720,8 +720,8 @@ fn kind_tier(kind: &NodeKind) -> u8 {
         | NodeKind::CompanionObject
         | NodeKind::Annotation
         | NodeKind::Event => 0,
-        // Proto definitions (feature-gated)
-        #[cfg(feature = "lang-protobuf")]
+        // Proto definitions are unconditional domain vocabulary even when
+        // the parser implementation is not enabled in this build.
         NodeKind::ProtoMessage | NodeKind::ProtoService | NodeKind::ProtoRpc => 0,
         // Tier 1: impl blocks — between definitions and references.
         NodeKind::Impl => 1,
@@ -792,8 +792,8 @@ fn kind_rank_bonus(kind: &NodeKind) -> f64 {
         | NodeKind::CompanionObject
         | NodeKind::Annotation
         | NodeKind::Event => 2.5,
-        // Proto definitions
-        #[cfg(feature = "lang-protobuf")]
+        // Proto definitions are unconditional domain vocabulary even when
+        // the parser implementation is not enabled in this build.
         NodeKind::ProtoMessage | NodeKind::ProtoService | NodeKind::ProtoRpc => 2.5,
         // Impl blocks (between defs and refs)
         NodeKind::Impl => 2.0,
