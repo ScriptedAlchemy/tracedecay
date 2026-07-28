@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { KnowledgePage } from './KnowledgePage.tsx';
+import { FeedbackSplit, KnowledgePage } from './KnowledgePage.tsx';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -171,6 +171,17 @@ describe('KnowledgePage fact detail', () => {
 
     expect(await screen.findByText('full authoritative fact detail')).toBeTruthy();
     expect(calls.some((url) => url.includes('/api/plugins/holographic/fact/7'))).toBe(true);
+  });
+
+  it('distinguishes unreported feedback counts from a reported zero', () => {
+    const unknown = render(<FeedbackSplit helpful={null} unhelpful={null} />);
+    expect(screen.getByText('feedback counts not reported')).toBeTruthy();
+    expect(screen.queryByText('no feedback recorded')).toBeNull();
+
+    unknown.unmount();
+    render(<FeedbackSplit helpful={0} unhelpful={0} />);
+    expect(screen.getByText('no feedback recorded')).toBeTruthy();
+    expect(screen.queryByText('feedback counts not reported')).toBeNull();
   });
 
   it('does not render a failed fact sub-read as an empty memory store', async () => {

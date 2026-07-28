@@ -1,4 +1,5 @@
 import { useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react';
+import type { EChartsOption } from 'echarts';
 import { Search } from 'lucide-react';
 import {
   DataRow,
@@ -91,6 +92,8 @@ export function KnowledgePage() {
               (max, row) => Math.max(max, row.count),
               0,
             );
+            const factCount = splitCount(stats?.facts);
+            const entityCount = splitCount(stats?.entities);
             const growth = stats?.growth ?? [];
             return (
               <div className="flex flex-col gap-3">
@@ -125,8 +128,8 @@ export function KnowledgePage() {
                     <Readout
                       label="facts"
                       size="xl"
-                      value={splitCount(stats?.facts).value}
-                      unit={splitCount(stats?.facts).unit}
+                      value={factCount.value}
+                      unit={factCount.unit}
                       note={
                         stats?.facts != null
                           ? `${stats.facts.toLocaleString()} recorded`
@@ -139,8 +142,8 @@ export function KnowledgePage() {
                       <Readout
                         label="entities"
                         size="sm"
-                        value={splitCount(stats?.entities).value}
-                        unit={splitCount(stats?.entities).unit}
+                        value={entityCount.value}
+                        unit={entityCount.unit}
                       />
                     </div>
                     {stats?.banks != null ? (
@@ -166,60 +169,7 @@ export function KnowledgePage() {
                   </figure>
                 ) : null}
                 <HrrCoveragePlate rows={stats?.hrr_coverage ?? []} />
-                {growth.length > 0 ? (
-                  <figure className="flex flex-col gap-1.5">
-                    <figcaption className="td-legend">growth</figcaption>
-                    {/* Same axis-elision as trust distribution: twelve weekly
-                     * dates at 9px in a 224px rail is unreadable debris, so
-                     * the shape carries the trend and the two endpoints are
-                     * printed directly underneath instead of a rotated,
-                     * truncated axis. */}
-                    <Chart
-                      ariaLabel={`Cumulative facts recorded across ${growth.length} periods, from ${growth[0]!.date} (${growth[0]!.cumulative_facts.toLocaleString()} facts) to ${growth[growth.length - 1]!.date} (${growth[growth.length - 1]!.cumulative_facts.toLocaleString()} facts)`}
-                      height={70}
-                      option={{
-                        xAxis: {
-                          type: 'category',
-                          data: growth.map((point) => point.date),
-                          axisLabel: { show: false },
-                          axisTick: { show: false },
-                        },
-                        yAxis: { type: 'value', axisLabel: { show: false } },
-                        grid: { left: 2, right: 2, top: 6, bottom: 2, containLabel: true },
-                        series: [
-                          {
-                            type: 'line',
-                            showSymbol: false,
-                            smooth: true,
-                            areaStyle: {},
-                            data: growth.map((point) => point.cumulative_facts),
-                          },
-                        ],
-                      }}
-                    />
-                    {/* Date-over-value, the same shape as every other
-                     * Readout on this page, rather than one cramped line —
-                     * "MAY 8 · 3,200" beside its mirror at the opposite edge
-                     * had nowhere to go in a 224px rail and truncated into
-                     * the gap between them. */}
-                    <div
-                      aria-hidden
-                      className="flex items-start justify-between gap-2 border-t border-edge-subtle pt-1.5"
-                    >
-                      <Readout
-                        label={formatShortDate(growth[0]!.date)}
-                        value={formatCount(growth[0]!.cumulative_facts)}
-                        size="sm"
-                      />
-                      <Readout
-                        label={formatShortDate(growth[growth.length - 1]!.date)}
-                        value={formatCount(growth[growth.length - 1]!.cumulative_facts)}
-                        size="sm"
-                        align="right"
-                      />
-                    </div>
-                  </figure>
-                ) : null}
+                {growth.length > 0 ? <GrowthChart growth={growth} /> : null}
               </div>
             );
           }}
@@ -276,32 +226,14 @@ export function KnowledgePage() {
               facts,
             );
             return (
-              <VirtualList
-                items={facts}
-                getKey={(fact) => String(fact.fact_id)}
-                estimateHeight={FACT_ROW_HEIGHT}
-                header={
-                  loaded ? (
-                    <FactListHeader
-                      loaded={loaded}
-                      distribution={trust}
-                      query={applied}
-                    />
-                  ) : null
-                }
-                renderItem={(fact) => (
-                  <FactListRow
-                    fact={fact}
-                    recallCeiling={recallCeiling}
-                    // A rail scaled 0-1 across a slice whose trust never leaves
-                    // the top tenth is the same length on every row: not a
-                    // ranking, just ink. The header states the slice's spread
-                    // instead, and the printed figure keeps the precision.
-                    showTrustRail={loaded ? !loaded.flat : true}
-                    selected={selected?.fact_id === fact.fact_id}
-                    onSelect={() => setSelected(fact)}
-                  />
-                )}
+              <FactList
+                facts={facts}
+                recallCeiling={recallCeiling}
+                loaded={loaded}
+                distribution={trust}
+                query={applied}
+                selected={selected}
+                onSelect={setSelected}
               />
             );
           }}
@@ -325,8 +257,8 @@ export function KnowledgePage() {
                 </p>
               ) : null}
               <FeedbackSplit
-                helpful={selectedDetail.helpful_count ?? 0}
-                unhelpful={selectedDetail.unhelpful_count ?? 0}
+                helpful={selectedDetail.helpful_count ?? null}
+                unhelpful={selectedDetail.unhelpful_count ?? null}
               />
               <KeyValueTree
                 value={Object.fromEntries(
@@ -338,6 +270,72 @@ export function KnowledgePage() {
         ) : undefined
       }
     />
+  );
+}
+
+function GrowthChart({
+  growth,
+}: {
+  growth: readonly { date: string; cumulative_facts: number }[];
+}) {
+  const option = useMemo<EChartsOption>(
+    () => ({
+      xAxis: {
+        type: 'category',
+        data: growth.map((point) => point.date),
+        axisLabel: { show: false },
+        axisTick: { show: false },
+      },
+      yAxis: { type: 'value', axisLabel: { show: false } },
+      grid: { left: 2, right: 2, top: 6, bottom: 2, containLabel: true },
+      series: [
+        {
+          type: 'line',
+          showSymbol: false,
+          smooth: true,
+          areaStyle: {},
+          data: growth.map((point) => point.cumulative_facts),
+        },
+      ],
+    }),
+    [growth],
+  );
+  const first = growth[0];
+  const last = growth.at(-1);
+  if (!first || !last) return null;
+  return (
+    <figure className="flex flex-col gap-1.5">
+      <figcaption className="td-legend">growth</figcaption>
+      {/* Same axis-elision as trust distribution: twelve weekly dates at 9px in
+       * a 224px rail is unreadable debris, so the shape carries the trend and
+       * the two endpoints are printed directly underneath instead of a rotated,
+       * truncated axis. */}
+      <Chart
+        ariaLabel={`Cumulative facts recorded across ${growth.length} periods, from ${first.date} (${first.cumulative_facts.toLocaleString()} facts) to ${last.date} (${last.cumulative_facts.toLocaleString()} facts)`}
+        height={70}
+        option={option}
+      />
+      {/* Date-over-value, the same shape as every other Readout on this page,
+       * rather than one cramped line — "MAY 8 · 3,200" beside its mirror at
+       * the opposite edge had nowhere to go in a 224px rail and truncated into
+       * the gap between them. */}
+      <div
+        aria-hidden
+        className="flex items-start justify-between gap-2 border-t border-edge-subtle pt-1.5"
+      >
+        <Readout
+          label={formatShortDate(first.date)}
+          value={formatCount(first.cumulative_facts)}
+          size="sm"
+        />
+        <Readout
+          label={formatShortDate(last.date)}
+          value={formatCount(last.cumulative_facts)}
+          size="sm"
+          align="right"
+        />
+      </div>
+    </figure>
   );
 }
 
@@ -527,6 +525,76 @@ function FactListHeader({
  * ninety-character prefix of a nineteen-hundred-character fact. */
 export const FACT_ROW_HEIGHT = 56;
 
+const FACT_SUMMARY_CHARACTER_SAMPLE = 'abcdefghijklmnopqrstuvwxyz';
+
+function FactList({
+  facts,
+  recallCeiling,
+  loaded,
+  distribution,
+  query,
+  selected,
+  onSelect,
+}: {
+  facts: MemoryFactRow[];
+  recallCeiling: number;
+  loaded: LoadedTrust | null;
+  distribution: TrustDistribution;
+  query: string;
+  selected: MemoryFactRow | null;
+  onSelect: (fact: MemoryFactRow) => void;
+}) {
+  const listRootRef = useRef<HTMLDivElement>(null);
+  const summaryProbeRef = useRef<HTMLSpanElement>(null);
+  const characterProbeRef = useRef<HTMLSpanElement>(null);
+  const characterLimit = useFactSummaryCharacterLimit(
+    listRootRef,
+    summaryProbeRef,
+    characterProbeRef,
+  );
+  return (
+    <div ref={listRootRef} className="relative h-full">
+      <div
+        aria-hidden
+        className="pointer-events-none invisible absolute inset-x-0 flex gap-3 px-3 pt-2"
+      >
+        <span className="w-14 shrink-0" />
+        <span ref={summaryProbeRef} className="min-w-0 flex-1 text-xs leading-snug">
+          <span ref={characterProbeRef} className="whitespace-nowrap">
+            {FACT_SUMMARY_CHARACTER_SAMPLE}
+          </span>
+        </span>
+        <span className="hidden w-16 shrink-0 md:block" />
+        <span className="hidden w-20 shrink-0 md:block" />
+      </div>
+      <VirtualList
+        items={facts}
+        getKey={(fact) => String(fact.fact_id)}
+        estimateHeight={FACT_ROW_HEIGHT}
+        header={
+          loaded ? (
+            <FactListHeader loaded={loaded} distribution={distribution} query={query} />
+          ) : null
+        }
+        renderItem={(fact) => (
+          <FactListRow
+            fact={fact}
+            recallCeiling={recallCeiling}
+            // A rail scaled 0-1 across a slice whose trust never leaves the top
+            // tenth is the same length on every row: not a ranking, just ink.
+            // The header states the slice's spread instead, and the printed
+            // figure keeps the precision.
+            showTrustRail={loaded ? !loaded.flat : true}
+            characterLimit={characterLimit}
+            selected={selected?.fact_id === fact.fact_id}
+            onSelect={() => onSelect(fact)}
+          />
+        )}
+      />
+    </div>
+  );
+}
+
 /** One fact, read as two ranked quantities and as much of the fact as fits.
  *
  * The row previously spent forty pixels on a hairline trust bar with no
@@ -550,23 +618,20 @@ function FactListRow({
   fact,
   recallCeiling,
   showTrustRail,
+  characterLimit,
   selected,
   onSelect,
 }: {
   fact: MemoryFactRow;
   recallCeiling: number;
   showTrustRail: boolean;
+  characterLimit: number | null;
   selected: boolean;
   onSelect: () => void;
 }) {
   const content = fact.content ?? String(fact.fact_id);
   const summary = useMemo(() => content.split('\n')[0] ?? '', [content]);
-  // Measured, not guessed. Whether two clamped lines hold a fact depends on
-  // the column's width, and this column is a third of a 1440px workspace or
-  // the whole of a 320px one — no character threshold is right at both. The
-  // element itself is asked.
-  const summaryRef = useRef<HTMLSpanElement>(null);
-  const clipped = useIsClamped(summaryRef, content);
+  const clipped = characterLimit !== null && content.length > characterLimit;
   const trust = Math.max(0, Math.min(fact.trust_score, 1));
   const recalls = fact.retrieval_count ?? 0;
   return (
@@ -601,11 +666,7 @@ function FactListRow({
         ) : null}
       </span>
       <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-        <span
-          ref={summaryRef}
-          className="line-clamp-2 leading-snug text-text-primary"
-          title={content}
-        >
+        <span className="line-clamp-2 leading-snug text-text-primary" title={content}>
           {summary}
         </span>
         {clipped ? (
@@ -639,36 +700,33 @@ function FactListRow({
   );
 }
 
-/**
- * Whether a line-clamped element is actually hiding anything right now.
- *
- * `scrollHeight > clientHeight` is the only reliable answer: it accounts for
- * the column's real width, the reader's font size and the clamp together. It
- * is re-checked when the viewport resizes, because a row that fits at 1440px
- * clips at 320px and an affordance that lied in either direction would be
- * worse than none — one hides a fact, the other promises a rest that is not
- * there.
- */
-function useIsClamped(
-  ref: RefObject<HTMLElement | null>,
-  content: string,
-): boolean {
-  const [clipped, setClipped] = useState(false);
+/** One width calibration for the scroll region replaces per-row layout reads. */
+function useFactSummaryCharacterLimit(
+  listRootRef: RefObject<HTMLDivElement | null>,
+  summaryProbeRef: RefObject<HTMLSpanElement | null>,
+  characterProbeRef: RefObject<HTMLSpanElement | null>,
+): number | null {
+  const [characterLimit, setCharacterLimit] = useState<number | null>(null);
   useLayoutEffect(() => {
-    const element = ref.current;
-    if (!element) return;
+    const scrollContainer = listRootRef.current?.parentElement;
+    const summaryProbe = summaryProbeRef.current;
+    const characterProbe = characterProbeRef.current;
+    if (!scrollContainer || !summaryProbe || !characterProbe) return;
     const measure = () => {
-      // +1: sub-pixel line heights make an unclipped element report a
-      // scrollHeight a fraction above its clientHeight.
-      setClipped(element.scrollHeight > element.clientHeight + 1);
+      const characterWidth =
+        characterProbe.getBoundingClientRect().width / FACT_SUMMARY_CHARACTER_SAMPLE.length;
+      const charactersPerLine =
+        characterWidth > 0 ? Math.floor(summaryProbe.clientWidth / characterWidth) : 0;
+      const next = charactersPerLine > 0 ? charactersPerLine * 2 : null;
+      setCharacterLimit((previous) => (previous === next ? previous : next));
     };
     measure();
     if (typeof ResizeObserver !== 'function') return;
     const observer = new ResizeObserver(measure);
-    observer.observe(element);
+    observer.observe(scrollContainer);
     return () => observer.disconnect();
-  }, [ref, content]);
-  return clipped;
+  }, [characterProbeRef, listRootRef, summaryProbeRef]);
+  return characterLimit;
 }
 
 /** "2026-05-08" -> "May 8". The growth caption prints a date beside a
@@ -712,54 +770,6 @@ function CategoryBar({ row, ceiling }: { row: MemoryCategoryCount; ceiling: numb
   );
 }
 
-/** Per-category HRR coverage: fraction bar plus a truthful status label when
- * the bank is missing, stale, or under-vectorized.
- *
- * The status cell used to be 36px wide, which is narrower than the words it
- * has to hold: "no bank" and "stale" both wrapped onto a second line and
- * collided with the bar above. Category and status now share one line above a
- * full-width rail, so the longest status string in the taxonomy still sits on
- * one line inside a 224px filter rail. */
-function HrrCoverageBar({ row }: { row: MemoryHrrCoverage }) {
-  const clamped = Math.max(0, Math.min(row.coverage, 1));
-  const degraded = row.status !== 'ready';
-  // missing_bank has no vector bank to measure against, so a percentage would
-  // be a fabricated denominator: the status is reported instead of a number.
-  const readout =
-    degraded && row.status !== 'missing_vectors'
-      ? row.status === 'missing_bank'
-        ? 'no bank'
-        : 'stale'
-      : `${(clamped * 100).toFixed(0)}%`;
-  return (
-    <div className="flex flex-col gap-1">
-      <div className="flex items-baseline gap-2">
-        <span className="min-w-0 flex-1 truncate text-2xs text-text-secondary">
-          {row.category}
-        </span>
-        <span
-          className={cn(
-            'shrink-0 text-2xs',
-            degraded ? 'td-legend' : 'tabular text-text-primary',
-          )}
-        >
-          {readout}
-        </span>
-      </div>
-      <span
-        className="td-meter block h-1 w-full"
-        role="img"
-        aria-label={`${row.category} HRR coverage ${(clamped * 100).toFixed(0)}% (${row.hrr_vectors}/${row.facts} facts), status ${row.status.replace('_', ' ')}`}
-      >
-        <span
-          className={cn('td-meter-fill', degraded && 'bg-accent/40')}
-          style={{ width: `${clamped * 100}%` }}
-        />
-      </span>
-    </div>
-  );
-}
-
 function TrustGauge({ score }: { score: number }) {
   const clamped = Math.max(0, Math.min(score, 1));
   return (
@@ -777,7 +787,16 @@ function TrustGauge({ score }: { score: number }) {
 }
 
 /** Helpful vs unhelpful feedback as one proportional split bar. */
-function FeedbackSplit({ helpful, unhelpful }: { helpful: number; unhelpful: number }) {
+export function FeedbackSplit({
+  helpful,
+  unhelpful,
+}: {
+  helpful: number | null;
+  unhelpful: number | null;
+}) {
+  if (helpful === null || unhelpful === null) {
+    return <p className="text-2xs text-text-muted">feedback counts not reported</p>;
+  }
   const total = helpful + unhelpful;
   if (total === 0) {
     return <p className="text-2xs text-text-muted">no feedback recorded</p>;

@@ -23,6 +23,7 @@
  *      are drawn.
  */
 import {
+  assertNever,
   type MemoryFactRow,
   type MemoryHrrCoverage,
 } from '../../contracts/wire.ts';
@@ -137,6 +138,8 @@ export function trustSourceNote(source: TrustSource): string {
       return 'only the facts loaded below — the store reported no distribution';
     case 'none':
       return 'no source reported a distribution';
+    default:
+      return assertNever(source);
   }
 }
 
