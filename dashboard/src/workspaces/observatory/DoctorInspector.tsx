@@ -2,19 +2,20 @@ import * as Dialog from '@radix-ui/react-dialog';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Activity, FileSearch, RefreshCw, ShieldCheck, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type {
-  DashboardDoctorRemediationDescriptorV1,
-  DoctorFindingsPayload,
-  DoctorOwningSurface,
-  DoctorRemediationOperation,
-  DoctorRemediationPayload,
-  DoctorRemediationTarget,
-  DoctorReportEntry,
-  DoctorReportCoverage,
-  ResolvedScope,
-  WireCoverage,
-  WireFreshness,
-  WireLegalActionRef,
+import {
+  assertNever,
+  type DashboardDoctorRemediationDescriptorV1,
+  type DoctorFindingsPayload,
+  type DoctorOwningSurface,
+  type DoctorRemediationOperation,
+  type DoctorRemediationPayload,
+  type DoctorRemediationTarget,
+  type DoctorReportEntry,
+  type DoctorReportCoverage,
+  type ResolvedScope,
+  type WireCoverage,
+  type WireFreshness,
+  type WireLegalActionRef,
 } from '../../contracts/wire.ts';
 import {
   applyDoctorRemediation,
@@ -354,6 +355,8 @@ function consultationState(
     case 'absent':
     case 'unknown':
       return 'unknown';
+    default:
+      return assertNever(reason);
   }
 }
 
@@ -813,6 +816,8 @@ function operationPhaseState(
     case 'failed':
     case 'effect_unknown':
       return 'error';
+    default:
+      return assertNever(phase);
   }
 }
 

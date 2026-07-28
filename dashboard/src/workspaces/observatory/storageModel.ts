@@ -1,3 +1,4 @@
+import { assertNever } from '../../contracts/generated.ts';
 import type {
   DoctorStorageFindingKind,
   StorageFindingKindStatus,
@@ -288,8 +289,4 @@ export function formatBytes(bytes: number | null): string {
 export function formatSignedBytes(bytes: number): string {
   if (bytes === 0) return 'no size change';
   return `${bytes > 0 ? '+' : '−'}${formatBytes(Math.abs(bytes))}`;
-}
-
-function assertNever(value: never): never {
-  throw new Error(`unsupported storage source state: ${String(value)}`);
 }
