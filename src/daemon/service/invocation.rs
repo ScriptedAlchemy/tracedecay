@@ -46,6 +46,7 @@ use tracedecay_domain::configuration::{
     ConfigurationMutationOperationV1, ConfigurationMutationSinkV1, ConfigurationRevisionId,
     ConfigurationSnapshotV1, ProtectedApplyRequest,
 };
+use tracedecay_domain::feedback::{FeedbackCycleTerminationV1, ProviderEvaluationStateV1};
 use tracedecay_domain::{
     AccessPolicyDigest, ActorId, ComponentVersion, GitHeadStateV1, GitIndexPreviewId,
     GitIndexPreviewV1, GitIndexTransactionOperationV1, GitIndexTransactionReceiptV1,
@@ -1999,7 +2000,7 @@ async fn execute_feedback_advisory_cycle(
             }),
         );
     };
-    let request_handle = match invoker
+    let invocation = match invoker
         .invoke(Pr13AdvisoryCycleInvocationRequestV1 {
             request_id: wire_request_id.clone(),
             document_uri,
@@ -2009,9 +2010,13 @@ async fn execute_feedback_advisory_cycle(
         })
         .await
     {
-        Ok(handle) => handle,
+        Ok(invocation) => invocation,
         Err(problem) => return application_problem(wire_request_id, problem),
     };
+    let Pr13AdvisoryCycleInvocationOutcomeV1 {
+        request_handle,
+        cycle,
+    } = invocation;
     let mut response = execute_feedback(
         wire_request_id,
         feedback_owner,
@@ -2024,9 +2029,13 @@ async fn execute_feedback_advisory_cycle(
     .await;
     if let DaemonInvocationOutcome::Feedback { result, .. } = &mut response.outcome {
         let diagnostics = result.payload.take();
+        // `cycle` keeps the four-pillar terminal state visible even when the
+        // publication-backed diagnostics read has nothing to return, so an
+        // incomplete-coverage cycle never renders as a clean empty result.
         result.payload = Some(serde_json::json!({
             "request_handle": request_handle,
             "diagnostics": diagnostics,
+            "cycle": cycle,
             "producer_contributions": [
                 "github_review_ingest",
                 "ci_failure_localize",
@@ -3971,12 +3980,34 @@ pub(crate) struct Pr13AdvisoryCycleInvocationRequestV1 {
     pub cancellation: CancellationContext,
 }
 
-pub(crate) type Pr13AdvisoryCycleInvocationFutureV1<'a> =
-    Pin<Box<dyn Future<Output = Result<String, ApplicationProblem>> + Send + 'a>>;
+/// Typed terminal state of the four-pillar cycle that minted a diagnostics
+/// handle. `published` separates a complete-coverage cycle recorded in the
+/// shared publication store from a cycle whose canonical result is truthfully
+/// incomplete and therefore not publishable, so callers never read partial
+/// coverage as complete.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub(crate) struct Pr13AdvisoryCycleTerminalV1 {
+    pub termination: FeedbackCycleTerminationV1,
+    pub provider_states: Vec<ProviderEvaluationStateV1>,
+    pub published: bool,
+}
+
+pub(crate) struct Pr13AdvisoryCycleInvocationOutcomeV1 {
+    pub request_handle: String,
+    pub cycle: Pr13AdvisoryCycleTerminalV1,
+}
+
+pub(crate) type Pr13AdvisoryCycleInvocationFutureV1<'a> = Pin<
+    Box<
+        dyn Future<Output = Result<Pr13AdvisoryCycleInvocationOutcomeV1, ApplicationProblem>>
+            + Send
+            + 'a,
+    >,
+>;
 
 /// Authenticated explicit entry to the same project-open four-pillar owner
 /// used by LSP and Hook V2. The returned diagnostics handle is minted by that
-/// owner after a durable publication; callers never provide one.
+/// owner from the cycle it just ran; callers never provide one.
 pub(crate) trait Pr13AdvisoryCycleInvocationPortV1: Send + Sync {
     fn invoke(
         &self,
@@ -7637,14 +7668,35 @@ fn valid_printable(value: &str, max_len: usize) -> bool {
 mod tests {
     use super::*;
 
-    struct MintedAdvisoryCycleHandle(&'static str);
+    struct MintedAdvisoryCycleHandle(&'static str, Pr13AdvisoryCycleTerminalV1);
+
+    impl MintedAdvisoryCycleHandle {
+        fn incomplete(request_handle: &'static str) -> Self {
+            Self(
+                request_handle,
+                Pr13AdvisoryCycleTerminalV1 {
+                    termination: FeedbackCycleTerminationV1::IncompleteCoverage,
+                    provider_states: vec![
+                        ProviderEvaluationStateV1::Unavailable,
+                        ProviderEvaluationStateV1::SupportedCompletedComplete,
+                    ],
+                    published: false,
+                },
+            )
+        }
+    }
 
     impl Pr13AdvisoryCycleInvocationPortV1 for MintedAdvisoryCycleHandle {
         fn invoke(
             &self,
             _request: Pr13AdvisoryCycleInvocationRequestV1,
         ) -> Pr13AdvisoryCycleInvocationFutureV1<'_> {
-            Box::pin(async { Ok(self.0.to_owned()) })
+            Box::pin(async {
+                Ok(Pr13AdvisoryCycleInvocationOutcomeV1 {
+                    request_handle: self.0.to_owned(),
+                    cycle: self.1.clone(),
+                })
+            })
         }
     }
 
@@ -7683,13 +7735,28 @@ mod tests {
         assert!(value.get("request_handle").is_none());
     }
 
+    #[test]
+    fn advisory_cycle_terminal_state_keeps_incomplete_coverage_explicit() {
+        let terminal = MintedAdvisoryCycleHandle::incomplete("rh.daemon.minted").1;
+        let value = serde_json::to_value(&terminal).expect("advisory cycle terminal");
+
+        assert_eq!(value["termination"], "incomplete_coverage");
+        assert_eq!(value["published"], false);
+        assert_eq!(
+            value["provider_states"],
+            serde_json::json!(["unavailable", "supported_completed_complete"])
+        );
+    }
+
     #[tokio::test]
     async fn advisory_cycle_reads_diagnostics_with_daemon_minted_handle() {
         let handles = Arc::new(std::sync::Mutex::new(Vec::new()));
         let project_id = ProjectId::new("project.feedback-cycle").expect("project");
         let response = execute_feedback_advisory_cycle(
             "request.feedback-cycle".to_owned(),
-            Some(Arc::new(MintedAdvisoryCycleHandle("rh.daemon.minted"))),
+            Some(Arc::new(MintedAdvisoryCycleHandle::incomplete(
+                "rh.daemon.minted",
+            ))),
             Some(DaemonFeedbackInvocationOwner::new(
                 project_id,
                 Arc::new(RecordingFeedbackHandle(Arc::clone(&handles))),
