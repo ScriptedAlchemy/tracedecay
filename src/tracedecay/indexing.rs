@@ -572,10 +572,12 @@ impl TraceDecay {
             .filter(|path| !completed.contains_key(*path))
             .cloned()
             .collect::<Vec<_>>();
-        for (_batch_index, batch) in pending
+        for (batch_index, batch) in pending
             .chunks(MIGRATION_REINDEX_CHECKPOINT_BATCH_SIZE)
             .enumerate()
         {
+            #[cfg(not(any(test, feature = "test-transport")))]
+            let _ = batch_index;
             let (extractions, _skipped) =
                 extract_files_isolated(&self.project_root, &self.registry, batch.to_vec());
             #[cfg(any(test, feature = "test-transport"))]
@@ -597,11 +599,11 @@ impl TraceDecay {
             })
             .await?;
             #[cfg(any(test, feature = "test-transport"))]
-            if MIGRATION_REINDEX_TEST_ABORT_AFTER_BATCHES.load(Ordering::SeqCst) == _batch_index + 1
+            if MIGRATION_REINDEX_TEST_ABORT_AFTER_BATCHES.load(Ordering::SeqCst) == batch_index + 1
             {
                 return Err(TraceDecayError::Database {
                     operation: "test migration re-index interruption".to_owned(),
-                    message: format!("aborted after {} checkpoint batch(es)", _batch_index + 1),
+                    message: format!("aborted after {} checkpoint batch(es)", batch_index + 1),
                 });
             }
         }
