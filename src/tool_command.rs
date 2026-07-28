@@ -223,7 +223,7 @@ pub(crate) async fn run(
         return dispatch_cli_application_surface(
             operation,
             request,
-            explicit_project.map(PathBuf::from),
+            DaemonToolDispatch::project_scoped(explicit_project, &def.name).project_path,
             requested_format,
             deadline,
         )
@@ -276,6 +276,12 @@ fn cli_surface_invocation(
     Ok((normalized.request, requested_format))
 }
 
+/// Every application-surface operation is project-scoped on the daemon side
+/// (`DaemonInvocationRequest::requires_project`), so `project` must already be
+/// the resolved project route — not just an explicit `--project`. A handshake
+/// without a project reaches the profile-scoped projectless route, where those
+/// operations can only answer `application.surface.unavailable` /
+/// `not_found_or_not_authorized`.
 async fn dispatch_cli_application_surface(
     operation: ApplicationSurfaceOperation,
     tool_args: Value,
