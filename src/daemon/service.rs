@@ -297,6 +297,7 @@ impl DaemonServiceSpec {
              [Service]\n\
              Type=simple\n\
              Environment=\"PATH={}\"\n\
+             Environment=\"MALLOC_ARENA_MAX=2\"\n\
              ExecStart={} daemon run --socket {}\n\
              Restart=on-failure\n\
              RestartSec=2\n\
