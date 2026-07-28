@@ -1399,6 +1399,47 @@ fn project_observation_id(cg: &TraceDecay) -> Result<ProjectId> {
         .map_err(|_| config_error("project observation identity is invalid"))
 }
 
+/// Admits every Codex rollout that belongs to `project_root` under one shared
+/// byte budget, reporting whether any source was left unfinished.
+///
+/// `max_new_bytes` is a budget for the whole pass, not an allowance per
+/// rollout: spending it across sources is what keeps one large rollout from
+/// silently consuming the cap and reporting the pass as complete.
+async fn admit_codex_project_rollouts(
+    admission: &HostAdmissionFacade<'_>,
+    source: &crate::sessions::codex::CodexSource,
+    project_root: &Path,
+    project_id: ProjectId,
+    max_new_bytes: Option<u64>,
+    cancellation: &ObservationCancellation,
+) -> Result<bool> {
+    let mut budget = max_new_bytes;
+    let mut deferred = false;
+    let mut paths = source.transcript_paths(project_root).into_iter().peekable();
+    while let Some(path) = paths.next() {
+        let progress =
+            crate::sessions::codex::try_admit_codex_jsonl_observations_for_project_with_admission_and_cancellation(
+                &path,
+                project_root,
+                project_id.clone(),
+                admission,
+                budget,
+                cancellation,
+            )
+            .await
+            .map_err(|error| map_transcript_ingest_error(&error))?;
+        deferred |= progress.source_deferred;
+        if let Some(remaining) = budget.as_mut() {
+            *remaining = remaining.saturating_sub(progress.bytes_consumed);
+            if *remaining == 0 {
+                deferred |= paths.peek().is_some();
+                break;
+            }
+        }
+    }
+    Ok(deferred)
+}
+
 async fn drain_host_observation_projections(
     admission: &HostAdmissionFacade<'_>,
     scope: &ObservationScopeV1,
@@ -1685,6 +1726,7 @@ async fn ingest_transcript(
     }
     let mut claude_observation_stats = None;
     let mut snapshot_capture = None;
+    let mut codex_source_deferred = false;
     let cancellation = ObservationCancellation::default();
     let messages_upserted = match (provider, user_scope) {
         ("claude", true) => {
@@ -1747,6 +1789,26 @@ async fn ingest_transcript(
             .await
             .map_err(|error| map_transcript_ingest_error(&error))?
             .messages_upserted
+        }
+        ("codex", false) => {
+            let cg =
+                cg.ok_or_else(|| config_error("project transcript ingest requires a project"))?;
+            let source = crate::sessions::codex::CodexSource::new()
+                .ok_or_else(|| config_error("Codex transcript source is unavailable"))?;
+            let project_id = project_observation_id(cg)?;
+            let scope = ObservationScopeV1::Project {
+                project_id: project_id.clone(),
+            };
+            codex_source_deferred = admit_codex_project_rollouts(
+                &facade,
+                &source,
+                cg.project_root(),
+                project_id,
+                max_new_bytes,
+                &cancellation,
+            )
+            .await?;
+            drain_host_observation_projections(&facade, &scope, &cancellation).await?
         }
         ("cursor", false) => {
             let cg =
@@ -1825,9 +1887,10 @@ async fn ingest_transcript(
         && claude_observation_stats
             .as_ref()
             .is_some_and(|stats| stats.observation_duplicates > 0 || stats.cursor_duplicates > 0);
-    let deferred_by_byte_cap = snapshot_capture
-        .as_ref()
-        .is_some_and(|capture| capture.deferred_by_byte_cap);
+    let deferred_by_byte_cap = codex_source_deferred
+        || snapshot_capture
+            .as_ref()
+            .is_some_and(|capture| capture.deferred_by_byte_cap);
     let admission = complete_ingest_admission(
         admission,
         authority_changed,
