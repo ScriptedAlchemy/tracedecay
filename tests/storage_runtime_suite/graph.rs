@@ -174,6 +174,7 @@ impl CanonicalGraphReader {
 async fn graph_read_only_parity_uses_the_process_isolated_rusqlite_helper() {
     let root = IsolatedTempRoot::new("graph");
     let source = root.path().join("source-graph.db");
+    let checkpointed_source = root.path().join("checkpointed-source-graph.db");
     let runtime_baseline_copy = root.path().join("runtime-baseline-graph.db");
     let helper_snapshot_copy = root.path().join("helper-snapshot-graph.db");
 
@@ -183,22 +184,26 @@ async fn graph_read_only_parity_uses_the_process_isolated_rusqlite_helper() {
         .checkpoint()
         .await
         .expect("checkpoint seeded latest-schema graph database");
+    writer
+        .snapshot_to(&checkpointed_source)
+        .await
+        .expect("snapshot seeded latest-schema graph database");
     writer.close();
 
-    let source_authority_before_probes = inventory_database_artifacts(&source);
+    let source_authority_before_probes = inventory_database_artifacts(&checkpointed_source);
     assert_checkpointed_snapshot(
         &source_authority_before_probes,
         "seeded graph source authority",
     );
 
     let runtime_baseline_before_reads = copy_checkpointed_graph_snapshot(
-        &source,
+        &checkpointed_source,
         &source_authority_before_probes,
         &runtime_baseline_copy,
         "canonical runtime graph baseline",
     );
     let helper_snapshot_before_reads = copy_checkpointed_graph_snapshot(
-        &source,
+        &checkpointed_source,
         &source_authority_before_probes,
         &helper_snapshot_copy,
         "rusqlite helper graph snapshot",
@@ -210,7 +215,7 @@ async fn graph_read_only_parity_uses_the_process_isolated_rusqlite_helper() {
     );
     assert_artifacts_unchanged(
         &source_authority_before_probes,
-        &inventory_database_artifacts(&source),
+        &inventory_database_artifacts(&checkpointed_source),
         "creating coherent graph probe copies must not mutate the source authority",
     );
 
@@ -225,7 +230,7 @@ async fn graph_read_only_parity_uses_the_process_isolated_rusqlite_helper() {
     );
     assert_artifacts_unchanged(
         &source_authority_before_probes,
-        &inventory_database_artifacts(&source),
+        &inventory_database_artifacts(&checkpointed_source),
         "canonical graph baseline must not mutate the source authority",
     );
 
@@ -249,7 +254,7 @@ async fn graph_read_only_parity_uses_the_process_isolated_rusqlite_helper() {
     );
     assert_artifacts_unchanged(
         &source_authority_before_probes,
-        &inventory_database_artifacts(&source),
+        &inventory_database_artifacts(&checkpointed_source),
         "all graph read-only parity probes must preserve the source authority",
     );
 }
