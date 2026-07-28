@@ -53,7 +53,7 @@ use registry::{DatabaseInner, database_slot};
 /// `SQLite` database backed by one daemon-owned native runtime attachment.
 #[cfg_attr(
     not(feature = "test-transport"),
-    doc = r#"
+    doc = r"
 Production builds do not expose writable daemonless fixture runtimes.
 
 ```compile_fail
@@ -61,7 +61,7 @@ use tracedecay::db::{Database, TestDatabaseRuntimeMode};
 
 let _ = (Database::publish_test_runtime, TestDatabaseRuntimeMode::Initialize);
 ```
-"#
+"
 )]
 #[derive(Clone)]
 pub struct Database {
