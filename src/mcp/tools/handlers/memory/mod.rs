@@ -435,9 +435,10 @@ mod tests {
         add_project_fact(&active, "active project selector fixture fact").await;
         add_project_fact(&target, "target selector fixture fact").await;
 
-        let default_scope = open_target_memory_db(&active, &json!({}), Some(active.profile_database()))
-            .await
-            .unwrap();
+        let default_scope =
+            open_target_memory_db(&active, &json!({}), Some(active.profile_database()))
+                .await
+                .unwrap();
         assert_eq!(fact_count(&default_scope).await, 1);
         assert_eq!(
             default_scope.owner(),

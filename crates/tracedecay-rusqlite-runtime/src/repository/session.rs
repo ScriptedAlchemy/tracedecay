@@ -133,33 +133,29 @@ impl SessionExecutor {
             insert_occurrence(&mut statements, batch, generation, occurrence)?;
         }
         for copy in batch.copies() {
-            statements.copy.execute(
-                params![
-                    batch.session_id().as_str(),
-                    generation,
-                    copy.occurrence_id.as_str(),
-                    copy.copied_from_occurrence_id.as_str(),
-                    encode(&copy.proof)?,
-                    copy.knowledge_at.0,
-                    encode(&copy.valid_time)?,
-                    copy.knowledge_at.0,
-                ],
-            )?;
+            statements.copy.execute(params![
+                batch.session_id().as_str(),
+                generation,
+                copy.occurrence_id.as_str(),
+                copy.copied_from_occurrence_id.as_str(),
+                encode(&copy.proof)?,
+                copy.knowledge_at.0,
+                encode(&copy.valid_time)?,
+                copy.knowledge_at.0,
+            ])?;
         }
         for assertion in batch.assertions() {
-            statements.assertion.execute(
-                params![
-                    batch.session_id().as_str(),
-                    generation,
-                    assertion.assertion_id.as_str(),
-                    assertion.kind.as_str(),
-                    assertion.subject_anchor_id.as_str(),
-                    assertion.object_anchor_id.as_str(),
-                    assertion.knowledge_at.0,
-                    encode(&assertion.valid_time)?,
-                    encode(&assertion.evidence)?,
-                ],
-            )?;
+            statements.assertion.execute(params![
+                batch.session_id().as_str(),
+                generation,
+                assertion.assertion_id.as_str(),
+                assertion.kind.as_str(),
+                assertion.subject_anchor_id.as_str(),
+                assertion.object_anchor_id.as_str(),
+                assertion.knowledge_at.0,
+                encode(&assertion.valid_time)?,
+                encode(&assertion.evidence)?,
+            ])?;
         }
 
         let occurrence_digest = canonical_digest(batch.occurrences())?;
@@ -179,25 +175,23 @@ impl SessionExecutor {
             )
             .max()
             .unwrap_or(0);
-        statements.receipt.execute(
-            params![
-                batch.session_id().as_str(),
-                generation,
-                u64_to_i64(batch.batch_ordinal(), "session batch ordinal")?,
-                digest,
-                frozen,
-                u64_to_i64(batch.source_through(), "session source frontier")?,
-                u64_to_i64(batch.projection_through(), "session projection frontier")?,
-                usize_to_i64(batch.occurrences().len(), "session occurrence count")?,
-                occurrence_digest,
-                empty_digest,
-                usize_to_i64(batch.copies().len(), "session copy count")?,
-                copy_digest,
-                usize_to_i64(batch.assertions().len(), "session assertion count")?,
-                assertion_digest,
-                committed_at,
-            ],
-        )?;
+        statements.receipt.execute(params![
+            batch.session_id().as_str(),
+            generation,
+            u64_to_i64(batch.batch_ordinal(), "session batch ordinal")?,
+            digest,
+            frozen,
+            u64_to_i64(batch.source_through(), "session source frontier")?,
+            u64_to_i64(batch.projection_through(), "session projection frontier")?,
+            usize_to_i64(batch.occurrences().len(), "session occurrence count")?,
+            occurrence_digest,
+            empty_digest,
+            usize_to_i64(batch.copies().len(), "session copy count")?,
+            copy_digest,
+            usize_to_i64(batch.assertions().len(), "session assertion count")?,
+            assertion_digest,
+            committed_at,
+        ])?;
         Ok(())
     }
 
@@ -220,16 +214,14 @@ impl SessionExecutor {
                 source_horizon_json, publication_json, created_at
              ) VALUES (?1, ?2, ?3, '', '', ?4, ?5, ?6)",
         )?;
-        node.execute(
-            params![
-                summary.summary_id().as_str(),
-                summary.session_id().as_str(),
-                summary.summary_anchor_id().as_str(),
-                encode(&summary.source_horizon())?,
-                summary.publication().map(encode).transpose()?,
-                summary.created_at().0,
-            ],
-        )?;
+        node.execute(params![
+            summary.summary_id().as_str(),
+            summary.session_id().as_str(),
+            summary.summary_anchor_id().as_str(),
+            encode(&summary.source_horizon())?,
+            summary.publication().map(encode).transpose()?,
+            summary.created_at().0,
+        ])?;
         if !summary.source_anchors().is_empty() {
             let mut source = savepoint.prepare(
                 "INSERT INTO session_summary_sources (
@@ -251,13 +243,11 @@ impl SessionExecutor {
                     predecessor_summary_id, successor_summary_id, created_at
                  ) VALUES (?1, ?2, ?3)",
             )?;
-            successor.execute(
-                params![
-                    predecessor.as_str(),
-                    summary.summary_id().as_str(),
-                    summary.created_at().0,
-                ],
-            )?;
+            successor.execute(params![
+                predecessor.as_str(),
+                summary.summary_id().as_str(),
+                summary.created_at().0,
+            ])?;
         }
         Ok(())
     }
@@ -337,63 +327,55 @@ fn insert_occurrence(
 ) -> rusqlite::Result<()> {
     if let (Some(thread_id), Some(grouping)) = (&occurrence.thread_id, &occurrence.thread_grouping)
     {
-        statements.thread.execute(
-            params![
-                batch.session_id().as_str(),
-                generation,
-                thread_id.as_str(),
-                encode(grouping)?,
-                occurrence.knowledge_at.0,
-            ],
-        )?;
-    }
-    if let (Some(turn_id), Some(grouping)) = (&occurrence.turn_id, &occurrence.turn_grouping) {
-        statements.turn.execute(
-            params![
-                batch.session_id().as_str(),
-                generation,
-                turn_id.as_str(),
-                encode(grouping)?,
-                occurrence.knowledge_at.0,
-            ],
-        )?;
-    }
-    if let Some(agent_id) = &occurrence.agent_id {
-        statements.agent.execute(
-            params![
-                batch.session_id().as_str(),
-                generation,
-                agent_id.as_str(),
-                encode(agent_id)?,
-                occurrence.knowledge_at.0,
-            ],
-        )?;
-    }
-    let role = encode(&occurrence.role)?.trim_matches('"').to_owned();
-    statements.occurrence.execute(
-        params![
+        statements.thread.execute(params![
             batch.session_id().as_str(),
             generation,
-            occurrence.occurrence_id.as_str(),
-            occurrence.source_observation_id.as_str(),
-            i64::from(occurrence.projection_output_ordinal.value()),
-            occurrence.retrieval_anchor_id.as_str(),
-            occurrence.thread_id.as_ref().map(|value| value.as_str()),
-            occurrence
-                .thread_grouping
-                .as_ref()
-                .map(encode)
-                .transpose()?,
-            occurrence.turn_id.as_ref().map(|value| value.as_str()),
-            occurrence.turn_grouping.as_ref().map(encode).transpose()?,
-            occurrence.message_id.as_ref().map(|value| value.as_str()),
-            occurrence.agent_id.as_ref().map(|value| value.as_str()),
-            role,
+            thread_id.as_str(),
+            encode(grouping)?,
             occurrence.knowledge_at.0,
-            encode(&occurrence.valid_time)?,
-            encode(&occurrence.evidence)?,
-        ],
-    )?;
+        ])?;
+    }
+    if let (Some(turn_id), Some(grouping)) = (&occurrence.turn_id, &occurrence.turn_grouping) {
+        statements.turn.execute(params![
+            batch.session_id().as_str(),
+            generation,
+            turn_id.as_str(),
+            encode(grouping)?,
+            occurrence.knowledge_at.0,
+        ])?;
+    }
+    if let Some(agent_id) = &occurrence.agent_id {
+        statements.agent.execute(params![
+            batch.session_id().as_str(),
+            generation,
+            agent_id.as_str(),
+            encode(agent_id)?,
+            occurrence.knowledge_at.0,
+        ])?;
+    }
+    let role = encode(&occurrence.role)?.trim_matches('"').to_owned();
+    statements.occurrence.execute(params![
+        batch.session_id().as_str(),
+        generation,
+        occurrence.occurrence_id.as_str(),
+        occurrence.source_observation_id.as_str(),
+        i64::from(occurrence.projection_output_ordinal.value()),
+        occurrence.retrieval_anchor_id.as_str(),
+        occurrence.thread_id.as_ref().map(|value| value.as_str()),
+        occurrence
+            .thread_grouping
+            .as_ref()
+            .map(encode)
+            .transpose()?,
+        occurrence.turn_id.as_ref().map(|value| value.as_str()),
+        occurrence.turn_grouping.as_ref().map(encode).transpose()?,
+        occurrence.message_id.as_ref().map(|value| value.as_str()),
+        occurrence.agent_id.as_ref().map(|value| value.as_str()),
+        role,
+        occurrence.knowledge_at.0,
+        encode(&occurrence.valid_time)?,
+        encode(&occurrence.evidence)?,
+    ])?;
     Ok(())
 }
 
@@ -687,13 +669,19 @@ mod tests {
     const OBSERVATION_DIGEST: &str =
         "sha256:1111111111111111111111111111111111111111111111111111111111111111";
 
-    fn install_insert_prepare_counter(connection: &Connection) -> Arc<Mutex<BTreeMap<String, usize>>> {
+    fn install_insert_prepare_counter(
+        connection: &Connection,
+    ) -> Arc<Mutex<BTreeMap<String, usize>>> {
         let counts = Arc::new(Mutex::new(BTreeMap::new()));
         let tracked = Arc::clone(&counts);
         connection
             .authorizer(Some(move |context: rusqlite::hooks::AuthContext<'_>| {
                 if let AuthAction::Insert { table_name } = context.action {
-                    *tracked.lock().unwrap().entry(table_name.to_owned()).or_default() += 1;
+                    *tracked
+                        .lock()
+                        .unwrap()
+                        .entry(table_name.to_owned())
+                        .or_default() += 1;
                 }
                 Authorization::Allow
             }))
@@ -895,7 +883,9 @@ mod tests {
             session_id.clone(),
             generation(8),
             SessionFrozenWatermarksV1::new(generation(7), 51, 47, 43),
-            (0..3).map(|ordinal| occurrence(&session_id, ordinal)).collect(),
+            (0..3)
+                .map(|ordinal| occurrence(&session_id, ordinal))
+                .collect(),
             (1..3)
                 .map(|ordinal| LogicalCopyRecordV1 {
                     occurrence_id: occurrence_id(ordinal),

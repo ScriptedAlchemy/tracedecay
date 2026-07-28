@@ -493,6 +493,18 @@ pub(crate) async fn session_temporal_store_repair_status(
 pub(crate) async fn advance_session_temporal_store_repair(
     database: &RegisteredGlobalDb,
 ) -> crate::errors::Result<SessionTemporalRepairOutcome> {
+    advance_session_temporal_store_repair_with_page_rows(
+        database,
+        schema_contract::SESSION_TEMPORAL_REPAIR_AUDIT_PAGE_ROWS,
+    )
+    .await
+}
+
+pub(crate) async fn advance_session_temporal_store_repair_with_page_rows(
+    database: &RegisteredGlobalDb,
+    page_rows: i64,
+) -> crate::errors::Result<SessionTemporalRepairOutcome> {
+    debug_assert!(page_rows > 0);
     let transaction = database
         .begin_write_transaction()
         .await
@@ -522,9 +534,10 @@ pub(crate) async fn advance_session_temporal_store_repair(
             }
             SessionTemporalRepairStage::AuthorityEffects => {
                 let (cursor, complete) =
-                    schema_contract::validate_session_temporal_effect_authority_page(
+                    schema_contract::validate_session_temporal_effect_authority_page_with_limit(
                         &transaction,
                         checkpoint.cursor,
+                        page_rows,
                     )
                     .await?;
                 (
@@ -534,9 +547,10 @@ pub(crate) async fn advance_session_temporal_store_repair(
             }
             SessionTemporalRepairStage::AuthorityReceipts => {
                 let (cursor, complete) =
-                    schema_contract::validate_session_temporal_receipt_authority_page(
+                    schema_contract::validate_session_temporal_receipt_authority_page_with_limit(
                         &transaction,
                         checkpoint.cursor,
+                        page_rows,
                     )
                     .await?;
                 (

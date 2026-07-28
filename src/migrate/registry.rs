@@ -702,12 +702,13 @@ fn record_batch_owner(
 }
 
 fn graph_scope_location_drift_is_repairable(existing: &str, expected: &GraphScopeUpsert) -> bool {
-    serde_json::from_str::<(String, String, String, String, Option<String>)>(existing)
-        .is_ok_and(|(project_id, store_id, branch_name, _, _)| {
+    serde_json::from_str::<(String, String, String, String, Option<String>)>(existing).is_ok_and(
+        |(project_id, store_id, branch_name, _, _)| {
             project_id == expected.project_id
                 && store_id == expected.store_id
                 && branch_name == expected.branch_name
-        })
+        },
+    )
 }
 
 async fn query_optional_text<Q, P>(
