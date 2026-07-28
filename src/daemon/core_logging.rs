@@ -4,6 +4,11 @@
 use std::collections::HashMap;
 use std::fmt::Write;
 
+use tracing::level_filters::LevelFilter;
+use tracing_subscriber::Layer as _;
+use tracing_subscriber::layer::SubscriberExt as _;
+use tracing_subscriber::util::SubscriberInitExt as _;
+
 #[cfg(unix)]
 use super::SERVICE_NAME;
 use super::{Path, TraceDecayError};
@@ -61,82 +66,248 @@ pub(crate) fn log_daemon_event(event: &str, fields: &[(&str, String)]) {
     eprintln!("{}", format_daemon_log_line(event, fields));
 }
 
+/// The stderr tracing filter derived from a `RUST_LOG` value.
+///
+/// `tracing-subscriber` is deliberately built without the `env-filter`
+/// feature (it pulls `matchers`/regex machinery into every build), so this
+/// understands a documented subset of the `RUST_LOG` grammar rather than the
+/// full directive language: a bare `level` sets the level for every target,
+/// and `target=level` sets the level for targets that start with `target`.
+/// Anything else — span selectors, field predicates, a target with no level —
+/// is recorded as unparsed and reported once, never reinterpreted as
+/// something the operator did not write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StderrTracingFilter {
+    /// Level for targets that no directive names.
+    global: LevelFilter,
+    /// Target-prefix directives, most specific (longest prefix) first.
+    targets: Vec<(String, LevelFilter)>,
+    /// Directives this subset cannot honor, in the order they were written.
+    unparsed: Vec<String>,
+}
+
+impl StderrTracingFilter {
+    /// Parses a `RUST_LOG` value. `default` applies to every target the value
+    /// does not name, and is what an unset or empty value resolves to.
+    pub(crate) fn parse(env_value: Option<&str>, default: LevelFilter) -> Self {
+        let mut filter = Self {
+            global: default,
+            targets: Vec::new(),
+            unparsed: Vec::new(),
+        };
+        let Some(env_value) = env_value else {
+            return filter;
+        };
+        for directive in env_value.split(',') {
+            let directive = directive.trim();
+            if directive.is_empty() {
+                continue;
+            }
+            filter.absorb(directive);
+        }
+        // Longest prefix first, so `level_for_target` can stop at its first
+        // match and `tracedecay::daemon=trace` outranks `tracedecay=warn`.
+        filter.targets.sort_by(|(left, _), (right, _)| {
+            right.len().cmp(&left.len()).then_with(|| left.cmp(right))
+        });
+        filter
+    }
+
+    fn absorb(&mut self, directive: &str) {
+        let Some((target, level)) = directive.rsplit_once('=') else {
+            match directive.parse::<LevelFilter>() {
+                Ok(level) => self.global = level,
+                Err(_) => self.unparsed.push(directive.to_string()),
+            }
+            return;
+        };
+        let target = target.trim();
+        let level = level.trim();
+        // An empty level parses as `error` in `tracing-core`, which would turn
+        // `foo=` into a directive the operator never wrote.
+        match level.parse::<LevelFilter>() {
+            Ok(parsed) if !level.is_empty() && is_plain_target(target) => {
+                self.targets.push((target.to_string(), parsed));
+            }
+            _ => self.unparsed.push(directive.to_string()),
+        }
+    }
+
+    /// Level for one event target: the most specific matching directive, or
+    /// the global level when no directive names it.
+    pub(crate) fn level_for_target(&self, target: &str) -> LevelFilter {
+        self.targets
+            .iter()
+            .find(|(prefix, _)| target.starts_with(prefix.as_str()))
+            .map_or(self.global, |(_, level)| *level)
+    }
+
+    /// The most verbose level any directive can enable. Only a max-level hint
+    /// for the subscriber — [`Self::level_for_target`] still decides each
+    /// event, so a target directive never globalizes.
+    pub(crate) fn max_level(&self) -> LevelFilter {
+        self.targets
+            .iter()
+            .fold(self.global, |max, (_, level)| max.max(*level))
+    }
+
+    /// The directives this subset could not honor.
+    pub(crate) fn unparsed(&self) -> &[String] {
+        &self.unparsed
+    }
+
+    /// One machine-readable line naming every unhonored directive, or `None`
+    /// when the whole value was understood. Emitted so a typo in `RUST_LOG`
+    /// surfaces as a diagnostic instead of silently changing nothing.
+    pub(crate) fn diagnostic(&self) -> Option<String> {
+        let unparsed = self.unparsed();
+        if unparsed.is_empty() {
+            return None;
+        }
+        Some(format_daemon_log_line(
+            "rust_log_unparsed",
+            &[
+                ("directives", unparsed.join(",")),
+                ("global_level", self.global.to_string()),
+            ],
+        ))
+    }
+}
+
+/// Whether a `RUST_LOG` directive target is a plain module path this subset
+/// can match by prefix, rather than a span or field selector it cannot.
+fn is_plain_target(target: &str) -> bool {
+    !target.is_empty()
+        && !target
+            .contains(|ch: char| ch.is_whitespace() || matches!(ch, '[' | ']' | '{' | '}' | '='))
+}
+
 /// Installs the process-wide stderr `tracing` subscriber, honoring `RUST_LOG`
 /// (default `warn`). Additive to the bespoke `[tracedecay] event=` stderr
 /// lines above — both channels share stderr, and tools that parse `event=`
 /// lines are unaffected because tracing output never carries that prefix.
-///
-/// `tracing-subscriber` is deliberately built without the `env-filter`
-/// feature (it pulls `matchers`/regex machinery into every build), so the
-/// `RUST_LOG` value is reduced to a plain global level with
-/// [`stderr_tracing_level`] instead of full per-target directives.
 pub fn install_stderr_tracing() {
-    let level = stderr_tracing_level(std::env::var("RUST_LOG").ok().as_deref());
-    let _ = tracing_subscriber::fmt()
-        .with_max_level(level)
+    install_stderr_tracing_filter(StderrTracingFilter::parse(
+        std::env::var("RUST_LOG").ok().as_deref(),
+        LevelFilter::WARN,
+    ));
+}
+
+fn install_stderr_tracing_filter(filter: StderrTracingFilter) {
+    if let Some(diagnostic) = filter.diagnostic() {
+        eprintln!("{diagnostic}");
+    }
+    let max_level = filter.max_level();
+    let layer = tracing_subscriber::fmt::layer()
         .with_writer(std::io::stderr)
         .with_target(true)
         .compact()
-        .try_init();
-}
-
-/// Reduces a `RUST_LOG`-style directive list to one global level: the most
-/// verbose level named anywhere in it (so `foo=debug` keeps debug events
-/// flowing even though per-target filtering is unavailable). Unset, empty, or
-/// unparseable input yields the crate's default of `warn`.
-pub(crate) fn stderr_tracing_level(env_value: Option<&str>) -> tracing::level_filters::LevelFilter {
-    use tracing::level_filters::LevelFilter;
-    let default = LevelFilter::WARN;
-    let Some(env_value) = env_value else {
-        return default;
-    };
-    env_value
-        .split(',')
-        .filter_map(|directive| {
-            let level = directive
-                .rsplit_once('=')
-                .map_or(directive, |(_, level)| level);
-            level.trim().parse::<LevelFilter>().ok()
-        })
-        .max()
-        .unwrap_or(default)
+        .with_filter(
+            tracing_subscriber::filter::filter_fn(move |metadata| {
+                filter.level_for_target(metadata.target()) >= *metadata.level()
+            })
+            .with_max_level_hint(max_level),
+        );
+    let _ = tracing_subscriber::registry().with(layer).try_init();
 }
 
 #[cfg(test)]
 mod stderr_tracing_tests {
     use tracing::level_filters::LevelFilter;
 
-    use super::stderr_tracing_level;
+    use super::{StderrTracingFilter, install_stderr_tracing};
+
+    fn parse(env_value: Option<&str>) -> StderrTracingFilter {
+        StderrTracingFilter::parse(env_value, LevelFilter::WARN)
+    }
 
     #[test]
     fn defaults_to_warn_without_rust_log() {
-        assert_eq!(stderr_tracing_level(None), LevelFilter::WARN);
-        assert_eq!(stderr_tracing_level(Some("")), LevelFilter::WARN);
-        assert_eq!(stderr_tracing_level(Some("not-a-level")), LevelFilter::WARN);
+        for value in [None, Some(""), Some("  ")] {
+            let filter = parse(value);
+            assert_eq!(filter.level_for_target("tracedecay"), LevelFilter::WARN);
+            assert_eq!(filter.max_level(), LevelFilter::WARN);
+            assert!(filter.unparsed().is_empty());
+        }
     }
 
     #[test]
     fn honors_plain_levels_case_insensitively() {
-        assert_eq!(stderr_tracing_level(Some("debug")), LevelFilter::DEBUG);
-        assert_eq!(stderr_tracing_level(Some("TRACE")), LevelFilter::TRACE);
-        assert_eq!(stderr_tracing_level(Some("error")), LevelFilter::ERROR);
-        assert_eq!(stderr_tracing_level(Some("off")), LevelFilter::OFF);
+        for (value, expected) in [
+            ("debug", LevelFilter::DEBUG),
+            ("TRACE", LevelFilter::TRACE),
+            ("error", LevelFilter::ERROR),
+            ("off", LevelFilter::OFF),
+        ] {
+            let filter = parse(Some(value));
+            assert_eq!(filter.level_for_target("anything"), expected);
+            assert_eq!(filter.max_level(), expected);
+            assert!(filter.diagnostic().is_none());
+        }
     }
 
     #[test]
-    fn takes_the_most_verbose_level_from_directive_lists() {
+    fn target_directives_do_not_globalize() {
+        let filter = parse(Some("tracedecay=debug,hyper=error"));
+
+        assert_eq!(filter.level_for_target("tracedecay"), LevelFilter::DEBUG);
         assert_eq!(
-            stderr_tracing_level(Some("tracedecay=debug,hyper=warn")),
+            filter.level_for_target("tracedecay::daemon"),
             LevelFilter::DEBUG
         );
+        assert_eq!(filter.level_for_target("hyper::client"), LevelFilter::ERROR);
+        // Untargeted crates keep the default instead of inheriting `debug`.
+        assert_eq!(filter.level_for_target("tokio::task"), LevelFilter::WARN);
+        // The hint has to cover the most verbose directive or the subscriber
+        // would discard the events the operator asked for.
+        assert_eq!(filter.max_level(), LevelFilter::DEBUG);
+    }
+
+    #[test]
+    fn the_most_specific_target_directive_wins() {
+        let filter = parse(Some("tracedecay=warn,tracedecay::daemon=trace"));
+
         assert_eq!(
-            stderr_tracing_level(Some("warn,tokio::task=trace")),
+            filter.level_for_target("tracedecay::daemon::scheduler"),
             LevelFilter::TRACE
         );
+        assert_eq!(filter.level_for_target("tracedecay::db"), LevelFilter::WARN);
+    }
+
+    #[test]
+    fn a_bare_level_sets_the_global_level_alongside_target_directives() {
+        let filter = parse(Some("info,tracedecay=trace"));
+
+        assert_eq!(filter.level_for_target("tokio::task"), LevelFilter::INFO);
+        assert_eq!(filter.level_for_target("tracedecay"), LevelFilter::TRACE);
+        assert_eq!(filter.max_level(), LevelFilter::TRACE);
+    }
+
+    #[test]
+    fn malformed_directives_are_reported_not_swallowed() {
+        let filter = parse(Some("garbage,tracedecay[span]=debug,hyper=,info"));
+
+        let unparsed: Vec<&str> = filter.unparsed().iter().map(String::as_str).collect();
+        assert_eq!(unparsed, ["garbage", "tracedecay[span]=debug", "hyper="]);
+        // The honored part of the value still applies.
+        assert_eq!(filter.level_for_target("tracedecay"), LevelFilter::INFO);
         assert_eq!(
-            stderr_tracing_level(Some("garbage,info")),
-            LevelFilter::INFO
+            filter.diagnostic().as_deref(),
+            Some(
+                "[tracedecay] event=rust_log_unparsed directives=\"garbage,tracedecay[span]=debug,hyper=\" global_level=info"
+            )
         );
+    }
+
+    #[test]
+    fn a_fully_understood_value_reports_nothing() {
+        assert!(parse(Some("warn,tracedecay=debug")).diagnostic().is_none());
+    }
+
+    #[test]
+    fn installing_the_subscriber_twice_does_not_panic() {
+        install_stderr_tracing();
+        install_stderr_tracing();
     }
 }
 
