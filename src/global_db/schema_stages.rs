@@ -220,6 +220,22 @@ const TRANSCRIPT_SCHEMA: &str = "
 /// Installs and migrates the global/session schema through the exact
 /// registered runtime connection. No database path is resolved or reopened.
 pub(crate) async fn ensure_registered_schema(conn: &Connection) -> crate::errors::Result<()> {
+    let convergence = ensure_registered_schema_for_admission(conn).await?;
+    converge_registered_schema(conn, convergence).await
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct RegisteredSchemaConvergence {
+    force_exhaustive: bool,
+    is_fresh: bool,
+}
+
+/// Installs the minimum schema and write guards required before a registered
+/// runtime may be published. Historical convergence remains separately
+/// resumable so daemon admission never waits for whole-store scans.
+pub(crate) async fn ensure_registered_schema_for_admission(
+    conn: &Connection,
+) -> crate::errors::Result<RegisteredSchemaConvergence> {
     const OPERATION: &str = "initialize registered global database schema";
     let is_fresh = !table_exists(conn, "sessions").await?
         && !table_exists(conn, "observations").await?
@@ -323,6 +339,18 @@ pub(crate) async fn ensure_registered_schema(conn: &Connection) -> crate::errors
             global_db_operation_error("initialize observation projection indexes", error)
         })?;
     validate_authority_schema_contract(conn).await?;
+    Ok(RegisteredSchemaConvergence {
+        force_exhaustive,
+        is_fresh,
+    })
+}
+
+/// Completes resumable historical convergence after the registered runtime is
+/// available. Every stage retains its existing durable checkpoint semantics.
+pub(crate) async fn converge_registered_schema(
+    conn: &Connection,
+    convergence: RegisteredSchemaConvergence,
+) -> crate::errors::Result<()> {
     observation_projection::converge_v4_projection_anchor_bindings(conn)
         .await
         .map_err(|error| {
@@ -344,14 +372,12 @@ pub(crate) async fn ensure_registered_schema(conn: &Connection) -> crate::errors
         .map_err(|error| global_db_operation_error("converge session project paths", error))?;
 
     // The invariant pass pages historical authority rows and can legitimately
-    // outlive the runtime's ordinary transaction lease on a large store. The
-    // schema transaction above has already installed and validated its guard
-    // triggers, and this runtime is not published until open completes, so no
-    // concurrent authorized writer can race the pass. Run each bounded query
-    // and idempotent repair through the connection instead: completed repairs
-    // survive interruption, while the trusted checkpoint is still written only
-    // after every audit succeeds.
-    ensure_authority_invariants(conn, force_exhaustive, is_fresh).await
+    // outlive an ordinary open on a large store. The admission phase has
+    // already installed and validated its guard triggers, so daemon reads and
+    // guarded writes may proceed while these idempotent repairs advance.
+    // Completed repairs survive interruption, while the trusted checkpoint is
+    // still written only after every audit succeeds.
+    ensure_authority_invariants(conn, convergence.force_exhaustive, convergence.is_fresh).await
 }
 
 async fn table_exists(conn: &impl QueryExecutor, table: &str) -> crate::errors::Result<bool> {
@@ -428,7 +454,7 @@ mod tests {
         let connection = TestConnection::open(&database_path);
         let error = ensure_registered_schema(&connection)
             .await
-            .expect_err("corrupt cursor keys must fail the exhaustive audit");
+            .expect_err("corrupt cursor keys must fail the full offline audit");
         assert!(
             error
                 .to_string()

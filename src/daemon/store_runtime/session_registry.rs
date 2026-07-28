@@ -2,10 +2,13 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 
 use tokio::sync::Mutex;
+#[cfg(test)]
+use tokio::sync::{Notify, Semaphore};
+use tokio::task::JoinHandle;
 use tracedecay_domain::RefId;
 use tracedecay_store::{
     CodeShardScopeV1, ProjectId, StoreIncarnationV1, StoreRuntimeBindingV1, StoreShardIdV1,
@@ -32,6 +35,190 @@ pub(crate) fn mark_process_long_lived_for_session_maintenance() {
     LONG_LIVED_SESSION_MAINTENANCE.store(true, Ordering::Relaxed);
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum RegisteredSchemaConvergenceStatus {
+    Pending,
+    Complete,
+    Degraded { message: String },
+}
+
+struct RegisteredSchemaConvergenceMaintenance {
+    statuses: Arc<StdMutex<BTreeMap<StoreShardIdV1, RegisteredSchemaConvergenceStatus>>>,
+    tasks: StdMutex<BTreeMap<StoreShardIdV1, JoinHandle<()>>>,
+    #[cfg(test)]
+    schedule_count: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    gate: StdMutex<Option<Arc<RegisteredSchemaConvergenceTestGateState>>>,
+}
+
+impl RegisteredSchemaConvergenceMaintenance {
+    fn new() -> Self {
+        Self {
+            statuses: Arc::new(StdMutex::new(BTreeMap::new())),
+            tasks: StdMutex::new(BTreeMap::new()),
+            #[cfg(test)]
+            schedule_count: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            gate: StdMutex::new(None),
+        }
+    }
+
+    fn status(&self, shard_id: &StoreShardIdV1) -> Option<RegisteredSchemaConvergenceStatus> {
+        self.statuses
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(shard_id)
+            .cloned()
+    }
+
+    fn schedule(
+        &self,
+        database: Arc<RegisteredGlobalDb>,
+        convergence: Option<crate::global_db::schema_stages::RegisteredSchemaConvergence>,
+        backfill_structured_rows: bool,
+    ) {
+        let shard_id = database.binding().shard_id.clone();
+        {
+            let mut statuses = self
+                .statuses
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if statuses.contains_key(&shard_id) {
+                return;
+            }
+            statuses.insert(shard_id.clone(), RegisteredSchemaConvergenceStatus::Pending);
+        }
+        #[cfg(test)]
+        self.schedule_count.fetch_add(1, Ordering::Relaxed);
+        #[cfg(test)]
+        let gate = self
+            .gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let statuses = Arc::clone(&self.statuses);
+        let task_shard_id = shard_id.clone();
+        let task = tokio::spawn(async move {
+            #[cfg(test)]
+            if let Some(gate) = gate {
+                gate.block().await;
+            }
+            let result = match convergence {
+                Some(convergence) => database.converge_schema(convergence).await,
+                None => Ok(()),
+            };
+            let (status, run_structured_backfill) = match result {
+                Ok(()) => {
+                    crate::daemon::log_daemon_event(
+                        "registered_schema_convergence",
+                        &[
+                            ("outcome", "complete".to_owned()),
+                            ("database", database.db_path().display().to_string()),
+                            ("shard", format!("{task_shard_id:?}")),
+                        ],
+                    );
+                    (
+                        RegisteredSchemaConvergenceStatus::Complete,
+                        backfill_structured_rows,
+                    )
+                }
+                Err(error) => {
+                    let message = error.to_string();
+                    crate::daemon::log_daemon_event(
+                        "registered_schema_convergence",
+                        &[
+                            ("outcome", "degraded".to_owned()),
+                            ("database", database.db_path().display().to_string()),
+                            ("shard", format!("{task_shard_id:?}")),
+                            ("error", message.clone()),
+                        ],
+                    );
+                    (
+                        RegisteredSchemaConvergenceStatus::Degraded { message },
+                        false,
+                    )
+                }
+            };
+            statuses
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(task_shard_id, status);
+            if run_structured_backfill {
+                let _ =
+                    crate::sessions::transcript_backfill::backfill_structured_rows(&database).await;
+            }
+        });
+        self.tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(shard_id, task);
+    }
+
+    #[cfg(test)]
+    fn install_gate(&self) -> RegisteredSchemaConvergenceTestGate {
+        let state = Arc::new(RegisteredSchemaConvergenceTestGateState {
+            started: AtomicBool::new(false),
+            started_notify: Notify::new(),
+            release: Semaphore::new(0),
+        });
+        *self
+            .gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&state));
+        RegisteredSchemaConvergenceTestGate { state }
+    }
+}
+
+impl Drop for RegisteredSchemaConvergenceMaintenance {
+    fn drop(&mut self) {
+        let tasks = self
+            .tasks
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (_, task) in std::mem::take(tasks) {
+            task.abort();
+        }
+    }
+}
+
+#[cfg(test)]
+struct RegisteredSchemaConvergenceTestGateState {
+    started: AtomicBool,
+    started_notify: Notify,
+    release: Semaphore,
+}
+
+#[cfg(test)]
+impl RegisteredSchemaConvergenceTestGateState {
+    async fn block(&self) {
+        self.started.store(true, Ordering::Release);
+        self.started_notify.notify_waiters();
+        self.release
+            .acquire()
+            .await
+            .expect("registered schema convergence test gate remains open")
+            .forget();
+    }
+}
+
+#[cfg(test)]
+struct RegisteredSchemaConvergenceTestGate {
+    state: Arc<RegisteredSchemaConvergenceTestGateState>,
+}
+
+#[cfg(test)]
+impl RegisteredSchemaConvergenceTestGate {
+    async fn wait_until_blocked(&self) {
+        while !self.state.started.load(Ordering::Acquire) {
+            self.state.started_notify.notified().await;
+        }
+    }
+
+    fn release(&self) {
+        self.state.release.add_permits(1);
+    }
+}
+
 /// One canonical registry and profile pin shared by every daemon session shard.
 pub(crate) struct DaemonSessionRuntimeRegistryV1 {
     identity: LocalProfileIdentityAuthorityV1,
@@ -45,6 +232,9 @@ pub(crate) struct DaemonSessionRuntimeRegistryV1 {
     profile_sessions: Mutex<Option<Arc<RegisteredGlobalDb>>>,
     project_memory: Mutex<BTreeMap<ProjectId, Arc<Database>>>,
     project_sessions: Mutex<BTreeMap<ProjectId, Arc<RegisteredGlobalDb>>>,
+    registered_schema_convergence: RegisteredSchemaConvergenceMaintenance,
+    #[cfg(test)]
+    long_lived_session_maintenance_for_test: AtomicBool,
 }
 
 impl DaemonSessionRuntimeRegistryV1 {
@@ -119,6 +309,9 @@ impl DaemonSessionRuntimeRegistryV1 {
             profile_sessions: Mutex::new(None),
             project_memory: Mutex::new(BTreeMap::new()),
             project_sessions: Mutex::new(BTreeMap::new()),
+            registered_schema_convergence: RegisteredSchemaConvergenceMaintenance::new(),
+            #[cfg(test)]
+            long_lived_session_maintenance_for_test: AtomicBool::new(false),
         })
     }
 
@@ -127,11 +320,12 @@ impl DaemonSessionRuntimeRegistryV1 {
         if let Some(database) = mounted.as_ref() {
             return Ok(Arc::clone(database));
         }
-        let database = attach_registered(
-            self.profile_runtime.clone(),
-            "attach profile authority store",
-        )
-        .await?;
+        let database = self
+            .attach_registered(
+                self.profile_runtime.clone(),
+                "attach profile authority store",
+            )
+            .await?;
         *mounted = Some(Arc::clone(&database));
         Ok(database)
     }
@@ -156,7 +350,9 @@ impl DaemonSessionRuntimeRegistryV1 {
             "mount profile session store",
         )
         .await?;
-        let database = attach_registered(runtime, "mount profile session store").await?;
+        let database = self
+            .attach_registered(runtime, "mount profile session store")
+            .await?;
         *mounted = Some(Arc::clone(&database));
         Ok(database)
     }
@@ -240,9 +436,97 @@ impl DaemonSessionRuntimeRegistryV1 {
             "mount project session store",
         )
         .await?;
-        let database = attach_registered(runtime, "mount project session store").await?;
+        let database = self
+            .attach_registered(runtime, "mount project session store")
+            .await?;
         mounted.insert(project_id, Arc::clone(&database));
         Ok(database)
+    }
+
+    fn long_lived_session_maintenance(&self) -> bool {
+        if LONG_LIVED_SESSION_MAINTENANCE.load(Ordering::Relaxed) {
+            return true;
+        }
+        #[cfg(test)]
+        if self
+            .long_lived_session_maintenance_for_test
+            .load(Ordering::Relaxed)
+        {
+            return true;
+        }
+        false
+    }
+
+    async fn attach_registered(
+        &self,
+        runtime: StoreRuntimeHandle,
+        operation: &'static str,
+    ) -> Result<Arc<RegisteredGlobalDb>> {
+        let expected_binding: StoreRuntimeBindingV1 = runtime.binding().clone();
+        let schedule_structured_backfill = matches!(
+            &expected_binding.shard_id.scope,
+            tracedecay_store::StoreShardScopeV1::ProfileSessions
+                | tracedecay_store::StoreShardScopeV1::ProjectSessions { .. }
+        );
+        let expected_locator = runtime.locator().verified().clone();
+        let authority = runtime
+            .database_authority(operation)
+            .map_err(|failure| registry_open_error(operation, failure))?;
+        let long_lived = self.long_lived_session_maintenance();
+        let (database, convergence) = if long_lived {
+            RegisteredGlobalDb::migrate_and_attach_for_daemon(
+                runtime,
+                expected_binding,
+                expected_locator,
+                authority,
+            )
+            .await?
+        } else {
+            (
+                RegisteredGlobalDb::migrate_and_attach(
+                    runtime,
+                    expected_binding,
+                    expected_locator,
+                    authority,
+                )
+                .await?,
+                None,
+            )
+        };
+        let database = Arc::new(database);
+        if long_lived {
+            self.registered_schema_convergence.schedule(
+                Arc::clone(&database),
+                convergence,
+                schedule_structured_backfill,
+            );
+        }
+        Ok(database)
+    }
+
+    pub(crate) fn registered_schema_convergence_status(
+        &self,
+        shard_id: &StoreShardIdV1,
+    ) -> Option<RegisteredSchemaConvergenceStatus> {
+        self.registered_schema_convergence.status(shard_id)
+    }
+
+    #[cfg(test)]
+    fn enable_long_lived_session_maintenance_for_test(&self) {
+        self.long_lived_session_maintenance_for_test
+            .store(true, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    fn block_registered_schema_convergence_for_test(&self) -> RegisteredSchemaConvergenceTestGate {
+        self.registered_schema_convergence.install_gate()
+    }
+
+    #[cfg(test)]
+    fn registered_schema_convergence_schedule_count_for_test(&self) -> usize {
+        self.registered_schema_convergence
+            .schedule_count
+            .load(Ordering::Relaxed)
     }
 
     /// Mounts one project graph/memory database through the retained registry.
@@ -668,38 +952,6 @@ async fn open_runtime(
     }
 }
 
-async fn attach_registered(
-    runtime: StoreRuntimeHandle,
-    operation: &'static str,
-) -> Result<Arc<RegisteredGlobalDb>> {
-    let expected_binding: StoreRuntimeBindingV1 = runtime.binding().clone();
-    let schedule_structured_backfill = matches!(
-        &expected_binding.shard_id.scope,
-        tracedecay_store::StoreShardScopeV1::ProfileSessions
-            | tracedecay_store::StoreShardScopeV1::ProjectSessions { .. }
-    );
-    let expected_locator = runtime.locator().verified().clone();
-    let authority = runtime
-        .database_authority(operation)
-        .map_err(|failure| registry_open_error(operation, failure))?;
-    let database = Arc::new(
-        RegisteredGlobalDb::migrate_and_attach(
-            runtime,
-            expected_binding,
-            expected_locator,
-            authority,
-        )
-        .await?,
-    );
-    if schedule_structured_backfill && LONG_LIVED_SESSION_MAINTENANCE.load(Ordering::Relaxed) {
-        let database = Arc::clone(&database);
-        tokio::spawn(async move {
-            let _ = crate::sessions::transcript_backfill::backfill_structured_rows(&database).await;
-        });
-    }
-    Ok(database)
-}
-
 fn registry_open_error(
     operation: &'static str,
     failure: StoreRuntimeRegistryFailure,
@@ -717,7 +969,70 @@ fn session_registry_error(operation: &'static str, message: String) -> TraceDeca
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::engine::TestConnection;
+    use crate::db::engine::{Executor, TestConnection};
+
+    async fn project_sessions_pending_convergence(
+        project_name: &str,
+    ) -> (
+        tempfile::TempDir,
+        LocalProfileIdentityAuthorityV1,
+        ProjectId,
+        PathBuf,
+        PathBuf,
+    ) {
+        let temporary = tempfile::tempdir().expect("temporary project parent");
+        let root = temporary
+            .path()
+            .canonicalize()
+            .expect("canonical fixture root");
+        let profile_root = root.join("profile");
+        let project_root = root.join("project");
+        std::fs::create_dir_all(&project_root).expect("project root");
+        let identity = crate::daemon::profile_identity::load_or_create(&profile_root)
+            .expect("durable profile identity");
+        let project_id = ProjectId::new(project_name).expect("typed project identity");
+        crate::storage::write_enrollment_marker(
+            &project_root,
+            &crate::storage::EnrollmentMarker {
+                project_id: project_id.as_str().to_owned(),
+                storage_mode: crate::storage::StorageMode::ProfileSharded,
+            },
+        )
+        .expect("project enrollment");
+        let sessions_path =
+            crate::storage::profile_sharded_data_root(identity.profile_root(), project_id.as_str())
+                .join(crate::storage::SESSIONS_DB_FILENAME);
+        std::fs::create_dir_all(sessions_path.parent().expect("session database parent"))
+            .expect("session database directory");
+        let connection = TestConnection::open(&sessions_path);
+        crate::global_db::ensure_registered_schema(&connection)
+            .await
+            .expect("seed complete registered schema");
+        connection
+            .execute("DELETE FROM authority_audit_checkpoints", ())
+            .await
+            .expect("remove durable convergence checkpoint");
+        drop(connection);
+        (temporary, identity, project_id, project_root, sessions_path)
+    }
+
+    async fn wait_for_schema_convergence(
+        registry: &DaemonSessionRuntimeRegistryV1,
+        shard_id: &StoreShardIdV1,
+    ) -> RegisteredSchemaConvergenceStatus {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if let Some(status) = registry.registered_schema_convergence_status(shard_id)
+                    && !matches!(status, RegisteredSchemaConvergenceStatus::Pending)
+                {
+                    return status;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("registered schema convergence must reach a terminal state")
+    }
 
     #[test]
     fn fallback_runtime_generation_always_fits_sqlite_integer() {
@@ -943,6 +1258,172 @@ mod tests {
             )
         );
         assert_eq!(first.db_path(), sessions_path);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn daemon_admission_returns_while_historical_convergence_is_blocked() {
+        let (_temporary, identity, project_id, project_root, _sessions_path) =
+            project_sessions_pending_convergence("project.schema-admission").await;
+        let shard_id = StoreShardIdV1::project_sessions(
+            identity.brain_id().clone(),
+            identity.profile_id().clone(),
+            project_id.clone(),
+        );
+        let registry = DaemonSessionRuntimeRegistryV1::open(identity)
+            .await
+            .expect("session runtime registry");
+        registry.enable_long_lived_session_maintenance_for_test();
+        let convergence_gate = registry.block_registered_schema_convergence_for_test();
+
+        let database = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            registry.project_sessions(project_id, [project_root]),
+        )
+        .await
+        .expect("daemon admission must not wait for historical convergence")
+        .expect("registered project sessions");
+        convergence_gate.wait_until_blocked().await;
+
+        assert_eq!(
+            registry.registered_schema_convergence_status(&shard_id),
+            Some(RegisteredSchemaConvergenceStatus::Pending)
+        );
+        let snapshot = database
+            .read_snapshot()
+            .await
+            .expect("ordinary read snapshot while convergence is pending");
+        let mut rows = snapshot
+            .query("SELECT COUNT(*) FROM sessions", ())
+            .await
+            .expect("ordinary read while convergence is pending");
+        assert_eq!(
+            rows.next()
+                .await
+                .expect("read session count")
+                .expect("session count row")
+                .get::<i64>(0)
+                .expect("decode session count"),
+            0
+        );
+        convergence_gate.release();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn duplicate_project_attaches_schedule_one_historical_convergence() {
+        let (_temporary, identity, project_id, project_root, _sessions_path) =
+            project_sessions_pending_convergence("project.schema-deduplication").await;
+        let registry = DaemonSessionRuntimeRegistryV1::open(identity)
+            .await
+            .expect("session runtime registry");
+        registry.enable_long_lived_session_maintenance_for_test();
+        let convergence_gate = registry.block_registered_schema_convergence_for_test();
+
+        let first = registry
+            .project_sessions(project_id.clone(), [project_root.clone()])
+            .await
+            .expect("first project session attach");
+        convergence_gate.wait_until_blocked().await;
+        let second = registry
+            .project_sessions(project_id, [project_root])
+            .await
+            .expect("duplicate project session attach");
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(
+            registry.registered_schema_convergence_schedule_count_for_test(),
+            1,
+            "the retained registry must deduplicate convergence tasks"
+        );
+        convergence_gate.release();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn background_convergence_commits_the_durable_authority_checkpoint() {
+        let (_temporary, identity, project_id, project_root, _sessions_path) =
+            project_sessions_pending_convergence("project.schema-checkpoint").await;
+        let shard_id = StoreShardIdV1::project_sessions(
+            identity.brain_id().clone(),
+            identity.profile_id().clone(),
+            project_id.clone(),
+        );
+        let registry = DaemonSessionRuntimeRegistryV1::open(identity)
+            .await
+            .expect("session runtime registry");
+        registry.enable_long_lived_session_maintenance_for_test();
+        let database = registry
+            .project_sessions(project_id, [project_root])
+            .await
+            .expect("registered project sessions");
+
+        assert_eq!(
+            wait_for_schema_convergence(&registry, &shard_id).await,
+            RegisteredSchemaConvergenceStatus::Complete
+        );
+        let snapshot = database
+            .read_snapshot()
+            .await
+            .expect("checkpoint read snapshot");
+        let mut rows = snapshot
+            .query(
+                "SELECT bounded_passes_since_exhaustive
+                 FROM authority_audit_checkpoints
+                 WHERE audit_name = 'observation-authority'",
+                (),
+            )
+            .await
+            .expect("read durable authority checkpoint");
+        assert_eq!(
+            rows.next()
+                .await
+                .expect("read checkpoint")
+                .expect("durable checkpoint row")
+                .get::<i64>(0)
+                .expect("decode checkpoint"),
+            0
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn background_convergence_failure_remains_observable_as_degraded() {
+        let (_temporary, identity, project_id, project_root, sessions_path) =
+            project_sessions_pending_convergence("project.schema-degraded").await;
+        rusqlite::Connection::open(&sessions_path)
+            .expect("open corruption fixture")
+            .execute_batch(
+                "DROP TRIGGER IF EXISTS session_query_cursor_keys_insert_guard_v1;
+                 DROP TRIGGER IF EXISTS session_query_cursor_keys_retire_update_v1;
+                 DROP TRIGGER IF EXISTS session_query_cursor_keys_rotate_insert_v1;
+                 INSERT INTO session_query_cursor_keys (
+                    key_id, key_version, key_material, created_at, retired_at
+                 ) VALUES
+                    ('cursor-a', 1, X'01', 100, NULL),
+                    ('cursor-b', 2, X'02', 200, NULL);",
+            )
+            .expect("seed corruption behind missing guards");
+        let shard_id = StoreShardIdV1::project_sessions(
+            identity.brain_id().clone(),
+            identity.profile_id().clone(),
+            project_id.clone(),
+        );
+        let registry = DaemonSessionRuntimeRegistryV1::open(identity)
+            .await
+            .expect("session runtime registry");
+        registry.enable_long_lived_session_maintenance_for_test();
+
+        registry
+            .project_sessions(project_id, [project_root])
+            .await
+            .expect("minimum schema admission remains available");
+        let status = wait_for_schema_convergence(&registry, &shard_id).await;
+
+        assert!(
+            matches!(
+                status,
+                RegisteredSchemaConvergenceStatus::Degraded { ref message }
+                    if message.contains("session cursor key rotation state is invalid")
+            ),
+            "unexpected convergence status: {status:?}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
