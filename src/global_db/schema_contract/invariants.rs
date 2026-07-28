@@ -43,10 +43,10 @@ const FOREIGN_KEY_AUDIT_PROGRESS: &str = "authority-invariants";
 /// rejects anything past `MAX_QUERY_ROWS` (`10_000`) or 64 MiB. Every audit below
 /// walks a table (or a checkpoint suffix of one) whose length grows with the
 /// store, so each scan pages with a keyset cursor instead of requesting one
-/// unbounded result set. Without paging a store simply became unopenable once a
-/// scanned table crossed the cap — the audit reported a materialization limit
-/// instead of a verdict.
-pub(super) const AUDIT_PAGE_ROWS: i64 = 1_000;
+/// unbounded result set. Long-lived daemons also retain allocator arenas sized
+/// for the largest page, so keep this comfortably below the hard channel cap;
+/// background convergence can afford the additional round trips.
+pub(super) const AUDIT_PAGE_ROWS: i64 = 128;
 
 /// Page size for scans that carry a full observation payload.
 ///
