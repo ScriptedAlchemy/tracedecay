@@ -3097,10 +3097,11 @@ async fn lcm_expand_real_service_rechecks_terminal_anchor_states() {
         .project_id
         .clone()
         .expect("test project id");
-    let registry =
-        HostAdmissionTestRuntimeV1::profile(tracedecay::storage::default_profile_root().unwrap())
-            .await
-            .expect("test registry");
+    // Register through the graph's own retained runtime. That runtime is the
+    // registry the MCP server's LCM service reads, and its profile root is the
+    // isolated standalone test profile the graph database actually lives under
+    // — the ambient profile root is a different identity that holds neither.
+    let registry = open_active_project_session_db(&cg).await;
     let project = registry
         .upsert_code_project(&project_id, cg.project_root(), None, None, None)
         .await
@@ -3136,7 +3137,6 @@ async fn lcm_expand_real_service_rechecks_terminal_anchor_states() {
         })
         .await
         .expect("register test graph scope");
-    drop(registry);
     let server = real_mcp_server(cg).await;
     let initial = handle_real_server_tool_call(
         &server,
@@ -3265,10 +3265,11 @@ async fn lcm_expand_cross_session_external_payload_supports_two_step_hydration()
         .project_id
         .clone()
         .expect("test project id");
-    let registry =
-        HostAdmissionTestRuntimeV1::profile(tracedecay::storage::default_profile_root().unwrap())
-            .await
-            .expect("test registry");
+    // Register through the graph's own retained runtime. That runtime is the
+    // registry the MCP server's LCM service reads, and its profile root is the
+    // isolated standalone test profile the graph database actually lives under
+    // — the ambient profile root is a different identity that holds neither.
+    let registry = open_active_project_session_db(&cg).await;
     let project = registry
         .upsert_code_project(&project_id, cg.project_root(), None, None, None)
         .await
@@ -3304,7 +3305,6 @@ async fn lcm_expand_cross_session_external_payload_supports_two_step_hydration()
         })
         .await
         .expect("register test graph scope");
-    drop(registry);
     let server = real_mcp_server(cg).await;
 
     let raw_result = handle_real_server_tool_call(
