@@ -52,22 +52,25 @@ agent hosts through MCP, hooks, LSP, and an embedded dashboard.
 - In shared checkouts, honor active file ownership: re-read before editing,
   commit only self-consistent owned paths, and never sweep in peer work.
 - Before launching Cargo, check for an equivalent active run; reuse or wait,
-  batch the narrowest checks, avoid overlapping broad builds, and never kill
-  peer build processes.
-- Require falsifiable verification and root-cause fixes; do not weaken
-  assertions, raise timeouts, ignore tests, or mask gate failures.
+  batch narrow local checks, prefer CI for aggregate verification when the
+  shared target is contended, and never kill peer build processes.
+- Require measured, falsifiable verification and root-cause fixes; preserve
+  byte-exact identity contracts, and never weaken assertions, raise timeouts,
+  ignore tests, or mask gate failures.
 - Keep every user-facing state truthful: unavailable, unsupported, partial,
   or failed data must never render as successful zero, empty, or complete.
 - Verify cutovers through real production callers and every exposed surface;
   compiled, unit-tested, or source-mentioned code alone is insufficient.
 - Audit all supported host integrations when changing shared host behavior;
   do not treat one host as representative of the complete integration set.
-- Parallelize independent work aggressively, but keep file ownership disjoint
-  and coordinate shared integration centrally.
+- Parallelize independent work aggressively, but inspect active agents first,
+  keep file ownership disjoint, and coordinate shared integration centrally.
 - Commit coherent completed fixes incrementally with explanatory conventional
   messages instead of holding a large mixed working tree.
 - Keep `cargo dogfood` as the fast development-build path; do not add a
   separate release-dogfood mode for local iteration.
+- Resolve conflicts and integrate parallel work from relevant transcripts,
+  plans, and Git history so intent—not whichever side is newer—wins.
 
 ## Learned Workspace Facts
 
@@ -75,16 +78,22 @@ agent hosts through MCP, hooks, LSP, and an embedded dashboard.
   branch stores are not their authoritative home.
 - Linked worktrees share the primary checkout's project/store identity while
   retaining exact worktree snapshot authority.
-- Semantic model acquisition and indexing are background work and must not
-  block exact, lexical, graph, or ordinary retrieval.
-- Test fixtures must isolate home, profile, and session inputs and must never
-  read or mutate the operator's real TraceDecay or agent-host data.
+- Historical convergence, repair/rebuilds, semantic model acquisition, and
+  indexing run as bounded background work after required fail-closed checks;
+  they must not block admission or exact, lexical, graph, or ordinary retrieval.
+- Test fixtures must use shared production identity and enrollment authorities,
+  isolate home, profile, project, and session inputs, and never read or mutate
+  the operator's real TraceDecay or agent-host data.
 - Missing registries and unavailable authorities are typed states, not
   transport errors or successful empty results.
 - Dogfood targets the real managed profile; back up live databases before
   mutation and never run a second daemon against that profile.
-- Root-wide LCM retrieval hydrates canonical records from each message's
-  owning store; ranked candidate metadata is not an authoritative backfill.
+- LCM retrieval, including paginated summary sources, hydrates through canonical
+  redaction/content authority from each message's owning store; raw rows and
+  ranked candidate metadata are not authoritative backfill.
+- Cross-project memory selectors open the selected registered project's durable
+  store with exact project/profile/store identity; they never alias the active
+  project's memory database.
 - `workspaceOpen` follow-up reads use daemon-wide typed route authority;
   linked-worktree requests retain registered identity and never fall back to
   the active graph.
