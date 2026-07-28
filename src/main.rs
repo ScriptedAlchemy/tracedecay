@@ -200,10 +200,6 @@ fn async_main() -> tracedecay::errors::Result<()> {
         tracedecay::extraction_worker::run_worker();
     }
     let worker_threads = async_worker_threads();
-    eprintln!(
-        "[tracedecay] event=async_runtime_config worker_threads={worker_threads} \
-         max_blocking_threads={MAX_BLOCKING_THREADS}"
-    );
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .worker_threads(worker_threads)
