@@ -488,22 +488,32 @@ async fn selected_project_read_skips_cache_write_for_read_only_store() {
         HostAdmissionTestRuntimeV1::project_scoped(&profile_root, cg.project_root(), project_id)
             .await
             .unwrap();
-    registry
-        .upsert_code_project("proj_read", target_project, None, None, Some("main"))
-        .await
-        .unwrap();
     let target_cg = TestTraceDecay::new(
         fixture::init_project_from_template(target_project)
             .await
             .unwrap(),
     );
-    let target_project_id = target_cg
+    let target_project_key = target_cg
         .store_layout()
         .identity
         .project_id
-        .as_deref()
-        .and_then(|value| tracedecay_domain::ProjectId::new(value.to_string()).ok())
+        .clone()
         .expect("target project identity");
+    let target_project_id = tracedecay_domain::ProjectId::new(target_project_key.clone())
+        .expect("target project identity is a valid project id");
+    // The retained resolver matches a mounted graph by its store identity, so
+    // the registry entry has to carry the target's real project id; a synthetic
+    // id registers a route that can never resolve to the graph.
+    registry
+        .upsert_code_project(
+            &target_project_key,
+            target_project,
+            None,
+            None,
+            Some("main"),
+        )
+        .await
+        .unwrap();
     let target_runtime = HostAdmissionTestRuntimeV1::project_scoped(
         &profile_root,
         target_project,
@@ -532,7 +542,7 @@ async fn selected_project_read_skips_cache_write_for_read_only_store() {
     .await;
 
     let read_args = json!({
-        "project_id": "proj_read",
+        "project_id": target_project_key,
         "file": "src/main.rs",
         "mode": "full",
         "format": "json"
@@ -540,8 +550,7 @@ async fn selected_project_read_skips_cache_write_for_read_only_store() {
     for attempt in 1..=2 {
         let selected_read =
             handle_real_server_tool_call(&server, "tracedecay_read", read_args.clone()).await;
-        let read_payload: Value =
-            serde_json::from_str(extract_real_server_text(&selected_read)).unwrap();
+        let read_payload = extract_first_json_content(&selected_read);
         assert_eq!(read_payload["file"], "src/main.rs");
         assert!(
             read_payload["body"]

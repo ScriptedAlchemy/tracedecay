@@ -349,21 +349,29 @@ fn retrieve_tool_schema_requires_handle_and_accepts_project_selector() {
 }
 
 #[test]
-fn always_loaded_graph_tool_schemas_advertise_project_selectors() {
+fn always_loaded_graph_tool_schemas_match_project_selector_authority() {
     let tools = get_tool_definitions();
-    for name in ["tracedecay_search", "tracedecay_context"] {
+    let selector_keys = ["project_selector", "project_id", "project_path"];
+
+    // Registered-project readers dispatch to other mounted projects, so the
+    // selector has to be discoverable from the schema.
+    for name in ["tracedecay_context", "tracedecay_grep", "tracedecay_read"] {
         let properties = tool_properties(&tools, name);
+        for key in selector_keys {
+            assert!(
+                properties.contains_key(key),
+                "registered-project reader {name} should advertise {key}"
+            );
+        }
+    }
+
+    // `tracedecay_search` is authority-bound to the active project and rejects
+    // selectors at dispatch, so advertising them would make the schema lie.
+    let search_properties = tool_properties(&tools, "tracedecay_search");
+    for key in selector_keys {
         assert!(
-            properties.contains_key("project_selector"),
-            "{name} should advertise nested project_selector"
-        );
-        assert!(
-            properties.contains_key("project_id"),
-            "{name} should advertise project_id"
-        );
-        assert!(
-            properties.contains_key("project_path"),
-            "{name} should advertise project_path"
+            !search_properties.contains_key(key),
+            "active-project-only tracedecay_search must not advertise {key}"
         );
     }
 }
