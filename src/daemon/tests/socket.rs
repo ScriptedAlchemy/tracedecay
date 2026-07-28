@@ -699,10 +699,21 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
     writer.write_all(b"\n").await.unwrap();
     let preview_line = lines.next_line().await.unwrap().expect("preview response");
     let preview_response: Value = serde_json::from_str(&preview_line).expect("preview JSON");
-    assert_eq!(preview_response["status"], "git_preview");
+    assert_eq!(
+        preview_response["status"], "git_preview",
+        "{preview_response:#}"
+    );
     let preview: tracedecay_domain::GitIndexPreviewV1 =
         serde_json::from_value(preview_response["preview"]["payload"].clone())
             .expect("typed immutable preview");
+    // An unsupported preview is never cached for apply, so a disposition
+    // regression here surfaces as an unexplained abort several requests later
+    // rather than as the blocker the daemon actually found.
+    assert_eq!(
+        preview.disposition,
+        tracedecay_domain::GitIndexPreviewDispositionV1::Applicable,
+        "{preview_response:#}"
+    );
 
     let apply = crate::application_surface::GitApplySurfaceRequest {
         preview,
@@ -716,7 +727,7 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
         cancellation,
     );
     let apply_request_json = serde_json::to_string(&apply_request).unwrap();
-    for _ in 0..2 {
+    for attempt in 1..=2 {
         let expected_request_id = "request.socket.apply";
         writer
             .write_all(apply_request_json.as_bytes())
@@ -726,10 +737,16 @@ async fn socket_git_preview_apply_replay_and_pre_admission_problems_are_canonica
         let line = lines.next_line().await.unwrap().expect("apply response");
         let response: Value = serde_json::from_str(&line).expect("apply JSON");
         assert_eq!(response["request_id"], expected_request_id);
-        assert_eq!(response["status"], "git_apply", "{response:#}");
+        assert_eq!(
+            response["status"], "git_apply",
+            "attempt {attempt}: {response:#}"
+        );
+        // Attempt 1 must commit; attempt 2 must replay that committed receipt.
+        // Naming the attempt is what separates an apply that never ran from a
+        // replay that lost the first attempt's outcome.
         assert_eq!(
             response["effect"]["receipt"]["outcome"], "completed",
-            "{response:#}"
+            "attempt {attempt}: {response:#}"
         );
         assert_ne!(response["effect"]["execution"]["started_at"], 1);
     }

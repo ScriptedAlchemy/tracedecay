@@ -420,7 +420,7 @@ fn test_kimi_install_stages_bundle_but_does_not_mutate_host_registry() {
     let ctx = make_install_ctx(home);
     let error = KimiIntegration.install(&ctx).unwrap_err().to_string();
     assert!(error.contains("interactive `/plugins` host API"));
-    assert!(error.contains("made no Kimi host-state changes"));
+    assert!(error.contains("made no current plugin registration changes"));
     assert_eq!(std::fs::read(&installed_path).unwrap(), prior_registry);
     assert!(!kimi_code_home.join("plugins/managed/tracedecay").exists());
 

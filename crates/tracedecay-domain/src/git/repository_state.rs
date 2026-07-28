@@ -262,7 +262,7 @@ impl RepositoryStateSnapshotV1 {
             && self.sparse_digest.is_some()
             && self.submodule_digest.is_some()
             && self.filesystem_capabilities_digest.is_some()
-            && self.coverage.is_complete()
+            && !self.coverage.leaves_state_unread()
             && !matches!(
                 self.index.state,
                 RepositoryIndexStateV1::Unmerged
