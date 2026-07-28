@@ -286,6 +286,7 @@ fn bounded_lcm_expand_query_floor_text(
     }
     insert_bounded_text_field(&mut object, value, "prompt", FLOOR_SCALAR_CHARS);
     insert_bounded_text_field(&mut object, value, "query", FLOOR_SCALAR_CHARS);
+    insert_lcm_expand_query_temporal_fields(&mut object, value, 0);
     // Contract-adjacent recovery metadata survives only when it is itself
     // small; anything larger is recoverable via the response handle.
     for key in ["context_recovery_hint", "summary_request"] {
@@ -397,6 +398,7 @@ pub(super) fn compact_lcm_expand_query_payload(
             max_node_ids: 50,
             max_node_id_chars: 160,
             max_pagination_items: 50,
+            max_temporal_items: 50,
             max_scalar_chars: None,
             max_prompt_chars: MAX_LCM_EXPAND_QUERY_PROMPT_CHARS,
             max_query_chars: MAX_LCM_EXPAND_QUERY_QUERY_CHARS,
@@ -413,6 +415,7 @@ pub(super) fn compact_lcm_expand_query_payload(
             max_node_ids: 25,
             max_node_id_chars: 120,
             max_pagination_items: 10,
+            max_temporal_items: 10,
             max_scalar_chars: Some(512),
             max_prompt_chars: 512,
             max_query_chars: 512,
@@ -476,6 +479,7 @@ pub(super) fn compact_lcm_expand_query_payload(
             .max_scalar_chars
             .unwrap_or(MAX_LCM_EXPAND_QUERY_STATUS_CHARS),
     );
+    insert_lcm_expand_query_temporal_fields(&mut object, value, limits.max_temporal_items);
 
     let (context_blocks, context_blocks_truncated) = compact_context_blocks(
         value.get("context_blocks"),
@@ -555,6 +559,7 @@ struct LcmExpandQueryCompactLimits {
     max_node_ids: usize,
     max_node_id_chars: usize,
     max_pagination_items: usize,
+    max_temporal_items: usize,
     max_scalar_chars: Option<usize>,
     max_prompt_chars: usize,
     max_query_chars: usize,
@@ -562,6 +567,32 @@ struct LcmExpandQueryCompactLimits {
     max_synthesis_prompt_chars: usize,
     compact_chars: Option<usize>,
     truncation_reason: &'static str,
+}
+
+fn insert_lcm_expand_query_temporal_fields(
+    object: &mut Map<String, Value>,
+    value: &Value,
+    max_items: usize,
+) {
+    for key in [
+        "omitted",
+        "watermarks",
+        "authorized_root",
+        "coverage",
+        "next_cursor",
+        "capped_sessions",
+    ] {
+        if let Some(field) = value.get(key) {
+            object.insert(key.to_string(), field.clone());
+        }
+    }
+    for key in ["anchors", "source_coverage", "explanations", "omissions"] {
+        if value.get(key).is_some() {
+            let (items, truncated) = compact_array(value.get(key), max_items);
+            object.insert(key.to_string(), items);
+            object.insert(format!("{key}_truncated_for_mcp"), json!(truncated));
+        }
+    }
 }
 
 fn compact_array(value: Option<&Value>, limit: usize) -> (Value, bool) {

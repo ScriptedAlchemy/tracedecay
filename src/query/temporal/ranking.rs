@@ -154,6 +154,7 @@ fn rank_validated_candidates(
             right
                 .raw_score
                 .cmp(&left.raw_score)
+                .then_with(|| right.knowledge_at_micros.cmp(&left.knowledge_at_micros))
                 .then_with(|| left.stable_id.cmp(&right.stable_id))
         });
         let count = channel_candidates.len() as u64;
@@ -979,6 +980,12 @@ mod tests {
         older_a.knowledge_at_micros = 10;
         let mut newer_c = candidate("c", CandidateChannel::Lexical, 10, Some("c"));
         newer_c.knowledge_at_micros = 20;
+        let ranked = rank(
+            &[newer_b.clone(), older_a.clone(), newer_c.clone()],
+            DiversityLimits::unbounded(),
+        );
+        assert_eq!(ids(&ranked), vec!["b", "c", "a"]);
+
         // Force equal normalized scores via singleton partitions.
         newer_b.source = Some("src-b".to_string());
         older_a.source = Some("src-a".to_string());

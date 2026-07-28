@@ -1284,7 +1284,10 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
         grep_payload["status"], "partial",
         "root-wide grep payload: {grep_payload}"
     );
-    assert_eq!(grep_payload["omitted"], 1);
+    assert_eq!(
+        grep_payload["omitted"], 2,
+        "root-wide grep payload: {grep_payload}"
+    );
     assert_eq!(grep_payload["coverage"]["unknown"], 1);
     assert_eq!(grep_payload["hits"].as_array().unwrap().len(), 1);
     assert!(
@@ -1312,7 +1315,10 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
         default_provider_grep_payload["status"], "partial",
         "default-provider root-wide grep payload: {default_provider_grep_payload}"
     );
-    assert_eq!(default_provider_grep_payload["omitted"], 1);
+    assert_eq!(
+        default_provider_grep_payload["omitted"], 2,
+        "default-provider root-wide grep payload: {default_provider_grep_payload}"
+    );
     assert_eq!(default_provider_grep_payload["coverage"]["unknown"], 1);
     assert_eq!(default_provider_grep_payload["provider"], "all");
     assert_eq!(
@@ -1471,7 +1477,7 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
             "session_id": "lcm-session",
             "prompt": "Summarize orchard dispatch",
             "query": "orchard dispatch",
-            "context_max_tokens": 128,
+            "context_max_tokens": 32_000,
             "max_tokens": 64
         }),
         None,
@@ -1480,8 +1486,14 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
     .await
     .unwrap();
     let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
-    assert_eq!(payload["status"], "partial");
-    assert_eq!(payload["omitted"], 1);
+    assert_eq!(
+        payload["status"], "partial",
+        "bounded expand-query payload: {payload}"
+    );
+    assert_eq!(
+        payload["omitted"], 2,
+        "bounded expand-query payload: {payload}"
+    );
     assert_eq!(payload["coverage"]["unknown"], 1);
     assert_eq!(payload["needs_synthesis"], true);
     assert_eq!(payload["prompt"], "Summarize orchard dispatch");
@@ -2251,8 +2263,11 @@ async fn lcm_grep_and_load_session_honor_native_filters_and_content_clamp() {
         loaded_payload["status"], "partial",
         "payload: {loaded_payload}"
     );
-    assert_eq!(loaded_payload["omitted"], 3);
-    assert_eq!(loaded_payload["coverage"]["unknown"], 3);
+    assert_eq!(
+        loaded_payload["omitted"], 2,
+        "native-filter load payload: {loaded_payload}"
+    );
+    assert_eq!(loaded_payload["coverage"]["unknown"], 2);
     assert_eq!(loaded_payload["content_limit"], 20_000);
     assert_eq!(loaded_payload["content_limit_clamped_from"], 25_000);
     assert_eq!(
@@ -3601,20 +3616,18 @@ async fn lcm_status_all_provider_counts_payload_health_once() {
 }
 
 // Repeated LCM tool calls in one process must reuse the per-process
-// "schema already ensured" flag instead of re-opening the project DB with a
-// full DDL ensure each time. Observable via the version gate: after the
-// first call marks the path as ensured, a manually downgraded version
-// marker stays downgraded — a re-run of the migrations would bump it back
-// to LCM_SCHEMA_VERSION.
+// The retained project runtime must not re-run the full DDL ensure for each
+// request. Observable via the version gate: after admission, a manually
+// downgraded version marker stays downgraded across calls on the same server
+// — reconstructing the server would correctly admit and migrate it again.
 #[tokio::test]
 async fn repeated_lcm_calls_skip_schema_reensure_per_process() {
     let dir = test_temp_dir();
     let (cg, _env) = init_test_project(dir.path()).await;
 
-    // Seed data to ensure the sessions.db exists (lcm_status is now read-only
-    // and will not create the DB). The schema-ensure caching under test lives
-    // in the write-path open (`open_session_db_with_cached_ensure`), triggered
-    // by the seed call, and is observable via the lcm_status read.
+    // Seed data to ensure the sessions.db exists (lcm_status is read-only and
+    // will not create the DB), then retain one real server/runtime across both
+    // calls.
     seed_lcm_session_message(
         &cg,
         "ensure-cache-session",
@@ -3623,27 +3636,24 @@ async fn repeated_lcm_calls_skip_schema_reensure_per_process() {
         1,
     )
     .await;
+    let runtime = open_active_project_session_db(&cg).await;
+    let server = real_mcp_server(cg).await;
 
-    let result = handle_tool_call(&cg, "tracedecay_lcm_status", json!({}), None, None)
-        .await
-        .unwrap();
-    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+    let result = handle_real_server_tool_call(&server, "tracedecay_lcm_status", json!({})).await;
+    let payload: Value = serde_json::from_str(extract_real_server_text(&result)).unwrap();
     assert_eq!(payload["status"], "ok");
     assert_eq!(
         payload["lcm"]["schema_version"],
         json!(tracedecay::sessions::lcm::LCM_SCHEMA_VERSION)
     );
 
-    let runtime = open_active_project_session_db(&cg).await;
     runtime
         .set_lcm_schema_migration_version_for_test(HostAdmissionScope::Project, 1)
         .await
         .unwrap();
 
-    let result = handle_tool_call(&cg, "tracedecay_lcm_status", json!({}), None, None)
-        .await
-        .unwrap();
-    let payload: Value = serde_json::from_str(extract_text(&result.value)).unwrap();
+    let result = handle_real_server_tool_call(&server, "tracedecay_lcm_status", json!({})).await;
+    let payload: Value = serde_json::from_str(extract_real_server_text(&result)).unwrap();
     assert_eq!(
         payload["status"], "ok",
         "repeated serve-mode call must work"
@@ -3651,7 +3661,7 @@ async fn repeated_lcm_calls_skip_schema_reensure_per_process() {
     assert_eq!(
         payload["lcm"]["schema_version"],
         json!(1),
-        "second call must take the per-process ensured fast path instead of re-running migrations"
+        "second call must use the retained runtime without re-running migrations; payload: {payload}"
     );
 
     // The on-disk marker is untouched as well.
@@ -3660,6 +3670,7 @@ async fn repeated_lcm_calls_skip_schema_reensure_per_process() {
         .await
         .unwrap();
     assert_eq!(version, Some(1));
+    server.shutdown().await;
 }
 
 // ---------------------------------------------------------------------------
