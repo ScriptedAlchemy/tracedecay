@@ -9,13 +9,6 @@ const PATTERN: Record<EvidenceQuality, string> = {
   unknown: 'var(--ev-unknown)',
 };
 
-const LABEL: Record<EvidenceQuality, string> = {
-  measured: 'measured',
-  associated: 'associated',
-  predicted: 'predicted',
-  unknown: 'unknown',
-};
-
 /** Evidence quality rendered as the plan's PATTERN axis (solid, hatched,
  * dotted, dashed) — never a color — with the label alongside so the meaning
  * survives monochrome, forced-colors, and screen readers alike. */
@@ -36,7 +29,7 @@ export function EvidencePattern({
           backgroundSize: quality === 'predicted' ? '4px 4px' : undefined,
         }}
       />
-      {LABEL[quality]}
+      {quality}
     </span>
   );
 }
