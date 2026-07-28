@@ -28,7 +28,8 @@ use crate::storage::{self, StoreLayout};
 use tracedecay_store::ProjectId;
 
 use super::locking::{
-    clear_dirty_sentinel_at, has_dirty_sentinel_at, try_acquire_graph_sync_locks,
+    clear_dirty_sentinel_at, dirty_marker_owner_is_live, has_dirty_sentinel_at,
+    try_acquire_graph_sync_locks,
 };
 use super::{TraceDecay, TraceDecayOpenOptions, current_timestamp};
 
@@ -558,6 +559,8 @@ impl TraceDecay {
 
         let mut roots = Vec::new();
         for candidate in candidates {
+            let candidate =
+                crate::worktree::repository_identity_root(&candidate).unwrap_or(candidate);
             let Ok(canonical) = candidate.canonicalize() else {
                 continue;
             };
@@ -574,13 +577,15 @@ impl TraceDecay {
             }
         }
         if roots.is_empty() {
+            let enrollment_root = crate::worktree::repository_identity_root(project_root)
+                .unwrap_or_else(|| project_root.to_path_buf());
             let canonical =
-                project_root
+                enrollment_root
                     .canonicalize()
                     .map_err(|error| TraceDecayError::Config {
                         message: format!(
                             "could not canonicalize project enrollment root '{}': {error}",
-                            project_root.display()
+                            enrollment_root.display()
                         ),
                     })?;
             storage::write_enrollment_marker(
@@ -917,10 +922,13 @@ impl TraceDecay {
             });
         }
 
-        // If the dirty sentinel exists, a previous sync/index was interrupted.
-        // Check integrity and rebuild if necessary.
-        let crashed = has_dirty_sentinel_at(&active_graph_layout.dirty_path)
-            || has_dirty_sentinel_at(&store_layout.dirty_path);
+        // A structured marker owned by a live process describes work in
+        // flight, not a crash. Only abandoned, legacy, or malformed dirty
+        // markers enter recovery and contend for the writer's lock.
+        let marker_is_abandoned =
+            |path: &Path| has_dirty_sentinel_at(path) && !dirty_marker_owner_is_live(path);
+        let crashed = marker_is_abandoned(&active_graph_layout.dirty_path)
+            || marker_is_abandoned(&store_layout.dirty_path);
         let mut crash_preflight_healthy = false;
         if crashed {
             eprintln!(
@@ -1305,7 +1313,12 @@ impl TraceDecay {
                 .await;
         }
 
-        if migrated {
+        if migrated.is_some_and(|from| {
+            crate::db::migrations::graph_reindex_required(
+                from,
+                crate::db::migrations::LATEST_VERSION,
+            )
+        }) {
             ts.mark_migration_reindex_pending().await?;
         }
 

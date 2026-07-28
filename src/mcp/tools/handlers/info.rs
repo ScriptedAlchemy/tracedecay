@@ -146,6 +146,21 @@ pub(super) async fn handle_status(
 
     let stats = cg.get_stats().await?;
     let mut output: Value = serde_json::to_value(&stats).unwrap_or(json!({}));
+    let migration_reindex = cg.migration_reindex_status().await?;
+    if !matches!(
+        &migration_reindex,
+        crate::tracedecay::MigrationReindexStatusV1::Current { .. }
+    ) {
+        output["migration_reindex"] =
+            serde_json::to_value(&migration_reindex).unwrap_or_else(|error| {
+                json!({
+                    "state": "failed",
+                    "reason": format!("could not serialize migration re-index state: {error}"),
+                })
+            });
+        output["migration_reindex_warning"] =
+            json!("graph counts are not authoritative while the migration re-index is pending");
+    }
     if include_storage_health {
         let mut storage_health =
             serde_json::to_value(crate::runtime_telemetry::collect_database(cg, false).await?)

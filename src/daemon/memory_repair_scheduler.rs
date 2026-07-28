@@ -495,7 +495,42 @@ async fn run_maintenance_repair_scheduler_tick(
                 MemoryRepairPassDecision::Idle
             }
         };
-    Ok(combine_repair_decisions(memory, session))
+    let transcript = match crate::sessions::transcript_backfill::advance_transcript_facts_backfill(
+        database.as_ref(),
+    )
+    .await?
+    {
+        crate::sessions::transcript_backfill::TranscriptFactsBackfillOutcome::Pending {
+            cursor,
+        } => {
+            log_daemon_event(
+                "transcript_facts_backfill",
+                &[
+                    ("project", project_path.display().to_string()),
+                    ("outcome", "pending".to_string()),
+                    ("cursor", cursor.to_string()),
+                ],
+            );
+            MemoryRepairPassDecision::Advanced
+        }
+        crate::sessions::transcript_backfill::TranscriptFactsBackfillOutcome::Complete => {
+            log_daemon_event(
+                "transcript_facts_backfill",
+                &[
+                    ("project", project_path.display().to_string()),
+                    ("outcome", "complete".to_string()),
+                ],
+            );
+            MemoryRepairPassDecision::Idle
+        }
+        crate::sessions::transcript_backfill::TranscriptFactsBackfillOutcome::NotRequired => {
+            MemoryRepairPassDecision::Idle
+        }
+    };
+    Ok(combine_repair_decisions(
+        combine_repair_decisions(memory, session),
+        transcript,
+    ))
 }
 
 fn combine_repair_decisions(
@@ -615,7 +650,7 @@ mod tests {
     use crate::errors::TraceDecayError;
 
     #[test]
-    fn session_repair_keeps_the_shared_maintenance_loop_alive() {
+    fn dogfood_recovery_session_repair_keeps_shared_maintenance_loop_alive() {
         assert_eq!(
             combine_repair_decisions(
                 MemoryRepairPassDecision::Idle,

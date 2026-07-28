@@ -16,6 +16,26 @@ use crate::memory::store::MemoryStore;
 /// new entry to `run_migration` whenever the schema changes.
 pub(crate) const LATEST_VERSION: u32 = 25;
 
+/// Metadata stamp for the extraction generation currently published in the
+/// core graph tables.
+pub(crate) const GRAPH_GENERATION_SCHEMA_KEY: &str = "graph_generation_schema_version";
+
+/// Migration versions whose resulting graph cannot be trusted without
+/// re-extracting source files.
+///
+/// V3/V4/V7 add extractor-populated node fields, while V17 marks the
+/// attrs-start-line semantic correction that historical rows cannot recover.
+/// V1 is the initial graph generation. Other migrations either preserve and
+/// transform graph rows in place (V5/V9), add indexes, or add auxiliary
+/// memory/evidence tables.
+pub(crate) const GRAPH_INVALIDATING_VERSIONS: &[u32] = &[1, 3, 4, 7, 17];
+
+pub(crate) fn graph_reindex_required(from: u32, to: u32) -> bool {
+    GRAPH_INVALIDATING_VERSIONS
+        .iter()
+        .any(|version| from < *version && *version <= to)
+}
+
 /// Reads the current schema version from `PRAGMA user_version`.
 async fn get_version(conn: &impl QueryExecutor) -> Result<u32> {
     let mut rows =
@@ -327,17 +347,17 @@ async fn create_schema_transaction(conn: &Transaction) -> Result<()> {
 /// Acquires the runtime's immediate transaction on its single writer lane.
 /// Each migration is applied and the version is bumped inside that same
 /// transaction.
-/// Returns `true` if any migrations were applied, `false` if already up-to-date.
-pub async fn migrate(database: &crate::db::Database) -> Result<bool> {
+/// Returns the pre-migration version when migrations were applied.
+pub async fn migrate(database: &crate::db::Database) -> Result<Option<u32>> {
     let writer = database.writer_connection("migrate schema").await?;
-    migrate_connection(writer.engine_connection()).await
+    migrate_inner(writer.engine_connection(), false).await
 }
 
 /// Internal registered-runtime entry point. Public callers migrate the
 /// authority-bound [`crate::db::Database`] facade instead of naming the
 /// private engine connection.
 pub(crate) async fn migrate_connection(conn: &Connection) -> Result<bool> {
-    migrate_inner(conn, false).await
+    Ok(migrate_inner(conn, false).await?.is_some())
 }
 
 /// Runs schema migrations and completes any whole-file auto-vacuum repair.
@@ -353,13 +373,15 @@ pub(crate) async fn migrate_with_exclusive_maintenance(
         let writer = database
             .writer_connection("migrate schema under exclusive maintenance")
             .await?;
-        migrate_inner(writer.engine_connection(), true).await
+        Ok(migrate_inner(writer.engine_connection(), true)
+            .await?
+            .is_some())
     };
     database.close();
     result
 }
 
-async fn migrate_inner(conn: &Connection, exclusive_maintenance: bool) -> Result<bool> {
+async fn migrate_inner(conn: &Connection, exclusive_maintenance: bool) -> Result<Option<u32>> {
     let current = get_version(conn).await?;
     if current > LATEST_VERSION {
         return Err(TraceDecayError::Database {
@@ -371,7 +393,7 @@ async fn migrate_inner(conn: &Connection, exclusive_maintenance: bool) -> Result
     }
     if current == LATEST_VERSION {
         repair_incremental_auto_vacuum(conn, "migrate", exclusive_maintenance).await?;
-        return Ok(false);
+        return Ok(None);
     }
 
     eprintln!("[tracedecay] migrating database schema v{current} → v{LATEST_VERSION}…");
@@ -411,13 +433,28 @@ async fn migrate_inner(conn: &Connection, exclusive_maintenance: bool) -> Result
                 operation: "migrate".to_string(),
             })?;
         repair_incremental_auto_vacuum(conn, "migrate", exclusive_maintenance).await?;
-        return Ok(false);
+        return Ok(None);
     }
 
     let result = run_migrations(&transaction, current).await;
 
     match result {
         Ok(()) => {
+            if !graph_reindex_required(current, LATEST_VERSION) {
+                transaction
+                    .execute(
+                        "INSERT INTO metadata (key, value) VALUES (?1, ?2)
+                         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                        (GRAPH_GENERATION_SCHEMA_KEY, LATEST_VERSION.to_string()),
+                    )
+                    .await
+                    .map_err(|error| TraceDecayError::Database {
+                        message: format!(
+                            "failed to carry graph generation through compatible migration: {error}"
+                        ),
+                        operation: "migrate".to_string(),
+                    })?;
+            }
             transaction
                 .commit()
                 .await
@@ -426,7 +463,7 @@ async fn migrate_inner(conn: &Connection, exclusive_maintenance: bool) -> Result
                     operation: "migrate".to_string(),
                 })?;
             repair_incremental_auto_vacuum(conn, "migrate", exclusive_maintenance).await?;
-            Ok(true)
+            Ok(Some(current))
         }
         Err(e) => {
             let _ = transaction.rollback().await;

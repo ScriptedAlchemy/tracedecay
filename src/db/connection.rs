@@ -966,7 +966,9 @@ impl Database {
                 crate::db::migrations::migrate(&database).await?;
                 false
             }
-            TestDatabaseRuntimeMode::Existing => crate::db::migrations::migrate(&database).await?,
+            TestDatabaseRuntimeMode::Existing => {
+                crate::db::migrations::migrate(&database).await?.is_some()
+            }
             TestDatabaseRuntimeMode::ReadOnly => false,
         };
         Ok((database, migrated))

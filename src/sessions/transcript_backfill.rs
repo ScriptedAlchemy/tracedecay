@@ -15,16 +15,19 @@
 //! Incremental parse offsets prevent a natural re-read from ever revisiting
 //! those lines, so this pass re-reads each affected transcript file from the
 //! start with the same derivation logic live ingest now uses, matching rows
-//! by their stored `source_offset`. One re-read populates both facts.
+//! by their stored `source_offset`. Each bounded page retains facts only for
+//! that page's source offsets.
 //!
-//! Mirrors the LCM schema self-heal pattern: runs once per store (marker row
-//! in `session_schema_migrations`), is fail-open (a missing or unreadable
-//! transcript file simply leaves its rows as-is), and never overwrites an
-//! existing timestamp or usage object — Hermes-migrated messages keep the
-//! values their migration derived.
+//! Mirrors the LCM schema self-heal pattern: background maintenance advances
+//! one durable, atomic page per tick until it writes the store marker in
+//! `session_schema_migrations`. A missing or unreadable transcript file simply
+//! leaves its rows as-is, and the pass never overwrites an existing timestamp
+//! or usage object — Hermes-migrated messages keep the values their migration
+//! derived.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::BufReader;
+use std::ops::Deref;
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
@@ -45,6 +48,9 @@ use crate::sessions::source::{
 
 const MARKER_NAME: &str = "transcript_facts_backfill";
 const MARKER_VERSION: i64 = 1;
+const CURSOR_KEY: &str = "transcript_facts_backfill_cursor:v1";
+const TRANSCRIPT_FACTS_BATCH: usize = 256;
+#[cfg(test)]
 const SAVEPOINT_NAME: &str = "transcript_facts_backfill_batch";
 /// Superseded by [`MARKER_NAME`]: the timestamps-only pass shipped briefly on
 /// this branch; its marker row is removed when the combined pass completes.
@@ -70,18 +76,36 @@ pub(crate) struct BackfillStats {
     pub(crate) usage_added: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TranscriptFactsBackfillOutcome {
+    NotRequired,
+    Pending { cursor: i64 },
+    Complete,
+}
+
+struct TranscriptFactCandidate {
+    rowid: i64,
+    provider: String,
+    message_id: String,
+    source_path: String,
+    source_offset: i64,
+}
+
+#[cfg(test)]
 #[derive(Debug)]
 pub(crate) struct BackfillError {
     primary: EngineError,
     rollback_cleanup: Option<EngineError>,
 }
 
+#[cfg(test)]
 impl BackfillError {
     pub(crate) const fn atomicity_preserved(&self) -> bool {
         self.rollback_cleanup.is_none()
     }
 }
 
+#[cfg(test)]
 impl From<EngineError> for BackfillError {
     fn from(primary: EngineError) -> Self {
         Self {
@@ -91,6 +115,7 @@ impl From<EngineError> for BackfillError {
     }
 }
 
+#[cfg(test)]
 impl std::fmt::Display for BackfillError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "{}", self.primary)?;
@@ -104,67 +129,153 @@ impl std::fmt::Display for BackfillError {
     }
 }
 
+#[cfg(test)]
 impl std::error::Error for BackfillError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(&self.primary)
     }
 }
 
-/// Runs the backfill if this store has not completed it yet. Returns the
-/// number of rows that gained facts. Database errors roll back the complete
-/// update batch, leave the marker unwritten, and allow a later open to retry.
-pub(crate) async fn backfill_transcript_facts(
-    conn: &(impl Executor + ?Sized),
-) -> Result<BackfillStats, BackfillError> {
-    if required_marker_version(conn, MARKER_NAME).await? >= MARKER_VERSION {
-        return Ok(BackfillStats::default());
+pub(crate) async fn transcript_facts_backfill_status(
+    db: &RegisteredGlobalDb,
+) -> crate::errors::Result<TranscriptFactsBackfillOutcome> {
+    if !matches!(
+        &db.binding().shard_id.scope,
+        StoreShardScopeV1::ProjectSessions { .. } | StoreShardScopeV1::ProfileSessions
+    ) {
+        return Ok(TranscriptFactsBackfillOutcome::NotRequired);
+    }
+    let snapshot = db
+        .read_snapshot()
+        .await
+        .map_err(|error| backfill_error("open transcript facts backfill status", error))?;
+    if required_marker_version(&snapshot, MARKER_NAME)
+        .await
+        .map_err(|error| backfill_error("read transcript facts backfill marker", error))?
+        >= MARKER_VERSION
+    {
+        return Ok(TranscriptFactsBackfillOutcome::NotRequired);
+    }
+    let cursor = read_transcript_facts_cursor(&snapshot)
+        .await
+        .map_err(|error| backfill_error("read transcript facts backfill cursor", error))?;
+    Ok(TranscriptFactsBackfillOutcome::Pending { cursor })
+}
+
+pub(crate) async fn advance_transcript_facts_backfill(
+    db: &RegisteredGlobalDb,
+) -> crate::errors::Result<TranscriptFactsBackfillOutcome> {
+    advance_transcript_facts_backfill_with_limit(db, TRANSCRIPT_FACTS_BATCH).await
+}
+
+async fn advance_transcript_facts_backfill_with_limit(
+    db: &RegisteredGlobalDb,
+    limit: usize,
+) -> crate::errors::Result<TranscriptFactsBackfillOutcome> {
+    let TranscriptFactsBackfillOutcome::Pending { cursor } =
+        transcript_facts_backfill_status(db).await?
+    else {
+        return Ok(TranscriptFactsBackfillOutcome::NotRequired);
+    };
+    let snapshot = db
+        .read_snapshot()
+        .await
+        .map_err(|error| backfill_error("open transcript facts candidate snapshot", error))?;
+    let candidates = load_candidates(&snapshot, cursor, limit.max(1))
+        .await
+        .map_err(|error| backfill_error("load transcript facts backfill candidates", error))?;
+    drop(snapshot);
+    if candidates.is_empty() {
+        mark_transcript_facts_backfill_complete(db).await?;
+        return Ok(TranscriptFactsBackfillOutcome::Complete);
     }
 
-    let candidates = load_candidates(conn).await?;
-
-    // Re-derive per-line facts file by file before applying database updates;
-    // transcripts that no longer exist drop out here and their
-    // rows simply stay as they are. The first run after an upgrade re-reads
-    // every affected transcript from byte 0 — easily hundreds of MB of
-    // JSONL — so the pure read+parse loop runs on the blocking pool instead
-    // of pinning the async runtime worker that scheduled the repair.
-    let mut by_file: HashMap<(String, String), Vec<(String, i64)>> = HashMap::new();
-    for (provider, message_id, source_path, source_offset) in candidates {
-        by_file
-            .entry((provider, source_path))
-            .or_default()
-            .push((message_id, source_offset));
+    let next_cursor = candidates
+        .last()
+        .map(|candidate| candidate.rowid)
+        .unwrap_or(cursor);
+    let updates = tokio::task::spawn_blocking(move || derive_candidate_updates(candidates))
+        .await
+        .map_err(|error| {
+            backfill_error(
+                "parse transcript facts backfill batch",
+                format!("parser task failed: {error}"),
+            )
+        })?;
+    let transaction = db.begin_write_transaction().await?;
+    let applied: EngineResult<BackfillStats> = async {
+        let stats = apply_updates(&transaction, &updates).await?;
+        write_transcript_facts_cursor(&transaction, next_cursor).await?;
+        Ok(stats)
     }
-    let updates = tokio::task::spawn_blocking(move || {
-        let mut updates: Vec<(String, String, LineFacts)> = Vec::new();
-        for ((provider, path), rows) in by_file {
-            let Some(mut line_facts) = derive_line_facts(&provider, Path::new(&path)) else {
-                continue;
-            };
-            for (message_id, source_offset) in rows {
-                if let Some(facts) = line_facts.remove(&source_offset)
-                    && (facts.timestamp.is_some() || facts.usage.is_some())
-                {
-                    updates.push((provider.clone(), message_id, facts));
-                }
-            }
+    .await;
+    let stats = match applied {
+        Ok(stats) => {
+            transaction.commit().await?;
+            stats
         }
-        updates
-    })
-    .await
-    .map_err(|error| {
-        EngineError::Runtime(format!("transcript backfill parser task failed: {error}"))
-    })?;
-
-    let stats = apply_updates_atomically(conn, &updates).await?;
+        Err(error) => {
+            transaction.rollback().await.map_err(|rollback_error| {
+                backfill_error(
+                    "roll back transcript facts backfill batch",
+                    format!("{rollback_error}; original batch failure: {error}"),
+                )
+            })?;
+            return Err(backfill_error(
+                "apply transcript facts backfill batch",
+                error,
+            ));
+        }
+    };
     if stats.dated > 0 || stats.usage_added > 0 {
         tracing::info!(
+            cursor = next_cursor,
             timestamps = stats.dated,
             usage_records = stats.usage_added,
-            "backfilled legacy transcript message facts"
+            "backfilled legacy transcript message facts batch"
         );
     }
-    Ok(stats)
+    Ok(TranscriptFactsBackfillOutcome::Pending {
+        cursor: next_cursor,
+    })
+}
+
+fn derive_candidate_updates(
+    candidates: Vec<TranscriptFactCandidate>,
+) -> Vec<(String, String, LineFacts)> {
+    let mut by_file: HashMap<(String, String), Vec<(String, i64)>> = HashMap::new();
+    for candidate in candidates {
+        by_file
+            .entry((candidate.provider, candidate.source_path))
+            .or_default()
+            .push((candidate.message_id, candidate.source_offset));
+    }
+    let mut updates = Vec::new();
+    for ((provider, path), rows) in by_file {
+        let target_offsets = rows.iter().map(|(_, offset)| *offset).collect();
+        let Some(mut line_facts) = derive_line_facts(&provider, Path::new(&path), &target_offsets)
+        else {
+            continue;
+        };
+        for (message_id, source_offset) in rows {
+            if let Some(facts) = line_facts.remove(&source_offset)
+                && (facts.timestamp.is_some() || facts.usage.is_some())
+            {
+                updates.push((provider.clone(), message_id, facts));
+            }
+        }
+    }
+    updates
+}
+
+fn backfill_error(
+    operation: &'static str,
+    error: impl std::fmt::Display,
+) -> crate::errors::TraceDecayError {
+    crate::errors::TraceDecayError::Database {
+        operation: operation.to_string(),
+        message: error.to_string(),
+    }
 }
 
 async fn required_marker_version(
@@ -187,20 +298,58 @@ async fn marker_version(conn: &(impl QueryExecutor + ?Sized), name: &str) -> i64
     required_marker_version(conn, name).await.unwrap_or(0)
 }
 
+async fn read_transcript_facts_cursor(conn: &(impl QueryExecutor + ?Sized)) -> EngineResult<i64> {
+    let mut rows = conn
+        .query(
+            "SELECT value FROM session_backfill_meta WHERE key = ?1",
+            params![CURSOR_KEY],
+        )
+        .await?;
+    let Some(row) = rows.next().await? else {
+        return Ok(0);
+    };
+    let value = row.get::<String>(0)?;
+    value.parse::<i64>().map_err(|error| {
+        EngineError::Runtime(format!(
+            "invalid transcript facts backfill cursor '{value}': {error}"
+        ))
+    })
+}
+
+async fn write_transcript_facts_cursor(
+    conn: &(impl Executor + ?Sized),
+    cursor: i64,
+) -> EngineResult<()> {
+    conn.execute(
+        "INSERT INTO session_backfill_meta(key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET
+            value = excluded.value,
+            updated_at = unixepoch()
+         WHERE CAST(excluded.value AS INTEGER) >
+               CAST(session_backfill_meta.value AS INTEGER)",
+        params![CURSOR_KEY, cursor.to_string()],
+    )
+    .await?;
+    Ok(())
+}
+
 /// Messages that still know where they came from and are missing a fact this
 /// pass can derive: `(provider, message_id, source_path, source_offset)`.
 /// A row qualifies when either projection is undated or its metadata lacks a
 /// `usage` object.
 async fn load_candidates(
     conn: &(impl QueryExecutor + ?Sized),
-) -> EngineResult<Vec<(String, String, String, i64)>> {
+    after_rowid: i64,
+    limit: usize,
+) -> EngineResult<Vec<TranscriptFactCandidate>> {
     let providers = JSONL_PROVIDERS
         .map(|provider| format!("'{provider}'"))
         .join(", ");
     let sql = format!(
-        "SELECT sm.provider, sm.message_id, sm.source_path, sm.source_offset
+        "SELECT sm.rowid, sm.provider, sm.message_id, sm.source_path, sm.source_offset
          FROM session_messages sm
-         WHERE sm.provider IN ({providers})
+         WHERE sm.rowid > ?1
+           AND sm.provider IN ({providers})
            AND sm.source_path IS NOT NULL
            AND sm.source_offset IS NOT NULL
            AND (sm.timestamp IS NULL
@@ -214,22 +363,25 @@ async fn load_candidates(
                       AND (r.timestamp IS NULL
                            OR r.metadata_json IS NULL
                            OR NOT json_valid(r.metadata_json)
-                           OR json_extract(r.metadata_json, '$.usage') IS NULL)))"
+                           OR json_extract(r.metadata_json, '$.usage') IS NULL)))
+         ORDER BY sm.rowid
+         LIMIT ?2"
     );
-    let mut rows = conn.query(&sql, ()).await?;
+    let mut rows = conn.query(&sql, params![after_rowid, limit as i64]).await?;
     let mut candidates = Vec::new();
     while let Some(row) = rows.next().await? {
-        let (provider, message_id, source_path, source_offset) = (
-            row.get::<String>(0)?,
-            row.get::<String>(1)?,
-            row.get::<String>(2)?,
-            row.get::<i64>(3)?,
-        );
-        candidates.push((provider, message_id, source_path, source_offset));
+        candidates.push(TranscriptFactCandidate {
+            rowid: row.get(0)?,
+            provider: row.get(1)?,
+            message_id: row.get(2)?,
+            source_path: row.get(3)?,
+            source_offset: row.get(4)?,
+        });
     }
     Ok(candidates)
 }
 
+#[cfg(test)]
 async fn apply_updates_atomically(
     conn: &(impl Executor + ?Sized),
     updates: &[(String, String, LineFacts)],
@@ -248,6 +400,7 @@ async fn apply_updates_atomically(
     }
 }
 
+#[cfg(test)]
 async fn rollback_updates(
     conn: &(impl Executor + ?Sized),
     primary: EngineError,
@@ -323,8 +476,10 @@ async fn apply_updates(
         }
     }
 
-    // Sessions ingested while messages were undated also have NULL
-    // started_at/ended_at; derive them from the freshly dated messages.
+    Ok(stats)
+}
+
+async fn update_session_windows(conn: &(impl Executor + ?Sized)) -> EngineResult<()> {
     let providers = JSONL_PROVIDERS
         .map(|provider| format!("'{provider}'"))
         .join(", ");
@@ -342,28 +497,68 @@ async fn apply_updates(
         (),
     )
     .await?;
+    Ok(())
+}
 
-    conn.execute(
-        "INSERT INTO session_schema_migrations(name, version)
-         VALUES (?1, ?2)
-         ON CONFLICT(name) DO UPDATE SET
-            version = excluded.version,
-            applied_at = unixepoch()",
-        params![MARKER_NAME, MARKER_VERSION],
-    )
-    .await?;
-    conn.execute(
-        "DELETE FROM session_schema_migrations WHERE name = ?1",
-        params![LEGACY_MARKER_NAME],
-    )
-    .await?;
-    Ok(stats)
+async fn mark_transcript_facts_backfill_complete(
+    db: &RegisteredGlobalDb,
+) -> crate::errors::Result<()> {
+    let transaction = db.begin_write_transaction().await?;
+    let completed: EngineResult<()> = async {
+        // Sessions ingested while messages were undated also have NULL
+        // started_at/ended_at; derive them once after every message page is
+        // durable, not once per bounded batch.
+        update_session_windows(&transaction).await?;
+        transaction
+            .execute(
+                "INSERT INTO session_schema_migrations(name, version)
+                 VALUES (?1, ?2)
+                 ON CONFLICT(name) DO UPDATE SET
+                    version = excluded.version,
+                    applied_at = unixepoch()",
+                params![MARKER_NAME, MARKER_VERSION],
+            )
+            .await?;
+        transaction
+            .execute(
+                "DELETE FROM session_schema_migrations WHERE name = ?1",
+                params![LEGACY_MARKER_NAME],
+            )
+            .await?;
+        transaction
+            .execute(
+                "DELETE FROM session_backfill_meta WHERE key = ?1",
+                params![CURSOR_KEY],
+            )
+            .await?;
+        Ok(())
+    }
+    .await;
+    match completed {
+        Ok(()) => transaction
+            .commit()
+            .await
+            .map_err(|error| backfill_error("commit transcript facts backfill", error)),
+        Err(error) => {
+            transaction.rollback().await.map_err(|rollback_error| {
+                backfill_error(
+                    "roll back transcript facts backfill completion",
+                    format!("{rollback_error}; original completion failure: {error}"),
+                )
+            })?;
+            Err(backfill_error("complete transcript facts backfill", error))
+        }
+    }
 }
 
 /// Re-reads a transcript from byte 0 and derives per-line facts keyed by the
 /// line's starting byte offset (the same offset live ingest stores as
 /// `source_offset`), using the same extraction rules as live ingest.
-fn derive_line_facts(provider: &str, path: &Path) -> Option<HashMap<i64, LineFacts>> {
+fn derive_line_facts(
+    provider: &str,
+    path: &Path,
+    target_offsets: &HashSet<i64>,
+) -> Option<HashMap<i64, LineFacts>> {
     let meta = std::fs::metadata(path).ok()?;
     let mtime = meta
         .modified()
@@ -419,7 +614,9 @@ fn derive_line_facts(provider: &str, path: &Path) -> Option<HashMap<i64, LineFac
                     }
                     line_facts.usage = None;
                 }
-                facts.insert(line_offset, line_facts);
+                if target_offsets.contains(&line_offset) {
+                    facts.insert(line_offset, line_facts);
+                }
             }
         }
     }
@@ -1046,6 +1243,56 @@ async fn mark_structured_backfill_complete(
     Some(())
 }
 
+/// Opaque registered ProjectSessions fixture for transcript-facts backfill tests.
+#[doc(hidden)]
+pub struct TranscriptFactsBackfillTestRuntimeV1 {
+    authority: crate::application::host_admission::HostAdmissionTestRuntimeV1,
+}
+
+impl TranscriptFactsBackfillTestRuntimeV1 {
+    pub async fn project(
+        profile_root: impl AsRef<Path>,
+        project_root: impl AsRef<Path>,
+        project_id: ProjectId,
+    ) -> crate::errors::Result<Self> {
+        Ok(Self {
+            authority: crate::application::host_admission::HostAdmissionTestRuntimeV1::project(
+                profile_root,
+                project_root,
+                project_id,
+            )
+            .await?,
+        })
+    }
+
+    fn database(&self) -> &RegisteredGlobalDb {
+        self.authority
+            .registered_database(crate::application::host_admission::HostAdmissionScope::Project)
+            .expect("transcript facts test runtime has ProjectSessions authority")
+    }
+
+    pub async fn transcript_facts_backfill_status_for_test(
+        &self,
+    ) -> crate::errors::Result<TranscriptFactsBackfillOutcome> {
+        transcript_facts_backfill_status(self.database()).await
+    }
+
+    pub async fn advance_transcript_facts_backfill_for_test(
+        &self,
+        limit: usize,
+    ) -> crate::errors::Result<TranscriptFactsBackfillOutcome> {
+        advance_transcript_facts_backfill_with_limit(self.database(), limit).await
+    }
+}
+
+impl Deref for TranscriptFactsBackfillTestRuntimeV1 {
+    type Target = crate::application::host_admission::HostAdmissionTestRuntimeV1;
+
+    fn deref(&self) -> &Self::Target {
+        &self.authority
+    }
+}
+
 /// Opaque registered ProjectSessions fixture for structured-backfill integration tests.
 #[doc(hidden)]
 pub struct StructuredBackfillTestRuntimeV1 {
@@ -1539,7 +1786,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transcript_fact_update_failure_rolls_back_the_entire_batch() {
+    async fn dogfood_recovery_transcript_fact_failure_rolls_back_entire_batch() {
         let directory = tempfile::tempdir().unwrap();
         let connection =
             crate::db::engine::TestConnection::open(&directory.path().join("sessions.db"));

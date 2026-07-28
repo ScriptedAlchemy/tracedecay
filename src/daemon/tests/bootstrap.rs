@@ -1,6 +1,7 @@
 use super::*;
 use crate::application::context::CancellationToken;
 use crate::daemon::ProductionProjectCompositionHarnessV1;
+use crate::errors::TraceDecayError;
 use crate::mcp::JsonRpcResponse;
 use std::process::Command;
 
@@ -39,6 +40,36 @@ fn project_open_test_route(name: &str) -> ProjectRouteKey {
     }
 }
 
+fn run_git(root: &std::path::Path, args: &[&str]) {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .env("GIT_AUTHOR_NAME", "TraceDecay Test")
+        .env("GIT_AUTHOR_EMAIL", "test@tracedecay.local")
+        .env("GIT_COMMITTER_NAME", "TraceDecay Test")
+        .env("GIT_COMMITTER_EMAIL", "test@tracedecay.local")
+        .output()
+        .expect("run git");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn assert_missing_enrollment_admission(error: &TraceDecayError) {
+    match error {
+        TraceDecayError::Config { message } => {
+            assert!(
+                message.contains("is not enrolled"),
+                "expected missing-enrollment admission error, got: {error}"
+            );
+        }
+        // Add the typed MissingEnrollment admission variant here once exposed.
+        other => panic!("expected missing-enrollment admission error, got: {other}"),
+    }
+}
+
 #[tokio::test]
 async fn unenrolled_ambient_directory_is_rejected_before_project_warmup() {
     let home = TempDir::new().expect("isolated home");
@@ -57,10 +88,7 @@ async fn unenrolled_ambient_directory_is_rejected_before_project_warmup() {
         Err(error) => error,
     };
 
-    assert!(
-        error.to_string().contains("is not enrolled"),
-        "the route must fail at enrollment admission: {error}"
-    );
+    assert_missing_enrollment_admission(&error);
     assert_eq!(
         engine
             .project_open_attempts
@@ -80,12 +108,7 @@ async fn unenrolled_leaf_is_rejected_from_cache_and_direct_open() {
     let profile_root = home.path().join(".tracedecay");
     let repository = home.path().join("repository");
     std::fs::create_dir_all(&repository).expect("create repository");
-    let status = Command::new("git")
-        .args(["init", "--quiet"])
-        .arg(&repository)
-        .status()
-        .expect("initialize repository");
-    assert!(status.success(), "initialize repository");
+    run_git(&repository, &["init", "--quiet"]);
     let leaf_directory = repository.join("leaf");
     std::fs::create_dir_all(&leaf_directory).expect("create leaf directory");
     let _database_scope =
@@ -100,10 +123,7 @@ async fn unenrolled_leaf_is_rejected_from_cache_and_direct_open() {
         Ok(_) => panic!("cache lookup must enforce enrollment admission"),
         Err(error) => error,
     };
-    assert!(
-        cache_error.to_string().contains("is not enrolled"),
-        "cache lookup must fail at enrollment admission: {cache_error}"
-    );
+    assert_missing_enrollment_admission(&cache_error);
 
     let cancellation = CancellationToken::new();
     let open_error = match engine
@@ -113,10 +133,7 @@ async fn unenrolled_leaf_is_rejected_from_cache_and_direct_open() {
         Ok(_) => panic!("direct project open must enforce enrollment admission"),
         Err(error) => error,
     };
-    assert!(
-        open_error.to_string().contains("is not enrolled"),
-        "the deepest project-open route must fail at enrollment admission: {open_error}"
-    );
+    assert_missing_enrollment_admission(&open_error);
     assert_eq!(
         engine
             .project_open_attempts
@@ -128,6 +145,128 @@ async fn unenrolled_leaf_is_rejected_from_cache_and_direct_open() {
         !leaf_directory.join(".tracedecay").exists(),
         "rejection must not manufacture project state"
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn linked_worktree_root_is_not_admitted_as_first_touch_project() {
+    let home = TempDir::new().expect("isolated home");
+    let root = home.path().canonicalize().expect("canonical home");
+    let primary = root.join("primary");
+    let linked = root.join("linked");
+    let profile_root = root.join("profile");
+    std::fs::create_dir_all(&primary).expect("create primary repository");
+    run_git(&primary, &["init", "-b", "main", "--quiet"]);
+    std::fs::write(primary.join("README.md"), "first touch authority\n").expect("fixture");
+    run_git(&primary, &["add", "."]);
+    run_git(&primary, &["commit", "-m", "fixture", "--quiet"]);
+    run_git(
+        &primary,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "feature/first-touch",
+            linked.to_str().expect("utf-8 linked path"),
+            "HEAD",
+        ],
+    );
+
+    let _database_scope =
+        enter_test_daemon_database_scope(&profile_root, "linked first-touch rejection");
+    let engine = test_daemon_engine_for_profile(&profile_root);
+    let handshake = DaemonHandshake {
+        project_path: Some(linked.clone()),
+        client_identity: test_client_identity_for(profile_root),
+        allow_init: true,
+        ..test_handshake_defaults()
+    };
+
+    let error = match engine.project_server(&handshake).await {
+        Ok(_) => panic!("linked worktree must not claim first-touch project authority"),
+        Err(error) => error,
+    };
+
+    assert_missing_enrollment_admission(&error);
+    assert_eq!(
+        engine
+            .project_open_attempts
+            .load(std::sync::atomic::Ordering::Relaxed),
+        0,
+        "linked first-touch rejection must precede project opening"
+    );
+    assert!(
+        crate::storage::read_enrollment_marker(&linked)
+            .expect("read linked marker")
+            .is_none(),
+        "rejection must not write a linked-worktree enrollment marker"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn same_identity_worktree_and_primary_register_one_project_authority() {
+    let home = TempDir::new().expect("isolated home");
+    let root = home.path().canonicalize().expect("canonical home");
+    let primary = root.join("primary");
+    let linked = root.join("linked");
+    let profile_root = root.join("profile");
+    std::fs::create_dir_all(&primary).expect("create primary repository");
+    run_git(&primary, &["init", "-b", "main", "--quiet"]);
+    std::fs::write(primary.join("README.md"), "shared authority\n").expect("fixture");
+    run_git(&primary, &["add", "."]);
+    run_git(&primary, &["commit", "-m", "fixture", "--quiet"]);
+    run_git(
+        &primary,
+        &[
+            "worktree",
+            "add",
+            "--force",
+            linked.to_str().expect("utf-8 linked path"),
+            "main",
+        ],
+    );
+
+    let client_identity = test_client_identity_for(profile_root.clone());
+    initialize_test_project(&primary, &client_identity).await;
+    let _database_scope =
+        enter_test_daemon_database_scope(&profile_root, "shared worktree authority");
+    let engine = test_daemon_engine_for_profile(&profile_root);
+    let primary_handshake = DaemonHandshake {
+        project_path: Some(primary.clone()),
+        client_identity: client_identity.clone(),
+        ..test_handshake_defaults()
+    };
+    let linked_handshake = DaemonHandshake {
+        project_path: Some(linked.clone()),
+        client_identity,
+        ..test_handshake_defaults()
+    };
+
+    let primary_server = engine
+        .project_server(&primary_handshake)
+        .await
+        .expect("primary project must open");
+    let linked_server = engine
+        .project_server(&linked_handshake)
+        .await
+        .expect("linked worktree must reuse the primary authority");
+
+    assert!(
+        Arc::ptr_eq(&primary_server, &linked_server),
+        "both routes must resolve one retained project server"
+    );
+    let servers = engine.store_administration.project_servers().lock().await;
+    assert_eq!(servers.servers.len(), 1, "one physical project server key");
+    assert_eq!(servers.aliases.len(), 2, "primary and linked route aliases");
+    drop(servers);
+    assert!(
+        crate::storage::read_enrollment_marker(&linked)
+            .expect("read linked marker")
+            .is_none(),
+        "linked route must not acquire a second enrollment marker"
+    );
+    engine.shutdown_all().await;
 }
 
 #[tokio::test]
