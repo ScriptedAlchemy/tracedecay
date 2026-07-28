@@ -6,9 +6,9 @@ import { useLegacy } from '../../data/query/useLegacy.ts';
 import {
   SavingsOverviewPayloadSchema,
 } from '../../contracts/wire.ts';
+import { logFraction } from '../../viz/scale.ts';
 import {
   costPerTurn,
-  logFraction,
   summarizeCoverage,
   summarizeProjectSpread,
   summarizeTokenMix,

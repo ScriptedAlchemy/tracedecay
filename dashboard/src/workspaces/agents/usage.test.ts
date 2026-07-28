@@ -5,7 +5,6 @@ import {
   familiesSummary,
   familyVerdict,
   formatSpan,
-  logFraction,
   percent,
   summarizeDominance,
 } from './usage.ts';
@@ -56,32 +55,6 @@ describe('summarizeDominance', () => {
     expect(summary.leaderShare).toBeNull();
     expect(summary.spread).toBeNull();
     expect(summary.dominant).toBe(false);
-  });
-});
-
-describe('logFraction', () => {
-  it('keeps the smallest live row visible against the largest', () => {
-    const smallest = logFraction(1, 6774);
-    expect(smallest).not.toBeNull();
-    // A linear scale would put this row at 0.015% of the band — invisible.
-    expect(smallest!).toBeGreaterThan(0.05);
-    expect(smallest!).toBeLessThan(0.1);
-  });
-
-  it('puts the ceiling at the end of the band and zero at its start', () => {
-    expect(logFraction(6774, 6774)).toBe(1);
-    expect(logFraction(0, 6774)).toBe(0);
-  });
-
-  it('preserves ordering', () => {
-    const a = logFraction(52, 6774)!;
-    const b = logFraction(643, 6774)!;
-    expect(a).toBeLessThan(b);
-  });
-
-  it('returns null rather than a fabricated length when there is no ceiling', () => {
-    expect(logFraction(5, 0)).toBeNull();
-    expect(logFraction(5, Number.NaN)).toBeNull();
   });
 });
 

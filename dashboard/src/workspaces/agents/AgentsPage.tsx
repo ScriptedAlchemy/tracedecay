@@ -5,6 +5,7 @@ import { MeterRow, ReadoutBar } from '../../ui/instrument.tsx';
 import { cn } from '../../ui/cn';
 import { useLegacy } from '../../data/query/useLegacy.ts';
 import { AnalyticsUsageSummarySchema } from '../../contracts/wire.ts';
+import { logFraction } from '../../viz/scale.ts';
 import {
   ANALYTICS_EVENT_LIMIT,
   describeWindow,
@@ -12,7 +13,6 @@ import {
   familyVerdict,
   FAMILY_NOTES,
   formatSpan,
-  logFraction,
   percent,
   summarizeDominance,
   type FamilyRow,
