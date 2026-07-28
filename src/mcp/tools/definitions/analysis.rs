@@ -38,25 +38,6 @@ pub(super) fn def_dead_code() -> ToolDefinition {
     )
 }
 
-#[allow(dead_code)] // Plan 21 module_api tool def — not yet registered
-pub(super) fn def_module_api() -> ToolDefinition {
-    def(
-        "tracedecay_module_api",
-        "Module API",
-        "Show the public API surface of a file or directory: all pub symbols sorted by file and line.",
-        json!({
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "File path or directory prefix to inspect"
-                }
-            },
-            "required": ["path"]
-        }),
-    )
-}
-
 pub(super) fn def_circular() -> ToolDefinition {
     def(
         "tracedecay_circular",

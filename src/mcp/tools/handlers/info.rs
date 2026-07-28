@@ -426,73 +426,6 @@ pub(super) fn handle_active_project(
     )
 }
 
-/// Handles `tracedecay_storage_status` tool calls.
-#[allow(dead_code)] // Plan 21 storage_status handler — not yet registered
-pub(super) async fn handle_storage_status(
-    cg: &TraceDecay,
-    args: Value,
-    scope_prefix: Option<&str>,
-) -> Result<ToolResult> {
-    let stats = cg.get_stats().await?;
-    let branch = cg.branch_diagnostics();
-    let layout = cg.store_layout();
-    let graph_db_path = cg.db_path();
-    let graph_db_size_bytes = graph_db_path
-        .metadata()
-        .map_or(0, |metadata| metadata.len());
-    let read_only = cg.is_read_only();
-    let writable = branch.serving_db_exists && !branch.is_fallback && !read_only;
-    let mut warnings = branch.warnings.clone();
-    if let Some(warning) = branch.fallback_warning.as_ref() {
-        warnings.push(warning.clone());
-    }
-    warnings.sort();
-    warnings.dedup();
-    let status = if branch.serving_db_exists {
-        "ok"
-    } else {
-        "missing_graph_db"
-    };
-    let output = json!({
-        "status": status,
-        "active_project": active_project_context(cg, &branch, None, scope_prefix),
-        "paths": {
-            "data_root": display_path(&layout.data_root),
-            "config_path": display_path(&layout.config_path),
-            "graph_db_path": display_path(&graph_db_path),
-            "sessions_db_path": display_path(&layout.sessions_db_path),
-            "response_handle_root": display_path(&layout.response_handle_root),
-            "lcm_payload_root": display_path(&layout.lcm_payload_root),
-            "manifest_path": layout.manifest_path.as_deref().map(display_path),
-            "dirty_path": display_path(&layout.dirty_path),
-        },
-        "locks": {
-            "sync_lock_path": display_path(&layout.sync_lock_path),
-            "sync_lock_exists": layout.sync_lock_path.exists(),
-            "branch_add_lock_path": display_path(&layout.branch_add_lock_path),
-            "branch_add_lock_exists": layout.branch_add_lock_path.exists(),
-        },
-        "quotas": {
-            "enforced": false,
-            "graph_db_size_bytes": graph_db_size_bytes,
-            "graph_db_size_limit_bytes": Value::Null,
-        },
-        "writable": writable,
-        "read_only": read_only,
-        "warnings": warnings,
-        "stats": stats,
-    });
-    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
-        render::generic_md(&output)
-    });
-    Ok(ToolResult::new(
-        json!({
-            "content": [{ "type": "text", "text": text }]
-        }),
-        vec![],
-    ))
-}
-
 fn bounded_limit(args: &Value, default: usize, max: usize) -> usize {
     args.get("limit")
         .and_then(Value::as_u64)
@@ -1961,8 +1894,7 @@ async fn body_candidates(
     // First try an exact-name lookup against the DB — this avoids the BM25
     // ranker's tendency to bury a definition under unrelated noise when the
     // bare name is common (e.g. `gmres` exists as both a `pub fn` and a
-    // struct field). Falls back to suffix / name match inside
-    // `get_nodes_by_qualified_name`.
+    // struct field). Falls back to suffix / name matching.
     let exact_nodes = cg.get_nodes_by_qualified_name(symbol).await?;
     let mut exact_nodes = filter_by_scope(exact_nodes, scope_prefix, |n| &n.file_path);
     if exact_nodes.is_empty() && lazy_index_ignored_dependencies {

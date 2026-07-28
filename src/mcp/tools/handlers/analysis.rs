@@ -1,6 +1,6 @@
 //! Structural analysis tool handlers: `dead_code`, `hotspots`, `circular`,
 //! `coupling`, `rank`, `largest`, `recursion`, `complexity`, `distribution`,
-//! `unused_imports`, `god_class`, `doc_coverage`, `inheritance_depth`, `module_api`.
+//! `unused_imports`, `god_class`, `doc_coverage`, `inheritance_depth`.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 
 use crate::errors::{Result, TraceDecayError};
 use crate::tracedecay::TraceDecay;
-use crate::types::{NodeKind, Visibility};
+use crate::types::NodeKind;
 
 use super::super::ToolResult;
 use super::super::render;
@@ -186,73 +186,6 @@ pub(super) async fn handle_dead_code(
 
     let output = json!({
         "dead_code_count": items.len(),
-        "symbols": items,
-    });
-
-    let text = render::finalize(Some(cg.project_root()), &args, &output, || {
-        render::generic_md(&output)
-    });
-    Ok(ToolResult::new(
-        json!({
-            "content": [{ "type": "text", "text": text }]
-        }),
-        touched_files,
-    ))
-}
-
-/// Handles `tracedecay_module_api` tool calls.
-#[allow(dead_code)] // Plan 21 module_api handler — not yet registered
-pub(super) async fn handle_module_api(
-    cg: &TraceDecay,
-    args: Value,
-    scope_prefix: Option<&str>,
-) -> Result<ToolResult> {
-    let path = effective_path(&args, scope_prefix).ok_or_else(|| TraceDecayError::Config {
-        message: "missing required parameter: path".to_string(),
-    })?;
-
-    let all_nodes = cg.get_all_nodes().await?;
-
-    // Filter to nodes in matching files (exact path or directory prefix)
-    let prefix = if path.ends_with('/') {
-        path.to_string()
-    } else {
-        format!("{path}/")
-    };
-
-    let mut pub_nodes: Vec<&crate::types::Node> = all_nodes
-        .iter()
-        .filter(|n| {
-            n.visibility == Visibility::Pub
-                && (n.file_path == path || n.file_path.starts_with(&prefix))
-        })
-        .collect();
-
-    pub_nodes.sort_by(|a, b| {
-        a.file_path
-            .cmp(&b.file_path)
-            .then(a.start_line.cmp(&b.start_line))
-    });
-
-    let touched_files = unique_file_paths(pub_nodes.iter().map(|n| n.file_path.as_str()));
-
-    let items: Vec<Value> = pub_nodes
-        .iter()
-        .map(|n| {
-            json!({
-                "id": n.id,
-                "name": n.name,
-                "kind": n.kind.as_str(),
-                "file": n.file_path,
-                "line": n.start_line,
-                "signature": n.signature,
-            })
-        })
-        .collect();
-
-    let output = json!({
-        "path": path,
-        "public_symbol_count": items.len(),
         "symbols": items,
     });
 

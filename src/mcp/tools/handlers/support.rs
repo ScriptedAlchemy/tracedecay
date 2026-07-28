@@ -116,20 +116,6 @@ pub(super) fn unique_file_paths<'a>(paths: impl Iterator<Item = &'a str>) -> Vec
     result
 }
 
-pub(super) fn safe_profile_relpath(value: &str) -> Result<PathBuf> {
-    let path = PathBuf::from(value);
-    if path.is_absolute()
-        || path
-            .components()
-            .any(|component| matches!(component, Component::ParentDir))
-    {
-        return Err(TraceDecayError::Config {
-            message: format!("registry artifact path is not a safe profile-relative path: {value}"),
-        });
-    }
-    Ok(path)
-}
-
 pub(super) fn profile_root_for_global_db(
     global_db: Option<&RegisteredGlobalDb>,
 ) -> Result<PathBuf> {

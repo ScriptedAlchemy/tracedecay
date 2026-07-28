@@ -575,37 +575,6 @@ impl McpServer {
         });
     }
 
-    /// D1/daemon hook: refresh the index if this cached project server's last
-    /// sync is older than `threshold_secs`. Called by the daemon on a
-    /// `project_server` cache hit so a long-lived cached server heals like a
-    /// freshly launched one. Non-blocking: it kicks the same detached D4
-    /// refresh and returns immediately.
-    pub async fn refresh_if_session_stale(&self, threshold_secs: u64) {
-        if !self.sync_config.read_refresh && !self.sync_config.auto_watch {
-            return;
-        }
-        let cg = self.cg_snapshot().await;
-        if cg.branch_drifted() {
-            return;
-        }
-        let now = crate::tracedecay::current_timestamp();
-        let last_sync = cg.last_sync_timestamp().await;
-        if last_sync != 0 && now.saturating_sub(last_sync) < threshold_secs as i64 {
-            return;
-        }
-        // Single-flight against the read-refresh machinery.
-        if self
-            .background_refresh_running
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return;
-        }
-        self.last_background_refresh_at
-            .store(now, Ordering::Release);
-        self.spawn_read_refresh_task(&cg, self.sync_config.full_sync_escalation_files);
-    }
-
     /// Returns a compact one-line notice when automation runs have staged
     /// managed-skill output awaiting review that the user hasn't been told
     /// about yet. Fact proposal counts remain telemetry-only.

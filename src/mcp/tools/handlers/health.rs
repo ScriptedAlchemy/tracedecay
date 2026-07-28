@@ -579,7 +579,6 @@ pub(super) async fn handle_gini(
         .filter(|n| crate::path_scope::path_matches_scope(&n.file_path, path_prefix))
         .collect();
 
-    // Build named_values per metric+scope
     let named_values: Vec<(String, f64)> = match (metric, scope) {
         ("complexity", "file") => {
             let mut per_file: HashMap<String, f64> = HashMap::new();
@@ -1420,22 +1419,6 @@ fn session_dimension_values(snap: &HealthSnapshot) -> [(&'static str, f64); 6] {
     ]
 }
 
-fn session_baseline_snapshot(snap: &HealthSnapshot) -> Value {
-    json!({
-        "quality_signal": snap.quality_signal,
-        "files_analyzed": snap.files_analyzed,
-        "dimensions": {
-            "acyclicity": snap.acyclicity,
-            "depth": snap.depth,
-            "equality": snap.equality,
-            "redundancy": snap.redundancy,
-            "modularity": snap.modularity,
-            "coverage_discipline": snap.coverage_discipline,
-        },
-        "timestamp": crate::tracedecay::current_timestamp(),
-    })
-}
-
 fn session_dimension_deltas(
     dims_before: &Value,
     snap: &HealthSnapshot,
@@ -1539,7 +1522,6 @@ pub(super) async fn handle_session_end(
         return Ok(session_tool_result(cg, &args, &output));
     }
 
-    // Read baseline
     let baseline_raw = std::fs::read_to_string(&baseline_path).map_err(|e| {
         crate::errors::TraceDecayError::Config {
             message: format!("failed to read session baseline: {e}"),
@@ -1600,7 +1582,6 @@ pub(super) async fn handle_session_end(
     let path_prefix = effective_path(&args, scope_prefix);
     let snap = compute_health_snapshot(cg, path_prefix).await?;
 
-    // Remove the baseline file
     let _ = std::fs::remove_file(&baseline_path);
 
     let signal_after = snap.quality_signal;

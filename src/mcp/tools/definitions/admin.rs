@@ -35,25 +35,6 @@ pub(super) fn def_active_project() -> ToolDefinition {
     )
 }
 
-#[allow(dead_code)] // Plan 21 storage_status tool def — not yet registered
-pub(super) fn def_storage_status() -> ToolDefinition {
-    def_always_load(
-        "tracedecay_storage_status",
-        "Storage Status",
-        "Return read-only health and path metadata for the resolved active project store backing this MCP session. Use this to answer which store is active and whether it is writable, stale, missing, or branch-fallback backed.",
-        json!({
-            "type": "object",
-            "properties": {
-                "include_details": {
-                    "type": "boolean",
-                    "default": false,
-                    "description": "Include bounded storage details when true."
-                }
-            }
-        }),
-    )
-}
-
 pub(super) fn def_project_list() -> ToolDefinition {
     def(
         "tracedecay_project_list",
