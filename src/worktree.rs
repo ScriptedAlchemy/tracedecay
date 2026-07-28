@@ -103,7 +103,7 @@ pub fn repository_identity_root(dir: &Path) -> Option<PathBuf> {
     crate::project_registry::primary_checkout_root(&worktree_root, Some(&common_dir))
 }
 
-pub fn is_detached_linked_worktree(dir: &Path) -> bool {
+pub(crate) fn is_linked_worktree(dir: &Path) -> bool {
     let Ok(repo) = gix::discover(dir) else {
         return false;
     };
@@ -115,7 +115,11 @@ pub fn is_detached_linked_worktree(dir: &Path) -> bool {
         .common_dir()
         .canonicalize()
         .unwrap_or_else(|_| repo.common_dir().to_path_buf());
-    git_dir != common_dir && crate::branch::current_branch(dir).is_none()
+    git_dir != common_dir
+}
+
+pub fn is_detached_linked_worktree(dir: &Path) -> bool {
+    is_linked_worktree(dir) && crate::branch::current_branch(dir).is_none()
 }
 
 /// Cheap pre-flight for the `git` subprocess fallbacks in this crate: `git`

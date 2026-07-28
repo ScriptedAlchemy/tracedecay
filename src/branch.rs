@@ -20,12 +20,15 @@ pub(crate) use admin::{BranchAdminRecoveryDisposition, prepare_pending_branch_ad
 const BRANCH_LOCK_RETRY_ATTEMPTS: usize = 20;
 const BRANCH_LOCK_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
 
-/// Resolves the current branch name using `gix`. Falls back to
-/// `git symbolic-ref HEAD` for worktrees when gix cannot resolve HEAD
-/// (e.g. with minimal feature flags that exclude worktree support).
+/// Resolves the current branch name using `gix`. Linked worktrees use
+/// `git symbolic-ref HEAD` because gix can resolve their shared repository's
+/// primary HEAD instead of the worktree-specific HEAD.
 ///
 /// Returns `None` for detached HEAD or if the repository cannot be opened.
 pub fn current_branch(project_root: &Path) -> Option<String> {
+    if crate::worktree::is_linked_worktree(project_root) {
+        return current_branch_git(project_root);
+    }
     match current_branch_gix(project_root) {
         GixHead::Branch(branch) => Some(branch),
         // A readable repo answered with a detached HEAD; `git symbolic-ref`
