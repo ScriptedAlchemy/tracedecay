@@ -639,6 +639,7 @@ fn error_class(error: &TraceDecayError) -> &'static str {
         TraceDecayError::Database { .. } | TraceDecayError::DatabaseOperation { .. } => "database",
         TraceDecayError::Search { .. } => "search",
         TraceDecayError::Config { .. } => "config",
+        TraceDecayError::ProjectRoute { .. } => "project_route",
         TraceDecayError::SyncLock { .. } => "sync_lock",
         TraceDecayError::Io(_) => "io",
         TraceDecayError::Sqlite(_) => "sqlite",
@@ -663,4 +664,20 @@ fn clipped_handle_for_log(handle: &str) -> String {
 #[cfg(test)]
 pub(crate) fn lock_response_handle_store() -> std::sync::MutexGuard<'static, ()> {
     crate::config::lock_user_data_dir_test_env()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn project_route_error_class_is_distinct() {
+        let error = TraceDecayError::project_route(
+            "project_route_unavailable",
+            true,
+            "project registry is warming",
+        );
+
+        assert_eq!(error_class(&error), "project_route");
+    }
 }
