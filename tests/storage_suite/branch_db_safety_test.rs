@@ -11,7 +11,7 @@ use crate::common::{self, IsolatedEnv};
 use tracedecay::branch::BranchAddOutcome;
 use tracedecay::branch_meta::load_branch_meta;
 use tracedecay::storage::resolve_layout_for_current_profile;
-use tracedecay::tracedecay::TraceDecay;
+use tracedecay::tracedecay::{TraceDecay, TraceDecayOpenOptions};
 
 // These tests resolve the profile layout from the live HOME without pinning
 // it, so under threaded `cargo test` they must not overlap with suite
@@ -55,15 +55,26 @@ fn project_data_dir(project: &Path) -> PathBuf {
         .data_root
 }
 
+fn profile_open_options(env: &IsolatedEnv) -> TraceDecayOpenOptions {
+    let profile_root = env.home().join(".tracedecay");
+    TraceDecayOpenOptions {
+        global_db_path: Some(profile_root.join("global.db")),
+        profile_root: Some(profile_root),
+    }
+}
+
 async fn open_untracked_project() -> (IsolatedEnv, PathBuf, TraceDecay) {
     let (env, project) = IsolatedEnv::acquire().await;
+    let open_options = profile_open_options(&env);
 
     git(&project, &["init", "-b", "main"]);
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn indexed_on_main() {}\n").unwrap();
     commit_all(&project, "initial commit");
 
-    let main = TraceDecay::init(&project).await.unwrap();
+    let main = TraceDecay::init_with_options(&project, open_options.clone())
+        .await
+        .unwrap();
     main.index_all().await.unwrap();
     drop(main);
 
@@ -74,7 +85,9 @@ async fn open_untracked_project() -> (IsolatedEnv, PathBuf, TraceDecay) {
     )
     .unwrap();
 
-    let feature = TraceDecay::open(&project).await.unwrap();
+    let feature = TraceDecay::open_with_options(&project, open_options)
+        .await
+        .unwrap();
     assert_eq!(feature.active_branch(), Some("feature/untracked"));
     assert_eq!(feature.serving_branch(), Some("feature/untracked"));
     assert!(!feature.is_fallback());
@@ -182,7 +195,8 @@ async fn corrupt_derived_branch_store_is_preserved_and_rebuilt_automatically() {
 
 #[tokio::test]
 async fn corrupt_derived_branch_repair_waits_for_the_active_sync_lease() {
-    let (_env, project, feature) = open_untracked_project().await;
+    let (env, project, feature) = open_untracked_project().await;
+    let open_options = profile_open_options(&env);
     let corrupt_db = feature.db_path().to_path_buf();
     let recovery_root = feature.store_layout().data_root.join("recovery");
     feature.checkpoint().await.unwrap();
@@ -204,20 +218,21 @@ async fn corrupt_derived_branch_repair_waits_for_the_active_sync_lease() {
         .unwrap();
     active_lock.try_lock_exclusive().unwrap();
 
-    let error = match TraceDecay::open(&project).await {
+    let error = match TraceDecay::open_with_options(&project, open_options.clone()).await {
         Ok(_) => panic!("active writer lease must block branch recovery"),
         Err(error) => error,
     };
     assert!(
         error
             .to_string()
-            .contains("another sync is already in progress")
+            .contains("another sync is already in progress"),
+        "unexpected active-lease recovery error: {error}"
     );
     assert_eq!(fs::read(&corrupt_db).unwrap(), corrupted);
     assert!(!recovery_root.exists());
 
     drop(active_lock);
-    let repaired = TraceDecay::open(&project)
+    let repaired = TraceDecay::open_with_options(&project, open_options)
         .await
         .expect("repair should proceed after the active lease is released");
     assert!(repaired.db().quick_check().await.unwrap());
@@ -247,13 +262,16 @@ async fn open_honors_and_clears_legacy_dirty_sentinel() {
 
 async fn open_detached_fallback_project() -> (IsolatedEnv, PathBuf, TraceDecay) {
     let (env, project) = IsolatedEnv::acquire().await;
+    let open_options = profile_open_options(&env);
 
     git(&project, &["init", "-b", "main"]);
     fs::create_dir_all(project.join("src")).unwrap();
     fs::write(project.join("src/lib.rs"), "pub fn indexed_on_main() {}\n").unwrap();
     commit_all(&project, "initial commit");
 
-    let main = TraceDecay::init(&project).await.unwrap();
+    let main = TraceDecay::init_with_options(&project, open_options.clone())
+        .await
+        .unwrap();
     main.index_all().await.unwrap();
     drop(main);
 
@@ -265,7 +283,9 @@ async fn open_detached_fallback_project() -> (IsolatedEnv, PathBuf, TraceDecay) 
     )
     .unwrap();
 
-    let fallback = TraceDecay::open(&project).await.unwrap();
+    let fallback = TraceDecay::open_with_options(&project, open_options)
+        .await
+        .unwrap();
     assert_eq!(fallback.active_branch(), None);
     assert_eq!(fallback.serving_branch(), Some("main"));
     assert!(fallback.is_fallback());
@@ -280,9 +300,16 @@ async fn open_detached_fallback_project() -> (IsolatedEnv, PathBuf, TraceDecay) 
     (env, project, fallback)
 }
 
-async fn assert_main_db_missing_symbol(project: &Path, symbol: &str, message: &str) {
+async fn assert_main_db_missing_symbol(
+    env: &IsolatedEnv,
+    project: &Path,
+    symbol: &str,
+    message: &str,
+) {
     git(project, &["checkout", "main"]);
-    let main = TraceDecay::open(project).await.unwrap();
+    let main = TraceDecay::open_with_options(project, profile_open_options(env))
+        .await
+        .unwrap();
     let results = main.search(symbol, 10).await.unwrap();
     assert!(results.is_empty(), "{message}");
 }
@@ -300,7 +327,7 @@ fn assert_fallback_write_refused(operation: &str, err: impl std::fmt::Display) {
 #[tokio::test]
 async fn open_auto_tracks_untracked_branch_and_syncs_its_db() {
     let _env_lock = HOME_ENV_LOCK.lock().await;
-    let (_env, project, feature) = open_untracked_project().await;
+    let (env, project, feature) = open_untracked_project().await;
 
     assert!(
         !feature
@@ -320,6 +347,7 @@ async fn open_auto_tracks_untracked_branch_and_syncs_its_db() {
 
     drop(feature);
     assert_main_db_missing_symbol(
+        &env,
         &project,
         "untracked_only",
         "auto-tracked branch sync must not index branch files into main DB",
@@ -330,7 +358,7 @@ async fn open_auto_tracks_untracked_branch_and_syncs_its_db() {
 #[tokio::test]
 async fn fallback_writes_are_refused_by_all_sync_entry_points() {
     let _env_lock = HOME_ENV_LOCK.lock().await;
-    let (_env, project, fallback) = open_detached_fallback_project().await;
+    let (env, project, fallback) = open_detached_fallback_project().await;
 
     let err = fallback
         .sync()
@@ -359,6 +387,7 @@ async fn fallback_writes_are_refused_by_all_sync_entry_points() {
 
     drop(fallback);
     assert_main_db_missing_symbol(
+        &env,
         &project,
         "detached_only",
         "fallback write attempts must not index detached files into main DB",
@@ -419,7 +448,8 @@ async fn detached_linked_worktree_uses_worktree_local_index() {
 #[tokio::test]
 async fn add_branch_tracking_copies_from_nearest_tracked_ancestor() {
     let _env_lock = HOME_ENV_LOCK.lock().await;
-    let (_env, project) = IsolatedEnv::acquire().await;
+    let (env, project) = IsolatedEnv::acquire().await;
+    let open_options = profile_open_options(&env);
     let project = project.as_path();
 
     git(project, &["init", "-b", "main"]);
@@ -427,7 +457,9 @@ async fn add_branch_tracking_copies_from_nearest_tracked_ancestor() {
     fs::write(project.join("src/lib.rs"), "pub fn main_only() {}\n").unwrap();
     commit_all(project, "initial commit");
 
-    let main = TraceDecay::init(project).await.unwrap();
+    let main = TraceDecay::init_with_options(project, open_options.clone())
+        .await
+        .unwrap();
     main.index_all().await.unwrap();
     main.set_tokens_saved(111).await.unwrap();
     main.checkpoint().await.unwrap();
@@ -441,12 +473,16 @@ async fn add_branch_tracking_copies_from_nearest_tracked_ancestor() {
     .unwrap();
     commit_all(project, "feature commit");
 
-    let feature_outcome = TraceDecay::add_branch_tracking(project, "feature/parent")
-        .await
-        .unwrap();
+    let feature_outcome = TraceDecay::add_branch_tracking_with_options(
+        project,
+        "feature/parent",
+        open_options.clone(),
+    )
+    .await
+    .unwrap();
     assert_eq!(feature_outcome, BranchAddOutcome::Added);
 
-    let feature_cg = TraceDecay::open_branch(project, "feature/parent")
+    let feature_cg = TraceDecay::open_with_options(project, open_options.clone())
         .await
         .unwrap();
     feature_cg.set_tokens_saved(777).await.unwrap();
@@ -461,9 +497,10 @@ async fn add_branch_tracking_copies_from_nearest_tracked_ancestor() {
     .unwrap();
     commit_all(project, "topic commit");
 
-    let topic_outcome = TraceDecay::add_branch_tracking(project, "topic/child")
-        .await
-        .unwrap();
+    let topic_outcome =
+        TraceDecay::add_branch_tracking_with_options(project, "topic/child", open_options.clone())
+            .await
+            .unwrap();
     assert_eq!(topic_outcome, BranchAddOutcome::Added);
 
     let meta = load_branch_meta(&project_data_dir(project)).unwrap();
@@ -473,7 +510,7 @@ async fn add_branch_tracking_copies_from_nearest_tracked_ancestor() {
         .expect("topic branch should be recorded in branch metadata");
     assert_eq!(topic_entry.parent.as_deref(), Some("feature/parent"));
 
-    let topic_cg = TraceDecay::open_branch(project, "topic/child")
+    let topic_cg = TraceDecay::open_branch_with_options(project, "topic/child", open_options)
         .await
         .unwrap();
     assert_eq!(
@@ -498,7 +535,8 @@ async fn add_branch_tracking_copies_from_nearest_tracked_ancestor() {
 #[tokio::test]
 async fn add_branch_tracking_refuses_corrupt_metadata_without_overwriting() {
     let _env_lock = HOME_ENV_LOCK.lock().await;
-    let (_env, project) = IsolatedEnv::acquire().await;
+    let (env, project) = IsolatedEnv::acquire().await;
+    let open_options = profile_open_options(&env);
     let project = project.as_path();
 
     git(project, &["init", "-b", "main"]);
@@ -506,7 +544,9 @@ async fn add_branch_tracking_refuses_corrupt_metadata_without_overwriting() {
     fs::write(project.join("src/lib.rs"), "pub fn main_only() {}\n").unwrap();
     commit_all(project, "initial commit");
 
-    let main = TraceDecay::init(project).await.unwrap();
+    let main = TraceDecay::init_with_options(project, open_options.clone())
+        .await
+        .unwrap();
     main.index_all().await.unwrap();
     drop(main);
 
@@ -522,9 +562,10 @@ async fn add_branch_tracking_refuses_corrupt_metadata_without_overwriting() {
     .unwrap();
     commit_all(project, "feature commit");
 
-    let err = TraceDecay::add_branch_tracking(project, "feature/corrupt-meta")
-        .await
-        .expect_err("corrupt metadata must stop branch tracking instead of being replaced");
+    let err =
+        TraceDecay::add_branch_tracking_with_options(project, "feature/corrupt-meta", open_options)
+            .await
+            .expect_err("corrupt metadata must stop branch tracking instead of being replaced");
 
     assert!(
         err.to_string().contains("corrupt branch metadata"),
@@ -606,6 +647,7 @@ fn cli_branch_add_refuses_corrupt_metadata_without_overwriting() {
 async fn cli_branch_add_uses_managed_daemon_as_the_only_database_writer() {
     let _env_lock = HOME_ENV_LOCK.lock().await;
     let (env, project) = IsolatedEnv::acquire().await;
+    let open_options = profile_open_options(&env);
     let project = project.as_path();
 
     git(project, &["init", "-b", "main"]);
@@ -613,7 +655,9 @@ async fn cli_branch_add_uses_managed_daemon_as_the_only_database_writer() {
     fs::write(project.join("src/lib.rs"), "pub fn main_only() {}\n").unwrap();
     commit_all(project, "initial commit");
 
-    let main = TraceDecay::init(project).await.unwrap();
+    let main = TraceDecay::init_with_options(project, open_options)
+        .await
+        .unwrap();
     main.index_all().await.unwrap();
     drop(main);
 
