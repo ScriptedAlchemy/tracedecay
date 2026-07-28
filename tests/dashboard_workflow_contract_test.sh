@@ -8,6 +8,7 @@ python3 - \
   .github/workflows/release-plz.yml \
   .github/workflows/release-pr-integrity.yml \
   .github/workflows/plugin-validation.yml <<'PY'
+import fnmatch
 import os
 import pathlib
 import re
@@ -352,6 +353,142 @@ if "--gate-passed pr13_lite_grammar_contract" in aggregate_job and not re.search
         "pr13_lite_grammar_contract but never ran the lite build, so it must "
         "require each OS lite_grammar.passed receipt"
     )
+
+# --------------------------------------------------------------------------
+# Raw nextest junit must survive a failing test step.
+#
+# The OS-tagged pr12-pr13 upload runs only after the strict validators, so a
+# red `Run tests` step ended the job before anything wrote the durations and
+# failure detail anywhere durable. Every Linux/macOS run must therefore keep an
+# unconditional raw copy, uploaded before the first gate that can abort.
+# --------------------------------------------------------------------------
+
+
+def steps_of(block: str) -> list[str]:
+    return [step for step in re.split(r"\n(?=      - )", block) if step.strip()]
+
+
+def step_title(step: str) -> str:
+    match = re.match(r"\s*- (?:name: (.+)|uses: (.+))", step.lstrip("\n"))
+    if match is None:
+        return step.strip().splitlines()[0]
+    return (match.group(1) or match.group(2)).strip()
+
+
+def with_mapping(step: str) -> str:
+    return step.split("with:", 1)[1] if "with:" in step else ""
+
+
+test_steps = steps_of(job_block(ci, "test"))
+raw_junit_indexes = [
+    index
+    for index, step in enumerate(test_steps)
+    if "actions/upload-artifact@" in step
+    and "path: target/nextest/ci/junit.xml" in step
+]
+if len(raw_junit_indexes) != 1:
+    raise SystemExit(
+        "CI test job must upload the raw nextest junit "
+        "('path: target/nextest/ci/junit.xml') exactly once; found "
+        f"{len(raw_junit_indexes)}"
+    )
+raw_junit_index = raw_junit_indexes[0]
+raw_junit_step = test_steps[raw_junit_index]
+
+if not re.search(r"(?m)^\s+if: always\(\)\s*$", raw_junit_step):
+    raise SystemExit(
+        "CI test job's raw nextest junit upload must be `if: always()`, or a "
+        "failing test step keeps taking the junit down with it"
+    )
+if "retention-days: 7" not in with_mapping(raw_junit_step):
+    raise SystemExit(
+        "CI test job's raw nextest junit upload must set retention-days: 7"
+    )
+# A missing junit means the compile or the runner died. That is already a job
+# failure; the upload must not add a second, misleading one, and must not
+# swallow the fact that there was nothing to keep either.
+if "if-no-files-found: warn" not in with_mapping(raw_junit_step):
+    raise SystemExit(
+        "CI test job's raw nextest junit upload must set "
+        "'if-no-files-found: warn': a compile failure leaves no junit, and "
+        "that must stay a warning on an already-failing job rather than a new "
+        "error or a silent skip"
+    )
+
+try:
+    run_tests_index = next(
+        index
+        for index, step in enumerate(test_steps)
+        if step_title(step) == "Run tests"
+    )
+except StopIteration:
+    raise SystemExit("CI test job must keep the 'Run tests' step")
+if raw_junit_index < run_tests_index:
+    raise SystemExit(
+        "CI test job's raw nextest junit upload must come after 'Run tests'"
+    )
+for step in test_steps[run_tests_index + 1 : raw_junit_index]:
+    if not re.search(r"(?m)^\s+if: always\(\)\s*$", step):
+        raise SystemExit(
+            "CI test job must upload the raw nextest junit before "
+            f"{step_title(step)!r}: that step can abort the job first and the "
+            "junit would be lost again"
+        )
+
+# Uploading it is only half the contract - the artifact names have to be
+# distinct per OS, or the second runner collides with the first.
+OS_TERNARY = re.compile(
+    r"\$\{\{ matrix\.name == 'Linux' && '([^']+)' \|\| '([^']+)' \}\}"
+)
+
+
+def expand_matrix_os(name: str) -> list[str]:
+    match = OS_TERNARY.search(name)
+    if match is None:
+        return [name]
+    return [OS_TERNARY.sub(value, name) for value in match.groups()]
+
+
+raw_junit_name = re.search(r"(?m)^\s+name: (.+)$", with_mapping(raw_junit_step))
+if raw_junit_name is None:
+    raise SystemExit("CI test job's raw nextest junit upload must name its artifact")
+raw_junit_names = expand_matrix_os(raw_junit_name.group(1).strip())
+if len(raw_junit_names) != 2:
+    raise SystemExit(
+        "CI test job's raw nextest junit artifact name must vary by OS "
+        f"(found {raw_junit_name.group(1).strip()!r}); the Linux and macOS "
+        "runners share this job and would otherwise collide on one name"
+    )
+
+uploaded: dict[str, str] = {}
+for job_name in re.findall(r"(?m)^  ([A-Za-z0-9_-]+):$", jobs_section):
+    for step in steps_of(job_block(ci, job_name)):
+        if "actions/upload-artifact@" not in step:
+            continue
+        name_match = re.search(r"(?m)^\s+name: (.+)$", with_mapping(step))
+        if name_match is None:
+            continue
+        for artifact in expand_matrix_os(name_match.group(1).strip()):
+            owner = f"{job_name} / {step_title(step)}"
+            if artifact in uploaded and uploaded[artifact] != owner:
+                raise SystemExit(
+                    f"CI uploads artifact {artifact!r} from two different "
+                    f"steps ({uploaded[artifact]} and {owner}); "
+                    "upload-artifact@v4 rejects duplicate names"
+                )
+            uploaded[artifact] = owner
+
+# The junit consumers download by glob. A raw artifact that drifts into one of
+# those patterns would feed unvalidated evidence into a strict packet gate.
+for consumer_pattern in re.findall(r"(?m)^\s+pattern: (\S*junit\S*)$", ci):
+    for artifact in raw_junit_names:
+        if fnmatch.fnmatch(artifact, consumer_pattern):
+            raise SystemExit(
+                f"raw nextest junit artifact {artifact!r} matches the "
+                f"download pattern {consumer_pattern!r}; the raw upload is "
+                "unvalidated retention and must stay out of the packet "
+                "aggregation inputs"
+            )
 
 # --------------------------------------------------------------------------
 # The workflow-contract tests must protect master, not just pull requests.
