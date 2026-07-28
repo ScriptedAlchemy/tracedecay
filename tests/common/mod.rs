@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+pub mod fixture;
+
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io::Read;
@@ -124,7 +126,7 @@ pub struct IsolatedEnv {
     // be declared last. Dropping it first would let the next waiting test
     // install its own isolated env, only for `storage`'s restore to clobber it.
     storage: TraceDecayStorageEnvGuard,
-    _dir: TempDir,
+    dir: TempDir,
     _env_lock: tokio::sync::MutexGuard<'static, ()>,
 }
 
@@ -142,7 +144,7 @@ impl IsolatedEnv {
         (
             Self {
                 storage,
-                _dir: dir,
+                dir,
                 _env_lock: env_lock,
             },
             project,
@@ -163,6 +165,13 @@ impl IsolatedEnv {
 
     pub fn home(&self) -> &Path {
         self.storage.home()
+    }
+
+    /// The throwaway directory holding the isolated home and every checkout, so
+    /// a fixture can place siblings of its project (a bare `origin`, a linked
+    /// worktree) inside the same disposable tree.
+    pub fn scratch(&self) -> &Path {
+        self.dir.path()
     }
 }
 
@@ -554,31 +563,14 @@ pub fn ensure_tracedecay_daemon(home: &Path) {
 
 /// Resolves the `git` executable to an absolute path exactly once per process.
 ///
-/// Under heavy parallel test load (nextest spawns one process per test, each
-/// spawning several `git` subprocesses), a bare `Command::new("git")` PATH
-/// lookup can transiently fail the spawn with `ENOENT` ("No such file or
-/// directory") even though git is installed. Resolving to an absolute path up
-/// front — with an optional `GIT` env override — removes the per-spawn PATH
-/// walk and makes the lookup deterministic.
+/// This delegates to the same cached authority the product spawns through, so
+/// tests and production resolve one program. Under heavy parallel test load
+/// (nextest spawns one process per test, each spawning several `git`
+/// subprocesses) a bare `Command::new("git")` PATH lookup can transiently fail
+/// the spawn with `ENOENT` even though git is installed; resolving to an
+/// absolute path up front removes the per-spawn PATH walk.
 pub fn git_program() -> std::ffi::OsString {
-    use std::sync::OnceLock;
-    static GIT: OnceLock<std::ffi::OsString> = OnceLock::new();
-    GIT.get_or_init(|| {
-        if let Some(explicit) = std::env::var_os("GIT") {
-            return explicit;
-        }
-        let exe_name = if cfg!(windows) { "git.exe" } else { "git" };
-        if let Some(paths) = std::env::var_os("PATH") {
-            for dir in std::env::split_paths(&paths) {
-                let candidate = dir.join(exe_name);
-                if candidate.is_file() {
-                    return candidate.into_os_string();
-                }
-            }
-        }
-        std::ffi::OsString::from("git")
-    })
-    .clone()
+    tracedecay::git::git_program().to_os_string()
 }
 
 #[cfg(unix)]

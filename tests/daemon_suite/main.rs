@@ -15,6 +15,7 @@
 #[path = "../common/mod.rs"]
 mod common;
 
+mod fixture_authority_test;
 mod git_watch_test;
 #[cfg(unix)]
 mod pr_autotrack_test;
