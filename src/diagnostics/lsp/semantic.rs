@@ -862,18 +862,22 @@ async fn graph_semantic_request(
         }
     }
     .await;
+    graph_projection_outcome(result)
+}
+
+fn graph_projection_outcome(result: Result<GraphProjection>) -> LspSemanticOperationOutcome {
     match result {
         Ok(projection) if projection.omitted == 0 => {
             LspSemanticOperationOutcome::Complete(projection.value)
         }
         Ok(projection) => LspSemanticOperationOutcome::Partial {
             value: projection.value,
-            coverage: format!("graph-results-truncated-{}", projection.omitted),
+            coverage: "graph-results-truncated".to_owned(),
             detail: None,
         },
         Err(error) => LspSemanticOperationOutcome::Partial {
             value: Value::Null,
-            coverage: format!("graph-read-{}", bounded_graph_failure(&error.to_string())),
+            coverage: "graph-read-failed".to_owned(),
             detail: LspSemanticOperationOutcome::bounded_detail(&error.to_string()),
         },
     }
@@ -1335,18 +1339,43 @@ fn symbol_kind(kind: &NodeKind) -> u32 {
     }
 }
 
-fn bounded_graph_failure(value: &str) -> String {
-    value
-        .chars()
-        .filter(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
-        .take(64)
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn partial_coverage(outcome: LspSemanticOperationOutcome) -> String {
+        match outcome {
+            LspSemanticOperationOutcome::Partial { coverage, .. } => coverage,
+            outcome => panic!("expected partial semantic outcome, got {outcome:?}"),
+        }
+    }
+
+    #[test]
+    fn graph_coverage_ignores_errors_and_omission_counts() {
+        for omitted in [1, 37, usize::MAX] {
+            assert_eq!(
+                partial_coverage(graph_projection_outcome(Ok(GraphProjection {
+                    value: json!([]),
+                    omitted,
+                }))),
+                "graph-results-truncated"
+            );
+        }
+
+        for message in [
+            "stale graph: Bearer super-secret-token!",
+            "file:///home/alice/private.rs?credential=hunter2",
+            r"C:\Users\alice\private.rs: failed?!",
+        ] {
+            assert_eq!(
+                partial_coverage(graph_projection_outcome(Err(TraceDecayError::Config {
+                    message: message.to_owned(),
+                }))),
+                "graph-read-failed"
+            );
+        }
+    }
 
     struct RecordingSemanticProvider {
         requests: AtomicUsize,

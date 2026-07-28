@@ -9,7 +9,7 @@
 
 use std::path::Path;
 
-use crate::db::engine::{Executor, QueryExecutor, params};
+use crate::db::engine::params;
 use crate::global_db::RegisteredGlobalDb;
 use crate::global_db::tests::harness::RegisteredGlobalDbHarness;
 

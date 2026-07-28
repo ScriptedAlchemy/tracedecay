@@ -10,7 +10,7 @@ use crate::branch;
 use crate::branch_meta;
 use crate::db::{Database, DatabaseAccessMode};
 use crate::errors::{Result, TraceDecayError};
-use crate::storage::{self, StoreLayout};
+use crate::storage::StoreLayout;
 
 use super::{TraceDecay, TraceDecayOpenOptions};
 

@@ -292,13 +292,13 @@ enum CutoverFaultPhase {
     TargetDurabilityBarrier = 1,
 }
 
-fn inject_cutover_fault(phase: CutoverFaultPhase) -> Result<()> {
+fn inject_cutover_fault(_phase: CutoverFaultPhase) -> Result<()> {
     #[cfg(any(test, feature = "test-transport"))]
     if CUTOVER_FAULT
-        .compare_exchange(phase as u8, 0, Ordering::SeqCst, Ordering::SeqCst)
+        .compare_exchange(_phase as u8, 0, Ordering::SeqCst, Ordering::SeqCst)
         .is_ok()
     {
-        return Err(migration_error(match phase {
+        return Err(migration_error(match _phase {
             CutoverFaultPhase::TargetDurabilityBarrier => {
                 "injected target durability barrier failure"
             }

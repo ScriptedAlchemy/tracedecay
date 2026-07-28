@@ -11,8 +11,8 @@ use tokio::time::{Duration, Instant};
 
 use super::{
     DAEMON_TOOL_LIVENESS_POLL_INTERVAL, DaemonClientDeadline, DaemonHandshake,
-    PROJECT_WARMING_RETRY_HINT, connect_to_current_daemon_within, connect_to_daemon_connection,
-    default_available_socket_path, next_daemon_response_line, write_daemon_preamble,
+    PROJECT_WARMING_RETRY_HINT, connect_to_current_daemon_within, default_available_socket_path,
+    next_daemon_response_line, write_daemon_preamble,
 };
 #[cfg(unix)]
 use super::{

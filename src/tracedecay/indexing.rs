@@ -576,6 +576,8 @@ impl TraceDecay {
             .chunks(MIGRATION_REINDEX_CHECKPOINT_BATCH_SIZE)
             .enumerate()
         {
+            #[cfg(not(any(test, feature = "test-transport")))]
+            let _ = batch_index;
             let (extractions, _skipped) =
                 extract_files_isolated(&self.project_root, &self.registry, batch.to_vec());
             #[cfg(any(test, feature = "test-transport"))]

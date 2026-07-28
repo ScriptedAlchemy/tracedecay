@@ -1,9 +1,8 @@
 use std::fmt;
 
 use tracedecay_domain::{
-    ActorId, CursorManifestLimitKindV1, RetrievalGrainV1, SESSION_TEMPORAL_CURSOR_MAX_PARTICIPANTS,
-    SessionId, SessionSourceCoverageAggregateStateV1, SessionSourceCoverageReceiptV1,
-    TemporalModeV1,
+    ActorId, CursorManifestLimitKindV1, RetrievalGrainV1, SessionId,
+    SessionSourceCoverageAggregateStateV1, SessionSourceCoverageReceiptV1, TemporalModeV1,
 };
 
 use crate::application::context::{
@@ -1159,7 +1158,7 @@ mod tests {
             SessionRetrievalOutcome::CursorManifestLimitExceeded {
                 kind: CursorManifestLimitKindV1::Participants,
                 observed: 257,
-                maximum: SESSION_TEMPORAL_CURSOR_MAX_PARTICIPANTS,
+                maximum: tracedecay_domain::SESSION_TEMPORAL_CURSOR_MAX_PARTICIPANTS,
             },
             SessionRetrievalOutcome::BudgetExhausted,
             SessionRetrievalOutcome::Cancelled,

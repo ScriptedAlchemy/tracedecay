@@ -16,10 +16,6 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use notify_debouncer_full::{
-    DebounceEventResult, Debouncer, RecommendedCache, new_debouncer,
-    notify::{RecommendedWatcher, RecursiveMode},
-};
 use thiserror::Error;
 use tracedecay_domain::{
     ChunkerRevision, CodeGenerationId, ComponentRevision, ContentDigest,

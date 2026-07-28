@@ -21,11 +21,11 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::pr10_native::{
-    Pr10ChannelAblationV1, Pr10NativeHydrationMeasurementV1, Pr10NativePendingReasonV1,
-    Pr10NativePr9StageMeasurementsV1, Pr10NativeQueryInputV1, Pr10NativeQueryOutputV1,
-    Pr10NativeRerankInputV1, Pr10NativeResourceEvidenceV1, Pr10NativeResourceSampleV1,
-    Pr10NativeSemanticInputV1, Pr10NativeStageMeasurementV1, Pr10NativeStageResultV1,
-    Pr10ProjectionCaseSampleV1, Pr10ProjectionCaseV1, evaluate_native_query,
+    Pr10ChannelAblationV1, Pr10NativeHydrationMeasurementV1, Pr10NativePr9StageMeasurementsV1,
+    Pr10NativeQueryInputV1, Pr10NativeQueryOutputV1, Pr10NativeRerankInputV1,
+    Pr10NativeResourceEvidenceV1, Pr10NativeResourceSampleV1, Pr10NativeSemanticInputV1,
+    Pr10NativeStageMeasurementV1, Pr10NativeStageResultV1, Pr10ProjectionCaseSampleV1,
+    Pr10ProjectionCaseV1, evaluate_native_query,
 };
 use crate::application::code_index::{
     ProductionCodeIndexOwnerV1, open_production_code_index_owner_v1,
@@ -3429,6 +3429,7 @@ fn hardware_fingerprint() -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::pr10_native::Pr10NativePendingReasonV1;
     use super::*;
 
     struct TestRepositoryFixture {
