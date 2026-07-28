@@ -1280,7 +1280,10 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
     .await
     .unwrap();
     let grep_payload: Value = serde_json::from_str(extract_text(&grep.value)).unwrap();
-    assert_eq!(grep_payload["status"], "partial");
+    assert_eq!(
+        grep_payload["status"], "partial",
+        "root-wide grep payload: {grep_payload}"
+    );
     assert_eq!(grep_payload["omitted"], 1);
     assert_eq!(grep_payload["coverage"]["unknown"], 1);
     assert_eq!(grep_payload["hits"].as_array().unwrap().len(), 1);
@@ -1305,7 +1308,10 @@ async fn lcm_session_handlers_expose_bounded_read_apis_and_placeholders() {
     .unwrap();
     let default_provider_grep_payload: Value =
         serde_json::from_str(extract_text(&default_provider_grep.value)).unwrap();
-    assert_eq!(default_provider_grep_payload["status"], "partial");
+    assert_eq!(
+        default_provider_grep_payload["status"], "partial",
+        "default-provider root-wide grep payload: {default_provider_grep_payload}"
+    );
     assert_eq!(default_provider_grep_payload["omitted"], 1);
     assert_eq!(default_provider_grep_payload["coverage"]["unknown"], 1);
     assert_eq!(default_provider_grep_payload["provider"], "all");

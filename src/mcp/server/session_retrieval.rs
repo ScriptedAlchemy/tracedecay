@@ -536,13 +536,15 @@ impl DaemonSessionRetrievalService {
     ) -> SessionRetrievalServiceOutcome {
         match outcome {
             SessionRetrievalOutcome::Complete { items, freshness } => {
-                match self.page(items).await {
-                    Some(page) => SessionRetrievalServiceOutcome::Complete { page, freshness },
-                    None => SessionRetrievalServiceOutcome::Unavailable(
-                        SessionRetrievalUnavailable::without_worker(
-                            SessionRetrievalUnavailableReason::HydrationUnavailable,
-                        ),
-                    ),
+                let (page, skipped, _) = self.page(items).await;
+                if skipped == 0 {
+                    SessionRetrievalServiceOutcome::Complete { page, freshness }
+                } else {
+                    SessionRetrievalServiceOutcome::Partial {
+                        page,
+                        freshness,
+                        omitted: skipped,
+                    }
                 }
             }
             SessionRetrievalOutcome::CompleteZero { freshness } => {
@@ -559,18 +561,14 @@ impl DaemonSessionRetrievalService {
                 items,
                 freshness,
                 omitted,
-            } => match self.page(items).await {
-                Some(page) => SessionRetrievalServiceOutcome::Partial {
+            } => {
+                let (page, _, rendering_omitted) = self.page(items).await;
+                SessionRetrievalServiceOutcome::Partial {
                     page,
                     freshness,
-                    omitted,
-                },
-                None => SessionRetrievalServiceOutcome::Unavailable(
-                    SessionRetrievalUnavailable::without_worker(
-                        SessionRetrievalUnavailableReason::HydrationUnavailable,
-                    ),
-                ),
-            },
+                    omitted: omitted.saturating_add(rendering_omitted),
+                }
+            }
             SessionRetrievalOutcome::WrongScope => SessionRetrievalServiceOutcome::WrongScope,
             SessionRetrievalOutcome::Locked => SessionRetrievalServiceOutcome::Locked,
             SessionRetrievalOutcome::Redacted => SessionRetrievalServiceOutcome::Redacted,
@@ -604,7 +602,7 @@ impl DaemonSessionRetrievalService {
         }
     }
 
-    async fn page(&self, items: Vec<TemporalKernelResult>) -> Option<SessionRetrievalPageView> {
+    async fn page(&self, items: Vec<TemporalKernelResult>) -> (SessionRetrievalPageView, u64, u64) {
         let mut results = Vec::new();
         let mut anchors = Vec::new();
         let mut explanations = Vec::new();
@@ -612,6 +610,8 @@ impl DaemonSessionRetrievalService {
         let mut source_coverage = Vec::new();
         let mut watermarks = SessionTemporalWatermarksView::default();
         let mut cursor = None;
+        let mut skipped = 0u64;
+        let mut rendering_omitted = 0u64;
         for item in items {
             let item_watermarks = item.snapshot.watermarks();
             watermarks.generation = watermarks.generation.max(item_watermarks.generation);
@@ -630,9 +630,21 @@ impl DaemonSessionRetrievalService {
                 cursor = item.next_cursor.clone();
             }
             for ranked in &item.ranked {
-                let result = self
+                let hydration_already_unavailable = item.hydrated.iter().any(|hydrated| {
+                    hydrated.anchor_id() == &ranked.anchor_id
+                        && hydrated.state() != HydrationStateV1::Available
+                });
+                let Some(result) = self
                     .hydrate_result(&item.snapshot, ranked, &item.hydrated)
-                    .await?;
+                    .await
+                else {
+                    skipped = skipped.saturating_add(1);
+                    if !hydration_already_unavailable {
+                        rendering_omitted = rendering_omitted.saturating_add(1);
+                        coverage.unknown = coverage.unknown.saturating_add(1);
+                    }
+                    continue;
+                };
                 anchors.push(ranked.anchor_id.clone());
                 explanations.push(SessionRetrievalExplanationView {
                     anchor: ranked.anchor_id.clone(),
@@ -646,18 +658,22 @@ impl DaemonSessionRetrievalService {
         }
         source_coverage.sort_by(|left, right| left.source_id().cmp(right.source_id()));
         source_coverage.dedup_by(|left, right| left.source_id() == right.source_id());
-        Some(SessionRetrievalPageView {
-            results,
-            temporal: SessionTemporalMetadataView {
-                anchors,
-                watermarks,
-                coverage,
-                source_coverage,
-                cursor,
-                explanations,
-                authorized_root: self.root.authorized_root.clone(),
+        (
+            SessionRetrievalPageView {
+                results,
+                temporal: SessionTemporalMetadataView {
+                    anchors,
+                    watermarks,
+                    coverage,
+                    source_coverage,
+                    cursor,
+                    explanations,
+                    authorized_root: self.root.authorized_root.clone(),
+                },
             },
-        })
+            skipped,
+            rendering_omitted,
+        )
     }
 
     async fn hydrate_result(
@@ -713,18 +729,21 @@ impl DaemonSessionRetrievalService {
                 score: ranked.normalized_score_micros as f64 / 1_000_000.0,
             });
         }
+        let provider = ranked.source.as_deref()?;
+        let session_id = ranked.session.as_deref()?;
         let message = self
             .registered_execution()
             .ok()?
-            .session_message_from_hydrated_occurrence(snapshot, &ranked.anchor_id, content)
+            .session_message_from_hydrated_occurrence(
+                snapshot,
+                &ranked.anchor_id,
+                provider,
+                session_id,
+                content,
+            )
             .await
             .ok()?;
-        let session = registered_session(
-            self.database.as_ref(),
-            &message.provider,
-            &message.session_id,
-        )
-        .await?;
+        let session = registered_session(self.database.as_ref(), provider, session_id).await?;
         if message.session_id != session.session_id {
             return None;
         }
