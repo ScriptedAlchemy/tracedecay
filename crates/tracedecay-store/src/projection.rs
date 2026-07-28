@@ -165,19 +165,6 @@ impl ObservationProjection {
         })
     }
 
-    pub fn for_composite(
-        observation: &DurableObservationV1,
-        message: Option<(SessionRecord, SessionMessageRecord)>,
-        workflow_facts: Vec<(SessionRecord, WorkflowFactRecord)>,
-    ) -> ProjectionStoreResult<Self> {
-        if workflow_facts.is_empty() {
-            return Err(ProjectionStoreError::Contract(
-                ObservationContractError::InvalidCanonicalPayload,
-            ));
-        }
-        Self::for_outputs(observation, message.into_iter().collect(), workflow_facts)
-    }
-
     pub fn for_outputs(
         observation: &DurableObservationV1,
         messages: Vec<(SessionRecord, SessionMessageRecord)>,

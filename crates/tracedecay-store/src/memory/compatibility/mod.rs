@@ -102,10 +102,6 @@ impl CompatibilityFactIdV1 {
         Ok(Self { owner, fact_id })
     }
 
-    pub fn from_legacy_mapping(mapping: &LegacyFactMappingV1) -> FactStoreResult<Self> {
-        Self::new(mapping.owner().clone(), mapping.fact_id().clone())
-    }
-
     pub fn owner(&self) -> &FactOwnerV1 {
         &self.owner
     }

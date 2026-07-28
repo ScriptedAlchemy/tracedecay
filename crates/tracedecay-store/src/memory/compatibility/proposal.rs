@@ -71,10 +71,6 @@ impl PromoteFactProposal {
     pub fn batch(&self) -> &FactWriteBatch {
         &self.batch
     }
-
-    pub fn into_batch(self) -> FactWriteBatch {
-        self.batch
-    }
 }
 
 /// Result of one atomic proposal CAS and fact append.

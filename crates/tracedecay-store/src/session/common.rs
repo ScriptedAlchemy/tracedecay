@@ -224,10 +224,6 @@ impl SessionTemporalDigestV1 {
     pub fn as_str(&self) -> &str {
         self.0.as_str()
     }
-
-    pub fn as_data_version_digest(&self) -> &DataVersionDigest {
-        &self.0
-    }
 }
 
 /// Errors returned by transport-neutral session-temporal store contracts.
