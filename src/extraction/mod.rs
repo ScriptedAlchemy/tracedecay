@@ -329,6 +329,11 @@ impl LanguageRegistry {
         Self { extractors }
     }
 
+    #[cfg(test)]
+    pub(crate) fn from_extractors_for_test(extractors: Vec<Box<dyn LanguageExtractor>>) -> Self {
+        Self { extractors }
+    }
+
     /// Returns the extractor for a file path based on its extension.
     pub fn extractor_for_file(&self, path: &str) -> Option<&dyn LanguageExtractor> {
         let ext = path.rsplit('.').next()?;
