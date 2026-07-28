@@ -12,11 +12,8 @@ use std::time::Duration;
 use serde_json::Value;
 use tempfile::TempDir;
 
-use super::writer_test_support::init_indexed_repo;
-use super::{
-    HookBranchWriteRequest, HookBranchWriteResult, HookBranchWriter, McpServer,
-    McpServerConstructionContext,
-};
+use super::writer_test_support::{init_indexed_repo, registered_context};
+use super::{HookBranchWriteRequest, HookBranchWriteResult, HookBranchWriter, McpServer};
 use crate::application::host_admission::{
     HostAdmissionBroker, HostAdmissionRuntime, HostAdmissionStatus, SharedHostAdmissionBroker,
     SpoolBounds,
@@ -29,22 +26,22 @@ fn session_start(root: PathBuf) -> Value {
     serde_json::to_value(DaemonHookEvent::session_start(HookAgent::Codex, root)).unwrap()
 }
 
-fn context_with_broker(
+async fn server_with_broker(
     cg: crate::tracedecay::TraceDecay,
     broker: SharedHostAdmissionBroker,
     writer: HookBranchWriter,
-) -> McpServerConstructionContext {
-    let mut context =
-        McpServerConstructionContext::direct(cg, None).with_hook_branch_writer(writer);
+) -> Arc<McpServer> {
+    let mut context = registered_context(cg).await.with_hook_branch_writer(writer);
     context.host_admission_broker = Some(broker);
-    context
+    McpServer::new_with_registered_test_context(context, Vec::new()).await
 }
 
-fn context_without_broker(
+async fn server_without_broker(
     cg: crate::tracedecay::TraceDecay,
     writer: HookBranchWriter,
-) -> McpServerConstructionContext {
-    McpServerConstructionContext::direct(cg, None).with_hook_branch_writer(writer)
+) -> Arc<McpServer> {
+    let context = registered_context(cg).await.with_hook_branch_writer(writer);
+    McpServer::new_with_registered_test_context(context, Vec::new()).await
 }
 
 fn failing_writer(message: &'static str) -> HookBranchWriter {
@@ -79,11 +76,11 @@ async fn matrix_duplicate_is_exact_duplicate_without_frontier_corruption() {
         .0;
     let broker = Arc::new(HostAdmissionBroker::new(runtime));
     let writes = Arc::new(Mutex::new(0usize));
-    let server = McpServer::new_with_context(context_with_broker(
+    let server = server_with_broker(
         cg,
         Arc::clone(&broker),
         counting_success_writer(Arc::clone(&writes)),
-    ))
+    )
     .await;
     let mut routes = HookProjectRouteCache::default();
     let event = session_start(project.path().to_path_buf());
@@ -109,11 +106,11 @@ async fn matrix_reordered_completion_waits_for_contiguous_frontier() {
         .unwrap()
         .0;
     let broker = Arc::new(HostAdmissionBroker::new(runtime));
-    let server = McpServer::new_with_context(context_with_broker(
+    let server = server_with_broker(
         cg,
         Arc::clone(&broker),
         failing_writer("injected retain for reorder"),
-    ))
+    )
     .await;
     let mut routes = HookProjectRouteCache::default();
 
@@ -212,7 +209,7 @@ async fn matrix_daemon_unavailable_without_broker_skips_writer_and_frontier() {
             })
         })
     };
-    let server = McpServer::new_with_context(context_without_broker(cg, writer)).await;
+    let server = server_without_broker(cg, writer).await;
     let mut routes = HookProjectRouteCache::default();
 
     let outcome = Box::pin(server.handle_hook_event_notification(
@@ -255,8 +252,7 @@ async fn matrix_backpressure_overflow_rejects_before_writer_without_pending_grow
             })
         })
     };
-    let server =
-        McpServer::new_with_context(context_with_broker(cg, Arc::clone(&broker), writer)).await;
+    let server = server_with_broker(cg, Arc::clone(&broker), writer).await;
     let mut routes = HookProjectRouteCache::default();
     let event = session_start(project.path().to_path_buf());
 
@@ -289,11 +285,11 @@ async fn matrix_unavailable_then_success_keeps_sticky_retained_failure_frontier(
         .unwrap()
         .0;
     let broker = Arc::new(HostAdmissionBroker::new(runtime));
-    let server = McpServer::new_with_context(context_with_broker(
+    let server = server_with_broker(
         cg,
         Arc::clone(&broker),
         failing_writer("injected unavailable"),
-    ))
+    )
     .await;
     let mut routes = HookProjectRouteCache::default();
 
@@ -317,11 +313,11 @@ async fn matrix_unavailable_then_success_keeps_sticky_retained_failure_frontier(
     let broker = Arc::new(HostAdmissionBroker::new(runtime));
     let writes = Arc::new(Mutex::new(0usize));
     let reopened_cg = authority.reopen_project_graph(project.path()).await;
-    let server = McpServer::new_with_context(context_with_broker(
+    let server = server_with_broker(
         reopened_cg,
         Arc::clone(&broker),
         counting_success_writer(Arc::clone(&writes)),
-    ))
+    )
     .await;
     Box::pin(server.replay_host_admission(None)).await;
     assert_eq!(broker.pending_count().await, 0);
@@ -349,8 +345,8 @@ async fn after_edit_hook_delivers_touched_paths_to_code_index_sink() {
             true
         })
     });
-    let context = McpServerConstructionContext::direct(cg, None).with_code_index_hook_sink(sink);
-    let server = McpServer::new_with_context(context).await;
+    let context = registered_context(cg).await.with_code_index_hook_sink(sink);
+    let server = McpServer::new_with_registered_test_context(context, Vec::new()).await;
     let mut routes = HookProjectRouteCache::default();
     let event = serde_json::to_value(DaemonHookEvent::post_tool_use_edit(
         HookAgent::Codex,

@@ -647,29 +647,6 @@ impl McpServer {
         retained_graphs: Vec<Arc<TraceDecay>>,
     ) -> Arc<Self> {
         let runtime = runtime.into_runtime();
-        let retained_root = cg.project_root().to_path_buf();
-        let profile_root = runtime.profile_root_for_test().to_path_buf();
-        let mut retained: Vec<(PathBuf, Arc<TraceDecay>)> = retained_graphs
-            .into_iter()
-            .map(|graph| (canonical_or_original(graph.project_root()), graph))
-            .collect();
-        // The runtime's resolver only mounts stores inside its own profile
-        // root. A runtime supplied purely as an injected registry for a graph
-        // in another profile has no graph here to retain; retaining
-        // unconditionally instead resolved a store path never created.
-        if graph_lives_under_profile(&cg, &profile_root) {
-            let active = runtime
-                .open_project_graph_for_test(
-                    &retained_root,
-                    crate::tracedecay::TraceDecayOpenOptions {
-                        global_db_path: Some(profile_root.join("global.db")),
-                        profile_root: Some(profile_root),
-                    },
-                )
-                .await
-                .expect("MCP test runtime retained project graph");
-            retained.push((canonical_or_original(&retained_root), Arc::new(active)));
-        }
         let mut context = runtime
             .mcp_server_context_for_test(cg, scope_prefix)
             .expect("MCP test runtime must retain exact profile and session authorities");
@@ -692,6 +669,55 @@ impl McpServer {
             context.host_admission_broker = Some(Arc::new(
                 crate::application::host_admission::HostAdmissionBroker::new(admission_runtime),
             ));
+        }
+        Self::new_with_registered_test_context(context, retained_graphs).await
+    }
+
+    /// Mounts the daemon-equivalent retained project-graph resolver on an
+    /// already-assembled registered test context, then constructs the server.
+    ///
+    /// Path-selector reads — including the hook workspace route resolved
+    /// before durable host admission — go through
+    /// `handlers::selected_registered_project_reader`, which needs both the
+    /// registry database the test runtime supplies and a resolver that can
+    /// mount the selected project. A context without the resolver makes every
+    /// hook notification fail closed as `project_registry_route_unavailable`
+    /// before it ever reaches the spool, which is a fixture gap rather than
+    /// the daemon's behaviour.
+    #[cfg(any(test, feature = "test-transport"))]
+    #[doc(hidden)]
+    pub async fn new_with_registered_test_context(
+        mut context: McpServerConstructionContext,
+        retained_graphs: Vec<Arc<TraceDecay>>,
+    ) -> Arc<Self> {
+        let runtime = Arc::clone(
+            context
+                .host_admission_test_runtime
+                .as_ref()
+                .expect("registered test context must carry its host-admission test runtime"),
+        );
+        let retained_root = context.cg.project_root().to_path_buf();
+        let profile_root = runtime.profile_root_for_test().to_path_buf();
+        let mut retained: Vec<(PathBuf, Arc<TraceDecay>)> = retained_graphs
+            .into_iter()
+            .map(|graph| (canonical_or_original(graph.project_root()), graph))
+            .collect();
+        // The runtime's resolver only mounts stores inside its own profile
+        // root. A runtime supplied purely as an injected registry for a graph
+        // in another profile has no graph here to retain; retaining
+        // unconditionally instead resolved a store path never created.
+        if graph_lives_under_profile(&context.cg, &profile_root) {
+            let active = runtime
+                .open_project_graph_for_test(
+                    &retained_root,
+                    crate::tracedecay::TraceDecayOpenOptions {
+                        global_db_path: Some(profile_root.join("global.db")),
+                        profile_root: Some(profile_root),
+                    },
+                )
+                .await
+                .expect("MCP test runtime retained project graph");
+            retained.push((canonical_or_original(&retained_root), Arc::new(active)));
         }
         // The daemon always has the active project mounted, so its resolver can
         // serve it like any other registered project. Mirror that here through

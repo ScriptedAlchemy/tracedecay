@@ -3,7 +3,9 @@ use std::sync::Arc;
 
 use tempfile::TempDir;
 
+use crate::application::host_admission::HostAdmissionTestRuntimeV1;
 use crate::config::PinnedUserDataDir;
+use crate::mcp::server::McpServerConstructionContext;
 use crate::tracedecay::TraceDecay;
 
 pub(super) fn git(root: &Path, args: &[&str]) {
@@ -37,6 +39,39 @@ impl WriterTestFixtureAuthority {
             .await
             .expect("reopen registered project graph")
     }
+}
+
+/// A registered project runtime for `cg`, rooted at the isolated profile the
+/// fixture already pinned. This is the registry authority the daemon holds in
+/// production, so a server built from it resolves path selectors — including
+/// hook workspace routes — instead of reporting the project unregistered.
+pub(super) async fn registered_runtime(cg: &TraceDecay) -> HostAdmissionTestRuntimeV1 {
+    let project_id = tracedecay_domain::ProjectId::new(
+        cg.store_layout()
+            .identity
+            .project_id
+            .as_deref()
+            .expect("project identity"),
+    )
+    .expect("typed project identity");
+    HostAdmissionTestRuntimeV1::project(
+        crate::config::user_data_dir().expect("isolated profile root"),
+        cg.project_root(),
+        project_id,
+    )
+    .await
+    .expect("registered host-admission runtime")
+}
+
+/// A registered construction context for `cg`.
+///
+/// Pair it with [`crate::mcp::server::McpServer::new_with_registered_test_context`],
+/// which adds the retained project-graph resolver.
+pub(super) async fn registered_context(cg: TraceDecay) -> McpServerConstructionContext {
+    registered_runtime(&cg)
+        .await
+        .into_mcp_server_context_for_test(cg, None)
+        .expect("registered MCP server context")
 }
 
 pub(super) async fn init_indexed_repo() -> (TraceDecay, TempDir, WriterTestFixtureAuthority) {
