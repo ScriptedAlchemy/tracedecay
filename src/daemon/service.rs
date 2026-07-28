@@ -109,6 +109,28 @@ impl QuiescedDaemonLifecycle {
     /// the old process and acquiring an exclusive maintenance lease. Failures
     /// never restore the captured pre-migration definition or running state.
     pub fn acquire_forward_only(operation: &str, spec: &DaemonServiceSpec) -> Result<Self> {
+        Self::acquire_forward_only_with(operation, spec, || {
+            crate::lifecycle_lease::acquire_exclusive(operation)
+        })
+    }
+
+    /// Forward-only acquisition that allows short-lived readers to drain
+    /// after the managed daemon has stopped.
+    pub fn acquire_forward_only_with_timeout(
+        operation: &str,
+        spec: &DaemonServiceSpec,
+        timeout: Duration,
+    ) -> Result<Self> {
+        Self::acquire_forward_only_with(operation, spec, || {
+            crate::lifecycle_lease::acquire_exclusive_with_timeout(operation, timeout)
+        })
+    }
+
+    fn acquire_forward_only_with(
+        operation: &str,
+        spec: &DaemonServiceSpec,
+        acquire: impl FnOnce() -> Result<crate::lifecycle_lease::LifecycleLease>,
+    ) -> Result<Self> {
         let previous_state = match prepare_forward_only_service_before_lease(spec) {
             Ok(state) => state,
             Err(operation_error) => {
@@ -121,7 +143,7 @@ impl QuiescedDaemonLifecycle {
             }
         };
 
-        let lifecycle_lease = match crate::lifecycle_lease::acquire_exclusive(operation) {
+        let lifecycle_lease = match acquire() {
             Ok(lease) => lease,
             Err(operation_error) => {
                 let recovery_result = enforce_forward_only_service_recovery(spec).map(drop);

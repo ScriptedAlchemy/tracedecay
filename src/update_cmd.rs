@@ -493,9 +493,10 @@ async fn run_forward_only_post_update_command(
             message: format!("could not resolve the dogfood post-update executable: {error}"),
         })?;
     let spec = tracedecay::daemon::service_spec(current_exe, None)?;
-    let guard = tracedecay::daemon::QuiescedDaemonLifecycle::acquire_forward_only(
+    let guard = tracedecay::daemon::QuiescedDaemonLifecycle::acquire_forward_only_with_timeout(
         "dogfood forward-only post-update",
         &spec,
+        DAEMON_RESTART_LEASE_TIMEOUT,
     )
     .map_err(|error| forward_only_failure(&spec, error))?;
     let previous_daemon_state = guard.previous_state();
