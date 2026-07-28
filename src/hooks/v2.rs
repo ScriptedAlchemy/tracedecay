@@ -386,6 +386,10 @@ struct DaemonAdmissionPort<'a> {
     session_id: Option<&'a str>,
     lifecycle: Option<&'a NativeContextScoutLifecycleV1>,
     feedback_notice: Mutex<Option<crate::application::advisory::Pr13AdvisoryHookLookupNoticeV1>>,
+    /// The caller's hook span, so the admission round trip is attributed like
+    /// every other hook/daemon call. Passing `None` here reported hosts that
+    /// route through V2 as having done no daemon IPC at all.
+    telemetry: Option<&'a HookTimingSpan>,
 }
 
 struct DaemonAdmissionResponseV1 {
@@ -507,7 +511,7 @@ impl AsyncHookAdmissionPortV1 for DaemonAdmissionPort<'_> {
                         "native_session_id": self.session_id,
                         "native_lifecycle": self.lifecycle,
                     }),
-                    None,
+                    self.telemetry,
                 ),
             )
             .await;
@@ -529,6 +533,7 @@ pub(crate) async fn dispatch(
     host: HookHostV1,
     event_json: &str,
     project_root: &Path,
+    telemetry: Option<&HookTimingSpan>,
 ) -> HookV2Dispatch {
     let started = Instant::now();
     let decoded = match tracedecay_hooks::decode_native_hook_event(host, event_json.as_bytes()) {
@@ -541,12 +546,13 @@ pub(crate) async fn dispatch(
         }
         Err(_) => return unavailable(),
     };
-    dispatch_decoded(host, event_json, project_root, decoded, started).await
+    dispatch_decoded(host, event_json, project_root, decoded, started, telemetry).await
 }
 
 pub(crate) async fn dispatch_opencode_tool_after(
     event_json: &str,
     project_root: &Path,
+    telemetry: Option<&HookTimingSpan>,
 ) -> HookV2Dispatch {
     let started = Instant::now();
     let decoded = match tracedecay_hooks::decode_opencode_plugin_event(
@@ -568,6 +574,7 @@ pub(crate) async fn dispatch_opencode_tool_after(
         project_root,
         decoded,
         started,
+        telemetry,
     )
     .await
 }
@@ -575,6 +582,7 @@ pub(crate) async fn dispatch_opencode_tool_after(
 pub(crate) async fn dispatch_opencode_lsp_updated(
     event_json: &str,
     project_root: &Path,
+    telemetry: Option<&HookTimingSpan>,
 ) -> HookV2Dispatch {
     if tracedecay_hooks::decode_opencode_lsp_event(event_json.as_bytes()).is_err() {
         return unavailable();
@@ -588,7 +596,7 @@ pub(crate) async fn dispatch_opencode_lsp_updated(
             "action": "opencode_lsp_updated",
             "event": event,
         }),
-        None,
+        telemetry,
     )
     .await;
     let accepted = response
@@ -616,6 +624,7 @@ async fn dispatch_decoded(
     project_root: &Path,
     decoded: tracedecay_hooks::DecodedNativeHookEventV1,
     started: Instant,
+    telemetry: Option<&HookTimingSpan>,
 ) -> HookV2Dispatch {
     let Ok(layout) = crate::storage::resolve_layout_for_current_profile(project_root) else {
         return unavailable();
@@ -646,6 +655,7 @@ async fn dispatch_decoded(
         session_id: native_session_id.as_deref(),
         lifecycle: native_lifecycle.as_ref(),
         feedback_notice: Mutex::new(None),
+        telemetry,
     };
     let immediate = match admission_window(started) {
         Some((deadline, timeout)) => match tokio::time::timeout(
@@ -1248,7 +1258,7 @@ mod tests {
             "status": "accepted",
         })]);
 
-        let dispatch = dispatch_opencode_lsp_updated(&event_json, project.path()).await;
+        let dispatch = dispatch_opencode_lsp_updated(&event_json, project.path(), None).await;
 
         assert!(matches!(
             dispatch,
