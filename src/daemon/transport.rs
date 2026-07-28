@@ -203,12 +203,46 @@ pub enum BrokerListener {
     Tcp(tokio::net::TcpListener),
 }
 
+/// Owner-only mode the daemon's Unix socket must carry for its whole lifetime.
+#[cfg(unix)]
+const DAEMON_SOCKET_MODE: u32 = 0o600;
+
+/// Binds the daemon's Unix socket and narrows it to its owner before the
+/// listener is handed back.
+///
+/// `bind(2)` creates the socket inode with `0o777 & !umask`, so the socket is
+/// briefly group- and world-connectable. Callers used to close that gap after
+/// recording the endpoint in the authority file, which left the wide-open
+/// socket live and discoverable across a durable write. Narrowing here means no
+/// caller can publish or accept on a socket that is not already owner-only, and
+/// a socket that cannot be narrowed is torn down instead of served.
+#[cfg(unix)]
+fn bind_owner_only_unix_listener(path: &std::path::Path) -> Result<tokio::net::UnixListener> {
+    use std::os::unix::fs::PermissionsExt;
+
+    // Binding the real path (rather than staging elsewhere and renaming) keeps
+    // `EADDRINUSE` as the kernel-level guarantee that only one daemon owns the
+    // endpoint.
+    let listener = tokio::net::UnixListener::bind(path)?;
+    if let Err(e) =
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(DAEMON_SOCKET_MODE))
+    {
+        drop(listener);
+        let _ = std::fs::remove_file(path);
+        return Err(config_error(format!(
+            "failed to restrict daemon socket '{}' to its owner: {e}",
+            path.display()
+        )));
+    }
+    Ok(listener)
+}
+
 impl BrokerListener {
     pub async fn bind(endpoint: &DaemonEndpoint) -> Result<(Self, DaemonEndpoint)> {
         match endpoint {
             #[cfg(unix)]
             DaemonEndpoint::Unix(path) => {
-                let listener = tokio::net::UnixListener::bind(path)?;
+                let listener = bind_owner_only_unix_listener(path)?;
                 Ok((Self::Unix(listener), endpoint.clone()))
             }
             DaemonEndpoint::Loopback(address) => {
@@ -258,6 +292,24 @@ mod tests {
         assert!(decoded.authenticate("0123456789abcdef"));
         assert!(!decoded.authenticate("0123456789abcdee"));
         assert!(!decoded.authenticate("short"));
+    }
+
+    /// The daemon socket must never be observable with wider-than-owner
+    /// permissions, so `bind` narrows it before any caller can publish the
+    /// endpoint or accept on it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn unix_listener_is_owner_only_the_moment_bind_returns() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("daemon.sock");
+        let (_listener, _endpoint) = BrokerListener::bind(&DaemonEndpoint::Unix(path.clone()))
+            .await
+            .unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, DAEMON_SOCKET_MODE, "daemon socket must be owner-only");
     }
 
     #[tokio::test]
