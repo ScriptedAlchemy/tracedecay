@@ -7,7 +7,7 @@ use serde_json::Value;
 
 #[cfg(test)]
 use crate::db::engine::{Connection, TransactionBehavior};
-use crate::db::engine::{Executor, QueryExecutor, WalCheckpointExecutor, params};
+use crate::db::engine::{Executor, QueryExecutor, params};
 
 use super::{LcmError, LcmGcConfig, maintenance, payload, schema};
 
@@ -423,7 +423,6 @@ pub async fn run_payload_gc_with_apply(
         return run_payload_gc_preview(conn, storage_root, provider, session_id, cfg, now).await;
     }
 
-    prepare_payload_gc_backup(conn, storage_root, cfg).await?;
     let transaction = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .await?;
@@ -445,22 +444,6 @@ pub async fn run_payload_gc_with_apply(
     finalize_gc_report(&transaction, &mut report, drain).await?;
     transaction.commit().await?;
     Ok(report)
-}
-
-pub(crate) async fn prepare_payload_gc_backup(
-    conn: &(impl WalCheckpointExecutor + ?Sized),
-    storage_root: &Path,
-    cfg: &LcmGcConfig,
-) -> Result<(), LcmError> {
-    if !cfg.backup_before_reap {
-        return Ok(());
-    }
-    let dir = payload::existing_payload_dir_opt(storage_root)?;
-    let all_metadata_refs = maintenance::all_payload_metadata_refs(conn).await?;
-    if dir.is_some() || !all_metadata_refs.is_empty() {
-        maintenance::checkpoint_wal_for_backup(conn, maintenance::BackupKind::Gc).await?;
-    }
-    Ok(())
 }
 
 pub(crate) async fn finalize_gc_report(

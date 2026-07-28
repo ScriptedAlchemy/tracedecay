@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 
 #[cfg(test)]
 use crate::db::engine::{Connection, TransactionBehavior};
-use crate::db::engine::{Executor, Value as SqlValue, WalCheckpointExecutor, params};
+use crate::db::engine::{Executor, Value as SqlValue, params};
 use crate::tracedecay::current_timestamp;
 
 use super::{
@@ -36,12 +36,6 @@ pub(crate) struct DoctorRequest<'a> {
 
 pub(crate) fn request_mutates(request: &DoctorRequest<'_>) -> bool {
     request.apply && matches!(request.mode, "repair" | "clean" | "gc")
-}
-
-pub(crate) async fn prepare_apply(
-    conn: &(impl WalCheckpointExecutor + ?Sized),
-) -> Result<(), LcmError> {
-    maintenance::checkpoint_wal_for_backup(conn, maintenance::BackupKind::Clean).await
 }
 
 struct RepairRequest<'a> {
@@ -1013,7 +1007,6 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = Result<Value, LcmError>>,
 {
-    maintenance::checkpoint_wal_for_backup(conn, maintenance::BackupKind::Clean).await?;
     let transaction = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .await?;
@@ -1295,7 +1288,51 @@ mod tests {
 
     use super::*;
     use crate::db::engine::TestConnection;
-    use std::path::Path;
+    use rusqlite::Connection as RusqliteConnection;
+    use std::path::{Path, PathBuf};
+
+    async fn open_clean_test_connection(
+        project_root: &Path,
+    ) -> Result<(PathBuf, TestConnection), String> {
+        let db_path = project_root.join("sessions.db");
+        let conn = TestConnection::open(&db_path);
+        conn.execute_batch(
+            "CREATE TABLE sessions (
+                provider TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                project_key TEXT NOT NULL,
+                project_path TEXT NOT NULL,
+                title TEXT,
+                started_at INTEGER,
+                ended_at INTEGER,
+                transcript_path TEXT,
+                metadata_json TEXT,
+                PRIMARY KEY(provider, session_id)
+            );
+            CREATE TABLE session_messages (
+                provider TEXT NOT NULL,
+                message_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                timestamp INTEGER,
+                ordinal INTEGER NOT NULL,
+                text TEXT NOT NULL,
+                kind TEXT,
+                model TEXT,
+                tool_names TEXT,
+                source_path TEXT,
+                source_offset INTEGER,
+                metadata_json TEXT,
+                PRIMARY KEY(provider, message_id)
+            );",
+        )
+        .await
+        .map_err(|err| format!("create test schema prerequisites: {err}"))?;
+        schema::ensure_lcm_schema(&*conn)
+            .await
+            .map_err(|err| format!("create LCM test schema: {err}"))?;
+        Ok((db_path, conn))
+    }
 
     async fn insert_test_clean_candidate(
         conn: &Connection,
@@ -1354,43 +1391,7 @@ mod tests {
     async fn clean_apply_backup_callback_runs_under_immediate_transaction() -> Result<(), String> {
         let temp = tempfile::tempdir().map_err(|err| format!("create tempdir: {err}"))?;
         let project_root = temp.path().to_path_buf();
-        let db_path = project_root.join("sessions.db");
-        let conn = TestConnection::open(&db_path);
-        conn.execute_batch(
-            "CREATE TABLE sessions (
-                provider TEXT NOT NULL,
-                session_id TEXT NOT NULL,
-                project_key TEXT NOT NULL,
-                project_path TEXT NOT NULL,
-                title TEXT,
-                started_at INTEGER,
-                ended_at INTEGER,
-                transcript_path TEXT,
-                metadata_json TEXT,
-                PRIMARY KEY(provider, session_id)
-            );
-            CREATE TABLE session_messages (
-                provider TEXT NOT NULL,
-                message_id TEXT NOT NULL,
-                session_id TEXT NOT NULL,
-                role TEXT NOT NULL,
-                timestamp INTEGER,
-                ordinal INTEGER NOT NULL,
-                text TEXT NOT NULL,
-                kind TEXT,
-                model TEXT,
-                tool_names TEXT,
-                source_path TEXT,
-                source_offset INTEGER,
-                metadata_json TEXT,
-                PRIMARY KEY(provider, message_id)
-            );",
-        )
-        .await
-        .map_err(|err| format!("create test schema prerequisites: {err}"))?;
-        schema::ensure_lcm_schema(&*conn)
-            .await
-            .map_err(|err| format!("create LCM test schema: {err}"))?;
+        let (db_path, conn) = open_clean_test_connection(&project_root).await?;
         insert_test_clean_candidate(
             &conn,
             &project_root,
@@ -1438,6 +1439,94 @@ mod tests {
         assert_eq!(deleted["sessions"], 1);
         assert_eq!(raw_count(&conn, "cron-before-lock").await?, 0);
         assert_eq!(raw_count(&conn, "cron-raced-lock").await?, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn clean_backup_succeeds_while_reader_blocks_truncate_checkpoint() -> Result<(), String> {
+        let temp = tempfile::tempdir().map_err(|err| format!("create tempdir: {err}"))?;
+        let project_root = temp.path().to_path_buf();
+        let (db_path, conn) = open_clean_test_connection(&project_root).await?;
+        insert_test_clean_candidate(
+            &conn,
+            &project_root,
+            "cron-before-reader",
+            "cron-before-reader-message",
+        )
+        .await?;
+
+        let mut reader = RusqliteConnection::open(&db_path)
+            .map_err(|err| format!("open blocking reader: {err}"))?;
+        let reader_snapshot = reader
+            .transaction()
+            .map_err(|err| format!("begin blocking reader snapshot: {err}"))?;
+        let visible_before: i64 = reader_snapshot
+            .query_row("SELECT COUNT(*) FROM lcm_raw_messages", [], |row| {
+                row.get(0)
+            })
+            .map_err(|err| format!("establish blocking reader snapshot: {err}"))?;
+        assert_eq!(visible_before, 1);
+
+        insert_test_clean_candidate(
+            &conn,
+            &project_root,
+            "cron-after-reader",
+            "cron-after-reader-message",
+        )
+        .await?;
+        let checkpoint = RusqliteConnection::open(&db_path)
+            .and_then(|connection| {
+                connection.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                })
+            })
+            .map_err(|err| format!("observe blocked WAL checkpoint: {err}"))?;
+        assert_eq!(checkpoint.0, 1, "reader must block WAL truncation");
+        assert!(
+            checkpoint.2 < checkpoint.1,
+            "blocked checkpoint must leave committed WAL frames"
+        );
+
+        let clean_config = LcmCleanConfig {
+            ignore_session_patterns: vec!["cron-*".to_string()],
+            ..Default::default()
+        };
+        let backup_db_path = db_path.clone();
+        let backup_storage_root = project_root.clone();
+        let (backup, deleted) = backup_and_delete_clean_candidates_with_backup(
+            &conn,
+            "cursor",
+            None,
+            &clean_config,
+            move || async move {
+                maintenance::backup_database(
+                    &backup_db_path,
+                    &backup_storage_root,
+                    maintenance::BackupKind::Clean,
+                )
+                .await
+            },
+        )
+        .await
+        .map_err(|err| format!("backup and delete with blocked reader: {err}"))?;
+
+        let backup_path = backup["path"]
+            .as_str()
+            .ok_or_else(|| "backup response omitted path".to_string())?;
+        let backed_up: i64 = RusqliteConnection::open(backup_path)
+            .and_then(|connection| {
+                connection.query_row("SELECT COUNT(*) FROM lcm_raw_messages", [], |row| {
+                    row.get(0)
+                })
+            })
+            .map_err(|err| format!("read online backup: {err}"))?;
+        assert_eq!(backed_up, 2);
+        assert_eq!(deleted["sessions"], 2);
+        drop(reader_snapshot);
         Ok(())
     }
 }

@@ -18,6 +18,30 @@ use crate::db::engine::{
 
 static NEXT_SNAPSHOT: AtomicU64 = AtomicU64::new(0);
 
+pub(crate) async fn backup_live_sqlite_database(
+    source: &Path,
+    destination: &Path,
+) -> io::Result<()> {
+    let source = source.to_path_buf();
+    let destination = destination.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let source = Connection::open_with_flags(&source, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(io::Error::other)?;
+        let mut destination = Connection::open_with_flags(
+            &destination,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE,
+        )
+        .map_err(io::Error::other)?;
+        let backup =
+            rusqlite::backup::Backup::new(&source, &mut destination).map_err(io::Error::other)?;
+        backup
+            .run_to_completion(128, Duration::from_millis(1), None)
+            .map_err(io::Error::other)
+    })
+    .await
+    .map_err(|error| io::Error::other(format!("live SQLite backup task failed: {error}")))?
+}
+
 pub(crate) struct SnapshotConnection {
     connection: Arc<Mutex<Connection>>,
     interrupt: rusqlite::InterruptHandle,
