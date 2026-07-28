@@ -491,7 +491,13 @@ impl LspSemanticOperationOutcome {
         }
         let mut detail: String = message
             .chars()
-            .map(|character| if character.is_control() { ' ' } else { character })
+            .map(|character| {
+                if character.is_control() {
+                    ' '
+                } else {
+                    character
+                }
+            })
             .collect();
         if detail.len() > Self::MAX_PARTIAL_DETAIL_BYTES {
             let mut end = Self::MAX_PARTIAL_DETAIL_BYTES;
