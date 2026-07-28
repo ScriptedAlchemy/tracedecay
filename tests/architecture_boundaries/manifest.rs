@@ -15,6 +15,7 @@ use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 
 const REPOSITORY_SOURCE_ROOTS: &[&str] = &["src", "tests", "examples", "benches"];
 const QUERY_ALLOWED_PACKAGES: &[&str] = &[
@@ -112,7 +113,7 @@ struct CargoTarget {
     kind: Vec<String>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CargoSourceLayout {
     pub(crate) target_roots: BTreeSet<PathBuf>,
     pub(crate) tracked_roots: BTreeSet<PathBuf>,
@@ -120,7 +121,18 @@ pub(crate) struct CargoSourceLayout {
     pub(crate) boundary_violations: BTreeSet<String>,
 }
 
+static WORKSPACE_CARGO_SOURCE_LAYOUT: OnceLock<Result<CargoSourceLayout, String>> = OnceLock::new();
+
 pub(crate) fn cargo_source_layout(repository: &Path) -> Result<CargoSourceLayout, String> {
+    if repository == Path::new(env!("CARGO_MANIFEST_DIR")) {
+        return WORKSPACE_CARGO_SOURCE_LAYOUT
+            .get_or_init(|| discover_cargo_source_layout(repository))
+            .clone();
+    }
+    discover_cargo_source_layout(repository)
+}
+
+fn discover_cargo_source_layout(repository: &Path) -> Result<CargoSourceLayout, String> {
     let output = Command::new("cargo")
         .current_dir(repository)
         .args(["metadata", "--no-deps", "--format-version", "1"])
@@ -549,7 +561,7 @@ fn git_tracked_rust_sources(
     let mut sources = BTreeSet::new();
     for path in live_tracked {
         if path.extension() != Some(OsStr::new("rs"))
-            || !source_roots.iter().any(|root| path.starts_with(root))
+            || !is_within_source_roots(&path, source_roots)
         {
             continue;
         }
@@ -566,10 +578,15 @@ fn git_tracked_rust_sources(
         physical
             .symlinked_rust_sources
             .into_iter()
-            .filter(|path| source_roots.iter().any(|root| path.starts_with(root))),
+            .filter(|path| is_within_source_roots(path, source_roots)),
     );
     sources.extend(filesystem_rust_sources(repository, source_roots)?);
     Ok(sources)
+}
+
+fn is_within_source_roots(path: &Path, source_roots: &BTreeSet<PathBuf>) -> bool {
+    path.ancestors()
+        .any(|ancestor| source_roots.contains(ancestor))
 }
 
 pub(crate) fn filesystem_rust_sources(
