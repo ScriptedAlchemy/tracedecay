@@ -398,7 +398,6 @@ async fn restore_legacy_aliases(conn: &(impl Executor + Sync), operation: &str) 
     drop(rows);
     conn.execute_batch("DROP TABLE retrieval_anchor_aliases_owner_unbound_v1;")
         .await
-        .map(|_| ())
         .map_err(|error| database_error(operation, error))
 }
 
@@ -595,7 +594,6 @@ async fn restore_legacy_dispositions(conn: &(impl Executor + Sync), operation: &
     drop(rows);
     conn.execute_batch("DROP TABLE retrieval_anchor_dispositions_terminal_v0;")
         .await
-        .map(|_| ())
         .map_err(|error| database_error(operation, error))
 }
 
@@ -670,7 +668,10 @@ async fn validate_disposition_rows(
             || record.anchor_id().as_str() != anchor_id
             || canonical_owner != owner_json
             || record.state().as_str() != state
-            || record.superseded_by().map(|value| value.as_str()) != superseded_by.as_deref()
+            || record
+                .superseded_by()
+                .map(tracedecay_domain::RetrievalAnchorId::as_str)
+                != superseded_by.as_deref()
             || record.reason_class().as_str() != reason_class
             || record.effective_at().0 != effective_at
         {
@@ -748,7 +749,6 @@ pub(crate) async fn install_retrieval_anchor_schema(
     .map_err(|error| database_error(operation, error))?;
     conn.execute_batch(IMMUTABILITY_TRIGGERS)
         .await
-        .map(|_| ())
         .map_err(|error| database_error(operation, error))
 }
 

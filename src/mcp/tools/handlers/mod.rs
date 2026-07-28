@@ -637,7 +637,8 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
         )
         .await?
     };
-    let selected_scope_prefix = if options.preselected_project_reader || selected_project.is_some() {
+    let selected_scope_prefix = if options.preselected_project_reader || selected_project.is_some()
+    {
         None
     } else {
         scope_prefix
@@ -645,14 +646,15 @@ pub async fn handle_tool_call_with_registry_and_implicit_project(
     let cg = selected_project
         .as_ref()
         .map_or(cg, |selected| selected.graph.as_ref());
-    let active_project_session_db = (!options.preselected_project_reader && selected_project.is_none())
-        .then(|| {
-            options
-                .registered_project_session_db
-                .as_ref()
-                .or(options.session_authorities.project)
-        })
-        .flatten();
+    let active_project_session_db = (!options.preselected_project_reader
+        && selected_project.is_none())
+    .then(|| {
+        options
+            .registered_project_session_db
+            .as_ref()
+            .or(options.session_authorities.project)
+    })
+    .flatten();
     let active_lcm_context = session::LcmHandlerContext::active(
         cg,
         active_project_session_db,
@@ -801,8 +803,8 @@ struct RetainedMcpCatalogDispatcher<'call, 'authority> {
 type RetainedMcpInvocationFuture<'a> =
     std::pin::Pin<Box<dyn std::future::Future<Output = Result<ToolResult>> + Send + 'a>>;
 
-impl<'call, 'authority> CanonicalApplicationDispatcher<CatalogBoundRetainedMcpRequest>
-    for RetainedMcpCatalogDispatcher<'call, 'authority>
+impl<'call> CanonicalApplicationDispatcher<CatalogBoundRetainedMcpRequest>
+    for RetainedMcpCatalogDispatcher<'call, '_>
 {
     type Output = RetainedMcpInvocationFuture<'call>;
 

@@ -128,9 +128,8 @@ pub(super) async fn merge(
         Err(db_message(
             "merge_external_source_authority",
             format!(
-                "external source state union verification failed: expected {} rows, \
-                 observed {after}, with {missing_or_changed} source row difference(s)",
-                expected
+                "external source state union verification failed: expected {expected} rows, \
+                 observed {after}, with {missing_or_changed} source row difference(s)"
             ),
         ))
     }

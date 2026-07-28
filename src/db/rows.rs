@@ -69,7 +69,7 @@ pub(super) fn row_to_node(row: &Row) -> std::result::Result<Node, Error> {
 /// This prevents crashes when source files with non-UTF-8 encoding (e.g. Latin-1)
 /// have their signatures or docstrings stored in the database.
 ///
-/// The underlying SQLite text decoder rejects blob values, so we
+/// The underlying `SQLite` text decoder rejects blob values, so we
 /// must read as `Value` first and convert.
 fn get_string_lossy(row: &Row, idx: i32) -> std::result::Result<String, Error> {
     let val = row.get::<Value>(idx)?;

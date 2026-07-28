@@ -38,10 +38,10 @@ pub enum DiagnosticSeverity {
 
 /// The source lane preserved while composing a document diagnostic report.
 ///
-/// The TraceDecay lane names its real producer (Plan 35): a review finding and
+/// The `TraceDecay` lane names its real producer (Plan 35): a review finding and
 /// a CI-localization finding are distinct producers and must not both render
 /// as an anonymous `tracedecay`. Every non-[`DiagnosticSource::Upstream`]
-/// variant belongs to the TraceDecay lane and keeps its lane privileges.
+/// variant belongs to the `TraceDecay` lane and keeps its lane privileges.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum DiagnosticSource {
     Upstream,
@@ -56,7 +56,7 @@ pub enum DiagnosticSource {
 }
 
 impl DiagnosticSource {
-    /// Whether this source belongs to the TraceDecay lane (as opposed to a
+    /// Whether this source belongs to the `TraceDecay` lane (as opposed to a
     /// host's own upstream language server).
     #[must_use]
     pub const fn is_tracedecay(self) -> bool {
@@ -77,7 +77,7 @@ impl DiagnosticSource {
 
     /// Resolves the producer lane from a durable record's canonical
     /// `provenance.producer` identity. Unrecognized producers fall back to the
-    /// generic TraceDecay lane rather than being dropped.
+    /// generic `TraceDecay` lane rather than being dropped.
     #[must_use]
     pub fn from_producer(producer: &str) -> Self {
         match producer {
@@ -90,7 +90,7 @@ impl DiagnosticSource {
 }
 
 /// Immutable identity needed to clear or reauthorize expansion of one
-/// TraceDecay diagnostic. It intentionally contains no source text, evidence,
+/// `TraceDecay` diagnostic. It intentionally contains no source text, evidence,
 /// credentials, or mutable path identity.
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct GatewayDiagnosticIdentity {
@@ -176,7 +176,7 @@ pub struct GatewayDiagnostic {
 impl GatewayDiagnostic {
     /// Normalizes one diagnostic into its merge lane.
     ///
-    /// The lane is authoritative, but within the TraceDecay lane a producer
+    /// The lane is authoritative, but within the `TraceDecay` lane a producer
     /// already named by the projection is preserved — merging must not erase
     /// `tracedecay-github`/`tracedecay-ci`/`tracedecay-proximity` back into an
     /// anonymous `tracedecay`.

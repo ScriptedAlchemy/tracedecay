@@ -2136,7 +2136,7 @@ async fn execute_primitive(
                 DaemonInvocationProblem::Unavailable,
             );
         }
-    };
+    }
     match feedback_invocation_result(result) {
         Ok(result) => DaemonInvocationResponse::with_outcome(
             wire_request_id,
@@ -3377,12 +3377,12 @@ fn semantic_profile_transition(
         DirectConfigurationMutation::Batch { mutations } => {
             let mut semantic = None;
             for mutation in mutations {
-                if let Some(next) = semantic_profile_transition(mutation)? {
-                    if semantic.replace(next).is_some() {
-                        return Err(ConfigurationError::validation_message(
-                            "semantic runtime configuration appears more than once",
-                        ));
-                    }
+                if let Some(next) = semantic_profile_transition(mutation)?
+                    && semantic.replace(next).is_some()
+                {
+                    return Err(ConfigurationError::validation_message(
+                        "semantic runtime configuration appears more than once",
+                    ));
                 }
             }
             Ok(semantic)

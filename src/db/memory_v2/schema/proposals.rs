@@ -189,7 +189,6 @@ async fn rebuild_v22_proposal_tables(conn: &impl MemoryV2Executor, operation: &s
          END;",
     )
     .await
-    .map(|_| ())
     .map_err(|error| db_error(operation, error))
 }
 
@@ -266,7 +265,6 @@ pub(super) async fn rebuild_v20_proposal_transition_tables(
          DROP TABLE memory_v2_proposal_transitions_v19;",
     )
     .await
-    .map(|_| ())
     .map_err(|error| db_error(operation, error))
 }
 
@@ -293,7 +291,6 @@ pub(super) async fn install_v21_current_projection_indexes(
              ON memory_v2_current_facts(owner_kind, project_id, projection_state);",
     )
     .await
-    .map(|_| ())
     .map_err(|error| db_error(operation, error))
 }
 
@@ -385,6 +382,5 @@ pub(super) async fn install_v20_integrity_triggers(
     }
     conn.execute_batch(&schema)
         .await
-        .map(|_| ())
         .map_err(|error| db_error(operation, error))
 }

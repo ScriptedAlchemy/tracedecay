@@ -201,7 +201,7 @@ impl ContextScoutAuthorityPinV1 {
                 .scope()
                 .reference
                 .as_ref()
-                .map(|reference| reference.as_str())
+                .map(tracedecay_domain::RefId::as_str)
                 != Some(feedback_scope.branch_ref.as_str())
         {
             return None;
@@ -223,7 +223,7 @@ impl ContextScoutAuthorityPinV1 {
                 .scope()
                 .reference
                 .as_ref()
-                .map(|reference| reference.as_str())
+                .map(tracedecay_domain::RefId::as_str)
                 == Some(self.feedback_scope.branch_ref.as_str())
     }
 
@@ -790,7 +790,7 @@ fn publication_matches_pin(
             .authorized_scope
             .reference
             .as_ref()
-            .map(|reference| reference.as_str())
+            .map(tracedecay_domain::RefId::as_str)
             == Some(pin.feedback_scope.branch_ref.as_str())
         && publication.result.configuration_digest == pin.configuration.configuration_digest
 }

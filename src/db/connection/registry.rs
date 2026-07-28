@@ -33,7 +33,7 @@ pub(super) struct DatabaseInner {
 
 impl DatabaseInner {
     /// Publishes an already-open canonical registry runtime without reopening
-    /// the SQLite path.
+    /// the `SQLite` path.
     pub(super) fn publish(
         runtime: StoreRuntimeHandle,
         writable: bool,
@@ -46,17 +46,17 @@ impl DatabaseInner {
                 "registered runtime did not report its opened SQLite file identity",
             )
         })?;
-        if let Some(authority) = authority.as_ref() {
-            if runtime.locator().path() != authority.canonical_database_path() {
-                return Err(database_registry_error(
-                    "publish canonical database runtime",
-                    format!(
-                        "registered locator {} does not match retained database authority {}",
-                        runtime.locator().path().display(),
-                        authority.canonical_database_path().display()
-                    ),
-                ));
-            }
+        if let Some(authority) = authority.as_ref()
+            && runtime.locator().path() != authority.canonical_database_path()
+        {
+            return Err(database_registry_error(
+                "publish canonical database runtime",
+                format!(
+                    "registered locator {} does not match retained database authority {}",
+                    runtime.locator().path().display(),
+                    authority.canonical_database_path().display()
+                ),
+            ));
         }
         runtime
             .validate_registered_read("publish canonical database runtime")

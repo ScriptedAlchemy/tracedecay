@@ -159,13 +159,13 @@ impl McpServer {
 
     pub(super) async fn shutdown_startup_transcript_ingest(&self) {
         self.cancel_startup_transcript_ingest();
-        if let Some(task) = self.startup_transcript_ingest_task.lock().await.take() {
-            if !join_or_abort_startup_ingest(task, STARTUP_TRANSCRIPT_INGEST_ABORT_DEADLINE).await {
-                tracing::warn!(
-                    deadline_secs = STARTUP_TRANSCRIPT_INGEST_ABORT_DEADLINE.as_secs(),
-                    "startup transcript ingest shutdown backstop aborted and joined the task"
-                );
-            }
+        if let Some(task) = self.startup_transcript_ingest_task.lock().await.take()
+            && !join_or_abort_startup_ingest(task, STARTUP_TRANSCRIPT_INGEST_ABORT_DEADLINE).await
+        {
+            tracing::warn!(
+                deadline_secs = STARTUP_TRANSCRIPT_INGEST_ABORT_DEADLINE.as_secs(),
+                "startup transcript ingest shutdown backstop aborted and joined the task"
+            );
         }
         self.transcript_ingest_done.store(true, Ordering::Release);
     }

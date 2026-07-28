@@ -369,7 +369,7 @@ pub fn get_catalog_filtered_tool_definitions_with_budget(
         .collect::<BTreeSet<_>>();
     let catalog_operations = catalog
         .capabilities()
-        .flat_map(|capability| capability.binding_ids())
+        .flat_map(tracedecay_tool_catalog::CapabilityManifestV1::binding_ids)
         .filter_map(|binding_id| catalog.binding(binding_id))
         .filter(|binding| binding.surface() == tracedecay_tool_catalog::BindingSurface::Mcp)
         .map(|binding| format!("tracedecay_{}", binding.operation().as_str()))

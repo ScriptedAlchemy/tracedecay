@@ -280,8 +280,7 @@ fn is_compaction_scheduled(
     };
     policy
         .decide(&sample)
-        .map(|decision| decision.is_scheduled())
-        .unwrap_or(false)
+        .is_ok_and(|decision| decision.is_scheduled())
 }
 
 #[cfg(test)]

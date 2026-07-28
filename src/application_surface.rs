@@ -1284,10 +1284,10 @@ impl HttpDisconnectCancellation {
 
 impl Drop for HttpDisconnectCancellation {
     fn drop(&mut self) {
-        if self.armed {
-            if let Ok(mut active) = self.registry.lock() {
-                active.remove(&self.request_id);
-            }
+        if self.armed
+            && let Ok(mut active) = self.registry.lock()
+        {
+            active.remove(&self.request_id);
         }
     }
 }
@@ -3375,10 +3375,10 @@ fn apply_http_page_to_surface_body(
     page: &PageRequest,
 ) -> Value {
     if operation_carries_callable_code_meta(operation) {
-        if let Some(meta) = body.get_mut("meta").and_then(Value::as_object_mut) {
-            if let Some(cursor) = page.cursor.as_ref() {
-                meta.insert("cursor".to_owned(), Value::from(cursor.as_str()));
-            }
+        if let Some(meta) = body.get_mut("meta").and_then(Value::as_object_mut)
+            && let Some(cursor) = page.cursor.as_ref()
+        {
+            meta.insert("cursor".to_owned(), Value::from(cursor.as_str()));
         }
         return body;
     }

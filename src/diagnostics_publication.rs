@@ -122,7 +122,7 @@ pub struct CleanGenerationDiagnosticScopeV1 {
 
 /// The code-index generation authority's identity for one project root.
 ///
-/// Every file identity TraceDecay publishes has exactly one mint: the
+/// Every file identity `TraceDecay` publishes has exactly one mint: the
 /// code-index scheduler, which derives `file.daemon.<digest>` from
 /// `(repository, worktree, logical path, content digest)`. A producer that
 /// invented its own file identity — a repository-relative path, say — would

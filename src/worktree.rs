@@ -198,9 +198,10 @@ pub(crate) fn detect_scoped_worktree_index_mismatch(
     index_root: &Path,
     scope_prefix: Option<&str>,
 ) -> Option<WorktreeIndexMismatch> {
-    let start_path = scope_prefix
-        .map(|prefix| index_root.join(prefix))
-        .unwrap_or_else(|| index_root.to_path_buf());
+    let start_path = scope_prefix.map_or_else(
+        || index_root.to_path_buf(),
+        |prefix| index_root.join(prefix),
+    );
     detect_worktree_index_mismatch(&start_path, index_root)
 }
 

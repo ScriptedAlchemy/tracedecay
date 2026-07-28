@@ -54,7 +54,11 @@ where
                 || request.scope.project_id != self.scope.project_id
                 || request.scope.repository_id != self.scope.repository_id
                 || request.scope.worktree_id != self.scope.worktree_id
-                || self.scope.reference.as_ref().map(|value| value.as_str())
+                || self
+                    .scope
+                    .reference
+                    .as_ref()
+                    .map(tracedecay_domain::RefId::as_str)
                     != Some(request.scope.branch_ref.as_str())
             {
                 return GitHubProviderLifecycleV1::Denied;
@@ -109,7 +113,11 @@ where
                 || scope.project_id != self.scope.project_id
                 || scope.repository_id != self.scope.repository_id
                 || scope.worktree_id != self.scope.worktree_id
-                || self.scope.reference.as_ref().map(|value| value.as_str())
+                || self
+                    .scope
+                    .reference
+                    .as_ref()
+                    .map(tracedecay_domain::RefId::as_str)
                     != Some(scope.branch_ref.as_str())
             {
                 return CiSourceAccessOutcomeV1::Denied;

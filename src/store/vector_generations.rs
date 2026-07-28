@@ -1592,7 +1592,7 @@ impl<'database> DatabaseVectorGenerationStoreV1<'database> {
 
     /// Replace the complete legacy state with scratch-built canonical
     /// generations in one guarded writer transaction. Unreadable state is
-    /// copied into an isolated quarantine table by SQLite itself; its bytes
+    /// copied into an isolated quarantine table by `SQLite` itself; its bytes
     /// never cross the Rust migration boundary.
     pub(crate) async fn replace_legacy_vectors_atomically(
         &self,

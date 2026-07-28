@@ -1,13 +1,13 @@
 //! What version this binary reports, and which value is safe to compare.
 //!
-//! [`PACKAGE_VERSION`] is the released SemVer that release-plz owns. It is the
+//! [`PACKAGE_VERSION`] is the released `SemVer` that release-plz owns. It is the
 //! only value with defined precedence, so upgrade checks, plugin staleness
 //! stamps, and anything ordering releases must keep using it.
 //!
 //! [`build_version()`] is what the binary reports about *itself*. It appends
-//! SemVer build metadata naming the commit it was compiled from
+//! `SemVer` build metadata naming the commit it was compiled from
 //! (`0.0.66+ab12cd34ef56`, or `…+ab12cd34ef56.dirty` when the worktree had
-//! uncommitted changes). SemVer requires build metadata to be ignored when
+//! uncommitted changes). `SemVer` requires build metadata to be ignored when
 //! determining precedence, so a locally built `cargo dogfood` binary is
 //! traceable to an exact tree without touching the `version` field in
 //! `Cargo.toml`. A build with no git checkout — a published crate, a registry

@@ -101,7 +101,7 @@ impl<'a> RegisteredObservabilityPortV1<'a> {
 }
 
 impl ObservabilityRecordPort for RegisteredObservabilityPortV1<'_> {
-    fn record<'a>(&'a self, envelope: ObservabilityEnvelopeV1) -> ObservabilityFuture<'a, String> {
+    fn record(&self, envelope: ObservabilityEnvelopeV1) -> ObservabilityFuture<'_, String> {
         Box::pin(async move {
             envelope
                 .validate()
@@ -135,10 +135,7 @@ impl ObservabilityRecordPort for RegisteredObservabilityPortV1<'_> {
 }
 
 impl ObservabilityQueryPort for RegisteredObservabilityPortV1<'_> {
-    fn query<'a>(
-        &'a self,
-        query: ObservabilityQueryV1,
-    ) -> ObservabilityFuture<'a, ObservabilityPageV1> {
+    fn query(&self, query: ObservabilityQueryV1) -> ObservabilityFuture<'_, ObservabilityPageV1> {
         Box::pin(async move {
             if query.limit == 0 {
                 return Err(ApplicationContractError::ZeroValue {

@@ -105,9 +105,10 @@ impl TraceDecay {
         {
             return Err(configuration_runtime_unavailable());
         }
-        let project_id = storage::read_enrollment_marker(project_root)?
-            .map(|marker| marker.project_id)
-            .unwrap_or_else(|| storage::default_profile_project_id(project_root));
+        let project_id = storage::read_enrollment_marker(project_root)?.map_or_else(
+            || storage::default_profile_project_id(project_root),
+            |marker| marker.project_id,
+        );
         let project_id = ProjectId::new(project_id).map_err(|error| TraceDecayError::Config {
             message: format!("invalid standalone test project identity: {error}"),
         })?;
@@ -175,7 +176,7 @@ impl TraceDecay {
                 .initialize_project_graph_for_test(project_root, open_options)
                 .await?;
             graph.test_runtime_guard = Some(runtime);
-            return Ok(graph);
+            Ok(graph)
         }
         #[cfg(not(any(test, feature = "test-transport")))]
         {
@@ -792,7 +793,7 @@ impl TraceDecay {
                 .open_project_graph_for_test(project_root, open_options)
                 .await?;
             graph.test_runtime_guard = Some(runtime);
-            return Ok(graph);
+            Ok(graph)
         }
         #[cfg(not(any(test, feature = "test-transport")))]
         {
@@ -1408,7 +1409,7 @@ impl TraceDecay {
                 .open_project_graph_read_only_for_test(project_root, open_options)
                 .await?;
             graph.test_runtime_guard = Some(runtime);
-            return Ok(graph);
+            Ok(graph)
         }
         #[cfg(not(any(test, feature = "test-transport")))]
         {
@@ -1927,7 +1928,7 @@ impl TraceDecay {
                 .open_project_branch_for_test(project_root, branch_name, open_options)
                 .await?;
             graph.test_runtime_guard = Some(runtime);
-            return Ok(graph);
+            Ok(graph)
         }
         #[cfg(not(any(test, feature = "test-transport")))]
         {
@@ -2075,6 +2076,9 @@ impl TraceDecay {
             &configuration.target,
             configuration_runtime.client(),
         );
+        let internal_detached_scope = crate::worktree::detached_worktree_graph_scope(project_root)
+            .as_deref()
+            == Some(branch_name);
         Ok(Self {
             db,
             profile_database,
@@ -2086,8 +2090,8 @@ impl TraceDecay {
             active_graph_layout,
             open_options,
             registry: LanguageRegistry::new(),
-            active_branch: Some(branch_name.to_string()),
-            serving_branch: Some(branch_name.to_string()),
+            active_branch: (!internal_detached_scope).then(|| branch_name.to_string()),
+            serving_branch: (!internal_detached_scope).then(|| branch_name.to_string()),
             fallback_warning: None,
             read_only,
             context_scout_owner: None,

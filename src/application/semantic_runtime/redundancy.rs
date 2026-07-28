@@ -205,9 +205,9 @@ pub(crate) async fn project_semantic_redundancy_generation(
     let mut admitted = Vec::new();
     for (chunk_id, vector) in vectors.vectors() {
         let chunk = chunks.get(chunk_id)?;
-        if &vector.source_generation != &source_generation
+        if vector.source_generation != source_generation
             || &vector.projection_key != vectors.projection_key()
-            || &vector.chunk_digest != &chunk.content_digest
+            || vector.chunk_digest != chunk.content_digest
         {
             return None;
         }

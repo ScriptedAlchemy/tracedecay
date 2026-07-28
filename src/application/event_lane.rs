@@ -271,9 +271,7 @@ pub(crate) async fn replay_after(
     project_id: &str,
     after: Option<u64>,
 ) -> Option<ActivityReplayV1> {
-    if authoritative_project_id(db, Some(project_id)).is_none() {
-        return None;
-    }
+    authoritative_project_id(db, Some(project_id))?;
     let port = RegisteredObservabilityPortV1::new(db);
     let page = ObservabilityApplicationV1::new(port, port)
         .query(ObservabilityQueryV1 {

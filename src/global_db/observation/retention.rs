@@ -675,8 +675,7 @@ async fn run_observation_pass(
     // maintenance transaction temporarily suspends only its UPDATE guard,
     // rewrites the payload, and restores the exact canonical trigger before
     // commit.
-    let sql = format!(
-        "SELECT o.observation_id, LENGTH(o.observation_json) AS len,
+    let sql = "SELECT o.observation_id, LENGTH(o.observation_json) AS len,
                 released.effective_at
          FROM observations o
          JOIN (
@@ -720,7 +719,7 @@ async fn run_observation_pass(
          WHERE json_extract(o.observation_json, '$.__retention_released') IS NULL
          ORDER BY o.sequence ASC
          LIMIT ?3"
-    );
+        .to_string();
     let transaction = if mode.is_apply() {
         authorize("begin observation retention pass")?;
         Some(

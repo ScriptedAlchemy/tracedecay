@@ -2028,7 +2028,7 @@ async fn resolve_production_github_provider_config(
                 pull_request_id: target.pull_request_id.clone(),
             };
             if source_access
-                .authorize(&authorization_context, &exact_request)
+                .authorize(authorization_context, &exact_request)
                 .await
                 != GitHubProviderLifecycleV1::Ready
             {

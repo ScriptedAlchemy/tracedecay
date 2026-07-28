@@ -10,7 +10,7 @@ use super::{
 };
 use crate::db::DatabaseAuthority;
 
-/// Proof that one exact runtime reached `Closed` after all physical SQLite
+/// Proof that one exact runtime reached `Closed` after all physical `SQLite`
 /// handles joined and before its registry entry was removed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ClosedStoreRuntime {

@@ -54,14 +54,13 @@ pub(super) fn exact_match_ranges(text: &str, literal: &str) -> Vec<tracedecay_do
         return Vec::new();
     }
     text.char_indices()
-        .filter_map(|(start_byte, _)| {
-            text[start_byte..].starts_with(literal).then(|| {
-                let end_byte = start_byte.saturating_add(literal.len());
-                let start = u64::try_from(start_byte).expect("byte offset fits u64");
-                let end = u64::try_from(end_byte).expect("byte offset fits u64");
-                tracedecay_domain::ByteRangeV1::new(start, end)
-                    .expect("non-empty exact literal produces a valid byte range")
-            })
+        .filter(|&(start_byte, _)| text[start_byte..].starts_with(literal))
+        .map(|(start_byte, _)| {
+            let end_byte = start_byte.saturating_add(literal.len());
+            let start = u64::try_from(start_byte).expect("byte offset fits u64");
+            let end = u64::try_from(end_byte).expect("byte offset fits u64");
+            tracedecay_domain::ByteRangeV1::new(start, end)
+                .expect("non-empty exact literal produces a valid byte range")
         })
         .collect()
 }

@@ -136,16 +136,15 @@ impl<'a> GlobalDbTemporalReadPort<'a> {
         candidate: &RankingCandidate,
         filter: &TemporalCandidateFilterV1,
     ) -> Result<bool, TemporalPortError> {
-        if candidate.channel == CandidateChannel::Summary {
-            if !filter.include_summaries
+        if candidate.channel == CandidateChannel::Summary
+            && (!filter.include_summaries
                 || !filter.roles.is_empty()
                 || filter.message_type != TemporalMessageTypeFilterV1::All
                 || filter.start_time.is_some()
                 || filter.end_time.is_some()
-                || filter.goals
-            {
-                return Ok(false);
-            }
+                || filter.goals)
+        {
+            return Ok(false);
         }
         if filter.is_empty() {
             return Ok(true);

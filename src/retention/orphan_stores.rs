@@ -556,8 +556,10 @@ enum DurableMemoryCheck {
 fn store_graph_db_relpath(manifest_bytes: Option<&[u8]>) -> PathBuf {
     manifest_bytes
         .and_then(|bytes| serde_json::from_slice::<crate::storage::StoreManifest>(bytes).ok())
-        .map(|manifest| manifest.graph_db_relpath)
-        .unwrap_or_else(|| PathBuf::from(crate::config::DB_FILENAME))
+        .map_or_else(
+            || PathBuf::from(crate::config::DB_FILENAME),
+            |manifest| manifest.graph_db_relpath,
+        )
 }
 
 /// The read-snapshot scratch directory for durable-memory checks.

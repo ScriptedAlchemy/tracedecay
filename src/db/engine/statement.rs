@@ -37,7 +37,7 @@ impl<'a> Statement<'a> {
         }
     }
 
-    /// Execution owns no SQLite cursor or bound parameter state: every call is
+    /// Execution owns no `SQLite` cursor or bound parameter state: every call is
     /// submitted as a fresh runtime request. Reset therefore preserves the
     /// statement-reuse contract without touching the writer or reader pool.
     pub(crate) fn reset(&self) {}

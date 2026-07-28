@@ -1227,10 +1227,7 @@ async fn validate_projection_authority_suffix_pages(
                     .map(|(_, observation)| validate_projection_effect(conn, observation)),
             )
             .await?;
-            let validated_through = chunk
-                .last()
-                .map(|(sequence, _)| *sequence)
-                .unwrap_or(scan_cursor);
+            let validated_through = chunk.last().map_or(scan_cursor, |(sequence, _)| *sequence);
             checkpoint =
                 projection_audit_checkpoint_through_sequence(conn, checkpoint, validated_through)
                     .await?;

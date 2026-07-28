@@ -19,7 +19,7 @@ use tracedecay_domain::{
 use super::profile_identity::LocalProfileIdentityAuthorityV1;
 
 pub(crate) const PR9_MCP_READ_CAPABILITY_V1: &str = "capability.application.code-index.search-read";
-const PR9_MCP_GRANT_HORIZON: Duration = Duration::from_secs(24 * 60 * 60);
+const PR9_MCP_GRANT_HORIZON: Duration = Duration::from_hours(24);
 const AUTHORIZATION_REVISION_DOMAIN_V1: &str = "tracedecay.daemon.pr9-mcp-read-authorization.v1";
 const PRINCIPAL_DOMAIN_V1: &str = "tracedecay.daemon.pr9-mcp-profile-principal.v1";
 

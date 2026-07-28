@@ -1297,7 +1297,7 @@ impl HostAdmissionTestRuntimeV1 {
                     message: "project graph initialization requires project-scoped test authority"
                         .to_owned(),
                 })?;
-        let project_database = self.project_registered.as_ref().cloned().ok_or_else(|| {
+        let project_database = self.project_registered.clone().ok_or_else(|| {
             crate::errors::TraceDecayError::Config {
                 message: "project graph initialization requires a registered project session"
                     .to_owned(),
@@ -1360,7 +1360,7 @@ impl HostAdmissionTestRuntimeV1 {
                 .ok_or_else(|| crate::errors::TraceDecayError::Config {
                     message: "project graph open requires project-scoped test authority".to_owned(),
                 })?;
-        let project_database = self.project_registered.as_ref().cloned().ok_or_else(|| {
+        let project_database = self.project_registered.clone().ok_or_else(|| {
             crate::errors::TraceDecayError::Config {
                 message: "project graph open requires a registered project session".to_owned(),
             }
@@ -1396,7 +1396,7 @@ impl HostAdmissionTestRuntimeV1 {
                     message: "project branch open requires project-scoped test authority"
                         .to_owned(),
                 })?;
-        let project_database = self.project_registered.as_ref().cloned().ok_or_else(|| {
+        let project_database = self.project_registered.clone().ok_or_else(|| {
             crate::errors::TraceDecayError::Config {
                 message: "project branch open requires a registered project session".to_owned(),
             }
@@ -2535,7 +2535,7 @@ impl HostAdmissionTestRuntimeV1 {
     ) -> crate::errors::Result<
         crate::global_db::configuration::OwnedGlobalDbConfigurationControlStore,
     > {
-        let database = self.project_registered.as_ref().cloned().ok_or_else(|| {
+        let database = self.project_registered.clone().ok_or_else(|| {
             crate::errors::TraceDecayError::Database {
                 operation: "bind configuration control test project sessions".to_string(),
                 message: "registered ProjectSessions mount is unavailable".to_string(),
@@ -2596,7 +2596,7 @@ impl HostAdmissionTestRuntimeV1 {
                         profile_root.display()
                     ),
                 })?;
-        let project_sessions = self.project_registered.as_ref().cloned().ok_or_else(|| {
+        let project_sessions = self.project_registered.clone().ok_or_else(|| {
             crate::errors::TraceDecayError::Database {
                 operation: "bind MCP test project sessions".to_string(),
                 message: "registered ProjectSessions mount is unavailable".to_string(),
@@ -2624,7 +2624,7 @@ impl HostAdmissionTestRuntimeV1 {
     pub(crate) fn dashboard_test_authority(
         self: &Arc<Self>,
     ) -> crate::errors::Result<crate::dashboard::DashboardHostAdmissionTestAuthorityV1> {
-        let project_sessions = self.project_registered.as_ref().cloned().ok_or_else(|| {
+        let project_sessions = self.project_registered.clone().ok_or_else(|| {
             crate::errors::TraceDecayError::Database {
                 operation: "bind dashboard test project sessions".to_string(),
                 message: "registered ProjectSessions mount is unavailable".to_string(),
@@ -2673,7 +2673,7 @@ impl HostAdmissionTestRuntimeV1 {
             .await
             .map_err(|error| crate::errors::TraceDecayError::Database {
                 operation: "set retained test parse offset".to_string(),
-                message: error.to_string(),
+                message: error.clone(),
             })?;
         Ok(())
     }

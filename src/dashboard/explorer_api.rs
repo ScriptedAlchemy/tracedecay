@@ -348,8 +348,7 @@ fn remember_run(run: StoredExplorerRun, run_id: String) -> Result<(), &'static s
                 stored
                     .run
                     .try_read()
-                    .map(|run| run.submitted_at_micros)
-                    .unwrap_or(i64::MIN)
+                    .map_or(i64::MIN, |run| run.submitted_at_micros)
             })
             .map(|(run_id, _)| run_id.clone());
         let Some(oldest_terminal) = oldest_terminal else {
@@ -478,8 +477,7 @@ async fn execute_query(
                             .sources
                             .iter()
                             .find(|source| source.outcome == ExplorerSourceOutcomeV1::Pending)
-                            .map(|source| source.source_id)
-                            .unwrap_or(ExplorerSourceIdV1::CodeGraph);
+                            .map_or(ExplorerSourceIdV1::CodeGraph, |source| source.source_id);
                         ExplorerSourceProgressV1::error(
                             source_id,
                             "source_task_failed",

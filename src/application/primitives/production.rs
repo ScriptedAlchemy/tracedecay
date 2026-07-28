@@ -1009,9 +1009,9 @@ fn update_storage_status_history(
     // size adds no information, and appending per read would both amplify
     // writes and make this evidence operation non-idempotent, so the same
     // authorized status read could never agree across CLI, MCP, and HTTP.
-    let recorded = !history
+    let recorded = history
         .last()
-        .is_some_and(|sample| sample.database_bytes == database_bytes);
+        .is_none_or(|sample| sample.database_bytes != database_bytes);
     if recorded {
         history.push(StorageStatusHistoryPointV1 {
             observed_at,
@@ -1416,9 +1416,10 @@ impl Pr12ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
             let selected_file = document_path
                 .as_deref()
                 .and_then(|path| identity.file(path).map(|(file, _)| file));
-            let cursor_lane = selected_file
-                .map(|file| file.as_str())
-                .unwrap_or(DIAGNOSTIC_CURSOR_LANE_WORKSPACE);
+            let cursor_lane = selected_file.map_or(
+                DIAGNOSTIC_CURSOR_LANE_WORKSPACE,
+                tracedecay_domain::FileOccurrenceId::as_str,
+            );
             let cursor = match request.cursor.as_deref() {
                 Some(cursor) => match self.diagnostic_cursors.decode(
                     cursor,
@@ -1427,7 +1428,7 @@ impl Pr12ExtendedPrimitivePort for TraceDecayExtendedPrimitivePortV1 {
                     cursor_lane,
                 ) {
                     Ok(cursor) => Some(cursor),
-                    Err(_) => {
+                    Err(()) => {
                         return diagnostics_unavailable(finished_at, OmissionReason::Unsupported);
                     }
                 },

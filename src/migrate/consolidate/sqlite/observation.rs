@@ -704,7 +704,6 @@ async fn merge_source_cursor_advances(conn: &impl Executor) -> Result<()> {
          FROM source.source_cursor_advances;",
     )
     .await
-    .map(|_| ())
     .map_err(|error| db_error("merge_source_cursor_advances", error))
 }
 

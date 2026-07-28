@@ -112,6 +112,6 @@ pub(super) async fn upsert_live_transcript_projection(
         .await
         .map_err(|error| TraceDecayError::Database {
             operation: "persist live transcript projection".to_string(),
-            message: error.to_string(),
+            message: error.clone(),
         })
 }

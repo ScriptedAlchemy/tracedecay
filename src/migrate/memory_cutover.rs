@@ -278,7 +278,7 @@ async fn apply_planned(
     inject_cutover_fault(CutoverFaultPhase::TargetDurabilityBarrier)?;
     storage::PrivateStoreIo::sync_sqlite_family(&resolved.graph_db_path)
         .map_err(|error| migration_error(format!("synchronize project memory target: {error}")))?;
-    write_cutover_receipt(&resolved, &planned.sources, &archive_proofs)?;
+    write_cutover_receipt(resolved, &planned.sources, &archive_proofs)?;
 
     Ok(MemoryCutoverReport {
         applied: true,

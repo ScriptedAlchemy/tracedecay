@@ -175,10 +175,9 @@ pub(crate) async fn ensure_authority_invariants(
     } else {
         None
     };
-    let exhaustive = checkpoint.is_none()
-        || checkpoint.is_some_and(|checkpoint| {
-            checkpoint.bounded_passes_since_exhaustive == INCOMPLETE_EXHAUSTIVE_PASS
-        });
+    let exhaustive = checkpoint.is_none_or(|checkpoint| {
+        checkpoint.bounded_passes_since_exhaustive == INCOMPLETE_EXHAUSTIVE_PASS
+    });
     let checkpoint = checkpoint.unwrap_or_default();
     let (receipt_rowid, receipts_audited) =
         validate_receipt_authority_rows(conn, checkpoint.receipt_rowid).await?;

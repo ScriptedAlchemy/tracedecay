@@ -247,8 +247,8 @@ impl GlobalDbCursorKeyProvider {
         if !expected_loaded {
             return Err(GlobalDbCursorKeyProviderError::ActiveKeyUnavailable { expected });
         }
-        let active_key = active_key
-            .ok_or_else(|| GlobalDbCursorKeyProviderError::ActiveKeyUnavailable { expected })?;
+        let active_key =
+            active_key.ok_or(GlobalDbCursorKeyProviderError::ActiveKeyUnavailable { expected })?;
         Ok(Self {
             active_key,
             authenticators,

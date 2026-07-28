@@ -1065,17 +1065,15 @@ impl Pr10NativeResourceEvidenceV1 {
             Pr10NativeStageResultV1::Complete(current),
             Pr10NativeStageResultV1::Complete(ten_x),
         ) = (current, ten_x)
-        {
-            if current
+            && current
                 .eligible_chunks
                 .checked_mul(10)
                 .is_none_or(|expected| ten_x.eligible_chunks != expected)
-            {
-                return Err(Pr10NativeEvaluationErrorV1::Contract(
-                    "10x resource evidence must contain exactly ten times the eligible chunks"
-                        .to_owned(),
-                ));
-            }
+        {
+            return Err(Pr10NativeEvaluationErrorV1::Contract(
+                "10x resource evidence must contain exactly ten times the eligible chunks"
+                    .to_owned(),
+            ));
         }
         Ok(())
     }

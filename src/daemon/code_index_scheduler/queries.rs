@@ -1205,12 +1205,11 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
             ) else {
                 return unavailable(finished_at);
             };
-            if let Some(cursor) = request.meta.page.cursor.as_ref() {
-                if let Err(error) =
+            if let Some(cursor) = request.meta.page.cursor.as_ref()
+                && let Err(error) =
                     authenticate_callable_code_cursor(cursor_authority.as_ref(), &base, cursor)
-                {
-                    return rejected_cursor(finished_at, served_generation, error);
-                }
+            {
+                return rejected_cursor(finished_at, served_generation, error);
             }
             let Ok(query_view) = tracedecay_domain::EphemeralSanitizedQueryViewV1::sanitize(
                 request.literal.clone(),
@@ -1299,12 +1298,11 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
             ) else {
                 return unavailable(finished_at);
             };
-            if let Some(cursor) = request.meta.page.cursor.as_ref() {
-                if let Err(error) =
+            if let Some(cursor) = request.meta.page.cursor.as_ref()
+                && let Err(error) =
                     authenticate_callable_code_cursor(cursor_authority.as_ref(), &base, cursor)
-                {
-                    return rejected_cursor(finished_at, served_generation, error);
-                }
+            {
+                return rejected_cursor(finished_at, served_generation, error);
             }
             let whole_terms = request
                 .query
@@ -1418,12 +1416,11 @@ impl CallableCodeQueryPort for CodeIndexSchedulerRegistryV1 {
             ) else {
                 return unavailable(finished_at);
             };
-            if let Some(cursor) = request.meta.page.cursor.as_ref() {
-                if let Err(error) =
+            if let Some(cursor) = request.meta.page.cursor.as_ref()
+                && let Err(error) =
                     authenticate_callable_code_cursor(cursor_authority.as_ref(), &base, cursor)
-                {
-                    return rejected_cursor(finished_at, served_generation, error);
-                }
+            {
+                return rejected_cursor(finished_at, served_generation, error);
             }
             let Ok(symbol) = typed::<SymbolOccurrenceId>(request.node_id.clone()) else {
                 return unavailable(finished_at);

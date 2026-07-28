@@ -8,7 +8,7 @@ use tracedecay::application_surface::{
     ApplicationSurfaceRequest, FeedbackImpactSurfaceRequest, FeedbackSurfaceRequest,
     GitApplySurfaceRequest, GitPreviewSurfaceRequest, GitReadSurfaceRequest,
     TestResultsSurfaceRequest, resolve_application_surface_dispatch,
-    resolve_http_application_surface, resolve_http_application_surface_dispatch,
+    resolve_http_application_surface_dispatch,
 };
 use tracedecay::daemon_client::{
     BindingResolution, BindingResolver, CatalogBindingResolver, RequestedOutputFormat,
@@ -16,12 +16,10 @@ use tracedecay::daemon_client::{
 use tracedecay::mcp::tools::dispatch::resolve_mcp_application_surface_dispatch;
 use tracedecay::mcp::tools::get_tool_definitions;
 use tracedecay_api::{
-    CanonicalInvocationResult, HttpApplicationControls, HttpApplicationRequest, HttpSseEvent,
-    application_router,
+    CanonicalInvocationResult, HttpApplicationRequest, HttpSseEvent, application_router,
 };
 use tracedecay_application::{
-    APPLICATION_DEFAULT_PROFILE_ID, ApplicationProblem, ApplicationProblemEnvelope,
-    CancellationSignal, Deadline, IdempotencyKey, RequestId, ResultContractRef, RetryDirective,
+    APPLICATION_DEFAULT_PROFILE_ID, IdempotencyKey, RequestId, ResultContractRef, RetryDirective,
     StreamEvent,
 };
 use tracedecay_domain::{
@@ -31,9 +29,7 @@ use tracedecay_domain::{
     RepositoryId, RepositoryIndexSnapshotV1, RepositoryIndexStateV1, RepositoryStateSnapshotV1,
     RepositoryWorkingTreeSnapshotV1, RepositoryWorkingTreeStateV1, UtcMicros, WorktreeId,
 };
-use tracedecay_tool_catalog::{
-    BindingId, BindingSurface, ProfileId, SchemaId, SurfaceOperationName,
-};
+use tracedecay_tool_catalog::{BindingSurface, ProfileId, SchemaId, SurfaceOperationName};
 
 const PARITY_FIXTURE: &str =
     include_str!("../benchmarks/pr12-transport-boundary/goldens/application-surface-parity.json");

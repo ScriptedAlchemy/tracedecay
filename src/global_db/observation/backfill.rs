@@ -115,7 +115,7 @@ pub(super) async fn backfill_page(
 }
 
 async fn backfill_page_transaction(
-    transaction: &(impl Executor + QueryExecutor),
+    transaction: &impl Executor,
     availability_json: &str,
 ) -> crate::errors::Result<BackfillPageOutcome> {
     if migration_recorded(transaction, OBSERVATION_PROVENANCE_SCHEMA_MIGRATION).await? {
@@ -187,7 +187,7 @@ async fn anchor_backfill_page(conn: &Connection) -> crate::errors::Result<Backfi
 }
 
 async fn anchor_backfill_page_transaction(
-    transaction: &(impl Executor + QueryExecutor + Sync),
+    transaction: &(impl Executor + Sync),
 ) -> crate::errors::Result<BackfillPageOutcome> {
     if migration_recorded(transaction, OBSERVATION_ANCHOR_SCHEMA_MIGRATION).await? {
         return Ok(BackfillPageOutcome::Completed);
@@ -246,7 +246,7 @@ async fn anchor_backfill_page_transaction(
 }
 
 async fn attach_legacy_observation_anchor(
-    conn: &(impl Executor + QueryExecutor + Sync),
+    conn: &(impl Executor + Sync),
     observation_json: &str,
     receipt_id: &str,
     receipt_json: Option<&str>,

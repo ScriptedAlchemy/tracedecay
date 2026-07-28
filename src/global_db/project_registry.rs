@@ -175,7 +175,7 @@ fn native_project_path_alias_decode_error(error: String) -> String {
 }
 
 pub(super) async fn migrate_project_rows_to_canonical_keys(
-    conn: &(impl Executor + QueryExecutor),
+    conn: &impl Executor,
 ) -> crate::db::engine::Result<()> {
     let mut rows = conn
         .query("SELECT path, tokens_saved FROM projects", ())

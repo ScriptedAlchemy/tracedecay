@@ -587,7 +587,7 @@ async fn finish_transaction<T>(
 ) -> Result<T> {
     match result {
         Ok(value) => match transaction.commit().await {
-            Ok(_) => Ok(value),
+            Ok(()) => Ok(value),
             Err(commit_error) => Err(db_message(
                 operation,
                 format!("commit failed; writer transaction retired: {commit_error}"),

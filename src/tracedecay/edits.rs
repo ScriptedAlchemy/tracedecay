@@ -774,12 +774,12 @@ impl TraceDecay {
         };
 
         let mut result =
-            safe_extract(extractor, file_path, &source).ok_or_else(|| TraceDecayError::Config {
+            safe_extract(extractor, file_path, source).ok_or_else(|| TraceDecayError::Config {
                 message: format!("extraction panicked for {file_path}"),
             })?;
         result.sanitize();
 
-        let hash = sync::content_hash(&source);
+        let hash = sync::content_hash(source);
         let size = source.len() as u64;
         let mtime = file
             .metadata()

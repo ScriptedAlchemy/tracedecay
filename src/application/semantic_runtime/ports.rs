@@ -898,11 +898,11 @@ impl SemanticConfigurationTransitionV1 {
     ) -> Result<Self, SemanticRuntimeContractErrorV1> {
         let result_active_semantic = accepted_runtime.semantic.clone();
         if accepted.compatibility().semantic != result_active_semantic
-            || match (&result_active_semantic, accepted_runtime.semantic_ceiling) {
+            || !(match (&result_active_semantic, accepted_runtime.semantic_ceiling) {
                 (Some(required), Some(ceiling)) => resources_covered(required.resources, ceiling),
                 (None, None) => true,
                 _ => false,
-            } == false
+            })
         {
             return Err(SemanticRuntimeContractErrorV1::InvalidCompatibility);
         }
@@ -937,10 +937,10 @@ impl SemanticConfigurationTransitionV1 {
             result_active_profile_digest,
             evaluation_anchor,
             expected_cas,
-            result_rollback_semantic,
             prior_active_semantic,
             prior_rollback_semantic,
             result_active_semantic,
+            result_rollback_semantic,
             transition_at,
             transition_digest,
         };

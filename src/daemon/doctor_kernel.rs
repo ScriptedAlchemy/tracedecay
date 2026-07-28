@@ -995,7 +995,7 @@ pub async fn collect_retention_backlog_findings(
 }
 
 /// Read the exact code-generation liveness plan and surface superseded and
-/// collectable bytes through Doctor. These are ordinary files, not SQLite
+/// collectable bytes through Doctor. These are ordinary files, not `SQLite`
 /// tables, so dbstat/table attribution cannot observe them.
 pub async fn collect_code_generation_retention_findings(
     graph: &crate::db::Database,
@@ -1564,7 +1564,7 @@ fn verify_doctor_remediation_observation(
         .entries()
         .iter()
         .filter(|entry| entry.finding().family() == family)
-        .map(|entry| entry.finding())
+        .map(tracedecay_application::DoctorReportEntryV1::finding)
         .collect::<Vec<_>>();
     if findings.is_empty() {
         return Ok(DoctorRemediationVerificationV1::Unavailable);
@@ -1970,7 +1970,7 @@ async fn dispatch_doctor_owner_operation(
         );
         let preview_id = match owner_preview {
             Some(preview_id) => preview_id,
-            None => PreviewId::new(format!("preview.doctor-remediation.{}", operation_id))
+            None => PreviewId::new(format!("preview.doctor-remediation.{operation_id}"))
                 .map_err(|_| DoctorRemediationDispatchErrorV1::InvalidReference)?,
         };
         return Ok(DoctorRemediationOperationV1 {

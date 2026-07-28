@@ -83,7 +83,7 @@ pub(crate) struct StoreTelemetryEntryV1 {
     pub free_page_ratio: Option<f64>,
     pub budget: StoreBudgetDimensionV1,
     pub growth: StoreGrowthDimensionV1,
-    /// Per-table payload growth from the SQLite `dbstat` watermarks retained by
+    /// Per-table payload growth from the `SQLite` `dbstat` watermarks retained by
     /// the production telemetry port.
     pub table_growth: TableGrowthDimensionV1,
 }

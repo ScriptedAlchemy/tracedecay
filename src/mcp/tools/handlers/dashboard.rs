@@ -122,9 +122,11 @@ pub(super) async fn handle_dashboard(
                 TraceDecayError::Config {
                     message: "retained dashboard project graph resolver is unavailable".to_string(),
                 }
-            })?(crate::mcp::server::RetainedProjectGraphRequest::for_mounted_root(
-                cg.project_root().to_path_buf(),
-            ))
+            })?(
+                crate::mcp::server::RetainedProjectGraphRequest::for_mounted_root(
+                    cg.project_root().to_path_buf(),
+                ),
+            )
             .await?
             .ok_or_else(|| TraceDecayError::Config {
                 message: "retained dashboard project graph is unavailable".to_string(),

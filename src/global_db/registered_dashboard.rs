@@ -319,7 +319,7 @@ impl RegisteredGlobalDb {
                         scope.db_relpath,
                         scope.parent_scope_id,
                         scope.last_synced_at,
-                        if scope.writable { 1_i64 } else { 0_i64 }
+                        i64::from(scope.writable)
                     ],
                 )
                 .await

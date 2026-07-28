@@ -590,9 +590,10 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use tracedecay_domain::{
-        ActorId, ProjectId, RepositoryId, RetrievalGrainV1, SessionId,
-        SessionSourceCoverageReceiptV1, SessionSourceCoverageV1, SessionSourceFrontierV1,
-        SessionSourceIdV1, SessionTemporalCoverageRequestV1, TemporalModeV1, UtcMicros, WorktreeId,
+        ActorId, ProjectId, RepositoryId, RetrievalGrainV1,
+        SESSION_TEMPORAL_CURSOR_MAX_PARTICIPANTS, SessionId, SessionSourceCoverageReceiptV1,
+        SessionSourceCoverageV1, SessionSourceFrontierV1, SessionSourceIdV1,
+        SessionTemporalCoverageRequestV1, TemporalModeV1, UtcMicros, WorktreeId,
     };
 
     use super::*;
@@ -1158,7 +1159,7 @@ mod tests {
             SessionRetrievalOutcome::CursorManifestLimitExceeded {
                 kind: CursorManifestLimitKindV1::Participants,
                 observed: 257,
-                maximum: tracedecay_domain::SESSION_TEMPORAL_CURSOR_MAX_PARTICIPANTS,
+                maximum: SESSION_TEMPORAL_CURSOR_MAX_PARTICIPANTS,
             },
             SessionRetrievalOutcome::BudgetExhausted,
             SessionRetrievalOutcome::Cancelled,

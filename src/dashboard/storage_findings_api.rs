@@ -199,7 +199,7 @@ fn canonical_kind_status(
             .families()
             .iter()
             .find(|family| family.family() == DoctorFindingFamilyV1::Storage)
-            .map(|family| family.consultation())
+            .map(tracedecay_application::DoctorFamilyCoverageV1::consultation)
     });
     let (state, reason) = match consultation {
         Some(DoctorFamilyConsultationV1::Consulted) => (
