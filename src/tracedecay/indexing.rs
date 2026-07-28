@@ -1354,17 +1354,19 @@ impl TraceDecay {
             .map(|record| record.path)
             .collect();
         if !files.is_empty() {
-            let (extractions, _skipped) =
-                extract_files_isolated(&self.project_root, &self.registry, files);
-            let mut all_unresolved = Vec::new();
-            for (_path, result, _hash, _size, _mtime) in &extractions {
-                all_unresolved.extend_from_slice(&result.unresolved_refs);
-            }
             // Replace the incomplete persisted set with the freshly extracted
             // complete one. Clearing first also bounds unbounded ref growth (#4).
             self.db.clear_unresolved_refs().await?;
-            if !all_unresolved.is_empty() {
-                self.db.insert_unresolved_refs(&all_unresolved).await?;
+            for paths in files.chunks(BRANCH_SYNC_EXTRACTION_PAGE_FILES) {
+                let (extractions, _skipped) =
+                    extract_files_isolated(&self.project_root, &self.registry, paths.to_vec());
+                let unresolved = extractions
+                    .iter()
+                    .flat_map(|(_, result, _, _, _)| result.unresolved_refs.iter().cloned())
+                    .collect::<Vec<_>>();
+                if !unresolved.is_empty() {
+                    self.db.insert_unresolved_refs(&unresolved).await?;
+                }
             }
         }
         self.db
