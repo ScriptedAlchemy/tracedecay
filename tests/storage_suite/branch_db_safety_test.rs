@@ -122,7 +122,8 @@ async fn init_index_uses_graph_specific_sync_lock() {
 
 #[tokio::test]
 async fn corrupt_derived_branch_store_is_preserved_and_rebuilt_automatically() {
-    let (_env, project, feature) = open_untracked_project().await;
+    let (env, project, feature) = open_untracked_project().await;
+    let open_options = profile_open_options(&env);
     let layout = feature.store_layout().clone();
     let corrupt_db = feature.db_path().to_path_buf();
     feature.checkpoint().await.unwrap();
@@ -145,7 +146,7 @@ async fn corrupt_derived_branch_store_is_preserved_and_rebuilt_automatically() {
     fs::write(&dirty_path, dirty_bytes).unwrap();
     fs::write(&layout.dirty_path, dirty_bytes).unwrap();
 
-    let repaired = TraceDecay::open(&project)
+    let repaired = TraceDecay::open_with_options(&project, open_options)
         .await
         .expect("a corrupt derived branch index should rebuild from its tracked ancestor");
     assert_eq!(repaired.active_branch(), Some("feature/untracked"));
