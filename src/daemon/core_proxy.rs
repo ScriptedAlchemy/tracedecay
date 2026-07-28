@@ -11,8 +11,8 @@ use tokio::time::{Duration, Instant};
 
 use super::{
     DAEMON_TOOL_LIVENESS_POLL_INTERVAL, DaemonClientDeadline, DaemonHandshake,
-    PROJECT_WARMING_RETRY_HINT, connect_to_current_daemon_within, default_available_socket_path,
-    next_daemon_response_line, write_daemon_preamble,
+    PROJECT_WARMING_RETRY_HINT, connect_to_current_daemon_within, next_daemon_response_line,
+    write_daemon_preamble,
 };
 #[cfg(unix)]
 use super::{
@@ -670,14 +670,6 @@ async fn proxy_one_request(
     }
     transport.flush().await?;
     Ok(())
-}
-
-pub async fn proxy_stdio_to_default_daemon(
-    handshake: &DaemonHandshake,
-    replay_line: Option<String>,
-) -> Result<()> {
-    let socket_path = default_available_socket_path()?;
-    proxy_stdio_to_daemon(&socket_path, handshake, replay_line).await
 }
 
 #[cfg(test)]

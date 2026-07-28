@@ -363,12 +363,6 @@ impl HostIntegrationDoctorAdapterV1 {
     pub fn from_read(read: HostIntegrationReadV1) -> Self {
         Self { read }
     }
-
-    /// Build the adapter from a real host conformance summary.
-    #[must_use]
-    pub fn from_summary(summary: &HostConformanceSummaryV1) -> Self {
-        Self::from_read(host_conformance_read(summary))
-    }
 }
 
 impl HostIntegrationDoctorPort for HostIntegrationDoctorAdapterV1 {

@@ -302,10 +302,6 @@ impl ShardRuntime {
         Ok(())
     }
 
-    pub(crate) fn note_activity(&self) {
-        self.lock_state().touch();
-    }
-
     pub(crate) fn last_activity(&self) -> Instant {
         self.lock_state().last_activity
     }
