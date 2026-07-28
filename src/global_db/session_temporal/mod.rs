@@ -16,10 +16,12 @@ mod sql;
 #[cfg(test)]
 mod tests;
 
+use std::collections::BTreeMap;
+
 use crate::db::engine::params;
 use serde::Deserialize;
 use serde_json::Value;
-use tracedecay_domain::{RetrievalAnchorId, SessionId, SignedCursorKeyRefV1};
+use tracedecay_domain::{HydrationStateV1, RetrievalAnchorId, SessionId, SignedCursorKeyRefV1};
 
 use crate::application::session::{
     AuthorizedTemporalExecutionRequest, SessionDataFreshness, SessionTemporalExecutionError,
@@ -29,6 +31,7 @@ use crate::global_db::RegisteredGlobalDb;
 use crate::query::temporal::context::VersionedTokenEstimator;
 use crate::query::temporal::cursor::{CursorError, StableSortKey, encode_cursor, verify_cursor};
 use crate::query::temporal::execute_temporal_kernel;
+use crate::query::temporal::hydration::hydrate_selected;
 use crate::query::temporal::ports::{
     BindingDigest, KernelVersions, MAX_TEMPORAL_PARTICIPANTS, TemporalAuthorizedRoot,
     TemporalExecutionSnapshot, TemporalParticipantAuthorization, TemporalParticipantGeneration,
@@ -37,13 +40,14 @@ use crate::query::temporal::ports::{
 use crate::query::temporal::resolution::ValidatedAuthorization;
 use crate::sessions::SessionMessageRecord;
 use crate::sessions::lcm::{
-    LcmDescribeRequest, LcmDescribeResponse, LcmDescribeTarget, LcmError, LcmExpandRequest,
-    LcmExpandResponse, LcmExpandTarget,
+    LcmContentSlice, LcmDescribeRequest, LcmDescribeResponse, LcmDescribeTarget, LcmError,
+    LcmExpandRequest, LcmExpandResponse, LcmExpandTarget, LcmSourceRef,
 };
 
 pub(crate) use self::cursor_keys::GlobalDbCursorKeyProvider;
 pub(crate) use self::direct::ResolvedDirectAnchor;
 use self::hydration::GlobalDbTemporalHydrationPort;
+use self::lcm_render::{CanonicalLcmSourceHydration, apply_canonical_summary_source_content};
 use self::retrieval::GlobalDbTemporalReadPort;
 use self::sql::TemporalSqlRead;
 
@@ -178,6 +182,126 @@ impl<'db> RegisteredGlobalDbSessionTemporalExecution<'db> {
         registered_lcm_render::expand(&snapshot, request, canonical_content)
             .await
             .map_err(map_lcm_error)
+    }
+
+    pub(crate) async fn hydrate_lcm_summary_sources(
+        &self,
+        snapshot: &TemporalExecutionSnapshot,
+        provider: &str,
+        session_id: &SessionId,
+        slice: LcmContentSlice,
+        expansion: &mut LcmExpandResponse,
+    ) -> Result<(), SessionTemporalExecutionError> {
+        if expansion.summary_sources.is_empty() {
+            return Ok(());
+        }
+        let read_snapshot = self
+            .db
+            .read_snapshot()
+            .await
+            .map_err(|_| SessionTemporalExecutionError::Unavailable)?;
+        let read = TemporalSqlRead::registered(&read_snapshot);
+        let mut resolutions = Vec::with_capacity(expansion.summary_sources.len());
+        let mut anchors = Vec::with_capacity(expansion.summary_sources.len());
+        for source in &expansion.summary_sources {
+            let target = match &source.source_ref {
+                LcmSourceRef::RawMessage { store_id } => LcmExpandTarget::RawMessage {
+                    store_id: *store_id,
+                },
+                LcmSourceRef::SummaryNode { node_id } => LcmExpandTarget::SummaryNode {
+                    node_id: node_id.clone(),
+                },
+            };
+            let resolution =
+                direct::resolve_expand_target(&read, provider, session_id, &target).await;
+            match resolution {
+                Ok(resolved) if &resolved.owner_session_id == session_id => {
+                    anchors.push(resolved.anchor_id.clone());
+                    resolutions.push(Ok(resolved.anchor_id));
+                }
+                Ok(_)
+                | Err(SessionTemporalExecutionError::Denied)
+                | Err(SessionTemporalExecutionError::WrongScope) => {
+                    resolutions.push(Err(HydrationStateV1::Unauthorized));
+                }
+                Err(SessionTemporalExecutionError::Deleted) => {
+                    resolutions.push(Err(HydrationStateV1::Deleted));
+                }
+                Err(SessionTemporalExecutionError::Redacted) => {
+                    resolutions.push(Err(HydrationStateV1::Redacted));
+                }
+                Err(SessionTemporalExecutionError::Locked) => {
+                    resolutions.push(Err(HydrationStateV1::Locked));
+                }
+                Err(SessionTemporalExecutionError::BudgetExhausted) => {
+                    return Err(SessionTemporalExecutionError::BudgetExhausted);
+                }
+                Err(SessionTemporalExecutionError::Cancelled) => {
+                    return Err(SessionTemporalExecutionError::Cancelled);
+                }
+                Err(_) => {
+                    resolutions.push(Err(HydrationStateV1::RetainedButUnavailable));
+                }
+            }
+        }
+        let storage_root = self
+            .db
+            .db_path()
+            .parent()
+            .ok_or(SessionTemporalExecutionError::Unavailable)?;
+        let authority =
+            GlobalDbTemporalHydrationPort::for_registered_snapshot(&read_snapshot, storage_root);
+        let batch = hydrate_selected(&authority, snapshot, &anchors)
+            .await
+            .map_err(|error| {
+                SessionTemporalExecutionError::Kernel(
+                    crate::query::temporal::TemporalKernelError::Hydration(error),
+                )
+            })?;
+        let available = batch
+            .available
+            .iter()
+            .filter_map(|payload| {
+                String::from_utf8(payload.bytes().to_vec())
+                    .ok()
+                    .map(|content| (payload.anchor_id().clone(), content))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let unavailable = batch
+            .unavailable
+            .iter()
+            .map(|denial| (denial.anchor_id().clone(), denial.state()))
+            .collect::<BTreeMap<_, _>>();
+        let hydration = expansion
+            .summary_sources
+            .iter()
+            .zip(resolutions)
+            .map(|(source, resolution)| {
+                let (state, content) = match resolution {
+                    Ok(anchor_id) => {
+                        if let Some(content) = available.get(&anchor_id) {
+                            (HydrationStateV1::Available, Some(content.clone()))
+                        } else {
+                            (
+                                unavailable
+                                    .get(&anchor_id)
+                                    .copied()
+                                    .unwrap_or(HydrationStateV1::RetainedButUnavailable),
+                                None,
+                            )
+                        }
+                    }
+                    Err(state) => (state, None),
+                };
+                CanonicalLcmSourceHydration {
+                    source_ref: source.source_ref.clone(),
+                    state,
+                    content,
+                }
+            })
+            .collect::<Vec<_>>();
+        apply_canonical_summary_source_content(expansion, slice, &hydration)
+            .map_err(|_| SessionTemporalExecutionError::Unavailable)
     }
 
     pub(crate) async fn encode_lcm_source_cursor(

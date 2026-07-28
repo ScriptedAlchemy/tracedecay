@@ -158,17 +158,17 @@ pub enum HydrationError {
 }
 
 #[derive(Clone, PartialEq, Eq)]
-pub(super) struct HydratedPayload {
+pub(crate) struct HydratedPayload {
     anchor_id: RetrievalAnchorId,
     bytes: Zeroizing<Vec<u8>>,
 }
 
 impl HydratedPayload {
-    pub(super) fn anchor_id(&self) -> &RetrievalAnchorId {
+    pub(crate) fn anchor_id(&self) -> &RetrievalAnchorId {
         &self.anchor_id
     }
 
-    pub(super) fn bytes(&self) -> &[u8] {
+    pub(crate) fn bytes(&self) -> &[u8] {
         &self.bytes
     }
 
@@ -189,17 +189,17 @@ impl fmt::Debug for HydratedPayload {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct UnavailableHydration {
+pub(crate) struct UnavailableHydration {
     anchor_id: RetrievalAnchorId,
     state: HydrationStateV1,
 }
 
 impl UnavailableHydration {
-    pub(super) fn anchor_id(&self) -> &RetrievalAnchorId {
+    pub(crate) fn anchor_id(&self) -> &RetrievalAnchorId {
         &self.anchor_id
     }
 
-    pub(super) const fn state(&self) -> HydrationStateV1 {
+    pub(crate) const fn state(&self) -> HydrationStateV1 {
         self.state
     }
 
@@ -209,12 +209,12 @@ impl UnavailableHydration {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(super) struct HydrationBatch {
-    pub(super) available: Vec<HydratedPayload>,
-    pub(super) unavailable: Vec<UnavailableHydration>,
+pub(crate) struct HydrationBatch {
+    pub(crate) available: Vec<HydratedPayload>,
+    pub(crate) unavailable: Vec<UnavailableHydration>,
 }
 
-pub(super) async fn hydrate_selected(
+pub(crate) async fn hydrate_selected(
     port: &impl TemporalHydrationPort,
     snapshot: &TemporalExecutionSnapshot,
     anchors: &[RetrievalAnchorId],

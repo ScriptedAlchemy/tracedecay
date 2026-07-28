@@ -610,6 +610,7 @@ impl ExpandQueryAssembler {
                 kind: kind.to_string(),
                 node_id,
                 source_ref,
+                state: None,
                 next_content_offset: admitted.next_content_offset,
                 has_more: admitted.truncated,
             });
@@ -627,6 +628,7 @@ impl ExpandQueryAssembler {
                 kind: kind.to_string(),
                 node_id,
                 source_ref,
+                state: None,
                 next_content_offset: admitted.next_content_offset,
                 has_more: true,
             });
@@ -1060,6 +1062,7 @@ mod tests {
     fn summary_source(store_id: i64) -> LcmExpandedSummarySource {
         LcmExpandedSummarySource {
             source_ref: LcmSourceRef::RawMessage { store_id },
+            state: tracedecay_domain::HydrationStateV1::Available,
             content: format!("source-{store_id}"),
             content_range: None,
             content_truncated: false,

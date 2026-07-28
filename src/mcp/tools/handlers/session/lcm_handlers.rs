@@ -1,7 +1,9 @@
 #[cfg(test)]
 use crate::automation::backend::{AgentTaskKind, AgentTaskRequest, run_agent_task_with_retry};
 use serde::Serialize;
-use tracedecay_domain::{RetrievalGrainV1, SessionId, TemporalCoverageCountsV1, TemporalModeV1};
+use tracedecay_domain::{
+    HydrationStateV1, RetrievalGrainV1, SessionId, TemporalCoverageCountsV1, TemporalModeV1,
+};
 
 use super::lcm_args::*;
 use super::lcm_compact::{
@@ -852,9 +854,15 @@ pub(in super::super) async fn handle_lcm_expand(
             grain,
             state,
         } => {
+            let omitted = expansion
+                .summary_sources
+                .iter()
+                .filter(|source| source.state != HydrationStateV1::Available)
+                .count();
             let mut payload = json!({
-            "status": "ok",
-            "provider": provider,
+                "status": if omitted == 0 { "ok" } else { "partial" },
+                "omitted": omitted,
+                "provider": provider,
                 "session_id": session_id.as_str(),
                 "expansion": expansion,
                 "grain": grain,
@@ -1119,6 +1127,7 @@ pub(in super::super) async fn handle_lcm_expand_query(
         };
         let mut sources = Vec::new();
         let mut summary_provenance = Vec::new();
+        let mut source_omitted = 0_usize;
         let mut temporal = SessionTemporalMetadataView::default();
         for node_id in request.node_ids.iter().take(request.max_results) {
             let outcome = service
@@ -1155,6 +1164,7 @@ pub(in super::super) async fn handle_lcm_expand_query(
                             kind: kind.to_string(),
                             node_id: Some(node_id.clone()),
                             source_ref: Some(source.source_ref.clone()),
+                            state: Some(source.state),
                             next_content_offset: source.content_range.as_ref().and_then(|range| {
                                 range
                                     .truncated
@@ -1162,7 +1172,11 @@ pub(in super::super) async fn handle_lcm_expand_query(
                             }),
                             has_more: source.content_truncated,
                         });
-                        sources.push((kind, Some(node_id.clone()), source.content));
+                        if source.state == HydrationStateV1::Available {
+                            sources.push((kind, Some(node_id.clone()), source.content));
+                        } else {
+                            source_omitted = source_omitted.saturating_add(1);
+                        }
                     }
                     sources.push(("summary_node", Some(node_id.clone()), expansion.content));
                     if !merge_temporal_metadata(&mut temporal, expansion_temporal) {
@@ -1201,7 +1215,8 @@ pub(in super::super) async fn handle_lcm_expand_query(
                 .node_ids
                 .len()
                 .saturating_sub(request.max_results)
-                .saturating_add(budget_omitted);
+                .saturating_add(budget_omitted)
+                .saturating_add(source_omitted);
             object.insert(
                 "status".to_string(),
                 json!(if omitted == 0 { "ok" } else { "partial" }),
@@ -2353,6 +2368,128 @@ mod compatibility_tests {
         assert_eq!(
             response["context_blocks"][0]["content"],
             "canonical summary context"
+        );
+    }
+
+    #[tokio::test]
+    async fn expand_query_omits_typed_unavailable_summary_sources() {
+        let service = RecordingService::new(complete("unused", "assistant", None));
+        let source =
+            |store_id, state, content: &str| crate::sessions::lcm::LcmExpandedSummarySource {
+                source_ref: LcmSourceRef::RawMessage { store_id },
+                state,
+                content: content.to_string(),
+                content_range: (state == HydrationStateV1::Available).then_some(LcmContentRange {
+                    offset: 0,
+                    limit: 4096,
+                    returned_chars: content.chars().count() as u64,
+                    total_chars: content.chars().count() as u64,
+                    truncated: false,
+                }),
+                content_truncated: false,
+                raw_message: None,
+                summary_node: None,
+            };
+        service.set_expand_outcome(LcmExpandServiceOutcome::Complete {
+            expansion: LcmExpandResponse {
+                kind: "summary_node".to_string(),
+                content: "canonical summary".to_string(),
+                content_range: LcmContentRange {
+                    offset: 0,
+                    limit: 4096,
+                    returned_chars: 17,
+                    total_chars: 17,
+                    truncated: false,
+                },
+                raw_message: None,
+                summary_node: None,
+                summary_sources: vec![
+                    source(1, HydrationStateV1::Available, "visible source"),
+                    source(2, HydrationStateV1::Redacted, ""),
+                    source(3, HydrationStateV1::Unauthorized, ""),
+                    source(4, HydrationStateV1::Deleted, ""),
+                ],
+                payload_ref: None,
+                from_current_session: None,
+                externalized_note: None,
+                source_pagination: None,
+            },
+            temporal: temporal(None),
+            grain: RetrievalGrainV1::Summary,
+            state: HydrationStateV1::Available,
+        });
+
+        let direct = payload(
+            handle_lcm_expand(
+                LcmHandlerContext::user(Path::new("/missing"), None, Some(&service)),
+                json!({
+                    "provider": "claude",
+                    "session_id": "session-exact",
+                    "target": {"kind": "summary_node", "node_id": "summary-1"},
+                    "format": "json"
+                }),
+            )
+            .await
+            .unwrap(),
+        );
+        assert_eq!(direct["status"], "partial", "{direct}");
+        assert_eq!(direct["omitted"], 3, "{direct}");
+        assert_eq!(
+            direct["expansion"]["summary_sources"][1]["state"],
+            "redacted"
+        );
+        assert_eq!(
+            direct["expansion"]["summary_sources"][2]["state"],
+            "unauthorized"
+        );
+        assert_eq!(
+            direct["expansion"]["summary_sources"][3]["state"],
+            "deleted"
+        );
+
+        let response = payload(
+            handle_lcm_expand_query(
+                LcmHandlerContext::user(Path::new("/missing"), None, Some(&service)),
+                json!({
+                    "provider": "claude",
+                    "session_id": "session-exact",
+                    "prompt": "Recover visible context",
+                    "node_ids": ["summary-1"],
+                    "max_results": 4,
+                    "context_max_tokens": 4096,
+                    "format": "json"
+                }),
+            )
+            .await
+            .unwrap(),
+        );
+
+        assert_eq!(response["status"], "partial", "{response}");
+        assert_eq!(response["omitted"], 3, "{response}");
+        assert!(
+            response["context_blocks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|block| block["content"] == "visible source"),
+            "{response}"
+        );
+        assert!(
+            response["context_blocks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|block| !block["content"].as_str().unwrap_or_default().is_empty()),
+            "{response}"
+        );
+        assert_eq!(
+            response["context_pagination"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|entry| entry["state"].as_str())
+                .collect::<Vec<_>>(),
+            vec!["available", "redacted", "unauthorized", "deleted"]
         );
     }
 
