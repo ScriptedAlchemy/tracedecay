@@ -214,70 +214,20 @@ fn load_scenario(id: &str) -> Scenario {
 }
 
 struct Fixture {
+    /// Declared first so the daemon is terminated and reaped before the
+    /// directories below are removed; a live daemon holds open profile files
+    /// that Windows refuses to delete.
+    _daemon: Option<common::DaemonProcess>,
     _home: TempDir,
     home_path: PathBuf,
     _project: TempDir,
     project_path: PathBuf,
-    _daemon: Option<common::DaemonProcess>,
-}
-
-#[cfg(windows)]
-struct FixtureSnapshot {
-    _dir: TempDir,
-    profile_path: PathBuf,
-}
-
-#[cfg(windows)]
-impl FixtureSnapshot {
-    fn capture(fixture: &mut Fixture) -> Self {
-        fixture.stop_daemon();
-        let dir = TempDir::new().expect("fixture snapshot tempdir");
-        let profile_path = dir.path().join(".tracedecay");
-        std::fs::create_dir_all(&profile_path).unwrap_or_else(|e| {
-            panic!(
-                "failed to create fixture snapshot dir {}: {e}",
-                profile_path.display()
-            )
-        });
-        copy_dir_contents(&fixture.home_path.join(".tracedecay"), &profile_path);
-        fixture.start_daemon();
-        Self {
-            _dir: dir,
-            profile_path,
-        }
-    }
-
-    fn restore_into(&self, fixture: &mut Fixture) {
-        fixture.stop_daemon();
-        let profile_path = fixture.home_path.join(".tracedecay");
-        if profile_path.exists() {
-            std::fs::remove_dir_all(&profile_path).unwrap_or_else(|e| {
-                panic!(
-                    "failed to remove fixture profile {}: {e}",
-                    profile_path.display()
-                )
-            });
-        }
-        std::fs::create_dir_all(&profile_path).unwrap_or_else(|e| {
-            panic!(
-                "failed to recreate fixture profile {}: {e}",
-                profile_path.display()
-            )
-        });
-        copy_dir_contents(&self.profile_path, &profile_path);
-        fixture.start_daemon();
-    }
 }
 
 impl Fixture {
     fn start_daemon(&mut self) {
         assert!(self._daemon.is_none(), "fixture daemon already running");
         self._daemon = Some(common::spawn_tracedecay_daemon(&self.home_path));
-    }
-
-    #[cfg(windows)]
-    fn stop_daemon(&mut self) {
-        drop(self._daemon.take());
     }
 
     fn db_path(&self) -> PathBuf {
@@ -474,37 +424,6 @@ fn canonical_test_dir(path: &Path) -> PathBuf {
         .unwrap_or_else(|e| panic!("failed to canonicalize test dir {}: {e}", path.display()))
 }
 
-#[cfg(windows)]
-fn copy_dir_contents(source: &Path, destination: &Path) {
-    for entry in std::fs::read_dir(source)
-        .unwrap_or_else(|e| panic!("failed to read fixture dir {}: {e}", source.display()))
-    {
-        let entry = entry.unwrap_or_else(|e| panic!("failed to read fixture entry: {e}"));
-        let source_path = entry.path();
-        let destination_path = destination.join(entry.file_name());
-        let file_type = entry
-            .file_type()
-            .unwrap_or_else(|e| panic!("failed to inspect {}: {e}", source_path.display()));
-        if file_type.is_dir() {
-            std::fs::create_dir_all(&destination_path).unwrap_or_else(|e| {
-                panic!(
-                    "failed to create fixture dir {}: {e}",
-                    destination_path.display()
-                )
-            });
-            copy_dir_contents(&source_path, &destination_path);
-        } else if file_type.is_file() {
-            std::fs::copy(&source_path, &destination_path).unwrap_or_else(|e| {
-                panic!(
-                    "failed to copy fixture file {} to {}: {e}",
-                    source_path.display(),
-                    destination_path.display()
-                )
-            });
-        }
-    }
-}
-
 fn initialize_fixture_project(fixture: &Fixture) {
     let profile_root = fixture.home_path.join(".tracedecay");
     let open_options = TraceDecayOpenOptions {
@@ -532,11 +451,11 @@ fn build_fixture(setup: &Setup) -> Fixture {
     let home_path = canonical_test_dir(home.path());
     let project_path = canonical_test_dir(project.path());
     let mut fixture = Fixture {
+        _daemon: None,
         _home: home,
         home_path,
         _project: project,
         project_path,
-        _daemon: None,
     };
     let src = fixture.project_path.join("src");
     std::fs::create_dir_all(&src).expect("create src dir");
@@ -548,19 +467,22 @@ fn build_fixture(setup: &Setup) -> Fixture {
     initialize_fixture_project(&fixture);
     seed_setup_facts(&fixture, &setup.facts);
     fixture.start_daemon();
-    wait_for_seeded_fact_cutover(&fixture, setup.facts.len());
+    wait_for_memory_ready(&fixture, setup.facts.len());
     fixture
 }
 
-/// Seeded facts land in the legacy `memory_facts` table; canonical search
-/// reads `memory_v2_current_facts`, which the daemon-owned legacy cutover
-/// populates asynchronously after the project first opens. Block until the
-/// cutover has imported every seeded fact so scenario steps observe a settled
-/// store instead of racing the daemon's repair scheduler.
-fn wait_for_seeded_fact_cutover(fixture: &Fixture, seeded: usize) {
-    if seeded == 0 {
-        return;
-    }
+/// Blocks until the daemon serves this fixture's memory through the same tool
+/// route the scenario steps use.
+///
+/// A cold daemon opens the project lazily on its first request, so without
+/// this probe the first scenario step silently absorbs the whole project-open
+/// cost. Seeded facts additionally land in the legacy `memory_facts` table
+/// while canonical search reads `memory_v2_current_facts`, which the
+/// daemon-owned legacy cutover populates asynchronously after the project
+/// first opens; the same probe waits for that cutover to import every seeded
+/// fact, so scenario steps observe a settled store instead of racing the
+/// daemon's repair scheduler.
+fn wait_for_memory_ready(fixture: &Fixture, seeded: usize) {
     let deadline = Instant::now() + Duration::from_secs(60);
     let last_memory = RefCell::new(Value::Null);
     common::poll_until(
@@ -589,7 +511,7 @@ fn wait_for_seeded_fact_cutover(fixture: &Fixture, seeded: usize) {
                 .as_bool()
                 .unwrap_or(false);
             format!(
-                "seeded legacy facts never finished the memory_v2 cutover \
+                "fixture memory never settled through the daemon tool route \
                  ({fact_count}/{seeded} canonical facts, backfill_complete={backfill_complete}); \
                  last status: {memory}"
             )
@@ -864,7 +786,25 @@ fn format_outcomes(outcomes: &[AssertionOutcome]) -> String {
 
 fn run_scenario(id: &str) {
     let scenario = load_scenario(id);
+    std::thread::scope(|threads| run_scenario_phases(id, &scenario, threads));
+}
+
+fn run_scenario_phases<'scope, 'env: 'scope>(
+    id: &str,
+    scenario: &'env Scenario,
+    threads: &'scope std::thread::Scope<'scope, 'env>,
+) {
     let well_behaved_steps = &scenario.deterministic.well_behaved;
+
+    // Phase B must observe the setup end-state, not phase A's writes, so it
+    // needs its own project, profile and daemon. Those two fixtures share
+    // nothing, and building one is dominated by waiting on subprocesses
+    // (project init, daemon startup, first store open), so start phase B's
+    // fixture now and let it warm up alongside phase A instead of paying the
+    // same wait again once phase A has finished.
+    let violation_fixture = (!well_behaved_steps.is_empty()
+        && scenario.deterministic.violation.is_some())
+    .then(|| threads.spawn(|| build_fixture(&scenario.setup)));
 
     // Phase A: a well-behaved agent's tool sequence must leave a compliant
     // end-state. Scenarios with no well-behaved steps can assert their
@@ -872,24 +812,15 @@ fn run_scenario(id: &str) {
     let mut fixture = build_fixture(&scenario.setup);
     let mut seeded_sources = fact_ids_by_source(&fixture);
     let mut dry_run_report = None;
-    #[cfg(windows)]
-    let baseline_snapshot =
-        if !well_behaved_steps.is_empty() && scenario.deterministic.violation.is_some() {
-            Some(FixtureSnapshot::capture(&mut fixture))
-        } else {
-            None
-        };
-    if !well_behaved_steps.is_empty() {
-        for step in well_behaved_steps {
-            let result = execute_step(&fixture, step, &mut dry_run_report);
-            assert!(
-                result.succeeded,
-                "[{id}] well-behaved step was refused; compliant writes must be accepted"
-            );
-        }
+    for step in well_behaved_steps {
+        let result = execute_step(&fixture, step, &mut dry_run_report);
+        assert!(
+            result.succeeded,
+            "[{id}] well-behaved step was refused; compliant writes must be accepted"
+        );
     }
     let well_behaved_outcomes = evaluate_assertions(
-        &scenario,
+        scenario,
         &fixture,
         Phase::WellBehaved,
         &seeded_sources,
@@ -910,15 +841,12 @@ fn run_scenario(id: &str) {
     let Some(violation) = &scenario.deterministic.violation else {
         return;
     };
-    if !well_behaved_steps.is_empty() {
-        #[cfg(windows)]
-        if let Some(snapshot) = &baseline_snapshot {
-            snapshot.restore_into(&mut fixture);
-        }
-        #[cfg(not(windows))]
-        {
-            fixture = build_fixture(&scenario.setup);
-        }
+    if let Some(handle) = violation_fixture {
+        // Replacing the binding drops phase A's fixture, so only one daemon
+        // outlives the handover.
+        fixture = handle
+            .join()
+            .unwrap_or_else(|payload| std::panic::resume_unwind(payload));
         seeded_sources = fact_ids_by_source(&fixture);
     }
     dry_run_report = None;
@@ -928,7 +856,7 @@ fn run_scenario(id: &str) {
         any_step_succeeded |= result.succeeded;
     }
     let outcomes = evaluate_assertions(
-        &scenario,
+        scenario,
         &fixture,
         Phase::Violation,
         &seeded_sources,
