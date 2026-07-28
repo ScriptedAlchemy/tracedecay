@@ -341,9 +341,11 @@ impl LspSemanticRequestAuthority for StdioLspSemanticAuthority {
                             // in it: slugifying stripped the punctuation and cut it
                             // mid-word, and a message happening to contain "stale"
                             // steered rename candidates down the wrong branch.
-                            tracing::warn!(
-                                error = %error,
-                                "analyzer failed to start for a semantic request"
+                            // The daemon installs no tracing subscriber, so this
+                            // goes to its event channel; through tracing the
+                            // analyzer's own message would be lost entirely.
+                            eprintln!(
+                                "[tracedecay] event=analyzer_start_failed error={error}"
                             );
                             LspSemanticOperationOutcome::Partial {
                                 value: serde_json::Value::Null,

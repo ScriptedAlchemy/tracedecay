@@ -143,6 +143,12 @@ async fn git_runtime_fixture() -> RuntimeFixture {
         &project,
         &["config", "user.email", "tracedecay@example.com"],
     );
+    // Snapshot equality spans two processes with different homes: this test
+    // captures in-process under the developer's real HOME, while the daemon
+    // recaptures under the isolated one. Without pinning excludes, whatever
+    // the developer ignores globally is merely untracked to the daemon, and
+    // the same files land in different snapshot digests on every machine.
+    git(&project, &["config", "core.excludesFile", "/dev/null"]);
     git(&project, &["add", "."]);
     git(&project, &["commit", "--quiet", "-m", "base"]);
 
