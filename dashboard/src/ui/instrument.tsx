@@ -228,6 +228,14 @@ export function Readout({
   );
 }
 
+type MeterHeight = 'standard' | 'hairline' | 'row';
+
+const METER_HEIGHT: Record<MeterHeight, string> = {
+  standard: 'h-1',
+  hairline: 'h-px',
+  row: 'h-[3px]',
+};
+
 /** The row-scale magnitude rail: a quantity given a length so a column of them
  * reads as a distribution. Pass `ariaLabel` only when the number is NOT also
  * printed beside the meter; when it is, the meter is redundant to a screen
@@ -252,7 +260,8 @@ export function Meter({
   /**
    * `standard` is the 4px measurement bar; `hairline` is the 1px rule dense
    * lists need, where a 4px bar per row reads as a chart rather than as an
-   * annotation.
+   * annotation; `row` is the 3px rail in between, for a ruled list of
+   * distribution rows (see `MeterRow`).
    *
    * This is a prop rather than a `className` override because `cn` is a plain
    * class joiner with no conflict resolution: passing `h-px` would leave both
@@ -261,7 +270,7 @@ export function Meter({
    * contrast, is safely overridable — `td-meter` lives in `@layer components`,
    * so a `bg-*` utility from the caller reliably wins.
    */
-  height?: 'standard' | 'hairline';
+  height?: MeterHeight;
 }) {
   const clamped =
     fraction == null || !Number.isFinite(fraction)
@@ -271,10 +280,7 @@ export function Meter({
     ? ({ role: 'img', 'aria-label': ariaLabel } as const)
     : ({ 'aria-hidden': true } as const);
   return (
-    <span
-      {...a11y}
-      className={cn('td-meter', height === 'hairline' ? 'h-px' : 'h-1', className)}
-    >
+    <span {...a11y} className={cn('td-meter', METER_HEIGHT[height], className)}>
       {clamped != null ? (
         <span
           className={cn('td-meter-fill', align === 'right' && 'left-auto right-0', tone)}
@@ -282,6 +288,64 @@ export function Meter({
         />
       ) : null}
     </span>
+  );
+}
+
+/** One row of a distribution: a name, the same quantity given a length, and the
+ * figure right-aligned in its own column so a stack of rows reads as one ruled
+ * table rather than as ragged sentences.
+ *
+ * The rail hides itself below `sm`, where 80px of bar would take the width the
+ * name needs. `fraction: null` draws the track and no fill — a row whose share
+ * of the whole is unknown must not borrow a length. The meter stays out of the
+ * accessibility tree because the figure beside it is the same number. */
+export function MeterRow({
+  label,
+  value,
+  fraction,
+  tone,
+  title,
+  leading,
+  figureWidth = 'standard',
+  className,
+}: {
+  label: ReactNode;
+  value: ReactNode;
+  fraction: number | null;
+  /** Utility class for the fill, when the row carries a state hue. */
+  tone?: string;
+  /** Hover text for the label, which the row truncates. */
+  title?: string;
+  /** A narrow column ahead of the label, for a row that is filed under
+   * something (a kind, a source) as well as named. */
+  leading?: ReactNode;
+  /** `wide` widens the figure column by half a rem, for values that carry a
+   * unit suffix and would otherwise wrap the row. */
+  figureWidth?: 'standard' | 'wide';
+  className?: string;
+}) {
+  return (
+    <div className={cn('flex items-center gap-2 text-xs', className)}>
+      {leading}
+      <span className="min-w-0 flex-1 truncate text-text-primary" title={title}>
+        {label}
+      </span>
+      <Meter
+        fraction={fraction}
+        tone={tone}
+        height="row"
+        className="w-20 shrink-0 max-sm:hidden"
+      />
+      <span
+        className={cn(
+          'td-value shrink-0 text-right text-2xs text-text-secondary',
+          figureWidth === 'wide' ? 'w-14' : 'w-12',
+        )}
+        data-cell="numeric"
+      >
+        {value}
+      </span>
+    </div>
   );
 }
 
