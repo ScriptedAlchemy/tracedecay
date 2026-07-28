@@ -68,6 +68,10 @@ pub(super) fn def_circular() -> ToolDefinition {
                 "max_depth": {
                     "type": "number",
                     "description": "Maximum cycle detection depth (default: 10)"
+                },
+                "limit": {
+                    "type": "number",
+                    "description": "Maximum number of cycles to report, largest first (default: 25, max: 200). The response always states the total detected and how many were omitted."
                 }
             }
         }),

@@ -291,19 +291,38 @@ pub(super) async fn handle_module_api(
     ))
 }
 
+/// Default and ceiling for the number of cycles `tracedecay_circular` reports
+/// in one call. A whole-repository cycle list runs to tens of kilobytes, which
+/// the response budget then truncates into a retrieval handle; a declared limit
+/// keeps the answer inside the budget and states what it left out.
+const CIRCULAR_DEFAULT_LIMIT: usize = 25;
+const CIRCULAR_MAX_LIMIT: usize = 200;
+
 /// Handles `tracedecay_circular` tool calls.
 pub(super) async fn handle_circular(cg: &TraceDecay, args: Value) -> Result<ToolResult> {
-    let cycles = cg.find_circular_dependencies().await?;
+    let limit = args
+        .get("limit")
+        .and_then(Value::as_u64)
+        .map_or(CIRCULAR_DEFAULT_LIMIT, |limit| {
+            (limit as usize).clamp(1, CIRCULAR_MAX_LIMIT)
+        });
+
+    let all_cycles = cg.find_circular_dependencies().await?;
+    let cycle_count = all_cycles.len();
+    let (cycles, omitted) = bound_cycles(all_cycles, limit);
 
     let items: Vec<Value> = cycles.iter().map(|cycle| json!(cycle)).collect();
 
     let output = json!({
-        "cycle_count": cycles.len(),
+        "cycle_count": cycle_count,
+        "reported_cycle_count": cycles.len(),
+        "omitted_cycle_count": omitted,
+        "limit": limit,
         "cycles": items,
     });
 
     let text = render::finalize(Some(cg.project_root()), &args, &output, || {
-        render_circular_md(&cycles)
+        render_circular_md(&cycles, cycle_count, omitted, limit)
     });
     Ok(ToolResult::new(
         json!({
@@ -318,14 +337,33 @@ pub(super) async fn handle_circular(cg: &TraceDecay, args: Value) -> Result<Tool
 /// directory tree, which destroys the cyclic relationship. Each SCC's member
 /// files are joined with ` -> ` and the first is repeated at the end to close
 /// the loop.
-fn render_circular_md(cycles: &[Vec<String>]) -> String {
+/// Orders cycles largest-first and bounds them to `limit`, returning the
+/// bounded page and the number of cycles it leaves out.
+///
+/// The largest strongly connected components are the ones worth breaking, so a
+/// bounded page reports the worst offenders rather than an arbitrary prefix.
+/// Ties fall back to path order so repeated calls agree. The omitted count is
+/// returned rather than dropped: the caller always states what it left out.
+fn bound_cycles(mut cycles: Vec<Vec<String>>, limit: usize) -> (Vec<Vec<String>>, usize) {
+    let omitted = cycles.len().saturating_sub(limit);
+    cycles.sort_by(|left, right| right.len().cmp(&left.len()).then_with(|| left.cmp(right)));
+    cycles.truncate(limit);
+    (cycles, omitted)
+}
+
+fn render_circular_md(
+    cycles: &[Vec<String>],
+    cycle_count: usize,
+    omitted: usize,
+    limit: usize,
+) -> String {
     use std::fmt::Write as _;
 
-    if cycles.is_empty() {
+    if cycle_count == 0 {
         return "No circular dependencies found.\n".to_string();
     }
     let mut out = String::new();
-    let _ = writeln!(out, "# Circular Dependencies ({})\n", cycles.len());
+    let _ = writeln!(out, "# Circular Dependencies ({cycle_count})\n");
     for (i, cycle) in cycles.iter().enumerate() {
         if cycle.is_empty() {
             continue;
@@ -334,6 +372,12 @@ fn render_circular_md(cycles: &[Vec<String>]) -> String {
         // Close the loop by repeating the entry file.
         let _ = write!(chain, " -> {}", cycle[0]);
         let _ = writeln!(out, "{}. {chain}", i + 1);
+    }
+    if omitted > 0 {
+        let _ = writeln!(
+            out,
+            "\n{omitted} further cycle(s) not shown at limit {limit}; raise `limit` (max {CIRCULAR_MAX_LIMIT}) to see more."
+        );
     }
     out
 }
@@ -2462,34 +2506,72 @@ fn line_is_comment(source: &str, byte: usize) -> bool {
 
 #[cfg(test)]
 mod circular_render_tests {
-    use super::render_circular_md;
+    use super::{CIRCULAR_MAX_LIMIT, bound_cycles, render_circular_md};
+
+    fn cycle(files: &[&str]) -> Vec<String> {
+        files.iter().map(|file| (*file).to_string()).collect()
+    }
 
     #[test]
     fn renders_arrow_chain_closing_the_loop() {
-        let cycles = vec![vec!["a.rs".to_string(), "b.rs".to_string()]];
-        let out = render_circular_md(&cycles);
+        let cycles = vec![cycle(&["a.rs", "b.rs"])];
+        let out = render_circular_md(&cycles, 1, 0, 25);
         assert!(out.contains("a.rs -> b.rs -> a.rs"), "got: {out}");
         assert!(out.contains("Circular Dependencies (1)"), "got: {out}");
     }
 
     #[test]
     fn renders_empty_state() {
-        let out = render_circular_md(&[]);
+        let out = render_circular_md(&[], 0, 0, 25);
         assert!(out.contains("No circular dependencies found"), "got: {out}");
     }
 
     #[test]
     fn numbers_multiple_cycles() {
-        let cycles = vec![
-            vec!["a.rs".to_string(), "b.rs".to_string()],
-            vec!["c.rs".to_string(), "d.rs".to_string(), "e.rs".to_string()],
-        ];
-        let out = render_circular_md(&cycles);
+        let cycles = vec![cycle(&["a.rs", "b.rs"]), cycle(&["c.rs", "d.rs", "e.rs"])];
+        let out = render_circular_md(&cycles, 2, 0, 25);
         assert!(out.contains("1. a.rs -> b.rs -> a.rs"), "got: {out}");
         assert!(
             out.contains("2. c.rs -> d.rs -> e.rs -> c.rs"),
             "got: {out}"
         );
+    }
+
+    #[test]
+    fn bounded_page_keeps_the_largest_cycles_and_counts_the_rest() {
+        let cycles = vec![
+            cycle(&["small-b.rs", "small-b2.rs"]),
+            cycle(&["big.rs", "big2.rs", "big3.rs", "big4.rs"]),
+            cycle(&["small-a.rs", "small-a2.rs"]),
+        ];
+
+        let (page, omitted) = bound_cycles(cycles, 2);
+
+        assert_eq!(omitted, 1, "the omitted cycle must be counted, not dropped");
+        assert_eq!(page.len(), 2);
+        assert_eq!(page[0], cycle(&["big.rs", "big2.rs", "big3.rs", "big4.rs"]));
+        // Ties resolve by path order so repeated calls agree.
+        assert_eq!(page[1], cycle(&["small-a.rs", "small-a2.rs"]));
+    }
+
+    #[test]
+    fn unbounded_page_reports_no_omission() {
+        let cycles = vec![cycle(&["a.rs", "b.rs"])];
+        let (page, omitted) = bound_cycles(cycles, 25);
+        assert_eq!(omitted, 0);
+        assert_eq!(page.len(), 1);
+    }
+
+    #[test]
+    fn omission_notice_states_the_remainder_and_the_ceiling() {
+        let cycles = vec![cycle(&["a.rs", "b.rs"])];
+        let out = render_circular_md(&cycles, 9, 8, 1);
+        assert!(out.contains("Circular Dependencies (9)"), "got: {out}");
+        assert!(
+            out.contains("8 further cycle(s) not shown at limit 1"),
+            "got: {out}"
+        );
+        assert!(out.contains(&CIRCULAR_MAX_LIMIT.to_string()), "got: {out}");
     }
 }
 
