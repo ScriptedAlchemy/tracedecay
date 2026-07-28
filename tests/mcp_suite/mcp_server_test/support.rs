@@ -41,6 +41,60 @@ pub(crate) async fn setup_server() -> (Arc<McpServer>, TempDir) {
     (server, dir)
 }
 
+/// The identity a fixture's store was actually opened with.
+///
+/// This is the authority the runtime and the retained project-graph resolver
+/// both key on, and unlike the repo-local identity marker it is always present
+/// for a template-seeded fixture.
+pub(crate) fn project_id_of(cg: &TraceDecay) -> tracedecay_domain::ProjectId {
+    let project_id = cg
+        .store_layout()
+        .identity
+        .project_id
+        .clone()
+        .expect("fixture project identity");
+    tracedecay_domain::ProjectId::new(project_id).expect("fixture project id is well formed")
+}
+
+/// Opens an already-initialized project and returns a server that retains the
+/// project's registered session authority.
+///
+/// Every LCM tool refuses to open a store without one, so a fixture built on
+/// [`McpServer::new`] makes each LCM call short-circuit to a typed
+/// `unavailable` payload instead of exercising the store. Requires an
+/// isolated profile (see [`crate::common::IsolatedEnv`]) because the runtime
+/// mounts the ambient profile root.
+pub(crate) async fn server_with_session_authority(project: &std::path::Path) -> Arc<McpServer> {
+    let cg = TraceDecay::open(project).await.unwrap();
+    let project_id = project_id_of(&cg);
+    let profile_root = tracedecay::storage::default_profile_root().unwrap();
+    let runtime = HostAdmissionTestRuntimeV1::project_scoped(&profile_root, project, project_id)
+        .await
+        .expect("registered project runtime opens for the isolated profile");
+    McpServer::new_with_host_admission_test_runtime_for_test(cg, None, runtime).await
+}
+
+/// As [`setup_server`], but the returned server retains the project's
+/// registered session authority. See [`server_with_session_authority`].
+pub(crate) async fn setup_server_with_session_authority() -> (Arc<McpServer>, TempDir) {
+    let dir = TempDir::new().unwrap();
+    let project = dir.path();
+    fs::create_dir_all(project.join("src")).unwrap();
+    fs::write(
+        project.join("src/main.rs"),
+        "fn main() { let x = helper(); }\nfn helper() -> i32 { 42 }\n",
+    )
+    .unwrap();
+    let cg = crate::fixture::init_project_from_template(project)
+        .await
+        .unwrap();
+    cg.index_all().await.unwrap();
+    cg.checkpoint().await.unwrap();
+    drop(cg);
+    let server = server_with_session_authority(project).await;
+    (server, dir)
+}
+
 /// Sends a sequence of JSON-RPC messages to a server, runs it to completion,
 /// and returns all non-empty response lines.
 pub(crate) async fn run_server_with_messages(

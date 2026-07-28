@@ -2938,20 +2938,20 @@ async fn lcm_expand_paginates_summary_sources_over_mcp() {
     .await;
     let first_query_page: Value =
         serde_json::from_str(extract_real_server_text(&first_query_page)).unwrap();
-    assert!(
-        first_query_page["context_blocks"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|block| block["content"] == "paged source body 1")
+    assert_eq!(
+        first_query_page["status"], "ok",
+        "expand-query first page: {first_query_page}"
     );
-    assert!(
-        first_query_page["context_blocks"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|block| block["content"] == "paged source body 2")
-    );
+    for body in ["paged source body 1", "paged source body 2"] {
+        assert!(
+            first_query_page["context_blocks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|block| block["content"] == body),
+            "expand-query first page should contain {body}: {first_query_page}"
+        );
+    }
     let query_cursor = first_query_page["next_cursor"]
         .as_str()
         .expect("expand-query source page should return a cursor");
@@ -2972,20 +2972,16 @@ async fn lcm_expand_paginates_summary_sources_over_mcp() {
     .await;
     let continued_query_page: Value =
         serde_json::from_str(extract_real_server_text(&continued_query_page)).unwrap();
-    assert!(
-        continued_query_page["context_blocks"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|block| block["content"] == "paged source body 3")
-    );
-    assert!(
-        continued_query_page["context_blocks"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|block| block["content"] == "paged source body 4")
-    );
+    for body in ["paged source body 3", "paged source body 4"] {
+        assert!(
+            continued_query_page["context_blocks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|block| block["content"] == body),
+            "expand-query continued page should contain {body}: {continued_query_page}"
+        );
+    }
     assert!(continued_query_page["next_cursor"].is_null());
     server.shutdown().await;
 }

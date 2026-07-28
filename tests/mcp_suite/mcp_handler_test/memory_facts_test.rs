@@ -2,6 +2,7 @@
 
 use crate::support::*;
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
@@ -46,9 +47,9 @@ async fn fact_store_large_list_response_reports_store_failure_actionably() {
     .unwrap();
     let envelope: Value = serde_json::from_str(extract_text(&listed.value)).unwrap();
 
-    assert_eq!(envelope["truncated"], true);
-    assert_eq!(envelope["handle_available"], false);
-    assert!(envelope.get("handle").is_none());
+    assert_eq!(envelope["truncated"], true, "{envelope}");
+    assert_eq!(envelope["handle_available"], false, "{envelope}");
+    assert!(envelope.get("handle").is_none(), "{envelope}");
     assert!(
         envelope["preview"]
             .as_str()
@@ -215,9 +216,19 @@ async fn fact_search_ranks_exact_operational_evidence_and_tracks_once() {
         analytics["facts"]["retrievals"].as_i64(),
         Some(first_results.len() as i64 + rare_results.len() as i64)
     );
+    // Every fact the two searches returned must be counted exactly once, so
+    // the distinct-fact tally is the size of the returned id set — not the
+    // number of stored facts, which would also assert how many weak matches
+    // the ranker chooses to return.
+    let retrieved_ids: BTreeSet<i64> = first_results
+        .iter()
+        .chain(rare_results.iter())
+        .filter_map(|hit| hit["fact"]["fact_id"].as_i64())
+        .collect();
     assert_eq!(
         analytics["facts"]["facts_retrieved"].as_i64(),
-        Some(contents.len() as i64)
+        Some(retrieved_ids.len() as i64),
+        "analytics must count each retrieved fact once: {analytics}"
     );
 }
 
@@ -505,6 +516,8 @@ async fn memory_fact_store_mutations_refresh_recorded_digest_exports() {
 #[tokio::test]
 async fn memory_fact_store_project_selector_targets_registered_project() {
     let (active, target, _env) = setup_cross_project_memory_projects().await;
+    let active_runtime = active.test_runtime_for_test().expect("active runtime");
+    let target_runtime = target.test_runtime_for_test().expect("target runtime");
     let target_project_id = target
         .store_layout()
         .identity
@@ -513,8 +526,9 @@ async fn memory_fact_store_project_selector_targets_registered_project() {
         .expect("target project should have a profile project_id");
     let target_project_path = target.project_root().to_string_lossy().to_string();
 
-    handle_tool_call(
+    handle_tool_call_with_runtime(
         &target,
+        &target_runtime,
         "tracedecay_fact_store",
         json!({
             "action": "add",
@@ -529,8 +543,9 @@ async fn memory_fact_store_project_selector_targets_registered_project() {
     .await
     .unwrap();
 
-    handle_tool_call(
+    handle_tool_call_with_runtime(
         &active,
+        &active_runtime,
         "tracedecay_fact_store",
         json!({
             "action": "add",
@@ -545,8 +560,9 @@ async fn memory_fact_store_project_selector_targets_registered_project() {
     .await
     .unwrap();
 
-    let target_list = handle_tool_call(
+    let target_list = handle_tool_call_with_runtime(
         &active,
+        &active_runtime,
         "tracedecay_fact_store",
         json!({
             "action": "list",
@@ -568,8 +584,9 @@ async fn memory_fact_store_project_selector_targets_registered_project() {
         "project_path selector should read target-project facts",
     );
 
-    let target_list_by_nested_project_path = handle_tool_call(
+    let target_list_by_nested_project_path = handle_tool_call_with_runtime(
         &active,
+        &active_runtime,
         "tracedecay_fact_store",
         json!({
             "action": "list",
@@ -592,8 +609,9 @@ async fn memory_fact_store_project_selector_targets_registered_project() {
         "nested project_path selector should read target-project facts",
     );
 
-    let active_list = handle_tool_call(
+    let active_list = handle_tool_call_with_runtime(
         &active,
+        &active_runtime,
         "tracedecay_fact_store",
         json!({"action": "list", "format": "json", "category": "project", "min_trust": 0.0}),
         None,
@@ -609,8 +627,9 @@ async fn memory_fact_store_project_selector_targets_registered_project() {
         "default fact_store scope should remain the active project",
     );
 
-    let cross_project_write = handle_tool_call(
+    let cross_project_write = handle_tool_call_with_runtime(
         &active,
+        &active_runtime,
         "tracedecay_fact_store",
         json!({
             "action": "add",
@@ -630,8 +649,9 @@ async fn memory_fact_store_project_selector_targets_registered_project() {
         "unexpected cross-project write error: {err}"
     );
 
-    let cross_project_feedback = handle_tool_call(
+    let cross_project_feedback = handle_tool_call_with_runtime(
         &active,
+        &active_runtime,
         "tracedecay_fact_feedback",
         json!({
             "fact_id": 1,
@@ -650,8 +670,9 @@ async fn memory_fact_store_project_selector_targets_registered_project() {
         "unexpected cross-project feedback error: {err}"
     );
 
-    let typo_selector = handle_tool_call(
+    let typo_selector = handle_tool_call_with_runtime(
         &active,
+        &active_runtime,
         "tracedecay_fact_store",
         json!({
             "action": "list",
@@ -671,8 +692,9 @@ async fn memory_fact_store_project_selector_targets_registered_project() {
         "unresolved selector must not fall back to active project: {err}"
     );
 
-    let hidden_top_level_path = handle_tool_call(
+    let hidden_top_level_path = handle_tool_call_with_runtime(
         &active,
+        &active_runtime,
         "tracedecay_fact_store",
         json!({
             "action": "list",
@@ -701,6 +723,8 @@ async fn memory_fact_store_project_selector_targets_registered_project() {
 #[tokio::test]
 async fn memory_status_project_selector_reports_registered_project_memory() {
     let (active, target, _env) = setup_cross_project_memory_projects().await;
+    let active_runtime = active.test_runtime_for_test().expect("active runtime");
+    let target_runtime = target.test_runtime_for_test().expect("target runtime");
     let target_project_id = target
         .store_layout()
         .identity
@@ -710,8 +734,9 @@ async fn memory_status_project_selector_reports_registered_project_memory() {
     let target_project_path = target.project_root().to_string_lossy().to_string();
 
     for content in ["Active status fact one", "Active status fact two"] {
-        handle_tool_call(
+        handle_tool_call_with_runtime(
             &active,
+            &active_runtime,
             "tracedecay_fact_store",
             json!({
                 "action": "add",
@@ -725,8 +750,9 @@ async fn memory_status_project_selector_reports_registered_project_memory() {
         .unwrap();
     }
 
-    handle_tool_call(
+    handle_tool_call_with_runtime(
         &target,
+        &target_runtime,
         "tracedecay_fact_store",
         json!({
             "action": "add",
@@ -739,16 +765,23 @@ async fn memory_status_project_selector_reports_registered_project_memory() {
     .await
     .unwrap();
 
-    let active_status =
-        handle_tool_call(&active, "tracedecay_memory_status", json!({}), None, None)
-            .await
-            .unwrap();
+    let active_status = handle_tool_call_with_runtime(
+        &active,
+        &active_runtime,
+        "tracedecay_memory_status",
+        json!({}),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
     let active_status = extract_json(&active_status.value);
     assert_eq!(active_status["status"], "ok");
     assert_eq!(active_status["memory"]["fact_count"].as_u64(), Some(2));
 
-    let target_status_by_id = handle_tool_call(
+    let target_status_by_id = handle_tool_call_with_runtime(
         &active,
+        &active_runtime,
         "tracedecay_memory_status",
         json!({"project_id": target_project_id}),
         None,
@@ -764,8 +797,9 @@ async fn memory_status_project_selector_reports_registered_project_memory() {
         "project_id selector should report the target project's memory: {target_status_by_id}"
     );
 
-    let target_status_by_path = handle_tool_call(
+    let target_status_by_path = handle_tool_call_with_runtime(
         &active,
+        &active_runtime,
         "tracedecay_memory_status",
         json!({"project_selector": {"path": target_project_path}}),
         None,
@@ -780,8 +814,9 @@ async fn memory_status_project_selector_reports_registered_project_memory() {
         "nested path selector should report the target project's memory: {target_status_by_path}"
     );
 
-    let missing_status = handle_tool_call(
+    let missing_status = handle_tool_call_with_runtime(
         &active,
+        &active_runtime,
         "tracedecay_memory_status",
         json!({"project_id": "proj_does_not_exist"}),
         None,

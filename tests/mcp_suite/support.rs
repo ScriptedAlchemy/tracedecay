@@ -818,16 +818,41 @@ pub(crate) async fn setup_cross_project_memory_projects()
     fs::write(active_project.join("src/lib.rs"), "pub fn active() {}\n").unwrap();
     fs::write(target_project.join("src/lib.rs"), "pub fn target() {}\n").unwrap();
 
-    let active = fixture::init_project_from_template(&active_project)
-        .await
-        .unwrap();
-    let target = fixture::init_project_from_template(&target_project)
-        .await
-        .unwrap();
+    let active = TestTraceDecay::new(
+        fixture::init_project_from_template(&active_project)
+            .await
+            .unwrap(),
+    );
+    let target = TestTraceDecay::new(
+        fixture::init_project_from_template(&target_project)
+            .await
+            .unwrap(),
+    );
+
+    // A selector resolves against the registry of the runtime serving the
+    // call, which is the active project's. Both roots therefore have to be
+    // registered there — under the identity their store was opened with —
+    // because initializing a graph does not register it, and registering the
+    // target through its own runtime lands in a registry no reader consults.
+    let registry = active
+        .test_runtime_for_test()
+        .expect("cross-project fixture active runtime");
+    for graph in [&active, &target] {
+        let project_id = graph
+            .store_layout()
+            .identity
+            .project_id
+            .clone()
+            .expect("cross-project fixture project identity");
+        registry
+            .upsert_code_project(&project_id, graph.project_root(), None, None, Some("main"))
+            .await
+            .expect("cross-project fixture registers both projects");
+    }
 
     (
-        TestTraceDecay::new(active),
-        TestTraceDecay::new(target),
+        active,
+        target,
         CrossProjectMemoryEnv {
             _dir: dir,
             _env_lock: env_lock,
@@ -844,8 +869,15 @@ pub(crate) fn project_graph_db(cg: &TraceDecay) -> PathBuf {
     cg.store_layout().graph_db_path.clone()
 }
 
+/// The directory `store_response_handle` actually writes to.
+///
+/// It resolves the layout for the current profile from the project root rather
+/// than reusing the graph's cached layout, so a test that blocks or inspects
+/// handle storage has to resolve it the same way or it acts on a path the
+/// writer never touches.
 pub(crate) fn response_handle_dir(cg: &TraceDecay) -> PathBuf {
-    cg.store_layout().response_handle_root.clone()
+    tracedecay::storage::resolve_response_handle_root(cg.project_root())
+        .unwrap_or_else(|err| panic!("failed to resolve test response handle root: {err}"))
 }
 
 pub(crate) fn lcm_payload_dir(cg: &TraceDecay) -> PathBuf {
@@ -1113,7 +1145,11 @@ pub(crate) fn extract_json(value: &Value) -> Value {
     serde_json::from_str(extract_text(value)).unwrap()
 }
 
-#[cfg(unix)]
+/// The first content item that parses as JSON.
+///
+/// The server prepends advisory text blocks (fallback-branch and staleness
+/// banners) ahead of a tool's payload, so a test that always reads
+/// `content[0]` sees the banner instead of the result.
 pub(crate) fn extract_first_json_content(value: &Value) -> Value {
     value["content"]
         .as_array()
