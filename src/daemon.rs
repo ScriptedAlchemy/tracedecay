@@ -4151,7 +4151,7 @@ enum ProductionProjectCompositionRuntime {
 impl ProductionProjectCompositionRuntime {
     fn database_owner_reconciler(
         &self,
-        store_administration: &StoreAdministration,
+        _store_administration: &StoreAdministration,
         current_key: Arc<tokio::sync::Mutex<ProjectServerKey>>,
         _current_project_path: Arc<tokio::sync::Mutex<PathBuf>>,
         route_registered: Arc<AtomicBool>,
@@ -4167,7 +4167,7 @@ impl ProductionProjectCompositionRuntime {
             ),
             #[cfg(any(not(unix), test, feature = "test-transport"))]
             Self::Portable { .. } => portable_database_owner_reconciler(
-                store_administration.clone(),
+                _store_administration.clone(),
                 current_key,
                 route_registered,
                 handshake,
