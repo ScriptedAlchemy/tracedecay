@@ -1,9 +1,15 @@
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::LazyLock;
+use std::time::{Duration, Instant, SystemTime};
 
 use tempfile::TempDir;
 use tracedecay::agents::{AgentIntegration, HermesIntegration, InstallContext};
+use tracedecay::external_tools::ast_grep_command;
 use tracedecay::sessions::lcm::{LcmCompressionRequest, LcmSummarizerMode};
 
 use crate::common::{PYYAML_FALLBACK_PRELUDE, write_pyyaml_shim};
@@ -57,10 +63,14 @@ sys.modules[module_name] = plugin
 spec.loader.exec_module(plugin)
 "#;
 
+/// Binary path baked into the generated `tools.py` for the shared install.
+/// Part of the bundle fingerprint: changing it changes the rendered plugin.
+const FIXTURE_TRACEDECAY_BIN: &str = "/usr/local/bin/tracedecay";
+
 fn make_install_ctx(home: &Path) -> InstallContext {
     InstallContext {
         home: home.to_path_buf(),
-        tracedecay_bin: "/usr/local/bin/tracedecay".to_string(),
+        tracedecay_bin: FIXTURE_TRACEDECAY_BIN.to_string(),
         tool_permissions: Vec::new(),
         project_root: None,
         // The LCM bridge checks never touch the dashboard deploy, and
@@ -70,32 +80,214 @@ fn make_install_ctx(home: &Path) -> InstallContext {
     }
 }
 
-/// One unpinned Hermes install shared by every check in this process.
+/// One unpinned Hermes install shared by every check.
 ///
 /// `HermesIntegration::install` regenerates the full plugin from embedded
 /// templates, so the output is identical for every unpinned install — there
 /// is no reason to redo it per test. Each check writes its own uniquely
-/// named script (and, where needed, fake binaries) into the shared plugin
-/// dir and only mutates state inside its own python interpreter, so tests
-/// stay independent. Checks that need a different `InstallContext` (e.g. a
-/// pinned project root) keep a private `TempDir` install.
+/// named script into the shared plugin dir and only mutates state inside its
+/// own python interpreter, so tests stay independent. Checks that need a
+/// different `InstallContext` (e.g. a pinned project root) keep a private
+/// `TempDir` install.
+///
+/// The bundle is also shared across *processes* (see [`cached_install_home`]):
+/// nextest runs one process per test, so a `LazyLock` alone re-renders the
+/// bundle 70+ times per suite. Rendering is not cheap — `get_tool_definitions`
+/// probes the host `ast-grep` with `--version` and `outline --help`, two real
+/// subprocess spawns, and Windows CI resolves `ast-grep` through an npm shim.
 struct SharedInstall {
     home: PathBuf,
     plugin_dir: PathBuf,
-    _tempdir: TempDir,
+    fake_tools_dir: PathBuf,
+    /// Set only on the fallback path, where the bundle could not be shared
+    /// and this process rendered a private copy that it must clean up.
+    _tempdir: Option<TempDir>,
 }
 
-static SHARED_INSTALL: LazyLock<SharedInstall> = LazyLock::new(|| {
-    let tempdir = TempDir::new().unwrap();
-    HermesIntegration
-        .install(&make_install_ctx(tempdir.path()))
-        .unwrap();
-    SharedInstall {
-        home: tempdir.path().to_path_buf(),
-        plugin_dir: tempdir.path().join(".hermes/plugins/tracedecay"),
-        _tempdir: tempdir,
+/// Written last, so its presence means the bundle beside it is complete.
+const INSTALL_READY_MARKER: &str = ".tracedecay-hermes-install-ready";
+/// How long a process waits for a peer that is already rendering the bundle
+/// before giving up and rendering a private copy.
+const INSTALL_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
+/// A lock older than this outlived the run that took it, so it is stale.
+const INSTALL_LOCK_STALE_AFTER: Duration = Duration::from_secs(300);
+
+static SHARED_INSTALL: LazyLock<SharedInstall> = LazyLock::new(|| match cached_install_home() {
+    Some(home) => SharedInstall {
+        plugin_dir: plugin_dir_for(&home),
+        fake_tools_dir: fake_tools_dir_for(&home),
+        home,
+        _tempdir: None,
+    },
+    None => {
+        let tempdir = TempDir::new().unwrap();
+        render_install(tempdir.path()).unwrap();
+        SharedInstall {
+            home: tempdir.path().to_path_buf(),
+            plugin_dir: plugin_dir_for(tempdir.path()),
+            fake_tools_dir: fake_tools_dir_for(tempdir.path()),
+            _tempdir: Some(tempdir),
+        }
     }
 });
+
+fn plugin_dir_for(home: &Path) -> PathBuf {
+    home.join(".hermes/plugins/tracedecay")
+}
+
+fn fake_tools_dir_for(home: &Path) -> PathBuf {
+    home.join("fake-tools")
+}
+
+/// Renders everything the checks read out of a shared install: the generated
+/// Hermes plugin plus the immutable fake `tracedecay` binaries the subprocess
+/// failure-mode check executes.
+fn render_install(home: &Path) -> std::io::Result<()> {
+    HermesIntegration
+        .install(&make_install_ctx(home))
+        .map_err(std::io::Error::other)?;
+    write_fake_tracedecay_binaries(&fake_tools_dir_for(home))
+}
+
+/// Path of the machine-shared bundle for the current inputs, rendering it
+/// first if no complete bundle exists yet.
+///
+/// Returns `None` when the bundle cannot be shared (unwritable temp dir, a
+/// peer still rendering after [`INSTALL_WAIT_TIMEOUT`]); the caller then
+/// renders a private copy, which is exactly the old per-process behaviour.
+fn cached_install_home() -> Option<PathBuf> {
+    let root = std::env::temp_dir().join(format!("tracedecay-hermes-suite-{}", install_key()));
+    let ready = root.join(INSTALL_READY_MARKER);
+    if ready.is_file() {
+        return Some(root);
+    }
+
+    let lock = root.with_extension("lock");
+    if lock_is_stale(&lock) {
+        let _ = std::fs::remove_file(&lock);
+    }
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&lock)
+    {
+        Ok(_) => {
+            // A leftover directory here is a partial render from a run that
+            // died before publishing the marker; nobody can be reading it,
+            // because readers only ever follow the marker.
+            let _ = std::fs::remove_dir_all(&root);
+            let rendered =
+                render_install(&root).and_then(|()| std::fs::write(&ready, install_key()));
+            let _ = std::fs::remove_file(&lock);
+            rendered.ok()?;
+            Some(root)
+        }
+        Err(_) => wait_for_ready(&ready, &lock).then_some(root),
+    }
+}
+
+/// Every input that can change the rendered bundle: the generator build (this
+/// executable embeds the plugin templates), the binary path baked into
+/// `tools.py`, and the `ast-grep` image whose presence decides which tool
+/// definitions are rendered. Metadata only — resolving the key must not spawn
+/// the subprocesses the shared bundle exists to avoid.
+fn install_key() -> String {
+    let mut hasher = DefaultHasher::new();
+    FIXTURE_TRACEDECAY_BIN.hash(&mut hasher);
+    let ast_grep = PathBuf::from(ast_grep_command().get_program());
+    for path in [std::env::current_exe().ok(), Some(ast_grep)]
+        .into_iter()
+        .flatten()
+    {
+        path.hash(&mut hasher);
+        file_identity(&path).hash(&mut hasher);
+    }
+    format!("{:016x}", hasher.finish())
+}
+
+fn file_identity(path: &Path) -> Option<(u64, Duration)> {
+    let metadata = std::fs::metadata(path).ok()?;
+    let modified = metadata
+        .modified()
+        .ok()?
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .ok()?;
+    Some((metadata.len(), modified))
+}
+
+fn lock_is_stale(lock: &Path) -> bool {
+    file_identity(lock)
+        .and_then(|(_, modified)| SystemTime::UNIX_EPOCH.checked_add(modified)?.elapsed().ok())
+        .is_some_and(|age| age > INSTALL_LOCK_STALE_AFTER)
+}
+
+/// Blocks until the peer holding `lock` publishes the ready marker.
+///
+/// The holder writes the marker before releasing the lock, so a lock that
+/// disappears with no marker means the render failed and waiting longer is
+/// pointless. The timeout only covers a holder killed outright.
+fn wait_for_ready(ready: &Path, lock: &Path) -> bool {
+    let deadline = Instant::now() + INSTALL_WAIT_TIMEOUT;
+    while Instant::now() < deadline {
+        if ready.is_file() {
+            return true;
+        }
+        if !lock.exists() {
+            return ready.is_file();
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    false
+}
+
+/// Fake `tracedecay` binaries for the subprocess failure-mode check, written
+/// once as part of the shared bundle.
+///
+/// `(file stem, POSIX body, Windows body)`. cmd.exe `echo` always appends a
+/// newline that POSIX `printf` does not, and a plain `echo text 1>&2` would
+/// emit a trailing space before the redirect — hence the redirect-first form
+/// (`>&2 echo`).
+const FAKE_TRACEDECAY_BINARIES: &[(&str, &str, &str)] = &[
+    (
+        // Dies mid-handshake: nonzero exit with partial stdout and stderr.
+        "fake-tracedecay-crash",
+        "printf '{\"content'\nprintf 'handshake aborted' >&2\nexit 3\n",
+        "echo {\"content\n>&2 echo handshake aborted\nexit /b 3\n",
+    ),
+    (
+        // Exit 0 with malformed JSON on stdout.
+        "fake-tracedecay-badjson",
+        "printf 'not-json-at-all'\nexit 0\n",
+        "echo not-json-at-all\nexit /b 0\n",
+    ),
+    (
+        // Exit 0 with empty stdout.
+        "fake-tracedecay-empty",
+        "exit 0\n",
+        "exit /b 0\n",
+    ),
+];
+
+fn write_fake_tracedecay_binaries(dir: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    for (name, posix_body, windows_body) in FAKE_TRACEDECAY_BINARIES {
+        if cfg!(windows) {
+            // CRLF matches what cmd.exe batch files are written with.
+            let body = format!("@echo off\n{windows_body}").replace('\n', "\r\n");
+            std::fs::write(dir.join(format!("{name}.cmd")), body)?;
+            continue;
+        }
+        let path = dir.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{posix_body}"))?;
+        #[cfg(unix)]
+        {
+            let mut permissions = std::fs::metadata(&path)?.permissions();
+            permissions.set_mode(permissions.mode() | 0o111);
+            std::fs::set_permissions(&path, permissions)?;
+        }
+    }
+    Ok(())
+}
 
 /// Command for the test python interpreter.
 ///
@@ -126,7 +318,14 @@ fn python_command() -> Command {
 fn run_python_check(script_name: &str, script: &str, failure_message: &str) {
     let install = &*SHARED_INSTALL;
     let script_path = install.plugin_dir.join(script_name);
-    std::fs::write(&script_path, script).unwrap();
+    // Script names are unique per check and their bodies are constants, so a
+    // matching file in a reused bundle is already this exact script. Skipping
+    // the rewrite keeps the shared plugin dir immutable across processes.
+    let already_written =
+        std::fs::read(&script_path).is_ok_and(|existing| existing == script.as_bytes());
+    if !already_written {
+        std::fs::write(&script_path, script).unwrap();
+    }
 
     let mut command = python_command();
     command
@@ -134,6 +333,7 @@ fn run_python_check(script_name: &str, script: &str, failure_message: &str) {
         .arg(&install.plugin_dir)
         // Isolate from the developer's real ~/.hermes.
         .env("HOME", &install.home)
+        .env("TRACEDECAY_TEST_FAKE_TOOLS", &install.fake_tools_dir)
         .env_remove("HERMES_HOME")
         .env_remove("HERMES_PROFILE");
     // Ambient LCM_* vars from the worker shell must not leak into the
@@ -4453,10 +4653,10 @@ import importlib.util
 import json
 import os
 import pathlib
-import stat
 import sys
 
 plugin_dir = pathlib.Path(sys.argv[1])
+fake_tools = pathlib.Path(os.environ["TRACEDECAY_TEST_FAKE_TOOLS"])
 parent_name = "_hermes_user_subprocess_failures"
 parent_spec = importlib.machinery.ModuleSpec(parent_name, None, is_package=True)
 parent_spec.submodule_search_locations = []
@@ -4475,18 +4675,16 @@ spec.loader.exec_module(plugin)
 
 tools = plugin.tools
 
-def write_fake_binary(name, body_posix, body_windows):
-    if os.name == "nt":
-        path = plugin_dir / f"{name}.cmd"
-        path.write_text("@echo off\n" + body_windows)
-        return str(path)
-    path = plugin_dir / name
-    path.write_text('#!/bin/sh\n' + body_posix)
-    path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+# The fake binaries are part of the shared immutable fixture, generated once
+# per machine by the Rust harness rather than rewritten (and re-chmodded, and
+# on Windows rescanned and re-imaged) on every run of this check.
+def fake_binary(name):
+    path = fake_tools / (f"{name}.cmd" if os.name == "nt" else name)
+    assert path.is_file(), f"missing fake tracedecay fixture: {path}"
     return str(path)
 
 # Missing binary: the OSError is wrapped, never raised.
-tools.TRACEDECAY_BIN = str(plugin_dir / "definitely-missing-tracedecay")
+tools.TRACEDECAY_BIN = str(fake_tools / "definitely-missing-tracedecay")
 missing = json.loads(tools.call_tracedecay_tool("tracedecay_lcm_status", {}))
 assert missing["error"].startswith("tracedecay tool failed:"), missing
 # The JSON bridge surfaces the same error dict without raising.
@@ -4494,35 +4692,25 @@ assert "error" in plugin.call_tracedecay_json("tracedecay_lcm_status", {})
 
 # Subprocess dies mid-handshake: nonzero exit with partial stdout and stderr
 # is reported with the exit status and bounded captures.
-# cmd.exe `echo` always appends a newline that POSIX printf does not, and a
-# plain `echo text 1>&2` would emit a trailing space before the redirect —
-# hence the redirect-first form (`>&2 echo`). Trim trailing newlines only on
-# Windows so Unix keeps byte-exact capture assertions.
+# cmd.exe `echo` always appends a newline that POSIX printf does not, so trim
+# trailing newlines only on Windows and keep Unix byte-exact.
 def trim_capture(text):
     return text.rstrip("\r\n") if os.name == "nt" else text
 
-tools.TRACEDECAY_BIN = write_fake_binary(
-    "fake-tracedecay-crash",
-    'printf \'{"content\'\nprintf \'handshake aborted\' >&2\nexit 3\n',
-    'echo {"content\n>&2 echo handshake aborted\nexit /b 3\n',
-)
+tools.TRACEDECAY_BIN = fake_binary("fake-tracedecay-crash")
 crashed = json.loads(tools.call_tracedecay_tool("tracedecay_lcm_status", {}))
 assert crashed["error"] == "tracedecay tool exited with status 3", crashed
 assert trim_capture(crashed["stdout"]) == '{"content', crashed
 assert trim_capture(crashed["stderr"]) == "handshake aborted", crashed
 
 # Exit 0 with malformed JSON on stdout.
-tools.TRACEDECAY_BIN = write_fake_binary(
-    "fake-tracedecay-badjson",
-    "printf 'not-json-at-all'\nexit 0\n",
-    "echo not-json-at-all\nexit /b 0\n",
-)
+tools.TRACEDECAY_BIN = fake_binary("fake-tracedecay-badjson")
 malformed = json.loads(tools.call_tracedecay_tool("tracedecay_lcm_status", {}))
 assert malformed["error"] == "tracedecay tool returned invalid JSON", malformed
 assert trim_capture(malformed["stdout"]) == "not-json-at-all", malformed
 
 # Exit 0 with empty stdout normalizes to an empty JSON object.
-tools.TRACEDECAY_BIN = write_fake_binary("fake-tracedecay-empty", "exit 0\n", "exit /b 0\n")
+tools.TRACEDECAY_BIN = fake_binary("fake-tracedecay-empty")
 assert tools.call_tracedecay_tool("tracedecay_lcm_status", {}) == "{}"
 "#,
         "generated tool bridge should normalize subprocess failures into JSON errors",
