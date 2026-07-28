@@ -1512,7 +1512,9 @@ fn legacy_diagnostics_name_routes_to_canonical_read_surface() {
         Some(ApplicationSurfaceOperation::DiagnosticsRead)
     );
     assert_eq!(
-        normalize_application_tool_args("tracedecay_diagnostics", json!({})).unwrap(),
+        normalize_application_tool_args("tracedecay_diagnostics", json!({}))
+            .unwrap()
+            .request,
         json!({"scope": "workspace", "maximum_diagnostics": 1000, "cursor": null})
     );
     assert_eq!(
@@ -1520,7 +1522,8 @@ fn legacy_diagnostics_name_routes_to_canonical_read_surface() {
             "tracedecay_diagnostics",
             json!({"scope": "file", "path": "src/lib.rs"}),
         )
-        .unwrap(),
+        .unwrap()
+        .request,
         json!({"scope": {"file": "src/lib.rs"}, "maximum_diagnostics": 1000, "cursor": null})
     );
     assert_eq!(
@@ -1528,7 +1531,8 @@ fn legacy_diagnostics_name_routes_to_canonical_read_surface() {
             "tracedecay_diagnostics",
             json!({"maximum_diagnostics": 25, "cursor": "opaque"}),
         )
-        .unwrap(),
+        .unwrap()
+        .request,
         json!({"scope": "workspace", "maximum_diagnostics": 25, "cursor": "opaque"})
     );
     assert!(

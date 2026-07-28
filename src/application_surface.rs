@@ -313,15 +313,57 @@ impl ApplicationSurfaceOperation {
     }
 }
 
+/// Transport keys every surface adapter accepts but no reviewed application
+/// request schema declares. `format` selects the rendered output and
+/// `__mcp_request_id` carries protocol identity; both are stripped here so
+/// that `deny_unknown_fields` request schemas never see them.
+const SURFACE_TRANSPORT_ARGUMENT_KEYS: [&str; 2] = ["format", "__mcp_request_id"];
+
+/// A reviewed application request body together with the presentation format
+/// that travelled alongside it in the caller's argument object.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NormalizedApplicationToolArgs {
+    pub request: Value,
+    pub requested_format: RequestedOutputFormat,
+}
+
+/// The single authority for reading the presentation format out of a tool
+/// argument object. CLI, MCP, and rendering all resolve `format` through here.
+pub fn requested_output_format(args: &Value) -> RequestedOutputFormat {
+    match args.get("format").and_then(Value::as_str) {
+        Some(format) if format.eq_ignore_ascii_case("json") => RequestedOutputFormat::Json,
+        _ => RequestedOutputFormat::Markdown,
+    }
+}
+
 /// Normalizes compatibility tool arguments before every CLI/MCP transport
 /// parses the canonical application request.
 pub fn normalize_application_tool_args(
     tool_name: &str,
-    args: Value,
-) -> Result<Value, ApplicationSurfaceAdapterError> {
-    if tool_name != "tracedecay_diagnostics" {
-        return Ok(args);
+    mut args: Value,
+) -> Result<NormalizedApplicationToolArgs, ApplicationSurfaceAdapterError> {
+    let requested_format = requested_output_format(&args);
+    if let Some(object) = args.as_object_mut() {
+        for key in SURFACE_TRANSPORT_ARGUMENT_KEYS {
+            object.remove(key);
+        }
     }
+    let request = if tool_name == "tracedecay_diagnostics" {
+        compatibility_diagnostics_request(&args)?
+    } else {
+        args
+    };
+    Ok(NormalizedApplicationToolArgs {
+        request,
+        requested_format,
+    })
+}
+
+/// Rewrites the compatibility `tracedecay_diagnostics` argument shape into the
+/// reviewed `diagnostics_read` request body.
+fn compatibility_diagnostics_request(
+    args: &Value,
+) -> Result<Value, ApplicationSurfaceAdapterError> {
     let scope = match args
         .get("scope")
         .and_then(Value::as_str)
