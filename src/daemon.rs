@@ -104,16 +104,44 @@ fn retained_project_graph_resolver(
         Box::pin(async move {
             let graphs = administration.mounted_project_graphs().await;
             let requested_root =
-                authority::canonical_identity_path(&request.requested_worktree_root).ok()?;
+                authority::canonical_identity_path(&request.requested_worktree_root).map_err(
+                    |error| {
+                        TraceDecayError::project_route(
+                            "project_route_unavailable",
+                            true,
+                            format!(
+                                "workspace identity is unavailable for {}: {error}",
+                                request.requested_worktree_root.display()
+                            ),
+                        )
+                    },
+                )?;
             let registered_root =
-                authority::canonical_identity_path(&request.registered_root).ok()?;
+                authority::canonical_identity_path(&request.registered_root).map_err(|error| {
+                    TraceDecayError::project_route(
+                        "project_route_unavailable",
+                        true,
+                        format!(
+                            "registered project identity is unavailable for {}: {error}",
+                            request.registered_root.display()
+                        ),
+                    )
+                })?;
             let Some(owner) = request.owner.as_ref() else {
                 return sole_mounted_graph_matching(&graphs, |graph| {
                     authority::canonical_identity_path(graph.project_root()).ok()
                         == Some(requested_root.clone())
                 })
-                .ok()
-                .flatten();
+                .map_err(|()| {
+                    TraceDecayError::project_route(
+                        "project_route_ambiguous",
+                        false,
+                        format!(
+                            "multiple mounted graphs claim workspace {}",
+                            request.requested_worktree_root.display()
+                        ),
+                    )
+                });
             };
             let project_id = owner.project.project_id.as_str();
             let candidates = graphs
@@ -151,12 +179,21 @@ fn retained_project_graph_resolver(
                 sole_mounted_graph_matching(&candidates, |_| true),
             ] {
                 match selected {
-                    Ok(Some(graph)) => return Some(graph),
+                    Ok(Some(graph)) => return Ok(Some(graph)),
                     Ok(None) => {}
-                    Err(()) => return None,
+                    Err(()) => {
+                        return Err(TraceDecayError::project_route(
+                            "project_route_ambiguous",
+                            false,
+                            format!(
+                                "multiple mounted graphs claim registered project '{}'",
+                                owner.project.project_id
+                            ),
+                        ));
+                    }
                 }
             }
-            None
+            Ok(None)
         })
     })
 }

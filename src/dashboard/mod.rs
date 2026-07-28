@@ -333,7 +333,7 @@ impl DashboardTestProjectGraphsV1 {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .get(&request.registered_root)
                 .cloned();
-            Box::pin(async move { graph })
+            Box::pin(async move { Ok(graph) })
         })
     }
 }
