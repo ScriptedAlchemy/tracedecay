@@ -35,6 +35,17 @@ pub(crate) fn mark_process_long_lived_for_session_maintenance() {
     LONG_LIVED_SESSION_MAINTENANCE.store(true, Ordering::Relaxed);
 }
 
+fn release_process_allocator_memory() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        // SAFETY: `malloc_trim` is a process-wide, thread-safe glibc allocator
+        // maintenance operation. It does not invalidate live allocations.
+        unsafe {
+            libc::malloc_trim(0);
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum RegisteredSchemaConvergenceStatus {
     Pending,
@@ -117,6 +128,7 @@ impl RegisteredSchemaConvergenceMaintenance {
                     ],
                 );
             }
+            release_process_allocator_memory();
             let status = match result {
                 Ok(()) => {
                     crate::daemon::log_daemon_event(
