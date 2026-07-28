@@ -717,6 +717,12 @@ fn production_lsp_input(
     .map_err(|()| ApplicationContractError::Inconsistent {
         field: "project-open feedback root URI",
     })?;
+    let root_path =
+        root_uri
+            .to_file_path()
+            .map_err(|()| ApplicationContractError::Inconsistent {
+                field: "project-open feedback root URI",
+            })?;
     Ok(Arc::new(move |request: FeedbackCycleRequest| {
         let feedback_scope = feedback_scope.clone();
         let scope = scope.clone();
@@ -726,10 +732,15 @@ fn production_lsp_input(
         let policy_digest = policy_digest.clone();
         let providers = providers.clone();
         let project_root = project_root.clone();
-        let root_uri = root_uri.clone();
+        let root_path = root_path.clone();
         let document_identity = Arc::clone(&document_identity);
         Box::pin(async move {
-            if url::Url::parse(&request.root_uri).ok().as_ref() != Some(&root_uri) {
+            if url::Url::parse(&request.root_uri)
+                .ok()
+                .and_then(|url| url.to_file_path().ok())
+                .as_ref()
+                != Some(&root_path)
+            {
                 return Err(LspRuntimeFailure::new("feedback-cycle-root-mismatch"));
             }
             let trigger = match request.trigger {
@@ -1251,7 +1262,7 @@ mod tests {
         .expect("input");
 
         let invocation = input(FeedbackCycleRequest {
-            root_uri: "file:///workspace/".to_owned(),
+            root_uri: "file:///workspace".to_owned(),
             trigger: DiagnosticTrigger::DocumentSave,
             document_uri: "file:///workspace/src/lib.rs".to_owned(),
         })

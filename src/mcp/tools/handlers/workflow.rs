@@ -24,6 +24,7 @@ use crate::application::operation_stream::{
 };
 use crate::diagnose::{Severity, parse_cargo_output};
 use crate::diagnostics_publication::CodeIndexPublicationIdentityPortV1;
+use crate::diagnostics_query::DiagnosticsQuery;
 use crate::diagnostics_store::DiagnosticsStore;
 use crate::errors::{Result, TraceDecayError};
 use crate::redundancy::{Fingerprint, body_token_window, redundancy_match_score, round4};
@@ -543,8 +544,16 @@ pub(super) async fn handle_run_affected_tests(
     cg: &TraceDecay,
     args: Value,
     cancellation: Option<CancellationSignal>,
+    code_index_identity: Option<&dyn CodeIndexPublicationIdentityPortV1>,
 ) -> Result<ToolResult> {
-    handle_run_affected_tests_with_runner(cg, args, cancellation, run_cargo_tests).await
+    handle_run_affected_tests_with_runner(
+        cg,
+        args,
+        cancellation,
+        code_index_identity,
+        run_cargo_tests,
+    )
+    .await
 }
 
 #[derive(Debug)]
@@ -582,6 +591,7 @@ async fn handle_run_affected_tests_with_runner<Runner, RunFuture>(
     cg: &TraceDecay,
     args: Value,
     cancellation: Option<CancellationSignal>,
+    code_index_identity: Option<&dyn CodeIndexPublicationIdentityPortV1>,
     runner: Runner,
 ) -> Result<ToolResult>
 where
@@ -624,7 +634,13 @@ where
         ),
     ))
     .map_err(test_run_contract_error)?;
-    let emitter = begin_test_run(cg, &changed_paths, effective_deadline.clone()).await?;
+    let emitter = begin_test_run(
+        cg,
+        &changed_paths,
+        effective_deadline.clone(),
+        code_index_identity,
+    )
+    .await?;
 
     // 3) Run cargo test --no-fail-fast with each test name as a libtest
     // filter. We use `--` to pass them through.
@@ -748,6 +764,7 @@ async fn begin_test_run(
     cg: &TraceDecay,
     changed_paths: &[String],
     deadline: Deadline,
+    code_index_identity: Option<&dyn CodeIndexPublicationIdentityPortV1>,
 ) -> Result<OperationEmitter> {
     let root = cg
         .project_root()
@@ -768,9 +785,18 @@ async fn begin_test_run(
             }
         })?;
     let database = cg.dashboard_database_guard();
-    let code_generation_id = DiagnosticsStore::new(database.conn())
-        .current_generation()
-        .await?;
+    let code_generation_id = match code_index_identity {
+        Some(identity) => identity
+            .resolve(root.clone())
+            .await
+            .map(|identity| identity.generation_id().clone()),
+        None => {
+            DiagnosticsQuery::new(database.conn())
+                .current_generation()
+                .await
+                .generation
+        }
+    };
     let document_content_digests =
         managed_test_document_content_digests(&root, changed_paths).await?;
     operation_event_authority()
@@ -1190,7 +1216,7 @@ mod tests {
     #[allow(dead_code)]
     fn assert_begin_test_run_future_is_send(cg: &TraceDecay, deadline: Deadline) {
         fn assert_send<T: Send>(_: T) {}
-        assert_send(begin_test_run(cg, &[], deadline));
+        assert_send(begin_test_run(cg, &[], deadline, None));
     }
 
     #[tokio::test]
@@ -1238,6 +1264,7 @@ mod tests {
                 "max_tests": 5,
                 "format": "json"
             }),
+            None,
             None,
             move |root, profile, tests, timeout_duration| async move {
                 assert_eq!(root, expected_root);
