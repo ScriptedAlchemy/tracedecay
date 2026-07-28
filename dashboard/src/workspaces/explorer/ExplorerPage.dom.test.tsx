@@ -608,6 +608,26 @@ describe('ExplorerPage', () => {
     expect(screen.getByText(/active-project session store/)).toBeTruthy();
   });
 
+  it('does not draw a measured signal bar without a denominator', async () => {
+    renderExplorer({
+      ...SEARCH_ROUTES,
+      '/api/explorer/queries': {
+        status: 200,
+        body: plannerEnvelope([
+          source('code_graph', [{ ...CODE_ROW, degree: 0 }], 1),
+          source('sessions', [MESSAGE_ROW, SUMMARY_ROW], 2),
+          source('knowledge', [FACT_ROW], null),
+        ]),
+      },
+    });
+    const user = userEvent.setup();
+    await user.type(screen.getByRole('searchbox'), 'graph');
+    await user.keyboard('{Enter}');
+
+    const meter = await screen.findByRole('img', { name: 'degree 0' });
+    expect(meter.querySelector('.td-meter-fill')).toBeNull();
+  });
+
   it('never turns a failed lane plus zero successful hits into complete-zero copy', async () => {
     const unavailableSessions = {
       ...source('sessions', [], 0),
