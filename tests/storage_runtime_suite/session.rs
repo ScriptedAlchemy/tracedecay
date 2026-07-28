@@ -222,10 +222,6 @@ async fn seed_profile_store(root: &Path, session_id: &str) -> (PathBuf, Vec<Obse
     let runtime = HostAdmissionTestRuntimeV1::profile(root.join("authoritative/profile-runtime"))
         .await
         .expect("open isolated registered profile store");
-    let database_path = runtime
-        .database_path(HostAdmissionScope::Profile)
-        .expect("registered profile session database path")
-        .to_path_buf();
     let transcript = write_admission_fixture(root, "profile", None);
     let expected_bytes = fs::metadata(&transcript)
         .expect("profile fixture metadata")
@@ -250,8 +246,15 @@ async fn seed_profile_store(root: &Path, session_id: &str) -> (PathBuf, Vec<Obse
         .checkpoint_session_database_for_test(HostAdmissionScope::Profile)
         .await
         .expect("checkpoint registered profile session store");
+    let snapshot_path = root.join("checkpointed-sources/profile.db");
+    fs::create_dir_all(snapshot_path.parent().expect("profile snapshot parent"))
+        .expect("create profile snapshot directory");
+    runtime
+        .snapshot_session_database_for_test(HostAdmissionScope::Profile, &snapshot_path)
+        .await
+        .expect("snapshot registered profile session store");
     drop(runtime);
-    (database_path, metadata)
+    (snapshot_path, metadata)
 }
 
 async fn seed_project_store(root: &Path, session_id: &str) -> (PathBuf, ProjectStoreMetadata) {
@@ -267,10 +270,6 @@ async fn seed_project_store(root: &Path, session_id: &str) -> (PathBuf, ProjectS
         HostAdmissionTestRuntimeV1::project(&profile_root, &project_root, project_id.clone())
             .await
             .expect("open isolated registered project store");
-    let database_path = runtime
-        .database_path(HostAdmissionScope::Project)
-        .expect("registered project session database path")
-        .to_path_buf();
     assert!(
         runtime
             .upsert_code_project(project_id.as_str(), &project_root, None, None, Some("main"))
@@ -303,8 +302,15 @@ async fn seed_project_store(root: &Path, session_id: &str) -> (PathBuf, ProjectS
         .checkpoint_session_database_for_test(HostAdmissionScope::Project)
         .await
         .expect("checkpoint registered project session store");
+    let snapshot_path = root.join("checkpointed-sources/project.db");
+    fs::create_dir_all(snapshot_path.parent().expect("project snapshot parent"))
+        .expect("create project snapshot directory");
+    runtime
+        .snapshot_session_database_for_test(HostAdmissionScope::Project, &snapshot_path)
+        .await
+        .expect("snapshot registered project session store");
     drop(runtime);
-    (database_path, metadata)
+    (snapshot_path, metadata)
 }
 
 async fn seed_session_store(root: &Path, session_id: &str) -> (PathBuf, SessionStoreMetadata) {
@@ -321,10 +327,6 @@ async fn seed_session_store(root: &Path, session_id: &str) -> (PathBuf, SessionS
         HostAdmissionTestRuntimeV1::project(&profile_root, &project_root, project_id.clone())
             .await
             .expect("open isolated registered session store");
-    let database_path = runtime
-        .database_path(HostAdmissionScope::Project)
-        .expect("registered project session database path")
-        .to_path_buf();
     assert!(
         runtime
             .upsert_code_project(project_id.as_str(), &project_root, None, None, Some("main"))
@@ -371,8 +373,15 @@ async fn seed_session_store(root: &Path, session_id: &str) -> (PathBuf, SessionS
         .checkpoint_session_database_for_test(HostAdmissionScope::Project)
         .await
         .expect("checkpoint registered project session store");
+    let snapshot_path = root.join("checkpointed-sources/session.db");
+    fs::create_dir_all(snapshot_path.parent().expect("session snapshot parent"))
+        .expect("create session snapshot directory");
+    runtime
+        .snapshot_session_database_for_test(HostAdmissionScope::Project, &snapshot_path)
+        .await
+        .expect("snapshot registered session store");
     drop(runtime);
-    (database_path, metadata)
+    (snapshot_path, metadata)
 }
 
 fn copy_checkpointed_store(source_path: &Path, root: &Path, label: &str) -> CopiedStore {
