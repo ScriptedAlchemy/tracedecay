@@ -988,6 +988,63 @@ async fn test_build_file_adjacency() {
     }
 }
 
+/// A whole-graph adjacency read of this size exceeds what the SQLite runtime
+/// will materialize for one query, so the scan has to page. Every distinct
+/// file pair must still appear in the result.
+#[tokio::test]
+async fn test_build_file_adjacency_pages_beyond_runtime_materialization_limit() {
+    const FILES: usize = 102;
+    let (db, _dir) = setup_db().await;
+
+    let nodes: Vec<Node> = (0..FILES)
+        .map(|index| {
+            make_node(
+                &format!("paged-{index:04}"),
+                &format!("func_{index}"),
+                &format!("src/paged_{index:04}.rs"),
+                Visibility::Pub,
+            )
+        })
+        .collect();
+    db.insert_nodes(&nodes).await.expect("insert nodes");
+
+    let mut edges = Vec::new();
+    for source in 0..FILES {
+        for target in 0..FILES {
+            if source == target {
+                continue;
+            }
+            edges.push(Edge {
+                source: format!("paged-{source:04}"),
+                target: format!("paged-{target:04}"),
+                kind: EdgeKind::Calls,
+                line: 1,
+            });
+        }
+    }
+    let expected_pairs = edges.len();
+    assert!(
+        expected_pairs > 10_000,
+        "the fixture must exceed the runtime materialization limit"
+    );
+    db.insert_edges(&edges).await.expect("insert edges");
+
+    let qm = GraphQueryManager::new(&db);
+    let adj = qm
+        .build_file_adjacency(None)
+        .await
+        .expect("adjacency must page instead of exceeding the materialization limit");
+
+    let observed_pairs: usize = adj.values().map(HashSet::len).sum();
+    assert_eq!(observed_pairs, expected_pairs);
+    for index in 0..FILES {
+        let file = format!("src/paged_{index:04}.rs");
+        let deps = adj.get(&file).expect("every source file is present");
+        assert_eq!(deps.len(), FILES - 1, "{file}");
+        assert!(!deps.contains(&file), "{file} must not self-depend");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Health algorithm tests
 // ---------------------------------------------------------------------------

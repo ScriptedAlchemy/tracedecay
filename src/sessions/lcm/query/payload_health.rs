@@ -3,6 +3,8 @@ use std::path::Path;
 
 use super::*;
 
+use crate::sessions::lcm::{LCM_SCAN_PAGE_MAX_BYTES, LCM_SCAN_PAGE_ROWS};
+
 pub(crate) async fn payload_health_detail(
     conn: &(impl QueryExecutor + ?Sized),
     storage_root: &Path,
@@ -263,22 +265,34 @@ async fn payload_byte_counts_for_scope(
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<BTreeMap<String, u64>, LcmError> {
-    let mut rows = conn
-        .query(
-            "SELECT payload_ref, byte_count
-             FROM lcm_external_payloads
-             WHERE (?1 = 'all' OR provider = ?1)
-               AND (?2 IS NULL OR session_id = ?2)",
-            params![provider, session_id],
-        )
-        .await?;
     let mut bytes = BTreeMap::new();
-    while let Some(row) = rows.next().await? {
-        let payload_ref: String = row.get(0)?;
-        let byte_count: i64 = row.get(1)?;
-        bytes.insert(payload_ref, byte_count.max(0) as u64);
+    let mut after_rowid = 0_i64;
+    loop {
+        let mut rows = conn
+            .query(
+                "SELECT payload_ref, byte_count, rowid
+                 FROM lcm_external_payloads
+                 WHERE (?1 = 'all' OR provider = ?1)
+                   AND (?2 IS NULL OR session_id = ?2)
+                   AND rowid > ?3
+                 ORDER BY rowid
+                 LIMIT ?4",
+                params![provider, session_id, after_rowid, LCM_SCAN_PAGE_ROWS],
+            )
+            .await?;
+        let mut page_rows = 0_i64;
+        while let Some(row) = rows.next().await? {
+            let payload_ref: String = row.get(0)?;
+            let byte_count: i64 = row.get(1)?;
+            after_rowid = row.get(2)?;
+            page_rows += 1;
+            bytes.insert(payload_ref, byte_count.max(0) as u64);
+        }
+        drop(rows);
+        if page_rows < LCM_SCAN_PAGE_ROWS {
+            return Ok(bytes);
+        }
     }
-    Ok(bytes)
 }
 
 async fn payload_ref_locations_for_scope(
@@ -286,46 +300,62 @@ async fn payload_ref_locations_for_scope(
     provider: &str,
     session_id: Option<&str>,
 ) -> Result<BTreeMap<String, PayloadRefLocation>, LcmError> {
-    let mut rows = conn
-        .query(
-            "SELECT store_id, message_id, session_id, storage_kind, payload_ref, content, snippet_text, index_text, metadata_json
-             FROM lcm_raw_messages
-             WHERE (?1 = 'all' OR provider = ?1)
-               AND (?2 IS NULL OR session_id = ?2)",
-            params![provider, session_id],
-        )
-        .await?;
     let mut refs = BTreeMap::new();
-    while let Some(row) = rows.next().await? {
-        let store_id: i64 = row.get(0)?;
-        let message_id: String = row.get(1)?;
-        let owner_session_id: String = row.get(2)?;
-        let storage_kind: String = row.get(3)?;
-        let raw_payload_ref: Option<String> = row.get(4).unwrap_or(None);
-        if storage_kind == "external"
-            && let Some(payload_ref) = raw_payload_ref
-        {
-            refs.entry(payload_ref.clone())
-                .or_insert_with(|| PayloadRefLocation {
-                    payload_ref,
-                    session_id: owner_session_id.clone(),
-                    message_id: message_id.clone(),
-                    store_id,
-                    field: "payload_ref".to_string(),
-                });
-        }
-        for index in 5..9 {
-            let value: Option<String> = row.get(index).unwrap_or(None);
-            let field = match index {
-                5 => "content",
-                6 => "snippet_text",
-                7 => "index_text",
-                _ => "metadata_json",
-            };
-            for payload_ref in value
-                .as_deref()
-                .map(payload::extract_payload_refs_from_text)
-                .unwrap_or_default()
+    let mut after_store_id = 0_i64;
+    loop {
+        let mut rows = conn
+            .query(
+                "WITH page AS (
+                     SELECT store_id, message_id, session_id, storage_kind, payload_ref,
+                            content, snippet_text, index_text, metadata_json
+                     FROM lcm_raw_messages
+                     WHERE (?1 = 'all' OR provider = ?1)
+                       AND (?2 IS NULL OR session_id = ?2)
+                       AND store_id > ?3
+                     ORDER BY store_id
+                     LIMIT ?4
+                 ),
+                 bounded AS (
+                     SELECT store_id, message_id, session_id, storage_kind, payload_ref,
+                            content, snippet_text, index_text, metadata_json,
+                            ROW_NUMBER() OVER (ORDER BY store_id) AS page_row,
+                            SUM(length(CAST(COALESCE(content, '') AS BLOB))
+                                + length(CAST(COALESCE(snippet_text, '') AS BLOB))
+                                + length(CAST(COALESCE(index_text, '') AS BLOB))
+                                + length(CAST(COALESCE(metadata_json, '') AS BLOB)))
+                                OVER (ORDER BY store_id) AS cumulative_bytes
+                     FROM page
+                 )
+                 SELECT store_id, message_id, session_id, storage_kind, payload_ref,
+                        content, snippet_text, index_text, metadata_json
+                 FROM bounded
+                 WHERE cumulative_bytes <= ?5 OR page_row = 1
+                 ORDER BY store_id",
+                params![
+                    provider,
+                    session_id,
+                    after_store_id,
+                    LCM_SCAN_PAGE_ROWS,
+                    LCM_SCAN_PAGE_MAX_BYTES
+                ],
+            )
+            .await?;
+        let mut page_rows = 0_usize;
+        while let Some(row) = rows.next().await? {
+            let store_id: i64 = row.get(0)?;
+            if store_id <= after_store_id {
+                return Err(LcmError::Db(
+                    "LCM payload reference scan page did not advance".to_string(),
+                ));
+            }
+            after_store_id = store_id;
+            page_rows += 1;
+            let message_id: String = row.get(1)?;
+            let owner_session_id: String = row.get(2)?;
+            let storage_kind: String = row.get(3)?;
+            let raw_payload_ref: Option<String> = row.get(4).unwrap_or(None);
+            if storage_kind == "external"
+                && let Some(payload_ref) = raw_payload_ref
             {
                 refs.entry(payload_ref.clone())
                     .or_insert_with(|| PayloadRefLocation {
@@ -333,12 +363,40 @@ async fn payload_ref_locations_for_scope(
                         session_id: owner_session_id.clone(),
                         message_id: message_id.clone(),
                         store_id,
-                        field: field.to_string(),
+                        field: "payload_ref".to_string(),
                     });
             }
+            for index in 5..9 {
+                let value: Option<String> = row.get(index).unwrap_or(None);
+                let field = match index {
+                    5 => "content",
+                    6 => "snippet_text",
+                    7 => "index_text",
+                    _ => "metadata_json",
+                };
+                for payload_ref in value
+                    .as_deref()
+                    .map(payload::extract_payload_refs_from_text)
+                    .unwrap_or_default()
+                {
+                    refs.entry(payload_ref.clone())
+                        .or_insert_with(|| PayloadRefLocation {
+                            payload_ref,
+                            session_id: owner_session_id.clone(),
+                            message_id: message_id.clone(),
+                            store_id,
+                            field: field.to_string(),
+                        });
+                }
+            }
+        }
+        drop(rows);
+        // A byte-bounded page can stop short of the row budget, so only an
+        // empty page proves the scan is complete.
+        if page_rows == 0 {
+            return Ok(refs);
         }
     }
-    Ok(refs)
 }
 
 fn payload_ref_location(

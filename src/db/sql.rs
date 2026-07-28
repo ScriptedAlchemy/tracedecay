@@ -74,6 +74,72 @@ pub(super) fn push_int(buf: &mut String, val: i64) {
     let _ = write!(buf, "{val}");
 }
 
+/// Rows requested per keyset page of a whole-table scan.
+///
+/// The SQLite runtime admits a bounded number of rows per query and rejects
+/// anything larger outright, so a whole-table read has to arrive as a sequence
+/// of pages. This budget stays well under that admission limit while keeping
+/// the number of round trips low.
+pub(super) const FULL_SCAN_PAGE_ROWS: i64 = 2_000;
+
+/// Reads an entire table through `rowid` keyset pages and returns every row.
+///
+/// `page_sql` must append `rowid` after the columns `map_fn` reads, bind the
+/// exclusive `rowid` cursor to `?1` and the page row budget to `?2`, and order
+/// by `rowid` so each page resumes exactly where the previous one stopped.
+/// `cursor_index` is the position of that trailing `rowid` column. The result
+/// is the complete scan: paging is a transport concern here, never a silent
+/// truncation.
+pub(super) async fn collect_rowid_pages<T, C>(
+    conn: &C,
+    page_sql: &str,
+    cursor_index: i32,
+    map_fn: fn(&Row) -> std::result::Result<T, Error>,
+    operation: &str,
+) -> Result<Vec<T>>
+where
+    C: crate::db::engine::QueryExecutor + ?Sized,
+{
+    let mut items = Vec::new();
+    let mut after_rowid = i64::MIN;
+    loop {
+        let mut rows = conn
+            .query(page_sql, (after_rowid, FULL_SCAN_PAGE_ROWS))
+            .await
+            .map_err(|e| TraceDecayError::Database {
+                message: format!("failed to query page: {e}"),
+                operation: operation.to_string(),
+            })?;
+        let mut page_rows = 0_i64;
+        while let Some(row) = rows.next().await.map_err(|e| TraceDecayError::Database {
+            message: format!("failed to read row: {e}"),
+            operation: operation.to_string(),
+        })? {
+            let rowid: i64 = row
+                .get(cursor_index)
+                .map_err(|e| TraceDecayError::Database {
+                    message: format!("failed to read page cursor: {e}"),
+                    operation: operation.to_string(),
+                })?;
+            if rowid <= after_rowid {
+                return Err(TraceDecayError::Database {
+                    message: "table scan page did not advance".to_string(),
+                    operation: operation.to_string(),
+                });
+            }
+            after_rowid = rowid;
+            page_rows += 1;
+            items.push(map_fn(&row).map_err(|e| TraceDecayError::Database {
+                message: format!("failed to map row: {e}"),
+                operation: operation.to_string(),
+            })?);
+        }
+        if page_rows < FULL_SCAN_PAGE_ROWS {
+            return Ok(items);
+        }
+    }
+}
+
 /// Collects all rows from a `Rows` iterator into a `Vec<T>` using the given
 /// row-mapping function. This helper never constructs SQL; callers must build
 /// and parameterize queries before invoking it.
@@ -93,4 +159,51 @@ pub(super) async fn collect_rows<T>(
         })?);
     }
     Ok(items)
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::TempDir;
+
+    use super::{FULL_SCAN_PAGE_ROWS, collect_rowid_pages};
+    use crate::db::engine::TestConnection;
+
+    /// A single query over this many rows is refused by the SQLite runtime, so
+    /// a whole-table read has to page. The scan must still return every row,
+    /// exactly once, in `rowid` order.
+    #[tokio::test]
+    async fn rowid_pages_complete_a_scan_larger_than_the_runtime_limit() {
+        const ROWS: i64 = 10_001;
+        let directory = TempDir::new().expect("scan tempdir");
+        let conn = TestConnection::open(&directory.path().join("scan.db"));
+        conn.execute_batch("CREATE TABLE sample (label TEXT NOT NULL);")
+            .await
+            .expect("create table");
+        conn.execute(
+            &format!(
+                "WITH RECURSIVE fixture(value) AS (
+                     SELECT 1 UNION ALL SELECT value + 1 FROM fixture WHERE value < {ROWS}
+                 )
+                 INSERT INTO sample(label) SELECT printf('row-%05d', value) FROM fixture"
+            ),
+            (),
+        )
+        .await
+        .expect("seed rows");
+
+        let labels = collect_rowid_pages(
+            &*conn,
+            "SELECT label, rowid FROM sample WHERE rowid > ?1 ORDER BY rowid LIMIT ?2",
+            1,
+            |row| row.get::<String>(0),
+            "sample_scan",
+        )
+        .await
+        .expect("a paged scan must not exceed the runtime materialization limit");
+
+        assert!(ROWS > FULL_SCAN_PAGE_ROWS, "the fixture must span pages");
+        assert_eq!(i64::try_from(labels.len()).expect("row count"), ROWS);
+        assert_eq!(labels.first().map(String::as_str), Some("row-00001"));
+        assert_eq!(labels.last().map(String::as_str), Some("row-10001"));
+    }
 }
