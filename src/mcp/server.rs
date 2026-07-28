@@ -694,27 +694,47 @@ impl McpServer {
                 crate::application::host_admission::HostAdmissionBroker::new(admission_runtime),
             ));
         }
-        if !retained.is_empty() {
-            let resolver: RetainedProjectGraphResolver = Arc::new(move |request| {
-                let requested = canonical_or_original(&request.requested_worktree_root);
-                let registered = canonical_or_original(&request.registered_root);
-                let project_id = request
-                    .owner
-                    .as_ref()
-                    .map(|owner| owner.project.project_id.as_str());
-                let mut matches = retained.iter().filter(|(root, graph)| {
-                    (*root == requested || *root == registered)
-                        && project_id.is_none_or(|project_id| {
-                            graph.store_layout().identity.project_id.as_deref() == Some(project_id)
-                        })
-                });
-                let graph = matches.next().map(|(_, graph)| Arc::clone(graph));
-                let graph = matches.next().is_none().then_some(graph).flatten();
-                Box::pin(async move { Ok(graph) })
+        // The daemon always has the active project mounted, so its resolver can
+        // serve it like any other registered project. Mirror that here through
+        // a late-bound slot: the server's own graph is only available after
+        // construction, so the resolver captures the slot now and the slot is
+        // filled from the finished server below. Without this fallback a
+        // repo-local fixture (whose graph never enters `retained` above) makes
+        // every path-selector read — including hook route resolution — report
+        // the active project as unmounted.
+        let active_graph_slot: Arc<std::sync::OnceLock<Arc<TraceDecay>>> =
+            Arc::new(std::sync::OnceLock::new());
+        let resolver_slot = Arc::clone(&active_graph_slot);
+        let active_root = canonical_or_original(&retained_root);
+        let resolver: RetainedProjectGraphResolver = Arc::new(move |request| {
+            let requested = canonical_or_original(&request.requested_worktree_root);
+            let registered = canonical_or_original(&request.registered_root);
+            let project_id = request
+                .owner
+                .as_ref()
+                .map(|owner| owner.project.project_id.as_str());
+            let identity_matches = |graph: &Arc<TraceDecay>| {
+                project_id.is_none_or(|project_id| {
+                    graph.store_layout().identity.project_id.as_deref() == Some(project_id)
+                })
+            };
+            let mut matches = retained.iter().filter(|(root, graph)| {
+                (*root == requested || *root == registered) && identity_matches(graph)
             });
-            context = context.with_retained_project_graph_resolver(resolver);
-        }
-        Self::new_with_context(context).await
+            let graph = matches.next().map(|(_, graph)| Arc::clone(graph));
+            let graph = matches.next().is_none().then_some(graph).flatten();
+            let graph = graph.or_else(|| {
+                ((active_root == requested || active_root == registered)
+                    && resolver_slot.get().is_some_and(identity_matches))
+                .then(|| resolver_slot.get().map(Arc::clone))
+                .flatten()
+            });
+            Box::pin(async move { Ok(graph) })
+        });
+        context = context.with_retained_project_graph_resolver(resolver);
+        let server = Self::new_with_context(context).await;
+        let _ = active_graph_slot.set(server.cg_snapshot().await);
+        server
     }
 
     /// Builds a direct test server with an isolated project admission spool.
