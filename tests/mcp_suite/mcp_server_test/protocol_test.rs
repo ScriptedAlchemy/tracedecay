@@ -360,9 +360,11 @@ fn tools_call_request_coordinator_stays_bounded() {
     for signature in [
         "fn prepare_tool_call(",
         "fn route_tool_arguments(",
+        "async fn begin_tool_dispatch(",
         "async fn execute_tool_dispatch(",
         "async fn dispatch_tool_call(",
         "fn attach_tool_timing(",
+        "fn finish_unavailable_tool_call(",
         "fn response_token_count(",
         "async fn apply_token_accounting(",
         "fn spawn_success_analytics(",
@@ -1827,7 +1829,7 @@ async fn test_run_returns_transport_read_errors() {
 #[tokio::test]
 async fn repeated_serve_lcm_calls_do_not_rerun_migrations() {
     let (_env, _active_project) = crate::common::IsolatedEnv::acquire().await;
-    let (server, dir) = setup_server().await;
+    let (server, dir) = setup_server_with_session_authority().await;
     let lcm_status_call = |id: i64| {
         jsonrpc_request(
             json!(id),
@@ -1895,10 +1897,7 @@ async fn repeated_serve_lcm_calls_do_not_rerun_migrations() {
     // Stamp a sentinel applied_at; only a re-run of the migrations would
     // rewrite it (the version-gate fast path and the per-process ensured
     // flag both leave the row untouched).
-    let marker = tracedecay::storage::read_repository_identity_marker(dir.path())
-        .unwrap()
-        .expect("test project identity marker");
-    let project_id = tracedecay_domain::ProjectId::new(marker.project_id).unwrap();
+    let project_id = project_id_of(&TraceDecay::open(dir.path()).await.unwrap());
     let profile_root = tracedecay::storage::default_profile_root().unwrap();
     let runtime = tracedecay::application::host_admission::HostAdmissionTestRuntimeV1::project(
         &profile_root,
@@ -1929,8 +1928,7 @@ async fn repeated_serve_lcm_calls_do_not_rerun_migrations() {
     // The write-path boundary call is the one that would re-run migrations
     // if the per-process ensured cache failed; the status reads must also
     // keep working.
-    let cg = TraceDecay::open(dir.path()).await.unwrap();
-    let server = McpServer::new(cg, None).await;
+    let server = server_with_session_authority(dir.path()).await;
     let responses = run_server_with_messages(
         server,
         vec![
@@ -1948,6 +1946,15 @@ async fn repeated_serve_lcm_calls_do_not_rerun_migrations() {
             .find(|r| r["id"] == json!(id))
             .unwrap_or_else(|| panic!("missing response for id={id} in second session"));
         assert!(resp["error"].is_null(), "second-session lcm call id={id}");
+    }
+    for id in [2_i64, 3] {
+        let resp = response_with_id(&responses, json!(id));
+        let payload: Value =
+            serde_json::from_str(successful_tool_text(&resp, "second-session lcm_status")).unwrap();
+        assert_eq!(
+            payload["status"], "ok",
+            "second-session lcm_status id={id} payload"
+        );
     }
     let runtime = tracedecay::application::host_admission::HostAdmissionTestRuntimeV1::project(
         &profile_root,
