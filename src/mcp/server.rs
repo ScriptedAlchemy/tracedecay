@@ -275,14 +275,13 @@ pub(crate) struct SourceEditReconciliationInvocationV1 {
 pub(crate) type SourceEditReconciliationExecutor =
     Arc<dyn Fn(SourceEditReconciliationInvocationV1) -> SourceEditFuture + Send + Sync + 'static>;
 
-pub(crate) type RetainedProjectGraphFuture =
-    std::pin::Pin<
-        Box<
-            dyn std::future::Future<Output = crate::errors::Result<Option<Arc<TraceDecay>>>>
-                + Send
-                + 'static,
-        >,
-    >;
+pub(crate) type RetainedProjectGraphFuture = std::pin::Pin<
+    Box<
+        dyn std::future::Future<Output = crate::errors::Result<Option<Arc<TraceDecay>>>>
+            + Send
+            + 'static,
+    >,
+>;
 
 #[derive(Clone)]
 pub(crate) struct RetainedProjectGraphRequest {
