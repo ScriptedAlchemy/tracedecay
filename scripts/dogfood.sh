@@ -4,7 +4,7 @@ umask 077
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 target_dir=${CARGO_TARGET_DIR:-"$repo_root/target"}
-source_binary=${TRACEDECAY_DOGFOOD_SOURCE_BINARY:-"$target_dir/release/tracedecay"}
+source_binary=${TRACEDECAY_DOGFOOD_SOURCE_BINARY:-"$target_dir/debug/tracedecay"}
 build_identity_stamp="$target_dir/dogfood-build-identity.stamp"
 dashboard_source_stamp="$target_dir/dogfood-dashboard-source.stamp"
 stage_dir=${TRACEDECAY_DOGFOOD_STAGE_DIR:-"$HOME/.local/lib/tracedecay/dogfood"}
@@ -81,7 +81,7 @@ verify_dashboard_freshness() {
   if [[ -z "$expected_stamp" || "$actual_stamp" != "$expected_stamp" ]]; then
     printf '%s\n' \
       'dogfood dashboard bundle does not match the freshly computed source stamp.' \
-      'Rebuild the dashboard and release binary, then rerun cargo dogfood.' >&2
+      'Rebuild the dashboard and dogfood binary, then rerun cargo dogfood.' >&2
     return 1
   fi
 }
@@ -122,9 +122,9 @@ if [[ -z "${TRACEDECAY_DOGFOOD_SOURCE_BINARY:-}" ]]; then
   TRACEDECAY_DOGFOOD_BUILD_IDENTITY_STAMP="$build_identity_stamp" \
     TRACEDECAY_DOGFOOD_BUILD_IDENTITY_REFRESH="$dogfood_build_identity_refresh" \
     TRACEDECAY_DOGFOOD_DASHBOARD_STAMP_PATH="$dashboard_source_stamp" \
-    cargo build --release --bin tracedecay
+    cargo build --bin tracedecay
 fi
-report_stage release-binary-build "$stage_started"
+report_stage dogfood-binary-build "$stage_started"
 
 if [[ ! -x "$source_binary" ]]; then
   printf 'dogfood build did not produce %s\n' "$source_binary" >&2
@@ -197,7 +197,7 @@ verify_binary_identity() {
   if [[ "$reported_identity" != "$expected_identity" ]]; then
     printf '%s\n' \
       "dogfood candidate binary identity mismatch: expected $expected_identity, got $reported_version." \
-      'Force a fresh release rebuild, then rerun cargo dogfood.' >&2
+      'Force a fresh dogfood rebuild, then rerun cargo dogfood.' >&2
     return 1
   fi
 }

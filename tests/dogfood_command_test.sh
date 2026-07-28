@@ -1396,7 +1396,10 @@ assert_boundary old_binary_policy forbidden
 assert_no_temporary_install_files
 
 grep -Fq \
-  'dogfood = "run --quiet --release --bin tracedecay -- dogfood"' \
+  'dogfood = "run --quiet --bin tracedecay -- dogfood"' \
   "$repo_root/.cargo/config.toml"
+if grep -Fq 'dogfood-release' "$repo_root/.cargo/config.toml"; then
+  fail 'dogfood retained a separate release-build alias'
+fi
 
 echo 'dogfood command contract passed'

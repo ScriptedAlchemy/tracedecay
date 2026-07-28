@@ -21,7 +21,7 @@ Use the repository command. Do not run release upgrade or point agents at
 3. Treat any nonzero exit as incomplete deployment. Inspect the printed stage,
    post-update, daemon, or doctor failure before retrying.
 
-The command builds the release binary, copies it outside the repository to
+The command builds the ordinary development binary, copies it outside the repository to
 `~/.local/lib/tracedecay/dogfood/tracedecay`, atomically replaces
 `~/.local/bin/tracedecay`, refreshes tracked integrations through the normal
 post-update lifecycle, restarts the managed daemon, and runs health checks.
@@ -30,7 +30,7 @@ post-update lifecycle, restarts the managed daemon, and runs health checks.
 targets the real user profile rather than Cargo's isolated
 `target/test-profile/.tracedecay`. That profile is left on disk, not deleted.
 
-The release build runs `build.rs`, and `dashboard/app-dist/` is git-ignored, so
+The development build runs `build.rs`, and `dashboard/app-dist/` is git-ignored, so
 a fresh worktree has no bundle and the build shells out to `npm ci` plus
 `npm run build` in `dashboard/`. Node.js 22+ and npm must be on PATH, and the
 first dogfood in a new worktree pays that frontend build.
