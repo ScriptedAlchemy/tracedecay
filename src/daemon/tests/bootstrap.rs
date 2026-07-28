@@ -1299,6 +1299,17 @@ async fn mcp_bootstrap_catalog_bypasses_project_writer_gate() {
     assert!(context_description.contains("3 calls maximum"));
     assert!(context_description.contains("project graph is warming"));
 
+    tokio::time::timeout(PHASE_TIMEOUT, async {
+        while engine
+            .project_open_attempts
+            .load(std::sync::atomic::Ordering::Relaxed)
+            == 0
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("initialize warmup did not start after the writer gate was released");
     tokio::time::timeout(PHASE_TIMEOUT, engine.shutdown_all())
         .await
         .expect("bootstrap-cache shutdown timed out");

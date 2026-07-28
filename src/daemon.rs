@@ -22,7 +22,8 @@ use crate::mcp::ReplayTransport;
 use crate::mcp::server::{McpMethod, SERVER_INSTRUCTIONS, classify_mcp_method, initialize_result};
 use crate::mcp::tools::{
     ToolRegistryMode, default_catalog_discovery_authority, explore_call_budget,
-    get_catalog_filtered_tool_definitions_with_budget, project_catalog_discovery_scope,
+    get_catalog_filtered_tool_definitions_with_budget,
+    get_catalog_filtered_tool_definitions_with_warming_budget, project_catalog_discovery_scope,
 };
 use crate::mcp::{ErrorCode, JsonRpcRequest, JsonRpcResponse, McpTransport};
 use branch_add::{branch_add_response, coordinated_hook_branch_writer, parse_branch_add_request};
@@ -2748,25 +2749,27 @@ fn project_route_for_handshake(handshake: &DaemonHandshake) -> Result<(PathBuf, 
 async fn bind_authenticated_profile_identity(
     handshake: &mut DaemonHandshake,
     store_administration: &StoreAdministration,
-) -> Result<()> {
-    let profile_identity = store_administration.profile_identity()?;
-    let profile_root = authority::canonical_identity_path(profile_identity.profile_root())?;
-    let profile_database = store_administration.registered_profile_database().await?;
+) -> Result<StoreAdministration> {
+    let profile_root = authority::canonical_identity_path(&handshake.client_identity.profile_root)?;
+    let profile_identity = profile_identity::load_or_create(&profile_root)?;
+    let scoped_administration = store_administration
+        .clone()
+        .with_profile_identity(profile_identity);
+    let profile_database = scoped_administration.registered_profile_database().await?;
     let global_db_path = authority::canonical_identity_path(profile_database.db_path())?;
-    let supplied_profile_root =
-        authority::canonical_identity_path(&handshake.client_identity.profile_root)?;
-    if supplied_profile_root != profile_root {
+    let supplied_global_db_path =
+        authority::canonical_identity_path(&handshake.client_identity.global_db_path)?;
+    if supplied_global_db_path != global_db_path {
         return Err(TraceDecayError::Config {
-            message:
-                "daemon client profile identity does not match the authenticated daemon profile"
-                    .to_owned(),
+            message: "daemon client global database does not match its registered profile runtime"
+                .to_owned(),
         });
     }
     handshake.client_identity = DaemonClientIdentity {
         profile_root,
         global_db_path,
     };
-    Ok(())
+    Ok(scoped_administration)
 }
 
 async fn project_open_gate(
@@ -3161,18 +3164,20 @@ impl DaemonEngine {
         handshake: &DaemonHandshake,
     ) -> Result<Option<Arc<crate::mcp::McpServer>>> {
         let (project_path, route) = Self::project_route(handshake)?;
-        self.ensure_registered_project_route(&project_path, handshake.allow_init)
-            .await?;
         let cached = {
             let mut servers = self.store_administration.project_servers().lock().await;
             servers
                 .get_route_and_touch(&route)
                 .map(|(_, server)| Arc::clone(server))
         };
-        Ok(match cached {
-            Some(server) => Some(self.activate_project_server(project_path, server).await),
-            None => None,
-        })
+        let Some(server) = cached else {
+            return Ok(None);
+        };
+        self.ensure_registered_project_route(&project_path, handshake.allow_init)
+            .await?;
+        Ok(Some(
+            self.activate_project_server(project_path, server).await,
+        ))
     }
 
     async fn begin_project_open(
@@ -3181,8 +3186,6 @@ impl DaemonEngine {
         initialize_request: Option<JsonRpcRequest>,
     ) -> Result<ProjectOpenTaskClaim> {
         let (project_path, route) = Self::project_route(&handshake)?;
-        self.ensure_registered_project_route(&project_path, handshake.allow_init)
-            .await?;
         let tasks = project_open_tasks(&self.project_open_gates).await;
         let engine = self.clone();
         let open_handshake = handshake.clone();
@@ -3810,22 +3813,31 @@ fn daemon_bootstrap_response(
         })),
         McpMethod::InitializedAck => Some(None),
         McpMethod::ToolsList => Some(request.id.clone().map(|id| {
-            let node_count = project_node_count.unwrap_or(0);
-            let budget = explore_call_budget(node_count);
+            let budget = explore_call_budget(project_node_count.unwrap_or(0));
             let profile_id = tracedecay_tool_catalog::ProfileId::new(
                 tracedecay_application::APPLICATION_DEFAULT_PROFILE_ID,
             );
             let authority = default_catalog_discovery_authority();
             match (profile_id, authority) {
                 (Ok(profile_id), Ok(authority)) => {
-                    match get_catalog_filtered_tool_definitions_with_budget(
-                        node_count,
-                        budget,
-                        &profile_id,
-                        &authority,
-                        &project_catalog_discovery_scope(),
-                        ToolRegistryMode::HostAvailable,
-                    ) {
+                    let definitions = match project_node_count {
+                        Some(node_count) => get_catalog_filtered_tool_definitions_with_budget(
+                            node_count,
+                            budget,
+                            &profile_id,
+                            &authority,
+                            &project_catalog_discovery_scope(),
+                            ToolRegistryMode::HostAvailable,
+                        ),
+                        None => get_catalog_filtered_tool_definitions_with_warming_budget(
+                            budget,
+                            &profile_id,
+                            &authority,
+                            &project_catalog_discovery_scope(),
+                            ToolRegistryMode::HostAvailable,
+                        ),
+                    };
+                    match definitions {
                         Ok(tools) => JsonRpcResponse::success(id, json!({ "tools": tools })),
                         Err(_) => JsonRpcResponse::error(
                             id,
@@ -3853,13 +3865,6 @@ async fn cached_project_node_count(
     let canonical_project_path = project_path
         .canonicalize()
         .unwrap_or_else(|_| project_path.clone());
-    ensure_registered_project_route(
-        store_administration,
-        &canonical_project_path,
-        handshake.allow_init,
-    )
-    .await
-    .ok()?;
     let route = ProjectRouteKey::from_handshake(&canonical_project_path, handshake).ok()?;
     let server = {
         let servers = store_administration.project_servers().lock().await;
@@ -3867,6 +3872,13 @@ async fn cached_project_node_count(
             .get_route(&route)
             .map(|(_, server)| Arc::clone(server))
     }?;
+    ensure_registered_project_route(
+        store_administration,
+        &canonical_project_path,
+        handshake.allow_init,
+    )
+    .await
+    .ok()?;
     server
         .cg()
         .await
@@ -3978,7 +3990,7 @@ async fn ensure_registered_project_route(
                 .await?
         }
     };
-    let Some(context) = context else {
+    if context.is_none() {
         let project_path = project_path
             .canonicalize()
             .unwrap_or_else(|_| project_path.to_path_buf());
@@ -3990,36 +4002,8 @@ async fn ensure_registered_project_route(
             return Ok(());
         }
         return Err(unenrolled_project_route_error(&project_path));
-    };
-
-    let project_id = context.project.project_id;
-    let mut enrollment_roots = vec![
-        project_path.to_path_buf(),
-        PathBuf::from(context.project.canonical_root),
-    ];
-    enrollment_roots.extend(
-        context
-            .aliases
-            .into_iter()
-            .map(|alias| PathBuf::from(alias.alias_path)),
-    );
-    enrollment_roots.sort();
-    enrollment_roots.dedup();
-    for root in enrollment_roots {
-        let Ok(root) = root.canonicalize() else {
-            continue;
-        };
-        let Some(marker) = crate::storage::read_enrollment_marker(&root)? else {
-            continue;
-        };
-        if marker.storage_mode == crate::storage::StorageMode::ProfileSharded
-            && marker.project_id == project_id
-        {
-            return Ok(());
-        }
     }
-
-    Err(unenrolled_project_route_error(project_path))
+    Ok(())
 }
 
 fn unenrolled_project_route_error(project_path: &Path) -> TraceDecayError {
@@ -4038,12 +4022,6 @@ async fn portable_cached_project_server(
     canonical_project_path: &Path,
     handshake: &DaemonHandshake,
 ) -> Result<Option<Arc<crate::mcp::McpServer>>> {
-    ensure_registered_project_route(
-        store_administration,
-        canonical_project_path,
-        handshake.allow_init,
-    )
-    .await?;
     let route = ProjectRouteKey::from_handshake(canonical_project_path, handshake)?;
     let server = {
         let mut servers = store_administration.project_servers().lock().await;
@@ -4051,7 +4029,16 @@ async fn portable_cached_project_server(
             .get_route_and_touch(&route)
             .map(|(_, server)| Arc::clone(server))
     };
-    Ok(server)
+    let Some(server) = server else {
+        return Ok(None);
+    };
+    ensure_registered_project_route(
+        store_administration,
+        canonical_project_path,
+        handshake.allow_init,
+    )
+    .await?;
+    Ok(Some(server))
 }
 
 #[cfg(any(not(unix), test))]
@@ -4069,15 +4056,6 @@ async fn begin_portable_project_open(
     initialize_request: Option<JsonRpcRequest>,
     #[cfg(test)] project_open_attempts: Option<Arc<AtomicUsize>>,
 ) -> ProjectOpenTaskClaim {
-    if let Err(error) = ensure_registered_project_route(
-        &store_administration,
-        &canonical_project_path,
-        handshake.allow_init,
-    )
-    .await
-    {
-        return ProjectOpenTaskClaim::Failed(ProjectOpenFailure::from_error(&error));
-    }
     let tasks = project_open_tasks(project_open_gates.as_ref()).await;
     let open_project_path = canonical_project_path.clone();
     let open_gates = Arc::clone(&project_open_gates);
@@ -5230,7 +5208,10 @@ async fn serve_broker_socket_client(
         return Ok(());
     };
     let mut handshake = DaemonHandshake::from_line(&line)?;
-    bind_authenticated_profile_identity(&mut handshake, &engine.store_administration).await?;
+    let store_administration =
+        bind_authenticated_profile_identity(&mut handshake, &engine.store_administration).await?;
+    let mut engine = engine;
+    engine.store_administration = store_administration;
     let first_request_line = tokio::select! {
         result = read_line_handling_wire_oversized(&mut transport) => result?,
         () = engine.lifecycle.wait_for_draining() => return Ok(()),
@@ -5560,7 +5541,8 @@ async fn serve_windows_broker_client_with_class_and_invocation(
         return Ok(());
     };
     let mut handshake = DaemonHandshake::from_line(&handshake_line)?;
-    bind_authenticated_profile_identity(&mut handshake, &store_administration).await?;
+    let store_administration =
+        bind_authenticated_profile_identity(&mut handshake, &store_administration).await?;
     let Some(first_request_line) = read_line_handling_wire_oversized(&mut transport).await? else {
         return Ok(());
     };
