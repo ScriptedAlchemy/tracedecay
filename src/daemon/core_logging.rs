@@ -25,8 +25,14 @@ pub struct WatcherEvent {
     pub detail: Option<String>,
 }
 
+/// Opening marker of every bespoke daemon log line. Watcher recovery anchors
+/// on it, so `tracing` output — which never carries the marker — cannot forge
+/// a `git_watch_*` event through a structured field that happens to be named
+/// `event`.
+const DAEMON_LOG_MARKER: &str = "[tracedecay] event=";
+
 pub(crate) fn format_daemon_log_line(event: &str, fields: &[(&str, String)]) -> String {
-    let mut line = format!("[tracedecay] event={}", quote_log_value(event));
+    let mut line = format!("{DAEMON_LOG_MARKER}{}", quote_log_value(event));
     for (key, value) in fields {
         line.push(' ');
         line.push_str(key);
@@ -314,10 +320,14 @@ mod stderr_tracing_tests {
 /// Parses one daemon log line into a [`WatcherEvent`] when it is a `git_watch_*`
 /// event. Mirrors [`format_daemon_log_line`] (space-separated `key=value`, values
 /// optionally double-quoted). Returns `None` for non-watcher lines.
+///
+/// The line must carry [`DAEMON_LOG_MARKER`] with `event=` immediately after
+/// it. The marker is searched for rather than required at column zero because
+/// journald and launchd prepend their own timestamp and unit prefix.
 #[cfg(unix)]
 fn parse_watcher_log_line(line: &str) -> Option<WatcherEvent> {
-    let idx = line.find("event=")?;
-    let rest = &line[idx + "event=".len()..];
+    let idx = line.find(DAEMON_LOG_MARKER)?;
+    let rest = &line[idx + DAEMON_LOG_MARKER.len()..];
     let mut fields = parse_log_fields(rest);
     let event = fields.remove("__first__")?;
     if !event.starts_with("git_watch_") {
@@ -398,6 +408,45 @@ fn parse_log_fields(rest: &str) -> HashMap<String, String> {
 #[cfg(unix)]
 fn unquote(s: &str) -> String {
     s.trim_matches('"').to_string()
+}
+
+#[cfg(all(unix, test))]
+mod watcher_log_tests {
+    use super::parse_watcher_log_line;
+
+    #[test]
+    fn journal_prefixed_daemon_lines_yield_watcher_events() {
+        let line = concat!(
+            "Jul 28 03:00:00 host tracedecay[1234]: ",
+            "[tracedecay] event=git_watch_degraded project=/tmp/project reason=\"watch limit reached\""
+        );
+
+        let event = parse_watcher_log_line(line).expect("marked daemon line is a watcher event");
+
+        assert_eq!(event.event, "git_watch_degraded");
+        assert_eq!(event.project.as_deref(), Some("/tmp/project"));
+        assert_eq!(event.detail.as_deref(), Some("watch limit reached"));
+    }
+
+    #[test]
+    fn tracing_formatted_lines_cannot_forge_watcher_events() {
+        // A `tracing` event carrying an `event` field renders `event=...` on
+        // stderr without the daemon marker. Accepting it would report watcher
+        // health the watcher never claimed.
+        let line = concat!(
+            "2026-07-28T03:00:00.000000Z  WARN tracedecay::daemon: ",
+            "event=git_watch_started project=/tmp/project"
+        );
+
+        assert!(parse_watcher_log_line(line).is_none());
+    }
+
+    #[test]
+    fn non_watcher_daemon_events_are_ignored() {
+        let line = "[tracedecay] event=scheduler_task task=memory_curator outcome=start";
+
+        assert!(parse_watcher_log_line(line).is_none());
+    }
 }
 
 /// Reads recent `git_watch_*` events from the daemon log and returns the most
