@@ -131,6 +131,15 @@ impl ObservationStore for GlobalDbObservationStore<'_> {
             "submit anchored observation",
         )
         .await?;
+        // The authority is durable but the caller has not been told yet: the
+        // daemon-crash harness stops here to prove a kill in this window loses
+        // the acknowledgement without losing the commit.
+        #[cfg(tracedecay_observation_fault_harness)]
+        tracedecay_store::fault_harness::wait_at_observation_persist_barrier(
+            tracedecay_store::fault_harness::ObservationPersistBarrierStageV1::PostCommitPreAck,
+            candidate.source().session_id().as_str(),
+        )
+        .map_err(|(operation, detail)| runtime_storage_error(operation, detail))?;
         let stored =
             read_runtime_stored_observation(runtime, &observation_id)?.ok_or_else(|| {
                 runtime_storage_error("read committed observation", "row unavailable")
