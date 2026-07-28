@@ -1,6 +1,5 @@
 import { useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import type { EChartsOption } from 'echarts';
-import { Search } from 'lucide-react';
 import {
   DataRow,
   ExplorerSplit,
@@ -9,6 +8,7 @@ import {
 } from '../../ui/archetypes/ExplorerSplit.tsx';
 import { LegacyBoundary } from '../../ui/LegacyStates.tsx';
 import { Meter, Readout } from '../../ui/instrument.tsx';
+import { SearchField } from '../../ui/search/SearchField.tsx';
 import { Chart } from '../../viz/chart/Chart.tsx';
 import { VirtualList } from '../../ui/VirtualList.tsx';
 import { formatCount, splitCount } from '../../ui/format.ts';
@@ -97,26 +97,19 @@ export function KnowledgePage() {
             const growth = stats?.growth ?? [];
             return (
               <div className="flex flex-col gap-3">
-                <form
-                  className="relative"
-                  onSubmit={(event) => {
-                    event.preventDefault();
-                    setApplied(query.trim());
+                <SearchField
+                  value={query}
+                  onChange={setQuery}
+                  onSubmit={() => setApplied(query.trim())}
+                  onClear={() => {
+                    setQuery('');
+                    setApplied('');
                   }}
-                >
-                  <Search
-                    aria-hidden
-                    size={13}
-                    className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-text-muted"
-                  />
-                  <input
-                    value={query}
-                    onChange={(event) => setQuery(event.target.value)}
-                    placeholder="Search facts"
-                    aria-label="Search facts"
-                    className="h-[calc(var(--touch-target-min)+2px)] w-full rounded-[var(--radius-standard)] border border-edge-subtle bg-surface-2 pl-7 pr-2 text-xs text-text-primary placeholder:text-text-muted focus:border-accent/60 focus:outline-none"
-                  />
-                </form>
+                  label="Search facts"
+                  placeholder="Search facts"
+                  hint="press / to focus, Esc to clear"
+                  submitted={applied}
+                />
                 {/* The rail used to be a 2×1 grid of equal tiles whose 26px
                  * numerals overflowed their own cells — 41,204 facts rendered
                  * as the string "41…". Facts is the quantity this workspace
