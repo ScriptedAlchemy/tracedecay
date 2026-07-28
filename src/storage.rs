@@ -427,12 +427,32 @@ pub fn write_enrollment_marker(project_root: &Path, marker: &EnrollmentMarker) -
             path.display()
         ),
     })?;
-    PrivateStoreIo::write_file(&path, &text).map_err(|e| TraceDecayError::Config {
-        message: format!(
-            "failed to write enrollment marker '{}': {e}",
-            path.display()
-        ),
+    // Several independent paths enroll the same project (CLI init, the
+    // daemon's first-touch open, enrollment-root repair) while the store
+    // resolver may read the marker concurrently. A truncate-then-write here
+    // briefly exposes an empty file, which the resolver reports as an
+    // invalid/missing enrollment and callers surface as a denial. Replace
+    // atomically so a reader only ever sees a complete marker or none.
+    let temp_path = path.with_extension(format!(
+        "json.tmp-{}-{}",
+        std::process::id(),
+        enrollment_marker_temp_nonce()
+    ));
+    PrivateStoreIo::write_file_atomically(&path, &temp_path, &text).map_err(|e| {
+        TraceDecayError::Config {
+            message: format!(
+                "failed to write enrollment marker '{}': {e}",
+                path.display()
+            ),
+        }
     })
+}
+
+/// Distinguishes concurrent in-process enrollment writers, which would
+/// otherwise race each other on one shared pid-derived temp path.
+fn enrollment_marker_temp_nonce() -> u64 {
+    static NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 pub fn remove_enrollment_marker(project_root: &Path, project_id: &str) -> Result<bool> {
