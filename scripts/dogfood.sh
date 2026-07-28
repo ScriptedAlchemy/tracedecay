@@ -41,6 +41,28 @@ refresh_build_identity_stamp() {
   fi
 }
 
+refresh_dashboard_source_stamp() {
+  local temporary
+  local writer
+
+  mkdir -p "$target_dir" || return
+  writer=$(mktemp "${target_dir}/dogfood-dashboard-stamp-writer.XXXXXX") || return
+  temporary=$(mktemp "${dashboard_source_stamp}.new.XXXXXX") || {
+    rm -f -- "$writer"
+    return 1
+  }
+  if ! rustc --edition 2024 -O \
+    "$repo_root/build-support/write_dashboard_stamp.rs" \
+    -o "$writer" ||
+    ! "$writer" "$repo_root" >"$temporary" ||
+    [[ ! -s "$temporary" ]] ||
+    ! mv -f -- "$temporary" "$dashboard_source_stamp"; then
+    rm -f -- "$writer" "$temporary"
+    return 1
+  fi
+  rm -f -- "$writer"
+}
+
 verify_dashboard_freshness() {
   local actual_stamp
   local expected_stamp
@@ -85,6 +107,11 @@ chmod 0600 "$dogfood_lock"
 flock -x "$dogfood_lock_fd"
 
 cd "$repo_root"
+if ! refresh_dashboard_source_stamp; then
+  printf 'dogfood could not refresh dashboard source stamp: %s\n' \
+    "$dashboard_source_stamp" >&2
+  exit 1
+fi
 stage_started=$SECONDS
 if [[ -z "${TRACEDECAY_DOGFOOD_SOURCE_BINARY:-}" ]]; then
   # Default features only — never `--all-features` (enables test-transport).
