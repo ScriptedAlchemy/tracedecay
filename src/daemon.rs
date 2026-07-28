@@ -4440,16 +4440,35 @@ async fn production_project_server(
         code_search_project_id.clone(),
         Arc::clone(&route_registered),
     );
-    let diagnostic_settings =
-        crate::diagnostics::lsp::settings::load_settings(&cg.store_layout().dashboard_root)
+    // `load_settings` returns defaults as `Ok` when no settings file exists,
+    // so an `Err` is an unreadable or unparsable file. Serving silent defaults
+    // there would drop the user's `custom_adapters`; record the degradation on
+    // the broker instead (same pattern as
+    // `application::dashboard_diagnostics::open_diagnostic_broker`).
+    let diagnostic_broker =
+        match crate::diagnostics::lsp::settings::load_settings(&cg.store_layout().dashboard_root)
             .await
-            .unwrap_or_default();
-    let diagnostic_broker = Arc::new(tokio::sync::Mutex::new(
-        crate::application::dashboard_diagnostics::diagnostic_broker(
-            canonical_project_path.to_path_buf(),
-            diagnostic_settings,
-        ),
-    ));
+        {
+            Ok(settings) => Arc::new(tokio::sync::Mutex::new(
+                crate::application::dashboard_diagnostics::diagnostic_broker(
+                    canonical_project_path.to_path_buf(),
+                    settings,
+                ),
+            )),
+            Err(error) => {
+                tracing::warn!(
+                    dashboard_root = %cg.store_layout().dashboard_root.display(),
+                    error = %error,
+                    "code diagnostics settings could not be loaded; serving defaults as degraded"
+                );
+                let mut broker = crate::application::dashboard_diagnostics::diagnostic_broker(
+                    canonical_project_path.to_path_buf(),
+                    crate::diagnostics::lsp::settings::CodeDiagnosticsSettings::default(),
+                );
+                broker.record_settings_unavailable(error.to_string());
+                Arc::new(tokio::sync::Mutex::new(broker))
+            }
+        };
     let doctor_report_reader = doctor_kernel::production_doctor_report_reader(
         canonical_project_path.to_path_buf(),
         code_search_project_id.clone(),

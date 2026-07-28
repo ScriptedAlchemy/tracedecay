@@ -805,10 +805,23 @@ async fn project_server_warmup_drops_lifecycle_activity_on_draining() {
     let profile_root = temp.path().join("profile");
     std::fs::create_dir_all(&project).expect("project dir");
     std::fs::create_dir_all(&profile_root).expect("profile dir");
+    let project = project.canonicalize().expect("canonical project");
+    let client_identity = test_client_identity_for(profile_root.clone());
+    initialize_test_project(&project, &client_identity).await;
+    let _database_scope =
+        enter_test_daemon_database_scope(&profile_root, "warmup drain enrolled route");
     let engine = test_daemon_engine_for_profile(&profile_root);
+    engine
+        .store_administration
+        .registered_profile_database()
+        .await
+        .expect("open registered profile database")
+        .upsert_code_project("warmup-drain-project", &project, None, None, None)
+        .await
+        .expect("enroll warmup drain project");
     let handshake = DaemonHandshake {
         project_path: Some(project),
-        client_identity: test_client_identity_for(profile_root),
+        client_identity,
         ..test_handshake_defaults()
     };
     let initialize_request = serde_json::from_value(json!({
@@ -1190,6 +1203,14 @@ async fn direct_tool_cache_miss_returns_warming_while_project_opens_in_backgroun
         crate::db::enter_daemon_database_scope(&profile_root, 1, "direct-warmup-test")
             .expect("daemon database scope");
     let engine = test_daemon_engine_for_profile(&profile_root);
+    engine
+        .store_administration
+        .registered_profile_database()
+        .await
+        .expect("open registered profile database")
+        .upsert_code_project("direct-warmup-project", &project, None, None, None)
+        .await
+        .expect("enroll direct warmup project");
     let handshake = DaemonHandshake {
         project_path: Some(project.clone()),
         client_identity,

@@ -941,6 +941,31 @@ impl TraceDecay {
         } else {
             None
         };
+        // SQLite may rewrite a WAL-index sidecar while opening a recovery set,
+        // even when the subsequent integrity check rejects the main database.
+        // Preserve an obviously invalid derived store before any SQLite handle
+        // can alter the forensic copy.
+        if crashed
+            && repair_corrupt_branch
+            && matches!(
+                crate::storage::has_sqlite_database_header(&db_path),
+                Ok(false)
+            )
+        {
+            drop(recovery_lock);
+            return Self::recover_corrupt_branch_or_fail(
+                project_root,
+                open_options,
+                &store_layout,
+                &db_path,
+                "invalid SQLite database header",
+                repair_corrupt_branch,
+                configuration_database,
+                profile_database,
+                runtime_registry,
+            )
+            .await;
+        }
         if crashed {
             // FTS-only damage is repairable from the content table on the
             // writable open below; do not force offline recovery for it. The
@@ -1147,8 +1172,14 @@ impl TraceDecay {
             }
         }
 
-        // If the sentinel was set but the database opened successfully, run a
-        // quick integrity check.
+        if crashed && crash_preflight_healthy {
+            clear_dirty_sentinel_at(&active_graph_layout.dirty_path);
+            clear_dirty_sentinel_at(&store_layout.dirty_path);
+        }
+
+        // If the sentinel was set but the read-only preflight could not prove
+        // the database healthy, validate the writable recovery before clearing
+        // either marker.
         if crashed && !crash_preflight_healthy {
             let mut integrity = db.quick_check_report().await;
             // An interrupted bulk load can desync the FTS5 inverted index from

@@ -216,11 +216,6 @@ fn extract_files_isolated(
     if should_use_subprocess() {
         let available = std::thread::available_parallelism().map_or(4, std::num::NonZeroUsize::get);
         let workers = bounded_extraction_workers(available, files.len());
-        eprintln!(
-            "[tracedecay] event=extraction_worker_pool workers={workers} \
-             available_parallelism={available} files={}",
-            files.len()
-        );
         let timeout = std::time::Duration::from_secs(
             crate::user_config::UserConfig::load().extraction_timeout_secs,
         );
