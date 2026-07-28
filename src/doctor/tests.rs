@@ -2296,6 +2296,107 @@ async fn language_analyzer_probe_detects_rustup_shim_without_component()
     Ok(())
 }
 
+/// `start_paused`: the analyzer that never answers sleeps in real time, so the
+/// only timer the runtime can advance to is the probe deadline. That grades the
+/// production `LANGUAGE_ANALYZER_PROBE_TIMEOUT` budget without spending it.
+///
+/// The probe pins the child's `PATH` to the fixture directory so it resolves the
+/// stub, which also hides `sleep`; the script restores a system `PATH` so it
+/// blocks instead of exiting 127 and grading as broken.
+#[cfg(unix)]
+#[tokio::test(start_paused = true)]
+async fn language_analyzer_probe_reports_timed_out_version_probe()
+-> std::result::Result<(), Box<dyn std::error::Error>> {
+    let temp = tempfile::tempdir()?;
+    write_executable_script(
+        temp.path(),
+        "clangd",
+        "#!/bin/sh\nPATH=/usr/bin:/bin\nexec sleep 30\n",
+    )?;
+
+    let result = probe_language_analyzer_with_path(
+        "clangd",
+        "clangd",
+        &["--version"],
+        false,
+        Some(temp.path().as_os_str()),
+    )
+    .await;
+
+    assert_eq!(result, LanguageAnalyzerProbe::TimedOut);
+    Ok(())
+}
+
+#[test]
+fn timed_out_analyzer_warning_is_distinct_from_missing_and_broken() {
+    let analyzer = LanguageAnalyzerSpec {
+        command: "gopls".to_string(),
+        probe_command: "gopls".to_string(),
+        version_args: &["version"],
+        languages: vec!["go".to_string()],
+        remedy: Some("go install golang.org/x/tools/gopls@latest".to_string()),
+        rustup_component: false,
+    };
+    let timed_out_problem = format!(
+        "resolved, but its version probe timed out after {}s",
+        LANGUAGE_ANALYZER_PROBE_TIMEOUT.as_secs()
+    );
+
+    let timed_out = analyzer_warning(&analyzer, "go", &timed_out_problem);
+
+    assert_eq!(
+        timed_out,
+        format!(
+            "gopls resolved, but its version probe timed out after {}s; LSP context projection for go is unavailable. Install with `go install golang.org/x/tools/gopls@latest`.",
+            LANGUAGE_ANALYZER_PROBE_TIMEOUT.as_secs()
+        )
+    );
+
+    let missing = analyzer_warning(&analyzer, "go", "was not found on PATH");
+    let broken = analyzer_warning(
+        &analyzer,
+        "go",
+        "resolved, but its version probe failed: exit status: 7",
+    );
+    assert_ne!(
+        timed_out, missing,
+        "an unresponsive analyzer must not read as absent"
+    );
+    assert_ne!(
+        timed_out, broken,
+        "an unresponsive analyzer must not read as a failed probe"
+    );
+}
+
+#[test]
+fn timed_out_custom_analyzer_warning_reports_the_absent_remedy() {
+    let analyzer = LanguageAnalyzerSpec {
+        command: "example-language-server".to_string(),
+        probe_command: "example-language-server".to_string(),
+        version_args: &["--version"],
+        languages: vec!["example".to_string()],
+        remedy: None,
+        rustup_component: false,
+    };
+
+    let warning = analyzer_warning(
+        &analyzer,
+        "example",
+        &format!(
+            "resolved, but its version probe timed out after {}s",
+            LANGUAGE_ANALYZER_PROBE_TIMEOUT.as_secs()
+        ),
+    );
+
+    assert_eq!(
+        warning,
+        format!(
+            "example-language-server resolved, but its version probe timed out after {}s; LSP context projection for example is unavailable. No install remedy is configured for this custom adapter.",
+            LANGUAGE_ANALYZER_PROBE_TIMEOUT.as_secs()
+        )
+    );
+}
+
 #[test]
 fn configured_language_analyzers_cover_builtins_and_custom_adapters() {
     let mut settings = CodeDiagnosticsSettings::default();
