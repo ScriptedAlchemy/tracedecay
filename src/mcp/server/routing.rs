@@ -59,13 +59,50 @@ pub(crate) async fn resolve_initialize_roots_project_path(
         return None;
     }
     let registry_db = registry_db?;
-    let projects = registry_db.list_code_projects(usize::MAX).await.ok()?;
     for root in roots {
-        if let Some(project_path) = match_initialize_root_to_registered_project(&root, &projects) {
-            return Some(project_path);
+        match resolve_initialize_root_project_path(&root, registry_db).await {
+            Ok(Some(project_path)) => return Some(project_path),
+            Ok(None) => {}
+            Err(_) => return None,
         }
     }
     None
+}
+
+async fn resolve_initialize_root_project_path(
+    root: &Path,
+    registry_db: &RegisteredGlobalDb,
+) -> Result<Option<PathBuf>, InitializeRootResolutionError> {
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let mut candidates = Vec::with_capacity(2);
+
+    for candidate in root.ancestors() {
+        match registry_db
+            .project_registry_context_by_alias(candidate)
+            .await
+        {
+            Ok(Some(context)) => {
+                candidates.push((candidate.to_path_buf(), context.project.project_id.clone()));
+                break;
+            }
+            Ok(None) => {}
+            Err(_) => return Err(InitializeRootResolutionError::AuthorityUnavailable),
+        }
+    }
+
+    if let Some(git_root) = crate::worktree::git_worktree_root(&root) {
+        let git_common_dir = crate::worktree::git_common_dir(&git_root);
+        match registry_db
+            .project_registry_context_by_identity(&git_root, git_common_dir.as_deref())
+            .await
+        {
+            Ok(Some(context)) => candidates.push((git_root, context.project.project_id)),
+            Ok(None) => {}
+            Err(_) => return Err(InitializeRootResolutionError::AuthorityUnavailable),
+        }
+    }
+
+    select_initialize_project_path(&candidates)
 }
 
 pub(crate) fn initialize_root_paths(params: Option<&Value>) -> Vec<PathBuf> {
@@ -81,28 +118,232 @@ pub(crate) fn initialize_root_paths(params: Option<&Value>) -> Vec<PathBuf> {
         .collect()
 }
 
-fn match_initialize_root_to_registered_project(
-    root: &Path,
-    projects: &[crate::global_db::CodeProjectRecord],
-) -> Option<PathBuf> {
-    // Canonicalize only the requested root. Registry rows already store the
-    // authoritative `canonical_root`; re-canonicalizing every row was an
-    // O(projects) filesystem walk on each connection initialize. Aliases and
-    // symlinks still resolve because the client root is canonicalized into the
-    // same form the registry persists.
-    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    projects
-        .iter()
-        .filter_map(|project| {
-            let project_path = PathBuf::from(&project.canonical_root);
-            (root == project_path || root.starts_with(&project_path)).then_some(project_path)
-        })
-        // Longest ancestor wins; equal depth keeps the lexicographically first
-        // path (same tie-break as the previous collect-then-sort).
-        .max_by(|left, right| {
-            left.components()
+fn select_initialize_project_path(
+    candidates: &[(PathBuf, String)],
+) -> Result<Option<PathBuf>, InitializeRootResolutionError> {
+    let Some((preferred_path, preferred_project_id)) =
+        candidates.iter().max_by(|(left_path, _), (right_path, _)| {
+            left_path
+                .components()
                 .count()
-                .cmp(&right.components().count())
-                .then_with(|| right.cmp(left))
+                .cmp(&right_path.components().count())
+                .then_with(|| right_path.cmp(left_path))
         })
+    else {
+        return Ok(None);
+    };
+    let preferred_depth = preferred_path.components().count();
+    if candidates.iter().any(|(path, project_id)| {
+        path.components().count() == preferred_depth && project_id != preferred_project_id
+    }) {
+        return Err(InitializeRootResolutionError::AmbiguousIdentity);
+    }
+    Ok(Some(preferred_path.clone()))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum InitializeRootResolutionError {
+    AuthorityUnavailable,
+    AmbiguousIdentity,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::symlink;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    use serde_json::json;
+    use tempfile::TempDir;
+
+    use super::{resolve_initialize_roots_project_path, select_initialize_project_path};
+    use crate::application::host_admission::{HostAdmissionScope, HostAdmissionTestRuntimeV1};
+
+    fn run_git(root: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .status()
+            .expect("git must be available for routing tests");
+        assert!(
+            status.success(),
+            "git {args:?} failed in {}",
+            root.display()
+        );
+    }
+
+    fn initialize_params(root: &Path) -> serde_json::Value {
+        json!({
+            "roots": [{
+                "uri": format!("file://{}", root.display()),
+                "name": "workspace"
+            }]
+        })
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn renamed_registered_project_symlink_resolves_same_project() {
+        let profile = TempDir::new().expect("profile temp dir");
+        let projects = TempDir::new().expect("projects temp dir");
+        let old_root = projects.path().join("old");
+        let new_root = projects.path().join("new");
+        fs::create_dir_all(&old_root).expect("create original project root");
+        run_git(&old_root, &["init", "--quiet"]);
+
+        let runtime = HostAdmissionTestRuntimeV1::profile(profile.path())
+            .await
+            .expect("open registered profile runtime");
+        let registry = runtime
+            .registered_database(HostAdmissionScope::Profile)
+            .expect("registered profile database");
+        let git_common_dir =
+            crate::worktree::git_common_dir(&old_root).expect("resolve git common dir");
+        registry
+            .upsert_code_project(
+                "proj_renamed",
+                &old_root,
+                Some(&git_common_dir),
+                None,
+                Some("main"),
+            )
+            .await
+            .expect("register original project root");
+        crate::storage::write_repository_identity_marker(&old_root, "proj_renamed")
+            .expect("write repository identity");
+
+        fs::rename(&old_root, &new_root).expect("rename project root");
+        symlink(&new_root, &old_root).expect("link old root to renamed root");
+
+        let params = initialize_params(&new_root);
+        let resolved = resolve_initialize_roots_project_path(Some(&params), Some(registry)).await;
+
+        assert_eq!(
+            resolved,
+            Some(new_root.canonicalize().expect("canonical renamed root"))
+        );
+    }
+
+    #[tokio::test]
+    async fn linked_worktree_resolves_registered_primary_checkout() {
+        let profile = TempDir::new().expect("profile temp dir");
+        let projects = TempDir::new().expect("projects temp dir");
+        let primary_root = projects.path().join("primary");
+        let linked_root = projects.path().join("linked");
+        fs::create_dir_all(&primary_root).expect("create primary checkout");
+        run_git(&primary_root, &["init", "--quiet"]);
+        fs::write(primary_root.join("README.md"), "fixture").expect("write initial file");
+        run_git(&primary_root, &["add", "README.md"]);
+        run_git(
+            &primary_root,
+            &[
+                "-c",
+                "user.name=TraceDecay Test",
+                "-c",
+                "user.email=test@tracedecay.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "initial",
+            ],
+        );
+        run_git(
+            &primary_root,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "--detach",
+                linked_root.to_str().expect("UTF-8 linked root"),
+                "HEAD",
+            ],
+        );
+
+        let runtime = HostAdmissionTestRuntimeV1::profile(profile.path())
+            .await
+            .expect("open registered profile runtime");
+        let registry = runtime
+            .registered_database(HostAdmissionScope::Profile)
+            .expect("registered profile database");
+        let git_common_dir =
+            crate::worktree::git_common_dir(&primary_root).expect("resolve git common dir");
+        registry
+            .upsert_code_project(
+                "proj_primary",
+                &primary_root,
+                Some(&git_common_dir),
+                None,
+                Some("main"),
+            )
+            .await
+            .expect("register primary checkout");
+        crate::storage::write_repository_identity_marker(&primary_root, "proj_primary")
+            .expect("write repository identity");
+
+        let params = initialize_params(&linked_root);
+        let resolved = resolve_initialize_roots_project_path(Some(&params), Some(registry)).await;
+
+        assert_eq!(
+            resolved,
+            Some(linked_root.canonicalize().expect("canonical linked root"))
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_registered_project_wins_over_registered_ancestor() {
+        let profile = TempDir::new().expect("profile temp dir");
+        let projects = TempDir::new().expect("projects temp dir");
+        let ancestor_root = projects.path().join("ancestor");
+        let nested_root = ancestor_root.join("nested");
+        let workspace_root = nested_root.join("workspace");
+        fs::create_dir_all(&workspace_root).expect("create nested workspace");
+
+        let runtime = HostAdmissionTestRuntimeV1::profile(profile.path())
+            .await
+            .expect("open registered profile runtime");
+        let registry = runtime
+            .registered_database(HostAdmissionScope::Profile)
+            .expect("registered profile database");
+        registry
+            .upsert_code_project("proj_ancestor", &ancestor_root, None, None, Some("main"))
+            .await
+            .expect("register ancestor project");
+        registry
+            .upsert_code_project("proj_nested", &nested_root, None, None, Some("main"))
+            .await
+            .expect("register nested project");
+
+        let params = initialize_params(&workspace_root);
+        let resolved = resolve_initialize_roots_project_path(Some(&params), Some(registry)).await;
+
+        assert_eq!(
+            resolved,
+            Some(nested_root.canonicalize().expect("canonical nested root"))
+        );
+    }
+
+    #[test]
+    fn equal_depth_candidates_keep_lexicographic_tie_break() {
+        let candidates = vec![
+            (PathBuf::from("/repo/zeta"), "proj_same".to_string()),
+            (PathBuf::from("/repo/alpha"), "proj_same".to_string()),
+        ];
+
+        assert_eq!(
+            select_initialize_project_path(&candidates),
+            Ok(Some(PathBuf::from("/repo/alpha")))
+        );
+    }
+
+    #[test]
+    fn equal_depth_conflicting_identities_fail_closed() {
+        let candidates = vec![
+            (PathBuf::from("/repo/zeta"), "proj_zeta".to_string()),
+            (PathBuf::from("/repo/alpha"), "proj_alpha".to_string()),
+        ];
+
+        assert!(select_initialize_project_path(&candidates).is_err());
+    }
 }
