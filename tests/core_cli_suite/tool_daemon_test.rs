@@ -656,7 +656,13 @@ fn cursor_after_shell_hook_notifies_daemon() {
             })
         },
         |request, project_path| {
-            assert_eq!(request["params"]["command"], "git pull --rebase");
+            // Shell text is never forwarded: `DaemonHookEvent` carries the
+            // working directory so native Git reconciliation owns the effect,
+            // and command text cannot become sync or branch authority.
+            assert!(
+                request["params"]["command"].is_null(),
+                "shell command text must not reach the daemon: {request}"
+            );
             assert_eq!(
                 request["params"]["cwd"],
                 project_path.to_string_lossy().to_string()
