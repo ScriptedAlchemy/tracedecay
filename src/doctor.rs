@@ -694,6 +694,7 @@ fn daemon_startup_error_is_retryable(error: &crate::errors::TraceDecayError) -> 
                 || message.contains("timed out during read before deadline")
                 || message.contains(RUNTIME_TELEMETRY_PENDING)
         }
+        crate::errors::TraceDecayError::ProjectRoute { retryable, .. } => *retryable,
         crate::errors::TraceDecayError::File { .. }
         | crate::errors::TraceDecayError::Parse { .. }
         | crate::errors::TraceDecayError::Database { .. }

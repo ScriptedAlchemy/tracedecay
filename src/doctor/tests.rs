@@ -1935,6 +1935,40 @@ fn daemon_startup_background_warmup_is_retryable() {
     assert!(super::daemon_startup_error_is_retryable(&error));
 }
 
+#[test]
+fn daemon_startup_project_route_uses_typed_retryability() {
+    let retryable = crate::errors::TraceDecayError::project_route(
+        "project_route_unavailable",
+        true,
+        "project registry is warming",
+    );
+    assert!(super::daemon_startup_error_is_retryable(&retryable));
+    assert!(matches!(
+        super::classify_daemon_startup_health_result(Err(retryable)),
+        super::DaemonStartupHealthOutcome::Retryable { detail }
+            if detail.contains("project_route_unavailable")
+                && detail.contains("project registry is warming")
+    ));
+
+    let terminal = crate::errors::TraceDecayError::project_route(
+        "project_route_not_authorized",
+        false,
+        "project route is outside the admitted profile",
+    );
+    assert!(!super::daemon_startup_error_is_retryable(&terminal));
+    assert!(matches!(
+        super::classify_daemon_startup_health_result(Err(terminal)),
+        super::DaemonStartupHealthOutcome::Terminal {
+            error: crate::errors::TraceDecayError::ProjectRoute {
+                reason_code,
+                retryable: false,
+                detail,
+            },
+        } if reason_code == "project_route_not_authorized"
+            && detail == "project route is outside the admitted profile"
+    ));
+}
+
 #[tokio::test]
 async fn daemon_startup_health_surfaces_terminal_project_open_failure_immediately() {
     let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
