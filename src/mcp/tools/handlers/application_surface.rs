@@ -7,7 +7,7 @@ use tracedecay_tool_catalog::BindingId;
 
 use crate::application_output::view::CanonicalHumanView;
 use crate::application_surface::{
-    ApplicationSurfaceInvocationResult, ApplicationSurfaceOperation,
+    ApplicationSurfaceInvocationResult, ApplicationSurfaceOperation, NormalizedApplicationToolArgs,
     parse_application_surface_request,
 };
 use crate::daemon_client::{DaemonInvocationExecutor, RequestedOutputFormat};
@@ -62,27 +62,16 @@ fn complete_protocol_controls(
 pub(super) async fn handle_application_surface(
     cg: &TraceDecay,
     operation: ApplicationSurfaceOperation,
-    args: &Value,
+    normalized: NormalizedApplicationToolArgs,
     executor: Option<&dyn DaemonInvocationExecutor>,
     protocol_request_id: Option<RequestId>,
     protocol_deadline: Option<Deadline>,
     protocol_cancellation: Option<CancellationSignal>,
 ) -> Result<crate::mcp::tools::ToolResult> {
-    let requested_format = if super::super::render::wants_json(args) {
-        RequestedOutputFormat::Json
-    } else {
-        RequestedOutputFormat::Markdown
-    };
-    let mut request_args = args.clone();
-    if let Some(object) = request_args.as_object_mut() {
-        object.remove("__mcp_request_id");
-    }
-    let render_args = request_args.clone();
-    if let Some(object) = request_args.as_object_mut() {
-        // `format` selects the rendered output only; it is not part of any
-        // reviewed surface schema and must not reach schema validation.
-        object.remove("format");
-    }
+    let NormalizedApplicationToolArgs {
+        request: request_args,
+        requested_format,
+    } = normalized;
     let request_id = protocol_request_id.unwrap_or(request_id()?);
     let request = match parse_application_surface_request(operation, request_args) {
         Ok(request) => request,
@@ -130,12 +119,11 @@ pub(super) async fn handle_application_surface(
         message: error.to_string(),
     })?;
 
-    render_result(cg, &render_args, result)
+    render_result(cg, result)
 }
 
 fn render_result(
     cg: &TraceDecay,
-    args: &Value,
     result: ApplicationSurfaceInvocationResult,
 ) -> Result<crate::mcp::tools::ToolResult> {
     let (value, failure_message) = match &result.result {
@@ -151,18 +139,20 @@ fn render_result(
             (serde_json::to_value(problem)?, Some(failure_message))
         }
     };
-    let markdown = if super::super::render::wants_json(args) {
-        None
-    } else {
-        Some(render_canonical_markdown(
+    let markdown = match result.requested_format {
+        RequestedOutputFormat::Json => None,
+        RequestedOutputFormat::Markdown => Some(render_canonical_markdown(
             result.operation.as_str(),
             &result.binding_id,
             &result.result,
-        )?)
+        )?),
     };
-    let text = super::super::render::finalize(Some(cg.project_root()), args, &value, || {
-        markdown.unwrap_or_default()
-    });
+    let text = super::super::render::finalize_with_format(
+        Some(cg.project_root()),
+        result.requested_format,
+        &value,
+        || markdown.unwrap_or_default(),
+    );
     let rendered = super::text_tool_result(&text);
     Ok(match failure_message {
         Some(failure_message) => rendered
