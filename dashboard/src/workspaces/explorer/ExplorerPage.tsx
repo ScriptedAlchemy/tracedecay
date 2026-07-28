@@ -76,6 +76,18 @@ const LANE_ICON: Record<LaneId, LucideIcon> = {
   knowledge: Lightbulb,
 };
 
+function laneSpec(id: LaneId): LaneSpec {
+  const spec = LANES.find((lane) => lane.id === id);
+  if (!spec) throw new Error(`Missing lane specification: ${id}`);
+  return spec;
+}
+
+const LANE_BY_ID: Record<LaneId, LaneSpec> = {
+  code: laneSpec('code'),
+  sessions: laneSpec('sessions'),
+  knowledge: laneSpec('knowledge'),
+};
+
 interface Lane {
   readonly id: LaneId;
   readonly hits: Hit[];
@@ -263,10 +275,11 @@ export function ExplorerPage() {
       }
     },
   });
+  const activeRunIdForQuery = activeRunId ?? '';
   const runStatus = useQuery({
-    queryKey: ['explorer', 'query-run', activeRunId],
-    queryFn: () => readPlannerQuery(activeRunId as string),
-    enabled: activeRunId !== null,
+    queryKey: ['explorer', 'query-run', activeRunIdForQuery],
+    queryFn: () => readPlannerQuery(activeRunIdForQuery),
+    enabled: activeRunIdForQuery !== '',
     refetchInterval: (queryState) => {
       const result = queryState.state.data;
       if (result?.outcome !== 'envelope') return 250;
@@ -304,6 +317,12 @@ export function ExplorerPage() {
     MemoryPayload,
     { enabled: !searching },
   );
+  const graphBrowseData = graphBrowse.data;
+  const graphBrowsePending = graphBrowse.isPending;
+  const lcmBrowseData = lcmBrowse.data;
+  const lcmBrowsePending = lcmBrowse.isPending;
+  const memoryData = memory.data;
+  const memoryPending = memory.isPending;
 
   const lanes: Lane[] = useMemo(() => {
     if (searching) {
@@ -351,52 +370,66 @@ export function ExplorerPage() {
       ];
     }
     const codeRows =
-      graphBrowse.data?.outcome === 'ok'
-        ? (graphBrowse.data.data as z.infer<typeof GraphOverviewPayload>).top_connected
+      graphBrowseData?.outcome === 'ok'
+        ? (graphBrowseData.data as z.infer<typeof GraphOverviewPayload>).top_connected
         : [];
     const sessionRows =
-      lcmBrowse.data?.outcome === 'ok'
-        ? (lcmBrowse.data.data as z.infer<typeof LcmOverviewPayload>).latest_summary_nodes
+      lcmBrowseData?.outcome === 'ok'
+        ? (lcmBrowseData.data as z.infer<typeof LcmOverviewPayload>).latest_summary_nodes
         : [];
     const factRows =
-      memory.data?.outcome === 'ok'
-        ? (memory.data.data as z.infer<typeof MemoryPayload>).holographic.facts
+      memoryData?.outcome === 'ok'
+        ? (memoryData.data as z.infer<typeof MemoryPayload>).holographic.facts
         : [];
     return [
       {
         id: 'code' as const,
         hits: codeHits(codeRows, terms),
-        pending: graphBrowse.isPending,
-        outcome: graphBrowse.isPending
+        pending: graphBrowsePending,
+        outcome: graphBrowsePending
           ? ('pending' as const)
-          : (graphBrowse.data?.outcome ?? 'unknown'),
+          : (graphBrowseData?.outcome ?? 'unknown'),
       },
       {
         id: 'sessions' as const,
         hits: sessionHits(sessionRows, terms),
-        pending: lcmBrowse.isPending,
-        outcome: lcmBrowse.isPending
+        pending: lcmBrowsePending,
+        outcome: lcmBrowsePending
           ? ('pending' as const)
-          : (lcmBrowse.data?.outcome ?? 'unknown'),
+          : (lcmBrowseData?.outcome ?? 'unknown'),
       },
       {
         id: 'knowledge' as const,
         hits: knowledgeHits(factRows, terms),
-        pending: memory.isPending,
-        outcome: memory.isPending ? ('pending' as const) : (memory.data?.outcome ?? 'unknown'),
+        pending: memoryPending,
+        outcome: memoryPending ? ('pending' as const) : (memoryData?.outcome ?? 'unknown'),
       },
     ];
-  }, [searching, plannerResult, plannerRun, graphBrowse, lcmBrowse, memory, terms]);
+  }, [
+    graphBrowseData,
+    graphBrowsePending,
+    lcmBrowseData,
+    lcmBrowsePending,
+    memoryData,
+    memoryPending,
+    plannerResult,
+    plannerRun,
+    searching,
+    terms,
+  ]);
 
   const laneById = useMemo(
     () => new Map(lanes.map((lane) => [lane.id, lane])),
     [lanes],
   );
-  const visibleLanes = laneFilter ? lanes.filter((l) => l.id === laneFilter) : lanes;
-  const laneHits = visibleLanes.flatMap((lane) => lane.hits);
-  const hits = facet
-    ? laneHits.filter((hit) => hit.lane === facet.lane && hit.facet === facet.value)
-    : laneHits;
+  const { visibleLanes, hits } = useMemo(() => {
+    const visibleLanes = laneFilter ? lanes.filter((lane) => lane.id === laneFilter) : lanes;
+    const laneHits = visibleLanes.flatMap((lane) => lane.hits);
+    const hits = facet
+      ? laneHits.filter((hit) => hit.lane === facet.lane && hit.facet === facet.value)
+      : laneHits;
+    return { visibleLanes, hits };
+  }, [facet, laneFilter, lanes]);
   const anyPending = lanes.some((lane) => lane.pending);
   const failedLanes = lanes.filter(
     (lane) => lane.outcome !== 'ok' && lane.outcome !== 'pending',
@@ -517,7 +550,7 @@ export function ExplorerPage() {
             </Reveal>
           ) : null}
           {visibleLanes.map((lane) => {
-            const spec = LANES.find((l) => l.id === lane.id)!;
+            const spec = LANE_BY_ID[lane.id];
             const counts = facetCounts(lane.hits);
             if (counts.length === 0) return null;
             return (
@@ -574,7 +607,7 @@ export function ExplorerPage() {
                 {failedLanes.map((lane) => (
                   <p key={lane.id} className="flex items-center gap-1.5 text-2xs text-text-muted">
                     <StateChip kind={laneStateKind(lane.outcome)} />
-                    <span>{LANES.find((l) => l.id === lane.id)?.label}</span>
+                    <span>{LANE_BY_ID[lane.id].label}</span>
                   </p>
                 ))}
                 <p className="text-2xs leading-relaxed text-text-muted">
@@ -609,7 +642,7 @@ export function ExplorerPage() {
                 <span>
                   {searching ? 'results' : 'rows'}
                   {laneFilter
-                    ? ` in ${LANES.find((l) => l.id === laneFilter)?.label.toLowerCase()}`
+                    ? ` in ${LANE_BY_ID[laneFilter].label.toLowerCase()}`
                     : // Never claim breadth the run did not deliver: a source
                       // that failed, went unavailable, or is still reading did
                       // not contribute to this set, and saying otherwise would
@@ -846,7 +879,7 @@ function HitRow({
   startsLane: boolean;
   onSelect: () => void;
 }) {
-  const spec = LANES.find((lane) => lane.id === hit.lane)!;
+  const spec = LANE_BY_ID[hit.lane];
   const Icon = LANE_ICON[hit.lane];
   const age = relativeTime(hit.stamp);
   return (
@@ -900,7 +933,7 @@ function HitRow({
           <>
             <span className="tabular text-2xs text-text-muted">{hit.signal.display}</span>
             <Meter
-              fraction={hit.signal.max <= 0 ? 0 : hit.signal.value / hit.signal.max}
+              fraction={hit.signal.max > 0 ? hit.signal.value / hit.signal.max : null}
               className="w-10 rounded-full"
               tone="bg-accent/80"
               ariaLabel={`${hit.signal.field} ${hit.signal.value}`}
@@ -926,7 +959,7 @@ function HitInspector({
   terms: readonly string[];
   onClose: () => void;
 }) {
-  const spec = LANES.find((lane) => lane.id === hit.lane)!;
+  const spec = LANE_BY_ID[hit.lane];
   const Icon = LANE_ICON[hit.lane];
   const age = relativeTime(hit.stamp);
   const rawSessionId = hit.lane === 'sessions' ? hit.raw['session_id'] : undefined;
@@ -934,15 +967,16 @@ function HitInspector({
     typeof rawSessionId === 'string' && rawSessionId.trim() !== ''
       ? rawSessionId.trim()
       : undefined;
+  const sessionIdForQuery = sessionId ?? '';
   const sessionSize = useQuery({
-    queryKey: ['explorer', 'session-size', sessionId],
-    queryFn: () => readSessionSize(sessionId as string),
-    enabled: sessionId !== undefined,
+    queryKey: ['explorer', 'session-size', sessionIdForQuery],
+    queryFn: () => readSessionSize(sessionIdForQuery),
+    enabled: sessionIdForQuery !== '',
   });
   const readContext = useQuery({
-    queryKey: ['explorer', 'read-context', sessionId],
-    queryFn: () => readSessionContext(sessionId as string),
-    enabled: sessionId !== undefined,
+    queryKey: ['explorer', 'read-context', sessionIdForQuery],
+    queryFn: () => readSessionContext(sessionIdForQuery),
+    enabled: sessionIdForQuery !== '',
   });
   return (
     <InspectorPanel
@@ -995,7 +1029,7 @@ function HitInspector({
             <MetaLabel>Measured</MetaLabel>
             <span className="flex items-center gap-2">
               <Meter
-                fraction={hit.signal.max <= 0 ? 0 : hit.signal.value / hit.signal.max}
+                fraction={hit.signal.max > 0 ? hit.signal.value / hit.signal.max : null}
                 className="w-10 rounded-full"
                 tone="bg-accent/80"
                 ariaLabel={`${hit.signal.field} ${hit.signal.value}`}
