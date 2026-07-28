@@ -512,7 +512,7 @@ async fn database_check_is_read_only_while_a_writer_is_live()
 }
 
 #[test]
-fn database_authority_audit_is_required_and_enforced() {
+fn database_authority_failures_are_enforced_and_unavailable_is_degraded() {
     let healthy_status = serde_json::json!({
         "storage_health": {
             "quick_check_ok": true,
@@ -536,11 +536,28 @@ fn database_authority_audit_is_required_and_enforced() {
     assert_eq!(failed_counters.issues, 1);
 
     let mut missing_counters = DoctorCounters::new();
-    assert!(!check_database(
+    assert!(check_database(
         &mut missing_counters,
         &serde_json::json!({ "storage_health": { "quick_check_ok": true } }),
     ));
-    assert_eq!(missing_counters.issues, 1);
+    assert_eq!(missing_counters.issues, 0);
+    assert_eq!(missing_counters.warnings, 1);
+
+    let mut bounded_counters = DoctorCounters::new();
+    assert!(check_database(
+        &mut bounded_counters,
+        &serde_json::json!({
+            "storage_health": {
+                "canonical_db_path": "/profile/project.db",
+                "quick_check_ok": null,
+                "quick_check_error": null,
+                "authority_audit_ok": null,
+                "authority_audit_reason": "authority_audit_not_run"
+            }
+        }),
+    ));
+    assert_eq!(bounded_counters.issues, 0);
+    assert_eq!(bounded_counters.warnings, 2);
 }
 
 #[tokio::test]
