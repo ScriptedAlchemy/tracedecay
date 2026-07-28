@@ -195,6 +195,85 @@ async fn registered_quarantined_legacy_source_never_enters_temporal_sinks() {
     );
 }
 
+/// Naming two sinks only proves those two are clean. A sink added later — a
+/// new occurrence, summary, or fact index — would carry the quarantined text
+/// with nothing complaining, so sweep every full-text sink the schema defines.
+#[tokio::test]
+async fn registered_quarantined_legacy_source_reaches_no_full_text_sink() {
+    let harness = RegisteredTemporalHarness::open("registered-privacy-sink-sweep").await;
+    harness.seed_quarantined_legacy_fixture().await;
+
+    let sinks = harness.full_text_sinks().await;
+    assert!(
+        !sinks.is_empty(),
+        "the schema must define full-text sinks for this sweep to mean anything"
+    );
+    for sink in sinks {
+        assert_eq!(
+            harness
+                .count(&format!(
+                    "SELECT COUNT(*) FROM {sink} WHERE {sink} MATCH '\"{PRIVACY_CANARY}\"'"
+                ))
+                .await,
+            0,
+            "quarantined legacy text reached the {sink} full-text sink"
+        );
+    }
+}
+
+/// Replaying through a fresh execution object reuses the open store. Privacy
+/// also has to survive losing the handle entirely and remounting, which is
+/// what every daemon restart does to a live user store.
+#[tokio::test]
+async fn registered_sanitized_temporal_state_stays_private_across_reopen() {
+    let harness = RegisteredTemporalHarness::open("registered-privacy-reopen").await;
+    let policy_digest = harness.seed_privacy_fixture().await;
+    let context = request_context(policy_digest);
+
+    let execution = RegisteredGlobalDbSessionTemporalExecution::new(harness.registered.as_ref());
+    let service = SessionRetrievalService::new(
+        AllowAuthorizer,
+        &execution,
+        Words,
+        SessionRetrievalConfiguration::new(3, 5).unwrap(),
+    );
+    let before = service.retrieve(&context, privacy_query()).await;
+    drop(service);
+    drop(execution);
+
+    let remounted = harness.remount().await;
+    let reopened_execution = RegisteredGlobalDbSessionTemporalExecution::new(remounted.as_ref());
+    let reopened_service = SessionRetrievalService::new(
+        AllowAuthorizer,
+        &reopened_execution,
+        Words,
+        SessionRetrievalConfiguration::new(3, 5).unwrap(),
+    );
+    let after = reopened_service.retrieve(&context, privacy_query()).await;
+
+    let (
+        SessionRetrievalOutcome::Complete {
+            items: before_items, ..
+        },
+        SessionRetrievalOutcome::Complete {
+            items: after_items, ..
+        },
+    ) = (&before, &after)
+    else {
+        panic!("privacy retrieval across reopen was not complete: {before:?} / {after:?}");
+    };
+    assert_eq!(
+        before_items[0].context.rendered,
+        after_items[0].context.rendered,
+        "a reopen must not change what the sanitized context renders"
+    );
+    assert!(after_items[0].context.rendered.contains(SAFE_PRIVACY_PAYLOAD));
+    assert!(
+        !format!("{after:?}").contains(PRIVACY_CANARY),
+        "the canary must not surface after a reopen"
+    );
+}
+
 #[tokio::test]
 async fn registered_sanitized_temporal_state_is_stable_across_execution_replay() {
     let harness = RegisteredTemporalHarness::open("registered-privacy-replay").await;

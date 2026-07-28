@@ -83,8 +83,7 @@ pub(crate) async fn open_diagnostic_broker(
                 error = %error,
                 "code diagnostics settings could not be loaded; serving defaults as degraded"
             );
-            let mut broker =
-                diagnostic_broker(project_root, CodeDiagnosticsSettings::default());
+            let mut broker = diagnostic_broker(project_root, CodeDiagnosticsSettings::default());
             broker.record_settings_unavailable(error.to_string());
             Arc::new(Mutex::new(broker))
         }

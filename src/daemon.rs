@@ -3141,15 +3141,19 @@ impl DaemonEngine {
             return Ok(server);
         }
         let (project_path, _) = Self::project_route(handshake)?;
+        // Bound only the wait behind an unrelated writer. An uncontended open
+        // is this request's own work and must run to completion.
+        let contended = self.store_administration.writer_is_busy();
         let claim = Box::pin(self.begin_project_open(handshake.clone(), None)).await?;
         match claim {
             ProjectOpenTaskClaim::InFlight(state) => {
-                match timeout(
-                    PROJECT_OPEN_REQUEST_DEADLINE,
-                    ProjectOpenTasks::wait_for_completion(state),
-                )
-                .await
-                {
+                let completion = ProjectOpenTasks::wait_for_completion(state);
+                let opened = if contended {
+                    timeout(PROJECT_OPEN_REQUEST_DEADLINE, completion).await
+                } else {
+                    Ok(completion.await)
+                };
+                match opened {
                     Ok(Ok(())) => self.cached_project_server(handshake).await?.ok_or_else(|| {
                         TraceDecayError::Config {
                             message: "project open completed without publishing a server"
@@ -4069,6 +4073,9 @@ async fn portable_project_server_for_request(
     {
         return Ok(server);
     }
+    // Match the Unix path: only a request queued behind an unrelated writer
+    // gets the retry deadline.
+    let contended = store_administration.writer_is_busy();
     let claim = Box::pin(begin_portable_project_open(
         lifecycle,
         store_administration.clone(),
@@ -4085,12 +4092,13 @@ async fn portable_project_server_for_request(
     .await;
     match claim {
         ProjectOpenTaskClaim::InFlight(state) => {
-            match timeout(
-                PROJECT_OPEN_REQUEST_DEADLINE,
-                ProjectOpenTasks::wait_for_completion(state),
-            )
-            .await
-            {
+            let completion = ProjectOpenTasks::wait_for_completion(state);
+            let opened = if contended {
+                timeout(PROJECT_OPEN_REQUEST_DEADLINE, completion).await
+            } else {
+                Ok(completion.await)
+            };
+            match opened {
                 Ok(Ok(())) => portable_cached_project_server(
                     &store_administration,
                     &canonical_project_path,

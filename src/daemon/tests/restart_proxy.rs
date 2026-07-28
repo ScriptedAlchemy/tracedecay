@@ -44,6 +44,51 @@ async fn answer_one_proxy_request(listener: tokio::net::UnixListener, generation
 }
 
 #[cfg(unix)]
+async fn answer_one_authenticated_proxy_request(
+    listener: tokio::net::UnixListener,
+    expected_token: &str,
+    generation: u64,
+) {
+    let (stream, _addr) = listener.accept().await.expect("accept proxied client");
+    let (reader, mut writer) = stream.into_split();
+    let mut lines = tokio::io::BufReader::new(reader).lines();
+    let auth_line = lines
+        .next_line()
+        .await
+        .expect("read auth preface")
+        .expect("auth preface line");
+    let preface =
+        super::super::transport::DaemonAuthPreface::from_line(auth_line.trim()).expect("auth");
+    assert!(
+        preface.authenticate(expected_token),
+        "proxy must reload current daemon authority"
+    );
+    let handshake_line = lines
+        .next_line()
+        .await
+        .expect("read handshake")
+        .expect("handshake line");
+    DaemonHandshake::from_line(&handshake_line).expect("parse handshake");
+    let request_line = lines
+        .next_line()
+        .await
+        .expect("read request")
+        .expect("request line");
+    let request: Value = serde_json::from_str(&request_line).expect("request json");
+    let response = json!({
+        "jsonrpc": "2.0",
+        "id": request["id"],
+        "result": { "generation": generation }
+    });
+    writer
+        .write_all(serde_json::to_string(&response).unwrap().as_bytes())
+        .await
+        .expect("write response");
+    writer.write_all(b"\n").await.expect("write newline");
+    writer.shutdown().await.expect("shutdown fake daemon");
+}
+
+#[cfg(unix)]
 #[test]
 fn transient_daemon_connect_errors_cover_restart_window_only() {
     assert!(super::super::is_transient_daemon_connect_error(
@@ -107,6 +152,86 @@ async fn connect_with_restart_grace_gives_up_with_restart_hint() {
         message.contains(&socket.display().to_string()),
         "error should name the socket path, got: {message}"
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn long_lived_proxy_reloads_rotated_auth_after_daemon_restart() {
+    let dir = TempDir::new().expect("temp dir");
+    let profile = dir.path().canonicalize().expect("canonical profile");
+    let socket = profile.join("daemon.sock");
+    let endpoint = super::super::transport::DaemonEndpoint::Unix(socket.clone());
+    let first_listener = tokio::net::UnixListener::bind(&socket).expect("bind first socket");
+    let first_authority =
+        super::super::authority::DaemonAuthority::acquire(&profile, &endpoint, "first")
+            .expect("first daemon authority");
+    let first_token = first_authority.auth_token().to_string();
+    let rebound_socket = socket.clone();
+    let rebound_profile = profile.clone();
+    let rebound_endpoint = endpoint.clone();
+    let (unbound_tx, unbound_rx) = tokio::sync::oneshot::channel();
+    let daemon = tokio::spawn(async move {
+        answer_one_authenticated_proxy_request(first_listener, &first_token, 1).await;
+        drop(first_authority);
+        std::fs::remove_file(&rebound_socket).expect("unlink first socket");
+        unbound_tx.send(()).expect("notify daemon outage");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let second_listener =
+            tokio::net::UnixListener::bind(&rebound_socket).expect("bind second socket");
+        let second_authority = super::super::authority::DaemonAuthority::acquire(
+            &rebound_profile,
+            &rebound_endpoint,
+            "second",
+        )
+        .expect("second daemon authority");
+        let second_token = second_authority.auth_token().to_string();
+        assert_ne!(first_token, second_token, "daemon restart must rotate auth");
+        answer_one_authenticated_proxy_request(second_listener, &second_token, 2).await;
+    });
+
+    let (mut transport, sender, mut receiver) = crate::mcp::transport::ChannelTransport::new();
+    let proxy_socket = socket.clone();
+    let proxy = tokio::spawn(async move {
+        super::super::proxy_transport_to_daemon(
+            &proxy_socket,
+            &test_handshake_defaults(),
+            None,
+            &mut transport,
+        )
+        .await
+    });
+    let request = |id| {
+        serde_json::to_string(&json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/list"
+        }))
+        .expect("request json")
+    };
+
+    sender.send(request(1)).expect("send first request");
+    let first = tokio::time::timeout(std::time::Duration::from_secs(2), receiver.recv())
+        .await
+        .expect("first response timed out")
+        .expect("first response");
+    let first: Value = serde_json::from_str(first.trim()).expect("first response json");
+    assert_eq!(first["result"]["generation"], json!(1));
+
+    unbound_rx.await.expect("first daemon should unlink socket");
+    sender.send(request(2)).expect("send second request");
+    let second = tokio::time::timeout(std::time::Duration::from_secs(2), receiver.recv())
+        .await
+        .expect("second response timed out")
+        .expect("second response");
+    let second: Value = serde_json::from_str(second.trim()).expect("second response json");
+    assert_eq!(second["result"]["generation"], json!(2));
+
+    drop(sender);
+    await_test_task(proxy, "rotating-auth proxy task")
+        .await
+        .expect("proxy transport");
+    await_test_task(daemon, "rotating-auth daemon task").await;
 }
 
 #[cfg(unix)]
