@@ -1634,6 +1634,7 @@ impl TraceDecay {
                 .await?;
             self.db.checkpoint().await?;
             sync_lease.commit()?;
+            let _ = self.db.release_connection_memory().await;
             release_process_allocator_memory();
             return Ok(SyncResult {
                 files_added: new_files.len(),
@@ -1818,6 +1819,7 @@ impl TraceDecay {
 
         self.db.checkpoint().await?;
         sync_lease.commit()?;
+        let _ = self.db.release_connection_memory().await;
         release_process_allocator_memory();
         Ok(SyncResult {
             files_added: new_files.len(),

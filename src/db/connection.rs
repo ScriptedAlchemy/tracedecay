@@ -1372,6 +1372,27 @@ impl Database {
         self.checkpoint_unguarded().await
     }
 
+    pub(crate) async fn release_connection_memory(&self) -> Result<()> {
+        self.inner
+            .conn
+            .execute_batch("PRAGMA shrink_memory")
+            .await
+            .map_err(|error| TraceDecayError::Database {
+                message: format!("failed to release graph reader cache: {error}"),
+                operation: "release graph database memory".to_owned(),
+            })?;
+        if let Some(connection) = &self.inner.write_conn {
+            connection
+                .execute_batch("PRAGMA shrink_memory")
+                .await
+                .map_err(|error| TraceDecayError::Database {
+                    message: format!("failed to release graph writer cache: {error}"),
+                    operation: "release graph database memory".to_owned(),
+                })?;
+        }
+        Ok(())
+    }
+
     /// Forces a complete WAL truncation through the retained writer actor.
     ///
     /// This is narrower than the pressure-based runtime checkpoint policy:
